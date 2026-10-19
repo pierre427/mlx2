@@ -179,13 +179,13 @@ def test_provider_stats_use_verified_depth_and_credit_each_source_once():
 def test_permanent_ordinary_fallback_retains_continuation_history():
     """The final target-only receipt stays authoritative after pool execution."""
     generator = _generator_class()
-    ordinary_round = next(
+    ordinary_response = next(
         node
         for node in generator.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_ordinary_round"
+        if isinstance(node, ast.FunctionDef) and node.name == "_ordinary_response"
     )
     receipts = []
-    for node in ast.walk(ordinary_round):
+    for node in ast.walk(ordinary_response):
         if not isinstance(node, ast.Dict):
             continue
         fields = {

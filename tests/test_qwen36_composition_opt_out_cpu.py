@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import pytest
 
-from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter
+from mlx2.adapters.qwen36_35b import (
+    Qwen3635BA3BAdapter,
+    partition_external_target_policy,
+)
 
 
 def test_proposal_composition_false_passes_the_policy_allowlist(tmp_path):
@@ -27,6 +30,46 @@ def test_unknown_keys_still_fail_closed(tmp_path):
     policy = {"draft_model": str(tmp_path / "draft"), "no_such_key": 1}
     with pytest.raises(ValueError, match="unknown keys"):
         Qwen3635BA3BAdapter(str(tmp_path / "target"), execution_policy=policy)
+
+
+@pytest.mark.parametrize("key", ["moe_window_row_exact", "fused_gdn_batch_verify"])
+def test_external_target_kernel_keys_pass_the_qwen36_allowlist(tmp_path, key):
+    policy = {"draft_model": str(tmp_path / "draft"), key: True}
+    with pytest.raises(ValueError) as caught:
+        Qwen3635BA3BAdapter(str(tmp_path / "target"), execution_policy=policy)
+    assert "unknown keys" not in str(caught.value)
+    assert "must pin" in str(caught.value)
+
+
+def test_external_target_kernel_keys_still_validate_types(tmp_path):
+    policy = {
+        "draft_model": str(tmp_path / "draft"),
+        "moe_window_row_exact": 1,
+    }
+    with pytest.raises(ValueError, match="must be boolean"):
+        Qwen3635BA3BAdapter(str(tmp_path / "target"), execution_policy=policy)
+
+
+@pytest.mark.parametrize("selected", [True, False])
+def test_external_target_kernel_partition_is_target_owned(selected):
+    external, target = partition_external_target_policy(
+        {
+            "draft_model": "/draft",
+            "num_draft": 7,
+            "moe_window_row_exact": selected,
+        }
+    )
+    assert target == {"moe_window_row_exact": selected}
+    assert "moe_window_row_exact" not in external
+    assert external == {"draft_model": "/draft", "num_draft": 7}
+
+
+def test_external_target_kernel_partition_omitted_and_unknown_keys():
+    external, target = partition_external_target_policy(
+        {"draft_model": "/draft", "unknown": True}
+    )
+    assert target == {}
+    assert external == {"draft_model": "/draft", "unknown": True}
 
 
 def test_composition_defaults_off_on_the_qwen36_chain():
@@ -46,4 +89,5 @@ def test_the_adapter_applies_the_composition_default():
     from mlx2.adapters import qwen36_35b
 
     source = inspect.getsource(qwen36_35b.Qwen3635BA3BAdapter._init_qwen36)
-    assert "self.external_policy = default_external_policy(policy)" in source
+    assert "self.external_policy = default_external_policy(external_policy)" in source
+    assert "policy = target_policy" in source

@@ -11,8 +11,10 @@ adapter's artifact-bound external-draft default (tree15 batch-size route for
 the pinned target/DFlash2 pair); ``--arm ordinary`` selects ``--ordinary``.
 ``--compare`` reports the first differing token per prompt between receipts.
 
-Never selects or qualifies a route.  Refuses a nonempty ``--out`` so retries
-stay distinguishable; run under ``scripts/run_with_gpu_locks.py``.
+Never changes the product default or qualifies a route.  It records whether
+the requested arm was selected and observed for these requests.  Refuses a
+nonempty ``--out`` so retries stay distinguishable; run under
+``scripts/run_with_gpu_locks.py``.
 """
 from __future__ import annotations
 
@@ -104,10 +106,106 @@ def _scheduler_numbers(status: dict) -> dict:
             for key, item in value.items():
                 walk(f"{prefix}.{key}" if prefix else key, item)
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            if any(word in prefix for word in ("tree", "tensorfold", "fallback", "restore", "chain")):
+            if (
+                prefix == "scheduler.external_rounds"
+                or any(word in prefix for word in ("tree", "tensorfold", "fallback", "restore", "chain"))
+            ):
                 out[prefix] = value
     walk("", status)
     return out
+
+
+def _source_identity(src: Path, model: Path) -> dict:
+    root = src.resolve().parent
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True
+    ).strip()
+    tracked = subprocess.check_output(
+        ["git", "status", "--porcelain", "--", "src"], cwd=root, text=True
+    ).strip()
+    env = dict(os.environ, PYTHONPATH=str(src.resolve()))
+    code = (
+        "import json,sys; from mlx2.adapters.registry import inspect_model; "
+        "r=inspect_model(sys.argv[1]); i=r.artifact['identity']; "
+        "print(json.dumps({"
+        "'artifact_name':i['path'].rstrip('/').rsplit('/',1)[-1],"
+        "'artifact_fingerprint':i['fingerprint']}))"
+    )
+    artifact = json.loads(subprocess.check_output(
+        [sys.executable, "-c", code, str(model.resolve())], env=env, text=True
+    ))
+    return {
+        "mlx2_commit": head,
+        "src": str(src.resolve()),
+        "tracked_source_dirty": bool(tracked),
+        "tracked_source_status": tracked,
+        **artifact,
+        "checkpoint": f"{artifact['artifact_name']}@{artifact['artifact_fingerprint']}",
+    }
+
+
+def _route_observation(arm: str, prompts: dict, status_deltas: dict) -> dict:
+    rows = [row.get("route_receipt") or {} for row in prompts.values()]
+    external = [row for row in rows if row.get("route") == "external_draft"]
+    providers = []
+    request_rounds = []
+    request_dispatches = 0
+    ordinary_fallbacks = 0
+    for row in external:
+        speculation = row.get("speculation") or {}
+        target = speculation.get("target_tree") or {}
+        providers.append(target.get("provider"))
+        rounds = speculation.get("external_rounds")
+        if type(rounds) is int:
+            request_rounds.append(rounds)
+        request_dispatches += sum(
+            int(value)
+            for value in (target.get("lane_width_histogram") or {}).values()
+        )
+        ordinary_fallbacks += int(bool(speculation.get("ordinary_fallback")))
+    selected = bool(rows) and all(
+        row.get("route") == ("external_draft" if arm == "tree" else "ordinary")
+        for row in rows
+    )
+    observed = selected and (
+        arm == "ordinary"
+        or (
+            len(request_rounds) == len(rows)
+            and all(rounds > 0 for rounds in request_rounds)
+            and all(provider == "qwen38_tensorfold_v1" for provider in providers)
+            and ordinary_fallbacks == 0
+        )
+    )
+    return {
+        "selected_for_requests": selected,
+        "observed_used": observed,
+        "request_count": len(rows),
+        "external_draft_request_count": len(external),
+        "tensorfold_provider_request_count": sum(
+            provider == "qwen38_tensorfold_v1" for provider in providers
+        ),
+        "ordinary_fallback_request_count": ordinary_fallbacks,
+        # Request receipts and scheduler counters have different ownership and
+        # must not be presented as the same round count.
+        "request_receipt_external_rounds_sum": sum(request_rounds),
+        "request_receipt_target_dispatches_sum": request_dispatches,
+        "scheduler_external_rounds": status_deltas.get("scheduler.external_rounds"),
+        "scheduler_external_auto_tree_rounds": status_deltas.get(
+            "scheduler.external_auto_tree_rounds"
+        ),
+        "scheduler_external_tree_rounds": status_deltas.get(
+            "scheduler.external_tree_rounds"
+        ),
+        "scheduler_target_dispatches": status_deltas.get(
+            "scheduler.external_target_tree_target_rounds"
+        ),
+        "scheduler_snapshot_state": (
+            "caught_up"
+            if int(status_deltas.get("scheduler.external_target_tree_target_rounds", 0))
+            >= request_dispatches
+            else "periodic_snapshot_lag"
+        ),
+    }
 
 
 def run_arm(args) -> int:
@@ -127,9 +225,17 @@ def run_arm(args) -> int:
         command += ["--ordinary"]
     env = dict(os.environ, PYTHONPATH=str(src), HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
     base = f"http://127.0.0.1:{args.port}"
-    receipt = {"schema": "mlx2.qwen38-tree-ordinary-parity.v1", "arm": args.arm, "src": str(src),
+    source_identity = _source_identity(src, args.model.expanduser().resolve())
+    receipt = {"schema": "mlx2.qwen38-tree-ordinary-parity.v2", "arm": args.arm, "src": str(src),
                "command": command, "model": str(args.model), "max_tokens": args.max_tokens,
-               "qualified": False, "route_selected": False, "prompts": {}, "started": time.time()}
+               "source_identity": source_identity,
+               "checkpoint": source_identity["checkpoint"],
+               "artifact_fingerprint": source_identity["artifact_fingerprint"],
+               "qualified": False,
+               "route_selected": None,
+               "product_default_changed": False,
+               "route_observed_used": False,
+               "prompts": {}, "started": time.time()}
     for name in ("lane_glue.py", "lane_fuse.py"):
         path = src / "mlx2/runtime/tensorfold_qwen38" / name
         receipt.setdefault("vendored_sha256", {})[name] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -163,6 +269,15 @@ def run_arm(args) -> int:
             after = _scheduler_numbers(receipt["status_after"])
             receipt["status_deltas"] = {key: after[key] - before.get(key, 0) for key in after
                                         if after[key] != before.get(key, 0)}
+            receipt["route_observation"] = _route_observation(
+                args.arm, receipt["prompts"], receipt["status_deltas"]
+            )
+            receipt["route_selected"] = receipt["route_observation"][
+                "selected_for_requests"
+            ]
+            receipt["route_observed_used"] = receipt["route_observation"]["observed_used"]
+            if not receipt["route_selected"] or not receipt["route_observed_used"]:
+                raise RuntimeError("requested route was not selected and observed in every request")
         receipt["passed"] = True
     except Exception as exc:  # noqa: BLE001 - recorded
         receipt["passed"] = False

@@ -15,7 +15,10 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .external_draft_policy import (
     ExternalDraftAdapterMixin,
+    PROGRESSIVE_VERIFICATION_TILE_AUTO,
     normalize_progressive_external_policy,
+    progressive_external_terminal_input_widths,
+    resolve_progressive_external_tile,
 )
 from .flash_next import FlashNextAdapter, gdn_state_diagnostics
 from .mtp_depth_cap import validate_self_mtp_num_draft
@@ -358,9 +361,11 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "progressive_alternative_branches",
         "progressive_alternative_strategy",
         "progressive_alternative_depth_policy",
+        "progressive_ast_rootless_fallback",
         "progressive_cross_session_pack_rows",
         "progressive_cross_session_pack_mode",
         "progressive_verification_fidelity",
+        "target_verify_row_exact",
         "cost_per_commit_handoff",
         "fold",
     }
@@ -423,6 +428,85 @@ def _tree_node_budgets(value, width):
     if any(left < right for left, right in zip(ordered, ordered[1:])):
         raise ValueError("tree node budgets must not increase as lanes fill")
     return normalized
+
+
+def validate_target_verify_row_exact(policy: dict) -> bool:
+    """Admission of the row-exact target route (``qwen_hybrid_row_exact``).
+
+    Exact progressive verification (AST included) needs the adapter-owned
+    row-exact target executor, which only ``target_verify_row_exact: true``
+    selects.  The selection is refused outside exact progressive
+    verification and with the routes whose target forward it does not own.
+    Policy-only: runs before any tensor loads.
+    """
+    selected = policy.get("target_verify_row_exact", False)
+    if type(selected) is not bool:
+        raise ValueError("target_verify_row_exact must be a boolean")
+    tile = policy.get("progressive_verification_tile")
+    fidelity = policy.get("progressive_verification_fidelity", "exact")
+    if not selected:
+        if tile is not None and fidelity == "exact":
+            raise ValueError(
+                "exact progressive verification requires target_verify_row_exact: "
+                "the target must run its row-exact B1 state-promotion executor"
+            )
+        return False
+    if tile is None:
+        raise ValueError(
+            "target_verify_row_exact requires progressive_verification_tile"
+        )
+    if fidelity != "exact":
+        raise ValueError(
+            "target_verify_row_exact cannot combine with approximate progressive "
+            "verification fidelity"
+        )
+    if policy.get("batch_size_route") is not None or any(
+        key in policy for key in ("tree_node_budget_by_lanes", "tensorfold_cohort_limit")
+    ):
+        raise ValueError(
+            "target_verify_row_exact cannot combine with the tree15/TensorFold "
+            "batch_size_route"
+        )
+    if policy.get("pairwise_selection", "host") != "host":
+        raise ValueError(
+            "target_verify_row_exact requires host pairwise selection"
+        )
+    return True
+
+
+def target_verify_row_exact_metadata():
+    from ..runtime.models.qwen_hybrid_row_exact import ALGORITHM, GPU_EVIDENCE
+
+    return {
+        "algorithm": ALGORITHM,
+        "implemented": True,
+        "qualified": False,
+        "selected": True,
+        "gpu_evidence": GPU_EVIDENCE,
+        "performance_claim": False,
+    }
+
+
+def target_verify_row_exact_numerics(model):
+    """Route-identity binding of the installed row-exact executor."""
+    from ..runtime.models.qwen_hybrid_row_exact import (
+        ALGORITHM,
+        SOURCE_PATHS,
+        installed,
+    )
+    from ..runtime.progressive_external_verify import _source_hashes
+
+    route = installed(model)
+    if route is None:
+        raise ValueError(
+            "selected target_verify_row_exact is not installed on the target"
+        )
+    return {
+        "algorithm": ALGORITHM,
+        "source_hashes": _source_hashes(SOURCE_PATHS),
+        "static_refusals": dict(sorted(route.static_refusals.items())),
+        "attention_window_row_exact": route.attention_window_row_exact,
+    }
 
 
 def inspect_external_policy(
@@ -514,6 +598,7 @@ def inspect_external_policy(
             "cost-per-commit handoff requires a fixed external route; "
             "batch_size_route must be null"
         )
+    validate_target_verify_row_exact(policy)
     exact_verification = policy.get("exact_verification", "token")
     if exact_verification not in ("token", "block"):
         raise ValueError("exact_verification must be 'token' or 'block'")
@@ -1262,6 +1347,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 ),
                 base,
             )
+            self._describe_target_verify_row_exact()
             mx.clear_cache()
 
     def _finish_load(
@@ -1351,6 +1437,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         mx.clear_cache()
         self._record_load_dtype()
         self._select_gdn_state(gdn_state_dtype)
+        self._select_target_verify_row_exact()
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -1368,6 +1455,40 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         self._gdn_core_initial = gdn_core_status()
         if getattr(self, "weight_stream", None) is not None:
             self.weight_stream.begin_serving()
+
+    def _select_target_verify_row_exact(self):
+        """Install the explicitly selected row-exact target executor.
+
+        Runs after every load-time target mutation (fused GDN, prefill
+        installs, fp32 head, GDN state class) and before the drafter binds,
+        whose progressive binding reads the protocol declaration.
+        """
+        self.target_verify_row_exact = None
+        if not (getattr(self, "external_policy", None) or {}).get(
+            "target_verify_row_exact"
+        ):
+            return
+        route = self.model.configure_target_verify_row_exact(True)
+        route.set_attention_window_row_exact(
+            bool(
+                getattr(self, "_kernels", {}).get(
+                    "attention_window_row_exact", False
+                )
+            )
+        )
+        self.target_verify_row_exact = route
+
+    def _describe_target_verify_row_exact(self):
+        """Descriptor metadata for the selected route (after the drafter binds)."""
+        if getattr(self, "target_verify_row_exact", None) is None:
+            return
+        self.descriptor = replace(
+            self.descriptor,
+            metadata={
+                **(self.descriptor.metadata or {}),
+                "target_verify_row_exact": target_verify_row_exact_metadata(),
+            },
+        )
 
     def create_external_batch(self, **kwargs):
         """Candidate DFlash2 draft/verify batch; implemented, not qualified."""
@@ -1391,10 +1512,40 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if adaptive is not None:
             kwargs.setdefault("adaptive_verification", adaptive)
         if self.external_policy.get("progressive_verification_tile") is not None:
+            requested_tile = self.external_policy["progressive_verification_tile"]
+            batch_lanes = kwargs.get("completion_batch_size")
+            if (
+                requested_tile == PROGRESSIVE_VERIFICATION_TILE_AUTO
+                and batch_lanes is None
+            ):
+                raise ValueError(
+                    "automatic progressive verification requires "
+                    "completion_batch_size at batch construction"
+                )
+            resolved_tile = resolve_progressive_external_tile(
+                self.external_policy,
+                num_draft=self._external_num_draft(),
+                target=self.model,
+                max_lanes=1 if batch_lanes is None else batch_lanes,
+            )
+            if "continuation_pool" in self.external_policy:
+                # The pool is a proposal source for exact AST; the generator
+                # refuses the bridge without exact ordered alternatives.
+                kwargs.setdefault("continuation_pool_ast_bridge", True)
             kwargs.setdefault(
                 "progressive_verification_tile",
-                self.external_policy["progressive_verification_tile"],
+                resolved_tile,
             )
+            if requested_tile == PROGRESSIVE_VERIFICATION_TILE_AUTO:
+                kwargs.setdefault("progressive_verification_tile_policy", "auto")
+                kwargs.setdefault(
+                    "progressive_terminal_input_widths",
+                    progressive_external_terminal_input_widths(
+                        self.model,
+                        max_lanes=batch_lanes,
+                        num_draft=self._external_num_draft(),
+                    ),
+                )
             kwargs.setdefault(
                 "multilane_draft_cap",
                 self.external_policy.get("progressive_multilane_draft_cap"),
@@ -1414,6 +1565,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 self.external_policy.get(
                     "progressive_alternative_depth_policy", "full"
                 ),
+            )
+            kwargs.setdefault(
+                "progressive_ast_rootless_fallback",
+                self.external_policy.get("progressive_ast_rootless_fallback", True),
             )
             kwargs.setdefault(
                 "progressive_cross_session_pack_rows",
@@ -1564,6 +1719,14 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             )
             if self.external_policy.get("pairwise_selection", "host") == "batched":
                 config["pairwise_selection"] = "batched"
+            if self.external_policy.get("target_verify_row_exact"):
+                config["target_verify_row_exact"] = True
+            if (
+                "continuation_pool" in self.external_policy
+                and self.external_policy.get("progressive_verification_tile")
+                is not None
+            ):
+                config["continuation_pool_ast_bridge"] = True
             config["minimum_draft_proposals"] = self.external_policy.get(
                 "minimum_draft_proposals", min(3, self._external_num_draft())
             )
@@ -1667,6 +1830,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             contract["external_exact_verification"] = {
                 "algorithm": "block-verification-sun-2024-alg2-v1",
             }
+        if self.external_policy.get("target_verify_row_exact"):
+            contract["target_verify_row_exact"] = target_verify_row_exact_numerics(
+                self.model
+            )
         return contract
 
     @staticmethod
@@ -1800,6 +1967,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 or getattr(self, "fused_gdn_prefill", False) else {}
             ),
             **({"gdn_core": core} if core_selected or core["calls"] else {}),
+            **(
+                {"target_verify_row_exact": self.target_verify_row_exact.status()}
+                if getattr(self, "target_verify_row_exact", None) is not None
+                else {}
+            ),
         }
 
     def execution_numerics_contract(self):

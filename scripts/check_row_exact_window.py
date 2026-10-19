@@ -316,6 +316,7 @@ def check_hc(a):
 
     config = json.loads((a.model / "config.json").read_text())
     text = config.get("text_config", config)
+    quant = config.get("quantization", config.get("quantization_config", {}))
     args = SimpleNamespace(hc_count=text["hc_count"], hidden_size=text["hidden_size"],
                            hc_lowrank=text["hc_lowrank"], rms_norm_eps=text["rms_norm_eps"])
     index = json.loads((a.model / "model.safetensors.index.json").read_text())["weight_map"]
@@ -323,19 +324,52 @@ def check_hc(a):
 
     def tensors(prefix):
         found = {}
+        source_prefix = (
+            "language_model." + prefix
+            if any(key.startswith("language_model." + prefix + ".") for key in index)
+            else prefix
+        )
         for key, shard in index.items():
-            if key.startswith(prefix + "."):
+            if key.startswith(source_prefix + "."):
                 if shard not in shards:
                     shards[shard] = mx.load(str(a.model / shard))
-                found[key[len(prefix) + 1:]] = shards[shard][key]
+                found[key[len(source_prefix) + 1:]] = shards[shard][key]
         if not found:
-            mtp = mx.load(str(a.model / "model-mtp-q4.safetensors"))
-            found = {k[len(prefix) + 1:]: v for k, v in mtp.items() if k.startswith(prefix + ".")}
+            legacy = a.model / "model-mtp-q4.safetensors"
+            if legacy.exists():
+                mtp = mx.load(str(legacy))
+                found = {
+                    k[len(prefix) + 1:]: v
+                    for k, v in mtp.items()
+                    if k.startswith(prefix + ".")
+                }
         return found
 
     def build(prefix, combine):
         module = Q.GatedResidual(args, use_combine=combine)
-        nn.quantize(module, group_size=64, bits=4)
+        source_prefix = (
+            "language_model." + prefix
+            if any(key.startswith("language_model." + prefix + ".") for key in index)
+            else prefix
+        )
+
+        def quantized_projection(name, child):
+            if not isinstance(child, nn.Linear):
+                return False
+            if f"{source_prefix}.{name}.scales" not in index:
+                return False
+            override = quant.get(f"{prefix}.{name}") or quant.get(
+                f"language_model.{prefix}.{name}"
+            )
+            return override if isinstance(override, dict) else True
+
+        nn.quantize(
+            module,
+            group_size=int(quant.get("group_size", 64)),
+            bits=int(quant.get("bits", 4)),
+            mode=quant.get("mode", "affine"),
+            class_predicate=quantized_projection,
+        )
         module.load_weights(list(tensors(prefix).items()), strict=True)
         module.eval()
         mx.eval(module.parameters())
@@ -372,9 +406,19 @@ def check_hc(a):
                     else:
                         refs[arm] = (mx.concatenate(parts, axis=1),)
                 # the route's class swap on the projections
+                original_classes = {}
                 for child in ("input_mix_weight_down", "input_mix_weight_up", "block_inject_weight"):
-                    if child in module and type(module[child]) is nn.QuantizedLinear:
-                        module[child].__class__ = RE._subclass(RE._RowExactQuantizedLinear, nn.QuantizedLinear)
+                    if child not in module:
+                        continue
+                    original_classes[child] = type(module[child])
+                    if type(module[child]) is nn.QuantizedLinear:
+                        module[child].__class__ = RE._subclass(
+                            RE._RowExactQuantizedLinear, nn.QuantizedLinear
+                        )
+                    elif type(module[child]) is nn.Linear:
+                        module[child].__class__ = RE._subclass(
+                            RE._RowExactLinear, nn.Linear
+                        )
                 HCD.set_hc_decode_enabled(True)
                 before = HCD.hc_decode_status()["row_exact_calls"]
                 record = REV.Window(r)
@@ -382,9 +426,8 @@ def check_hc(a):
                     got = module(x)
                 got = (got[0], got[2]) if combine else (got,)
                 served = HCD.hc_decode_status()["row_exact_calls"] - before
-                for child in ("input_mix_weight_down", "input_mix_weight_up", "block_inject_weight"):
-                    if child in module:
-                        module[child].__class__ = nn.QuantizedLinear
+                for child, original in original_classes.items():
+                    module[child].__class__ = original
                 HCD.set_hc_decode_enabled(False)
                 ok_kernel = all(_same(g, w) for g, w in zip(got, refs["one_row_kernel"]))
                 ok_comp = all(_same(g, w) for g, w in zip(got, refs["one_row_composed"]))

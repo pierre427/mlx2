@@ -74,6 +74,52 @@ def context(model, draft, history=(1, 2), anchor=3, depth=2):
     return ContinuationContext(history, anchor, depth, draft.make_cache(), pending)
 
 
+def test_dflash_tree_source_reports_token_redacted_path_geometry():
+    class TreeDraft:
+        proposal_distribution = "stochastic_exact_law"
+        fold_policy = None
+        config = SimpleNamespace(block_size=8)
+
+        @staticmethod
+        def propose_tree(_anchors, _pending, _cache, nodes, **_kwargs):
+            assert nodes == 15
+            return [
+                (
+                    [10, 11, 12, 13, 14, 15],
+                    [-1, -1, 0, 2, 1, 4],
+                )
+            ]
+
+    source = ExternalContinuationSource(TreeDraft())
+    ctx = SimpleNamespace(
+        depth=3,
+        anchor=7,
+        pending_features=None,
+        draft_cache=[],
+    )
+    paths = source(ctx, 15)
+    assert [path.tokens for path in paths] == [
+        (10,),
+        (11,),
+        (10, 12),
+        (10, 12, 13),
+        (11, 14),
+        (11, 14, 15),
+    ]
+    assert source.last_diagnostics == {
+        "mechanism": "dflash2",
+        "node_budget": 15,
+        "nodes": 6,
+        "roots": 2,
+        "leaves": 2,
+        "requested_depth": 3,
+        "depth_hist": {"1": 2, "2": 2, "3": 2},
+        "leaf_depth_hist": {"3": 2},
+        "full_depth_nodes": 2,
+        "full_depth_leaves": 2,
+    }
+
+
 @pytest.mark.parametrize("kind", ["xpress", "lilicorr"])
 def test_actual_external_head_beam_returns_complete_unique_paths_private_cache(kind):
     model, draft = pair(kind)
@@ -461,6 +507,7 @@ def test_bound_wrapper_selects_fifteen_complete_paths_and_advances_context_once(
         )
         wrapper.proposal_pool.discard(selection)
     assert len(wrapper.adaptive_confidence_features) == 2
+    assert wrapper.last_continuation_source_diagnostics == ({}, {})
     assert all(
         len(features) == len(tokens[row])
         and np.isfinite(features).all()
@@ -1456,6 +1503,64 @@ def test_continuation_ast_rootless_dflash_shape_cross_session_packs(monkeypatch)
     assert single_final[single_uid].speculative_receipt["continuation_pool"][
         "ast_observed_used"
     ]
+    assert not wrapper.proposal_pool._pending
+
+    refused = ExternalDraftBatchGenerator(
+        model,
+        draft_model=wrapper,
+        binding="continuation-ast-rootless-live-shape-refused",
+        completion_batch_size=1,
+        num_draft=3,
+        prefill_step_size=64,
+        ready_drain="all",
+        continuation_pool=wrapper.policy,
+        continuation_pool_ast_bridge=True,
+        progressive_verification_tile=2,
+        progressive_alternative_branches=4,
+        progressive_alternative_strategy="confidence_tree",
+        progressive_alternative_depth_policy="confidence_tail",
+        progressive_ast_rootless_fallback=False,
+    )
+    refused_uid = refused.insert(
+        [prompts[0]],
+        max_tokens=[4],
+        sampling_configs=[{"sampling_temp": 0}],
+    )[0]
+    refused_lane = refused.lanes[refused_uid]
+    while refused_lane.anchor is None:
+        refused._prefill(refused_lane)
+    refused_rng = refused_lane.rng.snapshot()
+    refused._round([refused_lane])
+    refused_output = [item.token for item in refused_lane.ready]
+    assert refused_output == reference(model, prompts[0], len(refused_output))
+    refused_receipt = refused_lane.ready[-1].speculative_receipt
+    refused_alternatives = refused_receipt["progressive_verification"][
+        "ordered_alternatives"
+    ]
+    assert refused_alternatives["rootless_fallback_allowed"] is False
+    assert refused_alternatives["rootless_refusal_rounds"] == 1
+    assert refused_alternatives["rounds"] == 0
+    assert refused_alternatives["last_active_branches"] == 1
+    assert refused_alternatives["last_primary_fallback_reason"] == (
+        "rootless_refused"
+    )
+    assert refused_alternatives["rootless_rounds"] == 0
+    assert refused_alternatives["last_prefix_diagnostics"] is None
+    assert refused_alternatives["last_proposed_prefix_diagnostics"][
+        "chosen_prefix"
+    ] == 0
+    assert not refused_receipt["continuation_pool"]["ast_observed_used"]
+    assert refused.scheduler_stats[
+        "external_progressive_ast_rootless_refusal_rounds"
+    ] == 1
+    assert refused.scheduler_stats[
+        "external_progressive_ast_rootless_refusal_sessions"
+    ] == 1
+    assert refused.scheduler_stats[
+        "external_progressive_ast_primary_fallback_rootless_refused_rounds"
+    ] == 1
+    assert refused.scheduler_stats["external_progressive_ast_rootless_rounds"] == 0
+    assert refused_lane.rng.snapshot() == refused_rng
     assert not wrapper.proposal_pool._pending
 
     ordinary = ExternalDraftBatchGenerator(

@@ -22,6 +22,7 @@ stay on their own per-row loop (``RowExactSwitchMixin``; see its docstring).
 from __future__ import annotations
 
 import mlx.core as mx
+from mlx import nn
 
 from .. import row_exact_verify as REV
 from ..row_exact import ops
@@ -53,16 +54,41 @@ def _unstrip(y, x):
 
 
 def grouped_quantized_linears(window, linears, inputs):
-    """Run compatible quantized projections with the row-exact grouped law.
+    """Run mixed projection siblings with their row-exact laws.
 
-    ``window`` is the open verify window the routes are noted on (the
-    package notes on ``row_exact_verify.current()``, which must be it).
+    GDN input projections can mix quantized q/k/v/z tables with small dense
+    b/a tables.  Keep the compatible quantized members in one grouped launch
+    and route dense members independently; sending the mixed tuple to
+    ``ops.quantized_linears`` makes one dense member demote every sibling to
+    the per-row fallback.
+
+    ``window`` is the open verify window the routes are noted on (the package
+    notes on ``row_exact_verify.current()``, which must be it).
     """
 
     rows = row_count(inputs)
-    # Lane-prepared members run their own lane law, each through its own
-    # canary (ops.quantized_linears_route); the rest may group.
-    outputs = ops.quantized_linears(linears, _strip(inputs, rows), stage=STAGE)
+    strip = _strip(inputs, rows)
+    outputs = [None] * len(linears)
+    quantized = [
+        (index, module)
+        for index, module in enumerate(linears)
+        if isinstance(module, nn.QuantizedLinear)
+    ]
+    if quantized:
+        grouped = ops.quantized_linears(
+            tuple(module for _, module in quantized), strip, stage=STAGE
+        )
+        for (index, _), value in zip(quantized, grouped, strict=True):
+            outputs[index] = value
+    for index, module in enumerate(linears):
+        if outputs[index] is not None:
+            continue
+        if isinstance(module, nn.Linear):
+            outputs[index] = ops.dense_linear(module, strip, stage=STAGE)
+        else:
+            # An undeclared projection stays exact by construction.
+            window.note(STAGE, "per_row_unsupported")
+            outputs[index] = ops.per_row(module, strip)
     return tuple(_unstrip(y, inputs) for y in outputs)
 
 

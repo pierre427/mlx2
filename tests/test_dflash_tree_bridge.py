@@ -33,6 +33,7 @@ def _clean_gates(monkeypatch):
     for name in ALL_GATES + [
         "MLX2_DFLASH_TOPOLOGY",
         "MLX2_EXTERNAL_ROUND_TIMING",
+        "MLX2_EXTERNAL_ROUND_TIMING_SYNC",
         "MLX2_TENSORFOLD_COHORT_LIMIT",
     ]:
         monkeypatch.delenv(name, raising=False)
@@ -1057,6 +1058,32 @@ def test_phase_timing_receipt_without_extra_syncs(monkeypatch):
         assert f"external_phase_{phase}_ns" in phases
         assert isinstance(stats[f"external_phase_{phase}_ns"], int)
     assert stats["external_phase_rounds"] == stats["external_tree_rounds"]
+
+
+def test_phase_timing_sync_is_explicit_and_fences_each_boundary(monkeypatch):
+    m, d = tiny(vocab=64, top_k=16, block_size=8)
+    _tree_env(monkeypatch, batched_laws=True, single_fence=True)
+    monkeypatch.setenv("MLX2_EXTERNAL_ROUND_TIMING", "1")
+    monkeypatch.setenv("MLX2_EXTERNAL_ROUND_TIMING_SYNC", "1")
+    calls = []
+    original = mx.synchronize
+    monkeypatch.setattr(mx, "synchronize", lambda *args: calls.append(args) or original(*args))
+    _, _, _, stats = _run(m, d, max_tokens=12)
+    assert calls
+    assert stats["external_phase_synchronizations"] == len(calls)
+    assert stats["external_phase_synchronizations"] > stats["external_phase_rounds"]
+
+
+def test_phase_timing_sync_gate_does_nothing_without_timing(monkeypatch):
+    m, d = tiny(vocab=64, top_k=16, block_size=8)
+    _tree_env(monkeypatch, batched_laws=True, single_fence=True)
+    monkeypatch.setenv("MLX2_EXTERNAL_ROUND_TIMING_SYNC", "1")
+    calls = []
+    original = mx.synchronize
+    monkeypatch.setattr(mx, "synchronize", lambda *args: calls.append(args) or original(*args))
+    _, _, _, stats = _run(m, d, max_tokens=12)
+    assert not calls
+    assert "external_phase_synchronizations" not in stats
 
 
 # -- fault injection and exact recovery ---------------------------------------

@@ -1,11 +1,12 @@
 """Repair-first CPU evidence for progressive external verify portability.
 
 These tests deliberately do not claim qualification.  They establish that
-the hybrid transaction can commit/abort exact prefixes, while the current
+the hybrid transaction can commit/abort exact prefixes, while the stock
 Qwen3.8 and Qwen3.6 target forwards do not supply the bit-exact wide-row law
-required by exact progressive verification.  Qwen3.8 carries its separate
-approximate AST contract; Qwen3.6 rejects the surface before loading instead
-of substituting a predictably slower serial target loop.
+required by exact progressive verification.  Exact progressive verification
+is available only on the explicitly selected row-exact target executor
+(``target_verify_row_exact``; tests/test_qwen_hybrid_row_exact_cpu.py);
+Qwen3.8 also carries its separate approximate AST contract.
 """
 
 import copy
@@ -148,11 +149,13 @@ def test_qwen_exact_progressive_remains_fail_closed_without_wide_row_protocol():
         "progressive_multilane_draft_cap",
         "progressive_verification_fidelity",
     }
-    # Qwen3.8 carries the separate approximate contract. Qwen3.6 continues to
-    # reject progressive keys until it has an exact or explicitly bounded
-    # target protocol. Neither model declares the row-exact wide protocol.
+    # Qwen3.8 carries the separate approximate contract.  Qwen3.6 admits the
+    # exact keys only beside target_verify_row_exact (never the approximate
+    # fidelity).  Neither model declares the row-exact protocol unless that
+    # executor is explicitly selected.
     assert candidate_keys <= QWEN38_EXTERNAL_KEYS
-    assert candidate_keys.isdisjoint(QWEN36_EXTERNAL_KEYS)
+    assert "progressive_verification_fidelity" not in QWEN36_EXTERNAL_KEYS
+    assert "target_verify_row_exact" in QWEN36_EXTERNAL_KEYS
     assert not hasattr(tiny_target(), "progressive_external_verify_protocol")
     assert not hasattr(tiny_qwen36(), "progressive_external_verify_protocol")
 
@@ -221,7 +224,10 @@ def test_adapter_owned_target_row_executor_fails_closed_on_fallback():
                 detail={"reason": "width_sensitive_attention"},
             )
 
-    with pytest.raises(RuntimeError, match="fell off its exact path"):
+    with pytest.raises(
+        RuntimeError,
+        match="fell off its exact path: width_sensitive_attention",
+    ):
         execute_progressive_target_rows(
             Target(),
             object(),

@@ -443,6 +443,55 @@ def test_stale_loss_refreshes_both_windows_before_terminal_decision():
     assert decision["speculative_samples_since_ordinary"] == 2
 
 
+def test_opt_in_current_round_loss_is_not_masked_by_rolling_win():
+    state = _state(
+        ordinary_samples=2,
+        speculative_samples=2,
+        loss_decisions=1,
+        window=4,
+        loss_basis="current_round",
+    )
+    _observe(state, "ordinary", 100)
+    _observe(state, "ordinary", 100)
+    assert _observe(state, "speculative", 250, committed=5) is None
+    decision = _observe(state, "speculative", 150)
+    assert decision["speculative_cost_basis"] == "current_round"
+    assert decision["speculative_ns_per_committed_token"] == 150
+    assert decision["speculative_window_ns_per_committed_token"] < 100
+    assert decision["speculative_samples_since_ordinary"] == 2
+    assert state.receipt()["ordinary_refreshes"] == 0
+
+
+def test_current_round_loss_still_refreshes_a_stale_baseline():
+    state = _state(
+        ordinary_samples=2,
+        speculative_samples=2,
+        loss_decisions=1,
+        window=4,
+        loss_basis="current_round",
+    )
+    _observe(state, "ordinary", 100)
+    _observe(state, "ordinary", 100)
+    for _ in range(4):
+        assert _observe(state, "speculative", 50) is None
+    assert _observe(state, "speculative", 150) is None
+    assert not state.handed_off
+    assert state.needs_ordinary_probe(1)
+    assert state.receipt()["ordinary_refreshes"] == 1
+
+
+def test_loss_basis_is_strict_and_default_serialization_is_stable():
+    assert "loss_basis" not in CostPerCommitHandoffSettings(
+        enabled=True
+    ).as_dict()
+    with pytest.raises(ValueError, match="loss_basis"):
+        CostPerCommitHandoffSettings(enabled=True, loss_basis="latest")
+    with pytest.raises(ValueError, match="only valid for one-way"):
+        CostPerCommitHandoffSettings(
+            enabled=True, reversible=True, loss_basis="current_round"
+        )
+
+
 class _ClosableTarget(list):
     def close(self):
         pass
@@ -1139,6 +1188,25 @@ def test_reversible_settle_rounds_exclude_warmup_of_each_kind():
     assert _observe(state, "speculative", 90, committed=1) is None
     assert not state.speculation_paused
     assert state.receipt()["reversible"]["settle_skipped_rounds"] == 2
+
+
+def test_one_way_ordinary_settle_excludes_only_probe_warmup_by_default():
+    default = _state(loss_decisions=1)
+    _observe(default, "ordinary", 10_000)
+    assert default.receipt()["ordinary"]["1"]["samples"] == 1
+
+    state = _state(loss_decisions=1, one_way_ordinary_settle_rounds=1)
+    _observe(state, "ordinary", 10_000)
+    assert state.needs_ordinary_probe(1)
+    _observe(state, "ordinary", 100)
+    _observe(state, "ordinary", 100)
+    _observe(state, "speculative", 50_000, committed=8)
+    decision = _observe(state, "speculative", 150)
+    assert decision["ordinary_ns_per_committed_token"] == 100
+    assert decision["speculative_ns_per_committed_token"] > 100
+    assert (
+        state.receipt()["settings"]["one_way_ordinary_settle_rounds"] == 1
+    )
 
 
 def test_reversible_ordinary_baseline_is_a_median():

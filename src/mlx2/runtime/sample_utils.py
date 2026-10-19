@@ -516,6 +516,16 @@ def make_presence_penalty(
         int(context_size),
         None if generation_start is None else int(generation_start),
     )
+    # Private progressive/AST branches may evaluate it: the law is a pure
+    # function of the supplied history with no mutable state, and it forbids
+    # no token at any length (it only lowers logits).  Every batched-law
+    # consumer reads ``presence_window`` before ``forbidden_token_ids_at_length``
+    # (``_batched_law_contract``, ``_launch_tree_laws``), so the empty forbidden
+    # set never stands in for the penalty itself.  Qwen instruct sampling
+    # profiles default presence_penalty to 1.5, which kept every Qwen AST round
+    # on its primary chain until this was declared (AST smokes 2026-10-18).
+    presence_penalty_processor.progressive_branch_safe = True
+    presence_penalty_processor.forbidden_token_ids_at_length = lambda length: ()
     return _probe_safe(presence_penalty_processor)
 
 

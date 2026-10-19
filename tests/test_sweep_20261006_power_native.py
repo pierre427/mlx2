@@ -260,7 +260,10 @@ def test_real_samplers_long_run_memory_stays_bounded(real_host):
             reading = energy.read()
             if index < temperature_reads:
                 temperature.die_summary()
-        assert reading.gpu_watts is not None and reading.dram_watts is not None
+        # Some supported hosts expose GPU energy but no DRAM IOReport channel.
+        # The lifecycle/leak contract needs a real sampler, not every optional
+        # power domain.
+        assert reading.gpu_watts is not None
     finally:
         energy.close()
         temperature.close()

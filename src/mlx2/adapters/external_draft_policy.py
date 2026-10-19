@@ -25,6 +25,36 @@ DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION = {
 COMPOSITION_DEFAULT_SKIPPED_NO_EXACT_LAW = (
     "composition default skipped: backend lacks exact proposal-law support"
 )
+PROGRESSIVE_VERIFICATION_TILE_AUTO = "auto"
+
+
+def progressive_external_terminal_input_widths(target, *, max_lanes, num_draft):
+    """Return executor-declared exact terminal target-input widths.
+
+    These are actual ``inputs.shape[1]`` widths, including the anchor and the
+    bonus-law input, not proposal tile widths.  Keeping this a separate
+    capability prevents an automatic K-wide tile from silently treating a
+    K-row non-final executor claim as evidence for its K+1-row terminal slab.
+    """
+
+    widths = getattr(
+        target, "progressive_external_exact_terminal_input_widths", None
+    )
+    if widths is None:
+        raise ValueError(
+            "automatic progressive verification requires target-declared exact "
+            "terminal input widths"
+        )
+    if callable(widths):
+        widths = widths(max_lanes=max_lanes, num_draft=int(num_draft))
+    if not isinstance(widths, (tuple, list, range)) or not widths or any(
+        type(width) is not int or width < 2 for width in widths
+    ):
+        raise ValueError(
+            "target exact terminal input widths must be nonempty integers "
+            "of at least two"
+        )
+    return tuple(dict.fromkeys(widths))
 
 
 def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposals=1):
@@ -42,9 +72,12 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
             PROGRESSIVE_FIDELITY_EXACT,
         )
 
-        if type(tile) is not int or not 1 <= tile < num_draft:
+        if tile != PROGRESSIVE_VERIFICATION_TILE_AUTO and (
+            type(tile) is not int or not 1 <= tile < num_draft
+        ):
             raise ValueError(
-                "progressive_verification_tile must be an integer from 1 below num_draft"
+                "progressive_verification_tile must be 'auto' or an integer "
+                "from 1 below num_draft"
             )
         if policy.get("proposal_composition") not in (None, False):
             raise ValueError(
@@ -98,10 +131,14 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
     alternative_depth_policy = policy.get(
         "progressive_alternative_depth_policy", "full"
     )
+    rootless_fallback = policy.get("progressive_ast_rootless_fallback", True)
+    if type(rootless_fallback) is not bool:
+        raise ValueError("progressive_ast_rootless_fallback must be boolean")
     cross_session_pack_rows = policy.get("progressive_cross_session_pack_rows")
     if (
         cross_session_pack_rows is not None
         and cap is not None
+        and type(tile) is int
         and cap <= tile
     ):
         raise ValueError(
@@ -152,7 +189,129 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
         raise ValueError(
             "confidence_tail requires confidence_tree with at least three branches"
         )
+    if not rootless_fallback and (
+        tile is None
+        or policy.get("continuation_pool") is None
+        or alternatives <= 1
+        or alternative_strategy != "confidence_tree"
+    ):
+        raise ValueError(
+            "progressive_ast_rootless_fallback=false requires a continuation_pool "
+            "confidence_tree with exact progressive alternatives"
+        )
+    # Explicit true is the compatibility spelling of omission. Keep old route
+    # identities stable; only the non-default refusal changes execution law.
+    if rootless_fallback:
+        policy.pop("progressive_ast_rootless_fallback", None)
     return policy
+
+
+def resolve_progressive_external_tile(policy, *, num_draft, target, max_lanes):
+    """Resolve automatic packing only from declared exact target geometry."""
+    requested = policy.get("progressive_verification_tile")
+    if type(max_lanes) is not int or max_lanes < 1:
+        raise ValueError("progressive verification max_lanes must be a positive integer")
+    if requested != PROGRESSIVE_VERIFICATION_TILE_AUTO:
+        if (
+            requested is not None
+            and policy.get("progressive_verification_fidelity", "exact") == "exact"
+            and max_lanes > 1
+        ):
+            minimum = max(
+                1,
+                int(
+                    getattr(
+                        target,
+                        "progressive_external_lane_exact_min_width",
+                        1,
+                    )
+                ),
+            )
+            if requested < minimum:
+                raise ValueError(
+                    "exact progressive verification tile is narrower than the "
+                    "target's declared multi-lane exact width: "
+                    f"tile={requested}, minimum={minimum}"
+                )
+        return requested
+
+    if policy.get("progressive_verification_fidelity", "exact") != "exact":
+        raise ValueError("automatic progressive verification requires exact fidelity")
+    widths = getattr(target, "progressive_external_exact_tile_widths", None)
+    maximum_lanes = getattr(target, "progressive_external_exact_max_lanes", None)
+    if widths is None or maximum_lanes is None:
+        raise ValueError(
+            "automatic progressive verification requires target-declared exact "
+            "tile widths and maximum lanes"
+        )
+    if callable(widths):
+        widths = widths(max_lanes=max_lanes, num_draft=int(num_draft))
+    if type(maximum_lanes) is not int or maximum_lanes < 1:
+        raise ValueError("target exact maximum lanes must be a positive integer")
+    if not 1 <= max_lanes <= maximum_lanes:
+        raise ValueError(
+            "automatic progressive verification cohort exceeds the target's "
+            f"declared exact lane limit: lanes={max_lanes}, maximum={maximum_lanes}"
+        )
+    if not isinstance(widths, (tuple, list, range)) or any(
+        type(width) is not int or width < 1 for width in widths
+    ):
+        raise ValueError("target exact tile widths must be positive integers")
+
+    terminal_widths = progressive_external_terminal_input_widths(
+        target, max_lanes=max_lanes, num_draft=num_draft
+    )
+
+    simple_primary = (
+        policy.get("progressive_alternative_branches", 1) == 1
+        and policy.get("continuation_pool") is None
+        and policy.get("progressive_cross_session_pack_rows") is None
+        and policy.get("progressive_cross_session_pack_mode") is None
+    )
+    # A simple primary chain may verify all K proposals and the bonus law in
+    # one terminal K+1-input target launch.  Alternative/continuation routes
+    # still need a suffix beyond the tile and therefore retain the K-1 bound.
+    ceiling = int(num_draft) - 1
+    if simple_primary and all(
+        width in terminal_widths for width in range(2, int(num_draft) + 2)
+    ):
+        ceiling = int(num_draft)
+    cap = policy.get("progressive_multilane_draft_cap")
+    if max_lanes > 1 and cap is not None:
+        ceiling = min(ceiling, int(cap))
+        if policy.get("progressive_cross_session_pack_rows") is not None:
+            ceiling = min(ceiling, int(cap) - 1)
+    minimum = (
+        max(
+            1,
+            int(
+                getattr(
+                    target,
+                    "progressive_external_lane_exact_min_width",
+                    1,
+                )
+            ),
+        )
+        if max_lanes > 1
+        else 1
+    )
+    feasible = [
+        width
+        for width in widths
+        if minimum <= width <= ceiling
+        and all(
+            terminal_width in terminal_widths
+            for terminal_width in range(2, min(width, int(num_draft)) + 2)
+        )
+    ]
+    if not feasible:
+        raise ValueError(
+            "automatic progressive verification has no target-declared exact "
+            "tile for the proposal/cohort geometry: "
+            f"num_draft={num_draft}, lanes={max_lanes}, minimum={minimum}, "
+            f"ceiling={ceiling}"
+        )
+    return max(feasible)
 
 
 def progressive_external_identity(policy, binding=None):
@@ -163,32 +322,31 @@ def progressive_external_identity(policy, binding=None):
         PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
     )
 
+    identity = {
+        "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
+        "verification_tile": tile,
+        "multilane_draft_cap": policy.get("progressive_multilane_draft_cap"),
+        "alternative_branches": policy.get("progressive_alternative_branches", 1),
+        "alternative_strategy": policy.get(
+            "progressive_alternative_strategy", "distinct_root"
+        ),
+        "alternative_depth_policy": policy.get(
+            "progressive_alternative_depth_policy", "full"
+        ),
+        "cross_session_pack_rows": policy.get(
+            "progressive_cross_session_pack_rows"
+        ),
+        "cross_session_pack_mode": policy.get(
+            "progressive_cross_session_pack_mode"
+        ),
+        "target_protocol": None if binding is None else binding["target_protocol"],
+        "fidelity": policy.get("progressive_verification_fidelity", "exact"),
+        "source_hashes": None if binding is None else binding["source_hashes"],
+    }
+    if policy.get("progressive_ast_rootless_fallback") is False:
+        identity["ast_rootless_fallback"] = False
     return json.dumps(
-        {
-            "algorithm": PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
-            "verification_tile": tile,
-            "multilane_draft_cap": policy.get("progressive_multilane_draft_cap"),
-            "alternative_branches": policy.get(
-                "progressive_alternative_branches", 1
-            ),
-            "alternative_strategy": policy.get(
-                "progressive_alternative_strategy", "distinct_root"
-            ),
-            "alternative_depth_policy": policy.get(
-                "progressive_alternative_depth_policy", "full"
-            ),
-            "cross_session_pack_rows": policy.get(
-                "progressive_cross_session_pack_rows"
-            ),
-            "cross_session_pack_mode": policy.get(
-                "progressive_cross_session_pack_mode"
-            ),
-            "target_protocol": (
-                None if binding is None else binding["target_protocol"]
-            ),
-            "fidelity": policy.get("progressive_verification_fidelity", "exact"),
-            "source_hashes": None if binding is None else binding["source_hashes"],
-        },
+        identity,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -215,6 +373,7 @@ class ExternalDraftAdapterMixin:
             "progressive_alternative_branches",
             "progressive_alternative_strategy",
             "progressive_alternative_depth_policy",
+            "progressive_ast_rootless_fallback",
             "progressive_cross_session_pack_rows",
             "progressive_cross_session_pack_mode",
             "progressive_verification_fidelity",
@@ -282,6 +441,7 @@ class ExternalDraftAdapterMixin:
                 hasattr(record["args"], "xpress_rank")
                 or hasattr(record["args"], "lilicorr_candidate_topk")
                 or record["config"].get("architectures") == ["DFlash2DraftModel"]
+                or getattr(record["args"], "native_mtp_head", False) is True
             ):
                 raise ValueError(
                     "continuation_pool requires a compatible complete-path external head"
@@ -587,8 +747,11 @@ class ExternalDraftAdapterMixin:
         progressive_fidelity = self.external_policy.get(
             "progressive_verification_fidelity", "exact"
         )
+        progressive_tile = self.external_policy.get(
+            "progressive_verification_tile"
+        )
         if (
-            self.external_policy.get("progressive_verification_tile") is not None
+            progressive_tile is not None
             and progressive_fidelity != "exact"
             and progressive_binding is None
         ):
@@ -596,6 +759,21 @@ class ExternalDraftAdapterMixin:
                 "approximate progressive verification requires a bound target "
                 "protocol before execution configuration"
             )
+        resolved_tile = resolve_progressive_external_tile(
+            self.external_policy,
+            num_draft=self._external_num_draft(),
+            target=getattr(self, "model", None),
+            max_lanes=max_lanes,
+        )
+        terminal_input_widths = (
+            progressive_external_terminal_input_widths(
+                getattr(self, "model", None),
+                max_lanes=max_lanes,
+                num_draft=self._external_num_draft(),
+            )
+            if progressive_tile == PROGRESSIVE_VERIFICATION_TILE_AUTO
+            else None
+        )
         return {
             "persistent": True,
             "num_draft": self._external_num_draft(),
@@ -615,9 +793,21 @@ class ExternalDraftAdapterMixin:
             ),
             **(
                 {
-                    "progressive_verification_tile": self.external_policy[
-                        "progressive_verification_tile"
-                    ],
+                    "progressive_verification_tile": resolved_tile,
+                    **(
+                        {"progressive_verification_tile_policy": "auto"}
+                        if progressive_tile == PROGRESSIVE_VERIFICATION_TILE_AUTO
+                        else {}
+                    ),
+                    **(
+                        {
+                            "progressive_terminal_input_widths": (
+                                terminal_input_widths
+                            )
+                        }
+                        if terminal_input_widths is not None
+                        else {}
+                    ),
                     "progressive_multilane_draft_cap": self.external_policy.get(
                         "progressive_multilane_draft_cap"
                     ),
@@ -629,6 +819,9 @@ class ExternalDraftAdapterMixin:
                     ),
                     "progressive_alternative_depth_policy": self.external_policy.get(
                         "progressive_alternative_depth_policy", "full"
+                    ),
+                    "progressive_ast_rootless_fallback": self.external_policy.get(
+                        "progressive_ast_rootless_fallback", True
                     ),
                     "progressive_cross_session_pack_rows": self.external_policy.get(
                         "progressive_cross_session_pack_rows"
@@ -648,8 +841,7 @@ class ExternalDraftAdapterMixin:
                         else {}
                     ),
                 }
-                if self.external_policy.get("progressive_verification_tile")
-                is not None
+                if progressive_tile is not None
                 else {}
             ),
         }
@@ -681,12 +873,38 @@ class ExternalDraftAdapterMixin:
                 self.external_policy["cost_per_commit_handoff"],
             )
         if self.external_policy.get("progressive_verification_tile") is not None:
+            requested_tile = self.external_policy["progressive_verification_tile"]
+            batch_lanes = kwargs.get("completion_batch_size")
+            if (
+                requested_tile == PROGRESSIVE_VERIFICATION_TILE_AUTO
+                and batch_lanes is None
+            ):
+                raise ValueError(
+                    "automatic progressive verification requires "
+                    "completion_batch_size at batch construction"
+                )
+            resolved_tile = resolve_progressive_external_tile(
+                self.external_policy,
+                num_draft=self._external_num_draft(),
+                target=self.model,
+                max_lanes=1 if batch_lanes is None else batch_lanes,
+            )
             if "continuation_pool" in self.external_policy:
                 kwargs.setdefault("continuation_pool_ast_bridge", True)
             kwargs.setdefault(
                 "progressive_verification_tile",
-                self.external_policy["progressive_verification_tile"],
+                resolved_tile,
             )
+            if requested_tile == PROGRESSIVE_VERIFICATION_TILE_AUTO:
+                kwargs.setdefault("progressive_verification_tile_policy", "auto")
+                kwargs.setdefault(
+                    "progressive_terminal_input_widths",
+                    progressive_external_terminal_input_widths(
+                        self.model,
+                        max_lanes=batch_lanes,
+                        num_draft=self._external_num_draft(),
+                    ),
+                )
             kwargs.setdefault(
                 "multilane_draft_cap",
                 self.external_policy.get("progressive_multilane_draft_cap"),
@@ -706,6 +924,10 @@ class ExternalDraftAdapterMixin:
                 self.external_policy.get(
                     "progressive_alternative_depth_policy", "full"
                 ),
+            )
+            kwargs.setdefault(
+                "progressive_ast_rootless_fallback",
+                self.external_policy.get("progressive_ast_rootless_fallback", True),
             )
             kwargs.setdefault(
                 "progressive_cross_session_pack_rows",
@@ -849,7 +1071,9 @@ class ExternalDraftAdapterMixin:
 
 
 __all__ = [
+    "PROGRESSIVE_VERIFICATION_TILE_AUTO",
     "ExternalDraftAdapterMixin",
     "normalize_progressive_external_policy",
     "progressive_external_identity",
+    "resolve_progressive_external_tile",
 ]

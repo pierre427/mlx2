@@ -89,7 +89,12 @@ def test_qwen38_is_the_only_qwen_external_policy_allowlist():
         "progressive_verification_fidelity",
     }
     assert candidate_keys <= QWEN38_EXTERNAL_POLICY_KEYS
-    assert candidate_keys.isdisjoint(QWEN36_EXTERNAL_POLICY_KEYS)
+    # Qwen3.6 admits exact progressive keys (row-exact executor) but never
+    # the approximate fidelity selector.
+    assert "progressive_verification_fidelity" not in QWEN36_EXTERNAL_POLICY_KEYS
+    assert candidate_keys - {"progressive_verification_fidelity"} <= (
+        QWEN36_EXTERNAL_POLICY_KEYS
+    )
     assert all(
         key not in Qwen3827BAdapter.default_route_execution_policy["external_draft"]
         for key in candidate_keys

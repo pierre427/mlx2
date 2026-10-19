@@ -1,6 +1,7 @@
 """Real hybrid rollback/tap/RNG parity for seven proposals in 4+4 rows."""
 import copy
 import itertools
+from types import SimpleNamespace
 
 import mlx.core as mx
 import numpy as np
@@ -20,6 +21,7 @@ from mlx2.runtime.speculative_topology import (
     AdaptiveTopologyLatch,
     confidence_tree_branch_depths,
     confidence_tree_trunk_length,
+    ordered_alternative_winner,
 )
 from tests.test_nemotron_external_taps_cpu import tiny_model
 
@@ -174,10 +176,15 @@ def test_ordered_b2_full_accept_commits_b2_discards_b3_b4_and_continues():
         ]["ordered_alternatives"]
         assert receipt["last_branch_accepts"] == [0, 8, 0, 0]
         assert receipt["last_selected_branch"] == 2
+        assert receipt["last_branch_committed_tokens"] == [1, 9, 1, 1]
+        assert receipt["last_selected_token_uplift"] == 8
         assert receipt["last_short_circuit_after_branch"] == 2
         assert receipt["last_discarded_branches"] == [1, 3, 4]
         assert receipt["b2_full_accept_short_circuits"] == 1
         assert receipt["next_round_base"] == "selected_branch_committed_state"
+        assert receipt["winner_selection"] == (
+            "first_full_branch_with_at_least_b1_committed_tokens"
+        )
         assert len(calls) == 2
         assert branch_batch.scheduler_stats[
             "external_progressive_alternative_b2_short_circuits"
@@ -347,6 +354,37 @@ def test_confidence_tree_uses_two_token_trunk_and_commits_rescue_branch():
         branch_batch.close()
 
 
+def test_confidence_tail_full_branch_cannot_replace_longer_b1_partial_path():
+    baseline_batch, baseline, _, _ = run_round(4, 4, proposal_count=7)
+    branch_batch, branch_lane, _calls, _proposal = run_round(
+        4,
+        4,
+        proposal_count=7,
+        alternative_accept_branch=2,
+        alternative_strategy="confidence_tree",
+        alternative_depth_policy="confidence_tail",
+        confidence_features=[2.0, 1.0, 0.5, -2.0, -2.0, -2.0, -2.0],
+    )
+    try:
+        assert branch_lane.history == baseline.history
+        assert branch_lane.anchor == baseline.anchor
+        assert branch_lane.rng.snapshot() == baseline.rng.snapshot()
+        close_caches(branch_lane.cache, baseline.cache)
+        alternatives = branch_lane.ready[-1].speculative_receipt[
+            "progressive_verification"
+        ]["ordered_alternatives"]
+        assert alternatives["last_branch_proposal_counts"] == [7, 7, 3, 3]
+        assert alternatives["last_branch_accepts"] == [4, 2, 3, 2]
+        assert alternatives["last_full_accept_branches"] == [3]
+        assert alternatives["last_selected_branch"] == 1
+        assert alternatives["last_branch_committed_tokens"] == [5, 3, 4, 3]
+        assert alternatives["last_selected_token_uplift"] == 0
+        assert alternatives["last_short_circuit_after_branch"] == 3
+    finally:
+        baseline_batch.close()
+        branch_batch.close()
+
+
 def test_confidence_tree_trunk_and_lagged_latch_retopology():
     assert confidence_tree_trunk_length([2, 1, -1, 3], 4, 4) == 2
     assert confidence_tree_trunk_length([2, 1, 0.5, 3], 4, 4) == 3
@@ -413,6 +451,67 @@ def test_confidence_tree_trunk_and_lagged_latch_retopology():
     assert latch.park_remaining == 0
     assert latch.snapshot()["periodic_reprobes"] == 1
     assert latch.snapshot()["accepted_token_uplift"] == 4
+
+
+def test_ordered_alternative_winner_preserves_longer_b1_partial_commit():
+    decisions = [
+        SimpleNamespace(accepted=4, emitted=list(range(5)), commit_count=5),
+        SimpleNamespace(accepted=3, emitted=list(range(4)), commit_count=4),
+        SimpleNamespace(accepted=3, emitted=list(range(4)), commit_count=4),
+    ]
+    winner, full = ordered_alternative_winner(decisions, [7, 3, 3])
+    assert full == (1, 2)
+    assert winner == 0
+
+
+def test_ordered_alternative_winner_keeps_first_nonlosing_full_branch():
+    decisions = [
+        SimpleNamespace(accepted=3, emitted=list(range(4)), commit_count=None),
+        SimpleNamespace(accepted=3, emitted=list(range(4)), commit_count=None),
+        SimpleNamespace(accepted=4, emitted=list(range(5)), commit_count=None),
+    ]
+    winner, full = ordered_alternative_winner(decisions, [7, 3, 4])
+    assert full == (1, 2)
+    assert winner == 1
+
+
+def test_ordered_alternative_winner_can_select_exact_partial_uplift():
+    decisions = [
+        SimpleNamespace(accepted=1, emitted=[1, 2], commit_count=2),
+        SimpleNamespace(accepted=2, emitted=[1, 3, 4], commit_count=3),
+        SimpleNamespace(accepted=0, emitted=[5], commit_count=1),
+    ]
+    winner, full = ordered_alternative_winner(
+        decisions, [3, 3, 3], allow_partial_uplift=True
+    )
+    assert full == ()
+    assert winner == 1
+    default_winner, _ = ordered_alternative_winner(decisions, [3, 3, 3])
+    assert default_winner == 0
+
+
+def test_ast_zero_uplift_alternative_selection_does_not_reset_parking():
+    latch = AdaptiveTopologyLatch(2, shrink_after=1, park_rounds=2)
+    decision = latch.choose(2, 7, 4)
+    latch.observe_many(
+        [
+            {
+                "branch_accepts": [3, 3],
+                "proposal_counts": [7, 3],
+                "selected_branch": 2,
+                "unique_target_rows": 8,
+                "outcome": "committed_conclusive",
+            }
+        ],
+        decision_token=decision.decision_token,
+    )
+    snapshot = latch.snapshot()
+    assert snapshot["alternative_selections"] == 1
+    assert snapshot["alternative_wins"] == 0
+    assert snapshot["zero_uplift_alternative_selections"] == 1
+    assert snapshot["accepted_token_uplift"] == 0
+    assert snapshot["active_branches"] == 1
+    assert snapshot["park_remaining"] == 2
 
 
 def test_ast_no_uplift_without_incremental_cost_does_not_downshift():
@@ -539,7 +638,9 @@ def test_ast_cohort_observation_is_order_independent_and_idempotent():
     assert all(snapshot == snapshots[0] for snapshot in snapshots)
     assert snapshots[0]["completed_samples"] == 1
     assert snapshots[0]["completed_sessions"] == 4
-    assert snapshots[0]["alternative_wins"] == 1
+    assert snapshots[0]["alternative_selections"] == 1
+    assert snapshots[0]["alternative_wins"] == 0
+    assert snapshots[0]["zero_uplift_alternative_selections"] == 1
 
 
 def test_ast_censored_cohort_cannot_shrink_and_out_of_order_token_fails():

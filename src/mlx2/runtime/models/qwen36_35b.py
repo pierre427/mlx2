@@ -139,6 +139,25 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
     def set_fused_gdn_batch_verify_mode(self, mode):
         self._set_row_mode("batch_verify", mode)
 
+    # Declarations read by the adapter-owned row-exact target executor
+    # (``qwen_hybrid_row_exact``); they select nothing themselves.
+    def row_exact_fused_verify(self, lanes, steps):
+        """The fused verify kind a speculating ``[lanes, steps]`` block would
+        run on this layer (``verify``/``batch_verify``), or None."""
+        if steps <= 1:
+            return None
+        choice = "batch_verify" if lanes > 1 else "verify"
+        if getattr(self, "fused_gdn_" + choice + "_mode") != "row_exact":
+            return None
+        return choice
+
+    def row_exact_fused_verify_calls(self):
+        return int(self.fused_gdn_verify_calls) + int(self.fused_gdn_batch_verify_calls)
+
+    def row_exact_decode_route(self):
+        """What this layer's ordinary one-token decode runs (canary identity)."""
+        return ("qwen36", QWEN36_GDN_CONTRACT.identity, self.fused_gdn_decode_mode)
+
     def _row_fallback(self, choice, reason):
         prefix = "fused_gdn_" + choice
         setattr(self, prefix + "_fallbacks", getattr(self, prefix + "_fallbacks") + 1)
@@ -156,7 +175,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         reasons[reason] = reasons.get(reason, 0) + 1
         return None
 
-    def _try_fused_decode(self, qkv, z, b, a, mask, cache):
+    def _try_fused_decode(self, qkv, z, b, a, mask, cache, *, account=True):
         if cache is not None:
             # A state of the class this layer did not select never runs.
             check_state(cache[1], getattr(self, "_gdn_state_dtype", None))
@@ -164,7 +183,9 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         if steps > 1 and bool(getattr(cache, "speculating", False)):
             choice = "batch_verify" if rows > 1 else "verify"
             if getattr(self, "fused_gdn_" + choice + "_mode") == "row_exact":
-                return self._try_fused_verify(qkv, z, b, a, mask, cache, choice)
+                return self._try_fused_verify(
+                    qkv, z, b, a, mask, cache, choice, account=account
+                )
             return None
         batch = rows > 1 and steps == 1
         if batch:
@@ -172,11 +193,14 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                 return None
         elif self.fused_gdn_decode_mode == "stock":
             return None
-        fallback = (
-            (lambda reason: self._row_fallback("batch_decode", reason))
-            if batch
-            else self._fallback
-        )
+        if not account:
+            fallback = lambda reason: None
+        else:
+            fallback = (
+                (lambda reason: self._row_fallback("batch_decode", reason))
+                if batch
+                else self._fallback
+            )
         if qkv.shape[1] > 1 and not bool(getattr(cache, "speculating", False)):
             # A prefill chunk is not a decode candidate; see Qwen4's gate.
             return None
@@ -252,16 +276,23 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         cache[0] = conv_state
         cache[1] = recurrent_state
         cache.advance(1)
-        if batch:
-            self.fused_gdn_batch_decode_calls += 1
-            self.fused_gdn_batch_decode_last_fallback = None
-        else:
-            self.fused_gdn_decode_calls += 1
-            self.fused_gdn_decode_last_fallback = None
+        if account:
+            if batch:
+                self.fused_gdn_batch_decode_calls += 1
+                self.fused_gdn_batch_decode_last_fallback = None
+            else:
+                self.fused_gdn_decode_calls += 1
+                self.fused_gdn_decode_last_fallback = None
         return self.out_proj(out)
 
-    def _try_fused_verify(self, qkv, z, b, a, mask, cache, choice):
-        fallback = lambda reason: self._row_fallback(choice, reason)
+    def _try_fused_verify(
+        self, qkv, z, b, a, mask, cache, choice, *, account=True
+    ):
+        fallback = (
+            (lambda reason: self._row_fallback(choice, reason))
+            if account
+            else (lambda reason: None)
+        )
         if cache is None or cache[0] is None or cache[1] is None:
             return fallback("uninitialized cache")
         describe = getattr(cache, "rollback_spans", None)
@@ -377,10 +408,17 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         cache.record_rollback(steps, restore, initial, per_row_fn=restore_rows)
         cache[0], cache[1] = conv, state
         cache.advance(steps)
-        prefix = "fused_gdn_" + choice
-        setattr(self, prefix + "_calls", getattr(self, prefix + "_calls") + 1)
-        setattr(self, prefix + "_last_fallback", None)
+        if account:
+            prefix = "fused_gdn_" + choice
+            setattr(self, prefix + "_calls", getattr(self, prefix + "_calls") + 1)
+            setattr(self, prefix + "_last_fallback", None)
         return self.out_proj(out)
+
+    def row_exact_probe_fused_decode(self, qkv, z, b, a, mask, cache):
+        """Run a parity probe without publishing serving-use counters."""
+        return self._try_fused_decode(
+            qkv, z, b, a, mask, cache, account=False
+        )
 
 
 def qwen36_fused_gdn_stats(model: nn.Module, *, reset: bool = False) -> dict[str, Any]:
@@ -532,6 +570,27 @@ class Model(nn.Module):
             capture_layers,
             body_only=body_only,
         )
+
+    def configure_target_verify_row_exact(self, enabled):
+        """Install (or remove) the adapter-selected row-exact target executor.
+
+        Only an explicit ``target_verify_row_exact`` policy selects it; the
+        protocol declaration and the target-row hook then exist on this
+        instance alone (``qwen_hybrid_row_exact``).
+        """
+        if type(enabled) is not bool:
+            raise ValueError("target_verify_row_exact must be a boolean")
+        from .qwen_hybrid_row_exact import install, uninstall
+
+        if enabled:
+            return install(self)
+        uninstall(self)
+        return None
+
+    @property
+    def external_execution_receipt(self):
+        route = self.__dict__.get("_mlx2_qwen_hybrid_row_exact")
+        return None if route is None else route.receipt()
 
     def prefill_body(self, inputs, cache, capture_layers):
         return self.language_model.prefill_body(inputs, cache, capture_layers)

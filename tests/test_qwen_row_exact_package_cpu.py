@@ -17,6 +17,7 @@ from mlx import nn
 
 from mlx2.runtime import row_exact_verify as REV
 from mlx2.runtime.models import qwen3_next as QN
+from mlx2.runtime.models import qwen36_moe_decode as Q36
 from mlx2.runtime.models import row_exact_components as REC
 from mlx2.runtime.row_exact import canary, ops
 
@@ -165,6 +166,29 @@ def test_grouped_projections_match_one_row_calls():
     assert record.exact and record.stages == {"projections": {"per_row": 4}}
 
 
+def test_grouped_projections_partition_quantized_and_dense_members():
+    group = (
+        _swap(_quantized(128, 64, seed=1), REC.RowExactQuantizedLinearMixin),
+        _swap(_dense(128, 32, seed=2), REC.RowExactLinearMixin),
+        _swap(_quantized(128, 16, seed=3), REC.RowExactQuantizedLinearMixin),
+        _swap(_dense(128, 8, seed=4), REC.RowExactLinearMixin),
+    )
+    x = _x((2, 3, 128), 9)
+    record = REV.Window(6)
+    with REV.window(record):
+        outputs = REC.grouped_quantized_linears(record, group, x)
+    calls = (
+        partial(nn.QuantizedLinear.__call__, group[0]),
+        partial(nn.Linear.__call__, group[1]),
+        partial(nn.QuantizedLinear.__call__, group[2]),
+        partial(nn.Linear.__call__, group[3]),
+    )
+    for call, output in zip(calls, outputs, strict=True):
+        assert _same(output, _one_row_calls(call, x))
+    assert record.exact
+    assert "per_row_unsupported" not in record.stages["projections"]
+
+
 def test_grouped_projections_with_a_failed_canary(failing_canaries):
     group = tuple(_quantized(128, n, seed=n) for n in (16, 8))
     x = _x((1, 5, 128), 8)
@@ -224,6 +248,72 @@ def test_moe_window_projections_match_one_row_calls():
     assert _same(logits, one(gate)) and _same(alone, one(gate))
     assert _same(gate_logit, one(shared_gate))
     assert record.stages == {"projections": {"per_row": 3}}
+
+
+@pytest.mark.parametrize("rows", [2, 3, 4, 5, 16])
+def test_qwen36_q8_router_shared_gate_rows_match_one_row_calls(rows):
+    gate = _quantized(128, 256, bits=8, seed=31)
+    shared_gate = _quantized(128, 1, bits=8, seed=32)
+    block = type("Block", (), {"gate": gate, "shared_expert_gate": shared_gate})()
+    flat = _x((rows, 128), 33 + rows)
+    record = REV.Window(rows)
+    with REV.window(record):
+        logits, shared = Q36.router_and_shared_gate_rows(block, flat)
+    one = lambda layer: _one_row_calls(layer, flat[:, None])[:, 0]
+    assert logits.shape == (rows, 256) and shared.shape == (rows, 1)
+    assert _same(logits, one(gate))
+    assert _same(shared, one(shared_gate))
+    # CPU cannot construct the Metal group plan, so both members remain on
+    # the exact one-row fallback.  The GPU canary owns promotion to one launch.
+    assert record.stages == {"projections": {"per_row": 2}}
+
+
+def test_qwen36_router_shared_gate_group_is_one_canary_owned_operation(monkeypatch):
+    gate = _quantized(128, 256, bits=8, seed=41)
+    shared_gate = _quantized(128, 1, bits=8, seed=42)
+    block = type("Block", (), {"gate": gate, "shared_expert_gate": shared_gate})()
+    flat = _x((5, 128), 43)
+    calls = []
+
+    def grouped(linears, strip, *, stage):
+        calls.append((tuple(linears), tuple(strip.shape), stage))
+        return tuple(
+            _one_row_calls(layer, strip) for layer in linears
+        )
+
+    monkeypatch.setattr(ops, "quantized_linears", grouped)
+    logits, shared = Q36.router_and_shared_gate_rows(block, flat)
+    assert calls == [((gate, shared_gate), (1, 5, 128), "projections")]
+    assert _same(logits, _one_row_calls(gate, flat[:, None])[:, 0])
+    assert _same(shared, _one_row_calls(shared_gate, flat[:, None])[:, 0])
+
+
+def test_qwen36_router_shared_gate_canary_refusal_and_mixed_fallback_are_exact(
+    failing_canaries,
+):
+    gate = _quantized(128, 256, bits=8, seed=51)
+    shared_gate = _quantized(128, 1, bits=8, seed=52)
+    block = type("Block", (), {"gate": gate, "shared_expert_gate": shared_gate})()
+    flat = _x((5, 128), 53)
+    record = REV.Window(5)
+    with REV.window(record):
+        logits, shared = Q36.router_and_shared_gate_rows(block, flat)
+    assert _same(logits, _one_row_calls(gate, flat[:, None])[:, 0])
+    assert _same(shared, _one_row_calls(shared_gate, flat[:, None])[:, 0])
+    assert record.stages == {"projections": {"per_row_canary": 2}}
+
+
+def test_qwen36_router_shared_gate_mixed_fallback_is_exact():
+    gate = _quantized(128, 256, bits=8, seed=51)
+    shared_gate = _dense(128, 1, seed=52)
+    block = type("Block", (), {"gate": gate, "shared_expert_gate": shared_gate})()
+    flat = _x((5, 128), 53)
+    record = REV.Window(5)
+    with REV.window(record):
+        logits, shared = Q36.router_and_shared_gate_rows(block, flat)
+    assert _same(logits, _one_row_calls(gate, flat[:, None])[:, 0])
+    assert _same(shared, _one_row_calls(shared_gate, flat[:, None])[:, 0])
+    assert record.stages == {"projections": {"per_row_unsupported": 2}}
 
 
 @pytest.mark.parametrize("canaries", ["admitted", "failed"])

@@ -344,7 +344,9 @@ def test_serving_composes_both_keys_through_the_helpers():
     from mlx2 import serving
 
     source = inspect.getsource(serving)
-    assert source.count("semantic_fingerprint=apc_semantic_namespace(") == 2
+    assert source.count("semantic_fingerprint=apc_semantic_namespace(") == 1
+    assert source.count("persistent_semantic_namespace = apc_semantic_namespace(") == 1
+    assert source.count("semantic_fingerprint=persistent_semantic_namespace") == 1
     assert source.count("apc_request_semantic(scope, media_fingerprint)") == 1
     for wrapper in ("apc_semantic_fingerprint(", "apc_lane_fingerprint(", "apc_prefill_fingerprint("):
         assert source.count(wrapper) == 1, wrapper  # only inside apc_semantic_namespace

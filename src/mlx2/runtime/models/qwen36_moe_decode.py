@@ -99,19 +99,23 @@ def down_source(shared=False):
     return prefix + source + "\n  }\n"
 
 
-@lru_cache(maxsize=8)
-def down_kernel(shared_format=None, fast=True):
+@lru_cache(maxsize=16)
+def down_kernel(
+    routed_bits=4, routed_group_size=64, shared_format=None, fast=True
+):
     """``fast``: MLX's qmv_fast layout (K in whole 512-wide blocks); else the
     qmv layout with a guarded K tail, as MLX picks for the same shape."""
     shared = shared_format is not None
     shared_bits, shared_gs = shared_format if shared else (None, None)
     names = ["x", "w", "scales", "biases", "rhs", "scores"]
-    header = RD._header(fast=fast)
+    header = RD._header(
+        fast=fast, bits=routed_bits, group_size=routed_group_size
+    )
     if shared:
         names += ["sdw", "sds", "sdb", "gate"]
         header += RD._format_header("shared_qmv", shared_bits, True, shared_gs)
     return mx.fast.metal_kernel(
-        name="qwen36_stock_down_rows"
+        name=f"qwen36_stock_down_rows_q{routed_bits}g{routed_group_size}"
         + (f"_shared{shared_bits}g{shared_gs}" if shared else "")
         + ("" if fast else "_qmv"),
         input_names=names,
@@ -122,20 +126,39 @@ def down_kernel(shared_format=None, fast=True):
     )
 
 
-@lru_cache(maxsize=4)
-def shared_gate_up_kernel(bits, group_size):
+@lru_cache(maxsize=8)
+def routed_gate_up_kernel(bits, group_size=64):
+    return mx.fast.metal_kernel(
+        name=f"qwen36_split_gate_up_rows_q{bits}g{group_size}",
+        input_names=["x", "wg", "sg", "bg", "wu", "su", "bu", "rhs"],
+        output_names=["y"],
+        header=RD._header(fast=True, bits=bits, group_size=group_size),
+        source=RD.SPLIT_GATE_UP_SOURCE,
+        ensure_row_contiguous=True,
+    )
+
+
+@lru_cache(maxsize=8)
+def shared_gate_up_kernel(routed_bits, bits, group_size):
     # A separate namespace keeps routed g64 and shared g128 affine scales
     # independent even when both projections are 4-bit.
     source = W._shared_gate_up_window_source(False).replace(
         "q4f::qmv_rows<", "shared_gate_qmv::qmv_rows<", 1
     )
+    source = source.replace("q4f::", "routed_qmv::")
+    common = RD.SHARED_COMMON.replace(
+        RD.SIGMOID, RD.SWIGLU_GATE.adapt(RD.SIGMOID, mx.bfloat16)
+    )
     header = (
-        RD.SHARED_COMMON
-        + RD._format_header("q4f", 4, True)
+        common
+        + RD._format_header("routed_qmv", routed_bits, True)
         + RD._format_header("shared_gate_qmv", bits, True, group_size)
     )
     return mx.fast.metal_kernel(
-        name=f"qwen36_gate_up_shared_rows_b{bits}g{group_size}",
+        name=(
+            f"qwen36_gate_up_shared_rows_q{routed_bits}"
+            f"_shared{bits}g{group_size}"
+        ),
         input_names=[
             "x",
             "wg",
@@ -160,11 +183,25 @@ def shared_gate_up_kernel(bits, group_size):
 
 
 def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=None):
-    """Exact one-token MoE arithmetic for each window row (Metal gate pending)."""
+    """Exact one-token MoE arithmetic for each window row.
+
+    Focused Q4/Q8 Metal checks pass; the full qualification gate remains pending.
+    """
     hidden = x.shape[-1]
     inter = gate.weight.shape[1]
     rows = x.size // hidden
     top_k = 8
+    routed_format = (gate.bits, gate.group_size)
+    if routed_format not in ((4, 64), (8, 64)):
+        raise ValueError(
+            f"unsupported routed expert format q{gate.bits}g{gate.group_size}"
+        )
+    if (up.bits, up.group_size) != routed_format or (
+        down.bits,
+        down.group_size,
+    ) != routed_format:
+        raise ValueError("routed gate/up/down formats differ")
+    routed_bits, routed_group_size = routed_format
     flat = x.reshape(rows, hidden)
     template = [
         ("T", x.dtype),
@@ -175,7 +212,7 @@ def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=
         ("TOPK", top_k),
     ]
     if shared is None:
-        h = RD._kernels()[2](
+        h = routed_gate_up_kernel(routed_bits, routed_group_size)(
             inputs=[
                 flat,
                 *RD.expert_operands(gate),
@@ -191,7 +228,9 @@ def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=
         extra = []
         shared_format = None
     else:
-        h = shared_gate_up_kernel(shared.gate_proj.bits, shared.gate_proj.group_size)(
+        h = shared_gate_up_kernel(
+            routed_bits, shared.gate_proj.bits, shared.gate_proj.group_size
+        )(
             inputs=[
                 flat,
                 *RD.expert_operands(gate),
@@ -213,8 +252,10 @@ def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=
     slots = top_k + int(shared is not None)
     # The split admission takes non-512 intermediates too; a qmv_fast walk
     # over those reads past each down row (no guarded tail).
-    fast = RD.qmv_fast_layout(inter, hidden)
-    return down_kernel(shared_format, fast)(
+    fast = RD.qmv_fast_layout(inter, hidden, routed_bits)
+    return down_kernel(
+        routed_bits, routed_group_size, shared_format, fast
+    )(
         inputs=[
             h,
             *RD.expert_operands(down),
@@ -234,6 +275,28 @@ def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=
         output_shapes=[(rows, hidden)],
         output_dtypes=[x.dtype],
     )[0]
+
+
+def router_and_shared_gate_rows(block, flat):
+    """Project a Qwen3.6 MoE window with one-row arithmetic per row.
+
+    The Q8 artifact stores both the E256 router and the scalar shared-expert
+    gate as affine quantized linears with the same input and format.  The
+    shared row-exact package can therefore read both tables in one grouped
+    launch while retaining an independent one-row accumulator for every
+    token.  Its canary owns admission and falls back member-by-member (and
+    ultimately row-by-row) for dense, mixed, lane-prepared, or mismatched
+    layouts.  A one-token decode keeps its established calls byte-for-byte.
+    """
+    rows = int(flat.shape[0])
+    if rows <= 1:
+        x = flat.reshape(1, 1, -1)
+        return block.gate(x).reshape(1, -1), block.shared_expert_gate(x).reshape(
+            1, 1
+        )
+    return QN._row_projections(
+        None, (block.gate, block.shared_expert_gate), flat
+    )
 
 
 class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
@@ -260,6 +323,26 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
         self.qwen36_window_consumers = consumers
         return consumers
 
+    def row_exact_window_selected(self):
+        """Declaration for the row-exact target executor: whether a
+        multi-row window call runs this block's ``row_exact`` window kernels
+        (explicitly selected consumer) over a routed one-token decode route.
+        Otherwise the executor runs one one-token block call per row."""
+        return (
+            "row_exact" in self.qwen36_window_consumers
+            and self.switch_mlp.routed_decode_mode
+            in ("gate_up_down", "gate_up_down_shared")
+        )
+
+    def row_exact_window_refusal(self, x):
+        """Why the selected multi-row exact window cannot run, or ``None``.
+
+        Selection is a policy statement; admission also depends on the loaded
+        artifact's tables and the live runtime.  The row-exact executor uses
+        this probe to retain its exact per-row fallback when those differ.
+        """
+        return self._routed_refusal(x, consumer="row_exact")
+
     def _decline(self, reason):
         self.qwen36_decode_fallbacks += 1
         self.qwen36_decode_last_fallback = reason
@@ -268,6 +351,59 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
             reason = "other"
         reasons[reason] = reasons.get(reason, 0) + 1
         return None
+
+    def _routed_refusal(self, x, *, consumer):
+        rows = x.size // x.shape[-1]
+        if not 1 <= rows <= W.WINDOW_MAX_ROWS:
+            return "window width outside 1..17"
+        sw = self.switch_mlp
+        reason = self.moe_routing_contract.routing_refusal(
+            expert_count=self.num_experts,
+            top_k=self.top_k,
+            normalize_topk=bool(self.norm_topk_prob),
+            activation_dtype=(
+                "bfloat16" if x.dtype == mx.bfloat16 else str(x.dtype)
+            ),
+            projection_layout="split_gate_up",
+            consumer=consumer,
+        )
+        if self.shared_folded or self.sharding_group is not None:
+            reason = "shared row folded or sharded"
+        elif self.training or sw.training:
+            reason = "training"
+        elif self.fused_expert_kernel_mode != "stock":
+            reason = "Qwen3.6 rows require stock down"
+        elif (
+            self.moe_router_mode != "stock" or QN._MOE_GATE_COMPILE or QN._COMPILE_GLUE
+        ):
+            reason = "alternative router or compiled combine selected"
+        elif reason is not None:
+            pass
+        elif "gate_up_proj" in sw:
+            reason = "requires split gate/up tables"
+        else:
+            bits = getattr(sw.gate_proj, "bits", None)
+            group_size = getattr(sw.gate_proj, "group_size", None)
+            if (bits, group_size) not in ((4, 64), (8, 64)):
+                return f"unsupported routed expert format q{bits}g{group_size}"
+            admit = RD.admit_split_routed_decode(
+                QN._ShapeOnly((x.shape[-1],), x.dtype),
+                QN._ShapeOnly((8,), mx.uint32),
+                QN._ShapeOnly((8,), x.dtype),
+                sw.gate_proj,
+                sw.up_proj,
+                sw.down_proj,
+                contract=self.moe_routing_contract,
+                bits=bits,
+                group_size=group_size,
+            )
+            if not admit.accepted:
+                reason = admit.reason
+        if reason is None and not RD.runtime_supported():
+            reason = "Metal runtime unavailable"
+        if reason is None:
+            reason = RD.served_swiglu_refusal()
+        return reason
 
     def __call__(self, x):
         rows = x.size // x.shape[-1]
@@ -283,62 +419,19 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
         window = rows > 1 and consumer in self.qwen36_window_consumers
         if not (routed_decode or window):
             return super().__call__(x)
-        if not 1 <= rows <= W.WINDOW_MAX_ROWS:
-            self._decline("window width outside 1..17")
-            return super().__call__(x)
         sw = self.switch_mlp
-        contract_reason = self.moe_routing_contract.routing_refusal(
-            expert_count=self.num_experts,
-            top_k=self.top_k,
-            normalize_topk=bool(self.norm_topk_prob),
-            activation_dtype=(
-                "bfloat16" if x.dtype == mx.bfloat16 else str(x.dtype)
-            ),
-            projection_layout="split_gate_up",
-            consumer=consumer if window else None,
+        reason = self._routed_refusal(
+            x, consumer=consumer if window else None
         )
-        reason = None
-        if self.shared_folded or self.sharding_group is not None:
-            reason = "shared row folded or sharded"
-        elif self.training or sw.training:
-            reason = "training"
-        elif self.fused_expert_kernel_mode != "stock":
-            reason = "Qwen3.6 rows require stock down"
-        elif (
-            self.moe_router_mode != "stock" or QN._MOE_GATE_COMPILE or QN._COMPILE_GLUE
-        ):
-            reason = "alternative router or compiled combine selected"
-        elif contract_reason is not None:
-            reason = contract_reason
-        elif "gate_up_proj" in sw:
-            reason = "requires split gate/up tables"
-        else:
-            admit = RD.admit_split_routed_decode(
-                QN._ShapeOnly((x.shape[-1],), x.dtype),
-                QN._ShapeOnly((8,), mx.uint32),
-                QN._ShapeOnly((8,), x.dtype),
-                sw.gate_proj,
-                sw.up_proj,
-                sw.down_proj,
-                contract=self.moe_routing_contract,
-            )
-            if not admit.accepted:
-                reason = admit.reason
-        if reason is None and not RD.runtime_supported():
-            reason = "Metal runtime unavailable"
-        if reason is None:
-            reason = RD.served_swiglu_refusal()
         if reason:
             self._decline(reason)
             return super().__call__(x)
-        # Router and shared projections retain one-token launch geometry.
+        # Router and shared-gate projections retain one-token arithmetic.
+        # When their capabilities match, the shared row-exact package groups
+        # the weight reads into one launch; its canary-preserving fallback is
+        # still the same independent one-token call for every row.
         flat = x.reshape(rows, -1)
-        logits = mx.concatenate(
-            [
-                self.gate(flat[r : r + 1].reshape(1, 1, -1)).reshape(1, -1)
-                for r in range(rows)
-            ]
-        )
+        logits, shared_gate_logit = router_and_shared_gate_rows(self, flat)
         refusal = None
         if self.moe_topk_mode == "launch":
             # The same structural admission the parent's launch applies; the
@@ -372,14 +465,7 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
         if (shared_decode or window) and shared_reason is not None:
             self.shared_fold_fallbacks += 1
             self.shared_fold_last_fallback = shared_reason
-        shared_gate = mx.concatenate(
-            [
-                gate_sigmoid(
-                    self.shared_expert_gate(flat[r : r + 1].reshape(1, 1, -1))
-                ).reshape(1, 1)
-                for r in range(rows)
-            ]
-        )
+        shared_gate = gate_sigmoid(shared_gate_logit).reshape(rows, 1)
         y = routed_rows(
             x,
             inds,

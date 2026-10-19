@@ -28,12 +28,17 @@ wait doubled up to ``reprobe_max_tokens``.  With ``pipelined_park`` a parked
 executor overlaps each anchor-only round with the host read of the previous
 one, as the PLD plain-round pipeline does.
 
-Reversible evidence excludes one-time costs that are not the route's steady
-price: each session's first ``settle_rounds`` rounds of each kind (the first
+Evidence can exclude one-time costs that are not the route's steady price.
+Reversible control uses ``settle_rounds`` for each kind (the first
 speculative round ingests the whole prompt into the draft plane; the first
 rounds after an APCv2 restore pay the lazy restore) and the first round of
 every re-probe (it consumes the deferred draft context).  The ordinary
 baseline is the median per-round cost, so one stalled round cannot set it.
+The terminal controller remains byte-for-byte backward compatible by default;
+an adapter may explicitly set ``one_way_ordinary_settle_rounds`` when its
+first ordinary probe rounds include compilation or lazy-restore work that the
+direct ordinary decoder would not keep paying.  Speculative startup remains
+charged because it is part of the selected route's per-request cost.
 Reversible evidence compares the
 session's own wall time per committed token, whatever cohort width the round
 ran at, because that is what the session waits for.
@@ -82,7 +87,9 @@ class CostPerCommitHandoffSettings:
     reprobe_max_tokens: int = 512
     deferred_context_cap: int = 256
     settle_rounds: int = 1
+    one_way_ordinary_settle_rounds: int = 0
     pipelined_park: bool = True
+    loss_basis: str = "rolling_window"
 
     _KEYS = frozenset(
         {
@@ -97,7 +104,9 @@ class CostPerCommitHandoffSettings:
             "reprobe_max_tokens",
             "deferred_context_cap",
             "settle_rounds",
+            "one_way_ordinary_settle_rounds",
             "pipelined_park",
+            "loss_basis",
         }
     )
 
@@ -108,6 +117,14 @@ class CostPerCommitHandoffSettings:
             raise ValueError("cost-per-commit reversible must be boolean")
         if type(self.pipelined_park) is not bool:
             raise ValueError("cost-per-commit pipelined_park must be boolean")
+        if self.loss_basis not in {"rolling_window", "current_round"}:
+            raise ValueError(
+                "cost-per-commit loss_basis must be rolling_window or current_round"
+            )
+        if self.reversible and self.loss_basis != "rolling_window":
+            raise ValueError(
+                "cost-per-commit current_round loss_basis is only valid for one-way handoff"
+            )
         for name in (
             "ordinary_samples",
             "speculative_samples",
@@ -123,8 +140,12 @@ class CostPerCommitHandoffSettings:
             raise ValueError(
                 "cost-per-commit window must cover both sample minima"
             )
-        if type(self.settle_rounds) is not int or self.settle_rounds < 0:
-            raise ValueError("cost-per-commit settle_rounds must be a non-negative integer")
+        for name in ("settle_rounds", "one_way_ordinary_settle_rounds"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(
+                    f"cost-per-commit {name} must be a non-negative integer"
+                )
         if self.reprobe_max_tokens < self.reprobe_tokens:
             raise ValueError(
                 "cost-per-commit reprobe_max_tokens must be at least reprobe_tokens"
@@ -168,7 +189,19 @@ class CostPerCommitHandoffSettings:
         if not self.reversible:
             # The terminal (pre-reversible) form stays byte-identical, so
             # existing receipts and qualification records keep matching.
-            return out
+            result = (
+                {**out, "loss_basis": "current_round"}
+                if self.loss_basis == "current_round"
+                else out
+            )
+            if self.one_way_ordinary_settle_rounds:
+                result = {
+                    **result,
+                    "one_way_ordinary_settle_rounds": (
+                        self.one_way_ordinary_settle_rounds
+                    ),
+                }
+            return result
         return {
             **out,
             "reversible": True,
@@ -327,10 +360,12 @@ class CostPerCommitLaneState:
         ):
             self._invalid_samples += 1
             return None
-        if (
-            self.settings.reversible
-            and self._settled[kind] < self.settings.settle_rounds
-        ):
+        settle_rounds = self.settings.settle_rounds if self.settings.reversible else (
+            self.settings.one_way_ordinary_settle_rounds
+            if kind == "ordinary"
+            else 0
+        )
+        if self._settled[kind] < settle_rounds:
             # One-time warm-up rounds are not the route's steady price.
             self._settled[kind] += 1
             self._settle_skipped += 1
@@ -358,7 +393,13 @@ class CostPerCommitLaneState:
         speculative_cost = self._cost(samples)
         if ordinary_cost is None or speculative_cost is None:
             return None
-        losing = speculative_cost >= ordinary_cost / self.settings.loss_ratio
+        latest_cost = elapsed_ns / committed_tokens
+        comparison_cost = (
+            latest_cost
+            if self.settings.loss_basis == "current_round"
+            else speculative_cost
+        )
+        losing = comparison_cost >= ordinary_cost / self.settings.loss_ratio
         streak = self._loss_streak.get(execution_width, 0)
         streak = streak + 1 if losing else 0
         self._loss_streak[execution_width] = streak
@@ -382,12 +423,19 @@ class CostPerCommitLaneState:
             "one_way": True,
             "execution_width": execution_width,
             "ordinary_ns_per_committed_token": ordinary_cost,
-            "speculative_ns_per_committed_token": speculative_cost,
-            "speculative_to_ordinary_cost_ratio": speculative_cost / ordinary_cost,
+            "speculative_ns_per_committed_token": comparison_cost,
+            "speculative_to_ordinary_cost_ratio": comparison_cost / ordinary_cost,
             "loss_ratio_threshold": self.settings.loss_ratio,
             "loss_decisions": streak,
             "speculative_samples_since_ordinary": since,
         }
+        if self.settings.loss_basis == "current_round":
+            self._decision.update(
+                {
+                    "speculative_cost_basis": "current_round",
+                    "speculative_window_ns_per_committed_token": speculative_cost,
+                }
+            )
         return dict(self._decision)
 
     def _event(self, event: str, **fields: Any) -> dict[str, Any]:

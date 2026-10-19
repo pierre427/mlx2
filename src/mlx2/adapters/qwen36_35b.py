@@ -225,9 +225,11 @@ KERNEL_POLICY_ENV = {
     "moe_window": "MLX_QWEN36_MOE_WINDOW",
     "moe_window_batch_decode": "MLX_QWEN36_MOE_WINDOW_BATCH_DECODE",
     "moe_window_verify": "MLX_QWEN36_MOE_WINDOW_VERIFY",
+    "moe_window_row_exact": "MLX_QWEN36_MOE_WINDOW_ROW_EXACT",
     "fused_gdn_batch_decode": "MLX_QWEN36_FUSED_GDN_BATCH_DECODE",
     "fused_gdn_verify": "MLX_QWEN36_FUSED_GDN_VERIFY",
     "fused_gdn_batch_verify": "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY",
+    "attention_window_row_exact": "MLX_QWEN36_ATTN_WINDOW_ROW_EXACT",
 }
 NEW_DECODE_KERNELS = frozenset(
     {
@@ -236,9 +238,11 @@ NEW_DECODE_KERNELS = frozenset(
         "moe_window",
         "moe_window_batch_decode",
         "moe_window_verify",
+        "moe_window_row_exact",
         "fused_gdn_batch_decode",
         "fused_gdn_verify",
         "fused_gdn_batch_verify",
+        "attention_window_row_exact",
     }
 )
 ENUM_KERNELS = {
@@ -273,6 +277,8 @@ LIVE_APPLIED_ENV = frozenset(
         "MLX_QWEN36_MOE_WINDOW",
         "MLX_QWEN36_MOE_WINDOW_BATCH_DECODE",
         "MLX_QWEN36_MOE_WINDOW_VERIFY",
+        "MLX_QWEN36_MOE_WINDOW_ROW_EXACT",
+        "MLX_QWEN36_ATTN_WINDOW_ROW_EXACT",
         "MLX_QWEN36_DECODE_WINS",
         # NAX sorted MoE gather: applied through moe_nax_gather.set_mode at
         # load, as on Flash-Next. The uncalibrated RHS pad policy is likewise
@@ -313,8 +319,40 @@ DEFAULT_DECODE_WINS = {
 }
 
 MOE_WINDOW_POLICY_KEYS = frozenset(
-    {"moe_window", "moe_window_batch_decode", "moe_window_verify"}
+    {
+        "moe_window",
+        "moe_window_batch_decode",
+        "moe_window_verify",
+        "moe_window_row_exact",
+    }
 )
+
+# These apply to the Qwen3.6 target while an external drafter is selected.
+# They are removed before the drafter policy is normalized or receipted.
+EXTERNAL_TARGET_KERNEL_KEYS = frozenset(
+    {
+        "moe_window_row_exact",
+        "fused_gdn_batch_verify",
+        "attention_window_row_exact",
+    }
+)
+
+
+def partition_external_target_policy(policy):
+    """Separate target-owned switches from the external drafter contract."""
+    if policy.get("attention_window_row_exact", False) and policy.get(
+        "target_verify_row_exact"
+    ) is not True:
+        raise ValueError(
+            "attention_window_row_exact requires target_verify_row_exact"
+        )
+    target = {
+        key: validate_kernel_choice(key, policy[key])
+        for key in EXTERNAL_TARGET_KERNEL_KEYS
+        if key in policy
+    }
+    external = {key: value for key, value in policy.items() if key not in target}
+    return external, target
 
 
 def moe_window_consumers(kernels):
@@ -326,6 +364,7 @@ def moe_window_consumers(kernels):
         for key, consumer in (
             ("moe_window_batch_decode", "batch_decode"),
             ("moe_window_verify", "verify"),
+            ("moe_window_row_exact", "row_exact"),
         )
         if kernels.get(key)
     )
@@ -333,11 +372,17 @@ def moe_window_consumers(kernels):
 
 def validate_moe_window_policy(kernels):
     if kernels.get("moe_window") and any(
-        key in kernels for key in ("moe_window_batch_decode", "moe_window_verify")
+        key in kernels
+        for key in (
+            "moe_window_batch_decode",
+            "moe_window_verify",
+            "moe_window_row_exact",
+        )
     ):
         raise ValueError(
             "Qwen3.6 moe_window compatibility umbrella cannot be mixed with "
-            "independent moe_window_batch_decode/moe_window_verify selections"
+            "independent moe_window_batch_decode/moe_window_verify/"
+            "moe_window_row_exact selections"
         )
 
 
@@ -425,6 +470,20 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "target_revision",
         "draft_quantization",
         "cost_per_commit_handoff",
+        # Exact AST: progressive verification on the adapter-owned row-exact
+        # target executor (qwen_hybrid_row_exact), selected only explicitly.
+        # No approximate fidelity exists for this target, so
+        # ``progressive_verification_fidelity`` stays refused.
+        "target_verify_row_exact",
+        "progressive_verification_tile",
+        "progressive_multilane_draft_cap",
+        "progressive_alternative_branches",
+        "progressive_alternative_strategy",
+        "progressive_alternative_depth_policy",
+        "progressive_ast_rootless_fallback",
+        "progressive_cross_session_pack_rows",
+        "progressive_cross_session_pack_mode",
+        *EXTERNAL_TARGET_KERNEL_KEYS,
     }
 )
 
@@ -577,7 +636,8 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 raise ValueError(
                     "Qwen3.6 expert streaming refuses the external draft route"
                 )
-            unknown = set(policy) - EXTERNAL_POLICY_KEYS
+            external_policy, target_policy = partition_external_target_policy(policy)
+            unknown = set(external_policy) - EXTERNAL_POLICY_KEYS
             if unknown:
                 raise ValueError(
                     f"Qwen3.6 external draft policy has unknown keys: {sorted(unknown)}"
@@ -585,13 +645,13 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             from .qwen38_27b import inspect_external_policy
 
             draft_record = inspect_external_policy(
-                policy,
+                external_policy,
                 model_path,
                 allow_continuation_strategy=True,
             )
-            self.external_policy = default_external_policy(policy)
+            self.external_policy = default_external_policy(external_policy)
             self._check_num_draft(draft_record)
-            policy = {}
+            policy = target_policy
         if set(policy) - {
             "num_draft",
             "gdn_state_dtype",
@@ -725,6 +785,8 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             self._select_gdn_state(gdn_state_dtype)
             self._select_routed_candidate()
             self._select_decode_wins()
+            # After every load-time target mutation, before the drafter binds.
+            self._select_target_verify_row_exact()
             tokenizer = AutoTokenizer.from_pretrained(
                 path, local_files_only=True, trust_remote_code=False
             )
@@ -765,6 +827,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                     ),
                     descriptor_for(has_mtp=False),
                 )
+                self._describe_target_verify_row_exact()
         except BaseException:
             self.close()
             raise
@@ -818,15 +881,23 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         # live mode either way so APCv2 and external-learning identities never
         # omit target arithmetic that actually ran.
         decode_kernels["fused_gdn_decode"] = fused_gdn_decode
-        return {
-            "qwen36_target": {
-                "cache_layout": CACHE_LAYOUT,
-                "moe_nax_gather": self.moe_nax_gather,
-                "decode_kernels": dict(sorted(decode_kernels.items())),
-                "proposal_state": "bound_source_only",
-                "target_state": "authoritative_exact",
-            }
+        target = {
+            "cache_layout": CACHE_LAYOUT,
+            "moe_nax_gather": self.moe_nax_gather,
+            "decode_kernels": dict(sorted(decode_kernels.items())),
+            "proposal_state": "bound_source_only",
+            "target_state": "authoritative_exact",
         }
+        if (getattr(self, "external_policy", None) or {}).get(
+            "target_verify_row_exact"
+        ):
+            from .qwen38_27b import target_verify_row_exact_numerics
+
+            # Only a selected route extends the identity; defaults keep theirs.
+            target["target_verify_row_exact"] = target_verify_row_exact_numerics(
+                self.model
+            )
+        return {"qwen36_target": target}
 
     def _load_weights(
         self,

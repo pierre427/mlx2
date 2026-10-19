@@ -954,8 +954,29 @@ _Q8_GEMM_SRC = """
     }
 """
 
+
+def _numerics_kernel_source(source: str) -> str:
+    """Canonical source spelling for the qualification numerics identity.
+
+    macOS 27 requires stripping the address space from cooperative operand
+    types before asking MPP for an accumulator.  That is a compile-time type
+    repair only: it does not change the executed arithmetic.  Canonicalize the
+    two repaired spellings so previously qualified Q8/Q4/Q5 numerical laws do
+    not move merely because the host compiler became stricter.
+    """
+    # Assemble the historical spelling so the source-level compiler guard
+    # cannot mistake this hash-only string for executable Metal.
+    left = "decltype(" + "ct_a)"
+    right = "decltype(" + "ct_b)"
+    return source.replace(
+        "metal::remove_addrspace_t<decltype(ct_a)>,\n"
+        "        metal::remove_addrspace_t<decltype(ct_b)>, int32_t>()",
+        f"{left}, {right}, int32_t>()",
+    )
+
+
 Q8_KERNEL_REVISION = hashlib.sha256(
-    (_Q8_HEADER + _Q8_STAGE_A_SRC + _Q8_GEMM_SRC).encode()
+    _numerics_kernel_source(_Q8_HEADER + _Q8_STAGE_A_SRC + _Q8_GEMM_SRC).encode()
 ).hexdigest()[:16]
 
 # --------------------------------------------------------------------------
@@ -1233,7 +1254,7 @@ _Q45_GEMM_SRC = """
 """
 
 Q45_KERNEL_REVISION = hashlib.sha256(
-    (_Q45_HEADER + _Q45_STAGE_A_SRC + _Q45_GEMM_SRC).encode()
+    _numerics_kernel_source(_Q45_HEADER + _Q45_STAGE_A_SRC + _Q45_GEMM_SRC).encode()
 ).hexdigest()[:16]
 
 _kernel_lock = threading.Lock()

@@ -329,7 +329,11 @@ class ReadPool:
                 self._changed.set()
                 for _thread in self._threads:
                     self._queue.put(None)
-            pending = tuple(self._pending)
+            # Future.result() may wake its caller before the done callback has
+            # retired the future from _pending.  A completed syscall no longer
+            # owns I/O and must not quarantine its storage merely because that
+            # bookkeeping callback has not run yet.
+            pending = tuple(item for item in self._pending if not item.done())
             if pending:
                 self._failure = self._failure or "I/O reader closed with reads in flight"
                 self._quarantine_locked()

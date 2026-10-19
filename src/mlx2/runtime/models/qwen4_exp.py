@@ -7221,6 +7221,16 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
         self.fa_idx = next(
             (i for (i, layer) in enumerate(self.layers) if not layer.is_linear), None
         )
+        self.external_capture_projection = "learned_mixer"
+
+    def _external_capture(self, hidden):
+        if self.external_capture_projection == "hc_mean":
+            return hidden.reshape(
+                *hidden.shape[:-1], self.args.hc_count, self.args.hidden_size
+            ).mean(axis=-2)
+        if self.external_capture_projection != "learned_mixer":
+            raise ValueError("unsupported Qwen4 external capture projection")
+        return self.hyper_connection_mixer(hidden)
 
     def __call__(self, inputs, cache=None, input_embeddings=None, return_hyper=False,
                  *, capture_layers=(), hidden_sink=None):
@@ -7307,9 +7317,7 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
                     _PLE_EARLY_STATS["device_ids"] += 1
             hidden = layer(hidden, inputs, fa_mask, layer_cache, ssm_mask)
             if hidden_sink is not None and index in capture_layers:
-                # HC expands the residual stream; expose H-wide features using
-                # the target's learned mixer, never an invented slice or mean.
-                hidden_sink.append(self.hyper_connection_mixer(hidden))
+                hidden_sink.append(self._external_capture(hidden))
             if eager and (index == last or (index + 1) % stride == 0):
                 mx.async_eval(hidden)
                 _lv.bump("eager_async_evals")
@@ -7543,11 +7551,203 @@ class Model(nn.Module):
     def speculative_args(self):
         return self.language_model.args
 
+    # External-draft feature source, selected by the adapter. ``None`` keeps
+    # the post-layer HC-mixer taps; ``"mtp_seed"`` returns the scheme-A HC
+    # hidden the native MTP head consumes; ``"completed_layer_hc_mean"`` is
+    # the separate, artifact-declared DFlash2 training feature law.
+    external_feature_source = None
+    _progressive_row_exact = False
+    # Batched one-token target forwards are not row-exact on this route
+    # (qwen4_row_exact records them not exact): lane-exact cohort forwards
+    # need at least two rows per lane.
+    progressive_external_lane_exact_min_width = 2
+
+    @property
+    def progressive_external_exact_tile_widths(self):
+        from .qwen4_row_exact import EXACT_PROGRESSIVE_TILE_WIDTHS
+
+        return EXACT_PROGRESSIVE_TILE_WIDTHS
+
+    @property
+    def progressive_external_exact_terminal_input_widths(self):
+        from .qwen4_row_exact import EXACT_PROGRESSIVE_TILE_WIDTHS
+
+        # This is the actual target input width.  Width five is intentionally
+        # separate from a four-row non-final tile: the 2026-10-19 real-weight
+        # gate established bit-exact attention/cache and HC execution for the
+        # five-input terminal slab.  Keep wider terminal widths unadvertised.
+        return tuple(range(2, max(EXACT_PROGRESSIVE_TILE_WIDTHS) + 2))
+
+    @property
+    def progressive_external_exact_max_lanes(self):
+        from .qwen4_row_exact import MAX_EVIDENCED_LANES
+
+        return MAX_EVIDENCED_LANES
+
+    def select_external_feature_source(self, source):
+        if source not in (None, "mtp_seed", "completed_layer_hc_mean"):
+            raise ValueError("unsupported Qwen4 external feature source")
+        if source == "mtp_seed" and getattr(self, "mtp", None) is None:
+            raise ValueError("the MTP seed feature requires a loaded MTP head")
+        self.external_feature_source = source
+        convention = {
+            None: "post_layer_shared_hc_mixer",
+            "mtp_seed": "native_mtp_scheme_a_hc_seed",
+            "completed_layer_hc_mean": "completed_layer_hc_mean",
+        }[source]
+        # MLX Module treats ordinary attribute assignment as potential child
+        # registration. These are immutable route metadata, not parameters.
+        object.__setattr__(self, "external_feature_convention", convention)
+        object.__setattr__(
+            self,
+            "external_execution_receipt",
+            {**TextModel.external_execution_receipt, "feature_convention": convention},
+        )
+        self.language_model.model.external_capture_projection = (
+            "hc_mean" if source == "completed_layer_hc_mean" else "learned_mixer"
+        )
+
+    @property
+    def external_feature_width(self):
+        args = self.language_model.args
+        if self.external_feature_source == "mtp_seed":
+            return int(args.hc_count) * int(args.hidden_size)
+        if self.external_feature_source == "completed_layer_hc_mean":
+            return int(args.hidden_size)
+        return None
+
+    def _mtp_seed_layers(self, capture_layers):
+        layers = tuple(capture_layers)
+        if layers != (len(self.language_model.model.layers) - 1,):
+            raise ValueError("the MTP seed feature is the last layer's HC stream")
+
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        if self.external_feature_source == "mtp_seed":
+            self._mtp_seed_layers(capture_layers)
+            if cache is not None and len(cache) != len(self.language_model.model.layers):
+                raise ValueError("Qwen4 external cache must cover every layer")
+            if self._progressive_row_exact and not body_only and int(inputs.shape[1]) > 1:
+                # A verify forward outside a progressive tile (the engine's
+                # standard-verify fallback, e.g. when a request's processors
+                # keep AST on its primary chain) is still a verify window on
+                # an exact route: run it on the row-exact law, fail closed.
+                rows = self.progressive_external_target_rows(inputs, cache, capture_layers)
+                if not rows.row_exact:
+                    raise RuntimeError(
+                        "Qwen4 exact verify forward fell off its row-exact path: "
+                        f"{rows.detail.get('reason')}"
+                    )
+                return rows.logits, rows.features
+            mixed, hyper = self.language_model.model(inputs, cache, return_hyper=True)
+            return (None if body_only else self.logits(mixed)), hyper
         return self.language_model.forward_with_taps(inputs, cache, capture_layers, body_only=body_only)
 
     def prefill_body(self, inputs, cache, capture_layers):
+        if self.external_feature_source == "mtp_seed":
+            return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
         return self.language_model.prefill_body(inputs, cache, capture_layers)
+
+    def configure_progressive_external_row_exact(self, enabled):
+        """Adapter selection of the exact progressive external protocol.
+
+        Requires the installed, enabled row-exact verify route
+        (``qwen4_row_exact``): its windows give every verify row the
+        one-token decode step's bits and attest it per launch.
+        """
+        if type(enabled) is not bool:
+            raise ValueError("progressive external row-exact selection must be boolean")
+        handle = getattr(self, "_mlx2_row_exact_verify", None)
+        if enabled and (handle is None or not handle.enabled):
+            raise ValueError(
+                "exact progressive external verification requires the enabled "
+                "row-exact verify route (policy row_exact_verify)"
+            )
+        if enabled and self.external_feature_source not in (
+            "mtp_seed", "completed_layer_hc_mean"
+        ):
+            raise ValueError(
+                "Qwen4 progressive external verification is implemented for the "
+                "native MTP head feature source or completed-layer HC-mean "
+                "feature source only"
+            )
+        self._progressive_row_exact = enabled
+
+    @property
+    def progressive_external_verify_protocol(self):
+        if not self._progressive_row_exact:
+            return None
+        from ..progressive_external_verify import PROGRESSIVE_TARGET_PROTOCOL_VERSION
+
+        return PROGRESSIVE_TARGET_PROTOCOL_VERSION
+
+    def progressive_external_target_rows(self, inputs, cache, capture_layers):
+        """One exact progressive target launch on the row-exact verify route.
+
+        A launch of two or more rows per lane runs one row-exact window and
+        attests what that window recorded.  One row on one plain lane is the
+        ordinary one-token decode step itself.  Anything else (a batched
+        one-token launch, a segmented single row) is reported not exact and
+        fails the exact protocol closed in the engine.
+        """
+        if not self._progressive_row_exact:
+            raise RuntimeError("Qwen4 progressive row-exact target is not selected")
+        from ..progressive_external_verify import (
+            PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+            ProgressiveTargetRows,
+        )
+        from .qwen4_row_exact import _has_segmented_layer
+
+        if self.external_feature_source == "mtp_seed":
+            self._mtp_seed_layers(capture_layers)
+        else:
+            layers = tuple(capture_layers)
+            if (
+                not layers
+                or layers != tuple(sorted(set(layers)))
+                or layers[0] < 0
+                or layers[-1] >= len(self.language_model.model.layers)
+            ):
+                raise ValueError("Invalid Qwen4 DFlash2 capture layers")
+        handle = self._mlx2_row_exact_verify
+        lanes, width = int(inputs.shape[0]), int(inputs.shape[1])
+        if width == 1 and lanes == 1 and not _has_segmented_layer(cache):
+            if self.external_feature_source == "mtp_seed":
+                mixed, features = self.language_model.model(inputs, cache, return_hyper=True)
+                logits = self.logits(mixed)
+            else:
+                logits, features = self.language_model.forward_with_taps(
+                    inputs, cache, capture_layers
+                )
+            exact, reason, route = True, None, "one_token_decode"
+        else:
+            handle.last_window = None
+            taps = [] if self.external_feature_source == "completed_layer_hc_mean" else None
+            mixed, hyper = handle.verify_backbone(
+                inputs, cache, capture_layers=capture_layers, hidden_sink=taps
+            )
+            logits = handle.verify_logits(mixed)
+            features = (
+                hyper if taps is None else mx.concatenate(taps, axis=-1)
+            )
+            record = handle.last_window
+            exact = record is not None and record.exact
+            reason = (
+                "no_row_exact_window" if record is None
+                else next(iter(sorted(record.failures)), None)
+            )
+            route = "row_exact_window"
+        return ProgressiveTargetRows(
+            logits=logits,
+            features=features,
+            protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+            row_exact=bool(exact),
+            detail={
+                "route": route,
+                "physical_width": lanes,
+                "token_width": width,
+                "reason": reason,
+            },
+        )
 
     def logits(self, hidden):
         return (

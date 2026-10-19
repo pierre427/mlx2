@@ -1540,14 +1540,17 @@ def row_exact_target_mutation_guard(adapter, *, lane_policy=None, lora=False):
         threshold = lane_policy.get("min_rows", {}).get(format_class(module))
         if threshold is None or skipped(lane_policy, name):
             continue
+        # A class-swapped row-exact leaf (``row_exact_subclass``) is still its
+        # base projection for this guard.
+        kind = type(module).__dict__.get("_mlx2_row_exact_base", type(module))
         if (
-            type(module) is nn.Linear
+            kind is nn.Linear
             and (exact or threshold <= lane_policy["max_rows"])
         ) or (
             # A quantized target verifies through row_exact_qmv, which gives
             # every row stock one-row arithmetic: a lane law over one-row
             # calls (ordinary decode) would break that equality.
-            type(module) is nn.QuantizedLinear
+            kind is nn.QuantizedLinear
             and (exact or threshold <= 1)
         ):
             if name in followers:
@@ -9535,7 +9538,7 @@ class ServingEngine:
             # on a hybrid cache; every such chat request then gets one exact
             # boundary just before that suffix (see interior_placement).
             self.apc_generation_prompt_suffixes = ()
-            if self.apc_interior_route_supported:
+            if self.apc_interior_route_supported or external_draft:
                 from .runtime.interior_placement import (
                     detect_generation_prompt_suffixes,
                 )
@@ -12001,9 +12004,7 @@ class ServingEngine:
                         # same prompt is cut (APC-3); the continuation skip
                         # and the headroom budget only decide captures.
                         job.prefill_cold_cuts = ()
-                        if self.apc_interior_route_supported and not job.request.get(
-                            "skip_writing_prefix_cache", False
-                        ):
+                        if self.apc_interior_route_supported or external_draft:
                             job.prefill_cold_cuts = cold_prefill_cuts(
                                 tokens,
                                 policy=self.apc_interior_checkpoint_policy,
@@ -12885,8 +12886,7 @@ class ServingEngine:
                             apc_interior_positions=[job.apc_interior_positions],
                             **(
                                 {"prefill_cuts": [job.prefill_cold_cuts]}
-                                if job.prefill_cold_cuts
-                                and not (external_draft or prompt_lookup)
+                                if job.prefill_cold_cuts and not prompt_lookup
                                 else {}
                             ),
                             **({"session_keys": [proposal_session_scope_hash(

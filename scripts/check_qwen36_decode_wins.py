@@ -148,9 +148,11 @@ def main():
                         sw.gate_proj,
                         sw.up_proj,
                         sw.down_proj,
+                        contract=QWEN36_E256_K8_ROUTING,
+                        bits=sw.gate_proj.bits,
+                        group_size=sw.gate_proj.group_size,
                     )
                     if not refusal.accepted:
-                        # Formats like UD-Q8 are negative gates, not silent success.
                         record.setdefault("refusals", []).append(
                             {"layer": li, "reason": refusal.reason}
                         )

@@ -304,10 +304,16 @@ def test_hybrid_rows_leave_no_rollback_records_after_commit():
                 assert not cache.speculating and not cache._rollbacks
             else:
                 assert cache.offset == len(prompt) + kept
-    # The committed recurrent rows equal a fresh forward over the kept prefix.
+    # The committed recurrent rows equal the same prompt-prefill followed by
+    # ordinary one-token decode for the kept prefix.  A single full-prefix
+    # prefill is a different reduction shape and is not this legacy B2
+    # transaction's numerical reference (the selected row-exact executor has
+    # separate bitwise B1 tests).
     for row, prompt, extra in zip(committed, PROMPTS[:2], [[1, 2], [5]]):
         fresh = target.make_cache()
-        target(mx.array([prompt + extra]), cache=fresh)
+        target(mx.array([prompt]), cache=fresh)
+        for token in extra:
+            target(mx.array([[token]]), cache=fresh)
         for mine, ref in zip(row, fresh):
             if isinstance(mine, ArraysCache):
                 for a, b in zip(mine.cache, ref.cache):

@@ -333,9 +333,14 @@ class AdaptiveSpeculationTopology:
                 "selected_branch": selected_branch,
                 "unique_target_rows": int(observation["unique_target_rows"]),
                 "committed_tokens": max(1, int(accepts[selected_branch - 1]) + 1),
+                "primary_committed_tokens": max(1, int(accepts[0]) + 1),
                 "visited_branches": len(visited),
                 "outcome": outcome,
             }
+            row["accepted_token_uplift"] = max(
+                0,
+                row["committed_tokens"] - row["primary_committed_tokens"],
+            )
             rows.append(row)
             if outcome == "committed_conclusive":
                 conclusive.append(row)
@@ -351,11 +356,7 @@ class AdaptiveSpeculationTopology:
         self.window.extend(conclusive)
 
         accepted_token_uplift = sum(
-            max(
-                0,
-                row["committed_tokens"]
-                - max(1, int(row["branch_accepts"][0]) + 1),
-            )
+            row["accepted_token_uplift"]
             for row in conclusive
         )
         avoidable_target_rows = sum(
@@ -371,6 +372,7 @@ class AdaptiveSpeculationTopology:
             row["selected_branch"]
             for row in conclusive
             if row["selected_branch"] > 1
+            and row["accepted_token_uplift"] > 0
         ]
         if alternative_winners:
             self.no_alternative_win = 0
@@ -449,7 +451,19 @@ class AdaptiveSpeculationTopology:
             "primary_only_samples": self.primary_only_samples,
             "primary_only_sessions": self.primary_only_sessions,
             "window_samples": len(rows),
-            "alternative_wins": sum(row["selected_branch"] > 1 for row in rows),
+            "alternative_selections": sum(
+                row["selected_branch"] > 1 for row in rows
+            ),
+            "alternative_wins": sum(
+                row["selected_branch"] > 1
+                and row["accepted_token_uplift"] > 0
+                for row in rows
+            ),
+            "zero_uplift_alternative_selections": sum(
+                row["selected_branch"] > 1
+                and row["accepted_token_uplift"] == 0
+                for row in rows
+            ),
             "full_accepts": sum(
                 row["branch_accepts"][row["selected_branch"] - 1]
                 == row["selected_proposal_count"]
@@ -614,16 +628,55 @@ def _proposal_counts(proposal_counts, branch_count):
     return counts
 
 
-def ordered_alternative_winner(decisions, proposal_counts):
-    """Choose the first complete ordered branch, else preserve B1 semantics."""
+def ordered_branch_commit_counts(decisions):
+    """Return the exact token count each verified branch would commit."""
+
+    return tuple(
+        max(
+            0,
+            int(decision.commit_count)
+            if decision.commit_count is not None
+            else min(int(decision.accepted) + 1, len(decision.emitted)),
+        )
+        for decision in decisions
+    )
+
+
+def ordered_alternative_winner(
+    decisions, proposal_counts, *, allow_partial_uplift=False
+):
+    """Choose the first complete branch that does not lose B1 token utility.
+
+    B1 remains the exact fallback.  A shorter confidence-tail branch can be
+    fully accepted while committing fewer tokens than B1's partial path; such
+    a branch is still reported as full evidence, but cannot replace B1.
+
+    A complete-path provider may opt into exact partial-prefix utility.  Its
+    target-verified branch owns a private cache and RNG transaction, so a
+    branch that commits strictly more exact tokens than the ordinary B1 path
+    is useful even when a later proposal rejects.  Ties retain the existing
+    full-branch/B1 order.
+    """
 
     counts = _proposal_counts(proposal_counts, len(decisions))
+    committed = ordered_branch_commit_counts(decisions)
     full = tuple(
         index
         for index, (decision, count) in enumerate(zip(decisions, counts, strict=True))
         if int(decision.accepted) == count
     )
-    return (full[0] if full else 0), full
+    useful_full = tuple(
+        index for index in full if committed[index] >= committed[0]
+    )
+    winner = useful_full[0] if useful_full else 0
+    if allow_partial_uplift:
+        best = max(
+            range(len(committed)),
+            key=lambda index: (committed[index], -index),
+        )
+        if committed[best] > committed[winner]:
+            winner = best
+    return winner, full
 
 
 def ordered_branch_outcomes(accepted, proposal_counts):

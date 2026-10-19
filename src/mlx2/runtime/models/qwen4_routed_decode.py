@@ -165,15 +165,17 @@ class RoutedDecodeAdmission:
     reason: str
 
 
-def _quantized_ok(layer) -> str | None:
+def _quantized_ok(
+    layer, *, bits: int = BITS, group_size: int = GROUP_SIZE
+) -> str | None:
     if layer is None:
         return "missing projection"
     if "weight" not in layer or "scales" not in layer:
         return "projection is not resident affine-quantized"
-    if getattr(layer, "bits", None) != BITS:
-        return f"bits {getattr(layer, 'bits', None)} != {BITS}"
-    if getattr(layer, "group_size", None) != GROUP_SIZE:
-        return f"group size {getattr(layer, 'group_size', None)} != {GROUP_SIZE}"
+    if getattr(layer, "bits", None) != bits:
+        return f"bits {getattr(layer, 'bits', None)} != {bits}"
+    if getattr(layer, "group_size", None) != group_size:
+        return f"group size {getattr(layer, 'group_size', None)} != {group_size}"
     if getattr(layer, "mode", "affine") != "affine":
         return "not affine"
     if "biases" not in layer or "bias" in layer:
@@ -248,6 +250,8 @@ def admit_split_routed_decode(
     down,
     *,
     contract: MoeRoutingContract | None,
+    bits: int = BITS,
+    group_size: int = GROUP_SIZE,
 ) -> RoutedDecodeAdmission:
     """``admit_routed_decode`` for separate gate and up expert tables.
 
@@ -285,22 +289,26 @@ def admit_split_routed_decode(
         # (streamed or repacked tables) may hold no rows or compute otherwise.
         if type(layer) is not QuantizedSwitchLinear:
             return RoutedDecodeAdmission(False, f"{name}: not a resident QuantizedSwitchLinear")
-        reason = _quantized_ok(layer)
+        reason = _quantized_ok(layer, bits=bits, group_size=group_size)
         if reason is not None:
             return RoutedDecodeAdmission(False, f"{name}: {reason}")
-    inter = down["weight"].shape[-1] * 32 // BITS
+    inter = down["weight"].shape[-1] * 32 // bits
     if hidden % 512:
         return RoutedDecodeAdmission(False, "hidden % 512 != 0 (MLX would not pick qmv_fast)")
     compact_intermediate = (
         contract.expert_kernel_layout == "qmv_fast_down_h2048_i512"
         and (hidden, inter) == (2048, 512)
     )
-    if (inter % 512 == 0 and not compact_intermediate) or inter % GROUP_SIZE:
-        return RoutedDecodeAdmission(False, "intermediate must be a non-multiple of 512, multiple of 64")
-    table = (experts, inter, hidden * BITS // 32)
+    if (inter % 512 == 0 and not compact_intermediate) or inter % group_size:
+        return RoutedDecodeAdmission(
+            False,
+            "intermediate must be a non-multiple of 512, "
+            f"multiple of {group_size}",
+        )
+    table = (experts, inter, hidden * bits // 32)
     if tuple(gate["weight"].shape) != table or tuple(up["weight"].shape) != table:
         return RoutedDecodeAdmission(False, "gate/up tables do not match down")
-    if tuple(down["weight"].shape) != (experts, hidden, inter * BITS // 32):
+    if tuple(down["weight"].shape) != (experts, hidden, inter * bits // 32):
         return RoutedDecodeAdmission(False, f"down weight shape {tuple(down['weight'].shape)}")
     if inter % (GATE_UP_ROWS * GATE_UP_SIMDGROUPS) or hidden % DOWN_ROWS:
         return RoutedDecodeAdmission(False, "row tiling")
@@ -819,10 +827,12 @@ SERVED_DOWN_SOURCE = r"""
 SERVED_DOWN_SIMDGROUPS = 5  # two slots each, as tile4
 
 
-def _header(fast: bool) -> str:
+def _header(
+    fast: bool, *, bits: int = BITS, group_size: int = GROUP_SIZE
+) -> str:
     return (
-        QMV_HEADER.replace("__BITS__", str(BITS))
-        .replace("__GS__", str(GROUP_SIZE))
+        QMV_HEADER.replace("__BITS__", str(bits))
+        .replace("__GS__", str(group_size))
         .replace("__FAST__", "1" if fast else "0")
         + SWIGLU_GATE.adapt(SIGMOID, mx.bfloat16)
     )

@@ -22,6 +22,7 @@ from mlx2.adapters.external_draft_policy import (
     ExternalDraftAdapterMixin,
     normalize_progressive_external_policy,
     progressive_external_identity,
+    resolve_progressive_external_tile,
 )
 from mlx2.adapters.proposal_sources import native_mtp_source
 from mlx2.runtime.proposal_composition import (
@@ -53,6 +54,160 @@ def test_progressive_external_policy_is_shared_and_identity_bound():
     assert progressive_external_identity(policy) != progressive_external_identity(
         {**policy, "progressive_multilane_draft_cap": 4}
     )
+
+
+@pytest.mark.parametrize(("num_draft", "expected"), [(2, 2), (3, 3), (4, 4)])
+def test_progressive_auto_tile_selects_largest_declared_exact_width(
+    num_draft, expected
+):
+    policy = normalize_progressive_external_policy(
+        {"progressive_verification_tile": "auto"}, num_draft=num_draft
+    )
+    target = SimpleNamespace(
+        progressive_external_exact_tile_widths=tuple(range(1, 17)),
+        progressive_external_exact_terminal_input_widths=tuple(range(2, 17)),
+        progressive_external_exact_max_lanes=8,
+    )
+    assert resolve_progressive_external_tile(
+        policy, num_draft=num_draft, target=target, max_lanes=1
+    ) == expected
+    assert '"verification_tile":"auto"' in progressive_external_identity(policy)
+
+
+def test_progressive_auto_tile_refuses_undeclared_or_empty_exact_geometry():
+    policy = normalize_progressive_external_policy(
+        {"progressive_verification_tile": "auto"}, num_draft=4
+    )
+    with pytest.raises(ValueError, match="target-declared exact tile widths"):
+        resolve_progressive_external_tile(
+            policy, num_draft=4, target=SimpleNamespace(), max_lanes=1
+        )
+    empty = SimpleNamespace(
+        progressive_external_exact_tile_widths=lambda **_: (),
+        progressive_external_exact_terminal_input_widths=tuple(range(2, 17)),
+        progressive_external_exact_max_lanes=8,
+    )
+    with pytest.raises(ValueError, match="has no target-declared exact tile"):
+        resolve_progressive_external_tile(
+            policy, num_draft=4, target=empty, max_lanes=1
+        )
+    with pytest.raises(ValueError, match="max_lanes must be a positive integer"):
+        resolve_progressive_external_tile(
+            policy, num_draft=4, target=empty, max_lanes=True
+        )
+
+    missing_terminal = SimpleNamespace(
+        progressive_external_exact_tile_widths=(1, 2, 3),
+        progressive_external_exact_max_lanes=8,
+    )
+    with pytest.raises(ValueError, match="terminal input widths"):
+        resolve_progressive_external_tile(
+            policy, num_draft=4, target=missing_terminal, max_lanes=1
+        )
+
+
+def test_explicit_progressive_tile_identity_and_config_stay_byte_exact():
+    raw = {
+        "draft_model": "unused",
+        "num_draft": 8,
+        "progressive_verification_tile": 2,
+        "progressive_multilane_draft_cap": 3,
+    }
+    adapter = ExternalDraftAdapterMixin()
+    adapter._parse_external_policy(raw, family="test")
+    adapter._check_num_draft(
+        {"args": SimpleNamespace(block_size=16, minimum_proposal_length=1)}
+    )
+    assert progressive_external_identity(adapter.external_policy) == (
+        '{"algorithm":"exact-linear-b1-private-promotion-v1",'
+        '"alternative_branches":1,"alternative_depth_policy":"full",'
+        '"alternative_strategy":"distinct_root","cross_session_pack_mode":null,'
+        '"cross_session_pack_rows":null,"fidelity":"exact",'
+        '"multilane_draft_cap":3,"source_hashes":null,"target_protocol":null,'
+        '"verification_tile":2}'
+    )
+    assert adapter._external_execution_config(max_lanes=4, prefill_step=512) == {
+        "persistent": True,
+        "num_draft": 8,
+        "backend": "external_draft",
+        "rate_gate": False,
+        "prefill_step_size": 512,
+        "segment_aware_live_tip": False,
+        "segment_aware_cohort_size": 4,
+        "progressive_verification_tile": 2,
+        "progressive_multilane_draft_cap": 3,
+        "progressive_alternative_branches": 1,
+        "progressive_alternative_strategy": "distinct_root",
+        "progressive_alternative_depth_policy": "full",
+        "progressive_ast_rootless_fallback": True,
+        "progressive_cross_session_pack_rows": None,
+        "progressive_cross_session_pack_mode": None,
+        "progressive_verification_fidelity": "exact",
+    }
+
+
+def test_auto_tile_resolution_is_ephemeral_exact_scheduling_not_state_identity():
+    policy = normalize_progressive_external_policy(
+        {
+            "progressive_verification_tile": "auto",
+            "progressive_multilane_draft_cap": 2,
+        },
+        num_draft=4,
+    )
+    target = SimpleNamespace(
+        progressive_external_exact_tile_widths=(1, 2, 3),
+        progressive_external_exact_terminal_input_widths=(2, 3, 4),
+        progressive_external_exact_max_lanes=8,
+    )
+    identity = progressive_external_identity(policy)
+    assert resolve_progressive_external_tile(
+        policy, num_draft=4, target=target, max_lanes=1
+    ) == 3
+    assert resolve_progressive_external_tile(
+        policy, num_draft=4, target=target, max_lanes=4
+    ) == 2
+    # Exact tiles change only ephemeral verify grouping; accepted target state
+    # remains canonical and the requested auto/cap law stays identity-bound.
+    assert progressive_external_identity(policy) == identity
+
+
+def test_auto_terminal_width_and_topology_bounds_fail_closed():
+    base = {"progressive_verification_tile": "auto"}
+    hybrid = SimpleNamespace(
+        progressive_external_exact_tile_widths=tuple(range(1, 17)),
+        progressive_external_exact_terminal_input_widths=tuple(range(2, 17)),
+        progressive_external_exact_max_lanes=8,
+    )
+    flash = SimpleNamespace(
+        progressive_external_exact_tile_widths=(1, 2, 3, 4),
+        progressive_external_exact_terminal_input_widths=(2, 3, 4, 5),
+        progressive_external_exact_max_lanes=8,
+        progressive_external_lane_exact_min_width=2,
+    )
+    policy = normalize_progressive_external_policy(base, num_draft=4)
+    assert resolve_progressive_external_tile(
+        policy, num_draft=4, target=flash, max_lanes=1
+    ) == 4
+    k2 = normalize_progressive_external_policy(base, num_draft=2)
+    assert resolve_progressive_external_tile(
+        k2, num_draft=2, target=flash, max_lanes=4
+    ) == 2
+    k16 = normalize_progressive_external_policy(base, num_draft=16)
+    assert resolve_progressive_external_tile(
+        k16, num_draft=16, target=hybrid, max_lanes=1
+    ) == 15
+    capped = normalize_progressive_external_policy(
+        {**base, "progressive_multilane_draft_cap": 2}, num_draft=4
+    )
+    assert resolve_progressive_external_tile(
+        capped, num_draft=4, target=hybrid, max_lanes=4
+    ) == 2
+    alternatives = normalize_progressive_external_policy(
+        {**base, "progressive_alternative_branches": 2}, num_draft=4
+    )
+    assert resolve_progressive_external_tile(
+        alternatives, num_draft=4, target=hybrid, max_lanes=1
+    ) == 3
 
 
 def test_external_adapter_mix_in_selects_and_reports_progressive_policy():
@@ -92,6 +247,45 @@ def test_cross_session_ast_pack_policy_is_validated_and_identity_bound():
     assert progressive_external_identity(policy) != progressive_external_identity(
         {**policy, "progressive_cross_session_pack_rows": 4}
     )
+
+
+def test_rootless_ast_refusal_is_nondefault_identity_bound_and_validated():
+    base = {
+        "progressive_verification_tile": 3,
+        "progressive_alternative_branches": 4,
+        "progressive_alternative_strategy": "confidence_tree",
+        "progressive_alternative_depth_policy": "confidence_tail",
+        "continuation_pool": {"sources": ["external"]},
+    }
+    omitted = normalize_progressive_external_policy(base, num_draft=7)
+    explicit_true = normalize_progressive_external_policy(
+        {**base, "progressive_ast_rootless_fallback": True}, num_draft=7
+    )
+    refused = normalize_progressive_external_policy(
+        {**base, "progressive_ast_rootless_fallback": False}, num_draft=7
+    )
+    assert omitted == explicit_true
+    assert "progressive_ast_rootless_fallback" not in omitted
+    assert refused["progressive_ast_rootless_fallback"] is False
+    assert progressive_external_identity(omitted) == progressive_external_identity(
+        explicit_true
+    )
+    assert progressive_external_identity(omitted) != progressive_external_identity(
+        refused
+    )
+
+    with pytest.raises(ValueError, match="must be boolean"):
+        normalize_progressive_external_policy(
+            {**base, "progressive_ast_rootless_fallback": "false"}, num_draft=7
+        )
+    for invalid in (
+        {key: value for key, value in base.items() if key != "continuation_pool"},
+        {**base, "progressive_alternative_branches": 1},
+        {**base, "progressive_alternative_strategy": "distinct_root"},
+    ):
+        invalid["progressive_ast_rootless_fallback"] = False
+        with pytest.raises(ValueError):
+            normalize_progressive_external_policy(invalid, num_draft=7)
 
 
 def test_cross_session_ast_rejects_multilane_cap_at_verification_tile():

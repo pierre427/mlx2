@@ -538,7 +538,12 @@ def test_qwen_external_policy_allowlists_adaptive_proposal_topology():
         "progressive_cross_session_pack_mode",
     }
     assert ast_keys <= qwen38_keys
-    assert ast_keys.isdisjoint(qwen36_keys)
+    # Exact AST on Qwen3.6 runs on the selected row-exact target executor.
+    assert ast_keys | {
+        "target_verify_row_exact",
+        "moe_window_row_exact",
+        "fused_gdn_batch_verify",
+    } <= qwen36_keys
 
 
 def test_external_varlen_prefill_has_a_distinct_counter_free_identity():

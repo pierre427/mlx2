@@ -231,6 +231,7 @@ class ContinuationDraftModel:
         self.last_ordered_alternative_prefix_tokens = ()
         self.last_ordered_alternative_search_diagnostics = ()
         self.last_continuation_confidence_provenance = ()
+        self.last_continuation_source_diagnostics = ()
         self.adaptive_confidence_features = None
         self.admission_planner = DrafterAdmissionPlanner(self.policy.admission)
 
@@ -378,6 +379,7 @@ class ContinuationDraftModel:
         )
         selections, sources, admissions, slates = [], [], [], []
         confidence_rows, confidence_provenance = [], []
+        source_diagnostic_rows = []
         for row, (context, identity) in enumerate(zip(contexts, proposal_contexts)):
             if not proposal_length:
                 tokens[row] = backbone_tokens[row]
@@ -388,6 +390,7 @@ class ContinuationDraftModel:
                 slates.append(())
                 confidence_rows.append([])
                 confidence_provenance.append(None)
+                source_diagnostic_rows.append({})
                 continue
             round = PoolRound(
                 self.session.session_revision,
@@ -423,12 +426,19 @@ class ContinuationDraftModel:
             )
             predictions_by_source = {item["source_id"]: item for item in predictions}
             admissions.append(admission)
-            for source_id in admission["admitted"]:
+            row_source_diagnostics = {}
+
+            def invoke(source_id):
                 provider = self.providers[source_id]
+                candidates = tuple(provider(context, self.policy.limit))
+                diagnostics = getattr(provider, "last_diagnostics", None)
+                if diagnostics is not None:
+                    row_source_diagnostics[source_id] = copy.deepcopy(diagnostics)
+                return candidates
+
+            for source_id in admission["admitted"]:
                 record = self.source_records[source_id]
-                for ordinal, candidate in enumerate(
-                    provider(context, self.policy.limit)
-                ):
+                for ordinal, candidate in enumerate(invoke(source_id)):
                     paths.append(
                         ProposalPath(
                             candidate_id=f"{source_id}:{row}:{ordinal}",
@@ -466,9 +476,7 @@ class ContinuationDraftModel:
                 if reserved is not None:
                     admission = reserved
                     admissions[-1] = admission
-                    for ordinal, candidate in enumerate(
-                        self.providers[fallback_id](context, self.policy.limit)
-                    ):
+                    for ordinal, candidate in enumerate(invoke(fallback_id)):
                         paths.append(
                             ProposalPath(
                                 candidate_id=f"{fallback_id}:{row}:{ordinal}",
@@ -499,9 +507,7 @@ class ContinuationDraftModel:
                         continue
                     admission = reserved
                     admissions[-1] = admission
-                    candidates = tuple(
-                        self.providers[source_id](context, self.policy.limit)
-                    )
+                    candidates = invoke(source_id)
                     for ordinal, candidate in enumerate(candidates):
                         paths.append(
                             ProposalPath(
@@ -625,6 +631,7 @@ class ContinuationDraftModel:
                     "verification_contract": selection.verification_contract,
                 }
             )
+            source_diagnostic_rows.append(row_source_diagnostics)
             tokens[row] = list(primary.tokens)
             laws[row] = [PointMassLaw(int(token)) for token in primary.tokens]
             # Pool ranking differs from the old greedy row's confidence law.
@@ -677,6 +684,7 @@ class ContinuationDraftModel:
         self.last_continuation_confidence_provenance = tuple(
             confidence_provenance
         )
+        self.last_continuation_source_diagnostics = tuple(source_diagnostic_rows)
         self.adaptive_confidence_features = confidence_rows
         return tokens, laws
 

@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from probe_qwen38_tree15_b1_discriminator import first_difference, validate_counters  # noqa: E402
+from probe_qwen38_tree15_b1_discriminator import (  # noqa: E402
+    first_difference,
+    validate_counters,
+    validate_status,
+)
 
 
 def status(*, tree=0, physical=0, width=0, fallback=0):
@@ -35,3 +39,16 @@ def test_ordinary_must_not_use_tree():
     validate_counters(status(), status(), False)
     with pytest.raises(RuntimeError, match="ordinary route used tree"):
         validate_counters(status(), status(tree=1, physical=1, width=1), False)
+
+
+def test_status_requires_exact_projection_and_candidate_execution():
+    exact = {"lane_matmul": {"requested": "exact", "mode": "exact"}}
+    validate_status(exact, False)
+    validate_status(
+        {**exact, "execution": {"speculation": "external-dflash2-implemented-unqualified"}},
+        True,
+    )
+    with pytest.raises(RuntimeError, match="exact projection"):
+        validate_status({"lane_matmul": {"requested": "auto", "mode": "auto"}}, False)
+    with pytest.raises(RuntimeError, match="candidate execution"):
+        validate_status(exact, True)

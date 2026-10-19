@@ -45,6 +45,7 @@ from .progressive_external_verify import (
     PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED,
     execute_progressive_target_rows,
     progressive_target_protocol_binding,
+    verify_greedy_proposal_tile,
     verify_proposal_tile,
 )
 from .proposal_providers import (
@@ -71,6 +72,7 @@ from .speculative_topology import (
     confidence_tree_branch_depths,
     confidence_tree_trunk_length,
     ordered_alternative_proposals,
+    ordered_branch_commit_counts,
     processors_branch_safe,
     ordered_alternative_winner,
     ordered_branch_outcomes,
@@ -137,6 +139,7 @@ def _target_executor_stats():
         "nonexact_launches": 0,
         "physical_width_hist": {},
         "token_width_hist": {},
+        "adapter_route_hist": {},
         "last": None,
     }
 
@@ -160,6 +163,11 @@ def _observe_target_executor(stats, receipt):
     ):
         key = str(int(receipt[source]))
         stats[target][key] = stats[target].get(key, 0) + 1
+    route = receipt.get("adapter_detail", {}).get("route")
+    if isinstance(route, str) and route:
+        stats["adapter_route_hist"][route] = (
+            stats["adapter_route_hist"].get(route, 0) + 1
+        )
     stats["last"] = copy.deepcopy(receipt)
 
 
@@ -176,7 +184,11 @@ def _merge_target_executor_stats(*rows):
             "nonexact_launches",
         ):
             result[key] += int(row.get(key, 0))
-        for key in ("physical_width_hist", "token_width_hist"):
+        for key in (
+            "physical_width_hist",
+            "token_width_hist",
+            "adapter_route_hist",
+        ):
             for width, count in row.get(key, {}).items():
                 result[key][str(width)] = (
                     result[key].get(str(width), 0) + int(count)
@@ -347,19 +359,19 @@ _SPARSE_LAW_LIMIT = 256
 
 
 class _PhaseClock:
-    """Accumulate host time between existing sync points (round timing only)."""
+    """Accumulate time between phase boundaries (diagnostic timing only)."""
 
     __slots__ = ("owner", "last")
 
     def __init__(self, owner):
         self.owner = owner
-        self.last = time.perf_counter()
+        self.last = owner._phase_time()
 
     def __call__(self, phase):
         self.last = self.owner._mark(phase, self.last)
 
     def skip(self):
-        self.last = time.perf_counter()
+        self.last = self.owner._phase_time()
 
 
 def _context_pairing(history, following, length):
@@ -420,6 +432,10 @@ class Lane:
     maximum: int
     processors: list
     sampling: dict
+    # Absolute prompt positions where prefill must end a slice.  These match
+    # ordinary serving's numerical geometry but never request or publish an
+    # APCv2 checkpoint on the external route.
+    prefill_cuts: deque = field(default_factory=deque)
     prefill_inserted_at: float = field(default_factory=time.monotonic)
     prefill_coalesce_expired_recorded: bool = False
     generated: int = 0
@@ -461,6 +477,11 @@ class Lane:
     target_tree_width_trace_overflow: int = 0
     cost_handoff_state: object | None = None
     cost_handoff_receipt: dict | None = None
+    # Opt-in executor timing baseline captured at admission.  Phase counters
+    # are process-local scheduler diagnostics, not request-exclusive clocks;
+    # retaining the baseline on the lane makes a final request receipt useful
+    # even when the periodic /v1/status snapshot has not refreshed yet.
+    external_timing_start: dict = field(default_factory=dict)
 
 
 # History changes only by append inside a decode round.  Keep its committed
@@ -659,6 +680,7 @@ class ExternalDraftBatchGenerator:
     prefill_allocator_reclaim = False
     external_varlen_prefill = False
     progressive_alternative_branches = 1
+    progressive_ast_rootless_fallback = True
     progressive_cross_session_pack_rows = None
     progressive_cross_session_pack_mode = None
     adaptive_policy = None
@@ -682,9 +704,12 @@ class ExternalDraftBatchGenerator:
                  external_prefill_coalesce_min_tokens=1,
                  exact_verification="token",
                  progressive_verification_tile=None,
+                 progressive_verification_tile_policy=None,
+                 progressive_terminal_input_widths=None,
                  progressive_alternative_branches=1,
                  progressive_alternative_strategy="distinct_root",
                  progressive_alternative_depth_policy="full",
+                 progressive_ast_rootless_fallback=True,
                  progressive_cross_session_pack_rows=None,
                  progressive_cross_session_pack_mode=None,
                  multilane_draft_cap=None,
@@ -935,12 +960,87 @@ class ExternalDraftBatchGenerator:
                 "adaptive verification"
             )
         self.exact_verification = exact_verification
+        monolithic_progressive = (
+            progressive_verification_tile is not None
+            and progressive_verification_tile == self.num_draft
+        )
         if progressive_verification_tile is not None and (
             type(progressive_verification_tile) is not int
-            or not 1 <= progressive_verification_tile < self.num_draft
+            or not 1 <= progressive_verification_tile <= self.num_draft
+            or monolithic_progressive
+            and progressive_verification_tile_policy != "auto"
         ):
             raise ValueError(
-                "progressive_verification_tile must be an integer from 1 below num_draft"
+                "progressive_verification_tile must be an integer from 1 below "
+                "num_draft, except an admitted automatic terminal tile"
+            )
+        if progressive_verification_tile_policy not in (None, "auto"):
+            raise ValueError("progressive_verification_tile_policy must be auto")
+        if (
+            progressive_verification_tile_policy is not None
+            and progressive_verification_tile is None
+        ):
+            raise ValueError(
+                "progressive_verification_tile_policy requires a resolved tile"
+            )
+        if progressive_verification_tile_policy == "auto":
+            declared_terminal_widths = getattr(
+                model,
+                "progressive_external_exact_terminal_input_widths",
+                None,
+            )
+            if callable(declared_terminal_widths):
+                declared_terminal_widths = declared_terminal_widths(
+                    max_lanes=completion_batch_size,
+                    num_draft=self.num_draft,
+                )
+            if (
+                not isinstance(
+                    progressive_terminal_input_widths, (tuple, list, range)
+                )
+                or not progressive_terminal_input_widths
+                or any(
+                    type(width) is not int or width < 2
+                    for width in progressive_terminal_input_widths
+                )
+            ):
+                raise ValueError(
+                    "automatic progressive verification requires declared exact "
+                    "terminal input widths"
+                )
+            if (
+                not isinstance(declared_terminal_widths, (tuple, list, range))
+                or not declared_terminal_widths
+                or any(
+                    type(width) is not int or width < 2
+                    for width in declared_terminal_widths
+                )
+            ):
+                raise ValueError(
+                    "automatic progressive verification target has no exact "
+                    "terminal input width capability"
+                )
+            required_terminal_widths = range(
+                2, int(progressive_verification_tile) + 2
+            )
+            if any(
+                width not in progressive_terminal_input_widths
+                or width not in declared_terminal_widths
+                for width in required_terminal_widths
+            ):
+                raise ValueError(
+                    "automatic progressive verification terminal input width "
+                    "is not declared exact"
+                )
+        if monolithic_progressive and (
+            progressive_alternative_branches != 1
+            or continuation_pool is not None
+            or progressive_cross_session_pack_rows is not None
+            or progressive_cross_session_pack_mode is not None
+        ):
+            raise ValueError(
+                "automatic terminal K-wide verification requires a simple "
+                "primary chain"
             )
         if progressive_verification_tile is None and any(
             value is not None
@@ -1029,6 +1129,17 @@ class ExternalDraftBatchGenerator:
             raise ValueError(
                 "confidence_tail requires confidence_tree with at least three branches"
             )
+        if type(progressive_ast_rootless_fallback) is not bool:
+            raise ValueError("progressive_ast_rootless_fallback must be boolean")
+        if not progressive_ast_rootless_fallback and (
+            not getattr(self, "continuation_pool_ast_bridge", False)
+            or progressive_alternative_strategy != "confidence_tree"
+            or progressive_alternative_branches <= 1
+        ):
+            raise ValueError(
+                "progressive_ast_rootless_fallback=false requires the exact "
+                "continuation-pool confidence-tree bridge"
+            )
         if progressive_alternative_branches > 1 and not callable(
             getattr(draft_model, "ordered_alternative_proposals", None)
         ):
@@ -1085,11 +1196,20 @@ class ExternalDraftBatchGenerator:
             self.progressive_target_protocol = resolved["target_protocol"]
             self.progressive_protocol_binding = resolved
         self.progressive_verification_tile = progressive_verification_tile
+        self.progressive_terminal_input_widths = (
+            tuple(progressive_terminal_input_widths)
+            if progressive_terminal_input_widths is not None
+            else None
+        )
+        self.progressive_verification_tile_policy = (
+            progressive_verification_tile_policy
+        )
         self.progressive_alternative_branches = progressive_alternative_branches
         self.progressive_alternative_strategy = progressive_alternative_strategy
         self.progressive_alternative_depth_policy = (
             progressive_alternative_depth_policy
         )
+        self.progressive_ast_rootless_fallback = progressive_ast_rootless_fallback
         self.progressive_cross_session_pack_rows = (
             progressive_cross_session_pack_rows
         )
@@ -1137,6 +1257,11 @@ class ExternalDraftBatchGenerator:
         # A parked cohort's dispatched, unread round (pipelined parked decode).
         self._parked_inflight = None
         self._parked_last_read_ns = None
+        # A permanent B1 ordinary lane can use the target model's native
+        # one-token pipeline after a one-way handoff.  Keep this separate from
+        # parked speculation: no draft plane or speculative transaction owns
+        # the state after the handoff.
+        self._ordinary_inflight = None
         self._lane_failures = []
         # Client-declared cohorts own every member until their first complete
         # decode frontier.  Cancellation/removal before that boundary fails
@@ -1219,10 +1344,13 @@ class ExternalDraftBatchGenerator:
                 external_progressive_ast_frontier_max_service_gap=0,
                 external_progressive_ast_primary_fallback_insufficient_branches_rounds=0,
                 external_progressive_ast_primary_fallback_depth_not_above_tile_rounds=0,
+                external_progressive_ast_primary_fallback_rootless_refused_rounds=0,
                 external_progressive_ast_branch_downshift_rounds=0,
                 external_progressive_ast_branch_downshift_lanes=0,
                 external_progressive_ast_rootless_rounds=0,
                 external_progressive_ast_rootless_lanes=0,
+                external_progressive_ast_rootless_refusal_rounds=0,
+                external_progressive_ast_rootless_refusal_sessions=0,
                 external_progressive_ast_adaptive_prefix_rounds=0,
                 external_progressive_ast_adaptive_prefix_lanes=0,
                 external_progressive_ast_utility_downshift_rounds=0,
@@ -1337,6 +1465,12 @@ class ExternalDraftBatchGenerator:
         # perf_counter in this path is cheap but the block exists only for
         # tuning, and the bounded integer counters above stay always-on.
         self.round_timing = bool(os.environ.get("MLX2_EXTERNAL_ROUND_TIMING"))
+        # Diagnostic-only: fence the MLX queue at every timing boundary so
+        # queued device work is charged to the phase that submitted it.  This
+        # deliberately serializes the measured route and is never default-on.
+        self.round_timing_sync = self.round_timing and bool(
+            os.environ.get("MLX2_EXTERNAL_ROUND_TIMING_SYNC")
+        )
         self.round_times = defaultdict(float)
 
     @property
@@ -1366,12 +1500,18 @@ class ExternalDraftBatchGenerator:
         width = int(inputs.shape[1])
         batch = int(inputs.shape[0])
         executor = getattr(self.model, "progressive_external_target_rows", None)
+        # A target may declare that its exact executor needs more than one
+        # row per lane (one-token batched launches are not on its row law);
+        # narrower cohort forwards then take the plain batched path.
+        min_width = int(
+            getattr(self.model, "progressive_external_lane_exact_min_width", 1)
+        )
         lane_exact = bool(
             executor is not None
             and self.progressive_verification_fidelity == PROGRESSIVE_FIDELITY_EXACT
             and getattr(transaction, "batched", False)
             and 2 <= batch <= 8
-            and 1 <= width <= 16
+            and max(1, min_width) <= width <= 16
         )
         if lane_exact:
             logits, features, detail = execute_progressive_target_rows(
@@ -1426,7 +1566,12 @@ class ExternalDraftBatchGenerator:
         return is_hybrid_rows(rows)
 
     def _empty_hidden(self):
-        return self.mx.zeros((1, 0, len(self.layers)*self._target_args.hidden_size))
+        # A drafter whose feature is not a concatenation of hidden-size layer
+        # taps (a native MTP head's multi-stream seed) declares its width.
+        width = getattr(self.draft.config, "feature_width", None)
+        if width is None:
+            width = len(self.layers) * self._target_args.hidden_size
+        return self.mx.zeros((1, 0, int(width)))
 
     def _append_context(self, lane, following):
         """Commit ``lane.tail`` to the draft plane.
@@ -1513,7 +1658,8 @@ class ExternalDraftBatchGenerator:
     def insert(self, prompts, *, max_tokens, caches=None, all_tokens=None,
                cache_states=None, lane_rngs=None, sampling_configs=None,
                logits_processors=None, samplers=None, resume_rng=False,
-               apc_interior_positions=None, prefill_inputs=None, session_keys=None):
+               apc_interior_positions=None, prefill_inputs=None,
+               prefill_cuts=None, session_keys=None):
         if self._open:
             raise RuntimeError("Membership change during external transaction")
         if session_keys is not None and (len(session_keys) != len(prompts) or any(
@@ -1528,12 +1674,17 @@ class ExternalDraftBatchGenerator:
         prefill_inputs = (
             [None] * len(prompts) if prefill_inputs is None else prefill_inputs
         )
+        prefill_cuts = (
+            [None] * len(prompts) if prefill_cuts is None else prefill_cuts
+        )
         if len(apc_interior_positions) != len(prompts):
             raise ValueError(
                 "apc_interior_positions must have one entry per external request"
             )
         if len(prefill_inputs) != len(prompts):
             raise ValueError("prefill_inputs must have one entry per external request")
+        if len(prefill_cuts) != len(prompts):
+            raise ValueError("prefill_cuts must have one entry per external request")
         if any(positions for positions in apc_interior_positions):
             raise ValueError(
                 "APCv2 interior checkpoints are unavailable on external draft routes"
@@ -1586,7 +1737,42 @@ class ExternalDraftBatchGenerator:
                 # This includes a zero-length hit: its branch still holds the
                 # APC's hooked cache objects, which the lane must not adopt.
                 todo = prefix + todo; prefix = []; target = None
-            lane = Lane(uid, prefix, deque(todo), list(target) if target is not None else self.model.make_cache(), draft_cache, tail, rng, int(max_tokens[i]), (logits_processors or [[]]*len(prompts))[i] or [], dict((sampling_configs or [{}]*len(prompts))[i]))
+            cuts = tuple(prefill_cuts[i] or ())
+            if any(
+                isinstance(position, bool) or not isinstance(position, int)
+                for position in cuts
+            ) or tuple(sorted(set(cuts))) != cuts:
+                raise ValueError("invalid prefill cut positions")
+            passed = len(prefix)
+            total = passed + len(todo)
+            cuts = tuple(
+                position for position in cuts
+                if passed < position < total - 1
+            )
+            lane = Lane(
+                uid,
+                prefix,
+                deque(todo),
+                list(target) if target is not None else self.model.make_cache(),
+                draft_cache,
+                tail,
+                rng,
+                int(max_tokens[i]),
+                (logits_processors or [[]] * len(prompts))[i] or [],
+                dict((sampling_configs or [{}] * len(prompts))[i]),
+                prefill_cuts=deque(cuts),
+            )
+            if self.round_timing:
+                lane.external_timing_start = {
+                    key: int(value)
+                    for key, value in self.scheduler_stats.items()
+                    if key.startswith("external_phase_")
+                    and (
+                        key.endswith("_ns")
+                        or key == "external_phase_synchronizations"
+                    )
+                    and type(value) is int
+                }
             if self._sampled_lane_needs_ordinary(lane):
                 # Point-mass continuation laws can only be verified greedily
                 # (progressive add_state refuses them under sampling): serve
@@ -1611,6 +1797,13 @@ class ExternalDraftBatchGenerator:
         self.lanes.update((lane.uid, lane) for lane in pending_lanes)
         self.next_uid += len(pending_lanes)
         self.scheduler_stats["paired_cache_resumes"] += resumed
+        planned_cuts = sum(len(lane.prefill_cuts) for lane in pending_lanes)
+        if planned_cuts:
+            _bump(
+                self.scheduler_stats,
+                "external_prefill_cuts_planned",
+                planned_cuts,
+            )
         return [lane.uid for lane in pending_lanes]
 
     def _sampled_lane_needs_ordinary(self, lane):
@@ -1643,6 +1836,11 @@ class ExternalDraftBatchGenerator:
             )
             if self.prefill_step_autoscale else self.prefill_step
         )
+        while lane.prefill_cuts and lane.prefill_cuts[0] <= len(lane.history):
+            lane.prefill_cuts.popleft()
+            _bump(self.scheduler_stats, "external_prefill_cuts_reached")
+        if lane.prefill_cuts:
+            step = min(step, lane.prefill_cuts[0] - len(lane.history))
         return step
 
     def _sync_decode_fairness_stats(self):
@@ -1936,6 +2134,23 @@ class ExternalDraftBatchGenerator:
                     getattr(lane, "progressive_verify_rounds", 0) > 0
                 ),
                 "verification_tile": self.progressive_verification_tile,
+                **(
+                    {
+                        "verification_tile_policy": "auto",
+                        "verification_tile_resolution_max_lanes": self.capacity,
+                    }
+                    if self.progressive_verification_tile_policy == "auto"
+                    else {}
+                ),
+                **(
+                    {
+                        "terminal_input_widths": list(
+                            self.progressive_terminal_input_widths
+                        )
+                    }
+                    if self.progressive_verification_tile_policy == "auto"
+                    else {}
+                ),
                 "rounds": getattr(lane, "progressive_verify_rounds", 0),
                 "target_launches": getattr(
                     lane, "progressive_verify_launches", 0
@@ -2012,6 +2227,17 @@ class ExternalDraftBatchGenerator:
                     "configured_strategy": self.progressive_alternative_strategy,
                     "configured_depth_policy": (
                         self.progressive_alternative_depth_policy
+                    ),
+                    "winner_contract": (
+                        "exact_max_committed_prefix_then_rank"
+                        if getattr(self, "continuation_pool_ast_bridge", False)
+                        else "first_nonlosing_full_branch_else_b1"
+                    ),
+                    "rootless_fallback_allowed": (
+                        self.progressive_ast_rootless_fallback
+                    ),
+                    "rootless_refusal_rounds": getattr(
+                        lane, "progressive_ast_rootless_refusal_rounds", 0
                     ),
                     "rounds": getattr(
                         lane, "progressive_alternative_rounds", 0
@@ -2093,6 +2319,16 @@ class ExternalDraftBatchGenerator:
                         "progressive_alternative_last_selected_branch",
                         None,
                     ),
+                    "last_branch_committed_tokens": getattr(
+                        lane,
+                        "progressive_alternative_last_branch_committed_tokens",
+                        [],
+                    ),
+                    "last_selected_token_uplift": getattr(
+                        lane,
+                        "progressive_alternative_last_selected_token_uplift",
+                        0,
+                    ),
                     "last_discarded_branches": getattr(
                         lane,
                         "progressive_alternative_last_discarded_branches",
@@ -2118,12 +2354,100 @@ class ExternalDraftBatchGenerator:
                         "progressive_alternative_last_unique_target_rows",
                         0,
                     ),
+                    "geometry_totals": {
+                        "verified_branches": getattr(
+                            lane, "progressive_ast_verified_branches_total", 0
+                        ),
+                        "unique_target_rows": getattr(
+                            lane, "progressive_ast_unique_target_rows_total", 0
+                        ),
+                        "shared_prefix_target_rows": getattr(
+                            lane,
+                            "progressive_ast_shared_prefix_target_rows_total",
+                            0,
+                        ),
+                        "branch_suffix_target_rows": getattr(
+                            lane,
+                            "progressive_ast_branch_suffix_target_rows_total",
+                            0,
+                        ),
+                        "selected_committed_inputs": getattr(
+                            lane,
+                            "progressive_ast_selected_committed_inputs_total",
+                            0,
+                        ),
+                        "selected_token_uplift": getattr(
+                            lane, "progressive_ast_selected_token_uplift_total", 0
+                        ),
+                        "counterfactual_partial_uplift_rounds": getattr(
+                            lane,
+                            "progressive_ast_counterfactual_partial_uplift_rounds",
+                            0,
+                        ),
+                        "counterfactual_partial_uplift_tokens": getattr(
+                            lane,
+                            "progressive_ast_counterfactual_partial_uplift_tokens",
+                            0,
+                        ),
+                        "counterfactual_best_branch_hist": copy.deepcopy(
+                            getattr(
+                                lane,
+                                "progressive_ast_counterfactual_best_branch_hist",
+                                {},
+                            )
+                        ),
+                        "provider_rank_verified_hist": copy.deepcopy(
+                            getattr(
+                                lane,
+                                "progressive_ast_provider_rank_verified_hist",
+                                {},
+                            )
+                        ),
+                        "provider_rank_committed_inputs": copy.deepcopy(
+                            getattr(
+                                lane,
+                                "progressive_ast_provider_rank_committed_inputs",
+                                {},
+                            )
+                        ),
+                        "provider_rank_full_accept_hist": copy.deepcopy(
+                            getattr(
+                                lane,
+                                "progressive_ast_provider_rank_full_accept_hist",
+                                {},
+                            )
+                        ),
+                        "alternative_divergence_position_hist": copy.deepcopy(
+                            getattr(
+                                lane,
+                                "progressive_ast_alternative_divergence_position_hist",
+                                {},
+                            )
+                        ),
+                        "prefix_rejected_rounds": getattr(
+                            lane, "progressive_ast_prefix_rejected_rounds", 0
+                        ),
+                        "active_branch_hist": copy.deepcopy(
+                            getattr(lane, "progressive_ast_active_branch_hist", {})
+                        ),
+                        "shared_prefix_token_hist": copy.deepcopy(
+                            getattr(
+                                lane,
+                                "progressive_ast_shared_prefix_token_hist",
+                                {},
+                            )
+                        ),
+                    },
                     "b2_full_accept_short_circuits": getattr(
                         lane,
                         "progressive_alternative_b2_short_circuits",
                         0,
                     ),
+                    "winner_selection": (
+                        "first_full_branch_with_at_least_b1_committed_tokens"
+                    ),
                     "fallback_when_none_full": "commit_b1_exact_result",
+                    "fallback_when_no_useful_full": "commit_b1_exact_result",
                     "next_round_base": "selected_branch_committed_state",
                     "committed_physical_width": getattr(
                         lane,
@@ -2916,6 +3240,19 @@ class ExternalDraftBatchGenerator:
             alternative_round = False
             if getattr(self, "continuation_pool_ast_bridge", False):
                 record_ast_primary_fallback(cohort, "unsupported_processors")
+            # Name the processor kinds that blocked the branches, so a receipt
+            # says which request feature kept AST on its primary chain.
+            for lane in cohort:
+                for processor in lane.processors:
+                    if not processors_branch_safe([processor]):
+                        kind = type(processor).__name__
+                        if kind == "function":
+                            kind = getattr(processor, "__qualname__", kind)
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_unsupported_processor:"
+                            + str(kind)[:64],
+                        )
         # Alternative rows are valid only for the proposal round that created
         # them.  Clear the prior round before deciding whether this round has
         # enough suffix depth to branch; short terminal paired rounds then use
@@ -3112,6 +3449,9 @@ class ExternalDraftBatchGenerator:
             selections = getattr(self.draft, "last_continuation_selections", None) if self.continuation_policy is not None else None
             admissions = getattr(self.draft, "last_continuation_admissions", None) if self.continuation_policy is not None else None
             slates = getattr(self.draft, "last_continuation_slates", None) if self.continuation_policy is not None else None
+            source_diagnostics = getattr(
+                self.draft, "last_continuation_source_diagnostics", None
+            ) if self.continuation_policy is not None else None
             payloads = getattr(self.draft, "draft_feedback_payloads", None)
             if selections is not None and len(selections) != len(lanes):
                 raise ValueError("continuation selection rows mismatch")
@@ -3119,6 +3459,42 @@ class ExternalDraftBatchGenerator:
                 raise ValueError("continuation admission rows mismatch")
             if slates is not None and len(slates) != len(lanes):
                 raise ValueError("continuation slate rows mismatch")
+            if source_diagnostics is not None and len(source_diagnostics) != len(lanes):
+                raise ValueError("continuation source diagnostic rows mismatch")
+            if source_diagnostics is not None:
+                for lane, diagnostics in zip(lanes, source_diagnostics, strict=True):
+                    lane.continuation_source_geometry_last = copy.deepcopy(diagnostics)
+                    totals = getattr(lane, "continuation_source_geometry_totals", {})
+                    for source_id, geometry in diagnostics.items():
+                        source_totals = totals.setdefault(
+                            source_id,
+                            {
+                                "calls": 0,
+                                "nodes": 0,
+                                "roots": 0,
+                                "leaves": 0,
+                                "full_depth_nodes": 0,
+                                "full_depth_leaves": 0,
+                                "depth_hist": {},
+                                "leaf_depth_hist": {},
+                            },
+                        )
+                        source_totals["calls"] += 1
+                        for key in (
+                            "nodes",
+                            "roots",
+                            "leaves",
+                            "full_depth_nodes",
+                            "full_depth_leaves",
+                        ):
+                            source_totals[key] += int(geometry.get(key, 0))
+                        for hist_key in ("depth_hist", "leaf_depth_hist"):
+                            target_hist = source_totals[hist_key]
+                            for bucket, count in geometry.get(hist_key, {}).items():
+                                target_hist[str(bucket)] = (
+                                    target_hist.get(str(bucket), 0) + int(count)
+                                )
+                    lane.continuation_source_geometry_totals = totals
             if selections is not None:
                 self._continuation_open_selections.extend(selection for selection in selections if selection is not None)
             if payloads is not None and len(payloads) != len(lanes):
@@ -3257,6 +3633,9 @@ class ExternalDraftBatchGenerator:
                         else (requested_branches,)
                     )
                     selected_topologies = ("shared_trunk",) * len(lanes)
+                    rootless_refused = False
+                    rootless_refused_uids = set()
+                    rootless_refusal_diagnostics = {}
                     for candidate_branches in branch_attempts:
                         adaptive_prefix_search = (
                             getattr(self, "continuation_pool_ast_bridge", False)
@@ -3299,14 +3678,47 @@ class ExternalDraftBatchGenerator:
                             "last_ordered_alternative_prefix_tokens",
                             (),
                         )
+                        candidate_prefixes = None
                         if actual_prefixes:
                             if len(actual_prefixes) != len(lanes):
                                 raise ValueError(
                                     "AST bridge prefix provenance rows mismatch"
                                 )
-                            alternative_prefixes = tuple(
+                            candidate_prefixes = tuple(
                                 int(value) for value in actual_prefixes
                             )
+                        elif adaptive_prefix_search:
+                            candidate_prefixes = tuple(alternative_prefixes or ())
+                        if (
+                            adaptive_prefix_search
+                            and not self.progressive_ast_rootless_fallback
+                            and any(prefix == 0 for prefix in (candidate_prefixes or ()))
+                        ):
+                            rootless_refused = True
+                            rootless_refused_uids.update(
+                                lane.uid
+                                for lane, prefix in zip(
+                                    lanes, candidate_prefixes, strict=True
+                                )
+                                if prefix == 0
+                            )
+                            failed_diagnostics = getattr(
+                                self.draft,
+                                "last_ordered_alternative_search_diagnostics",
+                                (),
+                            )
+                            if len(failed_diagnostics) == len(lanes):
+                                for lane, diagnostics in zip(
+                                    lanes, failed_diagnostics, strict=True
+                                ):
+                                    rootless_refusal_diagnostics[lane.uid] = (
+                                        copy.deepcopy(diagnostics)
+                                    )
+                            alternatives = None
+                            alternative_prefixes = requested_prefixes
+                            continue
+                        if candidate_prefixes is not None:
+                            alternative_prefixes = candidate_prefixes
                         active_alternative_branches = candidate_branches
                         if adaptive_prefix_search:
                             selected_topologies = tuple(
@@ -3318,6 +3730,30 @@ class ExternalDraftBatchGenerator:
                                 for index, prefix in enumerate(alternative_prefixes)
                             )
                         break
+                    if rootless_refused:
+                        self._last_alternative_prefix_diagnostics.update(
+                            rootless_refusal_diagnostics
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_ast_rootless_refusal_rounds",
+                        )
+                        _bump(
+                            self.scheduler_stats,
+                            "external_progressive_ast_rootless_refusal_sessions",
+                            len(rootless_refused_uids),
+                        )
+                        for lane in lanes:
+                            if lane.uid not in rootless_refused_uids:
+                                continue
+                            lane.progressive_ast_rootless_refusal_rounds = (
+                                getattr(
+                                    lane,
+                                    "progressive_ast_rootless_refusal_rounds",
+                                    0,
+                                )
+                                + 1
+                            )
                     if alternatives is not None:
                         prefix_diagnostics = getattr(
                             self.draft,
@@ -3370,7 +3806,12 @@ class ExternalDraftBatchGenerator:
                         alternatives = None
                         alternative_round = False
                         record_ast_primary_fallback(
-                            lanes, "insufficient_branches"
+                            lanes,
+                            (
+                                "rootless_refused"
+                                if rootless_refused
+                                else "insufficient_branches"
+                            ),
                         )
             for j,row in enumerate(indices):
                 feature_row = None
@@ -3944,7 +4385,47 @@ class ExternalDraftBatchGenerator:
                 _observe_target_executor(
                     target_executor, _target_executor_detail
                 )
-                self.mx.eval(logits, features)
+                # Greedy, processor-free rows need only the target argmax and
+                # (when requested) the ordinary float32 log-softmax row.  Keep
+                # the whole physical slab on device and cross the host/device
+                # boundary once: calling ``_target_law`` below once per row
+                # would otherwise launch and synchronize logsumexp/argmax for
+                # every row and allocate one vocabulary-sized NumPy one-hot
+                # law for each of them.
+                batched_greedy = all(
+                    not states[index]["lane"].processors
+                    and float(
+                        states[index]["lane"].sampling.get("sampling_temp", 0)
+                    )
+                    == 0.0
+                    for index in active
+                )
+                greedy_selected = None
+                greedy_normalizers = None
+                greedy_response_rows = None
+                if batched_greedy:
+                    rows32 = logits.astype(self.mx.float32)
+                    normalizers = self.mx.logsumexp(
+                        rows32, axis=-1, keepdims=True
+                    )
+                    selected = self.mx.argmax(rows32, axis=-1)
+                    if any(
+                        states[index]["response_rows"] is not None
+                        for index in active
+                    ):
+                        greedy_response_rows = rows32 - normalizers
+                        self.mx.eval(
+                            features,
+                            selected,
+                            normalizers,
+                            greedy_response_rows,
+                        )
+                    else:
+                        self.mx.eval(features, selected, normalizers)
+                    greedy_selected = selected.tolist()
+                    greedy_normalizers = normalizers.tolist()
+                else:
+                    self.mx.eval(logits, features)
                 for physical_row, (
                     index,
                     final,
@@ -3965,20 +4446,41 @@ class ExternalDraftBatchGenerator:
                     stage_response_rows = (
                         [] if state["response_rows"] is not None else None
                     )
-                    stage_target_laws = []
-                    for row in range(expected):
-                        stage_target_laws.append(
-                            self._target_law(
-                                state["lane"],
-                                logits[physical_row, row],
-                                state["local_history"],
-                                True,
-                                stage_response_rows,
-                                greedy_token=state["sparse_point_mass"],
-                                history_suffix=inputs[physical_row][: row + 1],
+                    if batched_greedy:
+                        stage_target_laws = [
+                            int(token)
+                            for token in greedy_selected[physical_row][:expected]
+                        ]
+                        for row in range(expected):
+                            normalizer = float(
+                                greedy_normalizers[physical_row][row][0]
                             )
-                        )
-                        state["window"].mark()
+                            if not np.isfinite(normalizer):
+                                raise LaneFailure(
+                                    state["lane"].uid,
+                                    "external draft target law is not a "
+                                    "probability distribution",
+                                )
+                            if stage_response_rows is not None:
+                                stage_response_rows.append(
+                                    greedy_response_rows[physical_row, row]
+                                )
+                            state["window"].mark()
+                    else:
+                        stage_target_laws = []
+                        for row in range(expected):
+                            stage_target_laws.append(
+                                self._target_law(
+                                    state["lane"],
+                                    logits[physical_row, row],
+                                    state["local_history"],
+                                    True,
+                                    stage_response_rows,
+                                    greedy_token=state["sparse_point_mass"],
+                                    history_suffix=inputs[physical_row][: row + 1],
+                                )
+                            )
+                            state["window"].mark()
                     if state["sparse_point_mass"]:
                         mismatch = next(
                             (
@@ -4017,6 +4519,13 @@ class ExternalDraftBatchGenerator:
                             emitted=tuple(emitted),
                             target_probabilities=tuple(None for _ in emitted),
                             rejected=rejected,
+                        )
+                    elif batched_greedy:
+                        outcome = verify_greedy_proposal_tile(
+                            stage_tokens,
+                            stage_target_laws,
+                            state["private_rng"],
+                            final=final,
                         )
                     else:
                         outcome = verify_proposal_tile(
@@ -4405,6 +4914,8 @@ class ExternalDraftBatchGenerator:
             physical = dict(physical)
             physical.update(
                 shared_prefix_tokens=0,
+                shared_prefix_target_rows=0,
+                branch_suffix_target_rows=physical["physical_target_rows"],
                 unique_target_rows=physical["physical_target_rows"],
                 prefix_rejected=False,
             )
@@ -4457,6 +4968,8 @@ class ExternalDraftBatchGenerator:
             physical = dict(prefix_physical)
             physical.update(
                 shared_prefix_tokens=prefix_count,
+                shared_prefix_target_rows=prefix_physical["physical_target_rows"],
+                branch_suffix_target_rows=0,
                 unique_target_rows=prefix_physical["physical_target_rows"],
                 prefix_rejected=True,
             )
@@ -4647,6 +5160,12 @@ class ExternalDraftBatchGenerator:
             "b4_aligned_continued_launches": continued[4],
             "first_tile_pairwise_disjoint": False,
             "shared_prefix_tokens": prefix_count,
+            "shared_prefix_target_rows": int(
+                prefix_physical["physical_target_rows"]
+            ),
+            "branch_suffix_target_rows": int(
+                unique_target_rows - prefix_physical["physical_target_rows"]
+            ),
             "unique_target_rows": unique_target_rows,
             "prefix_rejected": False,
             "short_circuit_after_branch": short_circuit_after_branch,
@@ -4959,7 +5478,14 @@ class ExternalDraftBatchGenerator:
             proposal_counts = tuple(len(block.tokens) for block in blocks)
             if int(prefix.accepted) != prefix_count:
                 decisions = [copy.copy(prefix) for _ in blocks]
-                winner, full = ordered_alternative_winner(decisions, proposal_counts)
+                winner, full = ordered_alternative_winner(
+                    decisions,
+                    proposal_counts,
+                    allow_partial_uplift=bool(
+                        getattr(self, "continuation_pool_ast_bridge", False)
+                    ),
+                )
+                committed_tokens = ordered_branch_commit_counts(decisions)
                 selected_feature = prefix_features[session_index][
                     :, : int(prefix.commit_count)
                 ]
@@ -5048,7 +5574,14 @@ class ExternalDraftBatchGenerator:
                     caches.append(cache)
                     rngs.append(rng)
                     stats_rows.append(stats)
-                winner, full = ordered_alternative_winner(decisions, proposal_counts)
+                winner, full = ordered_alternative_winner(
+                    decisions,
+                    proposal_counts,
+                    allow_partial_uplift=bool(
+                        getattr(self, "continuation_pool_ast_bridge", False)
+                    ),
+                )
+                committed_tokens = ordered_branch_commit_counts(decisions)
                 selected_feature = features[winner]
                 selected_cache = caches[winner]
                 selected_rng = rngs[winner]
@@ -5086,6 +5619,10 @@ class ExternalDraftBatchGenerator:
                     "proposal_counts": list(proposal_counts),
                     "full": list(full),
                     "winner": int(winner),
+                    "branch_committed_tokens": list(committed_tokens),
+                    "selected_token_uplift": max(
+                        0, int(committed_tokens[winner]) - int(committed_tokens[0])
+                    ),
                     "unique_target_rows": unique_target_rows,
                 }
             )
@@ -5917,7 +6454,7 @@ class ExternalDraftBatchGenerator:
             )
             for decision in decisions
         ]
-        clock = time.perf_counter() if self.round_timing else None
+        clock = self._phase_time() if self.round_timing else None
         paths = [
             (
                 list(decision.commit_rows)
@@ -6201,6 +6738,13 @@ class ExternalDraftBatchGenerator:
                 lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=(decision.continuation_outcome.physical_width if decision.continuation_outcome is not None else len(cohort)), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "trusted_pld_teacher_force" if getattr(blocks[row], "proposal_trusted", False) else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(lane), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(), **self._proposal_composition_receipt(lane), **self._continuation_receipt(lane)}))
         if clock is not None:
             self._mark("emit", clock)
+            # The responses are published only after this round returns, so
+            # refresh their diagnostic snapshot once the emit phase itself is
+            # accounted.  This does not change tokens, cache, or scheduling.
+            for lane in cohort:
+                timing = self._round_timing_receipt(lane)
+                for response in lane.ready:
+                    response.speculative_receipt.update(timing)
         self.scheduler_stats[
             "external_rounds" if any(proposal_counts) else "ordinary_rounds"
         ] += 1
@@ -6420,6 +6964,14 @@ class ExternalDraftBatchGenerator:
                         }
                         for source, row in getattr(lane, "continuation_provider_stats", {}).items()
                     },
+                    "source_tree_geometry": {
+                        "last": copy.deepcopy(
+                            getattr(lane, "continuation_source_geometry_last", {})
+                        ),
+                        "totals": copy.deepcopy(
+                            getattr(lane, "continuation_source_geometry_totals", {})
+                        ),
+                    },
                     "winning_combinations": copy.deepcopy(
                         getattr(lane, "continuation_winning_combinations", {})
                     ),
@@ -6575,9 +7127,16 @@ class ExternalDraftBatchGenerator:
         lane.continuation_winning_combinations = combinations
         lane.continuation_provider_stats = stats
 
+    def _phase_time(self):
+        """Return a phase boundary, optionally after a diagnostic device fence."""
+        if self.round_timing_sync:
+            self.mx.synchronize()
+            _bump(self.scheduler_stats, "external_phase_synchronizations")
+        return time.perf_counter()
+
     def _mark(self, phase, since):
-        """Accumulate host time for ``phase``; returns the new reference time."""
-        now = time.perf_counter()
+        """Accumulate phase time; returns the next boundary."""
+        now = self._phase_time()
         self.round_times[phase] += now - since
         # Receipt copy: integer nanoseconds per phase, present only when
         # MLX2_EXTERNAL_ROUND_TIMING is set.
@@ -6587,6 +7146,47 @@ class ExternalDraftBatchGenerator:
             int((now - since) * 1e9),
         )
         return now
+
+    def _round_timing_receipt(self, lane):
+        """Publish opt-in phase deltas without claiming per-request isolation.
+
+        ``/v1/status`` is a periodic worker snapshot.  A short diagnostic
+        request can finish before that snapshot refreshes, losing the only
+        externally visible phase breakdown.  The scheduler counters already
+        exist behind ``MLX2_EXTERNAL_ROUND_TIMING``; bind their admission-to-
+        receipt deltas into the request receipt as executor-scoped evidence.
+
+        Concurrent requests may share a physical phase, so these deltas are
+        deliberately labelled executor-scoped and unsuitable as controlled
+        performance evidence unless the campaign owns a single request lane.
+        """
+        if not self.round_timing:
+            return {}
+        baseline = getattr(lane, "external_timing_start", {})
+        phases = {
+            key.removeprefix("external_phase_").removesuffix("_ns"): (
+                int(value) - int(baseline.get(key, 0))
+            )
+            for key, value in self.scheduler_stats.items()
+            if key.startswith("external_phase_")
+            and key.endswith("_ns")
+            and type(value) is int
+            and int(value) >= int(baseline.get(key, 0))
+        }
+        return {
+            "round_timing": {
+                "enabled": True,
+                "device_synchronized": self.round_timing_sync,
+                "device_synchronizations": int(self.scheduler_stats.get(
+                    "external_phase_synchronizations", 0
+                )) - int(baseline.get("external_phase_synchronizations", 0)),
+                "scope": "executor_shared_since_request_admission",
+                "request_exclusive": False,
+                "performance_claim": False,
+                "phase_nanoseconds": dict(sorted(phases.items())),
+                "phase_total_nanoseconds": sum(phases.values()),
+            }
+        }
 
     def _proposal_composition_receipt(self, lane, *, current_source=None):
         if not hasattr(self.draft, "last_proposal_sources"):
@@ -7279,6 +7879,13 @@ class ExternalDraftBatchGenerator:
         states = [lane.cost_handoff_state for lane in cohort]
         width = len(cohort)
         _bump(self.scheduler_stats, f"external_round_cohort_width_{width}")
+        if cohort and all(lane.ordinary for lane in cohort):
+            # A permanent ordinary decision is authoritative.  In particular,
+            # an explicitly disabled lane must not run the cost controller's
+            # initial depth-zero sampling rounds before reaching the direct
+            # ordinary pipeline.
+            self._round(cohort)
+            return
         from .cost_per_commit_handoff import cohort_needs_ordinary_probe
 
         parked_uids = {lane.uid for lane in cohort if _speculation_parked(lane)}
@@ -8099,6 +8706,9 @@ class ExternalDraftBatchGenerator:
         if forced_depth not in (None, 0):
             raise ValueError("external forced draft depth must be zero or absent")
         if forced_depth is None and cohort and all(lane.ordinary for lane in cohort):
+            inflight = self._ordinary_inflight
+            if inflight is not None or self._ordinary_pipeline_eligible(cohort):
+                return self._ordinary_pipeline_round(cohort)
             return self._ordinary_round(cohort)
         if (
             forced_depth is None
@@ -8121,7 +8731,7 @@ class ExternalDraftBatchGenerator:
                 and self.adaptive_policy.costs(1) is not None
                 and self.adaptive_policy.costs(len(cohort)) is not None):
             return self._request_adaptive_round(cohort)
-        clock = time.perf_counter() if self.round_timing else None
+        clock = self._phase_time() if self.round_timing else None
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         if clock is not None:
@@ -8206,7 +8816,13 @@ class ExternalDraftBatchGenerator:
                 self.progressive_verification_tile is not None
                 and 1 <= len(cohort) == len(blocks) <= 4
                 and all(block is not None for block in blocks)
-                and progressive_proposal_span > self.progressive_verification_tile
+                and (
+                    progressive_proposal_span > self.progressive_verification_tile
+                    or self.progressive_verification_tile_policy == "auto"
+                    and self.progressive_verification_tile == self.num_draft
+                    and progressive_proposal_span
+                    == self.progressive_verification_tile
+                )
                 and all(
                     self._progressive_processors_supported(lane)
                     for lane in cohort
@@ -8354,6 +8970,12 @@ class ExternalDraftBatchGenerator:
                             index + 1 for index in full
                         ]
                         lane.progressive_alternative_last_selected_branch = winner + 1
+                        lane.progressive_alternative_last_branch_committed_tokens = list(
+                            selection["branch_committed_tokens"]
+                        )
+                        lane.progressive_alternative_last_selected_token_uplift = int(
+                            selection["selected_token_uplift"]
+                        )
                         lane.progressive_alternative_last_discarded_branches = [
                             index + 1
                             for index in range(len(lane_blocks))
@@ -8494,8 +9116,13 @@ class ExternalDraftBatchGenerator:
                         int(block.lengths[0]) for block in verify_blocks
                     )
                     winner, full = ordered_alternative_winner(
-                        decisions, proposal_counts
+                        decisions,
+                        proposal_counts,
+                        allow_partial_uplift=bool(
+                            getattr(self, "continuation_pool_ast_bridge", False)
+                        ),
                     )
+                    committed_tokens = ordered_branch_commit_counts(decisions)
                     branch_accepts = [
                         int(decision.accepted) for decision in decisions
                     ]
@@ -8530,13 +9157,22 @@ class ExternalDraftBatchGenerator:
                         index + 1 for index in full
                     ]
                     lane.progressive_alternative_last_selected_branch = winner + 1
+                    lane.progressive_alternative_last_branch_committed_tokens = list(
+                        committed_tokens
+                    )
+                    lane.progressive_alternative_last_selected_token_uplift = max(
+                        0,
+                        int(committed_tokens[winner]) - int(committed_tokens[0]),
+                    )
                     lane.progressive_alternative_last_discarded_branches = [
                         index + 1
                         for index in range(len(decisions))
                         if index != winner
                     ]
                     lane.progressive_alternative_last_short_circuit = (
-                        winner + 1 if winner in full else None
+                        physical_stats.get("short_circuit_after_branch")
+                        if physical_stats.get("short_circuit_after_branch") is not None
+                        else (full[0] + 1 if full else None)
                     )
                     lane.progressive_alternative_last_physical_width = (
                         physical_stats["max_cohort_width"]
@@ -8553,6 +9189,171 @@ class ExternalDraftBatchGenerator:
                             physical_stats["physical_target_rows"],
                         )
                     )
+                    lane.progressive_ast_verified_branches_total = (
+                        getattr(lane, "progressive_ast_verified_branches_total", 0)
+                        + len(verify_blocks)
+                    )
+                    lane.progressive_ast_unique_target_rows_total = (
+                        getattr(lane, "progressive_ast_unique_target_rows_total", 0)
+                        + lane.progressive_alternative_last_unique_target_rows
+                    )
+                    lane.progressive_ast_shared_prefix_target_rows_total = (
+                        getattr(
+                            lane,
+                            "progressive_ast_shared_prefix_target_rows_total",
+                            0,
+                        )
+                        + int(physical_stats.get("shared_prefix_target_rows", 0))
+                    )
+                    lane.progressive_ast_branch_suffix_target_rows_total = (
+                        getattr(
+                            lane,
+                            "progressive_ast_branch_suffix_target_rows_total",
+                            0,
+                        )
+                        + int(
+                            physical_stats.get(
+                                "branch_suffix_target_rows",
+                                physical_stats["physical_target_rows"],
+                            )
+                        )
+                    )
+                    lane.progressive_ast_selected_committed_inputs_total = (
+                        getattr(
+                            lane,
+                            "progressive_ast_selected_committed_inputs_total",
+                            0,
+                        )
+                        + int(decisions[winner].commit_count)
+                    )
+                    lane.progressive_ast_selected_token_uplift_total = (
+                        getattr(
+                            lane,
+                            "progressive_ast_selected_token_uplift_total",
+                            0,
+                        )
+                        + lane.progressive_alternative_last_selected_token_uplift
+                    )
+                    counterfactual_best = max(
+                        range(len(committed_tokens)),
+                        key=lambda index: (int(committed_tokens[index]), -index),
+                    )
+                    counterfactual_uplift = max(
+                        0,
+                        int(committed_tokens[counterfactual_best])
+                        - int(committed_tokens[0]),
+                    )
+                    lane.progressive_ast_counterfactual_partial_uplift_rounds = (
+                        getattr(
+                            lane,
+                            "progressive_ast_counterfactual_partial_uplift_rounds",
+                            0,
+                        )
+                        + int(counterfactual_uplift > 0)
+                    )
+                    lane.progressive_ast_counterfactual_partial_uplift_tokens = (
+                        getattr(
+                            lane,
+                            "progressive_ast_counterfactual_partial_uplift_tokens",
+                            0,
+                        )
+                        + counterfactual_uplift
+                    )
+                    if counterfactual_uplift:
+                        counterfactual_hist = getattr(
+                            lane,
+                            "progressive_ast_counterfactual_best_branch_hist",
+                            {},
+                        )
+                        counterfactual_key = str(counterfactual_best + 1)
+                        counterfactual_hist[counterfactual_key] = (
+                            counterfactual_hist.get(counterfactual_key, 0) + 1
+                        )
+                        lane.progressive_ast_counterfactual_best_branch_hist = (
+                            counterfactual_hist
+                        )
+                    provider_ranks = []
+                    if getattr(self, "continuation_pool_ast_bridge", False):
+                        for block in verify_blocks:
+                            provenance = getattr(
+                                block, "continuation_ast_provenance", None
+                            )
+                            rank = provenance.get("rank") if provenance else None
+                            if type(rank) is not int or rank < 0:
+                                raise RuntimeError(
+                                    "AST bridge verification lacks provider rank provenance"
+                                )
+                            provider_ranks.append(rank)
+                    rank_verified = getattr(
+                        lane, "progressive_ast_provider_rank_verified_hist", {}
+                    )
+                    rank_committed = getattr(
+                        lane, "progressive_ast_provider_rank_committed_inputs", {}
+                    )
+                    rank_full = getattr(
+                        lane, "progressive_ast_provider_rank_full_accept_hist", {}
+                    )
+                    for rank, decision, proposal_count in zip(
+                        provider_ranks,
+                        decisions,
+                        proposal_counts,
+                        strict=bool(provider_ranks),
+                    ):
+                        rank_key = str(rank)
+                        rank_verified[rank_key] = rank_verified.get(rank_key, 0) + 1
+                        rank_committed[rank_key] = (
+                            rank_committed.get(rank_key, 0)
+                            + int(decision.commit_count)
+                        )
+                        rank_full[rank_key] = rank_full.get(rank_key, 0) + int(
+                            int(decision.accepted) == int(proposal_count)
+                        )
+                    lane.progressive_ast_provider_rank_verified_hist = rank_verified
+                    lane.progressive_ast_provider_rank_committed_inputs = rank_committed
+                    lane.progressive_ast_provider_rank_full_accept_hist = rank_full
+                    divergence_hist = getattr(
+                        lane,
+                        "progressive_ast_alternative_divergence_position_hist",
+                        {},
+                    )
+                    primary_tokens = tuple(verify_blocks[0].tokens)
+                    for block in verify_blocks[1:]:
+                        alternative_tokens = tuple(block.tokens)
+                        divergence = next(
+                            (
+                                index
+                                for index, (primary, alternative) in enumerate(
+                                    zip(primary_tokens, alternative_tokens, strict=False)
+                                )
+                                if primary != alternative
+                            ),
+                            min(len(primary_tokens), len(alternative_tokens)),
+                        )
+                        divergence_key = str(divergence)
+                        divergence_hist[divergence_key] = (
+                            divergence_hist.get(divergence_key, 0) + 1
+                        )
+                    lane.progressive_ast_alternative_divergence_position_hist = (
+                        divergence_hist
+                    )
+                    lane.progressive_ast_prefix_rejected_rounds = (
+                        getattr(lane, "progressive_ast_prefix_rejected_rounds", 0)
+                        + int(bool(physical_stats.get("prefix_rejected", False)))
+                    )
+                    branch_hist = getattr(
+                        lane, "progressive_ast_active_branch_hist", {}
+                    )
+                    branch_key = str(len(verify_blocks))
+                    branch_hist[branch_key] = branch_hist.get(branch_key, 0) + 1
+                    lane.progressive_ast_active_branch_hist = branch_hist
+                    prefix_hist = getattr(
+                        lane, "progressive_ast_shared_prefix_token_hist", {}
+                    )
+                    prefix_key = str(
+                        int(physical_stats.get("shared_prefix_tokens", 0))
+                    )
+                    prefix_hist[prefix_key] = prefix_hist.get(prefix_key, 0) + 1
+                    lane.progressive_ast_shared_prefix_token_hist = prefix_hist
                     if self.progressive_topology_latch is not None:
                         observation = {
                             "branch_accepts": list(branch_accepts),
@@ -8583,7 +9384,7 @@ class ExternalDraftBatchGenerator:
                             "progressive_alternative_b2_short_circuits",
                             0,
                         )
-                        + int(winner == 1 and winner in full)
+                        + int(bool(full) and full[0] == 1)
                     )
                     lane.target_max_width = max(
                         lane.target_max_width, physical_stats["max_cohort_width"]
@@ -8865,9 +9666,13 @@ class ExternalDraftBatchGenerator:
                     _bump(
                         self.scheduler_stats,
                         "external_progressive_alternative_b2_short_circuits",
-                        int(winner == 1 and winner in full),
+                        int(bool(full) and full[0] == 1),
                     )
-                    if self.progressive_alternative_strategy == "shared_prefix":
+                    if self.progressive_alternative_strategy in {
+                        "shared_prefix",
+                        "confidence_tree",
+                        "paired_continuations",
+                    }:
                         _bump(
                             self.scheduler_stats,
                             "external_progressive_alternative_shared_prefix_rounds",
@@ -9020,7 +9825,7 @@ class ExternalDraftBatchGenerator:
             raise ValueError("multi-lane tree15 requires target-tree provider execution")
         if len(cohort) > self.target_tree_cohort_limit:
             raise ValueError("tree15 cohort exceeds its bounded lane limit")
-        clock = time.perf_counter() if self.round_timing else None
+        clock = self._phase_time() if self.round_timing else None
         phase = _PhaseClock(self) if self.round_timing else None
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
@@ -9148,6 +9953,170 @@ class ExternalDraftBatchGenerator:
             self._tree_clock = None
             self._open = False
 
+    def _ordinary_pipeline_eligible(self, cohort, *, following=False):
+        """Whether a permanent B1 lane may use native target pipelining.
+
+        Diagnostic phase timing stays on the synchronous implementation so a
+        boundary fence continues to measure exactly the phase that submitted
+        work.  The production pipeline is deliberately narrow: one permanent
+        greedy lane, no processor or residual-steering state, the ordinary
+        target executor, and the hybrid cache family whose exact one-token
+        undo record is already used by parked decode.
+        """
+        if (
+            self.round_timing
+            or len(cohort) != 1
+            or self.target_execution == "provider"
+            or self.fly_verification.enabled
+            or getattr(getattr(self.model, "model", None), "residual_taps", None)
+            is not None
+            or not self._is_hybrid([cohort[0].cache])
+        ):
+            return False
+        lane = cohort[0]
+        live = [candidate for candidate in self.lanes.values() if not candidate.cancelled]
+        if [candidate.uid for candidate in live] != [lane.uid]:
+            return False
+        return (
+            lane.ordinary
+            and not lane.cancelled
+            and not lane.processors
+            and float(lane.sampling.get("sampling_temp", 0)) == 0.0
+            and lane.maximum - lane.generated >= 2
+        )
+
+    def _dispatch_ordinary_pipeline(self, cohort, anchors):
+        """Dispatch a direct-cache B1 ordinary step without a host wait."""
+        recovery = self._parked_recovery(cohort)
+        lane = cohort[0]
+        inputs = (
+            anchors.astype(self.mx.int32)[:, None]
+            if isinstance(anchors, self.mx.array)
+            else self.mx.array([[int(anchors[0])]], dtype=self.mx.int32)
+        )
+        try:
+            logits = self.model(inputs, cache=lane.cache)
+            rows32 = logits[:, -1, :].astype(self.mx.float32)
+            normalizer_rows = self.mx.logsumexp(
+                rows32, axis=-1, keepdims=True
+            )
+            logprob_rows = (
+                [rows32[0] - normalizer_rows[0]]
+                if lane.sampling.get("emit_logprobs", True)
+                else []
+            )
+            normalizers = normalizer_rows.reshape(-1)
+            next_anchors = self.mx.argmax(rows32, axis=-1)
+            self.mx.async_eval(
+                logits, next_anchors, normalizers, *logprob_rows
+            )
+        except BaseException:
+            self._restore_parked(recovery)
+            raise
+        return _ParkedInflight(
+            lanes=list(cohort),
+            transaction=None,
+            logits=logits,
+            features=None,
+            next_anchors=next_anchors,
+            normalizers=normalizers,
+            logprob_rows=logprob_rows,
+            recovery=recovery,
+            timing_start_ns=0,
+            generated_before=[lane.generated],
+        )
+
+    def _abort_ordinary_inflight(self):
+        inflight, self._ordinary_inflight = self._ordinary_inflight, None
+        if inflight is not None:
+            self._restore_parked(inflight.recovery)
+            _bump(self.scheduler_stats, "external_ordinary_pipeline_aborts")
+
+    def _ordinary_pipeline_round(self, cohort):
+        """Read one B1 ordinary result while its successor runs on device."""
+        inflight = self._ordinary_inflight
+        if inflight is None:
+            self._ordinary_inflight = self._dispatch_ordinary_pipeline(
+                cohort, [cohort[0].anchor]
+            )
+            _bump(self.scheduler_stats, "external_ordinary_pipeline_starts")
+            return
+        if [lane.uid for lane in cohort] != [lane.uid for lane in inflight.lanes]:
+            self._abort_ordinary_inflight()
+            return self._ordinary_round(cohort)
+        self._ordinary_inflight = None
+        following = None
+        try:
+            if self._ordinary_pipeline_eligible(cohort, following=True):
+                following = self._dispatch_ordinary_pipeline(
+                    cohort, inflight.next_anchors
+                )
+            self.mx.eval(
+                inflight.next_anchors,
+                inflight.normalizers,
+                *inflight.logprob_rows,
+            )
+            decisions = self._parked_decisions(cohort, inflight)
+            lane = cohort[0]
+            decision = decisions[0]
+            token = int(decision.emitted[0])
+            lazy = int(inflight.next_anchors.item())
+            finish = (
+                "stop"
+                if token in self.stops
+                else "length"
+                if lane.generated + 1 >= lane.maximum
+                else None
+            )
+            if following is not None and (token != lazy or finish is not None):
+                self._restore_parked(following.recovery)
+                following = None
+                _bump(self.scheduler_stats, "external_ordinary_pipeline_drains")
+            lane.history.append(lane.anchor)
+            lane.anchor = token
+            lane.generated += 1
+            lane.target_max_width = max(lane.target_max_width, 1)
+            if self.adaptive_policy is not None:
+                self.scheduler_stats["external_adaptive_round_depth"] = 0
+                self.scheduler_stats["external_adaptive_verify_width"] = 1
+                _bump(self.scheduler_stats, "external_adaptive_target_rows")
+                lane.adaptive_round_policy = "ordinary_target"
+                lane.adaptive_feature_source = "not_executed"
+            logp = (
+                decision.response_logprobs[0]
+                if lane.sampling.get("emit_logprobs", True)
+                else None
+            )
+            lane.ready.append(
+                self._ordinary_response(
+                    lane,
+                    token=token,
+                    logp=logp,
+                    finish=finish,
+                    execution_width=1,
+                )
+            )
+            if following is not None:
+                self._refresh_parked_host(following.recovery)
+            count = len(cohort)
+            self.scheduler_stats["ordinary_rounds"] += 1
+            _bump(self.scheduler_stats, "external_ordinary_fast_path_rounds")
+            _bump(self.scheduler_stats, "external_ordinary_fast_path_lanes", count)
+            _bump(self.scheduler_stats, "external_draft_context_skipped", count)
+            _bump(self.scheduler_stats, "external_taps_skipped", count)
+            _bump(self.scheduler_stats, "external_transactions_skipped", count)
+            _bump(self.scheduler_stats, "external_ordinary_pipelined_rounds")
+            self.scheduler_stats["target_max_width"] = max(
+                self.scheduler_stats["target_max_width"], 1
+            )
+            self._ordinary_inflight = following
+        except BaseException:
+            if following is not None:
+                with suppress(Exception):
+                    self._restore_parked(following.recovery)
+            self._restore_parked(inflight.recovery)
+            raise
+
     def _ordinary_round(self, cohort):
         """Advance permanently ordinary external lanes on target state only.
 
@@ -9155,7 +10124,22 @@ class ExternalDraftBatchGenerator:
         transient depth-zero round, these rows can never need DFlash context
         again, so avoid draft append, target taps and speculative rollback.
         """
-        snapshots = self._snapshot_round(cohort)
+        phase = _PhaseClock(self) if self.round_timing else None
+        residual_taps = getattr(
+            getattr(self.model, "model", None), "residual_taps", None
+        )
+        light_recovery = residual_taps is None and all(
+            not lane.processors
+            and float(lane.sampling.get("sampling_temp", 0)) == 0.0
+            for lane in cohort
+        )
+        snapshots = (
+            self._parked_recovery(cohort)
+            if light_recovery
+            else self._snapshot_round(cohort)
+        )
+        if phase is not None:
+            phase("ordinary_snapshot")
         stats_snapshot = self._snapshot_scheduler_stats()
         self._open = True
         try:
@@ -9194,6 +10178,8 @@ class ExternalDraftBatchGenerator:
             taps, steer, steer_commits = self._verify_steer(
                 cohort, [[lane.anchor] for lane in cohort], [0] * len(cohort)
             )
+            if phase is not None:
+                phase("ordinary_setup")
             if steer is not None:
                 taps.steer = steer
             try:
@@ -9209,6 +10195,8 @@ class ExternalDraftBatchGenerator:
                     self.mx.eval([c.state for lane in cohort for c in lane.cache])
                 else:
                     self.mx.eval(logits, [cache.state for cache in batched_cache])
+                if phase is not None:
+                    phase("ordinary_forward")
             except BaseException:
                 if hybrid is not None and not hybrid.closed:
                     hybrid.abort()
@@ -9222,18 +10210,36 @@ class ExternalDraftBatchGenerator:
                 response_rows = (
                     [] if lane.sampling.get("emit_logprobs", True) else None
                 )
-                targets = [
-                    self._target_law(
+                if float(lane.sampling.get("sampling_temp", 0)) == 0.0:
+                    selected = self._target_law(
                         lane,
                         logits[row, 0],
                         lane.history,
                         True,
                         response_rows,
+                        greedy_token=True,
                         history_suffix=[lane.anchor],
                     )
-                ]
-                result = verify_proposals([], [], targets, lane.rng)
+                    # A dense one-hot law is almost 2 MiB for Qwen3.6's
+                    # vocabulary.  The compact verifier is bit- and RNG-exact
+                    # for greedy rows and avoids allocating/normalizing that
+                    # host vector on every permanently ordinary token.
+                    result = verify_greedy_proposals([], [selected], lane.rng)
+                else:
+                    targets = [
+                        self._target_law(
+                            lane,
+                            logits[row, 0],
+                            lane.history,
+                            True,
+                            response_rows,
+                            history_suffix=[lane.anchor],
+                        )
+                    ]
+                    result = verify_proposals([], [], targets, lane.rng)
                 token = int(result.emitted[0])
+                if phase is not None:
+                    phase("ordinary_law")
                 if row < len(steer_commits):
                     steer_commits[row](1)
                 lane.history.append(lane.anchor)
@@ -9247,53 +10253,27 @@ class ExternalDraftBatchGenerator:
                     if lane.generated >= lane.maximum
                     else None
                 )
-                logp = (
-                    self.mx.log(
-                        self.mx.array(result.target_probabilities[0].astype(np.float32))
-                    )
-                    if lane.sampling.get("emit_logprobs", True) else None
-                )
-                if logp is not None and response_rows and response_rows[0] is not None:
-                    logp = response_rows[0]
+                logp = None
+                if lane.sampling.get("emit_logprobs", True):
+                    if response_rows and response_rows[0] is not None:
+                        logp = response_rows[0]
+                    else:
+                        logp = self.mx.log(
+                            self.mx.array(
+                                result.target_probabilities[0].astype(np.float32)
+                            )
+                        )
                 lane.ready.append(
-                    SimpleNamespace(
-                        uid=lane.uid,
+                    self._ordinary_response(
+                        lane,
                         token=token,
-                        logprobs=logp,
-                        finish_reason=finish,
+                        logp=logp,
+                        finish=finish,
                         execution_width=len(cohort),
-                        # One token is this round's final response, even when
-                        # the request continues. Match the multi-token round
-                        # contract consumed by serving and downstream adapters.
-                        all_tokens=list(lane.history),
-                        prompt_cache=self._freeze_cache(lane.cache) if finish else None,
-                        # The draft plane stopped at fallback and is stale by
-                        # construction.  Publish this completion as target-only.
-                        cache_sidecar=None,
-                        mtp_state=None,
-                        mtp_receipt=None,
-                        speculative_receipt={
-                            "kind":self.receipt_kind,
-                            "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target",
-                            "current_execution":"ordinary_target",
-                            "ordinary_fallback":True,
-                            **({"ordinary_fallback_reason": lane.ordinary_reason}
-                               if lane.ordinary_reason else {}),
-                            "external_rounds":lane.external_rounds,
-                            "accepted":lane.accepted,
-                            "proposed":lane.proposed,
-                            "round_accepted":0,
-                            "round_proposed":0,
-                            "target_width":lane.target_max_width,
-                            "draft_width":lane.draft_max_width,
-                            "qualification_authority":"serving_route",
-                            **self._target_execution_receipt(lane),
-                            **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(),
-                            **self._proposal_composition_receipt(lane, current_source="ordinary"),
-                            **self._continuation_receipt(lane),
-                        },
                     )
                 )
+                if phase is not None:
+                    phase("ordinary_publish")
             count = len(cohort)
             self.scheduler_stats["ordinary_rounds"] += 1
             _bump(self.scheduler_stats, "external_ordinary_fast_path_rounds")
@@ -9306,11 +10286,68 @@ class ExternalDraftBatchGenerator:
                 self.scheduler_stats["target_max_width"], len(cohort)
             )
         except BaseException:
-            self._restore_round(cohort, snapshots)
+            if light_recovery:
+                self._restore_parked(snapshots)
+            else:
+                self._restore_round(cohort, snapshots)
             self.scheduler_stats = stats_snapshot
             raise
         finally:
             self._open = False
+
+    def _ordinary_response(self, lane, *, token, logp, finish, execution_width):
+        """Publish one permanent target-only token with the external receipt."""
+        return SimpleNamespace(
+            uid=lane.uid,
+            token=int(token),
+            logprobs=logp,
+            finish_reason=finish,
+            execution_width=int(execution_width),
+            # One token is this round's final response, even when the request
+            # continues. Match the multi-token external round contract.
+            all_tokens=list(lane.history),
+            prompt_cache=self._freeze_cache(lane.cache) if finish else None,
+            # The draft plane stopped at fallback and is stale by construction.
+            cache_sidecar=None,
+            mtp_state=None,
+            mtp_receipt=None,
+            speculative_receipt={
+                "kind": self.receipt_kind,
+                "execution": (
+                    "external_draft_verify"
+                    if lane.external_rounds
+                    else "ordinary_target"
+                ),
+                "current_execution": "ordinary_target",
+                "ordinary_fallback": True,
+                **(
+                    {"ordinary_fallback_reason": lane.ordinary_reason}
+                    if lane.ordinary_reason
+                    else {}
+                ),
+                "external_rounds": lane.external_rounds,
+                "accepted": lane.accepted,
+                "proposed": lane.proposed,
+                "round_accepted": 0,
+                "round_proposed": 0,
+                "target_width": lane.target_max_width,
+                "draft_width": lane.draft_max_width,
+                "qualification_authority": "serving_route",
+                **self._target_execution_receipt(lane),
+                **self._verification_receipt(lane),
+                **self._adaptive_receipt(lane),
+                **self._draft_settings_receipt(),
+                **self._proposal_composition_receipt(
+                    lane, current_source="ordinary"
+                ),
+                **self._continuation_receipt(lane),
+                **(
+                    self._round_timing_receipt(lane)
+                    if self.round_timing
+                    else {}
+                ),
+            },
+        )
 
     def _admit(self, lanes, append, *, prefill=False):
         """Explicit reservation estimate; measured peak qualification still required.
@@ -9339,7 +10376,8 @@ class ExternalDraftBatchGenerator:
             draft_bytes = sum(int(getattr(c,"nbytes",0)) for c in lane.draft_cache)
             required += 4*target_bytes + 3*draft_bytes
             required += lane_append*(target.num_hidden_layers*target_per_token + draft.num_hidden_layers*draft_per_token)
-            required += lane_append*target.hidden_size*len(self.layers)*8
+            feature_width = getattr(draft, "feature_width", None) or target.hidden_size*len(self.layers)
+            required += lane_append*int(feature_width)*8
             if callable(reserve_draft):
                 extra = reserve_draft(
                     lane.draft_cache, append=lane_append,
@@ -9870,6 +10908,13 @@ class ExternalDraftBatchGenerator:
         ):
             # Unread, so the host never saw it: rewind exactly, then remove.
             self._abort_parked_inflight()
+        ordinary_inflight = getattr(self, "_ordinary_inflight", None)
+        if ordinary_inflight is not None and any(
+            int(lane.uid) in requested_uids for lane in ordinary_inflight.lanes
+        ):
+            # The unread token was never published.  Rewind its direct target
+            # step before returning a cache or retiring the lane.
+            self._abort_ordinary_inflight()
         uids = set(requested_uids)
         # Before the first complete decode frontier, membership is owned by
         # the declaration rather than by individual lanes.  Removing one

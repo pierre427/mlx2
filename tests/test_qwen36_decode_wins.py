@@ -5,6 +5,7 @@ import pytest
 
 from mlx2.adapters import qwen36_35b as A
 from mlx2.qualification import unqualifiable_candidate
+from mlx2.runtime import row_exact_verify as REV
 from mlx2.runtime.models import qwen4_fused_gdn_verify as V
 from mlx2.runtime.models import qwen4_moe_window as W
 from mlx2.runtime.models import qwen4_routed_decode as RD
@@ -106,6 +107,7 @@ def test_adapter_new_selections_explicit_default_off(monkeypatch):
         "moe_window": "MLX_QWEN36_MOE_WINDOW",
         "moe_window_batch_decode": "MLX_QWEN36_MOE_WINDOW_BATCH_DECODE",
         "moe_window_verify": "MLX_QWEN36_MOE_WINDOW_VERIFY",
+        "moe_window_row_exact": "MLX_QWEN36_MOE_WINDOW_ROW_EXACT",
     }
     for name in names.values():
         monkeypatch.setenv(name, "1")
@@ -131,9 +133,14 @@ def test_adapter_moe_window_consumers_are_independent():
         "batch_decode",
     )
     assert A.moe_window_consumers({"moe_window_verify": True}) == ("verify",)
+    assert A.moe_window_consumers({"moe_window_row_exact": True}) == ("row_exact",)
     assert A.moe_window_consumers(
-        {"moe_window_batch_decode": True, "moe_window_verify": True}
-    ) == ("batch_decode", "verify")
+        {
+            "moe_window_batch_decode": True,
+            "moe_window_verify": True,
+            "moe_window_row_exact": True,
+        }
+    ) == ("batch_decode", "verify", "row_exact")
     # The compatibility umbrella retains its historical all-consumer meaning.
     assert A.moe_window_consumers({"moe_window": True}) == (
         "batch_decode",
@@ -142,7 +149,7 @@ def test_adapter_moe_window_consumers_are_independent():
     )
     with pytest.raises(ValueError, match="cannot be mixed"):
         A.configure_environment(
-            {"moe_window": True, "moe_window_batch_decode": True}
+            {"moe_window": True, "moe_window_row_exact": True}
         )
 
 
@@ -150,12 +157,17 @@ def test_adapter_independent_moe_window_environment_is_explicit_only(monkeypatch
     names = {
         "moe_window_batch_decode": "MLX_QWEN36_MOE_WINDOW_BATCH_DECODE",
         "moe_window_verify": "MLX_QWEN36_MOE_WINDOW_VERIFY",
+        "moe_window_row_exact": "MLX_QWEN36_MOE_WINDOW_ROW_EXACT",
     }
     for name in names.values():
         monkeypatch.setenv(name, "1")
     assert all(name not in A.configure_environment() for name in names.values())
     profile = A.configure_environment(
-        {"moe_window_batch_decode": True, "moe_window_verify": True}
+        {
+            "moe_window_batch_decode": True,
+            "moe_window_verify": True,
+            "moe_window_row_exact": True,
+        }
     )
     assert all(profile[name] == "1" for name in names.values())
     assert profile["MLX_QWEN36_DECODE_WINS"] == "1"
@@ -322,6 +334,21 @@ def test_cpu_verify_decline_preserves_cache_and_counts(monkeypatch):
     }
 
 
+def test_row_exact_canary_does_not_publish_fallback_counters(monkeypatch):
+    layer, cache, o = _gdn_stub()
+    layer.set_fused_gdn_batch_verify_mode("row_exact")
+    monkeypatch.setattr(Q, "fused_gdn_runtime_supported", lambda: False)
+    assert (
+        layer.row_exact_probe_fused_decode(
+            o["qkv"], o["z"], o["b"], o["a"], None, cache
+        )
+        is None
+    )
+    assert layer.fused_gdn_batch_verify_calls == 0
+    assert layer.fused_gdn_batch_verify_fallbacks == 0
+    assert layer.fused_gdn_batch_verify_fallback_reasons == {}
+
+
 def test_verify_snapshot_rollback_zero_partial_and_full(monkeypatch):
     layer, cache, o = _gdn_stub()
     # Hold the pre-forward entries, not ``cache.state``: its first element is
@@ -349,6 +376,30 @@ def test_verify_snapshot_rollback_zero_partial_and_full(monkeypatch):
         for row in (1, 2, 3):
             assert mx.all(cache[j][row] == row).item()
     assert layer.fused_gdn_batch_verify_calls == 1
+
+
+def test_row_exact_canary_does_not_publish_success_counters(monkeypatch):
+    layer, cache, o = _gdn_stub()
+    layer.set_fused_gdn_batch_verify_mode("row_exact")
+    monkeypatch.setattr(Q, "fused_gdn_runtime_supported", lambda: True)
+    monkeypatch.setattr(Q, "served_silu_refusal", lambda: None)
+    monkeypatch.setattr(Q, "probe_qwen36_gdn", lambda *a, **k: 4)
+
+    def kernel(*args, **kw):
+        out = mx.zeros((4, 3, 4096), mx.bfloat16)
+        conv = mx.zeros((4, 3, 8192), mx.bfloat16)
+        state = mx.zeros((4, 32, 128, 128), mx.float32)
+        convs = mx.zeros((4, 2, 3, 8192), mx.bfloat16)
+        states = mx.zeros((4, 2, 32, 128, 128), mx.float32)
+        return out, conv, state, states, convs
+
+    monkeypatch.setattr(V, "qwen4_fused_gdn_batch_verify", kernel)
+    got = layer.row_exact_probe_fused_decode(
+        o["qkv"], o["z"], o["b"], o["a"], None, cache
+    )
+    assert got.shape == (4, 3, 4096)
+    assert layer.fused_gdn_batch_verify_calls == 0
+    assert layer.fused_gdn_batch_verify_fallbacks == 0
 
 
 def test_decode_win_routes_are_qualifiable_and_their_slices_required():
@@ -386,27 +437,27 @@ def test_split_gate_up_admission_serves_exact_top8_geometry():
     from mlx2.runtime.models.qwen3_next import _ShapeOnly
     from mlx2.runtime.models.switch_layers import QuantizedSwitchLinear
 
-    def table(experts, out_dims, packed):
+    def table(experts, out_dims, packed, *, bits=4):
         # Resident tables are module parameters (real arrays), as a loaded
         # checkpoint holds them; they stay lazy because admission reads only
         # shape and dtype, so the full E256 geometry costs no memory.
         layer = QuantizedSwitchLinear.__new__(QuantizedSwitchLinear)
         nn.Module.__init__(layer)
-        layer.bits = 4
+        layer.bits = bits
         layer.group_size = 64
         layer.mode = "affine"
         layer.weight = mx.zeros((experts, out_dims, packed), mx.uint32)
-        groups = packed * 8 // 64
+        groups = packed * (32 // bits) // 64
         layer.scales = mx.zeros((experts, out_dims, groups), mx.bfloat16)
         layer.biases = mx.zeros((experts, out_dims, groups), mx.bfloat16)
         layer.eval()
         return layer
 
-    def tables(experts):
+    def tables(experts, *, bits=4):
         return (
-            table(experts, 512, 256),
-            table(experts, 512, 256),
-            table(experts, 2048, 64),
+            table(experts, 512, 2048 * bits // 32, bits=bits),
+            table(experts, 512, 2048 * bits // 32, bits=bits),
+            table(experts, 2048, 512 * bits // 32, bits=bits),
         )
 
     x = _ShapeOnly((1, 1, 2048), mx.bfloat16)
@@ -416,6 +467,20 @@ def test_split_gate_up_admission_serves_exact_top8_geometry():
         x, inds, scores, *tables(256), contract=QWEN36_E256_K8_ROUTING
     )
     assert ok.accepted, ok.reason
+    q8_default = RD.admit_split_routed_decode(
+        x, inds, scores, *tables(256, bits=8), contract=QWEN36_E256_K8_ROUTING
+    )
+    assert not q8_default.accepted and "bits 8 != 4" in q8_default.reason
+    q8 = RD.admit_split_routed_decode(
+        x,
+        inds,
+        scores,
+        *tables(256, bits=8),
+        contract=QWEN36_E256_K8_ROUTING,
+        bits=8,
+        group_size=64,
+    )
+    assert q8.accepted, q8.reason
     # A consistent E128 top-8 model is not the Qwen3.6 geometry: the width-512
     # intermediate exception must not silently widen to it.
     other = RD.admit_split_routed_decode(
@@ -454,6 +519,13 @@ def _qwen36_block(monkeypatch):
     block = M.Qwen36SparseMoeBlock(args)
     block.set_dtype(mx.bfloat16)
     block.eval()
+    for projection in (
+        block.switch_mlp.gate_proj,
+        block.switch_mlp.up_proj,
+        block.switch_mlp.down_proj,
+    ):
+        projection.bits = 4
+        projection.group_size = 64
     monkeypatch.setattr(
         RD,
         "admit_split_routed_decode",
@@ -505,6 +577,67 @@ def test_decode_wins_reports_window_consumers_and_keeps_aggregate(monkeypatch):
     }
 
 
+def test_row_exact_window_selection_remains_separate_from_artifact_admission(
+    monkeypatch,
+):
+    block, _, _ = _qwen36_block(monkeypatch)
+    block.set_moe_window_consumers(("row_exact",))
+    monkeypatch.setattr(
+        RD,
+        "admit_split_routed_decode",
+        lambda *a, **k: RD.RoutedDecodeAdmission(False, "gate: bits 8 != 4"),
+    )
+    x = mx.zeros((1, 3, 64), mx.bfloat16)
+    assert block.row_exact_window_selected() is True
+    assert block.row_exact_window_refusal(x) == "gate: bits 8 != 4"
+
+
+def test_admitted_qwen36_row_exact_window_engages_once(monkeypatch):
+    block, _, _ = _qwen36_block(monkeypatch)
+    block.set_moe_window_consumers(("row_exact",))
+    x = mx.zeros((1, 3, 64), mx.bfloat16)
+    assert block.row_exact_window_refusal(x) is None
+    with REV.window(REV.Window(3)):
+        y = block(x)
+    mx.eval(y)
+    assert block.moe_window_calls["row_exact"] == 1
+
+
+@pytest.mark.parametrize("rows", [2, 3, 4, 5, 16])
+def test_qwen36_grouped_router_shared_gate_keeps_full_block_bits(monkeypatch, rows):
+    from mlx2.runtime.models import qwen36_moe_decode as M
+
+    block, _, _ = _qwen36_block(monkeypatch)
+    block.set_moe_window_consumers(("row_exact",))
+    x = (mx.arange(rows * 64).reshape(1, rows, 64) / 257).astype(mx.bfloat16)
+    with REV.window(REV.Window(rows)):
+        grouped = block(x)
+    mx.eval(grouped)
+
+    def serial(block, flat):
+        logits = mx.concatenate(
+            [
+                block.gate(flat[r : r + 1].reshape(1, 1, -1)).reshape(1, -1)
+                for r in range(rows)
+            ]
+        )
+        shared = mx.concatenate(
+            [
+                block.shared_expert_gate(
+                    flat[r : r + 1].reshape(1, 1, -1)
+                ).reshape(1, 1)
+                for r in range(rows)
+            ]
+        )
+        return logits, shared
+
+    monkeypatch.setattr(M, "router_and_shared_gate_rows", serial)
+    with REV.window(REV.Window(rows)):
+        reference = block(x)
+    mx.eval(reference)
+    assert mx.array_equal(grouped, reference).item()
+
+
 def test_qwen36_topk_launch_runs_only_admitted_router_logits(monkeypatch):
     block, launches, nn = _qwen36_block(monkeypatch)
     x = mx.zeros((1, 1, 64), mx.bfloat16)
@@ -543,13 +676,13 @@ def test_qwen36_down_launch_covers_every_output_row(monkeypatch, shared, rps, ro
 
         return run
 
-    monkeypatch.setattr(RD, "_kernels", lambda: [None, None, recorder()])
+    monkeypatch.setattr(M, "routed_gate_up_kernel", recorder)
     monkeypatch.setattr(M, "shared_gate_up_kernel", recorder)
     monkeypatch.setattr(M, "down_kernel", recorder)
     monkeypatch.setattr(RD, "expert_operands", lambda layer: ())
     monkeypatch.setattr(RD, "_dense_operands", lambda layer: ())
     monkeypatch.setattr(RD, "served_down_rows", lambda: rps)
-    table = NS(weight=mx.zeros((256, 512, 1)))
+    table = NS(weight=mx.zeros((256, 512, 1)), bits=4, group_size=64)
     fmt = NS(bits=4, group_size=64)
     shared_mlp = NS(gate_proj=fmt, up_proj=fmt, down_proj=fmt) if shared else None
     hidden = 2048
@@ -572,6 +705,48 @@ def test_qwen36_down_launch_covers_every_output_row(monkeypatch, shared, rps, ro
     assert grid[2] == rows
 
 
+def test_qwen36_q8_window_kernels_bind_distinct_format_headers(monkeypatch):
+    from mlx2.runtime.models import qwen36_moe_decode as M
+
+    calls = []
+
+    def recorder(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    factories = (M.routed_gate_up_kernel, M.shared_gate_up_kernel, M.down_kernel)
+    for factory in factories:
+        factory.cache_clear()
+    monkeypatch.setattr(mx.fast, "metal_kernel", recorder)
+    monkeypatch.setattr(RD.SWIGLU_GATE, "adapt", lambda text, _dtype: text)
+    try:
+        M.routed_gate_up_kernel(4, 64)
+        M.shared_gate_up_kernel(4, 4, 64)
+        M.down_kernel(4, 64, (4, 64), True)
+        M.routed_gate_up_kernel(8, 64)
+        M.shared_gate_up_kernel(8, 8, 64)
+        M.down_kernel(8, 64, (8, 64), True)
+    finally:
+        for factory in factories:
+            factory.cache_clear()
+    assert [call["name"] for call in calls] == [
+        "qwen36_split_gate_up_rows_q4g64",
+        "qwen36_gate_up_shared_rows_q4_shared4g64",
+        "qwen36_stock_down_rows_q4g64_shared4g64",
+        "qwen36_split_gate_up_rows_q8g64",
+        "qwen36_gate_up_shared_rows_q8_shared8g64",
+        "qwen36_stock_down_rows_q8g64_shared8g64",
+    ]
+    assert all(
+        "constant constexpr int BITS = 4;" in call["header"] for call in calls[:3]
+    )
+    assert all(
+        "constant constexpr int BITS = 8;" in call["header"] for call in calls[3:]
+    )
+    assert "q4f::" not in calls[1]["source"]
+    assert "q4f::" not in calls[4]["source"]
+
+
 @pytest.mark.parametrize("inter, fast", [(512, True), (640, False)])
 def test_qwen36_down_kernel_layout_follows_qmv_fast(monkeypatch, inter, fast):
     """The stock-down kernel with the qmv_fast header walks K in whole
@@ -592,10 +767,10 @@ def test_qwen36_down_kernel_layout_follows_qmv_fast(monkeypatch, inter, fast):
         layouts.append((args, kwargs))
         return run
 
-    monkeypatch.setattr(RD, "_kernels", lambda: [None, None, run])
+    monkeypatch.setattr(M, "routed_gate_up_kernel", lambda *_args: run)
     monkeypatch.setattr(M, "down_kernel", down_kernel)
     monkeypatch.setattr(RD, "expert_operands", lambda layer: ())
-    table = NS(weight=mx.zeros((256, inter, 1)))
+    table = NS(weight=mx.zeros((256, inter, 1)), bits=4, group_size=64)
     M.routed_rows(
         mx.zeros((1, 1, 2048), mx.bfloat16),
         mx.zeros((1, 8), mx.uint32),
@@ -605,4 +780,4 @@ def test_qwen36_down_kernel_layout_follows_qmv_fast(monkeypatch, inter, fast):
         table,
     )
     (args, kwargs), = layouts
-    assert kwargs.get("fast", args[1] if len(args) > 1 else None) is fast
+    assert kwargs.get("fast", args[3] if len(args) > 3 else None) is fast

@@ -41,6 +41,52 @@ from ..process_env import (
 DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 3
 
 
+# External-draft policy keys of the Flash-Next AST route. ``draft_model`` may
+# name the target artifact itself (its native MTP head) or a payload-bound
+# DFlash2 artifact. Only exact progressive verification is offered; any other
+# external option fails closed rather than running an untested feature law.
+NATIVE_MTP_EXTERNAL_KEYS = frozenset(
+    {
+        "draft_model",
+        "draft_revision",
+        "target_revision",
+        "draft_quantization",
+        "proposal_composition",
+        "continuation_pool",
+        "progressive_verification_tile",
+        "progressive_multilane_draft_cap",
+        "progressive_alternative_branches",
+        "progressive_alternative_strategy",
+        "progressive_alternative_depth_policy",
+        "progressive_ast_rootless_fallback",
+        "progressive_cross_session_pack_rows",
+        "progressive_cross_session_pack_mode",
+        "progressive_verification_fidelity",
+        "cost_per_commit_handoff",
+    }
+)
+
+
+def split_native_mtp_external_policy(execution_policy):
+    """``(flash_next_policy, external_policy)``; ``num_draft`` follows the
+    external route only when a ``draft_model`` selects it."""
+    if execution_policy is None:
+        return None, {}
+    if not isinstance(execution_policy, dict):
+        return execution_policy, {}
+    native = dict(execution_policy)
+    external = {key: native.pop(key) for key in list(native) if key in NATIVE_MTP_EXTERNAL_KEYS}
+    if not external:
+        return execution_policy, {}
+    if "draft_model" not in external:
+        raise ValueError(
+            "Flash-Next external-draft options require draft_model"
+        )
+    if "num_draft" in native:
+        external["num_draft"] = native.pop("num_draft")
+    return native, external
+
+
 def artifact_identity(path: Path) -> dict:
     """Bind local artifacts without reading 100 GB of weight data on startup."""
     path = path.expanduser().resolve()
@@ -228,6 +274,10 @@ class FlashNextAdapter:
     # these numeric and paired: serving clamps proposer widths to their minimum.
     max_exact_self_mtp_verification_rows = 17
     max_exact_self_mtp_rollback_rows = 17
+    # Native-MTP AST route (external engine, own head as the drafter).
+    EXTERNAL_DEFAULT_NUM_DRAFT = 3
+    EXTERNAL_ROUTE_TAG = "flash-next-native-mtp-ast-v1"
+    EXTERNAL_PROFILE = "flash-next-apcv2-native-mtp-ast"
 
     # Explicit opt-in for the default-off, revision-bound serving candidate.
     # The renderer receives a private frozen HF tokenizer, so neither live
@@ -420,6 +470,12 @@ class FlashNextAdapter:
         )
 
     def execution_config(self, *, max_lanes, prefill_step):
+        if getattr(self, "draft_model", None) is not None:
+            from .external_draft_policy import ExternalDraftAdapterMixin as External
+
+            return External._external_execution_config(
+                self, max_lanes=max_lanes, prefill_step=prefill_step
+            )
         return self.policy.batch_config(max_lanes=max_lanes, prefill_step=prefill_step)
 
     def approximate_kv_operations(self):
@@ -438,7 +494,12 @@ class FlashNextAdapter:
 
     def _init_flash_next(self, model_path: str, *, execution_policy=None):
         from .flash_next_policy import FlashNextPolicy
+        execution_policy, external_policy = split_native_mtp_external_policy(
+            execution_policy
+        )
         self.policy = FlashNextPolicy.from_mapping(execution_policy)
+        self.external_policy = {}
+        self.draft_model = None
         path = Path(model_path).expanduser().resolve()
         self.identity = artifact_identity(path)
         self.environment = configure_environment(path, self.policy)
@@ -681,9 +742,143 @@ class FlashNextAdapter:
             self.layout = layout_with_state_dtype(
                 self.model.apc_v2_layout, self.policy.gdn_state_dtype
             )
+            if external_policy:
+                self._bind_external_ast(path, external_policy)
         except BaseException:
             self.close()
             raise
+
+    def _bind_native_mtp_external(self, path, value):
+        """Select the native-MTP AST route: the own head drafts, the external
+        engine verifies exactly on the row-exact route (implemented, not
+        qualified)."""
+        from ..runtime.drafters.native_mtp import (
+            inspect_native_mtp_policy,
+            load_native_mtp_drafter,
+        )
+        from .external_draft_policy import ExternalDraftAdapterMixin as External
+
+        if getattr(self.model, "mtp", None) is None:
+            raise ValueError("this Flash-Next artifact has no native MTP head")
+        if value.get("progressive_verification_fidelity", "exact") != "exact":
+            raise ValueError("the Flash-Next native-MTP AST route is exact only")
+        if value.get("progressive_verification_tile") is None:
+            raise ValueError(
+                "the Flash-Next native-MTP route requires exact progressive "
+                "verification (progressive_verification_tile)"
+            )
+        if not self.policy.row_exact_verify:
+            raise ValueError(
+                "exact progressive verification on Flash-Next requires "
+                "row_exact_verify: true"
+            )
+        if value.get("proposal_composition") not in (None, False):
+            raise ValueError("the native-MTP AST route has no proposal composition")
+        self.external_policy = dict(value)
+        self.external_policy.setdefault("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
+        record = inspect_native_mtp_policy(
+            self.external_policy, path, self.identity["fingerprint"]
+        )
+        External._check_num_draft(self, record)
+        self.model.select_external_feature_source("mtp_seed")
+        self.model.configure_progressive_external_row_exact(True)
+        External._bind_external_drafter(
+            self, record, load_native_mtp_drafter, type(self).descriptor
+        )
+
+    def _bind_dflash2_external(self, path, value):
+        """Bind a payload-pinned DFlash2 head to exact Flash-Next AST.
+
+        The published Flash-Next head was trained on completed target-layer
+        outputs reduced by an arithmetic mean over the four HC streams.  That
+        feature law is deliberately distinct from the learned HC mixer used
+        by the generic Qwen4 tap and from the native-MTP seed stream.
+        """
+        from .dflash2 import content_revision, inspect_drafter, load_drafter
+        from .external_draft_policy import ExternalDraftAdapterMixin as External
+
+        if value.get("progressive_verification_fidelity", "exact") != "exact":
+            raise ValueError("the Flash-Next DFlash2 AST route is exact only")
+        if value.get("progressive_verification_tile") is None:
+            raise ValueError(
+                "the Flash-Next DFlash2 route requires exact progressive "
+                "verification (progressive_verification_tile)"
+            )
+        if not self.policy.row_exact_verify:
+            raise ValueError(
+                "exact progressive verification on Flash-Next requires "
+                "row_exact_verify: true"
+            )
+        if value.get("proposal_composition") not in (None, False):
+            raise ValueError("Flash-Next DFlash2 AST has no qualified proposal composition")
+        if value.get("draft_quantization") is not None:
+            raise ValueError("Flash-Next DFlash2 AST currently requires the BF16 head")
+        target_revision = value.get("target_revision")
+        if target_revision != self.identity["fingerprint"]:
+            raise ValueError(
+                "Flash-Next DFlash2 target revision mismatch: policy pins "
+                f"{str(target_revision)[:12]}, artifact is "
+                f"{self.identity['fingerprint'][:12]}"
+            )
+        record = inspect_drafter(value["draft_model"], path)
+        revision = content_revision(record)
+        if value.get("draft_revision") != revision:
+            raise ValueError(
+                "Flash-Next DFlash2 draft revision mismatch: policy pins "
+                f"{str(value.get('draft_revision'))[:12]}, artifact is "
+                f"{revision[:12]}"
+            )
+        self.external_policy = dict(value)
+        self.external_policy.setdefault("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
+        External._check_num_draft(self, record)
+        self.model.select_external_feature_source("completed_layer_hc_mean")
+        self.model.configure_progressive_external_row_exact(True)
+        External._bind_external_drafter(
+            self, record, load_drafter, type(self).descriptor
+        )
+
+    def _bind_external_ast(self, path, value):
+        """Select the proposal backend from its declared artifact contract."""
+        draft = Path(value["draft_model"]).expanduser().resolve()
+        if draft == path:
+            unexpected = {"draft_revision", "target_revision", "draft_quantization"} & set(value)
+            if unexpected:
+                raise ValueError(
+                    "native-MTP AST does not accept external artifact pins: "
+                    f"{sorted(unexpected)}"
+                )
+            return self._bind_native_mtp_external(path, value)
+        try:
+            config = json.loads((draft / "config.json").read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid Flash-Next external draft artifact") from exc
+        if config.get("architectures") == ["DFlash2DraftModel"]:
+            return self._bind_dflash2_external(path, value)
+        raise ValueError(
+            "Flash-Next AST supports only its native MTP head or DFlash2DraftModel"
+        )
+
+    @classmethod
+    def external_profile_name(cls, mtp):
+        if mtp:
+            raise ValueError("External draft is not native MTP")
+        return cls.EXTERNAL_PROFILE
+
+    def _external_num_draft(self):
+        return self.external_policy.get("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
+
+    def create_external_batch(self, **kwargs):
+        from .external_draft_policy import ExternalDraftAdapterMixin as External
+
+        return External.create_external_batch(self, **kwargs)
+
+    def bind_external_serving_namespace(self, namespace):
+        from .external_draft_policy import ExternalDraftAdapterMixin as External
+
+        return External.bind_external_serving_namespace(self, namespace)
+
+    def _initialize_external_feedback(self):
+        return None
 
     def prompt_tokens(self, request: dict) -> list[int]:
         if "messages" in request:

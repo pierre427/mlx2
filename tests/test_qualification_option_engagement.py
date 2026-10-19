@@ -510,6 +510,56 @@ def test_qwen36_gdn_slice_reachability_follows_the_route():
         "feature_qwen36_fused_gdn_batch_verify"]
 
 
+def test_qwen36_external_exact_target_reaches_fused_gdn_verify():
+    environment = {
+        "MLX_QWEN36_FUSED_GDN_VERIFY": "1",
+        "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY": "1",
+    }
+    external = {
+        "environment": environment,
+        "speculation": "external_draft",
+        "mtp": False,
+        "max_lanes": 4,
+        "execution_policy": {"target_verify_row_exact": True},
+    }
+    assert {
+        "feature_qwen36_fused_gdn_verify",
+        "feature_qwen36_fused_gdn_batch_verify",
+    } <= required_feature_checks(external)
+    assert not (
+        {
+            "feature_qwen36_fused_gdn_verify",
+            "feature_qwen36_fused_gdn_batch_verify",
+        }
+        & selected_not_observed_features(external).keys()
+    )
+
+    b1 = {**external, "max_lanes": 1}
+    assert "feature_qwen36_fused_gdn_verify" in required_feature_checks(b1)
+    assert "feature_qwen36_fused_gdn_batch_verify" not in required_feature_checks(b1)
+    assert "no batched verify" in selected_not_observed_features(b1)[
+        "feature_qwen36_fused_gdn_batch_verify"
+    ]
+
+
+def test_qwen36_external_without_exact_target_cannot_claim_gdn_verify():
+    settings = {
+        "environment": {
+            "MLX_QWEN36_FUSED_GDN_VERIFY": "1",
+            "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY": "1",
+        },
+        "speculation": "external_draft",
+        "mtp": False,
+        "max_lanes": 4,
+        "execution_policy": {"target_verify_row_exact": False},
+    }
+    skipped = selected_not_observed_features(settings)
+    assert "exact target verify" in skipped["feature_qwen36_fused_gdn_verify"]
+    assert "exact target verify" in skipped[
+        "feature_qwen36_fused_gdn_batch_verify"
+    ]
+
+
 def test_qwen36_moe_window_is_required_when_selected(qualify):
     _, final = _q36("dw_all--ordinary")
     assert "feature_qwen36_moe_window" in required_feature_checks(final["settings"])

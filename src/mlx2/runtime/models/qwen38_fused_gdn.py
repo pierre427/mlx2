@@ -99,6 +99,32 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             else QWEN38_GDN_CONTRACT
         )
 
+    # Declarations read by the adapter-owned row-exact target executor
+    # (``qwen_hybrid_row_exact``); they select nothing themselves.
+    def row_exact_fused_verify(self, lanes, steps):
+        """``verify`` when a speculating B1 block of ``steps`` rows would run
+        the fused snapshot verify kernel here, else None.  Batched verify has
+        no fused kernel on this layer, and the compact-replay rollback is not
+        covered by the executor's decode-parity canary."""
+        if (
+            steps <= 1
+            or lanes != 1
+            or not self.fused_gdn_enabled
+            or self.fused_gdn_compact_replay_enabled
+        ):
+            return None
+        return "verify"
+
+    def row_exact_fused_verify_calls(self):
+        return int(self.fused_gdn_counters['verify_calls'])
+
+    def row_exact_decode_route(self):
+        """What this layer's ordinary one-token decode runs (canary identity)."""
+        return (
+            'qwen38', self.fused_gdn_contract.identity,
+            bool(self.fused_gdn_enabled), self.fused_gdn_architecture,
+        )
+
     def _fallback(self, reason):
         counts = self.fused_gdn_counters
         counts['fallbacks'] += 1
@@ -108,21 +134,26 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         counts['reasons'][reason] = counts['reasons'].get(reason, 0) + 1
         return None
 
-    def _try_fused_decode(self, qkv, z, b, a, mask, cache):
+    def _try_fused_decode(self, qkv, z, b, a, mask, cache, *, account=True):
+        fallback = self._fallback if account else (lambda reason: None)
         if (self.fused_gdn_prefill_enabled and qkv.shape[1] >= PREFILL_MIN_ROWS
                 and not bool(getattr(cache, 'speculating', False))):
             # A prefill chunk: the fused prefill route owns it (and its
             # refusals) whether or not the decode switch is on.
-            return self._try_fused_prefill(qkv, z, b, a, mask, cache)
+            return self._try_fused_prefill(
+                qkv, z, b, a, mask, cache, account=account
+            )
         if not self.fused_gdn_enabled:
             return None
         if qkv.shape[1] != 1:
-            return self._try_fused_multitoken(qkv, z, b, a, mask, cache)
+            return self._try_fused_multitoken(
+                qkv, z, b, a, mask, cache, account=account
+            )
         if cache is None or cache[0] is None or cache[1] is None:
-            return self._fallback('uninitialized cache')
+            return fallback('uninitialized cache')
         check_state(cache[1], getattr(self, '_gdn_state_dtype', None))
         if type(self.norm) is not Qwen3NextRMSNormGated:
-            return self._fallback('unsupported gated norm')
+            return fallback('unsupported gated norm')
         describe = getattr(cache, 'rollback_spans', None)
         spans = describe(1, mask) if callable(describe) else None
         rows = int(qkv.shape[0])
@@ -138,18 +169,18 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             training=bool(self.training), sharded=self.sharding_group is not None,
             gate_activation='swish', **geometry)
         if not admission.accepted:
-            return self._fallback(admission.reason)
+            return fallback(admission.reason)
         if not kernels.fused_gdn_runtime_supported():
-            return self._fallback('Metal runtime unavailable')
+            return fallback('Metal runtime unavailable')
         refusal = kernels.served_silu_refusal()
         if refusal is not None:
-            return self._fallback(refusal)
+            return fallback(refusal)
         try:
             ty = kernels.probe_qwen4_fused_gdn_decode(qkv.dtype,
                 contract=self.fused_gdn_contract,
                 **({'state_dtype': mx.float16} if cache[1].dtype == mx.float16 else {}))
             if ty is None:
-                return self._fallback('Metal kernel probe declined')
+                return fallback('Metal kernel probe declined')
             build = (kernels.qwen4_fused_gdn_decode if rows == 1
                      else kernels.qwen4_fused_gdn_batch_decode)
             out, conv, state = build(qkv, z, b, a, cache[0], self.conv1d.weight,
@@ -159,26 +190,28 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         except Exception as exc:
             if is_device_fault(exc):
                 raise
-            return self._fallback(f'Metal kernel dispatch failed: {type(exc).__name__}')
+            return fallback(f'Metal kernel dispatch failed: {type(exc).__name__}')
         cache[0], cache[1] = conv, state
         cache.advance(1)
-        counts = self.fused_gdn_counters
-        counts['decode_calls' if rows == 1 else 'batch_decode_calls'] += 1
-        if rows > 1:
-            counts['batch_decode_rows'] += rows
-        counts['last_fallback'] = None
+        if account:
+            counts = self.fused_gdn_counters
+            counts['decode_calls' if rows == 1 else 'batch_decode_calls'] += 1
+            if rows > 1:
+                counts['batch_decode_rows'] += rows
+            counts['last_fallback'] = None
         return output
 
-    def _try_fused_prefill(self, qkv, z, b, a, mask, cache):
+    def _try_fused_prefill(self, qkv, z, b, a, mask, cache, *, account=True):
         """Fused conv/RMS prework and swish norm-gate around the stock recurrence.
 
         Returns ``None`` (reference path runs) on any refusal, before the
         cache is touched.  See ``qwen4_fused_gdn_prefill`` for the audit.
         """
+        fallback = self._fallback if account else (lambda reason: None)
         if cache is not None and cache[1] is not None:
             check_state(cache[1], getattr(self, '_gdn_state_dtype', None))
         if type(self.norm) is not Qwen3NextRMSNormGated:
-            return self._fallback('prefill: unsupported gated norm')
+            return fallback('prefill: unsupported gated norm')
         admission = prefill_kernels.admit_qwen4_fused_gdn_prefill(
             qkv=qkv, z=z, b=b, a=a,
             conv_state=cache[0] if cache is not None else None,
@@ -196,15 +229,15 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             architecture=self.fused_gdn_architecture,
         )
         if not admission.accepted:
-            return self._fallback(f'prefill: {admission.reason}')
+            return fallback(f'prefill: {admission.reason}')
         if not prefill_kernels.runtime_supported():
-            return self._fallback('prefill: Metal runtime unavailable')
+            return fallback('prefill: Metal runtime unavailable')
         numerics, gate = prefill_kernels.ARCHITECTURE_CONTRACTS[
             self.fused_gdn_architecture]
         refusal = (kernels.served_silu_refusal()
                    or prefill_kernels.prefill_refusal(numerics, gate))
         if refusal is not None:
-            return self._fallback(f'prefill: {refusal}')
+            return fallback(f'prefill: {refusal}')
         steps = int(qkv.shape[1])
         norm_eager = False
         try:
@@ -222,33 +255,37 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         except Exception as exc:
             if is_device_fault(exc):
                 raise
-            return self._fallback(
+            return fallback(
                 f'prefill: Metal kernel dispatch failed: {type(exc).__name__}')
         cache[0], cache[1] = conv_state, state
         cache.advance(steps)
-        counts = self.fused_gdn_counters
-        counts['prefill_calls'] += 1
-        counts['prefill_tokens'] += steps
-        counts['prefill_chunk_calls'] += 1
-        counts['prefill_chunk_tokens'] += steps
-        if norm_eager:
-            counts['prefill_norm_eager'] += 1
-        counts['last_fallback'] = None
+        if account:
+            counts = self.fused_gdn_counters
+            counts['prefill_calls'] += 1
+            counts['prefill_tokens'] += steps
+            counts['prefill_chunk_calls'] += 1
+            counts['prefill_chunk_tokens'] += steps
+            if norm_eager:
+                counts['prefill_norm_eager'] += 1
+            counts['last_fallback'] = None
         return self.out_proj(flat)
 
-    def _try_fused_multitoken(self, qkv, z, b, a, mask, cache):
+    def _try_fused_multitoken(
+        self, qkv, z, b, a, mask, cache, *, account=True
+    ):
         """Fuse an exact B=1 block; speculative blocks retain rollback points."""
+        fallback = self._fallback if account else (lambda reason: None)
         speculating = bool(getattr(cache, 'speculating', False))
         refusal = VERIFY_REFUSAL if speculating else PREFILL_REFUSAL
         if cache is None or cache[0] is None or cache[1] is None:
-            return self._fallback('uninitialized cache')
+            return fallback('uninitialized cache')
         check_state(cache[1], getattr(self, '_gdn_state_dtype', None))
         if type(self.norm) is not Qwen3NextRMSNormGated:
-            return self._fallback('unsupported gated norm')
+            return fallback('unsupported gated norm')
         describe = getattr(cache, 'rollback_spans', None)
         record = getattr(cache, 'record_rollback', None)
         if not callable(describe) or (speculating and not callable(record)):
-            return self._fallback('cache lacks rollback geometry')
+            return fallback('cache lacks rollback geometry')
         steps = int(qkv.shape[1])
         spans = describe(steps, mask)
         geometry = dict(
@@ -269,12 +306,12 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             **geometry,
         )
         if not admission.accepted:
-            return self._fallback(admission.reason or refusal)
+            return fallback(admission.reason or refusal)
         if not kernels.fused_gdn_runtime_supported():
-            return self._fallback('Metal runtime unavailable')
+            return fallback('Metal runtime unavailable')
         silu_refusal = kernels.served_silu_refusal()
         if silu_refusal is not None:
-            return self._fallback(silu_refusal)
+            return fallback(silu_refusal)
         state_kw = ({'state_dtype': mx.float16}
                     if cache[1].dtype == mx.float16 else {})
         compact = bool(speculating and self.fused_gdn_compact_replay_enabled)
@@ -285,7 +322,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                     cache, self.fused_gdn_contract, steps
                 )
             except Exception as exc:
-                return self._fallback(
+                return fallback(
                     f'compact replay state contract refused: {type(exc).__name__}'
                 )
         probe = (
@@ -308,7 +345,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                 probe_kw['num_value_heads'] = self.num_v_heads
             ty = probe(qkv.dtype, steps, **probe_kw)
             if ty is None:
-                return self._fallback('Metal kernel probe declined')
+                return fallback('Metal kernel probe declined')
             outputs = build(
                 qkv, z, b, a, cache[0], self.conv1d.weight, self.A_log,
                 self.dt_bias, cache[1], self.norm.weight, self.norm.eps,
@@ -319,7 +356,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         except Exception as exc:
             if is_device_fault(exc):
                 raise
-            return self._fallback(f'Metal kernel dispatch failed: {type(exc).__name__}')
+            return fallback(f'Metal kernel dispatch failed: {type(exc).__name__}')
         if speculating:
             if compact:
                 replay_keys, replay_corrections, replay_decay = outputs[3:]
@@ -335,37 +372,46 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                         threadgroup_y=ty,
                     )
                 except Exception as exc:
-                    return self._fallback(
+                    return fallback(
                         f'compact replay plan refused: {type(exc).__name__}'
                     )
 
                 def rollback(m, plan=replay_plan):
                     restored = plan.accepted_prefix(m)
-                    self.fused_gdn_counters['verify_rollbacks'] += 1
-                    self.fused_gdn_counters['compact_rollback_calls'] += 1
+                    if account:
+                        self.fused_gdn_counters['verify_rollbacks'] += 1
+                        self.fused_gdn_counters['compact_rollback_calls'] += 1
                     return restored
             else:
                 state_snapshots, conv_snapshots = outputs[3:]
 
                 def rollback(m, conv=conv_snapshots, state=state_snapshots):
-                    self.fused_gdn_counters['verify_rollbacks'] += 1
+                    if account:
+                        self.fused_gdn_counters['verify_rollbacks'] += 1
                     return [mx.contiguous(conv[:, m - 1]), state[:, m - 1]]
 
             record(steps, rollback, [cache[0], cache[1]])
         cache[0], cache[1] = conv, state
         cache.advance(steps)
-        counts = self.fused_gdn_counters
-        kind = 'verify' if speculating else 'prefill'
-        counts[f'{kind}_calls'] += 1
-        counts[f'{kind}_tokens'] += steps
-        if compact:
-            counts['compact_verify_calls'] += 1
-            counts['compact_tape_bytes'] += authorization.tape_bytes
-            counts['compact_snapshot_bytes_avoided'] += (
-                authorization.snapshot_bytes_avoided
-            )
-        counts['last_fallback'] = None
+        if account:
+            counts = self.fused_gdn_counters
+            kind = 'verify' if speculating else 'prefill'
+            counts[f'{kind}_calls'] += 1
+            counts[f'{kind}_tokens'] += steps
+            if compact:
+                counts['compact_verify_calls'] += 1
+                counts['compact_tape_bytes'] += authorization.tape_bytes
+                counts['compact_snapshot_bytes_avoided'] += (
+                    authorization.snapshot_bytes_avoided
+                )
+            counts['last_fallback'] = None
         return self.out_proj(out)
+
+    def row_exact_probe_fused_decode(self, qkv, z, b, a, mask, cache):
+        """Run a parity probe without publishing serving-use counters."""
+        return self._try_fused_decode(
+            qkv, z, b, a, mask, cache, account=False
+        )
 
 
 def configure(

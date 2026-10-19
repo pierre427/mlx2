@@ -15,15 +15,34 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from probe_qwen38_tree15_live_transition import (
-    BASE_POLICY, DRAFT, GATES, MODEL, PYTHON, ROOT, ROUTE, SOURCE, SOURCE_PIN, stop,
-    tree_scheduler_counters,
-)
+from probe_qwen38_tree15_live_transition import stop, tree_scheduler_counters
+
+ROOT = Path(__file__).resolve().parents[1]
+PYTHON = Path(os.environ.get("MLX2_PROBE_PYTHON", sys.executable))
+MODEL = Path.home() / "mlx-models" / "Qwen3.8-27B-oQ4e-mtp"
+DRAFT = Path.home() / "mlx-models" / "Qwen3.8-27B-DFlash2"
+BASE_POLICY = ROOT / "qualification/policies/qwen38-27b-dflash2-tensorfold-unified.json"
+ROUTE = "tree15_b1_b4_chain_b5plus_v1"
+TARGET_ARTIFACT = "fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f"
+TARGET_REVISION = "e59471c5c6fa8c6819b81cb5957bcab10736020db8bacb47fbb9089813fa93f8"
+DRAFT_REVISION = "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90"
+TENSORFOLD_REVISION = "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170"
+TENSORFOLD_TREE = "d9d141b99525a8866f48475858d7011fb192c11b"
+GATES = {
+    "MLX2_TENSORFOLD_CACHE_EXECUTOR": "1",
+    "MLX2_DFLASH_TREE_CODEBOOK_CACHE": "1",
+    "MLX2_TREE_BATCHED_TARGET_LAWS": "1",
+    "MLX2_TREE_SINGLE_FENCE": "1",
+    "MLX2_TREE_LOGPROBS_ON_REQUEST": "1",
+    "MLX2_TREE_PIPELINE_DRAFT": "1",
+    "MLX2_EXTERNAL_ROUND_TIMING": "1",
+}
 
 PROMPT = ("Write a detailed, numbered tutorial on implementing a Python HTTP "
           "server, with examples and tests. Use B1 discriminator as the section title.")
@@ -42,11 +61,24 @@ def sha(path: Path) -> str:
 
 
 def source_state() -> dict:
-    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True).strip()
-    dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=SOURCE))
-    if head != SOURCE_PIN or dirty:
-        raise RuntimeError(f"TensorFold source is not clean at {SOURCE_PIN}: head={head}, dirty={dirty}")
-    return {"path": str(SOURCE), "head": head, "clean": True}
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    paths = (
+        "src/mlx2/runtime/tensorfold_qwen38",
+        "src/mlx2/runtime/qwen38_tensorfold.py",
+        "src/mlx2/adapters/qwen38_tensorfold_source.py",
+    )
+    dirty = subprocess.check_output(
+        ["git", "status", "--porcelain", "--", *paths], cwd=ROOT, text=True
+    ).strip()
+    if dirty:
+        raise RuntimeError(f"vendored TensorFold source is dirty: {dirty}")
+    return {
+        "mlx2_head": head,
+        "path": str(ROOT / "src/mlx2/runtime/tensorfold_qwen38"),
+        "revision": TENSORFOLD_REVISION,
+        "tree": TENSORFOLD_TREE,
+        "clean": True,
+    }
 
 
 def snapshot(base: str, deadline: float) -> dict:
@@ -78,6 +110,16 @@ def validate_counters(before: dict, after: dict, candidate: bool) -> dict:
     return {"before": first, "after": last, "delta": delta}
 
 
+def validate_status(status: dict, candidate: bool) -> None:
+    lane = status.get("lane_matmul") or {}
+    if lane.get("requested") != "exact" or lane.get("mode") != "exact":
+        raise RuntimeError(f"exact projection law was not installed: {lane}")
+    if candidate:
+        speculation = (status.get("execution") or {}).get("speculation")
+        if speculation != "external-dflash2-implemented-unqualified":
+            raise RuntimeError(f"unexpected candidate execution status: {speculation}")
+
+
 def first_difference(left: list[int], right: list[int]) -> int | None:
     for index, (a, b) in enumerate(zip(left, right)):
         if a != b:
@@ -91,8 +133,10 @@ def completion(base: str, deadline: float, candidate: bool) -> dict:
             "top_logprobs": 0, "skip_writing_prefix_cache": True, "seed": SEED}
     request = Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
                       headers={"Content-Type": "application/json"})
-    with urlopen(request, timeout=max(0.1, deadline - time.monotonic())) as response:
+    started = time.monotonic()
+    with urlopen(request, timeout=max(0.1, deadline - started)) as response:
         result = json.load(response)
+    wall_seconds = time.monotonic() - started
     receipt = result.get("mlx2") or {}
     route = (receipt.get("speculation") or {}).get("batch_size_route") or {}
     expected = "external_draft" if candidate else "ordinary"
@@ -100,6 +144,18 @@ def completion(base: str, deadline: float, candidate: bool) -> dict:
         raise RuntimeError(f"route receipt mismatch: {receipt}")
     if candidate and (route.get("policy") != ROUTE or route.get("qualified") is not False):
         raise RuntimeError(f"candidate policy/qualification receipt mismatch: {route}")
+    if candidate:
+        speculation = receipt.get("speculation") or {}
+        if speculation.get("ordinary_fallback") is not False:
+            raise RuntimeError("candidate used ordinary fallback")
+        target_tree = speculation.get("target_tree") or {}
+        identity = target_tree.get("source_identity") or {}
+        if (
+            target_tree.get("provider") != "qwen38_tensorfold_v1"
+            or identity.get("revision") != TENSORFOLD_REVISION
+            or identity.get("tree") != TENSORFOLD_TREE
+        ):
+            raise RuntimeError(f"candidate TensorFold identity mismatch: {target_tree}")
     choice = result["choices"][0]
     events = (choice.get("logprobs") or {}).get("content") or []
     ids = [event.get("id") for event in events]
@@ -107,6 +163,7 @@ def completion(base: str, deadline: float, candidate: bool) -> dict:
         raise RuntimeError("complete integer logprob token IDs are required")
     output = choice["message"].get("content") or ""
     return {"route_receipt": receipt, "completion_tokens": len(ids),
+            "wall_seconds": wall_seconds, "tokens_per_second": len(ids) / wall_seconds,
             "token_ids": ids, "token_ids_sha256": hashlib.sha256(json.dumps(ids).encode()).hexdigest(),
             "output_sha256": hashlib.sha256(output.encode()).hexdigest(),
             "finish_reason": choice.get("finish_reason")}
@@ -127,6 +184,7 @@ def run_server(command: list[str], environment: dict, log_path: Path, base: str,
                 try:
                     before = snapshot(base, deadline)
                     if before.get("healthy") and before.get("ready", True):
+                        validate_status(before, candidate)
                         break
                 except (OSError, ValueError):
                     pass
@@ -135,6 +193,7 @@ def run_server(command: list[str], environment: dict, log_path: Path, base: str,
                 raise TimeoutError("global deadline while loading server")
             row = completion(base, deadline, candidate)
             after = snapshot(base, deadline)
+            validate_status(after, candidate)
             row["status_counters"] = validate_counters(before, after, candidate)
             row["scheduler_status"] = {"before": before.get("scheduler") or {},
                                        "after": after.get("scheduler") or {}}
@@ -160,14 +219,27 @@ def main() -> int:
     source = source_state()
     if not all(path.exists() for path in (PYTHON, MODEL / "config.json", DRAFT / "config.json")):
         raise SystemExit("required Python/model/draft input missing")
+    from mlx2.adapters.qwen38_27b import inspect_artifact
+
+    target_identity = inspect_artifact(MODEL)["identity"]
+    if target_identity["fingerprint"] != TARGET_ARTIFACT:
+        raise SystemExit(
+            f"target artifact mismatch: {target_identity['fingerprint']} != {TARGET_ARTIFACT}"
+        )
     policy = json.loads(BASE_POLICY.read_text())
-    if Path(policy["draft_model"]).resolve() != DRAFT.resolve() or "batch_size_route" in policy:
+    if (
+        Path(policy["draft_model"]).resolve() != DRAFT.resolve()
+        or policy.get("batch_size_route") != ROUTE
+        or policy.get("target_revision") != TARGET_REVISION
+        or policy.get("draft_revision") != DRAFT_REVISION
+        or policy.get("tree_node_budget_by_lanes") != {"1": 15, "2": 7, "3": 4, "4": 3}
+    ):
         raise SystemExit("base policy does not match pinned candidate")
-    policy["batch_size_route"] = ROUTE
     output = args.output_dir.resolve()
     base = f"http://127.0.0.1:{args.port}"
     environment = dict(os.environ, PYTHONPATH=str(ROOT / "src"), HF_HUB_OFFLINE="1",
-                       TRANSFORMERS_OFFLINE="1", MLX2_TENSORFOLD_SOURCE=str(SOURCE), **GATES)
+                       TRANSFORMERS_OFFLINE="1", MLX_ENABLE_TF32="0", **GATES)
+    environment.pop("MLX2_TENSORFOLD_SOURCE", None)
     for key in ("MLX2_DFLASH_TOPOLOGY", "MLX2_QWEN_TARGET_EXECUTION", "MLX2_TENSORFOLD_COHORT_LIMIT"):
         environment.pop(key, None)
     common = [str(PYTHON), "-u", "-c",
@@ -175,26 +247,30 @@ def main() -> int:
               "--model", str(MODEL), "--host", "127.0.0.1", "--port", str(args.port),
               "--max-context", "8192", "--max-lanes", "4", "--max-inflight", "4",
               "--cache-bytes", str(8 << 30), "--qualification-mode", "--lane-matmul",
-              "crossover", "--lane-policy", '{"max_rows":128}']
+              "exact"]
     candidate = common + ["--cache-dir", str(output / "candidate-cache"), "--external-draft",
                           "--execution-policy", str(output / "policy.json")]
-    ordinary = common + ["--cache-dir", str(output / "ordinary-cache")]
-    artifact_hashes = {"target_config_sha256": sha(MODEL / "config.json"),
-                       "draft_config_sha256": sha(DRAFT / "config.json"),
-                       "base_policy_sha256": sha(BASE_POLICY)}
+    ordinary = common + ["--cache-dir", str(output / "ordinary-cache"), "--ordinary"]
+    file_hashes = {"target_config_sha256": sha(MODEL / "config.json"),
+                   "draft_config_sha256": sha(DRAFT / "config.json"),
+                   "base_policy_sha256": sha(BASE_POLICY)}
     for label, folder in (("target", MODEL), ("draft", DRAFT)):
         index = folder / "model.safetensors.index.json"
         if index.exists():
-            artifact_hashes[f"{label}_weights_index_sha256"] = sha(index)
+            file_hashes[f"{label}_weights_index_sha256"] = sha(index)
+    artifact_binding = {"target_artifact_fingerprint": TARGET_ARTIFACT,
+                        "target_payload_revision": TARGET_REVISION,
+                        "draft_payload_revision": DRAFT_REVISION}
     plan = {"schema": "mlx2.qwen38-tree15-b1-discriminator.v1",
             "created_at": datetime.now(UTC).isoformat(), "mlx2_head": subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
             "tensorfold_source": source, "model": str(MODEL), "draft": str(DRAFT),
-            "artifact_hashes": artifact_hashes, "prompt": PROMPT, "seed": SEED,
+            "artifact_hashes": file_hashes, "artifact_binding": artifact_binding,
+            "prompt": PROMPT, "seed": SEED,
             "max_tokens": TOKENS, "timeout_seconds": args.timeout_seconds,
             "candidate_command": candidate, "ordinary_command": ordinary,
             "environment": {key: environment[key] for key in (
-                "PYTHONPATH", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "MLX2_TENSORFOLD_SOURCE", *GATES)}}
+                "PYTHONPATH", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "MLX_ENABLE_TF32", *GATES)}}
     if not args.execute:
         print(json.dumps({**plan, "policy": policy}, indent=2, sort_keys=True))
         return 0
@@ -220,15 +296,17 @@ def main() -> int:
                       "base_policy_sha256": BASE_POLICY,
                       "target_weights_index_sha256": MODEL / "model.safetensors.index.json",
                       "draft_weights_index_sha256": DRAFT / "model.safetensors.index.json"}
-        if any(sha(hash_paths[key]) != value for key, value in artifact_hashes.items()):
+        if any(sha(hash_paths[key]) != value for key, value in file_hashes.items()):
             raise RuntimeError("model or policy metadata changed during probe")
         diff = first_difference(left["token_ids"], right["token_ids"])
-        receipt = {"valid": True, "exact_token_ids": diff is None,
+        receipt = {"valid": diff is None, "exact_token_ids": diff is None,
                    "first_difference_zero_based": diff, "candidate": left,
                    "ordinary": right, "completed_at": datetime.now(UTC).isoformat()}
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         print(json.dumps({"receipt": str(output / "receipt.json"),
                           "first_difference_zero_based": diff, "exact_token_ids": diff is None}))
+        if diff is not None:
+            raise RuntimeError(f"tree15 differs from exact ordinary at token {diff}")
     except BaseException as error:
         (output / "failed.json").write_text(json.dumps({"valid": False, "error": repr(error)}, indent=2) + "\n")
         raise

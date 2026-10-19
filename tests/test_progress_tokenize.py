@@ -593,7 +593,7 @@ def test_external_and_pld_prefill_report_progress():
     external._sidecar = lambda lane: None
     external.decode_time_fairness = DecodeTimeFairness()
     lane = NS(uid=2, remaining=deque([5, 6, 7, 8, 9]), history=[1, 2], tail=empty,
-              cache=[], draft_cache=[])
+              cache=[], draft_cache=[], prefill_cuts=deque())
     first = ExternalDraftBatchGenerator._prefill(external, lane)
     assert first.progress == (5, 7) and not first.end_of_prompt
     second = ExternalDraftBatchGenerator._prefill(external, lane)

@@ -212,6 +212,192 @@ def test_ordinary_round_without_exact_progressive_keeps_logits_only_call():
         batch.close()
 
 
+def test_greedy_ordinary_round_does_not_build_dense_target_law(monkeypatch):
+    batch, lanes, _ = _run([PROMPTS[0]], stop=15)
+    try:
+        lane = lanes[0]
+        lane.ordinary = True
+
+        def forbid_dense(*_args, **_kwargs):
+            raise AssertionError("greedy ordinary round built a dense target law")
+
+        monkeypatch.setattr(
+            "mlx2.runtime.external_speculative.verify_proposals", forbid_dense
+        )
+        generated = lane.generated
+        batch._ordinary_round(lanes)
+        assert lane.generated == generated + 1
+        assert lane.ready[-1].speculative_receipt["current_execution"] == "ordinary_target"
+    finally:
+        batch.close()
+
+
+def test_greedy_ordinary_round_uses_light_exact_recovery(monkeypatch):
+    batch, lanes, _ = _run([PROMPTS[0]], stop=15)
+    try:
+        lane = lanes[0]
+        lane.ordinary = True
+
+        def forbid_full_snapshot(*_args, **_kwargs):
+            raise AssertionError("safe ordinary round took a full speculative snapshot")
+
+        monkeypatch.setattr(batch, "_snapshot_round", forbid_full_snapshot)
+        batch._ordinary_round(lanes)
+        assert lane.ready[-1].speculative_receipt["current_execution"] == "ordinary_target"
+    finally:
+        batch.close()
+
+
+def test_light_ordinary_recovery_restores_host_state_after_law_failure(monkeypatch):
+    batch, lanes, _ = _run([PROMPTS[0]], stop=15)
+    try:
+        lane = lanes[0]
+        lane.ordinary = True
+        before = (
+            lane.anchor,
+            lane.generated,
+            list(lane.history),
+            list(lane.ready),
+            copy.deepcopy(lane.rng),
+        )
+
+        def fail_law(*_args, **_kwargs):
+            raise RuntimeError("injected ordinary law failure")
+
+        monkeypatch.setattr(
+            "mlx2.runtime.external_speculative.verify_greedy_proposals", fail_law
+        )
+        with pytest.raises(RuntimeError, match="injected ordinary law failure"):
+            batch._ordinary_round(lanes)
+        assert lane.anchor == before[0]
+        assert lane.generated == before[1]
+        assert lane.history == before[2]
+        assert list(lane.ready) == before[3]
+        assert lane.rng.draws == before[4].draws
+        assert (
+            lane.rng.generator.bit_generator.state
+            == before[4].generator.bit_generator.state
+        )
+    finally:
+        batch.close()
+
+
+def test_permanent_ordinary_b1_pipeline_matches_synchronous_target_path():
+    direct, direct_lanes, _ = _run([PROMPTS[0]], stop=15)
+    piped, piped_lanes, _ = _run([PROMPTS[0]], stop=15)
+    try:
+        left, right = direct_lanes[0], piped_lanes[0]
+        left.ready.clear()
+        right.ready.clear()
+        left.ordinary = right.ordinary = True
+        direct_tokens = []
+        for _ in range(6):
+            direct._ordinary_round([left])
+            direct_tokens.append(int(left.ready.popleft().token))
+        piped_tokens = []
+        while len(piped_tokens) < 6:
+            piped._run_round([right])
+            while right.ready and len(piped_tokens) < 6:
+                piped_tokens.append(int(right.ready.popleft().token))
+        assert piped.scheduler_stats["external_ordinary_pipelined_rounds"] == 6
+        assert piped_tokens == direct_tokens
+        # The live pipeline is one forward ahead. Rewind that unread result
+        # to compare the same committed response boundary.
+        assert piped._ordinary_inflight is not None
+        piped._abort_ordinary_inflight()
+        assert right.anchor == left.anchor
+        assert right.history == left.history
+        assert right.generated == left.generated
+        close_caches(right.cache, left.cache)
+    finally:
+        direct.close()
+        piped.close()
+
+
+def test_removing_permanent_ordinary_lane_rewinds_unread_direct_step():
+    batch, lanes, _ = _run([PROMPTS[0]], stop=15)
+    lane = lanes[0]
+    lane.ready.clear()
+    lane.ordinary = True
+    batch._run_round([lane])
+    assert batch._ordinary_inflight is not None
+    uid = lane.uid
+    batch.remove([uid], cancelled=True)
+    assert batch._ordinary_inflight is None
+    assert uid not in batch.lanes
+    assert batch.scheduler_stats["external_ordinary_pipeline_aborts"] == 1
+
+
+def test_permanent_ordinary_pipeline_rewinds_ahead_of_length_boundary():
+    direct, direct_lanes, _ = _run([PROMPTS[0]], stop=15)
+    piped, piped_lanes, _ = _run([PROMPTS[0]], stop=15)
+    try:
+        left, right = direct_lanes[0], piped_lanes[0]
+        left.ready.clear()
+        right.ready.clear()
+        left.ordinary = right.ordinary = True
+        left.maximum = left.generated + 3
+        right.maximum = right.generated + 3
+        direct_rows = []
+        while not direct_rows or direct_rows[-1].finish_reason is None:
+            direct._ordinary_round([left])
+            direct_rows.append(left.ready.popleft())
+        piped_rows = []
+        while not piped_rows or piped_rows[-1].finish_reason is None:
+            piped._run_round([right])
+            while right.ready:
+                piped_rows.append(right.ready.popleft())
+        assert [row.token for row in piped_rows] == [row.token for row in direct_rows]
+        assert piped_rows[-1].finish_reason == "length"
+        assert piped._ordinary_inflight is None
+        for actual, expected in zip(
+            piped_rows[-1].prompt_cache,
+            direct_rows[-1].prompt_cache,
+            strict=True,
+        ):
+            close_caches([actual], [expected])
+    finally:
+        direct.close()
+        piped.close()
+
+
+def test_permanent_ordinary_pipeline_rewinds_ahead_of_stop_boundary():
+    probe, probe_lanes, _ = _run([PROMPTS[0]], stop=15)
+    try:
+        lane = probe_lanes[0]
+        lane.ready.clear()
+        lane.ordinary = True
+        probe._ordinary_round([lane])
+        stop = int(lane.ready[-1].token)
+    finally:
+        probe.close()
+    # Establish the same speculative boundary before installing the stop.  A
+    # stop present during the initial AST round can change that round itself.
+    direct, direct_lanes, _ = _run([PROMPTS[0]], stop=15)
+    piped, piped_lanes, _ = _run([PROMPTS[0]], stop=15)
+    try:
+        left, right = direct_lanes[0], piped_lanes[0]
+        left.ready.clear()
+        right.ready.clear()
+        left.ordinary = right.ordinary = True
+        direct.stops = piped.stops = {stop}
+        direct._ordinary_round([left])
+        expected = left.ready.popleft()
+        while not right.ready:
+            piped._run_round([right])
+        actual = right.ready.popleft()
+        assert actual.token == expected.token == stop
+        assert actual.finish_reason == expected.finish_reason == "stop"
+        assert piped._ordinary_inflight is None
+        for actual_cache, expected_cache in zip(
+            actual.prompt_cache, expected.prompt_cache, strict=True
+        ):
+            close_caches([actual_cache], [expected_cache])
+    finally:
+        direct.close()
+        piped.close()
+
+
 class _KVTransactionStub:
     """A SegmentedKVTransaction-like B2 transaction: no ``batched`` attribute."""
 

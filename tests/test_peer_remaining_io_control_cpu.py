@@ -500,3 +500,26 @@ def test_bounded_pool_accepts_the_next_call_once_the_previous_result_returned():
         release.set()
         pool.close()
         _eventually(_drained)
+
+
+def test_close_does_not_quarantine_a_completed_call_awaiting_retirement():
+    owner = ("close-after-result", "storage")
+    pool = ReadPool(1, "close-after-result", timeout=5.0, owner=owner)
+    callback_entered, release = threading.Event(), threading.Event()
+    retire = pool._completed
+
+    def delayed_retire(future):
+        callback_entered.set()
+        assert release.wait(3)
+        retire(future)
+
+    pool._completed = delayed_retire
+    try:
+        assert pool.submit(lambda: 1).result(timeout=2) == 1
+        assert callback_entered.wait(2)
+        assert pool.close()
+        replacement = ReadPool(1, "close-after-result-replacement", owner=owner)
+        replacement.close()
+    finally:
+        release.set()
+        _eventually(_drained)

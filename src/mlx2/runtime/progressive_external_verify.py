@@ -18,6 +18,7 @@ from .speculative_sampling import (
     RequestRNG,
     VerifiedBlock,
     probability,
+    verify_greedy_proposals,
     verify_proposals,
 )
 
@@ -209,7 +210,11 @@ def execute_progressive_target_rows(
     if type(result.row_exact) is not bool:
         raise TypeError("progressive target-row executor row_exact must be boolean")
     if fidelity == PROGRESSIVE_FIDELITY_EXACT and not result.row_exact:
-        raise RuntimeError("progressive target-row executor fell off its exact path")
+        reason = result.detail.get("reason") if isinstance(result.detail, dict) else None
+        suffix = f": {reason}" if isinstance(reason, str) and reason else ""
+        raise RuntimeError(
+            "progressive target-row executor fell off its exact path" + suffix
+        )
     return result.logits, result.features, {
         "execution": "adapter_owned",
         "protocol": result.protocol,
@@ -271,3 +276,38 @@ def verify_proposal_tile(
         tuple(target_rows),
         False,
     )
+
+
+def verify_greedy_proposal_tile(
+    tokens: Sequence[int],
+    selected: Sequence[int],
+    rng: RequestRNG,
+    *,
+    final: bool,
+) -> VerifiedBlock:
+    """Greedy target-token form of ``verify_proposal_tile``.
+
+    ``selected`` contains one target argmax per proposal for a non-final
+    tile, and the additional bonus argmax for a final tile.  Keep the dense
+    one-hot verifier's RNG schedule exactly: one acceptance draw per visited
+    proposal plus one categorical draw for a correction or final bonus.
+    """
+
+    tokens = tuple(int(token) for token in tokens)
+    selected = tuple(int(token) for token in selected)
+    if final:
+        return verify_greedy_proposals(tokens, selected, rng)
+    if not tokens or len(selected) != len(tokens):
+        raise ValueError(
+            "non-final greedy tile needs one target token per proposal token"
+        )
+    emitted = []
+    for index, (token, target) in enumerate(zip(tokens, selected, strict=True)):
+        rng.uniform()
+        if token == target:
+            emitted.append(token)
+            continue
+        rng.uniform()
+        emitted.append(target)
+        return VerifiedBlock(index, tuple(emitted), (), True)
+    return VerifiedBlock(len(tokens), tuple(emitted), (), False)

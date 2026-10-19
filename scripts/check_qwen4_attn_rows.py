@@ -33,22 +33,46 @@ def load_layer(model: Path, layer):
 
     config = json.loads((model / "config.json").read_text())
     args = Q.TextModelArgs.from_dict(config["text_config"])
+    index = json.loads((model / "model.safetensors.index.json").read_text())["weight_map"]
     if layer == "mtp":
         attn = Q.Attention(args, 0, summary_layer_id="mtp:0")
         prefix = "mtp.layers.0.self_attn."
-        files = ["model-mtp-q4.safetensors"]
+        weight_prefix = (
+            "language_model." + prefix
+            if any(key.startswith("language_model." + prefix) for key in index)
+            else prefix
+        )
+        files = sorted(
+            {name for key, name in index.items() if key.startswith(weight_prefix)}
+        )
     else:
         layer = int(layer)
         attn = Q.Attention(args, layer)
-        index = json.loads((model / "model.safetensors.index.json").read_text())["weight_map"]
         prefix = f"language_model.model.layers.{layer}.self_attn."
-        files = sorted({f for k, f in index.items() if k.startswith(prefix)})
-    nn.quantize(attn, group_size=64, bits=4, class_predicate=lambda _p, m: isinstance(m, nn.Linear))
+        weight_prefix = prefix
+        files = sorted({f for k, f in index.items() if k.startswith(weight_prefix)})
+    quant = config.get("quantization", config.get("quantization_config", {}))
+
+    def quantized_projection(name, module):
+        if not isinstance(module, nn.Linear):
+            return False
+        override = quant.get(f"{prefix}{name}") or quant.get(
+            f"{weight_prefix}{name}"
+        )
+        return override if isinstance(override, dict) else True
+
+    nn.quantize(
+        attn,
+        group_size=int(quant.get("group_size", 64)),
+        bits=int(quant.get("bits", 4)),
+        mode=quant.get("mode", "affine"),
+        class_predicate=quantized_projection,
+    )
     weights = {}
     for name in files:
         for key, value in mx.load(str(model / name)).items():
-            if key.startswith(prefix):
-                weights[key[len(prefix):]] = value
+            if key.startswith(weight_prefix):
+                weights[key[len(weight_prefix):]] = value
     attn.load_weights(list(weights.items()), strict=True)
     attn.eval()
     mx.eval(attn.parameters())

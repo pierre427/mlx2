@@ -115,6 +115,28 @@ def test_verify_corrected_path_reaches_runtime_without_mutating_cache(monkeypatc
     assert all(a is b for a, b in zip(c.cache, old))
 
 
+def test_row_exact_canary_refusal_does_not_publish_counters(monkeypatch):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+
+    obj = layer()
+    obj.set_fused_gdn_enabled(True)
+    c = cache(obj)
+    c.start_speculation()
+    obj.fused_gdn_counters['decode_calls'] = 7
+    obj.fused_gdn_counters['fallbacks'] = 2
+    obj.fused_gdn_counters['last_fallback'] = 'prior serving refusal'
+    obj.fused_gdn_counters['reasons']['prior serving refusal'] = 2
+    before = {
+        **obj.fused_gdn_counters,
+        'reasons': dict(obj.fused_gdn_counters['reasons']),
+    }
+    monkeypatch.setattr(route.kernels, 'fused_gdn_runtime_supported', lambda: False)
+    assert obj.row_exact_probe_fused_decode(
+        *operands(obj, width=3), None, c
+    ) is None
+    assert obj.fused_gdn_counters == before
+
+
 def test_successful_verify_records_exact_rollback_and_commits_once(monkeypatch):
     from mlx2.runtime.models import qwen38_fused_gdn as route
     obj = layer()
@@ -144,6 +166,49 @@ def test_successful_verify_records_exact_rollback_and_commits_once(monkeypatch):
     assert obj.fused_gdn_counters['verify_calls'] == 1
     assert obj.fused_gdn_counters['verify_tokens'] == 3
     assert obj.fused_gdn_counters['verify_rollbacks'] == 1
+
+
+def test_row_exact_canary_success_and_rollback_do_not_publish_counters(monkeypatch):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+
+    obj = layer()
+    obj.set_fused_gdn_enabled(True)
+    c = cache(obj)
+    c.start_speculation()
+    qkv, z, b, a = operands(obj, width=3)
+    conv, state = c[0] + 1, c[1] + 1
+    state_snaps = mx.stack([c[1] + 2, c[1] + 3], axis=1)
+    conv_snaps = mx.stack([c[0] + 2, c[0] + 3], axis=1)
+    recorded = []
+    obj.fused_gdn_counters['verify_calls'] = 5
+    obj.fused_gdn_counters['verify_tokens'] = 15
+    obj.fused_gdn_counters['verify_rollbacks'] = 3
+    before = {
+        **obj.fused_gdn_counters,
+        'reasons': dict(obj.fused_gdn_counters['reasons']),
+    }
+
+    monkeypatch.setattr(route.kernels, 'fused_gdn_runtime_supported', lambda: True)
+    monkeypatch.setattr(route.kernels, 'served_silu_refusal', lambda: None)
+    monkeypatch.setattr(
+        route.verify_kernels, 'probe_qwen4_fused_gdn_verify',
+        lambda *a, **kw: 32,
+    )
+    monkeypatch.setattr(
+        route.verify_kernels, 'qwen4_fused_gdn_verify',
+        lambda *a, **kw: (z, conv, state, state_snaps, conv_snaps),
+    )
+    monkeypatch.setattr(
+        c, 'record_rollback',
+        lambda steps, fn, snapshot: recorded.append((steps, fn, snapshot)),
+    )
+    output = obj.row_exact_probe_fused_decode(qkv, z, b, a, None, c)
+    assert output.shape == (1, 3, 16)
+    assert recorded[0][0] == 3
+    restored = recorded[0][1](2)
+    assert mx.array_equal(restored[0], conv_snaps[:, 1]).item()
+    assert mx.array_equal(restored[1], state_snaps[:, 1]).item()
+    assert obj.fused_gdn_counters == before
 
 
 def test_successful_bounded_prefill_uses_corrected_catchup(monkeypatch):

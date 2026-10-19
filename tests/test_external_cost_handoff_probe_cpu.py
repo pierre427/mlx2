@@ -69,6 +69,25 @@ def test_ordinary_probe_skips_draft_append_and_preserves_output(monkeypatch):
     final.cache_sidecar.validate("test", len(final.all_tokens))
 
 
+def test_explicit_ordinary_route_bypasses_cost_probe_and_uses_direct_pipeline():
+    model, draft = tiny()
+    engine = generator(model, draft, cost_per_commit_handoff=SETTINGS)
+    uid = engine.insert(
+        [list(PROMPT)],
+        max_tokens=[8],
+        sampling_configs=[{"sampling_temp": 0.0, "emit_logprobs": False}],
+    )[0]
+    engine.disable_speculation(uid)
+    outputs, final = drain(engine)
+    assert len(outputs[uid]) == 8
+    assert final[uid].finish_reason == "length"
+    stats = engine.scheduler_stats
+    assert stats["ordinary_rounds"] == 8
+    assert stats["external_ordinary_fast_path_rounds"] == 8
+    assert stats["segmented_transactions"] == 0
+    assert stats["external_rounds"] == 0
+
+
 def test_request_finishing_inside_the_probe_publishes_a_paired_sidecar(monkeypatch):
     baseline, _final, _seen = _run(monkeypatch, max_tokens=2)
     tokens, final, seen = _run(
@@ -85,3 +104,27 @@ def test_request_finishing_inside_the_probe_publishes_a_paired_sidecar(monkeypat
     state = final.cache_sidecar
     state.validate("test", len(final.all_tokens))
     assert int(state.state[1].shape[1]) > 1
+
+
+def test_opt_in_round_timing_survives_a_short_request(monkeypatch):
+    monkeypatch.setenv("MLX2_EXTERNAL_ROUND_TIMING", "1")
+    _tokens, final, _seen = _run(monkeypatch, max_tokens=8)
+    timing = final.speculative_receipt["round_timing"]
+    assert timing["device_synchronized"] is False
+    assert timing["device_synchronizations"] == 0
+    assert timing["scope"] == "executor_shared_since_request_admission"
+    assert timing["request_exclusive"] is False
+    assert timing["performance_claim"] is False
+    assert timing["phase_total_nanoseconds"] > 0
+    assert timing["phase_nanoseconds"]["draft"] > 0
+    assert timing["phase_nanoseconds"]["emit"] > 0
+
+
+def test_opt_in_synchronized_round_timing_is_labelled(monkeypatch):
+    monkeypatch.setenv("MLX2_EXTERNAL_ROUND_TIMING", "1")
+    monkeypatch.setenv("MLX2_EXTERNAL_ROUND_TIMING_SYNC", "1")
+    _tokens, final, _seen = _run(monkeypatch, max_tokens=8)
+    timing = final.speculative_receipt["round_timing"]
+    assert timing["device_synchronized"] is True
+    assert timing["device_synchronizations"] > 0
+    assert timing["performance_claim"] is False

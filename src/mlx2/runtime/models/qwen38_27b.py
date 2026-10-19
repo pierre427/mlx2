@@ -847,6 +847,27 @@ class Model(nn.Module):
             last_logits_only=last_logits_only,
         )
 
+    def configure_target_verify_row_exact(self, enabled):
+        """Install (or remove) the adapter-selected row-exact target executor.
+
+        Only an explicit ``target_verify_row_exact`` policy selects it; the
+        protocol declaration and the target-row hook then exist on this
+        instance alone (``qwen_hybrid_row_exact``).
+        """
+        if type(enabled) is not bool:
+            raise ValueError("target_verify_row_exact must be a boolean")
+        from .qwen_hybrid_row_exact import install, uninstall
+
+        if enabled:
+            return install(self)
+        uninstall(self)
+        return None
+
+    @property
+    def external_execution_receipt(self):
+        route = self.__dict__.get("_mlx2_qwen_hybrid_row_exact")
+        return None if route is None else route.receipt()
+
     def prefill_body(self, inputs, cache, capture_layers):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 

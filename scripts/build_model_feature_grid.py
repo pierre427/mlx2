@@ -48,6 +48,8 @@ FEATURES = (
     "varlen_paged_attention", "row_exact_verify", "tensorfold_tree15",
     "fused_gdn", "fused_gdn_batch_verify", "moe_rhs_pad",
     "moe_nax_gather", "moe_routed_decode", "moe_topk_fold",
+    "moe_window_row_exact", "attention_window_row_exact",
+    "progressive_ast_rootless_fallback",
     "qsa_nax_prefill", "qsa_nax_batched", "qsa_nax_decode",
     "invariant_prefill", "quantized_kv", "approximate_kv",
     "host_memory_signals", "host_available_floor", "weight_streaming",

@@ -623,7 +623,7 @@ def test_keepalive_counts_each_request():
             response = client.getresponse()
             assert response.status == 200
             response.read()
-        assert sum(engine.http_metrics.prometheus_snapshot()["requests"].values()) == 3
+        assert _recorded_http_requests(engine, 3) == 3
     finally:
         client.close()
         server.shutdown()

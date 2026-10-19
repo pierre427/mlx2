@@ -145,3 +145,81 @@ def test_parity_compare_identical_only_on_complete_passing_evidence(tmp_path, ca
         assert report["identical"] is False and report["arms"][0]["identical"] is False
     assert compare([empty, partial]) == 1
     assert json.loads(capsys.readouterr().out)["arms"][0]["prompts"]["a"]["missing_from"] == "reference"
+
+
+def test_parity_route_observation_separates_request_and_scheduler_rounds():
+    observe = _parity_script()._route_observation
+    prompts = {
+        "a": {"route_receipt": {"route": "external_draft", "speculation": {
+            "external_rounds": 7, "ordinary_fallback": False,
+            "target_tree": {"provider": "qwen38_tensorfold_v1",
+                            "lane_width_histogram": {"1": 8}}}}},
+        "b": {"route_receipt": {"route": "external_draft", "speculation": {
+            "external_rounds": 5, "ordinary_fallback": False,
+            "target_tree": {"provider": "qwen38_tensorfold_v1",
+                            "lane_width_histogram": {"1": 5}}}}},
+    }
+    row = observe("tree", prompts, {
+        "scheduler.external_rounds": 10,
+        "scheduler.external_auto_tree_rounds": 11,
+        "scheduler.external_tree_rounds": 10,
+        "scheduler.external_target_tree_target_rounds": 11,
+    })
+    assert row == {
+        "selected_for_requests": True,
+        "observed_used": True,
+        "request_count": 2,
+        "external_draft_request_count": 2,
+        "tensorfold_provider_request_count": 2,
+        "ordinary_fallback_request_count": 0,
+        "request_receipt_external_rounds_sum": 12,
+        "request_receipt_target_dispatches_sum": 13,
+        "scheduler_external_rounds": 10,
+        "scheduler_external_auto_tree_rounds": 11,
+        "scheduler_external_tree_rounds": 10,
+        "scheduler_target_dispatches": 11,
+        "scheduler_snapshot_state": "periodic_snapshot_lag",
+    }
+
+
+def test_parity_route_observation_rejects_fallback_or_wrong_provider():
+    observe = _parity_script()._route_observation
+    prompts = {"a": {"route_receipt": {"route": "external_draft", "speculation": {
+        "external_rounds": 1, "ordinary_fallback": True,
+        "target_tree": {"provider": "other"}}}}}
+    row = observe("tree", prompts, {})
+    assert row["selected_for_requests"] is True
+    assert row["observed_used"] is False
+    assert row["ordinary_fallback_request_count"] == 1
+
+
+def test_parity_source_identity_uses_registry_artifact_identity(tmp_path, monkeypatch):
+    module = _parity_script()
+    root = tmp_path / "checkout"
+    src = root / "src"
+    src.mkdir(parents=True)
+    model = tmp_path / "Qwen3.8-27B-oQ4e-mtp"
+    model.mkdir()
+
+    def output(command, **_kwargs):
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return "a" * 40 + "\n"
+        if command[:3] == ["git", "status", "--porcelain"]:
+            return ""
+        assert command[1] == "-c"
+        return json.dumps({
+            "artifact_name": model.name,
+            "artifact_fingerprint": "b" * 64,
+        }) + "\n"
+
+    monkeypatch.setattr(module.subprocess, "check_output", output)
+    identity = module._source_identity(src, model)
+    assert identity == {
+        "mlx2_commit": "a" * 40,
+        "src": str(src.resolve()),
+        "tracked_source_dirty": False,
+        "tracked_source_status": "",
+        "artifact_name": model.name,
+        "artifact_fingerprint": "b" * 64,
+        "checkpoint": f"{model.name}@{'b' * 64}",
+    }

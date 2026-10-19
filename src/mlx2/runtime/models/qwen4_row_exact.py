@@ -91,6 +91,9 @@ ENV = "MLX_QWEN4_ROW_EXACT_VERIFY"
 # qualification/runs/batched-gdn-verify-20261001/README.md. Do not raise this
 # until the complete target path (including one-token rounds) is evidenced.
 MAX_EVIDENCED_LANES = 8
+# Token widths whose complete fused target path has an exact executor law.
+# Safety/admission capability only; this is not a qualification claim.
+EXACT_PROGRESSIVE_TILE_WIDTHS = (1, 2, 3, 4)
 # Layer names a per-row label lists (the counts cover all of them).
 _LABEL_LAYERS = 16
 
@@ -285,6 +288,7 @@ class RowExactVerify:
     lane_layers: Optional[Dict[str, Any]] = None
 
     def __init__(self, model, *, low_bit_lane: bool = False):
+        self.last_window = None
         from .qwen3_next import (
             FusedDownSwitchGLU,
             FusedGateUpSwitchGLU,
@@ -547,7 +551,7 @@ class RowExactVerify:
         key = ("qwen4_fused_gdn_verify_vs_decode", kind, str(state_dtype))
         return CANARIES.exact(key, decode_parity_probe(kind, state_dtype=state_dtype))
 
-    def verify_backbone(self, tokens, cache):
+    def verify_backbone(self, tokens, cache, *, capture_layers=(), hidden_sink=None):
         model = self.model
         rows = int(tokens.size)
         lanes = int(tokens.shape[0])
@@ -574,7 +578,12 @@ class RowExactVerify:
                 record.note("target_backbone", "segmented_one_token_passthrough")
                 record.fail("segmented_one_token_target_not_row_exact")
                 self._close(record)
-            return model.mtp_backbone(tokens, cache=cache)
+            if hidden_sink is None and not capture_layers:
+                return model.mtp_backbone(tokens, cache=cache)
+            return model.language_model.model(
+                tokens, cache, return_hyper=True,
+                capture_layers=capture_layers, hidden_sink=hidden_sink,
+            )
         from . import qwen4_exp as Q
 
         self._retire_pending()
@@ -584,7 +593,13 @@ class RowExactVerify:
             record.fail(reason)
         before = self._gdn_kinds()
         with REV.window(record), Q._declared_width(1):
-            out = model.language_model.model(tokens, cache, return_hyper=True)
+            if hidden_sink is None and not capture_layers:
+                out = model.language_model.model(tokens, cache, return_hyper=True)
+            else:
+                out = model.language_model.model(
+                    tokens, cache, return_hyper=True,
+                    capture_layers=capture_layers, hidden_sink=hidden_sink,
+                )
         after = self._gdn_kinds()
         launched = {kind: after[kind] - before[kind] for kind in after}
         engaged = sum(launched.values())
@@ -622,6 +637,9 @@ class RowExactVerify:
             self._close(record)
 
     def _close(self, record: REV.Window) -> None:
+        # The most recently closed window, for a caller that attests one
+        # launch (the progressive external target-row executor).
+        self.last_window = record
         with self._lock:
             counts = self.counts
             counts["windows"] += 1

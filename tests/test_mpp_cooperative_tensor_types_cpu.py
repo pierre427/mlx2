@@ -36,7 +36,7 @@ def test_cooperative_operand_decltypes_strip_the_address_space():
     for path, text in _kernel_files():
         files += 1
         for name in set(_INPUT.findall(text)):
-            bare = re.findall(r"(?<!remove_addrspace_t<)decltype\(%s\)" % name, text)
+            bare = re.findall(rf"(?<!remove_addrspace_t<)decltype\({name}\)", text)
             if bare:
                 offenders.append((str(path.relative_to(ROOT)), name, len(bare)))
     assert files, "no MPP cooperative-tensor kernels found; the guard scans nothing"

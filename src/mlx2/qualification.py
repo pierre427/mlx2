@@ -942,10 +942,16 @@ def _default_on_mechanisms(settings):
     env = settings.get("environment") or {}
     required, not_observed = set(), {}
     speculation = settings.get("speculation")
+    policy = settings.get("execution_policy") or {}
     native_mtp = bool(settings.get("mtp")) and speculation not in {
         "external_draft",
         "prompt_lookup",
     }
+    external_exact_target = (
+        speculation == "external_draft"
+        and policy.get("target_verify_row_exact") is True
+    )
+    exact_target_verify = native_mtp or external_exact_target
     width = min(int(settings.get("max_lanes") or 1), QUALIFIER_BATCH_WIDTH)
     handoff = settings.get("mtp_ordinary_handoff") or {}
     handoff_width = (
@@ -987,13 +993,17 @@ def _default_on_mechanisms(settings):
             required.add(name)
 
     def batch_verify(name):
-        if not native_mtp:
-            not_observed[name] = "route has no native MTP verify"
+        if not exact_target_verify:
+            not_observed[name] = (
+                "external_draft route has no selected exact target verify"
+                if speculation == "external_draft"
+                else "route has no native MTP verify"
+            )
         elif width < 2:
             not_observed[name] = (
                 f"max_lanes {settings.get('max_lanes')}: no batched verify"
             )
-        elif handoff_width is not None and handoff_width < 2:
+        elif native_mtp and handoff_width is not None and handoff_width < 2:
             not_observed[name] = (
                 "MTP->ordinary handoff at width 1 never batches MTP verify"
             )
@@ -1018,10 +1028,14 @@ def _default_on_mechanisms(settings):
     if env.get("MLX_QWEN36_FUSED_GDN_VERIFY") == "1":
         # One-lane MTP verify: every single-request probe of a native MTP
         # route verifies at width 1, under any handoff width.
-        if native_mtp:
+        if exact_target_verify:
             required.add("qwen36_fused_gdn_verify")
         else:
-            not_observed["qwen36_fused_gdn_verify"] = "route has no native MTP verify"
+            not_observed["qwen36_fused_gdn_verify"] = (
+                "external_draft route has no selected exact target verify"
+                if speculation == "external_draft"
+                else "route has no native MTP verify"
+            )
     if env.get("MLX_QWEN36_FUSED_GDN_BATCH_VERIFY") == "1":
         batch_verify("qwen36_fused_gdn_batch_verify")
     if env.get("MLX_QWEN36_MOE_WINDOW") == "1":

@@ -84,6 +84,14 @@ class ExternalContinuationSource:
             getattr(draft, "propose_complete_paths", None)
         ):
             self.mechanism = "dspark"
+        elif getattr(
+            draft, "continuation_protocol", None
+        ) == "native_mtp_head" and callable(
+            getattr(draft, "propose_complete_paths", None)
+        ):
+            # The target's own MTP head: its paths come from logits the
+            # round's greedy chain already computed (drafters/native_mtp.py).
+            self.mechanism = "native_mtp"
         elif hasattr(draft, "xpress_head"):
             self.mechanism = "xpress"
         elif hasattr(draft, "lilicorr"):
@@ -99,11 +107,20 @@ class ExternalContinuationSource:
                 "loaded external head has no supported continuation protocol"
             )
         self.draft = draft
+        self.last_diagnostics = None
 
     def __call__(self, context, limit):
         draft, config = self.draft, self.draft.config
         if not 1 <= context.depth < config.block_size:
             raise ValueError("continuation depth exceeds the loaded trained block")
+        if self.mechanism == "native_mtp":
+            result = draft.propose_complete_paths(context, limit)
+            return [
+                candidate
+                for candidate in result[:limit]
+                if isinstance(candidate, SourceContinuation)
+                and 1 <= len(candidate.tokens) <= context.depth
+            ]
         cache = copy.deepcopy(context.draft_cache)
         pending = context.pending_features
         if self.mechanism in {"dflash2", "dflash2_fold"}:
@@ -117,9 +134,35 @@ class ExternalContinuationSource:
                 nodes,
                 lattice_positions=context.depth + 1,
             )[0]
+            row_paths = tree_paths(parents)
+            depth_hist = {}
+            leaf_depth_hist = {}
+            parent_rows = {int(parent) for parent in parents if int(parent) >= 0}
+            for row, path_rows in enumerate(row_paths):
+                key = str(len(path_rows))
+                depth_hist[key] = depth_hist.get(key, 0) + 1
+                if row not in parent_rows:
+                    leaf_depth_hist[key] = leaf_depth_hist.get(key, 0) + 1
+            self.last_diagnostics = {
+                "mechanism": self.mechanism,
+                "node_budget": int(nodes),
+                "nodes": len(row_paths),
+                "roots": sum(int(parent) < 0 for parent in parents),
+                "leaves": len(row_paths) - len(parent_rows),
+                "requested_depth": int(context.depth),
+                "depth_hist": depth_hist,
+                "leaf_depth_hist": leaf_depth_hist,
+                "full_depth_nodes": sum(
+                    len(path_rows) == context.depth for path_rows in row_paths
+                ),
+                "full_depth_leaves": sum(
+                    row not in parent_rows and len(path_rows) == context.depth
+                    for row, path_rows in enumerate(row_paths)
+                ),
+            }
             result = []
             seen = set()
-            for ordinal, rows in enumerate(tree_paths(parents)):
+            for ordinal, rows in enumerate(row_paths):
                 if not 1 <= len(rows) <= context.depth:
                     continue
                 path = tuple(int(tokens[row]) for row in rows)

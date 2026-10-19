@@ -19,6 +19,10 @@ from mlx2.runtime.external_speculative import (
     _first_tiles_pairwise_disjoint,
 )
 from mlx2.runtime.models.muse_glimmer import Model
+from mlx2.runtime.progressive_external_verify import (
+    verify_greedy_proposal_tile,
+    verify_proposal_tile,
+)
 from mlx2.runtime.sample_utils import LaneRNG
 from mlx2.runtime.speculative_sampling import RequestRNG, verify_proposals
 
@@ -156,6 +160,118 @@ def test_external_insert_accepts_shared_serving_seam_and_rejects_unsupported_inp
         )
 
 
+def test_external_prefill_cuts_match_absolute_ordinary_geometry_without_checkpoints():
+    model, draft = tiny()
+    batch = generator(model, draft)
+    try:
+        uid = batch.insert(
+            [[4, 5, 6, 7]],
+            max_tokens=[2],
+            all_tokens=[[1, 2, 3]],
+            prefill_cuts=[(2, 5)],
+        )[0]
+        lane = batch.lanes[uid]
+        covered = []
+        while lane.anchor is None:
+            batch._prefill(lane)
+            covered.append(len(lane.history))
+        # A cache-less external lane rebuilds the supplied transcript, so the
+        # absolute cold positions are measured from zero, not from all_tokens.
+        assert covered == [2, 5, 6]
+        assert list(lane.prefill_cuts) == []
+        assert batch.scheduler_stats["external_prefill_cuts_planned"] == 2
+        assert batch.scheduler_stats["external_prefill_cuts_reached"] == 2
+        assert not hasattr(batch, "_interior_checkpoint_positions")
+        assert not hasattr(batch, "_interior_checkpoints")
+    finally:
+        batch.close()
+
+
+@pytest.mark.parametrize(
+    "cuts",
+    [((True,),), ((2, 1),), ((2, 2),), ((1.5,),)],
+)
+def test_external_prefill_cuts_fail_closed(cuts):
+    model, draft = tiny()
+    batch = generator(model, draft)
+    try:
+        with pytest.raises(ValueError, match="invalid prefill cut positions"):
+            batch.insert([[1, 2, 3, 4]], max_tokens=[1], prefill_cuts=cuts)
+    finally:
+        batch.close()
+
+
+def test_external_prefill_cuts_require_one_entry_per_request():
+    model, draft = tiny()
+    batch = generator(model, draft)
+    try:
+        with pytest.raises(ValueError, match="one entry per external request"):
+            batch.insert([[1, 2, 3]], max_tokens=[1], prefill_cuts=[])
+    finally:
+        batch.close()
+
+
+def test_external_prefill_cuts_drop_covered_and_terminal_positions_on_resume():
+    model, draft = tiny()
+    source = generator(model, draft)
+    resumed = generator(model, draft)
+    try:
+        source_uid = source.insert([[1, 2, 3, 4]], max_tokens=[1])[0]
+        source_lane = source.lanes[source_uid]
+        while source_lane.anchor is None:
+            source._prefill(source_lane)
+        boundary = source.boundaries[source_uid]
+        uid = resumed.insert(
+            [[4, 5, 6, 7]],
+            max_tokens=[1],
+            caches=[boundary["target_cache"]],
+            cache_states=[boundary["cache_sidecar"]],
+            all_tokens=[boundary["tokens"]],
+            prefill_cuts=[(2, 3, 5, 6)],
+        )[0]
+        lane = resumed.lanes[uid]
+        assert list(lane.prefill_cuts) == [5]
+        covered = []
+        while lane.anchor is None:
+            resumed._prefill(lane)
+            covered.append(len(lane.history))
+        assert covered == [5, 6]
+        assert resumed.scheduler_stats["paired_cache_resumes"] == 1
+        assert resumed.scheduler_stats["external_prefill_cuts_planned"] == 1
+        assert resumed.scheduler_stats["external_prefill_cuts_reached"] == 1
+    finally:
+        resumed.close()
+        source.close()
+
+
+def test_external_varlen_prefill_honors_each_lanes_next_cut():
+    from contextlib import nullcontext
+
+    model, draft = tiny()
+    scopes = []
+
+    def row_context(lengths, *, width):
+        scopes.append((tuple(lengths), width))
+        return nullcontext()
+
+    model.prefill_row_context = row_context
+    batch = generator(model, draft, external_varlen_prefill=True)
+    try:
+        uids = batch.insert(
+            [[1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13, 14]],
+            max_tokens=[2, 2],
+            prefill_cuts=[(2, 5), (3,)],
+        )
+        lanes = [batch.lanes[uid] for uid in uids]
+        batch._prefill_many(lanes)
+        assert [len(lane.history) for lane in lanes] == [2, 3]
+        batch._prefill_many(lanes)
+        assert [len(lane.history) for lane in lanes] == [5, 5]
+        assert scopes == [((2, 3), 3), ((3, 2), 3)]
+    finally:
+        batch.close()
+
+
 def test_real_dflash2_header_schema_reconciles_without_payload_load():
     from mlx2.adapters.dflash2 import inspect_drafter
 
@@ -233,11 +349,13 @@ def _run_forced_progressive_round(
     tile,
     reject_at,
     *,
+    tile_policy=None,
     stop_index=None,
     stop_expected=False,
     sampling_temp=0,
     processor=False,
     processor_history_pure=False,
+    poison_target_law=False,
 ):
     model, draft = tiny()
     prompt = [1, 2, 3, 4]
@@ -268,6 +386,10 @@ def _run_forced_progressive_round(
             law[token] = 1.0
             laws.append(law)
     model.configure_target_verify_row_exact(True)
+    if tile_policy == "auto":
+        model.progressive_external_exact_terminal_input_widths = tuple(
+            range(2, 17)
+        )
     batch = ExternalDraftBatchGenerator(
         model,
         draft_model=draft,
@@ -281,6 +403,10 @@ def _run_forced_progressive_round(
             else [[(expected if stop_expected else proposal)[stop_index]]]
         ),
         progressive_verification_tile=tile,
+        progressive_verification_tile_policy=tile_policy,
+        progressive_terminal_input_widths=(
+            tuple(range(2, 17)) if tile_policy == "auto" else None
+        ),
     )
     real = draft.draft_distributions
 
@@ -313,6 +439,13 @@ def _run_forced_progressive_round(
     lane = batch.lanes[uid]
     while lane.anchor is None:
         batch._prefill(lane)
+    if poison_target_law:
+        def unexpected_row_target_law(*_args, **_kwargs):
+            raise AssertionError(
+                "processor-free greedy progressive slabs must batch target laws"
+            )
+
+        batch._target_law = unexpected_row_target_law
     batch._round([lane])
     return batch, lane
 
@@ -426,6 +559,153 @@ def test_progressive_private_promotion_matches_fixed_verification(reject_at):
     assert receipt["state_promotion"] == (
         "request_private_then_atomic_lane_publish"
     )
+
+
+@pytest.mark.parametrize("sampling_temp", [0, 0.7])
+@pytest.mark.parametrize("reject_at", [None, 0, 1, 2])
+def test_auto_terminal_k_wide_matches_fixed_rng_and_state(
+    sampling_temp, reject_at
+):
+    fixed_batch, fixed = _run_forced_progressive_round(
+        None, reject_at, sampling_temp=sampling_temp
+    )
+    progressive_batch, progressive = _run_forced_progressive_round(
+        3,
+        reject_at,
+        tile_policy="auto",
+        sampling_temp=sampling_temp,
+    )
+    try:
+        _assert_lane_target_state_equal(progressive, fixed)
+        receipt = progressive.ready[-1].speculative_receipt[
+            "progressive_verification"
+        ]
+        assert receipt["observed_used"] is True
+        assert receipt["verification_tile"] == 3
+        assert receipt["verification_tile_policy"] == "auto"
+        assert receipt["terminal_input_widths"] == list(range(2, 17))
+        assert receipt["target_launches"] == 1
+        assert receipt["last_tile_input_rows"] == [4]
+    finally:
+        fixed_batch.close()
+        progressive_batch.close()
+
+
+def test_auto_terminal_k_wide_correction_stop_matches_fixed_state_and_rng():
+    fixed_batch, fixed = _run_forced_progressive_round(
+        None, 0, stop_index=0, stop_expected=True
+    )
+    progressive_batch, progressive = _run_forced_progressive_round(
+        3,
+        0,
+        tile_policy="auto",
+        stop_index=0,
+        stop_expected=True,
+    )
+    try:
+        _assert_lane_target_state_equal(progressive, fixed)
+        assert progressive.ready[-1].finish_reason == "stop"
+    finally:
+        fixed_batch.close()
+        progressive_batch.close()
+
+
+def test_auto_terminal_k_wide_generator_refuses_unsafe_shapes():
+    model, draft = tiny()
+    model.configure_target_verify_row_exact(True)
+    model.progressive_external_exact_terminal_input_widths = (2, 3, 4)
+    common = dict(
+        draft_model=draft,
+        binding="progressive-test",
+        num_draft=3,
+        completion_batch_size=1,
+        prefill_step_size=8,
+        progressive_verification_tile=3,
+        progressive_verification_tile_policy="auto",
+    )
+    with pytest.raises(ValueError, match="terminal input widths"):
+        ExternalDraftBatchGenerator(model, **common)
+    with pytest.raises(ValueError, match="not declared exact"):
+        ExternalDraftBatchGenerator(
+            model, **common, progressive_terminal_input_widths=(2, 3)
+        )
+    model.progressive_external_exact_terminal_input_widths = (2, 3)
+    with pytest.raises(ValueError, match="not declared exact"):
+        ExternalDraftBatchGenerator(
+            model, **common, progressive_terminal_input_widths=(2, 3, 4)
+        )
+    model.progressive_external_exact_terminal_input_widths = (2, 3, 4)
+    with pytest.raises(ValueError, match="simple primary chain"):
+        ExternalDraftBatchGenerator(
+            model,
+            **common,
+            progressive_terminal_input_widths=(2, 3, 4),
+            progressive_alternative_branches=2,
+        )
+
+
+@pytest.mark.parametrize("final", [False, True])
+@pytest.mark.parametrize("reject_at", [None, 0, 1, 2])
+def test_greedy_proposal_tile_matches_dense_one_hot_rng(final, reject_at):
+    tokens = [3, 5, 7]
+    selected = list(tokens)
+    if reject_at is not None:
+        selected[reject_at] = (selected[reject_at] + 1) % 11
+    if final:
+        selected.append(9)
+    proposals = []
+    for token in tokens:
+        law = np.full(11, 0.01, dtype=np.float64)
+        law[token] = 0.9
+        proposals.append(law / law.sum())
+    targets = []
+    for token in selected:
+        law = np.zeros(11, dtype=np.float64)
+        law[token] = 1.0
+        targets.append(law)
+    dense_rng = RequestRNG(2209)
+    greedy_rng = RequestRNG(2209)
+    dense = verify_proposal_tile(
+        tokens,
+        proposals,
+        targets,
+        dense_rng,
+        final=final,
+    )
+    greedy = verify_greedy_proposal_tile(
+        tokens,
+        selected,
+        greedy_rng,
+        final=final,
+    )
+    assert (greedy.accepted, greedy.emitted, greedy.rejected) == (
+        dense.accepted,
+        dense.emitted,
+        dense.rejected,
+    )
+    assert greedy_rng.snapshot() == dense_rng.snapshot()
+
+
+def test_progressive_greedy_batches_target_laws_without_row_helper():
+    _batch, lane = _run_forced_progressive_round(
+        2,
+        None,
+        poison_target_law=True,
+    )
+    assert lane.ready
+
+
+def test_progressive_batched_greedy_logprobs_match_fixed_verifier():
+    _fixed_batch, fixed = _run_forced_progressive_round(None, None)
+    _progressive_batch, progressive = _run_forced_progressive_round(2, None)
+    assert len(progressive.ready) == len(fixed.ready)
+    for got, expected in zip(progressive.ready, fixed.ready, strict=True):
+        np.testing.assert_allclose(
+            np.asarray(got.logprobs),
+            np.asarray(expected.logprobs),
+            rtol=1e-6,
+            atol=1e-6,
+        )
 
 
 def test_progressive_tile_one_spans_entire_long_proposal_without_bonus_draws():
@@ -2440,7 +2720,13 @@ def test_partial_fit_rotates_lanes_without_ready_queue_masking(monkeypatch, ordi
         real(anchors,hidden,cache,count,rngs,temperatures)
         return [[0]*count for _ in anchors],[[q]*count for _ in anchors]
     monkeypatch.setattr(d,'draft_distributions',proposals)
-    monkeypatch.setattr(b,'_target_law',lambda *args,greedy_token=False,**kwargs:1 if greedy_token else p)
+    def target_law(*args, greedy_token=False, **kwargs):
+        response_rows = args[4] if len(args) > 4 else kwargs.get("response_rows")
+        if response_rows is not None:
+            response_rows.append(mx.log(mx.array(p, dtype=mx.float32)))
+        return 1 if greedy_token else p
+
+    monkeypatch.setattr(b, '_target_law', target_law)
     append=1 if ordinary else b.num_draft+1
     b._admit([b.lanes[0]],append);budget[0]=int(b.scheduler_stats['reservation_bytes']*1.8)
     assert not b._admit(list(b.lanes.values()),append)
@@ -2647,7 +2933,7 @@ def test_external_verify_histograms_decompose_the_accepted_aggregate():
     assert all(k>=2 for k in span)
 
 
-def _external_engine(monkeypatch, m, d):
+def _external_engine(monkeypatch, m, d, *, chat_template=None):
     """A real ServingEngine on the external draft route over ``tiny()``."""
     from test_approximate_kv_serving import Detok, Parser
 
@@ -2662,13 +2948,26 @@ def _external_engine(monkeypatch, m, d):
     # thread's stream.
     mx.eval(m.parameters(), d.parameters())
 
-    class Tokenizer:
-        vocab_size = 32
-        eos_token_ids: ClassVar[list] = []
+    if chat_template is None:
+        class Tokenizer:
+            vocab_size = 32
+            eos_token_ids: ClassVar[list] = []
 
-        @property
-        def detokenizer(self):
-            return Detok()
+            @property
+            def detokenizer(self):
+                return Detok()
+    else:
+        class Tokenizer:
+            vocab_size = 32
+            eos_token_ids: ClassVar[list] = []
+            all_special_ids = chat_template.all_special_ids
+            apply_chat_template = staticmethod(chat_template.apply_chat_template)
+
+            @property
+            def detokenizer(self):
+                return Detok()
+
+    batches = []
 
     class Adapter:
         max_context = 128
@@ -2697,9 +2996,17 @@ def _external_engine(monkeypatch, m, d):
                     "rate_gate": False, "prefill_step_size": prefill_step}
 
         def create_external_batch(self, **kwargs):
-            return ExternalDraftBatchGenerator(m, draft_model=d, binding="tiny", num_draft=2, **kwargs)
+            batch = ExternalDraftBatchGenerator(
+                m, draft_model=d, binding="tiny", num_draft=2, **kwargs
+            )
+            batches.append(batch)
+            return batch
 
         def prompt_tokens(self, request):
+            if "messages" in request:
+                return self.tokenizer.apply_chat_template(
+                    request["messages"], add_generation_prompt=True
+                )
             return list(request["tokens"])
 
         def output_parser(self, _request):
@@ -2716,6 +3023,7 @@ def _external_engine(monkeypatch, m, d):
         max_lanes=1, prefill_step=16,
     )
     assert engine.ready.wait(60), engine.error
+    engine._test_external_batches = batches
     return engine
 
 
@@ -2730,6 +3038,93 @@ def _serve(engine, request):
             text += event["delta"].get("content", "")
         if "finish_reason" in event:
             return {"tokens": [int(t) for t in text.split()], "receipt": event["receipt"]}
+
+
+class _DroppingGenerationPromptTemplate:
+    """Tiny Qwen3.6-shaped template whose completed turn drops its suffix."""
+
+    start, end, think, unthink, nl, nn = range(24, 30)
+    roles = {"system": 1, "user": 2, "assistant": 3}
+    all_special_ids = [start, end, think, unthink]
+
+    @classmethod
+    def apply_chat_template(
+        cls, messages, *, add_generation_prompt, tokenize=True, **flags
+    ):
+        thinking = flags.get("enable_thinking", False)
+        out = []
+        for message in messages:
+            body = [
+                int(word) if word.isdigit() else 4 + ord(word[0]) % 16
+                for word in str(message["content"]).split()
+            ]
+            out += [cls.start, cls.roles[message["role"]], cls.nl]
+            out += body + [cls.end, cls.nl]
+        if add_generation_prompt:
+            out += [cls.start, cls.roles["assistant"], cls.nl, cls.think]
+            out += [cls.nl] if thinking else [cls.nn, cls.unthink, cls.nn]
+        return out
+
+
+def test_external_serving_passes_generation_suffix_cut_without_apc_checkpoint(
+    monkeypatch,
+):
+    model, draft = tiny(sliding_window=16)
+    template = _DroppingGenerationPromptTemplate()
+    engine = _external_engine(
+        monkeypatch, model, draft, chat_template=template
+    )
+    request = {
+        "messages": [{"role": "user", "content": "4 5 6 7 8 9"}],
+        "max_tokens": 2,
+        "temperature": 0,
+    }
+    try:
+        prompt = template.apply_chat_template(
+            request["messages"], add_generation_prompt=True
+        )
+        job = engine.submit(dict(request))
+        first_text = ""
+        while True:
+            event = job.events.get(timeout=60)
+            assert "error" not in event, event
+            if "delta" in event:
+                first_text += event["delta"].get("content", "")
+            if "finish_reason" in event:
+                break
+        assert tuple(job.prefill_cold_cuts) == (len(prompt) - 7,)
+        batch = engine._test_external_batches[0]
+        assert batch.scheduler_stats["external_prefill_cuts_planned"] == 1
+        assert batch.scheduler_stats["external_prefill_cuts_reached"] == 1
+        assert not hasattr(batch, "_interior_checkpoint_positions")
+        assert engine.counts.get("apc_interior_checkpoints_captured", 0) == 0
+        assert engine.counts.get("apc_interior_checkpoints_published", 0) == 0
+
+        # Keep the skip-writing arm cold so it must execute the cut instead
+        # of legitimately filtering an already-covered absolute position.
+        engine.apc.clear()
+        before = dict(batch.scheduler_stats)
+        skipped = engine.submit({**request, "skip_writing_prefix_cache": True})
+        skipped_text = ""
+        while True:
+            event = skipped.events.get(timeout=60)
+            assert "error" not in event, event
+            if "delta" in event:
+                skipped_text += event["delta"].get("content", "")
+            if "finish_reason" in event:
+                break
+        assert tuple(skipped.prefill_cold_cuts) == (len(prompt) - 7,)
+        assert skipped_text == first_text
+        assert batch.scheduler_stats["external_prefill_cuts_planned"] == (
+            before["external_prefill_cuts_planned"] + 1
+        )
+        assert batch.scheduler_stats["external_prefill_cuts_reached"] == (
+            before["external_prefill_cuts_reached"] + 1
+        )
+        assert engine.counts.get("apc_interior_checkpoints_captured", 0) == 0
+        assert engine.counts.get("apc_interior_checkpoints_published", 0) == 0
+    finally:
+        engine.close()
 
 
 def _greedy_reference(m, prompt, count):
