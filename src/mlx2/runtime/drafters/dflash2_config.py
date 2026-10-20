@@ -3,6 +3,7 @@
 import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from .base_config import DFlashConfig
 
@@ -36,6 +37,10 @@ def _refuse_other_draft_contracts(flat: Mapping, dflash: Mapping) -> None:
 
 @dataclass
 class DFlash2Config(DFlashConfig):
+    # Existing sixteen-position anchor/mask lattice.  Keep block_size as the
+    # artifact's training metadata; the length-generic runtime supports this
+    # separately bounded proposal domain without adding a new tensor law.
+    maximum_proposal_length: ClassVar[int] = 15
     model_type: str = "dflash2"
     backbone_model_type: str = "qwen3"
     architectures: list[str] = field(default_factory=list)

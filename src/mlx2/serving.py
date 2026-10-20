@@ -1511,6 +1511,8 @@ def proposal_session_scope_hash(tenant_id, session_id, route_revision):
 
 def row_exact_target_mutation_guard(adapter, *, lane_policy=None, lora=False):
     """Refuse unsupported mutations of selected native target math pre-write."""
+    if lora and getattr(adapter, "fast_ast_target", None) is not None:
+        raise ValueError("selected fast TensorFold does not support dynamic LoRA")
     model = getattr(adapter, "model", None)
     receipt = getattr(model, "external_execution_receipt", None) or {}
     if not receipt.get("target_verify_row_exact", {}).get("selected"):
@@ -8872,6 +8874,9 @@ class ServingEngine:
                     overrides=self.lane_policy_overrides,
                     mode=self.lane_matmul,
                 )
+                validate_lane = getattr(adapter, "validate_serving_lane_policy", None)
+                if callable(validate_lane):
+                    validate_lane(policy)
                 row_exact_target_mutation_guard(adapter, lane_policy=policy)
                 offered = getattr(adapter, "lane_projection_groups", None)
                 self.lane_matmul_receipt = apply_policy(
@@ -8893,6 +8898,9 @@ class ServingEngine:
                     raise ValueError(
                         "row_exact_verify cannot share projections with lane_matmul"
                     )
+            bind_lane = getattr(adapter, "bind_serving_lane_matmul", None)
+            if callable(bind_lane):
+                bind_lane(getattr(self, "lane_matmul_receipt", None))
             invariant_prefill = getattr(adapter, "invariant_prefill", None)
             if invariant_prefill is not None and (
                 self.sp_qmm_enabled

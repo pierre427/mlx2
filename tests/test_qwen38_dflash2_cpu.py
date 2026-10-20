@@ -417,10 +417,14 @@ def test_batched_pairwise_greedy_equals_ordinary_b2():
         assert got[uid] == ordinary_greedy(target, prompt, 9)
 
 
-@pytest.mark.parametrize("mode", ["one", "all"])
+@pytest.mark.parametrize("mode", ["one", "all", None], ids=["legacy", "explicit-batch", "automatic-ast-batch"])
 def test_ready_drain_modes_are_exact_and_all_keeps_lanes_in_lockstep(monkeypatch, mode):
     target, draft = tiny_pair()
-    batch = generator(target, draft, num_draft=4, ready_drain=mode)
+    options = {}
+    if mode is None:
+        target.configure_target_verify_row_exact(True)
+        options["progressive_verification_tile"] = 1
+    batch = generator(target, draft, num_draft=4, ready_drain=mode, **options)
     prompts = [PROMPTS[0], [11, 12, 13, 14, 15, 16, 17]]
     _install_oracle(monkeypatch, batch, target, prompts, 24)
     widths = []
@@ -432,12 +436,13 @@ def test_ready_drain_modes_are_exact_and_all_keeps_lanes_in_lockstep(monkeypatch
 
     monkeypatch.setattr(batch, "_round", record)
     uids = batch.insert(prompts, max_tokens=[24, 24], sampling_configs=[{"sampling_temp": 0}] * 2)
-    got, _ = drain(batch)
+    got, finals = drain(batch)
     for uid, prompt in zip(uids, prompts):
         assert got[uid] == ordinary_greedy(target, prompt, 24)
+        finals[uid].cache_sidecar.validate("test", len(finals[uid].all_tokens))
     start = widths.index(2)
     lockstep = all(a >= b for a, b in zip(widths[start:], widths[start + 1:]))
-    if mode == "all":
+    if mode != "one":
         # Once both lanes decode, they share every round until one finishes.
         assert lockstep, widths
     else:

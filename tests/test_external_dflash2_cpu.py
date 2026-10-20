@@ -3576,10 +3576,10 @@ def test_round_restore_with_an_empty_bfloat16_draft_kv_plane_is_exact():
     assert final[0].finish_reason == 'length'
 
 
-def _b4_lockstep_run(ready_drain, equalize):
+def _b4_lockstep_run(ready_drain, equalize, *, factory=tiny):
     """Four greedy lanes on the progressive route with an oracle drafter
     whose error position cycles, so lanes accept different block lengths."""
-    m, d = tiny()
+    m, d = factory()
     m.configure_target_verify_row_exact(True)
     batch = ExternalDraftBatchGenerator(
         m, draft_model=d, binding="b4-lockstep", num_draft=3,
@@ -3613,9 +3613,9 @@ def _b4_lockstep_run(ready_drain, equalize):
             wrong = rounds["n"] % (count + 1)
             rounds["n"] += 1
             if wrong < count:
-                proposal[wrong] = (proposal[wrong] + 1) % 30
+                proposal[wrong] = (proposal[wrong] + 1) % d.config.vocab_size
             tokens.append(proposal)
-            laws.append([np.eye(32)[token] for token in proposal])
+            laws.append([np.eye(d.config.vocab_size)[token] for token in proposal])
         return tokens, laws
 
     d.draft_distributions = oracle
@@ -3659,3 +3659,41 @@ def test_draft_tail_equalize_must_be_boolean():
     m, d = tiny()
     with pytest.raises(ValueError, match="draft_tail_equalize"):
         generator(m, d, draft_tail_equalize="yes")
+
+
+@pytest.mark.parametrize("family", ["muse", "qwen27"])
+def test_ast_defaults_preserve_the_live_draft_and_verify_cohort(family):
+    from test_qwen38_dflash2_cpu import tiny_pair
+
+    factory = tiny if family == "muse" else tiny_pair
+    split, split_widths = _b4_lockstep_run("one", False, factory=factory)
+    merged, merged_widths = _b4_lockstep_run(None, None, factory=factory)
+    assert split["external_decode_draining_lanes_skipped"] > 0
+    assert merged.get("external_decode_draining_lanes_skipped", 0) == 0
+    assert merged["external_round_cohort_width_4"] > 0
+    assert merged["external_draft_tail_equalized_lanes"] > 0
+    assert max(merged_widths) == 4
+    assert max(split_widths) < 4
+    assert merged["external_draft_cohort_calls"] < split["external_draft_cohort_calls"]
+
+
+def test_ast_batching_defaults_preserve_explicit_and_non_ast_choices():
+    model, draft = tiny()
+    legacy = generator(model, draft)
+    assert legacy.ready_drain == "one"
+    assert legacy.draft_tail_equalize is False
+    model.configure_target_verify_row_exact(True)
+    ast = generator(model, draft, progressive_verification_tile=1)
+    assert ast.ready_drain == "all"
+    assert ast.draft_tail_equalize is True
+    explicit = generator(model, draft, progressive_verification_tile=1,
+                         ready_drain="one", draft_tail_equalize=False)
+    assert explicit.ready_drain == "one"
+    assert explicit.draft_tail_equalize is False
+    receipt = ast._draft_settings_receipt()["draft_settings"]["batching"]
+    assert receipt == {"ready_drain": "all", "draft_tail_equalize": True,
+                       "scope": "live_ast_cohort"}
+    draft.requires_context_tokens = True
+    paired = generator(model, draft, progressive_verification_tile=1)
+    assert paired.ready_drain == "all"
+    assert paired.draft_tail_equalize is False

@@ -90,7 +90,7 @@ def main() -> int:
             linear = nn.QuantizedLinear.from_linear(base, group_size=args.group_size, bits=bits)
             mx.eval(linear.parameters())
             fast = REQ.qmv_fast_layout(k, n, bits)
-            limit = REQ._ROW_VALUES_BUDGET // REQ._values_per_thread(bits, fast)
+            limit = REQ.row_group_limit(bits, fast)
             tiles = (n + 2 * REQ._RPS - 1) // (2 * REQ._RPS)
             for rows in args.rows:
                 x = canary.probe_input(rows, k, mx.bfloat16, seed=rows * 31 + n)

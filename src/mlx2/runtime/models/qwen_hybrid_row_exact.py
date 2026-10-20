@@ -61,6 +61,11 @@ physical lanes, more than sixteen token rows) is recorded on the window and
 the launch is returned with ``row_exact=False``, which the generic engine
 refuses for exact fidelity.
 
+An irreversible ordinary handoff is a distinct numerical schedule: its
+logits-only one-token call uses the adapter's stock batched arithmetic outside
+the verify window. It is separately identity-bound and receipt-counted,
+cannot rejoin speculative verification, and is never credited as row-exact.
+
 Evidence state: implemented and CPU-tested.  A focused Q8 Qwen3.6 MoE Metal
 gate and bounded serving smoke pass, but the complete real-artifact route
 comparison at widths 1/2/4/8 on both artifacts is still pending.  The route
@@ -95,6 +100,7 @@ from .row_exact_components import (
 
 SCHEMA = "mlx2.qwen-hybrid-row-exact-target.v1"
 ALGORITHM = "qwen-hybrid-b1s1-row-exact-v1"
+ORDINARY_TERMINAL_PROTOCOL = "committed-stock-ordinary-terminal-v1"
 # Safety boundary, not qualification (the Flash-Next row-exact route saw
 # B=16 divergence despite clean stage counters; the engine's lane-exact
 # cohort forward is bounded to 2..8 lanes and 16 rows as well).
@@ -520,13 +526,17 @@ def gdn_verify_parity_probe(layer, kind, lanes, dtype, state_dtype):
         verify = ArraysCache(size=2)
         verify[0], verify[1] = conv0, state0
         mask = None
-        if lanes > 1:
+        if lanes > 1 and kind != "batch_decode":
             verify.prepare(lengths=counts)
             mask = verify.make_mask(steps)
-        verify.start_speculation()
+        if kind != "batch_decode":
+            verify.start_speculation()
         private = REV.Window(lanes * steps)
         try:
-            with REV.window(private):
+            # This synthetic batch has its own ragged lengths.  Inheriting
+            # the requesting batch's valid-row compaction can zero a live
+            # probe output row and cache a false numerical refusal.
+            with REV.window(private), REV.valid_rows(counts, steps):
                 fused_decode = getattr(
                     layer, "row_exact_probe_fused_decode", layer._try_fused_decode
                 )
@@ -539,9 +549,9 @@ def gdn_verify_parity_probe(layer, kind, lanes, dtype, state_dtype):
                     out = fused_decode(qkv, z, b, a, mask, verify)
         except Exception:  # noqa: BLE001 - a canary never raises mid-forward
             return refused
-        if out is None or not verify._rollbacks:
+        if out is None or (kind != "batch_decode" and not verify._rollbacks):
             return refused
-        record = verify._rollbacks[-1]
+        record = None if kind == "batch_decode" else verify._rollbacks[-1]
         multi, reference = [], []
         for lane in range(lanes):
             scratch = _scratch(conv0[lane : lane + 1], state0[lane : lane + 1])
@@ -669,6 +679,8 @@ class QwenHybridRowExactRoute:
             "stages": {},
             "failures": {},
             "physical_width_hist": {},
+            "ordinary_terminal_launches": 0,
+            "ordinary_terminal_rows": 0,
         }
         self.static_refusals: dict[str, int] = {}
         trunk = getattr(getattr(model, "language_model", None), "model", None)
@@ -731,6 +743,8 @@ class QwenHybridRowExactRoute:
                 "progressive_external_compact_exact_rows",
                 "progressive_external_target_modules",
                 "forward_with_taps",
+                "ordinary_external_target_forward",
+                "ordinary_external_target_protocol",
             )
         }
         from ..progressive_external_verify import PROGRESSIVE_TARGET_PROTOCOL_VERSION
@@ -757,6 +771,12 @@ class QwenHybridRowExactRoute:
             model, "progressive_external_exact_max_lanes", MAX_PHYSICAL_LANES
         )
         object.__setattr__(model, "forward_with_taps", self.forward_with_taps)
+        object.__setattr__(
+            model, "ordinary_external_target_forward", self.ordinary_terminal_forward
+        )
+        object.__setattr__(
+            model, "ordinary_external_target_protocol", ORDINARY_TERMINAL_PROTOCOL
+        )
         object.__setattr__(
             model,
             "progressive_external_verify_protocol",
@@ -873,13 +893,30 @@ class QwenHybridRowExactRoute:
         qkv, z, b, a = self._project_gdn(layer, inputs)
         state_dtype = rows[0][1].dtype
         kind = None
-        if speculating and steps > 1 and _fused_runtime_supported():
+        if (speculating or steps == 1) and _fused_runtime_supported():
             kind = layer.row_exact_fused_verify(batch, steps)
         if kind is not None and self._gdn_fused_admitted(
             layer, window, kind, batch, steps, qkv.dtype, state_dtype
         ):
             before = int(layer.row_exact_fused_verify_calls())
-            if kind == "batch_verify":
+            if kind == "batch_decode":
+                snapshot = [cache[0], cache[1]]
+                scratch = _scratch(*snapshot)
+                out = layer._try_fused_decode(qkv, z, b, a, None, scratch)
+                if out is not None:
+                    final = [scratch[0], scratch[1]]
+                    if speculating:
+                        def replay(count, _final=final):
+                            if int(count) != 1:
+                                raise RuntimeError(
+                                    "single-step GDN replay requires one token"
+                                )
+                            return list(_final)
+
+                        cache.record_rollback(1, replay, snapshot)
+                    cache[0], cache[1] = final
+                    cache.advance(1)
+            elif kind == "batch_verify":
                 with _authorize_gdn_batch_verify(
                     layer, cache, batch, steps
                 ):
@@ -1090,6 +1127,22 @@ class QwenHybridRowExactRoute:
         logits = result.logits[:, -1:] if last_logits_only else result.logits
         return logits, result.features
 
+    def ordinary_terminal_forward(self, inputs, caches):
+        """Stock arithmetic after irreversible handoff, never a verify window.
+
+        The ordinary path consumes already committed target state. All class
+        wrappers delegate to their ordinary implementations outside REV; no
+        model mutation or global fidelity change is needed. The caller owns
+        the same one-token transaction and cannot rejoin speculation.
+        """
+        if REV.current() is not None or int(inputs.shape[1]) != 1:
+            raise ValueError("terminal ordinary forward requires an ordinary one-token boundary")
+        logits = self.model(inputs, cache=caches)
+        with self._lock:
+            self.counts["ordinary_terminal_launches"] += 1
+            self.counts["ordinary_terminal_rows"] += int(inputs.shape[0])
+        return logits
+
     # -- receipts ----------------------------------------------------------------
     def status(self):
         with self._lock:
@@ -1142,6 +1195,14 @@ class QwenHybridRowExactRoute:
                 },
                 "failures": counts["failures"],
                 "static_refusals": status["static_refusals"],
+                "terminal_ordinary_handoff": {
+                    "protocol": ORDINARY_TERMINAL_PROTOCOL,
+                    "arithmetic": "stock_batched_autoregressive",
+                    "speculative_reentry": False,
+                    "observed_used": counts["ordinary_terminal_launches"] > 0,
+                    "launches": counts["ordinary_terminal_launches"],
+                    "rows": counts["ordinary_terminal_rows"],
+                },
             }
         }
 

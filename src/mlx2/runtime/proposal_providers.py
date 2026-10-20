@@ -260,6 +260,7 @@ class ContinuationDraftModel:
                         "mechanism": source.mechanism,
                         "revision": source.revision,
                         "loaded": source.loaded,
+                        "maximum_proposal_length": source.max_depth,
                         "qualified": False,
                     }
                     for name, source in self.source_records.items()
@@ -288,6 +289,7 @@ class ContinuationDraftModel:
         proposal_contexts=None,
         logits_processors=None,
         ast_source_budgets=None,
+        ast_tree_node_budgets=None,
         **kwargs,
     ):
         from .proposal_pool import PoolRound, ProposalPath
@@ -307,6 +309,12 @@ class ContinuationDraftModel:
                    for n in ast_source_budgets)
         ):
             raise ValueError("AST source budgets must cover every request within the pool limit")
+        if ast_tree_node_budgets is not None and (
+            ast_source_budgets is None
+            or len(ast_tree_node_budgets) != len(anchors)
+            or any(type(n) is not int or not 1 <= n <= 60 for n in ast_tree_node_budgets)
+        ):
+            raise ValueError("AST tree node budgets must be bounded per request")
         self.last_continuation_selections = ()
         self.last_continuation_admissions = ()
         self.last_continuation_slates = ()
@@ -320,7 +328,11 @@ class ContinuationDraftModel:
         private_needed = [not (ast_source_budgets is not None and
                               "external" in self.source_records and
                               (ast_source_budgets[row] == 1 or
-                               reusable and ast_source_budgets[row] >= proposal_length))
+                               reusable and (
+                                   ast_tree_node_budgets[row]
+                                   if ast_tree_node_budgets is not None
+                                   else ast_source_budgets[row]
+                               ) >= proposal_length))
                           for row in range(len(anchors))]
         if all(hasattr(layer, "rows") for layer in cache):
             private_rows = [
@@ -419,8 +431,12 @@ class ContinuationDraftModel:
                 source_diagnostic_rows.append({})
                 continue
             source_budget = self.policy.limit if ast_source_budgets is None else ast_source_budgets[row]
-            context = replace(context, node_budget=None if ast_source_budgets is None else source_budget)
-            if lattice is not None and source_budget >= proposal_length:
+            node_budget = (
+                ast_tree_node_budgets[row] if ast_tree_node_budgets is not None
+                else None if ast_source_budgets is None else source_budget
+            )
+            context = replace(context, node_budget=node_budget)
+            if lattice is not None and (node_budget or source_budget) >= proposal_length:
                 if lattice["anchors"] != tuple(int(a) for a in anchors) or lattice["depth"] != proposal_length:
                     raise ValueError("DFlash continuation lattice does not belong to this proposal call")
                 context = replace(context, draft_lattice={

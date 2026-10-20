@@ -1729,6 +1729,57 @@ def snapshot_recovery_descriptors(
     return snapshot, snapshot_sidecar, tuple(borrowed)
 
 
+class CommittedDescriptorPlan:
+    """Session-local cache-owned boundary journal, not a graph-clone cache.
+
+    Bind exact root types and operation identities once. Every capture still
+    validates each live descriptor's committed schema. No tensor results or
+    state are memoized; changed layouts decline to the ordinary descriptor
+    implementation before any mutation. Byte accounting remains with APCv2
+    publication, not this temporary private/recovery operation.
+    """
+
+    def __init__(self, cache, scope):
+        self.scope = scope
+        self.kinds = tuple(type(item) for item in cache)
+        self.operations = tuple(
+            kind.__dict__.get("committed_descriptor_clone") for kind in self.kinds
+        )
+
+    def capture(self, cache, scope, *, recovery=False):
+        if scope != self.scope or len(cache) != len(self.kinds):
+            return None
+        if len({id(item) for item in cache}) != len(cache):
+            return None
+        clones, borrowed = [], []
+        for live, kind, operation in zip(cache, self.kinds, self.operations, strict=True):
+            if (type(live) is not kind or operation is None
+                    or kind.__dict__.get("committed_descriptor_clone") is not operation
+                    or "committed_descriptor_clone" in vars(live)):
+                return None
+            clone = operation(live)
+            if clone is None:
+                return None
+            clones.append(clone)
+            if not recovery:
+                continue
+            record = []
+            for name, axis, level_name in _append_only_fields(live):
+                value, level = getattr(live, name), int(getattr(live, level_name))
+                if value is not None and level:
+                    record.append((name, axis, level_name, level,
+                                   _buffer_geometry(value, axis)))
+                    setattr(clone, name, None)
+            if record:
+                from .models.cache import register_recovery_rewind_guard
+
+                guard = register_recovery_rewind_guard(live, live.offset)
+                borrowed.append(_BorrowedRecoveryPlane(
+                    live, clone, tuple(record), (), guard
+                ))
+        return clones, tuple(borrowed)
+
+
 def restore_recovery_descriptors(
     snapshot: Iterable[Any],
     sidecar: Any,

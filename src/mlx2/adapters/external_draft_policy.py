@@ -28,7 +28,40 @@ COMPOSITION_DEFAULT_SKIPPED_NO_EXACT_LAW = (
 PROGRESSIVE_VERIFICATION_TILE_AUTO = "auto"
 
 
-def progressive_external_terminal_input_widths(target, *, max_lanes, num_draft):
+def progressive_external_approximate_geometry(target, *, max_lanes, num_draft):
+    """Resolve stock rectangular geometry, separately from exact row kernels."""
+    from ..runtime.progressive_external_verify import (
+        PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION,
+    )
+
+    declarations = getattr(target, "progressive_external_approximate_protocols", {})
+    if not isinstance(declarations, dict):
+        raise ValueError("automatic near-tie verification has no protocol geometry")
+    declaration = declarations.get(PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION, {})
+    if not isinstance(declaration, dict):
+        raise ValueError("automatic near-tie verification has no protocol geometry")
+    geometry = declaration.get("execution_geometry", {})
+    if (
+        declaration.get("fidelity") != "near_tie_bounded"
+        or not isinstance(geometry, dict)
+        or geometry.get("layout") != "padded_rectangular"
+        or geometry.get("state") != "private_transactional"
+        or type(geometry.get("max_lanes")) is not int
+        or type(geometry.get("max_input_width")) is not int
+        or not 1 <= max_lanes <= geometry["max_lanes"]
+        or geometry["max_input_width"] < 2
+    ):
+        raise ValueError(
+            "automatic near-tie verification requires declared stock rectangular "
+            "geometry and private transactional state within hard capacities"
+        )
+    maximum = min(int(num_draft), geometry["max_input_width"] - 1)
+    return tuple(range(1, maximum + 1)), tuple(range(2, maximum + 2))
+
+
+def progressive_external_terminal_input_widths(
+    target, *, max_lanes, num_draft, fidelity="exact"
+):
     """Return executor-declared exact terminal target-input widths.
 
     These are actual ``inputs.shape[1]`` widths, including the anchor and the
@@ -37,6 +70,14 @@ def progressive_external_terminal_input_widths(target, *, max_lanes, num_draft):
     K-row non-final executor claim as evidence for its K+1-row terminal slab.
     """
 
+    if getattr(target, "progressive_external_private_request_dispatch", False) is True:
+        max_lanes = 1
+    if fidelity == "near_tie_bounded":
+        return progressive_external_approximate_geometry(
+            target, max_lanes=max_lanes, num_draft=num_draft
+        )[1]
+    if fidelity != "exact":
+        raise ValueError("unsupported progressive verification fidelity")
     widths = getattr(
         target, "progressive_external_exact_terminal_input_widths", None
     )
@@ -62,6 +103,28 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
     policy = dict(policy)
     tile = policy.get("progressive_verification_tile")
     fidelity = policy.get("progressive_verification_fidelity")
+    oracle = policy.get("ast_target_tree_oracle")
+    projection_law = policy.get("ast_target_tree_projection_law")
+    if projection_law not in (None, "lane_mpp_exact"):
+        raise ValueError("unsupported AST target-tree projection law")
+    fast_tree = projection_law == "lane_mpp_exact"
+    if fast_tree and (
+        tile is None
+        or fidelity not in (None, "exact")
+        or policy.get("target_verify_row_exact") is True
+        or policy.get("ast_physical_target") is True
+    ):
+        raise ValueError("fast AST trees require their own exact projection law")
+    if oracle is not None and (
+        not isinstance(oracle, str) or not oracle.strip()
+        or tile is None or fidelity not in (None, "exact")
+        or (
+            not fast_tree
+            and policy.get("progressive_alternative_branches", 1) != 1
+        )
+        or policy.get("ast_physical_target") is True
+    ):
+        raise ValueError("AST target-tree oracle requires an explicit exact primary chain")
     if tile is None and fidelity is not None:
         raise ValueError(
             "progressive_verification_fidelity requires progressive_verification_tile"
@@ -90,12 +153,55 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
                 "progressive_verification_tile cannot combine with adaptive verification"
             )
         pool_branches = policy.get("progressive_alternative_branches", 1)
+        pool = policy.get("continuation_pool")
+        primary_near_tie_ast = (
+            fidelity == "near_tie_bounded"
+            and (type(tile) is int or tile == PROGRESSIVE_VERIFICATION_TILE_AUTO)
+            and pool_branches == 1
+            and isinstance(pool, dict)
+            and pool.get("ast_planner") is True
+            and pool.get("limit") == 1
+            and tuple(pool.get("sources", ())) == ("external",)
+        )
+        primary_exact_ast = (
+            fidelity in (None, "exact")
+            and pool_branches == 1
+            and isinstance(pool, dict)
+            and pool.get("ast_planner") is True
+            and pool.get("limit") == 1
+            and tuple(pool.get("sources", ())) == ("external",)
+        )
+        fast_tree_ast = (
+            fast_tree
+            and isinstance(pool, dict)
+            and pool.get("ast_planner") is True
+            and type(pool.get("limit")) is int
+            and 1 <= pool["limit"] <= 4
+            and type(pool_branches) is int
+            and 1 <= pool_branches <= pool["limit"]
+            and tuple(pool.get("sources", ())) == ("external",)
+            and policy.get("progressive_alternative_strategy", "distinct_root")
+            == "confidence_tree"
+            and policy.get("progressive_cross_session_pack_rows") is None
+        )
+        if fast_tree and not fast_tree_ast:
+            raise ValueError(
+                "fast AST trees require an external confidence-tree pool "
+                "with one through four paths"
+            )
         if policy.get("continuation_pool") is not None and (
             type(pool_branches) is not int or pool_branches <= 1
-        ):
+        ) and not (primary_near_tie_ast or primary_exact_ast or fast_tree_ast):
             raise ValueError(
                 "progressive continuation_pool requires ordered alternative branches"
             )
+        if pool is not None and fidelity == "near_tie_bounded" and not primary_near_tie_ast:
+            raise ValueError(
+                "near-tie AST requires a primary-only external "
+                "continuation pool with limit=1 and ast_planner=true"
+            )
+        if oracle is not None and not (primary_exact_ast or fast_tree_ast):
+            raise ValueError("AST target-tree oracle requires primary-only AST planning")
         if policy.get("lilicorr_feedback") is not None:
             raise ValueError(
                 "progressive_verification_tile cannot combine with LiLiCorr feedback"
@@ -207,10 +313,14 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
 
 
 def resolve_progressive_external_tile(policy, *, num_draft, target, max_lanes):
-    """Resolve automatic packing only from declared exact target geometry."""
+    """Resolve automatic packing from the selected fidelity's legal geometry."""
     requested = policy.get("progressive_verification_tile")
     if type(max_lanes) is not int or max_lanes < 1:
         raise ValueError("progressive verification max_lanes must be a positive integer")
+    # Request slots are scheduled independently when the executor owns one
+    # private tree at a time. They do not multiply its physical lane geometry.
+    if getattr(target, "progressive_external_private_request_dispatch", False) is True:
+        max_lanes = 1
     if requested != PROGRESSIVE_VERIFICATION_TILE_AUTO:
         if (
             requested is not None
@@ -235,8 +345,28 @@ def resolve_progressive_external_tile(policy, *, num_draft, target, max_lanes):
                 )
         return requested
 
-    if policy.get("progressive_verification_fidelity", "exact") != "exact":
-        raise ValueError("automatic progressive verification requires exact fidelity")
+    fidelity = policy.get("progressive_verification_fidelity", "exact")
+    if fidelity == "near_tie_bounded":
+        pool = policy.get("continuation_pool")
+        if (
+            policy.get("progressive_alternative_branches", 1) != 1
+            or not isinstance(pool, dict)
+            or pool.get("ast_planner") is not True
+            or pool.get("limit") != 1
+            or tuple(pool.get("sources", ())) != ("external",)
+        ):
+            raise ValueError("automatic near-tie verification requires primary-only AST")
+        widths, _ = progressive_external_approximate_geometry(
+            target, max_lanes=max_lanes, num_draft=num_draft
+        )
+        # The pool bridge retains a nonterminal suffix. The planner can still
+        # close a shorter live proposal with its separately admitted bonus row.
+        feasible = [width for width in widths if width < int(num_draft)]
+        if not feasible:
+            raise ValueError("automatic near-tie verification has no legal tile")
+        return max(feasible)
+    if fidelity != "exact":
+        raise ValueError("unsupported progressive verification fidelity")
     widths = getattr(target, "progressive_external_exact_tile_widths", None)
     maximum_lanes = getattr(target, "progressive_external_exact_max_lanes", None)
     if widths is None or maximum_lanes is None:
@@ -350,6 +480,10 @@ def progressive_external_identity(policy, binding=None):
     }
     if policy.get("progressive_ast_rootless_fallback") is False:
         identity["ast_rootless_fallback"] = False
+    if policy.get("ast_target_tree_projection_law") is not None:
+        identity["target_tree_projection_law"] = policy[
+            "ast_target_tree_projection_law"
+        ]
     return json.dumps(
         identity,
         sort_keys=True,
@@ -776,6 +910,7 @@ class ExternalDraftAdapterMixin:
                 getattr(self, "model", None),
                 max_lanes=max_lanes,
                 num_draft=self._external_num_draft(),
+                fidelity=progressive_fidelity,
             )
             if progressive_tile == PROGRESSIVE_VERIFICATION_TILE_AUTO
             else None
@@ -914,6 +1049,9 @@ class ExternalDraftAdapterMixin:
                         self.model,
                         max_lanes=batch_lanes,
                         num_draft=self._external_num_draft(),
+                        fidelity=self.external_policy.get(
+                            "progressive_verification_fidelity", "exact"
+                        ),
                     ),
                 )
             kwargs.setdefault(

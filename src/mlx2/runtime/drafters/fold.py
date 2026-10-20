@@ -10,7 +10,7 @@ from __future__ import annotations
 import mlx.core as mx
 
 from ..cache_operations import CacheOperationsContract, CachePlaneDeclaration
-from ..models.cache import KVCache
+from ..models.cache import KVCache, _committed_kv_descriptor
 from .fold_reference import FOLDPolicy
 
 FOLD_NUMERICS_VERSION = "mlx2.fold-drafter.v2"
@@ -45,6 +45,11 @@ class FOLDKVCache(KVCache):
     def __init__(self):
         super().__init__()
         self.raw_keys = None
+
+    def committed_descriptor_clone(self):
+        return _committed_kv_descriptor(
+            self, FOLDKVCache, ("keys", "values", "raw_keys"), ("offset",)
+        )
 
     def append_raw_keys(self, keys):
         previous = self.offset

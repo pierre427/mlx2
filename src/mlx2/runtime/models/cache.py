@@ -1217,6 +1217,39 @@ class QuantizedKVCache(_BaseCache):
         return tree_reduce(lambda a, x: a + x.nbytes, (self.keys, self.values), 0)
 
 
+def _committed_descriptor_fields(cache, allowed):
+    """Exact cache-owned schema, excluding APCv2 instance hook ownership.
+
+    Unknown state is deliberately not shallow-copied. The caller can retain
+    the general descriptor implementation for an unsupported cache/layout.
+    """
+    ephemeral = {
+        "_cow_segment_token", "_cow_segment_tokens", "_cow_hooked_methods",
+        *getattr(cache, "_cow_hooked_methods", ()),
+    }
+    fields = {k: v for k, v in vars(cache).items() if k not in ephemeral}
+    if fields.keys() - allowed:
+        return None
+    return fields
+
+
+def _committed_kv_descriptor(cache, exact_type, buffers, metadata):
+    if type(cache) is not exact_type:
+        return None
+    fields = _committed_descriptor_fields(cache, set(buffers) | set(metadata))
+    if fields is None or any(
+        not (fields.get(name) is None or isinstance(fields[name], mx.array))
+        for name in buffers
+    ) or any(type(fields.get(name)) is not int for name in metadata):
+        return None
+    clone = object.__new__(exact_type)
+    clone.__dict__.update(fields)
+    for name in buffers:
+        value = fields.get(name)
+        setattr(clone, name, None if value is None else mx.stop_gradient(value))
+    return clone
+
+
 class KVCache(_BaseCache):
     step = 256
     # Buffers written only at or past ``offset``: a recovery checkpoint keeps
@@ -1227,6 +1260,12 @@ class KVCache(_BaseCache):
         self.keys = None
         self.values = None
         self.offset = 0
+
+    def committed_descriptor_clone(self):
+        """Independent B1 descriptors; immutable tensor storage remains COW."""
+        return _committed_kv_descriptor(
+            self, KVCache, ("keys", "values"), ("offset",)
+        )
 
     def update_and_fetch(self, keys, values):
         prev = self.offset
@@ -1620,6 +1659,26 @@ class RotatingKVCache(_BaseCache):
         self.offset = 0
         self.max_size = max_size
         self._idx = 0
+
+    def committed_descriptor_clone(self):
+        if type(self) is not RotatingKVCache or self.speculating or self._rollbacks:
+            return None
+        allowed = {
+            "keys", "values", "offset", "keep", "max_size", "_idx",
+            "speculating", "_rollbacks", "_rollback_window", "_checkpoints",
+        }
+        fields = _committed_descriptor_fields(self, allowed)
+        if fields is None:
+            return None
+        clone = object.__new__(RotatingKVCache)
+        clone.__dict__.update(fields)
+        clone._rollbacks = deque()
+        # Checkpoint entries and their tensors are replace-only; only the
+        # history list is edited by checkpoint thinning/rewind.
+        clone._checkpoints = list(self._checkpoints)
+        clone.keys = None if self.keys is None else mx.stop_gradient(self.keys)
+        clone.values = None if self.values is None else mx.stop_gradient(self.values)
+        return clone
 
     def compact_to_window(self) -> bool:
         """Trim a post-chunk concatenation back to ``max_size`` columns.
@@ -2281,6 +2340,48 @@ class ArraysCache(_BaseCache):
             host_left_padding = [int(v) for v in left_padding]
             self.left_padding = mx.array(host_left_padding)
             self._host_left_padding = (self.left_padding, host_left_padding)
+
+    def committed_descriptor_clone(self):
+        """Capture a committed recurrent plane without walking old tensors.
+
+        Snapshot entries are never modified by cache methods. Each private
+        descriptor owns its lists; tensor aliases enforce write-time COW.
+        Transient replay/codec/unknown state retains the general clone path.
+        """
+        if (type(self) is not ArraysCache or self.speculating or self._rollbacks
+                or self._rollback_position or self._rollback_positions is not None):
+            return None
+        allowed = {
+            "cache", "left_padding", "lengths", "speculating", "_rollbacks",
+            "_rollback_window", "_rollback_epoch", "_rollback_position",
+            "_rollback_positions", "_rollback_invalid_reason", "_host_lengths",
+            "_host_left_padding", "_checkpoints", "apcv2_recurrent_kind",
+            "apcv2_layer_index", "_recurrent_codec_restored_leaves",
+        }
+        fields = _committed_descriptor_fields(self, allowed)
+        if fields is None or any(
+            value is not None and not isinstance(value, mx.array)
+            for value in self.cache
+        ):
+            return None
+        if ("_recurrent_codec_restored_leaves" in fields
+                and type(fields["_recurrent_codec_restored_leaves"]) is not int):
+            return None
+        clone = object.__new__(ArraysCache)
+        clone.__dict__.update(fields)
+        clone.cache = [None if value is None else mx.stop_gradient(value)
+                       for value in self.cache]
+        clone._rollbacks = deque()
+        clone._checkpoints = [
+            [(position, list(snapshot)) for position, snapshot in lane]
+            for lane in self._checkpoints
+        ]
+        for name in ("left_padding", "lengths"):
+            value = fields[name]
+            setattr(clone, name, None if value is None else mx.stop_gradient(value))
+        # Acceleration mirrors must be rebuilt for the new descriptor owner.
+        clone._host_lengths = clone._host_left_padding = None
+        return clone
 
     def exact_decode_checkpoint_contract(self):
         """Declare exact ordinary-checkpoint support for the base recurrent cache.

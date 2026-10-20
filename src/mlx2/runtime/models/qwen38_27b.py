@@ -759,10 +759,23 @@ class Model(nn.Module):
         return {
             PROGRESSIVE_APPROXIMATE_TARGET_PROTOCOL_VERSION: {
                 "fidelity": PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED,
+                "execution_geometry": {
+                    "layout": "padded_rectangular",
+                    "state": "private_transactional",
+                    "max_lanes": 4,
+                    "max_input_width": 16,
+                },
                 "source_paths": (
                     "src/mlx2/adapters/qwen38_27b.py",
                     "src/mlx2/runtime/models/qwen38_27b.py",
                     "src/mlx2/runtime/models/qwen3_next.py",
+                    "src/mlx2/runtime/models/qwen38_fused_gdn.py",
+                    "src/mlx2/runtime/models/qwen_gdn_contracts.py",
+                    "src/mlx2/runtime/models/gdn_kernel_contract.py",
+                    "src/mlx2/runtime/models/cache.py",
+                    "src/mlx2/runtime/models/base.py",
+                    "src/mlx2/runtime/segmented_plain_kv.py",
+                    "src/mlx2/runtime/segmented_batch_cache.py",
                 ),
                 "implemented": True,
                 "qualified": False,

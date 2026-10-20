@@ -887,6 +887,8 @@ def test_dflash2_receipt_settings_bind_complete_tree_geometry():
     assert model.receipt_settings == {
         "trained_block_size": 8,
         "runtime_block_size": 5,
+        "maximum_proposal_length": 15,
+        "proposal_length_authority": "implemented_sixteen_position_lattice",
         "target_layer_ids": [1, 6],
         "selector_top_k": 4,
         "selector_rank": 8,

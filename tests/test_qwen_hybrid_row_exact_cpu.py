@@ -715,11 +715,148 @@ def _install_qwen38_batch_verify_stand_in(monkeypatch, *, exact):
     )
 
 
-@pytest.mark.parametrize("canary_passes", [True, False])
-def test_qwen38_batched_fused_gdn_ast_route_is_exact_and_canary_gated(
-    canary_passes, monkeypatch
+def _install_qwen38_batch_decode_stand_in(monkeypatch, *, exact):
+    from mlx2.runtime.models import qwen38_fused_gdn as Q38
+
+    active = []
+    original = Q38.GatedDeltaNet._try_fused_decode
+
+    def invoke(layer, *args, **kwargs):
+        active.append(layer)
+        try:
+            return original(layer, *args, **kwargs)
+        finally:
+            active.pop()
+
+    def build(
+        qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias,
+        recurrent_state, norm_weight, norm_eps, **kwargs,
+    ):
+        del conv_weight, A_log, dt_bias, norm_weight, norm_eps, kwargs
+        layer = active[-1]
+        outputs, convs, states = [], [], []
+        for lane in range(qkv.shape[0]):
+            row = slice(lane, lane + 1)
+            scratch = QHR._scratch(conv_state[row], recurrent_state[row])
+            route, value = QHR.ordinary_one_token_step(
+                layer, qkv[row], z[row], b[row], a[row],
+                scratch, qkv.dtype, probe=True,
+            )
+            assert route == "stock_decode"
+            outputs.append(value)
+            convs.append(scratch[0])
+            states.append(scratch[1])
+        state = mx.concatenate(states, axis=0)
+        return (
+            mx.concatenate(outputs, axis=0),
+            mx.concatenate(convs, axis=0),
+            state if exact else state + 1,
+        )
+
+    monkeypatch.setattr(QHR, "_fused_runtime_supported", lambda: True)
+    monkeypatch.setattr(Q38.GatedDeltaNet, "_try_fused_decode", invoke)
+    monkeypatch.setattr(Q38.kernels, "fused_gdn_runtime_supported", lambda: True)
+    monkeypatch.setattr(Q38.kernels, "served_silu_refusal", lambda: None)
+    monkeypatch.setattr(
+        Q38.kernels, "admit_qwen4_fused_gdn_batch_decode",
+        lambda **kwargs: Q38.kernels.FusedGdnAdmission(True, "eligible"),
+    )
+    monkeypatch.setattr(
+        Q38.kernels, "probe_qwen4_fused_gdn_decode", lambda *args, **kwargs: 32
+    )
+    monkeypatch.setattr(Q38.kernels, "qwen4_fused_gdn_batch_decode", build)
+
+
+@pytest.mark.parametrize("lanes", [2, 4])
+@pytest.mark.parametrize("plain", [False, True], ids=["verify", "ordinary"])
+@pytest.mark.parametrize("exact", [False, True], ids=["declined", "fused"])
+def test_qwen38_one_token_batch_keeps_exact_outputs_state_and_rollback(
+    lanes, plain, exact, monkeypatch
 ):
-    """B4 ragged AST engagement is exact; a failed canary stays serial."""
+    from mlx2.runtime.models import qwen38_fused_gdn as Q38
+    from mlx2.runtime.row_exact.canary import CANARIES
+
+    CANARIES.reset()
+    _install_qwen38_batch_decode_stand_in(monkeypatch, exact=exact)
+    model = tiny_target()
+    for _, module in model.named_modules():
+        if isinstance(module, Q38.GatedDeltaNet):
+            module.set_fused_gdn_enabled(True)
+    model.configure_target_verify_row_exact(True)
+    bases = _bases(model, lanes)
+    lengths = [1] * lanes
+    tokens = _tokens(lengths)
+    owner = HybridVerifyRows([copy.deepcopy(base) for base in bases])
+    transaction = owner.begin(lengths, plain_single_token=plain)
+    result = model.progressive_external_target_rows(
+        mx.array(tokens), transaction.caches, LAYERS
+    )
+    mx.eval(result.logits, result.features)
+    assert result.row_exact is True
+    assert result.detail["gdn_route"] == (
+        "fused_batch_decode" if exact else "serial_one_token"
+    )
+    for lane in range(lanes):
+        logits, taps = _serial(model, copy.deepcopy(bases[lane]), tokens[lane])
+        np.testing.assert_array_equal(
+            np.asarray(result.logits[lane:lane + 1]), np.asarray(logits)
+        )
+        np.testing.assert_array_equal(
+            np.asarray(result.features[lane:lane + 1]), np.asarray(taps)
+        )
+    if plain:
+        for lane in range(0, lanes, 2):
+            transaction.release_row(lane)
+    committed = transaction.commit([1] * lanes)
+    for lane in range(lanes):
+        kept = not plain or lane % 2
+        reference = copy.deepcopy(bases[lane])
+        if kept:
+            _serial(model, reference, tokens[lane])
+        np.testing.assert_array_equal(
+            _next_logits(model, committed[lane]), _next_logits(model, reference)
+        )
+        for actual, expected in zip(committed[lane], reference, strict=True):
+            if isinstance(actual, ArraysCache):
+                for left, right in zip(actual.cache, expected.cache, strict=True):
+                    np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+    owner = HybridVerifyRows([copy.deepcopy(base) for base in bases])
+    transaction = owner.begin(lengths, plain_single_token=plain)
+    result = model.progressive_external_target_rows(
+        mx.array(tokens), transaction.caches, LAYERS
+    )
+    mx.eval(result.logits, result.features)
+    if not plain:
+        # Zero accepted inputs restore the snapshot through the cache law.
+        # The transaction's ordinary commit requires at least its anchor.
+        for actual, expected in zip(owner.rows[0], bases[0], strict=True):
+            if isinstance(actual, ArraysCache):
+                actual.trim(1)
+                for left, right in zip(actual.cache, expected.cache, strict=True):
+                    np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+    transaction.abort()
+    for lane in range(lanes):
+        np.testing.assert_array_equal(
+            _next_logits(model, owner.rows[lane]), _next_logits(model, bases[lane])
+        )
+    CANARIES.reset()
+
+
+@pytest.mark.parametrize("canary_passes", [True, False])
+@pytest.mark.parametrize(
+    "lengths,compact",
+    [
+        ([4, 3, 2, 1], False),
+        ([2, 3], True),
+        ([2, 3, 1, 2], True),
+    ],
+    ids=["rectangular-b4", "ragged-b2", "ragged-b4"],
+)
+def test_qwen38_batched_fused_gdn_ast_route_is_exact_and_canary_gated(
+    canary_passes, lengths, compact, monkeypatch
+):
+    """A probe owns its synthetic geometry; real numerical failures stay serial."""
 
     from mlx2.runtime.models import qwen38_fused_gdn as Q38
     from mlx2.runtime.row_exact.canary import CANARIES
@@ -733,11 +870,10 @@ def test_qwen38_batched_fused_gdn_ast_route_is_exact_and_canary_gated(
         if isinstance(module, Q38.GatedDeltaNet):
             module.set_fused_gdn_enabled(True)
     model.configure_target_verify_row_exact(True)
-    lengths = [4, 3, 2, 1]
-    accepted = [2, 3, 1, 1]
-    bases = _bases(model, 4)
+    accepted = [min(1 + lane % 3, valid) for lane, valid in enumerate(lengths)]
+    bases = _bases(model, len(lengths))
     tokens = _tokens(lengths)
-    _owner, transaction, result = _launch(model, bases, lengths)
+    _owner, transaction, result = _launch(model, bases, lengths, compact=compact)
     assert result.row_exact is True, result.detail
     routes = model.external_execution_receipt["target_verify_row_exact"]["routes"]
     layers = [
@@ -748,12 +884,12 @@ def test_qwen38_batched_fused_gdn_ast_route_is_exact_and_canary_gated(
     if canary_passes:
         assert result.detail["gdn_route"] == "fused_batch_verify"
         assert routes["gdn"] == {
-            "fused_batch_verify_decode_parity": len(layers) * 16
+            "fused_batch_verify_decode_parity": len(layers) * len(lengths) * max(lengths)
         }
         assert "gdn_canary" not in routes
         assert all(
             layer.fused_gdn_counters["batch_verify_calls"] == 1
-            and layer.fused_gdn_counters["batch_verify_tokens"] == 10
+            and layer.fused_gdn_counters["batch_verify_tokens"] == sum(lengths)
             for layer in layers
         )
     else:
@@ -855,7 +991,8 @@ def test_gdn_fused_verify_runs_only_under_a_passing_canary(
 
 
 # -- end to end: AST on the external DFlash2 engine ---------------------------
-def _ast_batch(target, *, lanes, monkeypatch, oracle=True, planner=False, auto=False):
+def _ast_batch(target, *, lanes, monkeypatch, oracle=True, planner=False, auto=False,
+               cost_handoff=False):
     from mlx2.adapters.proposal_path_sources import (
         SourceContinuation,
         build_continuation_drafter,
@@ -924,6 +1061,9 @@ def _ast_batch(target, *, lanes, monkeypatch, oracle=True, planner=False, auto=F
         ready_drain="all",
         continuation_pool=wrapper.policy,
         continuation_pool_ast_bridge=True,
+        # These tensor/transaction tests must exercise the speculative route,
+        # irrespective of host timing. Default cost admission is tested below.
+        cost_per_commit_handoff=cost_handoff,
         progressive_verification_tile=6 if auto else 3,
         **({"progressive_verification_tile_policy": "auto",
             "progressive_terminal_input_widths": target.progressive_external_exact_terminal_input_widths}
@@ -934,6 +1074,29 @@ def _ast_batch(target, *, lanes, monkeypatch, oracle=True, planner=False, auto=F
         progressive_alternative_depth_policy="confidence_tail",
         **packing,
     )
+
+
+@pytest.mark.parametrize("cost_handoff", [None, False])
+def test_ast_cost_control_does_not_require_native_physical_target(
+    monkeypatch, cost_handoff
+):
+    target = tiny_target()
+    batch = _ast_batch(
+        target, lanes=4, monkeypatch=monkeypatch, oracle=False,
+        planner=True, auto=True, cost_handoff=cost_handoff,
+    )
+    assert batch.ast_physical_target is False
+    assert batch.ast_execution_planner is not None
+    assert batch.ast_execution_planner.cohort_sources is True
+    assert batch.ast_execution_planner.ordered_branches is True
+    assert batch.ast_cost_self_configure is (cost_handoff is None)
+    if cost_handoff is None:
+        assert batch.cost_per_commit_handoff.reversible is True
+        assert batch.cost_per_commit_handoff_authority == (
+            "runtime_ast_self_configuring_default"
+        )
+    else:
+        assert batch.cost_per_commit_handoff is None
 
 
 @pytest.mark.parametrize("factory", FACTORIES)

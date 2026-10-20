@@ -13,6 +13,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from ..runtime.draft_capabilities import maximum_proposal_length
 from .external_draft_policy import (
     ExternalDraftAdapterMixin,
     PROGRESSIVE_VERIFICATION_TILE_AUTO,
@@ -366,6 +367,8 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "progressive_cross_session_pack_mode",
         "progressive_verification_fidelity",
         "ast_physical_target",
+        "ast_target_tree_oracle",
+        "ast_target_tree_projection_law",
         "ast_collision_probability",
         "target_verify_row_exact",
         "cost_per_commit_handoff",
@@ -462,6 +465,14 @@ def validate_target_verify_row_exact(policy: dict) -> bool:
         raise ValueError("ast_physical_target must be a boolean")
     tile = policy.get("progressive_verification_tile")
     fidelity = policy.get("progressive_verification_fidelity", "exact")
+    fast_tree = policy.get("ast_target_tree_projection_law") == "lane_mpp_exact"
+    if fast_tree:
+        if selected or physical_target or tile is None or fidelity != "exact":
+            raise ValueError(
+                "fast TensorFold requires exact progressive verification without "
+                "target_verify_row_exact or ast_physical_target"
+            )
+        return False
     if physical_target and (
         not selected or tile is None or fidelity != "exact"
     ):
@@ -528,6 +539,7 @@ def target_verify_row_exact_numerics(model):
     """Route-identity binding of the installed row-exact executor."""
     from ..runtime.models.qwen_hybrid_row_exact import (
         ALGORITHM,
+        ORDINARY_TERMINAL_PROTOCOL,
         SOURCE_PATHS,
         installed,
     )
@@ -543,6 +555,12 @@ def target_verify_row_exact_numerics(model):
         "source_hashes": _source_hashes(SOURCE_PATHS),
         "static_refusals": dict(sorted(route.static_refusals.items())),
         "attention_window_row_exact": route.attention_window_row_exact,
+        "terminal_ordinary_handoff": {
+            "protocol": ORDINARY_TERMINAL_PROTOCOL,
+            "arithmetic": "stock_batched_autoregressive",
+            "selection": "permanent_ordinary_lanes_only",
+            "speculative_reentry": False,
+        },
     }
 
 
@@ -716,8 +734,8 @@ def inspect_external_policy(
         )
     args = record["args"]
     count = policy.get("num_draft", Qwen3827BAdapter.EXTERNAL_DEFAULT_NUM_DRAFT)
-    if type(count) is not int or not 1 <= count < args.block_size:
-        raise ValueError("num_draft must be a positive integer below the draft block size")
+    if type(count) is not int or not 1 <= count <= maximum_proposal_length(args):
+        raise ValueError("num_draft exceeds the loaded draft's supported proposal length")
     floor = policy.get("minimum_draft_proposals", min(3, count))
     if type(floor) is not int or not min(2, count) <= floor <= count:
         raise ValueError(
@@ -1510,6 +1528,14 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         whose progressive binding reads the protocol declaration.
         """
         self.target_verify_row_exact = None
+        self.fast_ast_target = None
+        if (getattr(self, "external_policy", None) or {}).get(
+            "ast_target_tree_projection_law"
+        ) == "lane_mpp_exact":
+            from .qwen38_fast_ast import Qwen38FastAST
+
+            self.fast_ast_target = Qwen38FastAST(self.model)
+            return
         if not (getattr(self, "external_policy", None) or {}).get(
             "target_verify_row_exact"
         ):
@@ -1523,6 +1549,18 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             )
         )
         self.target_verify_row_exact = route
+
+    def validate_serving_lane_policy(self, policy):
+        route = getattr(self, "fast_ast_target", None)
+        if route is not None:
+            route.validate_policy(policy)
+
+    def bind_serving_lane_matmul(self, receipt):
+        """Seal the explicit target law after serving installs its projections."""
+        route = getattr(self, "fast_ast_target", None)
+        if route is not None:
+            return route.bind(receipt or {})
+        return None
 
     def _describe_target_verify_row_exact(self):
         """Descriptor metadata for the selected route (after the drafter binds)."""
@@ -1601,6 +1639,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                         self.model,
                         max_lanes=batch_lanes,
                         num_draft=self._external_num_draft(),
+                        fidelity=self.external_policy.get(
+                            "progressive_verification_fidelity", "exact"
+                        ),
                     ),
                 )
             kwargs.setdefault(
@@ -1654,6 +1695,37 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if self.external_policy.get("exact_verification", "token") != "token":
             kwargs.setdefault(
                 "exact_verification", self.external_policy["exact_verification"]
+            )
+        oracle_path = self.external_policy.get("ast_target_tree_oracle")
+        if oracle_path is not None:
+            private_dispatch = (
+                self.external_policy.get("ast_target_tree_projection_law") == "lane_mpp_exact"
+                and getattr(self.model, "progressive_external_private_request_dispatch", False) is True
+            )
+            request_slots = kwargs.get("completion_batch_size", 4)
+            if (
+                not private_dispatch and request_slots != 1
+                or private_dispatch and (type(request_slots) is not int or not 1 <= request_slots <= 4)
+            ):
+                raise ValueError("AST TensorFold phase one requires a B1 serving cohort")
+            from .qwen38_target_tree_executor import Qwen38TargetTreeExecutor
+
+            kwargs.setdefault(
+                "ast_target_tree_executor_provider",
+                Qwen38TargetTreeExecutor.create(
+                    ast_chain=self.external_policy.get(
+                        "ast_target_tree_projection_law"
+                    ) != "lane_mpp_exact",
+                    ast_fast_tree=self.external_policy.get(
+                        "ast_target_tree_projection_law"
+                    ) == "lane_mpp_exact",
+                ).with_ast_oracle(
+                    oracle_path,
+                    model=self.model,
+                    target_binding=self._progressive_external_binding,
+                    artifact=self.identity["fingerprint"],
+                    capture_layers=self.draft_model.config.target_layer_ids,
+                ),
             )
         if "cost_per_commit_handoff" in self.external_policy:
             kwargs.setdefault(
@@ -1910,6 +1982,16 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             contract["target_verify_row_exact"] = target_verify_row_exact_numerics(
                 self.model
             )
+        if self.external_policy.get("ast_target_tree_projection_law") == "lane_mpp_exact":
+            # The actual installed lane receipt is also included by serving in
+            # its APCv2 namespace. This distinguishes the selected target law
+            # even during adapter construction, before the lane installer.
+            contract["ast_fast_tree"] = {
+                "projection_law": "lane_mpp_exact",
+                "topology_law": "parent_ordered_rooted_tree_v1",
+                "maximum_tree_rows": 16,
+                "ordinary_reference": "ordinary_serial_b1_same_mpp_law",
+            }
         return contract
 
     @staticmethod

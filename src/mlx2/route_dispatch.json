@@ -7,7 +7,7 @@
       "reason": "selected-adapter dispatch"
     },
     "mlx2.runtime.models.cache": {
-      "sha256": "680130b360c621c273feeb5550ba514f73636fcf04f98b31227588275a019b9a",
+      "sha256": "a8af85e01779fb3125fa6f856ed2e363ad8b1e3ed2cb2bf242b1066b8fd8dde4",
       "targets": [],
       "reason": "revision-bound cache classes supplied by the selected adapter"
     },

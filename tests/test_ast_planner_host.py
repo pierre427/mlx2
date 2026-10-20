@@ -238,6 +238,23 @@ def test_measured_shape_cost_refines_later_plans_and_remains_source_local():
     assert planner().receipt()["observed_shape_count"] == 0
 
 
+def test_equal_work_preserves_b4_but_measured_cheaper_split_wins():
+    p = planner(profile(launch_cost=0), fixed_tile=True)
+    ready = [ReadyRow(i, i, 3, 0) for i in range(4)]
+    batched = p.plan_launch(ready, terminal=True, max_lanes=4)
+    assert batched.indices == (0, 1, 2, 3)
+    assert batched.batch_count == 1
+    assert batched.cohort_cost == 16
+    single = p.plan_launch(ready[:1], terminal=True, max_lanes=1)
+    for _ in range(16):
+        p.observe_launch(batched, .064)
+        p.observe_launch(single, .001)
+    split = p.plan_launch(ready, terminal=True, max_lanes=4)
+    assert split.batch_count > 1
+    assert len(split.indices) < 4
+    assert split.cohort_cost < p.cost(batched.input_lengths, batched.context_lengths)
+
+
 def test_censored_commits_do_not_invent_failures_and_retirement_clears_state():
     p = planner()
     p.observe_commit(1, 3, 7, censored=True)
@@ -252,7 +269,9 @@ def test_invalid_geometry_fails_closed():
     with pytest.raises(ValueError):
         planner(profile(terminal_widths=(2, 3)))
     with pytest.raises(ValueError):
-        planner().plan_launch([ReadyRow(0, 1, 0, 0)], terminal=True, max_lanes=4)
+        planner().plan_launch([ReadyRow(0, 1, -1, 0)], terminal=True, max_lanes=4)
+    with pytest.raises(ValueError):
+        planner().plan_launch([ReadyRow(0, 1, 0, 0)], terminal=False, max_lanes=4)
     with pytest.raises(ValueError):
         planner().source_budgets([RequestWork(1, 3, 0, 2, float("nan"))])
 
@@ -412,3 +431,97 @@ def test_collision_history_can_outlive_a_short_terminal_budget():
     p.observe_collision_probabilities(9, (.9, .8, .7, .6))
     terminal = p.source_budgets([RequestWork(9, 0, 0, 1)])[0]
     assert terminal.depth == 0 and terminal.survival_priors == ()
+
+
+def test_ordered_frontier_prices_separate_suffix_launches_and_requires_uplift():
+    p = planner(profile(row_costs=(1.0,) * 32), ordered_branches=True)
+    parallel = planner(profile(row_costs=(1.0,) * 32))
+    # Singleton: one trunk plus one parallel sibling fanout. Multi-request:
+    # one shared cohort trunk then one suffix launch per branch rank.
+    assert p._round_cost(3, 4, 3, 0, 1.0, trunk=1) == 4
+    assert p._round_cost(3, 4, 3, 0, 1.0, trunk=1, cohort_width=2) == 5
+    assert parallel._round_cost(3, 4, 3, 0, 1.0, trunk=1) == 2
+    work = RequestWork(7, 7, 128, 4, acceptance=.2)
+    assert p.source_budgets([work])[0].branches == 1
+    # Periodic exploration remains possible without paying for every sibling
+    # in every cold request. Useful measured alternatives can re-engage.
+    assert p.source_budgets([replace(work, reprobe=True)])[0].branches == 4
+    p.observe_branches(7, extra_rows=6, uplift=6)
+    assert p.source_budgets([work])[0].branches > 1
+    p.release(7)
+    assert p.source_budgets([work])[0].branches == 1
+
+
+def test_cohort_source_depth_prevents_acceptance_driven_draft_fragmentation():
+    geometry = profile(row_costs=(1.0,) * 32)
+    work = [
+        RequestWork(i, 7, 128, 4, acceptance=p)
+        for i, p in enumerate((.2, .9, .5, .7))
+    ]
+    independent = planner(geometry, ordered_branches=True).source_budgets(work)
+    assert len({row.depth for row in independent}) > 1
+    p = planner(geometry, cohort_sources=True, ordered_branches=True)
+    batched = p.source_budgets(work)
+    assert len({row.depth for row in batched}) == 1
+    assert all(row.branches == 1 for row in batched)
+    assert len({row.survival_priors for row in batched}) == 4
+    assert p.receipt()["source_depth_authority"] == "cohort_batched_cost"
+    assert p.receipt()["branch_execution"] == "cohort_ordered_singleton_shared_prefix"
+
+
+def test_cohort_source_preserves_terminal_bounds_and_explicit_reprobe():
+    p = planner(profile(row_costs=(1.0,) * 32),
+                cohort_sources=True, ordered_branches=True)
+    work = [
+        RequestWork(i, 7, 128, 4, acceptance=a)
+        for i, a in enumerate((.2, .9, .5, .7))
+    ]
+    clipped = p.source_budgets([replace(work[0], maximum_depth=1), *work[1:]])
+    assert clipped[0].depth == 1
+    assert len({row.depth for row in clipped[1:]}) == 1
+    assert clipped[1].depth > clipped[0].depth
+    probed = p.source_budgets([replace(work[0], reprobe=True), *work[1:]])
+    assert probed[0].depth == 7 and probed[0].branches == 2
+    assert probed[0].reason == "bounded_reprobe"
+    assert all(row.depth == 7 for row in probed)
+    terminal = p.source_budgets([replace(work[0], maximum_depth=0), *work[1:]])
+    assert terminal[0].depth == 0 and terminal[0].node_budget == 0
+    assert len({row.depth for row in terminal[1:]}) == 1
+
+
+def test_source_cohort_larger_than_target_capacity_prices_multiple_launches():
+    p = planner(profile(row_costs=(1.0,) * 32),
+                cohort_sources=True, ordered_branches=True)
+    work = [RequestWork(i, 3, 128, 1, acceptance=.8) for i in range(9)]
+    plans = p.source_budgets(work)
+    assert len(plans) == 9 and all(plan.depth > 0 for plan in plans)
+    assert p._round_cost(3, 1, 3, 0, 1., cohort_width=9) == 4 / 9
+
+
+def test_reprobe_respects_fair_capacity_even_when_all_requests_probe():
+    p = planner(profile(row_costs=(1.0,) * 32),
+                cohort_sources=True, ordered_branches=True)
+    work = [RequestWork(i, 7, 0, 4, .5, reprobe=True) for i in range(4)]
+    plans = p.source_budgets(work)
+    assert all(plan.reason == "bounded_reprobe" for plan in plans)
+    assert all(plan.branches == 2 for plan in plans)
+    assert sum(plan.branches for plan in plans) == p.profile.max_lanes
+    # A cohort already filling every lane cannot grow siblings merely
+    # because each request's independent timer asks for a reprobe.
+    crowded = p.source_budgets([
+        RequestWork(i, 7, 0, 4, .5, reprobe=True) for i in range(9)
+    ])
+    assert len(crowded) == 9 and all(plan.branches == 1 for plan in crowded)
+
+
+def test_reprobe_declines_shape_that_cannot_beat_primary_even_if_perfect():
+    p = planner(profile(row_costs=(1.0,) * 32),
+                cohort_sources=True, ordered_branches=True)
+    work = [RequestWork(i, 7, 0, 4, 1.) for i in range(4)]
+    ordinary = p.source_budgets(work)
+    probed = p.source_budgets([replace(row, reprobe=True) for row in work])
+    assert [(row.depth, row.branches, row.tile) for row in probed] == [
+        (row.depth, row.branches, row.tile) for row in ordinary
+    ]
+    assert all(row.reason != "bounded_reprobe" for row in probed)
+    assert all(row.branches == 1 for row in probed)

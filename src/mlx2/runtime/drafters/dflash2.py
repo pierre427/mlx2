@@ -163,6 +163,11 @@ class DFlash2DraftModel(DFlashDraftModel):
     dflash_initial_block_size = 3
     dflash_min_block_size = 3
     minimum_proposal_length = 3
+    maximum_proposal_length = DFlash2Config.maximum_proposal_length
+    # Committed context may be appended before a proposal call. An empty
+    # target-feature tail then reads the same committed draft KV without
+    # appending padding or changing proposal positions.
+    supports_empty_target_context = True
     # FOLDKVCache in make_cache, raw-key append and extra_memory_reservation.
     supports_fold = True
 
@@ -176,6 +181,8 @@ class DFlash2DraftModel(DFlashDraftModel):
         settings = {
             "trained_block_size": self.config.block_size,
             "runtime_block_size": self.config.runtime_block_size,
+            "maximum_proposal_length": self.maximum_proposal_length,
+            "proposal_length_authority": "implemented_sixteen_position_lattice",
             "target_layer_ids": list(self.config.target_layer_ids),
             "selector_top_k": self.config.selector_top_k,
             "selector_rank": self.config.selector_rank,

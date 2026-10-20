@@ -149,11 +149,7 @@ def test_dflash_tree_source_reports_token_redacted_path_geometry():
     )
     paths = source(ctx, 15)
     assert [path.tokens for path in paths] == [
-        (10,),
-        (11,),
-        (10, 12),
         (10, 12, 13),
-        (11, 14),
         (11, 14, 15),
     ]
     assert source.last_diagnostics == {
@@ -167,6 +163,13 @@ def test_dflash_tree_source_reports_token_redacted_path_geometry():
         "leaf_depth_hist": {"3": 2},
         "full_depth_nodes": 2,
         "full_depth_leaves": 2,
+        "path_selection": "prefix_nondominated",
+        "candidate_paths": 6,
+        "prefix_dominated_paths_removed": 4,
+        "nondominated_paths": 2,
+        "offered_paths": 2,
+        "offered_depth_hist": {"3": 2},
+        "offered_node_ordinals": [3, 5],
     }
 
 

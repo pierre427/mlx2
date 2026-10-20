@@ -24,7 +24,9 @@ from ..thinking_guard import stack_block_steer, verify_block_steer
 from . import round_phases
 from .cohort_ownership import declared_cohort_key
 from .committed_recovery import CommittedRecoverySlot
+from .ast_private_state import freeze_receipt
 from .cow_cache import (
+    CommittedDescriptorPlan,
     COWCacheUnsupported,
     restore_recovery_descriptors,
     snapshot_committed_cache,
@@ -512,6 +514,14 @@ class Lane:
 # list and length as a journal, copying the prefix only if recovery is needed.
 _LANE_PLANES = frozenset({"cache", "draft_cache", "tail"})
 _LANE_JOURNAL = frozenset({"history"})
+# These AST values are replaced, not mutated, inside a round. In particular,
+# tuning is attached to the completed receipt only after _run_round returns.
+# Alias their old versions in the recovery journal instead of recursively
+# copying the same bounded diagnostic history on every decode round.
+_LANE_AST_REPLACED = (
+    "ast_tree_tiles_receipt", "ast_tree_tuning", "ast_tree_source_plan",
+    "ast_source_budget",
+)
 
 
 @dataclass(frozen=True)
@@ -742,7 +752,7 @@ class ExternalDraftBatchGenerator:
                  prefill_step_size=2048, prefill_step_autoscale=False,
                  num_draft=4, stop_tokens=(), memory_headroom=None,
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
-                 pairwise_selection="host", ready_drain="one",
+                 pairwise_selection="host", ready_drain=None,
                  prefill_allocator_reclaim=False, adaptive_verification=None,
                  continuation_pool=None, continuation_verification_strategy=None,
                  continuation_pool_ast_bridge=False,
@@ -775,7 +785,7 @@ class ExternalDraftBatchGenerator:
                  ast_memo=None,
                  decode_time_fairness=None, decode_first=None,
                  cost_per_commit_handoff=None,
-                 draft_tail_equalize=False,
+                 draft_tail_equalize=None,
                  **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
@@ -878,8 +888,10 @@ class ExternalDraftBatchGenerator:
             raise ValueError("continuation strategy cache layout mismatch")
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
         self.prefill_step = prefill_step_size; self.num_draft = int(num_draft)
-        if not 1 <= self.num_draft < draft_model.config.block_size:
-            raise ValueError("External draft count must fit trained block")
+        from .draft_capabilities import maximum_proposal_length
+
+        if not 1 <= self.num_draft <= maximum_proposal_length(draft_model):
+            raise ValueError("External draft count exceeds adapter execution capacity")
         if type(prefill_step_autoscale) is not bool:
             raise ValueError("prefill_step_autoscale must be boolean")
         self.prefill_step_autoscale = prefill_step_autoscale
@@ -1089,16 +1101,16 @@ class ExternalDraftBatchGenerator:
                 "progressive_verification_tile_policy requires a resolved tile"
             )
         if progressive_verification_tile_policy == "auto":
-            declared_terminal_widths = getattr(
-                model,
-                "progressive_external_exact_terminal_input_widths",
-                None,
+            from ..adapters.external_draft_policy import (
+                progressive_external_terminal_input_widths,
             )
-            if callable(declared_terminal_widths):
-                declared_terminal_widths = declared_terminal_widths(
-                    max_lanes=completion_batch_size,
-                    num_draft=self.num_draft,
-                )
+
+            declared_terminal_widths = progressive_external_terminal_input_widths(
+                model,
+                max_lanes=completion_batch_size,
+                num_draft=self.num_draft,
+                fidelity=progressive_verification_fidelity or "exact",
+            )
             if (
                 not isinstance(
                     progressive_terminal_input_widths, (tuple, list, range)
@@ -1110,7 +1122,7 @@ class ExternalDraftBatchGenerator:
                 )
             ):
                 raise ValueError(
-                    "automatic progressive verification requires declared exact "
+                    "automatic progressive verification requires declared "
                     "terminal input widths"
                 )
             if (
@@ -1122,7 +1134,7 @@ class ExternalDraftBatchGenerator:
                 )
             ):
                 raise ValueError(
-                    "automatic progressive verification target has no exact "
+                    "automatic progressive verification target has no "
                     "terminal input width capability"
                 )
             required_terminal_widths = range(
@@ -1135,7 +1147,11 @@ class ExternalDraftBatchGenerator:
             ):
                 raise ValueError(
                     "automatic progressive verification terminal input width "
-                    "is not declared exact"
+                    + (
+                        "is not declared exact"
+                        if progressive_verification_fidelity in (None, "exact")
+                        else "is not declared for the selected fidelity"
+                    )
                 )
         if monolithic_progressive and (
             progressive_alternative_branches != 1
@@ -1213,6 +1229,7 @@ class ExternalDraftBatchGenerator:
             or (
                 completion_batch_size != 1
                 and progressive_cross_session_pack_rows is None
+                and not getattr(ast_target_tree_executor_provider, "ast_tree_tile_rows", 0)
             )
             or getattr(draft_model, "proposal_distribution", None)
             != "deterministic_point_mass"
@@ -1251,11 +1268,38 @@ class ExternalDraftBatchGenerator:
             raise ValueError(
                 "ordered alternative branches require a capable proposal adapter"
             )
+        primary_near_tie_ast = (
+            progressive_verification_fidelity == PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED
+            and type(progressive_verification_tile) is int
+            and progressive_verification_tile_policy in (None, "auto")
+            and progressive_alternative_branches == 1
+            and self.continuation_policy is not None
+            and self.continuation_policy.ast_planner
+            and self.continuation_policy.limit == 1
+            and self.continuation_policy.sources == ("external",)
+            and ast_target_tree_executor_provider is None
+        )
+        self.primary_near_tie_ast = bool(
+            self.continuation_pool_ast_bridge and primary_near_tie_ast
+        )
+        primary_exact_ast = (
+            progressive_verification_fidelity in (None, PROGRESSIVE_FIDELITY_EXACT)
+            and progressive_alternative_branches == 1
+            and self.continuation_policy is not None
+            and self.continuation_policy.ast_planner
+            and self.continuation_policy.limit == 1
+            and self.continuation_policy.sources == ("external",)
+        )
         if getattr(self, "continuation_pool_ast_bridge", False) and (
             progressive_verification_tile is None
-            or progressive_alternative_branches <= 1
-            or progressive_verification_fidelity
-            not in (None, PROGRESSIVE_FIDELITY_EXACT)
+            or (
+                not (primary_near_tie_ast or primary_exact_ast)
+                and (
+                    progressive_alternative_branches <= 1
+                    or progressive_verification_fidelity
+                    not in (None, PROGRESSIVE_FIDELITY_EXACT)
+                )
+            )
             or getattr(draft_model, "proposal_distribution", None)
             != "deterministic_point_mass"
             or not callable(
@@ -1263,8 +1307,9 @@ class ExternalDraftBatchGenerator:
             )
         ):
             raise ValueError(
-                "continuation_pool_ast_bridge requires exact progressive ordered "
-                "alternatives from a deterministic point-mass continuation wrapper"
+                "continuation_pool_ast_bridge requires exact ordered alternatives "
+                "or explicit primary-only near-tie AST from a deterministic "
+                "point-mass continuation wrapper"
             )
         self.progressive_verification_fidelity = None
         self.progressive_target_protocol = None
@@ -1350,18 +1395,47 @@ class ExternalDraftBatchGenerator:
                 max_lanes=progressive_cross_session_pack_rows or 4,
                 num_draft=self.num_draft,
                 alternative_provider=ast_target_tree_executor_provider,
+                fidelity=self.progressive_verification_fidelity,
+                automatic=progressive_verification_tile_policy == "auto",
             )
             self.ast_execution_planner = ASTExecutionPlanner(
                 profile, tile_cap=progressive_verification_tile,
                 fixed_tile=progressive_verification_tile_policy != "auto",
                 source_limit=self.continuation_policy.limit,
                 minimum_depth=self.minimum_draft_proposals,
+                cohort_sources=True,
+                ordered_branches=(
+                    progressive_cross_session_pack_mode == "ordered_live_frontier"
+                ),
             )
+            if not explicit_cost_handoff:
+                # Measured AST economics do not depend on selecting a
+                # specialized physical target. The padded exact verifier
+                # needs the same reversible ordinary-path control.
+                self.ast_cost_self_configure = True
+                self.cost_per_commit_handoff = (
+                    CostPerCommitHandoffSettings.ast_self_configuring_defaults()
+                )
+                self.cost_per_commit_handoff_authority = (
+                    "runtime_ast_self_configuring_default"
+                )
         elif ast_target_tree_executor_provider is not None:
             raise ValueError(
                 "AST target-tree backend requires an adapter-bound AST planner"
             )
         self.ast_target_tree_executor_provider = ast_target_tree_executor_provider
+        self.ast_tree_tile_rows = getattr(
+            ast_target_tree_executor_provider, "ast_tree_tile_rows", 0
+        )
+        if self.ast_tree_tile_rows and (
+            type(self.ast_tree_tile_rows) is not int
+            or not 2 <= self.ast_tree_tile_rows <= 16
+            or not self.continuation_pool_ast_bridge
+            or self.progressive_alternative_strategy != "confidence_tree"
+        ):
+            raise ValueError("AST tree tiles require private continuation ownership")
+        self._ast_tree_tuners = {}
+        self._ast_tree_ready_sessions = 1
         if type(ast_collision_probability) is not bool:
             raise ValueError("ast_collision_probability must be boolean")
         if ast_collision_probability and self.ast_execution_planner is None:
@@ -1380,12 +1454,13 @@ class ExternalDraftBatchGenerator:
                 "minimum_draft_proposals to num_draft"
             )
         self.multilane_draft_cap = multilane_draft_cap
-        # "one" (default, unchanged): one ready token per lane per poll.  A
-        # lane still draining a multi-token round sits out the next cohort,
-        # so at B>1 a lane that accepted more waits one round of the others
-        # per token it holds.  "all" returns every ready token of a lane in
-        # the poll that produced it, as the self-MTP generator does, so
-        # lanes stay in lockstep.  Opt-in per adapter (mlx2).
+        # AST owns a live speculative cohort, not one token of each lane's
+        # already-committed block per poll. Draining those blocks piecemeal
+        # excluded successful lanes from the next draft/verify batch.
+        # Preserve explicit choices and non-AST behavior.
+        ast_batching = self.progressive_verification_tile is not None
+        if ready_drain is None:
+            ready_drain = "all" if ast_batching else "one"
         if ready_drain not in ("one", "all"):
             raise ValueError("ready_drain must be 'one' or 'all'")
         self.ready_drain = ready_drain
@@ -1395,9 +1470,19 @@ class ExternalDraftBatchGenerator:
         # committed to each lane's own draft plane first (the depth-zero
         # append), so every lane enters one block call with the shortest
         # tail.  Draft-plane only: target rows and verification are unchanged.
+        if draft_tail_equalize is None:
+            draft_tail_equalize = bool(
+                ast_batching and not getattr(self.draft, "requires_context_tokens", False)
+                and callable(getattr(self.draft, "append_context", None))
+            )
         if type(draft_tail_equalize) is not bool:
             raise ValueError("draft_tail_equalize must be a boolean")
         self.draft_tail_equalize = draft_tail_equalize
+        self.speculative_batching = {
+            "ready_drain": ready_drain,
+            "draft_tail_equalize": draft_tail_equalize,
+            "scope": "live_ast_cohort" if ast_batching else "legacy_cohort",
+        }
         if any(len(t) != 1 for t in stop_tokens):
             raise ValueError("External executor currently requires single-token stops")
         self.stops = {int(t[0]) for t in stop_tokens}
@@ -1642,12 +1727,19 @@ class ExternalDraftBatchGenerator:
         caller) keeps the plain logits-only model call whenever the lane-exact
         executor is not selected, and returns ``None`` features.
 
-        The path is classified by the cohort's lane count, whatever the
-        transaction type: ``lane_exact``, ``batched`` (two or more lanes on
-        any other forward, KV or hybrid) or ``single_lane``.
+        Permanent ordinary cohorts may instead use an adapter's terminal
+        stock-forward capability. That is ``ordinary_native``, not a
+        row-exact launch; reversible parked/probe rounds cannot select it.
+        Other paths are classified by the cohort's lane count, whatever the
+        transaction type: ``lane_exact``, ``batched`` or ``single_lane``.
         """
         width = int(inputs.shape[1])
         batch = int(inputs.shape[0])
+        if getattr(self, "ast_tree_tile_rows", 0) and width > 1:
+            raise RuntimeError(
+                "AST tree tiles require the admitted target-tree provider; "
+                "ordinary multi-row verification is not a tile fallback"
+            )
         executor = getattr(self.model, "progressive_external_target_rows", None)
         # A target may declare that its exact executor needs more than one
         # row per lane (one-token batched launches are not on its row law);
@@ -1662,7 +1754,24 @@ class ExternalDraftBatchGenerator:
             and 2 <= batch <= 8
             and max(1, min_width) <= width <= 16
         )
-        if lane_exact:
+        ordinary_forward = getattr(self.model, "ordinary_external_target_forward", None)
+        terminal_ordinary = bool(
+            not taps
+            and width == 1
+            and cohort
+            and all(lane.ordinary for lane in cohort)
+            and getattr(transaction, "plain", False)
+            and callable(ordinary_forward)
+            and getattr(self.model, "ordinary_external_target_protocol", None)
+            == "committed-stock-ordinary-terminal-v1"
+        )
+        if terminal_ordinary:
+            # Irreversible handoff owns no future draft/verify transaction.
+            # Use the adapter's genuine ordinary arithmetic, not the exact
+            # speculative executor's more expensive B1-per-row law.
+            logits = ordinary_forward(inputs, transaction.caches)
+            features, detail, path = None, None, "ordinary_native"
+        elif lane_exact:
             logits, features, detail = execute_progressive_target_rows(
                 self.model,
                 inputs,
@@ -1744,7 +1853,8 @@ class ExternalDraftBatchGenerator:
         tail to that lane's own draft plane, exactly as a depth-zero round
         commits a whole tail, so one drafter call can cover the cohort.  A
         pairing drafter's context tokens are per position of the whole tail,
-        so it keeps its per-length groups.
+        so it keeps its per-length groups. Empty-tail coalescence additionally
+        requires the drafter's explicit committed-context capability.
         """
         if self.pair_context_tokens:
             return
@@ -1753,8 +1863,16 @@ class ExternalDraftBatchGenerator:
         if len(dtypes) != 1 or len(set(lengths)) == 1:
             return
         shortest = min(lengths)
-        if shortest < 1:
-            return
+        if shortest == 0:
+            _bump(self.scheduler_stats, "external_draft_zero_tail_mixed_rounds")
+            if (
+                self.progressive_verification_tile is None
+                or getattr(self.draft, "supports_empty_target_context", False)
+                is not True
+            ):
+                _bump(self.scheduler_stats, "external_draft_zero_tail_declined_rounds")
+                return
+            _bump(self.scheduler_stats, "external_draft_zero_tail_equalized_rounds")
         for lane, length in zip(cohort, lengths, strict=True):
             excess = length - shortest
             if not excess:
@@ -1763,6 +1881,9 @@ class ExternalDraftBatchGenerator:
             lane.tail = lane.tail[:, excess:]
             _bump(self.scheduler_stats, "external_draft_tail_equalized_lanes")
             _bump(self.scheduler_stats, "external_draft_tail_equalized_positions", excess)
+            if shortest == 0:
+                _bump(self.scheduler_stats, "external_draft_zero_tail_equalized_lanes")
+                _bump(self.scheduler_stats, "external_draft_zero_tail_equalized_positions", excess)
 
     def _verify_steer(self, cohort, inputs, proposal_counts):
         """Thinking-guard residual steering for one verify forward.
@@ -2302,6 +2423,8 @@ class ExternalDraftBatchGenerator:
                 "source_budget": getattr(lane, "ast_source_budget", None),
                 "last_launch": getattr(lane, "ast_last_launch", None),
             }
+        if getattr(lane, "ast_tree_tiles_receipt", None) is not None:
+            result["ast_tree_tiles"] = copy.deepcopy(lane.ast_tree_tiles_receipt)
         if self.progressive_verification_tile is not None:
             approximate = (
                 self.progressive_verification_fidelity
@@ -3119,14 +3242,22 @@ class ExternalDraftBatchGenerator:
                     raise TypeError(
                         "target-tree provider returned invalid dispatch metrics"
                     )
-                if type(event.width) is not int or event.width != 1:
+                if (
+                    type(event.width) is not int
+                    or event.width != len(cohort)
+                    or event.width > getattr(provider, "ast_tree_max_sessions", 1)
+                    or event.width > 1 and not event.physical_packed
+                ):
                     raise ValueError(
-                        "AST target-tree dispatch must remain single-session"
+                        "AST target-tree dispatch exceeds its admitted session shape"
                     )
                 _bump(
                     self.scheduler_stats,
                     "external_ast_target_tree_provider_launches",
                 )
+                if event.width > 1:
+                    _bump(self.scheduler_stats, "external_ast_target_tree_cohort_launches")
+                    _bump(self.scheduler_stats, "external_ast_target_tree_cohort_sessions", event.width)
         except BaseException:
             # Provider callbacks are untrusted and may corrupt `closed` before
             # failing. Only exact True is sufficient evidence that abort is no
@@ -3202,13 +3333,30 @@ class ExternalDraftBatchGenerator:
         fields = vars(lane)
         # Processors that re-sync from the next call's history stay shared.
         shared = rollback_shared_memo(fields.get("processors"))
+        if getattr(self, "ast_tree_tile_rows", 0):
+            shared.update(
+                (id(fields[name]), fields[name])
+                for name in _LANE_AST_REPLACED if name in fields
+            )
         # A graph carrying COW bookkeeping (an APC branch's hooked objects)
         # takes the descriptor route too: its segment tokens hold locks a
         # deep copy cannot pickle, as in ``snapshot_committed_cache``.
         try:
-            cache, (draft_cache, tail), borrowed = snapshot_recovery_descriptors(
-                fields["cache"], (fields["draft_cache"], fields["tail"])
-            )
+            captured = None
+            if getattr(self, "ast_tree_tile_rows", 0):
+                captured = self._ast_descriptor_capture(
+                    [*fields["cache"], *fields["draft_cache"]], recovery=True
+                )
+            if captured is None:
+                cache, (draft_cache, tail), borrowed = snapshot_recovery_descriptors(
+                    fields["cache"], (fields["draft_cache"], fields["tail"])
+                )
+            else:
+                clones, borrowed = captured
+                split = len(fields["cache"])
+                cache, draft_cache = clones[:split], clones[split:]
+                tail = self.mx.stop_gradient(fields["tail"])
+                _bump(self.scheduler_stats, "external_ast_lean_recovery_snapshots")
         except COWCacheUnsupported:
             _bump(self.scheduler_stats, "external_cow_fallbacks")
         else:
@@ -3340,6 +3488,10 @@ class ExternalDraftBatchGenerator:
         This is a host-only projection of already produced paths. No target
         state or proposal pool selection is replaced by the row-local search.
         """
+        if getattr(self, "ast_tree_tile_rows", 0):
+            from .ast_tree_verify import project_tree_slate
+
+            return project_tree_slate(self, lanes, tokens, widths)
         rows, actual_prefixes, provenance, search_diagnostics = [], [], [], []
         refused_sessions = 0
         for row, lane in enumerate(lanes):
@@ -3468,6 +3620,7 @@ class ExternalDraftBatchGenerator:
             branches > 1
             and len(cohort) != 1
             and getattr(self, "progressive_cross_session_pack_rows", None) is None
+            and not (len(cohort) <= getattr(self, "_ast_tree_cohort_limit", lambda: 1)())
         ):
             raise ValueError(
                 "ordered alternative proposals require one request lane or "
@@ -3598,12 +3751,16 @@ class ExternalDraftBatchGenerator:
             if force_zero:
                 return blocks
             for lane in cohort:
-                if lane.tail.shape[1]: self._append_context(lane, lane.anchor)
+                if lane.tail.shape[1] and not self._defer_ast_parked_context(lane):
+                    self._append_context(lane, lane.anchor)
             return blocks
         # Generators built without __init__ (tests, restored owners) predate
         # the flag; it is opt-in, so a missing attribute means off.
         if getattr(self, "draft_tail_equalize", False) and len(cohort) > 1:
-            self._equalize_draft_tails(cohort)
+            self._equalize_draft_tails([
+                lane for lane in cohort
+                if not self._defer_ast_parked_context(lane)
+            ])
         if ast_planner is not None:
             from .ast_planner import RequestWork
 
@@ -3626,19 +3783,92 @@ class ExternalDraftBatchGenerator:
                     ast_planner.acceptance(int(lane.uid)), choice.reprobe if choice is not None else False,
                     trunk=int(choice.trunk_tokens) if choice is not None else 1,
                 ))
-            source_plans = {plan.uid: plan for plan in ast_planner.source_budgets(work)}
+            source_plans = (
+                {} if getattr(self, "ast_tree_tile_rows", 0)
+                else {plan.uid: plan for plan in ast_planner.source_budgets(work)}
+            )
+            if getattr(self, "ast_tree_tile_rows", 0):
+                from .ast_planner import SourceBudget
+
+                # Exact parent-tree economics are measured separately from
+                # the rectangular verifier's launch curve.
+                source_plans = {
+                    item.uid: SourceBudget(
+                        item.uid,
+                        item.maximum_depth,
+                        min(item.branch_limit, self.continuation_policy.limit, 4),
+                        min(
+                            60,
+                            max(
+                                15,
+                                item.maximum_depth * min(item.branch_limit, 4),
+                            ),
+                        ),
+                        self.progressive_verification_tile,
+                        0.0,
+                        0.0,
+                        "fixed_tree_source_budget",
+                    )
+                    for item in work
+                }
+                if self.progressive_verification_tile_policy == "auto":
+                    from .ast_tree_tuning import ASTTreeTuner
+
+                    for lane, item in zip(cohort, work, strict=True):
+                        if item.maximum_depth == 0:
+                            lane.ast_tree_source_plan = None
+                            continue
+                        tuner = self._ast_tree_tuners.get(item.uid)
+                        if tuner is None:
+                            tuner = self._ast_tree_tuners[item.uid] = ASTTreeTuner(
+                                (ast_planner.profile.binding, item.uid),
+                                max_depth=self.num_draft,
+                                minimum_depth=self.minimum_draft_proposals,
+                                max_branches=min(self.continuation_policy.limit, 4),
+                                max_tile_rows=self.ast_tree_tile_rows,
+                            )
+                        plan = tuner.plan(
+                            remaining_tokens=item.maximum_depth + 1,
+                            ready_sessions=max(self._ast_tree_ready_sessions, len(cohort)),
+                            target_sessions=min(len(cohort), self._ast_tree_cohort_limit()),
+                        )
+                        lane.ast_tree_source_plan = plan
+                        lane.ast_tree_tuning = tuner.receipt()
+                        source_plans[item.uid] = SourceBudget(
+                            item.uid, plan.depth, plan.branches,
+                            plan.depth * plan.branches, plan.max_tile_rows - 1,
+                            0.0, 0.0, plan.reason,
+                        )
             for lane in cohort:
                 lane.ast_source_budget = source_plans[int(lane.uid)].receipt()
                 if lane.uid in self._last_alternative_latch:
-                    self._last_alternative_latch[lane.uid]["planner_branches"] = source_plans[int(lane.uid)].branches
+                    plan = source_plans[int(lane.uid)]
+                    self._last_alternative_latch[lane.uid].update(
+                        planner_branches=plan.branches,
+                        planner_depth=plan.depth,
+                        planner_reason=plan.reason,
+                    )
         groups = {}
         for row,lane in enumerate(cohort):
             depth = source_plans[int(lane.uid)].depth if ast_planner is not None else requested_count
             groups.setdefault((int(lane.tail.shape[1]),str(lane.tail.dtype),depth),[]).append(row)
         _bump(self.scheduler_stats, "external_draft_cohort_calls", len(groups))
-        if len(groups) > 1:
+        tail_groups = len({(tail, dtype) for tail, dtype, _depth in groups})
+        if any(tail == 0 for tail, _dtype, _depth in groups) and any(
+            tail > 0 for tail, _dtype, _depth in groups
+        ):
+            _bump(self.scheduler_stats, "external_draft_zero_tail_split_rounds")
+            _bump(
+                self.scheduler_stats,
+                "external_draft_zero_tail_split_extra_calls",
+                tail_groups - 1,
+            )
+        if tail_groups > 1:
             _bump(self.scheduler_stats, "external_draft_tail_split_rounds")
-            _bump(self.scheduler_stats, "external_draft_tail_split_extra_calls", len(groups) - 1)
+            _bump(self.scheduler_stats, "external_draft_tail_split_extra_calls", tail_groups - 1)
+        if len(groups) > tail_groups:
+            _bump(self.scheduler_stats, "external_draft_depth_split_rounds")
+            _bump(self.scheduler_stats, "external_draft_depth_split_extra_calls", len(groups) - tail_groups)
         cohort_alternative_round = alternative_round
         for (_tail, _dtype, group_depth), indices in groups.items():
             # A previous tail/dtype group's parked latch is not this group's
@@ -3651,7 +3881,7 @@ class ExternalDraftBatchGenerator:
                 alternative_round = False
             if not requested_count:
                 for lane in lanes:
-                    if lane.tail.shape[1]:
+                    if lane.tail.shape[1] and not self._defer_ast_parked_context(lane):
                         self._append_context(lane, lane.anchor)
                 continue
             processors = [lane.processors for lane in lanes]
@@ -3677,9 +3907,15 @@ class ExternalDraftBatchGenerator:
                 extra = {"context_tokens": pairing} if self.pair_context_tokens else {}
                 if ast_planner is not None:
                     extra["ast_source_budgets"] = [
-                        1 if source_plans[int(lane.uid)].branches == 1
+                        source_plans[int(lane.uid)].branches
+                        if getattr(self, "ast_tree_tile_rows", 0)
+                        else 1 if source_plans[int(lane.uid)].branches == 1
                         else source_plans[int(lane.uid)].node_budget for lane in lanes
                     ]
+                    if getattr(self, "ast_tree_tile_rows", 0):
+                        extra["ast_tree_node_budgets"] = [
+                            source_plans[int(lane.uid)].node_budget for lane in lanes
+                        ]
                 if getattr(self.draft, "requires_proposal_contexts", False):
                     from .proposal_providers import continuation_context_revision
                     extra["proposal_contexts"] = [{
@@ -3966,7 +4202,12 @@ class ExternalDraftBatchGenerator:
                     ):
                         payload = dict(decision.__dict__)
                         if ast_planner is not None:
-                            payload["planner_branches"] = source_plans[int(lane.uid)].branches
+                            plan = source_plans[int(lane.uid)]
+                            payload.update(
+                                planner_branches=plan.branches,
+                                planner_depth=plan.depth,
+                                planner_reason=plan.reason,
+                            )
                         payload["suggested_trunk_tokens"] = int(suggested)
                         payload["trunk_tokens"] = int(actual)
                         payload["snapshot_before"] = (
@@ -4116,6 +4357,10 @@ class ExternalDraftBatchGenerator:
                                 active_alternative_branches,
                                 branch_prefix,
                             )
+                        )
+                    elif getattr(self, "ast_tree_tile_rows", 0):
+                        branch_depths = tuple(
+                            len(branch_tokens) for branch_tokens in alternatives[j]
                         )
                     else:
                         branch_depths = (
@@ -4380,6 +4625,14 @@ class ExternalDraftBatchGenerator:
             _bump(self.scheduler_stats, "external_proposal_floor_raises")
         return max(floor, requested)
 
+    def _defer_ast_parked_context(self, lane):
+        return bool(
+            getattr(self, "ast_execution_planner", None) is not None
+            and _speculation_parked(lane)
+            and int(lane.tail.shape[1])
+            < lane.cost_handoff_state.settings.deferred_context_cap
+        )
+
     def _progressive_verify_many(
         self,
         cohort,
@@ -4399,6 +4652,11 @@ class ExternalDraftBatchGenerator:
         later launches without changing another lane's checkpoint.
         """
 
+        if getattr(self, "ast_tree_tile_rows", 0):
+            raise RuntimeError(
+                "AST tree tiles require the admitted target-tree provider; "
+                "legacy progressive verification is not a tile fallback"
+            )
         if self.progressive_verification_tile is None:
             raise RuntimeError("progressive verification is not selected")
         if max_physical_rows not in {4, 8}:
@@ -4456,12 +4714,12 @@ class ExternalDraftBatchGenerator:
                 )
             drafts = list(block.tokens)
             laws = list(block.laws)
-            if not drafts or len(laws) != len(drafts):
+            if (not drafts and not terminal) or len(laws) != len(drafts):
                 raise LaneFailure(
                     lane.uid,
                     "progressive verification requires one law per proposal token",
                 )
-            sparse_point_mass = all(
+            sparse_point_mass = bool(laws) and all(
                 isinstance(law, PointMassLaw) for law in laws
             )
             if sparse_point_mass:
@@ -4472,7 +4730,7 @@ class ExternalDraftBatchGenerator:
                     )
                 vocab = int(self.draft.config.vocab_size)
                 _greedy_proposal_supported(block, laws, drafts, vocab)
-            else:
+            elif laws:
                 vocab = len(laws[0])
                 validate_proposal_laws(drafts, laws, vocab)
             proposal_counts.append(len(drafts))
@@ -6858,6 +7116,52 @@ class ExternalDraftBatchGenerator:
                     item.values = item.values[..., :offset, :]
         return cloned
 
+    def _copy_ast_private_cache(self, cache):
+        """Fork only committed COW descriptors, never a general deep copy.
+
+        Private cache objects remain necessary: a failed later tile must not
+        publish changes to the original lane. Immutable tensor storage is
+        aliased, with the same prefix-view append geometry as the reference.
+        Unsupported descriptor graphs fail closed before native mutation.
+        """
+        captured = self._ast_descriptor_capture(cache)
+        if captured is None:
+            cloned, _sidecar, _receipt = snapshot_prompt_cache_descriptors(cache)
+        else:
+            cloned, _borrowed = captured
+            _bump(self.scheduler_stats, "external_ast_lean_private_forks")
+        for item in cloned:
+            if (
+                getattr(item, "keys", None) is not None
+                and isinstance(getattr(item, "offset", None), int)
+            ):
+                offset = int(item.offset)
+                item.keys = item.keys[..., :offset, :]
+                item.values = item.values[..., :offset, :]
+        _bump(self.scheduler_stats, "external_ast_private_descriptor_forks")
+        return cloned
+
+    def _ast_descriptor_capture(self, cache, *, recovery=False):
+        # This generator is the serving-session owner. Plans retain only
+        # types/operations, never lane objects, buffers, or mutable feedback.
+        plans = getattr(self, "_ast_descriptor_plans", None)
+        if plans is None:
+            plans = self._ast_descriptor_plans = {}
+        key = tuple(type(item) for item in cache)
+        scope = self.binding
+        plan = plans.get(key)
+        if plan is None or plan.scope != scope:
+            if len(plans) >= 8:
+                plans.clear()
+            plan = plans[key] = CommittedDescriptorPlan(cache, scope)
+        result = plan.capture(cache, scope, recovery=recovery)
+        if result is None:
+            # A changed class operation/layout may become supported again;
+            # no stale plan is allowed to silently retain admission.
+            plans.pop(key, None)
+            _bump(self.scheduler_stats, "external_ast_lean_descriptor_declines")
+        return result
+
     def _reference_tree_forward(self, lane, inputs, parents):
         """Exact generic control: independently replay every root-to-node path."""
 
@@ -6912,8 +7216,8 @@ class ExternalDraftBatchGenerator:
         )
         return self._finish_target_tree_dispatch(cohort, result, cached=cached)
 
-    def _ast_target_tree_forward(self, lane, cache, inputs):
-        """One exact linear chain through the admitted AST provider.
+    def _ast_target_tree_forward(self, lane, cache, inputs, *, parents=None):
+        """One private chain or admitted parent-closed AST tile.
 
         This deliberately accepts one lane and one private cache only. There
         is no sibling cache copy/share operation in the phase-1 contract.
@@ -6923,8 +7227,17 @@ class ExternalDraftBatchGenerator:
         if provider is None:
             raise RuntimeError("AST target-tree backend has no adapter provider")
         provider.validate_cohort(1, 1)
-        parents = list(range(-1, len(inputs) - 1))
-        cached = self.tree_gates["cache_executor"]
+        if parents is None:
+            parents = list(range(-1, len(inputs) - 1))
+        elif (
+            not getattr(self, "ast_tree_tile_rows", 0)
+            or len(parents) != len(inputs)
+            or len(inputs) > self.ast_tree_tile_rows
+        ):
+            raise ValueError("AST provider has no matching tree-tile capability")
+        # AST admission already binds this immutable provider and its validated
+        # module set. Legacy ordinary-tree experiment gates do not govern it.
+        cached = True
         result = provider.forward(
             self.model,
             inputs,
@@ -6939,6 +7252,124 @@ class ExternalDraftBatchGenerator:
             cached=cached,
             provider=provider,
             publish_tree_metrics=False,
+        )
+
+    def _ast_tree_cohort_limit(self):
+        """Request ownership capacity is distinct from a target tile's rows."""
+        provider = getattr(self, "ast_target_tree_executor_provider", None)
+        maximum = getattr(provider, "ast_tree_max_sessions", 1)
+        rows = getattr(self, "ast_tree_tile_rows", 0)
+        if (
+            not rows or type(maximum) is not int or not 1 <= maximum <= 4
+            or not callable(getattr(provider, "ast_tree_cohort_input_widths", None))
+        ):
+            return 1
+        floor = max(1, min(
+            getattr(self, "num_draft", 1), getattr(self, "minimum_draft_proposals", 1)
+        ))
+        return max(1, min(maximum, rows // (floor + 1)))
+
+    def _ast_target_tree_forward_many(self, lanes, caches, inputs, *, parents):
+        """Dispatch an admitted equal-node cohort with separate private state."""
+        provider = self.ast_target_tree_executor_provider
+        count = len(lanes)
+        if count == 1:
+            return self._ast_target_tree_forward(
+                lanes[0], caches[0], inputs[0], parents=parents[0]
+            )
+        widths = getattr(provider, "ast_tree_cohort_input_widths", None)
+        maximum = (
+            self._ast_tree_anchor_limit()
+            if inputs and all(len(row) == 1 for row in inputs)
+            else self._ast_tree_cohort_limit()
+        )
+        if (
+            not callable(widths) or not 2 <= count <= maximum
+            or len(caches) != count or len(inputs) != count or len(parents) != count
+            or len({len(row) for row in inputs}) != 1
+            or len(inputs[0]) not in widths(count)
+            or sum(map(len, inputs)) > self.ast_tree_tile_rows
+            or any(len(row) != len(parent) for row, parent in zip(inputs, parents, strict=True))
+        ):
+            raise ValueError("AST target-tree cohort has no admitted physical geometry")
+        provider.validate_cohort(count, provider.ast_tree_max_sessions)
+        result = provider.forward_many(
+            self.model, inputs, parents, caches, self.layers,
+            cached=True, configured_limit=provider.ast_tree_max_sessions,
+        )
+        return self._finish_target_tree_dispatch(
+            lanes, result, cached=True, provider=provider, publish_tree_metrics=False,
+        )
+
+    def _ast_tree_anchor_limit(self):
+        """Admitted private anchor rows need no proposal-depth allocation."""
+        provider = getattr(self, "ast_target_tree_executor_provider", None)
+        maximum = getattr(provider, "ast_tree_max_sessions", 1)
+        widths = getattr(provider, "ast_tree_cohort_input_widths", None)
+        if (
+            not getattr(self, "ast_tree_tile_rows", 0)
+            or type(maximum) is not int or not 1 <= maximum <= 4
+            or not callable(widths)
+        ):
+            return 1
+        return max(
+            (width for width in range(2, maximum + 1) if 1 in widths(width)),
+            default=1,
+        )
+
+    def _ast_anchor_cohort_eligible(self, cohort):
+        return (
+            2 <= len(cohort) <= self._ast_tree_anchor_limit()
+            and self.target_execution == "reference"
+            and getattr(getattr(self.model, "model", None), "residual_taps", None) is None
+            and all(
+                not lane.ordinary
+                and float(lane.sampling.get("sampling_temp", 0)) == 0.0
+                and self._progressive_processors_supported(lane)
+                and self._batched_law_contract(lane)
+                for lane in cohort
+            )
+        )
+
+    def _ast_verify_primary_tree_cohort(self, lanes, blocks):
+        """Collapse independent primary results into the unchanged commit ABI."""
+        from .ast_tree_verify import verify_tree_tiles_many
+
+        results = verify_tree_tiles_many(self, lanes, [[block] for block in blocks])
+        if len(results) != len(lanes) or any(len(row[0]) != 1 for row in results):
+            raise RuntimeError("AST primary cohort returned a foreign lane layout")
+        feature_width = max(int(row[1].shape[1]) for row in results)
+        features = []
+        for result in results:
+            row = result[1]
+            missing = feature_width - int(row.shape[1])
+            if missing:
+                row = self.mx.concatenate(
+                    [row, self.mx.zeros((1, missing, int(row.shape[2])), dtype=row.dtype)],
+                    axis=1,
+                )
+            features.append(row)
+        physical_rows = [row[5] for row in results]
+        physical = {
+            name: sum(row.get(name, 0) for row in physical_rows)
+            for name in ("physical_launches", "physical_target_rows", "unique_target_rows", "padding_rows", "ragged_launches")
+        }
+        physical.update(
+            max_cohort_width=max(row["max_cohort_width"] for row in physical_rows),
+            target_row_executor=_merge_target_executor_stats(
+                *(row.get("target_row_executor") for row in physical_rows)
+            ),
+            first_tile_pairwise_disjoint=False,
+        )
+        for name in ("aligned_tile_launches", "aligned_continued_launches"):
+            physical[name] = {
+                width: sum(row[name].get(width, 0) for row in physical_rows)
+                for width in range(1, 5)
+            }
+        return (
+            [row[0][0] for row in results], self.mx.concatenate(features, axis=0),
+            [row[2][0] for row in results], [row[3][0] for row in results],
+            [row[4][0] for row in results], physical,
         )
 
     @staticmethod
@@ -7003,6 +7434,11 @@ class ExternalDraftBatchGenerator:
         """
         from .proposal_providers import LONGEST_FIRST_EXACT_PREFIX
 
+        tree_rows = getattr(self, "ast_tree_tile_rows", 0)
+        if tree_rows:
+            # Source depth and proposal count do not widen a physical tile;
+            # each admitted private request runs through this same bound.
+            return {str(width): tree_rows for width in range(1, int(max_lanes) + 1)}
         dynamic = bool(getattr(self, "dynamic_singleton_tree", False))
         continuation = getattr(self, "continuation_policy", None)
         continuation_rows = 0
@@ -7049,11 +7485,28 @@ class ExternalDraftBatchGenerator:
             raise ValueError("continuation AST geometry requires the selected bridge")
         sessions = max(1, min(int(max_lanes), int(self.capacity), 4))
         branches = int(self.progressive_alternative_branches)
+        tree_rows = getattr(self, "ast_tree_tile_rows", 0)
+        if tree_rows:
+            return {
+                "schema": "mlx2.continuation-ast-bridge-geometry.v1",
+                "sessions": sessions,
+                "branches_per_session": branches,
+                "physical_path_rows": 1,
+                "tile_rows_per_path": tree_rows,
+                "maximum_target_rows_per_launch": tree_rows,
+                "private_target_checkpoints": sessions * branches,
+                "private_provider_cache_rows": sessions,
+                "live_frontier": True,
+                "dispatch": "fair_private_request_trees",
+            }
         pack_rows = self.progressive_cross_session_pack_rows
         live_frontier = (
             self.progressive_cross_session_pack_mode == "ordered_live_frontier"
         )
-        if pack_rows is None:
+        if branches == 1:
+            # Primary-only AST batches independent requests, not siblings.
+            live_paths = sessions
+        elif pack_rows is None:
             sessions = 1
             live_paths = branches
         elif live_frontier:
@@ -7326,7 +7779,7 @@ class ExternalDraftBatchGenerator:
         state.update(law=law, finite=finite)
         return (law, finite), state
 
-    def _verify_tree_batched(self, lane, block, state):
+    def _verify_tree_batched(self, lane, block, state, *, logprobs_on_request=None):
         """Host walk over laws already landed by the round's device read.
 
         Produces the same tokens, laws, RNG draws and failures as
@@ -7338,7 +7791,9 @@ class ExternalDraftBatchGenerator:
         from .speculative_sampling import probability
 
         emit = lane.sampling.get("emit_logprobs", True)
-        keep_laws = emit or not self.tree_gates["logprobs_on_request"]
+        if logprobs_on_request is None:
+            logprobs_on_request = self.tree_gates["logprobs_on_request"]
+        keep_laws = emit or not logprobs_on_request
         target_laws = [] if keep_laws else None
         response_rows = []
         vocab = state["vocab"]
@@ -7426,6 +7881,7 @@ class ExternalDraftBatchGenerator:
         committed_rows=None,
         committed_rngs=None,
         deferred_context=False,
+        deferred_context_uids=(),
     ):
         """Commit accepted prefixes, then publish responses for every row.
 
@@ -7455,8 +7911,8 @@ class ExternalDraftBatchGenerator:
             for decision, used in zip(decisions, consumed)
         ]
         bridge_provenance = [
-            self._ast_bridge_commit_provenance(block)
-            for block in blocks
+            self._ast_bridge_commit_provenance(block) if count else None
+            for block, count in zip(blocks, proposal_counts, strict=True)
         ]
         if committed_rows is not None:
             if transaction is not None or len(committed_rows) != len(cohort):
@@ -7529,7 +7985,7 @@ class ExternalDraftBatchGenerator:
                     self.mx.array(paths[row], dtype=self.mx.int32),
                     axis=1,
                 )
-            if deferred_context and lane.tail.shape[1]:
+            if (deferred_context or lane.uid in deferred_context_uids) and lane.tail.shape[1]:
                 tail = self.mx.concatenate([lane.tail, tail], axis=1)
             lane.tail = tail
             lane.history.extend(committed_inputs)
@@ -7708,6 +8164,23 @@ class ExternalDraftBatchGenerator:
                     self._feedback_outbox.append((lane, blocks[row], decision, lane.external_rounds - 1))
             if count:
                 lane.draft_max_width = max(lane.draft_max_width, getattr(blocks[row], "width", 1))
+            round_receipt = {
+                "kind": self.receipt_kind,
+                "execution": "external_draft_verify" if lane.external_rounds else "ordinary_target",
+                "current_execution": "ordinary_target" if count == 0 else "trusted_pld_teacher_force" if getattr(blocks[row], "proposal_trusted", False) else "external_draft_verify",
+                "ordinary_fallback": lane.ordinary,
+                "external_rounds": lane.external_rounds,
+                "accepted": lane.accepted, "proposed": lane.proposed,
+                "round_accepted": round_accepted, "round_proposed": count,
+                "target_width": lane.target_max_width, "draft_width": lane.draft_max_width,
+                "qualification_authority": "serving_route",
+                **self._target_execution_receipt(lane),
+                **self._verification_receipt(lane),
+                **self._adaptive_receipt(lane),
+                **self._draft_settings_receipt(),
+                **self._proposal_composition_receipt(lane),
+                **self._continuation_receipt(lane),
+            }
             for j,token in enumerate(emitted):
                 lane.generated += 1
                 finish = "stop" if token in self.stops else "length" if lane.generated >= lane.maximum else None
@@ -7726,7 +8199,7 @@ class ExternalDraftBatchGenerator:
                         and decision.target_laws[j] is not None
                     ):
                         logp = self.mx.log(self.mx.array(decision.target_laws[j].astype(np.float32)))
-                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=(decision.continuation_outcome.physical_width if decision.continuation_outcome is not None else len(cohort)), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "trusted_pld_teacher_force" if getattr(blocks[row], "proposal_trusted", False) else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(lane), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(), **self._proposal_composition_receipt(lane), **self._continuation_receipt(lane)}))
+                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=(decision.continuation_outcome.physical_width if decision.continuation_outcome is not None else len(cohort)), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt=dict(round_receipt)))
         if clock is not None:
             self._mark("emit", clock)
             # The responses are published only after this round returns, so
@@ -8287,15 +8760,24 @@ class ExternalDraftBatchGenerator:
             raise ValueError("drafter receipt_settings must be a dictionary")  # noqa: TRY004
         # Freeze settings with the response: later drafter tuning cannot change
         # the configuration attributed to an already committed token.
-        json.dumps(settings, allow_nan=False)
+        batching = getattr(self, "speculative_batching", {})
+        cached = getattr(self, "_draft_receipt_settings_snapshot", None)
+        if (cached is None or cached[0] is not self.draft
+                or cached[1] != settings or cached[2] != batching):
+            json.dumps(settings, allow_nan=False)
+            json.dumps(batching, allow_nan=False)
+            cached = self._draft_receipt_settings_snapshot = (
+                self.draft, freeze_receipt(settings), freeze_receipt(batching)
+            )
         return {
             "draft_settings": {
-                **copy.deepcopy(settings),
+                **cached[1],
                 "minimum_proposal_length": self.minimum_draft_proposals,
                 "proposal_floor_raises": self.scheduler_stats[
                     "external_proposal_floor_raises"
                 ],
                 "terminal_exhaustion_may_shorten": True,
+                "batching": cached[2],
                 "multilane_draft_cap": self.multilane_draft_cap,
                 "multilane_draft_cap_rounds": self.scheduler_stats.get(
                     "external_multilane_draft_cap_rounds", 0
@@ -8635,11 +9117,19 @@ class ExternalDraftBatchGenerator:
                 lanes = [lane]
                 try:
                     before = self.progressive_topology_latch.snapshot(lane.uid)
+                    payload = latch_payloads[lane.uid]
+                    unavailability_reason = (
+                        "planner_zero_depth" if payload.get("planner_depth") == 0
+                        else "planner_declined_alternatives"
+                        if payload.get("planner_branches") == 1 else None
+                    )
                     self.progressive_topology_latch.observe_primary_only(
                         session_uids=[lane.uid],
                         decision_tokens=[token],
-                        unavailable=(int(latch_payloads[lane.uid]["active_branches"]) > 1
-                                     and int(latch_payloads[lane.uid].get("planner_branches", 4)) > 1),
+                        unavailable=(
+                            unavailability_reason is not None
+                            or int(payload["active_branches"]) > 1
+                        ),
                     )
                     snapshot = self.progressive_topology_latch.snapshot(lane.uid)
                     _bump(
@@ -8664,6 +9154,7 @@ class ExternalDraftBatchGenerator:
                             "outcome": "committed_primary_only",
                             "executed_alternative_branches": 0,
                             "accepted_token_uplift": 0,
+                            "unavailability_reason": unavailability_reason,
                             "decision_token": int(token),
                             "snapshot_before": copy.deepcopy(before),
                             "snapshot_after": copy.deepcopy(snapshot),
@@ -8926,11 +9417,18 @@ class ExternalDraftBatchGenerator:
             # an explicitly disabled lane must not run the cost controller's
             # initial depth-zero sampling rounds before reaching the direct
             # ordinary pipeline.
+            inflight = getattr(self, "_parked_inflight", None)
+            if inflight is not None:
+                drained = list(inflight.lanes)
+                self._drain_parked_inflight()
+                if any(lane.ready for lane in drained if lane in cohort):
+                    return
             self._round(cohort)
             return
         from .cost_per_commit_handoff import cohort_needs_ordinary_probe
 
         parked_uids = {lane.uid for lane in cohort if _speculation_parked(lane)}
+        mixed_parked_uids = set()
         inflight = getattr(self, "_parked_inflight", None)
         if inflight is not None and (
             len(parked_uids) != len(cohort)
@@ -8968,6 +9466,8 @@ class ExternalDraftBatchGenerator:
                 else "external_cost_parked_rounds",
             )
         else:
+            if getattr(self, "ast_execution_planner", None) is not None:
+                mixed_parked_uids = set(parked_uids)
             parked_uids = set()
             ordinary_probe = cohort_needs_ordinary_probe(states, width)
             ordinary_probe_uids = {
@@ -8975,6 +9475,13 @@ class ExternalDraftBatchGenerator:
                 for lane, state in zip(cohort, states, strict=True)
                 if state is not None and state.needs_ordinary_probe(width)
             }
+            if ordinary_probe:
+                ordinary_probe_uids.update(mixed_parked_uids)
+                mixed_parked_uids.clear()
+            elif mixed_parked_uids:
+                _bump(self.scheduler_stats, "external_ast_mixed_parked_rounds")
+                _bump(self.scheduler_stats, "external_ast_mixed_parked_lanes",
+                      len(mixed_parked_uids))
         # Keep the default route free of timing calls.  ``states`` has one
         # entry per lane even when the capability was not selected.
         started_ns = (
@@ -8992,6 +9499,7 @@ class ExternalDraftBatchGenerator:
                 ordinary_probe=ordinary_probe or bool(parked_uids),
                 ordinary_probe_uids=ordinary_probe_uids,
                 prior_execution_width=logical_width,
+                mixed_parked_uids=mixed_parked_uids,
             )
             return
         mode = "chain" if concurrent else "tree15"
@@ -9039,6 +9547,7 @@ class ExternalDraftBatchGenerator:
         settings = self.cost_per_commit_handoff
         if (
             settings is None
+            or self._ast_anchor_cohort_eligible(cohort)
             or not settings.reversible
             or not settings.pipelined_park
             or self.dynamic_singleton_tree
@@ -9372,6 +9881,7 @@ class ExternalDraftBatchGenerator:
         ordinary_probe,
         ordinary_probe_uids=(),
         prior_execution_width=None,
+        mixed_parked_uids=(),
     ):
         """Publish request-local timing only after a complete round commit."""
         if started_ns is None:
@@ -9388,14 +9898,21 @@ class ExternalDraftBatchGenerator:
                 # A bounded speculative round granted to established peers
                 # is not evidence for a lane without a baseline.
                 continue
-            decision = state.observe(
-                kind="ordinary" if ordinary_probe else "speculative",
-                elapsed_ns=elapsed_ns,
-                committed_tokens=lane.generated - before,
-                execution_width=width,
-                lane_uid=lane.uid,
-                owner_scope=(self.binding, lane.session_scope_hash),
-            )
+            if lane.uid in mixed_parked_uids:
+                decision = state.observe_parked_progress(
+                    committed_tokens=lane.generated - before,
+                    lane_uid=lane.uid,
+                    owner_scope=(self.binding, lane.session_scope_hash),
+                )
+            else:
+                decision = state.observe(
+                    kind="ordinary" if ordinary_probe else "speculative",
+                    elapsed_ns=elapsed_ns,
+                    committed_tokens=lane.generated - before,
+                    execution_width=width,
+                    lane_uid=lane.uid,
+                    owner_scope=(self.binding, lane.session_scope_hash),
+                )
             if decision is None:
                 continue
             if state.settings.reversible:
@@ -9841,6 +10358,10 @@ class ExternalDraftBatchGenerator:
         self._open = True
         transaction = None
         try:
+            deferred_context_uids = {
+                lane.uid for lane in cohort
+                if self._defer_ast_parked_context(lane)
+            }
             if forced_depth is not None:
                 blocks = self._propose(cohort, force_zero=True)
                 fixed_depth = forced_depth
@@ -9859,6 +10380,17 @@ class ExternalDraftBatchGenerator:
                 clock = self._mark("draft", clock)
             proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
             verify_width = max(proposal_counts, default=0) + 1
+            if (
+                getattr(self, "ast_execution_planner", None) is not None
+                and any(proposal_counts)
+                and any(block is None for block in blocks)
+            ):
+                # A parked/final-budget row still owns one ordinary anchor
+                # law. It can share the active rows' exact ragged transaction.
+                blocks = [
+                    HostDraftRow([], [], 1) if block is None else block
+                    for block in blocks
+                ]
             for block in blocks:
                 if (
                     bool(getattr(block, "proposal_trusted", False))
@@ -9926,14 +10458,15 @@ class ExternalDraftBatchGenerator:
                     self._progressive_processors_supported(lane)
                     for lane in cohort
                 )
-                and not any(
+                and (len(cohort) > 1 and self._ast_tree_cohort_limit() >= len(cohort) or not any(
                     int(token) in self.stops
                     for block in blocks
                     for token in block.tokens
-                )
+                ))
             ):
                 cross_session_ast_available = bool(
-                    self.progressive_cross_session_pack_rows is not None
+                    not getattr(self, "ast_tree_tile_rows", 0)
+                    and self.progressive_cross_session_pack_rows is not None
                     and len(cohort) > 1
                     and all(
                         lane.uid in self._last_alternative_blocks
@@ -10179,6 +10712,42 @@ class ExternalDraftBatchGenerator:
                         ]
                 if cross_session_ast_mode:
                     pass
+                elif (
+                    len(cohort) > 1
+                    and self._ast_tree_cohort_limit() >= len(cohort)
+                    and all(
+                        block.tokens and float(lane.sampling.get("sampling_temp", 0)) == 0.0
+                        and self._batched_law_contract(lane)
+                        and len(self._last_alternative_blocks.get(lane.uid, (block,))) == 1
+                        for lane, block in zip(cohort, blocks, strict=True)
+                    )
+                ):
+                    (
+                        decisions, features, committed_caches, committed_rngs,
+                        progressive_stats, physical_stats,
+                    ) = self._ast_verify_primary_tree_cohort(cohort, blocks)
+                elif (
+                    getattr(self, "ast_tree_tile_rows", 0)
+                    and len(cohort) == 1
+                    and float(cohort[0].sampling.get("sampling_temp", 0)) == 0.0
+                    and self._progressive_processors_supported(cohort[0])
+                    and self._batched_law_contract(cohort[0])
+                ):
+                    from .ast_tree_verify import verify_tree_tiles
+
+                    (
+                        decisions,
+                        features,
+                        committed_caches,
+                        committed_rngs,
+                        progressive_stats,
+                        physical_stats,
+                    ) = verify_tree_tiles(self, cohort[0], verify_blocks)
+                elif getattr(self, "ast_tree_tile_rows", 0):
+                    raise RuntimeError(
+                        "AST tree tiles have no admitted target-tree dispatch "
+                        "for this request; legacy verification is not a fallback"
+                    )
                 elif (
                     alternative_mode
                     and self.progressive_alternative_strategy
@@ -10660,8 +11229,14 @@ class ExternalDraftBatchGenerator:
                     transaction=None,
                     committed_rows=committed_caches,
                     committed_rngs=committed_rngs,
+                    deferred_context_uids=deferred_context_uids,
                 )
                 return
+            if getattr(self, "ast_tree_tile_rows", 0) and any(proposal_counts):
+                raise RuntimeError(
+                    "AST tree tiles have no admitted target-tree dispatch "
+                    "for this request; ordinary verification is not a tile fallback"
+                )
             if self.adaptive_policy is not None:
                 effective_depth = max(proposal_counts, default=0)
                 _bump(self.scheduler_stats, "external_adaptive_rounds")
@@ -10686,7 +11261,23 @@ class ExternalDraftBatchGenerator:
             if steer is not None:
                 taps.steer = steer
             try:
-                if self.target_execution == "provider":
+                if (
+                    all(count == 0 for count in proposal_counts)
+                    and self._ast_anchor_cohort_eligible(cohort)
+                ):
+                    logits, features, transaction = self._ast_target_tree_forward_many(
+                        cohort, [lane.cache for lane in cohort], inputs,
+                        parents=[[-1] for _lane in cohort],
+                    )
+                    _bump(self.scheduler_stats, "external_ast_anchor_target_launches")
+                    _bump(self.scheduler_stats, "external_ast_anchor_target_rows", len(cohort))
+                    for lane in cohort:
+                        counts = getattr(lane, "cohort_target_execution", None)
+                        if counts is None:
+                            counts = lane.cohort_target_execution = {}
+                        key = "ast_anchor:target_tree_packed"
+                        counts[key] = counts.get(key, 0) + 1
+                elif self.target_execution == "provider":
                     parents = [
                         list(range(-1, len(row) - 1)) for row in inputs
                     ]
@@ -10744,6 +11335,7 @@ class ExternalDraftBatchGenerator:
                 blocks=blocks,
                 transaction=transaction,
                 deferred_context=forced_depth is not None,
+                deferred_context_uids=deferred_context_uids,
             )
             for commit, decision in zip(steer_commits, decisions):
                 commit(min(decision.accepted + 1, len(decision.emitted)))
@@ -11106,7 +11698,12 @@ class ExternalDraftBatchGenerator:
                 # Recurrent + KV rows: segmented compute views over the
                 # authoritative B1 rows, one token each, nothing trimmed.
                 hybrid = self._target_owner([lane.cache for lane in cohort]).begin(
-                    [1] * len(cohort)
+                    [1] * len(cohort),
+                    plain_single_token=(
+                        callable(getattr(self.model, "ordinary_external_target_forward", None))
+                        and getattr(self.model, "ordinary_external_target_protocol", None)
+                        == "committed-stock-ordinary-terminal-v1"
+                    ),
                 )
                 batched_cache = hybrid.caches
             else:
@@ -11518,6 +12115,12 @@ class ExternalDraftBatchGenerator:
 
     def disable_speculation(self, uid):
         if self._open: raise RuntimeError("Cannot change route inside a transaction")
+        inflight = getattr(self, "_parked_inflight", None)
+        if inflight is not None and any(lane.uid == uid for lane in inflight.lanes):
+            # Close the previous numerical schedule before making this
+            # request terminal ordinary. Its deferred draft state is still
+            # exact at this publication boundary.
+            self._drain_parked_inflight()
         self.lanes[uid].ordinary = True
         self._discard_prelaunched([uid])
 
@@ -11639,6 +12242,7 @@ class ExternalDraftBatchGenerator:
 
     def _drain_ready(self, prompts):
         responses = []
+        receipt_memo = {}
         # A lane can finish in the poll that completes its prefill
         # (max_tokens=1, or a stop as the first token).  Its end_of_prompt
         # response is in this same return, so its committed boundary stays
@@ -11651,6 +12255,12 @@ class ExternalDraftBatchGenerator:
         for lane in list(self.lanes.values()):
             while lane.ready:
                 response = lane.ready.popleft(); responses.append(response)
+                if getattr(self, "ast_tree_tile_rows", 0):
+                    # Feedback/round diagnostics have settled. Publish an
+                    # immutable snapshot; siblings share only frozen groups.
+                    response.speculative_receipt = freeze_receipt(
+                        response.speculative_receipt, receipt_memo
+                    )
                 if response.finish_reason:
                     self.remove([lane.uid], cancelled=False, keep_boundary=lane.uid in prompt_ended)
                     break
@@ -11691,6 +12301,34 @@ class ExternalDraftBatchGenerator:
             yield responses
             prompts.extend(self._prefill_phase(candidates))
         return prompts, responses
+
+    def _observe_ast_tree_round(self, cohort, before, seconds):
+        """Learn complete successful request turns at the publication boundary."""
+        for lane in cohort:
+            tuner = getattr(self, "_ast_tree_tuners", {}).get(lane.uid)
+            plan = getattr(lane, "ast_tree_source_plan", None)
+            previous = before[lane.uid]
+            receipt = getattr(lane, "ast_tree_tiles_receipt", {})
+            launches = receipt.get("launches", 0) - previous[2].get("launches", 0)
+            if tuner is None or plan is None or launches <= 0:
+                continue
+            tuner.observe(
+                plan, seconds=seconds,
+                emitted=lane.generated - previous[0],
+                accepted=lane.accepted - previous[1],
+                unique_rows=receipt.get("target_rows", 0)
+                - previous[2].get("target_rows", 0),
+                launches=launches,
+                terminal=previous[3] < self.num_draft + 1
+                or receipt.get("last", {}).get("termination_reason") in ("stop", "limit"),
+            )
+            lane.ast_tree_tuning = tuner.receipt()
+            receipt["tuning"] = lane.ast_tree_tuning
+            for response in lane.ready:
+                payload = getattr(response, "speculative_receipt", None)
+                if payload is not None and "ast_tree_tiles" in payload:
+                    payload["ast_tree_tiles"]["tuning"] = copy.deepcopy(lane.ast_tree_tuning)
+            _bump(self.scheduler_stats, "external_ast_tree_completed_turns")
 
     def _decode_phase(self, ordered):
         self._memory_waiting_uids.difference_update(
@@ -11745,16 +12383,41 @@ class ExternalDraftBatchGenerator:
             # Match the grouping key to the count _propose will actually ask
             # for, so capped lanes can form one physical target cohort.
             depth = min(depth, multilane_draft_cap)
+        mixed_ast = (
+            getattr(self, "ast_execution_planner", None) is not None
+            and self.target_execution == "reference"
+            and not self.dynamic_singleton_tree
+            and self.adaptive_policy is None
+            and (
+                self.progressive_verification_fidelity == PROGRESSIVE_FIDELITY_EXACT
+                or getattr(self, "primary_near_tie_ast", False)
+            )
+        )
+        ast_candidates = [lane for lane in ready if not lane.ordinary]
+        ast_count = max(
+            (0 if _speculation_parked(lane)
+             else min(depth, lane.maximum - lane.generated - 1)
+             for lane in ast_candidates),
+            default=0,
+        )
+        ast_all_parked = bool(ast_candidates) and all(
+            _speculation_parked(lane) for lane in ast_candidates
+        )
         groups = {}
         for lane in ready:
-            # Another lane's token budget must not change this lane's proposal
-            # count and random draw schedule. Cohort only compatible counts.
+            # The ordinary verifier groups compatible counts. The AST
+            # verifier below owns per-request ragged bounds and draws.
             parked = _speculation_parked(lane)
             count = 0 if lane.ordinary or parked else min(depth,lane.maximum-lane.generated-1)
             # Permanent ordinary lanes must not share a zero-depth round with
             # transient final-budget rows, whose draft context remains exact.
-            # Parked sessions run their own target-only rounds (deferred draft
-            # append), so they group apart from both.
+            # Without AST, parked sessions retain their separate target-only
+            # rounds and deferred draft append.
+            if mixed_ast and not lane.ordinary:
+                # AST owns ragged per-request depths, including the parked
+                # anchor-only row. Do not fragment the physical cohort by a
+                # reversible controller decision before AST can pack it.
+                count, parked = ast_count, ast_all_parked
             groups.setdefault((count, lane.ordinary, parked),[]).append(lane)
         if ready:
             _bump(self.scheduler_stats, "external_decode_phases")
@@ -11789,16 +12452,70 @@ class ExternalDraftBatchGenerator:
             self._decode_fit_waiting_uids.update(
                 lane.uid for lane in group_candidates if lane not in cohort
             )
-            if self.draft_topology == "tree15" and self.target_execution != "provider":
+            if getattr(self, "ast_tree_tile_rows", 0):
+                # Anchor-only work uses the same admitted private provider,
+                # not an accidental B1 bypass around the physical cohort.
+                limit = (
+                    self._ast_tree_cohort_limit()
+                    if self.progressive_verification_tile_policy == "auto" else 1
+                )
+                anchor_limit = (
+                    self._ast_tree_anchor_limit()
+                    if self.progressive_verification_tile_policy == "auto" else 1
+                )
+                turns, compatible = [], {}
+                for lane in cohort:
+                    state = lane.cost_handoff_state
+                    packable = (
+                        anchor_limit > 1 and not lane.ordinary
+                        and float(lane.sampling.get("sampling_temp", 0)) == 0.0
+                        and self._progressive_processors_supported(lane)
+                        and self._batched_law_contract(lane)
+                        and (state is None or state.settings.reversible)
+                    )
+                    if not packable:
+                        turns.append([lane])
+                    else:
+                        kind = (
+                            "parked" if _speculation_parked(lane)
+                            else "final" if lane.maximum - lane.generated <= 1
+                            else "speculative"
+                        )
+                        compatible.setdefault(kind, []).append(lane)
+                for kind, lanes in compatible.items():
+                    capacity = limit if kind == "speculative" else anchor_limit
+                    turns.extend(
+                        lanes[index:index + capacity]
+                        for index in range(0, len(lanes), capacity)
+                    )
+                turns.sort(key=lambda group: min(
+                    getattr(lane, "decode_service_epoch", -1) for lane in group
+                ))
+                pending = list(reversed(turns))
+            elif self.draft_topology == "tree15" and self.target_execution != "provider":
                 pending = [[lane] for lane in reversed(cohort)]
             else:
                 pending = [cohort]
             while pending:
                 group = pending.pop()
                 try:
+                    tree_timing = bool(getattr(self, "ast_tree_tile_rows", 0))
+                    if tree_timing:
+                        self._ast_tree_ready_sessions = max(1, len(ready))
+                        tree_before = {
+                            lane.uid: (lane.generated, lane.accepted,
+                                dict(getattr(lane, "ast_tree_tiles_receipt", {})),
+                                lane.maximum - lane.generated)
+                            for lane in group
+                        }
+                        tree_started = time.perf_counter()
                     self._round_at_batch_route(
                         group, concurrent=concurrent, active_width=active_width
                     )
+                    if tree_timing:
+                        self._observe_ast_tree_round(
+                            group, tree_before, time.perf_counter() - tree_started
+                        )
                     self._decode_service_epoch += 1
                     for lane in group:
                         lane.decode_service_epoch = self._decode_service_epoch
@@ -11929,6 +12646,7 @@ class ExternalDraftBatchGenerator:
                 ast_planner = getattr(self, "ast_execution_planner", None)
                 if ast_planner is not None:
                     ast_planner.release(uid)
+                getattr(self, "_ast_tree_tuners", {}).pop(uid, None)
                 lane.cancelled = bool(cancelled); self.scheduler_stats["cancelled"] += int(cancelled)
                 if return_prompt_caches and uid in requested_uids:
                     result[uid] = self._freeze_cache(lane.cache)

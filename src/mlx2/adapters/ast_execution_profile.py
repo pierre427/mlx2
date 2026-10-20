@@ -25,6 +25,8 @@ def build_execution_profile(
     max_lanes,
     num_draft,
     alternative_provider=None,
+    fidelity="exact",
+    automatic=False,
 ):
     import mlx.core as mx
     from mlx import nn
@@ -36,26 +38,50 @@ def build_execution_profile(
     from ..runtime.models.switch_layers import QuantizedSwitchLinear, SwitchLinear
     from ..runtime.row_exact.ops import installed_row_exact_base
 
-    declared_max = getattr(model, "progressive_external_exact_max_lanes", max_lanes)
+    if fidelity not in {"exact", "near_tie_bounded"}:
+        raise ValueError("unsupported AST execution-profile fidelity")
+    exact = fidelity == "exact"
+    if not exact and alternative_provider is not None:
+        raise ValueError("near-tie AST does not admit an exact alternative backend")
+    declared_max = (
+        getattr(model, "progressive_external_exact_max_lanes", max_lanes)
+        if exact else max_lanes
+    )
     maximum = min(max_lanes, int(declared_max))
 
     def widths(name, fallback):
-        value = getattr(model, name, fallback)
+        value = getattr(model, name, fallback) if exact else fallback
         if callable(value):
             value = value(max_lanes=maximum, num_draft=num_draft)
         return tuple(value)
 
     tiles = widths("progressive_external_exact_tile_widths", range(1, tile_cap + 1))
     terminal = widths("progressive_external_exact_terminal_input_widths", range(2, tile_cap + 2))
+    if not exact and automatic:
+        from .external_draft_policy import progressive_external_approximate_geometry
+
+        tiles, terminal = progressive_external_approximate_geometry(
+            model, max_lanes=maximum, num_draft=num_draft
+        )
     tiles = tuple(t for t in tiles if t <= tile_cap)
     terminal = tuple(t for t in terminal if t <= tile_cap + 1)
     max_rows = maximum * max(terminal)
+    alternative_capacity = getattr(
+        model, "progressive_external_alternative_row_capacity", None
+    )
+    if alternative_capacity is not None:
+        if type(alternative_capacity) is not int or not 1 <= alternative_capacity <= 64:
+            raise ValueError("AST alternative physical row capacity must be within1..64")
+        # A tree packs independent proposal nodes, not a longer trained draft
+        # sequence. Extend only the cost table; retain legal primary widths.
+        if exact:
+            max_rows = max(max_rows, alternative_capacity)
     costs = [0.0] * max_rows
     compact_costs = [0.0] * max_rows
     shapes, seen = [], set()
     total_bytes = 0
     row_capacity = None
-    compact = bool(getattr(model, "progressive_external_compact_exact_rows", False))
+    compact = exact and bool(getattr(model, "progressive_external_compact_exact_rows", False))
     args = getattr(model, "speculative_args", getattr(model, "args", None))
     active_experts = getattr(args, "num_experts_per_tok", None)
     named = getattr(model, "named_modules", None)
@@ -87,9 +113,9 @@ def build_execution_profile(
         # dispatch), an installed lane module declared by the adapter and
         # exact at every width (it serves a one-row call), else one stock
         # one-row call per row.
-        row_exact_lane = qmv.lane_preparation(module)
+        row_exact_lane = qmv.lane_preparation(module) if exact else None
         installed_lane = None
-        if (row_exact_lane is None and name in declared_compact
+        if (exact and row_exact_lane is None and name in declared_compact
                 and lane_installer.module_weight_passes(module, 1) is not None):
             installed_lane = lane_installer.installed_lane(module)
             cap = lane_installer.module_row_capacity(module)
@@ -102,10 +128,10 @@ def build_execution_profile(
         # Only a module the row-exact route swapped in (or one the adapter
         # declares compact) runs the guarded QMV kernel inside the window;
         # a stock module is priced as independent rows.
-        exact_quantized = row_exact_lane is not None or (
+        exact_quantized = exact and (row_exact_lane is not None or (
             isinstance(module, nn.QuantizedLinear)
             and (installed_row_exact_base(module) is nn.QuantizedLinear or name in declared_compact)
-        )
+        ))
         for index in range(max_rows):
             rows = index + 1
             if installed_lane is not None:
@@ -199,22 +225,32 @@ def build_execution_profile(
          maximum, compact, active_experts, kv_bytes, draft_bytes,
          row_capacity, windows, attention_authority,
          costs, compact_costs,
-         getattr(draft, "policy", None)],
+         getattr(draft, "policy", None),
+         *([] if exact else [fidelity])],
         sort_keys=True, default=str,
     ).encode()).hexdigest()
     profile = ExecutionProfile(
         binding=identity, device=device, build=build, max_lanes=maximum,
         tile_widths=tiles, terminal_widths=terminal,
-        packed_min_width=max(1, int(getattr(model, "progressive_external_lane_exact_min_width", 1))),
+        packed_min_width=(
+            max(1, int(getattr(model, "progressive_external_lane_exact_min_width", 1)))
+            if exact else 1
+        ),
         row_costs=tuple(costs),
         # Dispatch latency is unknown until measured. Do not fabricate a
         # time from the tensor size; the cold prior prices memory work only.
         launch_cost=0,
         context_row_cost=kv_bytes / total_bytes,
         draft_cost=draft_bytes / total_bytes if draft_bytes else 1.0,
-        cost_authority=("device_build_kernel_geometry_prior" if shapes else "undeclared_geometry_independent_row_prior")
+        cost_authority=(
+            ("device_build_kernel_geometry_prior" if shapes else "undeclared_geometry_independent_row_prior")
+            if exact else "stock_unmeasured_independent_row_prior"
+        )
         + "+" + attention_authority,
-        backend="padded_state_compact_exact_stages" if compact else "padded_row_exact",
+        backend=(
+            ("padded_state_compact_exact_stages" if compact else "padded_row_exact")
+            if exact else "padded_stock_near_tie_bounded"
+        ),
         valid_row_costs=tuple(compact_costs) if compact else (),
         reusable_draft_lattice=bool(getattr(backend, "supports_continuation_tree_reuse", False)
                                    or getattr(backend, "continuation_source_reuses_backbone", False)),

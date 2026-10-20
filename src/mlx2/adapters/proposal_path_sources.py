@@ -12,6 +12,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from ..runtime.draft_capabilities import maximum_proposal_length
+
 
 @dataclass(frozen=True)
 class SourceContinuation:
@@ -111,8 +113,8 @@ class ExternalContinuationSource:
 
     def __call__(self, context, limit):
         draft, config = self.draft, self.draft.config
-        if not 1 <= context.depth < config.block_size:
-            raise ValueError("continuation depth exceeds the loaded trained block")
+        if not 1 <= context.depth <= maximum_proposal_length(draft):
+            raise ValueError("continuation depth exceeds the loaded proposal capability")
         if self.mechanism == "native_mtp":
             result = draft.propose_complete_paths(context, limit)
             return [
@@ -195,7 +197,41 @@ class ExternalContinuationSource:
                         "dflash2_best_first_node_ordinal_proxy",
                     )
                 )
-            return result[:limit]
+            candidate_count = len(result)
+            frontier = [
+                path
+                for path in result
+                if not any(
+                    len(other.tokens) > len(path.tokens)
+                    and other.tokens[: len(path.tokens)] == path.tokens
+                    for other in result
+                )
+            ]
+            # A longer supplied path already covers every matching prefix of
+            # its ancestors under target-draw-then-prefix-match verification.
+            # Do not spend multi-path slots on those ancestors before a real
+            # sibling can be offered. Keep original node scores and order;
+            # neither the tree nor a continuation is synthesized here.
+            # The established single-path/backbone control stays unchanged.
+            offered = (frontier if limit > 1 else result)[:limit]
+            offered_depths = {}
+            for path in offered:
+                key = str(len(path.tokens))
+                offered_depths[key] = offered_depths.get(key, 0) + 1
+            self.last_diagnostics.update(
+                path_selection=(
+                    "prefix_nondominated" if limit > 1 else "legacy_single_path"
+                ),
+                candidate_paths=candidate_count,
+                prefix_dominated_paths_removed=(
+                    candidate_count - len(frontier) if limit > 1 else 0
+                ),
+                nondominated_paths=len(frontier),
+                offered_paths=len(offered),
+                offered_depth_hist=offered_depths,
+                offered_node_ordinals=[int(-path.ranking_score) for path in offered],
+            )
+            return offered
         if self.mechanism == "dspark":
             private_context = replace(context, draft_cache=cache)
             result = draft.propose_complete_paths(private_context, limit)
@@ -538,13 +574,13 @@ def build_continuation_drafter(
             lane_cost = resident.lane_cost
             tile_rows = resident.tile_rows
             fallback = resident.fallback
-            max_depth = resident.draft.config.block_size - 1
+            max_depth = maximum_proposal_length(resident.draft)
         elif name == "external":
             provider = ExternalContinuationSource(draft)
             revision = draft_revision
             lane_cost = tile_rows = 1
             fallback = False
-            max_depth = draft.config.block_size - 1
+            max_depth = maximum_proposal_length(draft)
         elif name == "native_mtp":
             provider = NativeMTPContinuationSource(
                 target, max_history=parsed.mtp_max_history
@@ -552,7 +588,7 @@ def build_continuation_drafter(
             revision = target_revision
             lane_cost = tile_rows = 1
             fallback = False
-            max_depth = draft.config.block_size - 1
+            max_depth = maximum_proposal_length(draft)
         else:
             if name != "prompt_lookup":
                 raise ValueError(
@@ -563,7 +599,7 @@ def build_continuation_drafter(
             revision = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
             lane_cost = tile_rows = 1
             fallback = True
-            max_depth = draft.config.block_size - 1
+            max_depth = maximum_proposal_length(draft)
         providers[name] = provider
         records[name] = ProposalSource(
             name,

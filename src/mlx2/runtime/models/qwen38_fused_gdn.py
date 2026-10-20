@@ -105,16 +105,21 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
     # Declarations read by the adapter-owned row-exact target executor
     # (``qwen_hybrid_row_exact``); they select nothing themselves.
     def row_exact_fused_verify(self, lanes, steps):
-        """The snapshot verify kind this layer can run, or ``None``.
+        """The fused exact row kind this layer can run, or ``None``.
 
         Compact replay remains B1-only.  The batched declaration is consumed
         by the generic row-exact executor and carries no scheduler policy.
+        A one-token batch uses the ordinary decode kernel on private scratch
+        state; the row-exact owner stages its zero/full rollback boundary.
         """
         if (
-            steps <= 1
-            or not self.fused_gdn_enabled
+            not self.fused_gdn_enabled
             or self.fused_gdn_compact_replay_enabled
         ):
+            return None
+        if steps == 1:
+            return "batch_decode" if lanes > 1 else None
+        if steps < 1:
             return None
         return "batch_verify" if lanes > 1 else "verify"
 
@@ -122,6 +127,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         return (
             int(self.fused_gdn_counters['verify_calls'])
             + int(self.fused_gdn_counters['batch_verify_calls'])
+            + int(self.fused_gdn_counters['batch_decode_calls'])
         )
 
     def row_exact_decode_route(self):

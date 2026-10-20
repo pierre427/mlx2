@@ -6,9 +6,10 @@ for observing a closed committed boundary and for moving exact target state to
 their ordinary decoder.  State is intentionally lane-local: timing evidence is
 never shared across requests, tenants, draft providers, or execution widths.
 
-The feature is default-off for ordinary speculative routes.  An explicitly
-selected AST physical target installs the generic reversible controller unless
-the caller supplies or disables it explicitly.  A selected controller first
+The feature is default-off for ordinary speculative routes.  A selected AST
+planner or explicitly selected AST physical target installs the generic
+reversible controller unless the caller supplies or disables it explicitly.
+A selected controller first
 collects ordinary target samples, then speculative samples in the same timing
 domain and physical width.  A sustained speculative loss produces one terminal
 decision.  It can never re-enter speculation for that request.
@@ -291,6 +292,7 @@ class CostPerCommitLaneState:
         self._invalid_samples = 0
         self._observations = 0
         self._valid_samples = 0
+        self._mixed_parked_rounds = 0
         # Reversible park state (unused by the one-way controller).
         self._parked = False
         self._probing = False
@@ -599,17 +601,7 @@ class CostPerCommitLaneState:
             ordinary.append((elapsed_ns, committed_tokens))
             if self._probing:
                 return None
-            self._parked_tokens += committed_tokens
-            if (
-                self._parked_tokens >= self._reprobe_after
-                and len(ordinary) >= self.settings.ordinary_samples
-            ):
-                self._probing = True
-                self._probe.clear()
-                self._probe_catchup_pending = True
-                self._reprobes += 1
-                return self._event("reprobe", parked_tokens=self._parked_tokens)
-            return None
+            return self._advance_parked_tokens(committed_tokens)
         if not self._probing:
             # A speculative round while paused (a cohort peer forced it) is
             # not evidence for this session's re-probe.
@@ -655,6 +647,35 @@ class CostPerCommitLaneState:
             reprobe_after_tokens=self._reprobe_after,
         )
 
+    def observe_parked_progress(self, *, committed_tokens, lane_uid, owner_scope):
+        """Advance a mixed cohort's park clock without fabricating timing.
+
+        A parked anchor can share a target invocation with speculative peers.
+        Its latency includes their speculation and is not an ordinary-route
+        sample. Only the committed-token reprobe clock advances.
+        """
+        if lane_uid != self.lane_uid or owner_scope != self.owner_scope:
+            raise ValueError("cost-per-commit handoff owner identity mismatch")
+        if type(committed_tokens) is not int or committed_tokens <= 0:
+            raise ValueError("parked progress requires positive committed tokens")
+        if not self.speculation_paused:
+            return None
+        self._mixed_parked_rounds += 1
+        return self._advance_parked_tokens(committed_tokens)
+
+    def _advance_parked_tokens(self, committed_tokens):
+        self._parked_tokens += committed_tokens
+        if (
+            self._parked_tokens >= self._reprobe_after
+            and len(self._ordinary.get(0, ())) >= self.settings.ordinary_samples
+        ):
+            self._probing = True
+            self._probe.clear()
+            self._probe_catchup_pending = True
+            self._reprobes += 1
+            return self._event("reprobe", parked_tokens=self._parked_tokens)
+        return None
+
     def receipt(self) -> dict[str, Any]:
         def costs(table):
             return {
@@ -689,6 +710,7 @@ class CostPerCommitLaneState:
                     "reengagements": self._reengagements,
                     "failed_reprobes": self._failed_reprobes,
                     "parked_tokens": self._parked_tokens,
+                    "mixed_parked_rounds": self._mixed_parked_rounds,
                     "settle_skipped_rounds": self._settle_skipped,
                     "reprobe_after_tokens": self._reprobe_after,
                     "events": [dict(event) for event in self._events],

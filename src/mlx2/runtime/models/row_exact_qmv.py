@@ -47,6 +47,10 @@ _RPS = 4
 # per-lane input values.
 _SHARED_ROWS_MIN_TILES = 2048
 _ROW_VALUES_BUDGET = 32
+# Fast 4/5-bit qmv loads sixteen values per row and thread.  Keep the
+# two-row register budget for the causal end-to-end control; the grouped
+# launch planner and every other traversal's geometry remain unchanged.
+_WIDE_ROW_VALUES_BUDGET = 32
 
 # Per row this is qmv_fast_impl (FAST) or qmv_impl; the row loop sits inside
 # each K block so the block's weight bytes are fetched once.  Columns past N
@@ -419,15 +423,11 @@ def decline_reason(linear, x: mx.array) -> str | None:
     return None
 
 
-def _launch_geometry(bits: int, fast: bool, n: int, rows: int) -> tuple[int, int]:
-    """(rows per threadgroup, output columns per simdgroup) for one launch."""
-    if (n + 2 * _RPS - 1) // (2 * _RPS) < _SHARED_ROWS_MIN_TILES:
-        return 1, _RPS
-    limit = _ROW_VALUES_BUDGET // _values_per_thread(bits, fast)
-    rows_per_group = next(
-        (d for d in range(min(rows, limit), 1, -1) if rows % d == 0), 1
-    )
-    return rows_per_group, _RPS
+def row_group_limit(bits: int, fast: bool) -> int:
+    """Register-bounded row sharing for the kernel and its cost/calibration."""
+    values = _values_per_thread(bits, fast)
+    budget = _WIDE_ROW_VALUES_BUDGET if values == 16 else _ROW_VALUES_BUDGET
+    return budget // values
 
 
 def _row_groups(bits: int, fast: bool, n: int, rows: int, k: int = 0) -> int:
@@ -444,7 +444,7 @@ def _row_groups(bits: int, fast: bool, n: int, rows: int, k: int = 0) -> int:
         n=n,
         k=k,
         rows=rows,
-        limit=_ROW_VALUES_BUDGET // _values_per_thread(bits, fast),
+        limit=row_group_limit(bits, fast),
         tiles=(n + 2 * _RPS - 1) // (2 * _RPS),
         narrow_tiles=_SHARED_ROWS_MIN_TILES,
     )
@@ -623,13 +623,17 @@ class _GroupPlan:
         first = linears[0]
         bits = int(first.bits)
         fast = qmv_fast_layout(k, sizes[0], bits)
-        rows_per_group, rps = _launch_geometry(bits, fast, max(sizes), rows)
+        # Existing same-input groups must share the single-projection row
+        # planner too.  The legacy geometry forced every narrow projection
+        # to reread its weights per row, even for long verify windows.
+        rows_per_group = _row_groups(bits, fast, max(sizes), rows, k)
+        rps = _RPS
         self.kernel = _group_kernel(bits, int(first.group_size), fast, len(linears))
         self.template = [("T", x.dtype), ("K_SIZE", k)]
         self.template += [(f"N_{i}", n) for i, n in enumerate(sizes)]
         self.template += [("ROWS", rows_per_group), ("RPS", rps), ("TOTAL_ROWS", rows)]
         tiles = sum((n + 2 * rps - 1) // (2 * rps) for n in sizes)
-        self.grid = (32, 2 * (rows // rows_per_group), tiles)
+        self.grid = (32, 2 * (-(-rows // rows_per_group)), tiles)
         self.output_shapes = [(rows, n) for n in sizes]
         self.output_dtypes = [x.dtype] * len(sizes)
 

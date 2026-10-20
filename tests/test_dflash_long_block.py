@@ -105,10 +105,10 @@ def test_trained_width_greedy_is_exact_and_receipts_show_full_block(prompts):
         assert b.scheduler_stats["target_max_width"] == len(prompts)
 
 
-@pytest.mark.parametrize("num_draft", [0, BLOCK, BLOCK + 1])
-def test_executor_rejects_count_outside_trained_block(num_draft):
+@pytest.mark.parametrize("num_draft", [0, 16, 17])
+def test_executor_rejects_count_outside_implemented_proposal_capacity(num_draft):
     m, d = tiny()
-    with pytest.raises(ValueError, match="trained block"):
+    with pytest.raises(ValueError, match="execution capacity"):
         generator(m, d, num_draft)
 
 
