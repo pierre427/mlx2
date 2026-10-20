@@ -799,7 +799,7 @@ class ExternalDraftAdapterMixin:
                         "cost_per_commit_handoff"
                     ]
                 }
-                if self.external_policy.get("cost_per_commit_handoff") is not None
+                if "cost_per_commit_handoff" in self.external_policy
                 else {}
             ),
             **(
@@ -878,7 +878,7 @@ class ExternalDraftAdapterMixin:
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:
             kwargs.setdefault("adaptive_verification", adaptive)
-        if self.external_policy.get("cost_per_commit_handoff") is not None:
+        if "cost_per_commit_handoff" in self.external_policy:
             kwargs.setdefault(
                 "cost_per_commit_handoff",
                 self.external_policy["cost_per_commit_handoff"],

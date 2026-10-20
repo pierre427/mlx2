@@ -817,9 +817,29 @@ class ExternalDraftBatchGenerator:
         self._ast_execution_capabilities = {}
         from .cost_per_commit_handoff import CostPerCommitHandoffSettings
 
-        self.cost_per_commit_handoff = (
-            CostPerCommitHandoffSettings.from_value(cost_per_commit_handoff)
+        explicit_cost_handoff = cost_per_commit_handoff is not None
+        self.ast_cost_self_configure = (
+            ast_physical_target and not explicit_cost_handoff
         )
+        # Mutable performance feedback stays local to this exact generator
+        # binding.  It is neither APC metadata nor adapter configuration.
+        self._ast_cost_prior = None
+        if self.ast_cost_self_configure and not explicit_cost_handoff:
+            self.cost_per_commit_handoff = (
+                CostPerCommitHandoffSettings.ast_self_configuring_defaults()
+            )
+            self.cost_per_commit_handoff_authority = (
+                "runtime_ast_self_configuring_default"
+            )
+        else:
+            self.cost_per_commit_handoff = (
+                CostPerCommitHandoffSettings.from_value(cost_per_commit_handoff)
+            )
+            self.cost_per_commit_handoff_authority = (
+                "explicit_policy"
+                if self.cost_per_commit_handoff is not None
+                else None
+            )
         self._feedback_outbox = None
         self.continuation_policy = None
         if type(continuation_pool_ast_bridge) is not bool:
@@ -2770,11 +2790,7 @@ class ExternalDraftBatchGenerator:
                 "ownership": "atomic_until_complete_decode_frontier",
             }
         if lane is not None and lane.cost_handoff_state is not None:
-            result["cost_per_commit_handoff"] = (
-                lane.cost_handoff_state.receipt()
-                if lane.cost_handoff_receipt is None
-                else copy.deepcopy(lane.cost_handoff_receipt)
-            )
+            result["cost_per_commit_handoff"] = self._cost_handoff_receipt(lane)
         if getattr(self, "external_varlen_prefill", False):
             result["external_varlen_prefill"] = {
                 "implemented": True,
@@ -2904,6 +2920,21 @@ class ExternalDraftBatchGenerator:
         # provider-neutral; older observers may still consume this key.
         result["tensorfold_target"] = copy.deepcopy(result["target_tree"])
         return result
+
+    def _cost_handoff_receipt(self, lane):
+        receipt = (
+            lane.cost_handoff_state.receipt()
+            if lane.cost_handoff_receipt is None
+            else copy.deepcopy(lane.cost_handoff_receipt)
+        )
+        authority = getattr(
+            self, "cost_per_commit_handoff_authority", "explicit_policy"
+        )
+        receipt["selection_authority"] = authority
+        receipt["defaulted"] = (
+            authority == "runtime_ast_self_configuring_default"
+        )
+        return receipt
 
     def _apply_target_tree_dispatch_metrics(self, cohort, event):
         """Apply provider-described metrics without delegating scheduler state.
@@ -8791,6 +8822,7 @@ class ExternalDraftBatchGenerator:
         """
         states = [lane.cost_handoff_state for lane in cohort]
         width = len(cohort)
+        logical_width = width if active_width is None else int(active_width)
         _bump(self.scheduler_stats, f"external_round_cohort_width_{width}")
         if cohort and all(lane.ordinary for lane in cohort):
             # A permanent ordinary decision is authoritative.  In particular,
@@ -8862,6 +8894,7 @@ class ExternalDraftBatchGenerator:
                 started_ns,
                 ordinary_probe=ordinary_probe or bool(parked_uids),
                 ordinary_probe_uids=ordinary_probe_uids,
+                prior_execution_width=logical_width,
             )
             return
         mode = "chain" if concurrent else "tree15"
@@ -8881,6 +8914,7 @@ class ExternalDraftBatchGenerator:
                 started_ns,
                 ordinary_probe=ordinary_probe,
                 ordinary_probe_uids=ordinary_probe_uids,
+                prior_execution_width=logical_width,
             )
             if mode != self._auto_last_mode and self._auto_last_mode is not None:
                 _bump(self.scheduler_stats, "external_auto_mode_switches")
@@ -9240,6 +9274,7 @@ class ExternalDraftBatchGenerator:
         *,
         ordinary_probe,
         ordinary_probe_uids=(),
+        prior_execution_width=None,
     ):
         """Publish request-local timing only after a complete round commit."""
         if started_ns is None:
@@ -9269,11 +9304,19 @@ class ExternalDraftBatchGenerator:
             if state.settings.reversible:
                 # A park only changes how the next closed boundary groups
                 # this session; its draft plane stays exact throughout.
+                prior_width = prior_execution_width
+                if prior_width is None and state.session_prior_active:
+                    prior_width = 1
+                if prior_width is not None:
+                    self._update_ast_cost_prior(
+                        decision, execution_width=prior_width
+                    )
                 _bump(self.scheduler_stats, f"external_cost_{decision['event']}_events")
                 lane.cost_handoff_receipt = state.receipt()
+                lane.cost_handoff_receipt = self._cost_handoff_receipt(lane)
                 for response in lane.ready:
                     response.speculative_receipt["cost_per_commit_handoff"] = (
-                        copy.deepcopy(lane.cost_handoff_receipt)
+                        self._cost_handoff_receipt(lane)
                     )
                 continue
             if not any(
@@ -9289,10 +9332,55 @@ class ExternalDraftBatchGenerator:
                 _bump(self.scheduler_stats, "external_cost_handoff_events")
                 _bump(self.scheduler_stats, "external_cost_handoff_lanes")
             lane.cost_handoff_receipt = state.receipt()
+            lane.cost_handoff_receipt = self._cost_handoff_receipt(lane)
             for response in lane.ready:
                 response.speculative_receipt["cost_per_commit_handoff"] = (
-                    copy.deepcopy(lane.cost_handoff_receipt)
+                    self._cost_handoff_receipt(lane)
                 )
+
+    def _apply_ast_cost_prior_scope(self, cohort, *, execution_width):
+        """Keep a measured slow-route hint inside its B1 execution scope."""
+        if not getattr(self, "ast_cost_self_configure", False):
+            return
+        if execution_width != 1:
+            for lane in cohort:
+                state = lane.cost_handoff_state
+                if state is None:
+                    continue
+                if not state.revoke_session_prior_for_width_growth(
+                    execution_width
+                ):
+                    continue
+                lane.cost_handoff_receipt = state.receipt()
+                _bump(
+                    self.scheduler_stats,
+                    "external_ast_cost_prior_width_revocations",
+                )
+            return
+        if getattr(self, "_ast_cost_prior", None) is None or len(cohort) != 1:
+            return
+        state = cohort[0].cost_handoff_state
+        if state is not None and state.session_prior_eligible:
+            state.seed_reversible_park(self._ast_cost_prior)
+
+    def _update_ast_cost_prior(self, decision, *, execution_width):
+        """Retain token-free B1 slow-route feedback for this generator binding."""
+        if not getattr(self, "ast_cost_self_configure", False) or execution_width != 1:
+            return
+        event = decision.get("event")
+        if event == "reengage":
+            self._ast_cost_prior = None
+            return
+        if event not in {"park", "repark"}:
+            return
+        self._ast_cost_prior = {
+            name: float(decision[name])
+            for name in (
+                "ordinary_ns_per_committed_token",
+                "speculative_ns_per_committed_token",
+                "speculative_to_ordinary_cost_ratio",
+            )
+        }
 
     def _pool_round(self, cohort):
         from .continuation_verification import (
@@ -11536,6 +11624,22 @@ class ExternalDraftBatchGenerator:
             sum(lane.anchor is not None and not lane.cancelled for lane in self.lanes.values())
             if self.dynamic_tree_max_width == 4 else len(self.lanes)
         )
+        inflight = getattr(self, "_parked_inflight", None)
+        if (
+            active_width != 1
+            and inflight is not None
+            and any(
+                lane.cost_handoff_state is not None
+                and lane.cost_handoff_state.session_prior_active
+                for lane in inflight.lanes
+            )
+        ):
+            # The dispatched B1 target transaction and its recovery snapshot
+            # own the seeded state until this exact boundary is closed.  Book
+            # it first; the next poll revokes the prior before regrouping.
+            self._drain_parked_inflight()
+            return
+        self._apply_ast_cost_prior_scope(ready, execution_width=active_width)
         concurrent = self.dynamic_singleton_tree and active_width > self.dynamic_tree_max_width
         chain_cap = self._chain_draft_cap(active_width) if concurrent else None
         depth = self.num_draft if chain_cap is None else min(self.num_draft, chain_cap)

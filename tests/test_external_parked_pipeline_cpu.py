@@ -180,3 +180,52 @@ def test_failed_pipelined_read_rewinds_exactly_and_the_lane_continues(monkeypatc
     assert tokens == baseline
     assert engine.scheduler_stats["recovery_checkpoint_restores"] >= 1
     final.cache_sidecar.validate("parked-pipeline-cpu", len(final.all_tokens))
+
+
+def test_width_growth_drains_seeded_inflight_before_revocation(monkeypatch):
+    model, draft = _models()
+    engine = ExternalDraftBatchGenerator(
+        model,
+        draft_model=draft,
+        binding="parked-seed-width-growth-cpu",
+        num_draft=3,
+        prefill_step_size=8,
+        cost_per_commit_handoff=_settings(),
+    )
+    engine.ast_cost_self_configure = True
+    engine._ast_cost_prior = {
+        "ordinary_ns_per_committed_token": 100,
+        "speculative_ns_per_committed_token": 200,
+        "speculative_to_ordinary_cost_ratio": 2,
+    }
+    uid = engine.insert(
+        [list(PROMPT)],
+        max_tokens=[40],
+        sampling_configs=[{"sampling_temp": 0.0}],
+    )[0]
+    lane = engine.lanes[uid]
+    engine._apply_ast_cost_prior_scope([lane], execution_width=1)
+    for _ in range(20):
+        engine.next()
+        if engine._parked_inflight is not None:
+            break
+    assert engine._parked_inflight is not None
+    assert lane.cost_handoff_state.session_prior_active
+
+    engine.insert(
+        [list(PROMPT)],
+        max_tokens=[40],
+        sampling_configs=[{"sampling_temp": 0.0}],
+    )
+    engine._decode_phase(list(engine.lanes.values()))
+    assert engine._parked_inflight is None
+    assert lane.cost_handoff_state.session_prior_active
+
+    # Revocation is now safe: the old B1 transaction and recovery snapshot no
+    # longer own the lane state, and the already-booked round remains visible.
+    observations = lane.cost_handoff_state.receipt()["observations"]
+    engine._apply_ast_cost_prior_scope([lane], execution_width=2)
+    receipt = lane.cost_handoff_state.receipt()
+    assert receipt["observations"] == observations
+    assert receipt["reversible"]["session_seed_active"] is False
+    assert receipt["reversible"]["events"][-1]["event"] == "seed_revoke"

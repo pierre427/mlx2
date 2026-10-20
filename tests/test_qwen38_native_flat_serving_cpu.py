@@ -127,14 +127,18 @@ def test_live_bridge_executes_flat_rows_and_transfers_exact_successors():
     assert initial_target_receipt["observed_used_cpu_fixture"] is False
 
     result = binding.execute()
-    actual_outputs = tuple(result.row(lane, position) for lane, length in enumerate(
-        descriptor.query_lengths
-    ) for position in range(length))
+    actual_outputs = tuple(
+        result.row(lane, position)
+        for lane, length in enumerate(descriptor.query_lengths)
+        for position in range(length)
+    )
     assert all(
         mx.array_equal(actual_logits, expected_logits)
         and mx.array_equal(actual_features, expected_features)
-        for (actual_logits, actual_features), (expected_logits, expected_features)
-        in zip(actual_outputs, expected_outputs, strict=True)
+        for (actual_logits, actual_features), (
+            expected_logits,
+            expected_features,
+        ) in zip(actual_outputs, expected_outputs, strict=True)
     )
     assert canonical_hybrid_state(owner.rows) == original
 
@@ -160,8 +164,7 @@ def test_live_bridge_executes_flat_rows_and_transfers_exact_successors():
     assert receipt["execution_mode"] == "native_flat_b1s1_rows"
     assert len(binding.delegate.transactions) == 4
     assert all(
-        transaction.batched is False
-        for transaction in binding.delegate.transactions
+        transaction.batched is False for transaction in binding.delegate.transactions
     )
     target_receipt = target.receipt()
     assert target_receipt["observed_execution_cpu_fixture"] is True
@@ -190,8 +193,10 @@ def test_uniform_live_bridge_uses_one_segmented_traversal_and_commits_exactly():
     assert all(
         mx.array_equal(actual_logits, expected_logits)
         and mx.array_equal(actual_features, expected_features)
-        for (actual_logits, actual_features), (expected_logits, expected_features)
-        in zip(actual_outputs, expected_outputs, strict=True)
+        for (actual_logits, actual_features), (
+            expected_logits,
+            expected_features,
+        ) in zip(actual_outputs, expected_outputs, strict=True)
     )
     counts_after = row_exact_route.status()["counts"]
     assert counts_after["launches"] == counts_before["launches"] + 1
@@ -208,6 +213,45 @@ def test_uniform_live_bridge_uses_one_segmented_traversal_and_commits_exactly():
         == expected_state
     )
     assert canonical_hybrid_state(owner.rows) == original
+
+
+def test_session_binding_runs_full_model_audit_once_then_uses_hot_guard(
+    monkeypatch,
+):
+    _descriptor, _owner, target, _tokens, _binding_value = _binding((2, 2))
+    calls = {"full": 0, "hot": 0}
+    full = target._validate_model
+    hot = target._validate_hot_model_binding
+
+    def counted_full():
+        calls["full"] += 1
+        return full()
+
+    def counted_hot():
+        calls["hot"] += 1
+        return hot()
+
+    monkeypatch.setattr(target, "_validate_model", counted_full)
+    monkeypatch.setattr(target, "_validate_hot_model_binding", counted_hot)
+    scope = "a" * 64
+
+    target.validate_session_model_binding(scope)
+    target.validate_session_model_binding(scope)
+    target.ast_live_serving_target_contract()
+    target.ast_live_serving_target_contract()
+
+    assert calls == {"full": 1, "hot": 1}
+
+    target.validate_session_model_binding("b" * 64)
+    assert calls == {"full": 2, "hot": 1}
+
+
+def test_hot_model_guard_rejects_mutable_row_exact_hook_drift(monkeypatch):
+    _descriptor, _owner, target, _tokens, _binding_value = _binding((2, 2))
+    monkeypatch.setattr(target.model, "progressive_external_compact_exact_rows", False)
+
+    with pytest.raises(ValueError, match="model binding drifted"):
+        target._validate_hot_model_binding()
 
 
 def test_live_bridge_failure_aborts_every_b1_lane_without_base_mutation(monkeypatch):
@@ -590,4 +634,3 @@ def test_provider_bind_rejects_live_authority_digest_drift(field):
             discovery=discovery,
             admission=admission,
         )
-

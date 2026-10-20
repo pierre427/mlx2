@@ -6,7 +6,9 @@ for observing a closed committed boundary and for moving exact target state to
 their ordinary decoder.  State is intentionally lane-local: timing evidence is
 never shared across requests, tenants, draft providers, or execution widths.
 
-The feature is default-off at every caller.  A selected controller first
+The feature is default-off for ordinary speculative routes.  An explicitly
+selected AST physical target installs the generic reversible controller unless
+the caller supplies or disables it explicitly.  A selected controller first
 collects ordinary target samples, then speculative samples in the same timing
 domain and physical width.  A sustained speculative loss produces one terminal
 decision.  It can never re-enter speculation for that request.
@@ -51,10 +53,11 @@ lane whose decision lands on its final token finishes without a handoff.
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass
 import math
-from typing import Any, Hashable, Mapping
+from collections import deque
+from collections.abc import Hashable, Mapping
+from dataclasses import dataclass
+from typing import Any
 
 
 def _positive_int(value: Any, name: str) -> int:
@@ -212,6 +215,39 @@ class CostPerCommitHandoffSettings:
             "pipelined_park": self.pipelined_park,
         }
 
+    @classmethod
+    def ast_self_configuring_defaults(cls) -> "CostPerCommitHandoffSettings":
+        """Conservative model-independent defaults for an explicit AST route.
+
+        These values only control how quickly a request obtains its own
+        ordinary and speculative measurements. They do not describe model
+        geometry or select a tensor executor. The reversible controller keeps
+        both state planes exact and can therefore park and later re-probe the
+        selected AST route without an adapter-owned tuning declaration.
+        """
+
+        return cls(
+            enabled=True,
+            # Three ordinary rounds give the reversible controller a median
+            # baseline that one stalled observation cannot poison.  One
+            # speculative observation can then protect a short request: a
+            # false park re-probes after bounded exact ordinary work, while
+            # later speculative observations can still overturn a false keep.
+            # The old 2+2 samples plus two discarded settle rounds let a
+            # 16-token request finish before a severe loss could be parked.
+            ordinary_samples=3,
+            speculative_samples=1,
+            loss_ratio=0.97,
+            loss_decisions=1,
+            window=4,
+            reversible=True,
+            reprobe_tokens=16,
+            reprobe_max_tokens=64,
+            deferred_context_cap=64,
+            settle_rounds=0,
+            pipelined_park=True,
+        )
+
 
 class CostPerCommitLaneState:
     """One request's handoff evidence: a terminal decision, or (reversible)
@@ -269,6 +305,99 @@ class CostPerCommitLaneState:
         self._settled = {"ordinary": 0, "speculative": 0}
         self._settle_skipped = 0
         self._probe_catchup_pending = False
+        self._session_seeded = False
+        self._session_seed_active = False
+
+    def seed_reversible_park(self, prior: Mapping[str, Any]) -> None:
+        """Start this exact lane parked from a generator-local slow-route prior.
+
+        The prior carries token-free timing only and never crosses a generator
+        binding.  Ordinary parked rounds rebuild this lane's own baseline;
+        after ``reprobe_tokens`` it exercises the normal exact speculative
+        re-probe, so the shared hint cannot permanently suppress a route.
+        """
+        if not self.settings.reversible:
+            raise ValueError("a session park prior requires reversible control")
+        if self._observations or self._parked or self._decision is not None:
+            raise RuntimeError("a session park prior requires a fresh lane state")
+        fields = {}
+        for name in (
+            "ordinary_ns_per_committed_token",
+            "speculative_ns_per_committed_token",
+            "speculative_to_ordinary_cost_ratio",
+        ):
+            value = prior.get(name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError("invalid session cost prior")
+            value = float(value)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("invalid session cost prior")
+            fields[name] = value
+        self._parked = True
+        self._parks = 1
+        self._session_seeded = True
+        self._session_seed_active = True
+        self._events.append(
+            {
+                "event": "seed_park",
+                "observation": 0,
+                "reason": "generator_session_measured_slow",
+                **fields,
+                "reprobe_after_tokens": self._reprobe_after,
+            }
+        )
+
+    @property
+    def session_prior_eligible(self) -> bool:
+        """Whether a generator may seed this untouched reversible state."""
+        return (
+            self.settings.reversible
+            and not self._observations
+            and not self._parked
+            and self._decision is None
+            and not self._cancelled
+        )
+
+    @property
+    def session_prior_seeded(self) -> bool:
+        return self._session_seeded
+
+    @property
+    def session_prior_active(self) -> bool:
+        return self._session_seed_active
+
+    def revoke_session_prior_for_width_growth(self, execution_width: int) -> bool:
+        """Drop a B1 seed's policy state before executing at a wider width.
+
+        Cumulative counters and events remain intact so receipts keep an exact
+        history of the B1 rounds that already ran.  Only the measurements and
+        state that could steer a future route decision are reset.
+        """
+        if type(execution_width) is not int or execution_width <= 1:
+            raise ValueError("session prior revocation requires width greater than one")
+        if not self._session_seed_active:
+            return False
+        self._ordinary.clear()
+        self._speculative.clear()
+        self._loss_streak.clear()
+        self._speculative_since_ordinary.clear()
+        self._decision = None
+        self._handoff_performed = False
+        self._parked = False
+        self._probing = False
+        self._parked_tokens = 0
+        self._reprobe_after = self.settings.reprobe_tokens
+        self._probe.clear()
+        self._settled = {"ordinary": 0, "speculative": 0}
+        self._probe_catchup_pending = False
+        self._probe_blocked_streak = 0
+        self._session_seed_active = False
+        self._event(
+            "seed_revoke",
+            reason="execution_width_grew",
+            execution_width=execution_width,
+        )
+        return True
 
     def _baseline(self, samples) -> float | None:
         """Ordinary cost: the median round under reversible evidence."""
@@ -563,6 +692,11 @@ class CostPerCommitLaneState:
                     "settle_skipped_rounds": self._settle_skipped,
                     "reprobe_after_tokens": self._reprobe_after,
                     "events": [dict(event) for event in self._events],
+                    "session_seeded": self._session_seeded,
+                    "session_seed_active": self._session_seed_active,
+                    "session_seed_revoked": (
+                        self._session_seeded and not self._session_seed_active
+                    ),
                 }
                 if self.settings.reversible
                 else None

@@ -1081,6 +1081,57 @@ def test_reversible_session_parks_instead_of_terminal_handoff():
     assert receipt["reversible"]["parks"] == 1
 
 
+def test_reversible_session_prior_starts_parked_and_reprobes_from_own_baseline():
+    state = _reversible(ordinary_samples=3)
+    state.seed_reversible_park(
+        {
+            "ordinary_ns_per_committed_token": 100,
+            "speculative_ns_per_committed_token": 200,
+            "speculative_to_ordinary_cost_ratio": 2,
+        }
+    )
+    assert state.speculation_paused
+    receipt = state.receipt()
+    assert receipt["observed_used"] is False
+    assert receipt["reversible"]["session_seeded"] is True
+    assert receipt["reversible"]["events"][0]["event"] == "seed_park"
+
+    assert _observe(state, "ordinary", 100, committed=2) is None
+    assert _observe(state, "ordinary", 100, committed=2) is None
+    event = _observe(state, "ordinary", 100, committed=1)
+    assert event["event"] == "reprobe"
+    assert not state.speculation_paused
+    assert state.receipt()["ordinary"]["0"]["samples"] == 3
+
+
+def test_reversible_session_prior_width_revocation_preserves_history():
+    state = _reversible(ordinary_samples=3)
+    state.seed_reversible_park(
+        {
+            "ordinary_ns_per_committed_token": 100,
+            "speculative_ns_per_committed_token": 200,
+            "speculative_to_ordinary_cost_ratio": 2,
+        }
+    )
+    assert _observe(state, "ordinary", 100, committed=2) is None
+    assert state.revoke_session_prior_for_width_growth(2) is True
+    assert state.revoke_session_prior_for_width_growth(2) is False
+    assert not state.speculation_paused
+    receipt = state.receipt()
+    assert receipt["observations"] == 1
+    assert receipt["valid_samples"] == 1
+    assert receipt["ordinary"] == {}
+    assert receipt["reversible"]["parks"] == 1
+    assert receipt["reversible"]["session_seeded"] is True
+    assert receipt["reversible"]["session_seed_active"] is False
+    assert receipt["reversible"]["session_seed_revoked"] is True
+    assert [event["event"] for event in receipt["reversible"]["events"]] == [
+        "seed_park",
+        "seed_revoke",
+    ]
+    assert receipt["reversible"]["events"][-1]["execution_width"] == 2
+
+
 def test_parked_session_reprobes_and_reengages_when_speculation_wins():
     state = _reversible()
     _park(state)

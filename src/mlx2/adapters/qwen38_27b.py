@@ -410,6 +410,19 @@ def _normalized_cost_per_commit_handoff(value):
     return None if settings is None else settings.as_dict()
 
 
+def _normalize_external_cost_policy_entry(policy):
+    """Normalize settings while preserving an explicit disable sentinel."""
+    if "cost_per_commit_handoff" not in policy:
+        return
+    raw = policy.pop("cost_per_commit_handoff")
+    if raw is None:
+        return
+    cost_handoff = _normalized_cost_per_commit_handoff(raw)
+    policy["cost_per_commit_handoff"] = (
+        False if cost_handoff is None else cost_handoff
+    )
+
+
 def _tree_node_budgets(value, width):
     if value is None:
         return {lane_width: 15 for lane_width in range(1, width + 1)}
@@ -1180,13 +1193,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 num_draft=count,
                 minimum_proposals=minimum,
             )
-            if "cost_per_commit_handoff" in self.external_policy:
-                # Receipt the effective settings, not a caller's shorthand.
-                cost_handoff = _normalized_cost_per_commit_handoff(
-                    self.external_policy.pop("cost_per_commit_handoff")
-                )
-                if cost_handoff is not None:
-                    self.external_policy["cost_per_commit_handoff"] = cost_handoff
+            # Receipt the effective settings, not a caller's shorthand. Keep
+            # explicit False distinct from omission: the physical AST runtime
+            # uses omission to install its measured self-configuring default.
+            _normalize_external_cost_policy_entry(self.external_policy)
             policy = {}
         else:
             policy.pop("varlen_dense_mlp", None)
@@ -1645,7 +1655,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             kwargs.setdefault(
                 "exact_verification", self.external_policy["exact_verification"]
             )
-        if self.external_policy.get("cost_per_commit_handoff") is not None:
+        if "cost_per_commit_handoff" in self.external_policy:
             kwargs.setdefault(
                 "cost_per_commit_handoff",
                 self.external_policy["cost_per_commit_handoff"],

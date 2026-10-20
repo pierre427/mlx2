@@ -278,9 +278,7 @@ def _literal_semantic(value):
     if isinstance(value, (tuple, list)):
         return tuple(_literal_semantic(item) for item in value)
     if isinstance(value, Mapping) and all(isinstance(key, str) for key in value):
-        return tuple(
-            (key, _literal_semantic(value[key])) for key in sorted(value)
-        )
+        return tuple((key, _literal_semantic(value[key])) for key in sorted(value))
     raise TypeError("value is not a token-free arithmetic literal")
 
 
@@ -511,6 +509,14 @@ class Qwen38HybridNativeFlatTarget:
         self._observed_real_artifact = False
         self._observed_identity = None
         self._last_serving_execution_mode = None
+        # A loaded serving model is immutable for the lifetime of its adapter
+        # session.  The complete binding audit below walks every executable
+        # module, tensor, and arithmetic policy; doing that again at each
+        # discovery/admission/publication seam turns a cheap authority check
+        # into a model-sized hot-path tax.  Keep one last-session token so a
+        # new session still receives the complete audit, while every round
+        # retains the cheap mutable-hook/device/source guards.
+        self._validated_session_scope_sha256 = None
         self._validate_model()
 
     @property
@@ -530,8 +536,7 @@ class Qwen38HybridNativeFlatTarget:
         trunk = model.language_model.model
         if (
             type(model) is not qwen38.Model
-            or self._model_manifest_sha256
-            != self._expected_model_manifest_sha256
+            or self._model_manifest_sha256 != self._expected_model_manifest_sha256
             or qwen38_hybrid_model_manifest_sha256(model)
             != self._expected_model_manifest_sha256
             or _quantized_manifest(model) != self._quantized_manifest
@@ -544,8 +549,7 @@ class Qwen38HybridNativeFlatTarget:
             or self.capture_layers[0] < 0
             or self.capture_layers[-1] >= len(trunk.layers)
             or (model.mtp is not None) != self._mtp_present
-            or (0 if model.mtp is None else len(model.mtp.layers))
-            != self._mtp_layers
+            or (0 if model.mtp is None else len(model.mtp.layers)) != self._mtp_layers
             or _target_execution_membership(model) != self._execution_membership
             or _target_execution_policy(model) != self._execution_policy
             or not _runtime_context_is_ordinary()
@@ -581,6 +585,77 @@ class Qwen38HybridNativeFlatTarget:
             )
         ):
             raise ValueError("native Qwen3.8 model binding drifted")
+
+    def _validate_hot_model_binding(self):
+        """Validate the mutable serving surface without rescanning tensors.
+
+        Tensor/module membership and numerical policy are fully audited when
+        a target is constructed and once when a new serving-session scope is
+        admitted.  mlx2 does not support mutating a loaded model in place;
+        replacing a model creates a new provider/session.  Hooks and runtime
+        switches *are* mutable, so keep checking those at every execution and
+        publication boundary.
+        """
+
+        model = self.model
+        trunk = model.language_model.model
+        if (
+            type(model) is not qwen38.Model
+            or trunk.pipeline_size != 1
+            or not trunk.layers
+            or (model.mtp is not None) != self._mtp_present
+            or (0 if model.mtp is None else len(model.mtp.layers)) != self._mtp_layers
+            or not _runtime_context_is_ordinary()
+            or model.__dict__.get("_mlx2_qwen_hybrid_row_exact")
+            is not self._installed_row_exact_route
+            or _callable_identity(
+                getattr(model, "progressive_external_target_rows", None)
+            )
+            != self._installed_row_exact_executor
+            or getattr(model, "progressive_external_compact_exact_rows", None)
+            != self._installed_compact_exact_rows
+            or getattr(model, "progressive_external_verify_protocol", None)
+            != self._installed_progressive_protocol
+            or (
+                self._construction_role == "serving"
+                and (
+                    self._installed_row_exact_executor is None
+                    or self._installed_compact_exact_rows is not True
+                    or self._installed_progressive_protocol
+                    != "row-exact-b1s1-cache-state-v1"
+                )
+            )
+            or any(
+                hasattr(layer.mlp, "_prefill_counts")
+                or (
+                    layer.is_linear
+                    and (
+                        hasattr(layer.linear_attn, "_prefill_counts")
+                        or layer.linear_attn.sharding_group is not None
+                    )
+                )
+                for layer in trunk.layers
+            )
+        ):
+            raise ValueError("native Qwen3.8 model binding drifted")
+
+    def validate_session_model_binding(self, session_scope_sha256):
+        """Run one complete model audit per exact serving-session scope."""
+
+        if (
+            not isinstance(session_scope_sha256, str)
+            or len(session_scope_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in session_scope_sha256
+            )
+        ):
+            raise ValueError("native Qwen3.8 session scope differs")
+        if self._validated_session_scope_sha256 != session_scope_sha256:
+            self._validate_model()
+            self._validated_session_scope_sha256 = session_scope_sha256
+        else:
+            self._validate_hot_model_binding()
 
     def ast_native_flat_device_attestation(self):
         return dense_qwen3_metal_device_attestation()
@@ -619,7 +694,12 @@ class Qwen38HybridNativeFlatTarget:
         )
 
     def ast_native_flat_target_contract(self):
-        self._validate_model()
+        # The direct-probe contract is also its admission-time drift gate.
+        # Live serving has a separate session audit plus per-boundary hot
+        # guard, so it must not repeat the model-sized scan while merely
+        # materializing the immutable contract.
+        if self._construction_role != "serving":
+            self._validate_model()
         return {
             "schema": NATIVE_TARGET_CAPABILITY_SCHEMA,
             "protocol": self.target_protocol,
@@ -698,17 +778,14 @@ class Qwen38HybridNativeFlatTarget:
 
         self._validate_model()
         prefixes = tuple(tuple(prefix) for prefix in prefixes)
-        if (
-            len(prefixes) != self.descriptor.lane_count
-            or any(
-                not prefix
-                or len(prefix) > MAX_BOUND_PREFIX_ROWS
-                or any(type(token) is not int or token < 0 for token in prefix)
-                or len(prefix) + length
-                > self.model.language_model.args.max_position_embeddings
-                for prefix, length in zip(
-                    prefixes, self.descriptor.query_lengths, strict=True
-                )
+        if len(prefixes) != self.descriptor.lane_count or any(
+            not prefix
+            or len(prefix) > MAX_BOUND_PREFIX_ROWS
+            or any(type(token) is not int or token < 0 for token in prefix)
+            or len(prefix) + length
+            > self.model.language_model.args.max_position_embeddings
+            for prefix, length in zip(
+                prefixes, self.descriptor.query_lengths, strict=True
             )
         ):
             raise ValueError("native Qwen3.8 prefix geometry differs")
@@ -768,16 +845,15 @@ class Qwen38HybridNativeFlatTarget:
                         raise TypeError("native Qwen3.8 GDN cache differs")
                     gdn = layer.linear_attn
                     conv, state = cache.cache
-                    if (
-                        conv.shape
-                        != (1, gdn.conv_kernel_size - 1, gdn.conv_dim)
-                        or state.shape
-                        != (
-                            1,
-                            gdn.num_v_heads,
-                            gdn.head_v_dim,
-                            gdn.head_k_dim,
-                        )
+                    if conv.shape != (
+                        1,
+                        gdn.conv_kernel_size - 1,
+                        gdn.conv_dim,
+                    ) or state.shape != (
+                        1,
+                        gdn.num_v_heads,
+                        gdn.head_v_dim,
+                        gdn.head_k_dim,
                     ):
                         raise ValueError("native Qwen3.8 GDN geometry differs")
                 else:
@@ -885,14 +961,11 @@ class Qwen38HybridNativeFlatTarget:
             self._observed_cpu_fixture = True
         elif (
             mx.default_device() == mx.gpu
-            and self._bound_identity["artifact"]
-            == QWEN38_27B_OQ4E_MTP_CHECKPOINT
+            and self._bound_identity["artifact"] == QWEN38_27B_OQ4E_MTP_CHECKPOINT
             and execution_attestation.get("backend") == "metal"
             and execution_attestation.get("ready") is True
-            and execution_attestation.get("device")
-            == self._bound_identity["device"]
-            and execution_attestation.get("build")
-            == self._bound_identity["build"]
+            and execution_attestation.get("device") == self._bound_identity["device"]
+            and execution_attestation.get("build") == self._bound_identity["build"]
         ):
             self._observed_real_artifact = True
         if self._observed_identity is None:
@@ -934,7 +1007,7 @@ class Qwen38HybridNativeFlatTarget:
         """Literal native-flat serving entry for genuinely ragged geometry."""
 
         attestation = self.validate_live_execution_attestation()
-        self._validate_model()
+        self._validate_hot_model_binding()
         if descriptor != self.descriptor:
             raise ValueError("native Qwen3.8 serving geometry differs")
         rows = tuple(tuple(row) for row in lane_caches)
@@ -962,7 +1035,7 @@ class Qwen38HybridNativeFlatTarget:
         """
 
         attestation = self.validate_live_execution_attestation()
-        self._validate_model()
+        self._validate_hot_model_binding()
         if descriptor != self.descriptor:
             raise ValueError("native Qwen3.8 serving geometry differs")
         if descriptor.logical_rows != (
@@ -1165,10 +1238,7 @@ class _Qwen38LiveFlatDelegate:
                 outputs = self.target.execute_live_flat_segments(
                     self.flat_inputs,
                     descriptor,
-                    tuple(
-                        transaction.owner.rows[0]
-                        for transaction in transactions
-                    ),
+                    tuple(transaction.owner.rows[0] for transaction in transactions),
                 )
                 self.execution_mode = "native_flat_b1s1_rows"
         except BaseException:
@@ -1414,9 +1484,7 @@ class Qwen38NativeFlatPhysicalTargetProvider:
         self._expected_model_manifest_sha256 = (
             QWEN38_27B_OQ4E_NO_MTP_MODEL_MANIFEST_SHA256
             if model.mtp is None
-            else QWEN38_27B_OQ4E_MTP_REVIEWED_MANIFEST[
-                "model_manifest_sha256"
-            ]
+            else QWEN38_27B_OQ4E_MTP_REVIEWED_MANIFEST["model_manifest_sha256"]
         )
         self._targets = {}
 
@@ -1486,9 +1554,7 @@ class Qwen38NativeFlatPhysicalTargetProvider:
                     **QWEN38_27B_OQ4E_MTP_REVIEWED_MANIFEST,
                 },
                 construction_role="serving",
-                expected_model_manifest_sha256=(
-                    self._expected_model_manifest_sha256
-                ),
+                expected_model_manifest_sha256=(self._expected_model_manifest_sha256),
                 source_hashes={
                     path: digest
                     for path, digest in self.source_identity
@@ -1533,6 +1599,7 @@ class Qwen38NativeFlatPhysicalTargetProvider:
 
         self.validate_revision()
         target = self._target(descriptor, capture_layers)
+        target.validate_session_model_binding(session_scope_sha256)
         attestation = target.validate_live_execution_attestation()
         source_manifest = self._session_source_manifest(session_scope_sha256)
         owner_manifest = _manifest(self.serving_admission_contract())
@@ -1599,6 +1666,7 @@ class Qwen38NativeFlatPhysicalTargetProvider:
             expected_session_scope_sha256=session_scope_sha256,
         )
         target = self._target(descriptor, capture_layers)
+        target._validate_hot_model_binding()
         attestation = target.validate_live_execution_attestation()
         expected = {
             "source_manifest_sha256": self._session_source_manifest(
@@ -1764,13 +1832,10 @@ def run_qwen38_hybrid_native_flat_probe(
     )
     if not admission.available:
         raise FlatSegmentUnsupported(
-            "native Qwen3.8 admission declined: "
-            + ",".join(admission.decline_reasons)
+            "native Qwen3.8 admission declined: " + ",".join(admission.decline_reasons)
         )
-    expected_outputs, expected_state, expected_continuation = (
-        _ordinary_serial_oracles(
-            target, owner, descriptor, tokens, accepted, continuation
-        )
+    expected_outputs, expected_state, expected_continuation = _ordinary_serial_oracles(
+        target, owner, descriptor, tokens, accepted, continuation
     )
     initial_positions = [boundary.position for boundary in owner.boundaries]
     initial_generations = [boundary.generation for boundary in owner.boundaries]
@@ -1780,9 +1845,7 @@ def run_qwen38_hybrid_native_flat_probe(
         transaction = owner.begin_native_flat(
             descriptor, target_executor=target, admission=admission
         )
-        execution = target.execute_native_flat_segments(
-            tokens, descriptor, transaction
-        )
+        execution = target.execute_native_flat_segments(tokens, descriptor, transaction)
         validate_native_flat_segment_execution(execution, descriptor)
         if target.invocations != 1 or not _outputs_exact(
             execution.outputs, expected_outputs
@@ -1855,9 +1918,7 @@ def run_qwen38_hybrid_native_flat_probe(
             "qualified": False,
             "selected": False,
             "default": False,
-            "observed_used_cpu_fixture": target_receipt[
-                "observed_used_cpu_fixture"
-            ],
+            "observed_used_cpu_fixture": target_receipt["observed_used_cpu_fixture"],
             "observed_used_real_artifact": target_receipt[
                 "observed_used_real_artifact"
             ],

@@ -1042,3 +1042,72 @@ def test_cost_handoff_settings_normalize_to_effective_receipt_form():
         "window": 16,
     }
     assert _normalized_cost_per_commit_handoff({"loss_ratio": 1})["loss_ratio"] == 1.0
+
+
+def test_disabled_cost_policy_remains_distinct_from_omission():
+    from mlx2.adapters.qwen38_27b import _normalize_external_cost_policy_entry
+
+    omitted = {}
+    _normalize_external_cost_policy_entry(omitted)
+    assert "cost_per_commit_handoff" not in omitted
+
+    explicit_null = {"cost_per_commit_handoff": None}
+    _normalize_external_cost_policy_entry(explicit_null)
+    assert "cost_per_commit_handoff" not in explicit_null
+
+    disabled = {"cost_per_commit_handoff": False}
+    _normalize_external_cost_policy_entry(disabled)
+    assert disabled == {"cost_per_commit_handoff": False}
+
+    disabled_mapping = {"cost_per_commit_handoff": {"enabled": False}}
+    _normalize_external_cost_policy_entry(disabled_mapping)
+    assert disabled_mapping == {"cost_per_commit_handoff": False}
+
+    shorthand = {"cost_per_commit_handoff": True}
+    _normalize_external_cost_policy_entry(shorthand)
+    assert shorthand["cost_per_commit_handoff"]["enabled"] is True
+
+
+@pytest.mark.parametrize(
+    ("raw_policy", "expected"),
+    [
+        ({"cost_per_commit_handoff": False}, False),
+        ({"cost_per_commit_handoff": {"enabled": False}}, False),
+        ({"cost_per_commit_handoff": None}, None),
+        ({}, None),
+    ],
+)
+def test_qwen38_external_batch_preserves_cost_disable_or_omission(
+    monkeypatch, raw_policy, expected
+):
+    from mlx2.adapters.qwen38_27b import (
+        Qwen3827BAdapter,
+        _normalize_external_cost_policy_entry,
+    )
+
+    adapter = object.__new__(Qwen3827BAdapter)
+    adapter.model = object()
+    adapter.draft_model = object()
+    adapter.identity = {"fingerprint": "route", "target_fingerprint": "target"}
+    policy = {
+        "num_draft": 3,
+        "ast_physical_target": True,
+        **raw_policy,
+    }
+    _normalize_external_cost_policy_entry(policy)
+    adapter.external_policy = policy
+    monkeypatch.setattr(
+        Qwen3827BAdapter, "_initialize_external_feedback", lambda self: None
+    )
+    calls = []
+    monkeypatch.setattr(
+        "mlx2.runtime.external_speculative.ExternalDraftBatchGenerator",
+        lambda *args, **kwargs: calls.append(kwargs) or object(),
+    )
+
+    adapter.create_external_batch()
+
+    if expected is False:
+        assert calls[-1]["cost_per_commit_handoff"] is expected
+    else:
+        assert "cost_per_commit_handoff" not in calls[-1]

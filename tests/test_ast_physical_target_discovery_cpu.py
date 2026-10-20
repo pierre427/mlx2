@@ -53,6 +53,10 @@ def _progressive_batch(model, draft, **kwargs):
     from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
 
     configure_row_exact = kwargs.pop("configure_row_exact", True)
+    # Physical-target contract tests exercise the native branch directly.
+    # Self-configuring cost control has explicit tests below, so ordinary
+    # baseline rounds do not mask the physical seam under test here.
+    kwargs.setdefault("cost_per_commit_handoff", False)
     if configure_row_exact:
         model.configure_target_verify_row_exact(True)
     tile = kwargs.pop("progressive_verification_tile", 2)
@@ -364,6 +368,176 @@ def test_installed_provider_failure_is_not_consulted_while_feature_is_off():
     assert model.ast_physical_target_provider.calls == 0
     assert "physical_target_discovery" not in layout
     assert layout["backend_mode"] == "padded"
+
+
+def test_selected_physical_target_self_configures_request_cost_handoff():
+    from test_external_dflash2_cpu import tiny
+
+    model, draft = tiny()
+    model.ast_physical_target_provider = _Provider()
+    batch = _progressive_batch(
+        model,
+        draft,
+        ast_physical_target=True,
+        cost_per_commit_handoff=None,
+    )
+    assert batch.ast_cost_self_configure is True
+    assert batch.cost_per_commit_handoff is not None
+    assert batch.cost_per_commit_handoff.reversible is True
+    assert batch.cost_per_commit_handoff.ordinary_samples == 3
+    assert batch.cost_per_commit_handoff.speculative_samples == 1
+    assert batch.cost_per_commit_handoff.settle_rounds == 0
+    assert batch.cost_per_commit_handoff_authority == (
+        "runtime_ast_self_configuring_default"
+    )
+    uid = batch.insert([[1, 2, 3]], max_tokens=[4])[0]
+    receipt = batch._cost_handoff_receipt(batch.lanes[uid])
+    assert receipt["selected"] is True
+    assert receipt["defaulted"] is True
+    assert receipt["selection_authority"] == (
+        "runtime_ast_self_configuring_default"
+    )
+
+
+def test_selected_physical_target_reuses_session_slow_route_prior_only_at_b1():
+    from test_external_dflash2_cpu import tiny
+
+    model, draft = tiny()
+    model.ast_physical_target_provider = _Provider()
+    batch = _progressive_batch(
+        model,
+        draft,
+        ast_physical_target=True,
+        cost_per_commit_handoff=None,
+    )
+    batch._ast_cost_prior = {
+        "ordinary_ns_per_committed_token": 100,
+        "speculative_ns_per_committed_token": 200,
+        "speculative_to_ordinary_cost_ratio": 2,
+    }
+    uids = batch.insert([[1, 2, 3]] * 4, max_tokens=[4] * 4)
+    cohort = [batch.lanes[uid] for uid in uids]
+    batch._apply_ast_cost_prior_scope(cohort, execution_width=4)
+    assert all(not lane.cost_handoff_state.speculation_paused for lane in cohort)
+
+    singleton = cohort[:1]
+    # A temporary singleton subgroup from an active B4 request must not seed.
+    batch._apply_ast_cost_prior_scope(singleton, execution_width=4)
+    assert not singleton[0].cost_handoff_state.speculation_paused
+    batch._apply_ast_cost_prior_scope(singleton, execution_width=1)
+    state = singleton[0].cost_handoff_state
+    assert state.speculation_paused
+    receipt = batch._cost_handoff_receipt(singleton[0])
+    assert receipt["reversible"]["session_seeded"] is True
+    assert receipt["reversible"]["events"][0]["event"] == "seed_park"
+    assert receipt["selection_authority"] == (
+        "runtime_ast_self_configuring_default"
+    )
+
+    # If a second request arrives before the B1 re-probe, discard the seeded
+    # B1 timing state so it cannot split or suppress the wider AST cohort.
+    old_state = singleton[0].cost_handoff_state
+    batch._apply_ast_cost_prior_scope(cohort[:2], execution_width=2)
+    assert singleton[0].cost_handoff_state is old_state
+    assert all(
+        not lane.cost_handoff_state.speculation_paused for lane in cohort[:2]
+    )
+    assert all(
+        not lane.cost_handoff_state.session_prior_active for lane in cohort[:2]
+    )
+    assert singleton[0].cost_handoff_state.session_prior_seeded
+    assert not cohort[1].cost_handoff_state.session_prior_seeded
+    assert batch.scheduler_stats[
+        "external_ast_cost_prior_width_revocations"
+    ] == 1
+    receipt = batch._cost_handoff_receipt(singleton[0])
+    assert receipt["reversible"]["session_seeded"] is True
+    assert receipt["reversible"]["session_seed_active"] is False
+    assert receipt["reversible"]["session_seed_revoked"] is True
+    assert [event["event"] for event in receipt["reversible"]["events"]] == [
+        "seed_park",
+        "seed_revoke",
+    ]
+
+
+def test_ast_session_slow_route_prior_tracks_park_and_reengage():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    batch = object.__new__(ExternalDraftBatchGenerator)
+    batch.ast_cost_self_configure = True
+    batch._ast_cost_prior = None
+    decision = {
+        "event": "park",
+        "ordinary_ns_per_committed_token": 100,
+        "speculative_ns_per_committed_token": 200,
+        "speculative_to_ordinary_cost_ratio": 2,
+    }
+    batch._update_ast_cost_prior(decision, execution_width=4)
+    assert batch._ast_cost_prior is None
+    batch._update_ast_cost_prior(decision, execution_width=1)
+    assert batch._ast_cost_prior == {
+        key: float(value) for key, value in decision.items() if key != "event"
+    }
+    batch._update_ast_cost_prior({"event": "reengage"}, execution_width=1)
+    assert batch._ast_cost_prior is None
+
+
+def test_physical_target_cost_self_configuration_can_be_explicitly_disabled():
+    from test_external_dflash2_cpu import tiny
+
+    model, draft = tiny()
+    model.ast_physical_target_provider = _Provider()
+    batch = _progressive_batch(
+        model,
+        draft,
+        ast_physical_target=True,
+        cost_per_commit_handoff=False,
+    )
+    assert batch.ast_cost_self_configure is False
+    assert batch.cost_per_commit_handoff is None
+    uid = batch.insert([[1, 2, 3]], max_tokens=[4])[0]
+    assert batch.lanes[uid].cost_handoff_state is None
+
+
+def test_explicit_cost_policy_overrides_ast_self_configuring_defaults():
+    from test_external_dflash2_cpu import tiny
+
+    model, draft = tiny()
+    model.ast_physical_target_provider = _Provider()
+    batch = _progressive_batch(
+        model,
+        draft,
+        ast_physical_target=True,
+        cost_per_commit_handoff={
+            "enabled": True,
+            "ordinary_samples": 3,
+            "speculative_samples": 3,
+            "window": 6,
+        },
+    )
+    assert batch.ast_cost_self_configure is False
+    assert batch.cost_per_commit_handoff.ordinary_samples == 3
+    assert batch.cost_per_commit_handoff_authority == "explicit_policy"
+    uid = batch.insert([[1, 2, 3]], max_tokens=[4])[0]
+    receipt = batch._cost_handoff_receipt(batch.lanes[uid])
+    assert receipt["defaulted"] is False
+    assert receipt["selection_authority"] == "explicit_policy"
+
+
+def test_explicit_false_cost_policy_disables_ast_self_configuration():
+    from test_external_dflash2_cpu import tiny
+
+    model, draft = tiny()
+    model.ast_physical_target_provider = _Provider()
+    batch = _progressive_batch(
+        model,
+        draft,
+        ast_physical_target=True,
+        cost_per_commit_handoff=False,
+    )
+    assert batch.ast_cost_self_configure is False
+    assert batch.cost_per_commit_handoff is None
+    assert batch.cost_per_commit_handoff_authority is None
 
 
 def test_requested_physical_target_requires_selected_progressive_exact_route():
