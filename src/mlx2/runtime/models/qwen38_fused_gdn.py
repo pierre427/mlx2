@@ -20,10 +20,10 @@ import mlx.core as mx
 from . import qwen4_fused_gdn as kernels
 from . import qwen4_fused_gdn_prefill as prefill_kernels
 from . import qwen4_fused_gdn_verify as verify_kernels
-from .qwen_gdn_contracts import QWEN36_GDN_CONTRACT, QWEN38_GDN_CONTRACT
 from .gdn_state import check_state
 from .qwen3_5 import GatedDeltaNet as ReferenceGatedDeltaNet
 from .qwen3_next import Qwen3NextRMSNormGated
+from .qwen_gdn_contracts import QWEN36_GDN_CONTRACT, QWEN38_GDN_CONTRACT
 from .served_exp import is_device_fault
 
 VERIFY_REFUSAL = 'verify shape outside corrected fused path'
@@ -32,6 +32,8 @@ PREFILL_MIN_ROWS = prefill_kernels.PREFILL_MIN_ROWS
 _COUNTER_NAMES = (
     'decode_calls', 'batch_decode_calls', 'batch_decode_rows',
     'verify_calls', 'verify_tokens', 'verify_rollbacks',
+    'batch_verify_calls', 'batch_verify_rows', 'batch_verify_tokens',
+    'batch_verify_ragged_calls', 'batch_verify_rollbacks',
     'compact_verify_calls', 'compact_rollback_calls',
     'compact_tape_bytes', 'compact_snapshot_bytes_avoided',
     'prefill_calls', 'prefill_tokens',
@@ -102,21 +104,24 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
     # Declarations read by the adapter-owned row-exact target executor
     # (``qwen_hybrid_row_exact``); they select nothing themselves.
     def row_exact_fused_verify(self, lanes, steps):
-        """``verify`` when a speculating B1 block of ``steps`` rows would run
-        the fused snapshot verify kernel here, else None.  Batched verify has
-        no fused kernel on this layer, and the compact-replay rollback is not
-        covered by the executor's decode-parity canary."""
+        """The snapshot verify kind this layer can run, or ``None``.
+
+        Compact replay remains B1-only.  The batched declaration is consumed
+        by the generic row-exact executor and carries no scheduler policy.
+        """
         if (
             steps <= 1
-            or lanes != 1
             or not self.fused_gdn_enabled
             or self.fused_gdn_compact_replay_enabled
         ):
             return None
-        return "verify"
+        return "batch_verify" if lanes > 1 else "verify"
 
     def row_exact_fused_verify_calls(self):
-        return int(self.fused_gdn_counters['verify_calls'])
+        return (
+            int(self.fused_gdn_counters['verify_calls'])
+            + int(self.fused_gdn_counters['batch_verify_calls'])
+        )
 
     def row_exact_decode_route(self):
         """What this layer's ordinary one-token decode runs (canary identity)."""
@@ -273,7 +278,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
     def _try_fused_multitoken(
         self, qkv, z, b, a, mask, cache, *, account=True
     ):
-        """Fuse an exact B=1 block; speculative blocks retain rollback points."""
+        """Fuse an exact block; speculative blocks retain rollback points."""
         fallback = self._fallback if account else (lambda reason: None)
         speculating = bool(getattr(cache, 'speculating', False))
         refusal = VERIFY_REFUSAL if speculating else PREFILL_REFUSAL
@@ -286,6 +291,20 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         record = getattr(cache, 'record_rollback', None)
         if not callable(describe) or (speculating and not callable(record)):
             return fallback('cache lacks rollback geometry')
+        if int(qkv.shape[0]) > 1:
+            if not speculating:
+                return fallback(PREFILL_REFUSAL)
+            from .qwen_hybrid_row_exact import _gdn_batch_verify_authorized
+
+            if not _gdn_batch_verify_authorized(
+                self, cache, int(qkv.shape[0]), int(qkv.shape[1])
+            ):
+                # Batched fused verify is an AST row-exact stage, not the
+                # ordinary/default multi-row GDN implementation.
+                return None
+            return self._try_fused_batch_verify(
+                qkv, z, b, a, mask, cache, account=account
+            )
         steps = int(qkv.shape[1])
         spans = describe(steps, mask)
         geometry = dict(
@@ -406,6 +425,146 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                 )
             counts['last_fallback'] = None
         return self.out_proj(out)
+
+    def _try_fused_batch_verify(
+        self, qkv, z, b, a, mask, cache, *, account=True
+    ):
+        """Run one exact snapshot verify over a ragged speculative cohort.
+
+        Admission, runtime probing and kernel construction all happen before
+        the recurrent cache is touched.  The compact-replay state-plane
+        contract is intentionally not generalized here: that configuration
+        declines before dispatch and keeps the serial executor as fallback.
+        """
+        fallback = self._fallback if account else (lambda reason: None)
+        if cache is None or cache[0] is None or cache[1] is None:
+            return fallback('uninitialized cache')
+        if self.fused_gdn_compact_replay_enabled:
+            return fallback('batched compact replay unavailable')
+        check_state(cache[1], getattr(self, '_gdn_state_dtype', None))
+        if type(self.norm) is not Qwen3NextRMSNormGated:
+            return fallback('unsupported gated norm')
+        describe = getattr(cache, 'rollback_spans', None)
+        record = getattr(cache, 'record_rollback', None)
+        if not callable(describe) or not callable(record):
+            return fallback('cache lacks rollback geometry')
+        rows, steps = (int(value) for value in qkv.shape[:2])
+        spans = describe(steps, mask)
+        geometry = {
+            'contract': self.fused_gdn_contract,
+            'num_key_heads': self.num_k_heads,
+            'num_value_heads': self.num_v_heads,
+            'key_head_dim': self.head_k_dim,
+            'value_head_dim': self.head_v_dim,
+            'conv_kernel': self.conv_kernel_size,
+        }
+        admission = verify_kernels.admit_qwen4_fused_gdn_batch_verify(
+            qkv=qkv, z=z, b=b, a=a, conv_state=cache[0],
+            recurrent_state=cache[1], conv_weight=self.conv1d.weight,
+            A_log=self.A_log, dt_bias=self.dt_bias, norm_weight=self.norm.weight,
+            mask=mask, spans=spans, speculating=True,
+            training=bool(self.training),
+            sharded=self.sharding_group is not None,
+            gate_activation='swish', **geometry,
+        )
+        if not admission.accepted:
+            return fallback(admission.reason or VERIFY_REFUSAL)
+        if not kernels.fused_gdn_runtime_supported():
+            return fallback('Metal runtime unavailable')
+        silu_refusal = kernels.served_silu_refusal()
+        if silu_refusal is not None:
+            return fallback(silu_refusal)
+        row_steps = verify_kernels.batch_verify_row_steps(
+            spans, mask, rows, steps
+        )
+        # Admission above guarantees a concrete tuple.  Keep this defensive
+        # check before dispatch so a future admission change cannot stage an
+        # unbounded or mismatched rollback.
+        if not isinstance(row_steps, tuple) or len(row_steps) != rows:
+            return fallback('rollback geometry not admitted')
+        initial = [cache[0], cache[1]]
+        state_kw = (
+            {'state_dtype': mx.float16}
+            if cache[1].dtype == mx.float16 else {}
+        )
+        try:
+            ty = verify_kernels.probe_qwen4_fused_gdn_batch_verify(
+                qkv.dtype, steps, compact=False,
+                contract=self.fused_gdn_contract, **state_kw,
+            )
+            if ty is None:
+                return fallback('Metal kernel probe declined')
+            out, conv, state, states, convs = (
+                verify_kernels.qwen4_fused_gdn_batch_verify(
+                    qkv, z, b, a, cache[0], self.conv1d.weight,
+                    self.A_log, self.dt_bias, cache[1], self.norm.weight,
+                    self.norm.eps, row_steps, threadgroup_y=ty,
+                    contract=self.fused_gdn_contract,
+                    num_value_heads=self.num_v_heads,
+                )
+            )
+            output = self.out_proj(out)
+        except Exception as exc:
+            if is_device_fault(exc):
+                raise
+            return fallback(
+                f'Metal kernel dispatch failed: {type(exc).__name__}'
+            )
+
+        def restore_rows(lengths):
+            # Snapshot slabs contain only positions before the lane's final
+            # valid row.  Select checkpoint/final explicitly so neither zero
+            # nor full acceptance reads an unwritten padded snapshot.
+            if isinstance(lengths, mx.array):
+                lengths = lengths.tolist()
+            values = list(lengths)
+            if len(values) == 1 and rows > 1:
+                values *= rows
+            if len(values) != rows:
+                raise ValueError('batched GDN rollback length count changed')
+            ends = [
+                min(max(int(value), 0), int(count))
+                for value, count in zip(values, row_steps)
+            ]
+
+            def pick(snapshots, before, final):
+                selected = []
+                for lane, (end, count) in enumerate(zip(ends, row_steps)):
+                    if end == 0:
+                        value = before[lane:lane + 1]
+                    elif end == count:
+                        value = final[lane:lane + 1]
+                    else:
+                        value = snapshots[lane:lane + 1, end - 1]
+                    selected.append(value)
+                return mx.contiguous(mx.concatenate(selected, axis=0))
+
+            if account:
+                self.fused_gdn_counters['batch_verify_rollbacks'] += 1
+            return [
+                pick(convs, initial[0], conv),
+                pick(states, initial[1], state),
+            ]
+
+        def restore(length):
+            values = length if isinstance(length, mx.array) else [length] * rows
+            return restore_rows(values)
+
+        record(
+            steps, restore, initial, per_row_fn=restore_rows,
+            depths=list(row_steps),
+        )
+        cache[0], cache[1] = conv, state
+        cache.advance(steps)
+        if account:
+            counts = self.fused_gdn_counters
+            counts['batch_verify_calls'] += 1
+            counts['batch_verify_rows'] += rows
+            counts['batch_verify_tokens'] += sum(row_steps)
+            if any(count != steps for count in row_steps):
+                counts['batch_verify_ragged_calls'] += 1
+            counts['last_fallback'] = None
+        return output
 
     def row_exact_probe_fused_decode(self, qkv, z, b, a, mask, cache):
         """Run a parity probe without publishing serving-use counters."""

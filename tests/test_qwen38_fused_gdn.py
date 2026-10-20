@@ -1,14 +1,17 @@
 """27B policy and fused routing regressions; no Metal or artifact loads."""
 import mlx.core as mx
-import mlx.nn as nn
 import pytest
+from mlx import nn
+
 from mlx2.runtime.models import qwen38_27b
 from mlx2.runtime.models.cache import ArraysCache
+from mlx2.runtime.models.qwen3_5 import GatedDeltaNet as Reference
+from mlx2.runtime.models.qwen3_5 import TextModelArgs
 from mlx2.runtime.models.qwen_gdn_contracts import (
     QWEN36_GDN_CONTRACT,
     QWEN38_GDN_CONTRACT,
 )
-from mlx2.runtime.models.qwen3_5 import TextModelArgs, GatedDeltaNet as Reference
+from mlx2.runtime.segmented_batch_cache import SegmentedBatchArraysCache
 
 
 def layer():
@@ -73,6 +76,79 @@ def cache(obj, rows=1):
     c[0] = mx.zeros((rows, 3, obj.conv_dim), mx.bfloat16)
     c[1] = mx.zeros((rows, 48, 128, 128), mx.float32)
     return c
+
+
+def ragged_cache(obj, spans, *, segmented=False):
+    merged = cache(obj, len(spans))
+    if segmented:
+        rows = []
+        for lane in range(len(spans)):
+            row = ArraysCache(size=2)
+            row[0] = merged[0][lane:lane + 1]
+            row[1] = merged[1][lane:lane + 1]
+            row.start_speculation()
+            rows.append(row)
+        result = SegmentedBatchArraysCache(rows)
+    else:
+        result = merged
+        result.start_speculation()
+    result.prepare(lengths=list(spans))
+    return result
+
+
+def install_fake_batch_verify(monkeypatch, obj, final_delta=100):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+
+    calls = []
+
+    def build(
+        qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias,
+        recurrent_state, norm_weight, norm_eps, row_steps, **kwargs,
+    ):
+        del qkv, b, a, conv_weight, A_log, dt_bias, norm_weight, norm_eps
+        assert kwargs['contract'] is QWEN38_GDN_CONTRACT
+        assert kwargs['num_value_heads'] == obj.num_v_heads
+        calls.append(tuple(row_steps))
+        steps = int(z.shape[1])
+        states = mx.stack(
+            [recurrent_state + 10 * (position + 1)
+             for position in range(steps - 1)],
+            axis=1,
+        )
+        convs = mx.stack(
+            [conv_state + position + 1 for position in range(steps - 1)],
+            axis=1,
+        )
+        for lane, valid in enumerate(row_steps):
+            if valid < steps:
+                states[lane, valid - 1:] = mx.nan
+                convs[lane, valid - 1:] = mx.nan
+        return (
+            mx.zeros(z.shape, z.dtype),
+            conv_state + final_delta,
+            recurrent_state + final_delta,
+            states,
+            convs,
+        )
+
+    monkeypatch.setattr(route.kernels, 'fused_gdn_runtime_supported', lambda: True)
+    monkeypatch.setattr(route.kernels, 'served_silu_refusal', lambda: None)
+    monkeypatch.setattr(
+        route.verify_kernels, 'probe_qwen4_fused_gdn_batch_verify',
+        lambda *args, **kwargs: 32,
+    )
+    monkeypatch.setattr(
+        route.verify_kernels, 'qwen4_fused_gdn_batch_verify', build,
+    )
+    return calls
+
+
+def authorized_batch_verify(obj, cache, rows, steps):
+    from mlx2.runtime.models.qwen_hybrid_row_exact import (
+        _authorize_gdn_batch_verify,
+    )
+
+    return _authorize_gdn_batch_verify(obj, cache, rows, steps)
 
 
 def test_default_off_is_reference_and_does_not_count():
@@ -211,6 +287,178 @@ def test_row_exact_canary_success_and_rollback_do_not_publish_counters(monkeypat
     assert obj.fused_gdn_counters == before
 
 
+@pytest.mark.parametrize('segmented', [False, True])
+def test_batched_verify_ragged_rows_restore_partial_full_and_zero(
+    monkeypatch, segmented
+):
+    obj = layer()
+    obj.set_fused_gdn_enabled(True)
+    spans = [4, 3, 2, 1]
+    accepted = [2, 3, 0, 1]
+    c = ragged_cache(obj, spans, segmented=segmented)
+    initial_conv, initial_state = c[0], c[1]
+    calls = install_fake_batch_verify(monkeypatch, obj)
+    qkv, z, b, a = operands(obj, rows=4, width=4)
+
+    with authorized_batch_verify(obj, c, 4, 4):
+        output = obj._try_fused_decode(qkv, z, b, a, c.make_mask(4), c)
+    mx.eval(output)
+    assert output.shape == (4, 4, 16)
+    assert calls == [(4, 3, 2, 1)]
+    assert obj.row_exact_fused_verify(4, 4) == 'batch_verify'
+    assert obj.row_exact_fused_verify_calls() == 1
+    counts = obj.fused_gdn_counters
+    assert counts['batch_verify_calls'] == 1
+    assert counts['batch_verify_rows'] == 4
+    assert counts['batch_verify_tokens'] == 10
+    assert counts['batch_verify_ragged_calls'] == 1
+
+    c.finalize()
+    c.trim_ragged([span - keep for span, keep in zip(spans, accepted)])
+    mx.eval(c[0], c[1])
+    for lane, (span, keep) in enumerate(zip(spans, accepted)):
+        if keep == 0:
+            conv_delta = state_delta = 0
+        elif keep == span:
+            conv_delta = state_delta = 100
+        else:
+            conv_delta, state_delta = keep, 10 * keep
+        assert mx.array_equal(
+            c[0][lane], initial_conv[lane] + conv_delta
+        ).item(), lane
+        assert mx.array_equal(
+            c[1][lane], initial_state[lane] + state_delta
+        ).item(), lane
+    assert counts['batch_verify_rollbacks'] >= 1
+
+
+def test_batched_verify_refusal_and_canary_leave_serving_state_isolated(
+    monkeypatch,
+):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+
+    obj = layer()
+    obj.set_fused_gdn_enabled(True)
+    spans = [4, 3, 2, 1]
+    qkv, z, b, a = operands(obj, rows=4, width=4)
+
+    refused = ragged_cache(obj, spans)
+    old = list(refused.cache)
+    before = {
+        **obj.fused_gdn_counters,
+        'reasons': dict(obj.fused_gdn_counters['reasons']),
+    }
+    monkeypatch.setattr(route.kernels, 'fused_gdn_runtime_supported', lambda: False)
+    with authorized_batch_verify(obj, refused, 4, 4):
+        assert obj.row_exact_probe_fused_decode(
+            qkv, z, b, a, refused.make_mask(4), refused
+        ) is None
+    assert all(left is right for left, right in zip(refused.cache, old))
+    assert not refused._rollbacks
+    assert obj.fused_gdn_counters == before
+
+    canary = ragged_cache(obj, spans)
+    calls = install_fake_batch_verify(monkeypatch, obj)
+    with authorized_batch_verify(obj, canary, 4, 4):
+        output = obj.row_exact_probe_fused_decode(
+            qkv, z, b, a, canary.make_mask(4), canary
+        )
+    mx.eval(output)
+    assert calls == [(4, 3, 2, 1)]
+    assert canary._rollbacks
+    canary.finalize()
+    canary.trim_ragged([2, 0, 2, 0])
+    mx.eval(canary[0], canary[1])
+    assert obj.fused_gdn_counters == before
+
+
+def test_batched_verify_dispatch_failure_precedes_state_publication(monkeypatch):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+
+    obj = layer()
+    obj.set_fused_gdn_enabled(True)
+    c = ragged_cache(obj, [4, 3, 2, 1])
+    old = list(c.cache)
+    monkeypatch.setattr(route.kernels, 'fused_gdn_runtime_supported', lambda: True)
+    monkeypatch.setattr(route.kernels, 'served_silu_refusal', lambda: None)
+    monkeypatch.setattr(
+        route.verify_kernels, 'probe_qwen4_fused_gdn_batch_verify',
+        lambda *args, **kwargs: 32,
+    )
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('injected')
+
+    monkeypatch.setattr(
+        route.verify_kernels, 'qwen4_fused_gdn_batch_verify', fail,
+    )
+    with authorized_batch_verify(obj, c, 4, 4):
+        assert obj._try_fused_decode(
+            *operands(obj, rows=4, width=4), c.make_mask(4), c
+        ) is None
+    assert obj.fused_gdn_counters['last_fallback'] == (
+        'Metal kernel dispatch failed: RuntimeError'
+    )
+    assert all(left is right for left, right in zip(c.cache, old))
+    assert not c._rollbacks
+
+
+def test_batched_verify_compact_mode_declines_before_dispatch(monkeypatch):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+
+    obj = layer()
+    obj.set_fused_gdn_enabled(True)
+
+    class CompactOperations:
+        provider_revision = 'test'
+
+        def contract(self, cache):
+            del cache
+
+        def authorize_compact_gdn_replay(self, cache, contract, steps):
+            raise AssertionError((cache, contract, steps))
+
+    obj.set_fused_gdn_compact_replay_enabled(
+        True, CompactOperations()
+    )
+    c = ragged_cache(obj, [4, 3, 2, 1])
+    old = list(c.cache)
+    monkeypatch.setattr(
+        route.verify_kernels, 'admit_qwen4_fused_gdn_batch_verify',
+        lambda **kwargs: pytest.fail('compact refusal reached admission'),
+    )
+    assert obj.row_exact_fused_verify(4, 4) is None
+    with authorized_batch_verify(obj, c, 4, 4):
+        assert obj._try_fused_decode(
+            *operands(obj, rows=4, width=4), c.make_mask(4), c
+        ) is None
+    assert obj.fused_gdn_counters['last_fallback'] == (
+        'batched compact replay unavailable'
+    )
+    assert all(left is right for left, right in zip(c.cache, old))
+    assert not c._rollbacks
+
+
+def test_batched_verify_never_engages_outside_row_exact_authorization(monkeypatch):
+    from mlx2.runtime.models import qwen38_fused_gdn as route
+
+    obj = layer()
+    obj.set_fused_gdn_enabled(True)
+    c = ragged_cache(obj, [4, 3, 2, 1])
+    old = list(c.cache)
+    monkeypatch.setattr(
+        route.verify_kernels, 'admit_qwen4_fused_gdn_batch_verify',
+        lambda **kwargs: pytest.fail('ordinary B>1 reached AST batch admission'),
+    )
+    assert obj._try_fused_decode(
+        *operands(obj, rows=4, width=4), c.make_mask(4), c
+    ) is None
+    assert all(left is right for left, right in zip(c.cache, old))
+    assert not c._rollbacks
+    assert obj.fused_gdn_counters['batch_verify_calls'] == 0
+    assert obj.fused_gdn_counters['fallbacks'] == 0
+
+
 def test_successful_bounded_prefill_uses_corrected_catchup(monkeypatch):
     from mlx2.runtime.models import qwen38_fused_gdn as route
     obj = layer()
@@ -288,7 +536,6 @@ def test_named_refusals_happen_before_runtime_probe(monkeypatch, reason):
     elif reason == 'distributed sharding':
         obj.sharding_group = object()
     elif reason == 'unsupported gated norm':
-        import mlx.nn as nn
         obj.norm = nn.RMSNorm(128)
     else:
         obj.num_v_heads = 32

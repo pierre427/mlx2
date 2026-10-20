@@ -192,9 +192,10 @@ def test_qwen36_35b_claims_the_rhs_pad_policy():
     assert json.loads(out)["moe_rhs_pad_policy"] == "floor"
 
 
-# Dense: its imports of invariant_prefill reach switch_layers only for the
-# MoE helpers it never builds.
-_DENSE_EXEMPT = {"qwen38_27b"}
+# Dense: their imports of invariant_prefill / standard_decoder reach
+# switch_layers only for the MoE helpers they never build (Qwen3.8-27B and
+# the dense Qwen3 / Qwen3.8 flat AST correctness targets).
+_DENSE_EXEMPT = {"qwen38_27b", "qwen38_hybrid_native_flat", "dense_qwen3_flat"}
 
 
 def test_every_adapter_building_switch_layers_claims_the_globals():

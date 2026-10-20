@@ -70,6 +70,8 @@ therefore remains unqualified and its receipts say so.
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from numbers import Integral
 from typing import Any
 
@@ -103,6 +105,16 @@ GPU_EVIDENCE = (
 )
 SOURCE_PATHS = (
     "src/mlx2/runtime/models/qwen_hybrid_row_exact.py",
+    "src/mlx2/runtime/models/qwen38_fused_gdn.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py",
+    "src/mlx2/runtime/models/qwen4_fused_gdn_prefill.py",
+    "src/mlx2/runtime/models/qwen_gdn_contracts.py",
+    "src/mlx2/runtime/models/gdn_kernel_contract.py",
+    "src/mlx2/runtime/models/gdn_state.py",
+    "src/mlx2/runtime/models/qwen3_5.py",
+    "src/mlx2/runtime/models/qwen3_next.py",
+    "src/mlx2/runtime/models/cache.py",
     "src/mlx2/runtime/models/qwen4_attn_rows.py",
     "src/mlx2/runtime/models/qwen4_attn_window.py",
     "src/mlx2/runtime/models/row_exact_components.py",
@@ -110,8 +122,34 @@ SOURCE_PATHS = (
     "src/mlx2/runtime/row_exact/canary.py",
     "src/mlx2/runtime/models/row_exact_qmv.py",
     "src/mlx2/runtime/hybrid_verify_rows.py",
+    "src/mlx2/runtime/segmented_batch_cache.py",
+    "src/mlx2/runtime/state_plane_operations.py",
+    "src/mlx2/runtime/models/served_exp.py",
 )
 _ROUTED_DECODE_MODES = ("gate_up_down", "gate_up_down_shared")
+_GDN_BATCH_VERIFY_AUTHORIZATION = ContextVar(
+    "mlx2_qwen_hybrid_gdn_batch_verify_authorization", default=None
+)
+
+
+@contextmanager
+def _authorize_gdn_batch_verify(layer, cache, lanes, steps):
+    """Authorize one exact Qwen-hybrid B>1 GDN call in this context only."""
+
+    authorization = (id(layer), id(cache), int(lanes), int(steps))
+    token = _GDN_BATCH_VERIFY_AUTHORIZATION.set(authorization)
+    try:
+        yield
+    finally:
+        _GDN_BATCH_VERIFY_AUTHORIZATION.reset(token)
+
+
+def _gdn_batch_verify_authorized(layer, cache, lanes, steps) -> bool:
+    """Whether the row-exact executor owns this exact batched GDN call."""
+
+    return _GDN_BATCH_VERIFY_AUTHORIZATION.get() == (
+        id(layer), id(cache), int(lanes), int(steps)
+    )
 
 
 def _ordinary_b1_mask(cache):
@@ -492,7 +530,13 @@ def gdn_verify_parity_probe(layer, kind, lanes, dtype, state_dtype):
                 fused_decode = getattr(
                     layer, "row_exact_probe_fused_decode", layer._try_fused_decode
                 )
-                out = fused_decode(qkv, z, b, a, mask, verify)
+                if kind == "batch_verify":
+                    with _authorize_gdn_batch_verify(
+                        layer, verify, lanes, steps
+                    ):
+                        out = fused_decode(qkv, z, b, a, mask, verify)
+                else:
+                    out = fused_decode(qkv, z, b, a, mask, verify)
         except Exception:  # noqa: BLE001 - a canary never raises mid-forward
             return refused
         if out is None or not verify._rollbacks:
@@ -835,7 +879,13 @@ class QwenHybridRowExactRoute:
             layer, window, kind, batch, steps, qkv.dtype, state_dtype
         ):
             before = int(layer.row_exact_fused_verify_calls())
-            out = layer._try_fused_decode(qkv, z, b, a, mask, cache)
+            if kind == "batch_verify":
+                with _authorize_gdn_batch_verify(
+                    layer, cache, batch, steps
+                ):
+                    out = layer._try_fused_decode(qkv, z, b, a, mask, cache)
+            else:
+                out = layer._try_fused_decode(qkv, z, b, a, mask, cache)
             if out is not None:
                 if int(layer.row_exact_fused_verify_calls()) != before + 1:
                     window.fail("gdn_fused_route_unaccounted")

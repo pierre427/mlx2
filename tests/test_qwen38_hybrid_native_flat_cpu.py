@@ -19,6 +19,7 @@ from mlx2.adapters.qwen38_hybrid_native_flat import (
     PHYSICAL_LAYOUT,
     Qwen38HybridNativeFlatTarget,
     run_qwen38_hybrid_native_flat_probe,
+    run_qwen38_whole_layer_direct_probe,
 )
 from mlx2.runtime import row_exact_verify as REV
 from mlx2.runtime.flat_segmented_ast import (
@@ -36,7 +37,9 @@ from mlx2.runtime.hybrid_verify_rows import HybridVerifyRows
 from mlx2.runtime.models import invariant_prefill, varlen_dense_mlp
 from mlx2.runtime.models.cache import KVCache
 from mlx2.runtime.models.qwen38_27b import Model, ModelArgs
+from mlx2.runtime.models.qwen_hybrid_row_exact import install as install_row_exact
 from mlx2.runtime.ragged_verify_observation import RaggedVerifyObserver, activate
+from mlx2.runtime.row_exact.canary import CANARIES, NumericalCanaryUnavailable
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_REVISION = "442a49d1de8027dfb57a7935623cef3025e746c1"
@@ -71,6 +74,7 @@ TARGET_SOURCE_PATHS = (
     "src/mlx2/runtime/flat_segmented_hybrid.py",
     "src/mlx2/runtime/flat_segmented_kv.py",
     "src/mlx2/runtime/ast_execution_capability.py",
+    "src/mlx2/runtime/ast_qualified_capability.py",
     "src/mlx2/runtime/hybrid_verify_rows.py",
     "src/mlx2/runtime/hybrid_speculative.py",
     "src/mlx2/runtime/cache_operations.py",
@@ -78,6 +82,7 @@ TARGET_SOURCE_PATHS = (
     "src/mlx2/runtime/segmented_plain_kv.py",
     "src/mlx2/runtime/models/cache.py",
     "src/mlx2/runtime/models/qwen38_27b.py",
+    "src/mlx2/runtime/models/qwen38_whole_layer_verify.py",
     "src/mlx2/runtime/models/qwen3_5.py",
     "src/mlx2/runtime/models/qwen3_next.py",
     "src/mlx2/runtime/models/varlen_dense_mlp.py",
@@ -122,8 +127,7 @@ def cpu():
 
 def _sources(paths):
     return {
-        path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
-        for path in paths
+        path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest() for path in paths
     }
 
 
@@ -182,6 +186,24 @@ def _pair(lengths=(1, 2, 3, 4), prefixes=None):
     return descriptor, owner, target
 
 
+def _whole_pair(lengths=(1, 2, 3, 4), prefixes=None):
+    descriptor = FlatSegmentDescriptor.from_query_lengths(lengths)
+    model = _tiny_quantized_mtp()
+    install_row_exact(model)
+    target = Qwen38HybridNativeFlatTarget(
+        model,
+        descriptor=descriptor,
+        capture_layers=(1, 6),
+        identity=_identity(),
+        expected_model_manifest_sha256=MODEL_MANIFEST_SHA256,
+        construction_role="whole_layer_probe",
+    )
+    if prefixes is None:
+        prefixes = tuple((1 + lane, 7, 11) for lane in range(len(lengths)))
+    owner = target.make_bound_rows(prefixes)
+    return descriptor, owner, target
+
+
 @contextmanager
 def _runtime_scope(model, kind):
     if kind == "invariant_prefill":
@@ -197,9 +219,7 @@ def _runtime_scope(model, kind):
     if getattr(model, "_varlen_dense_mlp", None) is None:
         varlen_dense_mlp.install(
             model,
-            varlen_dense_mlp.VarlenDenseMLPPolicy(
-                enabled=True, minimum_padding_rows=1
-            ),
+            varlen_dense_mlp.VarlenDenseMLPPolicy(enabled=True, minimum_padding_rows=1),
         )
     with model.prefill_row_context((1, 2), width=2):
         assert varlen_dense_mlp.active()
@@ -250,9 +270,7 @@ def _execute(owner, target, descriptor, tokens):
     transaction = owner.begin_native_flat(
         descriptor, target_executor=target, admission=admission
     )
-    execution = target.execute_native_flat_segments(
-        tokens, descriptor, transaction
-    )
+    execution = target.execute_native_flat_segments(tokens, descriptor, transaction)
     validate_native_flat_segment_execution(execution, descriptor)
     return transaction, execution
 
@@ -320,9 +338,7 @@ def test_b4_native_flat_exact_oracles_and_zero_padding(monkeypatch):
     expected_rows = _ordinary_committed_rows(
         target.model, base_rows, descriptor, tokens, accepted
     )
-    original_classes = tuple(
-        type(module) for _, module in target.model.named_modules()
-    )
+    original_classes = tuple(type(module) for _, module in target.model.named_modules())
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("native target reached padded row machinery")
@@ -336,7 +352,11 @@ def test_b4_native_flat_exact_oracles_and_zero_padding(monkeypatch):
         tokens,
         accepted,
         (41, 42, 43, 44),
-        **{key: value for key, value in _expected(owner).items() if key != "expected_backend"},
+        **{
+            key: value
+            for key, value in _expected(owner).items()
+            if key != "expected_backend"
+        },
     )
 
     receipt = result.receipt
@@ -357,11 +377,165 @@ def test_b4_native_flat_exact_oracles_and_zero_padding(monkeypatch):
     assert receipt["observed_used_real_artifact"] is False
     assert target.receipt()["padding_rows"] == 0
     assert target.receipt()["target_row_exact_installed"] is False
-    assert tuple(type(module) for _, module in target.model.named_modules()) == original_classes
+    assert (
+        tuple(type(module) for _, module in target.model.named_modules())
+        == original_classes
+    )
     assert target.model.__dict__.get("_mlx2_qwen_hybrid_row_exact") is None
     _assert_rows_exact(owner.rows, expected_rows)
     assert tuple(boundary.position for boundary in owner.boundaries) == (4, 4, 5, 7)
     assert all(boundary.generation == 1 for boundary in owner.boundaries)
+
+
+def test_b4_whole_layer_probe_mints_exact_domain_bound_capability(monkeypatch):
+    descriptor, owner, target = _whole_pair()
+    _ready(target, monkeypatch)
+    expected = _expected(owner)
+    expected.pop("expected_backend")
+
+    result = run_qwen38_whole_layer_direct_probe(
+        owner,
+        target,
+        descriptor,
+        tuple(range(13, 23)),
+        (1, 1, 2, 4),
+        (41, 42, 43, 44),
+        profile_sha256="a" * 64,
+        provider_binding_sha256="b" * 64,
+        **expected,
+    )
+
+    capability = result.capability.receipt()
+    assert capability["qualified"] is True
+    assert capability["eligible"] is capability["selected"] is False
+    assert capability["default"] is capability["observed_used"] is False
+    assert capability["performance_claim"] is False
+    assert capability["session_binding"]["executor_protocol"] == (
+        "qwen38-whole-layer-ragged-v1"
+    )
+    request = capability["qualification_domain"]["request_classes"][0]
+    assert request["query_lengths"] == [1, 2, 3, 4]
+    assert request["base_offsets"] == [3, 3, 3, 3]
+    assert request["capacities"] == [256, 256, 256, 256]
+    assert request["allocation_steps"] == [256, 256, 256, 256]
+    assert result.evidence["logical_rows"] == 10
+    assert result.evidence["padding_rows"] == 0
+    assert result.evidence["offline_numerical_canary_warmup"] is True
+    assert result.evidence["qualified_execution_numerical_canary"] is False
+    assert result.evidence["request_time_numerical_canary"] is False
+    assert result.evidence["observed_used"] is False
+    assert result.evidence["observed_used_cpu_fixture"] is True
+    assert result.evidence["observed_used_real_artifact"] is False
+    assert tuple(boundary.position for boundary in owner.boundaries) == (4, 4, 5, 7)
+    assert target.whole_layer_invocations == 8
+
+
+def test_whole_layer_probe_requires_installed_row_exact_arithmetic():
+    descriptor = FlatSegmentDescriptor.from_query_lengths((1, 2, 3, 4))
+    model = _tiny_quantized_mtp()
+    with pytest.raises(ValueError, match="row-exact route binding differs"):
+        Qwen38HybridNativeFlatTarget(
+            model,
+            descriptor=descriptor,
+            capture_layers=(1, 6),
+            identity=_identity(),
+            expected_model_manifest_sha256=MODEL_MANIFEST_SHA256,
+            construction_role="whole_layer_probe",
+        )
+
+
+def test_whole_layer_failure_aborts_private_state(monkeypatch):
+    descriptor, owner, target = _whole_pair()
+    _ready(target, monkeypatch)
+    admission = _admission(owner, target, descriptor)
+    transaction = owner.begin_native_flat(
+        descriptor, target_executor=target, admission=admission
+    )
+    before = canonical_bound_hybrid_state(owner.rows, owner.boundaries)
+    original = native.execute_qwen38_whole_layer_flat
+
+    def fail_after_private_mutation(*args, **kwargs):
+        kwargs["allow_numerical_canaries"] = True
+        original(*args, **kwargs)
+        raise RuntimeError("injected whole-layer failure")
+
+    monkeypatch.setattr(
+        native, "execute_qwen38_whole_layer_flat", fail_after_private_mutation
+    )
+    with pytest.raises(RuntimeError, match="injected whole-layer failure"):
+        target.execute_whole_layer_segments(
+            tuple(range(13, 23)), descriptor, transaction
+        )
+    transaction.abort()
+    assert canonical_bound_hybrid_state(owner.rows, owner.boundaries) == before
+    assert owner._active is None
+
+
+def test_whole_layer_execution_never_probes_numerical_canaries(monkeypatch):
+    descriptor, owner, target = _whole_pair()
+    _ready(target, monkeypatch)
+    admission = _admission(owner, target, descriptor)
+    transaction = owner.begin_native_flat(
+        descriptor, target_executor=target, admission=admission
+    )
+    before = canonical_bound_hybrid_state(owner.rows, owner.boundaries)
+    CANARIES.reset()
+    with pytest.raises(NumericalCanaryUnavailable, match="verdict is unavailable"):
+        target.execute_whole_layer_segments(
+            tuple(range(13, 23)), descriptor, transaction
+        )
+    transaction.abort()
+    assert canonical_bound_hybrid_state(owner.rows, owner.boundaries) == before
+    assert owner._active is None
+
+
+def test_whole_layer_malformed_authority_aborts_before_publication(monkeypatch):
+    descriptor, owner, target = _whole_pair()
+    _ready(target, monkeypatch)
+    expected = _expected(owner)
+    expected.pop("expected_backend")
+    before = canonical_bound_hybrid_state(owner.rows, owner.boundaries)
+    generations = tuple(boundary.generation for boundary in owner.boundaries)
+
+    with pytest.raises(ValueError, match="profile must be a lowercase SHA-256"):
+        run_qwen38_whole_layer_direct_probe(
+            owner,
+            target,
+            descriptor,
+            tuple(range(13, 23)),
+            (1, 1, 2, 4),
+            (41, 42, 43, 44),
+            profile_sha256="malformed",
+            provider_binding_sha256="b" * 64,
+            **expected,
+        )
+    assert canonical_bound_hybrid_state(owner.rows, owner.boundaries) == before
+    assert tuple(boundary.generation for boundary in owner.boundaries) == generations
+    assert owner._active is None
+    assert target.invocations == 0
+
+
+def test_whole_layer_probe_refuses_incomplete_acceptance_coverage(monkeypatch):
+    descriptor, owner, target = _whole_pair()
+    _ready(target, monkeypatch)
+    expected = _expected(owner)
+    expected.pop("expected_backend")
+    before = canonical_bound_hybrid_state(owner.rows, owner.boundaries)
+
+    with pytest.raises(FlatSegmentError, match="zero, partial and full"):
+        run_qwen38_whole_layer_direct_probe(
+            owner,
+            target,
+            descriptor,
+            tuple(range(13, 23)),
+            (1, 2, 3, 4),
+            (41, 42, 43, 44),
+            profile_sha256="a" * 64,
+            provider_binding_sha256="b" * 64,
+            **expected,
+        )
+    assert target.invocations == 0
+    assert canonical_bound_hybrid_state(owner.rows, owner.boundaries) == before
 
 
 def test_reordered_lanes_are_exactly_permuted(monkeypatch):
@@ -371,7 +545,10 @@ def test_reordered_lanes_are_exactly_permuted(monkeypatch):
     descriptor, owner, target = _pair(lengths, prefixes)
     _ready(target, monkeypatch)
     transaction, execution = _execute(
-        owner, target, descriptor, tuple(token for segment in segments for token in segment)
+        owner,
+        target,
+        descriptor,
+        tuple(token for segment in segments for token in segment),
     )
     base_outputs = _group_outputs(execution, descriptor)
     prepared = transaction.prepare_commit(lengths)
@@ -492,9 +669,7 @@ def test_post_admission_tensor_membership_replacement_fails_before_begin(
         replacement.weight = mx.zeros_like(replacement.weight)
         target.model.language_model.lm_head = replacement
     with pytest.raises(FlatSegmentUnsupported):
-        owner.begin_native_flat(
-            descriptor, target_executor=target, admission=admission
-        )
+        owner.begin_native_flat(descriptor, target_executor=target, admission=admission)
     assert owner._active is None
     assert target.invocations == 0
 
@@ -535,9 +710,7 @@ def test_post_admission_policy_drift_fails_before_begin(monkeypatch, policy):
     assert admission.available
     _install_unsupported_policy(target.model, policy)
     with pytest.raises(FlatSegmentUnsupported):
-        owner.begin_native_flat(
-            descriptor, target_executor=target, admission=admission
-        )
+        owner.begin_native_flat(descriptor, target_executor=target, admission=admission)
     assert owner._active is None
     assert target.invocations == 0
 
@@ -550,9 +723,7 @@ def test_post_admission_gdn_decode_policy_drift_fails_before_begin(monkeypatch):
     gdn = target.model.language_model.model.layers[0].linear_attn
     gdn.set_fused_gdn_enabled(not gdn.fused_gdn_enabled)
     with pytest.raises(FlatSegmentUnsupported):
-        owner.begin_native_flat(
-            descriptor, target_executor=target, admission=admission
-        )
+        owner.begin_native_flat(descriptor, target_executor=target, admission=admission)
     assert owner._active is None
     assert target.invocations == 0
 
@@ -575,9 +746,7 @@ def test_post_admission_arithmetic_scalar_drift_fails_before_begin(
     else:
         trunk.layers[0].linear_attn.conv1d.padding = 1
     with pytest.raises(FlatSegmentUnsupported):
-        owner.begin_native_flat(
-            descriptor, target_executor=target, admission=admission
-        )
+        owner.begin_native_flat(descriptor, target_executor=target, admission=admission)
     assert owner._active is None
     assert target.invocations == 0
 
@@ -609,12 +778,11 @@ def test_post_admission_runtime_scope_fails_before_begin(monkeypatch, scope_kind
     _ready(target, monkeypatch)
     admission = _admission(owner, target, descriptor)
     assert admission.available
-    with _runtime_scope(target.model, scope_kind), pytest.raises(
-        FlatSegmentUnsupported
+    with (
+        _runtime_scope(target.model, scope_kind),
+        pytest.raises(FlatSegmentUnsupported),
     ):
-        owner.begin_native_flat(
-            descriptor, target_executor=target, admission=admission
-        )
+        owner.begin_native_flat(descriptor, target_executor=target, admission=admission)
     assert owner._active is None
     assert target.invocations == 0
 
@@ -778,9 +946,7 @@ def test_continuation_mismatch_never_publishes(monkeypatch):
 def test_observed_use_is_latched_to_successful_execution_identity(monkeypatch):
     descriptor, owner, target = _pair()
     _ready(target, monkeypatch)
-    transaction, _execution = _execute(
-        owner, target, descriptor, tuple(range(13, 23))
-    )
+    transaction, _execution = _execute(owner, target, descriptor, tuple(range(13, 23)))
     transaction.abort()
     first = target.receipt()
     assert first["observed_used_cpu_fixture"] is True

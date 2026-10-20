@@ -137,6 +137,9 @@ def test_invalid_target_tree_protocol_with_truthy_closed_state_still_aborts():
             self.closed = True
 
     owner = object.__new__(ExternalDraftBatchGenerator)
+    # The finish reads the bound provider first (dd81dfc6a); the invalid
+    # transaction must still abort before any provider protocol check.
+    owner.target_tree_executor_provider = None
     transaction = InvalidTransaction()
     with pytest.raises(TypeError, match="invalid transaction"):
         owner._finish_target_tree_dispatch(

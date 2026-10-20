@@ -22,8 +22,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DONOR_REVISION = "f87a14e109c385a36ea83321a1db94e0c1efc9fc"
-DONOR_DEFAULT = Path("~/Desktop/mlx-uag/mlx-lm-unified-worktrees/ane-shadow-mtp-20260906")
-MODEL_DEFAULT = Path("~/mlx-models/Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP")
+DONOR_DEFAULT = Path.home() / "Desktop/mlx-uag/mlx-lm-unified-worktrees/ane-shadow-mtp-20260906"
+MODEL_DEFAULT = Path.home() / "mlx-models/Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP"
 TARGET_CONTRACT = "flash-next-phase5exp-serial-e2-approximate-research-v1"
 ENVIRONMENT = {
     "MLX_QWEN4_MEGAKERNEL": "1",

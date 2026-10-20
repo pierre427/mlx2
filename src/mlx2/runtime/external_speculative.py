@@ -4421,6 +4421,14 @@ class ExternalDraftBatchGenerator:
         proposal_counts = []
         cohort = list(cohort)
         blocks = list(blocks)
+        preserve_private_capacity = bool(
+            self.ast_physical_target
+            and getattr(
+                self.ast_physical_target_provider,
+                "requires_qualified_capability",
+                False,
+            )
+        )
         if row_metadata is not None:
             row_metadata = list(row_metadata)
 
@@ -4480,7 +4488,10 @@ class ExternalDraftBatchGenerator:
                     "drafts": drafts,
                     "laws": laws,
                     "sparse_point_mass": sparse_point_mass,
-                    "private_cache": self._copy_reference_cache(lane.cache),
+                    "private_cache": self._copy_reference_cache(
+                        lane.cache,
+                        preserve_capacity=preserve_private_capacity,
+                    ),
                     "private_rng": RequestRNG(state=lane.rng.snapshot()),
                     "local_history": list(lane.history),
                     "anchor": int(lane.anchor),
@@ -4629,7 +4640,57 @@ class ExternalDraftBatchGenerator:
                     "AST physical target conflicts with target-tree backend"
                 )
             physical_target_discovery = None
-            if self.ast_physical_target:
+            qualified_capability_discovery = None
+            requires_qualification = bool(
+                self.ast_physical_target
+                and getattr(
+                    self.ast_physical_target_provider,
+                    "requires_qualified_capability",
+                    False,
+                )
+            )
+            qualification_available = not requires_qualification
+            descriptor = None
+            live_rows = None
+            if self.ast_physical_target and requires_qualification:
+                from .ast_qualified_capability import (
+                    normalize_ast_qualified_capability_discovery,
+                )
+                from .flat_segmented_ast import FlatSegmentDescriptor
+
+                descriptor = FlatSegmentDescriptor.from_query_lengths(
+                    layout.query_lengths
+                )
+                live_rows = [states[index]["private_cache"] for index in active]
+                qualified_discover = getattr(
+                    self.ast_physical_target_provider,
+                    "discover_qualified_serving_request",
+                    None,
+                )
+                try:
+                    raw_qualified_discovery = (
+                        qualified_discover(
+                            rows=live_rows,
+                            descriptor=descriptor,
+                            capture_layers=tuple(self.layers),
+                        )
+                        if callable(qualified_discover)
+                        else None
+                    )
+                except Exception:  # noqa: BLE001 - ordinary fallback is safe
+                    raw_qualified_discovery = None
+                qualified_capability_discovery = (
+                    normalize_ast_qualified_capability_discovery(
+                        raw_qualified_discovery
+                    )
+                )
+                last_layout_receipt["qualified_capability_discovery"] = (
+                    qualified_capability_discovery
+                )
+                qualification_available = (
+                    qualified_capability_discovery.get("available") is True
+                )
+            if self.ast_physical_target and qualification_available:
                 from .ast_physical_target import (
                     discover_ast_physical_target_from_layout,
                 )
@@ -4656,7 +4717,7 @@ class ExternalDraftBatchGenerator:
             launch_padding = plan.padding_rows
             physical_binding = None
             physical_target_admission = None
-            if self.ast_physical_target:
+            if self.ast_physical_target and qualification_available:
                 if (
                     physical_target_discovery is None
                     or physical_target_discovery.get("candidate_implemented") is not True
@@ -4675,7 +4736,7 @@ class ExternalDraftBatchGenerator:
                     "bind_serving_physical_target",
                     None,
                 )
-                if not callable(bind):
+                if not callable(bind) and not requires_qualification:
                     raise RuntimeError(
                         "requested AST physical target lacks a serving binding"
                     )
@@ -4708,7 +4769,16 @@ class ExternalDraftBatchGenerator:
                     from .ast_physical_target import (
                         validate_ast_serving_admission,
                     )
-                    from .flat_segmented_ast import FlatSegmentDescriptor
+
+                    if descriptor is None:
+                        from .flat_segmented_ast import FlatSegmentDescriptor
+
+                        descriptor = FlatSegmentDescriptor.from_query_lengths(
+                            layout.query_lengths
+                        )
+                        live_rows = [
+                            states[index]["private_cache"] for index in active
+                        ]
 
                     if (
                         getattr(self.model, "ast_physical_target_provider", None)
@@ -4719,37 +4789,47 @@ class ExternalDraftBatchGenerator:
                         raise RuntimeError("physical-target provider validator drifted")
                     validate_provider()
 
-                    descriptor = FlatSegmentDescriptor.from_query_lengths(
-                        layout.query_lengths
-                    )
-                    physical_target_admission = admit(
-                        rows=[states[index]["private_cache"] for index in active],
-                        descriptor=descriptor,
-                        capture_layers=tuple(self.layers),
-                        session_scope_sha256=session_scope_sha256,
-                        discovery=physical_target_discovery,
-                    )
+                    if qualification_available:
+                        if not callable(bind):
+                            raise RuntimeError(
+                                "qualified AST physical target lacks a serving binding"
+                            )
+                        physical_target_admission = admit(
+                            rows=live_rows,
+                            descriptor=descriptor,
+                            capture_layers=tuple(self.layers),
+                            session_scope_sha256=session_scope_sha256,
+                            discovery=physical_target_discovery,
+                        )
                     if (
                         getattr(self.model, "ast_physical_target_provider", None)
                         is not self.ast_physical_target_provider
                     ):
                         raise RuntimeError("physical-target provider binding drifted")
                     validate_provider()
-                    physical_target_admission = validate_ast_serving_admission(
-                        physical_target_admission,
-                        physical_target_discovery,
-                        expected_session_scope_sha256=session_scope_sha256,
-                    )
+                    if qualification_available:
+                        physical_target_admission = validate_ast_serving_admission(
+                            physical_target_admission,
+                            physical_target_discovery,
+                            expected_session_scope_sha256=session_scope_sha256,
+                        )
 
-                    physical_binding = bind(
-                        rows=[states[index]["private_cache"] for index in active],
-                        descriptor=descriptor,
-                        capture_layers=tuple(self.layers),
-                        flat_inputs=tuple(token for row in inputs for token in row),
-                        session_scope_sha256=session_scope_sha256,
-                        discovery=physical_target_discovery,
-                        admission=physical_target_admission,
-                    )
+                        bind_kwargs = {
+                            "rows": live_rows,
+                            "descriptor": descriptor,
+                            "capture_layers": tuple(self.layers),
+                            "flat_inputs": tuple(
+                                token for row in inputs for token in row
+                            ),
+                            "session_scope_sha256": session_scope_sha256,
+                            "discovery": physical_target_discovery,
+                            "admission": physical_target_admission,
+                        }
+                        if requires_qualification:
+                            bind_kwargs["qualified_discovery"] = (
+                                qualified_capability_discovery
+                            )
+                        physical_binding = bind(**bind_kwargs)
                     if (
                         getattr(self.model, "ast_physical_target_provider", None)
                         is not self.ast_physical_target_provider
@@ -4771,11 +4851,21 @@ class ExternalDraftBatchGenerator:
                 )
                 last_layout_receipt["physical_target_serving"] = {
                     "implemented": True,
-                    "qualified": False,
+                    "qualified": bool(
+                        qualified_capability_discovery is not None
+                        and qualified_capability_discovery.get("available") is True
+                        and qualified_capability_discovery.get("qualified") is True
+                    ),
+                    "eligible": True,
                     "selected": True,
                     "default": False,
                     "observed_used": False,
-                    "physical_layout": "native_flat_logical_rows",
+                    "physical_layout": (
+                        "whole_layer_ragged_native_flat"
+                        if qualified_capability_discovery is not None
+                        else "native_flat_logical_rows"
+                    ),
+                    "performance_claim": False,
                 }
                 last_layout_receipt["physical_target_admission"] = (
                     physical_target_admission
@@ -6746,7 +6836,7 @@ class ExternalDraftBatchGenerator:
         return tree_paths(parents)
 
     @staticmethod
-    def _copy_reference_cache(cache):
+    def _copy_reference_cache(cache, *, preserve_capacity=False):
         """Clone a B1 cache and force KV appends onto fresh buffers."""
 
         cloned = copy.deepcopy(cache)
@@ -6757,8 +6847,15 @@ class ExternalDraftBatchGenerator:
                 and isinstance(getattr(item, "offset", None), int)
             ):
                 offset = int(item.offset)
-                item.keys = item.keys[..., :offset, :]
-                item.values = item.values[..., :offset, :]
+                if preserve_capacity:
+                    # Qualified request classes bind the allocation capacity,
+                    # not only the written prefix.  Detach the full arrays so
+                    # the private transaction preserves that exact schema.
+                    item.keys = item.keys * 1
+                    item.values = item.values * 1
+                else:
+                    item.keys = item.keys[..., :offset, :]
+                    item.values = item.values[..., :offset, :]
         return cloned
 
     def _reference_tree_forward(self, lane, inputs, parents):

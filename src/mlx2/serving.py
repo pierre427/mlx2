@@ -10088,7 +10088,11 @@ class ServingEngine:
                 ast_memo_debug=os.environ.get("MLX2_AST_MEMO_DEBUG", "0") == "1",
             )
             self.apc = apc
-            ast_memo_handle = apc.ast_memo_handle()
+            # The AST memo is an opt-in APCv2 child; a cache without the
+            # method (test doubles, caches built without the child) has
+            # no handle, which every AST consumer below already tolerates.
+            ast_memo = getattr(apc, "ast_memo_handle", None)
+            ast_memo_handle = ast_memo() if ast_memo is not None else None
             cache_keys = {}
 
             def lookup_apc(key, tokens, **kwargs):

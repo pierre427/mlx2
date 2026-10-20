@@ -12,9 +12,11 @@ makes the op take its per-row form, which is the one-row call itself.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Hashable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from threading import RLock
-from typing import Callable, Hashable
 
 import mlx.core as mx
 
@@ -26,6 +28,29 @@ _BIT_VIEWS = {
     mx.float16: mx.uint16,
     mx.float32: mx.uint32,
 }
+_PROBES_ALLOWED = ContextVar("mlx2_row_exact_canary_probes_allowed", default=True)
+
+
+class NumericalCanaryUnavailable(RuntimeError):
+    """A row-exact verdict was absent while tensor probes were forbidden."""
+
+
+@contextmanager
+def probe_policy(*, allow: bool):
+    """Control whether a cache miss may execute a numerical parity probe.
+
+    Offline direct probes use ``allow=True`` to populate verdicts. A physical
+    target uses ``allow=False`` so a reset or stale module verdict fails closed
+    instead of putting synthetic tensor work in request execution.
+    """
+
+    if type(allow) is not bool:
+        raise TypeError("row-exact canary probe policy must be boolean")
+    token = _PROBES_ALLOWED.set(allow)
+    try:
+        yield
+    finally:
+        _PROBES_ALLOWED.reset(token)
 
 
 def bit_mismatches(actual: mx.array, expected: mx.array) -> int:
@@ -121,6 +146,10 @@ class ParityCanaries:
             full = (*build_identity(), generation, probe_rows, *key)
             result = self._results.get(full)
             if result is None:
+                if not _PROBES_ALLOWED.get():
+                    raise NumericalCanaryUnavailable(
+                        "row-exact shared numerical verdict is unavailable"
+                    )
                 mismatches, conclusive = self._run(probe, probe_rows)
                 if self.generation != generation:
                     return False  # reset during the probe: fail closed, keep nothing
@@ -149,6 +178,10 @@ class ParityCanaries:
         it was earned on.  Counted in ``snapshot`` under ``private``.
         """
         with self._lock:
+            if not _PROBES_ALLOWED.get():
+                raise NumericalCanaryUnavailable(
+                    "row-exact private numerical verdict is unavailable"
+                )
             generation = self.generation
             mismatches, conclusive = self._run(probe, (int(rows),))
             if self.generation != generation:
@@ -159,8 +192,11 @@ class ParityCanaries:
             self._private["checked"] += 1
             if mismatches:
                 self._private["failed"].append(
-                    {"key": [str(part) for part in key], "rows": int(rows),
-                     "mismatches": mismatches}
+                    {
+                        "key": [str(part) for part in key],
+                        "rows": int(rows),
+                        "mismatches": mismatches,
+                    }
                 )
             return mismatches == 0
 

@@ -15,6 +15,7 @@ import functools
 import hashlib
 import importlib.machinery
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -447,6 +448,12 @@ def main():
             return getattr(subprocess, key)
 
         def Popen(self, argv, **keywords):
+            # The smoke pins the child to this checkout's src; refuse a
+            # server that would import mlx2 from the ambient PYTHONPATH.
+            pinned = str(ROOT / "src")
+            child_env = keywords.get("env") or {}
+            assert child_env.get("PYTHONPATH", "").split(os.pathsep)[0] == pinned, (
+                "the server child must import mlx2 from this checkout")
             if "--external-draft" in argv:
                 assert argv[1:4] == ["-u", "-m", "mlx2.server"]
                 argv = [argv[0], "-u", str(Path(__file__).resolve()), "--serve-trace",

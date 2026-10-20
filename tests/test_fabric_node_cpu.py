@@ -195,7 +195,11 @@ def test_link_probe_cadence_and_bounded_history(tmp_path) -> None:
     assert peer.link is peer.link_history[-1]
 
 
-def test_two_node_join_route_receipts_refusal_and_access_controls(tmp_path):
+def test_two_node_join_route_receipts_refusal_and_access_controls(tmp_path, monkeypatch):
+    # Loopback-only unit test: pin the listener address instead of
+    # enumerating interfaces, which needs ifaddr from ~/.mlx2-fabric-site
+    # (outside the venv; see qualification/runs/fabric-m5-m3-20261018).
+    monkeypatch.setenv("MLX2_FABRIC_ADDRESSES", "127.0.0.1")
     home_a, home_b = tmp_path / "a", tmp_path / "b"
     a = create_community(home_a, hosts=("127.0.0.1",))
     key_b, csr_b = make_csr(home_b)

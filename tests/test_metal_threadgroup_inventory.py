@@ -38,6 +38,10 @@ ABOVE_M1_FLOOR = {
     # NAX (M5-only) MoE gather and its research twin.
     "runtime/models/moe_nax_gather.py": 1,
     "adapters/segmented_moe_prefill_research.py": 1,
+    # Muse D128 attention window: the one_combine/two_combine reductions
+    # launch 1024; the fused window runs only on device classes s/d
+    # (_serial_plan returns None elsewhere), so M1-M4 keep the stock SDPA.
+    "runtime/models/muse_attn_window.py": 2,
 }
 
 

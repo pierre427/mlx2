@@ -22,7 +22,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-MODELS = Path("~/mlx-models")
+MODELS = Path.home() / "mlx-models"
 POLICIES = ROOT / "qualification/runs/ast-smokes-20261018/policies"
 CONFIGS = {
     "qwen27": ("Qwen3.8-27B-oQ4e-mtp", POLICIES / "qwen38-27b-ast.json", "off", None),

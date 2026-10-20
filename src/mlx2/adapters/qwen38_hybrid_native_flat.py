@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -38,6 +39,18 @@ from ..runtime.ast_physical_target import (
     ASTPhysicalTargetCandidate,
     ast_serving_admission_receipt,
     validate_ast_serving_admission,
+)
+from ..runtime.ast_qualified_capability import (
+    DIRECT_PROBE_SCHEMA as WHOLE_LAYER_DIRECT_PROBE_SCHEMA,
+)
+from ..runtime.ast_qualified_capability import (
+    QUALIFICATION_DOMAIN_SCHEMA,
+    discover_ast_qualified_capability,
+    load_ast_qualified_capability_evidence,
+    mint_ast_qualified_capability,
+    seal_ast_direct_probe_receipt,
+    unavailable_ast_qualified_capability_discovery,
+    validate_ast_qualified_session,
 )
 from ..runtime.cache_operations import cache_operations
 from ..runtime.flat_segmented_ast import (
@@ -69,6 +82,8 @@ from ..runtime.flat_segmented_hybrid import (
     HybridLiveStateBoundary,
     NativeFlatSegmentedHybridRows,
     NativeFlatSegmentedHybridTransaction,
+    canonical_bound_hybrid_state,
+    canonical_hybrid_state,
     successor_bound_hybrid_state,
 )
 from ..runtime.flat_segmented_kv import METAL_PROBE_HARD_LIMITS
@@ -78,11 +93,18 @@ from ..runtime.models import qwen38_27b as qwen38
 from ..runtime.models import varlen_dense_mlp as _varlen_dense_mlp
 from ..runtime.models.base import create_attention_mask
 from ..runtime.models.cache import ArraysCache, KVCache
+from ..runtime.models.qwen38_whole_layer_verify import (
+    EXECUTOR_PROTOCOL as WHOLE_LAYER_EXECUTOR_PROTOCOL,
+)
+from ..runtime.models.qwen38_whole_layer_verify import (
+    execute_qwen38_whole_layer_flat,
+)
 from ..runtime.models.qwen_hybrid_row_exact import (
     _scratch,
     ordinary_one_token_step,
 )
 from ..runtime.ragged_verify_observation import current_observer
+from ..runtime.row_exact.canary import CANARIES
 from .dense_qwen3_flat import dense_qwen3_metal_device_attestation
 from .qwen38_hybrid_metal_probe import (
     MAX_BOUND_PREFIX_ROWS,
@@ -113,6 +135,7 @@ SOURCE_PATHS = (
     "src/mlx2/runtime/flat_segmented_hybrid.py",
     "src/mlx2/runtime/flat_segmented_kv.py",
     "src/mlx2/runtime/ast_execution_capability.py",
+    "src/mlx2/runtime/ast_qualified_capability.py",
     "src/mlx2/runtime/hybrid_verify_rows.py",
     "src/mlx2/runtime/hybrid_speculative.py",
     "src/mlx2/runtime/cache_operations.py",
@@ -120,6 +143,7 @@ SOURCE_PATHS = (
     "src/mlx2/runtime/segmented_plain_kv.py",
     "src/mlx2/runtime/models/cache.py",
     "src/mlx2/runtime/models/qwen38_27b.py",
+    "src/mlx2/runtime/models/qwen38_whole_layer_verify.py",
     "src/mlx2/runtime/models/qwen3_5.py",
     "src/mlx2/runtime/models/qwen3_next.py",
     "src/mlx2/runtime/models/varlen_dense_mlp.py",
@@ -161,8 +185,13 @@ SERVING_SOURCE_PATHS = SOURCE_PATHS + (
     "src/mlx2/runtime/progressive_external_verify.py",
     "src/mlx2/runtime/row_exact_verify.py",
 )
-SERVING_TARGET_CAPABILITY_SCHEMA = "mlx2.ast-qwen38-live-target.v2"
-SERVING_TARGET_PROTOCOL = "qwen38-segmented-zero-pad-or-native-flat-v1"
+SERVING_TARGET_CAPABILITY_SCHEMA = "mlx2.ast-qwen38-whole-layer-live-target.v2"
+SERVING_TARGET_PROTOCOL = "qwen38-whole-layer-ragged-live-v1"
+WHOLE_LAYER_LIVE_OWNER_SCHEMA = "mlx2.ast-qwen38-whole-layer-live-owner.v1"
+WHOLE_LAYER_QUALIFICATION_PROFILE_SCHEMA = (
+    "mlx2.ast-qwen38-whole-layer-qualification-profile.v3"
+)
+WHOLE_LAYER_PROVIDER_BINDING_SCHEMA = "mlx2.ast-qwen38-whole-layer-provider-binding.v3"
 
 
 def _canonical(value: object) -> bytes:
@@ -176,6 +205,32 @@ def _callable_identity(value):
         id(getattr(value, "__self__", None)),
         id(getattr(value, "__func__", value)),
     )
+
+
+def qwen38_whole_layer_live_owner_contract():
+    """Truthful publication authority for the qualified whole-layer route."""
+
+    return {
+        "schema": WHOLE_LAYER_LIVE_OWNER_SCHEMA,
+        "executor_protocol": WHOLE_LAYER_EXECUTOR_PROTOCOL,
+        "state_write_law": "disjoint_private_successor_until_publish",
+        "transaction_law": "one_private_b1_transaction_per_lane",
+        "row_order_law": "descriptor_lane_major_then_local_position",
+        "row_independent_law": "packed_valid_rows_once_per_transformer_layer",
+        "attention_state_law": "private_lane_kv_in_ordinary_token_order",
+        "gdn_state_law": "private_lane_recurrence_in_ordinary_token_order",
+        "publication_law": "transfer_successor_after_complete_prepare",
+        "fallback_law": "ordinary_padded_before_native_execution_only",
+        "abort_law": "base_membership_exact_or_registry_poisoned",
+        "qualification_law": "offline_exact_capability_required",
+        "serving_wired": True,
+        "selection_eligible": True,
+        "implemented": True,
+        "qualified": False,
+        "selected": False,
+        "default": False,
+        "observed_used": False,
+    }
 
 
 def _source_hashes() -> dict[str, str]:
@@ -438,7 +493,7 @@ class Qwen38HybridNativeFlatTarget:
     ):
         if type(model) is not qwen38.Model:
             raise TypeError("native Qwen3.8 target requires exact wrapper")
-        if construction_role not in {"direct_probe", "serving"}:
+        if construction_role not in {"direct_probe", "whole_layer_probe", "serving"}:
             raise ValueError("native Qwen3.8 construction role differs")
         if not isinstance(descriptor, FlatSegmentDescriptor):
             raise TypeError("native Qwen3.8 target requires validated geometry")
@@ -497,7 +552,7 @@ class Qwen38HybridNativeFlatTarget:
         self._installed_progressive_protocol = getattr(
             model, "progressive_external_verify_protocol", None
         )
-        if (construction_role == "serving") != (
+        if (construction_role in {"whole_layer_probe", "serving"}) != (
             self._installed_row_exact_route is not None
         ):
             raise ValueError("native Qwen3.8 row-exact route binding differs")
@@ -509,6 +564,8 @@ class Qwen38HybridNativeFlatTarget:
         self._observed_real_artifact = False
         self._observed_identity = None
         self._last_serving_execution_mode = None
+        self.whole_layer_invocations = 0
+        self.whole_layer_segment_invocations = 0
         # A loaded serving model is immutable for the lifetime of its adapter
         # session.  The complete binding audit below walks every executable
         # module, tensor, and arithmetic policy; doing that again at each
@@ -564,7 +621,7 @@ class Qwen38HybridNativeFlatTarget:
             or getattr(model, "progressive_external_verify_protocol", None)
             != self._installed_progressive_protocol
             or (
-                self._construction_role == "serving"
+                self._construction_role in {"whole_layer_probe", "serving"}
                 and (
                     self._installed_row_exact_executor is None
                     or self._installed_compact_exact_rows is not True
@@ -617,7 +674,7 @@ class Qwen38HybridNativeFlatTarget:
             or getattr(model, "progressive_external_verify_protocol", None)
             != self._installed_progressive_protocol
             or (
-                self._construction_role == "serving"
+                self._construction_role in {"whole_layer_probe", "serving"}
                 and (
                     self._installed_row_exact_executor is None
                     or self._installed_compact_exact_rows is not True
@@ -727,7 +784,7 @@ class Qwen38HybridNativeFlatTarget:
         }
 
     def ast_live_serving_target_contract(self):
-        """Source-bound serving capability with truthful geometry dispatch."""
+        """Source-bound qualified whole-layer serving capability."""
 
         native_contract = self.ast_native_flat_target_contract()
         return {
@@ -738,14 +795,15 @@ class Qwen38HybridNativeFlatTarget:
             "input_storage": "flat_logical_rows",
             "output_storage": "flat_logical_rows_in_segment_order",
             "physical_rows_law": "logical_rows_only_no_padding_rows",
-            "dispatch_law": (
-                "equal_length_lanes_use_segmented_zero_padding_executor_"
-                "else_literal_native_flat_b1s1_rows"
-            ),
-            "segmented_zero_padding_law": (
-                "one_bxs_row_exact_traversal_with_segmented_kv_gdn_state"
-            ),
-            "ragged_law": "ordinary_b1s1_exact_per_logical_row",
+            "executor_protocol": WHOLE_LAYER_EXECUTOR_PROTOCOL,
+            "dispatch_law": "offline_qualified_whole_layer_only",
+            "transaction_law": "one_private_b1_transaction_per_lane",
+            "row_order_law": "descriptor_lane_major_then_local_position",
+            "row_independent_law": ("packed_valid_rows_once_per_transformer_layer"),
+            "attention_state_law": "private_lane_kv_in_ordinary_token_order",
+            "gdn_state_law": "private_lane_recurrence_in_ordinary_token_order",
+            "qualification_law": "offline_exact_capability_required",
+            "executable_model_manifest_sha256": (self._expected_model_manifest_sha256),
             "state_write_law": STATE_WRITE_LAW,
             "commit_law": COMMIT_LAW,
             "abort_law": ABORT_LAW,
@@ -1003,6 +1061,60 @@ class Qwen38HybridNativeFlatTarget:
             physical_rows=descriptor.logical_rows,
         )
 
+    def execute_whole_layer_segments(self, flat_inputs, descriptor, transaction):
+        """Offline-qualified packed traversal over private lane transactions."""
+
+        self._validate_model()
+        if type(transaction) is not NativeFlatSegmentedHybridTransaction:
+            raise TypeError("whole-layer Qwen3.8 target requires exact transaction")
+        if descriptor != self.descriptor or transaction.descriptor != descriptor:
+            raise ValueError("whole-layer Qwen3.8 execution geometry differs")
+        validate_native_flat_segment_admission(
+            transaction.admission,
+            transaction.owner,
+            self,
+            descriptor,
+            expected_backend="metal",
+        )
+        self.validate_native_flat_owner(transaction.owner, descriptor)
+        self.invocations += 1
+        execution = execute_qwen38_whole_layer_flat(
+            self.model,
+            flat_inputs,
+            descriptor,
+            transaction.lane_caches,
+            self.capture_layers,
+        )
+        if execution.layer_invocations != len(self.model.language_model.model.layers):
+            raise RuntimeError("whole-layer Qwen3.8 traversal differs")
+        self.successful_invocations += 1
+        self.executed_rows += descriptor.logical_rows
+        self.layer_traversals += execution.layer_invocations
+        self.whole_layer_invocations += execution.layer_invocations
+        self.whole_layer_segment_invocations += (
+            execution.attention_segment_invocations
+            + execution.recurrent_segment_invocations
+        )
+        attestation = transaction.admission.device_attestation
+        if mx.default_device() == mx.cpu:
+            self._observed_cpu_fixture = True
+        elif (
+            mx.default_device() == mx.gpu
+            and self._bound_identity["artifact"] == QWEN38_27B_OQ4E_MTP_CHECKPOINT
+            and attestation.get("backend") == "metal"
+            and attestation.get("ready") is True
+            and attestation.get("device") == self._bound_identity["device"]
+            and attestation.get("build") == self._bound_identity["build"]
+        ):
+            self._observed_real_artifact = True
+        if self._observed_identity is None:
+            self._observed_identity = dict(self._bound_identity)
+        return NativeFlatSegmentExecution(
+            outputs=execution.outputs,
+            geometry_sha256=descriptor.geometry_sha256,
+            physical_rows=descriptor.logical_rows,
+        )
+
     def execute_live_flat_segments(self, flat_inputs, descriptor, lane_caches):
         """Literal native-flat serving entry for genuinely ragged geometry."""
 
@@ -1021,6 +1133,45 @@ class Qwen38HybridNativeFlatTarget:
         )
         self._last_serving_execution_mode = "native_flat_b1s1_rows"
         return outputs
+
+    def execute_live_whole_layer_segments(self, flat_inputs, descriptor, lane_caches):
+        """Run the offline-qualified whole-layer executor on private rows."""
+
+        attestation = self.validate_live_execution_attestation()
+        self._validate_hot_model_binding()
+        if descriptor != self.descriptor:
+            raise ValueError("whole-layer Qwen3.8 serving geometry differs")
+        self.invocations += 1
+        execution = execute_qwen38_whole_layer_flat(
+            self.model,
+            flat_inputs,
+            descriptor,
+            lane_caches,
+            self.capture_layers,
+        )
+        if execution.layer_invocations != len(self.model.language_model.model.layers):
+            raise RuntimeError("whole-layer Qwen3.8 serving traversal differs")
+        self.successful_invocations += 1
+        self.executed_rows += descriptor.logical_rows
+        self.layer_traversals += execution.layer_invocations
+        self.whole_layer_invocations += execution.layer_invocations
+        self.whole_layer_segment_invocations += (
+            execution.attention_segment_invocations
+            + execution.recurrent_segment_invocations
+        )
+        if mx.default_device() == mx.cpu:
+            self._observed_cpu_fixture = True
+        elif (
+            mx.default_device() == mx.gpu
+            and self._bound_identity["artifact"] == QWEN38_27B_OQ4E_MTP_CHECKPOINT
+            and attestation.get("backend") == "metal"
+            and attestation.get("ready") is True
+        ):
+            self._observed_real_artifact = True
+        if self._observed_identity is None:
+            self._observed_identity = dict(self._bound_identity)
+        self._last_serving_execution_mode = "whole_layer_ragged_native_flat"
+        return execution.outputs
 
     def execute_live_rectangular_segments(self, flat_inputs, descriptor, transaction):
         """Run one segmented serving traversal over private KV/GDN successors.
@@ -1147,6 +1298,9 @@ class Qwen38HybridNativeFlatTarget:
             "physical_rows": self.executed_rows,
             "padding_rows": 0,
             "outer_layer_traversals": self.layer_traversals,
+            "whole_layer_executor_protocol": WHOLE_LAYER_EXECUTOR_PROTOCOL,
+            "whole_layer_invocations": self.whole_layer_invocations,
+            "whole_layer_segment_invocations": self.whole_layer_segment_invocations,
             "row_arithmetic": (
                 self._last_serving_execution_mode
                 if serving and self._last_serving_execution_mode is not None
@@ -1193,7 +1347,9 @@ def _live_positions(rows) -> tuple[int, ...]:
 class _Qwen38LiveFlatDelegate:
     """Adapter-owned private successor and transfer publication."""
 
-    def __init__(self, target, base_rows, flat_inputs, descriptor):
+    def __init__(
+        self, target, base_rows, flat_inputs, descriptor, *, whole_layer=False
+    ):
         self.target = target
         self.base_rows = tuple(tuple(row) for row in base_rows)
         self.flat_inputs = tuple(flat_inputs)
@@ -1202,6 +1358,7 @@ class _Qwen38LiveFlatDelegate:
         self.transactions = ()
         self.execution_mode = None
         self.aggregate_transaction = False
+        self.whole_layer = bool(whole_layer)
         self._published = False
 
     def execute_private(self, *, descriptor, result_plan):
@@ -1216,7 +1373,20 @@ class _Qwen38LiveFlatDelegate:
         )
         transactions = []
         try:
-            if uniform:
+            if self.whole_layer:
+                for row, length in zip(
+                    successor, descriptor.query_lengths, strict=True
+                ):
+                    transactions.append(
+                        HybridVerifyRows((row,)).begin(lengths=(length,))
+                    )
+                outputs = self.target.execute_live_whole_layer_segments(
+                    self.flat_inputs,
+                    descriptor,
+                    tuple(transaction.owner.rows[0] for transaction in transactions),
+                )
+                self.execution_mode = "whole_layer_ragged_native_flat"
+            elif uniform:
                 transaction = HybridVerifyRows(successor).begin(
                     lengths=descriptor.query_lengths
                 )
@@ -1316,11 +1486,20 @@ class Qwen38NativeFlatServingBinding:
         session_scope_sha256,
         discovery,
         admission,
+        qualified_discovery=None,
     ):
         self.provider = provider
         self.capture_layers = tuple(capture_layers)
         self.session_scope_sha256 = session_scope_sha256
         self.discovery = dict(discovery)
+        self.qualified_discovery = (
+            None if qualified_discovery is None else dict(qualified_discovery)
+        )
+        self.whole_layer = bool(
+            self.qualified_discovery is not None
+            and self.qualified_discovery.get("available") is True
+            and self.qualified_discovery.get("qualified") is True
+        )
         self.rows = tuple(tuple(row) for row in rows)
         self.positions = _live_positions(self.rows)
         self.descriptor = descriptor
@@ -1367,7 +1546,11 @@ class Qwen38NativeFlatServingBinding:
             self.rows, self.positions, authority=self.authority
         )
         self.delegate = _Qwen38LiveFlatDelegate(
-            self.target, self.rows, flat_inputs, descriptor
+            self.target,
+            self.rows,
+            flat_inputs,
+            descriptor,
+            whole_layer=self.whole_layer,
         )
         self.coordinator = None
         self.result = None
@@ -1406,6 +1589,8 @@ class Qwen38NativeFlatServingBinding:
                 session_scope_sha256=self.session_scope_sha256,
                 discovery=self.discovery,
                 admission=self.admission,
+                rows=self.rows,
+                qualified_discovery=self.qualified_discovery,
             )
             self.coordinator.prepare(accepted_lengths, authority=self.authority)
             # Target-law and prepare callbacks have run since execution. Rebind
@@ -1416,6 +1601,8 @@ class Qwen38NativeFlatServingBinding:
                 session_scope_sha256=self.session_scope_sha256,
                 discovery=self.discovery,
                 admission=self.admission,
+                rows=self.rows,
+                qualified_discovery=self.qualified_discovery,
             )
             self.published = self.coordinator.publish(authority=self.authority)
         except BaseException:
@@ -1441,7 +1628,8 @@ class Qwen38NativeFlatServingBinding:
         return {
             "schema": "mlx2.ast-qwen38-native-flat-serving.v1",
             "implemented": True,
-            "qualified": False,
+            "qualified": self.whole_layer,
+            "eligible": True,
             "selected": True,
             "default": False,
             "observed_used": self.published is not None,
@@ -1451,6 +1639,8 @@ class Qwen38NativeFlatServingBinding:
             "admission_manifest_sha256": self.admission["manifest_sha256"],
             "result": None if self.result is None else self.result.receipt(),
             "execution_mode": self.delegate.execution_mode,
+            "qualified_capability_discovery": self.qualified_discovery,
+            "performance_claim": False,
         }
 
 
@@ -1458,9 +1648,17 @@ class Qwen38NativeFlatPhysicalTargetProvider:
     """Reviewed exact-artifact provider for generic serving discovery."""
 
     protocol = PROVIDER_PROTOCOL
+    requires_qualified_capability = True
     hard_limits: ClassVar[Mapping[str, int]] = METAL_PROBE_HARD_LIMITS
 
-    def __init__(self, model):
+    def __init__(
+        self,
+        model,
+        *,
+        qualified_capability=None,
+        qualified_capture_layers=(),
+        qualified_provenance_path=None,
+    ):
         self.model = model
         self.source_revision_token = _git_source_revision()
         _require_clean_source_revision(self.source_revision_token)
@@ -1486,7 +1684,38 @@ class Qwen38NativeFlatPhysicalTargetProvider:
             if model.mtp is None
             else QWEN38_27B_OQ4E_MTP_REVIEWED_MANIFEST["model_manifest_sha256"]
         )
+        self._expected_model_manifest_binding = self._expected_model_manifest_sha256
         self._targets = {}
+        self._qualified_capability = qualified_capability
+        self._qualified_capability_binding = (
+            None
+            if qualified_capability is None
+            else qualified_capability.manifest_sha256
+        )
+        self._qualified_capture_layers = tuple(qualified_capture_layers)
+        self._qualified_capture_layers_binding = self._qualified_capture_layers
+        self._qualified_provenance_path = qualified_provenance_path
+        self._qualified_session_authority = None
+        self._qualified_session_authority_binding = None
+        self._qualified_canary_generation = None
+        self._qualified_canaries_ready = False
+        self._qualified_capability_decline_reason = None
+        self._qualified_warmup_phase = None
+        if self._qualified_capability is not None:
+            try:
+                self._warm_qualified_whole_layer_canaries()
+            except Exception:  # noqa: BLE001 - stale evidence leaves ordinary serving
+                self._qualified_capability_decline_reason = (
+                    self._qualified_warmup_phase or "qualification_warmup_inputs_failed"
+                )
+                self._qualified_capability = None
+                self._qualified_capability_binding = None
+                self._qualified_capture_layers = ()
+                self._qualified_capture_layers_binding = ()
+                self._qualified_session_authority = None
+                self._qualified_session_authority_binding = None
+                self._qualified_canary_generation = None
+                self._qualified_canaries_ready = False
 
     def validate_revision(self):
         if (
@@ -1496,35 +1725,205 @@ class Qwen38NativeFlatPhysicalTargetProvider:
             or self.source_revision_token != self._source_revision_binding
             or self.source_identity != self._source_identity_binding
             or _serving_source_generation() != self._source_generation_binding
+            or self._expected_model_manifest_sha256
+            != self._expected_model_manifest_binding
+            or (
+                None
+                if self._qualified_capability is None
+                else self._qualified_capability.manifest_sha256
+            )
+            != self._qualified_capability_binding
+            or self._qualified_capture_layers != self._qualified_capture_layers_binding
+            or (
+                None
+                if self._qualified_session_authority is None
+                else tuple(sorted(self._qualified_session_authority.items()))
+            )
+            != self._qualified_session_authority_binding
+            or (
+                self._qualified_capability is not None
+                and (
+                    self._qualified_canaries_ready is not True
+                    or self._qualified_canary_generation != CANARIES.generation
+                )
+            )
         ):
             raise RuntimeError("Qwen3.8 AST physical-target binding drifted")
+
+    def ast_qualified_physical_target_capability(self):
+        return self._qualified_capability
+
+    def _warm_qualified_whole_layer_canaries(self):
+        """Populate process-local sub-op verdicts outside request execution."""
+
+        self._qualified_warmup_phase = "qualification_warmup_inputs_failed"
+        capability = self._qualified_capability
+        if not self._qualified_capture_layers or not self._qualified_provenance_path:
+            raise ValueError("whole-layer Qwen3.8 qualification is stale")
+        request_classes = capability.qualified_request_classes
+        if len(request_classes) != 1:
+            raise ValueError("whole-layer Qwen3.8 qualification domain differs")
+        request = json.loads(request_classes[0])
+        descriptor = FlatSegmentDescriptor.from_query_lengths(
+            tuple(request["query_lengths"])
+        )
+        self._qualified_warmup_phase = "qualification_warmup_target_failed"
+        target = self._target(descriptor, self._qualified_capture_layers)
+        self._qualified_warmup_phase = "qualification_warmup_owner_failed"
+        prefixes = tuple(
+            tuple(1 for _ in range(offset)) for offset in request["base_offsets"]
+        )
+        owner = target.make_bound_rows(prefixes)
+        self._qualified_warmup_phase = "qualification_warmup_authority_failed"
+        request_class = qwen38_whole_layer_request_class(
+            owner.rows,
+            descriptor,
+            model=self.model,
+            capture_layers=self._qualified_capture_layers,
+        )
+        profile = qwen38_whole_layer_qualification_profile(
+            identity=self.identity,
+            descriptor=descriptor,
+            capture_layers=self._qualified_capture_layers,
+            request_class=request_class,
+            executable_model_manifest_sha256=(self._expected_model_manifest_sha256),
+        )
+        provenance_path = Path(self._qualified_provenance_path)
+        if not provenance_path.is_absolute():
+            provenance_path = _PACKAGE.parents[1] / provenance_path
+        provenance_sha256 = hashlib.sha256(provenance_path.read_bytes()).hexdigest()
+        owner_contract = qwen38_whole_layer_live_owner_contract()
+        target_contract = target.ast_live_serving_target_contract()
+        provider_binding = qwen38_whole_layer_provider_binding(
+            identity=self.identity,
+            owner_source_hashes=owner.native_source_hashes,
+            target_source_hashes=target.source_hashes,
+            owner_contract=owner_contract,
+            target_contract=target_contract,
+            provenance_sha256=provenance_sha256,
+        )
+        source_hashes = dict(owner.native_source_hashes)
+        for path, digest in target.source_hashes.items():
+            if path in source_hashes and source_hashes[path] != digest:
+                raise ValueError("whole-layer Qwen3.8 source authority conflicts")
+            source_hashes[path] = digest
+        current_session = {
+            **dict(self.identity),
+            "source_manifest_sha256": _manifest(source_hashes),
+            "profile_sha256": _manifest(profile),
+            "provider_binding_sha256": _manifest(provider_binding),
+            "owner_capability_manifest_sha256": _manifest(owner_contract),
+            "target_capability_manifest_sha256": _manifest(target_contract),
+            "executor_protocol": WHOLE_LAYER_EXECUTOR_PROTOCOL,
+        }
+        if current_session != dict(capability.session_binding):
+            raise ValueError("whole-layer Qwen3.8 live authority differs")
+        self._qualified_session_authority = MappingProxyType(current_session)
+        self._qualified_session_authority_binding = tuple(
+            sorted(current_session.items())
+        )
+        self._qualified_warmup_phase = "qualification_warmup_session_failed"
+        validate_ast_qualified_session(
+            capability,
+            current_session,
+            layout_class="flat_segmented",
+            query_lengths=tuple(request_class["query_lengths"]),
+            base_offsets=tuple(request_class["base_offsets"]),
+            capacities=tuple(request_class["capacities"]),
+            allocation_steps=tuple(request_class["allocation_steps"]),
+            capture_schema_sha256=request_class["capture_schema_sha256"],
+            state_schema_sha256=request_class["state_schema_sha256"],
+        )
+        self._qualified_warmup_phase = "qualification_warmup_numerical_failed"
+        transactions = _private_lane_transactions(
+            copy.deepcopy(owner.rows), descriptor.query_lengths
+        )
+        try:
+            execute_qwen38_whole_layer_flat(
+                self.model,
+                tuple(range(1, descriptor.logical_rows + 1)),
+                descriptor,
+                tuple(item.caches for item in transactions),
+                self._qualified_capture_layers,
+                allow_numerical_canaries=True,
+            )
+        finally:
+            for transaction in transactions:
+                if not transaction.closed:
+                    transaction.abort()
+        self._qualified_canary_generation = CANARIES.generation
+        self._qualified_canaries_ready = True
+        self._qualified_warmup_phase = "qualification_warmup_postcheck_failed"
+        discovery = self.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=self._qualified_capture_layers,
+        )
+        if discovery.get("available") is not True:
+            raise ValueError("whole-layer Qwen3.8 qualification domain is stale")
+        self._qualified_warmup_phase = None
+        self._qualified_capability_decline_reason = None
+
+    def discover_qualified_serving_request(self, *, rows, descriptor, capture_layers):
+        """Cheap exact-domain check performed before private state exists."""
+
+        if (
+            self._qualified_canaries_ready is not True
+            or self._qualified_canary_generation != CANARIES.generation
+        ):
+            if self._qualified_capability_decline_reason is not None:
+                return unavailable_ast_qualified_capability_discovery(
+                    self._qualified_capability_decline_reason
+                )
+            return discover_ast_qualified_capability(
+                None,
+                provider_getter=lambda: self,
+                session_binding={},
+                layout_class="flat_segmented",
+                query_lengths=tuple(descriptor.query_lengths),
+                base_offsets=tuple(0 for _ in descriptor.query_lengths),
+                capacities=tuple(0 for _ in descriptor.query_lengths),
+                allocation_steps=tuple(1 for _ in descriptor.query_lengths),
+                capture_schema_sha256="0" * 64,
+                state_schema_sha256="0" * 64,
+            )
+        request_class = qwen38_whole_layer_request_class(
+            rows,
+            descriptor,
+            model=self.model,
+            capture_layers=capture_layers,
+        )
+        profile = qwen38_whole_layer_qualification_profile(
+            identity=self.identity,
+            descriptor=descriptor,
+            capture_layers=capture_layers,
+            request_class=request_class,
+            executable_model_manifest_sha256=(self._expected_model_manifest_sha256),
+        )
+        session = (
+            {}
+            if self._qualified_session_authority is None
+            else dict(self._qualified_session_authority)
+        )
+        session["profile_sha256"] = _manifest(profile)
+        return discover_ast_qualified_capability(
+            self,
+            provider_getter=lambda: self,
+            session_binding=session,
+            layout_class="flat_segmented",
+            query_lengths=tuple(request_class["query_lengths"]),
+            base_offsets=tuple(request_class["base_offsets"]),
+            capacities=tuple(request_class["capacities"]),
+            allocation_steps=tuple(request_class["allocation_steps"]),
+            capture_schema_sha256=request_class["capture_schema_sha256"],
+            state_schema_sha256=request_class["state_schema_sha256"],
+        )
 
     @staticmethod
     def serving_admission_contract():
         """Truthful owner contract used only for live serving admission."""
 
-        return {
-            "schema": "mlx2.ast-qwen38-live-serving-owner.v2",
-            "state_write_law": "disjoint_private_successor_until_publish",
-            "transaction_law": (
-                "aggregate_segmented_transaction_only_for_zero_padding_geometry_"
-                "else_one_b1_transaction_per_lane"
-            ),
-            "segmented_execution_law": (
-                "one_row_exact_traversal_for_equal_length_lanes"
-            ),
-            "ragged_execution_law": "literal_native_flat_b1s1_rows",
-            "publication_law": "transfer_successor_after_complete_prepare",
-            "fallback_law": "ordinary_padded_before_native_execution_only",
-            "abort_law": "base_membership_exact_or_registry_poisoned",
-            "serving_wired": True,
-            "selection_eligible": True,
-            "implemented": True,
-            "qualified": False,
-            "selected": False,
-            "default": False,
-            "observed_used": False,
-        }
+        return qwen38_whole_layer_live_owner_contract()
 
     def _session_source_manifest(self, session_scope_sha256):
         # Provider installation is the model/engine session boundary at which
@@ -1629,6 +2028,7 @@ class Qwen38NativeFlatPhysicalTargetProvider:
         session_scope_sha256,
         discovery,
         admission,
+        qualified_discovery=None,
     ):
         self.validate_live_serving_admission(
             descriptor=descriptor,
@@ -1636,6 +2036,8 @@ class Qwen38NativeFlatPhysicalTargetProvider:
             session_scope_sha256=session_scope_sha256,
             discovery=discovery,
             admission=admission,
+            rows=rows,
+            qualified_discovery=qualified_discovery,
         )
         return Qwen38NativeFlatServingBinding(
             self,
@@ -1646,6 +2048,7 @@ class Qwen38NativeFlatPhysicalTargetProvider:
             session_scope_sha256=session_scope_sha256,
             discovery=discovery,
             admission=admission,
+            qualified_discovery=qualified_discovery,
         )
 
     def validate_live_serving_admission(
@@ -1656,6 +2059,8 @@ class Qwen38NativeFlatPhysicalTargetProvider:
         session_scope_sha256,
         discovery,
         admission,
+        rows=None,
+        qualified_discovery=None,
     ):
         """Rebind all mutable authority immediately before publication."""
 
@@ -1683,14 +2088,53 @@ class Qwen38NativeFlatPhysicalTargetProvider:
         }
         if any(checked.get(name) != value for name, value in expected.items()):
             raise RuntimeError("Qwen3.8 AST live admission authority drifted")
+        if qualified_discovery is not None:
+            refreshed = self.discover_qualified_serving_request(
+                rows=rows,
+                descriptor=descriptor,
+                capture_layers=capture_layers,
+            )
+            if (
+                refreshed != qualified_discovery
+                or refreshed.get("available") is not True
+            ):
+                raise RuntimeError("Qwen3.8 AST qualified authority drifted")
         return checked
 
 
-def install_qwen38_native_flat_physical_target_provider(model):
+def install_qwen38_native_flat_physical_target_provider(
+    model, *, qualified_capability_evidence_path=None
+):
     """Install only when exact repository provenance is locally available."""
 
     try:
-        return Qwen38NativeFlatPhysicalTargetProvider(model)
+        evidence_path = qualified_capability_evidence_path or os.environ.get(
+            "MLX2_AST_QUALIFIED_CAPABILITY_RECEIPT"
+        )
+        capability = None
+        capture_layers = ()
+        provenance_path = None
+        if evidence_path:
+            try:
+                evidence = json.loads(Path(evidence_path).read_text())
+                capability = load_ast_qualified_capability_evidence(evidence)
+                capture_layers = tuple(evidence.get("capture_layers", ()))
+                provenance = evidence.get("reviewed_provenance")
+                if not isinstance(provenance, Mapping):
+                    raise TypeError("whole-layer qualification provenance differs")
+                provenance_path = provenance.get("path")
+                if not isinstance(provenance_path, str):
+                    raise TypeError("whole-layer qualification provenance differs")
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                capability = None
+                capture_layers = ()
+                provenance_path = None
+        return Qwen38NativeFlatPhysicalTargetProvider(
+            model,
+            qualified_capability=capability,
+            qualified_capture_layers=capture_layers,
+            qualified_provenance_path=provenance_path,
+        )
     except (OSError, RuntimeError, subprocess.SubprocessError):
         return None
 
@@ -1929,13 +2373,457 @@ def run_qwen38_hybrid_native_flat_probe(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class Qwen38WholeLayerProbeResult:
+    """Offline whole-layer evidence plus its authority-minted capability."""
+
+    receipt: dict[str, object]
+    capability: object
+    evidence: dict[str, object]
+
+
+def _whole_layer_state_schema(rows) -> str:
+    schema = []
+    for row in rows:
+        lane = []
+        for cache in row:
+            if type(cache) is KVCache:
+                lane.append(
+                    (
+                        "kv",
+                        None if cache.keys is None else tuple(cache.keys.shape),
+                        None if cache.keys is None else str(cache.keys.dtype),
+                        int(cache.step),
+                    )
+                )
+            elif type(cache) is ArraysCache:
+                lane.append(
+                    (
+                        "arrays",
+                        tuple(
+                            (tuple(value.shape), str(value.dtype))
+                            for value in cache.cache
+                        ),
+                    )
+                )
+            else:  # pragma: no cover - target owner validation rejects first
+                raise TypeError("whole-layer Qwen3.8 state schema differs")
+        schema.append(tuple(lane))
+    return _manifest(tuple(schema))
+
+
+def qwen38_whole_layer_request_class(rows, descriptor, *, model, capture_layers):
+    """Token-free exact request class shared by direct probe and serving."""
+
+    base_offsets = list(_live_positions(rows))
+    capacities = []
+    allocation_steps = []
+    for row in rows:
+        lane_capacities = {
+            int(cache.keys.shape[2])
+            for cache in row
+            if type(cache) is KVCache and cache.keys is not None
+        }
+        lane_steps = {int(cache.step) for cache in row if type(cache) is KVCache}
+        if len(lane_capacities) != 1 or len(lane_steps) != 1:
+            raise ValueError("whole-layer Qwen3.8 KV allocation class differs")
+        capacities.append(next(iter(lane_capacities)))
+        allocation_steps.append(next(iter(lane_steps)))
+    hidden_size = int(model.language_model.args.hidden_size)
+    captures = tuple(capture_layers)
+    return {
+        "query_lengths": list(descriptor.query_lengths),
+        "base_offsets": base_offsets,
+        "capacities": capacities,
+        "allocation_steps": allocation_steps,
+        "capture_schema_sha256": _manifest(
+            {
+                "layers": list(captures),
+                "feature_width": hidden_size * len(captures),
+            }
+        ),
+        "state_schema_sha256": _whole_layer_state_schema(rows),
+    }
+
+
+def qwen38_whole_layer_qualification_profile(
+    *,
+    identity,
+    descriptor,
+    capture_layers,
+    request_class,
+    executable_model_manifest_sha256,
+):
+    """Stable serving-compatible profile; contains no probe token content."""
+
+    checked = _identity(identity)
+    captures = tuple(capture_layers)
+    if tuple(request_class.get("query_lengths", ())) != descriptor.query_lengths:
+        raise ValueError("whole-layer Qwen3.8 profile geometry differs")
+    return {
+        "schema": WHOLE_LAYER_QUALIFICATION_PROFILE_SCHEMA,
+        "artifact": checked["artifact"],
+        "executable_model_manifest_sha256": _sha256(
+            executable_model_manifest_sha256,
+            "whole-layer Qwen3.8 executable model manifest",
+        ),
+        "executor_protocol": WHOLE_LAYER_EXECUTOR_PROTOCOL,
+        "layout_class": LAYOUT_CLASS,
+        "query_lengths": list(descriptor.query_lengths),
+        "capture_layers": list(captures),
+        "request_class_sha256": _manifest(request_class),
+        "oracle": "ordinary_serial_b1s1",
+        "numerical_equivalence": "bit_exact",
+        "performance_claim": False,
+    }
+
+
+def qwen38_whole_layer_provider_binding(
+    *,
+    identity,
+    owner_source_hashes,
+    target_source_hashes,
+    owner_contract,
+    target_contract,
+    provenance_sha256,
+):
+    """Stable live/provider authority shared by direct probe and serving."""
+
+    checked = _identity(identity)
+    return {
+        "schema": WHOLE_LAYER_PROVIDER_BINDING_SCHEMA,
+        **checked,
+        "provider_protocol": PROVIDER_PROTOCOL,
+        "executor_protocol": WHOLE_LAYER_EXECUTOR_PROTOCOL,
+        "owner_source_manifest_sha256": _manifest(owner_source_hashes),
+        "target_source_manifest_sha256": _manifest(target_source_hashes),
+        "owner_capability_manifest_sha256": _manifest(owner_contract),
+        "target_capability_manifest_sha256": _manifest(target_contract),
+        "provenance_sha256": _sha256(
+            provenance_sha256, "whole-layer Qwen3.8 provenance"
+        ),
+    }
+
+
+def _private_lane_transactions(rows, lengths):
+    transactions = []
+    try:
+        for row, length in zip(rows, lengths, strict=True):
+            transactions.append(HybridVerifyRows((row,)).begin((length,)))
+    except BaseException:
+        for transaction in transactions:
+            if not transaction.closed:
+                transaction.abort()
+        raise
+    return transactions
+
+
+def run_qwen38_whole_layer_direct_probe(
+    owner,
+    target,
+    descriptor,
+    flat_tokens: Sequence[int],
+    accepted_lengths: Sequence[int],
+    continuation_tokens: Sequence[int],
+    *,
+    profile_sha256: str,
+    provider_binding_sha256: str,
+    expected_identity: Mapping[str, str],
+    expected_owner_semantic_contract_sha256: str,
+    expected_state_contract_fingerprints: Sequence[str],
+    expected_owner_source_hashes: Mapping[str, str],
+    expected_target_source_hashes: Mapping[str, str],
+):
+    """Run the complete offline exactness campaign and mint no weaker claim.
+
+    The acceptance vector must cover anchor-only (zero drafted acceptance), a
+    partial prefix and a full nontrivial prefix in the same exact request
+    class.  The runner additionally exercises abort, each lane alone, the
+    ordinary serial fallback, prepared state, publication and continuation.
+    """
+
+    if (
+        type(owner) is not NativeFlatSegmentedHybridRows
+        or type(target) is not Qwen38HybridNativeFlatTarget
+        or target._construction_role != "whole_layer_probe"
+        or target.invocations != 0
+    ):
+        raise TypeError("whole-layer Qwen3.8 probe requires a fresh offline target")
+    tokens = tuple(flat_tokens)
+    accepted = tuple(accepted_lengths)
+    continuation = tuple(continuation_tokens)
+    if (
+        descriptor != target.descriptor
+        or len(tokens) != descriptor.logical_rows
+        or any(type(token) is not int or token < 0 for token in tokens)
+        or len(accepted) != descriptor.lane_count
+        or any(type(value) is not int for value in accepted)
+        or any(
+            value < 1 or value > length
+            for value, length in zip(accepted, descriptor.query_lengths, strict=True)
+        )
+        or len(continuation) != descriptor.lane_count
+        or any(type(token) is not int or token < 0 for token in continuation)
+    ):
+        raise FlatSegmentError("whole-layer Qwen3.8 probe geometry differs")
+    zero_commit = any(value == 1 for value in accepted)
+    partial_commit = any(
+        1 < value < length
+        for value, length in zip(accepted, descriptor.query_lengths, strict=True)
+    )
+    full_commit = any(
+        length > 1 and value == length
+        for value, length in zip(accepted, descriptor.query_lengths, strict=True)
+    )
+    if not (zero_commit and partial_commit and full_commit):
+        raise FlatSegmentError(
+            "whole-layer Qwen3.8 probe must cover zero, partial and full acceptance"
+        )
+
+    admission = query_native_flat_segment_admission(
+        owner,
+        target,
+        descriptor,
+        expected_identity=expected_identity,
+        expected_owner_semantic_contract_sha256=(
+            expected_owner_semantic_contract_sha256
+        ),
+        expected_state_contract_fingerprints=expected_state_contract_fingerprints,
+        expected_owner_source_hashes=expected_owner_source_hashes,
+        expected_target_source_hashes=expected_target_source_hashes,
+        expected_backend="metal",
+    )
+    if not admission.available:
+        raise FlatSegmentUnsupported(
+            "whole-layer Qwen3.8 admission declined: "
+            + ",".join(admission.decline_reasons)
+        )
+
+    base_rows = copy.deepcopy(owner.rows)
+    base_bound_state = canonical_bound_hybrid_state(owner.rows, owner.boundaries)
+    expected_outputs, expected_state, expected_continuation = _ordinary_serial_oracles(
+        target, owner, descriptor, tokens, accepted, continuation
+    )
+    identity = _identity(expected_identity)
+    source_hashes = dict(expected_owner_source_hashes)
+    for name, digest in expected_target_source_hashes.items():
+        if name in source_hashes and source_hashes[name] != digest:
+            raise FlatSegmentError("whole-layer Qwen3.8 source authority conflicts")
+        source_hashes[name] = digest
+    request_class = qwen38_whole_layer_request_class(
+        base_rows,
+        descriptor,
+        model=target.model,
+        capture_layers=target.capture_layers,
+    )
+    coverage = {
+        "outputs": True,
+        "features": True,
+        "prepared_state": True,
+        "continuation": True,
+        "zero_commit": zero_commit,
+        "partial_commit": partial_commit,
+        "full_commit": full_commit,
+        "abort_rollback": True,
+        "lane_isolation": True,
+        "ordinary_fallback": True,
+    }
+    body = {
+        "schema": WHOLE_LAYER_DIRECT_PROBE_SCHEMA,
+        "execution_scope": "whole_transformer_layer_ragged_native_flat",
+        "fidelity": "exact",
+        "oracle": "ordinary_serial_b1s1",
+        "numerical_equivalence": "bit_exact",
+        "session_binding": {
+            "source_revision": identity["source_revision"],
+            "source_manifest_sha256": _manifest(source_hashes),
+            "build": identity["build"],
+            "device": identity["device"],
+            "artifact": identity["artifact"],
+            "profile_sha256": _sha256(profile_sha256, "whole-layer Qwen3.8 profile"),
+            "provider_binding_sha256": _sha256(
+                provider_binding_sha256, "whole-layer Qwen3.8 provider binding"
+            ),
+            "owner_capability_manifest_sha256": _manifest(
+                qwen38_whole_layer_live_owner_contract()
+            ),
+            "target_capability_manifest_sha256": _manifest(
+                target.ast_live_serving_target_contract()
+            ),
+            "executor_protocol": WHOLE_LAYER_EXECUTOR_PROTOCOL,
+        },
+        "layout_classes": [LAYOUT_CLASS],
+        "hard_limits": dict(target.hard_limits),
+        "qualification_domain": {
+            "schema": QUALIFICATION_DOMAIN_SCHEMA,
+            "request_classes": [request_class],
+        },
+        "coverage": coverage,
+        "passed": True,
+        "performance_claim": False,
+    }
+
+    # Numerical parity probes belong to this offline authority only. Warm the
+    # exact packed request class on private state, then require the qualifying
+    # execution itself to consume cached verdicts without synthetic tensor
+    # work. A canary reset or stale module verdict therefore fails closed.
+    warm_rows = copy.deepcopy(base_rows)
+    warm_transactions = _private_lane_transactions(warm_rows, descriptor.query_lengths)
+    try:
+        execute_qwen38_whole_layer_flat(
+            target.model,
+            tokens,
+            descriptor,
+            tuple(item.caches for item in warm_transactions),
+            target.capture_layers,
+            allow_numerical_canaries=True,
+        )
+    finally:
+        for item in warm_transactions:
+            if not item.closed:
+                item.abort()
+
+    transaction = owner.begin_native_flat(
+        descriptor, target_executor=target, admission=admission
+    )
+    published = False
+    try:
+        execution = target.execute_whole_layer_segments(tokens, descriptor, transaction)
+        validate_native_flat_segment_execution(execution, descriptor)
+        if not _outputs_exact(execution.outputs, expected_outputs):
+            raise FlatSegmentError("whole-layer Qwen3.8 full-logit/tap oracle differs")
+
+        # The same packed execution must be independent of its cohort topology.
+        alone_outputs = []
+        for lane, length in enumerate(descriptor.query_lengths):
+            lane_rows = [copy.deepcopy(base_rows[lane])]
+            (lane_transaction,) = _private_lane_transactions(lane_rows, (length,))
+            try:
+                lane_descriptor = FlatSegmentDescriptor.from_query_lengths((length,))
+                lane_execution = execute_qwen38_whole_layer_flat(
+                    target.model,
+                    tokens[descriptor.lane_slice(lane)],
+                    lane_descriptor,
+                    (lane_transaction.caches,),
+                    target.capture_layers,
+                    allow_numerical_canaries=True,
+                )
+                alone_outputs.extend(lane_execution.outputs)
+            finally:
+                if not lane_transaction.closed:
+                    lane_transaction.abort()
+        if not _outputs_exact(execution.outputs, tuple(alone_outputs)):
+            raise FlatSegmentError("whole-layer Qwen3.8 lane isolation differs")
+
+        # A completed private execution must still restore exactly on abort.
+        abort_rows = copy.deepcopy(base_rows)
+        before_abort = canonical_hybrid_state(abort_rows)
+        abort_transactions = _private_lane_transactions(
+            abort_rows, descriptor.query_lengths
+        )
+        try:
+            execute_qwen38_whole_layer_flat(
+                target.model,
+                tokens,
+                descriptor,
+                tuple(item.caches for item in abort_transactions),
+                target.capture_layers,
+            )
+        finally:
+            for item in abort_transactions:
+                if not item.closed:
+                    item.abort()
+        if canonical_hybrid_state(abort_rows) != before_abort:
+            raise FlatSegmentError("whole-layer Qwen3.8 abort rollback differs")
+
+        # Preserve and execute the ordinary literal B1/S1 implementation as a
+        # distinct fallback; it does not share the packed executor's arithmetic.
+        fallback_rows = copy.deepcopy(base_rows)
+        fallback_transactions = _private_lane_transactions(
+            fallback_rows, descriptor.query_lengths
+        )
+        try:
+            fallback = target._execute_rows(
+                tokens,
+                descriptor,
+                tuple(item.caches for item in fallback_transactions),
+                execution_attestation=admission.device_attestation,
+            )
+        finally:
+            for item in fallback_transactions:
+                if not item.closed:
+                    item.abort()
+        if not _outputs_exact(fallback, expected_outputs):
+            raise FlatSegmentError("whole-layer Qwen3.8 ordinary fallback differs")
+
+        prepared = transaction.prepare_commit(accepted)
+        if prepared.state != expected_state:
+            raise FlatSegmentError("whole-layer Qwen3.8 prepared state differs")
+        prepared_rows = transaction._prepared_successor_rows_for_oracle(prepared)
+        actual_continuation = []
+        for lane, token in enumerate(continuation):
+            logits, taps = _ordinary_forward_with_taps(
+                target.model,
+                mx.array([[token]], dtype=mx.int32),
+                copy.deepcopy(prepared_rows[lane]),
+                target.capture_layers,
+            )
+            mx.eval(logits, taps)
+            actual_continuation.append((logits[0, 0], taps[0, 0]))
+        if not _outputs_exact(tuple(actual_continuation), expected_continuation):
+            raise FlatSegmentError("whole-layer Qwen3.8 continuation oracle differs")
+        # Validate and mint the immutable authority before the sole live-state
+        # publication. Any malformed/stale binding still aborts private state.
+        receipt = seal_ast_direct_probe_receipt(body)
+        capability = mint_ast_qualified_capability(receipt)
+        if transaction.publish_commit(prepared) != expected_state:
+            raise FlatSegmentError("whole-layer Qwen3.8 publication differs")
+        published = True
+    finally:
+        if not transaction.closed and not published:
+            transaction.abort()
+
+    if canonical_bound_hybrid_state(owner.rows, owner.boundaries) != expected_state:
+        raise FlatSegmentError("whole-layer Qwen3.8 final bound state differs")
+    return Qwen38WholeLayerProbeResult(
+        receipt=receipt,
+        capability=capability,
+        evidence={
+            "schema": "mlx2.ast-qwen38-whole-layer-evidence.v1",
+            "checkpoint": identity["artifact"],
+            "source_revision": identity["source_revision"],
+            "geometry_sha256": descriptor.geometry_sha256,
+            "initial_state_sha256": _manifest(base_bound_state),
+            "published_state_sha256": _manifest(expected_state),
+            "executor_protocol": WHOLE_LAYER_EXECUTOR_PROTOCOL,
+            "layer_invocations": len(target.model.language_model.model.layers),
+            "logical_rows": descriptor.logical_rows,
+            "padding_rows": 0,
+            "offline_numerical_canary_warmup": True,
+            "qualified_execution_numerical_canary": False,
+            "request_time_numerical_canary": False,
+            "implemented": True,
+            "qualified": True,
+            "eligible": False,
+            "selected": False,
+            "default": False,
+            "observed_used": False,
+            "observed_used_cpu_fixture": target._observed_cpu_fixture,
+            "observed_used_real_artifact": target._observed_real_artifact,
+            "performance_claim": False,
+        },
+    )
+
+
 __all__ = [
     "PHYSICAL_LAYOUT",
     "PROBE_SCHEMA",
     "SOURCE_PATHS",
     "Qwen38HybridNativeFlatProbeResult",
     "Qwen38HybridNativeFlatTarget",
+    "Qwen38WholeLayerProbeResult",
     "install_qwen38_native_flat_physical_target_provider",
     "make_reviewed_qwen38_27b_native_flat_target",
     "run_qwen38_hybrid_native_flat_probe",
+    "run_qwen38_whole_layer_direct_probe",
 ]

@@ -57,6 +57,7 @@ def make_gen(width):
     gen.num_draft = 7
     gen.pair_context_tokens = False
     gen.pairwise_selection = "host"
+    gen.progressive_alternative_strategy = "distinct_root"  # constructor default
     gen.tree_gates = {g: True for g in (
         "cache_executor", "codebook_cache", "batched_laws",
         "logprobs_on_request", "single_fence", "pipeline_draft")}

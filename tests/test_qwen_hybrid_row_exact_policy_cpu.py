@@ -296,6 +296,17 @@ def test_route_identity_and_metadata_bind_the_selection():
     contract = adapter._external_execution_numerics()["target_verify_row_exact"]
     assert contract["algorithm"] == QHR.ALGORITHM
     assert set(contract["source_hashes"]) == set(QHR.SOURCE_PATHS)
+    assert {
+        "src/mlx2/runtime/models/qwen38_fused_gdn.py",
+        "src/mlx2/runtime/models/qwen4_fused_gdn.py",
+        "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py",
+        "src/mlx2/runtime/models/qwen_gdn_contracts.py",
+        "src/mlx2/runtime/models/gdn_kernel_contract.py",
+        "src/mlx2/runtime/models/gdn_state.py",
+        "src/mlx2/runtime/models/cache.py",
+        "src/mlx2/runtime/segmented_batch_cache.py",
+        "src/mlx2/runtime/state_plane_operations.py",
+    }.issubset(contract["source_hashes"])
     assert contract["static_refusals"] == {}
     adapter.external_policy = {"draft_model": "/draft"}
     assert "target_verify_row_exact" not in adapter._external_execution_numerics()

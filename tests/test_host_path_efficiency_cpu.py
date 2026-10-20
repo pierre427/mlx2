@@ -92,6 +92,7 @@ def setup_executor(kind, processors):
     batch._chain_draft_cap = lambda: None
     batch.pair_context_tokens = False
     batch.pairwise_selection = "batched" if kind == "pairwise" else "off"
+    batch.progressive_alternative_strategy = "distinct_root"  # constructor default
     batch.adaptive_policy = None
     batch.continuation_policy = None
     batch.scheduler_stats = Counter(

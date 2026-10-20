@@ -616,6 +616,179 @@ def _serial_equivalent_stand_in(self, qkv, z, b, a, mask, cache):
     return mx.concatenate(cores, axis=1)
 
 
+def _install_qwen38_batch_verify_stand_in(monkeypatch, *, exact):
+    """Install a CPU stand-in with the batched kernel's exact ABI."""
+
+    from mlx2.runtime.models import qwen38_fused_gdn as Q38
+
+    active = []
+    original = Q38.GatedDeltaNet._try_fused_batch_verify
+
+    def invoke(layer, *args, **kwargs):
+        active.append(layer)
+        try:
+            return original(layer, *args, **kwargs)
+        finally:
+            active.pop()
+
+    def build(
+        qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias,
+        recurrent_state, norm_weight, norm_eps, row_steps, **kwargs,
+    ):
+        del conv_weight, A_log, dt_bias, norm_weight, norm_eps, kwargs
+        layer = active[-1]
+        steps = qkv.shape[1]
+        lane_outputs = []
+        lane_finals = []
+        lane_state_snapshots = []
+        lane_conv_snapshots = []
+        for lane, valid in enumerate(row_steps):
+            scratch = QHR._scratch(
+                conv_state[lane:lane + 1], recurrent_state[lane:lane + 1]
+            )
+            outputs = []
+            states = []
+            for position in range(valid):
+                cut = slice(position, position + 1)
+                route, value = QHR.ordinary_one_token_step(
+                    layer,
+                    qkv[lane:lane + 1, cut],
+                    z[lane:lane + 1, cut],
+                    b[lane:lane + 1, cut],
+                    a[lane:lane + 1, cut],
+                    scratch,
+                    qkv.dtype,
+                    probe=True,
+                )
+                assert route == "stock_decode"
+                outputs.append(value)
+                states.append((scratch[0], scratch[1]))
+            zero = mx.zeros_like(outputs[0])
+            lane_outputs.append(
+                mx.concatenate(outputs + [zero] * (steps - valid), axis=1)
+            )
+            lane_finals.append(states[-1])
+            state_snaps = []
+            conv_snaps = []
+            for position in range(steps - 1):
+                if position < valid - 1:
+                    conv_value, state_value = states[position]
+                else:
+                    # Deliberately invalid padding: zero/full rollback must
+                    # not gather an unwritten intermediate snapshot.
+                    conv_value = mx.full_like(conv_state[lane:lane + 1], mx.nan)
+                    state_value = mx.full_like(
+                        recurrent_state[lane:lane + 1], mx.nan
+                    )
+                conv_snaps.append(conv_value)
+                state_snaps.append(state_value)
+            lane_conv_snapshots.append(mx.stack(conv_snaps, axis=1))
+            lane_state_snapshots.append(mx.stack(state_snaps, axis=1))
+        conv = mx.concatenate([value[0] for value in lane_finals], axis=0)
+        state = mx.concatenate([value[1] for value in lane_finals], axis=0)
+        if not exact:
+            state = state + 1
+        return (
+            mx.concatenate(lane_outputs, axis=0),
+            conv,
+            state,
+            mx.concatenate(lane_state_snapshots, axis=0),
+            mx.concatenate(lane_conv_snapshots, axis=0),
+        )
+
+    monkeypatch.setattr(QHR, "_fused_runtime_supported", lambda: True)
+    monkeypatch.setattr(Q38.GatedDeltaNet, "_try_fused_batch_verify", invoke)
+    monkeypatch.setattr(Q38.kernels, "fused_gdn_runtime_supported", lambda: True)
+    monkeypatch.setattr(Q38.kernels, "served_silu_refusal", lambda: None)
+    monkeypatch.setattr(
+        Q38.verify_kernels,
+        "admit_qwen4_fused_gdn_batch_verify",
+        lambda **kwargs: Q38.verify_kernels.FusedGdnAdmission(True, "eligible"),
+    )
+    monkeypatch.setattr(
+        Q38.verify_kernels,
+        "probe_qwen4_fused_gdn_batch_verify",
+        lambda *args, **kwargs: 32,
+    )
+    monkeypatch.setattr(
+        Q38.verify_kernels, "qwen4_fused_gdn_batch_verify", build
+    )
+
+
+@pytest.mark.parametrize("canary_passes", [True, False])
+def test_qwen38_batched_fused_gdn_ast_route_is_exact_and_canary_gated(
+    canary_passes, monkeypatch
+):
+    """B4 ragged AST engagement is exact; a failed canary stays serial."""
+
+    from mlx2.runtime.models import qwen38_fused_gdn as Q38
+    from mlx2.runtime.row_exact.canary import CANARIES
+
+    CANARIES.reset()
+    _install_qwen38_batch_verify_stand_in(
+        monkeypatch, exact=canary_passes
+    )
+    model = tiny_target()
+    for _, module in model.named_modules():
+        if isinstance(module, Q38.GatedDeltaNet):
+            module.set_fused_gdn_enabled(True)
+    model.configure_target_verify_row_exact(True)
+    lengths = [4, 3, 2, 1]
+    accepted = [2, 3, 1, 1]
+    bases = _bases(model, 4)
+    tokens = _tokens(lengths)
+    _owner, transaction, result = _launch(model, bases, lengths)
+    assert result.row_exact is True, result.detail
+    routes = model.external_execution_receipt["target_verify_row_exact"]["routes"]
+    layers = [
+        module
+        for _, module in model.named_modules()
+        if isinstance(module, Q38.GatedDeltaNet)
+    ]
+    if canary_passes:
+        assert result.detail["gdn_route"] == "fused_batch_verify"
+        assert routes["gdn"] == {
+            "fused_batch_verify_decode_parity": len(layers) * 16
+        }
+        assert "gdn_canary" not in routes
+        assert all(
+            layer.fused_gdn_counters["batch_verify_calls"] == 1
+            and layer.fused_gdn_counters["batch_verify_tokens"] == 10
+            for layer in layers
+        )
+    else:
+        assert result.detail["gdn_route"] == "serial_one_token"
+        assert routes["gdn_canary"] == {
+            "batch_verify_differs_from_decode": len(layers)
+        }
+        assert all(
+            layer.fused_gdn_counters["batch_verify_calls"] == 0
+            and layer.fused_gdn_counters["batch_verify_rows"] == 0
+            and layer.fused_gdn_counters["batch_verify_tokens"] == 0
+            for layer in layers
+        )
+    for lane, valid in enumerate(lengths):
+        logits, taps = _serial(
+            model, copy.deepcopy(bases[lane]), tokens[lane][:valid]
+        )
+        np.testing.assert_array_equal(
+            np.asarray(result.logits[lane:lane + 1, :valid]),
+            np.asarray(logits),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(result.features[lane:lane + 1, :valid]),
+            np.asarray(taps),
+        )
+    committed = transaction.commit(accepted)
+    for lane, kept in enumerate(accepted):
+        reference = copy.deepcopy(bases[lane])
+        _serial(model, reference, tokens[lane][:kept])
+        np.testing.assert_array_equal(
+            _next_logits(model, committed[lane]), _next_logits(model, reference)
+        )
+    CANARIES.reset()
+
+
 @pytest.mark.parametrize(
     "stand_in, canary_passes",
     [(_stock_core_stand_in, False), (_serial_equivalent_stand_in, True)],

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
+from types import MappingProxyType
 
 import mlx.core as mx
 import pytest
@@ -13,6 +15,8 @@ from test_qwen38_hybrid_native_flat_cpu import _pair
 
 from mlx2.adapters.qwen38_hybrid_metal_probe import (
     QWEN38_27B_OQ4E_MTP_CHECKPOINT,
+    QWEN38_27B_OQ4E_MTP_REVIEWED_MANIFEST,
+    QWEN38_27B_OQ4E_NO_MTP_MODEL_MANIFEST_SHA256,
 )
 from mlx2.adapters.qwen38_hybrid_native_flat import (
     SERVING_SOURCE_PATHS,
@@ -20,14 +24,29 @@ from mlx2.adapters.qwen38_hybrid_native_flat import (
     Qwen38NativeFlatPhysicalTargetProvider,
     Qwen38NativeFlatServingBinding,
     _ordinary_serial_oracles,
+    _private_lane_transactions,
     install_qwen38_native_flat_physical_target_provider,
+    qwen38_whole_layer_live_owner_contract,
+    qwen38_whole_layer_provider_binding,
+    qwen38_whole_layer_qualification_profile,
+    qwen38_whole_layer_request_class,
 )
 from mlx2.runtime.ast_physical_target import ast_serving_admission_receipt
+from mlx2.runtime.ast_qualified_capability import (
+    DIRECT_PROBE_SCHEMA,
+    QUALIFICATION_DOMAIN_SCHEMA,
+    mint_ast_qualified_capability,
+    seal_ast_direct_probe_receipt,
+)
 from mlx2.runtime.flat_segmented_hybrid import (
     canonical_hybrid_state,
     successor_bound_hybrid_state,
 )
 from mlx2.runtime.hybrid_verify_rows import HybridVerifyRows
+from mlx2.runtime.models.qwen38_whole_layer_verify import (
+    execute_qwen38_whole_layer_flat,
+)
+from mlx2.runtime.row_exact.canary import CANARIES
 
 
 def _admission(descriptor):
@@ -84,7 +103,7 @@ def cpu():
     mx.set_default_device(previous)
 
 
-def _binding(lengths=(1, 2, 3, 4)):
+def _binding(lengths=(1, 2, 3, 4), *, whole_layer=False):
     descriptor, owner, direct_target = _pair(lengths)
     direct_target.model.configure_target_verify_row_exact(True)
     target = type(direct_target)(
@@ -107,8 +126,639 @@ def _binding(lengths=(1, 2, 3, 4)):
         session_scope_sha256="1" * 64,
         discovery=discovery,
         admission=admission,
+        qualified_discovery=(
+            {
+                "schema": "mlx2.ast-qualified-capability-discovery.v1",
+                "available": True,
+                "qualified": True,
+                "capability_manifest_sha256": "9" * 64,
+                "direct_probe_receipt_sha256": "a" * 64,
+                "eligible": False,
+                "selected": False,
+                "default": False,
+                "observed_used": False,
+                "performance_claim": False,
+            }
+            if whole_layer
+            else None
+        ),
     )
     return descriptor, owner, target, tokens, binding
+
+
+def test_qualified_whole_layer_bridge_is_exact_and_publishes_only_on_commit():
+    descriptor, owner, target, tokens, binding = _binding(whole_layer=True)
+    accepted = (1, 1, 2, 3)
+    expected_outputs, _expected_state, _continuation = _ordinary_serial_oracles(
+        target, owner, descriptor, tokens, accepted, (31, 32, 33, 34)
+    )
+    original = canonical_hybrid_state(owner.rows)
+
+    warm = _private_lane_transactions(
+        copy.deepcopy(owner.rows), descriptor.query_lengths
+    )
+    try:
+        execute_qwen38_whole_layer_flat(
+            target.model,
+            tokens,
+            descriptor,
+            tuple(item.caches for item in warm),
+            target.capture_layers,
+            allow_numerical_canaries=True,
+        )
+    finally:
+        for transaction in warm:
+            if not transaction.closed:
+                transaction.abort()
+
+    result = binding.execute()
+    actual_outputs = tuple(
+        result.row(lane, position)
+        for lane, length in enumerate(descriptor.query_lengths)
+        for position in range(length)
+    )
+    assert all(
+        mx.array_equal(actual_logits, expected_logits)
+        and mx.array_equal(actual_features, expected_features)
+        for (actual_logits, actual_features), (
+            expected_logits,
+            expected_features,
+        ) in zip(actual_outputs, expected_outputs, strict=True)
+    )
+    assert canonical_hybrid_state(owner.rows) == original
+    published = binding.commit(accepted)
+    expected_rows = copy.deepcopy(owner.rows)
+    for lane, count in enumerate(accepted):
+        for token in tokens[descriptor.lane_slice(lane)][:count]:
+            mx.eval(
+                target.model(
+                    mx.array([[token]], dtype=mx.int32),
+                    cache=expected_rows[lane],
+                )
+            )
+    assert canonical_hybrid_state(published) == canonical_hybrid_state(expected_rows)
+    assert canonical_hybrid_state(owner.rows) == original
+    receipt = binding.receipt()
+    assert receipt["qualified"] is receipt["selected"] is True
+    assert receipt["observed_used"] is True
+    assert receipt["default"] is False
+    assert receipt["execution_mode"] == "whole_layer_ragged_native_flat"
+    assert len(binding.delegate.transactions) == 4
+
+
+def test_provider_forwards_qualified_discovery_into_whole_layer_binding():
+    descriptor, owner, target, tokens, _binding_value = _binding()
+    provider = object.__new__(Qwen38NativeFlatPhysicalTargetProvider)
+    provider.hard_limits = dict(target.hard_limits)
+    provider._target = lambda _descriptor, _layers: target
+    calls = []
+    provider.validate_live_serving_admission = lambda **kwargs: calls.append(kwargs)
+    discovery, admission = _admission(descriptor)
+    qualified = {
+        "schema": "mlx2.ast-qualified-capability-discovery.v1",
+        "available": True,
+        "qualified": True,
+    }
+
+    binding = provider.bind_serving_physical_target(
+        rows=owner.rows,
+        descriptor=descriptor,
+        capture_layers=target.capture_layers,
+        flat_inputs=tokens,
+        session_scope_sha256="1" * 64,
+        discovery=discovery,
+        admission=admission,
+        qualified_discovery=qualified,
+    )
+
+    assert binding.whole_layer is True
+    assert binding.qualified_discovery == qualified
+    assert calls[0]["rows"] == owner.rows
+    assert calls[0]["qualified_discovery"] == qualified
+
+
+def _qualified_discovery_fixture():
+    descriptor, owner, target, _tokens, _binding_value = _binding()
+    request_class = qwen38_whole_layer_request_class(
+        owner.rows,
+        descriptor,
+        model=target.model,
+        capture_layers=target.capture_layers,
+    )
+    profile = qwen38_whole_layer_qualification_profile(
+        identity=target.identity,
+        descriptor=descriptor,
+        capture_layers=target.capture_layers,
+        request_class=request_class,
+        executable_model_manifest_sha256=(target._expected_model_manifest_sha256),
+    )
+    owner_contract = qwen38_whole_layer_live_owner_contract()
+    target_contract = target.ast_live_serving_target_contract()
+    provider_binding = qwen38_whole_layer_provider_binding(
+        identity=target.identity,
+        owner_source_hashes=owner.native_source_hashes,
+        target_source_hashes=target.source_hashes,
+        owner_contract=owner_contract,
+        target_contract=target_contract,
+        provenance_sha256="b" * 64,
+    )
+    source_hashes = {**owner.native_source_hashes, **target.source_hashes}
+    session = {
+        **target.identity,
+        "source_manifest_sha256": _manifest(source_hashes),
+        "profile_sha256": _manifest(profile),
+        "provider_binding_sha256": _manifest(provider_binding),
+        "owner_capability_manifest_sha256": _manifest(owner_contract),
+        "target_capability_manifest_sha256": _manifest(target_contract),
+        "executor_protocol": "qwen38-whole-layer-ragged-v1",
+    }
+    direct = seal_ast_direct_probe_receipt(
+        {
+            "schema": DIRECT_PROBE_SCHEMA,
+            "execution_scope": "whole_transformer_layer_ragged_native_flat",
+            "fidelity": "exact",
+            "oracle": "ordinary_serial_b1s1",
+            "numerical_equivalence": "bit_exact",
+            "session_binding": session,
+            "layout_classes": ["flat_segmented"],
+            "hard_limits": dict(target.hard_limits),
+            "qualification_domain": {
+                "schema": QUALIFICATION_DOMAIN_SCHEMA,
+                "request_classes": [request_class],
+            },
+            "coverage": {
+                name: True
+                for name in (
+                    "outputs",
+                    "features",
+                    "prepared_state",
+                    "continuation",
+                    "zero_commit",
+                    "partial_commit",
+                    "full_commit",
+                    "abort_rollback",
+                    "lane_isolation",
+                    "ordinary_fallback",
+                )
+            },
+            "passed": True,
+            "performance_claim": False,
+        }
+    )
+    provider = object.__new__(Qwen38NativeFlatPhysicalTargetProvider)
+    provider.model = target.model
+    provider.identity = MappingProxyType(dict(target.identity))
+    provider.hard_limits = MappingProxyType(dict(target.hard_limits))
+    provider.source_identity = tuple(sorted(target.source_hashes.items()))
+    provider.source_revision_token = target.identity["source_revision"]
+    provider._expected_model_manifest_sha256 = target._expected_model_manifest_sha256
+    provider._qualified_capability = mint_ast_qualified_capability(direct)
+    provider._qualified_session_authority = MappingProxyType(dict(session))
+    warm = _private_lane_transactions(
+        copy.deepcopy(owner.rows), descriptor.query_lengths
+    )
+    try:
+        execute_qwen38_whole_layer_flat(
+            target.model,
+            tuple(range(1, descriptor.logical_rows + 1)),
+            descriptor,
+            tuple(item.caches for item in warm),
+            target.capture_layers,
+            allow_numerical_canaries=True,
+        )
+    finally:
+        for transaction in warm:
+            if not transaction.closed:
+                transaction.abort()
+    provider._qualified_canary_generation = CANARIES.generation
+    provider._qualified_canaries_ready = True
+    provider._qualified_capability_decline_reason = None
+    provider._target = lambda _descriptor, _layers: target
+    provider.validate_revision = lambda: None
+    return provider, descriptor, owner, target, session
+
+
+def test_whole_layer_session_uses_native_owner_source_authority():
+    _provider, _descriptor, owner, target, session = _qualified_discovery_fixture()
+    native_sources = {**owner.native_source_hashes, **target.source_hashes}
+    broad_sources = {**owner.source_hashes, **target.source_hashes}
+
+    assert session["source_manifest_sha256"] == _manifest(native_sources)
+    assert session["source_manifest_sha256"] != _manifest(broad_sources)
+    assert "src/mlx2/runtime/models/qsdpa_verify_metal.py" in broad_sources
+    assert "src/mlx2/runtime/models/qsdpa_verify_metal.py" not in native_sources
+    assert "src/mlx2/runtime/models/qwen4_qsa_indexed.py" in broad_sources
+    assert "src/mlx2/runtime/models/qwen4_qsa_indexed.py" not in native_sources
+
+
+def test_mtp_and_no_mtp_manifests_seal_distinct_qualification_authority(
+    monkeypatch,
+):
+    provider, descriptor, owner, target, mtp_session = _qualified_discovery_fixture()
+    assert (
+        provider.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=target.capture_layers,
+        )["available"]
+        is True
+    )
+    mtp_manifest = target._expected_model_manifest_sha256
+    no_mtp_manifest = QWEN38_27B_OQ4E_NO_MTP_MODEL_MANIFEST_SHA256
+    assert mtp_manifest != no_mtp_manifest
+
+    request_class = qwen38_whole_layer_request_class(
+        owner.rows,
+        descriptor,
+        model=target.model,
+        capture_layers=target.capture_layers,
+    )
+    mtp_contract = target.ast_live_serving_target_contract()
+    mtp_profile = qwen38_whole_layer_qualification_profile(
+        identity=target.identity,
+        descriptor=descriptor,
+        capture_layers=target.capture_layers,
+        request_class=request_class,
+        executable_model_manifest_sha256=mtp_manifest,
+    )
+    mtp_provider_binding = qwen38_whole_layer_provider_binding(
+        identity=target.identity,
+        owner_source_hashes=owner.native_source_hashes,
+        target_source_hashes=target.source_hashes,
+        owner_contract=qwen38_whole_layer_live_owner_contract(),
+        target_contract=mtp_contract,
+        provenance_sha256="b" * 64,
+    )
+
+    monkeypatch.setattr(target, "_expected_model_manifest_sha256", no_mtp_manifest)
+    monkeypatch.setattr(
+        provider, "_expected_model_manifest_sha256", no_mtp_manifest, raising=False
+    )
+    no_mtp_contract = target.ast_live_serving_target_contract()
+    no_mtp_profile = qwen38_whole_layer_qualification_profile(
+        identity=target.identity,
+        descriptor=descriptor,
+        capture_layers=target.capture_layers,
+        request_class=request_class,
+        executable_model_manifest_sha256=no_mtp_manifest,
+    )
+    no_mtp_provider_binding = qwen38_whole_layer_provider_binding(
+        identity=target.identity,
+        owner_source_hashes=owner.native_source_hashes,
+        target_source_hashes=target.source_hashes,
+        owner_contract=qwen38_whole_layer_live_owner_contract(),
+        target_contract=no_mtp_contract,
+        provenance_sha256="b" * 64,
+    )
+
+    assert mtp_contract["executable_model_manifest_sha256"] == mtp_manifest
+    assert no_mtp_contract["executable_model_manifest_sha256"] == no_mtp_manifest
+    assert _manifest(mtp_contract) != _manifest(no_mtp_contract)
+    assert _manifest(mtp_profile) != _manifest(no_mtp_profile)
+    assert _manifest(mtp_provider_binding) != _manifest(no_mtp_provider_binding)
+    assert mtp_session["profile_sha256"] == _manifest(mtp_profile)
+    assert mtp_session["target_capability_manifest_sha256"] == _manifest(mtp_contract)
+    assert mtp_session["provider_binding_sha256"] == _manifest(mtp_provider_binding)
+    assert (
+        provider.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=target.capture_layers,
+        )["available"]
+        is False
+    )
+
+
+def test_exact_domain_scheduler_harness_engages_and_publishes_whole_layer():
+    from test_qwen38_dflash2_cpu import tiny_draft_args
+
+    from mlx2.runtime.drafters.dflash2 import DFlash2DraftModel
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.progressive_external_verify import (
+        PROGRESSIVE_FIDELITY_EXACT,
+        PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+        progressive_target_protocol_binding,
+    )
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "qualification/runs/ast-whole-layer-qwen38-20261020/"
+        "qwen38-whole-layer-serving-exact-domain.py"
+    )
+    spec = importlib.util.spec_from_file_location("whole_layer_serving_harness", path)
+    assert spec is not None and spec.loader is not None
+    harness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(harness)
+
+    provider, _descriptor, _owner, target, _session = _qualified_discovery_fixture()
+    model = target.model
+    model.ast_physical_target_provider = provider
+    draft = DFlash2DraftModel(tiny_draft_args(target_layer_ids=[1, 6])).bind(model)
+    mx.eval(draft.parameters())
+    batch = ExternalDraftBatchGenerator(
+        model,
+        draft_model=draft,
+        binding=target.identity["artifact"],
+        target_artifact_fingerprint=target.identity["artifact"].rsplit("@sha256:", 1)[
+            -1
+        ],
+        completion_batch_size=4,
+        num_draft=5,
+        prefill_step_size=64,
+        ready_drain="all",
+        progressive_verification_tile=4,
+        progressive_verification_fidelity=PROGRESSIVE_FIDELITY_EXACT,
+        progressive_target_protocol=PROGRESSIVE_TARGET_PROTOCOL_VERSION,
+        progressive_protocol_binding=progressive_target_protocol_binding(
+            model, PROGRESSIVE_FIDELITY_EXACT
+        ),
+        ast_physical_target=True,
+    )
+    try:
+        receipt = harness.exercise_exact_progressive_domain(
+            batch,
+            prefix_rows=((1, 7, 11), (2, 7, 11), (3, 7, 11), (4, 7, 11)),
+            query_lengths=(1, 2, 3, 4),
+            capture_layers=target.capture_layers,
+        )
+    finally:
+        batch.close()
+
+    assert receipt["execution_mode"] == "whole_layer_ragged_native_flat"
+    assert receipt["publication_exact"] == [True] * 4
+    assert receipt["continuation_exact"] == [True] * 4
+    assert receipt["observed_used"] is True
+    assert receipt["performance_claim"] is False
+
+
+def test_exact_domain_scheduler_harness_refuses_foreign_draft_taps_before_mutation():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "qualification/runs/ast-whole-layer-qwen38-20261020/"
+        "qwen38-whole-layer-serving-exact-domain.py"
+    )
+    spec = importlib.util.spec_from_file_location("whole_layer_serving_harness", path)
+    assert spec is not None and spec.loader is not None
+    harness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(harness)
+
+    class Batch:
+        progressive_verification_tile = 4
+        ast_physical_target = True
+        layers = (5, 19, 33, 47, 61)
+
+        def insert(self, *_args, **_kwargs):
+            raise AssertionError("tap mismatch reached lane mutation")
+
+    with pytest.raises(ValueError, match="external drafter target taps"):
+        harness.exercise_exact_progressive_domain(
+            Batch(),
+            prefix_rows=((1,), (2, 2), (3, 3, 3), (4, 4, 4, 4)),
+            query_lengths=(1, 2, 3, 4),
+            capture_layers=(0, 31, 63),
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "provider_binding_sha256",
+        "owner_capability_manifest_sha256",
+        "target_capability_manifest_sha256",
+        "executor_protocol",
+    ],
+)
+def test_live_qualification_authority_fields_are_not_inherited_from_capability(
+    field,
+):
+    provider, descriptor, owner, target, session = _qualified_discovery_fixture()
+    assert (
+        provider.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=target.capture_layers,
+        )["available"]
+        is True
+    )
+    foreign = dict(session)
+    foreign[field] = "foreign-v1" if field == "executor_protocol" else "f" * 64
+    provider._qualified_session_authority = MappingProxyType(foreign)
+    assert (
+        provider.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=target.capture_layers,
+        )["available"]
+        is False
+    )
+
+
+def test_live_qualification_profile_is_recomputed_from_current_request(monkeypatch):
+    provider, descriptor, owner, target, _session = _qualified_discovery_fixture()
+    assert (
+        provider.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=target.capture_layers,
+        )["available"]
+        is True
+    )
+    original = qwen38_whole_layer_qualification_profile
+
+    def foreign_profile(**kwargs):
+        return {**original(**kwargs), "executor_protocol": "foreign-v1"}
+
+    monkeypatch.setattr(
+        "mlx2.adapters.qwen38_hybrid_native_flat."
+        "qwen38_whole_layer_qualification_profile",
+        foreign_profile,
+    )
+    assert (
+        provider.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=target.capture_layers,
+        )["available"]
+        is False
+    )
+
+
+def test_live_qualification_declines_before_mutation_after_canary_reset():
+    provider, descriptor, owner, target, _session = _qualified_discovery_fixture()
+    assert (
+        provider.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=target.capture_layers,
+        )["available"]
+        is True
+    )
+    CANARIES.reset()
+    assert (
+        provider.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=target.capture_layers,
+        )["available"]
+        is False
+    )
+
+
+def test_provider_constructor_warms_and_retains_valid_qualified_capability(
+    monkeypatch, tmp_path
+):
+    descriptor, owner, target, _tokens, _binding_value = _binding()
+    monkeypatch.setitem(
+        QWEN38_27B_OQ4E_MTP_REVIEWED_MANIFEST,
+        "model_manifest_sha256",
+        target._expected_model_manifest_sha256,
+    )
+    identity = {
+        "source_revision": "a" * 40,
+        "build": target.identity["build"],
+        "device": target.identity["device"],
+        "artifact": QWEN38_27B_OQ4E_MTP_CHECKPOINT,
+    }
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text("{}\n")
+    request_class = qwen38_whole_layer_request_class(
+        owner.rows,
+        descriptor,
+        model=target.model,
+        capture_layers=target.capture_layers,
+    )
+    profile = qwen38_whole_layer_qualification_profile(
+        identity=identity,
+        descriptor=descriptor,
+        capture_layers=target.capture_layers,
+        request_class=request_class,
+        executable_model_manifest_sha256=(target._expected_model_manifest_sha256),
+    )
+    owner_contract = qwen38_whole_layer_live_owner_contract()
+    target_contract = target.ast_live_serving_target_contract()
+    provider_binding = qwen38_whole_layer_provider_binding(
+        identity=identity,
+        owner_source_hashes=owner.native_source_hashes,
+        target_source_hashes=target.source_hashes,
+        owner_contract=owner_contract,
+        target_contract=target_contract,
+        provenance_sha256=hashlib.sha256(provenance.read_bytes()).hexdigest(),
+    )
+    source_hashes = {**owner.native_source_hashes, **target.source_hashes}
+    session = {
+        **identity,
+        "source_manifest_sha256": _manifest(source_hashes),
+        "profile_sha256": _manifest(profile),
+        "provider_binding_sha256": _manifest(provider_binding),
+        "owner_capability_manifest_sha256": _manifest(owner_contract),
+        "target_capability_manifest_sha256": _manifest(target_contract),
+        "executor_protocol": "qwen38-whole-layer-ragged-v1",
+    }
+    direct = seal_ast_direct_probe_receipt(
+        {
+            "schema": DIRECT_PROBE_SCHEMA,
+            "execution_scope": "whole_transformer_layer_ragged_native_flat",
+            "fidelity": "exact",
+            "oracle": "ordinary_serial_b1s1",
+            "numerical_equivalence": "bit_exact",
+            "session_binding": session,
+            "layout_classes": ["flat_segmented"],
+            "hard_limits": dict(target.hard_limits),
+            "qualification_domain": {
+                "schema": QUALIFICATION_DOMAIN_SCHEMA,
+                "request_classes": [request_class],
+            },
+            "coverage": {
+                name: True
+                for name in (
+                    "outputs",
+                    "features",
+                    "prepared_state",
+                    "continuation",
+                    "zero_commit",
+                    "partial_commit",
+                    "full_commit",
+                    "abort_rollback",
+                    "lane_isolation",
+                    "ordinary_fallback",
+                )
+            },
+            "passed": True,
+            "performance_claim": False,
+        }
+    )
+    capability = mint_ast_qualified_capability(direct)
+    monkeypatch.setattr(
+        "mlx2.adapters.qwen38_hybrid_native_flat._git_source_revision",
+        lambda: identity["source_revision"],
+    )
+    monkeypatch.setattr(
+        "mlx2.adapters.qwen38_hybrid_native_flat._require_clean_source_revision",
+        lambda _revision: None,
+    )
+    monkeypatch.setattr(
+        "mlx2.adapters.qwen38_hybrid_native_flat.dense_qwen3_metal_device_attestation",
+        lambda: {
+            "ready": True,
+            "build": identity["build"],
+            "device": identity["device"],
+        },
+    )
+    monkeypatch.setattr(
+        "mlx2.adapters.qwen38_hybrid_native_flat._serving_source_hashes",
+        lambda: dict(target.source_hashes),
+    )
+    monkeypatch.setattr(
+        "mlx2.adapters.qwen38_hybrid_native_flat._serving_source_generation",
+        lambda: (("fixture", 1),),
+    )
+    monkeypatch.setattr(
+        Qwen38NativeFlatPhysicalTargetProvider,
+        "_target",
+        lambda _self, _descriptor, _layers: target,
+    )
+
+    provider = Qwen38NativeFlatPhysicalTargetProvider(
+        target.model,
+        qualified_capability=capability,
+        qualified_capture_layers=target.capture_layers,
+        qualified_provenance_path=provenance,
+    )
+    assert provider.ast_qualified_physical_target_capability() is capability
+    assert provider._qualified_canaries_ready is True
+    assert provider._qualified_capability_decline_reason is None
+    assert (
+        provider.discover_qualified_serving_request(
+            rows=owner.rows,
+            descriptor=descriptor,
+            capture_layers=target.capture_layers,
+        )["available"]
+        is True
+    )
+
+    def broken_target(_self, _descriptor, _layers):
+        raise RuntimeError("private diagnostic detail")
+
+    monkeypatch.setattr(
+        Qwen38NativeFlatPhysicalTargetProvider,
+        "_target",
+        broken_target,
+    )
+    declined = Qwen38NativeFlatPhysicalTargetProvider(
+        target.model,
+        qualified_capability=capability,
+        qualified_capture_layers=target.capture_layers,
+        qualified_provenance_path=provenance,
+    )
+    assert declined.ast_qualified_physical_target_capability() is None
+    discovery = declined.discover_qualified_serving_request(
+        rows=owner.rows,
+        descriptor=descriptor,
+        capture_layers=target.capture_layers,
+    )
+    assert discovery["available"] is False
+    assert discovery["decline_reason"] == "qualification_warmup_target_failed"
+    assert "private diagnostic detail" not in repr(discovery)
 
 
 def test_live_bridge_executes_flat_rows_and_transfers_exact_successors():
@@ -521,6 +1171,41 @@ def test_provider_installation_is_unavailable_without_exact_git_provenance(
         lambda: (_ for _ in ()).throw(RuntimeError("not a git checkout")),
     )
     assert install_qwen38_native_flat_physical_target_provider(target.model) is None
+
+
+def test_provider_installation_treats_incomplete_pass_envelope_as_unqualified(
+    monkeypatch, tmp_path
+):
+    evidence = tmp_path / "incomplete.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "verdict": "pass_exact_direct_probe",
+                "cleanup_completed": True,
+                "performance_claim": False,
+            }
+        )
+    )
+    captured = {}
+
+    def construct(model, **kwargs):
+        captured.update(kwargs)
+        return model
+
+    monkeypatch.setattr(
+        "mlx2.adapters.qwen38_hybrid_native_flat."
+        "Qwen38NativeFlatPhysicalTargetProvider",
+        construct,
+    )
+    _descriptor, _owner, target = _pair((1,))
+    result = install_qwen38_native_flat_physical_target_provider(
+        target.model,
+        qualified_capability_evidence_path=evidence,
+    )
+    assert result is target.model
+    assert captured["qualified_capability"] is None
+    assert captured["qualified_capture_layers"] == ()
+    assert captured["qualified_provenance_path"] is None
 
 
 def test_provider_live_revision_check_rejects_source_generation_drift(monkeypatch):

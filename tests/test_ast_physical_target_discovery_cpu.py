@@ -370,6 +370,88 @@ def test_installed_provider_failure_is_not_consulted_while_feature_is_off():
     assert layout["backend_mode"] == "padded"
 
 
+def test_required_qualified_capability_decline_preserves_padded_fallback():
+    from test_external_dflash2_cpu import drain, tiny
+
+    class Unqualified(_Provider):
+        requires_qualified_capability = True
+
+        @staticmethod
+        def discover_qualified_serving_request(**_kwargs):
+            return {
+                "schema": "mlx2.ast-qualified-capability-discovery.v1",
+                "available": False,
+                "decline_reason": "qualification_unavailable_or_stale",
+                "qualified": False,
+                "eligible": False,
+                "selected": False,
+                "default": False,
+                "observed_used": False,
+                "performance_claim": False,
+            }
+
+    model, draft = tiny()
+    provider = Unqualified()
+    model.ast_physical_target_provider = provider
+    batch = _progressive_batch(model, draft, ast_physical_target=True)
+    uid = batch.insert([[1, 2, 3]], max_tokens=[4])[0]
+    output, final = drain(batch)
+
+    assert len(output[uid]) == 4
+    assert provider.admission_calls == 0
+    assert provider.calls == 0
+    layout = final[uid].speculative_receipt["progressive_verification"][
+        "last_ragged_layout"
+    ]
+    qualified = layout["qualified_capability_discovery"]
+    assert qualified["available"] is qualified["qualified"] is False
+    assert qualified["decline_reason"] == "qualification_unavailable_or_stale"
+    assert "physical_target_serving" not in layout
+    assert layout["executed_backend_mode"] == layout["backend_mode"] == "padded"
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        None,
+        {"available": True, "qualified": False},
+        {
+            "schema": "mlx2.ast-qualified-capability-discovery.v1",
+            "available": True,
+            "qualified": False,
+        },
+    ],
+)
+def test_malformed_required_qualification_declines_before_generic_discovery(
+    broken,
+):
+    from test_external_dflash2_cpu import drain, tiny
+
+    class BrokenQualification(_Provider):
+        requires_qualified_capability = True
+
+        @staticmethod
+        def discover_qualified_serving_request(**_kwargs):
+            return broken
+
+    model, draft = tiny()
+    provider = BrokenQualification()
+    model.ast_physical_target_provider = provider
+    batch = _progressive_batch(model, draft, ast_physical_target=True)
+    uid = batch.insert([[1, 2, 3]], max_tokens=[4])[0]
+    output, final = drain(batch)
+
+    assert len(output[uid]) == 4
+    assert provider.calls == 0
+    assert provider.admission_calls == 0
+    layout = final[uid].speculative_receipt["progressive_verification"][
+        "last_ragged_layout"
+    ]
+    assert layout["qualified_capability_discovery"]["available"] is False
+    assert "physical_target_discovery" not in layout
+    assert layout["executed_backend_mode"] == layout["backend_mode"] == "padded"
+
+
 def test_selected_physical_target_self_configures_request_cost_handoff():
     from test_external_dflash2_cpu import tiny
 
