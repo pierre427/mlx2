@@ -79,8 +79,29 @@ def test_ast_policy_is_admitted_by_both_adapters():
     assert normalized["progressive_verification_fidelity"] == PROGRESSIVE_FIDELITY_EXACT
     assert normalized["proposal_composition"] is False
     assert validate_target_verify_row_exact(normalized) is True
+    assert validate_target_verify_row_exact(
+        {**normalized, "ast_physical_target": True}
+    ) is True
     # Not selected and no exact tile: nothing to admit (default stays off).
     assert validate_target_verify_row_exact({"draft_model": "/draft"}) is False
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"ast_physical_target": "yes"},
+        {"ast_physical_target": True},
+        {
+            "ast_physical_target": True,
+            "target_verify_row_exact": True,
+            "progressive_verification_tile": 2,
+            "progressive_verification_fidelity": "near_tie_bounded",
+        },
+    ],
+)
+def test_native_physical_target_policy_fails_before_model_load(policy):
+    with pytest.raises(ValueError, match="ast_physical_target"):
+        validate_target_verify_row_exact(policy)
 
 
 def test_qwen36_attention_window_is_target_owned_and_requires_row_exact():
@@ -222,6 +243,8 @@ def test_ast_selection_reaches_batch_and_execution_config(cls, factory, monkeypa
     adapter, calls = _bound_adapter(cls, factory(), monkeypatch)
     adapter.create_external_batch()
     kwargs = calls[-1]
+    if cls is Qwen3827BAdapter:
+        assert kwargs["target_artifact_fingerprint"] == "test"
     assert kwargs["continuation_pool_ast_bridge"] is True
     assert kwargs["continuation_pool"] is adapter.draft_model.policy
     assert kwargs["progressive_verification_tile"] == 3

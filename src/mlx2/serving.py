@@ -10082,8 +10082,13 @@ class ServingEngine:
                 # TTFT (~1 s per 27B 4K-token request, intake-probes-20261007).
                 # MLX2_APC_BACKGROUND_SPILL=0 restores synchronous writes.
                 background_spill=os.environ.get("MLX2_APC_BACKGROUND_SPILL", "1") != "0",
+                # AST metadata is an APCv2 child and remains opt-in. Debug is
+                # independently opt-in and can never authorize execution.
+                ast_memo_enabled=os.environ.get("MLX2_AST_MEMO", "0") == "1",
+                ast_memo_debug=os.environ.get("MLX2_AST_MEMO_DEBUG", "0") == "1",
             )
             self.apc = apc
+            ast_memo_handle = apc.ast_memo_handle()
             cache_keys = {}
 
             def lookup_apc(key, tokens, **kwargs):
@@ -10605,6 +10610,7 @@ class ServingEngine:
                         fly_verification=self.fly_verification_policy,
                         decode_time_fairness=settings["decode_time_fairness"],
                         decode_first=self.decode_first_policy,
+                        ast_memo=ast_memo_handle,
                     )
                 elif prompt_lookup:
                     from .runtime.pld import PromptLookupBatchGenerator
@@ -12879,6 +12885,22 @@ class ServingEngine:
                         job.admission_reserved_gib = (float(required) if shared_bound is not None else max(
                             0.0, float(required) - float(controller.hard_reserve_gib)
                         ))
+                        proposal_scope = (
+                            proposal_session_scope_hash(
+                                job.tenant_id,
+                                job.request.get("session_id"),
+                                adapter.identity["fingerprint"],
+                            )
+                            if external_draft
+                            else None
+                        )
+                        request_cache_key = (
+                            cache_key_for(
+                                job.tenant_id, request_apc_scope(job.request)
+                            )
+                            if external_draft and ast_memo_handle is not None
+                            else None
+                        )
                         job.uid = batch.insert(
                             [hit.remaining_tokens], max_tokens=[maximum],
                             caches=[lane_cache], all_tokens=[tokens[:hit.cached_tokens]],
@@ -12889,10 +12911,16 @@ class ServingEngine:
                                 if job.prefill_cold_cuts and not prompt_lookup
                                 else {}
                             ),
-                            **({"session_keys": [proposal_session_scope_hash(
-                                job.tenant_id, job.request.get("session_id"),
-                                adapter.identity["fingerprint"],
-                            )]} if external_draft else {}),
+                            **({"session_keys": [proposal_scope]} if external_draft else {}),
+                            **(
+                                {
+                                    "ast_memo_layout_revisions": [
+                                        apc.ast_memo_layout_revision(request_cache_key)
+                                    ]
+                                }
+                                if external_draft and ast_memo_handle is not None
+                                else {}
+                            ),
                             **(
                                 {"state_boundaries": [job.state_boundaries]}
                                 if job.state_boundaries
@@ -12919,6 +12947,13 @@ class ServingEngine:
                                 else {}
                             ),
                         )[0]
+                        if proposal_scope is not None and ast_memo_handle is not None:
+                            apc.ast_memo_register_scope(
+                                proposal_scope,
+                                tenant=str(job.tenant_id or "default"),
+                                session_tag=session_tag_for(job),
+                                named=True,
+                            )
                         if job.activation_capsule_receipt is not None:
                             job.activation_capsule_receipt = {
                                 **job.activation_capsule_receipt,

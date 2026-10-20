@@ -33,6 +33,7 @@ from .io_ownership import (
 )
 from concurrent.futures import TimeoutError as FutureTimeout
 from . import loop_trace as _loop_trace
+from .apc_ast_metadata import APCASTMemoStore
 from .cache_capsule import CacheCapsuleGeneration, CacheCapsulePool
 from .cache_operations import cache_operations
 from .cache_planes import (
@@ -924,6 +925,7 @@ class APCv2(PrefixIndex):
     _metadata_operation = None
     _metadata_completion = "ready"
     _turn_supersessions = {}
+    _ast_memo = None
     # Windowed spill/restore activity (rolling_counter); created on first use
     # so instances built with object.__new__ still report it.
     _disk_windows = None
@@ -1051,6 +1053,8 @@ class APCv2(PrefixIndex):
         retention_policy: Any = None,
         background_spill: bool = False,
         background_spill_max_bytes: Optional[int] = None,
+        ast_memo_enabled: bool = False,
+        ast_memo_debug: bool = False,
     ):
         if not layout_name:
             raise ValueError("APCv2 requires a model cache-layout declaration")
@@ -1223,6 +1227,16 @@ class APCv2(PrefixIndex):
         self._persistent_block_bytes = max(0, int(persistent_block_bytes))
         self._now = now_fn
         self._wall_time = wall_time_fn
+        if type(ast_memo_enabled) is not bool or type(ast_memo_debug) is not bool:
+            raise ValueError("AST memo enablement flags must be boolean")
+        self._ast_memo = APCASTMemoStore(
+            lock=self._apc_lock,
+            now_fn=self._now,
+            wall_time_fn=self._wall_time,
+            enabled=ast_memo_enabled,
+            debug_enabled=ast_memo_debug,
+            session_max_ttl_seconds=self._session_max_ttl_seconds,
+        )
         self._last_idle_scan = 0.0
         self._disk_stats = {key: 0 for key in self._DISK_STAT_KEYS}
         self._disk_windows = None
@@ -1276,7 +1290,7 @@ class APCv2(PrefixIndex):
                 # Startup registration is host-only. Budget enforcement and
                 # any cache release remain on the owning model thread.
                 self._enforce_entry_limits_locked()
-            except BaseException:
+            except BaseException:  # noqa: BLE001,S110 - never mask serving
                 self._closed = True
                 self._release_persist_lock()
                 raise
@@ -4135,6 +4149,12 @@ class APCv2(PrefixIndex):
 
     def delete_session(self, tenant, session_id: str) -> dict:
         tag = (tenant, session_id)
+        # AST metadata is not durable session state. Purge its privacy scope at
+        # delete start even when leased APC entries defer their own retirement.
+        if self._ast_memo is not None:
+            self._ast_memo_lifecycle_call(
+                "purge_tag", 0, tag, "session_end"
+            )
         with self._apc_lock:
             self._ensure_metadata_available()
             records = self._session_entries_locked(tag)
@@ -5696,7 +5716,12 @@ class APCv2(PrefixIndex):
             self._remove_disk_files_locked(entry)
         self._apc_stats["stores"] += 1
         survivor = self._trie.search(key, tokens)
-        return replace(capabilities, stored=survivor.exact is not None)
+        stored = survivor.exact is not None
+        if self._ast_memo is not None and stored and session_tag is not None:
+            self._ast_memo_lifecycle_call(
+                "advance_tag", False, session_tag, "tagged_publication"
+            )
+        return replace(capabilities, stored=stored)
 
     def retire(self, key: Hashable, tokens: Iterable[int], *, role: str) -> bool:
         """Drop a disposable checkpoint its publisher no longer needs.
@@ -5750,6 +5775,81 @@ class APCv2(PrefixIndex):
         self._collect_spills_locked()
         for (key, tokens), role in tuple(self._pending_retirements.items()):
             self._retire_locked(key, tokens, role)
+
+    def _ast_memo_lifecycle_call(self, method, fallback, *args, **kwargs):
+        if self._ast_memo is None:
+            return fallback
+        try:
+            return getattr(self._ast_memo, method)(*args, **kwargs)
+        except Exception as error:  # noqa: BLE001 - optional metadata is fail-soft
+            try:
+                self._ast_memo.fail_closed(error)
+            except BaseException:
+                # Lifecycle cleanup must preserve the model result or original
+                # exception even if the optional metadata store is damaged.
+                pass
+            return fallback
+
+    def ast_memo_handle(self):
+        """Return the narrow metadata-only handle passed to AST executors."""
+
+        return (
+            self._ast_memo.handle()
+            if self._ast_memo is not None and self._ast_memo.enabled
+            else None
+        )
+
+    def ast_memo_layout_revision(self, key: APCKey) -> str:
+        """Bind AST metadata to APC key, cache layout, and state codec law."""
+
+        payload = {
+            "schema": "mlx2.apcv2.ast-layout-revision.v1",
+            "apc_key": _key_manifest(key),
+            "layout_name": self.layout_name,
+            "state_codec": self._state_codec_layer,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def ast_memo_register_scope(
+        self, scope_sha256, *, tenant=None, session_tag=None, named=False
+    ):
+        return self._ast_memo_lifecycle_call(
+            "register_scope",
+            False,
+            scope_sha256,
+            tenant=tenant,
+            session_tag=session_tag,
+            named=named,
+        )
+
+    def ast_memo_end_scope(self, scope_sha256, *, named=False):
+        if named:
+            return False
+        return self._ast_memo_lifecycle_call(
+            "advance", False, (scope_sha256,), "anonymous_lane_end", purge=True
+        )
+
+    def ast_memo_debug_records(self, scopes=()):
+        return self._ast_memo_lifecycle_call("debug_records", [], scopes)
+
+    def ast_memo_receipt(self):
+        if self._ast_memo is None:
+            return {
+                "schema": "mlx2.apcv2.ast-memo.v1",
+                "authority": "APCv2",
+                "enabled": False,
+            }
+        return self._ast_memo_lifecycle_call(
+            "snapshot",
+            {
+                "schema": "mlx2.apcv2.ast-memo.v1",
+                "authority": "APCv2",
+                "enabled": False,
+                "diagnostic_failure": True,
+            },
+        )
 
     def clear(self, *, release_memory: bool = True) -> dict:
         """Drop every stored prefix, its MTP sidecar, and its bytes.
@@ -5809,6 +5909,8 @@ class APCv2(PrefixIndex):
         contract, so that clear is not a loss to count."""
         self._ensure_metadata_available()
         self._abandon_spill_jobs_locked()
+        if self._ast_memo is not None:
+            self._ast_memo_lifecycle_call("clear", None, "apcv2_clear")
         self._turn_supersessions = {}
         entries = list(_iter_trie_entries(self._trie))
         pinned_lost = 0
@@ -5977,6 +6079,7 @@ class APCv2(PrefixIndex):
                 **self._capsule_capacity,
                 "reserved_bytes": self._capsule_reserved_bytes,
             }
+            stats["ast_memo"] = self.ast_memo_receipt()
             interior_entries = interior_bytes = interior_reused = 0
             for entry in _iter_trie_entries(self._trie):
                 if (
@@ -6028,6 +6131,8 @@ class APCv2(PrefixIndex):
         # owns immutable bytes and paths and may only finish its existing I/O.
         with self._apc_lock:
             self._closed = True
+            if self._ast_memo is not None:
+                self._ast_memo_lifecycle_call("clear", None, "apcv2_close")
             self._cancel_pending_prefetch_locked()
             if self._restore_pool is not None:
                 self._restore_pool.close()
@@ -6083,6 +6188,8 @@ class APCv2(PrefixIndex):
             if self._closed:
                 return None
             self._closed = True
+            if self._ast_memo is not None:
+                self._ast_memo_lifecycle_call("clear", None, "apcv2_close")
             if self._restore_pool is not None:
                 self._restore_pool.close()
             self._capsule_generation.advance()

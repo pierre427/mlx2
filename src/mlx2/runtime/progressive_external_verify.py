@@ -7,10 +7,10 @@ can stage every tile on request-private state before atomically promoting it.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +48,10 @@ _ALGORITHM_SOURCE_PATHS = (
     "src/mlx2/adapters/external_draft_policy.py",
     "src/mlx2/runtime/ast_planner.py",
     "src/mlx2/adapters/ast_execution_profile.py",
+    "src/mlx2/runtime/ast_execution_capability.py",
+    "src/mlx2/runtime/ragged_verify_layout.py",
+    "src/mlx2/runtime/hybrid_verify_rows.py",
+    "src/mlx2/runtime/segmented_rotating_kv.py",
     "src/mlx2/runtime/proposal_providers.py",
     "src/mlx2/adapters/proposal_path_sources.py",
     "src/mlx2/runtime/drafters/dflash2.py",
@@ -188,6 +192,7 @@ def execute_progressive_target_rows(
     protocol,
     fidelity,
     input_lengths=None,
+    include_stage_rows=False,
 ):
     """Run an optional model-owned target-row executor, with a safe fallback.
 
@@ -206,10 +211,31 @@ def execute_progressive_target_rows(
         or any(type(n) is not int or not 1 <= n <= int(tokens.shape[1]) for n in input_lengths)
     ):
         raise ValueError("progressive target lengths disagree with the physical slab")
+    if type(include_stage_rows) is not bool:
+        raise ValueError("include_stage_rows must be a boolean")
+    physical_rows = logical_rows = None
+    if include_stage_rows:
+        physical_rows = int(tokens.shape[0]) * int(tokens.shape[1])
+        logical_rows = (
+            sum(input_lengths) if input_lengths is not None else physical_rows
+        )
+        from .row_exact_verify import collect_stage_rows
+
+        stage_scope = collect_stage_rows()
+    else:
+        stage_scope = nullcontext(None)
+
     executor = getattr(model, "progressive_external_target_rows", None)
     if executor is None:
-        logits, features = model.forward_with_taps(tokens, caches, capture_layers)
-        return logits, features, {
+        with stage_scope as stage_rows:
+            if stage_rows is not None:
+                stage_rows.record(
+                    "target.forward",
+                    logical_rows=logical_rows,
+                    physical_rows=physical_rows,
+                )
+            logits, features = model.forward_with_taps(tokens, caches, capture_layers)
+        detail = {
             "execution": "legacy_forward_with_taps",
             "protocol": protocol,
             "row_exact": None,
@@ -217,14 +243,24 @@ def execute_progressive_target_rows(
             "physical_width": int(tokens.shape[0]),
             "token_width": int(tokens.shape[1]),
         }
+        if include_stage_rows:
+            detail["stage_rows"] = stage_rows.receipt()
+        return logits, features, detail
     if not callable(executor):
         raise TypeError("progressive target-row executor must be callable")
     from .row_exact_verify import valid_rows
     compact = (input_lengths is not None and fidelity == PROGRESSIVE_FIDELITY_EXACT
                and getattr(model, "progressive_external_compact_exact_rows", False))
     scope = valid_rows(input_lengths, int(tokens.shape[1])) if compact else nullcontext()
-    with scope:
-        result = executor(tokens, caches, capture_layers)
+    with stage_scope as stage_rows:
+        if stage_rows is not None:
+            stage_rows.record(
+                "target.forward",
+                logical_rows=logical_rows,
+                physical_rows=physical_rows,
+            )
+        with scope:
+            result = executor(tokens, caches, capture_layers)
     if not isinstance(result, ProgressiveTargetRows):
         raise TypeError(
             "progressive target-row executor must return ProgressiveTargetRows"
@@ -239,7 +275,7 @@ def execute_progressive_target_rows(
         raise RuntimeError(
             "progressive target-row executor fell off its exact path" + suffix
         )
-    return result.logits, result.features, {
+    detail = {
         "execution": "adapter_owned",
         "protocol": result.protocol,
         "row_exact": result.row_exact,
@@ -247,6 +283,9 @@ def execute_progressive_target_rows(
         "physical_width": int(tokens.shape[0]),
         "token_width": int(tokens.shape[1]),
     }
+    if include_stage_rows:
+        detail["stage_rows"] = stage_rows.receipt()
+    return result.logits, result.features, detail
 
 
 def verify_proposal_tile(

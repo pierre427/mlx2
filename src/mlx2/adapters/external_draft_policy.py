@@ -382,6 +382,7 @@ class ExternalDraftAdapterMixin:
             "progressive_cross_session_pack_rows",
             "progressive_cross_session_pack_mode",
             "progressive_verification_fidelity",
+            "ast_physical_target",
             "cost_per_commit_handoff",
         } | set(getattr(self, "EXTERNAL_POLICY_EXTENSIONS", ()))
         if set(self.external_policy) - allowed or (
@@ -788,6 +789,11 @@ class ExternalDraftAdapterMixin:
             "segment_aware_live_tip": False,
             "segment_aware_cohort_size": max_lanes,
             **(
+                {"ast_physical_target": True}
+                if self.external_policy.get("ast_physical_target") is True
+                else {}
+            ),
+            **(
                 {
                     "cost_per_commit_handoff": self.external_policy[
                         "cost_per_commit_handoff"
@@ -953,6 +959,11 @@ class ExternalDraftAdapterMixin:
             kwargs.setdefault(
                 "progressive_protocol_binding", self._progressive_external_binding
             )
+        if self.external_policy.get("ast_physical_target") is not None:
+            enabled = self.external_policy["ast_physical_target"]
+            if type(enabled) is not bool:
+                raise ValueError("ast_physical_target must be boolean")
+            kwargs.setdefault("ast_physical_target", enabled)
         return ExternalDraftBatchGenerator(
             self.model,
             draft_model=self.draft_model,

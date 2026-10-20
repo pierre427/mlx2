@@ -15,6 +15,7 @@ import uuid
 from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass, field
+from itertools import pairwise
 from types import SimpleNamespace
 
 import numpy as np
@@ -43,6 +44,7 @@ from .progressive_external_verify import (
     PROGRESSIVE_EXTERNAL_VERIFY_VERSION,
     PROGRESSIVE_FIDELITY_EXACT,
     PROGRESSIVE_FIDELITY_NEAR_TIE_BOUNDED,
+    PROGRESSIVE_TARGET_PROTOCOL_VERSION,
     execute_progressive_target_rows,
     progressive_target_protocol_binding,
     verify_greedy_proposal_tile,
@@ -67,20 +69,42 @@ from .speculative_sampling import (
     verify_proposals,
 )
 from .speculative_topology import (
-    PerSessionSpeculationTopology,
     OrderedLiveFrontierPlanner,
+    PerSessionSpeculationTopology,
     confidence_tree_branch_depths,
     confidence_tree_trunk_length,
     ordered_alternative_proposals,
-    ordered_branch_commit_counts,
-    processors_branch_safe,
     ordered_alternative_winner,
+    ordered_branch_commit_counts,
     ordered_branch_outcomes,
+    processors_branch_safe,
     staged_branch_indices,
     validate_ordered_alternative_strategy,
 )
 
 _COUNTER_MAX = (1 << 63) - 1
+
+
+def _ast_artifact_fingerprint(value, *, binding):
+    """Stable memo-only identity; never falls back to an object address."""
+
+    try:
+        payload = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        payload = json.dumps(
+            {
+                "binding": str(binding),
+                "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _speculation_parked(lane) -> bool:
@@ -709,9 +733,12 @@ class ExternalDraftBatchGenerator:
     progressive_cross_session_pack_mode = None
     adaptive_policy = None
     ast_collision_probability = False
+    ast_stage_row_telemetry = False
+    ast_physical_target = False
     multilane_draft_cap = None
 
-    def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
+    def __init__(self, model, *, draft_model, binding,
+                 target_artifact_fingerprint=None, completion_batch_size=4,
                  prefill_step_size=2048, prefill_step_autoscale=False,
                  num_draft=4, stop_tokens=(), memory_headroom=None,
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
@@ -743,6 +770,9 @@ class ExternalDraftBatchGenerator:
                  progressive_target_protocol=None,
                  progressive_protocol_binding=None,
                  ast_collision_probability=False,
+                 ast_stage_row_telemetry=False,
+                 ast_physical_target=False,
+                 ast_memo=None,
                  decode_time_fairness=None, decode_first=None,
                  cost_per_commit_handoff=None,
                  draft_tail_equalize=False,
@@ -756,7 +786,35 @@ class ExternalDraftBatchGenerator:
         # Responses returned by next(); drives the periodic allocator reclaim.
         self._emitted_responses = 0
         self.binding = binding; self.capacity = completion_batch_size
+        # ``binding`` identifies the composed target+drafter execution route.
+        # Physical-target discovery must instead compare the provider against
+        # the target artifact whose tensors it executes.
+        self.target_artifact_fingerprint = (
+            binding
+            if target_artifact_fingerprint is None
+            else target_artifact_fingerprint
+        )
         self._generator_revision = uuid.uuid4().hex
+        self.ast_memo = ast_memo
+        # Physical-target discovery is an installed semantic capability, not
+        # an adapter tuning declaration.  Discovery is read-only and cannot
+        # select an executor or open a transaction in this integration slice.
+        self.ast_physical_target_provider = getattr(
+            model, "ast_physical_target_provider", None
+        )
+        if type(ast_physical_target) is not bool:
+            raise ValueError("ast_physical_target must be boolean")
+        self.ast_physical_target = ast_physical_target
+        if ast_physical_target and self.ast_physical_target_provider is None:
+            raise ValueError(
+                "ast_physical_target requires an adapter-owned provider"
+            )
+        if type(ast_stage_row_telemetry) is not bool:
+            raise ValueError("ast_stage_row_telemetry must be boolean")
+        self.ast_stage_row_telemetry = ast_stage_row_telemetry
+        # Immutable semantic discovery is reused only for an equal owner
+        # contract. APC metadata does not replace this hot-path-local cache.
+        self._ast_execution_capabilities = {}
         from .cost_per_commit_handoff import CostPerCommitHandoffSettings
 
         self.cost_per_commit_handoff = (
@@ -1223,6 +1281,20 @@ class ExternalDraftBatchGenerator:
             self.progressive_target_protocol = resolved["target_protocol"]
             self.progressive_protocol_binding = resolved
         self.progressive_verification_tile = progressive_verification_tile
+        if self.ast_physical_target and (
+            self.progressive_verification_tile is None
+            or self.progressive_verification_fidelity
+            != PROGRESSIVE_FIDELITY_EXACT
+            or self.progressive_target_protocol
+            != PROGRESSIVE_TARGET_PROTOCOL_VERSION
+            or not callable(
+                getattr(self.model, "progressive_external_target_rows", None)
+            )
+        ):
+            raise ValueError(
+                "ast_physical_target requires selected exact progressive "
+                "verification and an adapter-owned row-exact target"
+            )
         self.progressive_terminal_input_widths = (
             tuple(progressive_terminal_input_widths)
             if progressive_terminal_input_widths is not None
@@ -1717,13 +1789,26 @@ class ExternalDraftBatchGenerator:
                cache_states=None, lane_rngs=None, sampling_configs=None,
                logits_processors=None, samplers=None, resume_rng=False,
                apc_interior_positions=None, prefill_inputs=None,
-               prefill_cuts=None, session_keys=None):
+               prefill_cuts=None, session_keys=None,
+               ast_memo_layout_revisions=None):
         if self._open:
             raise RuntimeError("Membership change during external transaction")
         if session_keys is not None and (len(session_keys) != len(prompts) or any(
                 value is not None and (type(value) is not str or len(value) != 64 or any(c not in "0123456789abcdef" for c in value))
                 for value in session_keys)):
             raise ValueError("session_keys must contain one pinned privacy hash per request")
+        if ast_memo_layout_revisions is not None and (
+            len(ast_memo_layout_revisions) != len(prompts)
+            or any(
+                type(value) is not str
+                or len(value) != 64
+                or any(c not in "0123456789abcdef" for c in value)
+                for value in ast_memo_layout_revisions
+            )
+        ):
+            raise ValueError(
+                "ast_memo_layout_revisions must contain one SHA-256 per request"
+            )
         apc_interior_positions = (
             [()] * len(prompts)
             if apc_interior_positions is None
@@ -1843,6 +1928,14 @@ class ExternalDraftBatchGenerator:
             lane.proposal_request_id = self._generator_revision + ":" + str(uid)
             lane.session_scope_hash = ((session_keys or [None] * len(prompts))[i]
                 or hashlib.sha256(json.dumps([self.binding, lane.proposal_request_id]).encode()).hexdigest())
+            lane.ast_memo_named_scope = bool(
+                (session_keys or [None] * len(prompts))[i]
+            )
+            lane.ast_memo_layout_revision = (
+                None
+                if ast_memo_layout_revisions is None
+                else ast_memo_layout_revisions[i]
+            )
             if self.cost_per_commit_handoff is not None:
                 from .cost_per_commit_handoff import CostPerCommitLaneState
 
@@ -1852,6 +1945,21 @@ class ExternalDraftBatchGenerator:
                     owner_scope=(self.binding, lane.session_scope_hash),
                 )
             pending_lanes.append(lane)
+        if self.ast_memo is not None:
+            registered = []
+            for lane in pending_lanes:
+                if lane.ast_memo_named_scope:
+                    continue
+                if self.ast_memo.register_scope(lane.session_scope_hash):
+                    registered.append(lane.session_scope_hash)
+                    continue
+                for scope in registered:
+                    self.ast_memo.advance(
+                        (scope,), "anonymous_lane_end", purge=True
+                    )
+                for pending in pending_lanes:
+                    pending.ast_memo_layout_revision = None
+                break
         self.lanes.update((lane.uid, lane) for lane in pending_lanes)
         self.next_uid += len(pending_lanes)
         self.scheduler_stats["paired_cache_resumes"] += resumed
@@ -4481,10 +4589,171 @@ class ExternalDraftBatchGenerator:
                 last_layout_receipt["ast_plan"] = launch_plan.receipt()
                 for index in active:
                     states[index]["lane"].ast_last_launch = launch_plan.receipt()
+            provider_backend = bool(
+                launch_plan is not None
+                and launch_plan.backend != ast_planner.profile.backend
+            )
+            if provider_backend and self.ast_physical_target:
+                raise RuntimeError(
+                    "AST physical target conflicts with target-tree backend"
+                )
+            physical_target_discovery = None
+            if self.ast_physical_target:
+                from .ast_physical_target import (
+                    discover_ast_physical_target_from_layout,
+                )
+
+                physical_target_discovery = (
+                    discover_ast_physical_target_from_layout(
+                        self.ast_physical_target_provider,
+                        provider_getter=lambda: getattr(
+                            self.model, "ast_physical_target_provider", None
+                        ),
+                        query_lengths=layout.query_lengths,
+                        capture_layers=tuple(self.layers),
+                        fidelity=self.progressive_verification_fidelity,
+                        fallback_target_protocol=self.progressive_target_protocol,
+                        artifact_fingerprint=str(self.target_artifact_fingerprint),
+                        fallback_plan=tuple(sorted(plan.receipt().items())),
+                    )
+                )
+                last_layout_receipt["physical_target_discovery"] = (
+                    physical_target_discovery
+                )
             input_lengths = list(layout.query_lengths)
             launch_width = layout.max_query_len
             launch_padding = plan.padding_rows
-            ragged = launch_padding > 0
+            physical_binding = None
+            physical_target_admission = None
+            if self.ast_physical_target:
+                if (
+                    physical_target_discovery is None
+                    or physical_target_discovery.get("candidate_implemented") is not True
+                ):
+                    reasons = (
+                        []
+                        if physical_target_discovery is None
+                        else physical_target_discovery.get("decline_reasons", [])
+                    )
+                    raise RuntimeError(
+                        "requested AST physical target is unavailable: "
+                        + (", ".join(reasons) or "discovery unavailable")
+                    )
+                bind = getattr(
+                    self.ast_physical_target_provider,
+                    "bind_serving_physical_target",
+                    None,
+                )
+                if not callable(bind):
+                    raise RuntimeError(
+                        "requested AST physical target lacks a serving binding"
+                    )
+                session_scope_sha256 = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "generator_revision": self._generator_revision,
+                            "scopes": [
+                                states[index]["lane"].session_scope_hash
+                                for index in active
+                            ],
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                admit = getattr(
+                    self.ast_physical_target_provider,
+                    "admit_serving_physical_target",
+                    None,
+                )
+                validate_provider = getattr(
+                    self.ast_physical_target_provider, "validate_revision", None
+                )
+                if not callable(admit):
+                    raise RuntimeError(
+                        "requested AST physical target lacks live admission"
+                    )
+                try:
+                    from .ast_physical_target import (
+                        validate_ast_serving_admission,
+                    )
+                    from .flat_segmented_ast import FlatSegmentDescriptor
+
+                    if (
+                        getattr(self.model, "ast_physical_target_provider", None)
+                        is not self.ast_physical_target_provider
+                    ):
+                        raise RuntimeError("physical-target provider binding drifted")
+                    if not callable(validate_provider):
+                        raise RuntimeError("physical-target provider validator drifted")
+                    validate_provider()
+
+                    descriptor = FlatSegmentDescriptor.from_query_lengths(
+                        layout.query_lengths
+                    )
+                    physical_target_admission = admit(
+                        rows=[states[index]["private_cache"] for index in active],
+                        descriptor=descriptor,
+                        capture_layers=tuple(self.layers),
+                        session_scope_sha256=session_scope_sha256,
+                        discovery=physical_target_discovery,
+                    )
+                    if (
+                        getattr(self.model, "ast_physical_target_provider", None)
+                        is not self.ast_physical_target_provider
+                    ):
+                        raise RuntimeError("physical-target provider binding drifted")
+                    validate_provider()
+                    physical_target_admission = validate_ast_serving_admission(
+                        physical_target_admission,
+                        physical_target_discovery,
+                        expected_session_scope_sha256=session_scope_sha256,
+                    )
+
+                    physical_binding = bind(
+                        rows=[states[index]["private_cache"] for index in active],
+                        descriptor=descriptor,
+                        capture_layers=tuple(self.layers),
+                        flat_inputs=tuple(token for row in inputs for token in row),
+                        session_scope_sha256=session_scope_sha256,
+                        discovery=physical_target_discovery,
+                        admission=physical_target_admission,
+                    )
+                    if (
+                        getattr(self.model, "ast_physical_target_provider", None)
+                        is not self.ast_physical_target_provider
+                    ):
+                        raise RuntimeError("physical-target provider binding drifted")
+                    validate_provider()
+                except Exception as error:
+                    raise RuntimeError(
+                        "requested AST physical target admission or binding failed"
+                    ) from error
+            native_selected = physical_binding is not None
+            if native_selected:
+                launch_padding = 0
+                last_layout_receipt["fallback_backend_mode"] = (
+                    last_layout_receipt["backend_mode"]
+                )
+                last_layout_receipt["executed_backend_mode"] = (
+                    "native_flat_logical_rows"
+                )
+                last_layout_receipt["physical_target_serving"] = {
+                    "implemented": True,
+                    "qualified": False,
+                    "selected": True,
+                    "default": False,
+                    "observed_used": False,
+                    "physical_layout": "native_flat_logical_rows",
+                }
+                last_layout_receipt["physical_target_admission"] = (
+                    physical_target_admission
+                )
+            else:
+                last_layout_receipt["executed_backend_mode"] = (
+                    last_layout_receipt["backend_mode"]
+                )
+            ragged = not native_selected and launch_padding > 0
             if ragged:
                 # Cache/state planes consume the exact lengths. Token values in
                 # the right-padding tail are therefore inert and never commit.
@@ -4493,8 +4762,10 @@ class ExternalDraftBatchGenerator:
                 ]
                 ragged_launches += 1
                 padding_rows += launch_padding
-            else:
+            elif not native_selected:
                 padded_inputs = inputs
+            else:
+                padded_inputs = None
             active_width = len(active)
             if row_metadata is not None:
                 launch_schedule.append(
@@ -4516,24 +4787,31 @@ class ExternalDraftBatchGenerator:
                         ],
                     }
                 )
-            if not ragged:
+            if not ragged and not native_selected:
                 aligned_tile_launches[active_width] += 1
                 if all(states[index]["offset"] > 0 for index in active):
                     aligned_continued_launches[active_width] += 1
 
-            provider_backend = bool(
-                launch_plan is not None
-                and launch_plan.backend != ast_planner.profile.backend
-            )
             if provider_backend and len(active) != 1:
                 raise RuntimeError(
                     "AST target-tree backend is single-session only"
                 )
             transaction = None
+            transaction_committed = False
             results = []
+            participating_ast_scopes = tuple(
+                dict.fromkeys(
+                    states[index]["lane"].session_scope_hash for index in active
+                )
+            )
+            ast_memo_identity = None
+            ast_memo_debug_identity = None
+            ast_memo_debug = None
             try:
-                planning_started = time.perf_counter() if launch_plan is not None else None
+                planning_started = None
                 if provider_backend:
+                    if launch_plan is not None and not self.ast_stage_row_telemetry:
+                        planning_started = time.perf_counter()
                     logits, features, transaction = self._ast_target_tree_forward(
                         states[active[0]]["lane"],
                         states[active[0]]["private_cache"],
@@ -4554,10 +4832,234 @@ class ExternalDraftBatchGenerator:
                             },
                         },
                     )
+                elif native_selected:
+                    if (
+                        getattr(self.model, "ast_physical_target_provider", None)
+                        is not self.ast_physical_target_provider
+                    ):
+                        raise RuntimeError("physical-target provider binding drifted")
+                    validate_provider()
+                    native_result = physical_binding.execute()
+                    execution_receipt = getattr(physical_binding, "receipt", None)
+                    physical_execution_receipt = (
+                        execution_receipt() if callable(execution_receipt) else {}
+                    )
+                    native_execution_mode = physical_execution_receipt.get(
+                        "execution_mode"
+                    ) or "native_flat_logical_rows"
+                    last_layout_receipt["executed_backend_mode"] = (
+                        native_execution_mode
+                    )
+                    if (
+                        getattr(self.model, "ast_physical_target_provider", None)
+                        is not self.ast_physical_target_provider
+                    ):
+                        raise RuntimeError("physical-target provider binding drifted")
+                    validate_provider()
+                    logits = features = None
+                    _observe_target_executor(
+                        target_executor,
+                        {
+                            "execution": "adapter_owned",
+                            "row_exact": True,
+                            "physical_width": len(active),
+                            "token_width": layout.max_query_len,
+                            "adapter_detail": {
+                                "route": native_execution_mode,
+                                "geometry_sha256": layout.geometry_sha256,
+                                "logical_rows": layout.logical_rows,
+                                "physical_rows": layout.logical_rows,
+                                "padding_rows": 0,
+                            },
+                        },
+                    )
                 else:
                     owner = self._target_owner(
                         [states[index]["private_cache"] for index in active]
                     )
+                    from .ast_execution_capability import (
+                        query_ast_execution_capability,
+                        transaction_owner_contract,
+                    )
+
+                    owner_contract = transaction_owner_contract(owner)
+                    owner_contract_sha256 = (
+                        hashlib.sha256(
+                            json.dumps(
+                                owner_contract,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode()
+                        ).hexdigest()
+                        if owner_contract is not None
+                        else None
+                    )
+                    capability = (
+                        None
+                        if owner_contract_sha256 is None
+                        else self._ast_execution_capabilities.get(
+                            owner_contract_sha256
+                        )
+                    )
+                    if capability is None:
+                        capability = query_ast_execution_capability(
+                            self.model,
+                            owner,
+                            fidelity=self.progressive_verification_fidelity,
+                            protocol_binding=self.progressive_protocol_binding,
+                            execution_profile=(
+                                None if ast_planner is None else ast_planner.profile
+                            ),
+                            artifact_identity=str(self.binding),
+                        ).receipt()
+                        if owner_contract_sha256 is not None:
+                            self._ast_execution_capabilities[
+                                owner_contract_sha256
+                            ] = capability
+                    memo_snapshot = (
+                        None
+                        if self.ast_memo is None
+                        else self.ast_memo.snapshot(participating_ast_scopes)
+                    )
+                    memo_enabled = bool(
+                        memo_snapshot is not None and memo_snapshot.get("enabled")
+                    )
+                    memo_outcome = None
+                    layout_revisions = {
+                        getattr(
+                            states[index]["lane"],
+                            "ast_memo_layout_revision",
+                            None,
+                        )
+                        for index in active
+                    }
+                    if (
+                        memo_enabled
+                        and owner_contract_sha256 is not None
+                        and len(layout_revisions) == 1
+                        and None not in layout_revisions
+                    ):
+                        source_build_device_sha256 = hashlib.sha256(
+                            json.dumps(
+                                capability["identity"],
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode()
+                        ).hexdigest()
+                        policy_sha256 = hashlib.sha256(
+                            json.dumps(
+                                {
+                                    "fidelity": self.progressive_verification_fidelity,
+                                    "protocol_binding": self.progressive_protocol_binding,
+                                    "tile": self.progressive_verification_tile,
+                                    "tile_policy": self.progressive_verification_tile_policy,
+                                    "terminal_input_widths": self.progressive_terminal_input_widths,
+                                    "alternative_branches": self.progressive_alternative_branches,
+                                    "alternative_strategy": self.progressive_alternative_strategy,
+                                    "alternative_depth_policy": self.progressive_alternative_depth_policy,
+                                    "rootless_fallback": self.progressive_ast_rootless_fallback,
+                                    "cross_session_pack_rows": self.progressive_cross_session_pack_rows,
+                                    "cross_session_pack_mode": self.progressive_cross_session_pack_mode,
+                                    "collision_probability": self.ast_collision_probability,
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode()
+                        ).hexdigest()
+                        ast_memo_identity = {
+                            "schema": "mlx2.apcv2.ast-memo.v1",
+                            "value_kind": "ragged_geometry",
+                            "apc_semantic_epoch": memo_snapshot[
+                                "apc_semantic_epoch"
+                            ],
+                            "scope_epochs": (),
+                            "layout_revision_sha256": next(iter(layout_revisions)),
+                            "target_fingerprint": _ast_artifact_fingerprint(
+                                getattr(self.model, "identity", self.model),
+                                binding=self.binding,
+                            ),
+                            "drafter_fingerprint": _ast_artifact_fingerprint(
+                                getattr(self.draft, "identity", self.draft),
+                                binding=self.binding,
+                            ),
+                            "source_build_device_sha256": source_build_device_sha256,
+                            "policy_sha256": policy_sha256,
+                            "owner_semantic_contract_sha256": owner_contract_sha256,
+                            "capability_manifest_sha256": capability[
+                                "manifest_sha256"
+                            ],
+                            "cohort_geometry_sha256": layout.geometry_sha256,
+                        }
+                        ast_memo_debug_identity = {
+                            **ast_memo_identity,
+                            "scope_epochs": tuple(
+                                tuple(item)
+                                for item in memo_snapshot["scope_epochs"]
+                            ),
+                        }
+                        live_geometry = {
+                            "schema": "mlx2.ast-ragged-geometry.v1",
+                            "query_lengths": list(layout.query_lengths),
+                            "cu_query_lengths": list(layout.cu_query_lengths),
+                            "right_padding": list(layout.right_padding),
+                            "token_to_lane": list(layout.token_to_lane),
+                            **plan.receipt(),
+                        }
+                        from .apc_ast_metadata import shadow_checked_metadata
+
+                        comparison = shadow_checked_metadata(
+                            self.ast_memo, ast_memo_identity, live_geometry
+                        )
+                        memo_outcome = comparison["outcome"]
+                        ast_memo_debug = {
+                            "lookup_input_sha256": layout.geometry_sha256,
+                            "candidate_backends_and_shapes": [
+                                {
+                                    "backend": plan.mode.value,
+                                    "logical_rows": plan.logical_rows,
+                                    "physical_rows": plan.physical_rows,
+                                    "max_query_len": plan.max_query_len,
+                                }
+                            ],
+                            "selected_plan": plan.receipt(),
+                            "decline_reasons": (
+                                ["shadow_mismatch_live_authoritative"]
+                                if comparison["outcome"] == "shadow_mismatch"
+                                else []
+                            ),
+                            "memo_outcome": comparison["outcome"],
+                            "invalidation_cause": None,
+                            "shadow_comparison": comparison,
+                        }
+                        self.ast_memo.debug_append(
+                            ast_memo_debug_identity, ast_memo_debug
+                        )
+                    last_layout_receipt["execution_capability"] = capability
+                    last_layout_receipt["memo_identity_material"] = {
+                        "capability_manifest_sha256": capability[
+                            "manifest_sha256"
+                        ],
+                        "cohort_geometry_sha256": layout.geometry_sha256,
+                        "owner_semantic_contract_sha256": (
+                            owner_contract_sha256 or "unknown"
+                        ),
+                        "authoritative_cache": "APCv2",
+                        "memo_implemented": True,
+                        "memo_enabled": memo_enabled,
+                        "memo_value_kind": (
+                            None
+                            if ast_memo_identity is None
+                            else ast_memo_identity["value_kind"]
+                        ),
+                        "memo_selected_for_execution": False,
+                        "memo_observed_used": memo_outcome is not None,
+                        "memo_outcome": memo_outcome,
+                    }
+                    # Discovery and optional row telemetry are diagnostics, not
+                    # execution cost.  Start the planner sample only after
+                    # discovery; diagnostic launches do not update feedback.
+                    if launch_plan is not None and not self.ast_stage_row_telemetry:
+                        planning_started = time.perf_counter()
                     transaction = owner.begin(lengths=input_lengths)
                     (
                         logits,
@@ -4571,6 +5073,13 @@ class ExternalDraftBatchGenerator:
                         protocol=self.progressive_target_protocol,
                         fidelity=self.progressive_verification_fidelity,
                         input_lengths=input_lengths,
+                        include_stage_rows=self.ast_stage_row_telemetry,
+                    )
+                    _target_executor_detail["capability_manifest_sha256"] = (
+                        capability["manifest_sha256"]
+                    )
+                    _target_executor_detail["cohort_geometry_sha256"] = (
+                        layout.geometry_sha256
                     )
                     _observe_target_executor(
                         target_executor, _target_executor_detail
@@ -4593,8 +5102,22 @@ class ExternalDraftBatchGenerator:
                 greedy_selected = None
                 greedy_normalizers = None
                 greedy_response_rows = None
+                greedy_lane_offsets = None
                 if batched_greedy:
-                    rows32 = logits.astype(self.mx.float32)
+                    if native_selected:
+                        lane_row_counts = []
+                        flat_logits = []
+                        for lane in range(len(active)):
+                            lane_logits, _lane_features = native_result.lane(lane)
+                            lane_row_counts.append(len(lane_logits))
+                            flat_logits.extend(lane_logits)
+                        rows32 = self.mx.stack(flat_logits).astype(self.mx.float32)
+                        offsets = [0]
+                        for count in lane_row_counts:
+                            offsets.append(offsets[-1] + count)
+                        greedy_lane_offsets = tuple(offsets)
+                    else:
+                        rows32 = logits.astype(self.mx.float32)
                     normalizers = self.mx.logsumexp(
                         rows32, axis=-1, keepdims=True
                     )
@@ -4604,20 +5127,37 @@ class ExternalDraftBatchGenerator:
                         for index in active
                     ):
                         greedy_response_rows = rows32 - normalizers
-                        self.mx.eval(
-                            features,
-                            selected,
-                            normalizers,
-                            greedy_response_rows,
-                        )
+                        values = [selected, normalizers, greedy_response_rows]
                     else:
-                        self.mx.eval(features, selected, normalizers)
-                    greedy_selected = selected.tolist()
-                    greedy_normalizers = normalizers.tolist()
+                        values = [selected, normalizers]
+                    if not native_selected:
+                        values.insert(0, features)
+                    self.mx.eval(*values)
+                    selected_values = selected.tolist()
+                    normalizer_values = normalizers.tolist()
+                    if native_selected:
+                        greedy_selected = [
+                            selected_values[start:stop]
+                            for start, stop in pairwise(greedy_lane_offsets)
+                        ]
+                        greedy_normalizers = [
+                            normalizer_values[start:stop]
+                            for start, stop in pairwise(greedy_lane_offsets)
+                        ]
+                    else:
+                        greedy_selected = selected_values
+                        greedy_normalizers = normalizer_values
+                elif native_selected:
+                    # The physical target evaluates its result before returning;
+                    # sampled rows still need the ordinary per-row target law,
+                    # but must not force the tensors a second time here.
+                    pass
                 else:
                     self.mx.eval(logits, features)
-                if launch_plan is not None:
-                    ast_planner.observe_launch(launch_plan, time.perf_counter() - planning_started)
+                if planning_started is not None:
+                    ast_planner.observe_launch(
+                        launch_plan, time.perf_counter() - planning_started
+                    )
                 for physical_row, (
                     index,
                     final,
@@ -4627,14 +5167,26 @@ class ExternalDraftBatchGenerator:
                 ) in enumerate(stage):
                     state = states[index]
                     expected = count + int(final)
-                    if int(logits.shape[1]) < expected:
-                        raise RuntimeError(
-                            "progressive target stage returned the wrong row count"
-                        )
-                    if int(features.shape[1]) < len(inputs[physical_row]):
-                        raise RuntimeError(
-                            "progressive target stage returned the wrong feature count"
-                        )
+                    if native_selected:
+                        lane_logits, lane_features = native_result.lane(physical_row)
+                        if (
+                            len(lane_logits) < expected
+                            or len(lane_features) < len(inputs[physical_row])
+                        ):
+                            raise RuntimeError(
+                                "native progressive target returned the wrong row count"
+                            )
+                    else:
+                        lane_logits = logits[physical_row]
+                        lane_features = features[physical_row]
+                        if int(logits.shape[1]) < expected:
+                            raise RuntimeError(
+                                "progressive target stage returned the wrong row count"
+                            )
+                        if int(features.shape[1]) < len(inputs[physical_row]):
+                            raise RuntimeError(
+                                "progressive target stage returned the wrong feature count"
+                            )
                     stage_response_rows = (
                         [] if state["response_rows"] is not None else None
                     )
@@ -4654,9 +5206,16 @@ class ExternalDraftBatchGenerator:
                                     "probability distribution",
                                 )
                             if stage_response_rows is not None:
-                                stage_response_rows.append(
-                                    greedy_response_rows[physical_row, row]
-                                )
+                                if native_selected:
+                                    stage_response_rows.append(
+                                        greedy_response_rows[
+                                            greedy_lane_offsets[physical_row] + row
+                                        ]
+                                    )
+                                else:
+                                    stage_response_rows.append(
+                                        greedy_response_rows[physical_row, row]
+                                    )
                             state["window"].mark()
                     else:
                         stage_target_laws = []
@@ -4664,7 +5223,7 @@ class ExternalDraftBatchGenerator:
                             stage_target_laws.append(
                                 self._target_law(
                                     state["lane"],
-                                    logits[physical_row, row],
+                                    lane_logits[row],
                                     state["local_history"],
                                     True,
                                     stage_response_rows,
@@ -4746,16 +5305,86 @@ class ExternalDraftBatchGenerator:
                             consumed,
                             stage_target_laws,
                             stage_response_rows,
-                            features[physical_row : physical_row + 1, :consumed],
+                            (
+                                self.mx.stack(
+                                    [lane_features[row] for row in range(consumed)]
+                                )[None]
+                                if native_selected
+                                else features[
+                                    physical_row : physical_row + 1, :consumed
+                                ]
+                            ),
                             inputs[physical_row],
                         )
                     )
-                committed = transaction.commit(
-                    accepted_lengths=[result[6] for result in results]
+                accepted_lengths = [result[6] for result in results]
+                if native_selected:
+                    if (
+                        getattr(self.model, "ast_physical_target_provider", None)
+                        is not self.ast_physical_target_provider
+                    ):
+                        raise RuntimeError("physical-target provider binding drifted")
+                    validate_provider()
+                committed = (
+                    physical_binding.commit(accepted_lengths)
+                    if native_selected
+                    else transaction.commit(accepted_lengths=accepted_lengths)
                 )
+                transaction_committed = True
+                if native_selected:
+                    last_layout_receipt["physical_target_serving"] = (
+                        physical_binding.receipt()
+                    )
+                if self.ast_memo is not None:
+                    if (
+                        ast_memo_debug_identity is not None
+                        and ast_memo_debug is not None
+                    ):
+                        self.ast_memo.debug_append(
+                            ast_memo_debug_identity,
+                            {
+                                **ast_memo_debug,
+                                "memo_outcome": None,
+                                "invalidation_cause": "transaction_commit",
+                                "shadow_comparison": None,
+                            },
+                        )
+                    self.ast_memo.advance(
+                        participating_ast_scopes,
+                        "transaction_commit",
+                    )
             except BaseException:
-                if transaction is not None and not transaction.closed:
-                    transaction.abort()
+                if native_selected and not transaction_committed:
+                    try:
+                        physical_binding.abort()
+                    except BaseException:  # noqa: BLE001,S110 - preserve original
+                        pass
+                if transaction is not None and not transaction_committed:
+                    if not transaction.closed:
+                        try:
+                            transaction.abort()
+                        except BaseException:
+                            # Preserve the original model/commit exception.
+                            # The memo epoch is still advanced below.
+                            pass
+                if self.ast_memo is not None:
+                    if (
+                        ast_memo_debug_identity is not None
+                        and ast_memo_debug is not None
+                    ):
+                        self.ast_memo.debug_append(
+                            ast_memo_debug_identity,
+                            {
+                                **ast_memo_debug,
+                                "memo_outcome": None,
+                                "invalidation_cause": "transaction_abort",
+                                "shadow_comparison": None,
+                            },
+                        )
+                    self.ast_memo.advance(
+                        participating_ast_scopes,
+                        "transaction_abort",
+                    )
                 raise
 
             physical_launches += 1
@@ -11082,6 +11711,15 @@ class ExternalDraftBatchGenerator:
             if not keep_boundary: self.boundaries.pop(uid,None)
             if lane is not None:
                 removed = True
+                if (
+                    self.ast_memo is not None
+                    and not getattr(lane, "ast_memo_named_scope", False)
+                ):
+                    self.ast_memo.advance(
+                        (lane.session_scope_hash,),
+                        "anonymous_lane_end",
+                        purge=True,
+                    )
                 if lane.cost_handoff_state is not None:
                     lane.cost_handoff_state.cancel()
                 latches = getattr(self, "progressive_topology_latch", None)

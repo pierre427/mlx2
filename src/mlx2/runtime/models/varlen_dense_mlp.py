@@ -258,6 +258,17 @@ def prefill_row_context(model, lengths, *, width, padding="right"):
     return _active_scope(lengths, width, handle, padding)
 
 
+def active() -> bool:
+    """Whether this context currently carries live-row MLP geometry.
+
+    This token-free query lets exact executors fail closed instead of silently
+    inheriting a gather/scatter policy that is outside their admitted
+    arithmetic contract.
+    """
+
+    return _SCOPE.get() is not None
+
+
 def compact_rows(values, *, operation="dense_mlp"):
     """Return live rows when ``values`` matches the active padded slab."""
     scope = _SCOPE.get()
@@ -280,6 +291,7 @@ __all__ = [
     "CompactedRows",
     "VarlenDenseMLPPolicy",
     "VarlenSparseMoEPolicy",
+    "active",
     "compact_rows",
     "identity",
     "install",

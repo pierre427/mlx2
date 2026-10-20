@@ -43,7 +43,7 @@ FEATURES = (
     "apc_rolling_checkpoints", "apc_session_persistence", "tools",
     "vision_input", "video_input", "audio_input", "native_mtp",
     "mtp_ordinary_handoff", "adaptive_mtp_depth", "self_mtp_copy_draft",
-    "external_draft", "prompt_lookup", "prompt_lookup_target_s1",
+    "external_draft", "flat_segmented_ast", "prompt_lookup", "prompt_lookup_target_s1",
     "decode_first", "prefill_scheduling", "mixed_prefill_decode",
     "varlen_paged_attention", "row_exact_verify", "tensorfold_tree15",
     "fused_gdn", "fused_gdn_batch_verify", "moe_rhs_pad",

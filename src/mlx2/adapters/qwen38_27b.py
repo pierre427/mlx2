@@ -365,6 +365,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "progressive_cross_session_pack_rows",
         "progressive_cross_session_pack_mode",
         "progressive_verification_fidelity",
+        "ast_physical_target",
         "ast_collision_probability",
         "target_verify_row_exact",
         "cost_per_commit_handoff",
@@ -443,8 +444,18 @@ def validate_target_verify_row_exact(policy: dict) -> bool:
     selected = policy.get("target_verify_row_exact", False)
     if type(selected) is not bool:
         raise ValueError("target_verify_row_exact must be a boolean")
+    physical_target = policy.get("ast_physical_target", False)
+    if type(physical_target) is not bool:
+        raise ValueError("ast_physical_target must be a boolean")
     tile = policy.get("progressive_verification_tile")
     fidelity = policy.get("progressive_verification_fidelity", "exact")
+    if physical_target and (
+        not selected or tile is None or fidelity != "exact"
+    ):
+        raise ValueError(
+            "ast_physical_target requires target_verify_row_exact and exact "
+            "progressive verification"
+        )
     if not selected:
         if tile is not None and fidelity == "exact":
             raise ValueError(
@@ -1366,6 +1377,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 base,
             )
             self._describe_target_verify_row_exact()
+            from .qwen38_hybrid_native_flat import (
+                install_qwen38_native_flat_physical_target_provider,
+            )
+
+            self.model.ast_physical_target_provider = (
+                install_qwen38_native_flat_physical_target_provider(self.model)
+            )
             mx.clear_cache()
 
     def _finish_load(
@@ -1618,6 +1636,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             kwargs.setdefault(
                 "progressive_protocol_binding", self._progressive_external_binding
             )
+        if self.external_policy.get("ast_physical_target") is not None:
+            enabled = self.external_policy["ast_physical_target"]
+            if type(enabled) is not bool:
+                raise ValueError("ast_physical_target must be boolean")
+            kwargs.setdefault("ast_physical_target", enabled)
         if self.external_policy.get("exact_verification", "token") != "token":
             kwargs.setdefault(
                 "exact_verification", self.external_policy["exact_verification"]
@@ -1665,6 +1688,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             self.model,
             draft_model=self.draft_model,
             binding=self.identity["fingerprint"],
+            target_artifact_fingerprint=self.identity.get(
+                "target_fingerprint", self.identity["fingerprint"]
+            ),
             num_draft=self._external_num_draft(),
             minimum_draft_proposals=self.external_policy.get(
                 "minimum_draft_proposals", min(3, self._external_num_draft())

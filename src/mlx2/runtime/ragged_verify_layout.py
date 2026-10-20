@@ -13,10 +13,12 @@ the model adapter and its ordinary reference path.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from numbers import Integral
-from typing import Iterable, Mapping
 
 
 class RaggedVerifyError(ValueError):
@@ -136,6 +138,25 @@ class RaggedVerifyLayout:
     def is_ragged(self) -> bool:
         return len(set(self.query_lengths)) > 1
 
+    @property
+    def geometry_sha256(self) -> str:
+        """Canonical token- and lane-identity-free geometry digest.
+
+        This is not a cache key by itself.  A future session-scoped APCv2
+        metadata memo must additionally bind the session, APCv2 revisions,
+        artifacts, source/build/device, policy and capability manifest.
+        """
+
+        payload = {
+            "query_lengths": self.query_lengths,
+            "cu_query_lengths": self.cu_query_lengths,
+            "right_padding": self.right_padding,
+            "token_to_lane": self.token_to_lane,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
     def lane_slice(self, lane_index: int) -> slice:
         if (
             isinstance(lane_index, bool)
@@ -205,6 +226,7 @@ class RaggedVerifyLayout:
             "query_lengths": list(self.query_lengths),
             "cu_query_lengths": list(self.cu_query_lengths),
             "right_padding": list(self.right_padding),
+            "geometry_sha256": self.geometry_sha256,
             "ragged": self.is_ragged,
             **plan.receipt(),
         }

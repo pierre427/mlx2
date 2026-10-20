@@ -35,6 +35,7 @@ from test_qwen4_row_exact_verify import _fake_gdn_engaged
 from test_standard_xpress_serving_cpu import drain, reference
 
 from mlx2.adapters.proposal_path_sources import build_continuation_drafter
+from mlx2.runtime.apc_v2 import APCv2
 from mlx2.runtime.drafters.native_mtp import (
     NativeMTPDraftModel,
     inspect_native_mtp_policy,
@@ -317,7 +318,15 @@ def test_policy_names_the_head_by_the_target_artifact(tmp_path):
 
 
 def _ast_generator(
-    model, wrapper, *, lanes=1, num_draft=4, tile=2, tile_policy=None
+    model,
+    wrapper,
+    *,
+    lanes=1,
+    num_draft=4,
+    tile=2,
+    tile_policy=None,
+    stage_row_telemetry=False,
+    ast_memo=None,
 ):
     from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
 
@@ -350,6 +359,8 @@ def _ast_generator(
         progressive_alternative_branches=4,
         progressive_alternative_strategy="confidence_tree",
         progressive_alternative_depth_policy="confidence_tail",
+        ast_stage_row_telemetry=stage_row_telemetry,
+        ast_memo=ast_memo,
         **extra,
     )
 
@@ -383,6 +394,24 @@ def test_ast_over_native_mtp_matches_ordinary_greedy_b1():
     executor = progressive["target_row_executor"]
     assert executor["row_exact_launches"] > 0 and executor["nonexact_launches"] == 0
     assert sum(executor["adapter_route_hist"].values()) == executor["launches"]
+    layout = progressive["last_ragged_layout"]
+    capability = layout["execution_capability"]
+    # This direct tiny fixture has no device/build execution profile; semantic
+    # discovery must attach its evidence but refuse to advertise availability.
+    assert capability["available"] is False
+    assert capability["discovery"] == "unknown_fail_closed"
+    assert capability["supported_layout_classes"] == ["padded_rectangular"]
+    memo = layout["memo_identity_material"]
+    assert memo["capability_manifest_sha256"] == capability["manifest_sha256"]
+    assert memo["cohort_geometry_sha256"] == layout["geometry_sha256"]
+    assert len(memo["owner_semantic_contract_sha256"]) == 64
+    assert memo["authoritative_cache"] == "APCv2"
+    assert memo["memo_implemented"] is True
+    assert memo["memo_enabled"] is False
+    assert memo["memo_selected_for_execution"] is False
+    assert memo["memo_observed_used"] is False
+    assert memo["memo_outcome"] is None
+    assert "stage_rows" not in executor["last"]
     geometry = progressive["ordered_alternatives"]["geometry_totals"]
     assert progressive["ordered_alternatives"]["winner_contract"] == (
         "exact_max_visited_committed_prefix_then_full_rank"
@@ -421,6 +450,164 @@ def test_ast_over_native_mtp_matches_ordinary_greedy_b1():
     assert draft.stats["complete_path_calls"] > 0
     assert draft.stats["complete_path_stash_misses"] == 0
     assert handle.status()["windows_not_exact"] == 0
+
+
+def test_ast_memo_reuses_static_geometry_without_selecting_execution():
+    model, _ = tiny_qwen4_mtp()
+    _route(model)
+    draft = _drafter(model, num_draft=4)
+    wrapper = _wrapper(model, draft)
+    apc = APCv2(
+        layout_name="test-layout",
+        max_size=2,
+        max_bytes=1 << 20,
+        ast_memo_enabled=True,
+        ast_memo_debug=True,
+    )
+    batch = _ast_generator(model, wrapper, ast_memo=apc.ast_memo_handle())
+    prompt = [1, 7, 3, 9, 2, 8, 4, 6, 5, 11, 13, 2]
+    try:
+        batch.insert(
+            [prompt],
+            max_tokens=[16],
+            sampling_configs=[{"sampling_temp": 0}],
+            ast_memo_layout_revisions=["d" * 64],
+        )
+        output, final = drain(batch)
+        assert output[0] == reference(model, prompt, 16)
+        memo = final[0].speculative_receipt["progressive_verification"][
+            "last_ragged_layout"
+        ]["memo_identity_material"]
+        assert memo["memo_enabled"] is True
+        assert memo["memo_observed_used"] is True
+        assert memo["memo_outcome"] in {"miss", "hit"}
+        assert memo["memo_selected_for_execution"] is False
+        snapshot = apc.ast_memo_receipt()
+        assert snapshot["executor_entries"] >= 1
+        assert snapshot["stats"]["stores"] >= 1
+        assert snapshot["stats"]["hits"] >= 1
+    finally:
+        batch.close()
+        apc.close(release_memory=False)
+
+
+@pytest.mark.parametrize("memo_enabled", [False, True])
+def test_capability_discovery_is_cached_per_owner_contract(monkeypatch, memo_enabled):
+    from mlx2.runtime import ast_execution_capability
+
+    model, _ = tiny_qwen4_mtp()
+    _route(model)
+    draft = _drafter(model, num_draft=4)
+    wrapper = _wrapper(model, draft)
+    apc = (
+        APCv2(
+            layout_name="test-layout",
+            max_size=2,
+            max_bytes=1 << 20,
+            ast_memo_enabled=True,
+        )
+        if memo_enabled
+        else None
+    )
+    batch = _ast_generator(
+        model,
+        wrapper,
+        ast_memo=None if apc is None else apc.ast_memo_handle(),
+    )
+    original = ast_execution_capability.query_ast_execution_capability
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ast_execution_capability, "query_ast_execution_capability", counted
+    )
+    prompt = [1, 7, 3, 9, 2, 8, 4, 6, 5, 11, 13, 2]
+    try:
+        batch.insert(
+            [prompt],
+            max_tokens=[16],
+            sampling_configs=[{"sampling_temp": 0}],
+            **(
+                {"ast_memo_layout_revisions": ["d" * 64]}
+                if memo_enabled
+                else {}
+            ),
+        )
+        output, final = drain(batch)
+        assert output[0] == reference(model, prompt, 16)
+        assert final[0].speculative_receipt["external_rounds"] > 1
+        assert len(calls) == 1
+    finally:
+        batch.close()
+        if apc is not None:
+            apc.close(release_memory=False)
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_failed_cohort_insert_does_not_leak_ast_memo_scope(named):
+    model, _ = tiny_qwen4_mtp()
+    _route(model)
+    draft = _drafter(model, num_draft=4)
+    wrapper = _wrapper(model, draft)
+    apc = APCv2(
+        layout_name="test-layout",
+        max_size=2,
+        max_bytes=1 << 20,
+        ast_memo_enabled=True,
+    )
+    batch = _ast_generator(
+        model, wrapper, lanes=2, ast_memo=apc.ast_memo_handle()
+    )
+    try:
+        with pytest.raises(ValueError, match="prompt tokens"):
+            batch.insert(
+                [[1, 2, 3], []],
+                max_tokens=[4, 4],
+                sampling_configs=[{"sampling_temp": 0}, {"sampling_temp": 0}],
+                ast_memo_layout_revisions=["d" * 64, "d" * 64],
+                **(
+                    {"session_keys": ["e" * 64, "f" * 64]}
+                    if named
+                    else {}
+                ),
+            )
+        assert apc.ast_memo_receipt()["scopes"] == 0
+    finally:
+        batch.close()
+        apc.close(release_memory=False)
+
+
+def test_ast_stage_row_telemetry_is_opt_in_and_excluded_from_feedback(monkeypatch):
+    model, _ = tiny_qwen4_mtp()
+    _route(model)
+    draft = _drafter(model, num_draft=4)
+    wrapper = _wrapper(model, draft, planner=True)
+    batch = _ast_generator(
+        model, wrapper, stage_row_telemetry=True
+    )
+
+    def forbidden_feedback(*_args, **_kwargs):
+        pytest.fail("diagnostic AST telemetry must not update planner feedback")
+
+    monkeypatch.setattr(
+        batch.ast_execution_planner, "observe_launch", forbidden_feedback
+    )
+    prompt = [1, 7, 3, 9, 2, 8, 4, 6, 5, 11, 13, 2]
+    batch.insert([prompt], max_tokens=[8], sampling_configs=[{"sampling_temp": 0}])
+    output, final = drain(batch)
+    assert output[0] == reference(model, prompt, 8)
+    executor = final[0].speculative_receipt["progressive_verification"][
+        "target_row_executor"
+    ]
+    target_rows = executor["last"]["stage_rows"]["stages"]["target.forward"]
+    assert target_rows["logical_rows"] <= target_rows["physical_rows"]
+    assert target_rows["padding_rows"] == (
+        target_rows["physical_rows"] - target_rows["logical_rows"]
+    )
+    assert batch.ast_execution_planner.receipt()["cost_samples"] == 0
 
 
 def test_auto_tile_runtime_receipt_names_policy_resolution_and_cohort():

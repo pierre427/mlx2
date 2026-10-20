@@ -629,7 +629,11 @@ class QwenHybridRowExactRoute:
         self.static_refusals: dict[str, int] = {}
         trunk = getattr(getattr(model, "language_model", None), "model", None)
         final_norm = getattr(trunk, "norm", None)
-        for name, module in model.named_modules():
+        # The target executor owns the language trunk and vocabulary head.
+        # An embedded MTP head is a drafter with separate caches and must not
+        # be class-swapped, counted as a target layer, or required to engage
+        # during target verification.
+        for name, module in self._target_named_modules():
             cls = type(module)
             if cls is nn.QuantizedLinear:
                 mixin = RowExactQuantizedLinearMixin
@@ -719,6 +723,13 @@ class QwenHybridRowExactRoute:
     def _refuse(self, reason):
         self.static_refusals[reason] = self.static_refusals.get(reason, 0) + 1
 
+    def _target_named_modules(self):
+        for name, module in self.model.named_modules():
+            components = name.split(".")
+            if "mtp" in components:
+                continue
+            yield name, module
+
     def set_attention_window_row_exact(self, selected: bool) -> None:
         if type(selected) is not bool:
             raise ValueError("attention_window_row_exact must be a boolean")
@@ -726,7 +737,7 @@ class QwenHybridRowExactRoute:
 
     def _audit(self):
         swapped = {id(module) for module, _, _ in self._swapped}
-        for _, module in self.model.named_modules():
+        for _, module in self._target_named_modules():
             if id(module) in swapped:
                 continue
             if isinstance(module, (nn.Linear, nn.QuantizedLinear)):

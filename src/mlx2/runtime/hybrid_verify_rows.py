@@ -86,6 +86,29 @@ def _kv_offset(cache):
 class HybridVerifyRows:
     """Owner of independent B1 hybrid lanes; lends them to one transaction."""
 
+    def ast_execution_transaction_contract(self):
+        """Semantic AST state contract; never a backend-selection hint."""
+
+        from .ast_execution_capability import (
+            OWNER_SCHEMA,
+            PADDED_RECTANGULAR,
+            state_contract_from_rows,
+        )
+
+        return {
+            "schema": OWNER_SCHEMA,
+            **state_contract_from_rows(self.rows),
+            "supported_layout_classes": (PADDED_RECTANGULAR,),
+            "transaction_operations": {
+                "begin": True,
+                "commit": True,
+                "abort": True,
+            },
+            "commit_law": "accepted_verified_input_prefix_per_lane",
+            "abort_law": "restore_exact_pre_begin_state",
+            "rollback_law": "kv_trim_and_recurrent_record_restore",
+        }
+
     def __init__(self, rows, note=None):
         rows = [list(row) for row in rows]
         if not rows or not rows[0] or len({len(row) for row in rows}) != 1:

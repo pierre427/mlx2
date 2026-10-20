@@ -99,6 +99,29 @@ def clone_kv_row(caches):
 class SegmentedKVRows:
     """Exclusive lane ownership and membership revision for ordinary KV caches."""
 
+    def ast_execution_transaction_contract(self):
+        """Semantic AST state contract; never a backend-selection hint."""
+
+        from .ast_execution_capability import (
+            OWNER_SCHEMA,
+            PADDED_RECTANGULAR,
+            state_contract_from_rows,
+        )
+
+        return {
+            "schema": OWNER_SCHEMA,
+            **state_contract_from_rows(self.rows),
+            "supported_layout_classes": (PADDED_RECTANGULAR,),
+            "transaction_operations": {
+                "begin": True,
+                "commit": True,
+                "abort": True,
+            },
+            "commit_law": "accepted_verified_input_prefix_per_lane",
+            "abort_law": "restore_exact_pre_begin_state",
+            "rollback_law": "snapshot_restore_then_exact_prefix_replay",
+        }
+
     def __init__(self, rows, note=None):
         self.rows = [list(row) for row in rows]
         self.note = note

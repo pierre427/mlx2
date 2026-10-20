@@ -24,6 +24,53 @@ _WINDOW: ContextVar[Optional["Window"]] = ContextVar(
     "mlx2_row_exact_verify_window", default=None
 )
 _VALID_ROWS = ContextVar("mlx2_exact_valid_rows", default=None)
+_STAGE_ROWS = ContextVar("mlx2_exact_stage_rows", default=None)
+
+
+class StageRowTelemetry:
+    """Launch-local logical/physical row accounting with no tensor values."""
+
+    def __init__(self):
+        self._rows = {}
+
+    def record(self, stage, *, logical_rows, physical_rows):
+        if (
+            not isinstance(stage, str)
+            or not stage
+            or type(logical_rows) is not int
+            or type(physical_rows) is not int
+            or not 0 <= logical_rows <= physical_rows
+        ):
+            raise ValueError("stage row telemetry requires valid logical geometry")
+        entry = self._rows.setdefault(
+            stage,
+            {"calls": 0, "logical_rows": 0, "physical_rows": 0, "padding_rows": 0},
+        )
+        entry["calls"] += 1
+        entry["logical_rows"] += logical_rows
+        entry["physical_rows"] += physical_rows
+        entry["padding_rows"] += physical_rows - logical_rows
+
+    def receipt(self):
+        return {
+            "schema": "mlx2.ast-stage-row-telemetry.v1",
+            "scope": "sum_over_observed_stage_invocations",
+            "stages": {
+                name: dict(values) for name, values in sorted(self._rows.items())
+            },
+        }
+
+
+@contextmanager
+def collect_stage_rows():
+    """Collect geometry for one target forward without changing execution."""
+
+    telemetry = StageRowTelemetry()
+    token = _STAGE_ROWS.set(telemetry)
+    try:
+        yield telemetry
+    finally:
+        _STAGE_ROWS.reset(token)
 
 
 @contextmanager
@@ -76,6 +123,9 @@ def compact_rows(value, *, stage):
         return None
     import mlx.core as mx
     batch, width, live, indices = scope
+    telemetry = _STAGE_ROWS.get()
+    if telemetry is not None:
+        telemetry.record(stage, logical_rows=live, physical_rows=batch * width)
     values = mx.take(value.reshape(batch * width, *value.shape[2:]), indices, axis=0)
     record.note("valid_row_compaction", stage + "_executed", live)
     record.note("valid_row_compaction", stage + "_padding_skipped", batch * width - live)
