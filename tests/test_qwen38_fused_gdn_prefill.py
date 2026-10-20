@@ -140,22 +140,31 @@ def kernels_on_cpu(monkeypatch):
     def prework(qkv, conv_state, conv_weight, *, numerics="qwen4", **_):
         calls["prework"].append(numerics)
         assert numerics == "qwen35"
-        state = (
-            np.zeros((NKEEP, C), np.float32)
+        raw = f32(qkv)
+        states = (
+            np.zeros((raw.shape[0], NKEEP, C), np.float32)
             if conv_state is None
-            else f32(conv_state)[0]
+            else f32(conv_state)
         )
-        q, k, v, nxt = ref_prework_qwen35(
-            f32(qkv)[0], state, f32(conv_weight)[:, :, 0]
+        rows = [
+            ref_prework_qwen35(row, state, f32(conv_weight)[:, :, 0])
+            for row, state in zip(raw, states)
+        ]
+        return tuple(
+            mx.array(np.stack(parts)).astype(qkv.dtype)
+            for parts in zip(*rows)
         )
-        to = lambda a: mx.array(a[None]).astype(qkv.dtype)
-        return to(q), to(k), to(v), to(nxt)
 
     def norm_gate(y, z, norm_weight, eps, *, gate="sigmoid", **_):
         calls["norm_gate"].append(gate)
         assert gate == "swish"
-        out = ref_norm_gate_swish(f32(y)[0], f32(z)[0], f32(norm_weight), eps)
-        return mx.array(out[None]).astype(y.dtype)
+        out = np.stack(
+            [
+                ref_norm_gate_swish(yr, zr, f32(norm_weight), eps)
+                for yr, zr in zip(f32(y), f32(z))
+            ]
+        )
+        return mx.array(out).astype(y.dtype)
 
     monkeypatch.setattr(gdn_prefill, "runtime_supported", lambda: True)
     monkeypatch.setattr(route.kernels, "served_silu_refusal", lambda: None)
@@ -221,6 +230,44 @@ def test_qwen35_eps_equals_the_eager_rms_norm_eps():
     eager = np.float32(1e-06 * inv_scale**2)  # normalize_gdn_qk's float arg
     kernel = np.float32(np.float32(1.0e-6) / np.float32(DK))
     assert eager == kernel
+
+
+def test_batch_launch_geometry_flattens_batch_times_rows():
+    calls = []
+
+    def fake_kernel(**kwargs):
+        calls.append(kwargs)
+        return [
+            mx.zeros(shape, dtype=dtype)
+            for shape, dtype in zip(kwargs["output_shapes"], kwargs["output_dtypes"])
+        ]
+
+    qkv = mx.zeros((4, 7, C), mx.bfloat16)
+    q, k, v, state = gdn_prefill.qwen4_gdn_prefill_prework(
+        qkv,
+        None,
+        mx.zeros((C, K, 1), mx.bfloat16),
+        numerics="qwen35",
+        _kernel=fake_kernel,
+    )
+    assert calls[-1]["grid"] == (32, 28, 2 * HK + HV)
+    assert [tuple(x.shape) for x in (q, k, v, state)] == [
+        (4, 7, HK, DK),
+        (4, 7, HK, DK),
+        (4, 7, HV, DV),
+        (4, NKEEP, C),
+    ]
+
+    flat = gdn_prefill.qwen4_gdn_prefill_norm_gate(
+        v,
+        mx.zeros((4, 7, HV * DV), mx.bfloat16),
+        mx.ones((DV,), mx.bfloat16),
+        1e-6,
+        gate="swish",
+        _kernel=fake_kernel,
+    )
+    assert calls[-1]["grid"] == (32, 28, HV)
+    assert flat.shape == (4, 7, HV * DV)
 
 
 # --------------------------------------------------------------------------
@@ -292,12 +339,12 @@ def test_swish_norm_gate_mirror_tracks_eager_qwen3next_norm(layer):
 # --------------------------------------------------------------------------
 
 
-def _admission_kwargs(S=64, **overrides):
+def _admission_kwargs(S=64, B=1, **overrides):
     kw = dict(
-        qkv=mx.zeros((1, S, C), mx.bfloat16),
-        z=mx.zeros((1, S, HV * DV), mx.bfloat16),
-        b=mx.zeros((1, S, HV), mx.bfloat16),
-        a=mx.zeros((1, S, HV), mx.bfloat16),
+        qkv=mx.zeros((B, S, C), mx.bfloat16),
+        z=mx.zeros((B, S, HV * DV), mx.bfloat16),
+        b=mx.zeros((B, S, HV), mx.bfloat16),
+        a=mx.zeros((B, S, HV), mx.bfloat16),
         conv_state=None,
         recurrent_state=None,
         conv_weight=mx.zeros((C, K, 1), mx.bfloat16),
@@ -329,6 +376,20 @@ def test_admission_accepts_the_27b_contract():
         recurrent_state=mx.zeros((1, HV, DV, DK), mx.float16),
     )
     assert gdn_prefill.admit_qwen4_fused_gdn_prefill(**warm).accepted
+    batched = _admission_kwargs(
+        B=4,
+        conv_state=mx.zeros((4, NKEEP, C), mx.bfloat16),
+        recurrent_state=mx.zeros((4, HV, DV, DK), mx.float16),
+    )
+    assert gdn_prefill.admit_qwen4_fused_gdn_prefill(**batched).accepted
+
+
+def test_admission_keeps_flash_next_batched_prefill_outside_qualified_domain():
+    admission = gdn_prefill.admit_qwen4_fused_gdn_prefill(
+        **_admission_kwargs(B=4, architecture="qwen4", gate_activation="sigmoid")
+    )
+    assert not admission.accepted
+    assert admission.reason == "batch of 4 rows"
 
 
 @pytest.mark.parametrize(
@@ -340,7 +401,7 @@ def test_admission_accepts_the_27b_contract():
         (dict(num_value_heads=32), "unsupported geometry"),
         (dict(speculating=True), "speculative rollback"),
         (dict(mask=mx.ones((1, 64), mx.bool_)), "masked prefill"),
-        (dict(qkv=mx.zeros((2, 64, C), mx.bfloat16)), "batch of 2 rows"),
+        (dict(z=mx.zeros((2, 64, HV * DV), mx.bfloat16)), "z shape"),
         (dict(qkv=mx.zeros((1, 63, C), mx.bfloat16)), "rows 63 < 64"),
         (dict(norm_weight=mx.zeros((DV,), mx.float32)), "norm_weight dtype"),
     ],
@@ -421,13 +482,82 @@ def test_fused_prefill_cold_and_warm_chunks_match_eager(
     assert report["prefill_chunk_calls"] == 3
 
 
+def test_fused_prefill_uniform_b4_cold_and_warm_match_eager(
+    layer, kernels_on_cpu
+):
+    chunks = [_inputs(64, seed=41, rows=4), _inputs(96, seed=42, rows=4)]
+    eager_outs, eager_cache, eager_adv = _run(layer, chunks, False)
+    layer.fused_gdn_counters.update(fallbacks=0, reasons={})
+    fused_outs, fused_cache, fused_adv = _run(layer, chunks, True)
+
+    assert kernels_on_cpu == {
+        "prework": ["qwen35"] * 2,
+        "norm_gate": ["swish"] * 2,
+    }
+    counts = layer.fused_gdn_counters
+    assert counts["prefill_calls"] == counts["prefill_chunk_calls"] == 2
+    assert counts["prefill_batch_calls"] == 2
+    assert counts["prefill_batch_rows"] == 4 * (64 + 96)
+    assert counts["fallbacks"] == 0 and counts["reasons"] == {}
+    assert fused_adv == eager_adv == [64, 96]
+    assert fused_cache[0].shape == eager_cache[0].shape == (4, NKEEP, C)
+    assert fused_cache[1].shape == eager_cache[1].shape == (4, HV, DV, DK)
+    assert np.array_equal(f32(fused_cache[0]), f32(eager_cache[0]))
+    np.testing.assert_allclose(
+        f32(fused_cache[1]), f32(eager_cache[1]), rtol=0.05, atol=0.05
+    )
+    for fused, eager in zip(fused_outs, eager_outs):
+        assert fused.shape == eager.shape and fused.dtype == eager.dtype
+        diff = np.abs(f32(fused) - f32(eager))
+        assert diff.max() <= 0.05 * np.abs(f32(eager)).max() + 1e-3
+
+
 def test_zero_left_padding_merged_cache_fuses(layer, kernels_on_cpu):
-    """The ordinary route's merged cache carries host-known [0] padding."""
-    cache = ArraysCache.merge([ArraysCache(2)])
-    assert cache.host_left_padding() == [0]
-    _run(layer, [_inputs(64, seed=5), _inputs(64, seed=6)], True, cache)
+    """The ordinary B4 route's merged cache carries host-known zero padding."""
+    cache = ArraysCache.merge([ArraysCache(2) for _ in range(4)])
+    assert cache.host_left_padding() == [0, 0, 0, 0]
+    _run(
+        layer,
+        [_inputs(64, seed=5, rows=4), _inputs(64, seed=6, rows=4)],
+        True,
+        cache,
+    )
     assert layer.fused_gdn_counters["prefill_chunk_calls"] == 2
+    assert layer.fused_gdn_counters["prefill_batch_calls"] == 2
     assert layer.fused_gdn_counters["reasons"] == {}
+
+
+def test_prepared_full_chunk_b4_fuses_without_reading_length_values(
+    layer, kernels_on_cpu
+):
+    cache = ArraysCache.merge([ArraysCache(2) for _ in range(4)])
+    cache.prepare(lengths=[64] * 4, right_padding=[0] * 4)
+    assert cache.host_lengths() == [64] * 4
+    assert cache.make_mask(64) is None
+    _run(layer, [_inputs(64, seed=71, rows=4)], True, cache)
+    assert layer.fused_gdn_counters["prefill_batch_calls"] == 1
+    assert layer.fused_gdn_counters["reasons"] == {}
+    assert cache.host_lengths() == [0] * 4
+    cache.finalize()
+    assert cache.host_lengths() is None
+
+
+@pytest.mark.parametrize("host_lengths", [None, [64, 64, 63, 64], [64] * 3])
+def test_length_metadata_must_cover_every_full_chunk_row(host_lengths):
+    admission = gdn_prefill.admit_qwen4_fused_gdn_prefill(
+        **_admission_kwargs(
+            B=4, lengths=mx.array([64] * 4), host_lengths=host_lengths
+        )
+    )
+    assert not admission.accepted
+    assert admission.reason == "ragged lengths"
+
+
+def test_replaced_length_array_invalidates_host_mirror():
+    cache = ArraysCache(2)
+    cache.prepare(lengths=[64] * 4)
+    cache.lengths = mx.array([64] * 4)
+    assert cache.host_lengths() is None
 
 
 def test_short_chunks_and_speculation_keep_their_existing_routes(layer, kernels_on_cpu):
@@ -448,23 +578,21 @@ def test_short_chunks_and_speculation_keep_their_existing_routes(layer, kernels_
 
 def test_refusals_are_counted_as_prefill_reasons(layer, kernels_on_cpu):
     layer.set_fused_gdn_prefill_enabled(True)
-    want = layer(_inputs(64, seed=9, rows=2), None, ArraysCache(2))
-    assert layer.fused_gdn_counters["reasons"] == {"prefill: batch of 2 rows": 1}
     padded = ArraysCache(2, left_padding=[3])
     layer(_inputs(64, seed=10), padded.make_mask(64), padded)
     assert layer.fused_gdn_counters["reasons"]["prefill: masked prefill"] == 1
     layer(_inputs(64, seed=11))
     assert layer.fused_gdn_counters["reasons"]["prefill: no cache"] == 1
     assert kernels_on_cpu["prework"] == []
-    assert want.shape == (2, 64, HIDDEN)
 
 
 def test_refusal_returns_the_reference_bits(layer, kernels_on_cpu):
     x = _inputs(64, seed=12, rows=2)
+    mask = mx.zeros((2, 64), mx.bool_)
     layer.set_fused_gdn_prefill_enabled(False)
-    want = layer(x, None, ArraysCache(2))
+    want = layer(x, mask, ArraysCache(2))
     layer.set_fused_gdn_prefill_enabled(True)
-    got = layer(x, None, ArraysCache(2))
+    got = layer(x, mask, ArraysCache(2))
     assert np.array_equal(f32(got), f32(want))
 
 

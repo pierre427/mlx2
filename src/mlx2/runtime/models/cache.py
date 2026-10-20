@@ -2442,6 +2442,13 @@ class ArraysCache(_BaseCache):
             return None
         return list(cached[1])
 
+    def host_lengths(self) -> Optional[List[int]]:
+        """Read the identity-bound length mirror without evaluating the device."""
+        cached = self._host_lengths
+        if self.lengths is None or cached is None or cached[0] is not self.lengths:
+            return None
+        return list(cached[1])
+
     def rollback_spans(self, length: int, mask=None):
         """Tokens this forward advances per row, host-side — or ``None``.
 

@@ -7,7 +7,8 @@ provenance/qwen38-fused-gdn-prefill.json. Unsupported multi-token shapes
 remain on the reference path.
 
 Fused prefill (``set_fused_gdn_prefill_enabled``, default off) routes
-non-speculative B=1 forwards of at least ``PREFILL_MIN_ROWS`` rows to the
+non-speculative uniform, unmasked forwards of at least ``PREFILL_MIN_ROWS``
+rows to the
 shared omlx #3903 prework/norm-gate kernels in their Qwen3.5-numerics variant
 (``qwen4_fused_gdn_prefill``, ``architecture="qwen38"``); the chunked
 recurrence stays this layer's own ``_gated_delta_update``.  It is independent
@@ -36,7 +37,7 @@ _COUNTER_NAMES = (
     'batch_verify_ragged_calls', 'batch_verify_rollbacks',
     'compact_verify_calls', 'compact_rollback_calls',
     'compact_tape_bytes', 'compact_snapshot_bytes_avoided',
-    'prefill_calls', 'prefill_tokens',
+    'prefill_calls', 'prefill_tokens', 'prefill_batch_calls', 'prefill_batch_rows',
     'prefill_chunk_calls', 'prefill_chunk_tokens', 'prefill_norm_eager',
     'fallbacks',
 )
@@ -224,6 +225,8 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             conv_weight=self.conv1d.weight, norm_weight=self.norm.weight,
             mask=mask, has_cache=cache is not None,
             lengths=getattr(cache, 'lengths', None),
+            host_lengths=(cache.host_lengths()
+                          if callable(getattr(cache, 'host_lengths', None)) else None),
             left_padding=getattr(cache, 'left_padding', None),
             host_left_padding=_host_left_padding(cache),
             speculating=bool(getattr(cache, 'speculating', False)),
@@ -243,6 +246,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                    or prefill_kernels.prefill_refusal(numerics, gate))
         if refusal is not None:
             return fallback(f'prefill: {refusal}')
+        batch = int(qkv.shape[0])
         steps = int(qkv.shape[1])
         norm_eager = False
         try:
@@ -255,8 +259,8 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                     out, z, self.norm.weight, self.norm.eps, gate=gate)
             else:
                 norm_eager = True
-                gated = z.reshape(1, steps, self.num_v_heads, self.head_v_dim)
-                flat = self.norm(out, gated).reshape(1, steps, -1)
+                gated = z.reshape(batch, steps, self.num_v_heads, self.head_v_dim)
+                flat = self.norm(out, gated).reshape(batch, steps, -1)
         except Exception as exc:
             if is_device_fault(exc):
                 raise
@@ -268,6 +272,9 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             counts = self.fused_gdn_counters
             counts['prefill_calls'] += 1
             counts['prefill_tokens'] += steps
+            if batch > 1:
+                counts['prefill_batch_calls'] += 1
+                counts['prefill_batch_rows'] += batch * steps
             counts['prefill_chunk_calls'] += 1
             counts['prefill_chunk_tokens'] += steps
             if norm_eager:

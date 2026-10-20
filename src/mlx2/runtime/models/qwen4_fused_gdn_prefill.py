@@ -19,13 +19,19 @@ The recurrence itself (``gated_delta_update`` with ``beta_input_dtype=True``)
 is untouched and still runs through the layer's own ``_gated_delta_update``.
 
 Admission (``admit_qwen4_fused_gdn_prefill``) is purely structural and fails
-closed with a reason: batch 1, rows >= 64, bf16 activations, no mask, no
-ragged lengths, no left padding that is pending or unknown on the host (see
+closed with a reason: rows >= 64, bf16 activations, no mask, no ragged lengths,
+no left padding that is pending or unknown on the host (see
 "Left padding" below), not speculating, not training, not sharded,
 sigmoid output gate, and the Flash-Next geometry (conv_dim 10240, HK 16,
 HV 48, DK = DV = 128, conv kernel 4).  The route is opt-in through
 ``MLX_QWEN4_FUSED_GDN_PREFILL`` (default ``0``) until a GPU bit/ULP gate
 qualifies it.
+
+The shared kernels are batch-aware, but admission intentionally distinguishes
+the qualified uses.  Flash-Next (``architecture="qwen4"``) remains B1-only.
+The default-off Qwen3.8 route (``architecture="qwen38"``) also admits a uniform
+unmasked batch with private per-row conv/recurrent state.  Ragged or padded
+batches remain on the ordinary path.
 
 Semantics audit: eager path vs. kernel
 --------------------------------------
@@ -648,17 +654,18 @@ def qwen4_gdn_prefill_prework(
 ):
     """``(q, k, v, next_conv_state)``; callers must run admission first.
 
-    ``qkv`` is the raw ``in_proj_qkv`` output ``(1, S, C)``; ``conv_state``
-    ``(1, 3, C)`` or ``None`` (zeros, as the eager path).  Shapes out:
-    q/k ``(1, S, HK, DK)``, v ``(1, S, HV, DV)``, conv ``(1, 3, C)``.
+    ``qkv`` is the raw ``in_proj_qkv`` output ``(B, S, C)``; ``conv_state``
+    ``(B, 3, C)`` or ``None`` (zeros, as the eager path).  Shapes out:
+    q/k ``(B, S, HK, DK)``, v ``(B, S, HV, DV)``, conv ``(B, 3, C)``.
     ``numerics`` picks the q/k normalization contract (``PREWORK_NUMERICS``).
     """
     if numerics not in PREWORK_NUMERICS:
         raise ValueError(f"unsupported GDN prework numerics {numerics!r}")
+    batch = int(qkv.shape[0])
     length = int(qkv.shape[1])
     conv_dim = int(qkv.shape[2])
     if conv_state is None:
-        conv_state = mx.zeros((1, NKEEP, conv_dim), dtype=qkv.dtype)
+        conv_state = mx.zeros((batch, NKEEP, conv_dim), dtype=qkv.dtype)
     prework = (
         _kernel
         if _kernel is not None
@@ -693,13 +700,13 @@ def qwen4_gdn_prefill_prework(
                 ("C", conv_dim),
                 ("L2", 1 if numerics == "qwen4" else 0),
             ],
-            grid=(32, length, 2 * hk + hv),
+            grid=(32, batch * length, 2 * hk + hv),
             threadgroup=(32, 1, 1),
             output_shapes=[
-                (1, length, hk, dk),
-                (1, length, hk, dk),
-                (1, length, hv, dv),
-                (1, NKEEP, conv_dim),
+                (batch, length, hk, dk),
+                (batch, length, hk, dk),
+                (batch, length, hv, dv),
+                (batch, NKEEP, conv_dim),
             ],
             output_dtypes=[qkv.dtype] * 4,
         )
@@ -717,12 +724,13 @@ def qwen4_gdn_prefill_norm_gate(
     gate: str = "sigmoid",
     _kernel=None,
 ) -> mx.array:
-    """``RMSNormGated(y, z)`` flattened to ``(1, S, HV*DV)``.
+    """``RMSNormGated(y, z)`` flattened to ``(B, S, HV*DV)``.
 
     ``gate`` picks the output-gate contract (``NORM_GATES``).
     """
     if gate not in NORM_GATES:
         raise ValueError(f"unsupported GDN output gate {gate!r}")
+    batch = int(y.shape[0])
     length = int(y.shape[1])
     hv, dv = num_value_heads, value_head_dim
     norm_gate = (
@@ -733,9 +741,9 @@ def qwen4_gdn_prefill_norm_gate(
     return norm_gate(
         inputs=[y, z, norm_weight, mx.array(eps, dtype=mx.float32)],
         template=[("T", y.dtype), ("HV", hv), ("DV", dv)],
-        grid=(32, length, hv),
+        grid=(32, batch * length, hv),
         threadgroup=(32, 1, 1),
-        output_shapes=[(1, length, hv * dv)],
+        output_shapes=[(batch, length, hv * dv)],
         output_dtypes=[y.dtype],
     )[0]
 
@@ -794,6 +802,7 @@ def admit_qwen4_fused_gdn_prefill(
     lengths: Any,
     left_padding: Any,
     host_left_padding: Optional[Sequence[int]] = None,
+    host_lengths: Optional[Sequence[int]] = None,
     speculating: bool,
     training: bool,
     sharded: bool,
@@ -830,8 +839,6 @@ def admit_qwen4_fused_gdn_prefill(
         return FusedGdnAdmission(False, "speculative rollback")
     if mask is not None:
         return FusedGdnAdmission(False, "masked prefill")
-    if lengths is not None:
-        return FusedGdnAdmission(False, "ragged lengths")
     if left_padding is not None:
         refusal = _left_padding_refusal(left_padding, host_left_padding)
         if refusal is not None:
@@ -851,16 +858,36 @@ def admit_qwen4_fused_gdn_prefill(
     qkv_shape = _shape(qkv)
     if len(qkv_shape) != 3:
         return FusedGdnAdmission(False, f"qkv rank {len(qkv_shape)}")
-    if qkv_shape[0] != 1:
-        return FusedGdnAdmission(False, f"batch of {qkv_shape[0]} rows")
+    batch = int(qkv_shape[0])
+    if batch < 1:
+        return FusedGdnAdmission(False, f"batch of {batch} rows")
+    if batch != 1 and architecture != "qwen38":
+        # Flash-Next enables this route by default and has only B1 evidence.
+        # Keep its admitted domain unchanged while the explicit/default-off
+        # Qwen3.8 route gathers exact B>1 evidence.
+        return FusedGdnAdmission(False, f"batch of {batch} rows")
+    if left_padding is not None and _shape(left_padding) != (batch,):
+        return FusedGdnAdmission(False, LEFT_PADDING_UNKNOWN)
     rows = int(qkv_shape[1])
+    if lengths is not None:
+        # Prepared multirow prefill retains a lengths array even when every
+        # row covers the full physical chunk. Only the exact host mirror can
+        # establish that fact; an absent/stale mirror still declines.
+        if (
+            architecture != "qwen38"
+            or _shape(lengths) != (batch,)
+            or host_lengths is None
+            or len(host_lengths) != batch
+            or any(type(value) is not int or value < rows for value in host_lengths)
+        ):
+            return FusedGdnAdmission(False, "ragged lengths")
     if rows < min_rows:
         return FusedGdnAdmission(False, f"rows {rows} < {min_rows}")
     expected = {
-        "qkv": (1, rows, CONV_DIM),
-        "z": (1, rows, VALUE_DIM),
-        "b": (1, rows, NUM_VALUE_HEADS),
-        "a": (1, rows, NUM_VALUE_HEADS),
+        "qkv": (batch, rows, CONV_DIM),
+        "z": (batch, rows, VALUE_DIM),
+        "b": (batch, rows, NUM_VALUE_HEADS),
+        "a": (batch, rows, NUM_VALUE_HEADS),
         "conv_weight": (CONV_DIM, CONV_KERNEL, 1),
         "norm_weight": (VALUE_HEAD_DIM,),
     }
@@ -882,12 +909,12 @@ def admit_qwen4_fused_gdn_prefill(
         if dtype != mx.bfloat16:
             return FusedGdnAdmission(False, f"{name} dtype {dtype}")
     if conv_state is not None:
-        if _shape(conv_state) != (1, NKEEP, CONV_DIM):
+        if _shape(conv_state) != (batch, NKEEP, CONV_DIM):
             return FusedGdnAdmission(False, f"conv_state shape {_shape(conv_state)}")
         if conv_state.dtype != mx.bfloat16:
             return FusedGdnAdmission(False, f"conv_state dtype {conv_state.dtype}")
     if recurrent_state is not None:
-        expected_state = (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM)
+        expected_state = (batch, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM)
         if _shape(recurrent_state) != expected_state:
             return FusedGdnAdmission(
                 False, f"recurrent_state shape {_shape(recurrent_state)}"

@@ -27,7 +27,8 @@ Exit status 0 only when everything is bit-identical and engaged.
 
     MLX_ENABLE_TF32=0 PYTHONPATH=src .venv/bin/python \\
       scripts/check_qwen38_27b_fused_gdn_prefill.py --i-own-the-gpu \\
-      --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --out receipt.json
+      --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp \\
+      --checkpoint Qwen3.8-27B-oQ4e-mtp@sha256:<fingerprint> --out receipt.json
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -64,10 +66,15 @@ def _prompt_texts(root: Path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--model', required=True)
+    ap.add_argument('--checkpoint', required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--layers', nargs='+', type=int,
                     help='default: every GDN layer; subsets are partial coverage')
     ap.add_argument('--rows', nargs='+', type=int, default=list(DEFAULT_ROWS))
+    ap.add_argument('--batch', type=int, default=1,
+                    help='uniform layer and full-model gate batch width')
+    ap.add_argument('--batch-model-rows', type=int, default=256,
+                    help='exact token rows per lane for the B>1 full-model gate')
     ap.add_argument('--chunks', nargs='+', type=int, default=list(DEFAULT_CHUNKS))
     ap.add_argument('--continuation', type=int, default=8)
     ap.add_argument('--skip-layers', action='store_true')
@@ -81,14 +88,23 @@ def main():
         ap.error('set MLX_ENABLE_TF32=0 (the adapter pins it)')
     if any(r < 64 for r in args.rows):
         ap.error('--rows must be at least the 64-row prefill floor')
+    if args.batch < 1:
+        ap.error('--batch must be at least 1')
+    if args.batch != 1 and not args.skip_model and args.batch_model_rows < 64:
+        ap.error('--batch-model-rows must be at least the fused 64-row floor')
     sys.path.insert(0, str(ROOT / 'src'))
     import mlx.core as mx
 
     mx.set_default_device(mx.gpu)
     model_path = Path(args.model).expanduser().resolve()
+    source_revision = subprocess.check_output(
+        ['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True
+    ).strip()
     report = {
         'schema': 'mlx2.qwen38-fused-gdn-prefill-check.v1',
-        'model': str(model_path), 'seed': args.seed,
+        'model': str(model_path), 'checkpoint': args.checkpoint,
+        'source_revision': source_revision,
+        'seed': args.seed, 'batch': args.batch,
         'mlx_version': getattr(mx, '__version__', None),
         'source_sha256': {
             name: hashlib.sha256(
@@ -162,6 +178,7 @@ def check_layers(args, mx, model_path):
         raise ValueError('--layers must name GDN layers')
     mx.random.seed(args.seed)
     result = {'all_layers_covered': indices == expected, 'rows': args.rows,
+              'batch': args.batch,
               'layers': {}, 'components': None, 'passed': False}
 
     def load_layer(i):
@@ -204,10 +221,14 @@ def check_layers(args, mx, model_path):
     for n, i in enumerate(indices):
         obj = load_layer(i)
         entry = {}
-        warm_x = (0.5 * mx.random.normal((1, 64, text.hidden_size))).astype(mx.bfloat16)
+        warm_x = (
+            0.5 * mx.random.normal((args.batch, 64, text.hidden_size))
+        ).astype(mx.bfloat16)
         warm, _ = run(obj, warm_x, (None, None), False)
         for rows in args.rows:
-            x = (0.5 * mx.random.normal((1, rows, text.hidden_size))).astype(mx.bfloat16)
+            x = (
+                0.5 * mx.random.normal((args.batch, rows, text.hidden_size))
+            ).astype(mx.bfloat16)
             for label, start in (('cold', (None, None)), ('warm', warm[1:])):
                 ref, _ = run(obj, x, start, False)
                 got, engaged = run(obj, x, start, True)
@@ -220,7 +241,9 @@ def check_layers(args, mx, model_path):
                     check['output_diff'] = _diff(mx, ref[0], got[0])
                 entry[f'{label}/{rows}'] = check
         if n == 0:
-            result['components'] = _components(mx, nn, obj, prefill, args.rows[-1])
+            result['components'] = _components(
+                mx, nn, obj, prefill, args.rows[-1], args.batch
+            )
         entry['reasons'] = dict(obj.fused_gdn_counters['reasons'])
         entry['passed'] = all(v['passed'] for k, v in entry.items()
                               if isinstance(v, dict) and 'passed' in v)
@@ -233,42 +256,42 @@ def check_layers(args, mx, model_path):
     return result
 
 
-def _components(mx, nn, obj, prefill, rows):
+def _components(mx, nn, obj, prefill, rows, batch=1):
     """Prework q/k/v/conv and the norm-gate against the eager ops."""
     C = obj.conv_dim
     out = {}
-    qkv = mx.random.normal((1, rows, C)).astype(mx.bfloat16)
-    warm = mx.random.normal((1, 3, C)).astype(mx.bfloat16)
+    qkv = mx.random.normal((batch, rows, C)).astype(mx.bfloat16)
+    warm = mx.random.normal((batch, 3, C)).astype(mx.bfloat16)
     for label, state in (('cold', None), ('warm', warm)):
         fused = prefill.qwen4_gdn_prefill_prework(qkv, state, obj.conv1d.weight,
                                                   numerics='qwen35')
-        conv_state = mx.zeros((1, 3, C), qkv.dtype) if state is None else state
+        conv_state = mx.zeros((batch, 3, C), qkv.dtype) if state is None else state
         conv_input = mx.concatenate([conv_state, qkv], axis=1)
         conv_out = nn.silu(obj.conv1d(conv_input))
         kd = obj.key_dim
-        q = conv_out[..., :kd].reshape(1, rows, obj.num_k_heads, obj.head_k_dim)
-        k = conv_out[..., kd:2 * kd].reshape(1, rows, obj.num_k_heads, obj.head_k_dim)
-        v = conv_out[..., 2 * kd:].reshape(1, rows, obj.num_v_heads, obj.head_v_dim)
+        q = conv_out[..., :kd].reshape(batch, rows, obj.num_k_heads, obj.head_k_dim)
+        k = conv_out[..., kd:2 * kd].reshape(batch, rows, obj.num_k_heads, obj.head_k_dim)
+        v = conv_out[..., 2 * kd:].reshape(batch, rows, obj.num_v_heads, obj.head_v_dim)
         q, k = obj._normalize_qk(q, k)
         eager = (q, k, v, mx.contiguous(conv_input[:, -3:, :]))
         mx.eval(*fused, *eager)
         for part, got, want in zip(('q', 'k', 'v', 'conv_out'), fused, eager):
             same = _same(mx, got, want)
             out[f'prework/{label}/{part}'] = same if same else _diff(mx, got, want)
-    y = mx.random.normal((1, rows, obj.num_v_heads, obj.head_v_dim)).astype(mx.bfloat16)
-    z = mx.random.normal((1, rows, obj.value_dim)).astype(mx.bfloat16)
+    y = mx.random.normal((batch, rows, obj.num_v_heads, obj.head_v_dim)).astype(mx.bfloat16)
+    z = mx.random.normal((batch, rows, obj.value_dim)).astype(mx.bfloat16)
     fused = prefill.qwen4_gdn_prefill_norm_gate(y, z, obj.norm.weight, obj.norm.eps,
                                                 gate='swish')
-    eager = obj.norm(y, z.reshape(y.shape)).reshape(1, rows, -1)
+    eager = obj.norm(y, z.reshape(y.shape)).reshape(batch, rows, -1)
     mx.eval(fused, eager)
     same = _same(mx, fused, eager)
     out['norm_gate'] = same if same else _diff(mx, fused, eager)
-    out.update(_components_sweep(mx, nn, obj, prefill, rows))
+    out.update(_components_sweep(mx, nn, obj, prefill, rows, batch))
     out['passed'] = all(v is True for v in out.values())
     return out
 
 
-def _sweep_rows(mx, rows, width, seed):
+def _sweep_rows(mx, rows, width, seed, batch=1):
     """Rows covering every bf16 value with magnitude in [2**-6, 32], shuffled."""
     from mlx2.runtime.models.qwen4_fused_gdn_verify import _decode_parity_grid
 
@@ -277,39 +300,54 @@ def _sweep_rows(mx, rows, width, seed):
         raise ValueError(f"a row of {width} cannot cover {int(grid.size)} values")
     # Cut the tile to width before shuffling, so every row keeps every value.
     base = mx.tile(grid, (-(-width // int(grid.size)),))[:width]
-    return mx.stack([
-        base[mx.random.permutation(width, key=mx.random.key(seed + r))] for r in range(rows)
-    ])[None]
+    return mx.stack(
+        [
+            mx.stack(
+                [
+                    base[mx.random.permutation(
+                        width, key=mx.random.key(seed + b * rows + r)
+                    )]
+                    for r in range(rows)
+                ]
+            )
+            for b in range(batch)
+        ]
+    )
 
 
-def _components_sweep(mx, nn, obj, prefill, rows):
+def _components_sweep(mx, nn, obj, prefill, rows, batch=1):
     """The prework and swish norm-gate against the eager ops on a value sweep."""
     C = obj.conv_dim
     taps = int(obj.conv1d.weight.shape[1])
     identity = mx.zeros((C, taps, 1), dtype=mx.bfloat16)
     identity[:, taps - 1, 0] = 1
     out = {}
-    qkv = _sweep_rows(mx, rows, C, 38270)
-    for label, state in (('cold', None), ('warm', mx.zeros((1, taps - 1, C), mx.bfloat16))):
+    qkv = _sweep_rows(mx, rows, C, 38270, batch)
+    for label, state in (
+        ('cold', None),
+        ('warm', mx.zeros((batch, taps - 1, C), mx.bfloat16)),
+    ):
         fused = prefill.qwen4_gdn_prefill_prework(qkv, state, identity, numerics='qwen35')
-        conv_state = mx.zeros((1, taps - 1, C), qkv.dtype) if state is None else state
+        conv_state = (
+            mx.zeros((batch, taps - 1, C), qkv.dtype) if state is None else state
+        )
         conv_input = mx.concatenate([conv_state, qkv], axis=1)
         conv_out = nn.silu(mx.conv1d(conv_input, identity, groups=C))
         kd = obj.key_dim
-        q = conv_out[..., :kd].reshape(1, rows, obj.num_k_heads, obj.head_k_dim)
-        k = conv_out[..., kd:2 * kd].reshape(1, rows, obj.num_k_heads, obj.head_k_dim)
-        v = conv_out[..., 2 * kd:].reshape(1, rows, obj.num_v_heads, obj.head_v_dim)
+        q = conv_out[..., :kd].reshape(batch, rows, obj.num_k_heads, obj.head_k_dim)
+        k = conv_out[..., kd:2 * kd].reshape(batch, rows, obj.num_k_heads, obj.head_k_dim)
+        v = conv_out[..., 2 * kd:].reshape(batch, rows, obj.num_v_heads, obj.head_v_dim)
         q, k = obj._normalize_qk(q, k)
         eager = (q, k, v, mx.contiguous(conv_input[:, -(taps - 1):, :]))
         mx.eval(*fused, *eager)
         for part, got, want in zip(('q', 'k', 'v', 'conv_out'), fused, eager):
             same = _same(mx, got, want)
             out[f'prework_sweep/{label}/{part}'] = same if same else _diff(mx, got, want)
-    y = mx.random.normal((1, rows, obj.num_v_heads, obj.head_v_dim)).astype(mx.bfloat16)
-    z = _sweep_rows(mx, rows, obj.value_dim, 38271)
+    y = mx.random.normal((batch, rows, obj.num_v_heads, obj.head_v_dim)).astype(mx.bfloat16)
+    z = _sweep_rows(mx, rows, obj.value_dim, 38271, batch)
     fused = prefill.qwen4_gdn_prefill_norm_gate(y, z, obj.norm.weight, obj.norm.eps,
                                                 gate='swish')
-    eager = obj.norm(y, z.reshape(y.shape)).reshape(1, rows, -1)
+    eager = obj.norm(y, z.reshape(y.shape)).reshape(batch, rows, -1)
     mx.eval(fused, eager)
     same = _same(mx, fused, eager)
     out['norm_gate_sweep'] = same if same else _diff(mx, fused, eager)
@@ -326,25 +364,57 @@ def check_model(args, mx, model_path):
     from mlx2.runtime.models import qwen38_fused_gdn as route
     load_s = time.perf_counter() - started
     model = adapter.model
-    prompts = {name: list(adapter.tokenizer.encode(text))
-               for name, text in _prompt_texts(ROOT).items()}
+    prompt_texts = _prompt_texts(ROOT)
+    if args.batch == 1:
+        prompts = {
+            name: [list(adapter.tokenizer.encode(text))]
+            for name, text in prompt_texts.items()
+        }
+    else:
+        corpus = list(adapter.tokenizer.encode('\n\n'.join(prompt_texts.values())))
+        needed = args.batch_model_rows + 17 * (args.batch - 1)
+        if not corpus:
+            raise ValueError('empty batch-model corpus')
+        corpus = (corpus * (-(-needed // len(corpus))))[:needed]
+        prompts = {
+            f'uniform_b{args.batch}': [
+                corpus[lane * 17:lane * 17 + args.batch_model_rows]
+                for lane in range(args.batch)
+            ]
+        }
 
-    def prefill(ids, chunk, fused):
+    def prefill(lanes, chunk, fused):
         route.configure(model, adapter.fused_gdn, prefill=fused)
         cache = model.make_cache()
         before = route.stats(model)
         logits = None
-        for start in range(0, len(ids), chunk):
-            logits = model(mx.array(ids[start:start + chunk])[None], cache=cache)
+        width = len(lanes[0])
+        for start in range(0, width, chunk):
+            block = [ids[start:start + chunk] for ids in lanes]
+            logits = model(mx.array(block), cache=cache)
             mx.eval(logits, [c.state for c in cache])
         tokens = []
         nxt = mx.argmax(logits[:, -1, :], axis=-1)
         for _ in range(args.continuation):
-            tokens.append(int(nxt.item()))
-            step = model(nxt[None], cache=cache)
+            selected = [int(nxt[lane].item()) for lane in range(args.batch)]
+            tokens.append(selected[0] if args.batch == 1 else selected)
+            step = model(nxt[:, None], cache=cache)
             nxt = mx.argmax(step[:, -1, :], axis=-1)
         after = route.stats(model)
-        delta = {k: after[k] - before[k] for k in ('prefill_chunk_calls', 'prefill_chunk_tokens')}
+        delta = {
+            k: after[k] - before[k]
+            for k in (
+                'prefill_chunk_calls',
+                'prefill_chunk_tokens',
+                'prefill_batch_calls',
+                'prefill_batch_rows',
+            )
+        }
+        delta['reasons'] = {
+            reason: count - before['reasons'].get(reason, 0)
+            for reason, count in after['reasons'].items()
+            if count != before['reasons'].get(reason, 0)
+        }
         return logits, cache, tokens, delta
 
     def flat_state(cache):
@@ -359,34 +429,54 @@ def check_model(args, mx, model_path):
         return out
 
     cases = {}
-    for name, ids in prompts.items():
+    for name, lanes in prompts.items():
+        width = len(lanes[0])
+        if any(len(ids) != width for ids in lanes):
+            raise ValueError('batch-model lanes must have one exact width')
         for chunk in args.chunks:
             if name == 'short' and chunk != args.chunks[0]:
                 continue
-            ref_logits, ref_cache, ref_tokens, ref_delta = prefill(ids, chunk, False)
-            got_logits, got_cache, got_tokens, got_delta = prefill(ids, chunk, True)
+            ref_logits, ref_cache, ref_tokens, ref_delta = prefill(lanes, chunk, False)
+            got_logits, got_cache, got_tokens, got_delta = prefill(lanes, chunk, True)
             ref_state, got_state = flat_state(ref_cache), flat_state(got_cache)
             states_equal = len(ref_state) == len(got_state) and all(
                 _same(mx, a, b) for a, b in zip(ref_state, got_state))
             expected_chunks = sum(
-                1 for s in range(0, len(ids), chunk) if min(chunk, len(ids) - s) >= 64)
+                1 for s in range(0, width, chunk) if min(chunk, width - s) >= 64
+            )
+            expected_batch_rows = sum(
+                args.batch * min(chunk, width - s)
+                for s in range(0, width, chunk)
+                if min(chunk, width - s) >= 64
+            )
             gdn_layers = route.stats(model)['layers']
             case = {
-                'tokens': len(ids), 'chunk': chunk,
+                'batch': args.batch, 'tokens_per_lane': width, 'chunk': chunk,
                 'logits_bit_identical': _same(mx, ref_logits, got_logits),
                 'cache_bit_identical': states_equal,
                 'continuation_identical': ref_tokens == got_tokens,
                 'continuation': got_tokens,
                 'fused_prefill_chunk_calls': got_delta['prefill_chunk_calls'],
+                'fused_prefill_batch_calls': got_delta['prefill_batch_calls'],
+                'fused_prefill_batch_rows': got_delta['prefill_batch_rows'],
+                'fused_fallback_reasons': got_delta['reasons'],
                 'reference_prefill_chunk_calls': ref_delta['prefill_chunk_calls'],
+                'reference_fallback_reasons': ref_delta['reasons'],
                 'expected_chunk_calls': expected_chunks * gdn_layers,
+                'expected_batch_rows': expected_batch_rows * gdn_layers,
             }
             if not case['logits_bit_identical']:
                 case['logits_diff'] = _diff(mx, ref_logits, got_logits)
             case['passed'] = (case['logits_bit_identical'] and states_equal
                               and case['continuation_identical']
                               and ref_delta['prefill_chunk_calls'] == 0
-                              and got_delta['prefill_chunk_calls'] == case['expected_chunk_calls'])
+                              and got_delta['reasons'] == {}
+                              and got_delta['prefill_chunk_calls'] == case['expected_chunk_calls']
+                              and (args.batch == 1 or
+                                   got_delta['prefill_batch_calls'] ==
+                                   case['expected_chunk_calls'] and
+                                   got_delta['prefill_batch_rows'] ==
+                                   case['expected_batch_rows']))
             cases[f'{name}/{chunk}'] = case
             print(json.dumps({'case': f'{name}/{chunk}', 'passed': case['passed']}), flush=True)
             del ref_cache, got_cache
