@@ -212,6 +212,19 @@ def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
 
 
+def _bump_map(stats, key, field, amount=1):
+    """Bump ``stats[key][field]`` copy-on-write.
+
+    The scheduler snapshot shares nested dicts with this generator; replacing
+    the map keeps an exporter iterating the previous one consistent.
+    """
+    previous = stats.get(key) or {}
+    stats[key] = {
+        **previous,
+        field: min(_COUNTER_MAX, int(previous.get(field, 0)) + int(amount)),
+    }
+
+
 # Per-uid draft-phase side tables; reset each draft phase and popped on remove.
 _LAST_ALTERNATIVE_FIELDS = (
     "_last_alternative_blocks", "_last_alternative_prefix_tokens",
@@ -4015,6 +4028,10 @@ class ExternalDraftBatchGenerator:
                         )
             for lane in cohort:
                 lane.ast_source_budget = source_plans[int(lane.uid)].receipt()
+                _bump_map(
+                    self.scheduler_stats, "ast_planner_source_budgets",
+                    str(source_plans[int(lane.uid)].reason),
+                )
                 if lane.uid in self._last_alternative_latch:
                     plan = source_plans[int(lane.uid)]
                     self._last_alternative_latch[lane.uid].update(
@@ -5086,6 +5103,16 @@ class ExternalDraftBatchGenerator:
                 if tuple(map(len, inputs)) != launch_plan.input_lengths or packing_split:
                     raise RuntimeError("AST physical launch disagrees with its exact plan")
                 last_layout_receipt["ast_plan"] = launch_plan.receipt()
+                _bump_map(
+                    self.scheduler_stats, "ast_planner_launches",
+                    "primary" if launch_plan.backend == ast_planner.profile.backend
+                    else "alternative",
+                )
+                for row_kind in ("logical", "physical", "padding"):
+                    _bump_map(
+                        self.scheduler_stats, "ast_planner_launch_rows", row_kind,
+                        last_layout_receipt["ast_plan"][f"{row_kind}_rows"],
+                    )
                 for index in active:
                     states[index]["lane"].ast_last_launch = launch_plan.receipt()
             provider_backend = bool(

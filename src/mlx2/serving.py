@@ -3822,9 +3822,15 @@ class ServingEngine:
         power_governor=None,
         prefill_handoff="off",
         prefill_handoff_records=None,
+        ast_route=None,
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
+        if ast_route is not None and not isinstance(ast_route, Mapping):
+            raise TypeError("ast_route must be a mapping or None")
+        # Bounded --ast route configuration (ast_observability.route_status);
+        # surfaced on /v1/status and as mlx2_ast_route_info.
+        self.ast_route = None if ast_route is None else dict(ast_route)
         if prefill_handoff not in {"off", "export", "import", "both"}:
             raise ValueError("invalid prefill handoff mode")
         self.prefill_handoff_mode = prefill_handoff
@@ -6439,6 +6445,14 @@ class ServingEngine:
         self.expert_stream.forced_stock = force_stock_expert_arithmetic(model)
         self.expert_stream_collector = collector
 
+    def _ast_route_status(self):
+        """``{"ast_route": ...}`` when ``--ast`` selected the route, else {}."""
+
+        from .ast_observability import route_view
+
+        view = route_view(self)
+        return {} if view is None else {"ast_route": view}
+
     def status(self):
         from .runtime.models import qsdpa_verify_metal as qvm
 
@@ -6491,6 +6505,7 @@ class ServingEngine:
                     if self.power_telemetry is not None
                     else {}
                 ),
+                **self._ast_route_status(),
                 "quiesce": quiesce,
                 "admissions_rejected": {
                     endpoint: counts[f"admissions_rejected_{endpoint}"]

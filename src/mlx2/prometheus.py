@@ -2119,6 +2119,38 @@ def _add_drafter_metrics(
         )
 
 
+def _add_ast(
+    builder: PrometheusBuilder, engine: Any, scheduler: Mapping[str, Any] | None
+) -> None:
+    """The ``--ast`` route identity and its controller receipts.
+
+    Every series comes from ``ast_observability``: the info labels are closed
+    enums, and the scheduler receipts are walked through its field tables.
+    A server without ``--ast`` and without AST receipts emits none of them.
+    """
+
+    from .ast_observability import ast_scheduler_series, route_info_labels, route_view
+
+    view = route_view(engine)
+    if view is not None:
+        builder.gauge(
+            "mlx2_ast_route_info",
+            "Selected --ast route configuration in closed enums; the sample value is always one.",
+            1,
+            route_info_labels(view),
+        )
+    if isinstance(scheduler, Mapping):
+        for series in ast_scheduler_series(scheduler):
+            if series.kind == "counter":
+                builder.counter(
+                    series.name, series.help, series.value, dict(series.labels)
+                )
+            else:
+                builder.gauge(
+                    series.name, series.help, series.value, dict(series.labels)
+                )
+
+
 def render_engine_metrics(
     engine: Any, *, tenant_id=None, include_request_metrics=True,
 ) -> str:
@@ -2374,6 +2406,7 @@ def render_engine_metrics(
     scheduler = snapshot.get("scheduler")
     if isinstance(scheduler, Mapping):
         _add_scheduler(builder, scheduler)
+    _add_ast(builder, engine, scheduler)
     segmented = snapshot.get("segmented_self_mtp")
     if isinstance(segmented, Mapping):
         _add_segmented_mtp(builder, segmented)

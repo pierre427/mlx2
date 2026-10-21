@@ -7079,6 +7079,7 @@ def serving_engine_kwargs(
         "power_governor": power_governor_policy_value(args),
         "prefill_handoff": getattr(args, "prefill_handoff", "off"),
         "prefill_handoff_records": getattr(args, "prefill_handoff_records", None),
+        "ast_route": getattr(args, "ast_route_status", None),
     }
 
 
@@ -7274,6 +7275,13 @@ def main():
         if getattr(args, "ast_route", {}).get("tree_tiles_refused"):
             logging.getLogger("mlx2.server").warning(
                 "--ast: chain route selected; %s", args.ast_route["tree_tiles_refused"])
+        if getattr(args, "ast_route", None) is not None:
+            from .ast_observability import route_status as ast_route_status
+
+            args.ast_route_status = ast_route_status(
+                args.ast_route, policy,
+                getattr(adapter_resolution, "adapter_type", None),
+            )
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
         native_mtp = route_selection.native_mtp
         # Route resolution, rather than only the spelling of the CLI, is the
