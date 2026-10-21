@@ -12072,7 +12072,11 @@ class ExternalDraftBatchGenerator:
         if self.memory_headroom is None: return True
         target = self._target_args; draft = self.draft.config
         target_per_token = 2*target.num_key_value_heads*target.head_dim*4
-        draft_per_token = 2*draft.num_key_value_heads*draft.head_dim*4
+        # A model-free drafter (prompt lookup) has no draft KV to reserve.
+        draft_per_token = (
+            2 * int(getattr(draft, "num_key_value_heads", 0) or 0)
+            * int(getattr(draft, "head_dim", 0) or 0) * 4
+        )
         required = 0
         extra_required = 0
         ast_private_required = 0
@@ -12087,7 +12091,7 @@ class ExternalDraftBatchGenerator:
             target_bytes = sum(int(getattr(c,"nbytes",0)) for c in lane.cache)
             draft_bytes = sum(int(getattr(c,"nbytes",0)) for c in lane.draft_cache)
             required += 4*target_bytes + 3*draft_bytes
-            required += lane_append*(target.num_hidden_layers*target_per_token + draft.num_hidden_layers*draft_per_token)
+            required += lane_append*(target.num_hidden_layers*target_per_token + int(getattr(draft, "num_hidden_layers", 0) or 0)*draft_per_token)
             feature_width = getattr(draft, "feature_width", None) or target.hidden_size*len(self.layers)
             required += lane_append*int(feature_width)*8
             if callable(reserve_draft):

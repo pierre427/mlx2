@@ -116,3 +116,43 @@ def test_cohort_lanes_stay_independent():
         np.testing.assert_allclose(np.asarray(logits[lane, 2].astype(mx.float32)), expected,
                                    atol=2e-4, rtol=2e-4)
     txn.abort()
+
+
+def _greedy(model, prompt, count):
+    cache = model.make_cache()
+    logits = model(mx.array([prompt]), cache=cache)[0, -1]
+    out = []
+    for _ in range(count):
+        token = int(mx.argmax(logits).item())
+        out.append(token)
+        logits = model(mx.array([[token]]), cache=cache)[0, -1]
+    return out
+
+
+def test_external_route_with_prompt_lookup_tiles_matches_greedy_under_admission():
+    """gpt-oss --ast end to end: PLD tree drafter, attention tree target,
+    admission memory accounting on (the model-free drafter has no draft KV)."""
+    from mlx2.runtime.attention_tree_executor import AttentionTreeExecutor
+    from mlx2.runtime.drafters.prompt_lookup_draft import PromptLookupDraftModel
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    model = tiny(window=6)
+    prompt = [3, 9, 4, 3, 9, 4, 3, 9, 4, 11, 3, 9]
+    reference = _greedy(model, prompt, 24)
+    draft = PromptLookupDraftModel(model, num_draft=15)
+    batch = ExternalDraftBatchGenerator(
+        model, draft_model=draft, binding="tiny-gpt-oss", num_draft=15,
+        completion_batch_size=4, dynamic_singleton_tree=True, dynamic_tree_max_width=4,
+        tree_node_budget_by_lanes={1: 15, 2: 7, 3: 4, 4: 3},
+        target_tree_executor_provider=AttentionTreeExecutor.create(),
+        memory_headroom=lambda: 1 << 40,
+    )
+    uid = batch.insert([prompt], max_tokens=[24], sampling_configs=[{"sampling_temp": 0.0}])[0]
+    tokens = []
+    for _ in range(200):
+        _, responses = batch.next()
+        tokens.extend(r.token for r in responses if r.uid == uid)
+        if uid not in batch.lanes:
+            break
+    assert tokens == reference
+    assert batch.scheduler_stats["external_tree_rounds"] > 0

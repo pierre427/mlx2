@@ -25,6 +25,7 @@ QWEN3_PREFILL_STEP = 512
 QWEN3_SIDECAR_ARCHITECTURES = frozenset(
     {
         "Qwen3XPressModel",
+        "Eagle3Speculator",
         "DFlashDraftModel",
         "DFlash2DraftModel",
         "Lfm2DSparkDraftModel",
@@ -818,6 +819,21 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                     )
 
                     kind = "lilicorr"
+                elif architecture == ["Eagle3Speculator"]:
+                    if portfolio_selected:
+                        # The portfolio wrapper forwards no context tokens,
+                        # and EAGLE-3 needs each feature's following token.
+                        raise ValueError(
+                            "EAGLE-3 is a context-paired drafter and cannot "
+                            "join a draft_models portfolio"
+                        )
+                    from .eagle3 import (
+                        content_revision as revision_fn,
+                        inspect_drafter as inspector,
+                        load_drafter as draft_loader,
+                    )
+
+                    kind = "eagle3"
                 else:
                     raise ValueError(
                         "unsupported standard decoder draft architecture: "

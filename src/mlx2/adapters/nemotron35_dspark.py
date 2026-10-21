@@ -1,14 +1,13 @@
 """Strict CPU binding for the published RedHat Super VL DSpark head."""
 import hashlib
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 from ..conversion.nvfp4 import read_header, sha256
 from ..runtime.drafters.base_config import DFlashConfig
+from .dspark import DSparkConfig as GenericDSparkConfig
+from .dspark import expected_weight_shapes
 from .nemotron35_super_config import language_config
-from .xpress import XPressConfig
-from .xpress import expected_weight_shapes as xpress_shapes
 
 CONFIG_SHA256 = "88462ccd207ac7238f656bcab777cc320ef0a006e66702ac3b09736da6404365"
 TAP_CONVENTION = "speculators-hidden-state-index-to-post-layer-v1"
@@ -25,23 +24,8 @@ def post_layer_ids(aux_ids, num_layers):
     return [index - 1 for index in aux_ids]
 
 
-@dataclass
-class DSparkConfig(DFlashConfig):
-    markov_rank: int = 256
-    sample_from_anchor: bool = True
-    enable_confidence_head: bool = True
-    confidence_head_with_markov: bool = True
-
-    def __post_init__(self):
-        shared = {key: getattr(self, key) for key in DFlashConfig.__dataclass_fields__}
-        shared.update(layer_types=["full_attention"] * self.num_hidden_layers, sliding_window=None)
-        XPressConfig(**shared, xpress_num_passes=1)
-        if (self.sample_from_anchor is not True or type(self.markov_rank) is not int
-                or self.markov_rank <= 0 or self.enable_confidence_head is not True
-                or self.confidence_head_with_markov is not True
-                or self.layer_types != ["sliding_attention"] * self.num_hidden_layers
-                or type(self.sliding_window) is not int or self.sliding_window < 2):
-            raise ValueError("Unsupported DSpark Markov/confidence/attention geometry")
+class DSparkConfig(GenericDSparkConfig):
+    """Speculators-format (RedHat Super VL) DSpark configuration."""
 
     @classmethod
     def from_dict(cls, config):
@@ -61,18 +45,6 @@ class DSparkConfig(DFlashConfig):
                       enable_confidence_head=config["enable_confidence_head"],
                       confidence_head_with_markov=config["confidence_head_with_markov"])
         return cls(**fields)
-
-
-def expected_weight_shapes(args):
-    shared = {key: getattr(args, key) for key in DFlashConfig.__dataclass_fields__}
-    shared.update(layer_types=["full_attention"] * args.num_hidden_layers, sliding_window=None)
-    shapes = {key: shape for key, shape in xpress_shapes(XPressConfig(**shared, xpress_num_passes=1)).items()
-              if not key.startswith("xpress_head.")}
-    shapes.update({"markov_head.markov_w1.weight": [args.vocab_size, args.markov_rank],
-                   "markov_head.markov_w2.weight": [args.vocab_size, args.markov_rank],
-                   "confidence_head.proj.weight": [1, args.hidden_size + args.markov_rank],
-                   "confidence_head.proj.bias": [1]})
-    return shapes
 
 
 def inspect_drafter(path, target):

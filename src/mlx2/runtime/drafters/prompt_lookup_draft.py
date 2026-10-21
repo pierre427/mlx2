@@ -55,12 +55,18 @@ class PromptLookupDraftModel:
             self.requires_context_tokens = bool(getattr(base, "requires_context_tokens", False))
         else:
             # Taps are never read; the last layer keeps the capture cheapest.
+            # A zero draft geometry: memory admission reserves no draft KV,
+            # no draft transient and no draft layers for a model-free drafter.
             self.config = SimpleNamespace(
                 block_size=num_draft + 1,
                 vocab_size=int(args.vocab_size),
                 target_layer_ids=(len(layers) - 1,),
-                hidden_size=int(args.hidden_size),
+                hidden_size=0,
+                intermediate_size=0,
                 num_hidden_layers=0,
+                num_key_value_heads=0,
+                head_dim=0,
+                feature_width=int(args.hidden_size),
             )
             self.requires_context_tokens = False
         self.num_draft = int(num_draft)

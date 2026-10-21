@@ -127,6 +127,11 @@ def inspect_artifact(model_path: str | Path) -> dict:
         if not (path / name).is_file():
             raise ValueError(f"missing weight shard: {name}")
     mtp_keys = [k for k in index if k.startswith(("language_model.mtp.", "mtp."))]
+    sidecar = None
+    if not mtp_keys:
+        sidecar = _mtp_sidecar(path)
+        if sidecar is not None:
+            mtp_keys = list(sidecar["keys"])
     has_mtp = bool(mtp_keys)
     if has_mtp and text.get("mtp_num_hidden_layers") != 1:
         raise ValueError("MTP tensors and configured head count disagree")
@@ -161,7 +166,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
             digest.update(name.encode())
             digest.update(item.read_bytes())
     records = []
-    for name in names:
+    for name in names + ([sidecar["file"]] if sidecar is not None else []):
         stat = (path / name).stat()
         record = (name, stat.st_size, stat.st_mtime_ns)
         records.append(record)
@@ -171,6 +176,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "weight_map": index,
         "has_mtp": has_mtp,
         "mtp_tensor_count": len(mtp_keys),
+        "mtp_sidecar": None if sidecar is None else {"file": sidecar["file"], "prefix": sidecar["prefix"]},
         "identity": {
             "path": str(path),
             "fingerprint": digest.hexdigest(),
@@ -231,7 +237,7 @@ def _verify_target_source_bindings(root: Path, records) -> None:
             raise ValueError(f"DFlash2 target source binding changed: {record[0]}")
 
 
-def _load_target_weights(files, *, external_draft: bool, sanitize):
+def _load_target_weights(files, *, external_draft: bool, sanitize, mtp_sidecar=None):
     """Materialize target shards, omitting an unreachable embedded MTP head.
 
     External DFlash2 owns proposal generation and cannot execute the target's
@@ -242,14 +248,45 @@ def _load_target_weights(files, *, external_draft: bool, sanitize):
     from ..runtime.ubc_evict import load_shards_evicting
 
     options = {}
-    if external_draft:
+    if external_draft and mtp_sidecar is None:
         options = {
             "keep_lazy": lambda name: name.startswith(
                 ("language_model.mtp.", "model.language_model.mtp.", "mtp.")
             ),
             "prune_lazy": True,
         }
-    return sanitize(load_shards_evicting(files, **options))
+    weights = load_shards_evicting(files, **options)
+    if mtp_sidecar is not None and not external_draft:
+        import mlx.core as mx
+
+        prefix = mtp_sidecar["prefix"]
+        for key, value in mx.load(str(mtp_sidecar["path"])).items():
+            weights[key if key.startswith("mtp.") else prefix + key] = value
+    return sanitize(weights)
+
+
+def _mtp_sidecar(path):
+    """A separately shipped MTP head inside the artifact directory.
+
+    ``mtp/model.safetensors`` (rapid-mlx / TensorFold layout, keys without
+    the ``mtp.`` prefix) or ``mtp.safetensors`` (keys with it).  Only header
+    keys are read here; the tensors load with the target.
+    """
+    import struct
+
+    for name, prefix in (("mtp/model.safetensors", "mtp."), ("mtp.safetensors", "mtp.")):
+        item = path / name
+        if not item.is_file():
+            continue
+        with item.open("rb") as handle:
+            size = struct.unpack("<Q", handle.read(8))[0]
+            header = json.loads(handle.read(size))
+        keys = [
+            key if key.startswith("mtp.") else prefix + key
+            for key in header if key != "__metadata__"
+        ]
+        return {"file": name, "prefix": prefix, "keys": keys}
+    return None
 
 
 def _target_revision_inputs(model_path: str | Path):
@@ -700,6 +737,13 @@ def _native_mtp_tree_policy(policy):
     return value
 
 
+def _external_speculation_label(draft_model):
+    """Diagnostics label of the bound drafter (DFlash2, DSpark, MTP head, PLD)."""
+    kind = str(getattr(draft_model, "receipt_kind", "external_dflash2"))
+    kind = kind.removeprefix("external_").replace("_", "-")
+    return f"external-{kind}-implemented-unqualified"
+
+
 def inspect_external_policy(
     policy: dict,
     model_path: str | Path,
@@ -707,9 +751,14 @@ def inspect_external_policy(
     allow_continuation_strategy: bool = False,
 ) -> dict:
     """Static drafter inspection and payload-bound revision check; no tensor loads."""
-    from .dflash2 import _legacy_content_revision as draft_legacy_revision
-    from .dflash2 import content_revision as draft_content_revision
-    from .dflash2 import inspect_drafter, validate_runtime_quantization
+    from .external_drafter_formats import drafter_format
+
+    # DFlash2 or DSpark, chosen by the artifact's declared architecture.
+    draft_format = drafter_format(policy.get("draft_model"))
+    draft_legacy_revision = draft_format.legacy_content_revision
+    draft_content_revision = draft_format.content_revision
+    inspect_drafter = draft_format.inspect_drafter
+    validate_runtime_quantization = draft_format.validate_runtime_quantization
 
     unknown = set(policy) - EXTERNAL_POLICY_KEYS
     if unknown:
@@ -840,7 +889,7 @@ def inspect_external_policy(
         raise ValueError("tensorfold_cohort_limit requires a batch_size_route")
     if "target_revision" not in autopin and policy["target_revision"] == _legacy_content_revision(model_path):
         raise ValueError(
-            "DFlash2 target revision mismatch: policy uses a legacy "
+            "External draft target revision mismatch: policy uses a legacy "
             "metadata-only pin; regenerate a payload-bound policy"
         )
     target_content = _inspect_target_content(model_path)
@@ -849,7 +898,7 @@ def inspect_external_policy(
         policy["target_revision"] = target_revision
     if target_revision != policy["target_revision"]:
         raise ValueError(
-            "DFlash2 target revision mismatch: policy pins "
+            "External draft target revision mismatch: policy pins "
             f"{policy['target_revision'][:12]}, artifact is {target_revision[:12]}"
         )
     record = inspect_drafter(policy["draft_model"], model_path)
@@ -859,11 +908,11 @@ def inspect_external_policy(
     if draft_revision != policy["draft_revision"]:
         if policy["draft_revision"] == draft_legacy_revision(record):
             raise ValueError(
-                "DFlash2 draft revision mismatch: policy uses a legacy "
+                "External draft revision mismatch: policy uses a legacy "
                 "metadata-only pin; regenerate a payload-bound policy"
             )
         raise ValueError(
-            "DFlash2 draft revision mismatch: policy pins "
+            "External draft revision mismatch: policy pins "
             f"{policy['draft_revision'][:12]}, artifact is {draft_revision[:12]}"
         )
     args = record["args"]
@@ -1488,10 +1537,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 path, draft_record["target_source_bindings"]
             )
         if stream_request is None:
+            sidecar = artifact.get("mtp_sidecar")
             weights = _load_target_weights(
                 files,
                 external_draft=draft_record is not None,
                 sanitize=self.model.sanitize,
+                mtp_sidecar=None if sidecar is None else {**sidecar, "path": path / sidecar["file"]},
             )
             self.norm_convention = getattr(
                 getattr(self.model, "language_model", None), "norm_convention", None
@@ -1541,8 +1592,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 self.close()
             raise
         if draft_record is not None:
-            from .dflash2 import load_drafter
+            from .external_drafter_formats import drafter_format_for_record
 
+            load_drafter = drafter_format_for_record(draft_record).load_drafter
             self.identity = {
                 **self.identity,
                 "draft_revision": draft_record["draft_revision"],
@@ -2229,7 +2281,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             "layout": self.layout,
             "mtp_head_present": Capability.MTP in self.descriptor.capabilities,
             "speculation": (
-                "external-dflash2-implemented-unqualified"
+                _external_speculation_label(self.draft_model)
                 if getattr(self, "draft_model", None) is not None
                 else "self-mtp"
                 if Capability.MTP in self.descriptor.capabilities

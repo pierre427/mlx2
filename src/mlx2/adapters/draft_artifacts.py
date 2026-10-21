@@ -14,11 +14,15 @@ from pathlib import Path
 
 from .dflash2 import _decode_unique_json, _read_safetensors_header
 
-_DTYPE_BYTES = {"BF16": 2, "F16": 2, "F32": 4}
+_DTYPE_BYTES = {"BF16": 2, "F16": 2, "F32": 4, "I64": 8, "BOOL": 1}
 _DTYPES = {"bfloat16": "BF16", "float16": "F16", "float32": "F32"}
 
 
-def validate_headers(paths, mapping, expected, dtype, *, label):
+def validate_headers(paths, mapping, expected, dtype, *, label, dtype_overrides=None):
+    """``dtype_overrides`` names tensors stored in another dtype (e.g. an
+    int64 vocabulary map beside bf16 weights); every other tensor uses
+    ``dtype``."""
+    dtype_overrides = dict(dtype_overrides or {})
     observed, digests = {}, []
     for path in paths:
         raw, header, payload = _read_safetensors_header(path)
@@ -32,7 +36,8 @@ def validate_headers(paths, mapping, expected, dtype, *, label):
             if name in observed:
                 raise ValueError(f"Duplicate {label} tensor across shards: {name}")
             shape, offsets = record["shape"], record["data_offsets"]
-            if record["dtype"] != dtype or not isinstance(shape, list) or not all(
+            wanted = dtype_overrides.get(name, dtype)
+            if record["dtype"] != wanted or not isinstance(shape, list) or not all(
                 type(v) is int and v >= 0 for v in shape
             ):
                 raise ValueError(f"{label} tensor dtype/shape mismatch: {name}")
@@ -45,7 +50,7 @@ def validate_headers(paths, mapping, expected, dtype, *, label):
             elements = 1
             for value in shape:
                 elements *= value
-            if offsets[1] - offsets[0] != elements * _DTYPE_BYTES[dtype]:
+            if offsets[1] - offsets[0] != elements * _DTYPE_BYTES[wanted]:
                 raise ValueError(f"{label} tensor byte size mismatch: {name}")
             ranges.append((offsets[0], offsets[1], name))
             observed[name] = shape
@@ -67,7 +72,7 @@ def validate_headers(paths, mapping, expected, dtype, *, label):
     return digests
 
 
-def inspect_files(path, config_bytes, *, expected, dtype, label):
+def inspect_files(path, config_bytes, *, expected, dtype, label, dtype_overrides=None):
     """Resolve shards (index or single file), validate headers, fingerprint."""
     path = Path(path).expanduser().resolve()
     dtype_code = _DTYPES.get(str(dtype).lower())
@@ -100,7 +105,10 @@ def inspect_files(path, config_bytes, *, expected, dtype, label):
         files.append(record)
         paths.append(path / name)
         digest.update(json.dumps(record).encode())
-    header_digests = validate_headers(paths, mapping, expected, dtype_code, label=label)
+    header_digests = validate_headers(
+        paths, mapping, expected, dtype_code, label=label,
+        dtype_overrides=dtype_overrides,
+    )
     digest.update(json.dumps(header_digests).encode())
     return {
         "path": str(path),
