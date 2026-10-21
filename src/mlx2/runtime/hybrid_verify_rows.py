@@ -159,6 +159,10 @@ class HybridVerifyRows:
                 else:
                     _kv_offset(cache)
         self.rows = rows
+        # Per row and layer: whether the plane is recurrent.  A plane's
+        # rollback contract is fixed for its lifetime, and a kept owner opens
+        # one transaction per round, so classify once.
+        self._recurrent_rows = [[_recurrent(cache) for cache in row] for row in rows]
         self._note = note
         self._active = None
         # Per-layer batched views, kept across this owner's rounds while
@@ -237,27 +241,29 @@ class HybridVerifyTransaction:
         self.width = max(self.lengths)
         self.closed = False
         self._finalized = False
+        flags = getattr(owner, "_recurrent_rows", None)
+        if flags is None:
+            flags = [[_recurrent(cache) for cache in row] for row in rows]
         self._kv_base = [
-            [None if _recurrent(c) else _kv_offset(c) for c in row]
-            for row in rows
+            [None if recurrent else _kv_offset(c) for c, recurrent in zip(row, row_flags)]
+            for row, row_flags in zip(rows, flags)
         ]
         self._started = []
         # The pre-round recurrent state, by reference (see the module note).
         self._recurrent_base = [
             (cache, list(cache.cache), cache.lengths, cache.left_padding)
-            for row in rows
-            for cache in row
-            if _recurrent(cache)
+            for row, row_flags in zip(rows, flags)
+            for cache, recurrent in zip(row, row_flags)
+            if recurrent
         ]
         self.plain = bool(plain_single_token) and self.width == 1
         # Rows of a plain round rewound and dropped before commit.
         self._released = set()
         try:
-            for row in rows:
-                for cache in row:
-                    if _recurrent(cache) and not self.plain:
-                        cache.start_speculation()
-                        self._started.append(cache)
+            if not self.plain:
+                for cache, *_state in self._recurrent_base:
+                    cache.start_speculation()
+                    self._started.append(cache)
             if len(rows) == 1:
                 if self.lengths[0] != self.width:
                     raise AssertionError("single lane has no padding")

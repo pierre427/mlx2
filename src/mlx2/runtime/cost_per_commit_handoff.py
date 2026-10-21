@@ -318,6 +318,13 @@ class CostPerCommitLaneState:
         self._parks = 0
         self._reengagements = 0
         self._reprobes = 0
+        self._cohort_reprobes = 0
+        self._cohort_decisions = 0
+        # Flap damping: the re-probe backoff held when the session last
+        # re-engaged, and the tokens it has committed speculating since.
+        self._reengage_backoff: int | None = None
+        self._tokens_since_reengage = 0
+        self._damped_parks = 0
         self._failed_reprobes = 0
         self._events: deque[dict[str, Any]] = deque(maxlen=16)
         self._settled = {"ordinary": 0, "speculative": 0}
@@ -531,6 +538,8 @@ class CostPerCommitLaneState:
             execution_width, deque(maxlen=self.settings.window)
         )
         samples.append((elapsed_ns, committed_tokens))
+        if kind == "speculative" and self._reengage_backoff is not None:
+            self._tokens_since_reengage += committed_tokens
         if kind == "ordinary":
             self._speculative_since_ordinary[execution_width] = 0
             self._refresh_pending.discard(execution_width)
@@ -605,7 +614,35 @@ class CostPerCommitLaneState:
         self._events.append(record)
         return dict(record)
 
+    def _damp_reengage_flap(self):
+        """Back off again when a re-engagement parks before paying back.
+
+        A re-engagement resets the re-probe backoff to ``reprobe_tokens``.
+        Prose has short predictable stretches: a probe wins on one, the
+        session re-engages, loses within a few rounds and parks, and the
+        reset backoff re-probes it again after ``reprobe_tokens``, so every
+        cycle pays the catch-up and probe rounds.  A session that parks again
+        before committing the backoff it re-engaged from as speculative
+        tokens is treated as a failed re-probe: its backoff doubles from that
+        value instead of restarting.
+        """
+        held, spent = self._reengage_backoff, self._tokens_since_reengage
+        self._reengage_backoff = None
+        self._tokens_since_reengage = 0
+        if held is None or spent >= held:
+            return False
+        self._reprobe_after = min(
+            max(2 * held, self._reprobe_after), self.settings.reprobe_max_tokens
+        )
+        self._damped_parks += 1
+        return True
+
+    def _note_reengage(self):
+        self._reengage_backoff = self._reprobe_after
+        self._tokens_since_reengage = 0
+
     def _park(self, width, ordinary_cost, speculative_cost, streak):
+        damped = self._damp_reengage_flap()
         self._parked = True
         self._probing = False
         self._parked_tokens = 0
@@ -622,6 +659,7 @@ class CostPerCommitLaneState:
             speculative_to_ordinary_cost_ratio=speculative_cost / ordinary_cost,
             loss_decisions=streak,
             reprobe_after_tokens=self._reprobe_after,
+            **({"flap_damped": True} if damped else {}),
         )
 
     def _observe_parked(self, kind, elapsed_ns, committed_tokens):
@@ -653,6 +691,7 @@ class CostPerCommitLaneState:
             return None
         ratio = probe_cost / ordinary_cost
         if probe_cost <= ordinary_cost * self.settings.loss_ratio:
+            self._note_reengage()
             self._parked = False
             self._parked_tokens = 0
             self._reprobe_after = self.settings.reprobe_tokens
@@ -694,6 +733,154 @@ class CostPerCommitLaneState:
             return None
         self._mixed_parked_rounds += 1
         return self._advance_parked_tokens(committed_tokens)
+
+    def begin_cohort_reprobe(self) -> dict[str, Any] | None:
+        """Start this parked session's re-probe with a cohort peer's.
+
+        At width two or more, a session that re-probes alone leaves its parked
+        peers in a separate target cohort: every decode phase then runs a
+        one-lane speculative round beside an unpipelined plain step of the
+        rest, and the probe is timed at a width the cohort does not run.  The
+        executor therefore aligns the parked peers' re-probes with the first
+        one due.  Only a parked, non-probing session with a complete ordinary
+        baseline joins; its re-probe is the ordinary exact one (catch-up round
+        first), so a losing probe re-parks it with the usual backoff.
+        """
+        if (
+            not self.settings.reversible
+            or not self._parked
+            or self._probing
+            or self._cancelled
+            or self._decision is not None
+            or len(self._ordinary.get(0, ())) < self.settings.ordinary_samples
+        ):
+            return None
+        self._probing = True
+        self._probe.clear()
+        self._probe_catchup_pending = True
+        self._reprobes += 1
+        self._cohort_reprobes += 1
+        return self._event(
+            "reprobe", parked_tokens=self._parked_tokens, reason="cohort_aligned"
+        )
+
+    @property
+    def reprobe_after_tokens(self) -> int:
+        return self._reprobe_after
+
+    @property
+    def last_park_speculative_cost(self) -> float | None:
+        """The speculative cost the session's latest park or re-park lost at."""
+        for event in reversed(self._events):
+            if event.get("event") in ("park", "repark"):
+                value = event.get("speculative_ns_per_committed_token")
+                return None if value is None else float(value)
+        return None
+
+    @property
+    def parked(self) -> bool:
+        """Parked, whether or not a re-probe is running."""
+        return self._parked
+
+    def ordinary_baseline(self) -> float | None:
+        """The reversible ordinary cost this session's decisions compare to."""
+        if not self.settings.reversible:
+            return None
+        samples = self._ordinary.get(0, ())
+        if len(samples) < self.settings.ordinary_samples:
+            return None
+        return self._baseline(samples)
+
+    def adopt_cohort_decision(
+        self,
+        *,
+        park: bool,
+        ordinary_cost: float,
+        speculative_cost: float,
+        reprobe_after: int | None = None,
+        reason: str = "cohort_aggregate",
+    ) -> dict[str, Any] | None:
+        """Take the cohort's aggregate park/speculate decision at a boundary.
+
+        Sessions sharing a cohort at width two or more decide from the same
+        rounds but their own commit counts, so one can re-engage (or keep
+        speculating) while its peers park.  The executor then runs a one-lane
+        speculative round beside an unpipelined plain step every phase, and the
+        lone session's rounds are timed at a width the cohort does not run.
+        The executor compares the cohort's aggregate round cost per committed
+        token with the mean ordinary baseline and every session adopts that
+        decision.  A parking session takes the cohort's re-probe backoff; a
+        re-engaging one resets it, as its own re-engagement would.
+        ``reason="width_prior"`` parks a session from the executor's record
+        that the tree lost at the cohort's width; it needs no samples of its
+        own, and parked plain steps build its ordinary baseline.
+        """
+        if (
+            not self.settings.reversible
+            or self._cancelled
+            or self._decision is not None
+        ):
+            return None
+        fields = {
+            "reason": reason,
+            "ordinary_ns_per_committed_token": float(ordinary_cost),
+            "speculative_ns_per_committed_token": float(speculative_cost),
+            "speculative_to_ordinary_cost_ratio": float(speculative_cost)
+            / float(ordinary_cost),
+        }
+        if park:
+            if self._parked and not self._probing:
+                return None
+            if self._parked:
+                # Mid-probe: the cohort's probe lost; a failed re-probe.
+                self._probing = False
+                self._probe_catchup_pending = False
+                self._failed_reprobes += 1
+                self._parked_tokens = 0
+                self._reprobe_after = min(
+                    max(2 * self._reprobe_after, int(reprobe_after or 0)),
+                    self.settings.reprobe_max_tokens,
+                )
+                self._cohort_decisions += 1
+                return self._event(
+                    "repark", **fields, reprobe_after_tokens=self._reprobe_after
+                )
+            damped = self._damp_reengage_flap()
+            if damped:
+                fields["flap_damped"] = True
+            self._parked = True
+            self._probing = False
+            self._parked_tokens = 0
+            self._parks += 1
+            if reprobe_after is not None:
+                self._reprobe_after = min(
+                    max(int(reprobe_after), self.settings.reprobe_tokens),
+                    self.settings.reprobe_max_tokens,
+                )
+            self._loss_streak[0] = 0
+            self._speculative.pop(0, None)
+            self._speculative_since_ordinary[0] = 0
+            self._refresh_pending.discard(0)
+            self._cohort_decisions += 1
+            return self._event(
+                "park", **fields, reprobe_after_tokens=self._reprobe_after
+            )
+        if not self._parked:
+            return None
+        self._note_reengage()
+        self._parked = False
+        self._probing = False
+        self._probe_catchup_pending = False
+        self._parked_tokens = 0
+        self._reprobe_after = self.settings.reprobe_tokens
+        self._reengagements += 1
+        # The session's own window restarts: a probe window may be stale
+        # (a session parked from speculation keeps its last probe's).
+        self._speculative[0] = deque(maxlen=self.settings.window)
+        self._speculative_since_ordinary[0] = 0
+        self._loss_streak[0] = 0
+        self._cohort_decisions += 1
+        return self._event("reengage", **fields)
 
     def _advance_parked_tokens(self, committed_tokens):
         self._parked_tokens += committed_tokens
@@ -739,6 +926,9 @@ class CostPerCommitLaneState:
                     ),
                     "parks": self._parks,
                     "reprobes": self._reprobes,
+                    "cohort_reprobes": self._cohort_reprobes,
+                    "cohort_decisions": self._cohort_decisions,
+                    "flap_damped_parks": self._damped_parks,
                     "reengagements": self._reengagements,
                     "failed_reprobes": self._failed_reprobes,
                     "parked_tokens": self._parked_tokens,

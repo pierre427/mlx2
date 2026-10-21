@@ -135,6 +135,35 @@ class _CommittedPlainRows:
         return self._rows
 
 
+class _RngMark:
+    """A request RNG's exact stream position, restorable onto the same object.
+
+    A parked round's undo record used a deep copy of the lane RNG, taken twice
+    per round on the decode critical path.  ``RequestRNG`` is a NumPy PCG64
+    stream plus a draw count: its ``bit_generator.state`` getter already
+    returns a detached snapshot, and assigning it back rewinds the stream to
+    exactly that position.  Other RNG types keep the deep copy.
+    """
+
+    __slots__ = ("rng", "state", "draws")
+
+    def __init__(self, rng):
+        self.rng = rng
+        self.state = rng.generator.bit_generator.state
+        self.draws = rng.draws
+
+    def restore(self):
+        self.rng.generator.bit_generator.state = self.state
+        self.rng.draws = self.draws
+        return self.rng
+
+
+def _rng_mark(rng):
+    if type(rng) is RequestRNG:
+        return _RngMark(rng)
+    return copy.deepcopy(rng)
+
+
 @dataclass
 class _ParkedInflight:
     """One dispatched, unread anchor-only round of a parked cohort."""
@@ -1042,10 +1071,14 @@ class ExternalDraftBatchGenerator:
             from dataclasses import replace as _replace
 
             # The first tree round also ingests the prompt into the draft
-            # plane: settle it, and decide on two speculative samples.
+            # plane: settle it, and decide on two speculative samples.  A
+            # losing re-probe costs a catch-up round and two tree rounds
+            # (about 33 ms each on Qwen3.6-35B-A3B chat, against a 5.4 ms
+            # plain step), so failed re-probes back off to 256 parked tokens
+            # rather than 64; the first re-probe still comes after 16.
             self.cost_per_commit_handoff = _replace(
                 CostPerCommitHandoffSettings.ast_self_configuring_defaults(),
-                speculative_samples=2, settle_rounds=1,
+                speculative_samples=2, settle_rounds=1, reprobe_max_tokens=256,
             )
             self.cost_per_commit_handoff_authority = "runtime_tree_tile_default"
         if self.draft_topology not in ("chain", "tree15"):
@@ -1553,6 +1586,11 @@ class ExternalDraftBatchGenerator:
         # A parked cohort's dispatched, unread round (pipelined parked decode).
         self._parked_inflight = None
         self._parked_last_read_ns = None
+        # The multi-lane plain step's hybrid owner (``_parked_target_owner``).
+        self._parked_owner = None
+        # Cohort widths at which every session parked: the tree lost to plain
+        # decode there (``_record_width_park_prior``).
+        self._width_park_priors = {}
         # A permanent B1 ordinary lane can use the target model's native
         # one-token pipeline after a one-way handoff.  Keep this separate from
         # parked speculation: no draft plane or speculative transaction owns
@@ -9655,8 +9693,8 @@ class ExternalDraftBatchGenerator:
         inflight = getattr(self, "_parked_inflight", None)
         if inflight is not None and (
             len(parked_uids) != len(cohort)
-            or [lane.uid for lane in cohort]
-            != [lane.uid for lane in inflight.lanes]
+            or {lane.uid for lane in cohort}
+            != {lane.uid for lane in inflight.lanes}
         ):
             # Another cohort owns this round: finish the parked one first.
             drained = list(inflight.lanes)
@@ -9665,11 +9703,20 @@ class ExternalDraftBatchGenerator:
             if any(lane.ready for lane in drained if lane in cohort):
                 # Those lanes just produced this poll's token.
                 return
+        if inflight is not None:
+            # The scheduler rotates its service order every poll; the
+            # dispatched round's rows keep the order they were launched in.
+            cohort = list(inflight.lanes)
         if (
             parked_uids
             and len(parked_uids) == len(cohort)
             and (inflight is not None or self._parked_pipeline_eligible(cohort))
         ):
+            if inflight is None:
+                # A tree round may have queued this cohort's next lattice
+                # (MLX2_TREE_PIPELINE_DRAFT) at the boundary the parked rounds
+                # now move; release it before the first dispatch.
+                self._discard_prelaunched([lane.uid for lane in cohort])
             self._parked_pipeline_round(cohort)
             return
         if parked_uids and len(parked_uids) == len(cohort):
@@ -9705,6 +9752,21 @@ class ExternalDraftBatchGenerator:
                 _bump(self.scheduler_stats, "external_ast_mixed_parked_rounds")
                 _bump(self.scheduler_stats, "external_ast_mixed_parked_lanes",
                       len(mixed_parked_uids))
+        if (
+            ordinary_probe
+            and self.dynamic_singleton_tree
+            and not mixed_parked_uids
+            and self._plain_target_step_eligible(cohort)
+        ):
+            # The tree route's ordinary probe and its unpipelined parked
+            # rounds time the plain target step the ordinary route runs, not
+            # a depth-zero external round through the tree provider.
+            self._plain_target_round(
+                cohort,
+                probe_uids=ordinary_probe_uids,
+                execution_width=logical_width,
+            )
+            return
         # Keep the default route free of timing calls.  ``states`` has one
         # entry per lane even when the capability was not selected.
         started_ns = (
@@ -9766,6 +9828,15 @@ class ExternalDraftBatchGenerator:
         free, hybrid parked cohort (no other lane may see a transaction across
         the publication point), every lane has budget for another token, and
         the deferred draft context stays below its cap.
+
+        The tree route (``dynamic_singleton_tree``, provider target) is
+        included: a parked round there is the same plain hybrid target step
+        on the lane's own cache (the provider never sees it), its draft
+        append is deferred exactly as on the chain route, and the caller
+        releases the cohort's prelaunched lattices before the first dispatch.
+        The hybrid-cache, residual-tap and fly-verification guards remain:
+        only the hybrid owner has a plain one-token transaction, and steering
+        or relaxed verification change the step itself.
         """
         settings = self.cost_per_commit_handoff
         if (
@@ -9773,8 +9844,6 @@ class ExternalDraftBatchGenerator:
             or self._ast_anchor_cohort_eligible(cohort)
             or not settings.reversible
             or not settings.pipelined_park
-            or self.dynamic_singleton_tree
-            or self.target_execution == "provider"
             or self.fly_verification.enabled
             or getattr(getattr(self.model, "model", None), "residual_taps", None)
             is not None
@@ -9799,13 +9868,94 @@ class ExternalDraftBatchGenerator:
                 return False
         return True
 
+    def _plain_target_step_eligible(self, cohort):
+        """Whether a tree-route anchor-only round may be one plain target step.
+
+        On the tree route a depth-zero external round (an ordinary probe, or
+        a parked round that cannot pipeline) otherwise runs the full external
+        round: recovery snapshot, zero-count proposal and a one-row provider
+        tree.  That costs about twice the plain decode step it stands for, so
+        the cost controller compared the tree against an inflated ordinary
+        baseline.  The plain step is the parked pipeline's own round, run
+        synchronously: greedy, processor-free lanes of a hybrid target with
+        no residual taps or fly verification.  Sampled or processed rows keep
+        the exact external round and its RNG schedule.  A parked lane also
+        needs its deferred draft context below the cap (the flush round
+        appends it).  Each lane needs budget beyond this token: a final
+        token keeps the round that publishes the draft plane.
+        """
+        if (
+            not cohort
+            or self._open
+            or self.fly_verification.enabled
+            or getattr(getattr(self.model, "model", None), "residual_taps", None)
+            is not None
+            or self._ast_anchor_cohort_eligible(cohort)
+            or not self._is_hybrid([lane.cache for lane in cohort])
+        ):
+            return False
+        for lane in cohort:
+            state = lane.cost_handoff_state
+            if (
+                lane.ordinary
+                or lane.cancelled
+                or lane.processors
+                or float(lane.sampling.get("sampling_temp", 0)) != 0.0
+                or lane.maximum - lane.generated <= 1
+                or (
+                    _speculation_parked(lane)
+                    and int(lane.tail.shape[1])
+                    >= state.settings.deferred_context_cap
+                )
+            ):
+                return False
+        return True
+
+    def _plain_target_round(self, cohort, *, probe_uids, execution_width):
+        """One synchronous plain target step for an anchor-only tree cohort.
+
+        The cohort's prelaunched lattices belong to the boundary this step
+        moves, so they are released first.  Timing covers dispatch, commit
+        and the host read, as the depth-zero external round's did; the draft
+        append stays deferred.  Only ``probe_uids`` record ordinary evidence.
+        """
+        self._discard_prelaunched([lane.uid for lane in cohort])
+        probe = any(not _speculation_parked(lane) for lane in cohort)
+        inflight = self._dispatch_parked(
+            cohort,
+            [lane.anchor for lane in cohort],
+            timing_start_ns=time.perf_counter_ns(),
+        )
+        try:
+            rows = inflight.transaction.commit(
+                accepted_lengths=[1] * len(cohort)
+            )
+        except BaseException:
+            if not inflight.transaction.closed:
+                inflight.transaction.abort()
+            self._restore_parked(inflight.recovery)
+            raise
+        self._read_parked(
+            inflight,
+            rows,
+            None,
+            pipelined=False,
+            probe_uids=probe_uids,
+            prior_execution_width=execution_width,
+        )
+        _bump(self.scheduler_stats, "external_cost_plain_target_rounds")
+        if probe:
+            _bump(self.scheduler_stats, "external_cost_plain_probe_rounds")
+
     def _dispatch_parked(self, cohort, anchors, *, timing_start_ns):
         """Begin and dispatch one anchor-only round; nothing is read."""
         phase = _PhaseClock(self) if self.round_timing else None
-        recovery = self._parked_recovery(cohort)
+        owner = self._parked_target_owner(cohort)
+        recovery = self._parked_recovery(
+            cohort, recurrent_rows=getattr(owner, "_recurrent_rows", None)
+        )
         if phase is not None:
             phase("parked_snapshot")
-        owner = self._target_owner([lane.cache for lane in cohort])
         transaction = owner.begin(
             lengths=[1] * len(cohort), plain_single_token=True
         )
@@ -9857,22 +10007,55 @@ class ExternalDraftBatchGenerator:
             generated_before=[lane.generated for lane in cohort],
         )
 
-    def _parked_recovery(self, cohort):
+    def _parked_target_owner(self, cohort):
+        """The plain step's hybrid owner, kept while the cohort is unchanged.
+
+        A multi-lane plain step runs on the owner's batched views (segmented
+        KV rows, joined recurrent state).  Rebuilding the owner every round
+        re-validated every plane and re-joined every recurrent state from its
+        rows; a kept owner resynchronizes its views instead (KV views re-read
+        row offsets, a recurrent view re-joins only when a row no longer holds
+        the arrays it split into it), exactly as the PLD cohort owner does.
+        A B1 owner has no views; keeping it skips the per-plane validation.
+        """
+        from .hybrid_verify_rows import HybridVerifyRows
+
+        rows = [lane.cache for lane in cohort]
+        owner = getattr(self, "_parked_owner", None)
+        if (
+            owner is not None
+            and owner.holds(rows)
+            and (owner._active is None or owner._active.closed)
+        ):
+            _bump(self.scheduler_stats, "external_hybrid_transactions")
+            _bump(self.scheduler_stats, "external_parked_owner_reuses")
+            return owner
+        owner = self._target_owner(rows)
+        self._parked_owner = owner if isinstance(owner, HybridVerifyRows) else None
+        return owner
+
+    def _parked_recovery(self, cohort, *, recurrent_rows=None):
         """A one-token plain step's exact undo record, without a deep snapshot.
 
         The pipelined round advances each lane by exactly one anchor, so its
         undo is the plain transaction's own: trim every KV plane back to its
         offset and put each recurrent plane's state list back.  Host fields
         are restored from a shallow copy; the lists the round appends to
-        (history, ready) are cut back to their lengths and the RNG is copied.
+        (history, ready) are cut back to their lengths and the RNG position is
+        recorded.  ``recurrent_rows`` is the owner's per-plane classification
+        of exactly these lanes, when the caller holds one.
         """
         from .hybrid_verify_rows import _kv_offset, _recurrent
 
+        if recurrent_rows is None or len(recurrent_rows) != len(cohort):
+            recurrent_rows = [
+                [_recurrent(cache) for cache in lane.cache] for lane in cohort
+            ]
         records = []
-        for lane in cohort:
+        for lane, row_flags in zip(cohort, recurrent_rows):
             planes = []
-            for cache in lane.cache:
-                if _recurrent(cache):
+            for cache, recurrent in zip(lane.cache, row_flags, strict=True):
+                if recurrent:
                     planes.append(
                         ("recurrent", cache, list(cache.cache), cache.lengths, cache.left_padding)
                     )
@@ -9883,7 +10066,7 @@ class ExternalDraftBatchGenerator:
 
     @staticmethod
     def _parked_host_record(lane):
-        return dict(vars(lane)), len(lane.history), len(lane.ready), copy.deepcopy(lane.rng)
+        return dict(vars(lane)), len(lane.history), len(lane.ready), _rng_mark(lane.rng)
 
     def _refresh_parked_host(self, records):
         """Re-take the host half after the previous round is booked.
@@ -9915,7 +10098,7 @@ class ExternalDraftBatchGenerator:
                 lane.history.pop()
             while len(lane.ready) > ready:
                 lane.ready.pop()
-            lane.rng = rng
+            lane.rng = rng.restore() if isinstance(rng, _RngMark) else rng
         _bump(self.scheduler_stats, "recovery_checkpoint_restores", len(records))
 
     def _abort_parked_inflight(self):
@@ -10019,8 +10202,22 @@ class ExternalDraftBatchGenerator:
                 following = None
         self._read_parked(inflight, rows, following)
 
-    def _read_parked(self, inflight, rows, following):
-        """Book a committed parked round; keep ``following`` only if it is exact."""
+    def _read_parked(
+        self,
+        inflight,
+        rows,
+        following,
+        *,
+        pipelined=True,
+        probe_uids=None,
+        prior_execution_width=None,
+    ):
+        """Book a committed parked round; keep ``following`` only if it is exact.
+
+        ``pipelined=False`` books a synchronous plain step
+        (``_plain_target_round``): no pipeline state is read or left behind,
+        and only ``probe_uids`` record ordinary evidence.
+        """
         cohort = inflight.lanes
         phase = _PhaseClock(self) if self.round_timing else None
         self._open = True
@@ -10064,8 +10261,18 @@ class ExternalDraftBatchGenerator:
                 transaction=_CommittedPlainRows(rows),
                 deferred_context=True,
             )
+            # Before the following round's host record is retaken: its
+            # recovery must describe the tail this flush leaves.
+            self._flush_parked_context(cohort)
             if following is not None:
                 self._refresh_parked_host(following.recovery)
+                # The following round was dispatched before this read booked
+                # its token; its evidence is its own token only.  Counting
+                # from the dispatch boundary credited two tokens per read
+                # interval and halved the parked ordinary baseline.
+                following.generated_before = [
+                    lane.generated for lane in following.lanes
+                ]
             if phase is not None:
                 phase("parked_book")
         except BaseException:
@@ -10073,14 +10280,15 @@ class ExternalDraftBatchGenerator:
                 with suppress(Exception):
                     following.transaction.abort()
             self._restore_parked(inflight.recovery)
-            self._parked_last_read_ns = None
+            if pipelined:
+                self._parked_last_read_ns = None
             raise
         finally:
             self._open = False
         now = time.perf_counter_ns()
         start = (
             self._parked_last_read_ns
-            if self._parked_last_read_ns is not None
+            if pipelined and self._parked_last_read_ns is not None
             else inflight.timing_start_ns
         )
         self._observe_cost_handoff_round(
@@ -10088,12 +10296,55 @@ class ExternalDraftBatchGenerator:
             inflight.generated_before,
             start,
             ordinary_probe=True,
-            ordinary_probe_uids={lane.uid for lane in cohort},
+            ordinary_probe_uids=(
+                {lane.uid for lane in cohort}
+                if probe_uids is None
+                else set(probe_uids)
+            ),
+            prior_execution_width=prior_execution_width,
         )
+        if not pipelined:
+            return
         _bump(self.scheduler_stats, "external_cost_parked_rounds")
         _bump(self.scheduler_stats, "external_parked_pipelined_rounds")
         self._parked_last_read_ns = now if following is not None else None
         self._parked_inflight = following
+
+    def _flush_parked_context(self, cohort):
+        """Commit a parked lane's deferred draft context before it reaches its cap.
+
+        A parked lane defers its draft append; at the cap the scheduler used
+        to stop the pipeline and run a flush round, a full depth-zero external
+        round (recovery snapshot, provider tree, draft append) whose only job
+        was the append, at about twice a plain step and then a pipeline
+        restart.  The append is the same call that round's proposal phase
+        makes at this boundary (``_append_context(lane, lane.anchor)``), so
+        the draft plane is identical; it is queued behind the in-flight plain
+        step and the pipeline keeps running.  A lane that finished this round
+        keeps its tail: its response already published the paired sidecar.
+        """
+        for lane in cohort:
+            state = lane.cost_handoff_state
+            if (
+                state is None
+                # The AST planner owns its parked context schedule.
+                or getattr(self, "ast_execution_planner", None) is not None
+                or not _speculation_parked(lane)
+                or int(lane.tail.shape[1]) + 3 < state.settings.deferred_context_cap
+                or any(
+                    getattr(response, "finish_reason", None) is not None
+                    for response in lane.ready
+                )
+            ):
+                continue
+            self._append_context(lane, lane.anchor)
+            _bump(self.scheduler_stats, "external_parked_context_flushes")
+            _bump(
+                self.scheduler_stats,
+                "external_parked_context_flush_positions",
+                int(lane.tail.shape[1]),
+            )
+            lane.tail = lane.tail[:, :0]
 
     def _observe_cost_handoff_round(
         self,
@@ -10111,6 +10362,7 @@ class ExternalDraftBatchGenerator:
             return
         elapsed_ns = max(time.perf_counter_ns() - started_ns, 1)
         width = len(cohort)
+        reprobed = reengaged = False
         for lane, before in zip(cohort, generated_before, strict=True):
             state = lane.cost_handoff_state
             if state is None or lane.cancelled:
@@ -10148,6 +10400,8 @@ class ExternalDraftBatchGenerator:
                     self._update_ast_cost_prior(
                         decision, execution_width=prior_width
                     )
+                reprobed = reprobed or decision["event"] == "reprobe"
+                reengaged = reengaged or decision["event"] == "reengage"
                 _bump(self.scheduler_stats, f"external_cost_{decision['event']}_events")
                 lane.cost_handoff_receipt = state.receipt()
                 lane.cost_handoff_receipt = self._cost_handoff_receipt(lane)
@@ -10174,6 +10428,196 @@ class ExternalDraftBatchGenerator:
                 response.speculative_receipt["cost_per_commit_handoff"] = (
                     self._cost_handoff_receipt(lane)
                 )
+        if not ordinary_probe and width >= 2:
+            reengaged = (
+                self._reconcile_cohort_costs(cohort, generated_before, elapsed_ns)
+                or reengaged
+            )
+        if reprobed:
+            self._align_cohort_reprobes()
+        self._record_width_park_prior(reengaged=reengaged)
+
+    def _publish_cost_receipt(self, lane):
+        lane.cost_handoff_receipt = lane.cost_handoff_state.receipt()
+        lane.cost_handoff_receipt = self._cost_handoff_receipt(lane)
+        for response in lane.ready:
+            response.speculative_receipt["cost_per_commit_handoff"] = (
+                self._cost_handoff_receipt(lane)
+            )
+
+    def _reconcile_cohort_costs(self, cohort, generated_before, elapsed_ns):
+        """Keep a whole speculating cohort on one route at width two or more.
+
+        After a speculative round over every live session, some sessions may
+        have parked (or re-parked after a probe) while others keep speculating
+        or re-engage.  The decode phase would then split into a speculative
+        round beside an unpipelined plain step every poll, and the lone
+        speculating sessions would be timed at a width the cohort no longer
+        runs.  The cohort instead adopts the aggregate decision: this round's
+        cost per committed token across the cohort (``elapsed * width /
+        committed``, the per-session unit) against the sessions' mean ordinary
+        baseline, with the sessions' loss ratio.
+        """
+        live = self._live_reversible_lanes()
+        if (
+            not live
+            or len(live) < 2
+            or {lane.uid for lane in live} != {lane.uid for lane in cohort}
+        ):
+            return False
+        states = [lane.cost_handoff_state for lane in cohort]
+        paused = [state.speculation_paused for state in states]
+        if all(paused) or not any(paused):
+            return False
+        baselines = [state.ordinary_baseline() for state in states]
+        committed = sum(
+            lane.generated - before for lane, before in zip(cohort, generated_before)
+        )
+        if any(value is None for value in baselines) or committed <= 0:
+            return False
+        ordinary = sum(baselines) / len(baselines)
+        speculative = elapsed_ns * len(cohort) / committed
+        park = speculative >= ordinary / states[0].settings.loss_ratio
+        backoff = max(
+            (state.reprobe_after_tokens for state in states if state.speculation_paused),
+            default=None,
+        )
+        _bump(
+            self.scheduler_stats,
+            "external_cost_cohort_park_decisions" if park
+            else "external_cost_cohort_reengage_decisions",
+        )
+        for lane, state in zip(cohort, states):
+            decision = state.adopt_cohort_decision(
+                park=park,
+                ordinary_cost=ordinary,
+                speculative_cost=speculative,
+                reprobe_after=backoff,
+            )
+            if decision is None:
+                continue
+            _bump(self.scheduler_stats, f"external_cost_{decision['event']}_events")
+            self._publish_cost_receipt(lane)
+        return not park
+
+    def _live_reversible_lanes(self):
+        """Live decoding lanes when every one carries reversible cost state.
+
+        ``None`` under the AST planner, which packs parked anchors into its own
+        cohorts, or when any live lane has no reversible state.
+        """
+        if getattr(self, "ast_execution_planner", None) is not None:
+            return None
+        live = [
+            lane for lane in getattr(self, "lanes", {}).values()
+            if not lane.cancelled and lane.anchor is not None
+        ]
+        if any(
+            lane.cost_handoff_state is None
+            or not lane.cost_handoff_state.settings.reversible
+            or lane.cost_handoff_state.handed_off
+            for lane in live
+        ):
+            return None
+        return live
+
+    def _record_width_park_prior(self, *, reengaged):
+        """Remember, per cohort width, that the tree lost to plain decode.
+
+        When every live session at width two or more is parked (and not
+        probing), speculation lost at that width; a session that re-engages
+        at a width clears it.  The record is token-free timing local to this
+        generator binding, like the B1 ``_ast_cost_prior``.
+        """
+        live = self._live_reversible_lanes()
+        if not live or len(live) < 2:
+            return
+        priors = self.__dict__.setdefault("_width_park_priors", {})
+        width = len(live)
+        if reengaged:
+            if priors.pop(width, None) is not None:
+                _bump(self.scheduler_stats, "external_cost_width_prior_clears")
+            return
+        states = [lane.cost_handoff_state for lane in live]
+        if not all(state.speculation_paused for state in states):
+            return
+        backoff = max(state.reprobe_after_tokens for state in states)
+        if width in priors:
+            # Failed cohort re-probes at this width carry their backoff.
+            priors[width]["reprobe_after"] = max(
+                priors[width]["reprobe_after"], backoff
+            )
+            return
+        baselines = [state.ordinary_baseline() for state in states]
+        speculative = [state.last_park_speculative_cost for state in states]
+        baselines = [value for value in baselines if value is not None]
+        speculative = [value for value in speculative if value is not None]
+        if not baselines or not speculative:
+            return
+        _bump(self.scheduler_stats, "external_cost_width_prior_records")
+        priors[width] = {
+            "ordinary_ns_per_committed_token": sum(baselines) / len(baselines),
+            "speculative_ns_per_committed_token": max(speculative),
+            "reprobe_after": backoff,
+        }
+
+    def _apply_width_park_prior(self, active_width):
+        """Park new or speculating sessions at a width where the tree lost.
+
+        A cohort that already learned (this generator binding) that the tree
+        loses to plain decode at this width does not re-measure it with every
+        new set of requests: their sessions start parked, build their own
+        ordinary baselines from the pipelined plain steps, and re-probe with
+        the cohort after the re-probe backoff the earlier cohorts at this
+        width reached (failed re-probes double it, as for one session).
+        Sessions already parked or probing keep their state; a re-engagement
+        at the width clears the record.
+        """
+        priors = getattr(self, "_width_park_priors", None)
+        if not priors or active_width < 2:
+            return
+        prior = priors.get(active_width)
+        live = self._live_reversible_lanes()
+        if prior is None or not live or len(live) != active_width:
+            return
+        for lane in live:
+            state = lane.cost_handoff_state
+            if state.parked:
+                continue
+            decision = state.adopt_cohort_decision(
+                park=True,
+                ordinary_cost=prior["ordinary_ns_per_committed_token"],
+                speculative_cost=prior["speculative_ns_per_committed_token"],
+                reprobe_after=prior["reprobe_after"],
+                reason="width_prior",
+            )
+            if decision is None:
+                continue
+            _bump(self.scheduler_stats, "external_cost_park_events")
+            _bump(self.scheduler_stats, "external_cost_width_prior_parks")
+            self._publish_cost_receipt(lane)
+
+    def _align_cohort_reprobes(self):
+        """Re-probe every parked peer with the session whose re-probe fired.
+
+        At width two or more a lone re-probing session splits the decode
+        phase into its one-lane speculative round and an unpipelined plain
+        step of its parked peers, and its probe is timed at a width the
+        cohort never runs.  Aligned, the peers re-probe in the same rounds:
+        the probe runs at the cohort's own width, each session decides from
+        its own probe against its own ordinary baseline, and the parked
+        cohort leaves and re-forms its batched plain pipeline once.
+        """
+        live = self._live_reversible_lanes()
+        if not live or len(live) < 2:
+            return
+        for lane in live:
+            decision = lane.cost_handoff_state.begin_cohort_reprobe()
+            if decision is None:
+                continue
+            _bump(self.scheduler_stats, "external_cost_reprobe_events")
+            _bump(self.scheduler_stats, "external_cost_cohort_reprobe_events")
+            self._publish_cost_receipt(lane)
 
     def _apply_ast_cost_prior_scope(self, cohort, *, execution_width):
         """Keep a measured slow-route hint inside its B1 execution scope."""
@@ -12635,6 +13079,7 @@ class ExternalDraftBatchGenerator:
             self._drain_parked_inflight()
             return
         self._apply_ast_cost_prior_scope(ready, execution_width=active_width)
+        self._apply_width_park_prior(active_width)
         concurrent = self.dynamic_singleton_tree and active_width > self.dynamic_tree_max_width
         chain_cap = self._chain_draft_cap(active_width) if concurrent else None
         depth = self.num_draft if chain_cap is None else min(self.num_draft, chain_cap)
@@ -12845,6 +13290,8 @@ class ExternalDraftBatchGenerator:
         ):
             # Unread, so the host never saw it: rewind exactly, then remove.
             self._abort_parked_inflight()
+        # A kept plain-step owner pins its lanes' caches and joined views.
+        self._parked_owner = None
         ordinary_inflight = getattr(self, "_ordinary_inflight", None)
         if ordinary_inflight is not None and any(
             int(lane.uid) in requested_uids for lane in ordinary_inflight.lanes
