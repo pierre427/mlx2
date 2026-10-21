@@ -21,6 +21,9 @@ from .external_draft_policy import ExternalDraftAdapterMixin
 
 FAMILIES = frozenset({"qwen3", "qwen3_moe", "qwen2", "llama"})
 CACHE_LAYOUT = "standard-full-kv-layer-segments-v1"
+# EAGLE-3 proposal depth when a policy omits num_draft (must stay below the
+# EAGLE-3 block size, 8).
+EAGLE3_DEFAULT_NUM_DRAFT = 3
 QWEN3_PREFILL_STEP = 512
 QWEN3_SIDECAR_ARCHITECTURES = frozenset(
     {
@@ -52,6 +55,10 @@ def descriptor_for(family: str) -> ModelDescriptor:
                 Capability.PREFIX_REUSE,
                 Capability.APC_V2,
                 Capability.LAYERED_CACHE,
+                # Full-KV only (sliding-window artifacts are refused), so the
+                # generic target-verified PLD path rolls back with kv_trim.
+                # With no drafter, adaptive PLD (latched) is the default route.
+                Capability.PROMPT_LOOKUP,
             }
         ),
         cache_layout=CACHE_LAYOUT,
@@ -460,6 +467,8 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
     # Adapter-owned declaration consumed by the server's generic invocation
     # boundary. Other adapters keep their singular draft_model contracts.
     supports_draft_portfolio = True
+    # "ordinary" resolves to the server's latched adaptive prompt-lookup
+    # capability default when no drafter is selected (Pierre, 2026-10-21).
     default_route = "ordinary"
     descriptor = descriptor_for("qwen3")
     EXTERNAL_DEFAULT_NUM_DRAFT = 15
@@ -871,6 +880,12 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                         "tile_rows": raw_entry.get("tile_rows", 1),
                     }
                 )
+                if kind == "eagle3" and "num_draft" not in self.external_policy:
+                    # The class default (15, sized for XPress) exceeds the
+                    # EAGLE-3 block (8) and refused every policy that omitted
+                    # num_draft; 3 is the depth of the recorded EAGLE-3 smoke
+                    # (qualification/runs/eagle3-smoke-20261021).
+                    self.external_policy["num_draft"] = EAGLE3_DEFAULT_NUM_DRAFT
                 self._check_num_draft(record)
             kinds = {entry["kind"] for entry in draft_entries}
             if "xpress_num_passes" in self.external_policy and "xpress" not in kinds:

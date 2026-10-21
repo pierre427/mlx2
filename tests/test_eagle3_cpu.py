@@ -449,6 +449,27 @@ def test_standard_decoder_adapter_serves_eagle3_route(tmp_path, monkeypatch):
         )
 
 
+def test_standard_decoder_eagle3_defaults_num_draft_below_its_block(tmp_path, monkeypatch):
+    # model-matrix-20261021: a policy without num_draft inherited the class
+    # default 15 (sized for XPress) and was refused against the 8-row block.
+    from transformers import AutoTokenizer
+
+    from mlx2.adapters.standard_decoder import EAGLE3_DEFAULT_NUM_DRAFT, StandardDecoderAdapter
+
+    draft_dir, target_dir, _ = write_artifact(tmp_path)
+    tokenizer = SimpleNamespace(
+        eos_token_id=39, chat_template=None,
+        get_vocab=lambda: {f"t{i}": i for i in range(VOCAB)},
+    )
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *a, **k: tokenizer)
+    monkeypatch.setattr(mx, "clear_cache", lambda: None)
+    adapter = StandardDecoderAdapter(str(target_dir), execution_policy={"draft_model": str(draft_dir)})
+    try:
+        assert adapter.external_policy["num_draft"] == EAGLE3_DEFAULT_NUM_DRAFT == 3
+    finally:
+        adapter.close()
+
+
 def _read_tensor(path: Path, name: str):
     with path.open("rb") as stream:
         length = struct.unpack("<Q", stream.read(8))[0]

@@ -491,3 +491,41 @@ def test_qwen38_27b_defaults_fused_gdn_and_num_draft_three(monkeypatch):
     nine = built(Qwen359BAdapter)
     assert nine.fused_gdn is False and nine._num_draft == 2
     assert "default_fused_gdn" not in vars(Qwen3635BA3BAdapter)
+
+
+def test_agnes_defaults_to_adaptive_prompt_lookup_without_a_drafter():
+    # model-matrix-20261021: Agnes declares the target-verified PLD route
+    # (GPU smoke pass at 67dbd6fc6) and, with no drafter, takes the latched
+    # adaptive PLD capability default (Pierre, via coordinator 2026-10-21).
+    from mlx2.adapters.agnes_3_flash import DESCRIPTOR, Agnes3FlashAdapter
+    from mlx2.contracts import Capability
+    from mlx2.server import build_parser, resolve_route_selection
+
+    descriptor = DESCRIPTOR
+    assert Capability.PROMPT_LOOKUP in descriptor.capabilities
+    resolution = _resolution(Agnes3FlashAdapter, descriptor)
+    parser = build_parser()
+    selected = resolve_route_selection(parser.parse_args(["--model", "fixture"]), None, resolution)
+    assert (selected.route, selected.source) == ("prompt_lookup", "capability_default")
+    selected = resolve_route_selection(parser.parse_args(["--model", "fixture", "--ordinary"]), None, resolution)
+    assert (selected.route, selected.source) == ("ordinary", "explicit_flag")
+    selected = resolve_route_selection(
+        parser.parse_args(["--model", "fixture", "--prompt-lookup"]), None, resolution
+    )
+    assert (selected.route, selected.source) == ("prompt_lookup", "explicit_flag")
+
+
+def test_ast_on_qwen35_9b_maps_to_its_chain_route():
+    # model-matrix-20261021: --ast on Qwen3.5-9B inherited the 27B tree-tile
+    # target and loaded the external route, which the 9B adapter refuses.
+    from mlx2.adapters.qwen35_9b import Qwen359BAdapter, descriptor_for
+    from mlx2.server import apply_ast_invocation, build_parser
+
+    resolution = AdapterResolution(
+        Qwen359BAdapter, descriptor_for(has_mtp=False), {"fingerprint": "fixture", "has_mtp": False}
+    )
+    args = build_parser().parse_args(["--model", "fixture", "--ast"])
+    policy = apply_ast_invocation(args, None, resolution)
+    assert not (policy or {}).get("draft_model")
+    assert args.prompt_lookup and not args.external_draft
+    assert args.ast_route["tree_tiles"] is False

@@ -196,6 +196,11 @@ class Qwen359BAdapter(Qwen3827BAdapter):
     # The parent 27B decode-first default has only been measured on 27B.
     default_route_execution_policy: ClassVar[dict] = {}
     descriptor = QWEN35_9B
+    # Tree tiles run on the external-draft route, which this adapter refuses
+    # (no artifact-bound drafter contract), so --ast must map to the best
+    # chain route (adaptive prompt lookup) instead of inheriting the 27B tile
+    # target and failing at load.
+    ast_tree_tiles = False
     artifact_inspector = staticmethod(inspect_artifact)
     descriptor_builder = staticmethod(descriptor_for)
     environment_configurator = staticmethod(configure_environment)

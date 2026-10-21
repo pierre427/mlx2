@@ -5715,6 +5715,34 @@ class _ExplicitCacheBytes(argparse.Action):
         namespace.cache_bytes_source = "explicit"
 
 
+class _ExplicitMaxLanes(argparse.Action):
+    """Record that --max-lanes was given, so an adapter lane cap only
+    replaces the server default, never an operator's choice."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.max_lanes_explicit = True
+
+
+def apply_adapter_lane_default(args, adapter_resolution):
+    """Use an adapter-declared ``default_max_lanes`` when --max-lanes is unset.
+
+    Some adapters serve only fixed session widths (Nemotron 3.5 Super VL and
+    Bolt: B1, or B2/B4 under exact progressive verification) and refuse the
+    server's generic 16-lane default at load.  The adapter's declaration then
+    replaces that default; an explicit --max-lanes is always kept and still
+    fails closed if the adapter cannot serve it.
+    """
+    if getattr(args, "max_lanes_explicit", False):
+        return args.max_lanes
+    declared = getattr(getattr(adapter_resolution, "adapter_type", None), "default_max_lanes", None)
+    if declared is not None:
+        if type(declared) is not int or declared < 1:
+            raise ValueError("adapter default_max_lanes must be a positive integer")
+        args.max_lanes = declared
+    return args.max_lanes
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="mlx2 APCv2 Flash-Next server")
     parser.add_argument("--model", required=True)
@@ -5896,6 +5924,7 @@ def build_parser():
     parser.add_argument(
         "--max-lanes",
         type=int,
+        action=_ExplicitMaxLanes,
         default=DEFAULT_MAX_LANES,
         help=f"decode lanes (default: {DEFAULT_MAX_LANES}; admission bounds real width)",
     )
@@ -7191,6 +7220,7 @@ def main():
             # any other flag (OSError and TypeError used to be tracebacks).
             parser.error(f"cannot inspect --model {args.model}: {error}")
         validate_invocation_draft_adapter(args, adapter_resolution)
+        apply_adapter_lane_default(args, adapter_resolution)
         policy = apply_ast_invocation(args, policy, adapter_resolution)
         if getattr(args, "ast_route", {}).get("tree_tiles_refused"):
             logging.getLogger("mlx2.server").warning(

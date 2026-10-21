@@ -728,8 +728,34 @@ class MuseGlimmerAdapter:
         self.external_policy = normalize_external_policy(execution_policy)
         self.draft_model = None
         draft_record = None
+        # Meta's original DFlash drafter (MuseGlimmerAssistantModel) is a
+        # separate drafter class from the DFlash2 closure.
+        self._draft_kind = "dflash2"
+        self._external_route_tag = "external-dflash2-v1"
         if self.external_policy:
-            from .dflash2 import inspect_drafter
+            from .muse_dflash import is_assistant_artifact
+
+            if is_assistant_artifact(self.external_policy["draft_model"]):
+                self._draft_kind = "assistant"
+                self._external_route_tag = "external-muse-dflash-assistant-v1"
+                unsupported = {
+                    "continuation_pool", "progressive_verification_tile",
+                    "progressive_multilane_draft_cap", "target_verify_row_exact",
+                    "attention_window_row_exact",
+                } & set(execution_policy or {})
+                if unsupported or self.external_policy.get("pairwise_selection", "host") != "host":
+                    raise ValueError(
+                        "the Muse assistant DFlash drafter supports the linear "
+                        f"host route only; unsupported: {sorted(unsupported) or ['pairwise_selection']}"
+                    )
+                if "proposal_composition" not in (execution_policy or {}):
+                    # The composition default is selected for DFlash2's
+                    # selector laws; the assistant publishes dense laws and
+                    # takes no default it was not measured with.
+                    self.external_policy["proposal_composition"] = False
+                from .muse_dflash import inspect_drafter
+            else:
+                from .dflash2 import inspect_drafter
             draft_record = inspect_drafter(self.external_policy["draft_model"], model_path)
             count = self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT)
             if type(count) is not int or not 1 <= count < draft_record["args"].block_size:
@@ -824,7 +850,10 @@ class MuseGlimmerAdapter:
         if draft_record is not None:
             from dataclasses import replace
 
-            from .dflash2 import load_drafter
+            if self._draft_kind == "assistant":
+                from .muse_dflash import load_drafter
+            else:
+                from .dflash2 import load_drafter
 
             self.draft_model = load_drafter(draft_record, self.model)
             composition_identity = ""
@@ -895,13 +924,17 @@ class MuseGlimmerAdapter:
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-            self.profile_name = self.external_profile_name
+            self.profile_name = (
+                self.external_assistant_profile_name
+                if self._draft_kind == "assistant"
+                else self.external_profile_name
+            )
             progressive_identity = progressive_external_identity(
                 self.external_policy
             )
-            digest = hashlib.sha256((self.identity["fingerprint"] + draft_record["fingerprint"] + "external-dflash2-v1" + composition_identity + progressive_identity).encode()).hexdigest()
+            digest = hashlib.sha256((self.identity["fingerprint"] + draft_record["fingerprint"] + self._external_route_tag + composition_identity + progressive_identity).encode()).hexdigest()
             self.identity = {**self.identity, "target_fingerprint": self.identity["fingerprint"], "draft_fingerprint": draft_record["fingerprint"], "fingerprint": digest}
-            self.layout += ":external-dflash2-v1:" + digest
+            self.layout += ":" + self._external_route_tag + ":" + digest
             metadata = {
                 **MUSE_GLIMMER.metadata,
                 "qualification": "unqualified",
@@ -975,6 +1008,11 @@ class MuseGlimmerAdapter:
     def external_profile_name(mtp):
         if mtp: raise ValueError("External draft is not native MTP")
         return "muse-glimmer-apcv2-dflash2"
+
+    @staticmethod
+    def external_assistant_profile_name(mtp):
+        if mtp: raise ValueError("External draft is not native MTP")
+        return "muse-glimmer-apcv2-dflash-assistant"
 
     def create_external_batch(self, **kwargs):
         if self.draft_model is None:

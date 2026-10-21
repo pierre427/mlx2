@@ -23,7 +23,12 @@ DESCRIPTOR = ModelDescriptor(
                             StatePlane.RNG, StatePlane.TRANSCRIPT}),
     capabilities=frozenset({Capability.TEXT, Capability.STREAMING,
                             Capability.CONTINUOUS_BATCH, Capability.PREFIX_REUSE,
-                            Capability.APC_V2, Capability.LAYERED_CACHE}),
+                            Capability.APC_V2, Capability.LAYERED_CACHE,
+                            # GDN ArraysCache + KVCache with
+                            # supports_speculative_rollback: the generic hybrid
+                            # PLD verify path (as Qwen3.5/3.6); the no-drafter
+                            # default route via the capability default.
+                            Capability.PROMPT_LOOKUP}),
     cache_layout=CACHE_LAYOUT,
     metadata={"execution": "mlx2.adapters.agnes_3_flash.Agnes3FlashAdapter",
               "qualification": "pending", "scope": "text-only", "mtp": "absent",

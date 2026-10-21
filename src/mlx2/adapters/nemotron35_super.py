@@ -354,6 +354,10 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
+    # _validate_session_width serves B1 (B2/B4 only under exact progressive
+    # external verification), so a bare start must not inherit the server's
+    # 16-lane default and refuse to load.  An explicit --max-lanes still wins.
+    default_max_lanes = 1
     # Locked in by Pierre on 2026-10-18 after the feature sweep: native MTP
     # depth 2 is the default text route.  Greedy output was identical to
     # ordinary on every probe (feature sweep 33235e9f1, mtp-d2 unit), row-exact
