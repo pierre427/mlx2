@@ -92,7 +92,9 @@ def test_serving_loop_inserts_lanes_on_the_generation_stream(host, monkeypatch):
 
 def test_without_the_binding_inserts_run_on_another_stream(host, monkeypatch):  # noqa: F811
     """Negative control: the check detects an unbound generation thread."""
-    monkeypatch.setattr(generate_module, "bind_generation_thread_stream", lambda: None)
+    import mlx2.runtime.generation_stream as stream_module
+
+    monkeypatch.setattr(stream_module, "bind_generation_thread_stream", lambda: None)
     model, vocab = tiny_laguna()
     device = generation_stream.device
     observed = []
@@ -157,3 +159,20 @@ def test_without_both_guards_lazy_restored_state_reaches_insert(host, monkeypatc
     model, vocab = tiny_laguna()
     warm = _lazy_at_insert(monkeypatch, vocab, model)
     assert all(lazy > 0 for _arrays, lazy in warm), warm
+
+
+def test_binding_module_does_not_import_the_model_modules():
+    # The serving thread binds the stream before the adapter pins its
+    # import-time environment; importing runtime.models.base first made every
+    # import-order-checking adapter (Qwen3.8-27B) refuse to load.
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, mlx2.runtime.generation_stream as g; "
+        "assert 'mlx2.runtime.models.base' not in sys.modules, 'models imported'; "
+        "import mlx2.runtime.generate as gen; "
+        "assert gen.generation_stream is g.generation_stream; "
+        "assert gen.bind_generation_thread_stream is g.bind_generation_thread_stream"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

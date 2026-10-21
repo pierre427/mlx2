@@ -8915,7 +8915,9 @@ class ServingEngine:
             pass
 
     def _run(self):
-        from .runtime.generate import bind_generation_thread_stream
+        # A model-free module: runtime.generate would import the model
+        # modules before the adapter below pins its import-time environment.
+        from .runtime.generation_stream import bind_generation_thread_stream
 
         # Single-stream generation thread: every lazy array built here
         # (restores, lane-cache merges, trims, KV requantization) shares the

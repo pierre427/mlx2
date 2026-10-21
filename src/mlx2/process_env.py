@@ -77,7 +77,7 @@ def apply_process_numerics(environ=None) -> dict:
 # on one command queue for a ``fence_update`` on another, and the two command
 # buffers are not guaranteed to overlap: the GPU can wedge at 100% with no
 # error.  mlx2 therefore keeps the generation thread single-stream
-# (``runtime.generate.bind_generation_thread_stream``) and hands lanes
+# (``runtime.generation_stream.bind_generation_thread_stream``) and hands lanes
 # evaluated state (``models.cache.materialize_restored_state``), and the
 # eval watchdog (``runtime.eval_watchdog``) reports a wedge instead of
 # serving silently.  Any new cross-stream lazy handoff reopens the hazard.
