@@ -1268,3 +1268,48 @@ def test_reversible_ordinary_baseline_is_a_median():
     _observe(state, "speculative", 300)
     _observe(state, "speculative", 300)
     assert _observe(state, "speculative", 300)["event"] == "park"
+
+
+def test_reversible_stale_loss_owes_one_fresh_ordinary_round_not_a_full_baseline():
+    """F11: AST defaults (loss_decisions=1) used to wipe a three-round baseline
+    on any loss after the first speculative round and force three probes."""
+    settings = CostPerCommitHandoffSettings.ast_self_configuring_defaults()
+    state = CostPerCommitLaneState(settings, lane_uid=7, owner_scope="t")
+
+    def observe(kind, elapsed, committed=1):
+        return state.observe(
+            kind=kind, elapsed_ns=elapsed, committed_tokens=committed,
+            execution_width=1, lane_uid=7, owner_scope="t",
+        )
+
+    for _ in range(settings.ordinary_samples):
+        observe("ordinary", 100)
+    assert not state.needs_ordinary_probe(1)
+    assert observe("speculative", 120, committed=3) is None  # winning, fresh
+    assert observe("speculative", 1000) is None  # stale loss: refresh, no park
+    receipt = state.receipt()
+    assert receipt["ordinary_refreshes"] == 1
+    assert receipt["reversible"]["parks"] == 0
+    assert receipt["ordinary"]["0"]["samples"] == settings.ordinary_samples
+    # Exactly one forced ordinary round, not ``ordinary_samples`` of them.
+    assert state.needs_ordinary_probe(1)
+    observe("ordinary", 100)
+    assert not state.needs_ordinary_probe(1)
+    # A fresh loss directly after the refresh now decides (parks).
+    event = observe("speculative", 1000)
+    assert event is not None and event["event"] == "park"
+    assert state.speculation_paused
+
+
+def test_one_way_stale_loss_still_remeasures_the_whole_baseline():
+    state = _state(ordinary_samples=3, speculative_samples=1, loss_decisions=1)
+    for _ in range(3):
+        _observe(state, "ordinary", 100)
+    assert _observe(state, "speculative", 40, committed=3) is None
+    assert _observe(state, "speculative", 1000) is None
+    assert state.receipt()["ordinary"] == {}
+    probes = 0
+    while state.needs_ordinary_probe(1):
+        _observe(state, "ordinary", 100)
+        probes += 1
+    assert probes == 3

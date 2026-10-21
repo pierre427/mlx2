@@ -965,6 +965,23 @@ class ContinuationDraftModel:
                         break
                 return selected
 
+            def choose_distinct_roots(ranked_paths=ranked_all):
+                # A zero-trunk (rootless sibling) launch verifies every row
+                # from the request base as its own full row.  Rows sharing a
+                # first token would re-verify their common prefix (native-MTP
+                # alternatives are truncations of the primary plus one other
+                # token), so keep the best-ranked row per root token.  Ragged
+                # depths stay legal here.
+                selected, roots = [], set()
+                for candidate in ranked_paths:
+                    if candidate[0][0] in roots:
+                        continue
+                    selected.append(candidate)
+                    roots.add(candidate[0][0])
+                    if len(selected) == 4:
+                        break
+                return selected
+
             chosen = [ranked[0]]
             actual_prefix = 0 if strategy == "distinct_root" else prefix
             if strategy == "distinct_root":
@@ -989,7 +1006,7 @@ class ContinuationDraftModel:
                 chosen = []
                 for candidate_prefix in prefix_candidates:
                     candidate_rows = (
-                        ranked_all[:4]
+                        choose_distinct_roots()
                         if allow_adaptive_prefix_search and candidate_prefix == 0
                         else choose_distinct_children(candidate_prefix)
                     )

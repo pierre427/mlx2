@@ -358,7 +358,7 @@ def test_ranked_r8_slate_searches_deeper_exact_fanout():
     assert model.last_ordered_alternative_prefix_tokens == (2,)
     assert model.last_ordered_alternative_search_diagnostics == ({
         "attempted_prefixes": (1, 2, 3, 0),
-        "feasible_width_by_prefix": ((1, 1), (2, 4), (3, 1), (0, 4)),
+        "feasible_width_by_prefix": ((1, 1), (2, 4), (3, 1), (0, 1)),
         "chosen_prefix": 2,
         "chosen_width": 4,
     },)
@@ -391,6 +391,38 @@ def test_rootless_adaptive_rows_are_contiguous_global_rank_prefix(branch_count):
     assert [
         item["rank"] for item in model.last_ordered_alternative_provenance[0]
     ] == list(range(branch_count))
+
+
+def test_rootless_rows_are_distinct_at_the_root_not_overlapping_truncations():
+    """F8: native-MTP alternatives are the primary's prefix plus one other
+    token; as separate zero-trunk rows they re-verified the shared prefix."""
+    primary = (1, 2, 3, 4)
+    paths = [
+        _ranked_path(primary, 0),
+        _ranked_path((1, 2, 9), 1),
+        _ranked_path((1, 8), 2),
+        _ranked_path((7,), 3),
+        _ranked_path((1, 2, 3, 5), 4),
+        _ranked_path((6,), 5),
+    ]
+    model = _continuation_bridge(paths)
+    model.last_requested_proposal_length = 4
+
+    alternatives = model.ordered_alternative_proposals(
+        [list(primary)],
+        branch_count=3,
+        strategy="confidence_tree",
+        shared_prefix_tokens=(3,),
+        allow_adaptive_prefix_search=True,
+    )
+
+    # Prefix 3 has only two same-depth children; the rootless fallback keeps
+    # one row per root token, in global rank order.
+    assert model.last_ordered_alternative_prefix_tokens == (0,)
+    assert alternatives == [[[1, 2, 3, 4], [7], [6]]]
+    assert [
+        item["rank"] for item in model.last_ordered_alternative_provenance[0]
+    ] == [0, 3, 5]
 
 
 def test_rootless_ragged_path_exceeding_requested_depth_fails_closed():
@@ -2106,9 +2138,13 @@ def test_continuation_ast_processor_uses_exact_primary_chain():
     assert not wrapper.proposal_pool._pending
 
 
-def test_inventory_auto_admits_actual_resident_mtp_and_refuses_missing_requested_source():
+def test_inventory_admits_resident_mtp_only_when_named_and_refuses_missing_source():
     model, draft = _native_qsa_pair("xpress")
-    wrapper = wrapped(model, draft)
+    # A resident head is never silently added: it costs a head pass per round.
+    assert set(wrapped(model, draft).providers) == {"external", "prompt_lookup"}
+    wrapper = wrapped(
+        model, draft, {"sources": ["external", "prompt_lookup", "native_mtp"]}
+    )
     assert set(wrapper.providers) == {"external", "prompt_lookup", "native_mtp"}
     model, draft = pair("xpress")
     assert set(wrapped(model, draft).providers) == {"external", "prompt_lookup"}

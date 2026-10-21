@@ -187,6 +187,24 @@ def _bounded_target_executor_detail(detail):
     return result
 
 
+def cohort_exact_lane_limit(model, ceiling=8):
+    """Widest cohort the target's row-exact executor may receive at once.
+
+    ``progressive_external_exact_max_lanes`` is the executor's own admission
+    contract (a B1-only executor declares 1 and raises for wider slabs).  An
+    undeclared target keeps the historical scheduler ceiling; a malformed
+    declaration admits no cohort, so the caller takes its non-exact path
+    instead of launching an executor outside its declared shape.
+    """
+
+    declared = getattr(model, "progressive_external_exact_max_lanes", None)
+    if declared is None:
+        return ceiling
+    if type(declared) is not int or declared < 1:
+        return 0
+    return min(int(ceiling), declared)
+
+
 def execute_progressive_target_rows(
     model,
     tokens,

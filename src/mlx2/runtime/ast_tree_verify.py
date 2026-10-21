@@ -491,22 +491,32 @@ def _finish_request(work):
     # Loser metadata is an exact prefix observation of the same target walk,
     # not a fabricated zero-utility branch. Only the selected winner owns the
     # final private state; an unexpected caller cannot publish a loser cache.
-    feature_row = generator.mx.concatenate(feature_parts, axis=1)
-    feature_rows = generator.mx.concatenate(
-        [
-            feature_row if index == winner else generator.mx.zeros_like(feature_row)
-            for index in range(len(blocks))
-        ],
-        axis=0,
+    feature_row = (
+        feature_parts[0]
+        if len(feature_parts) == 1
+        else generator.mx.concatenate(feature_parts, axis=1)
+    )
+    feature_rows = (
+        feature_row
+        if len(blocks) == 1
+        else generator.mx.concatenate(
+            [
+                feature_row if index == winner else generator.mx.zeros_like(feature_row)
+                for index in range(len(blocks))
+            ],
+            axis=0,
+        )
     )
     rows = sum(tile["physical_rows"] for tile in tiles)
     stat = {
         "launches": len(tiles),
         "target_rows": rows,
         "rejected": int(reason == "correction"),
-        "full_tiles": sum(
-            tile["physical_rows"] == generator.ast_tree_tile_rows for tile in tiles
-        ),
+        # Same meaning as the linear progressive path: full non-final tiles,
+        # i.e. tiles the walk continued past (the rollback base). Comparing
+        # row counts with the global tile size missed every cohort-quota
+        # tile and counted a final 16-row tile as continued.
+        "full_tiles": len(tiles) - 1,
         "tile_checkpoints": checkpoints,
         "tile_input_rows": [tile["physical_rows"] for tile in tiles],
         "rollback_base_tile": len(tiles) - 1,

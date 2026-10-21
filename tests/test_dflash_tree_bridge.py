@@ -1342,3 +1342,34 @@ def test_membership_and_route_changes_discard_queued_draft(monkeypatch, action):
         b.disable_speculation(lane.uid)
     assert lane.uid not in b._prelaunched
     assert b.scheduler_stats["external_tree_pipeline_discards"] == 1
+
+
+def test_mixed_parked_or_ordinary_cohort_never_enters_the_tree_round(monkeypatch):
+    """A cohort with a lane that drafts nothing takes the chain body.
+
+    h2h r1 (2026-10-21): sampled B4 with the reversible cost controller
+    parked one lane; the tree round then raised "tree15 proposal did not
+    return a tree" and killed the generation worker.
+    """
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    batch = generator(
+        model, draft, completion_batch_size=4, ready_drain="all",
+        dynamic_singleton_tree=True, dynamic_tree_max_width=4,
+        tree_node_budget_by_lanes={1: 15, 2: 7, 3: 4, 4: 3},
+    )
+    _install_reference_cohort(batch, monkeypatch, [])
+    uids = batch.insert([[1, 2, 3], [4, 5, 6]], max_tokens=[40, 40],
+                        sampling_configs=[{"sampling_temp": 0.0}] * 2)
+    for _ in range(4):
+        batch.next()
+    from mlx2.runtime import external_speculative as es
+
+    parked = uids[1]
+    monkeypatch.setattr(es, "_speculation_parked", lambda lane: lane.uid == parked)
+    cohort = [batch.lanes[uid] for uid in uids]
+    before = batch.scheduler_stats["external_tree_rounds"]
+    generated = [lane.generated for lane in cohort]
+    batch._round(cohort)                      # one mixed cohort, as at sampled B4
+    assert batch.scheduler_stats["external_tree_rounds"] == before   # chain body
+    assert all(lane.generated > count for lane, count in zip(cohort, generated))

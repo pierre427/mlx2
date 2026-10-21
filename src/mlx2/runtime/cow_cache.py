@@ -1627,6 +1627,42 @@ def _append_only_fields(cache: Any) -> tuple:
     return type(cache).__dict__.get("_RECOVERY_APPEND_ONLY_FIELDS", ())
 
 
+def lend_append_only_kv(live: Any, clone: Any) -> bool:
+    """Lend ``live``'s K/V buffer objects to a private fork for one round.
+
+    A private AST fork used to slice K/V to the fill level, so its first
+    append concat-grew the whole prefix into a new buffer (an O(context)
+    copy and a second KV allocation every round).  A cache whose exact type
+    declares K/V in ``_RECOVERY_APPEND_ONLY_FIELDS`` only writes at or past
+    ``offset``; the fork may therefore append into the very same buffer
+    objects.  The positions below the lane's ``offset`` are never written,
+    so if the fork is aborted the lane keeps exactly its committed prefix
+    (anything the fork wrote lies past the lane's fill level, as stale rows
+    after a trim already do); if it commits, the fork replaces the lane's
+    cache.  A buffer that grows is rebound on the fork only.  Returns
+    whether the buffers were lent; other caches keep the caller's copy.
+    """
+
+    fields = {
+        name
+        for name, axis, level_name in _append_only_fields(live)
+        if level_name == "offset" and axis == -2
+    }
+    offset = getattr(live, "offset", None)
+    if (
+        not {"keys", "values"} <= fields
+        or getattr(live, "keys", None) is None
+        or getattr(live, "values", None) is None
+        or not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or getattr(clone, "offset", None) != offset
+        or type(clone) is not type(live)
+    ):
+        return False
+    clone.keys, clone.values = live.keys, live.values
+    return True
+
+
 def _buffer_leaves(value: Any) -> tuple:
     return tuple(value) if isinstance(value, (tuple, list)) else (value,)
 
@@ -1764,18 +1800,28 @@ class CommittedDescriptorPlan:
             if not recovery:
                 continue
             record = []
-            for name, axis, level_name in _append_only_fields(live):
+            fields = _append_only_fields(live)
+            for name, axis, level_name in fields:
                 value, level = getattr(live, name), int(getattr(live, level_name))
                 if value is not None and level:
                     record.append((name, axis, level_name, level,
                                    _buffer_geometry(value, axis)))
                     setattr(clone, name, None)
+            # Same contract as snapshot_recovery_descriptors: views derived
+            # from a borrowed buffer must not survive on the clone, where
+            # they would pin the live buffer and go stale after restore.
+            derived = (
+                tuple(kind.__dict__.get("_RECOVERY_DERIVED_FIELDS", ()))
+                if fields else ()
+            )
+            for name in derived:
+                setattr(clone, name, None)
             if record:
                 from .models.cache import register_recovery_rewind_guard
 
                 guard = register_recovery_rewind_guard(live, live.offset)
                 borrowed.append(_BorrowedRecoveryPlane(
-                    live, clone, tuple(record), (), guard
+                    live, clone, tuple(record), derived, guard
                 ))
         return clones, tuple(borrowed)
 

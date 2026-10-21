@@ -32,6 +32,15 @@ def cpu():
     mx.set_default_device(previous)
 
 
+@pytest.fixture
+def wide_startup(monkeypatch):
+    """These tests exercise four-path lattice wiring at startup; production
+    seeds a chain and widens only on measured throughput."""
+    from mlx2.runtime.ast_tree_tuning import ASTTreeTuner
+
+    monkeypatch.setattr(ASTTreeTuner, "SEED_BRANCHES", 4)
+
+
 def _policy():
     return {
         "num_draft": 7,
@@ -161,7 +170,9 @@ def test_fast_policy_remains_explicit_separate_and_source_bound():
         normalize_progressive_external_policy(ordinary, num_draft=7)
 
 
-def test_actual_dflash_block7_reuses_lattice_for_four_path_node28_budget(monkeypatch):
+def test_actual_dflash_block7_reuses_lattice_for_four_path_node28_budget(
+    monkeypatch, wide_startup
+):
     draft, batch, lane = _batch()
     calls = []
     original = draft.draft_distributions
@@ -220,7 +231,9 @@ def test_short_remaining_request_never_exceeds_trained_or_response_depth():
         batch.close()
 
 
-def test_fast_ast_ready_pressure_reallocates_source_work_without_changing_law():
+def test_fast_ast_ready_pressure_reallocates_source_work_without_changing_law(
+    wide_startup,
+):
     _draft, batch, lane = _batch(maximum=32, num_draft=15, capacity=4)
     batch._ast_tree_ready_sessions = 4
     try:
@@ -326,7 +339,7 @@ def test_adapter_constructs_four_request_slots_with_one_private_tree_provider(
 
 
 def test_actual_dflash_block15_keeps_trained_metadata_and_reuses_one_lattice(
-    monkeypatch,
+    monkeypatch, wide_startup,
 ):
     draft, batch, lane = _batch(maximum=32, num_draft=15)
     calls = []

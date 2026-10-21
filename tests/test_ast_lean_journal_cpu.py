@@ -195,3 +195,33 @@ def test_settings_memo_invalidates_on_change_and_counters_stay_live():
             nested["items"][0]["value"] = 2
     finally:
         batch.close()
+
+
+def test_lean_recovery_capture_drops_derived_views_like_descriptor_snapshot():
+    """F10: the lean plan honours ``_RECOVERY_DERIVED_FIELDS`` on the clone."""
+    from mlx2.runtime.cache_operations import KV_OPERATIONS
+    from mlx2.runtime.models import cache as cache_module
+
+    class DerivedKV(KVCache):
+        cache_operations_contract = KV_OPERATIONS
+        _RECOVERY_APPEND_ONLY_FIELDS = KVCache._RECOVERY_APPEND_ONLY_FIELDS
+        _RECOVERY_DERIVED_FIELDS = ("_derived_view",)
+
+        def committed_descriptor_clone(self):
+            fields = dict(vars(self))
+            clone = object.__new__(DerivedKV)
+            clone.__dict__.update(fields)
+            return clone
+
+    live = DerivedKV()
+    live.update_and_fetch(mx.ones((1, 1, 3, 2)), mx.ones((1, 1, 3, 2)))
+    live._derived_view = live.keys[..., :3, :]
+    plan = CommittedDescriptorPlan([live], "derived")
+    clones, borrowed = plan.capture([live], "derived", recovery=True)
+    assert clones[0].keys is None and clones[0]._derived_view is None
+    assert borrowed and borrowed[0].derived == ("_derived_view",)
+    restored, _ = restore_recovery_descriptors(clones, None, borrowed)
+    assert restored[0]._derived_view is None
+    assert restored[0].offset == 3
+    assert restored[0].keys is not None
+    assert cache_module.KVCache._RECOVERY_APPEND_ONLY_FIELDS

@@ -31,11 +31,24 @@ wait doubled up to ``reprobe_max_tokens``.  With ``pipelined_park`` a parked
 executor overlaps each anchor-only round with the host read of the previous
 one, as the PLD plain-round pipeline does.
 
+Under reversible control a stale-baseline loss refreshes only one ordinary
+round, not the whole ``ordinary_samples`` baseline: the fresh round joins the
+rolling median window and the speculative window restarts, so the next
+decision compares fresh evidence on both sides.  A park is not terminal, and
+every re-engage is judged against the baseline refreshed while parked, so a
+full re-measure would only add forced target-only rounds to a winning
+speculator (with ``loss_decisions=1`` one noisy round after the first used
+to force ``ordinary_samples`` probes).
+
 Evidence can exclude one-time costs that are not the route's steady price.
-Reversible control uses ``settle_rounds`` for each kind (the first
+Reversible control discards ``settle_rounds`` rounds of each kind (the first
 speculative round ingests the whole prompt into the draft plane; the first
-rounds after an APCv2 restore pay the lazy restore) and the first round of
-every re-probe (it consumes the deferred draft context).  The ordinary
+rounds after an APCv2 restore pay the lazy restore) and always discards the
+first round of every re-probe (it consumes the deferred draft context).  The
+AST self-configuring defaults set ``settle_rounds=0`` on purpose: a short
+request must be able to park a severe loss before it finishes, and a park
+caused by the first round's draft-prompt ingestion is undone by the bounded
+re-probe.  The ordinary
 baseline is the median per-round cost, so one stalled round cannot set it.
 The terminal controller remains byte-for-byte backward compatible by default;
 an adapter may explicitly set ``one_way_ordinary_settle_rounds`` when its
@@ -279,6 +292,9 @@ class CostPerCommitLaneState:
         # last sampled; bounds how stale a baseline a decision may use.
         self._speculative_since_ordinary: dict[int, int] = {}
         self._ordinary_refreshes = 0
+        # Reversible stale-baseline refresh: widths owed one fresh ordinary
+        # round before the next decision (see module docstring).
+        self._refresh_pending: set[int] = set()
         # Cohort probe accounting (see cohort_needs_ordinary_probe): forced
         # depth-zero rounds while this lane's own baseline was complete, the
         # current consecutive run of them, and speculative rounds granted to
@@ -383,6 +399,7 @@ class CostPerCommitLaneState:
         self._speculative.clear()
         self._loss_streak.clear()
         self._speculative_since_ordinary.clear()
+        self._refresh_pending.clear()
         self._decision = None
         self._handoff_performed = False
         self._parked = False
@@ -436,7 +453,10 @@ class CostPerCommitLaneState:
     def needs_ordinary_probe(self, execution_width: int) -> bool:
         if self._decision is not None or self._cancelled or self._parked:
             return False
-        samples = self._ordinary.get(self._width_key(execution_width), ())
+        width = self._width_key(execution_width)
+        if width in self._refresh_pending:
+            return True
+        samples = self._ordinary.get(width, ())
         return len(samples) < self.settings.ordinary_samples
 
     @property
@@ -455,6 +475,7 @@ class CostPerCommitLaneState:
         self._speculative.clear()
         self._loss_streak.clear()
         self._speculative_since_ordinary.clear()
+        self._refresh_pending.clear()
 
     def observe(
         self,
@@ -512,9 +533,14 @@ class CostPerCommitLaneState:
         samples.append((elapsed_ns, committed_tokens))
         if kind == "ordinary":
             self._speculative_since_ordinary[execution_width] = 0
+            self._refresh_pending.discard(execution_width)
             return None
         ordinary = self._ordinary.get(execution_width)
-        if ordinary is None or len(ordinary) < self.settings.ordinary_samples:
+        if (
+            ordinary is None
+            or len(ordinary) < self.settings.ordinary_samples
+            or execution_width in self._refresh_pending
+        ):
             return None
         since = self._speculative_since_ordinary.get(execution_width, 0) + 1
         self._speculative_since_ordinary[execution_width] = since
@@ -540,8 +566,13 @@ class CostPerCommitLaneState:
             self.settings.speculative_samples + self.settings.loss_decisions - 1
         ):
             # The baseline predates the speculative window.  Re-measure both
-            # routes at the current context before any one-way decision.
-            del self._ordinary[execution_width]
+            # routes at the current context before any decision: a one-way
+            # decision re-measures the whole baseline, a reversible one owes
+            # a single fresh ordinary round (see module docstring).
+            if self.settings.reversible:
+                self._refresh_pending.add(execution_width)
+            else:
+                del self._ordinary[execution_width]
             samples.clear()
             self._loss_streak[execution_width] = 0
             self._speculative_since_ordinary[execution_width] = 0
@@ -582,6 +613,7 @@ class CostPerCommitLaneState:
         self._loss_streak[width] = 0
         self._speculative.pop(width, None)
         self._speculative_since_ordinary[width] = 0
+        self._refresh_pending.discard(width)
         return self._event(
             "park",
             reason="cost_per_committed_token",

@@ -24,7 +24,7 @@ from ..thinking_guard import stack_block_steer, verify_block_steer
 from . import round_phases
 from .cohort_ownership import declared_cohort_key
 from .committed_recovery import CommittedRecoverySlot
-from .ast_private_state import freeze_receipt
+from .ast_private_state import PrivateHistory, freeze_receipt, snapshot_receipt
 from .cow_cache import (
     CommittedDescriptorPlan,
     COWCacheUnsupported,
@@ -152,6 +152,15 @@ class _ParkedInflight:
 
 def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
+
+
+# Per-uid draft-phase side tables; reset each draft phase and popped on remove.
+_LAST_ALTERNATIVE_FIELDS = (
+    "_last_alternative_blocks", "_last_alternative_prefix_tokens",
+    "_last_alternative_latch", "_last_alternative_topology",
+    "_last_alternative_downshift", "_last_alternative_prefix_search",
+    "_last_alternative_prefix_diagnostics",
+)
 
 
 def _target_executor_stats():
@@ -1800,11 +1809,13 @@ class ExternalDraftBatchGenerator:
         min_width = int(
             getattr(self.model, "progressive_external_lane_exact_min_width", 1)
         )
+        from .progressive_external_verify import cohort_exact_lane_limit
+
         lane_exact = bool(
             executor is not None
             and self.progressive_verification_fidelity == PROGRESSIVE_FIDELITY_EXACT
             and getattr(transaction, "batched", False)
-            and 2 <= batch <= 8
+            and 2 <= batch <= cohort_exact_lane_limit(self.model)
             and max(1, min_width) <= width <= 16
         )
         ordinary_forward = getattr(self.model, "ordinary_external_target_forward", None)
@@ -2477,7 +2488,7 @@ class ExternalDraftBatchGenerator:
                 "last_launch": getattr(lane, "ast_last_launch", None),
             }
         if getattr(lane, "ast_tree_tiles_receipt", None) is not None:
-            result["ast_tree_tiles"] = copy.deepcopy(lane.ast_tree_tiles_receipt)
+            result["ast_tree_tiles"] = snapshot_receipt(lane.ast_tree_tiles_receipt)
         if self.progressive_verification_tile is not None:
             approximate = (
                 self.progressive_verification_fidelity
@@ -2563,7 +2574,7 @@ class ExternalDraftBatchGenerator:
                 "last_ragged_layout": getattr(
                     lane, "progressive_verify_last_ragged_layout", None
                 ),
-                "target_row_executor": copy.deepcopy(
+                "target_row_executor": snapshot_receipt(
                     getattr(
                         lane,
                         "progressive_target_row_executor",
@@ -2614,7 +2625,7 @@ class ExternalDraftBatchGenerator:
                     "primary_fallback_rounds": getattr(
                         lane, "progressive_ast_primary_fallback_rounds", 0
                     ),
-                    "primary_fallback_reasons": copy.deepcopy(
+                    "primary_fallback_reasons": snapshot_receipt(
                         getattr(lane, "progressive_ast_primary_fallback_reasons", {})
                     ),
                     "last_primary_fallback_reason": getattr(
@@ -2623,7 +2634,7 @@ class ExternalDraftBatchGenerator:
                     "branch_downshift_rounds": getattr(
                         lane, "progressive_ast_branch_downshift_rounds", 0
                     ),
-                    "last_branch_downshift": copy.deepcopy(
+                    "last_branch_downshift": snapshot_receipt(
                         getattr(lane, "progressive_ast_last_branch_downshift", None)
                     ),
                     "rootless_rounds": getattr(
@@ -2635,17 +2646,17 @@ class ExternalDraftBatchGenerator:
                     "adaptive_prefix_rounds": getattr(
                         lane, "progressive_ast_adaptive_prefix_rounds", 0
                     ),
-                    "last_prefix_search": copy.deepcopy(
+                    "last_prefix_search": snapshot_receipt(
                         getattr(lane, "progressive_ast_last_prefix_search", None)
                     ),
-                    "last_prefix_diagnostics": copy.deepcopy(
+                    "last_prefix_diagnostics": snapshot_receipt(
                         getattr(
                             lane,
                             "progressive_ast_last_prefix_diagnostics",
                             None,
                         )
                     ),
-                    "last_proposed_prefix_diagnostics": copy.deepcopy(
+                    "last_proposed_prefix_diagnostics": snapshot_receipt(
                         getattr(
                             lane,
                             "progressive_ast_last_proposed_prefix_diagnostics",
@@ -2762,35 +2773,35 @@ class ExternalDraftBatchGenerator:
                             "progressive_ast_counterfactual_partial_uplift_tokens",
                             0,
                         ),
-                        "counterfactual_best_branch_hist": copy.deepcopy(
+                        "counterfactual_best_branch_hist": snapshot_receipt(
                             getattr(
                                 lane,
                                 "progressive_ast_counterfactual_best_branch_hist",
                                 {},
                             )
                         ),
-                        "provider_rank_verified_hist": copy.deepcopy(
+                        "provider_rank_verified_hist": snapshot_receipt(
                             getattr(
                                 lane,
                                 "progressive_ast_provider_rank_verified_hist",
                                 {},
                             )
                         ),
-                        "provider_rank_committed_inputs": copy.deepcopy(
+                        "provider_rank_committed_inputs": snapshot_receipt(
                             getattr(
                                 lane,
                                 "progressive_ast_provider_rank_committed_inputs",
                                 {},
                             )
                         ),
-                        "provider_rank_full_accept_hist": copy.deepcopy(
+                        "provider_rank_full_accept_hist": snapshot_receipt(
                             getattr(
                                 lane,
                                 "progressive_ast_provider_rank_full_accept_hist",
                                 {},
                             )
                         ),
-                        "alternative_divergence_position_hist": copy.deepcopy(
+                        "alternative_divergence_position_hist": snapshot_receipt(
                             getattr(
                                 lane,
                                 "progressive_ast_alternative_divergence_position_hist",
@@ -2800,10 +2811,10 @@ class ExternalDraftBatchGenerator:
                         "prefix_rejected_rounds": getattr(
                             lane, "progressive_ast_prefix_rejected_rounds", 0
                         ),
-                        "active_branch_hist": copy.deepcopy(
+                        "active_branch_hist": snapshot_receipt(
                             getattr(lane, "progressive_ast_active_branch_hist", {})
                         ),
-                        "shared_prefix_token_hist": copy.deepcopy(
+                        "shared_prefix_token_hist": snapshot_receipt(
                             getattr(
                                 lane,
                                 "progressive_ast_shared_prefix_token_hist",
@@ -3094,14 +3105,14 @@ class ExternalDraftBatchGenerator:
             )
         # Receipt compatibility only. Scheduler state and counters stay
         # provider-neutral; older observers may still consume this key.
-        result["tensorfold_target"] = copy.deepcopy(result["target_tree"])
+        result["tensorfold_target"] = snapshot_receipt(result["target_tree"])
         return result
 
     def _cost_handoff_receipt(self, lane):
         receipt = (
             lane.cost_handoff_state.receipt()
             if lane.cost_handoff_receipt is None
-            else copy.deepcopy(lane.cost_handoff_receipt)
+            else snapshot_receipt(lane.cost_handoff_receipt)
         )
         authority = getattr(
             self, "cost_per_commit_handoff_authority", "explicit_policy"
@@ -4857,7 +4868,13 @@ class ExternalDraftBatchGenerator:
                         preserve_capacity=preserve_private_capacity,
                     ),
                     "private_rng": RequestRNG(state=lane.rng.snapshot()),
-                    "local_history": list(lane.history),
+                    # Processors read the full token history; otherwise
+                    # only its length and private suffix are used, so pin
+                    # the committed prefix instead of copying it per round.
+                    "local_history": (
+                        list(lane.history) if lane.processors
+                        else PrivateHistory(lane.history)
+                    ),
                     "anchor": int(lane.anchor),
                     "offset": 0,
                     "accepted": 0,
@@ -7236,10 +7253,13 @@ class ExternalDraftBatchGenerator:
         else:
             cloned, _borrowed = captured
             _bump(self.scheduler_stats, "external_ast_lean_private_forks")
-        for item in cloned:
+        from .cow_cache import lend_append_only_kv
+
+        for live, item in zip(cache, cloned, strict=True):
             if (
                 getattr(item, "keys", None) is not None
                 and isinstance(getattr(item, "offset", None), int)
+                and not lend_append_only_kv(live, item)
             ):
                 offset = int(item.offset)
                 item.keys = item.keys[..., :offset, :]
@@ -10465,7 +10485,11 @@ class ExternalDraftBatchGenerator:
         ):
             return self._pool_round(cohort)
         if forced_depth is None and self.draft_topology == "tree15" and all(
-            lane.maximum - lane.generated > 1 for lane in cohort
+            lane.maximum - lane.generated > 1
+            # A parked or ordinary lane drafts nothing this round; a mixed
+            # cohort takes the chain body, which handles zero-count lanes.
+            and not lane.ordinary and not _speculation_parked(lane)
+            for lane in cohort
         ):
             # A lane's last budget token takes the chain body's zero-count
             # round, which appends the draft context and publishes the
@@ -12794,6 +12818,8 @@ class ExternalDraftBatchGenerator:
                 if ast_planner is not None:
                     ast_planner.release(uid)
                 getattr(self, "_ast_tree_tuners", {}).pop(uid, None)
+                for name in _LAST_ALTERNATIVE_FIELDS:
+                    getattr(self, name, {}).pop(uid, None)
                 lane.cancelled = bool(cancelled); self.scheduler_stats["cancelled"] += int(cancelled)
                 if return_prompt_caches and uid in requested_uids:
                     result[uid] = self._freeze_cache(lane.cache)

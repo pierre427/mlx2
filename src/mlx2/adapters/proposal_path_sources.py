@@ -446,12 +446,22 @@ class ExternalContinuationSource:
         ]
 
 
+def native_mtp_live_head(draft, target):
+    """Whether ``draft`` is the target's own resident native-MTP drafter."""
+    return (
+        draft is not None
+        and getattr(draft, "continuation_protocol", None) == "native_mtp_head"
+        and callable(getattr(draft, "propose_complete_paths", None))
+        and getattr(draft, "target", None) is target
+    )
+
+
 class NativeMTPContinuationSource:
     """A beam over a loaded target's native head, using private cache branches."""
 
     mechanism = "native_mtp"
 
-    def __init__(self, model, *, max_history=4096):
+    def __init__(self, model, *, max_history=4096, live_head=None):
         from .proposal_sources import native_mtp_source
 
         native_mtp_source(model)  # Validate the actual resident head protocol.
@@ -464,6 +474,13 @@ class NativeMTPContinuationSource:
         if type(max_history) is not int or max_history < 1:
             raise ValueError("native MTP continuation history bound must be positive")
         self.model, self.max_history = model, max_history
+        # The resident native-MTP drafter on this same target, if any.  Its
+        # round already ran the head over this exact context and stashed the
+        # ranked logits, so a stash hit needs no history re-prefill.
+        self.live_head = (
+            live_head if native_mtp_live_head(live_head, model) else None
+        )
+        self.stats = {"live_head_hits": 0, "history_prefills": 0}
 
     def open_sidecar_tree(
         self,
@@ -507,6 +524,19 @@ class NativeMTPContinuationSource:
 
         if not 0 < len(context.history) <= self.max_history:
             return []
+        if self.live_head is not None:
+            live = [
+                candidate
+                for candidate in self.live_head.propose_complete_paths(context, limit)[
+                    :limit
+                ]
+                if isinstance(candidate, SourceContinuation)
+                and 1 <= len(candidate.tokens) <= context.depth
+            ]
+            if live:
+                self.stats["live_head_hits"] += 1
+                return live
+        self.stats["history_prefills"] += 1
         model = self.model
         target_cache, head_cache = make_prompt_cache(model), model.make_mtp_cache()
         step = getattr(model, "mtp_step_full_vocab", model.mtp_step)
@@ -600,14 +630,15 @@ def build_continuation_drafter(
 
     policy = dict(policy)
     if "sources" not in policy:
+        # The native-MTP source is admitted only when a policy names it: it
+        # costs a head pass per round (a whole-history prefill whenever no
+        # resident native-MTP drafter stashed this context).
         policy["sources"] = (
             [item.provider_id for item in draft.providers]
             if isinstance(draft, DrafterPortfolio)
             else ["external"]
         )
         policy["sources"].append("prompt_lookup")
-        if getattr(target, "mtp", None) is not None:
-            policy["sources"].append("native_mtp")
     parsed = ContinuationPoolPolicy.from_value(policy)
     session = ProposalSession(
         session_revision, target_revision, tokenizer_revision, draft.config.vocab_size
@@ -636,8 +667,18 @@ def build_continuation_drafter(
             fallback = False
             max_depth = maximum_proposal_length(draft)
         elif name == "native_mtp":
+            residents = (
+                [item.draft for item in draft.providers]
+                if isinstance(draft, DrafterPortfolio)
+                else [draft]
+            )
             provider = NativeMTPContinuationSource(
-                target, max_history=parsed.mtp_max_history
+                target,
+                max_history=parsed.mtp_max_history,
+                live_head=next(
+                    (item for item in residents if native_mtp_live_head(item, target)),
+                    None,
+                ),
             )
             revision = target_revision
             lane_cost = tile_rows = 1

@@ -252,6 +252,34 @@ class FlashNextTreeTransaction:
         self.successors = []
 
 
+_SOURCE_BINDINGS = {}
+
+
+def _source_binding(root, paths):
+    """Source hashes and git revision, computed once per source state.
+
+    Every external batch builds an executor; re-hashing seventeen files and
+    spawning ``git rev-parse`` each time was pure admission latency.  The
+    cache key is each file's (mtime_ns, size), so an edited source on disk
+    still produces a fresh identity.
+    """
+    key = (str(root), tuple(
+        (path, stat.st_mtime_ns, stat.st_size)
+        for path, stat in ((path, (root / path).stat()) for path in paths)
+    ))
+    cached = _SOURCE_BINDINGS.get(key)
+    if cached is None:
+        identity = tuple(
+            (path, hashlib.sha256((root / path).read_bytes()).hexdigest())
+            for path in paths
+        )
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True
+        ).strip()
+        cached = _SOURCE_BINDINGS[key] = (identity, revision)
+    return cached
+
+
 class FlashNextTargetTreeExecutor:
     protocol = PROTOCOL
     maximum_cohort_width = 1
@@ -271,9 +299,7 @@ class FlashNextTargetTreeExecutor:
             "src/mlx2/runtime/ast_tree_tiles.py", "src/mlx2/adapters/flash_next.py",
             "src/mlx2/adapters/external_draft_policy.py", "src/mlx2/adapters/ast_execution_profile.py",
         )
-        self.source_identity = tuple((path, hashlib.sha256((root / path).read_bytes()).hexdigest())
-                                     for path in paths)
-        self.source_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        self.source_identity, self.source_revision = _source_binding(root, paths)
         self.source_revision_token = hashlib.sha256(json.dumps(
             [PROTOCOL, self.source_revision, self.source_identity], separators=(",", ":")
         ).encode()).hexdigest()

@@ -1,6 +1,7 @@
 """Host-only measured source decisions; synthetic times are not GPU evidence."""
 
 from dataclasses import FrozenInstanceError
+import itertools
 import json
 
 import pytest
@@ -21,11 +22,11 @@ def _observe(tuner, plan, *, seconds=0.1, accepted=None, **flags):
     )
 
 
-def test_startup_preserves_legal_four_path_source_and_root_inclusive_capacity():
+def test_startup_seeds_a_chain_with_root_inclusive_capacity():
     tuner = ASTTreeTuner(("source-model-profile", 17), max_depth=7)
     plan = tuner.plan(remaining_tokens=64)
-    assert (plan.depth, plan.branches, plan.max_tile_rows) == (7, 4, 16)
-    assert plan.expected_tiles == plan.max_tiles == 2
+    assert (plan.depth, plan.branches, plan.max_tile_rows) == (7, 1, 16)
+    assert plan.expected_tiles == 1 and plan.max_tiles == 2
     assert plan.reason == "startup_measurement"
     with pytest.raises(FrozenInstanceError):
         plan.depth = 2
@@ -61,7 +62,7 @@ def test_beneficial_deep_continuation_is_retained_over_shorter_work():
 
 def test_pressure_growth_limits_source_work_not_target_capacity_and_release_recovers():
     tuner = ASTTreeTuner("scope", max_depth=7)
-    for _ in range(2):
+    for _ in range(4):
         _observe(tuner, tuner.plan(remaining_tokens=64))
     pressured = tuner.plan(remaining_tokens=64, ready_sessions=4, target_sessions=4)
     assert pressured.depth == 7 and pressured.branches == 1
@@ -69,7 +70,9 @@ def test_pressure_growth_limits_source_work_not_target_capacity_and_release_reco
     assert pressured.ready_sessions == 4
     _observe(tuner, pressured, seconds=10)
     released = tuner.plan(remaining_tokens=64, ready_sessions=1)
-    assert released.depth * released.branches > pressured.depth * pressured.branches
+    # Release restores the full target tile and the measured solo champion.
+    assert (released.depth, released.branches) == (7, 1)
+    assert released.cost_samples == 4
     assert released.max_tile_rows == 16 and released.max_tiles == 2
     assert {row["ready_sessions"] for row in tuner.receipt()["measurements"]} == {1, 4}
 
@@ -96,14 +99,18 @@ def test_scope_isolation_hysteresis_and_fixed_policy_bypass():
     assert not _observe(tuner, foreign)
     # A five-percent advantage does not defeat the ten-percent hysteresis.
     plans = []
-    for _ in range(20):
+    for _ in range(40):
         plan = tuner.plan(remaining_tokens=64)
         plans.append(plan)
-        _observe(tuner, plan, seconds=1 if plan.branches == 4 else 0.95)
+        seed = (plan.depth, plan.branches) == (7, 1)
+        _observe(tuner, plan, seconds=(plan.depth + 1) / (1.0 if seed else 1.05))
+    assert any(plan.reason == "adjacent_exploration" for plan in plans)
     incumbent = [
         plan for plan in plans if plan.reason == "measured_throughput_hysteresis"
     ]
-    assert incumbent and all(plan.branches == 4 for plan in incumbent)
+    assert incumbent and all(
+        (plan.depth, plan.branches) == (7, 1) for plan in incumbent
+    )
     fixed = ASTTreeTuner("fixed", max_depth=7, fixed_depth=5, fixed_branches=4)
     plan = fixed.plan(remaining_tokens=64, ready_sessions=20)
     assert (plan.depth, plan.branches, plan.reason) == (5, 4, "explicit_fixed")
@@ -193,3 +200,29 @@ def test_physical_cohort_refuses_a_quota_below_semantic_source_floor():
     tail = tuner.plan(remaining_tokens=2, ready_sessions=4, target_sessions=3)
     assert tail.depth == 1 and tail.terminal_censored
     assert not _observe(tuner, tail)
+
+
+def test_long_source_seeds_chain_probes_sparsely_and_needs_four_incumbent_samples():
+    """F7: no (15, 2) seed, probes every eighth round, switch after >=4 samples."""
+    tuner = ASTTreeTuner("scope", max_depth=15)
+    plans = []
+    for _ in range(32):
+        plan = tuner.plan(remaining_tokens=256)
+        plans.append(plan)
+        # A strongly better challenger: shorter shapes win on rate.
+        _observe(tuner, plan, seconds=0.01 * plan.depth * plan.branches, accepted=0)
+    first = plans[0]
+    assert (first.depth, first.branches) == (15, 1)
+    assert [plan.reason for plan in plans[:4]] == ["startup_measurement"] * 4
+    # No exploration and no champion switch before the seed has four samples.
+    assert all((plan.depth, plan.branches) == (15, 1) for plan in plans[:4])
+    probe_starts = [
+        index
+        for index, plan in enumerate(plans)
+        if plan.reason == "adjacent_exploration"
+        and (index == 0 or plans[index - 1].reason != "adjacent_exploration")
+    ]
+    assert probe_starts and probe_starts[0] >= 8
+    assert all(b - a >= 8 for a, b in itertools.pairwise(probe_starts))
+    shapes = {(plan.depth, plan.branches) for plan in plans}
+    assert len(shapes) <= 5

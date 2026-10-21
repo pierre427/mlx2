@@ -37,7 +37,20 @@ class ASTTreeTuner:
     The caller supplies a source/model/session-bound immutable scope and never
     transfers this instance to another session. No histories or cache state are
     retained. Explicit fixed plans bypass both adaptation and pressure shaping.
+
+    Startup seeds a chain and keeps it until it has ``INCUMBENT_SAMPLES``
+    measurements; a new adjacent shape is probed at most every
+    ``PROBE_PERIOD`` rounds, and a measured challenger (``CANDIDATE_SAMPLES``
+    or more) replaces the champion only when it beats it by ``HYSTERESIS``.
     """
+
+    INCUMBENT_SAMPLES = 4
+    CANDIDATE_SAMPLES = 2
+    PROBE_PERIOD = 8
+    HYSTERESIS = 1.10
+    # Startup width; 1 is a chain.  Tests that exercise wide startup trees
+    # raise it explicitly rather than relying on the production seed.
+    SEED_BRANCHES = 1
 
     def __init__(
         self,
@@ -104,10 +117,16 @@ class ASTTreeTuner:
         return sample["emitted"] / sample["seconds"]
 
     def _choose(self, group, budget):
+        # Seed the cheapest full-depth shape (a chain).  Wider trees cost a
+        # full extra tile per round and must earn their place by measurement;
+        # seeding the most expensive legal shape spent the startup rounds on
+        # the widest tree and kept re-electing it from noisy samples.
         depth = min(self.max_depth, budget)
         seed = (
             depth,
-            1 if group[1] > 1 else min(self.max_branches, budget // depth),
+            1
+            if group[1] > 1
+            else max(1, min(self.max_branches, self.SEED_BRANCHES, budget // depth)),
         )
         incumbent = self._champions.setdefault(group, seed)
         current = self._sample(group, incumbent)
@@ -115,20 +134,20 @@ class ASTTreeTuner:
             (key[2:], value)
             for key, value in self._stats.items()
             if key[:2] == group
-            and value["samples"] >= 2
+            and value["samples"] >= self.CANDIDATE_SAMPLES
             and self._legal(key[2:], budget)
         ]
-        if current and current["samples"] >= 2 and measured:
+        if current and current["samples"] >= self.INCUMBENT_SAMPLES and measured:
             best, sample = max(measured, key=lambda item: self._rate(item[1]))
-            if self._rate(sample) > self._rate(current) * 1.10:
+            if self._rate(sample) > self._rate(current) * self.HYSTERESIS:
                 incumbent = self._champions[group] = best
                 current = sample
-        if current is None or current["samples"] < 2:
+        if current is None or current["samples"] < self.INCUMBENT_SAMPLES:
             return incumbent, "startup_measurement"
         probe = self._probes.get(group)
         if probe is not None:
             sample = self._sample(group, probe)
-            if sample is None or sample["samples"] < 2:
+            if sample is None or sample["samples"] < self.CANDIDATE_SAMPLES:
                 return probe, "adjacent_exploration"
             del self._probes[group]
         count = self._rounds.get(group, 0)
@@ -152,12 +171,12 @@ class ASTTreeTuner:
                 and (group[1] == 1 or item[1] == 1)
             )
         )
-        if count % 4 == 2:
+        if count % self.PROBE_PERIOD == 2:
             unseen = [
                 item
                 for item in neighbors
                 if self._sample(group, item) is None
-                or self._sample(group, item)["samples"] < 2
+                or self._sample(group, item)["samples"] < self.CANDIDATE_SAMPLES
             ]
             if unseen:
                 self._probes[group] = unseen[0]

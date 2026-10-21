@@ -946,3 +946,54 @@ def test_presence_penalty_is_branch_safe_and_ast_engages_with_it():
     assert not any(key.startswith("external_progressive_unsupported_processor:") for key in stats)
     executor = final[0].speculative_receipt["progressive_verification"]["target_row_executor"]
     assert executor["row_exact_launches"] > 0 and executor["nonexact_launches"] == 0
+
+
+def test_native_mtp_pool_source_reuses_live_head_stash_and_is_never_auto_admitted(
+    monkeypatch,
+):
+    """F5: no whole-history re-prefill when the resident head stashed this
+    context, and no silent ``native_mtp`` admission without ``sources``."""
+    from mlx2.adapters import proposal_path_sources
+    from mlx2.runtime.proposal_providers import ContinuationContext
+
+    model, _ = tiny_qwen4_mtp()
+    model.select_external_feature_source("mtp_seed")
+    draft = _drafter(model)
+    common = {
+        "target_revision": PIN,
+        "draft_revision": "b" * 64,
+        "tokenizer_revision": PIN,
+        "session_revision": "c" * 64,
+    }
+    implicit = build_continuation_drafter(model, draft, {"limit": 15}, **common)
+    assert "native_mtp" not in implicit.providers
+    wrapper = build_continuation_drafter(
+        model, draft, {"sources": ["native_mtp"], "limit": 15}, **common
+    )
+    source = wrapper.providers["native_mtp"]
+    assert source.live_head is draft
+
+    prompt = [1, 7, 3, 9, 2, 8]
+    target = model.make_cache()
+    seeds = model.prefill_body(mx.array([prompt]), target, _layers(model))
+    anchor = 5
+    draft.draft_distributions(
+        [anchor], seeds, draft.make_cache(), 3, [None], [0.0],
+        context_tokens=[prompt[1:] + [anchor]], processor_histories=[prompt],
+    )
+    original = proposal_path_sources.NativeMTPContinuationSource.__call__
+
+    def backbone(*args, **kwargs):
+        raise AssertionError("native MTP source re-prefilled a stashed context")
+
+    monkeypatch.setattr("mlx2.runtime.hybrid_speculative._mtp_backbone", backbone)
+    context = ContinuationContext(tuple(prompt), anchor, 3, None, None)
+    paths = source(context, 15)
+    assert paths and paths == draft.propose_complete_paths(context, 15)
+    assert source.stats == {"live_head_hits": 1, "history_prefills": 0}
+    # A context the head never ran over still takes the exact beam fallback.
+    monkeypatch.undo()
+    missed = ContinuationContext(tuple(prompt), anchor + 1, 2, None, None)
+    beam = original(source, missed, 4)
+    assert beam and all(len(path.tokens) == 2 for path in beam)
+    assert source.stats["history_prefills"] == 1

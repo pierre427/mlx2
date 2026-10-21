@@ -874,3 +874,21 @@ def test_async_preplan_failure_fences_before_abort_and_preserves_error(
     assert not hasattr(lane, "ast_tree_tiles_receipt")
     if fence_failure:
         assert "fence also failed" in failure.__notes__[0]
+
+
+def test_full_tiles_counts_continued_tiles_like_the_linear_path():
+    """K4: a final 16-row tile is not a continued tile; quota tiles are."""
+    primary = tuple(range(1, 16))
+    single = verify_tree_tiles(_Generator(primary), _lane(), _blocks((primary,)))
+    stat = single[4][0]
+    assert stat["launches"] == 1
+    assert stat["full_tiles"] == stat["rollback_base_tile"] == 0
+    prefix = tuple(range(1, 11))
+    paths = ((*prefix, 11, 12, 13, 14, 15), (*prefix, 21, 22, 23, 24, 25))
+    generator = _Generator(paths[1], tile_rows=11)
+    result = verify_tree_tiles(generator, _lane(), _blocks(paths))
+    winner = _winner(result, paths)
+    stat = result[4][winner]
+    assert stat["launches"] == 2
+    assert stat["full_tiles"] == stat["rollback_base_tile"] == 1
+    assert result[1].shape[0] == 2 and single[1].shape[0] == 1

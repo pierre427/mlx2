@@ -28,6 +28,32 @@ class FrozenReceiptList(list):
         return self
 
 
+_RECEIPT_SCALARS = frozenset({str, int, float, bool, type(None)})
+
+
+def snapshot_receipt(value):
+    """Independent copy of a JSON-shaped diagnostic value.
+
+    Round receipts snapshot lane-owned counters and histograms that later
+    rounds mutate in place.  ``copy.deepcopy`` paid its memo/reductor
+    machinery about fifteen times per lane per round for what are dicts,
+    lists and tuples of scalars; this copies those directly, shares frozen
+    receipts and scalars, and falls back to ``deepcopy`` for anything else.
+    """
+    kind = type(value)
+    if kind in _RECEIPT_SCALARS or kind in (FrozenReceipt, FrozenReceiptList):
+        return value
+    if kind is dict:
+        return {key: snapshot_receipt(item) for key, item in value.items()}
+    if kind is list:
+        return [snapshot_receipt(item) for item in value]
+    if kind is tuple:
+        return tuple(snapshot_receipt(item) for item in value)
+    import copy
+
+    return copy.deepcopy(value)
+
+
 def freeze_receipt(value, memo=None):
     memo = {} if memo is None else memo
     if isinstance(value, (FrozenReceipt, FrozenReceiptList)):
