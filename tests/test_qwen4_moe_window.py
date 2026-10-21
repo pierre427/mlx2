@@ -444,3 +444,61 @@ def test_dense_shared_gate_with_bias_is_refused(monkeypatch, ref_kernels):
     block(_x(32, (2, 1, H)))
     assert block.moe_window_fallbacks["batch_decode"] == 1
     assert "shared_expert_gate" in block.moe_window_last_fallback
+
+
+# ------------------------------------------------- multi-row stock-block glue
+
+
+def test_topk_launch_takes_multi_row_calls_only_up_to_the_declared_rows(
+    monkeypatch, ref_kernels
+):
+    block = _block(monkeypatch)
+    x = _x(21, (1, 3, H))
+    want = block(x)
+    block.set_moe_topk_mode("launch")
+    assert mx.array_equal(block(x), want).item()
+    assert block.moe_topk_calls["launch"] == 0 and ref_kernels["router"] == 0
+    object.__setattr__(block, "moe_topk_launch_max_rows", 3)
+    assert mx.array_equal(block(x), want).item()
+    assert block.moe_topk_calls["launch"] == 1 and ref_kernels["router"] == 1
+    wider = _x(22, (1, 4, H))
+    block(wider)
+    assert block.moe_topk_calls["launch"] == 1
+
+
+def test_switch_sort_floor_is_per_module_and_keeps_the_block_output(monkeypatch):
+    from mlx2.runtime.models import switch_layers as SL
+
+    block = _block(monkeypatch)
+    x = _x(23, (1, 3, H))  # 30 assignments: sorted under the module floor (20)
+    sorts = []
+    real = QN._gather_sort
+
+    def counting(*a, **k):
+        sorts.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(QN, "_gather_sort", counting)
+    want = block(x)
+    assert len(sorts) == 1
+    object.__setattr__(block.switch_mlp, "moe_sort_min_assignments", 31)
+    got = block(x)
+    assert len(sorts) == 1
+    assert mx.array_equal(got, want).item()
+    assert SL._GATHER_SORT_MIN_ASSIGNMENTS == 20
+
+
+def test_qwen36_block_declares_its_multi_row_glue():
+    from mlx2.runtime.models import qwen36_moe_decode as M
+
+    args = SimpleNamespace(
+        hidden_size=64, moe_intermediate_size=32, shared_expert_intermediate_size=32,
+        norm_topk_prob=True, num_experts=256, num_experts_per_tok=8,
+    )
+    block = M.Qwen36SparseMoeBlock(args)
+    assert block.moe_topk_launch_max_rows == 4
+    assert block.switch_mlp.moe_sort_min_assignments == 33
+    # The parent block keeps one-token launches and the module sort floor.
+    parent = QN.Qwen3NextSparseMoeBlock(args)
+    assert "moe_topk_launch_max_rows" not in parent.__dict__
+    assert "moe_sort_min_assignments" not in parent.switch_mlp.__dict__

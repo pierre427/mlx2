@@ -13,6 +13,7 @@ import mlx.core as mx
 
 from . import qwen3_next as QN
 from . import qwen4_moe_window as W
+from . import qwen36_moe_grouped as G
 from . import qwen4_routed_decode as RD
 from .import_env import snapshot
 from .qwen_moe_contracts import QWEN36_E256_K8_ROUTING
@@ -20,6 +21,28 @@ from .precise_ops import gate_sigmoid
 
 snapshot(__name__)
 _WINDOW = os.environ.get("MLX_QWEN36_MOE_WINDOW", "0") == "1"
+# Expert-grouped multi-row routed experts (``qwen36_moe_grouped``), default
+# off; ``Qwen36SparseMoeBlock.set_grouped_rows`` switches it live.  "1" is
+# the stock-exact law ("qmv"); "lane" selects the tensor-unit law.
+_GROUPED_ROWS = {"0": "off", "1": "qmv", "qmv": "qmv", "lane": "lane"}.get(
+    os.environ.get("MLX_QWEN36_MOE_GROUPED_ROWS", "0"), "off"
+)
+
+# Routed expert table formats the row kernels serve.  The kernels are written
+# over the shared QMV header, which carries MLX's 6-bit unpack; 6-bit g64
+# tables (the mixed-precision 4-bit artifacts keep half their MoE layers at
+# 6 bits) are admitted for the one-token decode only, where the GPU check
+# (``qwen36-q6-routed-decode``) compared them bitwise with the stock block.
+# Multi-row window consumers keep the 4/8-bit formats they were checked on.
+ROUTED_FORMATS = ((4, 64), (8, 64))
+DECODE_ONLY_ROUTED_FORMATS = ((6, 64),)
+# Widest stock-block call that takes the short multi-row glue (see
+# ``Qwen36SparseMoeBlock.__init__``).
+MULTI_ROW_GLUE_ROWS = 4
+# Widest call that takes the one-launch routing while the grouped rows serve
+# the experts (the widths that routing was checked on).
+GROUPED_TOPK_LAUNCH_ROWS = 16
+GROUPED_ROWS_LAWS = ("off", "qmv", "lane")
 
 
 def shared_admission(shared, hidden, inter):
@@ -192,7 +215,7 @@ def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=
     rows = x.size // hidden
     top_k = 8
     routed_format = (gate.bits, gate.group_size)
-    if routed_format not in ((4, 64), (8, 64)):
+    if routed_format not in ROUTED_FORMATS + DECODE_ONLY_ROUTED_FORMATS:
         raise ValueError(
             f"unsupported routed expert format q{gate.bits}g{gate.group_size}"
         )
@@ -277,6 +300,52 @@ def routed_rows(x, indices, scores, gate, up, down, *, shared=None, shared_gate=
     )[0]
 
 
+def _grouped_rows_hook(switch, x, indices):
+    """``FusedDownSwitchGLU`` hook: per-slot outputs from the grouped kernels.
+
+    Declines (counted, ``None``) for one row and every call the structural
+    admission refuses, so the module's stock gathers run unchanged.  Law
+    ``qmv`` is bitwise the stock gathers; ``lane`` is the tensor-unit law.
+    """
+    rows = x.size // x.shape[-1]
+    if rows < 2:
+        return None
+    stats = switch.__dict__["grouped_rows_stats"]
+    law = switch.__dict__.get("grouped_rows_law", "qmv")
+    gate, up, down = switch.gate_proj, switch.up_proj, switch.down_proj
+    reason = G.admission_refusal(x, indices, gate, up, down)
+    if reason is None and law == "lane":
+        reason = G.lane_refusal(gate, up, down)
+    if reason is not None:
+        stats["fallbacks"] += 1
+        reasons = stats["reasons"]
+        if reason not in reasons and len(reasons) >= 16:
+            reason = "other"
+        reasons[reason] = reasons.get(reason, 0) + 1
+        return None
+    stats["calls"] += 1
+    stats["rows"] += rows
+    if law == "lane":
+        return G.lane_grouped_rows(x, indices, gate, up, down)
+    return G.grouped_rows(x, indices, gate, up, down)
+
+
+def qwen36_grouped_rows_stats(model, *, reset=False):
+    """Aggregate grouped-rows calls, rows and counted refusals of a model."""
+    report = {"selected_blocks": 0, "calls": 0, "rows": 0, "fallbacks": 0, "reasons": {}}
+    for _, module in model.named_modules():
+        if isinstance(module, Qwen36SparseMoeBlock):
+            law = module.grouped_rows_selected()
+            report["selected_blocks"] += int(law != "off")
+            report.setdefault("laws", {})[law] = report.get("laws", {}).get(law, 0) + 1
+            stats = module.grouped_rows_stats(reset=reset)
+            for key in ("calls", "rows", "fallbacks"):
+                report[key] += stats[key]
+            for reason, count in stats["reasons"].items():
+                report["reasons"][reason] = report["reasons"].get(reason, 0) + count
+    return report
+
+
 def router_and_shared_gate_rows(block, flat):
     """Project a Qwen3.6 MoE window with one-row arithmetic per row.
 
@@ -311,10 +380,67 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
             if _WINDOW
             else frozenset()
         )
+        # Short multi-row forwards (2..4 tokens: MTP verify, small batches)
+        # that reach the stock block: the routing runs as the one-launch
+        # stock-identical kernel and the expert gathers stay unsorted.  Both
+        # are bitwise equal to the stock block on the 35B at 2..16 rows (GPU
+        # check ``qwen36-moe-rows-glue``) and 3-7% faster per forward at 2..4
+        # rows; from 6 rows the timing was within noise or slower (the sort's
+        # expert reuse wins at 16), so wider calls keep the stock glue.
+        object.__setattr__(self, "moe_topk_launch_max_rows", MULTI_ROW_GLUE_ROWS)
+        object.__setattr__(
+            self.switch_mlp,
+            "moe_sort_min_assignments",
+            MULTI_ROW_GLUE_ROWS * self.top_k + 1,
+        )
         self.qwen36_decode_calls = 0
         self.qwen36_decode_fallbacks = 0
         self.qwen36_decode_last_fallback = None
         object.__setattr__(self, "qwen36_decode_reasons", {})
+        object.__setattr__(
+            self.switch_mlp,
+            "grouped_rows_stats",
+            {"calls": 0, "rows": 0, "fallbacks": 0, "reasons": {}},
+        )
+        self.set_grouped_rows(_GROUPED_ROWS)
+
+    def set_grouped_rows(self, enabled):
+        """Select the expert-grouped multi-row routed experts for every
+        multi-row call of this block's switch module: ``"qmv"`` (or True,
+        bitwise the stock gathers), ``"lane"`` (tensor-unit law, a separate
+        numerical law) or ``"off"`` (or False, the stock gathers)."""
+        law = {True: "qmv", False: "off", None: "off"}.get(enabled, enabled)
+        if law not in GROUPED_ROWS_LAWS:
+            raise ValueError(f"grouped rows law must be one of {GROUPED_ROWS_LAWS}")
+        enabled = law != "off"
+        sw = self.switch_mlp
+        if enabled:
+            object.__setattr__(sw, "grouped_rows_hook", _grouped_rows_hook)
+            object.__setattr__(sw, "grouped_rows_law", law)
+        else:
+            sw.__dict__.pop("grouped_rows_hook", None)
+            sw.__dict__.pop("grouped_rows_law", None)
+        # The stock-identical one-launch routing was checked bit-equal on the
+        # 35B at 2..16 rows (``qwen36-moe-rows-glue``); the default stops at
+        # MULTI_ROW_GLUE_ROWS only because wider stock calls preferred the
+        # sorted gathers, which the grouped rows replace.
+        object.__setattr__(
+            self,
+            "moe_topk_launch_max_rows",
+            GROUPED_TOPK_LAUNCH_ROWS if enabled else MULTI_ROW_GLUE_ROWS,
+        )
+        return enabled
+
+    def grouped_rows_selected(self):
+        return self.switch_mlp.__dict__.get("grouped_rows_law", "off")
+
+    def grouped_rows_stats(self, reset=False):
+        stats = self.switch_mlp.__dict__["grouped_rows_stats"]
+        report = {**stats, "reasons": dict(stats["reasons"])}
+        if reset:
+            stats.update(calls=0, rows=0, fallbacks=0)
+            stats["reasons"].clear()
+        return report
 
     def set_moe_window_consumers(self, consumers):
         consumers = frozenset(consumers)
@@ -384,7 +510,13 @@ class Qwen36SparseMoeBlock(QN.Qwen3NextSparseMoeBlock):
         else:
             bits = getattr(sw.gate_proj, "bits", None)
             group_size = getattr(sw.gate_proj, "group_size", None)
-            if (bits, group_size) not in ((4, 64), (8, 64)):
+            if (bits, group_size) in DECODE_ONLY_ROUTED_FORMATS:
+                if consumer is not None or rows != 1:
+                    return (
+                        f"routed q{bits}g{group_size} tables are admitted for "
+                        "the one-token decode only"
+                    )
+            elif (bits, group_size) not in ROUTED_FORMATS:
                 return f"unsupported routed expert format q{bits}g{group_size}"
             admit = RD.admit_split_routed_decode(
                 QN._ShapeOnly((x.shape[-1],), x.dtype),

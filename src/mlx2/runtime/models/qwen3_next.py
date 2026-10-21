@@ -437,6 +437,18 @@ def switch_layers_sort_min() -> int:
     return _switch_layers._GATHER_SORT_MIN_ASSIGNMENTS
 
 
+def _sort_min(switch_mlp) -> int:
+    """The switch module's own sorted-gather threshold, else the module one.
+
+    Below MLX's streaming floor a sorted and an unsorted quantized gather run
+    the same ``gather_qmv`` per assignment, so the threshold only trades the
+    sort/unsort launches against the sorted order's expert reuse in cache; a
+    model block that measured its crossover declares it here.
+    """
+    own = switch_mlp.__dict__.get("moe_sort_min_assignments")
+    return switch_layers_sort_min() if own is None else own
+
+
 class FusedGateUpSwitchGLU(nn.Module):
     """SwitchGLU holding gate and up as one [gate|up] projection.
 
@@ -469,7 +481,7 @@ class FusedGateUpSwitchGLU(nn.Module):
         variant: str = "scalar",
     ) -> mx.array:
         x = mx.expand_dims(x, (-2, -3))
-        do_sort = indices.size >= switch_layers_sort_min() or _invariant.active()
+        do_sort = indices.size >= _sort_min(self) or _invariant.active()
         idx = indices
         inv_order = None
         token_rows = None
@@ -521,8 +533,22 @@ class FusedDownSwitchGLU(SwitchGLU):
         scores: Optional[mx.array] = None,
         variant: str = "scalar",
     ) -> mx.array:
+        # A model block may install a multi-row routed-expert hook that
+        # returns the same per-slot outputs (or None to decline); only the
+        # plain unweighted call outside the invariant lane is offered to it.
+        hook = self.__dict__.get("grouped_rows_hook")
+        if (
+            hook is not None
+            and scores is None
+            and variant == "scalar"
+            and not self.training
+            and not _invariant.active()
+        ):
+            grouped = hook(self, x, indices)
+            if grouped is not None:
+                return grouped
         x = mx.expand_dims(x, (-2, -3))
-        do_sort = indices.size >= switch_layers_sort_min() or _invariant.active()
+        do_sort = indices.size >= _sort_min(self) or _invariant.active()
         idx = indices
         inv_order = None
         token_rows = None
@@ -1103,8 +1129,14 @@ def _try_topk_fold_decode(block, x):
 
 def _try_topk_launch(block, x, gates):
     """``(inds, scores)`` from the one-launch stock-identical routing for a
-    one-token call (top-k mode ``launch``), or None."""
-    if block.moe_topk_mode != "launch" or x.size != x.shape[-1]:
+    one-token call (top-k mode ``launch``), or for up to the block's declared
+    ``moe_topk_launch_max_rows`` rows, or None."""
+    rows = x.size // x.shape[-1]
+    # Multi-row calls only where the block declares the rows it checked
+    # (``moe_topk_launch_max_rows``, default 1: one token).
+    if block.moe_topk_mode != "launch" or rows > block.__dict__.get(
+        "moe_topk_launch_max_rows", 1
+    ):
         return None
     refusal = _topk_refusal(block, x, gates.shape)
     if refusal is None and gates.dtype != x.dtype:

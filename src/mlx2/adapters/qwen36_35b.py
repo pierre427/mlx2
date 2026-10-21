@@ -230,9 +230,11 @@ KERNEL_POLICY_ENV = {
     "fused_gdn_verify": "MLX_QWEN36_FUSED_GDN_VERIFY",
     "fused_gdn_batch_verify": "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY",
     "attention_window_row_exact": "MLX_QWEN36_ATTN_WINDOW_ROW_EXACT",
+    "moe_grouped_rows": "MLX_QWEN36_MOE_GROUPED_ROWS",
 }
 NEW_DECODE_KERNELS = frozenset(
     {
+        "moe_grouped_rows",
         "moe_routed_decode",
         "moe_topk_fold",
         "moe_window",
@@ -254,6 +256,9 @@ ENUM_KERNELS = {
         "two_launch",
     ),
     "moe_topk_fold": ("off", "launch"),
+    # Expert-grouped multi-row routed experts: "qmv" is bitwise the stock
+    # gathers; "lane" is the tensor-unit law (a different numerical law).
+    "moe_grouped_rows": ("off", "qmv", "lane"),
 }
 EXPLICIT_ONLY_KERNELS = NEW_DECODE_KERNELS | {"moe_routed_candidate"}
 # Profile variables ``_select_decode_wins`` re-applies to every module that
@@ -279,6 +284,7 @@ LIVE_APPLIED_ENV = frozenset(
         "MLX_QWEN36_MOE_WINDOW_VERIFY",
         "MLX_QWEN36_MOE_WINDOW_ROW_EXACT",
         "MLX_QWEN36_ATTN_WINDOW_ROW_EXACT",
+        "MLX_QWEN36_MOE_GROUPED_ROWS",
         "MLX_QWEN36_DECODE_WINS",
         # NAX sorted MoE gather: applied through moe_nax_gather.set_mode at
         # load, as on Flash-Next. The uncalibrated RHS pad policy is likewise
@@ -331,6 +337,7 @@ MOE_WINDOW_POLICY_KEYS = frozenset(
 # They are removed before the drafter policy is normalized or receipted.
 EXTERNAL_TARGET_KERNEL_KEYS = frozenset(
     {
+        "moe_grouped_rows",
         "moe_window_row_exact",
         "fused_gdn_batch_verify",
         "attention_window_row_exact",
@@ -737,7 +744,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             or any(
                 choice_selected(k, v)
                 for k, v in self._kernels.items()
-                if k in {"moe_routed_decode", *MOE_WINDOW_POLICY_KEYS}
+                if k in {"moe_routed_decode", "moe_grouped_rows", *MOE_WINDOW_POLICY_KEYS}
             )
         ):
             raise ValueError(
@@ -752,7 +759,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             if not moe_nax_explicit:
                 self.moe_nax_gather = "off"
             for key in {"moe_routed_decode", "moe_topk_fold", "moe_routed_candidate",
-                        *MOE_WINDOW_POLICY_KEYS}:
+                        "moe_grouped_rows", *MOE_WINDOW_POLICY_KEYS}:
                 if key not in policy:
                     self._kernels.pop(key, None)
         if require_mtp and not artifact["has_mtp"]:
@@ -1190,6 +1197,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 )
                 module.set_moe_topk_mode(self._kernels.get("moe_topk_fold", "off"))
                 module.set_moe_window_consumers(moe_window_consumers(self._kernels))
+                module.set_grouped_rows(self._kernels.get("moe_grouped_rows", "off"))
 
     def diagnostics(self):
         result = super().diagnostics()
@@ -1257,6 +1265,13 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             from ..runtime.models import moe_nax_gather as _moe_nax
 
             result["moe_nax_gather"] = _moe_nax.status()
+        if choice_selected("moe_grouped_rows", (getattr(self, "_kernels", None) or {}).get("moe_grouped_rows", "off")):
+            from ..runtime.models.qwen36_moe_decode import qwen36_grouped_rows_stats
+
+            result["moe_grouped_rows"] = {
+                "qualification": "unqualified",
+                **qwen36_grouped_rows_stats(self.model),
+            }
         if (getattr(self, "_kernels", None) or {}).get("moe_routed_candidate"):
             from ..runtime.models.qwen3_next import routed_candidate_stats
 

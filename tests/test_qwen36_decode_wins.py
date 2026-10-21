@@ -781,3 +781,92 @@ def test_qwen36_down_kernel_layout_follows_qmv_fast(monkeypatch, inter, fast):
     )
     (args, kwargs), = layouts
     assert kwargs.get("fast", args[3] if len(args) > 3 else None) is fast
+
+
+def _set_routed_format(block, bits, group_size=64):
+    for projection in (
+        block.switch_mlp.gate_proj,
+        block.switch_mlp.up_proj,
+        block.switch_mlp.down_proj,
+    ):
+        projection.bits = bits
+        projection.group_size = group_size
+
+
+def test_qwen36_q6_routed_tables_admitted_for_one_token_decode_only(monkeypatch):
+    """Mixed-precision 4-bit artifacts keep half their MoE layers at 6 bits:
+    the one-token decode runs those through the routed row kernels; every
+    multi-row window consumer keeps refusing them."""
+    from mlx2.runtime.models import qwen36_moe_decode as M
+
+    block, _, _ = _qwen36_block(monkeypatch)
+    _set_routed_format(block, 6)
+    seen = {}
+
+    def admit(*_a, **k):
+        seen.update(bits=k.get("bits"), group_size=k.get("group_size"))
+        return RD.RoutedDecodeAdmission(True, "eligible")
+
+    monkeypatch.setattr(RD, "admit_split_routed_decode", admit)
+    one = mx.zeros((1, 1, 64), mx.bfloat16)
+    assert block._routed_refusal(one, consumer=None) is None
+    assert seen == {"bits": 6, "group_size": 64}
+    block(one)
+    assert block.qwen36_decode_calls == 1, block.qwen36_decode_last_fallback
+    rows = mx.zeros((1, 3, 64), mx.bfloat16)
+    for consumer in ("batch_decode", "verify", "row_exact"):
+        assert block._routed_refusal(rows, consumer=consumer) == (
+            "routed q6g64 tables are admitted for the one-token decode only"
+        )
+    block.set_moe_window_consumers(("row_exact",))
+    assert block.row_exact_window_refusal(rows) is not None
+    # With no decode-only formats, q6 is refused as before.
+    monkeypatch.setattr(M, "DECODE_ONLY_ROUTED_FORMATS", ())
+    assert block._routed_refusal(one, consumer=None) == (
+        "unsupported routed expert format q6g64"
+    )
+
+
+@pytest.mark.parametrize("bits, group_size", [(5, 64), (6, 32), (3, 64)])
+def test_qwen36_other_routed_formats_stay_refused(monkeypatch, bits, group_size):
+    block, _, _ = _qwen36_block(monkeypatch)
+    _set_routed_format(block, bits, group_size)
+    one = mx.zeros((1, 1, 64), mx.bfloat16)
+    assert block._routed_refusal(one, consumer=None) == (
+        f"unsupported routed expert format q{bits}g{group_size}"
+    )
+
+
+def test_qwen36_routed_rows_accepts_q6_tables(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    from mlx2.runtime.models import qwen36_moe_decode as M
+
+    built = []
+
+    def run(**kw):
+        return [mx.zeros(s, d) for s, d in zip(kw["output_shapes"], kw["output_dtypes"])]
+
+    def gate_up(bits, group_size=64):
+        built.append(("gate_up", bits, group_size))
+        return run
+
+    def down(bits, group_size, shared_format, fast):
+        built.append(("down", bits, group_size, fast))
+        return run
+
+    monkeypatch.setattr(M, "routed_gate_up_kernel", gate_up)
+    monkeypatch.setattr(M, "down_kernel", down)
+    monkeypatch.setattr(RD, "expert_operands", lambda layer: ())
+    table = NS(weight=mx.zeros((256, 512, 1)), bits=6, group_size=64)
+    out = M.routed_rows(
+        mx.zeros((1, 1, 2048), mx.bfloat16),
+        mx.zeros((1, 8), mx.uint32),
+        mx.zeros((1, 8), mx.bfloat16),
+        table,
+        table,
+        table,
+    )
+    assert out.shape == (1, 2048)
+    # 6-bit qmv_fast walks 256-value blocks, so inter 512 is a fast layout.
+    assert built == [("gate_up", 6, 64), ("down", 6, 64, True)]

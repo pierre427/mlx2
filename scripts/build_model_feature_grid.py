@@ -49,7 +49,7 @@ FEATURES = (
     "decode_first", "prefill_scheduling", "mixed_prefill_decode",
     "varlen_paged_attention", "row_exact_verify", "tensorfold_tree15",
     "fused_gdn", "fused_gdn_batch_verify", "moe_rhs_pad",
-    "moe_nax_gather", "moe_routed_decode", "moe_topk_fold",
+    "moe_nax_gather", "moe_routed_decode", "moe_topk_fold", "moe_grouped_rows",
     "moe_window_row_exact", "attention_window_row_exact",
     "progressive_ast_rootless_fallback",
     "qsa_nax_prefill", "qsa_nax_batched", "qsa_nax_decode",
