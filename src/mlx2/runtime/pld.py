@@ -322,6 +322,9 @@ class _PlainInflight:
     prepared: list
     # Rows rewound and dropped before the read (finished, failed, removed).
     dropped: set = field(default_factory=set)
+    # Other work (a prefill slice) ran between dispatch and read: the round's
+    # wall time is not its decode cost, so cost latches do not book it.
+    contended: bool = False
 
 
 @dataclass
@@ -370,6 +373,9 @@ class _Lane:
     # The finish reason of the round being committed (stop/length or None).
     round_finish: Any = None
     pipelined_rounds: int = 0
+    # Set around a pipelined round's bookkeeping when its wall time is not a
+    # decode cost (``_PlainInflight.contended``): the cost latch skips it.
+    round_untimed: bool = False
     source_scope: object = None
     source_stats: dict = field(default_factory=dict)
     apcv2_source_segments: int = 0
@@ -712,6 +718,7 @@ class PromptLookupBatchGenerator:
             "pld_pipeline_dropped_proposals": 0,
             "pld_pipeline_refuted_proposals": 0,
             "pld_pipeline_released_rows": 0,
+            "pld_pipeline_untimed_rounds": 0,
             "pld_parked_direct_rounds": 0,
             "pld_cost_width1_cohort_splits": 0,
             "pld_recovery_checkpoint_captures": 0,
@@ -1465,6 +1472,22 @@ class PromptLookupBatchGenerator:
             return owner.begin(lengths, plain_single_token=True)
         return SegmentedKVRows(rows).begin(lengths=lengths)
 
+    def _begin_plain(self, lanes):
+        """Open a pipelined anchor-only round's plain transaction.
+
+        A lone lane on plain/rotating KV planes takes the ordinary B1 step on
+        its own caches (``PlainKVStep``); a hybrid cohort its owner's plain
+        transaction (``_begin_verify``).
+        """
+        from .hybrid_verify_rows import is_hybrid_rows
+        from .plain_kv_step import PlainKVStep, is_plain_kv_row
+
+        rows = [lane.cache for lane in lanes]
+        if len(rows) == 1 and not is_hybrid_rows(rows) and is_plain_kv_row(rows[0]):
+            self._cohort_owner = None
+            return PlainKVStep(rows)
+        return self._begin_verify(lanes, [1] * len(lanes))
+
     def _round_batched(self, lanes):
         """Verify several lanes in one target forward.
 
@@ -1571,16 +1594,33 @@ class PromptLookupBatchGenerator:
     def _pipeline_eligible(self, lanes):
         """Lanes whose anchor-only round may run before the host reads them.
 
-        Hybrid planes (their plain transaction can release a finished row),
-        no processors (nothing reads host tokens or steers the forward), no
-        cost latch (it times one round at a time).
+        Never with processors (they read host tokens or steer the forward).
+        A cohort of hybrid lanes without cost latches pipelines whatever its
+        width (its plain transaction can release a finished row).  So does a
+        lone cost-latched lane while its latch is parked (or handed off), on
+        hybrid planes or on plain/rotating KV planes (``PlainKVStep``): it
+        proposes nothing then, and its plain rounds are timed between reads,
+        the per-token cost of the pipelined decode it falls back to.  Shadow
+        probes are host lookups, so the latch still re-probes and re-admits;
+        the first round after it leaves ``parked`` drains the pipeline.
         """
-        return self.pipelined_plain and all(
-            lane.batched
-            and lane.hybrid_rows
-            and lane.cost_latch is None
-            and not lane.processors
-            for lane in lanes
+        from .plain_kv_step import is_plain_kv_row
+
+        if not self.pipelined_plain or not lanes:
+            return False
+        if any(not getattr(lane, "batched", False) or lane.processors for lane in lanes):
+            return False
+        if all(lane.hybrid_rows and lane.cost_latch is None for lane in lanes):
+            return True
+        if len(lanes) != 1:
+            return False
+        (lane,) = lanes
+        cost = lane.cost_latch
+        return (
+            cost is not None
+            and lane.ordinary
+            and cost.state in ("parked", "handed_off")
+            and (lane.hybrid_rows or is_plain_kv_row(lane.cache))
         )
 
     def _dispatch_plain(self, lanes, steps, anchors):
@@ -1588,7 +1628,7 @@ class PromptLookupBatchGenerator:
 
         ``anchors`` are host tokens or the previous round's lazy tokens.
         """
-        transaction = self._begin_verify(lanes, [1] * len(lanes))
+        transaction = self._begin_plain(lanes)
         try:
             if not getattr(transaction, "plain", False):
                 raise RuntimeError("a pipelined round requires a plain transaction")
@@ -1738,10 +1778,17 @@ class PromptLookupBatchGenerator:
                         )
                 following = None
         # Phase 3: bookkeeping (and, for a finished lane, its frozen cache).
+        if inflight.contended:
+            self.scheduler_stats["pld_pipeline_untimed_rounds"] += 1
         for row in sent:
-            lanes[row].pipelined_rounds += 1
-            with suppress(StopIteration):
-                next(inflight.steps[row])
+            lane = lanes[row]
+            lane.pipelined_rounds += 1
+            lane.round_untimed = inflight.contended
+            try:
+                with suppress(StopIteration):
+                    next(inflight.steps[row])
+            finally:
+                lane.round_untimed = False
         self.scheduler_stats["pld_batched_rounds"] += 1
         self.scheduler_stats["pld_batched_lanes"] += len(lanes)
         self.scheduler_stats["pld_pipelined_rounds"] += 1
@@ -1826,7 +1873,10 @@ class PromptLookupBatchGenerator:
         # A lane the adaptive gate delatched re-probes like a deferred one;
         # without this the latch was one-way and ``reprobe_at`` dead.
         probing = (
-            (deferred or (cost is None and lane.stats.admission_delatches > 0))
+            (deferred or (
+                cost is None
+                and getattr(getattr(lane, "stats", None), "admission_delatches", 0) > 0
+            ))
             and lane.ordinary
             and lane.generated >= lane.reprobe_at
             and lane.generated % lane.config.get("admission_probe_stride", 1) == 0
@@ -1998,8 +2048,14 @@ class PromptLookupBatchGenerator:
             if cost is not None and not proposal:
                 cost.observe_plain_token(token)
         if cost is not None and round_started_ns is not None:
-            duration_ns = time.perf_counter_ns() - round_started_ns
-            cost.observe_round(duration_ns, len(delivered), len(proposal), lane.generated)
+            # A pipelined round's span runs from the previous read to this
+            # one: the per-token cost of pipelined plain decode.  One that
+            # shared its window with a prefill slice is not booked.
+            if not lane.round_untimed:
+                duration_ns = time.perf_counter_ns() - round_started_ns
+                cost.observe_round(
+                    duration_ns, len(delivered), len(proposal), lane.generated
+                )
             lane.ordinary = cost.state in {"parked", "handed_off"}
             lane.stats.latched = lane.ordinary
         if probing and delivered:
@@ -2180,6 +2236,9 @@ class PromptLookupBatchGenerator:
             contended = self.decode_time_fairness.enabled and any(
                 other.anchor is not None for other in self.lanes.values()
             )
+            if self._inflight is not None:
+                # The slice runs inside the dispatched plain round's window.
+                self._inflight.contended = True
             return [self._prefill(lane, contended=contended)]
         return []
 
@@ -2218,6 +2277,14 @@ class PromptLookupBatchGenerator:
             lane for lane in pending
             if getattr(lane, "batched", False) and lane.cost_latch is None
         ]
+        if (
+            len(pending) == 1
+            and pending[0].cost_latch is not None
+            and self._pipeline_eligible(pending)
+        ):
+            # A lone parked lane decodes plain rounds, one target row each:
+            # pipelined like ordinary decode (``_pipeline_eligible``).
+            together = list(pending)
         if together or self._inflight is not None:
             # A lone batchable lane takes the same transactional path: it is
             # unarmed, so the snapshot/rewind driver is not its rollback.
@@ -2237,6 +2304,9 @@ class PromptLookupBatchGenerator:
                     )
                     self.remove([failure.uid])
         for lane in pending:
+            if lane.ready and lane.ready[-1].finish_reason:
+                # A drained pipelined round finished it this poll.
+                continue
             if lane not in together and lane.uid in self.lanes:
                 try:
                     if lane.cost_latch is not None:

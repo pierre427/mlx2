@@ -233,7 +233,8 @@ def test_cost_aware_latch_uses_shadow_copies_and_keeps_exact_output():
     assert latch["activations"] >= 1
     assert latch["plain_ns"] > 0 and latch["plain_tokens"] >= 4
     assert latch["verify_ns"] > 0 and latch["verify_tokens"] >= 1
-    assert generator.scheduler_stats["pld_parked_direct_rounds"] >= 4
+    # A lone parked lane pipelines its plain rounds (and still re-admits).
+    assert generator.scheduler_stats["pld_pipelined_rounds"] >= 4
 
 
 def test_cost_aware_latch_leaves_novel_lane_parked_with_sparse_lookups():
@@ -265,7 +266,8 @@ def test_cost_aware_latch_leaves_novel_lane_parked_with_sparse_lookups():
     assert receipt["cost_latch"]["state"] == "parked"
     assert receipt["cost_latch"]["activations"] == 0
     assert generator.scheduler_stats["pld_recovery_checkpoint_captures"] == 1
-    assert generator.scheduler_stats["pld_parked_direct_rounds"] == 12
+    assert generator.scheduler_stats["pld_pipelined_rounds"] == 12
+    assert generator.scheduler_stats["pld_parked_direct_rounds"] == 0
 
 
 def test_cost_latch_uses_ordinary_b1_full_attention_mask():
@@ -472,12 +474,13 @@ def test_warm_apc_continuation_on_prompt_lookup_server_matches_cold(monkeypatch)
     # them and killed the generation worker on the first continuation.
     from types import SimpleNamespace
 
+    from test_approximate_kv_serving import make_adapter, run
+
     from mlx2 import memory, serving
     from mlx2.contracts import Capability
     from mlx2.runtime import os_memory
     from mlx2.runtime.models.cohere2_moe import Model, ModelArgs
     from mlx2.serving import ServingEngine
-    from test_approximate_kv_serving import make_adapter, run
 
     monkeypatch.delenv("MLX_LM_EXTERNAL_ROUND_COW", raising=False)
     monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "src"})

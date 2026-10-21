@@ -57,3 +57,15 @@ def test_ast_options_require_ast_and_refuse_conflicts():
         apply_ast_invocation(_args(ast_topology="9x9"), None, _resolution(tiles=True, mtp=True))
     with pytest.raises(ValueError, match="--ast-drafter"):
         apply_ast_invocation(_args(), {"draft_model": "/x"}, _resolution(tiles=True, mtp=True))
+
+
+def test_attention_family_auto_drafter_takes_the_pld_route_explicit_keeps_tiles():
+    adapter = type("Adapter", (), {"ast_tree_tiles": True, "attention_tree_tiles": True})
+    resolution = SimpleNamespace(adapter_type=adapter, artifact={"has_mtp": False},
+                                 default_route="ordinary")
+    args = _args()
+    assert apply_ast_invocation(args, None, resolution) == {}
+    assert args.prompt_lookup and not args.external_draft
+    args = _args(ast_drafter="pld")
+    assert apply_ast_invocation(args, None, resolution) == {"draft_model": "prompt_lookup"}
+    assert args.external_draft

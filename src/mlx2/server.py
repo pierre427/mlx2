@@ -6606,6 +6606,7 @@ def apply_ast_invocation(args, policy, adapter_resolution):
         raise ValueError("--ast selects the drafter itself; use --ast-drafter")
     if getattr(args, "draft_model", None):
         raise ValueError("--ast selects the drafter itself; use --ast-drafter")
+    explicit_drafter = ast_options[0] is not None
     drafter = ast_options[0] or "auto"
     adapter_type = getattr(adapter_resolution, "adapter_type", None)
     artifact = getattr(adapter_resolution, "artifact", None) or {}
@@ -6615,6 +6616,12 @@ def apply_ast_invocation(args, policy, adapter_resolution):
     tiles = bool(getattr(adapter_type, "ast_tree_tiles", False))
     if drafter == "auto":
         drafter = "mtp" if has_mtp else "pld"
+        if drafter == "pld" and getattr(adapter_type, "attention_tree_tiles", False):
+            # Measured on gpt-oss-20b: the pipelined adaptive PLD route runs
+            # at ordinary speed with nothing to copy and copies at ~2x, while
+            # prompt-lookup tiles on the generic attention target paid tile
+            # overhead on every round. Explicit --ast-drafter pld keeps tiles.
+            tiles = False
     if drafter == "mtp" and not has_mtp:
         raise ValueError("--ast-drafter mtp: this artifact has no native MTP head")
     if ast_options[1] is not None:

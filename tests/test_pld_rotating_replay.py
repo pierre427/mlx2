@@ -107,11 +107,49 @@ def test_rotating_replay_is_default_off_and_validated():
         PromptLookupBatchGenerator.validate_policy({"max_proposal_tokens": 0})
 
 
+def _parked(*, cost, pipelined_plain=False):
+    policy = {
+        "num_draft": 4, "ngram_min": 2, "ngram_max": 3,
+        "memory_max_draft": 0, "pipelined_plain": pipelined_plain,
+    }
+    if cost:
+        policy.update(cost_aware_admission=True, cost_shadow_span=4)
+    generator = PromptLookupBatchGenerator(
+        _MixedCacheModel(), prefill_step_size=4, prompt_lookup=policy,
+    )
+    generator.insert(
+        [PROMPT], max_tokens=[24],
+        caches=[[KVCache(), RotatingKVCache(max_size=WINDOW)]],
+    )
+    return generator
+
+
+def test_cost_parked_pipelined_rounds_match_segmented_plain_mixed_cache():
+    """The pipelined parked lane (``PlainKVStep`` on the wrapped ring) ends on
+    the same tokens and bitwise the same committed cache."""
+    finals, tokens, stats = [], [], []
+    for generator in (_parked(cost=False), _parked(cost=True, pipelined_plain=True)):
+        emitted, final = [], None
+        while final is None:
+            _prompts, responses = generator.next()
+            emitted.extend(response.token for response in responses)
+            final = next((r for r in responses if r.finish_reason), final)
+        finals.append(final)
+        tokens.append(emitted)
+        stats.append(generator.scheduler_stats)
+    assert tokens[0] == tokens[1] and len(tokens[0]) == 24
+    _assert_same_final(finals)
+    assert stats[1]["pld_pipelined_rounds"] == 24
+    assert stats[1]["pld_parked_direct_rounds"] == 0
+
+
 def test_cost_parked_direct_rounds_match_segmented_plain_mixed_cache():
     def make(*, cost):
         policy = {
             "num_draft": 4, "ngram_min": 2, "ngram_max": 3,
             "memory_max_draft": 0,
+            # Per-poll lockstep: the serial parked driver.
+            "pipelined_plain": False,
         }
         if cost:
             policy.update(cost_aware_admission=True, cost_shadow_span=4)
