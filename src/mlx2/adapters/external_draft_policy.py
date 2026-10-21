@@ -108,6 +108,17 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
     if projection_law not in (None, "lane_mpp_exact"):
         raise ValueError("unsupported AST target-tree projection law")
     fast_tree = projection_law == "lane_mpp_exact"
+    packed_tree = isinstance(policy.get("continuation_pool"), dict) and policy["continuation_pool"].get("packed_pattern") is not None
+    if packed_tree:
+        from ..runtime.proposal_providers import ContinuationPoolPolicy
+
+        packed = ContinuationPoolPolicy.from_value(policy["continuation_pool"])
+        if (num_draft != max(packed.packed_pattern)
+            or policy.get("progressive_alternative_branches") != len(packed.packed_pattern)
+            or policy.get("progressive_alternative_strategy") != "confidence_tree"
+            or policy.get("cost_per_commit_handoff") is not False
+            or oracle is None):
+            raise ValueError("packed_pattern requires exact fixed-source B1 AST tree admission")
     b1_tiles = policy.get("ast_b1_tile_policy")
     if b1_tiles is not None and (
         b1_tiles != "four_path15"
@@ -129,7 +140,7 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
         not isinstance(oracle, str) or not oracle.strip()
         or tile is None or fidelity not in (None, "exact")
         or (
-            not fast_tree
+            not (fast_tree or packed_tree)
             and policy.get("progressive_alternative_branches", 1) != 1
         )
         or policy.get("ast_physical_target") is True
@@ -210,7 +221,7 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
                 "near-tie AST requires a primary-only external "
                 "continuation pool with limit=1 and ast_planner=true"
             )
-        if oracle is not None and not (primary_exact_ast or fast_tree_ast):
+        if oracle is not None and not (primary_exact_ast or fast_tree_ast or packed_tree):
             raise ValueError("AST target-tree oracle requires primary-only AST planning")
         if policy.get("lilicorr_feedback") is not None:
             raise ValueError(
@@ -234,7 +245,7 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
     alternatives = policy.get("progressive_alternative_branches", 1)
     if (
         type(alternatives) is not int
-        or not 1 <= alternatives <= 4
+        or not 1 <= alternatives <= (5 if packed_tree else 4)
         or alternatives > 1 and tile is None
     ):
         raise ValueError(

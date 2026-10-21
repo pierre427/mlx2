@@ -26,7 +26,7 @@ def project_tree_slate(generator, lanes, primary_tokens, widths):
         ranked = list(enumerate(selection.paths))
         if not ranked or tuple(primary) != tuple(ranked[0][1].tokens):
             raise ValueError("AST tree primary differs from its selected slate")
-        count = min(4, int(widths[lane.uid]))
+        count = min(5 if getattr(generator, "ast_packed_pattern", None) else 4, int(widths[lane.uid]))
         selected = ranked[:count]
         rows.append([list(path.tokens) for _, path in selected])
         provenance_rows.append(
@@ -78,7 +78,7 @@ def _prepare_request(generator, lane, blocks):
     from .external_speculative import _target_executor_stats
 
     if (
-        not 1 <= len(blocks) <= 4
+        not 1 <= len(blocks) <= (5 if getattr(generator, "ast_packed_pattern", None) else 4)
         or any(block is None or not block.tokens for block in blocks)
         or float(lane.sampling.get("sampling_temp", 0)) != 0.0
         or not generator._batched_law_contract(lane)
@@ -164,7 +164,8 @@ def _plan_request(work, quota):
         tile = plan_tree_tile(work.trie, root=work.root, max_rows=rows, **options)
     else:
         work.consumed_plans += 1
-    if getattr(work.generator, "ast_b1_tile_policy", None) == "four_path15" and len(tile.tokens) < 2:
+    if (getattr(work.generator, "ast_b1_tile_policy", None) == "four_path15"
+        or getattr(work.generator, "ast_packed_pattern", None)) and len(tile.tokens) < 2:
         raise ValueError("four_path15 cannot submit an anchor-only AST tile")
     work.plan_rows = rows
     if work.executed_nodes.intersection(tile.global_indices):
@@ -537,6 +538,8 @@ def _finish_request(work):
         "packing": (
             "static_b1_four_path15_fresh_source_each_round"
             if getattr(generator, "ast_b1_tile_policy", None) == "four_path15"
+            else "static_b1_packed_pattern_fresh_source_each_round"
+            if getattr(generator, "ast_packed_pattern", None)
             else "measured_round_conditional_reach"
             if source_plan is not None else "fixed_budget_conditional_reach"
         ),

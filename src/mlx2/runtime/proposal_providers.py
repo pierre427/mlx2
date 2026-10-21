@@ -73,8 +73,18 @@ class ContinuationPoolPolicy:
     verification_algorithm: str = CONTINUATION_VERIFICATION_ALGORITHM
     admission: dict | None = None
     ast_planner: bool = False
+    packed_pattern: tuple[int, ...] | None = None
 
     def __post_init__(self):
+        if self.packed_pattern is not None and (
+            not isinstance(self.packed_pattern, tuple)
+            or not 2 <= len(self.packed_pattern) <= 5
+            or any(type(n) is not int or not 1 <= n <= 15 for n in self.packed_pattern)
+            or sum(self.packed_pattern) > 15
+            or self.limit != len(self.packed_pattern)
+            or self.sources != ("external",) or not self.ast_planner
+        ):
+            raise ValueError("packed_pattern requires an external AST pool with at most15 proposal rows")
         if type(self.ast_planner) is not bool:
             raise ValueError("continuation_pool ast_planner must be boolean")
         if (
@@ -93,6 +103,10 @@ class ContinuationPoolPolicy:
         if set(value) - set(cls.__dataclass_fields__):
             raise ValueError("unknown continuation_pool policy keys")
         fields = dict(value)
+        if "packed_pattern" in fields and fields["packed_pattern"] is not None:
+            if not isinstance(fields["packed_pattern"], (list, tuple)):
+                raise ValueError("packed_pattern must be a depth list")
+            fields["packed_pattern"] = tuple(fields["packed_pattern"])
         if "sources" in fields:
             if not isinstance(fields["sources"], (list, tuple)):
                 raise ValueError("continuation_pool sources must be a list")
@@ -133,6 +147,8 @@ class ContinuationPoolPolicy:
         # performance/correctness gates justify promoting a default.
         if not result["ast_planner"]:
             del result["ast_planner"]
+        if result["packed_pattern"] is None:
+            del result["packed_pattern"]
         return result
 
 
@@ -205,6 +221,8 @@ class ContinuationDraftModel:
 
         self.backend = backend
         self.policy = ContinuationPoolPolicy.from_value(policy)
+        if self.policy.packed_pattern is not None and not callable(getattr(backend, "draft_packed_paths", None)):
+            raise ValueError("packed_pattern requires a full-depth packed proposal source")
         if (
             getattr(backend, "proposal_distribution", None)
             != self.proposal_distribution
@@ -271,7 +289,9 @@ class ContinuationDraftModel:
                     "selected_path_lagged_conditional_acceptance_"
                     "log_odds_clamped_40"
                 ),
-                "cache": "private_provider_recompute_public_backbone_advanced_once",
+                "cache": ("packed_full_depth_private_branches_verified_head_advanced_once"
+                          if self.policy.packed_pattern else
+                          "private_provider_recompute_public_backbone_advanced_once"),
                 "admission": self.admission_planner.policy.as_dict(),
                 "qualified": False,
             },
@@ -336,7 +356,13 @@ class ContinuationDraftModel:
         # A batched cache exposes authoritative rows, while plain B1 cache does
         # not. Snapshot before the external context append changes its offset.
         reusable = bool(getattr(self.backend, "supports_continuation_tree_reuse", False))
-        private_needed = [not (ast_source_budgets is not None and
+        packed = self.policy.packed_pattern if proposal_length else None
+        if packed is not None and (
+            len(anchors) != 1 or proposal_length != max(packed)
+            or ast_source_budgets != [len(packed)]
+        ):
+            raise ValueError("packed source must retain its exact B1 proposal geometry")
+        private_needed = [packed is None and not (ast_source_budgets is not None and
                               "external" in self.source_records and
                               (ast_source_budgets[row] == 1 or
                                reusable and (
@@ -410,7 +436,17 @@ class ContinuationDraftModel:
                             any(n > 1 for n in ast_source_budgets) and
                             getattr(self.backend, "supports_continuation_tree_reuse", False))
         try:
-            backbone_tokens, _backbone_laws = self.backend.draft_distributions(
+            if packed is not None:
+                packed_candidates = self.backend.draft_packed_paths(
+                    anchors, hidden, cache, packed,
+                    processor_histories=processor_histories,
+                    logits_processors=logits_processors, **kwargs,
+                )
+                backbone_tokens = [list(row[0].tokens) for row in packed_candidates]
+                _backbone_laws = [[PointMassLaw(token) for token in row] for row in backbone_tokens]
+                lattice = None
+            else:
+                backbone_tokens, _backbone_laws = self.backend.draft_distributions(
                 anchors, hidden, cache, proposal_length, private_rngs, temperatures,
                 processor_histories=processor_histories,
                 logits_processors=None if ast_b1_tile_policy == "four_path15" else logits_processors,
@@ -418,7 +454,7 @@ class ContinuationDraftModel:
                 **({"capture_lattice_only": True} if ast_b1_tile_policy == "four_path15" else {}),
                 **kwargs,
             )
-            lattice = getattr(self.backend, "last_continuation_lattice", None) if capture_tree else None
+                lattice = getattr(self.backend, "last_continuation_lattice", None) if capture_tree else None
         finally:
             if capture_tree:
                 object.__setattr__(self.backend, "last_continuation_lattice", None)
@@ -493,7 +529,8 @@ class ContinuationDraftModel:
 
             def invoke(source_id):
                 provider = self.providers[source_id]
-                candidates = tuple(provider(context, source_budget))
+                candidates = (tuple(packed_candidates[row]) if packed is not None
+                              else tuple(provider(context, source_budget)))
                 admission.setdefault("observed_invoked_sources", []).append(source_id)
                 diagnostics = getattr(provider, "last_diagnostics", None)
                 if diagnostics is not None:

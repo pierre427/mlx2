@@ -54,7 +54,7 @@ class ASTProposalTrie:
         if (
             type(anchor) is not int
             or anchor < 0
-            or not 1 <= len(paths) <= 4
+            or not 1 <= len(paths) <= 5
             or any(
                 len(path) > 15
                 or any(type(token) is not int or token < 0 for token in path)
@@ -63,7 +63,7 @@ class ASTProposalTrie:
             or not isinstance(score_authority, str)
             or not score_authority
         ):
-            raise ValueError("AST trie requires one to four bounded token paths")
+            raise ValueError("AST trie requires one to five bounded token paths")
         if lagged_acceptance is not None and not _probability(lagged_acceptance):
             raise ValueError("AST trie lagged acceptance must be a probability")
         confidence = (

@@ -63,6 +63,7 @@ NATIVE_MTP_EXTERNAL_KEYS = frozenset(
         "progressive_cross_session_pack_mode",
         "progressive_verification_fidelity",
         "cost_per_commit_handoff",
+        "ast_target_tree_oracle",
     }
 )
 
@@ -769,7 +770,11 @@ class FlashNextAdapter:
                 "the Flash-Next native-MTP route requires exact progressive "
                 "verification (progressive_verification_tile)"
             )
-        if not self.policy.row_exact_verify:
+        packed = value.get("continuation_pool", {}).get("packed_pattern")
+        if packed is not None:
+            if self.policy.row_exact_verify or not value.get("ast_target_tree_oracle"):
+                raise ValueError("packed Flash AST requires a numerical oracle and row_exact_verify=false (no REV)")
+        elif not self.policy.row_exact_verify:
             raise ValueError(
                 "exact progressive verification on Flash-Next requires "
                 "row_exact_verify: true"
@@ -783,7 +788,13 @@ class FlashNextAdapter:
         )
         External._check_num_draft(self, record)
         self.model.select_external_feature_source("mtp_seed")
-        self.model.configure_progressive_external_row_exact(True)
+        if packed is not None:
+            from .flash_next_tree import install_projection_law, install_ast_target_contract
+
+            install_projection_law(self.model)
+            install_ast_target_contract(self.model)
+        else:
+            self.model.configure_progressive_external_row_exact(True)
         External._bind_external_drafter(
             self, record, load_native_mtp_drafter, type(self).descriptor
         )
@@ -872,6 +883,16 @@ class FlashNextAdapter:
     def create_external_batch(self, **kwargs):
         from .external_draft_policy import ExternalDraftAdapterMixin as External
 
+        if self.external_policy.get("continuation_pool", {}).get("packed_pattern") is not None:
+            from .flash_next_tree import FlashNextTargetTreeExecutor
+
+            if kwargs.get("completion_batch_size", 4) != 1:
+                raise ValueError("packed Flash AST owns exactly one request")
+            kwargs.setdefault("ast_target_tree_executor_provider", FlashNextTargetTreeExecutor(self.model).with_ast_oracle(
+                self.external_policy["ast_target_tree_oracle"], artifact=self.identity["fingerprint"],
+                capture_layers=self.draft_model.config.target_layer_ids,
+                target_binding=self._progressive_external_binding,
+            ))
         return External.create_external_batch(self, **kwargs)
 
     def bind_external_serving_namespace(self, namespace):
@@ -1250,6 +1271,8 @@ class FlashNextAdapter:
         switches = [getattr(block, "switch_mlp", None) for block in blocks]
         lane = getattr(getattr(self, "row_exact_verify", None), "lane_layers", None) or {}
         return {
+            **({"flash_tensorfold_tree_projection_law": dict(self.model._mlx2_flash_tree_law)}
+               if getattr(self.model, "_mlx2_flash_tree_law", None) else {}),
             # Present only when low_bit_lane moved layers onto the lane law:
             # their decode and prefill state differ from the stock product's.
             **(

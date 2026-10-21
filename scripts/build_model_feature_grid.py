@@ -33,6 +33,7 @@ VARIANTS = {
     "gemma4": ("a4b", "31b"),
     "laguna": ("xs21", "s21"),
     "nemotron_h": ("super", "lightning"),
+    "qwen4_exp": ("base", "flash-next"),
 }
 
 # Features that are selected through execution policy or adapter configuration
@@ -55,6 +56,9 @@ FEATURES = (
     "invariant_prefill", "quantized_kv", "approximate_kv",
     "host_memory_signals", "host_available_floor", "weight_streaming",
     "constrained_tool_grammar", "strict_json_schema", "thinking_guard",
+    "exact_prefill_projection_law", "native_mtp_packed_paths",
+    "shared_root_tensorfold_tree_target", "ast_native_mtp_packed_3x5",
+    "ast_native_mtp_packed_5x3",
 )
 
 

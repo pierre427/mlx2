@@ -225,6 +225,8 @@ class NativeMTPDraftModel:
         context_tokens=None,
         logits_processors=None,
         processor_histories=None,
+        _packed_capture=None,
+        _packed_root_count=0,
         **_unused,
     ):
         """Greedy-draft ``proposal_length`` tokens per row; point-mass laws."""
@@ -275,9 +277,14 @@ class NativeMTPDraftModel:
             top = logits[:, -1]
             seed = seed[:, -1:]
             private = copy.deepcopy(rows[row])
+            drafted, ranked = [], []
+            if _packed_capture is not None:
+                # A branch starts AFTER the verified anchor, but BEFORE any
+                # proposed token. Never reuse the primary chain's final seed
+                # or cache for a different root token.
+                _packed_capture.append((seed, copy.deepcopy(private), ranked))
             if callable(start):
                 start(private, share_index_state=False)
-            drafted, ranked = [], []
             try:
                 for position in range(int(proposal_length)):
                     if position:
@@ -301,7 +308,11 @@ class NativeMTPDraftModel:
                         values = probe_logits_processors(
                             processors, prefix, values[None]
                         )[0].astype(mx.float32)
-                    count = min(ALTERNATIVES_PER_POSITION + 1, int(values.shape[-1]))
+                    count = min(
+                        max(ALTERNATIVES_PER_POSITION + 1,
+                            _packed_root_count if position == 0 else 0),
+                        int(values.shape[-1]),
+                    )
                     candidates = mx.argpartition(-values, count - 1)[:count]
                     normalizer = mx.logsumexp(values)
                     chosen = values[candidates] - normalizer
@@ -331,6 +342,118 @@ class NativeMTPDraftModel:
             if histories[row] is not None:
                 self._remember(histories[row], anchors[row], drafted, ranked)
         return tokens_out, laws_out
+
+    def draft_packed_paths(
+        self, anchors, hidden, cache, pattern, *, context_tokens=None,
+        logits_processors=None, processor_histories=None,
+    ):
+        """Make full-depth, distinct-root paths for one bounded AST tile.
+
+        ``pattern`` counts proposal rows only (e.g. 3x5 or 5x3); the target
+        owns the extra anchor row. This is a proposal capability, NOT a target
+        TensorFold executor. Verified head context advances once. Each branch
+        unrolls on an independent private cache; no target state is touched.
+        All transient tensor captures are discarded before returning.
+        """
+        import mlx.core as mx
+
+        from ...adapters.proposal_path_sources import SourceContinuation
+        from ..processor_probe import probe_logits_processors
+
+        pattern = tuple(pattern)
+        if (not pattern or len(pattern) > 15
+            or any(type(depth) is not int or not 1 <= depth <= 15 for depth in pattern)
+            or sum(pattern) > 15):
+            raise ValueError("packed MTP requires 1..15 proposal rows plus one anchor")
+        if max(pattern) >= self.config.block_size:
+            raise ValueError("packed MTP depth exceeds the loaded proposal capability")
+        anchors = list(anchors)
+        if not anchors or int(hidden.shape[0]) != len(anchors) or hidden.shape[1] == 0:
+            raise ValueError("packed MTP requires one verified seed tail per anchor")
+        processors = logits_processors or [[] for _ in anchors]
+        histories = processor_histories or [None for _ in anchors]
+        if len(processors) != len(anchors) or len(histories) != len(anchors):
+            raise ValueError("packed MTP context topology mismatch")
+        captures = []
+        try:
+            primary, _ = self.draft_distributions(
+                anchors, hidden, cache, max(pattern), [None] * len(anchors),
+                [0.0] * len(anchors), context_tokens=context_tokens,
+                logits_processors=processors, processor_histories=histories,
+                _packed_capture=captures, _packed_root_count=len(pattern),
+            )
+            output = []
+            for row, (seed, root_cache, ranked) in enumerate(captures):
+                def rank(top, prefix, count):
+                    values = top[0].astype(mx.float32)
+                    if processors[row]:
+                        history = mx.array(
+                            [*list(histories[row] or []), int(anchors[row]), *prefix],
+                            dtype=mx.int32,
+                        )
+                        values = probe_logits_processors(
+                            processors[row], history, values[None]
+                        )[0].astype(mx.float32)
+                    count = min(count, int(values.shape[-1]))
+                    indices = mx.argpartition(-values, count - 1)[:count]
+                    normalizer = mx.logsumexp(values)
+                    probabilities = values[indices] - normalizer
+                    mx.eval(indices, probabilities, normalizer)
+                    if not math.isfinite(float(normalizer.item())):
+                        return []
+                    return sorted(
+                        ((int(token), float(value)) for token, value in zip(
+                            np.asarray(indices).tolist(), np.asarray(probabilities).tolist(),
+                        ) if math.isfinite(value)), key=lambda item: (-item[1], item[0]),
+                    )
+
+                roots = ranked[0][:len(pattern)] if ranked else []
+                if len(roots) != len(pattern) or not primary[row]:
+                    raise ValueError("packed MTP has fewer legal distinct roots than requested")
+                paths = []
+                for branch, ((token, log_probability), depth) in enumerate(zip(roots, pattern)):
+                    if branch == 0:
+                        if len(primary[row]) < depth:
+                            raise ValueError("packed MTP primary reached a grammar dead end")
+                        logps = [entry[0][1] for entry in ranked[:depth]]
+                        paths.append(SourceContinuation(
+                            tuple(primary[row][:depth]),
+                            tuple(_confidence(value) for value in logps),
+                            float(sum(logps)), "native_mtp_conditioned_full_path_log_proxy",
+                        ))
+                        continue
+                    private = copy.deepcopy(root_cache)
+                    branch_seed = seed
+                    start = getattr(self.target, "mtp_start_cycle", None)
+                    end = getattr(self.target, "mtp_end_cycle", None)
+                    path, logps = [token], [log_probability]
+                    try:
+                        if callable(start):
+                            start(private, share_index_state=False)
+                        while len(path) < depth:
+                            top, branch_seed = self._step(
+                                branch_seed, mx.array([[path[-1]]], mx.uint32),
+                                private, full_vocab=bool(processors[row]),
+                            )
+                            self.stats["chain_steps"] += 1
+                            chosen = rank(top[:, -1], path, 1)
+                            if not chosen:
+                                raise ValueError("packed MTP branch reached a grammar dead end")
+                            path.append(chosen[0][0])
+                            logps.append(chosen[0][1])
+                        paths.append(SourceContinuation(
+                            tuple(path), tuple(_confidence(value) for value in logps),
+                            float(sum(logps)), "native_mtp_conditioned_full_path_log_proxy",
+                        ))
+                    finally:
+                        if callable(end):
+                            end(private)
+                if paths[0].tokens != tuple(primary[row][:pattern[0]]):
+                    raise RuntimeError("packed MTP primary changed during private branching")
+                output.append(paths)
+            return output
+        finally:
+            captures.clear()
 
     # -- complete paths for the continuation pool ------------------------------
     def _remember(self, history, anchor, drafted, ranked):

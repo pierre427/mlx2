@@ -764,7 +764,7 @@ This bounds starvation while allowing live-frontier refill and retirement.
         options = {}
         live_width = sum(request.maximum_depth > 0 for request in requests)
         for request in requests:
-            if (not 1 <= request.branch_limit <= 4 or request.maximum_depth < 0
+            if (not 1 <= request.branch_limit <= 5 or request.maximum_depth < 0
                     or request.maximum_depth > 15 or request.context_length < 0):
                 raise ValueError("AST request bounds are invalid")
             p = request.acceptance

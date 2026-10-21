@@ -1197,9 +1197,10 @@ class ExternalDraftBatchGenerator:
                 "with host proposals and no FLy, tree, continuation, composition, "
                 "or adaptive route"
             )
+        self.ast_packed_pattern = getattr(self.continuation_policy, "packed_pattern", None)
         if (
             type(progressive_alternative_branches) is not int
-            or not 1 <= progressive_alternative_branches <= 4
+            or not 1 <= progressive_alternative_branches <= (5 if self.ast_packed_pattern else 4)
         ):
             raise ValueError(
                 "progressive_alternative_branches must be an integer from 1 to 4"
@@ -1383,6 +1384,7 @@ class ExternalDraftBatchGenerator:
             PerSessionSpeculationTopology(progressive_alternative_branches)
             if progressive_alternative_strategy == "confidence_tree"
             and progressive_alternative_branches > 1
+            and self.ast_packed_pattern is None
             else None
         )
         self.ast_execution_planner = None
@@ -1436,6 +1438,13 @@ class ExternalDraftBatchGenerator:
         ):
             raise ValueError("AST tree tiles require private continuation ownership")
         self._ast_tree_tuners = {}
+        if self.ast_packed_pattern is not None and (
+            completion_batch_size != 1 or self.num_draft != max(self.ast_packed_pattern)
+            or self.progressive_alternative_branches != len(self.ast_packed_pattern)
+            or self.ast_tree_tile_rows != 16 or not self.continuation_pool_ast_bridge
+            or cost_per_commit_handoff is not False
+        ):
+            raise ValueError("packed_pattern requires a B1 sixteen-row AST provider and fixed source geometry")
         if ast_b1_tile_policy is not None and (
             ast_b1_tile_policy != "four_path15"
             or completion_batch_size != 1 or self.num_draft != 15
@@ -3692,6 +3701,10 @@ class ExternalDraftBatchGenerator:
                        for processor in cohort[0].processors)):
                 raise ValueError("four_path15 requires one unconstrained greedy request")
             requested_count = 15
+        if getattr(self, "ast_packed_pattern", None) and requested_count:
+            if len(cohort) != 1 or float(cohort[0].sampling.get("sampling_temp", 0)) != 0.0:
+                raise ValueError("packed_pattern requires one greedy request")
+            requested_count = max(self.ast_packed_pattern)
         alternative_round = branches > 1 and not (
             (
                 self.progressive_alternative_strategy == "paired_continuations"
@@ -3831,7 +3844,20 @@ class ExternalDraftBatchGenerator:
                     )
                     for item in work
                 }
-                if getattr(self, "ast_b1_tile_policy", None) == "four_path15":
+                if getattr(self, "ast_packed_pattern", None):
+                    from .ast_tree_tuning import ASTTreeSourcePlan
+
+                    lane = cohort[0]
+                    depth, branches = max(self.ast_packed_pattern), len(self.ast_packed_pattern)
+                    plan = ASTTreeSourcePlan(depth, branches, 16, 1, 1, 1,
+                                            "fixed_packed_proposal_tile", 0,
+                                            lane.maximum - lane.generated < depth + 1, 1)
+                    lane.ast_tree_source_plan = plan
+                    lane.ast_tree_tuning = {"policy": "packed_pattern", "fixed": True,
+                                            "pattern": self.ast_packed_pattern, "defaulted": False}
+                    source_plans[int(lane.uid)] = SourceBudget(int(lane.uid), depth, branches,
+                                                               15, depth, 0.0, 0.0, plan.reason)
+                elif getattr(self, "ast_b1_tile_policy", None) == "four_path15":
                     from .ast_tree_tuning import ASTTreeSourcePlan
 
                     lane = cohort[0]
@@ -4170,7 +4196,12 @@ class ExternalDraftBatchGenerator:
                     source_plans[int(lane.uid)].branches for lane in lanes)
                 alternative_round = alternative_round and active_alternative_branches > 1
             latch_decisions = None
-            if alternative_round:
+            if alternative_round and getattr(self, "ast_packed_pattern", None):
+                from .ast_tree_verify import project_tree_slate
+
+                alternatives, alternative_prefixes = project_tree_slate(
+                    self, lanes, tokens, {int(lane.uid): len(self.ast_packed_pattern) for lane in lanes})
+            elif alternative_round:
                 if self.progressive_alternative_strategy == "confidence_tree":
                     if confidence is None:
                         raise ValueError(
@@ -7256,7 +7287,8 @@ class ExternalDraftBatchGenerator:
         This deliberately accepts one lane and one private cache only. There
         is no sibling cache copy/share operation in the phase-1 contract.
         """
-        if getattr(self, "ast_b1_tile_policy", None) == "four_path15" and len(inputs) < 2:
+        if (getattr(self, "ast_b1_tile_policy", None) == "four_path15"
+            or getattr(self, "ast_packed_pattern", None)) and len(inputs) < 2:
             raise ValueError("four_path15 cannot submit an anchor-only TensorFold tile")
 
         provider = self.ast_target_tree_executor_provider
@@ -10358,7 +10390,8 @@ class ExternalDraftBatchGenerator:
         return tuple(unique), tuple(representatives), tuple(inverse)
 
     def _run_round(self, cohort, *, forced_depth=None):
-        if getattr(self, "ast_b1_tile_policy", None) == "four_path15":
+        if (getattr(self, "ast_b1_tile_policy", None) == "four_path15"
+            or getattr(self, "ast_packed_pattern", None)):
             if len(cohort) != 1:
                 raise ValueError("four_path15 admits only one active request")
             if forced_depth == 0 or cohort[0].maximum - cohort[0].generated <= 1:
@@ -10505,6 +10538,7 @@ class ExternalDraftBatchGenerator:
                     for lane in cohort
                 )
                 and (getattr(self, "ast_b1_tile_policy", None) == "four_path15"
+                     or getattr(self, "ast_packed_pattern", None)
                      or len(cohort) > 1 and self._ast_tree_cohort_limit() >= len(cohort) or not any(
                     int(token) in self.stops
                     for block in blocks
@@ -10731,7 +10765,8 @@ class ExternalDraftBatchGenerator:
                             lane.uid,
                             "ordered alternative proposal rows are unavailable",
                         )
-                    if getattr(self, "ast_b1_tile_policy", None) != "four_path15" and any(
+                    if (getattr(self, "ast_b1_tile_policy", None) != "four_path15"
+                        and not getattr(self, "ast_packed_pattern", None)) and any(
                         int(token) in self.stops
                         for block in verify_blocks
                         for token in block.tokens
