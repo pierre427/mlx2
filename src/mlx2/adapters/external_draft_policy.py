@@ -1137,7 +1137,10 @@ class ExternalDraftAdapterMixin:
             kwargs.setdefault("target_tree_executor_provider", AttentionTreeExecutor.create())
             kwargs.setdefault("dynamic_tree_max_width", width)
             kwargs.setdefault(
-                "tree_node_budget_by_lanes", _tile_node_budgets(self.external_policy, width)
+                "tree_node_budget_by_lanes", _tile_node_budgets(
+                    self.external_policy, width,
+                    getattr(self, "default_ast_multilane_tile_rows", None),
+                )
             )
             for key in ("ast_topology", "ast_adaptive_rows"):
                 if key in self.external_policy:

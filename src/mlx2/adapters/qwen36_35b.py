@@ -491,6 +491,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "tensorfold_cohort_limit",
         "ast_tiles",
         "ast_tile_rows",
+        "ast_multilane_tile_rows",
         "ast_adaptive_rows",
         *EXTERNAL_TARGET_KERNEL_KEYS,
     }
@@ -532,6 +533,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     # B16.  Fixed MTP without the handoff still loses, so this default is only
     # sound while ``mtp_ordinary_handoff`` below stays enabled.
     default_route = "native_mtp"
+    # Lanes sharing a tree round split an 8-row tile (3/1/1 proposal nodes at
+    # B2/B3/B4): expert loads grow with rows on this 3B-active MoE.
+    default_ast_multilane_tile_rows = 8
     # Required by the route above, not merely available to it: see the note on
     # ``default_route``.  Also applies when native MTP is selected explicitly.
     default_mtp_ordinary_handoff_max_width = DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH

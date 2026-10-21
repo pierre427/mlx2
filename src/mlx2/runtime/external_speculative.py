@@ -990,7 +990,7 @@ class ExternalDraftBatchGenerator:
             except (TypeError, ValueError) as exc:
                 raise ValueError("tree node budget widths must be integers") from exc
             if type(nodes) is not int:
-                raise ValueError("tree node budgets must be integers from 3 to 31")
+                raise ValueError("tree node budgets must be integers from 1 to 31")
             normalized_tree_budgets[width] = nodes
         tree_node_budget_by_lanes = normalized_tree_budgets
         expected_widths = set(range(1, dynamic_tree_max_width + 1))
@@ -999,8 +999,8 @@ class ExternalDraftBatchGenerator:
                 "tree_node_budget_by_lanes must declare every enabled tree width"
             )
         # Up to two 16-row tiles per round; a stream holds 32 rows.
-        if any(not 3 <= nodes <= 31 for nodes in tree_node_budget_by_lanes.values()):
-            raise ValueError("tree node budgets must be integers from 3 to 31")
+        if any(not 1 <= nodes <= 31 for nodes in tree_node_budget_by_lanes.values()):
+            raise ValueError("tree node budgets must be integers from 1 to 31")
         ordered_budgets = [
             tree_node_budget_by_lanes[width]
             for width in range(1, dynamic_tree_max_width + 1)
@@ -4053,7 +4053,9 @@ class ExternalDraftBatchGenerator:
                             lanes[0], requested_count, forbidden[0]
                         )
                     else:
-                        self._discard_prelaunched([lane.uid for lane in lanes])
+                        trees = self._adopt_prelaunched_cohort(
+                            lanes, requested_count, forbidden
+                        )
                     if trees is None:
                         tree_options = self._tree_options(count_hits=True)
                         if self._tree_clock is not None:
@@ -7731,9 +7733,88 @@ class ExternalDraftBatchGenerator:
         _bump(self.scheduler_stats, "external_tree_pipelined_drafts")
         return self.draft.finish_tree(record.state, mark=self._tree_clock)
 
+    def _prelaunch_tree_cohort(self, cohort, decisions):
+        """Queue the next round's batched lattices for a multi-lane cohort.
+
+        Lanes are grouped as ``_propose`` groups them (equal draft tails), so
+        each group's lattice is exactly the batched draft the next round
+        would build; it is adopted only if the same lanes return at the same
+        committed boundaries (see ``_adopt_prelaunched_cohort``).
+        """
+
+        self._discard_prelaunched([lane.uid for lane in cohort])
+        if any(
+            lane.ordinary or lane.cancelled or lane.maximum - lane.generated <= 1
+            or (decision.emitted and decision.emitted[-1] in self.stops)
+            or _speculation_parked(lane)
+            for lane, decision in zip(cohort, decisions)
+        ):
+            return
+        groups = {}
+        for lane in cohort:
+            groups.setdefault((int(lane.tail.shape[1]), str(lane.tail.dtype)), []).append(lane)
+        budget = self._tree_node_budget()
+        for lanes in groups.values():
+            try:
+                count = min(budget, min(l.maximum - l.generated - 1 for l in lanes))
+                forbidden = [self._tree_forbidden(lane) for lane in lanes]
+                options = self._tree_options(count_hits=False)
+                snapshots = [
+                    self._snapshot_draft_state(lane.draft_cache, lane.tail) for lane in lanes
+                ]
+                state = self.draft.start_tree(
+                    [lane.anchor for lane in lanes],
+                    self.mx.concatenate([tail for _cache, tail in snapshots], axis=0),
+                    self.draft.batch_caches([cache for cache, _tail in snapshots]),
+                    count,
+                    forbidden_token_ids=forbidden,
+                    **options,
+                )
+                self.mx.async_eval(*state["pending"])
+            except Exception:
+                _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+                continue
+            self._prelaunched[("cohort",) + tuple(lane.uid for lane in lanes)] = SimpleNamespace(
+                tails=[lane.tail for lane in lanes],
+                keys=[
+                    (len(lane.history), lane.anchor, lane.generated, count, tuple(f))
+                    for lane, f in zip(lanes, forbidden)
+                ],
+                state=state,
+                draft_caches=[cache for cache, _tail in snapshots],
+            )
+
+    def _adopt_prelaunched_cohort(self, lanes, count, forbidden):
+        """The queued batched lattice if this exact group returns unchanged."""
+
+        for lane in lanes:
+            # A singleton lattice queued before the lanes joined is stale.
+            if self._prelaunched.pop(lane.uid, None) is not None:
+                _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+        record = self._prelaunched.pop(("cohort",) + tuple(lane.uid for lane in lanes), None)
+        if record is None:
+            return None
+        if (
+            any(tail is not lane.tail for tail, lane in zip(record.tails, lanes))
+            or record.keys != [
+                (len(lane.history), lane.anchor, lane.generated, count, tuple(f))
+                for lane, f in zip(lanes, forbidden)
+            ]
+        ):
+            _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+            return None
+        if self._tree_clock is not None:
+            self._tree_clock("tree_draft_setup")
+        for lane, cache in zip(lanes, record.draft_caches):
+            lane.draft_cache = cache
+        _bump(self.scheduler_stats, "external_tree_pipelined_drafts", len(lanes))
+        return self.draft.finish_tree(record.state, mark=self._tree_clock)
+
     def _discard_prelaunched(self, uids):
-        for uid in uids:
-            if self._prelaunched.pop(uid, None) is not None:
+        uids = set(uids)
+        for key in list(self._prelaunched):
+            members = key[1:] if isinstance(key, tuple) and key[:1] == ("cohort",) else (key,)
+            if uids.intersection(members) and self._prelaunched.pop(key, None) is not None:
                 _bump(self.scheduler_stats, "external_tree_pipeline_discards")
 
     def _walk_tree(self, block, sample_row, *, max_emitted=None):
@@ -11608,6 +11689,8 @@ class ExternalDraftBatchGenerator:
             )
             if tile_started is not None:
                 seconds = time.perf_counter() - tile_started
+                if any(getattr(lane, "external_rounds", 0) < 2 for lane in cohort):
+                    seconds = None          # prompt ingest is not tile cost
                 for block, decision in zip(blocks, decisions):
                     rows = decision.commit_rows or [0]
                     self.tile_budget.observe(
@@ -11622,11 +11705,13 @@ class ExternalDraftBatchGenerator:
             # every round (SPEC-01, packed provider B2-B4).
             if (
                 self.tree_gates["pipeline_draft"]
-                and len(cohort) == 1
                 and callable(getattr(self.draft, "start_tree", None))
                 and not self.pair_context_tokens
             ):
-                self._prelaunch_tree(cohort[0], decisions[0])
+                if len(cohort) == 1:
+                    self._prelaunch_tree(cohort[0], decisions[0])
+                else:
+                    self._prelaunch_tree_cohort(cohort, decisions)
                 if phase is not None:
                     phase("tree_draft_prelaunch")
             else:

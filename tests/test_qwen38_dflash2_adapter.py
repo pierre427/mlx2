@@ -248,7 +248,7 @@ def test_bounded_route_refuses_incompatible_policy(tmp_path, monkeypatch, extra,
     "budgets,error",
     [
         ({"1": 15, "2": 7, "4": 3}, "every enabled tree width"),
-        ({"1": 15, "2": 7, "3": 4, "4": 2}, "integers from 3 to 31"),
+        ({"1": 15, "2": 7, "3": 4, "4": 0}, "integers from 1 to 31"),
         ({"1": 15, "2": 7, "3": 8, "4": 3}, "must not increase"),
     ],
 )

@@ -36,7 +36,7 @@ class _Width:
 class TileBudgetController:
     """Choose proposal nodes per lane from counterfactual acceptance and cost."""
 
-    def __init__(self, *, warmup=6, probe=3, refresh=48, alpha=0.25, margin=1.03):
+    def __init__(self, *, warmup=6, probe=3, refresh=48, alpha=0.25, margin=1.08):
         self.warmup, self.probe, self.refresh = int(warmup), int(probe), int(refresh)
         self.alpha, self.margin = float(alpha), float(margin)
         self._widths: dict[int, _Width] = {}
@@ -87,7 +87,11 @@ class TileBudgetController:
         return mean_y - slope * mean_x, slope
 
     def observe(self, width, nodes, path_ranks, seconds):
-        """Record one lane's round: verified ``nodes``, committed node ranks."""
+        """Record one lane's round: verified ``nodes``, committed node ranks.
+
+        ``seconds=None`` records acceptance only (a lane's first rounds also
+        pay its prompt ingest into the draft plane, which is not tile cost).
+        """
 
         state = self._state(width)
         state.rounds += 1

@@ -35,11 +35,12 @@ class StubDraft:
 
     def start_tree(self, anchors, tail, caches, count, **_):
         self.start_calls += 1
-        return {"pending": [mx.zeros((1,))], "n": count}
+        return {"pending": [mx.zeros((1,))], "n": count, "rows": len(anchors)}
 
     def finish_tree(self, state, mark=None):
         self.finish_calls += 1
-        return [(list(range(state["n"])), [-1] + list(range(state["n"] - 1)))]
+        return [(list(range(state["n"])), [-1] + list(range(state["n"] - 1)))
+                for _ in range(state.get("rows", 1))]
 
     def propose_tree(self, anchors, tail, caches, count, **_):
         self.fresh_calls += 1
@@ -133,3 +134,16 @@ def test_serial_singleton_lanes_adopt_or_count_every_prelaunch(monkeypatch):
         stats["external_tree_pipelined_drafts"] + stats["external_tree_pipeline_discards"]
         == len(starts)
     )
+
+
+@pytest.mark.parametrize("width", [2, 4])
+def test_cohort_prelaunch_is_adopted_by_the_same_group(width):
+    gen = make_gen(width)
+    cohort = [lane(i) for i in range(width)]
+    decisions = [SimpleNamespace(emitted=[7]) for _ in cohort]
+    for _round in range(3):
+        gen._prelaunch_tree_cohort(cohort, decisions)
+        blocks = gen._propose(cohort)
+        assert all(isinstance(b, TreeDraftRow) for b in blocks)
+    assert gen.scheduler_stats["external_tree_pipelined_drafts"] == 3 * width
+    assert gen.scheduler_stats["external_tree_pipeline_discards"] == 0

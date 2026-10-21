@@ -66,3 +66,12 @@ def test_tile_knobs_derive_lane_budgets():
         _tile_node_budgets({"ast_tiles": 3}, 4)
     with pytest.raises(ValueError, match="conflicts"):
         _tile_node_budgets({"ast_tiles": 2, "tree_node_budget_by_lanes": {"1": 15}}, 1)
+
+
+def test_multilane_tile_rows_shrink_shared_rounds_only():
+    from mlx2.adapters.qwen38_27b import _tile_node_budgets
+
+    assert _tile_node_budgets({}, 4, 8) == {1: 15, 2: 3, 3: 1, 4: 1}
+    assert _tile_node_budgets({"ast_multilane_tile_rows": 16}, 4, 8) == {1: 15, 2: 7, 3: 4, 4: 3}
+    with pytest.raises(ValueError, match="multilane"):
+        _tile_node_budgets({"ast_multilane_tile_rows": 2}, 4)

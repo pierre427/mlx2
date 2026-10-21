@@ -742,12 +742,33 @@ def dense_weight_streaming_policy(value) -> dict:
 
 # Selectable mechanisms that read projection or expert storage directly, or
 # bind per-row adapters to it.  None has evidence with streamed weights.
+def install_tensorfold_lane(model):
+    """Route QuantizedLinear calls through TensorFold's tiled lane matmul.
+
+    Packs scales, re-tiles the weights the kernel reads and stacks the
+    z/b/a, k/v and gate/up projection groups.  Process-wide: the patch is
+    on ``nn.QuantizedLinear``.  Returns the lane receipt.
+    """
+    from .runtime.tensorfold_qwen38 import lane_fuse, lane_qmm
+
+    lane_qmm.install(model, tile=True)
+    lane_qmm.enabled = True
+    lane_fuse.enabled = True
+    groups = lane_fuse.build(model)
+    return {
+        "law_id": "tensorfold-lane-qmm-v1+fused-groups",
+        "covered": groups,
+        "uncovered": lane_qmm.uncovered(model),
+        "policy": {"mode": "tensorfold"},
+    }
+
+
 def weight_streaming_refusals(
     *, lane_matmul, sp_qmm, int8_prefill, verify_bitexact, multi_lora, lora_root,
     execution_policy,
 ) -> list:
     reasons = []
-    if lane_matmul in ("crossover", "exact"):
+    if lane_matmul in ("crossover", "exact", "tensorfold"):
         reasons.append(f"lane_matmul={lane_matmul}")
     if sp_qmm:
         reasons.append("sp_qmm")
@@ -3978,8 +3999,8 @@ class ServingEngine:
         self.thinking_steer_hammer = float(thinking_steer_hammer or 0.0)
         self.thinking_defaults_source = "server"
         self.thinking_auto_calibration = bool(thinking_auto_calibration)
-        if lane_matmul not in ("auto", "off", "crossover", "exact"):
-            raise ValueError("lane_matmul must be auto, off, crossover or exact")
+        if lane_matmul not in ("auto", "off", "crossover", "exact", "tensorfold"):
+            raise ValueError("lane_matmul must be auto, off, crossover, exact or tensorfold")
         from .runtime.lane.policy import load_overrides
 
         self.lane_matmul = lane_matmul
@@ -8847,7 +8868,14 @@ class ServingEngine:
                 raise ValueError("sp_qmm and lane_matmul cannot own the same projections")
             from .runtime.lane import available as lane_available
 
-            if self.lane_matmul != "off" and not (
+            if self.lane_matmul == "tensorfold":
+                # TensorFold's own tiled lane matmul and stacked projection
+                # groups (vendored runtime/tensorfold_qwen38), installed in
+                # place of mlx2's lane law: about 14% faster 16-row TensorFold
+                # tiles on uniform 4-bit Qwen3.8-27B, ~15% slower one-row
+                # decode.  Opt-in, unqualified.
+                self.lane_matmul_receipt = install_tensorfold_lane(adapter.model)
+            elif self.lane_matmul != "off" and not (
                 # No lane backend on this device (off the GPU): the automatic
                 # law installs nothing, so it does not inspect the model.
                 self.lane_matmul == "auto" and not lane_available()

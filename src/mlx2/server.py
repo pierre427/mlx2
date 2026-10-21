@@ -6351,7 +6351,7 @@ def build_parser():
     )
     parser.add_argument(
         "--lane-matmul",
-        choices=("auto", "off", "crossover", "exact"),
+        choices=("auto", "off", "crossover", "exact", "tensorfold"),
         default="auto",
         help=(
             "row-invariant lane matmul for small multi-row projection calls "

@@ -394,6 +394,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "tensorfold_cohort_limit",
         "ast_tiles",
         "ast_tile_rows",
+        "ast_multilane_tile_rows",
         "ast_adaptive_rows",
         "minimum_draft_proposals",
         "exact_verification",
@@ -478,8 +479,8 @@ def _tree_node_budgets(value, width):
             lane_width = int(key)
         except (TypeError, ValueError) as exc:
             raise ValueError("tree node budget widths must be integers") from exc
-        if type(nodes) is not int or not 3 <= nodes <= 31:
-            raise ValueError("tree node budgets must be integers from 3 to 31")
+        if type(nodes) is not int or not 1 <= nodes <= 31:
+            raise ValueError("tree node budgets must be integers from 1 to 31")
         normalized[lane_width] = nodes
     if set(normalized) != set(range(1, width + 1)):
         raise ValueError("tree node budgets must declare every enabled tree width")
@@ -489,7 +490,7 @@ def _tree_node_budgets(value, width):
     return normalized
 
 
-def _tile_node_budgets(policy, width):
+def _tile_node_budgets(policy, width, default_multilane_rows=None):
     """Per-lane tree node budgets: explicit, or from the tile knobs.
 
     ``ast_tiles`` (1 or 2) tiles of ``ast_tile_rows`` (4..16) rows are
@@ -500,17 +501,24 @@ def _tile_node_budgets(policy, width):
     """
     tiles = policy.get("ast_tiles", 1)
     rows = policy.get("ast_tile_rows", 16)
+    shared = policy.get("ast_multilane_tile_rows", default_multilane_rows)
     if type(tiles) is not int or not 1 <= tiles <= 2:
         raise ValueError("ast_tiles must be 1 or 2")
     if type(rows) is not int or not 4 <= rows <= 16:
         raise ValueError("ast_tile_rows must be an integer from 4 to 16")
+    if shared is not None and (type(shared) is not int or not 4 <= shared <= 16):
+        raise ValueError("ast_multilane_tile_rows must be an integer from 4 to 16")
     explicit = policy.get("tree_node_budget_by_lanes")
     if explicit is not None:
-        if "ast_tiles" in policy or "ast_tile_rows" in policy:
+        if any(key in policy for key in ("ast_tiles", "ast_tile_rows", "ast_multilane_tile_rows")):
             raise ValueError("tree_node_budget_by_lanes conflicts with ast_tiles/ast_tile_rows")
         return _tree_node_budgets(explicit, width)
+    # Lanes sharing a round may get a smaller tile than a lone lane: an MoE
+    # target pays expert loads per row (Kapitsa verifies 4/2/2 rows per
+    # lane at B2/B3/B4).
     return {
-        lanes: max(3, min(31, tiles * rows // lanes - 1)) for lanes in range(1, width + 1)
+        lanes: max(1, min(31, tiles * (rows if lanes == 1 or shared is None else shared) // lanes - 1))
+        for lanes in range(1, width + 1)
     }
 
 
@@ -644,6 +652,7 @@ NATIVE_MTP_TREE_POLICY_KEYS = frozenset({
     "draft_model", "num_draft", "batch_size_route", "tree_node_budget_by_lanes",
     "tensorfold_cohort_limit", "ast_topology", "pairwise_selection",
     "ast_graft_prompt_lookup", "ast_tiles", "ast_tile_rows", "ast_adaptive_rows",
+    "ast_multilane_tile_rows",
 })
 
 
@@ -1976,7 +1985,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             )
             kwargs.setdefault(
                 "tree_node_budget_by_lanes",
-                _tile_node_budgets(self.external_policy, tree_width),
+                _tile_node_budgets(
+                    self.external_policy, tree_width,
+                    getattr(self, "default_ast_multilane_tile_rows", None),
+                ),
             )
         return ExternalDraftBatchGenerator(
             self.model,
@@ -2129,6 +2141,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 config["tree_node_budget_by_lanes"] = _tile_node_budgets(
                     self.external_policy,
                     _TREE_BATCH_ROUTES[self.external_policy["batch_size_route"]],
+                    getattr(self, "default_ast_multilane_tile_rows", None),
                 )
             return config
         config = {
