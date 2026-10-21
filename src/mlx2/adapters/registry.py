@@ -403,6 +403,12 @@ def _agnes(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.Agnes3FlashAdapter, module.DESCRIPTOR, artifact)
 
 
+def _ling3(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".ling3_flash", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.Ling3FlashAdapter, module.DESCRIPTOR, artifact)
+
+
 def _hy_v3(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".hy_v3", __package__)
     artifact = module.inspect_artifact(path)
@@ -484,6 +490,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "llama": _standard_decoder,
     "mellum": _mellum,
     "agnes": _agnes,
+    "bailing_hybrid": _ling3,
     "hy_v3": _hy_v3,
     "gpt_oss": _gpt_oss,
     "gpt_oss_puzzle": _gpt_oss,

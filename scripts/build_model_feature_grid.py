@@ -19,7 +19,6 @@ import csv
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs" / "research" / "model-feature-grid.tsv"
 DECISIONS = ROOT / "docs" / "research" / "model-feature-decisions.tsv"
@@ -49,6 +48,7 @@ FEATURES = (
     "packed_prefill_serial_equivalence", "prompt_lookup", "prompt_lookup_target_s1",
     "decode_first", "prefill_scheduling", "mixed_prefill_decode",
     "varlen_paged_attention", "row_exact_verify", "tensorfold_tree15",
+    "ast_ubtree_b15",
     "fused_gdn", "fused_gdn_batch_verify", "moe_rhs_pad",
     "moe_nax_gather", "moe_routed_decode", "moe_topk_fold", "moe_grouped_rows",
     "moe_window_row_exact", "attention_window_row_exact",
@@ -85,9 +85,12 @@ def server_flags() -> set[str]:
         if node.func.attr != "add_argument":
             continue
         for arg in node.args:
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                if arg.value.startswith("--"):
-                    flags.add(arg.value)
+            if (
+                isinstance(arg, ast.Constant)
+                and isinstance(arg.value, str)
+                and arg.value.startswith("--")
+            ):
+                flags.add(arg.value)
     return flags
 
 

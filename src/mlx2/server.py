@@ -6676,7 +6676,7 @@ def apply_ast_invocation(args, policy, adapter_resolution):
     )
     tiles = bool(getattr(adapter_type, "ast_tree_tiles", False))
     tiles_refused = None
-    if tiles:
+    if tiles and getattr(adapter_type, "ast_tree_tile_dtype_gate", True):
         from .adapters.tensorfold_dtype_gate import artifact_tree_tile_dtype_issue
 
         tiles_refused = artifact_tree_tile_dtype_issue(args.model)

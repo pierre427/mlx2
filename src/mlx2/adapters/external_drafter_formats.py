@@ -5,6 +5,10 @@ A target adapter whose external route verifies DFlash-backbone heads calls
 The choice is keyed on the artifact's declared ``architectures``, never on a
 model name.  An unreadable or unknown config keeps the DFlash2 format, whose
 own inspector then reports the artifact's defect exactly as before.
+
+Ling's UBTree is a separate format: it uses a DFlash (not DFlash2) backbone
+and target-embedding factorizer MLPs, so it must never enter the DFlash2
+weight schema by fallback.
 """
 
 import json
@@ -51,9 +55,23 @@ def _eagle4():
     )
 
 
+def _ubtree():
+    from . import ubtree
+
+    return SimpleNamespace(
+        name="ubtree",
+        inspect_drafter=ubtree.inspect_drafter,
+        content_revision=ubtree.content_revision,
+        legacy_content_revision=ubtree.legacy_content_revision,
+        validate_runtime_quantization=ubtree.validate_runtime_quantization,
+        load_drafter=ubtree.load_drafter,
+    )
+
+
 _FORMATS = {
     "Qwen3DSparkModel": _dspark,
     "LlamaForCausalLMEagle4": _eagle4,
+    "Ling3UBTreeModel": _ubtree,
 }
 
 
