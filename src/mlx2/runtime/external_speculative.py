@@ -323,6 +323,8 @@ _TREE_GATE_COUNTERS = {
     "pipeline_draft": (
         "external_tree_pipelined_drafts",
         "external_tree_pipeline_discards",
+        "external_tree_early_prelaunches",
+        "external_tree_pipeline_reordered_adoptions",
     ),
 }
 
@@ -663,6 +665,9 @@ class RoundDecision:
     commit_count: int | None = None
     committed_inputs: object = None
     relaxed_positions: tuple[int, ...] = ()
+    # Tree rounds only: the committed feature rows, built once before commit
+    # so the next round's lattice can start from the very same array.
+    committed_tail: object = None
 
 
 def _greedy_proposal_supported(block, laws, drafts, vocab):
@@ -1794,6 +1799,8 @@ class ExternalDraftBatchGenerator:
         # uid -> next round's lattice queued after this round's commit
         # (MLX2_TREE_PIPELINE_DRAFT). Never part of a lane or its snapshot.
         self._prelaunched = {}
+        # (lane, draft plane, its descriptor copy) taken during the tile wait.
+        self._draft_presnapshot = None
         self._open = False
         # Host-time attribution for one external round.  Default off: a
         # perf_counter in this path is cheap but the block exists only for
@@ -7542,19 +7549,22 @@ class ExternalDraftBatchGenerator:
         )
 
     @staticmethod
-    def _tree_forbidden(lane):
+    def _tree_forbidden(lane, history_length=None):
         """The proposer's forbidden ids at the lane's next position.
 
         Only when every processor declares the stateless mask; otherwise
         the lattice stays unmasked and verification alone enforces them.
+        ``history_length`` names a committed length other than the lane's
+        current one (the boundary a pending commit is about to publish).
         """
 
+        length = len(lane.history) if history_length is None else int(history_length)
         ids = set()
         for processor in lane.processors:
             rule = getattr(processor, "forbidden_token_ids_at_length", None)
             if not callable(rule):
                 return ()
-            ids.update(int(token) for token in rule(len(lane.history) + 1))
+            ids.update(int(token) for token in rule(length + 1))
         return tuple(sorted(ids))
 
     def _tree_options(self, *, count_hits):
@@ -7707,6 +7717,76 @@ class ExternalDraftBatchGenerator:
     def _tree_count(self, lane):
         return min(self._tree_node_budget(), lane.maximum - lane.generated - 1)
 
+    def _lattice_submit_option(self):
+        """Queue a prelaunched lattice's draft layers as they are built.
+
+        A prelaunch is evaluated asynchronously anyway; submitting layer by
+        layer lets the device start on the first draft layer while the host
+        still builds the others.  Only drafters that declare the option.
+        """
+        return {"submit": True} if getattr(self.draft, "start_tree_submits", False) else {}
+
+    def _presnapshot_draft(self, cohort):
+        """Copy a B1 lane's draft plane while the host waits on the tile.
+
+        The next lattice runs on a descriptor copy of the draft plane, which
+        nothing in a tree round writes after the proposal is adopted.  Taking
+        the copy here moves it off the path between the tile and the next
+        lattice; ``_start_lattice`` uses it only for the same lane and the
+        same draft-plane object, and copies afresh otherwise.
+        """
+
+        self._draft_presnapshot = None
+        if (
+            len(cohort) != 1
+            or not self.tree_gates["pipeline_draft"]
+            or not callable(getattr(self.draft, "start_tree", None))
+            or self.pair_context_tokens
+        ):
+            return
+        lane = cohort[0]
+        try:
+            draft_cache, _tail = self._snapshot_draft_state(lane.draft_cache, None)
+        except Exception:
+            return
+        self._draft_presnapshot = (lane, lane.draft_cache, draft_cache)
+
+    def _start_lattice(self, lane, anchor, tail, count, forbidden):
+        """Snapshot the draft plane and queue one lattice on the copy."""
+
+        mark = self._tree_clock
+        options = self._tree_options(count_hits=False)
+        if mark is not None:
+            mark("tree_prelaunch_setup")
+        pre = getattr(self, "_draft_presnapshot", None)
+        self._draft_presnapshot = None
+        if pre is not None and pre[0] is lane and pre[1] is lane.draft_cache:
+            draft_cache, tail_copy = pre[2], tail
+        else:
+            draft_cache, tail_copy = self._snapshot_draft_state(lane.draft_cache, tail)
+        if mark is not None:
+            mark("tree_prelaunch_snapshot")
+        state = self.draft.start_tree(
+            [anchor],
+            tail_copy,
+            self.draft.batch_caches([draft_cache]),
+            count,
+            forbidden_token_ids=[forbidden],
+            **options,
+            **self._lattice_submit_option(),
+        )
+        if mark is not None:
+            mark("tree_prelaunch_build")
+        self.mx.async_eval(*state["pending"])
+        if mark is not None:
+            mark("tree_prelaunch_submit")
+        return SimpleNamespace(
+            tail=tail,
+            options=options,
+            state=state,
+            draft_cache=draft_cache,
+        )
+
     def _prelaunch_tree(self, lane, decision):
         """Queue the next round's lattice right after this round's commit.
 
@@ -7728,34 +7808,91 @@ class ExternalDraftBatchGenerator:
         try:
             count = self._tree_count(lane)
             forbidden = self._tree_forbidden(lane)
-            options = self._tree_options(count_hits=False)
-            draft_cache, tail = self._snapshot_draft_state(lane.draft_cache, lane.tail)
-            state = self.draft.start_tree(
-                [lane.anchor],
-                tail,
-                self.draft.batch_caches([draft_cache]),
-                count,
-                forbidden_token_ids=[forbidden],
-                **options,
-            )
-            self.mx.async_eval(*state["pending"])
+            record = self._start_lattice(lane, lane.anchor, lane.tail, count, forbidden)
         except Exception:
             _bump(self.scheduler_stats, "external_tree_pipeline_discards")
             return
-        self._prelaunched[lane.uid] = SimpleNamespace(
-            tail=lane.tail,
-            key=(len(lane.history), lane.anchor, lane.generated, count, forbidden),
-            options=options,
-            state=state,
-            draft_cache=draft_cache,
+        record.key = (len(lane.history), lane.anchor, lane.generated, count, forbidden)
+        self._prelaunched[lane.uid] = record
+
+    def _prelaunch_tree_early(self, lane, decision, features):
+        """Queue the next lattice from a verified, not yet committed round.
+
+        Everything the lattice reads is already fixed by the walk: the new
+        anchor (the last emitted token), the committed feature rows (the
+        accepted path's rows of ``features``, the exact array ``_commit``
+        then publishes as ``lane.tail``) and the draft plane, which a target
+        commit never touches.  Submitting it before the commit lets the
+        drafter run on the device while the host commits and publishes.
+        The record is bound to the post-commit boundary it predicts and is
+        kept only if ``_bind_early_prelaunch`` finds that boundary exactly.
+        """
+
+        rows = decision.commit_rows
+        emitted = decision.emitted
+        if rows is None or not emitted:
+            return None
+        if len(rows) != len(emitted):
+            return None
+        tail = self.mx.take(
+            features[0:1], self.mx.array(list(rows), dtype=self.mx.int32), axis=1
         )
+        decision.committed_tail = tail
+        generated = lane.generated + len(emitted)
+        if (
+            lane.ordinary
+            or lane.cancelled
+            or lane.maximum - generated <= 1
+            or emitted[-1] in self.stops
+        ):
+            return None
+        history = len(lane.history) + len(rows)
+        anchor = emitted[-1]
+        try:
+            count = min(self._tree_node_budget(), lane.maximum - generated - 1)
+            forbidden = self._tree_forbidden(lane, history)
+            record = self._start_lattice(lane, anchor, tail, count, forbidden)
+        except Exception:
+            _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+            return None
+        record.key = (history, anchor, generated, count, forbidden)
+        return record
+
+    def _bind_early_prelaunch(self, lane, decision, record):
+        """Keep an early lattice only at the exact boundary it predicted."""
+
+        self._discard_prelaunched([lane.uid])
+        if (
+            record is not None
+            and not lane.ordinary
+            and not lane.cancelled
+            and record.tail is lane.tail
+            and record.key == (
+                len(lane.history), lane.anchor, lane.generated,
+                self._tree_count(lane), self._tree_forbidden(lane),
+            )
+        ):
+            self._prelaunched[lane.uid] = record
+            _bump(self.scheduler_stats, "external_tree_early_prelaunches")
+            return
+        if record is not None:
+            _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+        self._prelaunch_tree(lane, decision)
 
     def _adopt_prelaunched(self, lane, count, forbidden):
         """Return the queued trees if they belong to this exact boundary."""
 
         record = self._prelaunched.pop(lane.uid, None)
         if record is None:
-            return None
+            # A multi-lane round queues one lattice per equal-tail group; a
+            # lane alone in its group comes back as a singleton group here.
+            group = self._prelaunched.pop(("cohort", lane.uid), None)
+            if group is None:
+                return None
+            record = SimpleNamespace(
+                tail=group.tails[0], key=group.keys[0],
+                state=group.state, draft_cache=group.draft_caches[0],
+            )
         if (
             record.tail is not lane.tail
             or record.key
@@ -7771,56 +7908,138 @@ class ExternalDraftBatchGenerator:
         _bump(self.scheduler_stats, "external_tree_pipelined_drafts")
         return self.draft.finish_tree(record.state, mark=self._tree_clock)
 
-    def _prelaunch_tree_cohort(self, cohort, decisions):
+    def _prelaunch_tree_cohort(self, cohort, decisions, views=None):
         """Queue the next round's batched lattices for a multi-lane cohort.
 
         Lanes are grouped as ``_propose`` groups them (equal draft tails), so
         each group's lattice is exactly the batched draft the next round
         would build; it is adopted only if the same lanes return at the same
         committed boundaries (see ``_adopt_prelaunched_cohort``).
+
+        ``views`` (one per lane: anchor, tail, history and generated
+        lengths) names a boundary a pending commit is about to publish; the
+        records are then returned for ``_bind_early_cohort`` instead of
+        being queued.
         """
 
-        self._discard_prelaunched([lane.uid for lane in cohort])
+        early = views is not None
+        if not early:
+            self._discard_prelaunched([lane.uid for lane in cohort])
+            views = [
+                SimpleNamespace(
+                    anchor=lane.anchor, tail=lane.tail,
+                    history=len(lane.history), generated=lane.generated,
+                )
+                for lane in cohort
+            ]
+        records = {}
         if any(
-            lane.ordinary or lane.cancelled or lane.maximum - lane.generated <= 1
+            lane.ordinary or lane.cancelled or lane.maximum - view.generated <= 1
             or (decision.emitted and decision.emitted[-1] in self.stops)
             or _speculation_parked(lane)
-            for lane, decision in zip(cohort, decisions)
+            for lane, decision, view in zip(cohort, decisions, views)
         ):
-            return
+            return records
         groups = {}
-        for lane in cohort:
-            groups.setdefault((int(lane.tail.shape[1]), str(lane.tail.dtype)), []).append(lane)
+        for lane, view in zip(cohort, views):
+            groups.setdefault(
+                (int(view.tail.shape[1]), str(view.tail.dtype)), []
+            ).append((lane, view))
         budget = self._tree_node_budget()
-        for lanes in groups.values():
+        for members in groups.values():
+            lanes = [lane for lane, _view in members]
             try:
-                count = min(budget, min(l.maximum - l.generated - 1 for l in lanes))
-                forbidden = [self._tree_forbidden(lane) for lane in lanes]
+                count = min(budget, min(l.maximum - v.generated - 1 for l, v in members))
+                forbidden = [self._tree_forbidden(lane, view.history) for lane, view in members]
                 options = self._tree_options(count_hits=False)
                 snapshots = [
-                    self._snapshot_draft_state(lane.draft_cache, lane.tail) for lane in lanes
+                    self._snapshot_draft_state(lane.draft_cache, view.tail)
+                    for lane, view in members
                 ]
                 state = self.draft.start_tree(
-                    [lane.anchor for lane in lanes],
+                    [view.anchor for _lane, view in members],
                     self.mx.concatenate([tail for _cache, tail in snapshots], axis=0),
                     self.draft.batch_caches([cache for cache, _tail in snapshots]),
                     count,
                     forbidden_token_ids=forbidden,
                     **options,
+                    **self._lattice_submit_option(),
                 )
                 self.mx.async_eval(*state["pending"])
             except Exception:
                 _bump(self.scheduler_stats, "external_tree_pipeline_discards")
                 continue
-            self._prelaunched[("cohort",) + tuple(lane.uid for lane in lanes)] = SimpleNamespace(
-                tails=[lane.tail for lane in lanes],
+            records[("cohort",) + tuple(lane.uid for lane in lanes)] = SimpleNamespace(
+                tails=[view.tail for _lane, view in members],
                 keys=[
-                    (len(lane.history), lane.anchor, lane.generated, count, tuple(f))
-                    for lane, f in zip(lanes, forbidden)
+                    (view.history, view.anchor, view.generated, count, tuple(f))
+                    for (_lane, view), f in zip(members, forbidden)
                 ],
                 state=state,
                 draft_caches=[cache for cache, _tail in snapshots],
             )
+        if not early:
+            self._prelaunched.update(records)
+        return records
+
+    def _prelaunch_tree_cohort_early(self, cohort, decisions, features):
+        """Queue a cohort's next lattices from its verified, uncommitted round."""
+
+        views = []
+        for row, (lane, decision) in enumerate(zip(cohort, decisions)):
+            rows, emitted = decision.commit_rows, decision.emitted
+            if rows is None or not emitted or len(rows) != len(emitted):
+                return None
+            tail = self.mx.take(
+                features[row:row + 1],
+                self.mx.array(list(rows), dtype=self.mx.int32),
+                axis=1,
+            )
+            decision.committed_tail = tail
+            views.append(SimpleNamespace(
+                anchor=emitted[-1], tail=tail,
+                history=len(lane.history) + len(rows),
+                generated=lane.generated + len(emitted),
+            ))
+        return self._prelaunch_tree_cohort(cohort, decisions, views)
+
+    def _bind_early_cohort(self, cohort, decisions, records):
+        """Keep early cohort lattices only at the exact boundaries predicted."""
+
+        if not records:
+            self._prelaunch_tree_cohort(cohort, decisions)
+            return
+        self._discard_prelaunched([lane.uid for lane in cohort])
+        lanes = {lane.uid: lane for lane in cohort}
+        budget = self._tree_node_budget()
+        exact = not any(
+            lane.ordinary or lane.cancelled or _speculation_parked(lane)
+            for lane in cohort
+        )
+        for key, record in records.items():
+            members = [lanes[uid] for uid in key[1:]]
+            count = min(budget, min(l.maximum - l.generated - 1 for l in members))
+            if not exact or any(
+                tail is not lane.tail
+                or expected != (
+                    len(lane.history), lane.anchor, lane.generated, count,
+                    tuple(self._tree_forbidden(lane)),
+                )
+                for lane, tail, expected in zip(members, record.tails, record.keys)
+            ):
+                exact = False
+                break
+        if exact:
+            self._prelaunched.update(records)
+            _bump(
+                self.scheduler_stats,
+                "external_tree_early_prelaunches",
+                sum(len(key) - 1 for key in records),
+            )
+            return
+        if records:
+            _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+        self._prelaunch_tree_cohort(cohort, decisions)
 
     def _adopt_prelaunched_cohort(self, lanes, count, forbidden):
         """The queued batched lattice if this exact group returns unchanged."""
@@ -7829,12 +8048,28 @@ class ExternalDraftBatchGenerator:
             # A singleton lattice queued before the lanes joined is stale.
             if self._prelaunched.pop(lane.uid, None) is not None:
                 _bump(self.scheduler_stats, "external_tree_pipeline_discards")
-        record = self._prelaunched.pop(("cohort",) + tuple(lane.uid for lane in lanes), None)
+        uids = tuple(lane.uid for lane in lanes)
+        key = ("cohort",) + uids
+        record = self._prelaunched.pop(key, None)
+        if record is None:
+            # The scheduler rotates its lane order every poll, so the same
+            # group may return in another order: its rows are the same lanes'
+            # independent lattice rows, read back in the group's new order.
+            key = next(
+                (
+                    queued for queued in self._prelaunched
+                    if isinstance(queued, tuple) and queued[:1] == ("cohort",)
+                    and len(queued) == len(key) and set(queued[1:]) == set(uids)
+                ),
+                None,
+            )
+            record = None if key is None else self._prelaunched.pop(key)
         if record is None:
             return None
+        rows = [key[1:].index(uid) for uid in uids]
         if (
-            any(tail is not lane.tail for tail, lane in zip(record.tails, lanes))
-            or record.keys != [
+            any(record.tails[row] is not lane.tail for row, lane in zip(rows, lanes))
+            or [record.keys[row] for row in rows] != [
                 (len(lane.history), lane.anchor, lane.generated, count, tuple(f))
                 for lane, f in zip(lanes, forbidden)
             ]
@@ -7843,10 +8078,13 @@ class ExternalDraftBatchGenerator:
             return None
         if self._tree_clock is not None:
             self._tree_clock("tree_draft_setup")
-        for lane, cache in zip(lanes, record.draft_caches):
-            lane.draft_cache = cache
+        for row, lane in zip(rows, lanes):
+            lane.draft_cache = record.draft_caches[row]
         _bump(self.scheduler_stats, "external_tree_pipelined_drafts", len(lanes))
-        return self.draft.finish_tree(record.state, mark=self._tree_clock)
+        if rows != sorted(rows):
+            _bump(self.scheduler_stats, "external_tree_pipeline_reordered_adoptions")
+        trees = self.draft.finish_tree(record.state, mark=self._tree_clock)
+        return [trees[row] for row in rows]
 
     def _discard_prelaunched(self, uids):
         uids = set(uids)
@@ -8240,6 +8478,8 @@ class ExternalDraftBatchGenerator:
                 lane.rng = committed_rngs[row]
             if decision.commit_rows is None:
                 tail = features[row:row+1,:consumed[row]]
+            elif decision.committed_tail is not None:
+                tail = decision.committed_tail
             else:
                 tail = self.mx.take(
                     features[row:row+1],
@@ -12044,12 +12284,27 @@ class ExternalDraftBatchGenerator:
             raise ValueError("tree15 cohort exceeds its bounded lane limit")
         clock = self._phase_time() if self.round_timing else None
         phase = _PhaseClock(self) if self.round_timing else None
+        if phase is not None:
+            # Wall time between the previous tree round's end and this one's
+            # start: scheduling, response publication, ordinary probes.
+            ended, uids = getattr(self, "_tree_round_ended", None) or (None, None)
+            if ended is not None and uids == [lane.uid for lane in cohort] \
+                    and clock - ended < 1.0:
+                self.round_times["tree_gap"] += clock - ended
+                _bump(
+                    self.scheduler_stats,
+                    "external_phase_tree_gap_ns",
+                    int((clock - ended) * 1e9),
+                )
         tile_started = time.perf_counter() if getattr(self, "tile_budget", None) else None
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         if phase is not None:
             phase("tree_recovery_capture")
         stats_snapshot = self._snapshot_scheduler_stats()
+        if phase is not None:
+            phase("tree_stats_snapshot")
+        budget_backup = None
         self._open = True
         transaction = None
         self._tree_clock = phase
@@ -12062,9 +12317,13 @@ class ExternalDraftBatchGenerator:
                 for lane, block in zip(cohort, blocks)
             ]
             parents = [self._target_tree_parents(block) for block in blocks]
+            if phase is not None:
+                phase("tree_inputs")
             logits, features, transaction = self._target_tree_forward_many(
                 cohort, inputs, parents
             )
+            if phase is not None:
+                phase("tree_target_forward_build")
             batched = [
                 self.tree_gates["batched_laws"]
                 and self._batched_law_contract(lane)
@@ -12082,6 +12341,7 @@ class ExternalDraftBatchGenerator:
                     fences.extend(fence)
                 if phase is not None:
                     phase("tree_target_launch")
+                self._presnapshot_draft(cohort)
                 self.mx.eval(*fences)
                 _bump(
                     self.scheduler_stats,
@@ -12093,6 +12353,7 @@ class ExternalDraftBatchGenerator:
             else:
                 if phase is not None:
                     phase("tree_target_launch")
+                self._presnapshot_draft(cohort)
                 self.mx.eval(logits, features)
                 if phase is not None:
                     phase("tree_target_wait")
@@ -12124,14 +12385,16 @@ class ExternalDraftBatchGenerator:
                 decisions.append(decision)
             if phase is not None:
                 phase("tree_target_law")
-            self._commit(
-                cohort,
-                decisions,
-                features,
-                blocks=blocks,
-                transaction=transaction,
+            pipelined = (
+                self.tree_gates["pipeline_draft"]
+                and callable(getattr(self.draft, "start_tree", None))
+                and not self.pair_context_tokens
             )
             if tile_started is not None:
+                # Observed at the verified boundary, before the commit: the
+                # next lattice's node budget must already be the one the
+                # next round will ask for when it is queued below.
+                budget_backup = self.tile_budget.snapshot()
                 seconds = time.perf_counter() - tile_started
                 if any(getattr(lane, "external_rounds", 0) < 2 for lane in cohort):
                     seconds = None          # prompt ingest is not tile cost
@@ -12143,19 +12406,33 @@ class ExternalDraftBatchGenerator:
                     )
                 self.scheduler_stats["external_tree_tile_budget"] = self.tile_budget.receipt()
             if phase is not None:
-                phase.skip()
+                phase("tree_tile_budget")
+            early = None
+            if pipelined:
+                # The drafter reads nothing the target commit writes; queue
+                # it first so it runs while the host commits and publishes.
+                early = (
+                    self._prelaunch_tree_early(cohort[0], decisions[0], features)
+                    if len(cohort) == 1
+                    else self._prelaunch_tree_cohort_early(cohort, decisions, features)
+                )
+            self._commit(
+                cohort,
+                decisions,
+                features,
+                blocks=blocks,
+                transaction=transaction,
+            )
+            if phase is not None:
+                phase("tree_commit")
             # ``_propose`` adopts a queued lattice only for a singleton group,
             # so a multi-lane cohort's prelaunches were built and thrown away
             # every round (SPEC-01, packed provider B2-B4).
-            if (
-                self.tree_gates["pipeline_draft"]
-                and callable(getattr(self.draft, "start_tree", None))
-                and not self.pair_context_tokens
-            ):
+            if pipelined:
                 if len(cohort) == 1:
-                    self._prelaunch_tree(cohort[0], decisions[0])
+                    self._bind_early_prelaunch(cohort[0], decisions[0], early)
                 else:
-                    self._prelaunch_tree_cohort(cohort, decisions)
+                    self._bind_early_cohort(cohort, decisions, early)
                 if phase is not None:
                     phase("tree_draft_prelaunch")
             else:
@@ -12172,7 +12449,9 @@ class ExternalDraftBatchGenerator:
                 sum(decision.accepted for decision in decisions),
             )
             if clock is not None:
-                self._mark("tree_round", clock)
+                self._tree_round_ended = (
+                    self._mark("tree_round", clock), [lane.uid for lane in cohort]
+                )
                 _bump(self.scheduler_stats, "external_phase_rounds")
         except BaseException:
             if transaction is not None and not transaction.closed:
@@ -12184,9 +12463,12 @@ class ExternalDraftBatchGenerator:
             self.scheduler_stats = stats_snapshot
             self.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
             self._discard_prelaunched([lane.uid for lane in cohort])
+            if budget_backup is not None:
+                self.tile_budget.restore(budget_backup)
             raise
         finally:
             self._tree_clock = None
+            self._draft_presnapshot = None
             self._open = False
 
     def _ordinary_pipeline_eligible(self, cohort, *, following=False):

@@ -1,8 +1,9 @@
 """mlx2 public control-plane contracts."""
 
-from .process_env import apply_process_numerics
+from .process_env import apply_process_numerics, apply_process_runtime_defaults
 
 apply_process_numerics()
+apply_process_runtime_defaults()
 
 from .cache import CacheFingerprint, CacheLease, CacheMiss, CacheOwner
 from .contracts import (

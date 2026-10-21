@@ -638,6 +638,43 @@ def test_lane_pressure_tree_budget_preserves_exact_b4_tokens(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("width", [2, 4])
+def test_early_cohort_lattices_are_bound_and_adopted_with_exact_tokens(monkeypatch, width):
+    # The next lattices are queued before the target commit, bound at the
+    # boundary they predicted and adopted by the next round's groups;
+    # tokens equal the unpipelined reference.
+    prompts = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]][:width]
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    reference = generator(model, draft, completion_batch_size=4, ready_drain="all")
+    reference.insert(prompts, max_tokens=[20] * width,
+                     sampling_configs=[{"sampling_temp": 0.0}] * width)
+    expected, _ = drain(reference)
+
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    candidate = generator(
+        model, draft, completion_batch_size=4, ready_drain="all",
+        dynamic_singleton_tree=True, dynamic_tree_max_width=4,
+        tree_node_budget_by_lanes={1: 15, 2: 7, 3: 4, 4: 3},
+    )
+    starts = []
+    real = draft.start_tree
+    monkeypatch.setattr(draft, "start_tree", lambda *a, **k: starts.append(len(a[0])) or real(*a, **k))
+    candidate.insert(prompts, max_tokens=[20] * width,
+                     sampling_configs=[{"sampling_temp": 0.0}] * width)
+    _install_reference_cohort(candidate, monkeypatch, [])
+    actual, _receipts = drain(candidate)
+
+    assert actual == expected
+    stats = candidate.scheduler_stats
+    assert stats["external_tree_early_prelaunches"] > 0
+    assert len(starts) > 0
+    # Equal-tail groups return in the scheduler's rotated order and lone
+    # lanes as singleton groups; both adopt their queued lattice.
+    assert stats["external_tree_pipelined_drafts"] > 0
+    assert stats["external_tree_pipeline_reordered_adoptions"] > 0
+    assert stats["external_tree_pipeline_discards"] <= 1
+
+
 def test_bounded_tree_candidate_uses_chain_reference_above_four(monkeypatch):
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
     model, draft = tiny(vocab=64, top_k=16, block_size=8)
@@ -1214,21 +1251,24 @@ def test_prelaunch_leaves_committed_draft_plane_untouched(monkeypatch):
     b.insert([[1, 2, 3]], max_tokens=[12], sampling_configs=[{"sampling_temp": 0.0}])
     lane = _started(b)
     seen = []
-    original = b._prelaunch_tree
+    original = b._start_lattice
 
-    def watch(lane, decision):
+    # Every lattice (early, before the commit, or after it) starts here.
+    def watch(lane, anchor, tail, count, forbidden):
         before = (_draft_offsets(lane), lane.draft_cache[0].keys, lane.tail)
-        pending = int(lane.tail.shape[1])
-        original(lane, decision)
+        pending = int(tail.shape[1])
+        record = original(lane, anchor, tail, count, forbidden)
         after = (_draft_offsets(lane), lane.draft_cache[0].keys, lane.tail)
-        seen.append((before, after, b._prelaunched.get(lane.uid), pending))
+        seen.append((before, after, record, pending))
+        return record
 
-    monkeypatch.setattr(b, "_prelaunch_tree", watch)
+    monkeypatch.setattr(b, "_start_lattice", watch)
     while lane.ready:
         b.next()
     b.next()
     assert seen
     assert any(record is not None for _, _, record, _ in seen)
+    assert b.scheduler_stats["external_tree_early_prelaunches"] > 0
     for before, after, record, pending in seen:
         assert before[0] == after[0]
         assert before[1] is after[1] and before[2] is after[2]
@@ -1238,6 +1278,67 @@ def test_prelaunch_leaves_committed_draft_plane_untouched(monkeypatch):
             assert [int(c.offset) for c in record.draft_cache] == [
                 offset + pending for offset in before[0]
             ]
+
+
+def test_draft_presnapshot_is_used_only_for_its_own_lane_and_plane(monkeypatch):
+    # The draft plane is copied during the tile wait; the next lattice uses
+    # that copy only when lane and draft-plane object are unchanged.
+    _tree_env(monkeypatch, pipeline_draft=True)
+    m, d = tiny(vocab=64, top_k=16, block_size=8)
+    b = generator(m, d)
+    b.insert([[1, 2, 3]], max_tokens=[12], sampling_configs=[{"sampling_temp": 0.0}])
+    lane = _started(b)
+    used = []
+    original = b._start_lattice
+
+    def watch(lane, anchor, tail, count, forbidden):
+        pre = b._draft_presnapshot
+        record = original(lane, anchor, tail, count, forbidden)
+        used.append(pre is not None and record.draft_cache is pre[2])
+        assert b._draft_presnapshot is None
+        return record
+
+    monkeypatch.setattr(b, "_start_lattice", watch)
+    while lane.ready:
+        b.next()
+    b.next()
+    assert used and all(used)
+    assert b._draft_presnapshot is None
+    # A copy taken for another draft plane is never used.
+    stale = (lane, object(), object())
+    b._draft_presnapshot = stale
+    record = original(lane, lane.anchor, lane.tail, 3, ())
+    assert record.draft_cache is not stale[2]
+    assert b._draft_presnapshot is None
+
+
+@pytest.mark.parametrize("depth", [0, 5, 15])
+def test_layer_submitted_lattice_is_bitwise_the_unsubmitted_one(depth):
+    # ``submit`` only queues the draft layers early; every lattice output and
+    # the copied draft plane must be bitwise those of the plain build.
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator as G
+
+    m, d = tiny(vocab=64, top_k=16, block_size=8)
+    assert d.start_tree_submits is True
+    prompt = list(range(1, 20))
+    context = taps(m, [prompt[:-(depth + 1)]])
+    tail = taps(m, [prompt])[:, -(depth + 1):]
+    live = d.make_cache()
+    d.append_context(context, live)
+    results = []
+    for submit in (False, True):
+        cache, copy_tail = G._snapshot_draft_state(live, tail)
+        state = d.start_tree([5], copy_tail, d.batch_caches([cache]), 15,
+                             forbidden_token_ids=[(7,)], submit=submit)
+        mx.async_eval(*state["pending"])
+        results.append((d.finish_tree(state), state["pending"], cache))
+    (plain_tree, plain, plain_cache), (tree, pending, submitted_cache) = results
+    assert tree == plain_tree
+    for ours, theirs in zip(pending, plain):
+        np.testing.assert_array_equal(np.asarray(ours), np.asarray(theirs))
+    for ours, theirs in zip(submitted_cache, plain_cache):
+        assert int(ours.offset) == int(theirs.offset)
+        np.testing.assert_array_equal(np.asarray(ours.keys), np.asarray(theirs.keys))
 
 
 @pytest.mark.parametrize("depth", range(16))

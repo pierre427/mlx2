@@ -39,3 +39,23 @@ def test_no_adapter_carries_its_own_tf32_literal():
         and "MLX_ENABLE_TF32" in path.read_text()
     ]
     assert not copies, f"TF32 pinned outside process_env: {copies}"
+
+
+def test_runtime_sync_default_applied_at_import_and_explicit_value_wins():
+    from mlx2.process_env import PROCESS_RUNTIME_DEFAULTS, apply_process_runtime_defaults
+
+    env = {}
+    assert apply_process_runtime_defaults(env) == PROCESS_RUNTIME_DEFAULTS
+    assert env["MLX_METAL_FAST_SYNCH"] == "1"
+    env = {"MLX_METAL_FAST_SYNCH": "0"}
+    assert apply_process_runtime_defaults(env) == {}
+    assert env["MLX_METAL_FAST_SYNCH"] == "0"
+    script = (
+        "import os, sys; os.environ.pop('MLX_METAL_FAST_SYNCH', None); "
+        "import mlx2; assert 'mlx' not in sys.modules; "
+        "print(os.environ['MLX_METAL_FAST_SYNCH'])"
+    )
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                         env={"PYTHONPATH": str(SRC.parent), "PATH": "/usr/bin:/bin"})
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "1"

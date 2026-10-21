@@ -62,6 +62,27 @@ def apply_process_numerics(environ=None) -> dict:
     return applied
 
 
+# Host/device synchronization mechanism, latched by MLX when Metal starts.
+# It never changes a computed bit: MLX_METAL_FAST_SYNCH makes a host wait on
+# device work poll a shared event instead of blocking in Metal's completion
+# wait.  Each blocking wait cost ~0.15 ms of wake-up latency on M5 Max, paid
+# at every host read of a device result (two to three per speculative tree
+# round, plus the ordinary decode's per-token read), so the default is on.
+# An explicit value (``0`` included) is left alone.
+PROCESS_RUNTIME_DEFAULTS = {"MLX_METAL_FAST_SYNCH": "1"}
+
+
+def apply_process_runtime_defaults(environ=None) -> dict:
+    """Set each runtime default that is not already present; return what was set."""
+    target = os.environ if environ is None else environ
+    applied = {}
+    for name, value in PROCESS_RUNTIME_DEFAULTS.items():
+        if name not in target:
+            target[name] = value
+            applied[name] = value
+    return applied
+
+
 def require_process_numerics(owner: str, environ=None) -> None:
     """Refuse an explicit TF32-enabling value a pinned profile would override."""
     target = os.environ if environ is None else environ

@@ -321,7 +321,16 @@ class DFlashDraftModel(nn.Module):
         inputs: mx.array,
         target_hidden: mx.array,
         cache: List[KVCache],
+        *,
+        submit: bool = False,
     ) -> mx.array:
+        """Draft block hidden states.
+
+        ``submit`` queues the projected context and each layer's output for
+        evaluation as soon as its graph is built, so the device starts on
+        the first layer while the host still builds the rest.  It changes
+        when work is submitted, never what is computed.
+        """
         h = self._embed_input_tokens(inputs)
         fold = getattr(self, "fold_policy", None) is not None
         projected_context = self.fc(target_hidden)
@@ -330,8 +339,12 @@ class DFlashDraftModel(nn.Module):
             if fold
             else self.hidden_norm(projected_context)
         )
+        if submit:
+            mx.async_eval(h_ctx)
         for layer, c in zip(self.layers, cache):
             h = layer(h, h_ctx, self.rope, c)
+            if submit:
+                mx.async_eval(h)
         return _fold_rms_norm(self.norm, h) if fold else self.norm(h)
 
     def _embed_input_tokens(self, inputs: mx.array) -> mx.array:

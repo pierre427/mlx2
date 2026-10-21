@@ -716,11 +716,14 @@ def _start_tree(
     forbidden_token_ids=None,
     lattice_positions=16,
     codebooks=None,
+    submit=False,
 ):
     """Queue the lattice graph (draft-context append included) on ``cache``.
 
-    Returns the state ``finish_tree`` evaluates and searches; nothing is
-    evaluated here, so a caller may ``mx.async_eval(*state["pending"])``.
+    Returns the state ``finish_tree`` evaluates and searches.  With
+    ``submit`` the draft layers are queued for evaluation as they are built
+    (the caller then ``mx.async_eval(*state["pending"])`` for the rest);
+    otherwise nothing is evaluated here.
     """
 
     anchors_list = [int(value) for value in anchors]
@@ -740,7 +743,11 @@ def _start_tree(
         ],
         axis=1,
     )
-    features = self._hidden(inputs, hidden, cache)[:, 1:]
+    features = (
+        self._hidden(inputs, hidden, cache, submit=True)
+        if submit
+        else self._hidden(inputs, hidden, cache)
+    )[:, 1:]
     logits = self._logits(features)
     selector = self.candidate_selector
     count = min(selector.top_k, int(logits.shape[-1]))
@@ -829,5 +836,7 @@ def _propose_tree(self, anchors, hidden, cache, max_nodes, *, mark=None, **optio
 
 DFlash2DraftModel.propose_tree = _propose_tree
 DFlash2DraftModel.start_tree = _start_tree
+# ``start_tree(..., submit=True)`` queues the draft layers as they are built.
+DFlash2DraftModel.start_tree_submits = True
 DFlash2DraftModel.finish_tree = _finish_tree
 DFlash2DraftModel.tree_codebooks = tree_codebooks

@@ -33,3 +33,21 @@ def test_counterfactual_tokens_count_only_ranks_below_each_size():
     controller.observe(1, 15, [0, 1, 4, 9], 0.05)
     tokens = controller.receipt()["1"]["tokens_per_round"]
     assert tokens["3"] == 3 and tokens["5"] == 4 and tokens["11"] == 5 and tokens["15"] == 5
+
+
+def test_snapshot_restore_rolls_back_an_observation_and_stays_reusable():
+    controller = TileBudgetController()
+    _drive(controller, cost=lambda n: 0.010 + 0.004 * (n + 1), path_len=2, rounds=20)
+    before = controller.receipt()
+    choice = controller.choose(1, 15)
+    snapshot = controller.snapshot()
+    controller.observe(1, 15, [0, 1, 2], 0.5)
+    controller.observe(2, 7, [0], 0.3)
+    assert controller.receipt() != before
+    controller.restore(snapshot)
+    assert controller.receipt() == before
+    assert controller.choose(1, 15) == choice
+    # The snapshot is independent of the restored state.
+    controller.observe(1, 15, [0], 0.5)
+    controller.restore(snapshot)
+    assert controller.receipt() == before

@@ -106,6 +106,33 @@ class TileBudgetController:
             )
             state.cost_samples[nodes] = state.cost_samples.get(nodes, 0) + 1
 
+    def snapshot(self):
+        """An independent copy of the learned state, for round rollback."""
+
+        return (
+            {
+                width: _Width(
+                    state.rounds, dict(state.tokens), dict(state.samples),
+                    dict(state.cost), dict(state.cost_samples), state.chosen,
+                )
+                for width, state in self._widths.items()
+            },
+            dict(self.decisions),
+        )
+
+    def restore(self, snapshot):
+        """Return to a ``snapshot()``; the snapshot itself stays reusable."""
+
+        widths, decisions = snapshot
+        self._widths = {
+            width: _Width(
+                state.rounds, dict(state.tokens), dict(state.samples),
+                dict(state.cost), dict(state.cost_samples), state.chosen,
+            )
+            for width, state in widths.items()
+        }
+        self.decisions = dict(decisions)
+
     def receipt(self):
         return {
             str(width): {
