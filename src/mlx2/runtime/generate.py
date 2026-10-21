@@ -103,6 +103,40 @@ def bind_generation_thread_stream():
     mx.set_default_stream(stream)
     return stream
 
+
+def prefill_model_forward(model):
+    """The forward a prompt prefill chunk runs through.
+
+    A model may own a distinct prefill entry (``prefill_forward``), as the
+    mlx-vlm wrappers do for their media embeddings; otherwise it is the
+    model call.  An isolated media prefill passes the adapter-validated
+    media kwargs to this forward in one chunk covering the whole uncached
+    prompt but its final token.  The ordinary prompt batch and the
+    prompt-lookup generator's media lanes share this rule.
+    """
+    return getattr(model, "prefill_forward", model)
+
+
+def isolated_media_prefill(model, tokens, cache, prefill_input):
+    """One isolated B=1 media prefill chunk on ``cache`` (evaluated).
+
+    ``tokens`` is a ``[1, n]`` array: every uncached prompt token but the
+    final one.  Sliding windows are trimmed to their bound before the chunk
+    is evaluated, as the ordinary prompt loop does, so a published boundary
+    never keeps a full-prompt-length sliding copy.  Returns the reserved
+    kwarg names that crossed the forward (execution evidence).
+    """
+    if not isinstance(prefill_input, dict) or not prefill_input:
+        raise ValueError("an isolated media prefill needs its media inputs")
+    if _PERSISTENT_DECODE_INPUTS in prefill_input:
+        raise ValueError("persistent decode inputs are not media prefill inputs")
+    if tokens.ndim != 2 or tokens.shape[0] != 1 or tokens.shape[1] < 1:
+        raise RuntimeError("multimodal prefill must run at an isolated B=1 boundary")
+    prefill_model_forward(model)(tokens, cache=cache, **prefill_input)
+    compact_prompt_cache_windows(cache)
+    mx.eval([entry.state for entry in cache])
+    return tuple(sorted(prefill_input))
+
 # A generator may close while an ambiguous native command is still pending.
 # Keep that arena reachable for process lifetime until terminal/teardown proof.
 _NATIVE_ORPHANED_RETIREMENTS = []
@@ -1051,7 +1085,7 @@ class PromptProcessingBatch:
             else:
                 lora_rows = bind_lora_rows(self.model, self.uids)
                 try:
-                    forward = getattr(self.model, "prefill_forward", self.model)
+                    forward = prefill_model_forward(self.model)
                     row_context = getattr(self.model, "prefill_row_context", None)
                     context = (
                         row_context(chunk_lengths, width=n_to_process)

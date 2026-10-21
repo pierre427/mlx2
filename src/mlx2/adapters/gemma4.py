@@ -240,12 +240,14 @@ def _descriptor(variant, adapter_name):
                 Capability.CONTINUOUS_BATCH,
                 Capability.PREFIX_REUSE,
                 Capability.APC_V2,
-                # Text-only target-verified PLD.  Its verify, replay and plain
+                # Target-verified PLD for text.  Its verify, replay and plain
                 # forwards go through ``_Gemma4LogitsModel.pld_verify_forward``,
                 # whose attention consumes mlx2 segmented row masks (global and
-                # wrapped sliding rings); media prefill stays on the ordinary
-                # route (``multimodal_routes``).  With no drafter flag the
-                # server selects it: latched adaptive PLD (capability default).
+                # wrapped sliding rings).  An image or video request on the
+                # PLD server is served with plain decode, no speculation
+                # (``multimodal_plain_decode_routes``).  With no drafter flag
+                # the server selects it: latched adaptive PLD (capability
+                # default).
                 Capability.PROMPT_LOOKUP,
             }
         ),
@@ -290,11 +292,14 @@ def _stamp_fps(timestamps) -> float:
 class _Gemma4Adapter(_MLXVLMAdapter):
     """Shared text/image/video prefill with exact media-bound feature reuse."""
 
-    # Image and video prefill run on the ordinary route only: the prompt
-    # lookup generator refuses media prefill inputs, so a media request on
-    # the (default) prompt-lookup route fails closed before preprocessing.
-    # A multimodal server passes --ordinary.
+    # Image and video requests: the ordinary route serves them natively.
+    # On the (default) prompt-lookup server they are served with plain
+    # decode (Pierre, 2026-10-21): the media prefill runs as on the ordinary
+    # route (one isolated chunk through the model's own embeddings) and the
+    # lane never speculates, every round the ordinary one-token step; the
+    # request's ``media_decode`` receipt says so.  Text keeps PLD.
     multimodal_routes = frozenset({"ordinary"})
+    multimodal_plain_decode_routes = frozenset({"prompt_lookup"})
 
     @staticmethod
     def streaming_detokenizer_class():
@@ -414,8 +419,15 @@ class _Gemma4Adapter(_MLXVLMAdapter):
             },
             "prompt_lookup": {
                 "implemented": True,
-                "scope": "text_only",
+                # Speculation covers text; media is served with plain decode.
+                "scope": "text_speculation",
+                "media": "plain_decode",
+                "media_speculation": "disabled_for_media",
+                "media_receipt": "media_decode",
                 "media_routes": tuple(sorted(type(self).multimodal_routes)),
+                "media_plain_decode_routes": tuple(
+                    sorted(type(self).multimodal_plain_decode_routes)
+                ),
                 "verify": _Gemma4LogitsModel.pld_verify_forward_kind,
                 "default_without_drafter_flag": True,
                 "qualified": False,

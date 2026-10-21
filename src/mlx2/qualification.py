@@ -445,7 +445,12 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-16 (sweep APC-10): dense_int8_prefill defers
             # selection to the serving route receipt instead of claiming
             # False.  Companions from 43fae4ad... must be regenerated.
-            "adapter_contract_sha256": "72bdaed84be3763c025fa1d1bfe6d57a4769b4feaf1ea44d35979a2b1d7bc3f1",
+            # Re-pinned 2026-10-21: 6847b4824 declared prompt lookup with its
+            # segmented verify forward (the pin was left at 72bdaed8...), and
+            # media requests on the PLD route are now served with plain
+            # decode (``multimodal_plain_decode_routes``).  Companions from
+            # 72bdaed8... and 03e4d4e6... must be regenerated.
+            "adapter_contract_sha256": "37e1c72e7f60e613dc27112146e74a670fb7ec436c3aa8fa5601d820a303551b",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma4"],

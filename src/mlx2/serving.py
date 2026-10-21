@@ -105,6 +105,72 @@ def validated_adapter_prefill_inputs(adapter, request, remaining_tokens, prefill
     return result
 
 
+MEDIA_PLAIN_DECODE_REASON = "media_request"
+
+
+def media_route_policy(adapter, route):
+    """How the selected ``route`` serves an image/video request.
+
+    The adapter's contract decides, never a model name.
+    ``multimodal_routes`` names the routes whose own execution covers media
+    prefill and decode.  ``multimodal_plain_decode_routes`` names speculative
+    routes that serve a media request on the same server with speculation
+    disabled for that request: the media prefill runs as on the ordinary
+    route and every decode round is the ordinary one-token step.  An adapter
+    that declares neither leaves every route to its media hook.
+    """
+    native = getattr(adapter, "multimodal_routes", None)
+    plain = frozenset(getattr(adapter, "multimodal_plain_decode_routes", ()) or ())
+    if native is None and route not in plain:
+        return {"route": route, "media": "route_native"}
+    if native is not None and route in native:
+        return {"route": route, "media": "route_native"}
+    if route in plain:
+        return {
+            "route": route,
+            "media": "plain_decode",
+            "speculation": "disabled_for_media",
+            "decode": "ordinary",
+            "reason": MEDIA_PLAIN_DECODE_REASON,
+            "contract": "multimodal_plain_decode_routes",
+        }
+    return {
+        "route": route,
+        "media": "refused",
+        "reason": f"the selected {route} route has no implemented multimodal prefill",
+    }
+
+
+def media_decode_receipt(job, speculation):
+    """The terminal ``media_decode`` receipt of a plain-decode media request.
+
+    ``decode`` is what the lane reports it ran (``ordinary`` only when no
+    round proposed or verified a draft), not the declaration.
+    """
+    policy = job.media_decode
+    if policy is None:
+        return None
+    lane = speculation if isinstance(speculation, Mapping) else {}
+    consumed = list(lane.get("media_prefill_inputs") or ())
+    return {
+        "schema": "mlx2.media-decode.v1",
+        "route": policy["route"],
+        "speculation": lane.get("speculation", "unobserved"),
+        "decode": lane.get("decode", "unobserved"),
+        "reason": policy["reason"],
+        "contract": policy["contract"],
+        "media_prefill": (
+            "isolated_prefill_forward"
+            if consumed
+            else "apcv2_restored"
+            if int(job.cached_tokens or 0) > 0
+            else "unobserved"
+        ),
+        "media_prefill_inputs": consumed,
+        "plain_only_rounds": lane.get("plain_only_rounds", 0),
+    }
+
+
 def adapter_media_checkpoint_position(adapter, request, tokens, *, cached_tokens):
     """Validate an adapter-declared exact post-media APCv2 boundary.
 
@@ -3633,6 +3699,9 @@ class Job:
     lora_residency: str | None = None
     neural_concept_receipt: dict | None = None
     activation_capsule_receipt: dict | None = None
+    # A media request on a route that serves media with plain decode
+    # (``media_route_policy``): the declared policy, receipt at finish.
+    media_decode: dict | None = None
     # The bounded event queue overflowed: None, "pending" (decided at finish,
     # the 429 not yet queued) or "delivered".  The 429 is the only terminal.
     output_overflow: str | None = None
@@ -5322,16 +5391,15 @@ class ServingEngine:
             ):
                 raise ValueError("prefill handoff v1 accepts text-only base-model requests")
             public_request["skip_writing_prefix_cache"] = True
+        media_policy = None
         if has_media:
-            supported_media_routes = getattr(self.adapter, "multimodal_routes", None)
-            if supported_media_routes is not None:
-                selected_route = (self.snapshot.get("settings") or {}).get("route")
-                if selected_route not in supported_media_routes:
-                    from .api_resources import CapabilityUnavailable
+            media_policy = media_route_policy(
+                self.adapter, (self.snapshot.get("settings") or {}).get("route")
+            )
+            if media_policy["media"] == "refused":
+                from .api_resources import CapabilityUnavailable
 
-                    raise CapabilityUnavailable(
-                        f"the selected {selected_route} route has no implemented multimodal prefill"
-                    )
+                raise CapabilityUnavailable(media_policy["reason"])
             prepare = getattr(self.adapter, "prepare_multimodal_request", None)
             if not callable(prepare):
                 from .api_resources import CapabilityUnavailable
@@ -5412,6 +5480,9 @@ class ServingEngine:
         job = Job(
             public_request, tenant_id=str(tenant_id or "default"), fault=fault
         )
+        if media_policy is not None and media_policy["media"] == "plain_decode":
+            job.media_decode = media_policy
+            count_add(self.counts, "media_plain_decode_requests", 1)
         if lora is not None:
             job.lora_name, job.lora_fingerprint = lora
         if handle is not None:
@@ -10942,6 +11013,15 @@ class ServingEngine:
                     )
                     if self.qualification_state == "qualified"
                     else [],
+                    # How this route serves image/video requests (adapter
+                    # contract): natively, with plain decode, or refused.
+                    "media_route": (
+                        media_route_policy(adapter, settings.get("route"))
+                        if callable(
+                            getattr(adapter, "prepare_multimodal_request", None)
+                        )
+                        else None
+                    ),
                     "qualification": self.qualification_state,
                     **(
                         {"adaptive_profile": dict(self.adaptive_profile_binding)}
@@ -12947,6 +13027,10 @@ class ServingEngine:
                             sampling_config["target_only_plain_fallback"] = True
                         if prompt_lookup and job.prompt_lookup_span is not None:
                             sampling_config["memory_max_draft"] = job.prompt_lookup_span
+                        if prompt_lookup and job.media_decode is not None:
+                            # Cold or warm (media restored from APCv2), the
+                            # lane never speculates: plain decode for media.
+                            sampling_config["plain_decode_reason"] = job.media_decode["reason"]
                         if job.request.get("batch_cohort") is not None:
                             sampling_config["batch_cohort"] = {
                                 "tenant_id": job.tenant_id,
@@ -14373,6 +14457,16 @@ class ServingEngine:
                                        if job.token_trace is not None else {}),
                                     "mtp": response.mtp_receipt,
                                     "speculation": getattr(response, "speculative_receipt", None),
+                                    **(
+                                        {
+                                            "media_decode": media_decode_receipt(
+                                                job,
+                                                getattr(response, "speculative_receipt", None),
+                                            )
+                                        }
+                                        if job.media_decode is not None
+                                        else {}
+                                    ),
                                     "spomin_live_surgery": job.spomin_receipt,
                                     "prefill_chunk": job.prefill_chunk_receipt,
                                     "approximate_kv": job.approximate_kv_receipt,

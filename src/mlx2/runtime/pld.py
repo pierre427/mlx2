@@ -27,11 +27,13 @@ from .cow_cache import (
     snapshot_recovery_descriptors,
 )
 from .generate import (
+    _PERSISTENT_DECODE_INPUTS,
     ALLOCATOR_RECLAIM_STEP_INTERVAL,
     GenerationBatch,
     StopSequenceMatcher,
     _crossed_counter_interval,
     generation_stream,
+    isolated_media_prefill,
 )
 from .models import cache as cache_module
 from .models.cache import CacheList, KVCache
@@ -380,6 +382,27 @@ class _Lane:
     source_stats: dict = field(default_factory=dict)
     apcv2_source_segments: int = 0
     recent_source_segments: int = 0
+    # Speculation is off for this lane's whole life (a media request): no
+    # lookup, no probe, no verify cohort, no re-latch.  Each round is the
+    # ordinary one-token step on the lane's own caches.  The value is the
+    # receipt's reason (``plain_decode_reason``); None for a PLD lane.
+    plain_only: str | None = None
+    # Adapter-validated media kwargs for the lane's isolated prefill chunk,
+    # dropped once that forward has evaluated.
+    prefill_input: dict | None = None
+    # The lane carries media state: a text re-prefill cannot rebuild it.
+    media: bool = False
+    consumed_prefill_inputs: tuple = ()
+    plain_only_rounds: int = 0
+
+
+# Per-lane override: the reason this lane decodes plain for its whole life.
+# Serving sets it for a media request on a route whose adapter declares
+# media plain decode (``multimodal_plain_decode_routes``), cold or warm; a
+# lane admitted with media prefill inputs is plain-only whether or not it is
+# set.
+PLAIN_DECODE_REASON = "plain_decode_reason"
+MEDIA_REQUEST = "media_request"
 
 
 class PromptLookupBatchGenerator:
@@ -748,6 +771,11 @@ class PromptLookupBatchGenerator:
             "pld_recovery_checkpoint_failures": 0,
             "pld_recovery_full_rebuilds": 0,
             "pld_model_verify_forwards": 0,
+            # Lanes admitted plain-only (media), their media prefill
+            # forwards, and the ordinary one-token rounds they ran.
+            "pld_plain_only_lanes": 0,
+            "pld_media_prefills": 0,
+            "pld_plain_only_rounds": 0,
             "target_max_width": 1,
         }
         from .adaptive_policy import DecodeTimeFairness
@@ -816,10 +844,18 @@ class PromptLookupBatchGenerator:
         state_boundaries = aligned(
             "state_boundaries", state_boundaries, [()] * count
         )
-        if any(value is not None for value in prefill_inputs or ()):
-            raise ValueError(
-                "multimodal and neural-concept prefill are unavailable on prompt lookup"
-            )
+        for value in prefill_inputs:
+            # Media prefill is accepted only as a plain-only lane (below).
+            # Concept and activation memory acts on decode rows, which a
+            # speculative route would verify, so it stays on ordinary.
+            if value is None:
+                continue
+            if not isinstance(value, dict) or not value:
+                raise ValueError("prompt lookup media prefill inputs must be a mapping")
+            if _PERSISTENT_DECODE_INPUTS in value or "deep_concept_memory" in value:
+                raise ValueError(
+                    "neural-concept and activation inputs are unavailable on prompt lookup"
+                )
         if any(positions for positions in apc_interior_positions or ()):
             raise ValueError("APCv2 interior checkpoints are unavailable on prompt lookup")
         if any(bounds for bounds in state_boundaries or ()):
@@ -848,31 +884,45 @@ class PromptLookupBatchGenerator:
         # Every lane's refusals run before any lane is built or any caller
         # cache is touched, so a refused batch leaves those caches as given.
         admitted = []
-        for prompt, maximum, prompt_cache, prefix, overrides, source_scope in zip(
+        for prompt, maximum, prompt_cache, prefix, overrides, source_scope, media in zip(
             prompts,
             max_tokens,
             caches,
             all_tokens,
             prompt_lookup_configs,
             pld_source_scopes,
+            prefill_inputs,
             strict=True,
         ):
             prompt = [int(token) for token in prompt]
             prefix = [int(token) for token in prefix]
             if not prompt or int(maximum) <= 0:
                 raise ValueError("prompt lookup requires a nonempty tail and output budget")
+            if media is not None and (prefix or len(prompt) < 2):
+                # As on the ordinary route: media inputs arrive only with a
+                # cold prompt, prefilled in one chunk before its final token.
+                raise ValueError(
+                    "prompt lookup media prefill needs a cold prompt of at least two tokens"
+                )
             prompt_cache = prompt_cache or cache_module.make_prompt_cache(self.model)
             _validate_cache(prompt_cache)
             overrides = dict(overrides)
             config = {**overrides, **self.validate_lane_policy(self.config, overrides)}
+            plain_reason = config.get(PLAIN_DECODE_REASON)
+            if plain_reason is not None and (
+                not isinstance(plain_reason, str) or not plain_reason
+            ):
+                raise ValueError("prompt lookup plain_decode_reason must be a nonempty string")
+            if media is not None and plain_reason is None:
+                plain_reason = MEDIA_REQUEST
             if config.get("recent_committed_segments", False) and source_scope is None:
                 raise ValueError(
                     "recent committed PLD segments require an APCv2-bound source scope"
                 )
-            admitted.append((prompt, prefix, prompt_cache, config))
+            admitted.append((prompt, prefix, prompt_cache, config, plain_reason, media))
         staged = []
         next_uid = self.next_uid
-        for (prompt, prefix, prompt_cache, config), maximum, sampler, processors, matcher, source_scope, apc_ledger in zip(
+        for (prompt, prefix, prompt_cache, config, plain_reason, media), maximum, sampler, processors, matcher, source_scope, apc_ledger in zip(
             admitted,
             max_tokens,
             samplers,
@@ -980,7 +1030,7 @@ class PromptLookupBatchGenerator:
                     one_way_handoff=config.get("cost_one_way_handoff", False),
                     lane_uid=uid,
                     owner_scope=source_scope,
-                ) if config.get("cost_aware_admission", False) else None),
+                ) if config.get("cost_aware_admission", False) and plain_reason is None else None),
                 source_scope=source_scope,
                 source_stats={
                     kind: {"cycles": 0, "proposed": 0, "accepted": 0}
@@ -1002,19 +1052,62 @@ class PromptLookupBatchGenerator:
             )
             if lane.cost_latch is not None:
                 lane.ordinary = True
+            if plain_reason is not None:
+                lane.plain_only = plain_reason
+                lane.ordinary = True
+                lane.stats.latched = True
+                lane.prefill_input = dict(media) if media is not None else None
+                # A warm media request restored its media state from APCv2.
+                lane.media = media is not None or plain_reason == MEDIA_REQUEST
             lane.matcher_state = matcher.make_state()
             staged.append(lane)
         # Batch admission is atomic: no lane becomes schedulable, and no
         # caller cache is armed, until every lane has passed validation and
         # construction.
         for lane in staged:
-            _set_ordinary_b1_mask(lane.cache, lane.cost_latch is not None)
+            _set_ordinary_b1_mask(lane.cache, self._ordinary_b1_lane(lane))
+        self.scheduler_stats["pld_plain_only_lanes"] += sum(
+            lane.plain_only is not None for lane in staged
+        )
         self.lanes.update((lane.uid, lane) for lane in staged)
         self.next_uid = next_uid
         return [lane.uid for lane in staged]
 
+    @staticmethod
+    def _ordinary_b1_lane(lane):
+        """Lanes whose plain rounds take ordinary's B=1 target arithmetic."""
+        return lane.cost_latch is not None or lane.plain_only is not None
+
+    def _media_prefill(self, lane):
+        """The lane's isolated media prefill: one chunk, the ordinary rule.
+
+        The whole prompt but its final token runs through the model's
+        prefill forward with the adapter-validated media kwargs
+        (``isolated_media_prefill``, shared with the ordinary prompt batch),
+        so the vision/video embeddings are the model's own, computed once.
+        """
+        inputs = [lane.remaining.popleft() for _ in range(len(lane.remaining) - 1)]
+        with mx.stream(generation_stream):
+            consumed = isolated_media_prefill(
+                self.model,
+                mx.array([inputs], dtype=mx.uint32),
+                lane.cache,
+                lane.prefill_input,
+            )
+        lane.prefill_input = None
+        lane.consumed_prefill_inputs = consumed
+        mx.clear_cache()
+        lane.history.extend(inputs)
+        self.scheduler_stats["pld_prefill_rounds"] += 1
+        self.scheduler_stats["pld_media_prefills"] += 1
+        cache_module.record_state_checkpoints(
+            lane.cache, [len(lane.history)], force=True
+        )
+
     def _prefill(self, lane, *, contended=False):
-        if len(lane.remaining) > 1:
+        if lane.prefill_input is not None and len(lane.remaining) > 1:
+            self._media_prefill(lane)
+        elif len(lane.remaining) > 1:
             total = len(lane.history) + len(lane.remaining)
             step = (
                 prompt_length_prefill_step(total, maximum=self.prefill_step)
@@ -1079,6 +1172,9 @@ class PromptLookupBatchGenerator:
             progress=progress,
             end_of_prompt=done,
             end_of_segment=done,
+            # Execution evidence, as the ordinary prompt response reports it:
+            # the media kwargs that crossed this lane's evaluated forward.
+            consumed_prefill_inputs=lane.consumed_prefill_inputs if done else (),
         )
 
     def _freeze_cache(self, cache):
@@ -1113,6 +1209,11 @@ class PromptLookupBatchGenerator:
 
     def _arm_lane_speculation(self, lane):
         lane.hybrid_rows = self._hybrid(lane)
+        if lane.plain_only is not None:
+            # No rollback epoch and no verify cohort: the lane never
+            # speculates, so its caches stay the ordinary B1 caches.
+            lane.batched = False
+            return
         # An explicit rotating-replay policy selects that per-lane transaction.
         lane.batched = (
             self.batched_verify
@@ -1205,10 +1306,15 @@ class PromptLookupBatchGenerator:
             self._arm_lane_speculation(lane)
             tokens = list(lane.history[boundary:]) + list(committed_inputs)
         else:
+            if lane.media:
+                # A text re-prefill would drop the media embeddings.
+                raise PromptLookupLaneFailure(
+                    lane.uid, "media lane has no restorable committed checkpoint"
+                )
             self.scheduler_stats["pld_recovery_full_rebuilds"] += 1
             lane.cache = cache_module.make_prompt_cache(self.model)
             tokens = list(lane.history) + list(committed_inputs)
-        _set_ordinary_b1_mask(lane.cache, lane.cost_latch is not None)
+        _set_ordinary_b1_mask(lane.cache, self._ordinary_b1_lane(lane))
         # The committed inputs are the tail of ``tokens``.  Earlier generated
         # positions (after an older checkpoint, or in a full re-prefill) are
         # replayed unsteered; this is the last-resort path after a failed
@@ -1325,9 +1431,13 @@ class PromptLookupBatchGenerator:
             except RotatingReplayError:
                 # Refused rounds keep the exact copy snapshot below.
                 self.scheduler_stats["pld_rotating_replay_refusals"] += 1
+        plain_only = lane.plain_only is not None
+        if plain_only and (proposal or lane.speculation_started):
+            raise RuntimeError("a plain-only prompt-lookup lane cannot speculate")
         # A proposal-free round verifies only the anchor, which is always
         # consumed, so its rotating rings need neither transaction nor copy.
-        snapshots = _snapshot(
+        # A plain-only lane never rolls back: no snapshot at all.
+        snapshots = None if plain_only else _snapshot(
             lane.cache,
             skip_rotating=transaction is not None
             or (bool(lane.rotating) and not proposal),
@@ -1345,8 +1455,13 @@ class PromptLookupBatchGenerator:
                 taps.steer = steer
             try:
                 with mx.stream(generation_stream):
-                    logits = self._target_forward(
-                        mx.array([inputs], dtype=mx.uint32), lane.cache
+                    # A plain-only lane's round is the ordinary one-token
+                    # step: the model call, never a verify forward.
+                    block = mx.array([inputs], dtype=mx.uint32)
+                    logits = (
+                        self.model(block, cache=lane.cache)
+                        if plain_only
+                        else self._target_forward(block, lane.cache)
                     )[0]
                     prepared = self._prepare_rows(lane, logits, proposal)
                     mx.eval(logits, self._prepared_arrays([prepared]))
@@ -1369,9 +1484,13 @@ class PromptLookupBatchGenerator:
             if transaction is not None:
                 with suppress(Exception):
                     transaction.rollback()
-            with suppress(Exception):
-                _rewind(lane.cache, snapshots)
+            if snapshots is not None:
+                with suppress(Exception):
+                    _rewind(lane.cache, snapshots)
             raise
+        if plain_only:
+            lane.plain_only_rounds += 1
+            self.scheduler_stats["pld_plain_only_rounds"] += 1
         if consumed < len(inputs):
             self.scheduler_stats["pld_rollbacks"] += 1
             _rewind(lane.cache, snapshots)
@@ -1907,7 +2026,7 @@ class PromptLookupBatchGenerator:
         deferred = bool(lane.config.get("deferred_admission", False))
         # A lane the adaptive gate delatched re-probes like a deferred one;
         # without this the latch was one-way and ``reprobe_at`` dead.
-        probing = (
+        probing = lane.plain_only is None and (
             (deferred or (
                 cost is None
                 and getattr(getattr(lane, "stats", None), "admission_delatches", 0) > 0
@@ -2217,6 +2336,21 @@ class PromptLookupBatchGenerator:
         if cost is not None:
             receipt["cost_latch"] = cost.receipt()
             receipt["cost_width1_cohort_splits"] = lane.cost_width1_cohort_splits
+        if lane.plain_only is not None:
+            # Speculation was off for this whole request: every round was the
+            # ordinary one-token step on the lane's own B1 caches.
+            receipt["speculation"] = (
+                "disabled_for_media" if lane.media else "disabled"
+            )
+            receipt["decode"] = (
+                "ordinary"
+                if not lane.verify_path_rounds and not lane.stats.retrieval_proposed
+                else "speculative"
+            )
+            receipt["plain_decode_reason"] = lane.plain_only
+            receipt["plain_only_rounds"] = lane.plain_only_rounds
+            if lane.consumed_prefill_inputs:
+                receipt["media_prefill_inputs"] = list(lane.consumed_prefill_inputs)
         if finish_reason:
             receipt["ordinary_b1_mask_calls"] = _ordinary_b1_mask_calls(lane.cache)
         if finish_reason and lane.speculation_started:

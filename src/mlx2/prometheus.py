@@ -445,6 +445,8 @@ _ENGINE_EVENTS = {
     "minicpmo_vision_slices": ("multimodal", "minicpmo_vision_slice"),
     "minicpmo_audio_chunks": ("multimodal", "minicpmo_audio_chunk"),
     "multimodal_apcv2_boundary_misses": ("multimodal", "apcv2_boundary_miss"),
+    # Media requests a speculative route served with plain decode.
+    "media_plain_decode_requests": ("multimodal", "plain_decode_request"),
     "output_audio_completed": ("output_audio", "completed"),
     "output_audio_failed": ("output_audio", "failed"),
     "output_audio_requests": ("output_audio", "request"),
