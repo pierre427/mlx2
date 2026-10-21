@@ -47,6 +47,7 @@ def _adapter_classes():
     from mlx2.adapters.gpt_oss import GptOssAdapter, GptOssPuzzleAdapter
     from mlx2.adapters.granite_swa import GraniteSWAAdapter
     from mlx2.adapters.lfm25_moe import LFM25MoEAdapter
+    from mlx2.adapters.flint import FlintAdapter
     from mlx2.adapters.xing import XingAdapter
 
     return {
@@ -67,6 +68,7 @@ def _adapter_classes():
         "gpt_oss_puzzle": GptOssPuzzleAdapter,
         "granitemoe_swa": GraniteSWAAdapter,
         "lfm2_moe": LFM25MoEAdapter,
+        "flint": FlintAdapter,
     }
 
 
@@ -232,6 +234,7 @@ EXPECTED = {
     "gpt_oss": {"general": dict(temperature=1.0)},
     "gpt_oss_puzzle": {"general": dict(temperature=1.0)},
     "granitemoe_swa": {"general": dict(temperature=1.0)},
+    "flint": {"general": dict(temperature=1.0, top_p=0.95, top_k=20)},
     "lfm2_moe": {
         "general": dict(
             temperature=0.1,

@@ -34,13 +34,14 @@ VARIANTS = {
     "laguna": ("xs21", "s21"),
     "nemotron_h": ("super", "lightning"),
     "qwen4_exp": ("base", "flash-next"),
+    "flint": ("40b-a2.5b",),
 }
 
 # Features that are selected through execution policy or adapter configuration
 # rather than a dedicated command-line switch. This is a review vocabulary,
 # not a statement that every registered model implements each feature.
 FEATURES = (
-    "apc_v2", "apc_interior_checkpoints", "apc_junction_checkpoints",
+    "ordinary_reference", "apc_v2", "apc_interior_checkpoints", "apc_junction_checkpoints",
     "apc_rolling_checkpoints", "apc_session_persistence", "tools",
     "vision_input", "video_input", "audio_input", "native_mtp",
     "mtp_ordinary_handoff", "adaptive_mtp_depth", "self_mtp_copy_draft",
