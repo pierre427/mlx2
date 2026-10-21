@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 
+from .external_draft_policy import ExternalDraftAdapterMixin
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..output import callable_tools
 from ..process_env import (
@@ -200,16 +201,27 @@ def configure_environment() -> dict[str, str]:
     return profile
 
 
-def _validate_execution_policy(execution_policy) -> None:
-    """Reject unsupported GPT-OSS routes before artifact or tensor access."""
+def _validate_execution_policy(execution_policy) -> dict:
+    """Reject unsupported GPT-OSS routes before artifact or tensor access.
+
+    The only external policy is the AST tree-tile route with the model-free
+    prompt-lookup drafter (``--ast`` writes it); its knobs are validated
+    here and its tile defaults filled.
+    """
     if execution_policy in (None, {}):
-        return
+        return {}
     if not isinstance(execution_policy, dict):
         raise TypeError("GPT-OSS execution policy must be an object")
+    from .qwen38_27b import PROMPT_LOOKUP_DRAFT_NAMES, _native_mtp_tree_policy
+
+    if execution_policy.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES:
+        if execution_policy.get("ast_graft_prompt_lookup"):
+            raise ValueError("GPT-OSS prompt-lookup tiles have no base drafter to graft onto")
+        return _native_mtp_tree_policy(execution_policy)
     if execution_policy.get("draft_model"):
         raise ValueError(
-            "GPT-OSS external drafting is not implemented: no compatible "
-            "artifact-bound drafter contract is declared"
+            "GPT-OSS external drafting is implemented for the prompt-lookup "
+            "tree-tile drafter only (draft_model \"prompt_lookup\")"
         )
     if execution_policy.get("proposal_composition") not in (None, False):
         raise ValueError(
@@ -217,13 +229,19 @@ def _validate_execution_policy(execution_policy) -> None:
             "which is not implemented"
         )
     raise ValueError(
-        "GPT-OSS supports ordinary decode and request-scoped prompt lookup; "
-        "it has no adapter execution-policy overrides"
+        "GPT-OSS supports ordinary decode, request-scoped prompt lookup and "
+        "prompt-lookup AST tiles; it has no other execution-policy overrides"
     )
 
 
-class _GptOssOrdinaryAdapter:
+class _GptOssOrdinaryAdapter(ExternalDraftAdapterMixin):
     default_route = "ordinary"
+    # AST tree tiles on the attention-only target (--ast).
+    ast_tree_tiles = True
+    attention_tree_tiles = True
+    EXTERNAL_DEFAULT_NUM_DRAFT = 15
+    EXTERNAL_ROUTE_TAG = "external-gpt-oss-ast-tiles-v1"
+    EXTERNAL_PROFILE = "gpt-oss-apcv2-ast-prompt-lookup"
     expected_type: str
     # Whether the model answers well when the prompt opens the final channel
     # directly, skipping analysis.  Stock GPT-OSS does; the NAS-pruned Puzzle
@@ -241,7 +259,9 @@ class _GptOssOrdinaryAdapter:
     def _init_gpt_oss(self, model_path: str, *, execution_policy=None):
         from .process_globals import claim_stock_moe
 
-        _validate_execution_policy(execution_policy)
+        external_policy = _validate_execution_policy(execution_policy)
+        self.external_policy = {}
+        self.draft_model = None
         artifact = inspect_artifact(model_path, expected=self.expected_type)
         self.identity = artifact["identity"]
         self.descriptor = descriptor_for(self.expected_type)
@@ -299,6 +319,18 @@ class _GptOssOrdinaryAdapter:
         self.tokenizer = TokenizerWrapper(tokenizer, detokenizer_class=BPEStreamingDetokenizer,
                                           eos_token_ids=eos_ids)
         self.max_context = int(config["max_position_embeddings"])
+        if external_policy:
+            from ..runtime.drafters.prompt_lookup_draft import load_prompt_lookup_drafter
+            from .qwen38_27b import _prompt_lookup_record
+
+            self.external_policy = external_policy
+            record = _prompt_lookup_record(self.external_policy, self.identity["fingerprint"])
+            self.identity = {
+                **self.identity,
+                "draft_revision": record["draft_revision"],
+                "target_revision": record["target_revision"],
+            }
+            self._bind_external_drafter(record, load_prompt_lookup_drafter, self.descriptor)
 
     def thinking_enabled(self, request: dict) -> bool:
         """Whether this chat request shows the analysis channel.
@@ -405,6 +437,8 @@ class _GptOssOrdinaryAdapter:
         return f"{self.expected_type}-apcv2-ordinary"
 
     def execution_config(self, *, max_lanes, prefill_step):
+        if getattr(self, "draft_model", None) is not None:
+            return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
         return {"persistent": True, "num_draft": 0, "rate_gate": False,
                 "prefill_step_size": prefill_step, "segment_aware_live_tip": False,
                 "segment_aware_cohort_size": max_lanes}
@@ -440,11 +474,12 @@ class _GptOssOrdinaryAdapter:
                 "observation_authority": "speculative_route_receipt",
             },
             "external_draft": {
-                "implemented": False,
+                "implemented": True,
                 "qualified": False,
-                "selected": False,
+                "selected": getattr(self, "draft_model", None) is not None,
                 "observed_used": False,
-                "refusal": "no_compatible_artifact_bound_drafter_contract",
+                "drafters": ["prompt_lookup_tree_tiles"],
+                "tree_target": "attention_tree_v1",
             },
             "proposal_composition": {
                 "implemented": False,

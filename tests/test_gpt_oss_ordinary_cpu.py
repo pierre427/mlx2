@@ -108,8 +108,10 @@ def test_ordinary_descriptors_and_cache_geometry(tmp_path, puzzle):
 def test_execution_policy_refuses_unimplemented_routes_before_artifact_load():
     _validate_execution_policy(None)
     _validate_execution_policy({})
-    with pytest.raises(ValueError, match="external drafting is not implemented"):
+    with pytest.raises(ValueError, match="prompt-lookup tree-tile drafter only"):
         GptOssAdapter("/missing", execution_policy={"draft_model": "/draft"})
+    tiles = _validate_execution_policy({"draft_model": "prompt_lookup"})
+    assert tiles["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
     with pytest.raises(ValueError, match="proposal composition requires"):
         GptOssAdapter(
             "/missing", execution_policy={"proposal_composition": {"prompt_lookup": True}}
@@ -135,7 +137,9 @@ def test_capability_receipts_keep_ordinary_and_request_scoped_paths_distinct(ada
     assert features["prompt_lookup"]["implemented"] is True
     assert features["prompt_lookup"]["selected"] is None
     assert features["prompt_lookup"]["selection"] == "request_scoped"
-    assert features["external_draft"]["implemented"] is False
+    # AST tree tiles with the prompt-lookup drafter: implemented, unselected.
+    assert features["external_draft"]["implemented"] is True
+    assert features["external_draft"]["selected"] is False
     assert features["proposal_composition"]["implemented"] is False
 
 

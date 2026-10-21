@@ -1125,6 +1125,23 @@ class ExternalDraftAdapterMixin:
             if type(enabled) is not bool:
                 raise ValueError("ast_physical_target must be boolean")
             kwargs.setdefault("ast_physical_target", enabled)
+        if getattr(self, "attention_tree_tiles", False) and self.external_policy.get(
+            "batch_size_route"
+        ):
+            # AST tree tiles on an attention-only target (generic executor).
+            from ..runtime.attention_tree_executor import AttentionTreeExecutor
+            from .qwen38_27b import _TREE_BATCH_ROUTES, _tile_node_budgets
+
+            width = _TREE_BATCH_ROUTES[self.external_policy["batch_size_route"]]
+            kwargs.setdefault("dynamic_singleton_tree", True)
+            kwargs.setdefault("target_tree_executor_provider", AttentionTreeExecutor.create())
+            kwargs.setdefault("dynamic_tree_max_width", width)
+            kwargs.setdefault(
+                "tree_node_budget_by_lanes", _tile_node_budgets(self.external_policy, width)
+            )
+            for key in ("ast_topology", "ast_adaptive_rows"):
+                if key in self.external_policy:
+                    kwargs.setdefault(key, self.external_policy[key])
         return ExternalDraftBatchGenerator(
             self.model,
             draft_model=self.draft_model,

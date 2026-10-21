@@ -208,6 +208,7 @@ class GptOssMoeModel(nn.Module):
         inputs: mx.array,
         cache=None,
         input_embeddings: Optional[mx.array] = None,
+        capture=None,
     ):
         if input_embeddings is not None:
             x = input_embeddings
@@ -222,15 +223,20 @@ class GptOssMoeModel(nn.Module):
             x, cache[self.swa_idx], window_size=self.window_size
         )
 
-        for layer, c, layer_type in zip(self.layers, cache, self.layer_types):
+        for index, (layer, c, layer_type) in enumerate(
+            zip(self.layers, cache, self.layer_types)
+        ):
             mask = full_mask if layer_type == "full_attention" else swa_mask
             x = layer(x, mask, c)
+            if capture is not None and index in capture:
+                # Post-block residual stream, before the final norm.
+                capture[index] = x
         x = self.norm(x)
         return x
 
 
 class Model(nn.Module):
-    # No speculative route: the adapter serves ordinary decode only.
+    # Ordinary decode, prompt lookup, and AST tree tiles on the external route.
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
@@ -240,6 +246,34 @@ class Model(nn.Module):
 
     def __call__(self, inputs: mx.array, cache=None):
         return self.lm_head(select_checkpoint_rows(self.model(inputs, cache)))
+
+    @property
+    def layers(self):
+        return self.model.layers
+
+    @property
+    def speculative_args(self):
+        return self.args
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        """Logits plus ascending post-block taps for external/tree drafting."""
+        capture_layers = tuple(int(index) for index in capture_layers)
+        if (
+            not capture_layers
+            or tuple(sorted(set(capture_layers))) != capture_layers
+            or capture_layers[0] < 0
+            or capture_layers[-1] >= len(self.model.layers)
+        ):
+            raise ValueError("Invalid target capture layers")
+        taps = {index: None for index in capture_layers}
+        hidden = self.model(inputs, cache, capture=taps)
+        features = mx.concatenate([taps[index] for index in capture_layers], axis=-1)
+        if body_only:
+            return None, features
+        return self.lm_head(hidden), features
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     def sanitize(self, weights):
         if any("gate_proj.weight" in k for k in weights.keys()):
