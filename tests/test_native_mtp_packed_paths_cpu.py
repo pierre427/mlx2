@@ -95,3 +95,61 @@ def test_branch_failure_keeps_live_head_at_verified_context(monkeypatch):
     with pytest.raises(RuntimeError, match="injected"):
         draft.draft_packed_paths([5], seeds, cache, (3, 3, 3, 3, 3), context_tokens=pairing)
     assert all(layer.offset == seeds.shape[1] for layer in cache)
+
+
+@pytest.mark.parametrize("topology", ["3x5", "5x3", "4/4/4/3", "chain"])
+def test_lazy_tree_tile_matches_synced_packed_paths(topology):
+    from mlx2.runtime.ast_tree_proposals import paths_to_tree, pattern_for_budget
+
+    model, seeds, pairing = setup()
+    pattern = pattern_for_budget(topology, 15)
+    depth = max(pattern)
+    synced = NativeMTPDraftModel(model, num_draft=depth, revision="a" * 64)
+    lazy = NativeMTPDraftModel(model, num_draft=depth, revision="a" * 64)
+    synced_cache, lazy_cache = synced.make_cache(), lazy.make_cache()
+    if len(pattern) > 1:
+        reference = [path.tokens for path in synced.draft_packed_paths(
+            [5], seeds, synced_cache, pattern, context_tokens=pairing)[0]]
+    else:
+        reference = [tuple(synced.draft_distributions(
+            [5], seeds, synced_cache, depth, [None], [0.0], context_tokens=pairing)[0][0])]
+    tree = lazy.propose_tree([5], seeds, lazy_cache, 15, context_tokens=pairing,
+                             topology=topology)[0]
+    assert tree == paths_to_tree(reference, 15)
+    assert lazy.stats["committed_positions"] == seeds.shape[1]
+    for actual, expected in zip(lazy_cache, synced_cache):
+        assert actual.offset == expected.offset
+        for lhs, rhs in zip(actual.state, expected.state):
+            np.testing.assert_array_equal(np.asarray(lhs), np.asarray(rhs))
+
+
+@pytest.mark.parametrize("topology", ["3x5", "5x3", "4/4/4/3"])
+def test_batched_branches_on_a_plain_kv_head_match_independent_unrolls(topology):
+    """A plain KV head (Qwen3.8) drafts every branch in one step per depth."""
+    from route_harness import tiny_qwen38_mtp
+
+    from mlx2.runtime.ast_tree_proposals import paths_to_tree, pattern_for_budget
+
+    model, _ = tiny_qwen38_mtp()
+    object.__setattr__(model, "external_feature_source", "mtp_seed")
+    object.__setattr__(model, "external_feature_width", 64)
+    prompt = [1, 7, 3, 9, 2, 8]
+    seeds = model.model(mx.array([prompt]), model.make_cache())
+    pairing = [prompt[1:] + [5]]
+    pattern = pattern_for_budget(topology, 15)
+    draft = NativeMTPDraftModel(model, num_draft=max(pattern), revision="a" * 64)
+    tree = draft.propose_tree([5], seeds, draft.make_cache(), 15, context_tokens=pairing,
+                              topology=topology)[0]
+    assert draft.stats["batched_tree_calls"] == 1
+    reference = model.make_mtp_cache()
+    model.mtp_step(seeds[:, :-1], mx.array([pairing[0][:-1]], mx.uint32), reference)
+    logits, seed = model.mtp_step(seeds[:, -1:], mx.array([[5]], mx.uint32), reference)
+    roots = np.argsort(-np.asarray(logits[0, -1]).astype(np.float64), kind="stable")[:len(pattern)]
+    paths = []
+    for root, depth in zip(roots.tolist(), pattern):
+        state, hidden, path = copy.deepcopy(reference), seed[:, -1:], [root]
+        while len(path) < depth:
+            top, hidden = model.mtp_step(hidden, mx.array([[path[-1]]], mx.uint32), state)
+            path.append(int(mx.argmax(top[0, -1]).item()))
+        paths.append(tuple(path))
+    assert tree == paths_to_tree(paths, 15)

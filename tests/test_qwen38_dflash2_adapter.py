@@ -248,7 +248,7 @@ def test_bounded_route_refuses_incompatible_policy(tmp_path, monkeypatch, extra,
     "budgets,error",
     [
         ({"1": 15, "2": 7, "4": 3}, "every enabled tree width"),
-        ({"1": 15, "2": 7, "3": 4, "4": 2}, "integers from 3 to 15"),
+        ({"1": 15, "2": 7, "3": 4, "4": 2}, "integers from 3 to 31"),
         ({"1": 15, "2": 7, "3": 8, "4": 3}, "must not increase"),
     ],
 )
@@ -620,13 +620,16 @@ def test_tree_topology_override_requires_explicit_route_before_artifact_load(tmp
 
 
 @pytest.mark.parametrize("key", ["draft_revision", "target_revision"])
-def test_missing_or_wrong_revision_pin_fails_closed(tmp_path, key):
+def test_missing_pin_is_filled_and_wrong_pin_fails_closed(tmp_path, key):
     from mlx2.adapters.qwen38_27b import inspect_external_policy
 
     target, draft = _write_artifacts(tmp_path)
     policy = _pins(target, draft)
+    unpinned = {k: v for k, v in policy.items() if k != key}
+    inspect_external_policy(unpinned, target)
+    assert unpinned[key] == policy[key]          # filled from the artifact
     with pytest.raises(ValueError, match="must pin"):
-        inspect_external_policy({k: v for k, v in policy.items() if k != key}, target)
+        inspect_external_policy({**policy, key: "abc"}, target)
     with pytest.raises(ValueError, match="revision mismatch"):
         inspect_external_policy({**policy, key: "0" * 64}, target)
 
@@ -964,13 +967,14 @@ def test_block_verification_is_bound_into_the_numerics_contract(tmp_path):
     assert unqualifiable_candidate({"execution_policy": {"exact_verification": "token"}}) is None
 
 
-# R1-3 (codex review of sweep 2026-10-12): cost-per-commit handoff needs a
-# fixed external route, but the tree batch_size_route conflict surfaced only
-# when ExternalDraftBatchGenerator was built, after the 27B weights loaded.
+# R1-3 (codex review of sweep 2026-10-12) refused cost-per-commit handoff on
+# the tree route. Since 2026-10-21 the tree route installs the reversible
+# controller by default, so an explicit setting passes policy validation and
+# inspection proceeds to the artifact payload.
 
 
 @pytest.mark.parametrize("value", [True, {"enabled": True}, {"window": 32}])
-def test_cost_handoff_with_tree_route_is_refused_at_inspection(
+def test_cost_handoff_with_tree_route_passes_policy_validation(
     tmp_path, monkeypatch, value
 ):
     from mlx2.adapters import qwen38_27b, qwen38_tensorfold_source
@@ -984,11 +988,11 @@ def test_cost_handoff_with_tree_route_is_refused_at_inspection(
     monkeypatch.setattr(qwen38_tensorfold_source, "validate_source", lambda: None)
 
     def no_artifact_reads(*_args, **_kwargs):
-        raise AssertionError("artifact payload inspected before the policy conflict")
+        raise AssertionError("artifact payload inspected after policy validation")
 
     monkeypatch.setattr(qwen38_27b, "_inspect_target_content", no_artifact_reads)
     monkeypatch.setattr("mlx2.adapters.dflash2.inspect_drafter", no_artifact_reads)
-    with pytest.raises(ValueError, match="cost-per-commit handoff requires a fixed"):
+    with pytest.raises(AssertionError, match="artifact payload inspected"):
         qwen38_27b.inspect_external_policy(policy, target)
 
 

@@ -320,22 +320,53 @@ def _capture_storage(model, capture_layers, cached):
     return storage
 
 
+def _mtp_seed(model):
+    """True when the target hands its post-norm hidden to a native MTP head."""
+
+    return getattr(model, "external_feature_source", None) == "mtp_seed"
+
+
+class _PostNormSink:
+    """Collect the tree forward's post-final-norm rows (the MTP seed)."""
+
+    def __init__(self, lane_tree, enabled):
+        self.lane_tree, self.enabled, self.rows = lane_tree, enabled, []
+
+    def __enter__(self):
+        if self.enabled:
+            self.lane_tree.HIDDEN_SINK = self.rows
+        return self
+
+    def __exit__(self, *_exc):
+        if self.enabled:
+            self.lane_tree.HIDDEN_SINK = None
+
+    def features(self):
+        if len(self.rows) != 1:
+            raise RuntimeError("TensorFold tree did not publish one post-norm row block")
+        return self.rows[0]
+
+
 def _forward(lane_tree, model, tokens, parents, cache, capture_layers, *, cached):
     capture_layers = tuple(int(index) for index in capture_layers)
     storage = _capture_storage(model, capture_layers, cached)
     start = _offset(cache)
-    logits, record = lane_tree.tree_forward(
-        model.model,
-        model.logits,
-        [int(token) for token in tokens],
-        [int(parent) for parent in parents],
-        cache,
-        start,
-    )
-    taps = [storage[index] for index in capture_layers]
-    if any(value is None for value in taps):
-        raise RuntimeError("TensorFold target executor did not capture every draft tap")
-    features = mx.concatenate(taps, axis=-1)
+    with _PostNormSink(lane_tree, _mtp_seed(model)) as sink:
+        logits, record = lane_tree.tree_forward(
+            model.model,
+            model.logits,
+            [int(token) for token in tokens],
+            [int(parent) for parent in parents],
+            cache,
+            start,
+        )
+    if sink.enabled:
+        features = sink.features()
+    else:
+        taps = [storage[index] for index in capture_layers]
+        if any(value is None for value in taps):
+            raise RuntimeError("TensorFold target executor did not capture every draft tap")
+        features = mx.concatenate(taps, axis=-1)
     transaction = TensorfoldTransaction(lane_tree, cache, record, len(tokens), start)
     return logits, features, transaction
 
@@ -411,21 +442,25 @@ def forward_many(
     storage = _capture_storage(model, capture_layers, cached)
     starts = [_offset(cache) for cache in caches]
     row_width = next(iter(lengths))
-    logits, records, offsets = lane_multi.multi_tree_forward(
-        model.model,
-        model.logits,
-        token_rows,
-        parent_rows,
-        caches,
-        starts,
-    )
+    with _PostNormSink(lane_tree, _mtp_seed(model)) as sink:
+        logits, records, offsets = lane_multi.multi_tree_forward(
+            model.model,
+            model.logits,
+            token_rows,
+            parent_rows,
+            caches,
+            starts,
+        )
     expected_offsets = [row * row_width for row in range(width)]
     if list(offsets) != expected_offsets or len(records) != width:
         raise RuntimeError("TensorFold packed target returned misaligned lane records")
-    taps = [storage[index] for index in capture_layers]
-    if any(value is None for value in taps):
-        raise RuntimeError("TensorFold packed target did not capture every draft tap")
-    features = mx.concatenate(taps, axis=-1)
+    if sink.enabled:
+        features = sink.features()
+    else:
+        taps = [storage[index] for index in capture_layers]
+        if any(value is None for value in taps):
+            raise RuntimeError("TensorFold packed target did not capture every draft tap")
+        features = mx.concatenate(taps, axis=-1)
     logits = mx.reshape(logits, (width, row_width, int(logits.shape[-1])))
     features = mx.reshape(
         features,

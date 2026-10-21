@@ -19,11 +19,10 @@ from mlx2.adapters.qwen36_35b import (
 
 def test_proposal_composition_false_passes_the_policy_allowlist(tmp_path):
     policy = {"draft_model": str(tmp_path / "draft"), "proposal_composition": False}
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises((ValueError, OSError)) as caught:
         Qwen3635BA3BAdapter(str(tmp_path / "target"), execution_policy=policy)
-    # It now fails later, on the missing revision pins, not on the key.
+    # It now fails later (missing artifacts; absent pins are filled), not on the key.
     assert "unknown keys" not in str(caught.value)
-    assert "must pin" in str(caught.value)
 
 
 def test_unknown_keys_still_fail_closed(tmp_path):
@@ -35,10 +34,9 @@ def test_unknown_keys_still_fail_closed(tmp_path):
 @pytest.mark.parametrize("key", ["moe_window_row_exact", "fused_gdn_batch_verify"])
 def test_external_target_kernel_keys_pass_the_qwen36_allowlist(tmp_path, key):
     policy = {"draft_model": str(tmp_path / "draft"), key: True}
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises((ValueError, OSError)) as caught:
         Qwen3635BA3BAdapter(str(tmp_path / "target"), execution_policy=policy)
     assert "unknown keys" not in str(caught.value)
-    assert "must pin" in str(caught.value)
 
 
 def test_external_target_kernel_keys_still_validate_types(tmp_path):

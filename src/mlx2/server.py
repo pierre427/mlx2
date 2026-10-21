@@ -6228,6 +6228,36 @@ def build_parser():
         action="store_true",
         help="target-verified indexed prompt-lookup route",
     )
+    execution.add_argument(
+        "--ast",
+        action="store_true",
+        help=(
+            "adaptive speculative tree route: proposals verified in TensorFold "
+            "tree tiles where the model family has a tile target (drafter: "
+            "--ast-drafter, else the artifact's MTP head, else adaptive prompt "
+            "lookup); other families take their best chain route"
+        ),
+    )
+    parser.add_argument(
+        "--ast-drafter",
+        help="AST drafter: a draft artifact path, 'mtp' (built-in head), 'pld' "
+        "(adaptive prompt lookup) or 'auto' (default)",
+    )
+    parser.add_argument(
+        "--ast-topology",
+        help="AST tile topology for path drafters: e.g. 3x5 (default), 5x3, "
+        "4/4/4/3, chain",
+    )
+    parser.add_argument("--ast-tiles", type=int, help="AST tiles per round: 1 (default) or 2")
+    parser.add_argument(
+        "--ast-tile-rows", type=int,
+        help="AST rows per tile, anchor included (default 16, at most 16)",
+    )
+    parser.add_argument(
+        "--ast-graft-pld",
+        action="store_true",
+        help="graft prompt-lookup copy paths onto the AST drafter's tile",
+    )
     owned = parser.add_argument_group("experimental TensorFold-owned token-ID route")
     owned.add_argument("--tensorfold-owned-live", action="store_true",
                        help="enable unqualified, default-off native worker endpoint")
@@ -6550,6 +6580,76 @@ def validate_invocation_draft_adapter(args, adapter_resolution):
             "adapter does not implement; use --execution-policy with its "
             "singular draft_model contract"
         )
+
+
+def apply_ast_invocation(args, policy, adapter_resolution):
+    """Translate ``--ast`` into the concrete route and policy it selects.
+
+    A family whose adapter declares ``ast_tree_tiles`` runs the external
+    route on TensorFold tree tiles with the chosen drafter: an explicit
+    artifact, else the artifact's own MTP head, else model-free adaptive
+    prompt lookup.  Any other family keeps its best chain route: native MTP
+    when the artifact has a head, an external chain for an explicit drafter,
+    otherwise adaptive prompt lookup with latches.
+    """
+    ast_options = (
+        getattr(args, "ast_drafter", None), getattr(args, "ast_topology", None),
+        getattr(args, "ast_graft_pld", False), getattr(args, "ast_tiles", None),
+        getattr(args, "ast_tile_rows", None),
+    )
+    if not getattr(args, "ast", False):
+        if any(ast_options):
+            raise ValueError("--ast-drafter/--ast-topology/--ast-graft-pld/--ast-tiles/--ast-tile-rows require --ast")
+        return policy
+    resolved = {} if policy is None else dict(policy)
+    if resolved.get("draft_model") or resolved.get("draft_models"):
+        raise ValueError("--ast selects the drafter itself; use --ast-drafter")
+    if getattr(args, "draft_model", None):
+        raise ValueError("--ast selects the drafter itself; use --ast-drafter")
+    drafter = ast_options[0] or "auto"
+    adapter_type = getattr(adapter_resolution, "adapter_type", None)
+    artifact = getattr(adapter_resolution, "artifact", None) or {}
+    has_mtp = bool(artifact.get("has_mtp")) or (
+        getattr(adapter_resolution, "default_route", None) == "native_mtp"
+    )
+    tiles = bool(getattr(adapter_type, "ast_tree_tiles", False))
+    if drafter == "auto":
+        drafter = "mtp" if has_mtp else "pld"
+    if drafter == "mtp" and not has_mtp:
+        raise ValueError("--ast-drafter mtp: this artifact has no native MTP head")
+    if ast_options[1] is not None:
+        from .runtime.ast_tree_proposals import parse_topology
+
+        parse_topology(ast_options[1])
+    if tiles:
+        resolved["draft_model"] = (
+            str(args.model) if drafter == "mtp" else "prompt_lookup" if drafter == "pld"
+            else drafter
+        )
+        if ast_options[1] is not None:
+            resolved["ast_topology"] = ast_options[1]
+        if ast_options[2]:
+            resolved["ast_graft_prompt_lookup"] = True
+        if ast_options[3] is not None:
+            resolved["ast_tiles"] = ast_options[3]
+        if ast_options[4] is not None:
+            resolved["ast_tile_rows"] = ast_options[4]
+        if drafter not in ("mtp", "pld"):
+            resolved.setdefault("batch_size_route", "tree15_b1_b4_chain_b5plus_v1")
+        args.external_draft = True
+    elif drafter == "mtp":
+        args.native_mtp = True
+    elif drafter == "pld":
+        args.prompt_lookup = True
+    else:
+        resolved["draft_model"] = drafter
+        args.external_draft = True
+    if not tiles and (ast_options[3] is not None or ast_options[4] is not None):
+        raise ValueError("--ast-tiles/--ast-tile-rows need a family with tree tiles")
+    args.ast_route = {"tree_tiles": tiles, "drafter": drafter, "topology": ast_options[1],
+                      "graft_pld": bool(ast_options[2]), "tiles": ast_options[3],
+                      "tile_rows": ast_options[4]}
+    return resolved
 
 
 def resolve_route_selection(args, policy, adapter_resolution=None):
@@ -7075,6 +7175,7 @@ def main():
             # any other flag (OSError and TypeError used to be tracebacks).
             parser.error(f"cannot inspect --model {args.model}: {error}")
         validate_invocation_draft_adapter(args, adapter_resolution)
+        policy = apply_ast_invocation(args, policy, adapter_resolution)
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
         native_mtp = route_selection.native_mtp
         # Route resolution, rather than only the spelling of the CLI, is the

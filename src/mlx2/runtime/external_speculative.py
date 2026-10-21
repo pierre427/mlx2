@@ -787,9 +787,21 @@ class ExternalDraftBatchGenerator:
                  decode_time_fairness=None, decode_first=None,
                  cost_per_commit_handoff=None,
                  draft_tail_equalize=None,
+                 ast_topology=None,
+                 ast_adaptive_rows=None,
                  **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
+        # Tree-tile proposal topology for drafters that build paths rather
+        # than their own lattice ("3x5", "4/4/4/3", "chain"); validated here.
+        if ast_topology is not None:
+            from .ast_tree_proposals import parse_topology
+
+            parse_topology(ast_topology)
+        self.ast_topology = ast_topology
+        if ast_adaptive_rows not in (None, True, False):
+            raise ValueError("ast_adaptive_rows must be a boolean")
+        self._ast_adaptive_rows = ast_adaptive_rows
         round_phases.initialize(self, decode_first)
         self.memory_headroom = memory_headroom
         self.reclaim_memory = reclaim_memory; self.evict_checkpoint = evict_checkpoint
@@ -969,7 +981,7 @@ class ExternalDraftBatchGenerator:
             except (TypeError, ValueError) as exc:
                 raise ValueError("tree node budget widths must be integers") from exc
             if type(nodes) is not int:
-                raise ValueError("tree node budgets must be integers from 3 to 15")
+                raise ValueError("tree node budgets must be integers from 3 to 31")
             normalized_tree_budgets[width] = nodes
         tree_node_budget_by_lanes = normalized_tree_budgets
         expected_widths = set(range(1, dynamic_tree_max_width + 1))
@@ -977,8 +989,9 @@ class ExternalDraftBatchGenerator:
             raise ValueError(
                 "tree_node_budget_by_lanes must declare every enabled tree width"
             )
-        if any(not 3 <= nodes <= 15 for nodes in tree_node_budget_by_lanes.values()):
-            raise ValueError("tree node budgets must be integers from 3 to 15")
+        # Up to two 16-row tiles per round; a stream holds 32 rows.
+        if any(not 3 <= nodes <= 31 for nodes in tree_node_budget_by_lanes.values()):
+            raise ValueError("tree node budgets must be integers from 3 to 31")
         ordered_budgets = [
             tree_node_budget_by_lanes[width]
             for width in range(1, dynamic_tree_max_width + 1)
@@ -991,6 +1004,13 @@ class ExternalDraftBatchGenerator:
         if not dynamic_singleton_tree and ordered_budgets != [15]:
             raise ValueError("tree node budgets require an enabled tree route")
         self.tree_node_budget_by_lanes = tree_node_budget_by_lanes
+        # Measured tile size within the knob maximum (default on for the
+        # tree route; ``ast_adaptive_rows: false`` keeps the knob budget).
+        self.tile_budget = None
+        if dynamic_singleton_tree and self._ast_adaptive_rows is not False:
+            from .ast_tile_budget import TileBudgetController
+
+            self.tile_budget = TileBudgetController()
         self._auto_last_mode = None
         self._auto_active_width = 0
         self._auto_cohort_width = 0
@@ -1004,10 +1024,21 @@ class ExternalDraftBatchGenerator:
             self.draft_topology != "tree15" or self.target_execution != "provider"
         ):
             raise ValueError("dynamic singleton tree requires tree15 and a target-tree provider")
-        if self.cost_per_commit_handoff is not None and dynamic_singleton_tree:
-            raise ValueError(
-                "cost-per-commit handoff requires a fixed external route"
+        if dynamic_singleton_tree and not explicit_cost_handoff:
+            # A tree tile that commits fewer tokens per second than plain
+            # decode (an MoE target on prose) parks its session on the
+            # ordinary path and re-probes; the same reversible controller
+            # the AST planner installs.  ``cost_per_commit_handoff: false``
+            # keeps the tree unconditionally.
+            from dataclasses import replace as _replace
+
+            # The first tree round also ingests the prompt into the draft
+            # plane: settle it, and decide on two speculative samples.
+            self.cost_per_commit_handoff = _replace(
+                CostPerCommitHandoffSettings.ast_self_configuring_defaults(),
+                speculative_samples=2, settle_rounds=1,
             )
+            self.cost_per_commit_handoff_authority = "runtime_tree_tile_default"
         if self.draft_topology not in ("chain", "tree15"):
             raise ValueError("MLX2_DFLASH_TOPOLOGY must be chain or tree15")
         if hasattr(draft_model, "last_proposal_sources") and self.draft_topology != "chain":
@@ -4000,7 +4031,9 @@ class ExternalDraftBatchGenerator:
                         lane.proposal_trust_states for lane in lanes
                     ]
                 if self.draft_topology == "tree15":
-                    if self.pair_context_tokens:
+                    if self.pair_context_tokens and not getattr(
+                        self.draft, "tree_topology_aware", False
+                    ):
                         raise ValueError("tree15 is unavailable for paired-context drafters")
                     forbidden = [self._tree_forbidden(lane) for lane in lanes]
                     trees = None
@@ -4015,6 +4048,14 @@ class ExternalDraftBatchGenerator:
                         if self._tree_clock is not None:
                             self._tree_clock("tree_draft_setup")
                             tree_options["mark"] = self._tree_clock
+                        if self.pair_context_tokens:
+                            tree_options["context_tokens"] = pairing
+                        if needs_histories and getattr(
+                            self.draft, "tree_topology_aware", False
+                        ):
+                            tree_options["processor_histories"] = extra[
+                                "processor_histories"
+                            ]
                         trees = self.draft.propose_tree(
                             *arguments[:4], forbidden_token_ids=forbidden, **tree_options
                         )
@@ -7458,7 +7499,13 @@ class ExternalDraftBatchGenerator:
 
     def _tree_options(self, *, count_hits):
         options = {}
-        if self.tree_gates["codebook_cache"]:
+        if getattr(self.draft, "tree_topology_aware", False):
+            from .ast_tree_proposals import DEFAULT_TOPOLOGY
+
+            options["topology"] = self.ast_topology or DEFAULT_TOPOLOGY
+        if self.tree_gates["codebook_cache"] and callable(
+            getattr(self.draft, "tree_codebooks", None)
+        ):
             pred, succ, hit = self.draft.tree_codebooks()
             options["codebooks"] = (pred, succ)
             if hit:
@@ -7476,6 +7523,9 @@ class ExternalDraftBatchGenerator:
             "tree_node_budget_by_lanes",
             {candidate: 15 for candidate in range(1, self.dynamic_tree_max_width + 1)},
         )
+        controller = getattr(self, "tile_budget", None)
+        if controller is not None:
+            return controller.choose(width, budgets[width])
         return budgets[width]
 
     def _chain_draft_cap(self, active_width=None):
@@ -11445,6 +11495,7 @@ class ExternalDraftBatchGenerator:
             raise ValueError("tree15 cohort exceeds its bounded lane limit")
         clock = self._phase_time() if self.round_timing else None
         phase = _PhaseClock(self) if self.round_timing else None
+        tile_started = time.perf_counter() if getattr(self, "tile_budget", None) else None
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         if phase is not None:
@@ -11531,12 +11582,26 @@ class ExternalDraftBatchGenerator:
                 blocks=blocks,
                 transaction=transaction,
             )
+            if tile_started is not None:
+                seconds = time.perf_counter() - tile_started
+                for block, decision in zip(blocks, decisions):
+                    rows = decision.commit_rows or [0]
+                    self.tile_budget.observe(
+                        len(cohort), len(block.tokens),
+                        [row - 1 for row in rows[1:]], seconds,
+                    )
+                self.scheduler_stats["external_tree_tile_budget"] = self.tile_budget.receipt()
             if phase is not None:
                 phase.skip()
             # ``_propose`` adopts a queued lattice only for a singleton group,
             # so a multi-lane cohort's prelaunches were built and thrown away
             # every round (SPEC-01, packed provider B2-B4).
-            if self.tree_gates["pipeline_draft"] and len(cohort) == 1:
+            if (
+                self.tree_gates["pipeline_draft"]
+                and len(cohort) == 1
+                and callable(getattr(self.draft, "start_tree", None))
+                and not self.pair_context_tokens
+            ):
                 self._prelaunch_tree(cohort[0], decisions[0])
                 if phase is not None:
                     phase("tree_draft_prelaunch")

@@ -484,6 +484,14 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "progressive_cross_session_pack_rows",
         "progressive_cross_session_pack_mode",
         "ast_collision_probability",
+        # Bounded TensorFold tree tiles (tree15 B1-B4): the vendored lane
+        # forward runs this MoE target's sparse block row-locally.
+        "batch_size_route",
+        "tree_node_budget_by_lanes",
+        "tensorfold_cohort_limit",
+        "ast_tiles",
+        "ast_tile_rows",
+        "ast_adaptive_rows",
         *EXTERNAL_TARGET_KERNEL_KEYS,
     }
 )
@@ -630,7 +638,21 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         self.external_policy = {}
         self.draft_model = None
         draft_record = None
-        if "draft_model" in policy:
+        from .qwen38_27b import PROMPT_LOOKUP_DRAFT_NAMES, _names_target, _native_mtp_tree_policy
+
+        prompt_lookup_draft = policy.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES
+        native_tree_draft = "draft_model" in policy and (
+            prompt_lookup_draft or _names_target(policy["draft_model"], model_path)
+        )
+        graft_prompt_lookup = bool(policy.pop("ast_graft_prompt_lookup", False))
+        if native_tree_draft:
+            if require_mtp:
+                raise ValueError("External draft is not native MTP")
+            if stream_request is not None:
+                raise ValueError("Qwen3.6 expert streaming refuses the external draft route")
+            self.external_policy = _native_mtp_tree_policy(policy)
+            policy = {}
+        elif "draft_model" in policy:
             if require_mtp:
                 raise ValueError("External draft is not native MTP")
             if stream_request is not None:
@@ -829,6 +851,22 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                     descriptor_for(has_mtp=False),
                 )
                 self._describe_target_verify_row_exact()
+            elif native_tree_draft:
+                from .qwen38_27b import bind_tree_tile_drafter
+
+                if not prompt_lookup_draft and not artifact["has_mtp"]:
+                    raise ValueError(
+                        "draft_model names this artifact (its native MTP head), but "
+                        "the artifact ships no MTP head"
+                    )
+                bind_tree_tile_drafter(
+                    self, path, prompt_lookup=prompt_lookup_draft,
+                    descriptor_for=descriptor_for,
+                )
+            if graft_prompt_lookup:
+                from .qwen38_27b import graft_prompt_lookup_drafter
+
+                graft_prompt_lookup_drafter(self, prompt_lookup=prompt_lookup_draft)
         except BaseException:
             self.close()
             raise

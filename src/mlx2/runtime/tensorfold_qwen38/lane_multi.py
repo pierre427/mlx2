@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+import os
+
 import mlx.core as mx
 
 
@@ -15,12 +17,30 @@ def _ordinary_qkv_rows(
     values: mx.array,
     positions: Sequence[int],
 ) -> tuple[mx.array, mx.array, mx.array]:
-    """Normalize and rotate each row through the ordinary one-token geometry."""
+    """Normalize and rotate each row through the ordinary one-token geometry.
+
+    Norms are row-local, and RoPE runs with rows as the batch axis and one
+    offset per row, which is the same per-element law as one call per row
+    without one launch per row.  A RoPE that rejects an array offset keeps
+    the per-row calls.
+    """
 
     B, L, _, D = (int(value) for value in queries.shape)
     nkv = int(attn.num_key_value_heads)
     if B != 1 or len(positions) != L:
         raise ValueError("lane_multi: ordinary attention positions do not match rows")
+    if _BATCHED_ROPE[0]:
+        q = attn.q_norm(queries).transpose(1, 2, 0, 3)                       # [L, H, 1, D]
+        k = attn.k_norm(keys.reshape(B, L, nkv, D)).transpose(1, 2, 0, 3)    # [L, HKV, 1, D]
+        v = values.reshape(B, L, nkv, D).transpose(0, 2, 1, 3)
+        offsets = mx.array([int(position) for position in positions], dtype=mx.int32)
+        try:
+            q = attn.rope(q, offset=offsets)
+            k = attn.rope(k, offset=offsets)
+        except (TypeError, ValueError):
+            _BATCHED_ROPE[0] = False
+        else:
+            return q.transpose(2, 1, 0, 3), k.transpose(2, 1, 0, 3), v
     q_rows, k_rows, v_rows = [], [], []
     for row, position in enumerate(positions):
         q = attn.q_norm(queries[:, row:row + 1]).transpose(0, 2, 1, 3)
@@ -30,6 +50,15 @@ def _ordinary_qkv_rows(
         k_rows.append(attn.rope(k, offset=int(position)))
         v_rows.append(v)
     return tuple(mx.concatenate(rows, axis=2) for rows in (q_rows, k_rows, v_rows))
+
+
+# Mutable so a RoPE without array offsets falls back once per process.
+_BATCHED_ROPE = [os.environ.get("MLX2_TREE_ROPE", "batched") != "rows"]
+# "masked" (default): one fused SDPA per stream over prefix + window.
+# "ordinary": the per-node one-query reference law with ancestor gathers.
+_TREE_ATTENTION = os.environ.get("MLX2_TREE_ATTENTION", "masked")
+if _TREE_ATTENTION not in ("masked", "ordinary"):
+    raise ValueError("MLX2_TREE_ATTENTION must be masked or ordinary")
 
 
 def _attention(attn: Any, x: mx.array, caches: Sequence[Any], positions: list[int], offsets: Sequence[int],
@@ -59,15 +88,17 @@ def _attention(attn: Any, x: mx.array, caches: Sequence[Any], positions: list[in
     outs = []
     for first, plan in plans:
         span = queries if len(plans) == 1 else queries[:, :, offsets[first]:offsets[first] + plan.rows]
-        outs.append(stream_attention.ordinary_tree_sdpa(
-            span, kv[first:first + plan.streams], attn.scale, plan))
+        sdpa = (stream_attention.masked_tree_sdpa if _TREE_ATTENTION == "masked"
+                else stream_attention.ordinary_tree_sdpa)
+        outs.append(sdpa(span, kv[first:first + plan.streams], attn.scale, plan))
     output = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
     output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
     return attn.o_proj(output * mx.sigmoid(gate))
 
 
 def _gdn(gdn: Any, x: mx.array, caches: Sequence[Any], parents: Sequence[Sequence[int]], plans: list[Any],
-         offsets: Sequence[int], widths: Sequence[int], records: list[list[Any]]) -> mx.array:
+         offsets: Sequence[int], widths: Sequence[int], records: list[list[Any]],
+         windows: dict | None = None) -> mx.array:
     """Share row-local Gated DeltaNet projections, conv and norms while walking each stream's tree from its own state."""
 
     from . import lane_fuse, lane_glue, stream_gdn
@@ -81,8 +112,13 @@ def _gdn(gdn: Any, x: mx.array, caches: Sequence[Any], parents: Sequence[Sequenc
               for cache in caches]
     if zba is None:
         z, b, a = gdn.in_proj_z(x), gdn.in_proj_b(x), gdn.in_proj_a(x)
+        if windows is None:
+            windows = {}
+        for s in range(len(offsets)):
+            if (s, n_keep) not in windows:   # one conv layout per stream per forward
+                windows[(s, n_keep)] = _windows(parents[s], n_keep)
         rows = [lane_glue.gdn_pre(qkv[:, o:o + w], states[s], gdn.conv1d.weight,
-                                  _windows(parents[s], n_keep), a[:, o:o + w], b[:, o:o + w], gdn.A_log, gdn.dt_bias,
+                                  windows[(s, n_keep)], a[:, o:o + w], b[:, o:o + w], gdn.A_log, gdn.dt_bias,
                                   **heads) for s, (o, w) in enumerate(zip(offsets, widths))]
         q, k, v, g, beta = (mx.concatenate([r[i] for r in rows], axis=1) for i in range(5))
     else:
@@ -150,6 +186,7 @@ def multi_tree_forward(core: Any, head: Any, windows: Sequence[Sequence[int]], p
     records: list[list[Any]] = [[] for _ in windows]
     layers = list(core.layers)
     conv_plans: list[tuple[int, Any, Any]] = []    # (first stream, conv and tree layouts) per group, built once
+    conv_windows: dict = {}                        # per-stream conv windows of the unfused path, built once
     plans: list[tuple[int, Any]] = []              # (first stream, attention layout) per group, built once
     pending: mx.array | None = None
     tapped: Any = None
@@ -166,7 +203,7 @@ def multi_tree_forward(core: Any, head: Any, windows: Sequence[Sequence[int]], p
                 for first in range(0, len(windows), stream_gdn.MAX_STREAMS):
                     group = parents[first:first + stream_gdn.MAX_STREAMS]
                     conv_plans.append((first, stream_gdn.ConvPlan(group, n_keep), stream_gdn.TreePlan(group)))
-            r = _gdn(inner.linear_attn, x, items, parents, conv_plans, offsets, widths, records)
+            r = _gdn(inner.linear_attn, x, items, parents, conv_plans, offsets, widths, records, conv_windows)
         else:
             if not plans:
                 attn = inner.self_attn
@@ -178,9 +215,14 @@ def multi_tree_forward(core: Any, head: Any, windows: Sequence[Sequence[int]], p
         norm = inner.post_attention_layernorm
         hidden, x = lane_glue.norm_xs(hidden, r, norm.weight, norm.eps)
         mlp = inner.mlp
-        gu = lane_fuse.mlp_gate_up(mlp, x)
-        act = lane_glue.mlp_act(mlp.gate_proj(x), mlp.up_proj(x)) if gu is None else lane_fuse.mlp_act(gu)
-        pending = mlp.down_proj(act)
+        if getattr(mlp, "gate_proj", None) is None:
+            # Sparse MoE (or any other) block: row-local, so the module's own
+            # call over all tree rows is each row's ordinary arithmetic.
+            pending = mlp(x)
+        else:
+            gu = lane_fuse.mlp_gate_up(mlp, x)
+            act = lane_glue.mlp_act(mlp.gate_proj(x), mlp.up_proj(x)) if gu is None else lane_fuse.mlp_act(gu)
+            pending = mlp.down_proj(act)
         storage = getattr(layer, "_storage", None)
         tapped = (storage, layer._idx) if storage is not None else None
         if pipeline_layers and ((index + 1) % pipeline_layers == 0 or (index == 0 and first_alone)) \

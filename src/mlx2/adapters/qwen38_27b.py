@@ -355,6 +355,9 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "batch_size_route",
         "tree_node_budget_by_lanes",
         "tensorfold_cohort_limit",
+        "ast_tiles",
+        "ast_tile_rows",
+        "ast_adaptive_rows",
         "minimum_draft_proposals",
         "exact_verification",
         "progressive_verification_tile",
@@ -438,8 +441,8 @@ def _tree_node_budgets(value, width):
             lane_width = int(key)
         except (TypeError, ValueError) as exc:
             raise ValueError("tree node budget widths must be integers") from exc
-        if type(nodes) is not int or not 3 <= nodes <= 15:
-            raise ValueError("tree node budgets must be integers from 3 to 15")
+        if type(nodes) is not int or not 3 <= nodes <= 31:
+            raise ValueError("tree node budgets must be integers from 3 to 31")
         normalized[lane_width] = nodes
     if set(normalized) != set(range(1, width + 1)):
         raise ValueError("tree node budgets must declare every enabled tree width")
@@ -447,6 +450,31 @@ def _tree_node_budgets(value, width):
     if any(left < right for left, right in zip(ordered, ordered[1:])):
         raise ValueError("tree node budgets must not increase as lanes fill")
     return normalized
+
+
+def _tile_node_budgets(policy, width):
+    """Per-lane tree node budgets: explicit, or from the tile knobs.
+
+    ``ast_tiles`` (1 or 2) tiles of ``ast_tile_rows`` (4..16) rows are
+    shared by the lanes of a round: each lane gets ``tiles * rows // lanes``
+    rows, one of them its anchor.  One 16-row tile reproduces the measured
+    15/7/4/3 budgets; two tiles give 31/15/9/7 (the kernels hold 32 rows per
+    stream).
+    """
+    tiles = policy.get("ast_tiles", 1)
+    rows = policy.get("ast_tile_rows", 16)
+    if type(tiles) is not int or not 1 <= tiles <= 2:
+        raise ValueError("ast_tiles must be 1 or 2")
+    if type(rows) is not int or not 4 <= rows <= 16:
+        raise ValueError("ast_tile_rows must be an integer from 4 to 16")
+    explicit = policy.get("tree_node_budget_by_lanes")
+    if explicit is not None:
+        if "ast_tiles" in policy or "ast_tile_rows" in policy:
+            raise ValueError("tree_node_budget_by_lanes conflicts with ast_tiles/ast_tile_rows")
+        return _tree_node_budgets(explicit, width)
+    return {
+        lanes: max(3, min(31, tiles * rows // lanes - 1)) for lanes in range(1, width + 1)
+    }
 
 
 def validate_target_verify_row_exact(policy: dict) -> bool:
@@ -565,6 +593,113 @@ def target_verify_row_exact_numerics(model):
     }
 
 
+def _names_target(draft_model, model_path):
+    """True when an external policy's draft_model is the target artifact."""
+
+    try:
+        return Path(str(draft_model)).expanduser().resolve() == Path(model_path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+# Keys of the native-MTP tree-tile route (draft_model is the target itself).
+NATIVE_MTP_TREE_POLICY_KEYS = frozenset({
+    "draft_model", "num_draft", "batch_size_route", "tree_node_budget_by_lanes",
+    "tensorfold_cohort_limit", "ast_topology", "pairwise_selection",
+    "ast_graft_prompt_lookup", "ast_tiles", "ast_tile_rows", "ast_adaptive_rows",
+})
+
+
+PROMPT_LOOKUP_DRAFT_NAMES = frozenset({"prompt_lookup", "pld"})
+
+
+def _prompt_lookup_record(policy, target_fingerprint):
+    """Inspection record for the model-free prompt-lookup tree drafter."""
+    from types import SimpleNamespace
+
+    num_draft = policy.get("num_draft", 15)
+    if type(num_draft) is not int or not 1 <= num_draft <= 15:
+        raise ValueError("prompt lookup num_draft must be an integer from 1 to 15")
+    revision = hashlib.sha256(f"mlx2.prompt-lookup-draft.v1:{target_fingerprint}".encode()).hexdigest()
+    return {
+        "fingerprint": revision,
+        "config": {"architectures": ["PromptLookupDraft"]},
+        "args": SimpleNamespace(block_size=num_draft + 1, minimum_proposal_length=1),
+        "draft_revision": revision,
+        "target_revision": target_fingerprint,
+    }
+
+
+def bind_tree_tile_drafter(adapter, path, *, prompt_lookup, descriptor_for=None):
+    """Bind the native-MTP head or model-free prompt lookup as the tile drafter."""
+
+    descriptor_for = descriptor_for or adapter.descriptor_builder
+    if prompt_lookup:
+        from ..runtime.drafters.prompt_lookup_draft import load_prompt_lookup_drafter
+
+        record = _prompt_lookup_record(adapter.external_policy, adapter.identity["fingerprint"])
+        loader, has_mtp = load_prompt_lookup_drafter, False
+    else:
+        from ..runtime.drafters.native_mtp import (
+            inspect_native_mtp_policy,
+            load_native_mtp_drafter,
+        )
+
+        adapter.model.select_external_feature_source("mtp_seed")
+        record = inspect_native_mtp_policy(
+            {**adapter.external_policy, "draft_model": str(path)}, path,
+            adapter.identity["fingerprint"],
+        )
+        loader, has_mtp = load_native_mtp_drafter, True
+    adapter.identity = {
+        **adapter.identity,
+        "draft_revision": record["draft_revision"],
+        "target_revision": record["target_revision"],
+    }
+    adapter._bind_external_drafter(record, loader, descriptor_for(has_mtp=has_mtp))
+
+
+def graft_prompt_lookup_drafter(adapter, *, prompt_lookup):
+    """Wrap the bound tree drafter so prompt-lookup copies join its tile."""
+
+    if adapter.draft_model is None or prompt_lookup:
+        raise ValueError("ast_graft_prompt_lookup grafts onto a tree drafter")
+    if not callable(getattr(adapter.draft_model, "propose_tree", None)):
+        raise ValueError("ast_graft_prompt_lookup requires a tree-tile drafter")
+    from ..runtime.drafters.prompt_lookup_draft import PromptLookupDraftModel
+
+    adapter.draft_model = PromptLookupDraftModel(
+        adapter.model,
+        num_draft=int(adapter.draft_model.config.block_size) - 1,
+        base=adapter.draft_model,
+    )
+    adapter.external_policy["ast_graft_prompt_lookup"] = True
+
+
+def _native_mtp_tree_policy(policy):
+    """Validate the native-MTP tree policy and fill the tile defaults.
+
+    One 16-row TensorFold tile per round at B1 (anchor plus ``ast_topology``,
+    default three branches five deep), shared by up to four lanes with the
+    node budgets of the measured tree route.
+    """
+    from ..runtime.ast_tree_proposals import DEFAULT_TOPOLOGY, parse_topology
+
+    unknown = set(policy) - NATIVE_MTP_TREE_POLICY_KEYS
+    if unknown:
+        raise ValueError(f"native-MTP tree policy has unknown keys: {sorted(unknown)}")
+    value = dict(policy)
+    # A copy source pays off as one long run; a head's branches as 3x5.
+    default = "chain" if value.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES else DEFAULT_TOPOLOGY
+    topology = parse_topology(value.setdefault("ast_topology", default))
+    deepest = max(topology) if isinstance(topology, tuple) else 15
+    value.setdefault("num_draft", min(15, max(deepest, 5)))
+    value.setdefault("batch_size_route", "tree15_b1_b4_chain_b5plus_v1")
+    value.setdefault("pairwise_selection", "host")
+    _tile_node_budgets(value, 4)
+    return value
+
+
 def inspect_external_policy(
     policy: dict,
     model_path: str | Path,
@@ -595,7 +730,12 @@ def inspect_external_policy(
             if key in policy
         }
     )
+    # Absent pins are filled from the artifacts below and recorded in the
+    # policy (and so in receipts); a present pin must match exactly.
+    autopin = {key for key in ("draft_revision", "target_revision") if key not in policy}
     for key in ("draft_revision", "target_revision"):
+        if key in autopin:
+            continue
         if not isinstance(policy.get(key), str) or len(policy[key]) != 64:
             raise ValueError(f"Qwen3.8 27B external draft policy must pin {key}")
     if policy.get("pairwise_selection", "host") not in ("host", "batched"):
@@ -643,19 +783,11 @@ def inspect_external_policy(
             "external_prefill_coalesce_min_tokens must be a positive integer"
         )
     batch_route = policy.get("batch_size_route")
+    # Validated before any artifact read; the tree route takes the reversible
+    # controller as its default, so an explicit setting no longer conflicts.
+    _normalized_cost_per_commit_handoff(policy.get("cost_per_commit_handoff"))
     if batch_route is None and os.environ.get("MLX2_DFLASH_TOPOLOGY") == "tree15":
         raise ValueError("tree15 requires an explicit batch_size_route policy")
-    if (
-        _normalized_cost_per_commit_handoff(policy.get("cost_per_commit_handoff"))
-        is not None
-        and batch_route is not None
-    ):
-        # The batch generator refuses this too, but only after the target
-        # weights load; the policy alone decides it.
-        raise ValueError(
-            "cost-per-commit handoff requires a fixed external route; "
-            "batch_size_route must be null"
-        )
     validate_target_verify_row_exact(policy)
     exact_verification = policy.get("exact_verification", "token")
     if exact_verification not in ("token", "block"):
@@ -692,10 +824,7 @@ def inspect_external_policy(
         from .qwen38_tensorfold_source import validate_source
 
         validate_source()
-        _tree_node_budgets(
-            policy.get("tree_node_budget_by_lanes"),
-            _TREE_BATCH_ROUTES[batch_route],
-        )
+        _tile_node_budgets(policy, _TREE_BATCH_ROUTES[batch_route])
         cohort_limit = policy.get("tensorfold_cohort_limit")
         if cohort_limit is not None and (
             type(cohort_limit) is not int
@@ -709,13 +838,15 @@ def inspect_external_policy(
         raise ValueError("tree node budgets require a batch_size_route")
     elif "tensorfold_cohort_limit" in policy:
         raise ValueError("tensorfold_cohort_limit requires a batch_size_route")
-    if policy["target_revision"] == _legacy_content_revision(model_path):
+    if "target_revision" not in autopin and policy["target_revision"] == _legacy_content_revision(model_path):
         raise ValueError(
             "DFlash2 target revision mismatch: policy uses a legacy "
             "metadata-only pin; regenerate a payload-bound policy"
         )
     target_content = _inspect_target_content(model_path)
     target_revision = target_content["revision"]
+    if "target_revision" in autopin:
+        policy["target_revision"] = target_revision
     if target_revision != policy["target_revision"]:
         raise ValueError(
             "DFlash2 target revision mismatch: policy pins "
@@ -723,6 +854,8 @@ def inspect_external_policy(
         )
     record = inspect_drafter(policy["draft_model"], model_path)
     draft_revision = draft_content_revision(record)
+    if "draft_revision" in autopin:
+        policy["draft_revision"] = draft_revision
     if draft_revision != policy["draft_revision"]:
         if policy["draft_revision"] == draft_legacy_revision(record):
             raise ValueError(
@@ -935,6 +1068,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         return receipt
 
     default_route = "native_mtp"
+    # TensorFold tree tiles (tree15 B1-B4) for any drafter (``--ast``).
+    ast_tree_tiles = True
     # Explicit because Qwen3.8 retains its independently measured threshold
     # instead of inheriting Flash-Next's width-three default.
     default_mtp_ordinary_handoff_max_width = (
@@ -1199,7 +1334,19 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         self.external_policy = {}
         self.draft_model = None
         draft_record = None
-        if "draft_model" in policy:
+        prompt_lookup_draft = policy.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES
+        native_tree_draft = "draft_model" in policy and (
+            prompt_lookup_draft or _names_target(policy["draft_model"], model_path)
+        )
+        graft_prompt_lookup = bool(policy.pop("ast_graft_prompt_lookup", False))
+        if native_tree_draft:
+            if require_mtp:
+                raise ValueError("External draft is not native MTP")
+            # The artifact's own MTP head drafts AST tree tiles verified by
+            # the TensorFold tile provider (tree15 B1-B4 widths).
+            self.external_policy = _native_mtp_tree_policy(policy)
+            policy = {}
+        elif "draft_model" in policy:
             if require_mtp:
                 raise ValueError("External draft is not native MTP")
             # Revision pins and drafter headers are checked before the
@@ -1254,6 +1401,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if gdn_core is not None and type(gdn_core) is not bool:
             raise ValueError("gdn_core must be boolean")
         artifact = self.artifact_inspector(model_path)
+        if native_tree_draft and not prompt_lookup_draft and not artifact["has_mtp"]:
+            raise ValueError(
+                "draft_model names this artifact (its native MTP head), but the "
+                "artifact ships no MTP head"
+            )
         if require_mtp and not artifact["has_mtp"]:
             raise ValueError("requested MTP requires embedded head weights")
         self.identity = artifact["identity"]
@@ -1414,6 +1566,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 install_qwen38_native_flat_physical_target_provider(self.model)
             )
             mx.clear_cache()
+        elif native_tree_draft:
+            bind_tree_tile_drafter(self, path, prompt_lookup=prompt_lookup_draft)
+        if graft_prompt_lookup:
+            graft_prompt_lookup_drafter(self, prompt_lookup=prompt_lookup_draft)
 
     def _finish_load(
         self, weights, prefill_policy, fp32_head, path, config,
@@ -1698,6 +1854,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "exact_verification", self.external_policy["exact_verification"]
             )
         oracle_path = self.external_policy.get("ast_target_tree_oracle")
+        if self.external_policy.get("ast_topology") is not None:
+            kwargs.setdefault("ast_topology", self.external_policy["ast_topology"])
+        if "ast_adaptive_rows" in self.external_policy:
+            kwargs.setdefault("ast_adaptive_rows", self.external_policy["ast_adaptive_rows"])
         if self.external_policy.get("ast_b1_tile_policy") is not None:
             kwargs.setdefault("ast_b1_tile_policy", self.external_policy["ast_b1_tile_policy"])
         if oracle_path is not None:
@@ -1764,10 +1924,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             )
             kwargs.setdefault(
                 "tree_node_budget_by_lanes",
-                _tree_node_budgets(
-                    self.external_policy.get("tree_node_budget_by_lanes"),
-                    tree_width,
-                ),
+                _tile_node_budgets(self.external_policy, tree_width),
             )
         return ExternalDraftBatchGenerator(
             self.model,
@@ -1917,8 +2074,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                     "tensorfold_cohort_limit",
                     _TREE_BATCH_ROUTES[self.external_policy["batch_size_route"]],
                 )
-                config["tree_node_budget_by_lanes"] = _tree_node_budgets(
-                    self.external_policy.get("tree_node_budget_by_lanes"),
+                config["tree_node_budget_by_lanes"] = _tile_node_budgets(
+                    self.external_policy,
                     _TREE_BATCH_ROUTES[self.external_policy["batch_size_route"]],
                 )
             return config

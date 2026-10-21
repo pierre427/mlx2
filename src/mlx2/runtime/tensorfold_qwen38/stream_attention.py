@@ -426,6 +426,75 @@ def ordinary_tree_sdpa(
     return outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=2)
 
 
+def _tree_mask(plan: Plan, stream: int) -> Any:
+    """Prefix-plus-ancestor boolean mask for one stream, built once per plan.
+
+    ``None`` means no mask (one row); ``"causal"`` a chain, whose ancestor
+    set is the ordinary bottom-right-aligned causal window.
+    """
+
+    from .lane_tree import tree_paths
+
+    masks = plan.__dict__.setdefault("_tree_masks", {})
+    if stream not in masks:
+        parents, start = plan.parents[stream], plan.starts[stream]
+        W = len(parents)
+        _, paths = tree_paths(parents)
+        if W == 1:
+            masks[stream] = None
+        elif all(list(path) == list(range(len(path))) for path in paths):
+            masks[stream] = "causal"
+        else:
+            rows = [[False] * W for _ in range(W)]
+            for node, path in enumerate(paths):
+                for ancestor in path:
+                    rows[node][ancestor] = True
+            ancestors = mx.array(rows, dtype=mx.bool_)
+            masks[stream] = (
+                ancestors if start == 0
+                else mx.concatenate([mx.ones((W, start), dtype=mx.bool_), ancestors], axis=1)
+            )
+    return masks[stream]
+
+
+def masked_tree_sdpa(
+    queries: mx.array,
+    kv: Sequence[tuple[mx.array, mx.array]],
+    scale: float,
+    plan: Plan,
+) -> mx.array:
+    """Attend every tree node of a stream in one fused SDPA over its committed prefix.
+
+    Same keys and values per node as ``ordinary_tree_sdpa`` (prefix plus
+    ancestor path), expressed as a boolean mask over the contiguous
+    ``prefix + window`` buffer: no per-node gather, and the prefix is read
+    once per stream instead of once per node.  Kernel reduction order may
+    differ from the per-node one-query law at rounding level.
+    """
+
+    _, H, R, D = (int(value) for value in queries.shape)
+    if H != plan.heads or R != plan.rows or len(kv) != plan.streams:
+        raise ValueError(
+            f"stream_attention: unsupported masked tree shape q={queries.shape} for {len(kv)} streams"
+        )
+    outputs = []
+    first = 0
+    for stream, (parents, start, (keys, values)) in enumerate(zip(plan.parents, plan.starts, kv)):
+        W = len(parents)
+        stop = start + W
+        if int(keys.shape[2]) < stop or int(values.shape[2]) < stop:
+            raise ValueError("stream_attention: masked tree cache does not contain every staged row")
+        span = queries if plan.streams == 1 else queries[:, :, first:first + W]
+        mask = _tree_mask(plan, stream)
+        outputs.append(
+            mx.fast.scaled_dot_product_attention(
+                span, keys[:, :, :stop], values[:, :, :stop], scale=scale, mask=mask
+            )
+        )
+        first += W
+    return outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=2)
+
+
 def tree_sdpa(queries: mx.array, kv: Sequence[tuple[mx.array, mx.array]], scale: float, plan: Plan) -> mx.array:
     """Attend grouped queries [1, H, R, D] over each stream's whole KV buffers [1, HKV, capacity, D], with window rows last."""
 
@@ -470,4 +539,4 @@ def tree_sdpa(queries: mx.array, kv: Sequence[tuple[mx.array, mx.array]], scale:
         output_shapes=[(1, H, NT, D)], output_dtypes=[mx.bfloat16])[0]
 
 
-__all__ = ["MAX_STREAMS", "Plan", "ordinary_tree_sdpa", "sources", "tree_sdpa"]
+__all__ = ["MAX_STREAMS", "Plan", "masked_tree_sdpa", "ordinary_tree_sdpa", "sources", "tree_sdpa"]

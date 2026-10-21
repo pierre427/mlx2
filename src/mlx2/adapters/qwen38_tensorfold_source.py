@@ -15,11 +15,11 @@ QUALIFICATION_MODULE_SHA256 = {
     "lane_attention.py": "fc66173e75b660c069011eb15d63ca51368132f017c55fc49d5c91c6529efd91",
     "lane_fuse.py": "c46846660d619ab6426f52b7f9174d45961a7b0158add33fc7b8f300f75372bb",
     "lane_glue.py": "82bad8f18d1cfe624aaf13eec6179c4955d3a3e45d3d95e686cd5c97214be846",
-    "lane_multi.py": "d2b7d81038eec7e1cf035eddf340e28d5ff0a776f28feb8ce4252ade67624884",
+    "lane_multi.py": "47401ec83cc263b24ae626f7435a4e67949c7f2b4f4376f1f601292ed8ff9516",
     "lane_qmm.py": "02ee84c02a46e2b91ca3d77806fc57f0e19003115e766d975dbe9f1eefc158ac",
     "lane_tree.py": "e6de53828708e4833fcf390bc1dd330377cbdd26629da235c9728822770b5839",
     "lane_widen.py": "66369189f5300c06af754c0d867b7f50a55519aadb2342fe05785275767e8b77",
-    "stream_attention.py": "cf3560e44bdf4789f7a0dc1cd6fe5c6760364347db0558dc5b97c10945ff63a0",
+    "stream_attention.py": "1501520b7c46932c4526cb9c2b5d5cddeced40f9178f643a852726a12a412b6e",
     "stream_gdn.py": "f120c8c25c5e2712ee214b770200d621b7d0824acb01cafc8f1a9b04ababc9a0",
 }
 

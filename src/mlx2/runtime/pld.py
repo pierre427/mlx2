@@ -1823,8 +1823,10 @@ class PromptLookupBatchGenerator:
                 cliff_end=int(lane.config.get("verify_cliff_end", 15)),
             )
         deferred = bool(lane.config.get("deferred_admission", False))
+        # A lane the adaptive gate delatched re-probes like a deferred one;
+        # without this the latch was one-way and ``reprobe_at`` dead.
         probing = (
-            deferred
+            (deferred or (cost is None and lane.stats.admission_delatches > 0))
             and lane.ordinary
             and lane.generated >= lane.reprobe_at
             and lane.generated % lane.config.get("admission_probe_stride", 1) == 0

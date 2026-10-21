@@ -91,10 +91,18 @@ def require_native_mtp_target(target):
     return width
 
 
+def mx_repeat(array, count):
+    import mlx.core as mx
+
+    return mx.repeat(array, count, axis=0)
+
+
 class NativeMTPDraftModel:
     """External-draft backend over the target's resident MTP head."""
     continuation_source_reuses_backbone = True
     ast_sequential_draft = True
+    # propose_tree folds ``topology`` paths and takes the context pairing.
+    tree_topology_aware = True
 
     @property
     def ast_execution_modules(self):
@@ -345,7 +353,7 @@ class NativeMTPDraftModel:
 
     def draft_packed_paths(
         self, anchors, hidden, cache, pattern, *, context_tokens=None,
-        logits_processors=None, processor_histories=None,
+        logits_processors=None, processor_histories=None, strict=True,
     ):
         """Make full-depth, distinct-root paths for one bounded AST tile.
 
@@ -354,6 +362,10 @@ class NativeMTPDraftModel:
         TensorFold executor. Verified head context advances once. Each branch
         unrolls on an independent private cache; no target state is touched.
         All transient tensor captures are discarded before returning.
+
+        ``strict=False`` (the AST tree tile) keeps every path it can make
+        instead of raising: fewer legal roots or a branch's grammar dead end
+        drops that branch, since the head context has already advanced.
         """
         import mlx.core as mx
 
@@ -408,13 +420,19 @@ class NativeMTPDraftModel:
                     )
 
                 roots = ranked[0][:len(pattern)] if ranked else []
-                if len(roots) != len(pattern) or not primary[row]:
+                if not strict:
+                    if not primary[row]:
+                        output.append([])
+                        continue
+                elif len(roots) != len(pattern) or not primary[row]:
                     raise ValueError("packed MTP has fewer legal distinct roots than requested")
                 paths = []
                 for branch, ((token, log_probability), depth) in enumerate(zip(roots, pattern)):
                     if branch == 0:
                         if len(primary[row]) < depth:
-                            raise ValueError("packed MTP primary reached a grammar dead end")
+                            if strict:
+                                raise ValueError("packed MTP primary reached a grammar dead end")
+                            depth = len(primary[row])
                         logps = [entry[0][1] for entry in ranked[:depth]]
                         paths.append(SourceContinuation(
                             tuple(primary[row][:depth]),
@@ -438,6 +456,8 @@ class NativeMTPDraftModel:
                             self.stats["chain_steps"] += 1
                             chosen = rank(top[:, -1], path, 1)
                             if not chosen:
+                                if not strict:
+                                    break
                                 raise ValueError("packed MTP branch reached a grammar dead end")
                             path.append(chosen[0][0])
                             logps.append(chosen[0][1])
@@ -448,12 +468,155 @@ class NativeMTPDraftModel:
                     finally:
                         if callable(end):
                             end(private)
-                if paths[0].tokens != tuple(primary[row][:pattern[0]]):
+                if paths[0].tokens != tuple(primary[row][:len(paths[0].tokens)]):
                     raise RuntimeError("packed MTP primary changed during private branching")
                 output.append(paths)
             return output
         finally:
             captures.clear()
+
+    def propose_tree(
+        self, anchors, hidden, cache, max_nodes, *, context_tokens=None,
+        forbidden_token_ids=None, topology=None, logits_processors=None,
+        processor_histories=None, mark=None, **_unused,
+    ):
+        """One AST tree tile per row from the head's distinct-root branches.
+
+        ``topology`` (default ``3x5``) is fitted to ``max_nodes`` proposal
+        rows; branches come from ``draft_packed_paths`` (verified head
+        context advances once, each branch unrolls privately) and fold into
+        a parent-first tree.  A row whose head cannot supply that many
+        distinct roots keeps the branches it can make.
+        """
+        from ..ast_tree_proposals import paths_to_tree, pattern_for_budget
+
+        anchors = [int(anchor) for anchor in anchors]
+        forbidden = forbidden_token_ids or [() for _ in anchors]
+        pattern = tuple(
+            min(depth, self.config.block_size - 1)
+            for depth in pattern_for_budget(topology, int(max_nodes))
+        )
+        if not pattern or hidden.shape[1] == 0:
+            # No verified seed yet (a one-token prompt): an ordinary round.
+            return [([], []) for _ in anchors]
+        if not any(logits_processors or ()):
+            rows = self._lazy_tree_paths(anchors, hidden, cache, pattern, context_tokens)
+        elif len(pattern) > 1:
+            rows = self.draft_packed_paths(
+                anchors, hidden, cache, pattern, context_tokens=context_tokens,
+                logits_processors=logits_processors,
+                processor_histories=processor_histories, strict=False,
+            )
+            rows = [[path.tokens for path in paths] for paths in rows]
+            self.stats["tree_calls"] = self.stats.get("tree_calls", 0) + 1
+        else:
+            drafted, _laws = self.draft_distributions(
+                anchors, hidden, cache, pattern[0],
+                [None] * len(anchors), [0.0] * len(anchors),
+                context_tokens=context_tokens, logits_processors=logits_processors,
+                processor_histories=processor_histories,
+            )
+            rows = [[tuple(tokens)] for tokens in drafted]
+        if mark is not None:
+            mark("tree_draft_build")
+        return [
+            paths_to_tree(paths, int(max_nodes), forbidden_root=forbidden[row])
+            for row, paths in enumerate(rows)
+        ]
+
+    @staticmethod
+    def _branch_batch_cache(committed, branches):
+        """One head cache holding ``branches`` copies of the committed prefix.
+
+        Only for plain KV head caches (rows stay independent, so each row is
+        that branch's ordinary unroll); ``None`` otherwise.
+        """
+        from ..models.cache import KVCache
+
+        if not all(type(layer) is KVCache and layer.keys is not None for layer in committed):
+            return None
+        batched = []
+        for layer in committed:
+            clone = KVCache()
+            clone.keys = mx_repeat(layer.keys[..., :layer.offset, :], branches)
+            clone.values = mx_repeat(layer.values[..., :layer.offset, :], branches)
+            clone.offset = layer.offset
+            batched.append(clone)
+        return batched
+
+    def _lazy_tree_paths(self, anchors, hidden, cache, pattern, context_tokens):
+        """Greedy distinct-root paths with no host sync until the end.
+
+        Commits the verified pending seeds to each row's head cache exactly
+        as ``draft_distributions`` does, takes the ``len(pattern)`` best
+        first tokens on the device, unrolls each branch greedily on a
+        private copy of the committed head cache, and reads every token
+        back in one evaluation (the synced path costs one ``.item()`` round
+        trip per head step).
+        """
+        import mlx.core as mx
+
+        if context_tokens is None:
+            if hidden.shape[1] != 1:
+                raise ValueError("native MTP draft needs pairing for a multi-feature tail")
+            context_tokens = [[anchor] for anchor in anchors]
+        rows = self._rows(cache, len(anchors))
+        start = getattr(self.target, "mtp_start_cycle", None)
+        end = getattr(self.target, "mtp_end_cycle", None)
+        branches = len(pattern)
+        pending = []
+        self.stats["draft_calls"] += 1
+        for row in range(len(anchors)):
+            pairing = list(context_tokens[row])
+            if len(pairing) != hidden.shape[1] or pairing[-1] != anchors[row]:
+                raise ValueError("native MTP pending pairing must end with the anchor")
+            if len(pairing) > 1:
+                self._step(hidden[row:row + 1, :-1], mx.array([pairing[:-1]], mx.uint32),
+                           rows[row], full_vocab=False)
+            logits, seed = self._step(hidden[row:row + 1, -1:], mx.array([pairing[-1:]], mx.uint32),
+                                      rows[row], full_vocab=False)
+            self.stats["committed_positions"] += len(pairing)
+            values = logits[0, -1].astype(mx.float32)
+            roots = mx.argpartition(-values, branches - 1)[:branches]
+            # Rank the roots on the device: best root first (the primary).
+            roots = roots[mx.argsort(-values[roots])]
+            seed = seed[:, -1:]
+            batched = self._branch_batch_cache(rows[row], branches) if not callable(start) else None
+            if batched is not None:
+                # All branches advance together: one head step per depth.
+                tokens = roots.reshape(branches, 1).astype(mx.uint32)
+                seeds = mx.repeat(seed, branches, axis=0)
+                steps = [tokens]
+                for _ in range(max(pattern) - 1):
+                    top, seeds = self._step(seeds, steps[-1], batched, full_vocab=False)
+                    steps.append(mx.argmax(top[:, -1], axis=-1).reshape(branches, 1).astype(mx.uint32))
+                    self.stats["chain_steps"] += 1
+                grid = mx.concatenate(steps, axis=1)
+                pending.append([grid[branch, :depth] for branch, depth in enumerate(pattern)])
+                self.stats["batched_tree_calls"] = self.stats.get("batched_tree_calls", 0) + 1
+                continue
+            branch_tokens = []
+            for branch, depth in enumerate(pattern):
+                private = copy.deepcopy(rows[row])
+                if callable(start):
+                    start(private, share_index_state=False)
+                try:
+                    token = roots[branch:branch + 1].reshape(1, 1).astype(mx.uint32)
+                    path, branch_seed = [token], seed
+                    for _ in range(depth - 1):
+                        top, branch_seed = self._step(branch_seed, path[-1], private, full_vocab=False)
+                        path.append(mx.argmax(top[:, -1], axis=-1).reshape(1, 1).astype(mx.uint32))
+                        self.stats["chain_steps"] += 1
+                finally:
+                    if callable(end):
+                        end(private)
+                branch_tokens.append(mx.concatenate(path, axis=1))
+            pending.append(branch_tokens)
+        mx.eval([token for branch_tokens in pending for token in branch_tokens])
+        return [
+            [tuple(int(token) for token in path.reshape(-1).tolist()) for path in branch_tokens]
+            for branch_tokens in pending
+        ]
 
     # -- complete paths for the continuation pool ------------------------------
     def _remember(self, history, anchor, drafted, ranked):

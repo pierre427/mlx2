@@ -854,6 +854,25 @@ class Model(nn.Module):
         """Text geometry for external draft executors (hidden size, heads)."""
         return self.language_model.args
 
+    # Adapter-selected external feature: ``None`` (post-block taps) or
+    # ``"mtp_seed"`` (the post-final-norm hidden the native MTP head takes,
+    # so the head can draft for the external/tree-tile engine).
+    external_feature_source = None
+
+    def select_external_feature_source(self, source):
+        if source not in (None, "mtp_seed"):
+            raise ValueError("unsupported Qwen3.8 external feature source")
+        if source == "mtp_seed" and getattr(self.language_model, "mtp", None) is None:
+            raise ValueError("the MTP seed feature requires a loaded MTP head")
+        # Route metadata, not a child module (MLX registers assignments).
+        object.__setattr__(self, "external_feature_source", source)
+
+    @property
+    def external_feature_width(self):
+        if self.external_feature_source == "mtp_seed":
+            return int(self.language_model.args.hidden_size)
+        return None
+
     def forward_with_taps(
         self,
         inputs,
@@ -863,6 +882,16 @@ class Model(nn.Module):
         body_only=False,
         last_logits_only=False,
     ):
+        if self.external_feature_source == "mtp_seed":
+            if tuple(capture_layers) != (len(self.language_model.model.layers) - 1,):
+                raise ValueError("the MTP seed feature is the last layer's post-norm hidden")
+            if body_only and last_logits_only:
+                raise ValueError("body_only and last_logits_only are mutually exclusive")
+            hidden = self.language_model.model(inputs, cache)
+            if body_only:
+                return None, hidden
+            projected = hidden[:, -1:] if last_logits_only else hidden
+            return self.language_model.logits(projected), hidden
         return self.language_model.forward_with_taps(
             inputs,
             cache,

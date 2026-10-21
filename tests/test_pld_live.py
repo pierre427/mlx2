@@ -637,3 +637,44 @@ def test_live_retrieval_segment_proposes_under_documented_context_match():
     assert receipt["retrieval_cycles"] > 0
     assert receipt["accepted"] > 0
     assert receipt["context_mismatch_sites"] == 0
+
+
+def test_adaptive_delatch_reprobes_and_reenters(monkeypatch):
+    """The adaptive gate's latch is two-way: a delatched lane re-probes."""
+
+    from mlx2.runtime import prompt_lookup
+
+    real_propose = prompt_lookup.IndexedPromptLookup.propose
+    phase = {"wrong": True}
+
+    def propose(self, budget, *args, **kwargs):
+        if phase["wrong"]:
+            return [7] * max(1, min(int(budget), 2))   # never the target's token
+        return real_propose(self, budget, *args, **kwargs)
+
+    monkeypatch.setattr(prompt_lookup.IndexedPromptLookup, "propose", propose)
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(),
+        prefill_step_size=16,
+        prompt_lookup={
+            "num_draft": 2, "ngram_min": 2, "ngram_max": 2,
+            "adaptive": True, "adaptive_warmup": 0, "adaptive_gate": 0.5,
+            "admission_window": 1, "admission_gate": 1.0,
+            "admission_reprobe_interval": 1,
+        },
+    )
+    uid = generator.insert([[1, 2, 1, 2]], max_tokens=[40], caches=[[KVCache()]])[0]
+    receipt = None
+    for _ in range(200):
+        _, responses = generator.next()
+        for response in responses:
+            receipt = response.speculative_receipt or receipt
+            if response.finish_reason:
+                break
+        lane = generator.lanes.get(uid)
+        if lane is None:
+            break
+        if phase["wrong"] and lane.stats.admission_delatches:
+            phase["wrong"] = False
+    assert receipt["admission_delatches"] >= 1
+    assert receipt["admission_reentries"] >= 1

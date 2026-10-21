@@ -563,7 +563,29 @@ class Model(nn.Module):
         """Text geometry for external draft executors and compatibility gates."""
         return self.language_model.args
 
+    # Adapter-selected external feature: ``None`` (post-block taps) or
+    # ``"mtp_seed"`` (post-final-norm hidden for the native MTP head drafter).
+    external_feature_source = None
+
+    def select_external_feature_source(self, source):
+        if source not in (None, "mtp_seed"):
+            raise ValueError("unsupported Qwen3.6 external feature source")
+        if source == "mtp_seed" and self.language_model.mtp is None:
+            raise ValueError("the MTP seed feature requires a loaded MTP head")
+        object.__setattr__(self, "external_feature_source", source)
+
+    @property
+    def external_feature_width(self):
+        if self.external_feature_source == "mtp_seed":
+            return int(self.language_model.args.hidden_size)
+        return None
+
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        if self.external_feature_source == "mtp_seed":
+            if tuple(capture_layers) != (len(self.language_model.model.layers) - 1,):
+                raise ValueError("the MTP seed feature is the last layer's post-norm hidden")
+            hidden = self.language_model.model(inputs, cache)
+            return (None if body_only else self.language_model.logits(hidden)), hidden
         return self.language_model.forward_with_taps(
             inputs,
             cache,
@@ -593,6 +615,8 @@ class Model(nn.Module):
         return None if route is None else route.receipt()
 
     def prefill_body(self, inputs, cache, capture_layers):
+        if self.external_feature_source == "mtp_seed":
+            return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
         return self.language_model.prefill_body(inputs, cache, capture_layers)
 
     def make_cache(self):
