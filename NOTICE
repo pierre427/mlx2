@@ -797,3 +797,32 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+------------------------------------------------------------------------------
+Eagle 4 (https://github.com/eagle-hq/EAGLE-4, revision
+75436712e7415d352cf9f17d070019d07410786f) — Eagle 4 Source-Available License
+
+This project includes or is derived from Eagle 4 technology developed by
+Eagle AI Corp. It is not an official Eagle AI Corp project unless expressly
+stated otherwise.
+
+The Eagle Files src/mlx2/runtime/drafters/eagle4.py,
+src/mlx2/runtime/drafters/eagle4_config.py and src/mlx2/adapters/eagle4.py
+(the MLX port of the dense Qwen3.8 EAGLE-4 drafter) are Copyright 2026 Eagle AI
+Corp., modified by mlx2 contributors, and are licensed under the Eagle 4
+Source-Available License, NOT under this repository's Apache-2.0 LICENSE. That
+license is source-available and is not an OSI-approved open-source license; it
+restricts Commercial Use and Competing Offerings. Downloading, cloning,
+forking, copying, accessing, modifying, using, hosting, distributing, or
+otherwise exercising any licensed right in those files constitutes acceptance
+of the Eagle 4 Source-Available License and the incorporated Eagle Trademark
+Policy, which is TRADEMARKS.md in the Eagle 4 repository
+(https://github.com/eagle-hq/EAGLE-4/blob/main/TRADEMARKS.md).
+
+third_party/eagle4/ holds the license (LICENSE), Eagle 4's NOTICE file, its
+third-party notices and license texts (THIRD_PARTY_NOTICES.md, LICENSES/),
+and the modification notice and change log (MODIFICATIONS.md).
+
+EAGLE, Eagle 4, EAGLE-Harness, and EAGLE Efficient LM Head are trademarks or
+claimed trademarks of Eagle AI Corp. mlx2 is not affiliated with, certified
+by, sponsored by, or endorsed by Eagle AI Corp.

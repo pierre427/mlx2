@@ -13,6 +13,10 @@ not depend on the unified checkout or a legacy server.
 
 Contact: Pierre Lamy, [pierre@userid.org](mailto:pierre@userid.org)
 
+mlx2 is licensed under Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)),
+except the EAGLE-4 drafter files, which are source-available under the Eagle 4
+Source-Available License; see [Third-party code](#third-party-code).
+
 ## Serving stack
 
 - OpenAI-compatible chat/completions, SSE streaming, function calls, reasoning,
@@ -185,3 +189,21 @@ PEFT adapter with `mlx2.runtime.media_lora.convert_media_lora` (or
 `load_lora`, `lora_receipt` and `unload_lora` on `QwenImage21Adapter`,
 `LTX25Adapter` or `mlx2.adapters.music3.Music3Adapter`. Only one adapter may be
 active at a time, and unsupported tensor layouts fail closed.
+
+## Third-party code
+
+Code adapted from other projects is listed, with its license and notices, in
+[NOTICE](NOTICE).
+
+This project includes or is derived from Eagle 4 technology developed by
+Eagle AI Corp. It is not an official Eagle AI Corp project unless expressly
+stated otherwise. The EAGLE-4 drafter files (`src/mlx2/runtime/drafters/eagle4.py`,
+`src/mlx2/runtime/drafters/eagle4_config.py`, `src/mlx2/adapters/eagle4.py`)
+are licensed under the Eagle 4 Source-Available License, which is **not an
+OSI-approved open-source license**, and not under Apache-2.0. Downloading,
+cloning, forking, copying, accessing, modifying, using, hosting, distributing,
+or otherwise exercising any licensed right in those files constitutes
+acceptance of that license and the incorporated
+[Eagle Trademark Policy](https://github.com/eagle-hq/EAGLE-4/blob/main/TRADEMARKS.md).
+The license, Eagle 4's NOTICE, and the modification log are in
+[third_party/eagle4/](third_party/eagle4/).
