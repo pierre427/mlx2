@@ -1,10 +1,12 @@
-"""Disk streaming of quantized weights: MoE expert rows and dense MLP projections.
+"""Disk streaming of weights: MoE expert rows and dense MLP projections.
 
 Experts of a routed MoE layer are contiguous rows of a stacked ``[E, ...]``
-tensor inside the model's own safetensors shards.  This module reads one
+tensor inside the model's own safetensors shards, or one tensor per expert
+that ``sanitize`` stacks (:func:`record_stack`).  This module reads one
 expert's rows by byte range on demand, keeps a bounded per-layer LRU of the
 experts a run actually touches, and remaps ``rhs_indices`` so the untouched
-``mx.gather_qmm`` kernel computes on the resident subset.  Dense paging
+``mx.gather_qmm`` (quantized tables) or ``mx.gather_mm`` (unquantized
+``SwitchLinear`` tables) kernel computes on the resident subset.  Dense paging
 (``install_dense_streaming``) reads a whole quantized projection per call,
 runs the stock ``mx.quantized_matmul`` and evaluates its output before the
 projection's bytes are released.
@@ -460,8 +462,16 @@ class BoundShards:
     remains the adapter identity's job.
     """
 
-    def __init__(self, root, names: Sequence[str], *, records=None, weight_map=None):
+    def __init__(self, root, names: Sequence[str], *, records=None, weight_map=None,
+                 bypass_page_cache: bool = False):
         self.root = Path(root).expanduser()
+        # ``F_NOCACHE`` on every bound descriptor: streamed reads of a table
+        # far larger than RAM otherwise fill the unified buffer cache with
+        # rows the expert LRU already holds, and macOS answers that pressure
+        # by swapping other processes out (measured 2026-10-21: +10 GB of
+        # swap-outs streaming the 219 GiB Laguna S bf16).  It changes where
+        # bytes are cached, never their value.
+        self.bypass_page_cache = bool(bypass_page_cache)
         self._lock = threading.Lock()
         self._closed = False
         self._fds: Dict[Path, int] = {}
@@ -508,6 +518,13 @@ class BoundShards:
                 fd = os.open(str(path), os.O_RDONLY)
                 self._fds[path] = fd
                 self._names[path] = name
+                if self.bypass_page_cache:
+                    import fcntl
+
+                    nocache = getattr(fcntl, "F_NOCACHE", None)
+                    if nocache is None:
+                        raise StreamingUnavailable("this platform has no F_NOCACHE")
+                    fcntl.fcntl(fd, nocache, 1)
                 info = os.fstat(fd)
                 if not stat_module.S_ISREG(info.st_mode):
                     raise StreamingUnavailable(f"shard is not a regular file: {name}")
@@ -1700,6 +1717,106 @@ def _streamed_switch_linear(base, reader, cache, *, layer_index, unit_offset, co
     )
 
 
+_STREAMED_DENSE_CLASS = None
+
+
+def _streamed_dense_class():
+    """The unquantized (``SwitchLinear``/``mx.gather_mm``) streamed module.
+
+    Same contract as :func:`_streamed_class`: module scope, nothing of the
+    replaced module captured.  The stock resident ``SwitchLinear`` computes
+    ``gather_mm(x, weight.swapaxes(-1, -2), rhs_indices=indices)``; this one
+    stacks only the resident rows the call names, remaps the indices order
+    preservingly onto that stack, and calls the very same ``gather_mm`` with
+    the very same ``sorted_indices``.  Each selected expert's matrix is the
+    checkpoint's bytes unchanged, so only the index vector differs.
+    """
+    global _STREAMED_DENSE_CLASS
+    if _STREAMED_DENSE_CLASS is not None:
+        return _STREAMED_DENSE_CLASS
+
+    import mlx.core as mx
+    import numpy as np
+
+    from .models.switch_layers import SwitchLinear
+
+    class StreamedSwitchLinear(SwitchLinear):
+        def __init__(self, *, bias, input_dims, output_dims, reader, cache,
+                     layer_index, collector):
+            object.__setattr__(self, "_no_grad", set())
+            object.__setattr__(self, "_training", False)
+            dict.__init__(self)
+            if bias is not None:
+                self["bias"] = bias
+            self._stream_reader = reader
+            self._stream_cache = cache
+            self._stream_layer = layer_index
+            self._stream_collector = collector
+            self._stream_num_experts = reader.num_experts
+            self._stream_input_dims = int(input_dims)
+            self._stream_output_dims = int(output_dims)
+            self.freeze(recurse=False)
+
+        @property
+        def input_dims(self):
+            return self._stream_input_dims
+
+        @property
+        def output_dims(self):
+            return self._stream_output_dims
+
+        @property
+        def num_experts(self):
+            return self._stream_num_experts
+
+        def to_quantized(self, *args, **kwargs):
+            raise StreamingUnavailable(
+                "a streamed unquantized expert table cannot be quantized in place"
+            )
+
+        def __call__(self, x, indices, sorted_indices=False):
+            host = np.asarray(indices, dtype=np.int64)
+            unique = np.unique(host)  # ascending: the remap stays monotonic
+            try:
+                entries = self._stream_cache.acquire([int(e) for e in unique])
+            except BaseException:
+                if self._stream_collector is not None:
+                    self._stream_collector.note_lost_call(self._stream_layer)
+                raise
+            self._stream_cache.note_gather(int(unique.size))
+            if self._stream_collector is not None:
+                self._stream_collector.observe(self._stream_layer, unique)
+            table = np.zeros(self._stream_num_experts, dtype=np.uint32)
+            table[unique] = np.arange(unique.size, dtype=np.uint32)
+            remapped = mx.array(table[host].reshape(host.shape))
+            weight = mx.stack([entries[int(e)][0] for e in unique])
+            out = mx.gather_mm(
+                x,
+                weight.swapaxes(-1, -2),
+                rhs_indices=remapped,
+                sorted_indices=sorted_indices,
+            )
+            if "bias" in self:
+                out = out + mx.expand_dims(self["bias"][indices], -2)
+            return out
+
+    _STREAMED_DENSE_CLASS = StreamedSwitchLinear
+    return _STREAMED_DENSE_CLASS
+
+
+def _streamed_dense_switch_linear(base, reader, cache, *, layer_index, collector):
+    """Drop-in replacement for one unquantized ``SwitchLinear``."""
+    return _streamed_dense_class()(
+        bias=base["bias"] if "bias" in base else None,
+        input_dims=base.input_dims,
+        output_dims=base.output_dims,
+        reader=reader,
+        cache=cache,
+        layer_index=layer_index,
+        collector=collector,
+    )
+
+
 def is_streamed_module(module) -> bool:
     return getattr(module, "_stream_reader", None) is not None
 
@@ -1808,9 +1925,20 @@ class ExpertStreamPlan:
     staging_window: int = 0
     manifest_sha256: str = ""
     resident_remainder_bytes: Optional[int] = None
+    ceiling_source: str = "explicit"
+    table_kinds: Tuple[str, ...] = ()
+    page_cache: str = "kernel"
 
     def as_dict(self) -> Dict[str, object]:
         extra = {"resident_paths": list(self.resident_paths)} if self.resident_paths else {}
+        # Present only when they differ from the historical shape, so an
+        # explicit quantized plan's receipt stays byte-identical.
+        if self.ceiling_source != "explicit":
+            extra["ceiling_source"] = self.ceiling_source
+        if self.table_kinds and self.table_kinds != ("gather_qmm",):
+            extra["table_kinds"] = list(self.table_kinds)
+        if self.page_cache != "kernel":
+            extra["page_cache"] = self.page_cache
         return {
             **extra,
             "layers": self.layers,
@@ -2124,8 +2252,21 @@ def install_expert_streaming(
     router_hint: str = "off",
     shards: Optional[BoundShards] = None,
     resolver: Optional[Callable] = None,
+    auto_ceiling: Optional[Callable[[Dict[str, int]], int]] = None,
 ) -> ExpertStreamManager:
-    """Replace every streamable ``QuantizedSwitchLinear`` with a streamed one.
+    """Replace every streamable routed-expert table with a streamed one.
+
+    Quantized tables (``QuantizedSwitchLinear``, ``mx.gather_qmm``) and
+    unquantized ones (``SwitchLinear``, ``mx.gather_mm``) share the reader,
+    the LRU and the order-preserving index remap.
+
+    ``auto_ceiling`` (automatic selection) replaces ``ceiling_bytes``: it is
+    called once the targets are resolved with the table geometry
+    (``table_bytes``, ``expert_bytes``, ``layers``, ``top_k``,
+    ``floor_bytes``, ``target_bytes`` -- live bytes leaving the tree -- and
+    ``transient_bytes``, the reserve at the smallest capacity) and returns the
+    bytes available to the cache.  The plan's ceiling is then the capacity it
+    actually holds, so the reservation is never larger than the cache.
 
     With ``shards`` and ``resolver`` (the early-load path from
     :mod:`mlx2.runtime.streamed_load`) the model still holds unevaluated
@@ -2150,7 +2291,7 @@ def install_expert_streaming(
     """
     import mlx.core as mx
 
-    from .models.switch_layers import QuantizedSwitchLinear
+    from .models.switch_layers import QuantizedSwitchLinear, SwitchLinear
 
     if type(overlap) is not bool:
         raise ValueError("expert overlap must be boolean")
@@ -2173,7 +2314,8 @@ def install_expert_streaming(
         targets: List[Tuple[str, object, List[ExpertSliceSpec]]] = []
         resident_paths: List[str] = []
         for (path, module) in model.named_modules():
-            if not isinstance(module, QuantizedSwitchLinear):
+            quantized = isinstance(module, QuantizedSwitchLinear)
+            if not quantized and not isinstance(module, SwitchLinear):
                 continue
             if is_streamed_module(module):
                 raise StreamingUnavailable(
@@ -2187,8 +2329,12 @@ def install_expert_streaming(
                     f"{path!r}: nvfp4 gathers may take a dequantized dense tail "
                     "whose transient is not reserved"
                 )
+            if overlap and not quantized:
+                raise StreamingUnavailable(
+                    f"{path!r}: the gated expert overlap bank is quantized-only"
+                )
             specs = []
-            for key in ("weight", "scales", "biases"):
+            for key in (("weight", "scales", "biases") if quantized else ("weight",)):
                 value = module.get(key)
                 if value is None:
                     continue
@@ -2217,7 +2363,11 @@ def install_expert_streaming(
             targets.append((path, module, specs))
 
         if not targets:
-            raise StreamingUnavailable("model has no quantized routed experts")
+            raise StreamingUnavailable("model has no routed expert tables")
+        table_kinds = {
+            "gather_qmm" if isinstance(module, QuantizedSwitchLinear) else "gather_mm"
+            for (_, module, _) in targets
+        }
 
         expert_bytes = max(
             sum(spec.row_bytes() for spec in specs) for (_, _, specs) in targets
@@ -2227,13 +2377,6 @@ def install_expert_streaming(
             specs[0].num_experts * sum(spec.row_bytes() for spec in specs)
             for (_, _, specs) in targets
         )
-        capacity = plan_cache_experts(
-            table_bytes=table_bytes,
-            expert_bytes=expert_bytes,
-            num_layers=len(targets),
-            top_k=top_k,
-            ceiling_bytes=ceiling_bytes,
-        )
         workers = max(1, int(read_workers))
         window = workers * STAGING_WINDOW_PER_WORKER
         groups: Dict[str, List[Tuple[int, int]]] = {}
@@ -2241,21 +2384,60 @@ def install_expert_streaming(
             groups.setdefault(path.rpartition(".")[0], []).append(
                 (specs[0].num_experts, sum(spec.row_bytes() for spec in specs))
             )
-        transient = expert_transient_bound(
-            groups, capacity=capacity, staging_bytes=window * expert_bytes
-        )
-        # The first speculative bank of the next layer may materialize before
-        # its router sync releases the previous layer's gather copies. Reserve
-        # that one immutable bank explicitly; subsequent calls have synced.
-        if overlap:
-            transient += capacity * expert_bytes
-        if router_hint != "off":
-            # One raw host-byte bundle: at most top_k rows for all projections
-            # of one target layer. It is separate from the demand staging pool.
-            transient += max(
-                int(top_k) * sum(row_bytes for _, row_bytes in members)
-                for members in groups.values()
+
+        def transient_for(capacity_experts: int) -> int:
+            bound = expert_transient_bound(
+                groups, capacity=capacity_experts, staging_bytes=window * expert_bytes
             )
+            # The first speculative bank of the next layer may materialize
+            # before its router sync releases the previous layer's gather
+            # copies. Reserve that one immutable bank explicitly; subsequent
+            # calls have synced.
+            if overlap:
+                bound += capacity_experts * expert_bytes
+            if router_hint != "off":
+                # One raw host-byte bundle: at most top_k rows for all
+                # projections of one target layer. It is separate from the
+                # demand staging pool.
+                bound += max(
+                    int(top_k) * sum(row_bytes for _, row_bytes in members)
+                    for members in groups.values()
+                )
+            return int(bound)
+
+        ceiling_source = "explicit"
+        if auto_ceiling is not None:
+            ceiling_source = "auto"
+            floor_capacity = max(int(top_k), 1)
+            ceiling_bytes = int(auto_ceiling({
+                "table_bytes": int(table_bytes),
+                "expert_bytes": int(expert_bytes),
+                "layers": len(targets),
+                "top_k": int(top_k),
+                "floor_bytes": len(targets) * floor_capacity * int(expert_bytes),
+                "target_bytes": sum(
+                    int(module.get(spec.key).nbytes)
+                    for (_, module, specs) in targets
+                    for spec in specs
+                    if module.get(spec.key) is not None
+                ),
+                # A smaller cache holds fewer of a wide call's rows, so the
+                # smallest admissible capacity bounds the transient above.
+                "transient_bytes": transient_for(floor_capacity),
+            }))
+        capacity = plan_cache_experts(
+            table_bytes=table_bytes,
+            expert_bytes=expert_bytes,
+            num_layers=len(targets),
+            top_k=top_k,
+            ceiling_bytes=ceiling_bytes,
+        )
+        if ceiling_source == "auto":
+            # Reserve what the cache can actually hold, not the whole room
+            # offered: the resident-fraction curve usually sizes it smaller,
+            # and the rest stays with the page cache, KV and the APCv2 cache.
+            ceiling_bytes = capacity * len(targets) * expert_bytes
+        transient = transient_for(capacity)
         manifest = _manifest(
             [
                 [
@@ -2287,17 +2469,24 @@ def install_expert_streaming(
                 prefill_admission=prefill_admission,
             )
             caches[path] = cache
-            replacements.append((path, _streamed_switch_linear(
-                module,
-                reader,
-                cache,
-                layer_index=layer_index,
-                unit_offset=0,
-                collector=collector,
-                overlap=overlap,
-            )))
-            if replacements[-1][1]._overlap is not None:
-                overlaps.append(replacements[-1][1]._overlap)
+            if isinstance(module, QuantizedSwitchLinear):
+                replacement = _streamed_switch_linear(
+                    module,
+                    reader,
+                    cache,
+                    layer_index=layer_index,
+                    unit_offset=0,
+                    collector=collector,
+                    overlap=overlap,
+                )
+            else:
+                replacement = _streamed_dense_switch_linear(
+                    module, reader, cache, layer_index=layer_index, collector=collector,
+                )
+            replacements.append((path, replacement))
+            if getattr(replacement, "_overlap", None) is not None:
+                overlaps.append(replacement._overlap)
+            replacement = None
             streamed_keys.extend(f"{path}.{spec.key}" for spec in specs)
         for (path, replacement) in replacements:
             _swap_module(model, path, replacement)
@@ -2330,6 +2519,11 @@ def install_expert_streaming(
             transient_bound_bytes=transient,
             staging_window=window,
             manifest_sha256=manifest,
+            ceiling_source=ceiling_source,
+            table_kinds=tuple(sorted(table_kinds)),
+            page_cache=(
+                "bypassed" if getattr(handles, "bypass_page_cache", False) else "kernel"
+            ),
         )
         if collector is not None:
             collector.bind(num_layers=plan.layers, num_units=plan.experts_per_layer,

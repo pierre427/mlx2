@@ -1110,6 +1110,8 @@ class NemotronHMoE(nn.Module):
     def set_relu2_down_policy(self, policy: str) -> str:
         if policy not in {"auto", "fused_b1"}:
             raise ValueError("Nemotron ReLU2/down policy must be auto or fused_b1")
+        if policy != "auto" and self.__dict__.get("_mlx2_expert_streaming"):
+            raise ValueError("Nemotron fused ReLU2/down cannot read a streamed expert table")
         old, self._relu2_down_policy = self._relu2_down_policy, policy
         return old
 
@@ -1119,7 +1121,20 @@ class NemotronHMoE(nn.Module):
             "counts": dict(self._relu2_down_counts),
         }
 
+    def force_stock_for_expert_streaming(self) -> dict:
+        """Select the stock routed arithmetic for a streamed expert table.
+
+        The fused ReLU2/down kernel reads the resident ``fc2`` table, and the
+        exact routed batch/lattice probes the table with canary gathers; both
+        are refused once the table lives on disk, leaving ``SwitchMLP``.
+        """
+        self._relu2_down_policy = "auto"
+        self.__dict__["_mlx2_expert_streaming"] = True
+        return {"relu2_down": 1, "routed_batch": 1}
+
     def _routed_batch_geometry_refusal(self, rows: int) -> str | None:
+        if self.__dict__.get("_mlx2_expert_streaming"):
+            return "expert streaming"
         if self.training:
             return "training"
         if not 2 <= rows <= NEMOTRON_ROUTED_EXACT_MAX_ROWS:
@@ -1275,6 +1290,8 @@ class NemotronHMoE(nn.Module):
     def routed_lattice_plan(self, lengths) -> tuple[tuple[int, ...] | None, str | None]:
         """Admit one lattice and return its exact physical expert-call plan."""
 
+        if self.__dict__.get("_mlx2_expert_streaming"):
+            return None, "expert streaming"
         if type(self.gate) is not MoEGate:
             return (
                 None,

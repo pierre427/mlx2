@@ -218,6 +218,17 @@ class LagunaSparseMoeBlock(nn.Module):
         self.fused_down_fallbacks = 0
         self.fused_down_last_fallback = None
 
+    def force_stock_for_expert_streaming(self) -> dict:
+        """Select the stock routed arithmetic for a streamed expert table.
+
+        The fused down kernel reads the resident ``down_proj`` table; with the
+        table on disk only the stock ``SwitchGLU`` gather is admitted.  The
+        router reads its own gate projection, never the expert table, so it
+        keeps its selection.
+        """
+        self.fused_down_mode = False
+        return {"fused_down": 1}
+
     def __call__(self, x):
         inds, weights = self.gate(x)
         if self.fused_down_mode and inds.size // self.top_k > 8:
@@ -448,7 +459,13 @@ class Model(nn.Module):
                         continue
                     rows = [weights.pop(f"{prefix}.experts.{expert}.{projection}.{suffix}")
                             for expert in range(self.args.num_experts)]
-                    weights[f"{prefix}.switch_mlp.{projection}.{suffix}"] = mx.stack(rows)
+                    stacked = mx.stack(rows)
+                    from ..weight_stream import record_stack
+
+                    # An expert-axis stack of untransformed checkpoint
+                    # tensors: each expert stays byte-addressable.
+                    record_stack(stacked, rows)
+                    weights[f"{prefix}.switch_mlp.{projection}.{suffix}"] = stacked
         return {
             key: value for key, value in weights.items()
             if "rotary_emb.inv_freq" not in key

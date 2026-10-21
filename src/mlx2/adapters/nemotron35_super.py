@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -19,8 +20,10 @@ from .external_draft_policy import ExternalDraftAdapterMixin
 from .nemotron3_super import Nemotron3SuperAdapter, configure_environment
 from .nemotron35_super_config import (
     SOURCE_CONFIG_SHA256,
+    SOURCE_INDEX_SHA256,
     SOURCE_REVISION,
     language_config,
+    tensor_schema,
     vision_config,
 )
 
@@ -263,11 +266,87 @@ def native_draft_depth(value):
     )
 
 
+# The unconverted vendor release, served unquantized (bf16 everywhere).  No
+# mlx2 conversion ran, so there is no recipe; the source's own pins bind it.
+SOURCE_CONVERSION = {
+    "recipe": "bf16-source-unconverted",
+    "expert_bits": None,
+    "activation_aware": False,
+}
+SOURCE_DESCRIPTOR = replace(DESCRIPTOR, variant="bf16-source")
+
+
+def inspect_source_artifact(path, config):
+    """The pinned bf16 vendor release, without an mlx2 conversion.
+
+    The config and index bytes must be the pinned source revision's, and every
+    shard header must carry exactly the published per-expert geometry
+    (``tensor_schema(fused=False)``).  Nothing is quantized at load.
+    """
+    if sha256(path / "config.json") != SOURCE_CONFIG_SHA256:
+        raise ValueError("Super VL source config differs from the pinned revision")
+    if sha256(path / "model.safetensors.index.json") != SOURCE_INDEX_SHA256:
+        raise ValueError("Super VL source index differs from the pinned revision")
+    schema = tensor_schema(config, fused=False)
+    mapping = json.loads((path / "model.safetensors.index.json").read_text())[
+        "weight_map"
+    ]
+    if set(mapping) != set(schema):
+        raise ValueError("Super VL source index has missing or unexpected tensors")
+    digest, records = hashlib.sha256(), []
+    for name in (
+        "config.json",
+        "model.safetensors.index.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "chat_template.jinja",
+        "generation_config.json",
+    ):
+        item = path / name
+        if item.is_symlink() or not item.is_file():
+            raise ValueError(f"Missing or escaped Super VL metadata: {name}")
+        digest.update(name.encode())
+        digest.update(item.read_bytes())
+    for name in sorted(set(mapping.values())):
+        if Path(name).name != name or "\\" in name or not name.endswith(".safetensors"):
+            raise ValueError("Super VL shard path escapes artifact")
+        item = path / name
+        if item.is_symlink() or not item.is_file():
+            raise ValueError("Super VL source shard is absent or escaped")
+        header, _ = read_header(item)
+        tensors = {key: entry for key, entry in header.items() if key != "__metadata__"}
+        if set(tensors) != {key for key, shard in mapping.items() if shard == name}:
+            raise ValueError("Super VL source shard/index differs")
+        for key, entry in tensors.items():
+            if {field: entry[field] for field in ("shape", "dtype")} != schema[key]:
+                raise ValueError(f"Super VL source tensor geometry differs: {key}")
+        stat = item.stat()
+        record = (name, stat.st_size, stat.st_mtime_ns)
+        records.append(record)
+        digest.update(json.dumps(record).encode())
+        digest.update(json.dumps(header, sort_keys=True).encode())
+    return {
+        "config": config,
+        "weight_map": mapping,
+        "conversion": dict(SOURCE_CONVERSION),
+        "has_mtp": True,
+        "quantization": {},
+        "source_bf16": True,
+        "identity": {
+            "path": str(path),
+            "fingerprint": digest.hexdigest(),
+            "files": records,
+        },
+    }
+
+
 def inspect_artifact(model_path):
     path = Path(model_path).expanduser().resolve()
     config = json.loads((path / "config.json").read_text())
     language_config(config)
     vision_config(config)
+    if not (path / "mlx2-conversion.json").exists():
+        return inspect_source_artifact(path, config)
     receipt = json.loads((path / "mlx2-conversion.json").read_text())
     if (
         receipt.get("schema") != "mlx2.nemotron35-super-vl-conversion.v1"
@@ -416,14 +495,31 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     EXTERNAL_POLICY_EXTENSIONS = frozenset({"draft_weight_quantization"})
     incremental_tokenizer_renderer_revision = "nemotron35-super-vl-renderer-v1"
 
-    def __init__(self, model_path, *, execution_policy=None):
+    # Streams the routed experts (backbone and MTP head) of the unconverted
+    # bf16 release (232 GiB, unquantized gather_mm tables) and of a converted
+    # artifact (quantized tables).  Declared on this class only: Bolt and
+    # other derivatives do not inherit it.
+    weight_streaming_modes = frozenset({"moe_experts"})
+
+    def __init__(self, model_path, *, execution_policy=None, weight_streaming=None):
         from .process_globals import guarded_construction
 
-        guarded_construction(
-            self, lambda: self._init_super(model_path, execution_policy)
-        )
+        try:
+            guarded_construction(
+                self,
+                lambda: self._init_super(
+                    model_path, execution_policy, weight_streaming=weight_streaming
+                ),
+            )
+        except BaseException:
+            self.close()
+            raise
 
-    def _init_super(self, model_path, execution_policy):
+    def _init_super(self, model_path, execution_policy, weight_streaming=None):
+        from ..runtime.streamed_load import require_declared
+
+        self._stream_request = require_declared(type(self), weight_streaming)
+        self.weight_stream = None
         execution_policy, self.moe_nax_gather = _split_moe_nax_gather(execution_policy)
         (
             expert_sort,
@@ -454,10 +550,33 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         self.mamba_projection = mamba_projection
         self.mamba_segment = mamba_segment
         self.moe_relu2_down = relu2_down
+        if self._stream_request is not None:
+            # Both read the resident expert table (the fused down kernel) or
+            # run per-row canary gathers over it (the routed-batch segment):
+            # no evidence with streamed experts, so refuse before loading.
+            refused = [
+                name
+                for name, selected in (
+                    ("moe_relu2_down", relu2_down != "auto"),
+                    (
+                        "mamba_segment=layerwise_short_exact_routed_batch",
+                        mamba_segment == "layerwise_short_exact_routed_batch",
+                    ),
+                )
+                if selected
+            ]
+            if refused:
+                raise ValueError(
+                    "Super VL expert streaming has no evidence with "
+                    + ", ".join(refused)
+                    + "; refusing before any weight is loaded"
+                )
         self._num_draft = native_draft_depth(
             3 if external else policy.get("num_draft", 3)
         )
         artifact = type(self).artifact_inspector(model_path)
+        if artifact.get("source_bf16"):
+            self.descriptor = SOURCE_DESCRIPTOR
         self.identity, self.layout = artifact["identity"], type(self).cache_layout
         self.source_config, self.conversion = artifact["config"], artifact["conversion"]
         draft_record = None
@@ -553,22 +672,48 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         text = self._runtime_language_config(self.source_config)
         self.model = Model(ModelArgs.from_dict(text))
         self._declare_model_contracts(self.model, text)
-        weights = self.model.sanitize(
-            load_shards_evicting(
-                path / name for name in sorted(set(artifact["weight_map"].values()))
-            )
-        )
+        shard_names = sorted(set(artifact["weight_map"].values()))
         modules = {
             name.removeprefix("language_model."): quant
             for name, quant in artifact["quantization"].items()
         }
-        nn.quantize(
-            self.model,
-            class_predicate=lambda name, module: (
-                dict(modules[name]) if name in modules else False
-            ),
-        )
-        self.model.load_weights(list(weights.items()), strict=True)
+
+        def quantize(_weights):
+            # The bf16 source declares no modules: nothing is quantized.
+            nn.quantize(
+                self.model,
+                class_predicate=lambda name, module: (
+                    dict(modules[name]) if name in modules else False
+                ),
+            )
+
+        stream_request = getattr(self, "_stream_request", None)
+        if stream_request is None:
+            weights = self.model.sanitize(
+                load_shards_evicting(path / name for name in shard_names)
+            )
+            quantize(weights)
+            self.model.load_weights(list(weights.items()), strict=True)
+        else:
+            from ..runtime.streamed_load import force_stock_expert_arithmetic, load_streamed
+
+            def installed(manager):
+                manager.forced_stock = force_stock_expert_arithmetic(self.model)
+
+            loaded = load_streamed(
+                self.model,
+                path,
+                shard_names,
+                request=stream_request,
+                sanitize=self.model.sanitize,
+                quantize=quantize,
+                records=self.identity["files"],
+                weight_map=artifact["weight_map"],
+                top_k=int(text["num_experts_per_tok"]),
+                on_installed=installed,
+            )
+            weights = loaded.weights
+            self.weight_stream = loaded.manager
         self.model.eval()
         self._super_expert_gathers = _super_expert_gathers(self.model)
         self._super_mamba_mixers = _super_mamba_mixers(self.model)
@@ -643,6 +788,15 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         self.max_context = self.model.args.max_position_embeddings
         if draft_record is not None:
             self._bind_external_drafter(draft_record, draft_loader, type(self).descriptor)
+        if self.weight_stream is not None:
+            self.weight_stream.begin_serving()
+
+    def close(self):
+        stream = getattr(self, "weight_stream", None)
+        if stream is not None:
+            stream.close()
+            self.weight_stream = None
+        super().close()
 
     def prompt_tokens(self, request):
         if "_mlx2_prompt_tokens" in request:
@@ -727,7 +881,9 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         return prefill_input
 
     def profile_name(self, mtp):
-        return f"nemotron35-super-vl-affine{self.conversion['expert_bits']}-apcv2-" + (
+        bits = self.conversion["expert_bits"]
+        precision = f"affine{bits}" if bits is not None else "bf16"
+        return f"nemotron35-super-vl-{precision}-apcv2-" + (
             f"mtp{self._num_draft}" if mtp else "ordinary"
         )
 

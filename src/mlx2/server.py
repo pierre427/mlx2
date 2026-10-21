@@ -5743,6 +5743,38 @@ def apply_adapter_lane_default(args, adapter_resolution):
     return args.max_lanes
 
 
+def apply_auto_streaming_lane_default(args, adapter_resolution, policy, *, admission_limit_bytes=None):
+    """Serve one lane when automatic expert streaming will be selected.
+
+    Streaming is single lane by construction.  When the engine is going to
+    auto-select it (a declaring adapter whose resident load does not fit),
+    the server's generic lane default would only make it refuse at start;
+    an explicit --max-lanes is kept and the engine then fails closed.
+    Returns the decision (or None when it was not evaluated).
+    """
+    policy = policy or {}
+    if "moe_expert_streaming" in policy or (
+        (policy.get("dense_weight_streaming") or {}).get("enabled")
+    ):
+        return None
+    adapter_type = getattr(adapter_resolution, "adapter_type", None)
+    if adapter_type is None:
+        return None
+    from .runtime.streamed_load import auto_expert_streaming_decision
+
+    if admission_limit_bytes is None:
+        from .serving import preload_admission_limit_bytes
+
+        admission_limit_bytes = preload_admission_limit_bytes()
+    decision = auto_expert_streaming_decision(
+        adapter_type, args.model,
+        admission_limit_bytes=admission_limit_bytes, explicit=False,
+    )
+    if decision["selected"] and not getattr(args, "max_lanes_explicit", False):
+        args.max_lanes = 1
+    return decision
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="mlx2 APCv2 Flash-Next server")
     parser.add_argument("--model", required=True)
@@ -7225,6 +7257,7 @@ def main():
             parser.error(f"cannot inspect --model {args.model}: {error}")
         validate_invocation_draft_adapter(args, adapter_resolution)
         apply_adapter_lane_default(args, adapter_resolution)
+        apply_auto_streaming_lane_default(args, adapter_resolution, policy)
         policy = apply_ast_invocation(args, policy, adapter_resolution)
         if getattr(args, "ast_route", {}).get("tree_tiles_refused"):
             logging.getLogger("mlx2.server").warning(

@@ -145,17 +145,32 @@ class HYV3Adapter(OrdinaryTextAdapter):
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
     profile = "hy-v3-apcv2-ordinary"
+    # The routed experts are stacked ``[E, ...]`` quantized tables (or one
+    # tensor per expert that ``sanitize`` stacks through the ledger), so the
+    # early loader can stream them; the 6-bit artifact (224 GiB) only fits a
+    # 128 GiB host that way.  The trunk-only model has no MTP head.
+    weight_streaming_modes = frozenset({"moe_experts"})
 
-    def __init__(self, model_path: str, *, execution_policy=None):
+    def __init__(self, model_path: str, *, execution_policy=None, weight_streaming=None):
         from .process_globals import guarded_construction
 
-        guarded_construction(
-            self, lambda: self._init_hy_v3(model_path, execution_policy=execution_policy)
-        )
+        try:
+            guarded_construction(
+                self,
+                lambda: self._init_hy_v3(
+                    model_path, execution_policy=execution_policy,
+                    weight_streaming=weight_streaming,
+                ),
+            )
+        except BaseException:
+            self.close()
+            raise
 
-    def _init_hy_v3(self, model_path: str, *, execution_policy=None):
+    def _init_hy_v3(self, model_path: str, *, execution_policy=None, weight_streaming=None):
+        from ..runtime.streamed_load import require_declared
         from .process_globals import claim_stock_moe
 
+        stream_request = require_declared(type(self), weight_streaming)
         if execution_policy:
             raise ValueError("HY V3 ordinary decode accepts no model execution policy")
         artifact = inspect_artifact(model_path)
@@ -175,18 +190,43 @@ class HYV3Adapter(OrdinaryTextAdapter):
         config = artifact["config"]
         self.model = Model(ModelArgs.from_dict(config))
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        weights = self.model.sanitize(load_shards_evicting(files))
-
-        def predicate(name, module):
-            override = config["quantization"].get(name)
-            if isinstance(override, dict):
-                return override
-            return hasattr(module, "to_quantized") and f"{name}.scales" in weights
-
         quant = config["quantization"]
-        nn.quantize(self.model, group_size=quant["group_size"], bits=quant["bits"],
-                    mode=quant["mode"], class_predicate=predicate)
-        self.model.load_weights(list(weights.items()), strict=True)
+
+        def quantize(weights):
+            def predicate(name, module):
+                override = quant.get(name)
+                if isinstance(override, dict):
+                    return override
+                return hasattr(module, "to_quantized") and f"{name}.scales" in weights
+
+            nn.quantize(self.model, group_size=quant["group_size"], bits=quant["bits"],
+                        mode=quant["mode"], class_predicate=predicate)
+
+        self.weight_stream = None
+        if stream_request is None:
+            weights = self.model.sanitize(load_shards_evicting(files))
+            quantize(weights)
+            self.model.load_weights(list(weights.items()), strict=True)
+        else:
+            from ..runtime.streamed_load import force_stock_expert_arithmetic, load_streamed
+
+            def installed(manager):
+                manager.forced_stock = force_stock_expert_arithmetic(self.model)
+
+            loaded = load_streamed(
+                self.model,
+                path,
+                [file.name for file in files],
+                request=stream_request,
+                sanitize=self.model.sanitize,
+                quantize=quantize,
+                records=self.identity["files"],
+                weight_map=artifact["weight_map"],
+                top_k=int(config["num_experts_per_tok"]),
+                on_installed=installed,
+            )
+            weights = loaded.weights
+            self.weight_stream = loaded.manager
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
@@ -201,3 +241,12 @@ class HYV3Adapter(OrdinaryTextAdapter):
                                           detokenizer_class=BPEStreamingDetokenizer,
                                           eos_token_ids=[int(config["eos_token_id"])])
         self.max_context = int(config["max_position_embeddings"])
+        if self.weight_stream is not None:
+            self.weight_stream.begin_serving()
+
+    def close(self):
+        stream = getattr(self, "weight_stream", None)
+        if stream is not None:
+            stream.close()
+            self.weight_stream = None
+        super().close()

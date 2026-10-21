@@ -24,6 +24,8 @@ from pathlib import Path
 LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock"))
 WAITERS = Path("/Users/Shared/mlxuag/gpu.lock.waiters")
 DEFAULT_SESSION = "codex-hils-declared-groups-20260930"
+# How long the head of the queue waits for a held lock before failing.
+HEAD_WAIT_SECONDS = 4 * 3600
 MODEL_PROCESS = re.compile(
     r"-m\s+mlx2\.(?:server|decisions\.server)(?:\s|$)|mlx_lm\.server|mlx_vlm\.server|rapid-mlx|llama-server|"
     r"qualify_hils_declared_groups\.py",
@@ -274,7 +276,21 @@ def main(argv: list[str] | None = None) -> int:
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
     }
     try:
-        while predecessor := earlier_waiter(waiter, created):
+        # At the head of the queue, wait for the current owner to release the
+        # locks and its model processes to exit instead of failing and
+        # re-queueing at the back (which starves a waiter while other
+        # sessions run back-to-back windows).  The checks below still refuse
+        # anything that persists past the wait.
+        while True:
+            predecessor = earlier_waiter(waiter, created)
+            if predecessor is None:
+                held = [str(path) for path in LOCKS if path.is_dir()]
+                foreign = foreign_model_processes() if not held else []
+                if not held and not foreign:
+                    break
+                predecessor = f"lock owner ({'held' if held else 'foreign process'})"
+                if time.time() - created > HEAD_WAIT_SECONDS:
+                    break
             receipt["waiting_behind"] = predecessor
             waiter.touch()
             save()

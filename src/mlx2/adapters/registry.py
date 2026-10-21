@@ -345,7 +345,7 @@ def _nemotron_h_omni(path: Path, config: dict) -> AdapterResolution:
     artifact = module.inspect_artifact(path)
     return AdapterResolution(
         module.Nemotron35SuperAdapter,
-        module.DESCRIPTOR,
+        module.SOURCE_DESCRIPTOR if artifact.get("source_bf16") else module.DESCRIPTOR,
         artifact,
     )
 

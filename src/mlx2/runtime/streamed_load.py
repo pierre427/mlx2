@@ -45,6 +45,7 @@ from .weight_stream import (
 )
 
 DECLARATION = "weight_streaming_modes"
+BUDGET_MODES = ("explicit", "auto")
 ROUTER_HINT_DECLARATION = "weight_stream_router_hints"
 # A lane needs at least this much beside the weights and the streaming
 # reservation before the pre-load budget admits a streamed model.  A floor,
@@ -66,17 +67,35 @@ class WeightStreamRequest:
     expert_overlap: bool = False
     prefill_admission: str = "lru"
     router_hint: str = "off"
+    # "explicit": ``budget_bytes`` is the operator's cache ceiling.  "auto":
+    # the engine selected streaming because the resident load does not fit;
+    # the loader sizes the ceiling from the admission limit once the resident
+    # remainder is known, and ``budget_bytes`` must be 0.
+    budget_mode: str = "explicit"
+    # Read streamed rows with ``F_NOCACHE`` (see ``BoundShards``).  The
+    # engine sets it for the automatic selection; explicit routes keep the
+    # kernel page cache as before.
+    bypass_page_cache: bool = False
 
     def __post_init__(self):
         if self.mode not in STREAM_MODES:
             raise ValueError(f"unknown weight streaming mode {self.mode!r}")
+        if self.budget_mode not in BUDGET_MODES:
+            raise ValueError(f"unknown weight streaming budget mode {self.budget_mode!r}")
+        auto = self.budget_mode == "auto"
+        if auto and (self.mode != "moe_experts" or self.admission_limit_bytes is None):
+            raise ValueError(
+                "automatic weight streaming is MoE-only and needs a measured admission limit"
+            )
         for (name, value, low) in (
-            ("budget_bytes", self.budget_bytes, 1),
+            ("budget_bytes", self.budget_bytes, 0 if auto else 1),
             ("read_workers", self.read_workers, 1),
             ("headroom_bytes", self.headroom_bytes, 0),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < low:
                 raise ValueError(f"weight streaming {name} must be an integer >= {low}")
+        if type(self.bypass_page_cache) is not bool:
+            raise ValueError("weight streaming bypass_page_cache must be boolean")
         if type(self.mtp_resident) is not bool:
             raise ValueError("weight streaming mtp_resident must be boolean")
         if type(self.expert_overlap) is not bool or (self.expert_overlap and self.mode != "moe_experts"):
@@ -94,6 +113,8 @@ class WeightStreamRequest:
             isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
         ):
             raise ValueError("weight streaming admission_limit_bytes must be a non-negative int")
+        if auto and self.budget_bytes != 0:
+            raise ValueError("automatic weight streaming sizes its own budget; pass 0")
 
 
 def declared_stream_modes(adapter_class) -> frozenset:
@@ -143,6 +164,128 @@ def _tree_nbytes(tree) -> int:
     return sum(int(value.nbytes) for (_, value) in tree_flatten(tree))
 
 
+def _auto_ceiling(model, request: WeightStreamRequest):
+    """The cache room an automatically selected stream may take.
+
+    Everything is counted against the same admission limit the pre-evaluation
+    refusal below uses: the resident remainder (the whole lazy tree minus the
+    expert tables leaving it), the lane headroom floor and the worst-case
+    gather transient.  What is left is offered to the cache; the planner then
+    sizes the cache from the resident-fraction curve inside it.
+    """
+    limit = int(request.admission_limit_bytes)
+
+    def ceiling(shape: Dict[str, int]) -> int:
+        remainder = _tree_nbytes(model.parameters()) - int(shape["target_bytes"])
+        available = (
+            limit - remainder - int(request.headroom_bytes) - int(shape["transient_bytes"])
+        )
+        if available < int(shape["floor_bytes"]):
+            raise WorkingSetTooSmall(
+                "automatic expert streaming cannot fit: admission limit "
+                f"{limit} B - resident remainder {remainder} B - lane headroom "
+                f"{request.headroom_bytes} B - worst gather transient "
+                f"{shape['transient_bytes']} B leaves {available} B, below one "
+                f"routed step ({shape['floor_bytes']} B = {shape['layers']} layers x "
+                f"{shape['top_k']} experts x {shape['expert_bytes']} B)"
+            )
+        return available
+
+    return ceiling
+
+
+def artifact_weight_bytes(model_path) -> int:
+    """Bytes of the safetensors shards a resident load reads.
+
+    The indexed shard set when ``model.safetensors.index.json`` exists (a
+    stray or stale file beside it is never counted), otherwise every
+    top-level ``*.safetensors``.  File sizes include the small JSON headers:
+    an upper bound on the weights, read without opening a shard.
+    """
+    import json
+    from pathlib import Path
+
+    root = Path(model_path).expanduser()
+    index = root / "model.safetensors.index.json"
+    if index.is_file():
+        weight_map = json.loads(index.read_text()).get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(f"{index} has no weight map")
+        names = sorted(set(str(name) for name in weight_map.values()))
+        paths = []
+        for name in names:
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"shard path escapes the artifact: {name}")
+            paths.append(root / relative)
+    else:
+        paths = sorted(root.glob("*.safetensors"))
+    if not paths:
+        raise ValueError(f"no safetensors shards under {root}")
+    return sum(int(path.stat().st_size) for path in paths)
+
+
+AUTO_REASONS = (
+    "explicit_policy",
+    "undeclared",
+    "admission_limit_unmeasured",
+    "artifact_unmeasured",
+    "fits_resident",
+    "resident_exceeds_admission",
+)
+
+
+def auto_expert_streaming_decision(
+    adapter_class,
+    model_path,
+    *,
+    admission_limit_bytes: Optional[int],
+    explicit: bool,
+    headroom_bytes: int = MIN_LANE_HEADROOM_BYTES,
+) -> Dict[str, object]:
+    """Whether a resident load fits; select expert streaming when it does not.
+
+    The rule (Pierre, 2026-10-21): an adapter that declares ``moe_experts`` on
+    its own class, whose artifact weights plus one lane's headroom floor
+    exceed the admission limit (Metal advisory minus the service and driver
+    reserves), streams its experts.  Everything else keeps the resident path.
+    An explicit ``moe_expert_streaming`` policy always wins; ``fits`` is still
+    reported so the engine can fail closed when streaming is explicitly
+    disabled for an artifact that cannot be resident.
+    """
+    decision: Dict[str, object] = {
+        "selected": False,
+        "admission_limit_bytes": admission_limit_bytes,
+        "headroom_bytes": int(headroom_bytes),
+        "weight_bytes": None,
+        "fits": None,
+    }
+    declared = "moe_experts" in declared_stream_modes(adapter_class)
+    if declared:
+        try:
+            decision["weight_bytes"] = artifact_weight_bytes(model_path)
+        except (OSError, ValueError, TypeError):
+            decision["weight_bytes"] = None
+    weight = decision["weight_bytes"]
+    if weight is not None and admission_limit_bytes is not None:
+        decision["fits"] = weight + int(headroom_bytes) <= int(admission_limit_bytes)
+    if explicit:
+        reason = "explicit_policy"
+    elif not declared:
+        reason = "undeclared"
+    elif admission_limit_bytes is None:
+        reason = "admission_limit_unmeasured"
+    elif weight is None:
+        reason = "artifact_unmeasured"
+    elif decision["fits"]:
+        reason = "fits_resident"
+    else:
+        reason = "resident_exceeds_admission"
+        decision["selected"] = True
+    decision["reason"] = reason
+    return decision
+
+
 @dataclass
 class StreamedLoad:
     weights: Dict[str, object]
@@ -178,7 +321,8 @@ def load_streamed(
     from .ubc_evict import ubc_evict_paths
 
     request = require_declared_mode(request)
-    shards = BoundShards(root, names, records=records, weight_map=weight_map)
+    shards = BoundShards(root, names, records=records, weight_map=weight_map,
+                         bypass_page_cache=request.bypass_page_cache)
     manager = None
     try:
         origins = TensorOrigins(
@@ -199,10 +343,14 @@ def load_streamed(
         model.load_weights(list(weights.items()), strict=True)
         model.eval()
         if request.mode == "moe_experts":
+            auto_ceiling = None
+            if request.budget_mode == "auto":
+                auto_ceiling = _auto_ceiling(model, request)
             manager = install_expert_streaming(
                 model,
                 shards.root,
                 ceiling_bytes=request.budget_bytes,
+                auto_ceiling=auto_ceiling,
                 top_k=top_k,
                 read_workers=request.read_workers,
                 collector=request.collector,

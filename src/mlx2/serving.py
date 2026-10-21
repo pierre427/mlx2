@@ -2288,6 +2288,27 @@ def parallel_sample_lane_gib(controller, *, draft_depth, prompt_lookup_num_draft
     ) - controller.hard_reserve_gib
 
 
+def preload_admission_limit_bytes():
+    """The pre-load admission limit (advisory minus reserves), or None if unmeasured.
+
+    The one budget both the streamed loader's refusal and the automatic
+    expert-streaming selection are measured against.
+    """
+    try:
+        from .memory import host_memory_gib, metal_advisory_gib
+        from .runtime.memory_policy import SelfMTPLaneAdmissionController
+
+        advisory = metal_advisory_gib()
+        if advisory is None:
+            return None
+        (service, driver) = SelfMTPLaneAdmissionController.host_scaled_reserves(
+            host_memory_gib(), advisory
+        )
+        return admission_memory_limit_bytes(advisory, service, driver)
+    except Exception:  # noqa: BLE001 - an unmeasurable host skips the check
+        return None
+
+
 def admission_memory_limit_bytes(advisory_gib, service_reserve_gib, driver_allowance_gib):
     """MLX memory limit that keeps the allocator inside the admission plan.
 
@@ -3873,6 +3894,12 @@ class ServingEngine:
         self.moe_expert_streaming_policy = moe_expert_streaming_policy(
             (execution_policy or {}).get("moe_expert_streaming")
         )
+        # An operator's key -- including ``{"enabled": false}`` -- overrides
+        # the automatic selection made once the adapter is resolved.
+        self.moe_expert_streaming_explicit = "moe_expert_streaming" in (
+            execution_policy or {}
+        )
+        self.weight_streaming_auto = None
         # A streamed configuration is single lane by construction: two lanes'
         # expert working sets sum, and a shared cache thrashing between them
         # makes page-in counts -- the only diagnostic this feature has --
@@ -4242,26 +4269,7 @@ class ServingEngine:
         )
         self.multi_lora = None
         if self.weight_streaming_enabled():
-            refused = weight_streaming_refusals(
-                lane_matmul=self.lane_matmul,
-                sp_qmm=self.sp_qmm_enabled,
-                int8_prefill=self.int8_prefill_policy.enabled,
-                verify_bitexact=self.verify_bitexact_policy.enabled,
-                multi_lora=self.multi_lora_policy is not None,
-                lora_root=self.lora_root,
-                execution_policy=execution_policy,
-            )
-            if refused:
-                raise ValueError(
-                    "weight streaming has no evidence with "
-                    + ", ".join(refused)
-                    + "; refusing before any weight is loaded"
-                )
-            if self.lane_matmul == "auto":
-                # A streamed projection is a plain module the lane installer
-                # skips; resolve the automatic law off for the whole route.
-                self.lane_matmul = "off"
-                self.weight_streaming_lane_matmul = "auto->off (weight streaming)"
+            self._refuse_unevidenced_weight_streaming(execution_policy)
         self.max_inflight, self.max_lanes = max_inflight, max_lanes
         self.max_context, self.max_request_bytes = max_context, max_request_bytes
         self.prefill_step = prefill_step
@@ -4492,6 +4500,7 @@ class ServingEngine:
                 qualification=qualification,
             )
         self.adapter_factory = adapter_factory
+        self._select_automatic_expert_streaming(adapter_factory, max_lanes)
         if self.weight_streaming_enabled():
             from .runtime.streamed_load import declared_stream_modes
 
@@ -6076,6 +6085,105 @@ class ServingEngine:
                 detail["lane_need_bytes"],
             )
 
+    def _refuse_unevidenced_weight_streaming(self, execution_policy) -> None:
+        """Refuse every mechanism with no streamed-weight evidence, pre-load."""
+        refused = weight_streaming_refusals(
+            lane_matmul=self.lane_matmul,
+            sp_qmm=self.sp_qmm_enabled,
+            int8_prefill=self.int8_prefill_policy.enabled,
+            verify_bitexact=self.verify_bitexact_policy.enabled,
+            multi_lora=self.multi_lora_policy is not None,
+            lora_root=self.lora_root,
+            execution_policy=execution_policy,
+        )
+        if refused:
+            raise ValueError(
+                "weight streaming has no evidence with "
+                + ", ".join(refused)
+                + "; refusing before any weight is loaded"
+            )
+        if self.lane_matmul == "auto":
+            # A streamed projection is a plain module the lane installer
+            # skips; resolve the automatic law off for the whole route.
+            self.lane_matmul = "off"
+            self.weight_streaming_lane_matmul = "auto->off (weight streaming)"
+
+    def _select_automatic_expert_streaming(self, adapter_factory, max_lanes) -> None:
+        """Stream a declaring adapter's experts when its resident load cannot fit.
+
+        Decided before any weight is read, from the artifact's shard bytes
+        and the same admission limit the streamed loader checks
+        (:func:`mlx2.runtime.streamed_load.auto_expert_streaming_decision`).
+        An explicit ``moe_expert_streaming`` or an enabled dense policy wins;
+        explicitly disabling streaming for an artifact that does not fit fails
+        closed here instead of starting a load that cannot complete.
+        """
+        dense = getattr(self, "dense_weight_streaming_policy", None) or {}
+        if dense.get("enabled"):
+            return
+        from .runtime.streamed_load import auto_expert_streaming_decision
+
+        decision = auto_expert_streaming_decision(
+            adapter_factory,
+            self.model_path,
+            admission_limit_bytes=self._preload_admission_limit_bytes(),
+            explicit=self.moe_expert_streaming_explicit,
+        )
+        gib = float(1 << 30)
+        if (
+            self.moe_expert_streaming_explicit
+            and not self.moe_expert_streaming_policy["enabled"]
+            and decision["fits"] is False
+        ):
+            raise ValueError(
+                "artifact weights %.2f GiB + %.2f GiB lane headroom exceed the "
+                "admission limit %.2f GiB and moe_expert_streaming is explicitly "
+                "disabled; refusing before any weight is loaded"
+                % (
+                    decision["weight_bytes"] / gib,
+                    decision["headroom_bytes"] / gib,
+                    decision["admission_limit_bytes"] / gib,
+                )
+            )
+        if not decision["selected"]:
+            if decision["reason"] not in ("undeclared", "explicit_policy"):
+                self.weight_streaming_auto = decision
+            return
+        message = (
+            "MoE expert streaming auto-selected: artifact weights %.2f GiB + "
+            "%.2f GiB lane headroom exceed the admission limit %.2f GiB"
+            % (
+                decision["weight_bytes"] / gib,
+                decision["headroom_bytes"] / gib,
+                decision["admission_limit_bytes"] / gib,
+            )
+        )
+        if max_lanes != 1:
+            raise ValueError(
+                message + f"; streaming requires max_lanes=1 (got {max_lanes}). "
+                "Pass --max-lanes 1, or an explicit moe_expert_streaming policy"
+            )
+        self._refuse_unevidenced_weight_streaming(self.execution_policy)
+        self.moe_expert_streaming_policy = {
+            **self.moe_expert_streaming_policy,
+            "enabled": True,
+            # Sized by the loader once the resident remainder is known.
+            "cache_gib": 0.0,
+            "selection": "auto",
+        }
+        self.weight_streaming_auto = decision
+        log.warning("%s; cache sized at load from the remaining budget", message)
+
+    def weight_streaming_status(self) -> dict:
+        """Selection, decision and plan of the weight stream (streamed routes only)."""
+        stream = getattr(self, "expert_stream", None)
+        policy = self.moe_expert_streaming_policy
+        return {
+            "selection": policy.get("selection", "explicit"),
+            "decision": self.weight_streaming_auto,
+            "plan": stream.plan.as_dict() if stream is not None else None,
+        }
+
     def weight_streaming_enabled(self) -> bool:
         dense = getattr(self, "dense_weight_streaming_policy", None) or {}
         return bool(
@@ -6153,19 +6261,7 @@ class ServingEngine:
 
     def _preload_admission_limit_bytes(self):
         """The admission limit a streamed load must fit, or None if unmeasured."""
-        try:
-            from .memory import host_memory_gib, metal_advisory_gib
-            from .runtime.memory_policy import SelfMTPLaneAdmissionController
-
-            advisory = metal_advisory_gib()
-            if advisory is None:
-                return None
-            (service, driver) = SelfMTPLaneAdmissionController.host_scaled_reserves(
-                host_memory_gib(), advisory
-            )
-            return admission_memory_limit_bytes(advisory, service, driver)
-        except Exception:  # noqa: BLE001 - an unmeasurable host skips the check
-            return None
+        return preload_admission_limit_bytes()
 
     def _weight_stream_request(self):
         """The typed request handed to a declaring adapter before it loads."""
@@ -6182,9 +6278,12 @@ class ServingEngine:
             )
         policy = self.moe_expert_streaming_policy
         self.expert_stream_collector = self._atlas_collector()
+        auto = policy.get("selection") == "auto"
         return WeightStreamRequest(
             mode="moe_experts",
-            budget_bytes=int(policy["cache_gib"] * (1 << 30)),
+            budget_mode="auto" if auto else "explicit",
+            budget_bytes=0 if auto else int(policy["cache_gib"] * (1 << 30)),
+            bypass_page_cache=auto,
             read_workers=policy["read_workers"],
             mtp_resident=bool(policy.get("mtp_resident", False)),
             collector=self.expert_stream_collector,
@@ -6202,6 +6301,21 @@ class ServingEngine:
             )
         self.expert_stream = stream
         self._expert_stream_engine_owned = False
+        policy = self.moe_expert_streaming_policy
+        plan = getattr(stream, "plan", None)
+        if policy.get("selection") == "auto" and plan is not None:
+            policy["cache_gib"] = plan.ceiling_bytes / float(1 << 30)
+            log.warning(
+                "MoE expert streaming (auto): resident remainder %.2f GiB, "
+                "expert table %.2f GiB, cache %.2f GiB (%d of %d experts per "
+                "layer), reserved %.2f GiB",
+                (plan.resident_remainder_bytes or 0) / float(1 << 30),
+                plan.table_bytes / float(1 << 30),
+                plan.ceiling_bytes / float(1 << 30),
+                plan.capacity_experts,
+                plan.experts_per_layer,
+                stream.reserved_bytes() / float(1 << 30),
+            )
 
     def _install_expert_streaming(self, adapter) -> None:
         """Legacy: replace an undeclaring adapter's expert tables after load.
@@ -6272,6 +6386,11 @@ class ServingEngine:
                 )(),
                 "queue_depth": self.queued_jobs,
                 "counts": {**counts, **self.expert_stream_counters()},
+                **(
+                    {"weight_streaming": self.weight_streaming_status()}
+                    if self.weight_streaming_enabled()
+                    else {}
+                ),
                 **(
                     {"gpu_keep_warm": self.gpu_keep_warm.status()}
                     if self.gpu_keep_warm_policy.enabled
@@ -10276,6 +10395,22 @@ class ServingEngine:
                         previous_limit / float(1 << 30),
                     )
             cache_limit = mlx_cache_limit_bytes()
+            cache_limit_source = "MLX2_CACHE_LIMIT_GIB"
+            stream_plan = getattr(getattr(self, "expert_stream", None), "plan", None)
+            if (
+                cache_limit is None
+                and self.moe_expert_streaming_policy.get("selection") == "auto"
+                and stream_plan is not None
+            ):
+                # An auto-streamed route frees an expert row on every
+                # eviction and a whole layer's stack after every wide call.
+                # Unbounded, the allocator pool keeps those buffers -- wired
+                # up to the advisory -- until host memory runs out and macOS
+                # swaps (measured 2026-10-21: +5 GB of swap-outs within
+                # seconds on Laguna S bf16).  Bound it by the gather
+                # transient the stream already reserves.
+                cache_limit = int(stream_plan.transient_bound_bytes)
+                cache_limit_source = "auto weight streaming transient reserve"
             if (
                 cache_limit is not None
                 and mx.metal.is_available()
@@ -10285,8 +10420,9 @@ class ServingEngine:
                 # relies on periodic ``mx.clear_cache()`` to return it.
                 previous_cache_limit = mx.set_cache_limit(cache_limit)
                 log.info(
-                    "MLX cache limit %.4g GiB (MLX2_CACHE_LIMIT_GIB; was %.4g)",
+                    "MLX cache limit %.4g GiB (%s; was %.4g)",
                     cache_limit / float(1 << 30),
+                    cache_limit_source,
                     previous_cache_limit / float(1 << 30),
                 )
             admission = {}
