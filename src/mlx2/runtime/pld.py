@@ -686,6 +686,28 @@ class PromptLookupBatchGenerator:
             ),
         )
         self.default_matcher = StopSequenceMatcher(stop_tokens or None)
+        # A model may own its verify forward (``pld_verify_forward``): the
+        # forward a verify block, a replay of its accepted prefix, or a plain
+        # round on transaction-owned caches runs through.  It is how model
+        # math (an attention that consumes segmented row masks, row-exact
+        # recurrent verification) stays behind the adapter: this generator
+        # never branches on the model.  ``pld_verify_max_lanes`` bounds how
+        # many lanes may share one such forward (verify rows of a wider
+        # cohort are not computed by that model's exact law).
+        self._model_verify = getattr(model, "pld_verify_forward", None)
+        if self._model_verify is not None and not callable(self._model_verify):
+            raise TypeError("pld_verify_forward must be callable")
+        verify_lanes = getattr(model, "pld_verify_max_lanes", None)
+        if verify_lanes is not None and (
+            type(verify_lanes) is not int or verify_lanes < 1
+        ):
+            raise ValueError("pld_verify_max_lanes must be a positive integer")
+        self._verify_max_lanes = verify_lanes
+        self.verify_forward = (
+            str(getattr(model, "pld_verify_forward_kind", "model_owned"))
+            if self._model_verify is not None
+            else "generic"
+        )
         self.lanes = {}
         self._lane_failures = []
         self.next_uid = 0
@@ -725,6 +747,7 @@ class PromptLookupBatchGenerator:
             "pld_recovery_checkpoint_restores": 0,
             "pld_recovery_checkpoint_failures": 0,
             "pld_recovery_full_rebuilds": 0,
+            "pld_model_verify_forwards": 0,
             "target_max_width": 1,
         }
         from .adaptive_policy import DecodeTimeFairness
@@ -1322,8 +1345,8 @@ class PromptLookupBatchGenerator:
                 taps.steer = steer
             try:
                 with mx.stream(generation_stream):
-                    logits = self.model(
-                        mx.array([inputs], dtype=mx.uint32), cache=lane.cache
+                    logits = self._target_forward(
+                        mx.array([inputs], dtype=mx.uint32), lane.cache
                     )[0]
                     prepared = self._prepare_rows(lane, logits, proposal)
                     mx.eval(logits, self._prepared_arrays([prepared]))
@@ -1363,9 +1386,9 @@ class PromptLookupBatchGenerator:
                     taps.steer = replay_steer
                 try:
                     with mx.stream(generation_stream):
-                        self.model(
+                        self._target_forward(
                             mx.array([list(tokens)], dtype=mx.uint32),
-                            cache=lane.cache,
+                            lane.cache,
                         )
                         mx.eval(_walk_state(lane.cache))
                 finally:
@@ -1423,6 +1446,18 @@ class PromptLookupBatchGenerator:
         if steer is None:
             return None, None, commits
         return taps, steer, commits
+
+    def _target_forward(self, tokens, cache):
+        """One verify, replay or transaction-owned plain forward.
+
+        The model's own ``pld_verify_forward`` when it declares one, else
+        the ordinary model call.  Prefill and recovery re-prefill keep the
+        ordinary call: they are not verify rows.
+        """
+        if self._model_verify is None:
+            return self.model(tokens, cache=cache)
+        self.scheduler_stats["pld_model_verify_forwards"] += 1
+        return self._model_verify(tokens, cache=cache)
 
     @staticmethod
     def _batchable(cache):
@@ -1488,7 +1523,7 @@ class PromptLookupBatchGenerator:
             return PlainKVStep(rows)
         return self._begin_verify(lanes, [1] * len(lanes))
 
-    def _round_batched(self, lanes):
+    def _round_batched(self, lanes, pipeline=True):
         """Verify several lanes in one target forward.
 
         Each lane keeps its own request-private B1 caches; the segmented
@@ -1509,7 +1544,7 @@ class PromptLookupBatchGenerator:
         # round, for a checkpoint the batched path never restored.
         lengths = [len(inputs) for inputs, _proposal in plans]
         width = max(lengths)
-        if width == 1 and self._pipeline_eligible(lanes):
+        if width == 1 and pipeline and self._pipeline_eligible(lanes):
             # A proposal-free round of a hybrid cohort: dispatch it now and
             # read it next poll, after the round that follows is dispatched.
             self._inflight = self._dispatch_plain(
@@ -1535,8 +1570,8 @@ class PromptLookupBatchGenerator:
                 taps.steer = steer
             try:
                 with mx.stream(generation_stream):
-                    logits = self.model(
-                        mx.array(padded, dtype=mx.uint32), cache=transaction.caches
+                    logits = self._target_forward(
+                        mx.array(padded, dtype=mx.uint32), transaction.caches
                     )
                     # Every lane's rows (and deterministic tokens) evaluate
                     # with the forward: one host sync for the cohort.
@@ -1637,7 +1672,7 @@ class PromptLookupBatchGenerator:
                     tokens = anchors.astype(mx.uint32)[:, None]
                 else:
                     tokens = mx.array([[int(a)] for a in anchors], dtype=mx.uint32)
-                logits = self.model(tokens, cache=transaction.caches)
+                logits = self._target_forward(tokens, transaction.caches)
                 prepared = [
                     self._prepare_plain_row(lane, logits[row])
                     for row, lane in enumerate(lanes)
@@ -2158,6 +2193,9 @@ class PromptLookupBatchGenerator:
             "span_extend_cycles": lane.stats.span_extend_cycles,
             "lookup_index": lane.proposer.index_receipt(),
             "target_width": lane.target_max_width,
+            # Who computed the verify rows: the generic model call, or the
+            # model's own verify forward (``pld_verify_forward``).
+            "verify_forward": self.verify_forward,
             "memory_max_draft": lane.config.get("memory_max_draft"),
             "qualification_authority": "serving_route",
         }
@@ -2295,7 +2333,15 @@ class PromptLookupBatchGenerator:
                     # dispatched the next) or drain it into this poll's round.
                     remaining = self._advance_inflight(together)
                 if remaining:
-                    self._round_batched(remaining)
+                    # A model whose verify law bounds its lanes gets that many
+                    # per forward; split cohorts never pipeline (one round
+                    # may be in flight, not one per slice).
+                    width = self._verify_max_lanes or len(remaining)
+                    for start in range(0, len(remaining), width):
+                        self._round_batched(
+                            remaining[start : start + width],
+                            pipeline=len(remaining) <= width,
+                        )
             except PromptLookupLaneFailure as error:
                 # Healthy peers committed their rows; the failed lanes leave.
                 for failure in error.failures:

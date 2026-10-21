@@ -144,8 +144,70 @@ def inspect_gemma4_artifact(model_path):
     return artifact
 
 
+def _segmented_view_attention(stock):
+    """Gemma 4 attention that lets an mlx2 segmented verify view reduce rows.
+
+    Prompt lookup verifies a block through ``SegmentedKVRows``: each layer's
+    ``SegmentedKVView`` takes the verify append (its ``update_and_fetch``
+    returns no batched keys) and builds an ``_RowMask``.  mlx-vlm's Gemma 4
+    attention hands both straight to ``mx.fast.scaled_dot_product_attention``
+    (TypeError on GPU, model-matrix-20261021).  Here a view reduces its own
+    rows (``bucketed_attention``: each lane's history and its B1 causal or
+    sliding-window mask from the pre-round geometry, wrapped rings
+    included); every other cache keeps mlx-vlm's attention unchanged.
+    """
+    from ..runtime.segmented_rotating_kv import SegmentedKVView
+
+    def attention(queries, keys, values, cache, scale, mask, sinks=None):
+        if type(cache) is SegmentedKVView:
+            return cache.bucketed_attention(queries, scale, mask, sinks=sinks)
+        return stock(
+            queries, keys, values, cache=cache, scale=scale, mask=mask, sinks=sinks
+        )
+
+    attention._mlx2_segmented_view_attention = True
+    return attention
+
+
+def _install_segmented_view_attention(language_module):
+    """Route segmented views in ``language_module`` (idempotent, exact else)."""
+    current = language_module.scaled_dot_product_attention
+    if not getattr(current, "_mlx2_segmented_view_attention", False):
+        language_module.scaled_dot_product_attention = _segmented_view_attention(
+            current
+        )
+
+
 class _Gemma4LogitsModel(_LogitsModel):
     """Use mlx2 cache types so batching and APCv2 can own model state."""
+
+    pld_verify_forward_kind = "gemma4_segmented_row_attention"
+
+    def pld_verify_forward(self, inputs, cache=None):
+        """Prompt-lookup verify/replay/plain forward on mlx2 caches.
+
+        The text forward is mlx-vlm's own Gemma 4 forward (embeddings, both
+        attention kinds, dense or sparse MLP, soft-capped head); only its
+        attention core consumes mlx2 segmented views when the generator
+        hands it a verify transaction (``_segmented_view_attention``).  On a
+        lane's own ``KVCache``/``RotatingKVCache`` it is the ordinary call.
+        KV-shared layers read the preceding layer's batched keys, which a
+        segmented view never returns, so such a model fails closed.
+        """
+        import sys
+
+        from ..runtime.segmented_rotating_kv import SegmentedKVView
+
+        language = self._model.language_model.model
+        if cache is not None and any(type(c) is SegmentedKVView for c in cache):
+            if language.first_kv_shared_layer_idx < len(language.layers):
+                raise ValueError(
+                    "Gemma 4 prompt-lookup verify does not support KV-shared layers"
+                )
+            _install_segmented_view_attention(
+                sys.modules[type(language.layers[0].self_attn).__module__]
+            )
+        return self(inputs, cache=cache)
 
     def make_cache(self):
         from ..runtime.models.cache import KVCache, RotatingKVCache
@@ -178,6 +240,13 @@ def _descriptor(variant, adapter_name):
                 Capability.CONTINUOUS_BATCH,
                 Capability.PREFIX_REUSE,
                 Capability.APC_V2,
+                # Text-only target-verified PLD.  Its verify, replay and plain
+                # forwards go through ``_Gemma4LogitsModel.pld_verify_forward``,
+                # whose attention consumes mlx2 segmented row masks (global and
+                # wrapped sliding rings); media prefill stays on the ordinary
+                # route (``multimodal_routes``).  With no drafter flag the
+                # server selects it: latched adaptive PLD (capability default).
+                Capability.PROMPT_LOOKUP,
             }
         ),
         cache_layout=f"gemma4-{variant}-full-sliding-v1",
@@ -220,6 +289,12 @@ def _stamp_fps(timestamps) -> float:
 
 class _Gemma4Adapter(_MLXVLMAdapter):
     """Shared text/image/video prefill with exact media-bound feature reuse."""
+
+    # Image and video prefill run on the ordinary route only: the prompt
+    # lookup generator refuses media prefill inputs, so a media request on
+    # the (default) prompt-lookup route fails closed before preprocessing.
+    # A multimodal server passes --ordinary.
+    multimodal_routes = frozenset({"ordinary"})
 
     @staticmethod
     def streaming_detokenizer_class():
@@ -336,6 +411,16 @@ class _Gemma4Adapter(_MLXVLMAdapter):
                     "_mlx2_media_token_end",
                     "_mlx2_media_fingerprint",
                 ),
+            },
+            "prompt_lookup": {
+                "implemented": True,
+                "scope": "text_only",
+                "media_routes": tuple(sorted(type(self).multimodal_routes)),
+                "verify": _Gemma4LogitsModel.pld_verify_forward_kind,
+                "default_without_drafter_flag": True,
+                "qualified": False,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
             },
             "optimization": self.optimization_eligibility(),
             "qualified": False,

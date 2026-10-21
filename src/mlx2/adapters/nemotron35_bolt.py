@@ -79,6 +79,8 @@ DESCRIPTOR = ModelDescriptor(
             Capability.APC_V2,
             Capability.LAYERED_CACHE,
             Capability.GRAMMAR,
+            # Row-exact B1 verify (nemotron_h.Model.pld_verify_forward).
+            Capability.PROMPT_LOOKUP,
         }
     ),
     metadata={
@@ -721,6 +723,26 @@ class Nemotron35BoltAdapter(Nemotron35SuperAdapter):
     artifact_inspector = staticmethod(inspect_artifact)
     default_route = "ordinary"
     multimodal_routes = frozenset()
+    # With no drafter flag the server selects latched prompt lookup
+    # (capability default); its verify rows then run the exact short-segment
+    # kernels Super's native route uses (nemotron_h.Model.pld_verify_forward).
+    # pld-families-20261021 at c7aa1e237: greedy output identical to
+    # --ordinary on code, copy, 1.5K-token copy and Spomin 4K prompts;
+    # decode 1.90x (copy) and 2.62x (long copy) of ordinary, 1.02x code,
+    # 0.77x Spomin (latch probes).  Without these kernels the verify is
+    # tokenwise and PLD runs at 0.82-1.01x.  An operator policy naming any
+    # key wins.  Not a qualification.
+    adapter_owned_default_policy_keys = frozenset({
+        "mamba_conv", "mamba_projection", "mamba_segment", "mamba_ssm",
+    })
+    default_route_execution_policy = {
+        "prompt_lookup": {
+            "mamba_conv": "fused_short",
+            "mamba_projection": "short_row_exact",
+            "mamba_segment": "layerwise_short_exact_routed_batch",
+            "mamba_ssm": "fused_short_gate",
+        },
+    }
     cache_layout = CACHE_LAYOUT
     # llm_config declares </s> (2); generation_config adds <|im_end|> (11).
     eos_token_ids = (2, 11)

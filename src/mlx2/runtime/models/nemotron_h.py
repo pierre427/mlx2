@@ -2149,6 +2149,67 @@ class Model(nn.Module):
         out = self.backbone(inputs, cache=cache)
         return self.lm_head(select_checkpoint_rows(out))
 
+    # Prompt lookup verifies through ``pld_verify_forward`` one lane at a
+    # time: its exact law is the B1 one-token decode step.
+    pld_verify_max_lanes = 1
+    pld_verify_forward_kind = "nemotron_h_row_exact_b1"
+
+    def pld_verify_forward(self, inputs: mx.array, cache: Any | None = None):
+        """Prompt-lookup verify rows with ordinary one-token decode arithmetic.
+
+        A block forward of several rows runs the chunked SSM and multi-row
+        attention and projections, whose rounding differs from ordinary S=1
+        decode (CPU fp32 already differs by ~4e-7 on a tiny model), so a
+        near tie could authorize a different token than ordinary greedy.
+        Each verify row here is computed as the ordinary step would compute
+        it: through the selected layerwise short-exact recipes when the
+        adapter selected them (``_layerwise_short_hidden``, the shared
+        ``row_exact`` executor, GPU bit-exact for native MTP), else one
+        ordinary one-token forward per row.  The recurrent planes are in a
+        speculation epoch, so each one-token step records its exact
+        snapshot and the transaction trims to the accepted prefix.
+
+        A single row, or a forward on caches outside a speculation epoch (a
+        plain anchor round), is the ordinary forward itself.  Verify rows of
+        several lanes in one forward are refused: ``pld_verify_max_lanes``
+        keeps the generator from building one.
+        """
+        speculating = cache is not None and any(
+            getattr(entry, "speculating", False) for entry in cache
+        )
+        counts = self.__dict__.setdefault(
+            "_mlx2_pld_verify_counts",
+            {"ordinary_forward": 0, "layerwise_short_exact": 0, "tokenwise": 0, "rows": 0},
+        )
+        if inputs.ndim != 2 or inputs.shape[1] == 1 or not speculating:
+            counts["ordinary_forward"] += 1
+            return self(inputs, cache=cache)
+        if inputs.shape[0] != 1:
+            raise ValueError(
+                "Nemotron prompt-lookup verify is exact for one lane per forward"
+            )
+        counts["rows"] += int(inputs.shape[1])
+        if self._short_segment_refusal(inputs, cache) is None:
+            counts["layerwise_short_exact"] += 1
+            hidden, _taps = self._layerwise_short_hidden(inputs, cache, ())
+            return self._row_exact_head(hidden)
+        counts["tokenwise"] += 1
+        return mx.concatenate(
+            [
+                self(inputs[:, index : index + 1], cache=cache)
+                for index in range(inputs.shape[1])
+            ],
+            axis=1,
+        )
+
+    def pld_verify_status(self) -> dict:
+        return {
+            "schema": "mlx2.nemotron-pld-verify.v1",
+            "kind": self.pld_verify_forward_kind,
+            "max_lanes": self.pld_verify_max_lanes,
+            **dict(self.__dict__.get("_mlx2_pld_verify_counts") or {}),
+        }
+
     @property
     def embed_tokens(self):
         """Architecture-neutral embedding contract without duplicate parameters."""

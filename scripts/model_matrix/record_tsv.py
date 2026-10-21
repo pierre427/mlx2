@@ -66,10 +66,53 @@ FLAG_FOR_ROUTE = {
 }
 
 
-def flag_for(route: str) -> tuple[str, str]:
-    """(scope, feature_or_flag) for a cell route name (suffixes ignored)."""
+# Route kind a no-flag (adapter default) cell serves -> the row that records it.
+DEFAULT_ROUTE_ROW = {
+    "prompt_lookup": ("feature", "prompt_lookup"),
+    "native_mtp": ("feature", "native_mtp"),
+    "external_draft": ("feature", "external_draft"),
+    # An ordinary default has no feature of its own: it is --ordinary decoding.
+    "ordinary": ("server_cli", "--ordinary"),
+}
+
+
+def drop_superseded_skips(items: list) -> list:
+    """A skipped cell that a later run of the same checkpoint/route replaced
+    is not evidence about that route: it never loaded, so it cannot say which
+    route the server would have picked."""
+    latest_run = {}
+    for _, cell in items:
+        if cell.get("verdict") != "skipped":
+            key = (cell.get("checkpoint"), cell.get("route"))
+            latest_run[key] = max(latest_run.get(key, ""), cell.get("finished_at") or "")
+    return [
+        (path, cell) for path, cell in items
+        if not (cell.get("verdict") == "skipped"
+                and latest_run.get((cell.get("checkpoint"), cell.get("route")), "")
+                > (cell.get("finished_at") or ""))
+    ]
+
+
+def default_route_kind(cell: dict) -> str | None:
+    """The route a cell's server actually served (one route receipt), else
+    the route the inventory expected.  The adapter attribute an inventory
+    reads is not always what the server selects: a capability default can
+    pick adaptive prompt lookup for an adapter whose default_route is
+    ordinary."""
+    seen = cell.get("routes_seen") or []
+    return seen[0] if len(seen) == 1 else cell.get("expected_route_kind")
+
+
+def flag_for(route: str, default_kind: str | None = "prompt_lookup") -> tuple[str, str]:
+    """(scope, feature_or_flag) for a cell route name (suffixes ignored).
+
+    A no-flag cell is recorded under the route its adapter default selects
+    (``default_kind``, the cell's expected route kind).
+    """
     if route.startswith("no_flag_default"):
-        return "feature", "prompt_lookup"
+        if default_kind not in DEFAULT_ROUTE_ROW:
+            raise ValueError(f"no-flag cell with unmapped default route {default_kind!r}")
+        return DEFAULT_ROUTE_ROW[default_kind]
     for prefix, flag in (("ordinary", "--ordinary"), ("pld_", "--prompt-lookup"),
                          ("native_mtp", "--native-mtp"), ("ast_", "--ast"),
                          ("external_", "--external-draft")):
@@ -131,12 +174,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence-root", type=Path, required=True)
     parser.add_argument("--profile", required=True, help="artifact_profile text (host, MLX, serving shape)")
     parser.add_argument("--host", help="only cells from this host label")
+    parser.add_argument("--note", action="append", default=[], metavar="NAME=TEXT",
+                        help="append TEXT to the reason of every row of artifact NAME (e.g. a root cause)")
+    parser.add_argument("--campaign", default="model-matrix-20261021",
+                        help="campaign name quoted at the start of each row's reason")
     parser.add_argument("--write", action="store_true", help="append to the TSV (default: print)")
     args = parser.parse_args(argv)
+    notes = []
+    for item in args.note:
+        name, separator, text = item.partition("=")
+        if not separator or not name or not text:
+            parser.error(f"--note needs NAME=TEXT, got {item!r}")
+        notes.append((name, text))
     groups: dict[tuple, list] = defaultdict(list)
+    loaded = []
     for path in sorted(args.evidence_root.resolve().glob("*/*/cell.json")):
         cell = json.loads(path.read_text())
         cell["verdict"] = effective_verdict(cell)
+        loaded.append((path, cell))
+    for path, cell in drop_superseded_skips(loaded):
         if cell["verdict"] == "artifact_offline":
             # Offline artifacts get no decision row (coordinator, 2026-10-21).
             continue
@@ -146,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         if not key:
             print(f"no family key for {cell.get('adapter')}: {path}", file=sys.stderr)
             continue
-        scope, flag = flag_for(cell["route"])
+        scope, flag = flag_for(cell["route"], default_route_kind(cell))
         groups[(key, cell["checkpoint"], scope, flag)].append((path, cell))
         if any(r.get("kind") == "tool" for r in cell.get("requests") or ()):
             groups[(key, cell["checkpoint"], "feature", "tools")].append((path, cell))
@@ -195,12 +251,17 @@ def main(argv: list[str] | None = None) -> int:
             "feature_or_flag": flag,
             "implemented": "no" if fail_closed else "yes",
             "qualified": "no",
-            "selected": "no" if fail_closed else "yes_explicit",
+            "selected": "no" if fail_closed else (
+                "yes_default" if all(c["route"].startswith("no_flag_default") for _, c in cells)
+                else "yes_explicit"),
             "observed_used": observed,
             "decision": decision,
-            "reason": ("model-matrix-20261021 smoke (code, explain, multi-turn, frozen-Spomin 4K, "
+            "reason": (f"{args.campaign} smoke (code, explain, multi-turn, frozen-Spomin 4K, "
                        "default sampling, tool call when declared; temperature 0, max_tokens 200). "
-                       "Not qualification. " + summary).replace("\t", " ").replace("\n", " "),
+                       "Not qualification. " + summary
+                       + "".join(f" || note: {text}" for name, text in notes
+                                 if checkpoint.split("@", 1)[0] == name)
+                       ).replace("\t", " ").replace("\n", " "),
             "evidence": evidence,
             "source_revision": ";".join(revisions) or "not_recorded",
             "artifact_profile": args.profile + "; host " + ",".join(sorted({c.get('host') or '?' for _, c in cells})),

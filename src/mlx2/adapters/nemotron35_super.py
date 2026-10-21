@@ -56,6 +56,8 @@ DESCRIPTOR = ModelDescriptor(
             Capability.APC_V2,
             Capability.LAYERED_CACHE,
             Capability.GRAMMAR,
+            # Row-exact B1 verify (nemotron_h.Model.pld_verify_forward).
+            Capability.PROMPT_LOOKUP,
             Capability.MTP,
         }
     ),
@@ -366,6 +368,10 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     # the ordinary route only (``multimodal_routes``), so a multimodal server
     # passes --ordinary.  Not a qualification: the route stays unqualified.
     default_route = "native_mtp"
+    # Its prompt-lookup route selects the exact short-segment kernels
+    # (``default_route_execution_policy["prompt_lookup"]``), so a subclass
+    # whose default route is ordinary (Bolt) defaults to latched PLD.
+    prompt_lookup_default = True
     multimodal_routes = frozenset({"ordinary"})
     default_mtp_ordinary_handoff_max_width = None
     # The exact kernels of that route: the fused short Mamba conv and gated
@@ -384,6 +390,19 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "mamba_ssm": "fused_short_gate",
             "moe_nax_gather": "gather",
             "num_draft": 2,
+        },
+        # An explicit --prompt-lookup verifies through the same exact
+        # short-segment kernels (nemotron_h.Model.pld_verify_forward).
+        # pld-families-20261021 at c7aa1e237 (Super-VL affine4-protected8):
+        # greedy output identical to --ordinary on code, copy, 1.5K-token copy
+        # and Spomin 4K prompts; decode 1.72x (copy) and 2.36x (long copy) of
+        # ordinary, 1.00x code, 0.99x Spomin.  Tokenwise verify without them:
+        # 0.84-1.00x.  Not a qualification.
+        "prompt_lookup": {
+            "mamba_conv": "fused_short",
+            "mamba_projection": "short_row_exact",
+            "mamba_segment": "layerwise_short_exact_routed_batch",
+            "mamba_ssm": "fused_short_gate",
         },
     }
     think_close_separator = ""

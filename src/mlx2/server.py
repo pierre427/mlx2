@@ -6741,7 +6741,11 @@ def resolve_route_selection(args, policy, adapter_resolution=None):
         if adapter_resolution is not None and route == "ordinary":
             from .contracts import Capability
 
-            if Capability.PROMPT_LOOKUP in adapter_resolution.descriptor.capabilities:
+            # An adapter whose prompt-lookup verify cannot amortize rows (a
+            # measured no-flag regression) keeps the route explicit-only.
+            if Capability.PROMPT_LOOKUP in adapter_resolution.descriptor.capabilities and getattr(
+                adapter_resolution.adapter_type, "prompt_lookup_default", True
+            ):
                 route = "prompt_lookup"
                 capability_default = True
     source = (

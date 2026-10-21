@@ -223,7 +223,12 @@ def test_route_contract_preserves_ordinary_and_fails_closed_without_sidecar():
     assert contract["default_route"] == "ordinary"
     assert contract["native_mtp"]["implemented"] is False
     assert contract["native_mtp"]["ordinary_handoff"] is None
-    assert contract["prompt_lookup"]["implemented"] is False
+    # Lifted 2026-10-21: row-exact B1 verify (nemotron_h pld_verify_forward).
+    assert contract["prompt_lookup"]["implemented"] is True
+    assert contract["prompt_lookup"]["verify"] == "nemotron_h_row_exact_b1"
+    # Explicit-only: tokenwise verify measured 0.81-1.00x of ordinary.
+    assert contract["prompt_lookup"]["default_without_drafter_flag"] is False
+    assert contract["prompt_lookup"]["qualified"] is False
     assert contract["external_draft"]["implemented"] is False
 
     adapter._has_mtp = True

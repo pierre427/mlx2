@@ -60,6 +60,8 @@ DESCRIPTOR = ModelDescriptor(
             Capability.APC_V2,
             Capability.LAYERED_CACHE,
             Capability.GRAMMAR,
+            # Row-exact B1 verify (nemotron_h.Model.pld_verify_forward).
+            Capability.PROMPT_LOOKUP,
         }
     ),
     state_planes=frozenset(

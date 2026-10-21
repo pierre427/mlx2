@@ -33,9 +33,9 @@ DESCRIPTOR = ModelDescriptor(
     family="nemotron3-super-120b-a12b",
     variant="5bit-mtp",
     state_planes=frozenset({StatePlane.ATTENTION_KV, StatePlane.RECURRENT, StatePlane.RNG, StatePlane.TRANSCRIPT, StatePlane.DRAFT}),
-    capabilities=frozenset({Capability.TEXT, Capability.STREAMING, Capability.TOOLS, Capability.REASONING, Capability.CONTINUOUS_BATCH, Capability.PREFIX_REUSE, Capability.APC_V2, Capability.LAYERED_CACHE, Capability.GRAMMAR, Capability.MTP}),
+    capabilities=frozenset({Capability.TEXT, Capability.STREAMING, Capability.TOOLS, Capability.REASONING, Capability.CONTINUOUS_BATCH, Capability.PREFIX_REUSE, Capability.APC_V2, Capability.LAYERED_CACHE, Capability.GRAMMAR, Capability.MTP, Capability.PROMPT_LOOKUP}),
     cache_layout=CACHE_LAYOUT,
-    metadata={"execution": "mlx2.adapters.nemotron3_super.Nemotron3SuperAdapter", "qualification": "pending", "scope": "text-only", "embedded_mtp": "implemented-candidate"},
+    metadata={"execution": "mlx2.adapters.nemotron3_super.Nemotron3SuperAdapter", "qualification": "pending", "scope": "text-only", "embedded_mtp": "implemented-candidate", "prompt_lookup": "implemented-row-exact-b1-verify"},
 )
 
 
@@ -163,6 +163,72 @@ def configure_environment() -> dict[str, str]:
     assert_process_profile_applied("the Nemotron-3 Super profile")
     return profile
 
+# Nemotron-H short-segment exact kernels an adapter may select by policy:
+# the fused short Mamba conv and SSM, short row-exact projections and the
+# layerwise short-exact segment walk (``nemotron_h.Model``).  Prompt lookup
+# verifies through them (``pld_verify_forward``); unset keys stay ``auto``.
+SHORT_EXACT_POLICY_KEYS = {
+    "mamba_conv": ("auto", "fused_b1", "fused_b1_compact", "fused_short"),
+    "mamba_ssm": ("auto", "fused_short", "fused_short_gate"),
+    "mamba_projection": (
+        "auto", "compact_padded", "compact_row_exact", "adaptive_row_exact",
+        "short_row_exact", "native_qmm_residual_b1",
+    ),
+    "mamba_segment": (
+        "auto", "layerwise_short_exact", "layerwise_short_exact_routed_batch",
+    ),
+}
+_SHORT_EXACT_LAYOUT = {
+    ("mamba_conv", "fused_short"): ":mamba-conv4-silu-short-checkpoints-v1",
+    ("mamba_conv", "fused_b1_compact"): ":mamba-conv4-silu-b1-compact-state-v2",
+    ("mamba_conv", "fused_b1"): ":mamba-conv4-silu-b1-v1",
+    ("mamba_ssm", "fused_short_gate"): ":mamba-ssm-short-dt-gate-v1",
+    ("mamba_ssm", "fused_short"): ":mamba-ssm-short-dt-v1",
+    ("mamba_projection", "compact_padded"): ":mamba-varlen-q8-projection-v1",
+    ("mamba_projection", "compact_row_exact"): ":mamba-varlen-row-exact-q8-projection-v1",
+    ("mamba_projection", "adaptive_row_exact"): ":mamba-varlen-adaptive-row-exact-q8-projection-v1",
+    ("mamba_projection", "short_row_exact"): ":mamba-short-row-exact-q8-projection-v1",
+    ("mamba_projection", "native_qmm_residual_b1"): ":mamba-native-qmm-residual-b1-v1",
+    ("mamba_segment", "layerwise_short_exact"): ":mamba-layerwise-short-exact-v1",
+    ("mamba_segment", "layerwise_short_exact_routed_batch"): ":mamba-layerwise-short-exact-routed-batch-v1",
+}
+
+
+def validate_short_exact_policy(policy):
+    """``{key: value}`` for the selected (non-``auto``) short-exact kernels."""
+    selected = {}
+    for key, value in dict(policy or {}).items():
+        allowed = SHORT_EXACT_POLICY_KEYS.get(key)
+        if allowed is None or not isinstance(value, str) or value not in allowed:
+            raise ValueError(
+                f"Nemotron {key} must be one of " + ", ".join(allowed or ())
+            )
+        if value != "auto":
+            selected[key] = value
+    return selected
+
+
+def apply_short_exact_policy(model, policy) -> str:
+    """Set the selected kernels on ``model``; return the cache-layout suffix.
+
+    The layout changes with the kernels so APCv2 never mixes state written
+    by different arithmetic.  The order matches Super's layout suffixes.
+    """
+    mixers = [layer.mixer for layer in model.layers if layer.block_type == "M"]
+    setters = {
+        "mamba_conv": lambda value: [m.set_conv_policy(value) for m in mixers],
+        "mamba_ssm": lambda value: [m.set_ssm_policy(value) for m in mixers],
+        "mamba_projection": lambda value: [m.set_projection_policy(value) for m in mixers],
+        "mamba_segment": model.set_short_segment_policy,
+    }
+    suffix = ""
+    for key in ("mamba_conv", "mamba_ssm", "mamba_projection", "mamba_segment"):
+        if key in policy:
+            setters[key](policy[key])
+            suffix += _SHORT_EXACT_LAYOUT[(key, policy[key])]
+    return suffix
+
+
 class Nemotron3SuperAdapter(FlashNextAdapter):
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING
@@ -171,6 +237,14 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
     # than ordinary decode at the tested 8K and 32K contexts; batched MTP,
     # cached-prefix parity, and longer contexts still need qualification.
     default_route = "ordinary"
+    # Prompt lookup is implemented and exact here (row-exact B1 verify), but
+    # without the short-segment kernels its verify is one ordinary forward
+    # per row, which cannot beat ordinary decode.  pld-families-20261021 at
+    # fe7c40169, greedy output token-identical throughout: Nemotron 3 Super
+    # 5-bit latched PLD ran 0.70-0.89x of ordinary; Lightning (at c7aa1e237)
+    # 0.81-1.00x.  So --prompt-lookup stays explicit here.  A subclass whose
+    # PLD route selects the exact kernels (Nemotron 3.5 Super/Bolt) opts in.
+    prompt_lookup_default = False
     # Preserve the source-bound Nemotron serving profile.  The generic
     # prompt-length schedule is used only by adapters that return ``None``.
     default_prefill_step = 2048

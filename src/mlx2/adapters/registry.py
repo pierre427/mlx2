@@ -98,16 +98,15 @@ class AdapterResolution:
         if declared is None:
             return {}
         name = self.adapter_type.__name__
-        if not isinstance(declared, dict) or set(declared) - {
-            "ordinary",
-            "native_mtp",
-            "external_draft",
-        }:
+        routes = {"ordinary", "native_mtp", "external_draft", "prompt_lookup"}
+        if not isinstance(declared, dict) or set(declared) - routes:
             raise ValueError(
-                f"{name} default_route_execution_policy must map 'ordinary' "
-                "'native_mtp', or 'external_draft' to a policy object"
+                f"{name} default_route_execution_policy must map 'ordinary', "
+                "'native_mtp', 'external_draft', or 'prompt_lookup' to a policy object"
             )
-        if route not in {"ordinary", "native_mtp", "external_draft"}:
+        if route not in routes:
+            return {}
+        if route == "prompt_lookup" and Capability.PROMPT_LOOKUP not in self.descriptor.capabilities:
             return {}
         if route == "native_mtp" and Capability.MTP not in self.descriptor.capabilities:
             return {}

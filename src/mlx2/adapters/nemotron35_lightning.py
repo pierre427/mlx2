@@ -11,7 +11,14 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
-from .nemotron3_super import Nemotron3SuperAdapter, _shard_header, configure_environment
+from .nemotron3_super import (
+    SHORT_EXACT_POLICY_KEYS,
+    Nemotron3SuperAdapter,
+    _shard_header,
+    apply_short_exact_policy,
+    configure_environment,
+    validate_short_exact_policy,
+)
 
 TARGET_REVISION = "a9db86e1fe5baf448346efd33541ce117b5b8403"
 TARGET_CONFIG_SHA256 = "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b"
@@ -30,7 +37,7 @@ SAMPLING = VendorSampling.single(
 BASE_CAPABILITIES = frozenset({
     Capability.TEXT, Capability.STREAMING, Capability.TOOLS, Capability.REASONING,
     Capability.CONTINUOUS_BATCH, Capability.PREFIX_REUSE, Capability.APC_V2,
-    Capability.LAYERED_CACHE, Capability.GRAMMAR,
+    Capability.LAYERED_CACHE, Capability.GRAMMAR, Capability.PROMPT_LOOKUP,
 })
 BASE_STATE_PLANES = frozenset({
     StatePlane.ATTENTION_KV, StatePlane.RECURRENT, StatePlane.RNG,
@@ -52,7 +59,10 @@ def descriptor_for(*, has_mtp: bool) -> ModelDescriptor:
             "scope": "text-only",
             "external_mtp": "implemented-candidate" if has_mtp else "absent",
             "ordinary_reference": "implemented",
-            "prompt_lookup": "unsupported-unverified-hybrid-checkpoint",
+            # Verify rows are computed with ordinary one-token arithmetic
+            # (nemotron_h.Model.pld_verify_forward) and committed through the
+            # exact hybrid record-and-trim transaction.
+            "prompt_lookup": "implemented-row-exact-b1-verify",
             "external_draft": "unsupported-no-bound-draft-artifact",
         },
     )
@@ -242,10 +252,22 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
     def _init_lightning(self, model_path: str, *, execution_policy=None):
         from .process_globals import claim_stock_moe
 
-        if execution_policy is not None and (
-            not isinstance(execution_policy, dict) or set(execution_policy) - {"num_draft"}
-        ):
-            raise ValueError("Nemotron 3.5 Lightning execution policy supports only num_draft")
+        if execution_policy is not None and not isinstance(execution_policy, dict):
+            raise ValueError("Nemotron 3.5 Lightning execution policy must be an object")
+        execution_policy = dict(execution_policy or {})
+        # The short-segment exact kernels (prompt-lookup verify rows through
+        # nemotron_h.Model.pld_verify_forward); applied after load.
+        short_exact = {
+            key: execution_policy.pop(key)
+            for key in tuple(SHORT_EXACT_POLICY_KEYS)
+            if key in execution_policy
+        }
+        if set(execution_policy) - {"num_draft"}:
+            raise ValueError(
+                "Nemotron 3.5 Lightning execution policy supports num_draft and "
+                + ", ".join(sorted(SHORT_EXACT_POLICY_KEYS))
+            )
+        self.short_exact_policy = validate_short_exact_policy(short_exact)
         from .mtp_depth_cap import validate_self_mtp_num_draft
 
         self._num_draft = validate_self_mtp_num_draft((execution_policy or {}).get("num_draft", 2))
@@ -284,6 +306,7 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
         )
         self.model.load_weights(list(weights.items()), strict=True)
         self.model.eval(); mx.eval(self.model.parameters())
+        self.layout += apply_short_exact_policy(self.model, self.short_exact_policy)
         weights.clear(); mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         # Some tokenizer classes rebuild the pre-tokenizer instead of reading tokenizer.json.
@@ -336,11 +359,21 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
                     sorted(plane.value for plane in self.descriptor.state_planes)
                 ),
             },
+            # Lifted 2026-10-21: verify rows run the ordinary one-token step
+            # (``pld_verify_forward``) and commit through the exact hybrid
+            # record-and-trim transaction, so greedy prompt lookup equals
+            # ordinary greedy.  It stays explicit (--prompt-lookup): one
+            # ordinary forward per verify row measured 0.81-1.00x ordinary
+            # (``Nemotron3SuperAdapter.prompt_lookup_default``).  The short
+            # exact kernels (execution policy mamba_*) measured 0.89-1.46x.
             "prompt_lookup": {
-                "implemented": False,
-                "reason": "hybrid checkpoint publication is not verified",
+                "implemented": True,
+                "verify": "nemotron_h_row_exact_b1",
+                "default_without_drafter_flag": type(self).prompt_lookup_default,
+                "short_exact_kernels": dict(getattr(self, "short_exact_policy", {}) or {}),
                 "qualified": False,
-                "selected": False,
+                "selected": None,
+                "selection_authority": "serving_route_receipt",
             },
             "native_mtp": {
                 "implemented": has_mtp,

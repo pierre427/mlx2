@@ -117,9 +117,20 @@ def foreign_model_processes() -> list[str]:
         executable = fields[1].split(None, 1)[0]
         if executable.endswith(("/zsh", "/bash", "/sh", "/git", "/git-remote-https")):
             continue
+        arguments = fields[1].split()
+        if len(arguments) > 1 and Path(arguments[1]).name == "run_with_gpu_locks.py":
+            # Another lock wrapper names its server command in its argv, but
+            # it owns no GPU state: while waiting it holds nothing, and once
+            # running its lock directories and its child server say so.
+            # Counting it made two queued sessions refuse each other forever.
+            continue
         if Path(executable).name.lower() in {"ssh", "ssh.exe"}:
             # A local SSH client can mention mlx2.server in the command it
             # executes on another host; it does not own this host's GPU.
+            continue
+        if Path(executable).name.lower() in {"node", "codex", "claude"}:
+            # Agent CLIs carry their prompt in argv; a prompt that quotes a
+            # server command does not load a model (servers run as python).
             continue
         if MODEL_PROCESS.search(fields[1]):
             foreign.append(row.strip()[:500])

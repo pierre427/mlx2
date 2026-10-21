@@ -118,9 +118,18 @@ def model_processes() -> list[str]:
         if len(fields) != 2 or int(fields[0]) in own or not pattern.search(fields[1]):
             continue
         # Shell drivers and ssh clients merely mention a server in their
-        # arguments; they do not own this host's GPU (as run_with_gpu_locks).
+        # arguments, and agent CLIs carry prompts that quote server commands;
+        # none of them own this host's GPU (as run_with_gpu_locks).
         executable = Path(fields[1].split(None, 1)[0]).name
-        if executable in {"bash", "zsh", "sh", "ssh", "git"}:
+        if executable in {"bash", "zsh", "sh", "ssh", "git", "node", "codex", "claude"}:
+            continue
+        arguments = fields[1].split()
+        script = Path(arguments[1]).name if len(arguments) > 1 else ""
+        # A queued GPU-lock wrapper, or an agent CLI whose prompt quotes a
+        # server command line, owns no GPU (as run_with_gpu_locks).
+        if script == "run_with_gpu_locks.py" or (
+            executable == "node" and script in {"codex", "claude"}
+        ):
             continue
         found.append(row.strip()[:300])
     return found
@@ -499,6 +508,16 @@ def run_cell(args, target: dict, route: dict, out: Path, revision: str, dirty: b
                        reason=f"weights {weight / 1e9:.1f} GB exceed host budget {args.max_model_bytes / 1e9:.1f} GB")
         atomic_json(out / "cell.json", receipt)
         return receipt
+    settle_deadline = time.monotonic() + max(0.0, getattr(args, "memory_settle_seconds", 0.0))
+    while (receipt["host_before"]["available_bytes"] < need and not args.ignore_free_memory
+           and time.monotonic() < settle_deadline):
+        # The previous cell's server releases tens of GiB of Metal buffers
+        # for a while after it exits; wait for them instead of skipping.
+        time.sleep(5)
+        counters = vm_counters()
+        receipt["host_before"]["available_bytes"] = available_bytes(counters)
+        receipt["host_before"]["memory_settle_waited_seconds"] = round(
+            receipt["host_before"].get("memory_settle_waited_seconds", 0) + 5, 1)
     if receipt["host_before"]["available_bytes"] < need and not args.ignore_free_memory:
         receipt.update(status="skipped", verdict="skipped",
                        reason=f"available {receipt['host_before']['available_bytes'] / 1e9:.1f} GB < needed {need / 1e9:.1f} GB")
@@ -729,6 +748,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--memory-factor", type=float, default=1.08)
     parser.add_argument("--max-model-bytes", type=float, default=0)
     parser.add_argument("--ignore-free-memory", action="store_true")
+    parser.add_argument("--memory-settle-seconds", type=float, default=180.0,
+                        help="wait up to this long for memory freed by the previous cell before skipping")
     parser.add_argument("--swap-pages-limit", type=int, default=2048)
     parser.add_argument("--suffix", default="", help="evidence directory suffix for a distinguishable retry")
     args = parser.parse_args(argv)

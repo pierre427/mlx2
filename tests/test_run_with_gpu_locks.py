@@ -31,10 +31,34 @@ def test_foreign_decision_server_blocks_gpu_admission(monkeypatch):
             "13 /venv/bin/python -m mlx2.server_helpers\n"
             "14 ssh gpu-host /venv/bin/python -m mlx2.server --port 9001\n"
             "15 /usr/bin/ssh gpu-host mlx_lm.server --port 9002\n"
+            # A queued lock wrapper names its server command but owns no GPU.
+            "16 /venv/bin/python /repo/scripts/run_with_gpu_locks.py --session s"
+            " --label l --receipt r -- env /venv/bin/python -m mlx2.server --port 9003\n"
+            # An agent CLI whose prompt quotes a server command line.
+            "17 node /home/u/.local/bin/codex exec -s workspace-write 'run -m mlx2.server'\n"
         ),
     )
     assert module.foreign_model_processes() == [
         "11 /venv/bin/python -m mlx2.decisions.server --port 9000"
+    ]
+
+
+def test_agent_cli_prompt_that_quotes_a_server_does_not_block(monkeypatch):
+    module = _load_module()
+    monkeypatch.setattr(module.os, "getpid", lambda: 10)
+    monkeypatch.setattr(module.os, "getppid", lambda: 9)
+    monkeypatch.setattr(
+        module.subprocess, "check_output",
+        lambda *args, **kwargs: (
+            "21 node /Users/x/.local/bin/codex exec -m gpt -s workspace-write "
+            "Update docs: start python -m mlx2.server --model M\n"
+            "22 /opt/homebrew/bin/node /usr/local/bin/claude -p 'run mlx_lm.server'\n"
+            "23 /Users/x/.local/bin/codex exec 'python -m mlx2.server --port 1'\n"
+            "24 /venv/bin/python -m mlx2.server --model M --port 8757\n"
+        ),
+    )
+    assert module.foreign_model_processes() == [
+        "24 /venv/bin/python -m mlx2.server --model M --port 8757"
     ]
 
 
