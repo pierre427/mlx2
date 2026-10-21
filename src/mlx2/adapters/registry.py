@@ -452,6 +452,12 @@ def _qwen25_vl(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.Qwen25VLCandidateAdapter, module.DESCRIPTOR, artifact)
 
 
+def _hysparse2(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".hysparse2", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.HySparse2Adapter, module.DESCRIPTOR, artifact)
+
+
 _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "bert": _minilm,
     "qwen4_exp": _flash_next,
@@ -481,6 +487,9 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "lfm2_vl": _lfm25_vl,
     "smolvlm": _smolvlm2,
     "qwen2_5_vl": _qwen25_vl,
+    # Exported HySparse2 research checkpoints (scripts/export_hysparse2_serving.py).
+    "mlx2_hysparse2_research": _hysparse2,
+    "mlx2_hysparse2_memory_diffusion_research": _hysparse2,
 }
 
 

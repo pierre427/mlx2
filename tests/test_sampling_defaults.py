@@ -251,6 +251,8 @@ def test_every_target_adapter_declares_cited_vendor_defaults():
     no_vendor_profile = {
         "agnes", "bert", "hy_v3", "lfm2_vl", "llama", "muse_glimmer_text",
         "qwen2", "qwen2_5_vl", "qwen3", "qwen3_moe", "smolvlm",
+        # Locally trained HySparse2 research checkpoints have no vendor.
+        "mlx2_hysparse2_research", "mlx2_hysparse2_memory_diffusion_research",
     }
     assert set(_RESOLVERS) == set(EXPECTED) | no_vendor_profile
     for model_type, profiles in EXPECTED.items():

@@ -95,4 +95,22 @@ def select_checkpoint_rows(hidden):
     return mx.take_along_axis(hidden, index, axis=1)
 
 
-__all__ = ["prefill_checkpoint_rows", "select_checkpoint_rows"]
+def select_checkpoint_rows_with_indices(hidden):
+    """``select_checkpoint_rows`` that also reports which rows it kept.
+
+    Returns ``(hidden, None)`` when nothing was narrowed, else the narrowed
+    input and each lane's selected row index within the chunk.  A model whose
+    head computation depends on absolute positions (per-row attention after
+    the narrowing point) needs the indices to place each kept row.
+    """
+    narrowed = select_checkpoint_rows(hidden)
+    if narrowed is hidden:
+        return hidden, None
+    return narrowed, _REQUEST.get().rows
+
+
+__all__ = [
+    "prefill_checkpoint_rows",
+    "select_checkpoint_rows",
+    "select_checkpoint_rows_with_indices",
+]
