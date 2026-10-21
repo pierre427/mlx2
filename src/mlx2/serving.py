@@ -46,6 +46,12 @@ from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
 from .runtime.eval_watchdog import EvalWatchdog
 from .runtime import loop_trace as _loop_trace
 from .runtime.gpu_keep_warm import GpuKeepWarm, GpuKeepWarmPolicy
+from .runtime.residency_heartbeat import (
+    DEFAULT_KEEP_SECONDS as RESIDENCY_KEEP_SECONDS_DEFAULT,
+    ResidencyHeartbeat,
+    stream_index as residency_stream_index,
+    validate_keep_seconds as validate_residency_keep_seconds,
+)
 
 log = logging.getLogger(__name__)
 
@@ -3818,6 +3824,7 @@ class ServingEngine:
         prefill_depth_budget=None,
         recurrent_state_codec=None,
         gpu_keep_warm=None,
+        residency_keep_seconds=RESIDENCY_KEEP_SECONDS_DEFAULT,
         power_telemetry=None,
         power_governor=None,
         prefill_handoff="off",
@@ -4408,6 +4415,13 @@ class ServingEngine:
         self.tenant_scoped_cache = bool(tenant_scoped_cache)
         # Off by default: idle-loop GPU keep-warm ticks (omlx #3974).
         self.gpu_keep_warm_policy = GpuKeepWarmPolicy.from_value(gpu_keep_warm)
+        # Built on the generation thread once the weights are wired
+        # (runtime/residency_heartbeat.py); until then status reports the
+        # configured window only.
+        self.residency_keep_seconds = validate_residency_keep_seconds(
+            residency_keep_seconds
+        )
+        self.residency_heartbeat = None
         # Off by default: host-side power/thermal sampler (mlx2.power_telemetry).
         self.power_telemetry_policy = PowerTelemetryPolicy.from_value(power_telemetry)
         self.power_telemetry = None
@@ -6471,6 +6485,7 @@ class ServingEngine:
                 and not self.eval_watchdog.stalled,
                 "error": self.error,
                 "eval_watchdog": self.eval_watchdog.status(),
+                "residency_heartbeat": self._residency_heartbeat_status(),
                 "inflight": len(self.jobs),
                 "accepted_lifecycles": len(self._admission_leases),
                 "tokenizers_v1": getattr(
@@ -9169,6 +9184,7 @@ class ServingEngine:
             from .runtime import weight_residency
 
             self.weight_residency = weight_residency.wire_serving_weights()
+            self._start_residency_heartbeat()
             from .runtime import mlx_build
 
             self.mlx_build = mlx_build.status()
@@ -11521,6 +11537,10 @@ class ServingEngine:
 
             while not self.stop_event.is_set():
                 self._retry_terminal_cleanup()
+                if self.residency_heartbeat is not None:
+                    # Lanes present: the engine's own command buffers keep
+                    # the wired set in use, so the heartbeat stays quiet.
+                    self.residency_heartbeat.mark(bool(active))
                 if _loop_trace.enabled():
                     _loop_trace.flush(trace_iteration)
                     trace_iteration = {
@@ -14712,8 +14732,15 @@ class ServingEngine:
                     # Last in the idle branch, on this (MLX) thread, so a tick
                     # never overlaps a stepped request; a queued one wakes the
                     # GPU itself.
+                    # A running residency heartbeat pulses on its own
+                    # stream and honours memory pressure; the keep-warm tick
+                    # (same one-element kernel, generation stream) steps
+                    # aside so it cannot keep the set wired under pressure.
+                    heartbeat = self.residency_heartbeat
                     self.gpu_keep_warm.maybe_tick(
-                        pending_work=bool(published) or not self.incoming.empty()
+                        pending_work=bool(published)
+                        or not self.incoming.empty()
+                        or (heartbeat is not None and heartbeat.running)
                     )
                 now = time.monotonic()
                 if now - last_snapshot > 1:
@@ -14785,6 +14812,7 @@ class ServingEngine:
                 self._finish(
                     job, {"error": self.error or "server stopped", "status": 503}
                 )
+            self._stop_residency_heartbeat("generation thread ended")
             if batch is not None:
                 batch.close()
             for prepared in tuple(self.fanout_capsules.values()):
@@ -14825,8 +14853,55 @@ class ServingEngine:
                         close_tokenizer()
                     adapter.close()
 
+    def _start_residency_heartbeat(self):
+        """Start the idle residency heartbeat on its own thread and stream."""
+        receipt = getattr(self, "weight_residency", None) or {}
+        stream = getattr(self, "_generation_thread_stream", None)
+        engine_pressure = getattr(self, "memory_pressure_level", None)
+
+        def pressure():
+            from .runtime.os_memory import host_pressure_level
+
+            level = host_pressure_level()
+            level = 0 if level is None else int(level)
+            if callable(engine_pressure):
+                # The host-signal policy's hysteresis, when the operator
+                # enabled it (a constant NORMAL otherwise).
+                level = max(level, int(engine_pressure()))
+            return level
+
+        heartbeat = ResidencyHeartbeat(
+            getattr(self, "residency_keep_seconds", 0.0),
+            pressure=pressure,
+            wired=bool(receipt.get("wired")),
+            generation_stream_index=residency_stream_index(stream),
+        )
+        heartbeat.start()
+        self.residency_heartbeat = heartbeat
+        return heartbeat
+
+    def _stop_residency_heartbeat(self, reason="shutdown"):
+        heartbeat = getattr(self, "residency_heartbeat", None)
+        if heartbeat is not None:
+            heartbeat.stop(reason)
+
+    def _residency_heartbeat_status(self):
+        heartbeat = getattr(self, "residency_heartbeat", None)
+        if heartbeat is not None:
+            return heartbeat.status()
+        keep = float(getattr(self, "residency_keep_seconds", 0.0) or 0.0)
+        return {
+            "implemented": True,
+            "qualified": False,
+            "enabled": keep > 0,
+            "state": "off" if keep == 0 else "not_started",
+            "keep_seconds": keep,
+            "running": False,
+        }
+
     def close(self):
         self.stop_event.set()
+        self._stop_residency_heartbeat("shutdown")
         self.thread.join(timeout=30)
         if getattr(self, "power_telemetry", None) is not None:
             self.power_telemetry.close()

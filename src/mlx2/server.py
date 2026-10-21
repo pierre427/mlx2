@@ -45,6 +45,11 @@ from .usage import UsageLimitExceeded, UsageReloadBusy, metered_pooled
 from .host_counters import count_add
 from .batch_metrics import http_metric_route
 from .runtime.int8_prefill import cli_value as int8_prefill_cli_value
+from .runtime.residency_heartbeat import (
+    DEFAULT_KEEP_SECONDS as RESIDENCY_KEEP_SECONDS_DEFAULT,
+    validate_keep_seconds as _validate_residency_keep_seconds,
+)
+
 # The --cache-bytes default and its post-load clamp live in cache_sizing: pure
 # arithmetic with no MLX import, so the parser stays GPU-free.
 from .cache_sizing import (  # noqa: F401 - re-exported for callers and tests
@@ -179,6 +184,13 @@ def served_file_content_type(content_type):
     """Return the Content-Type /v1/files/{id}/content may send for a file."""
     base = str(content_type or "").split(";", 1)[0].strip().lower()
     return base if base in INERT_FILE_CONTENT_TYPES else "application/octet-stream"
+
+
+def _residency_keep_seconds(value):
+    try:
+        return _validate_residency_keep_seconds(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
 
 
 def load_admin_token(path):
@@ -5992,6 +6004,21 @@ def build_parser():
         help="seconds between keep-warm ticks (default: %(default)s)",
     )
     parser.add_argument(
+        "--residency-keep-seconds",
+        type=_residency_keep_seconds,
+        default=RESIDENCY_KEEP_SECONDS_DEFAULT,
+        metavar="SECONDS",
+        help=(
+            "keep the wired model weights wired for this long after the last "
+            "request: a heartbeat thread commits a one-element kernel every "
+            "0.5 s on its own GPU stream while the server is idle, so Metal "
+            "does not release the residency set and the next request skips "
+            "the re-wire. Stops on memory pressure (warning or critical) and "
+            "at shutdown; supersedes the keep-warm tick while it runs. "
+            "0 disables; at most 3600 (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--power-telemetry",
         action="store_true",
         help=(
@@ -7067,6 +7094,9 @@ def serving_engine_kwargs(
             }
             if getattr(args, "gpu_keep_warm_seconds", 0)
             else None
+        ),
+        "residency_keep_seconds": getattr(
+            args, "residency_keep_seconds", RESIDENCY_KEEP_SECONDS_DEFAULT
         ),
         "power_telemetry": (
             {
