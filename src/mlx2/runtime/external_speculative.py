@@ -109,6 +109,35 @@ def _ast_artifact_fingerprint(value, *, binding):
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _pad_cohort_trees(inputs, parents):
+    """Pad a cohort's trees to one width for a uniform provider tile.
+
+    A drafter may propose fewer nodes for one lane than another (prompt
+    lookup finds fewer copies).  Each short tree gets extra leaves under its
+    anchor, with token ids that are not already among the anchor's children,
+    appended after its real nodes.  The walk and commit read only a lane's
+    own tree (``logits[:, :len(tree)]`` and committed path indices), so the
+    padding rows are computed and ignored.
+    """
+    width = max(len(row) for row in inputs)
+    if all(len(row) == width for row in inputs):
+        return inputs, parents
+    padded_inputs, padded_parents = [], []
+    for row, tree in zip(inputs, parents, strict=True):
+        row, tree = list(row), list(tree)
+        taken = {row[index] for index, parent in enumerate(tree) if parent == 0}
+        filler = 0
+        while len(row) < width:
+            while filler in taken:
+                filler += 1
+            row.append(filler)
+            tree.append(0)
+            taken.add(filler)
+        padded_inputs.append(row)
+        padded_parents.append(tree)
+    return padded_inputs, padded_parents
+
+
 def _speculation_parked(lane) -> bool:
     """A reversible cost-handoff session that is parked and not re-probing."""
     state = getattr(lane, "cost_handoff_state", None)
@@ -7378,6 +7407,7 @@ class ExternalDraftBatchGenerator:
         if len(cohort) > self.target_tree_cohort_limit:
             raise ValueError("target-tree cohort exceeds its bounded lane limit")
         cached = self.tree_gates["cache_executor"]
+        inputs, parents = _pad_cohort_trees(inputs, parents)
         result = self.target_tree_executor_provider.forward_many(
             self.model,
             inputs,

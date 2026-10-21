@@ -156,3 +156,67 @@ def test_external_route_with_prompt_lookup_tiles_matches_greedy_under_admission(
             break
     assert tokens == reference
     assert batch.scheduler_stats["external_tree_rounds"] > 0
+
+
+def test_pad_cohort_trees_adds_unused_anchor_leaves():
+    from mlx2.runtime.external_speculative import _pad_cohort_trees
+
+    inputs = [[7, 0, 1, 2], [9, 0]]
+    parents = [[-1, 0, 1, 0], [-1, 0]]
+    padded, tree = _pad_cohort_trees(inputs, parents)
+    assert padded[0] == inputs[0] and tree[0] == parents[0]
+    assert padded[1] == [9, 0, 1, 2] and tree[1] == [-1, 0, 0, 0]
+    same = [[1, 2], [3, 4]]
+    assert _pad_cohort_trees(same, [[-1, 0], [-1, 0]])[0] is same
+
+
+class _UniformCohortExecutor(AttentionTreeExecutor):
+    """The TensorFold cohort contract: one width for every lane of a tile."""
+
+    def forward_many(self, model, inputs, parents, *args, **kwargs):
+        if len({len(row) for row in inputs}) != 1:
+            raise ValueError("TensorFold cohort requires uniform token/parent widths")
+        return super().forward_many(model, inputs, parents, *args, **kwargs)
+
+
+def test_ragged_cohort_trees_are_padded_to_one_uniform_tile():
+    """Lanes of one tree round may propose trees of different sizes (prompt
+    lookup finds fewer copies for one lane: the Qwen3.6-35B --ast B4 crash of
+    2026-10-21). The cohort tile must stay uniform and every real row must
+    still equal serial decoding of its path."""
+    from mlx2.runtime.drafters.prompt_lookup_draft import PromptLookupDraftModel
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    model = tiny(window=6)
+    prompts = [[3, 9, 4, 3, 9, 4, 3, 9, 4, 11, 3, 9], [5, 17, 29, 41, 2, 13]]
+    batch = ExternalDraftBatchGenerator(
+        model, draft_model=PromptLookupDraftModel(model, num_draft=15),
+        binding="tiny-gpt-oss", num_draft=15, completion_batch_size=4,
+        dynamic_singleton_tree=True, dynamic_tree_max_width=4,
+        tree_node_budget_by_lanes={1: 15, 2: 7, 3: 4, 4: 3},
+        target_tree_executor_provider=_UniformCohortExecutor.create(),
+        memory_headroom=lambda: 1 << 40,
+    )
+    batch.insert(prompts, max_tokens=[20, 20],
+                 sampling_configs=[{"sampling_temp": 0.0}] * 2)
+    for _ in range(20):
+        batch.next()
+        if len(batch.lanes) == 2 and all(lane.anchor is not None for lane in batch.lanes.values()):
+            break
+    cohort = list(batch.lanes.values())
+    references = [copy.deepcopy(lane.cache) for lane in cohort]
+    inputs = [[cohort[0].anchor, 1, 2, 3], [cohort[1].anchor, 4]]
+    parents = [[-1, 0, 1, 2], [-1, 0]]
+    logits, _features, transaction = batch._target_tree_forward_many(cohort, inputs, parents)
+    mx.eval(logits)
+    assert logits.shape[1] == 4
+    for lane, (tokens, tree) in enumerate(zip(inputs, parents)):
+        for row in range(len(tokens)):
+            path, node = [], row
+            while node >= 0:
+                path.append(tokens[node])
+                node = tree[node]
+            expected, _ = _serial_last_logits(model, references[lane], list(reversed(path)))
+            np.testing.assert_allclose(np.asarray(logits[lane, row].astype(mx.float32)), expected,
+                                       atol=2e-4, rtol=2e-4)
+    transaction.abort()
