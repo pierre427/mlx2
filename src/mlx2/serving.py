@@ -43,6 +43,7 @@ from .batch_metrics import BatchFaultSpec, BatchRuntimeMetrics, HttpRuntimeMetri
 from .power_governor import PowerGovernor, PowerGovernorPolicy
 from .power_telemetry import PowerTelemetry, PowerTelemetryPolicy
 from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
+from .runtime.eval_watchdog import EvalWatchdog
 from .runtime import loop_trace as _loop_trace
 from .runtime.gpu_keep_warm import GpuKeepWarm, GpuKeepWarmPolicy
 
@@ -4353,6 +4354,12 @@ class ServingEngine:
         self.slots = threading.BoundedSemaphore(max_inflight)
         self.stop_event, self.ready = threading.Event(), threading.Event()
         self.lock = threading.Lock()
+        # A device evaluation that never returns (a wedged GPU) would
+        # otherwise leave the service "ok" with its generation thread blocked
+        # forever.  The watchdog turns that into a reported, unhealthy state.
+        self.eval_watchdog = EvalWatchdog.from_environment(
+            model_label=str(model_path), stop_event=self.stop_event
+        )
         self._quiesce_complete = threading.Event()
         self._quiesce_complete.set()
         now_wall = time.time()
@@ -4536,6 +4543,7 @@ class ServingEngine:
             target=self._run, name="mlx2-generation", daemon=True
         )
         self.thread.start()
+        self.eval_watchdog.watch(self.thread)
 
     @classmethod
     def validate_arguments(cls, model_path, **kwargs):
@@ -6374,8 +6382,10 @@ class ServingEngine:
                 **self._distributed_dense_state(self.adapter),
                 "healthy": self.ready.is_set()
                 and self.thread.is_alive()
-                and not self.error,
+                and not self.error
+                and not self.eval_watchdog.stalled,
                 "error": self.error,
+                "eval_watchdog": self.eval_watchdog.status(),
                 "inflight": len(self.jobs),
                 "accepted_lifecycles": len(self._admission_leases),
                 "tokenizers_v1": getattr(
@@ -8834,6 +8844,13 @@ class ServingEngine:
             pass
 
     def _run(self):
+        from .runtime.generate import bind_generation_thread_stream
+
+        # Single-stream generation thread: every lazy array built here
+        # (restores, lane-cache merges, trims, KV requantization) shares the
+        # stream the generators evaluate on, so no cross-stream fence can form
+        # inside a prefill or decode evaluation (apc-warm-hit-hang-20261021).
+        self._generation_thread_stream = bind_generation_thread_stream()
         adapter = batch = apc = capsule_pool = None
         active = {}
         deferred = deque()
@@ -13077,6 +13094,15 @@ class ServingEngine:
                             if external_draft and ast_memo_handle is not None
                             else None
                         )
+                        # A lane enters the generator with evaluated state:
+                        # the APCv2 restore is materialized by lookup, and a
+                        # requantized or otherwise staged cache is evaluated
+                        # here, on this thread's stream, before any prefill
+                        # graph can consume it (apc-warm-hit-hang-20261021).
+                        # Already-evaluated arrays cost nothing.
+                        from .runtime.models.cache import materialize_restored_state
+
+                        materialize_restored_state(lane_cache)
                         job.uid = batch.insert(
                             [hit.remaining_tokens], max_tokens=[maximum],
                             caches=[lane_cache], all_tokens=[tokens[:hit.cached_tokens]],
@@ -13508,7 +13534,11 @@ class ServingEngine:
                         self._inject_device_fault(active)
                         if _loop_trace.enabled():
                             trace_iteration["next0"] = _loop_trace.now()
-                        prompts, responses = batch.next()
+                        self.eval_watchdog.enter("batch.next", lanes=len(active))
+                        try:
+                            prompts, responses = batch.next()
+                        finally:
+                            self.eval_watchdog.leave()
                         if _loop_trace.enabled():
                             trace_iteration["next1"] = _loop_trace.now()
                             trace_iteration["prompts"] = [

@@ -5824,6 +5824,58 @@ def _copy_prompt_cache_for_restore(prompt_cache):
     return restored
 
 
+def restored_state_arrays(*trees) -> List[mx.array]:
+    """Every array a restored prompt cache (or sidecar) holds, unevaluated.
+
+    Walks lists, tuples, dicts, sets and cache objects' attributes.  A list
+    subclass (a COW branch) contributes its items only, never its own
+    bookkeeping attributes (the owner, the frozen source).  Modules are not
+    walked: a restored cache never owns model weights.
+    """
+    arrays: List[mx.array] = []
+    seen: set = set()
+    stack = list(trees)
+    while stack:
+        item = stack.pop()
+        if item is None or isinstance(item, (str, bytes, int, float, bool)):
+            continue
+        ident = id(item)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if isinstance(item, mx.array):
+            arrays.append(item)
+        elif isinstance(item, nn.Module):
+            continue
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple, deque, set, frozenset)):
+            stack.extend(item)
+        elif hasattr(item, "__dict__") and not callable(item):
+            stack.extend(vars(item).values())
+    return arrays
+
+
+def materialize_restored_state(*trees) -> int:
+    """Evaluate a restored cache's arrays once, where the restore ran.
+
+    An APCv2 restore leaves lazy graph behind: the COW branch aliases every
+    stored buffer with ``mx.stop_gradient`` and a codec entry decodes lazily,
+    all on the restoring thread's default GPU stream.  Left lazy, those nodes
+    are evaluated inside the first prefill graph, which runs on the generation
+    stream, so every restored layer becomes a cross-stream fence inside one
+    large evaluation (a GPU spin-wait under ``MLX_METAL_FAST_SYNCH``).  One
+    evaluation here retires them on their own stream before any prefill
+    forward.  It changes when the restored values materialize, never their
+    bits: an alias shares the stored buffer, and a decode is the same op
+    either way.  Returns the number of arrays evaluated.
+    """
+    arrays = restored_state_arrays(*trees)
+    if arrays:
+        mx.eval(arrays)
+    return len(arrays)
+
+
 class PrefixIndex:
     @dataclass
     class CacheEntry:

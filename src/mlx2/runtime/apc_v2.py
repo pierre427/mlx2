@@ -59,6 +59,7 @@ from .models.cache import (
     can_trim_prompt_cache,
     can_trim_prompt_cache_at,
     load_prompt_cache,
+    materialize_restored_state,
     prompt_cache_payload,
     save_prompt_cache,
 )
@@ -4498,7 +4499,37 @@ class APCv2(PrefixIndex):
         hit landing at ``len - 1`` ahead of it, for a route that decodes that
         one token plainly (self-MTP); external draft cannot use a target-only
         hit at any depth and passes False.
+
+        A hit's restored cache and sidecar are returned materialized: the
+        restore's lazy nodes (COW aliases, codec decodes, trims) are
+        evaluated here, on the stream that built them, after the APCv2 lock
+        is released.  Leaving them to the first prefill graph made every
+        restored layer a cross-stream fence inside that graph, which hung the
+        GPU on Laguna-S-2.1 (model-matrix-t7-20261021).
         """
+        result = self._lookup_accounted(
+            key,
+            tokens,
+            allow_disk_restore=allow_disk_restore,
+            session_tag=session_tag,
+            require_sidecar=require_sidecar,
+            allow_target_only_plain=allow_target_only_plain,
+        )
+        if result.cache is not None or result.sidecar is not None:
+            materialize_restored_state(result.cache, result.sidecar)
+        return result
+
+    def _lookup_accounted(
+        self,
+        key: Hashable,
+        tokens: Iterable[int],
+        *,
+        allow_disk_restore: bool,
+        session_tag: Optional[tuple],
+        require_sidecar: bool,
+        allow_target_only_plain: bool,
+    ) -> APCLookup:
+        """``lookup`` under the APCv2 lock, with its request credit."""
         with self._apc_lock:
             self._ensure_metadata_available()
             self._sweep_retirements_locked()

@@ -69,6 +69,18 @@ def apply_process_numerics(environ=None) -> dict:
 # at every host read of a device result (two to three per speculative tree
 # round, plus the ordinary decode's per-token read), so the default is on.
 # An explicit value (``0`` included) is left alone.
+#
+# Hazard (apc-warm-hit-hang-20261021): MLX's maintainers mark fast synch
+# unsupported (ml-explore/mlx#3142, won't-fix; #3830).  Inside one
+# evaluation, an array produced on one GPU stream and consumed on another is
+# bridged by a Fence; in fast mode that is a ``fence_wait`` kernel spinning
+# on one command queue for a ``fence_update`` on another, and the two command
+# buffers are not guaranteed to overlap: the GPU can wedge at 100% with no
+# error.  mlx2 therefore keeps the generation thread single-stream
+# (``runtime.generate.bind_generation_thread_stream``) and hands lanes
+# evaluated state (``models.cache.materialize_restored_state``), and the
+# eval watchdog (``runtime.eval_watchdog``) reports a wedge instead of
+# serving silently.  Any new cross-stream lazy handoff reopens the hazard.
 PROCESS_RUNTIME_DEFAULTS = {"MLX_METAL_FAST_SYNCH": "1"}
 
 

@@ -78,6 +78,31 @@ _COUNTER_MAX = (1 << 63) - 1
 _PERSISTENT_DECODE_INPUTS = "_mlx2_persistent_decode_inputs"
 generation_stream = mx.new_thread_local_stream(mx.default_device())
 
+
+def bind_generation_thread_stream():
+    """Make the calling thread's default stream its generation stream.
+
+    MLX gives every thread its own default stream on first use, and the
+    generators run their forwards under ``with mx.stream(generation_stream)``
+    (another per-thread stream).  Any lazy array the serving loop builds on
+    the generation thread outside that context (an APCv2 restore alias, a
+    merged or trimmed lane cache, a quantized KV plane) therefore sat on a
+    different GPU stream from the prefill that consumed it, and MLX bridged
+    the two with a Fence inside one evaluation.  Under
+    ``MLX_METAL_FAST_SYNCH=1`` that fence is a GPU spin kernel whose producer
+    is not guaranteed to run, and the GPU wedged on Laguna-S-2.1 and on
+    Qwen3.8-27B at B4 (apc-warm-hit-hang-20261021).
+
+    Binding the thread's default stream to the generation stream makes the
+    generation thread single-stream: nothing it builds can need a
+    cross-stream fence.  It changes which command queue carries the work,
+    never the kernels, so no computed bit changes.  Returns the bound stream.
+    """
+    with mx.stream(generation_stream):
+        stream = mx.default_stream(generation_stream.device)
+    mx.set_default_stream(stream)
+    return stream
+
 # A generator may close while an ambiguous native command is still pending.
 # Keep that arena reachable for process lifetime until terminal/teardown proof.
 _NATIVE_ORPHANED_RETIREMENTS = []
