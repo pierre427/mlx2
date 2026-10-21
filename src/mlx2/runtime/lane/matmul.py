@@ -91,8 +91,7 @@ _MAIN = r"""
 @@SB_LOAD@@
     auto a = tA.slice(g * GS, 0);
 @@B_GROUP@@
-    auto P = op.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();
-    op.run(a, b, P);
+@@RUN@@
 @@ACCUM@@
 @@AFTER@@
   }
@@ -232,6 +231,68 @@ def _unpack_group_source(bits: int, group_size: int) -> str:
 
 _AFTER_UNPACK = "    simdgroup_barrier(mem_flags::mem_threadgroup);\n"
 
+# 4-bit group-64 weights: each lane loads its own share of the group's
+# integer codes straight from MLX's layout and hands them to the tensor op as
+# a right-input cooperative tensor of half, in place of MPP reading a
+# ``uint4b_format`` device tensor.  Codes become half exactly through
+# ``(q | 0x6400) - 1024`` on nibble pairs, and the next group's codes are
+# loaded while this group runs.  Same products, same op, same K order: the
+# result is bitwise identical to the device-tensor read (GPU gate:
+# register/device parity, 1-128 rows, bf16 and fp16), so the law is
+# unchanged.  q4 g64 only, where it was measured: in-model Qwen3.8-27B
+# 16-row forward -6% on an M5 Max (docs/experiments/LANE-REGISTER-B-2026-10-21.md).
+#
+# The fragment layout of matmul2d(16, NT, GS, B transposed) right inputs on
+# M5: lane l holds k in {4 qi .. 4 qi + 3} + 16 kb (kb < GS / 16) of the
+# columns nb + 8 j (j < 4), element kb * 16 + j * 4 + kk, where
+# qi = (l & 1) | ((l >> 3) & 1) << 1 and nb = ((l >> 1) & 3) | ((l >> 4) & 1) << 2:
+# one aligned ushort of four nibbles per (column, kb).
+REGISTER_B = [True]
+REGISTER_B_FORMATS = frozenset({(4, 64)})
+
+
+def _register_sources(group_size: int) -> tuple[str, str]:
+    """(declarations, per-group body) of the register-fed q4 path."""
+    chunks = group_size // 16
+    names = [f"bw{j}_{kb}" for j in range(4) for kb in range(chunks)]
+
+    def load(gexpr: str, indent: str) -> str:
+        return "".join(
+            f"{indent}bw{j}_{kb} = bok{j} ? bwp{j}[({gexpr}) * (GS / 4) + {kb * 4}] : ushort(0);\n"
+            for j in range(4) for kb in range(chunks))
+
+    decl = [
+        "  const int bqi = (lane & 1) | (((lane >> 3) & 1) << 1);     // k quarter of this lane's codes\n",
+        "  const int bnb = ((lane >> 1) & 3) | (((lane >> 4) & 1) << 2);   // first of its four columns\n",
+    ]
+    for j in range(4):
+        decl.append(f"  const bool bok{j} = n0 + bnb + {8 * j} < N;\n")
+        decl.append(f"  const device ushort* bwp{j} = (const device ushort*)((const device uchar*)W\n"
+                    f"      + (int64_t)(bok{j} ? n0 + bnb + {8 * j} : 0) * (K / 2)) + bqi;\n")
+    decl.append("  ushort " + ", ".join(names) + ";\n")
+    decl.append("  if (g_begin < g_end) {\n" + load("g_begin", "    ") + "  }\n")
+    body = ["    auto b = op.template get_right_input_cooperative_tensor<XT, half, float>();\n"]
+    for j in range(4):
+        for kb in range(0, chunks, 2):
+            body.append(f"    {{ const uint v = uint(bw{j}_{kb}) | (uint(bw{j}_{kb + 1}) << 16);\n")
+            for kk in range(4):
+                body.append(
+                    f"      const half2 h{kk} = as_type<half2>(((v >> {4 * kk}) & 0x000F000Fu) | 0x64006400u)"
+                    " - half2(1024.0h);\n"
+                    f"      b[{kb * 16 + j * 4 + kk}] = h{kk}.x; b[{(kb + 1) * 16 + j * 4 + kk}] = h{kk}.y;\n")
+            body.append("    }\n")
+    body.append("    if (g + 1 < g_end) {\n" + load("g + 1", "      ") + "    }\n")
+    body.append("    auto P = op.template get_destination_cooperative_tensor<decltype(a), "
+                "metal::remove_addrspace_t<decltype(b)>, float>();\n")
+    body.append("    op.run(a, b, P);\n")
+    return "".join(decl), "".join(body)
+
+
+_RUN_DEVICE = (
+    "    auto P = op.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();\n"
+    "    op.run(a, b, P);\n"
+)
+
 
 class LaneUnsupported(ValueError):
     """This projection cannot use the lane matmul without changing its contract."""
@@ -359,16 +420,25 @@ def prepare(module, backend_name: str | None = None) -> LaneWeights:
     raise LaneUnsupported(f"{type(module).__name__} is not a linear projection")
 
 
-def main_source(bits: int, group_size: int) -> str:
-    """The main kernel body for one weight format (placeholders substituted)."""
+def main_source(bits: int, group_size: int, register_b: bool | None = None) -> str:
+    """The main kernel body for one weight format (placeholders substituted).
+
+    ``register_b`` (default ``REGISTER_B[0]``) feeds the codes of the formats
+    in ``REGISTER_B_FORMATS`` to the tensor op from registers; False keeps
+    MPP's device-tensor read.  Both give the same bits.
+    """
     affine = bits != UNQUANTIZED_BITS
-    if bits in _NATIVE or not affine:
+    register_b = REGISTER_B[0] if register_b is None else register_b
+    run = _RUN_DEVICE
+    if register_b and (bits, group_size) in REGISTER_B_FORMATS:
+        (b_decl, b_group), after, run = _register_sources(group_size), "", ""
+    elif bits in _NATIVE or not affine:
         b_decl, b_group, after = _B_DECL_NATIVE, _B_GROUP_NATIVE, ""
     else:
         b_decl, after = _B_DECL_UNPACK, _AFTER_UNPACK
         b_group = _unpack_group_source(bits, group_size)
     part = ("  threadgroup float part[(SK > 1 ? SK - 1 : 1) * NF * 8 * 32];\n"
-            if b_decl is _B_DECL_NATIVE else
+            if b_decl is not _B_DECL_UNPACK else
             "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
             "  threadgroup float* part = (threadgroup float*)wbuf32;\n")
     parts = {
@@ -377,6 +447,7 @@ def main_source(bits: int, group_size: int) -> str:
         "@@SB_DECL@@": _SB_DECL if affine else "",
         "@@SB_LOAD@@": _SB_LOAD if affine else "",
         "@@B_GROUP@@": b_group,
+        "@@RUN@@": run,
         "@@ACCUM@@": _ACCUM_AFFINE if affine else _ACCUM_PLAIN,
         "@@AFTER@@": after,
     }
@@ -398,9 +469,10 @@ def _named(base: str, source: str) -> str:
 
 
 def _kernel(bits: int, group_size: int, xt: str, wt: str, st: str) -> Any:
-    key = (bits, group_size, xt, wt, st)
+    register_b = REGISTER_B[0] and (bits, group_size) in REGISTER_B_FORMATS
+    key = (bits, group_size, xt, wt, st, register_b)
     if key not in _KERNELS:
-        source = main_source(bits, group_size)
+        source = main_source(bits, group_size, register_b)
         wp = "uchar" if bits != UNQUANTIZED_BITS else wt
         wtype = _NATIVE.get(bits, wt if bits == UNQUANTIZED_BITS else "uchar")
         header = (_HEADER + f"typedef {xt} XT;\ntypedef {wtype} WT;\ntypedef {wp} WP;\n"

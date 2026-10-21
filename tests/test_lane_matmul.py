@@ -298,3 +298,20 @@ def test_the_row_window_is_part_of_the_law_and_the_apc_namespace(monkeypatch):
     assert apc_lane_fingerprint("base", {"law_id": "stock", "covered": {}}) == "base"
     assert apc_lane_fingerprint("base", default) != apc_lane_fingerprint("base", wide)
     assert apc_lane_fingerprint("base", default) != "base"
+
+
+def test_register_fed_codes_cover_only_the_measured_formats():
+    # q4 g64 hands its codes to the tensor op from registers; every other
+    # format keeps MPP's device read.  Both paths are one law (the GPU gate
+    # checks register/device parity bit for bit).
+    assert lm.REGISTER_B_FORMATS == frozenset({(4, 64)})
+    reg = lm.main_source(4, 64, register_b=True)
+    dev = lm.main_source(4, 64, register_b=False)
+    assert "get_right_input_cooperative_tensor" in reg and "tB.slice" not in reg
+    assert "get_right_input_cooperative_tensor" not in dev and "tB.slice" in dev
+    for bits, gs in ((4, 32), (4, 128), (8, 64), (5, 64), (16, 64)):
+        assert lm.main_source(bits, gs, register_b=True) == lm.main_source(bits, gs, register_b=False)
+    # One aligned ushort of four nibbles per (column, 16-k chunk): 16 a group
+    # per lane, decoded exactly through (q | 0x6400) - 1024 on nibble pairs,
+    # with the next group's codes loaded while this one runs.
+    assert reg.count("ushort(0);") == 32 and "0x64006400u" in reg and "g + 1 < g_end" in reg

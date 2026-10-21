@@ -88,6 +88,18 @@ def case(bits, gs, k, n, dtype, key):
         if not bool(mx.array_equal(together, alone[:r]).item()):
             bad.append(r)
     rec["invariant_fail_rows"] = bad
+    if lw.backend == "mpp" and (bits, gs) in getattr(lane, "REGISTER_B_FORMATS", ()):
+        # Register-fed codes must give the device-tensor read's bits exactly.
+        saved = lane.REGISTER_B[0]
+        try:
+            lane.REGISTER_B[0] = False
+            device = [lane.lane_matmul(x[:r], lw) for r in ROWS]
+            mx.eval(device)
+        finally:
+            lane.REGISTER_B[0] = saved
+        rec["register_parity_fail_rows"] = [
+            r for r, d in zip(ROWS, device) if not bool(mx.array_equal(d, alone[:r]).item())]
+        bad = bad + rec["register_parity_fail_rows"]
     ref = x[:16].astype(mx.float32) @ ref_w.T
     lane_err = float(mx.max(mx.abs(alone[:16].astype(mx.float32) - ref)).item())
     stock_err = float(mx.max(mx.abs(stock(x[:16]).astype(mx.float32) - ref)).item())
@@ -132,7 +144,7 @@ def main():
                                "dtype": dname, "passed": False, "error": repr(exc)[:400]}
                     records.append(rec)
                     print(json.dumps({key2: rec.get(key2) for key2 in (
-                        "bits", "group_size", "k", "n", "dtype", "passed", "invariant_fail_rows",
+                        "bits", "group_size", "k", "n", "dtype", "passed", "invariant_fail_rows", "register_parity_fail_rows",
                         "lane_max_err", "stock_max_err", "ms", "error")}), flush=True)
     summary = {"cases": len(records), "passed": sum(r["passed"] for r in records)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
