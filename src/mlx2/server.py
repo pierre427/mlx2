@@ -6695,6 +6695,7 @@ def apply_ast_invocation(args, policy, adapter_resolution):
         from .runtime.ast_tree_proposals import parse_topology
 
         parse_topology(ast_options[1])
+    applied = {}
     if tiles:
         resolved["draft_model"] = (
             str(args.model) if drafter == "mtp" else "prompt_lookup" if drafter == "pld"
@@ -6710,6 +6711,15 @@ def apply_ast_invocation(args, policy, adapter_resolution):
             resolved["ast_tile_rows"] = ast_options[4]
         if drafter not in ("mtp", "pld"):
             resolved.setdefault("batch_size_route", "tree15_b1_b4_chain_b5plus_v1")
+        # Adapter-measured drafter arithmetic (e.g. a quantized lane drafter);
+        # keys the operator's policy names, null included, win.
+        drafter_defaults = getattr(adapter_type, "ast_drafter_policy_defaults", None)
+        if callable(drafter_defaults):
+            applied = {
+                key: value for key, value in drafter_defaults(drafter).items()
+                if key not in resolved
+            }
+            resolved.update(applied)
         args.external_draft = True
     elif drafter == "mtp":
         args.native_mtp = True
@@ -6724,6 +6734,8 @@ def apply_ast_invocation(args, policy, adapter_resolution):
     args.ast_route = {"tree_tiles": tiles, "drafter": drafter, "topology": ast_options[1],
                       "graft_pld": bool(ast_options[2]), "tiles": ast_options[3],
                       "tile_rows": ast_options[4]}
+    if applied:
+        args.ast_route["drafter_policy_defaults"] = applied
     if tiles_refused is not None:
         args.ast_route["tree_tiles_refused"] = tiles_refused
     return resolved

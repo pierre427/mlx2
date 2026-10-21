@@ -128,3 +128,28 @@ def test_model_gate_reads_live_parameter_dtypes():
 
     assert model_tree_tile_dtype_issue(Layer(mx.bfloat16)) is None
     assert "float32" in model_tree_tile_dtype_issue(Layer(mx.float32))
+
+
+def test_adapter_drafter_defaults_fill_only_unnamed_keys():
+    seen = []
+
+    def defaults(cls, drafter):
+        seen.append(drafter)
+        return {} if drafter in ("mtp", "pld") else {
+            "draft_kernel": "lane", "draft_quantization": {"bits": 4, "group_size": 64},
+        }
+
+    adapter = type("Adapter", (), {
+        "ast_tree_tiles": True, "ast_drafter_policy_defaults": classmethod(defaults),
+    })
+    resolution = SimpleNamespace(adapter_type=adapter, artifact={"has_mtp": True},
+                                 default_route="native_mtp")
+    args = _args(ast_drafter="/m/dflash")
+    policy = apply_ast_invocation(args, {"draft_quantization": None}, resolution)
+    # An operator key (null included) wins; the rest is filled and receipted.
+    assert policy["draft_kernel"] == "lane" and policy["draft_quantization"] is None
+    assert args.ast_route["drafter_policy_defaults"] == {"draft_kernel": "lane"}
+    args = _args()
+    assert apply_ast_invocation(args, None, resolution) == {"draft_model": "/m/target"}
+    assert "drafter_policy_defaults" not in args.ast_route
+    assert seen == ["/m/dflash", "mtp"]

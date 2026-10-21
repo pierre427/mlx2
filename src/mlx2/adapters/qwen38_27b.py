@@ -381,6 +381,8 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "draft_revision",
         "target_revision",
         "draft_quantization",
+        "draft_kernel",
+        "draft_vocab",
         "tensorfold_prefill",
         "tensorfold_prefill_backend",
         "varlen_dense_mlp",
@@ -946,6 +948,47 @@ def inspect_external_policy(
                 (record["fingerprint"] + json.dumps(quantization, sort_keys=True)).encode()
             ).hexdigest(),
         }
+    kernel = policy.get("draft_kernel")
+    if kernel is not None:
+        if draft_format.name != "dflash2":
+            raise ValueError("draft_kernel applies to DFlash2 drafters only")
+        from .dflash2 import validate_draft_kernel
+        # Model-free module: inspection runs before the adapter pins its
+        # import environment.
+        from ..runtime.drafters.dflash2_kernel import draft_kernel_law
+
+        kernel = validate_draft_kernel(kernel)
+        law = draft_kernel_law(kernel)
+        if law is not None:
+            # The drafter's projection law is part of its numerics: bound into
+            # the drafter fingerprint (route and APCv2 identity) like the
+            # runtime quantization.
+            record = {
+                **record,
+                "fingerprint": hashlib.sha256(
+                    (record["fingerprint"] + json.dumps(
+                        {"draft_kernel": kernel, "law_id": law}, sort_keys=True
+                    )).encode()
+                ).hexdigest(),
+            }
+    vocab = policy.get("draft_vocab")
+    if vocab is not None:
+        if draft_format.name != "dflash2":
+            raise ValueError("draft_vocab applies to DFlash2 drafters only")
+        from .dflash2 import draft_special_floor, validate_draft_vocab
+
+        vocab = validate_draft_vocab(vocab)
+        if not vocab["rows"] < draft_special_floor(record["config"]):
+            raise ValueError("draft_vocab rows must stay below the special-token ids")
+        # Which rows the drafter can propose is part of its numerics.
+        record = {
+            **record,
+            "fingerprint": hashlib.sha256(
+                (record["fingerprint"] + json.dumps(
+                    {"draft_vocab": vocab, "schema": "mlx2.draft-vocab.v1"}, sort_keys=True
+                )).encode()
+            ).hexdigest(),
+        }
     return {
         **record,
         "draft_revision": draft_revision,
@@ -953,6 +996,8 @@ def inspect_external_policy(
         "target_path": target_content["path"],
         "target_source_bindings": target_content["source_bindings"],
         "runtime_quantization": quantization,
+        "draft_kernel": kernel,
+        "draft_vocab": vocab,
     }
 
 
@@ -1128,6 +1173,37 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     default_route = "native_mtp"
     # TensorFold tree tiles (tree15 B1-B4) for any drafter (``--ast``).
     ast_tree_tiles = True
+
+    @classmethod
+    def ast_drafter_policy_defaults(cls, drafter):
+        """Policy defaults ``--ast`` adds for an artifact drafter (explicit keys win).
+
+        A bf16 DFlash2 drafter on this target runs runtime q4 g64 projections
+        on the lane matmul (``draft_kernel: "lane"``): about 6 ms less drafter
+        device time per round on the M5 (docs/experiments/
+        AST-DRAFTER-KERNEL-2026-10-21.md).  Only where it was measured: this
+        descriptor (not the Qwen subclasses) and the M5 tensor-unit backend.
+        ``"draft_kernel": "stock"`` and ``"draft_quantization": null`` restore
+        the bf16 stock drafter.
+        """
+        if cls.descriptor is not QWEN38_27B or drafter in ("mtp", "pld"):
+            return {}
+        from .external_drafter_formats import drafter_format
+
+        if drafter_format(drafter).name != "dflash2":
+            return {}
+        from ..runtime.lane import backend
+
+        if backend() != "mpp":
+            return {}
+        try:
+            config = json.loads((Path(str(drafter)).expanduser() / "config.json").read_text())
+        except (OSError, ValueError):
+            return {}
+        defaults = {"draft_kernel": "lane"}
+        if not (config.get("quantization") or config.get("quantization_config")):
+            defaults["draft_quantization"] = {"bits": 4, "group_size": 64}
+        return defaults
     # Explicit because Qwen3.8 retains its independently measured threshold
     # instead of inheriting Flash-Next's width-three default.
     default_mtp_ordinary_handoff_max_width = (
@@ -1615,6 +1691,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 lambda record, target: load_drafter(
                     record, target,
                     runtime_quantization=record["runtime_quantization"],
+                    # Only DFlash2 takes a projection kernel (checked above).
+                    **{
+                        key: record[key]
+                        for key in ("draft_kernel", "draft_vocab")
+                        if record.get(key) is not None
+                    },
                 ),
                 base,
             )

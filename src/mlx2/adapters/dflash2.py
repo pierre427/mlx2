@@ -305,7 +305,39 @@ def validate_runtime_quantization(value):
     return dict(value)
 
 
-def load_drafter(record,target_model,*,runtime_quantization=None):
+def validate_draft_kernel(value):
+    """Drafter projection kernel (mlx2): None/"stock" or "lane"."""
+    if value is None or value == 'stock':
+        return None
+    if value != 'lane':
+        raise ValueError('draft_kernel must be "stock" or "lane"')
+    return value
+
+
+def validate_draft_vocab(value):
+    """Reduced draft head (mlx2): None, or {"order": "id", "rows": N}."""
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict) or set(value) != {'order', 'rows'}
+        or value['order'] != 'id' or type(value['rows']) is not int
+        or not 1 <= value['rows'] <= 1 << 20
+    ):
+        raise ValueError('draft_vocab must be {"order": "id", "rows": 1..1048576, below the special ids}')
+    return dict(value)
+
+
+def draft_special_floor(config):
+    """Lowest EOS id of a draft config: where the added/special tokens start."""
+    eos = config.get('eos_token_id')
+    eos = [eos] if isinstance(eos, int) else list(eos or ())
+    values = [int(value) for value in eos if isinstance(value, int) and value >= 0]
+    if not values:
+        raise ValueError('draft_vocab needs the draft config eos_token_id')
+    return min(values)
+
+
+def load_drafter(record,target_model,*,runtime_quantization=None,draft_kernel=None,draft_vocab=None):
     # Import/load only after both artifact roles and dimensions are checked.
     root = Path(record['path'])
 
@@ -366,6 +398,21 @@ def load_drafter(record,target_model,*,runtime_quantization=None):
             class_predicate=lambda _name, module: isinstance(module, nn.Linear),
         )
     model.eval();mx.eval(model.parameters());weights.clear();mx.clear_cache()
+    # Drafter projection kernel (mlx2): before bind, so the target's shared
+    # embedding/head keep the target's own kernels.
+    from ..runtime.drafters.dflash2 import configure_draft_kernel
+    kernel_receipt = configure_draft_kernel(model, validate_draft_kernel(draft_kernel))
+    object.__setattr__(model, 'draft_kernel_receipt', kernel_receipt)
+    object.__setattr__(model, 'runtime_quantization', runtime_quantization)
+    mx.clear_cache()
     bound = model.bind(target_model)
+    draft_vocab = validate_draft_vocab(draft_vocab)
+    if draft_vocab is not None:
+        # After bind: the reduced head is a row copy of the target head.
+        from ..runtime.drafters.dflash2 import configure_draft_vocab
+        object.__setattr__(bound, 'draft_vocab_receipt', configure_draft_vocab(
+            bound, draft_vocab['rows'], special_from=draft_special_floor(record['config']),
+            lane=kernel_receipt is not None,
+        ))
     verify_sources()
     return bound

@@ -192,6 +192,19 @@ class DFlash2DraftModel(DFlashDraftModel):
             "tree_ranking": "best_first_cumulative_sibling_log_law",
             "tree_max_nodes": 15,
         }
+        # Drafter arithmetic (mlx2), present only when not the artifact's
+        # own bf16 weights on stock kernels, so default receipts are unchanged.
+        quantization = self.__dict__.get("runtime_quantization")
+        if quantization is not None:
+            settings["runtime_quantization"] = dict(quantization)
+        kernel = self.__dict__.get("draft_kernel_receipt")
+        if kernel is not None:
+            settings["projection_kernel"] = {
+                "kernel": kernel["kernel"], "law_id": kernel["law_id"],
+            }
+        vocab = self.__dict__.get("draft_vocab_receipt")
+        if vocab is not None:
+            settings["draft_vocab"] = dict(vocab)
         from .fold import status as fold_status
 
         fold = fold_status(self)
@@ -220,8 +233,8 @@ class DFlash2DraftModel(DFlashDraftModel):
             * self.config.input_embedding_scale
         )
 
-    def _logits(self, hidden: mx.array) -> mx.array:
-        logits = self.lm_head(hidden) * self.config.output_multiplier
+    def _logits(self, hidden: mx.array, head=None) -> mx.array:
+        logits = (self.lm_head if head is None else head)(hidden) * self.config.output_multiplier
         if self.config.final_logit_softcapping is not None:
             softcap = self.config.final_logit_softcapping
             logits = mx.tanh(logits / softcap) * softcap
@@ -706,6 +719,119 @@ def tree_codebooks(self):
     return pred_rows, succ_rows, False
 
 
+def block_topk(logits, count, block=256):
+    """Indices (uint32) of a top-``count`` set along the last axis.
+
+    One pass of per-block maxima, ``argpartition`` over the block maxima,
+    then ``argpartition`` over the ``count`` winning blocks only.  Every
+    element above the ``count``-th largest value lies in a block whose
+    maximum is above it, and fewer than ``count`` blocks qualify, so the
+    winners hold a full top-``count`` set; ties at that value may resolve to
+    other members than a whole-row ``argpartition`` picks.  Order within the
+    set is unspecified, as for ``argpartition``.
+    """
+    *lead, vocab = logits.shape
+    blocks = -(-vocab // block)
+    if blocks <= count:
+        return mx.argpartition(logits, -count, axis=-1)[..., -count:]
+    pad = blocks * block - vocab
+    padded = logits if not pad else mx.concatenate(
+        [logits, mx.full((*lead, pad), -float("inf"), dtype=logits.dtype)], axis=-1
+    )
+    tiles = padded.reshape(*lead, blocks, block)
+    chosen = mx.argpartition(mx.max(tiles, axis=-1), -count, axis=-1)[..., -count:]
+    gathered = mx.take_along_axis(
+        tiles, mx.broadcast_to(chosen[..., None], (*lead, count, block)), axis=-2
+    ).reshape(*lead, count * block)
+    local = mx.argpartition(gathered, -count, axis=-1)[..., -count:]
+    rows = mx.take_along_axis(chosen, local // block, axis=-1)
+    return (rows * block + local % block).astype(mx.uint32)
+
+
+def configure_draft_vocab(model, rows, *, special_from, lane=False):
+    """Reduced draft head over ids ``[0, rows)`` plus the special tail (mlx2).
+
+    Byte-level BPE ids follow merge order, a frequency proxy, so the low ids
+    cover nearly all English and code tokens (Kapitsa's id-order draft head,
+    ``src/model/dflash2.cpp`` ``build_head``).  The tail from the lowest EOS id
+    up (``special_from``) holds the added/special tokens.  Rows are copied out of the bound
+    target head after ``bind``; the full head stays in place for rounds whose
+    anchor lies outside the subset (see ``_lattice_candidates``).  Returns a
+    receipt, or None for the full vocabulary.
+    """
+    if rows is None:
+        return None
+    head = model.lm_head
+    vocab = int(model.config.vocab_size)
+    special = int(special_from)
+    if not 0 < special <= vocab:
+        raise ValueError("draft_vocab special_from must lie inside the vocabulary")
+    if not 0 < rows < special:
+        raise ValueError(f"draft_vocab rows must be in 1..{special - 1}")
+    if isinstance(head, nn.QuantizedLinear):
+        names = ("weight", "scales", "biases")
+        sub = nn.QuantizedLinear(
+            int(head["scales"].shape[1]) * int(head.group_size), 1, bias=False,
+            group_size=int(head.group_size), bits=int(head.bits),
+            **({"mode": head.mode} if hasattr(head, "mode") else {}),
+        )
+    elif isinstance(head, nn.Linear):
+        names = ("weight",)
+        sub = nn.Linear(int(head["weight"].shape[1]), 1, bias=False)
+    else:
+        raise ValueError(f"draft_vocab needs a linear target head, not {type(head).__name__}")
+    for name in names:
+        value = head[name]
+        setattr(sub, name, mx.concatenate([value[:rows], value[special:vocab]], axis=0))
+    if head.get("bias") is not None:
+        raise ValueError("draft_vocab does not take a biased target head")
+    mx.eval(sub.parameters())
+    if lane:
+        from ..lane import installer
+
+        holder = nn.Module()
+        holder.head = sub
+        installer.install(holder, min_rows=1, max_rows=DRAFT_LANE_MAX_ROWS,
+                          chunk_above_max=False, unquantized=True, groups=())
+        if installer.installed_lane(sub) is None:
+            raise ValueError("draft_vocab: the lane kernel does not cover the reduced head")
+    ids = mx.concatenate([mx.arange(rows), mx.arange(special, vocab)]).astype(mx.uint32)
+    mx.eval(ids)
+    state = {"head": sub, "ids": ids, "rows": int(rows), "special": int(special),
+             "vocab": vocab, "reduced_rounds": 0, "full_rounds": 0}
+    object.__setattr__(model, "_draft_vocab", state)
+    return {"order": "id", "rows": int(rows), "special_from": int(special),
+            "head_rows": int(ids.shape[0]), "fallback": "full_head_when_an_anchor_is_outside"}
+
+
+def _lattice_candidates(self, features, anchors, top_k):
+    """``(candidates uint32 [B, K, C], unary f32 [B, K, C])`` of one lattice."""
+    reduced = self.__dict__.get("_draft_vocab")
+    if reduced is not None and all(
+        value < reduced["rows"] or reduced["special"] <= value < reduced["vocab"]
+        for value in anchors
+    ):
+        # Every anchor is a token the reduced head can propose: draft from it.
+        # An anchor outside it means the text has left the head's subset, so
+        # this round drafts from the full head (per round, no request state).
+        reduced["reduced_rounds"] += 1
+        logits = self._logits(features, head=reduced["head"])
+        ids = reduced["ids"]
+    else:
+        if reduced is not None:
+            reduced["full_rounds"] += 1
+        logits = self._logits(features)
+        ids = None
+    count = min(top_k, int(logits.shape[-1]))
+    local = (
+        block_topk(logits, count)
+        if self.__dict__.get("_block_topk", False)
+        else mx.argpartition(logits, -count, axis=-1)[..., -count:]
+    )
+    unary = mx.take_along_axis(logits, local, axis=-1).astype(mx.float32)
+    return (local if ids is None else mx.take(ids, local)), unary
+
+
 def _start_tree(
     self,
     anchors,
@@ -748,11 +874,8 @@ def _start_tree(
         if submit
         else self._hidden(inputs, hidden, cache)
     )[:, 1:]
-    logits = self._logits(features)
     selector = self.candidate_selector
-    count = min(selector.top_k, int(logits.shape[-1]))
-    candidates = mx.argpartition(logits, -count, axis=-1)[..., -count:]
-    unary = mx.take_along_axis(logits, candidates, axis=-1).astype(mx.float32)
+    candidates, unary = _lattice_candidates(self, features, anchors_list, selector.top_k)
     if forbidden_token_ids is not None:
         if len(forbidden_token_ids) != batch:
             raise ValueError("DFlash2 tree forbidden-token rows must match the batch")
@@ -840,3 +963,109 @@ DFlash2DraftModel.start_tree = _start_tree
 DFlash2DraftModel.start_tree_submits = True
 DFlash2DraftModel.finish_tree = _finish_tree
 DFlash2DraftModel.tree_codebooks = tree_codebooks
+
+
+# Drafter projection kernels (original mlx2).  The drafter only proposes; the
+# target's verification law decides every committed token, so the drafter's
+# arithmetic may change as long as its identity (bound into route and APCv2
+# identity by the adapter) says which arithmetic ran.
+from .dflash2_kernel import (  # noqa: E402 - the law lives in a model-free module
+    DRAFT_KERNELS,
+    DRAFT_LANE_MAX_ROWS,
+    DRAFT_LANE_SUFFIX,
+    draft_kernel_law,
+)
+
+
+def _fused_context_projections(attn, x, x_ctx):
+    """Context and proposal rows through one launch per projection.
+
+    The DFlash attention projects the context tail and the proposal block
+    with the same ``k_proj``/``v_proj`` weights, and the lane installer stacks
+    ``q/k/v`` into one group keyed on the input tensor object, so the plain
+    path issues three stacked launches (proposal, context, proposal again).
+    Concatenating the rows reads the weights once.  On a row-invariant lane
+    law every row keeps its bits, so this changes no value.
+    """
+    from ..lane import installer
+
+    batch, length, width = x.shape
+    span = x_ctx.shape[1]
+    split = batch * span
+    if span == 0 or x_ctx.shape[0] != batch or split + batch * length > DRAFT_LANE_MAX_ROWS:
+        # Long context (a first append) takes stock kernels per projection;
+        # fusing it would only add q rows nobody reads.
+        return (attn.q_proj(x), attn.k_proj(x_ctx), attn.v_proj(x_ctx),
+                attn.k_proj(x), attn.v_proj(x))
+    rows = mx.concatenate(
+        [x_ctx.reshape(split, width), x.reshape(batch * length, width)], axis=0
+    )
+    group = installer._group(attn.q_proj)
+    shared = group is not None and group is installer._group(attn.k_proj)
+    # A stacked q/k/v group computes all three in the one launch the first
+    # member triggers; otherwise q stays on the proposal rows only.
+    queries = attn.q_proj(rows)[split:] if shared else attn.q_proj(x)
+    keys = attn.k_proj(rows)
+    values = attn.v_proj(rows)
+    return (
+        queries.reshape(batch, length, -1),
+        keys[:split].reshape(batch, span, -1),
+        values[:split].reshape(batch, span, -1),
+        keys[split:].reshape(batch, length, -1),
+        values[split:].reshape(batch, length, -1),
+    )
+
+
+def configure_draft_kernel(model, kernel):
+    """Install the drafter's projection kernel before ``bind``; returns a receipt.
+
+    ``"stock"`` (or None) leaves MLX's kernels.  ``"lane"`` runs every drafter
+    projection (bf16 or runtime-quantized) on the row-invariant lane matmul,
+    q/k/v and gate/up stacked, with context and proposal rows fused per
+    projection.  It fails closed when the device has no lane backend or the
+    backend does not cover a projection (the M1-M4 simd kernels have no bf16
+    path: quantize the drafter first).  The target's shared embedding and
+    head are never touched: they are bound after this and follow the target's
+    own lane policy.
+    """
+    expected = draft_kernel_law(kernel)
+    if expected is None:
+        return None
+    if getattr(model, "lm_head", None) is not None or getattr(model, "embed_tokens", None) is not None:
+        raise ValueError("configure the draft kernel before binding the target head")
+    from ..lane import available, installer
+
+    if not available():
+        raise ValueError("draft_kernel 'lane' needs a lane matmul backend on this device")
+    receipt = installer.install(
+        model, min_rows=1, max_rows=DRAFT_LANE_MAX_ROWS, chunk_above_max=False,
+        unquantized=True,
+    )
+    uncovered = [
+        name for name, module in model.named_modules()
+        if isinstance(module, (nn.Linear, nn.QuantizedLinear))
+        and installer.installed_lane(module) is None
+    ]
+    if uncovered:
+        installer.uninstall(model)
+        raise ValueError(
+            f"draft_kernel 'lane' does not cover {len(uncovered)} drafter projections "
+            f"on this backend (first {uncovered[0]!r}): {receipt.get('refused')}"
+        )
+    law = receipt["law_id"] + DRAFT_LANE_SUFFIX
+    if law != expected:
+        installer.uninstall(model)
+        raise ValueError(f"draft lane law {law!r} differs from the bound {expected!r}")
+    for layer in model.layers:
+        object.__setattr__(layer.self_attn, "_fused_projections", _fused_context_projections)
+    # The lattice's top-k over the vocabulary through block maxima.
+    object.__setattr__(model, "_block_topk", True)
+    return {
+        "kernel": "lane",
+        "law_id": law,
+        "backend": receipt["backend"],
+        "covered": receipt["covered"],
+        "groups": receipt["groups"],
+        "fused_context_projections": True,
+        "lattice_topk": "block256",
+    }

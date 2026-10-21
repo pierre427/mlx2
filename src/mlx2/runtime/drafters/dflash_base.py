@@ -81,15 +81,30 @@ class DFlashAttention(nn.Module):
         sinks = getattr(self, "attention_sink_bias", None)
         return None if sinks is None else sinks.astype(queries.dtype)
 
+    def _projections(self, x: mx.array, x_ctx: mx.array):
+        """``(queries, ctx_keys, ctx_values, prop_keys, prop_values)``.
+
+        Context and proposal are projected separately so only context KV
+        enters the cache.  A drafter may replace this per instance (DFlash2's
+        one-launch path, ``dflash2.fuse_context_projections``).
+        """
+        fused = self.__dict__.get("_fused_projections")
+        if fused is not None:
+            return fused(self, x, x_ctx)
+        return (
+            self.q_proj(x),
+            self.k_proj(x_ctx),
+            self.v_proj(x_ctx),
+            self.k_proj(x),
+            self.v_proj(x),
+        )
+
     def __call__(self, x: mx.array, x_ctx: mx.array, rope, cache: KVCache):
         B, L, _ = x.shape
         S = x_ctx.shape[1]
-        # Project context and proposal separately so only context KV
-        queries = self.q_proj(x)
-        ctx_keys = self.k_proj(x_ctx)
-        ctx_values = self.v_proj(x_ctx)
-        prop_keys = self.k_proj(x)
-        prop_values = self.v_proj(x)
+        queries, ctx_keys, ctx_values, prop_keys, prop_values = self._projections(
+            x, x_ctx
+        )
         fold = getattr(self, "fold_policy", None) is not None
         if fold and getattr(self, "attention_sink_bias", None) is not None:
             raise ValueError("FOLD attention does not implement attention sinks")
