@@ -266,6 +266,18 @@ def resolve(detected: dict, *, family: str | None = None, adapter=None, override
         sources["mode"] = "cli"
     if policy["mode"] == "auto":
         policy["mode"] = "crossover"
+    # Exact mode is one numerical projection law, including warm/cold prefill
+    # tails. Sending a wider tail to stock QMM made APC replay depend on where
+    # its previous prompt ended. Chunk wide inputs through the same lane law.
+    # Explicit adapter/operator choices remain available as historical controls.
+    if (
+        policy["mode"] == "exact"
+        and "chunk_above_max" not in adapter
+        and "chunk_above_max" not in user
+        and "chunk_above_max" not in user.get("moe", {})
+    ):
+        policy["chunk_above_max"] = True
+        sources["chunk_above_max"] = "exact_mode_default"
     if policy["declared_groups"] and not policy["grouping"]:
         raise ValueError("lane policy: declared_groups requires grouping")
     policy.pop("moe", None)

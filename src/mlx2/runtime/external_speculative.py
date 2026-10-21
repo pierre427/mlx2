@@ -762,6 +762,7 @@ class ExternalDraftBatchGenerator:
                  tensorfold_cohort_limit=None,
                  target_tree_executor_provider=None,
                  ast_target_tree_executor_provider=None,
+                 ast_b1_tile_policy=None,
                  minimum_draft_proposals=None,
                  external_prefill_coalesce_ms=0,
                  external_prefill_coalesce_min_tokens=1,
@@ -1435,6 +1436,18 @@ class ExternalDraftBatchGenerator:
         ):
             raise ValueError("AST tree tiles require private continuation ownership")
         self._ast_tree_tuners = {}
+        if ast_b1_tile_policy is not None and (
+            ast_b1_tile_policy != "four_path15"
+            or completion_batch_size != 1 or self.num_draft != 15
+            or self.ast_tree_tile_rows != 16
+            or self.progressive_alternative_branches != 4
+            or not getattr(self.draft, "supports_continuation_tree_reuse", False)
+            or not getattr(self.draft, "requires_proposal_contexts", False)
+            or getattr(self.draft, "fold_policy", None) is not None
+            or cost_per_commit_handoff is not False
+        ):
+            raise ValueError("four_path15 requires B1 K15/four-path TensorFold and cost handoff off")
+        self.ast_b1_tile_policy = ast_b1_tile_policy
         self._ast_tree_ready_sessions = 1
         if type(ast_collision_probability) is not bool:
             raise ValueError("ast_collision_probability must be boolean")
@@ -3672,6 +3685,13 @@ class ExternalDraftBatchGenerator:
             requested_count = self._proposal_depth(adaptive_count, requested_count)
         if (all if ast_planner is not None else any)(l.ordinary or _speculation_parked(l) for l in cohort):
             requested_count = 0
+        if getattr(self, "ast_b1_tile_policy", None) == "four_path15" and requested_count:
+            if (len(cohort) != 1 or float(cohort[0].sampling.get("sampling_temp", 0)) != 0.0
+                or any(not getattr(processor, "history_pure", False)
+                       or not callable(getattr(processor, "forbidden_token_ids_at_length", None))
+                       for processor in cohort[0].processors)):
+                raise ValueError("four_path15 requires one unconstrained greedy request")
+            requested_count = 15
         alternative_round = branches > 1 and not (
             (
                 self.progressive_alternative_strategy == "paired_continuations"
@@ -3811,7 +3831,19 @@ class ExternalDraftBatchGenerator:
                     )
                     for item in work
                 }
-                if self.progressive_verification_tile_policy == "auto":
+                if getattr(self, "ast_b1_tile_policy", None) == "four_path15":
+                    from .ast_tree_tuning import ASTTreeSourcePlan
+
+                    lane = cohort[0]
+                    plan = ASTTreeSourcePlan(15, 4, 16, 1, 1, 1,
+                                             "fixed_b1_horizon15_four_path_tile", 0,
+                                             lane.maximum - lane.generated < 16, 1)
+                    lane.ast_tree_source_plan = plan
+                    lane.ast_tree_tuning = {"policy": "four_path15", "fixed": True,
+                                            "defaulted": False, "optimality_claim": False}
+                    source_plans[int(lane.uid)] = SourceBudget(int(lane.uid), 15, 4, 60, 15,
+                                                               0.0, 0.0, plan.reason)
+                elif self.progressive_verification_tile_policy == "auto":
                     from .ast_tree_tuning import ASTTreeTuner
 
                     for lane, item in zip(cohort, work, strict=True):
@@ -3905,6 +3937,8 @@ class ExternalDraftBatchGenerator:
                 )
             try:
                 extra = {"context_tokens": pairing} if self.pair_context_tokens else {}
+                if getattr(self, "ast_b1_tile_policy", None) is not None:
+                    extra["ast_b1_tile_policy"] = self.ast_b1_tile_policy
                 if ast_planner is not None:
                     extra["ast_source_budgets"] = [
                         source_plans[int(lane.uid)].branches
@@ -7222,6 +7256,8 @@ class ExternalDraftBatchGenerator:
         This deliberately accepts one lane and one private cache only. There
         is no sibling cache copy/share operation in the phase-1 contract.
         """
+        if getattr(self, "ast_b1_tile_policy", None) == "four_path15" and len(inputs) < 2:
+            raise ValueError("four_path15 cannot submit an anchor-only TensorFold tile")
 
         provider = self.ast_target_tree_executor_provider
         if provider is None:
@@ -7598,7 +7634,7 @@ class ExternalDraftBatchGenerator:
             if self._prelaunched.pop(uid, None) is not None:
                 _bump(self.scheduler_stats, "external_tree_pipeline_discards")
 
-    def _walk_tree(self, block, sample_row):
+    def _walk_tree(self, block, sample_row, *, max_emitted=None):
         """Follow target samples through matching children; otherwise correct.
 
         ``sample_row(row, prefix_rows)`` draws the target token at ``row``,
@@ -7607,6 +7643,8 @@ class ExternalDraftBatchGenerator:
         """
 
         inputs = [None] + list(block.tokens)
+        if max_emitted is not None and (type(max_emitted) is not int or max_emitted < 1):
+            raise ValueError("tree response budget must be a positive integer")
         parents = self._target_tree_parents(block)
         children = defaultdict(list)
         for row, parent in enumerate(parents):
@@ -7618,7 +7656,7 @@ class ExternalDraftBatchGenerator:
             token = int(sample_row(row, commit_rows + [row]))
             emitted.append(token)
             commit_rows.append(row)
-            if token in self.stops:
+            if token in self.stops or max_emitted is not None and len(emitted) >= max_emitted:
                 break
             child = next(
                 (
@@ -7854,7 +7892,9 @@ class ExternalDraftBatchGenerator:
                     response_rows.append(None)
                 return lane.rng.sample(law)
 
-        commit_rows, emitted = self._walk_tree(block, sample_row)
+        budget = state.get("max_emitted")
+        options = {"max_emitted": budget} if budget is not None and budget < len(block.tokens) + 1 else {}
+        commit_rows, emitted = self._walk_tree(block, sample_row, **options)
         if not keep_laws:
             response_rows = None
             _bump(
@@ -10318,6 +10358,12 @@ class ExternalDraftBatchGenerator:
         return tuple(unique), tuple(representatives), tuple(inverse)
 
     def _run_round(self, cohort, *, forced_depth=None):
+        if getattr(self, "ast_b1_tile_policy", None) == "four_path15":
+            if len(cohort) != 1:
+                raise ValueError("four_path15 admits only one active request")
+            if forced_depth == 0 or cohort[0].maximum - cohort[0].generated <= 1:
+                _bump(self.scheduler_stats, "external_ast_b1_explicit_ordinary_terminal_rounds")
+                return self._ordinary_round(cohort)
         if forced_depth not in (None, 0):
             raise ValueError("external forced draft depth must be zero or absent")
         if forced_depth is None and cohort and all(lane.ordinary for lane in cohort):
@@ -10458,7 +10504,8 @@ class ExternalDraftBatchGenerator:
                     self._progressive_processors_supported(lane)
                     for lane in cohort
                 )
-                and (len(cohort) > 1 and self._ast_tree_cohort_limit() >= len(cohort) or not any(
+                and (getattr(self, "ast_b1_tile_policy", None) == "four_path15"
+                     or len(cohort) > 1 and self._ast_tree_cohort_limit() >= len(cohort) or not any(
                     int(token) in self.stops
                     for block in blocks
                     for token in block.tokens
@@ -10684,7 +10731,7 @@ class ExternalDraftBatchGenerator:
                             lane.uid,
                             "ordered alternative proposal rows are unavailable",
                         )
-                    if any(
+                    if getattr(self, "ast_b1_tile_policy", None) != "four_path15" and any(
                         int(token) in self.stops
                         for block in verify_blocks
                         for token in block.tokens

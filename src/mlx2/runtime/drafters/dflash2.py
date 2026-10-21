@@ -302,6 +302,7 @@ def _draft_distributions(
     logits_processors=None,
     processor_histories=None,
     capture_continuation_tree=False,
+    capture_lattice_only=False,
 ):
     """Return tokens and the exact selector laws that produced them.
 
@@ -312,6 +313,8 @@ def _draft_distributions(
     processors and sample sequentially while retaining the one-pass features.
     """
     object.__setattr__(self, "last_continuation_lattice", None)
+    if capture_lattice_only and (not capture_continuation_tree or any(logits_processors or ())):
+        raise ValueError("lattice-only drafting requires an unprocessed continuation-tree capture")
     import numpy as np
     from ..processor_probe import probe_logits_processors
     from ..speculative_sampling import softmax
@@ -335,6 +338,11 @@ def _draft_distributions(
             "pending": (candidates, unary.astype(mx.float32),
                         selector.hidden_projection(features).astype(mx.float32)),
         })
+        if capture_lattice_only:
+            # The deterministic continuation provider owns path selection.
+            # Do not sample an unused backbone or materialize fifteen dense
+            # vocabulary laws just to throw them away in the wrapper.
+            return [[] for _ in range(batch)], [[] for _ in range(batch)]
     if not any(logits_processors):
         # Keep the request-bound wrapper path numerically coupled to the
         # compact pairwise path.  Computing q again through NumPy's float64

@@ -146,6 +146,7 @@ class ContinuationContext:
     processors: tuple = ()
     node_budget: int | None = None
     draft_lattice: object = None
+    tile_policy: str | None = None
 
 
 class PromptLookupContinuationSource:
@@ -290,9 +291,19 @@ class ContinuationDraftModel:
         logits_processors=None,
         ast_source_budgets=None,
         ast_tree_node_budgets=None,
+        ast_b1_tile_policy=None,
         **kwargs,
     ):
         from .proposal_pool import PoolRound, ProposalPath
+        if ast_b1_tile_policy is not None and (
+            ast_b1_tile_policy != "four_path15" or len(anchors) != 1
+            or proposal_length != 15 or ast_source_budgets != [4]
+            or not getattr(self.backend, "supports_continuation_tree_reuse", False)
+            or any(not getattr(processor, "history_pure", False)
+                   or not callable(getattr(processor, "forbidden_token_ids_at_length", None))
+                   for row in (logits_processors or ()) for processor in row)
+        ):
+            raise ValueError("four_path15 source requires one unconstrained 15-position lattice")
 
         if (
             processor_histories is None
@@ -402,8 +413,9 @@ class ContinuationDraftModel:
             backbone_tokens, _backbone_laws = self.backend.draft_distributions(
                 anchors, hidden, cache, proposal_length, private_rngs, temperatures,
                 processor_histories=processor_histories,
-                logits_processors=logits_processors,
+                logits_processors=None if ast_b1_tile_policy == "four_path15" else logits_processors,
                 **({"capture_continuation_tree": True} if capture_tree else {}),
+                **({"capture_lattice_only": True} if ast_b1_tile_policy == "four_path15" else {}),
                 **kwargs,
             )
             lattice = getattr(self.backend, "last_continuation_lattice", None) if capture_tree else None
@@ -435,7 +447,7 @@ class ContinuationDraftModel:
                 ast_tree_node_budgets[row] if ast_tree_node_budgets is not None
                 else None if ast_source_budgets is None else source_budget
             )
-            context = replace(context, node_budget=node_budget)
+            context = replace(context, node_budget=node_budget, tile_policy=ast_b1_tile_policy)
             if lattice is not None and (node_budget or source_budget) >= proposal_length:
                 if lattice["anchors"] != tuple(int(a) for a in anchors) or lattice["depth"] != proposal_length:
                     raise ValueError("DFlash continuation lattice does not belong to this proposal call")

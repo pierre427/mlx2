@@ -82,11 +82,12 @@ class _CPUProvider(Qwen38TargetTreeExecutor):
         raise AssertionError("proposal-only CPU test must not execute TensorFold")
 
 
-def _batch(maximum=24, num_draft=7, *, capacity=1):
+def _batch(maximum=24, num_draft=7, *, capacity=1, b1_tile_policy=None):
     target, draft = tiny_pair()
     Qwen38FastAST(target)
     policy = normalize_progressive_external_policy(
-        {**_policy(), "num_draft": num_draft}, num_draft=num_draft
+        {**_policy(), "num_draft": num_draft,
+         **({"ast_b1_tile_policy": b1_tile_policy, "cost_per_commit_handoff": False} if b1_tile_policy is not None else {})}, num_draft=num_draft
     )
     tile = resolve_progressive_external_tile(
         policy, num_draft=num_draft, target=target, max_lanes=1
@@ -122,6 +123,7 @@ def _batch(maximum=24, num_draft=7, *, capacity=1):
         progressive_alternative_branches=4,
         progressive_alternative_strategy="confidence_tree",
         ast_target_tree_executor_provider=provider,
+        ast_b1_tile_policy=b1_tile_policy,
         cost_per_commit_handoff=False,
     )
     uid = batch.insert(

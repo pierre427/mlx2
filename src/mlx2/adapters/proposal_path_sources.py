@@ -137,6 +137,60 @@ class ExternalContinuationSource:
                 predecessor, successor, codebook_cache_hit = cached_codebooks()
                 options["codebooks"] = (predecessor, successor)
             lattice = getattr(context, "draft_lattice", None)
+            if getattr(context, "tile_policy", None) == "four_path15":
+                if (self.mechanism != "dflash2" or lattice is None
+                    or context.depth != 15 or limit != 4
+                    or lattice["anchors"] != [context.anchor] or lattice["depth"] != 15
+                    or "codebooks" not in options
+                    or any(not getattr(processor, "history_pure", False)
+                           or not callable(getattr(processor, "forbidden_token_ids_at_length", None))
+                           for processor in context.processors)):
+                    raise ValueError("four_path15 requires a bound ordinary DFlash2 lattice")
+                import mlx.core as mx
+
+                mx.eval(*lattice["pending"])
+                candidate, unary, projected = (np.asarray(value)[0] for value in lattice["pending"])
+                pred, succ = options["codebooks"]
+
+                def scores(position, previous):
+                    values = unary[position] + np.sum(
+                        pred[previous][None] * projected[position][None]
+                        * succ[candidate[position]], axis=-1)
+                    forbidden = {int(token) for processor in context.processors
+                                 for token in processor.forbidden_token_ids_at_length(len(context.history) + 1 + position)}
+                    if forbidden:
+                        values = np.where(np.isin(candidate[position], tuple(forbidden)), -np.inf, values)
+                    return _log_probs(values)
+
+                initial = scores(0, context.anchor)
+                roots = _top(initial, 4)
+                if len(roots) != 4:
+                    raise ValueError("four_path15 has fewer than four legal roots")
+                result = []
+                for root in roots:
+                    path = [int(candidate[0, root])]
+                    logps = [float(initial[root])]
+                    for position in range(1, 15):
+                        values = scores(position, path[-1])
+                        best = _top(values, 1)
+                        if not best:
+                            raise ValueError("four_path15 has no finite continuation")
+                        column = best[0]
+                        path.append(int(candidate[position, column]))
+                        logps.append(float(values[column]))
+                    result.append(SourceContinuation(
+                        tuple(path), tuple(_confidence(p) for p in logps),
+                        sum(logps[:4]), "four_path15_prefix4_selector_log_proxy",
+                    ))
+                self.last_diagnostics = {
+                    "mechanism": self.mechanism, "tile_policy": "four_path15",
+                    "requested_depth": 15, "roots": 4, "nodes": 60,
+                    "leaves": 4, "full_depth_nodes": 4, "full_depth_leaves": 4,
+                    "depth_hist": {str(n): 4 for n in range(1, 16)},
+                    "leaf_depth_hist": {"15": 4}, "backbone_reused": True,
+                    "private_head_calls": 0, "codebook_cache_hit": bool(codebook_cache_hit),
+                }
+                return sorted(result, key=lambda path: (-path.ranking_score, path.tokens))
             if lattice is not None:
                 if "codebooks" not in options:
                     raise ValueError("reused DFlash lattice requires weight-bound codebooks")

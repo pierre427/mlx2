@@ -369,6 +369,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "ast_physical_target",
         "ast_target_tree_oracle",
         "ast_target_tree_projection_law",
+        "ast_b1_tile_policy",
         "ast_collision_probability",
         "target_verify_row_exact",
         "cost_per_commit_handoff",
@@ -1697,6 +1698,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "exact_verification", self.external_policy["exact_verification"]
             )
         oracle_path = self.external_policy.get("ast_target_tree_oracle")
+        if self.external_policy.get("ast_b1_tile_policy") is not None:
+            kwargs.setdefault("ast_b1_tile_policy", self.external_policy["ast_b1_tile_policy"])
         if oracle_path is not None:
             private_dispatch = (
                 self.external_policy.get("ast_target_tree_projection_law") == "lane_mpp_exact"

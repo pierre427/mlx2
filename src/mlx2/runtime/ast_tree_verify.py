@@ -85,6 +85,18 @@ def _prepare_request(generator, lane, blocks):
     ):
         raise ValueError("AST tree tiles require bounded greedy branch-safe paths")
     probabilities, authority = _slate_priors(blocks)
+    if getattr(generator, "ast_b1_tile_policy", None) == "four_path15":
+        import math
+
+        probabilities = []
+        for block in blocks:
+            path = next(path for path in block.continuation_selection.paths
+                        if tuple(block.tokens) == tuple(path.tokens))
+            features = path.representative.confidence_features
+            if len(features) != len(block.tokens) or any(value is None or not math.isfinite(value) for value in features):
+                raise ValueError("four_path15 requires actual source confidence for every row")
+            probabilities.append(tuple(1.0 / (1.0 + math.exp(-value)) for value in features))
+        authority = "draft_selector_probability_for_static_packing_not_target_acceptance"
     trie = ASTProposalTrie.from_paths(
         int(lane.anchor),
         [tuple(int(token) for token in block.tokens) for block in blocks],
@@ -148,9 +160,12 @@ def _plan_request(work, quota):
     tile = work.preplans.pop(key, None)
     work.preplans.clear()
     if tile is None:
-        tile = plan_tree_tile(work.trie, root=work.root, max_rows=rows)
+        options = {"balanced": True} if getattr(work.generator, "ast_b1_tile_policy", None) == "four_path15" else {}
+        tile = plan_tree_tile(work.trie, root=work.root, max_rows=rows, **options)
     else:
         work.consumed_plans += 1
+    if getattr(work.generator, "ast_b1_tile_policy", None) == "four_path15" and len(tile.tokens) < 2:
+        raise ValueError("four_path15 cannot submit an anchor-only AST tile")
     work.plan_rows = rows
     if work.executed_nodes.intersection(tile.global_indices):
         raise RuntimeError("AST tree scheduled an already verified node")
@@ -291,6 +306,9 @@ def _execute_group(generator, group):
         for index, ((work, _tile, block), state) in enumerate(
             zip(group, launched, strict=True)
         ):
+            # Bound the walk before target sampling: truncating afterward
+            # would consume RNG and publish a successor beyond the request.
+            state["max_emitted"] = int(work.lane.maximum - work.lane.generated - len(work.emitted))
             decision = generator._verify_tree_batched(
                 work.private, block, state, logprobs_on_request=True
             )
@@ -516,9 +534,12 @@ def _finish_request(work):
         "implemented": True,
         "observed_used": True,
         "default": False,
-        "packing": "measured_round_conditional_reach"
-        if source_plan is not None
-        else "fixed_budget_conditional_reach",
+        "packing": (
+            "static_b1_four_path15_fresh_source_each_round"
+            if getattr(generator, "ast_b1_tile_policy", None) == "four_path15"
+            else "measured_round_conditional_reach"
+            if source_plan is not None else "fixed_budget_conditional_reach"
+        ),
         "source_plan": source_plan.receipt() if source_plan is not None else None,
         "tuning": getattr(lane, "ast_tree_tuning", None),
         "launches": previous.get("launches", 0) + len(tiles),

@@ -108,6 +108,16 @@ def normalize_progressive_external_policy(policy, *, num_draft, minimum_proposal
     if projection_law not in (None, "lane_mpp_exact"):
         raise ValueError("unsupported AST target-tree projection law")
     fast_tree = projection_law == "lane_mpp_exact"
+    b1_tiles = policy.get("ast_b1_tile_policy")
+    if b1_tiles is not None and (
+        b1_tiles != "four_path15"
+        or not fast_tree or num_draft != 15
+        or policy.get("progressive_alternative_branches") != 4
+        or not isinstance(policy.get("continuation_pool"), dict)
+        or policy["continuation_pool"].get("limit") != 4
+        or policy.get("cost_per_commit_handoff") is not False
+    ):
+        raise ValueError("four_path15 requires explicit B1 TensorFold K15/four-path policy with cost handoff off")
     if fast_tree and (
         tile is None
         or fidelity not in (None, "exact")
@@ -484,6 +494,8 @@ def progressive_external_identity(policy, binding=None):
         identity["target_tree_projection_law"] = policy[
             "ast_target_tree_projection_law"
         ]
+    if policy.get("ast_b1_tile_policy") is not None:
+        identity["b1_tile_policy"] = policy["ast_b1_tile_policy"]
     return json.dumps(
         identity,
         sort_keys=True,

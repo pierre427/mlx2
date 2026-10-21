@@ -181,7 +181,7 @@ class ASTTreeTile:
         }
 
 
-def plan_tree_tile(trie, *, root=0, max_rows=16):
+def plan_tree_tile(trie, *, root=0, max_rows=16, balanced=False):
     """Fill one parent-closed tile, including its single executable root.
 
     Monotone cumulative reach gives a best-first useful-row priority. Unknown
@@ -208,9 +208,11 @@ def plan_tree_tile(trie, *, root=0, max_rows=16):
                 if trie.priority_mode == "balanced_unknown_acceptance"
                 else -node.reach
             )
-            heapq.heappush(
-                frontier, (priority, node.depth, node.path_indices[0], child)
-            )
+            if balanced:
+                # Breadth first, then retain the strongest removable tails.
+                heapq.heappush(frontier, (float(node.depth), -(node.reach or 0.0), node.path_indices[0], child))
+            else:
+                heapq.heappush(frontier, (priority, node.depth, node.path_indices[0], child))
 
     add_children(root)
     while frontier and len(selected) < max_rows:
@@ -232,7 +234,7 @@ def plan_tree_tile(trie, *, root=0, max_rows=16):
         ),
         path_depths,
         appearances - len(selected),
-        trie.priority_mode,
+        "balanced_four_path_prefix" if balanced else trie.priority_mode,
         trie.score_authority,
     )
 
