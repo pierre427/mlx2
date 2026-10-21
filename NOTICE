@@ -622,3 +622,114 @@ The EXL3 synthetic converter oracle in tests/fixtures is retained from the
 same Sushi revision under MIT; it is test data, not a trained model pack.
 Fixture SHA256: 5a651adc9cb67f065d2786b548b3a0a010ae482b80c4e269a6701f745840be08.
 The Metal header has trailing whitespace normalized; kernel arithmetic is unchanged.
+
+------------------------------------------------------------------------------
+Apache-2.0 sources adapted in the AST, drafter, MoE and model work (2026-10)
+
+The full Apache License, Version 2.0 text is this repository's LICENSE. None
+of these projects ships a NOTICE file at the revisions read.
+
+1. Kapitsa (https://github.com/nace-ai/kapitsa) — Apache License 2.0
+   - Revision 8b190f58131d51083f09d1473224c1853bdab466
+     (src/kernels/verify8.metal moe8_plan / moe8_combine / moe8e_gu_r2 /
+     moe8e_down_r2, src/model/qwen35_v8.cpp enc_moe8): the design of a
+     GPU-side plan that groups a verify window's (row, slot) expert
+     assignments by distinct expert and combines per-(row, slot) outputs in
+     fixed slot order. Re-implemented in
+     src/mlx2/runtime/models/qwen36_moe_grouped.py and its callers
+     (qwen36_moe_decode.py, qwen3_next.py, adapters/qwen36_35b.py). No
+     Kapitsa Metal or C++ is copied.
+   - Revision 6a8d18a735f3b0665c59c366104640af30094275 (pull request #115):
+     the DFlash pre-sample collision-probability depth feature, sum(q_i^2)
+     over each proposal law, used as an AST survival prior; and the KFlash
+     budget idea followed by src/mlx2/runtime/ast_tile_budget.py. Original
+     mlx2 Python; no Kapitsa source is copied.
+
+2. dflash-mlx (https://github.com/bstnxbt/dflash-mlx, release
+   0.1.10+omlx.7) — Apache License 2.0; the Muse drafter module is
+   Copyright 2026 jundot.
+   Adapted in src/mlx2/runtime/drafters/muse_dflash.py and
+   src/mlx2/adapters/muse_dflash.py from dflash_mlx/models/muse_glimmer_draft.py,
+   dflash_mlx/model.py and dflash_mlx/engine/target_muse_glimmer.py: the
+   drafter's config normalization, weight renames, layer geometry,
+   sliding-window mask law and target-logits-tail projection. No dflash-mlx
+   engine or cache code is used.
+
+3. vLLM (https://github.com/vllm-project/vllm) — Apache License 2.0,
+   Copyright contributors to the vLLM project.
+   - Revision e8ae84bf7e992c63570905fce3073fd7a7de2412
+     (vllm/model_executor/models/llama_eagle3.py and the speculators config
+     and proposer paths): the EAGLE-3 drafter's fused auxiliary-feature
+     projection, decoder layer, reduced draft vocabulary and tap mapping,
+     re-implemented in MLX in src/mlx2/runtime/drafters/eagle3.py and
+     src/mlx2/adapters/eagle3.py.
+   - Revision 338dab077c187e1bd421c4624af1169f95f60e06: the speculators
+     hidden-state index convention translated to post-layer taps for DSpark
+     in src/mlx2/adapters/nemotron35_dspark.py and src/mlx2/adapters/dspark.py.
+
+4. speculators (https://github.com/vllm-project/speculators) — Apache
+   License 2.0. Revision c5d4f9dec9bddcad48b5611344ba19b8b6039dc0
+   (src/speculators/models/dspark/, src/speculators/models/dflash/attention.py)
+   and the eagle3.py shipped with RedHatAI/Qwen3-8B-speculator.eagle3: the
+   DSpark proposal attention, Markov and confidence heads and the EAGLE-3
+   config semantics, re-implemented in src/mlx2/runtime/drafters/dspark.py,
+   src/mlx2/runtime/drafters/nemotron35_dspark.py and the EAGLE-3 files above.
+
+5. oMLX (https://github.com/jundot/omlx) — Apache License 2.0. Revision
+   003217318b32e1a6909707ccbbf25922de1e7e45 (omlx/oq.py): stored-precision
+   weighted affine clipping and alternating least-squares refit, implemented
+   independently in NumPy in src/mlx2/conversion/affine.py for the
+   Nemotron 3.5 conversion (src/mlx2/conversion/nemotron35*.py).
+
+6. MOSS-Image (https://github.com/OpenMOSS/MOSS-Image) — Apache License 2.0.
+   Revision 0ee86ac9576a6b3f1ada73e0e02aab5c710a58da (comfyui/moss-image/
+   model.py, text_encoder.py, inference_runtime.py): the DiT, SiTU
+   activation, four-axis rotary embedding, sampling schedule and VAE decode,
+   ported to MLX in src/mlx2/adapters/moss_image*.py.
+
+7. FOLD (https://github.com/NuyoahNasuS/FOLD) — Apache License 2.0.
+   Revision 22beb43a7704beeabd6e5a242404aa2f44982a79 (fold/reference.py,
+   fold/attention.py, fold/kernels.py): the far-memory drafter attention,
+   re-implemented as a NumPy oracle and an MLX path in
+   src/mlx2/runtime/drafters/fold_reference.py and fold.py.
+
+8. Rapid-MLX (https://github.com/raullenchai/Rapid-MLX) — Apache License 2.0,
+   Copyright 2025-2026 the Rapid-MLX contributors. Pull request #4711 at
+   revision 15f2a923cd90e8e347096644a024c3c6f66aa998
+   (rapid_mlx/patches/nemotron_h_ssm.py) informed the padded recurrent-state
+   boundary hardening in src/mlx2/runtime/models/ssm.py; mlx2 keeps its own
+   SSM implementation.
+
+------------------------------------------------------------------------------
+MIT-licensed sources adapted in the Nemotron 3.5 and Muse work (2026-10)
+
+- src/mlx2/conversion/ggml.py: the Q8_0 and IQ2_XXS block decoders and the
+  IQ2_XXS grid and sign tables, from gguf-py 0.19.0 (gguf/quants.py) of
+  llama.cpp (https://github.com/ggml-org/llama.cpp), Copyright (c) 2023
+  Georgi Gerganov; the tables are ggml's reference tables, Copyright (c)
+  2023-2026 The ggml authors.
+- src/mlx2/runtime/models/muse_attn_window.py: transcription of MLX's vector
+  scaled-dot-product-attention arithmetic (mlx/backend/metal/
+  scaled_dot_product_attention.cpp and kernels/sdpa_vector.h, revision
+  39400a0d4cf1641bc6e543cb5e3585757f491854), Copyright © 2023-2026 Apple Inc.
+  No Apple copyright header is added to mlx2 source files.
+
+Both are licensed under the MIT License:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
