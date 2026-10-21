@@ -6614,6 +6614,12 @@ def apply_ast_invocation(args, policy, adapter_resolution):
         getattr(adapter_resolution, "default_route", None) == "native_mtp"
     )
     tiles = bool(getattr(adapter_type, "ast_tree_tiles", False))
+    tiles_refused = None
+    if tiles:
+        from .adapters.tensorfold_dtype_gate import artifact_tree_tile_dtype_issue
+
+        tiles_refused = artifact_tree_tile_dtype_issue(args.model)
+        tiles = tiles_refused is None
     if drafter == "auto":
         drafter = "mtp" if has_mtp else "pld"
         if drafter == "pld" and getattr(adapter_type, "attention_tree_tiles", False):
@@ -6652,10 +6658,13 @@ def apply_ast_invocation(args, policy, adapter_resolution):
         resolved["draft_model"] = drafter
         args.external_draft = True
     if not tiles and (ast_options[3] is not None or ast_options[4] is not None):
-        raise ValueError("--ast-tiles/--ast-tile-rows need a family with tree tiles")
+        raise ValueError("--ast-tiles/--ast-tile-rows need a family with tree tiles"
+                         + (f": {tiles_refused}" if tiles_refused else ""))
     args.ast_route = {"tree_tiles": tiles, "drafter": drafter, "topology": ast_options[1],
                       "graft_pld": bool(ast_options[2]), "tiles": ast_options[3],
                       "tile_rows": ast_options[4]}
+    if tiles_refused is not None:
+        args.ast_route["tree_tiles_refused"] = tiles_refused
     return resolved
 
 
@@ -7183,6 +7192,9 @@ def main():
             parser.error(f"cannot inspect --model {args.model}: {error}")
         validate_invocation_draft_adapter(args, adapter_resolution)
         policy = apply_ast_invocation(args, policy, adapter_resolution)
+        if getattr(args, "ast_route", {}).get("tree_tiles_refused"):
+            logging.getLogger("mlx2.server").warning(
+                "--ast: chain route selected; %s", args.ast_route["tree_tiles_refused"])
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
         native_mtp = route_selection.native_mtp
         # Route resolution, rather than only the spelling of the CLI, is the

@@ -1972,6 +1972,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         ):
             raise ValueError("tree15 requires an explicit batch_size_route policy")
         kwargs.setdefault("dynamic_singleton_tree", tree_width is not None)
+        if tree_width is not None or oracle_path is not None:
+            from .tensorfold_dtype_gate import model_tree_tile_dtype_issue
+
+            issue = model_tree_tile_dtype_issue(self.model)
+            if issue is not None:
+                raise ValueError(f"Qwen3.8 TensorFold {route or 'AST'} route refused: {issue}")
         if tree_width is not None:
             from .qwen38_target_tree_executor import Qwen38TargetTreeExecutor
 
