@@ -52,8 +52,10 @@ def test_target_binding_is_deterministic_and_source_bound():
 
 
 def test_research_summary_keeps_approximate_state_boundaries():
-    summary = json.loads((PATH.parents[1] /
-        "qualification/runs/flash-megakernel-ast-20261019/summary.json").read_text())
+    path = PATH.parents[1] / "qualification/runs/flash-megakernel-ast-20261019/summary.json"
+    if not path.is_file():
+        pytest.skip("private material absent: research summary (not exported to the public mirror)")
+    summary = json.loads(path.read_text())
     states = summary["states"]
     assert summary["status"] == "bounded_research_only"
     assert summary["ordinary_target_comparison"]["equivalent"] is False

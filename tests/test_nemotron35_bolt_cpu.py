@@ -286,7 +286,10 @@ def _bolt_provenance():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    return root, json.loads((root / "provenance" / "nemotron35-bolt.json").read_text())
+    path = root / "provenance" / "nemotron35-bolt.json"
+    if not path.is_file():
+        pytest.skip("private material absent: Bolt provenance (not exported to the public mirror)")
+    return root, json.loads(path.read_text())
 
 
 def test_bolt_provenance_names_only_real_model_args_fields():

@@ -170,6 +170,8 @@ def test_ast_campaign_deselects_rejected_muse_attention_window():
         "qualification/runs/ast-cost-contract-20261019/policies/"
         "muse-ast-planner-auto.json"
     )
+    if not path.is_file():
+        pytest.skip("private material absent: AST campaign policy (not exported to the public mirror)")
     policy = json.loads(path.read_text())
     assert policy["target_verify_row_exact"] is True
     assert policy["attention_window_row_exact"] is False

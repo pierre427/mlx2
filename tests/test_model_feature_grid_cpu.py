@@ -66,6 +66,8 @@ def test_duplicates_and_missing_checkpoint_are_refused():
 
 def test_the_committed_decisions_carry_the_checkpoint_dimension():
     path = ROOT / "docs" / "research" / "model-feature-decisions.tsv"
+    if not path.is_file():
+        pytest.skip("private material absent: decisions TSV (not exported to the public mirror)")
     with path.open(newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
     assert rows and "checkpoint" in rows[0]

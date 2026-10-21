@@ -72,6 +72,17 @@ def served_exp_forms_match(monkeypatch):
 # provenance/; there the module is reported as skipped instead of erroring.
 _MODULE_PRIVATE_MATERIAL = {
     "test_segmented_moe_prefill_research.py": "provenance/segmented-moe-prefill-research.json",
+    # Modules that load a private harness, policy set or package at import or
+    # in every test (not exported to the public mirror).
+    "test_ast_smoke_host.py": "qualification/runs/ast-smokes-20261018/ast_smoke.py",
+    "test_qwen38_whole_layer_refresh_runner_host.py": (
+        "qualification/runs/ast-whole-layer-qwen38-20261020/"
+        "qwen38-27b-whole-layer-final-head-refresh-runner.py"),
+    "test_flash_next_ast_perf_policy_cpu.py": (
+        "qualification/runs/ast-smokes-20261018/policies/flash-next-native-mtp-ast.json"),
+    "test_qwen36_ast_perf_policies_cpu.py": (
+        "qualification/runs/ast-smokes-20261018/policies/qwen36-35b-ast-q8-moe-attn-k2-primary.json"),
+    "test_decision_benchmark_v1_cpu.py": "benchmarks/decisions/v1/run.py",
 }
 _ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 

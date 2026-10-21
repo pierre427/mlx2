@@ -445,6 +445,8 @@ def test_exact_domain_scheduler_harness_engages_and_publishes_whole_layer():
         / "qualification/runs/ast-whole-layer-qwen38-20261020/"
         "qwen38-whole-layer-serving-exact-domain.py"
     )
+    if not path.is_file():
+        pytest.skip("private material absent: serving harness (not exported to the public mirror)")
     spec = importlib.util.spec_from_file_location("whole_layer_serving_harness", path)
     assert spec is not None and spec.loader is not None
     harness = importlib.util.module_from_spec(spec)
@@ -497,6 +499,8 @@ def test_exact_domain_scheduler_harness_refuses_foreign_draft_taps_before_mutati
         / "qualification/runs/ast-whole-layer-qwen38-20261020/"
         "qwen38-whole-layer-serving-exact-domain.py"
     )
+    if not path.is_file():
+        pytest.skip("private material absent: serving harness (not exported to the public mirror)")
     spec = importlib.util.spec_from_file_location("whole_layer_serving_harness", path)
     assert spec is not None and spec.loader is not None
     harness = importlib.util.module_from_spec(spec)
@@ -1120,12 +1124,13 @@ def test_serving_source_closure_includes_segmented_executor_modules():
         "src/mlx2/runtime/row_exact_verify.py",
     )
     assert SERVING_SOURCE_PATHS == SOURCE_PATHS + serving_only
-    provenance = json.loads(
-        (
-            Path(__file__).parents[1]
-            / "provenance/ast-qwen38-hybrid-native-flat-target-20261020.json"
-        ).read_text()
+    record = (
+        Path(__file__).parents[1]
+        / "provenance/ast-qwen38-hybrid-native-flat-target-20261020.json"
     )
+    if not record.is_file():
+        pytest.skip("private material absent: provenance record (not exported to the public mirror)")
+    provenance = json.loads(record.read_text())
     assert set(SERVING_SOURCE_PATHS).issubset(provenance["source_paths"])
 
 

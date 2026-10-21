@@ -38,6 +38,12 @@ from mlx2.runtime.progressive_external_verify import (
 POLICIES = Path(__file__).resolve().parents[1] / (
     "qualification/runs/ast-smokes-20261018/policies"
 )
+
+
+def _private_policy(path):
+    if not path.is_file():
+        pytest.skip("private material absent: AST campaign policy (not exported to the public mirror)")
+    return path
 AST = {
     "draft_model": "/draft",
     "draft_revision": "d" * 64,
@@ -143,7 +149,7 @@ def test_ast_cost_attention_window_policies_are_explicit_candidates():
         "qualification/runs/ast-cost-contract-20261019/policies"
     )
     qwen38 = json.loads(
-        (policies / "qwen38-27b-ast-planner-auto.json").read_text()
+        _private_policy(policies / "qwen38-27b-ast-planner-auto.json").read_text()
     )
     qwen36 = json.loads(
         (policies / "qwen36-35b-ast-planner-auto.json").read_text()
@@ -386,7 +392,7 @@ def test_selected_route_refuses_dynamic_lora():
     ],
 )
 def test_shipped_smoke_policies_parse(name, keys):
-    policy = json.loads((POLICIES / name).read_text())
+    policy = json.loads(_private_policy(POLICIES / name).read_text())
     assert set(policy) <= keys
     for key in ("draft_revision", "target_revision"):
         assert len(policy[key]) == 64
@@ -425,7 +431,7 @@ def test_shipped_smoke_policies_parse(name, keys):
 def test_qwen38_guarded_ast_candidate_policies_parse(
     name, num_draft, tile, rootless_fallback
 ):
-    policy = json.loads((POLICIES / name).read_text())
+    policy = json.loads(_private_policy(POLICIES / name).read_text())
     assert set(policy) <= QWEN38_KEYS
     assert len(policy["draft_revision"]) == 64
     assert len(policy["target_revision"]) == 64
