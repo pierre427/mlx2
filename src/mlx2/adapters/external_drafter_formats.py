@@ -70,6 +70,7 @@ def _ubtree():
 
 _FORMATS = {
     "Qwen3DSparkModel": _dspark,
+    "Lfm2DSparkDraftModel": _dspark,
     "LlamaForCausalLMEagle4": _eagle4,
     "Ling3UBTreeModel": _ubtree,
 }

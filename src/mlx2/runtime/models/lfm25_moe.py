@@ -70,6 +70,11 @@ class ModelArgs(BaseModelArgs):
             raise ValueError("LFM2.5 attention indices disagree with layer_types")
         self.full_attn_idxs = derived
 
+    @property
+    def head_dim(self):
+        # Attention geometry, also read by the external-draft KV admission estimate.
+        return self.hidden_size // self.num_attention_heads
+
 
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -77,7 +82,7 @@ class Attention(nn.Module):
         dim = args.hidden_size
         self.n_heads = args.num_attention_heads
         self.n_kv_heads = args.num_key_value_heads
-        self.head_dim = dim // self.n_heads
+        self.head_dim = args.head_dim
         self.scale = self.head_dim**-0.5
         self.q_layernorm = nn.RMSNorm(self.head_dim, eps=args.norm_eps)
         self.k_layernorm = nn.RMSNorm(self.head_dim, eps=args.norm_eps)
@@ -296,7 +301,7 @@ class LFM25Model(nn.Module):
             if not layer.is_attention_layer
         )
 
-    def __call__(self, inputs, cache=None, input_embeddings=None):
+    def __call__(self, inputs, cache=None, input_embeddings=None, capture=None):
         # The NAX sorted expert gather (MLX2_MOE_NAX_GATHER=gather, default
         # off) is prefill-only; the trunk forward decides the phase once.
         # Decode, speculating caches and prepared verify blocks are not
@@ -304,9 +309,9 @@ class LFM25Model(nn.Module):
         with _moe_nax.forward_scope(
             inputs if inputs is not None else input_embeddings, cache
         ):
-            return self._forward(inputs, cache, input_embeddings)
+            return self._forward(inputs, cache, input_embeddings, capture)
 
-    def _forward(self, inputs, cache, input_embeddings):
+    def _forward(self, inputs, cache, input_embeddings, capture=None):
         hidden = (
             self.embed_tokens(inputs) if input_embeddings is None else input_embeddings
         )
@@ -314,9 +319,12 @@ class LFM25Model(nn.Module):
             cache = [None] * len(self.layers)
         attention_mask = create_attention_mask(hidden, cache[self.attention_index])
         convolution_mask = create_ssm_mask(hidden, cache[self.conv_index])
-        for layer, layer_cache in zip(self.layers, cache):
+        for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
             mask = attention_mask if layer.is_attention_layer else convolution_mask
             hidden = layer(hidden, mask=mask, cache=layer_cache)
+            # Post-block taps for external drafters (layer k = output of layer k).
+            if capture is not None and index in capture:
+                capture[index] = hidden
         return self.embedding_norm(hidden)
 
 
@@ -337,6 +345,28 @@ class Model(nn.Module):
     def __call__(self, inputs, cache=None, input_embeddings=None):
         hidden = self.model(inputs, cache=cache, input_embeddings=input_embeddings)
         return self.model.embed_tokens.as_linear(hidden)
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        """Target features for an external drafter, paired with the cache
+        tokens consumed; ascending post-block taps, before the final norm
+        (the pinned mlx-vlm LFM2 ``hidden_sink`` convention)."""
+        capture_layers = tuple(int(i) for i in capture_layers)
+        if (
+            not capture_layers
+            or tuple(sorted(set(capture_layers))) != capture_layers
+            or capture_layers[0] < 0
+            or capture_layers[-1] >= len(self.model.layers)
+        ):
+            raise ValueError("Invalid target capture layers")
+        taps = {i: None for i in capture_layers}
+        hidden = self.model(inputs, cache=cache, capture=taps)
+        features = mx.concatenate([taps[i] for i in capture_layers], axis=-1)
+        if body_only:
+            return None, features
+        return self.model.embed_tokens.as_linear(hidden), features
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     @property
     def layers(self):

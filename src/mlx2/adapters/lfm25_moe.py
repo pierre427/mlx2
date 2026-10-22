@@ -1,4 +1,5 @@
-"""Official 8-bit LFM2.5 24B-A2B adapter (ordinary decode, PLD, batching)."""
+"""Official 8-bit LFM2.5 24B-A2B adapter (ordinary decode, PLD, batching,
+candidate external DSpark draft route)."""
 
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from .lfm25_output import (
     render_chat,
     validate_tool_request,
 )
+from .external_draft_policy import ExternalDraftAdapterMixin
 from .ordinary_artifact import inspect_indexed_artifact
 
 CACHE_LAYOUT = "lfm25-24b-a2b-hybrid-layer-segments-v1"
@@ -111,6 +113,7 @@ DESCRIPTOR = ModelDescriptor(
         "weights": "official affine 8-bit",
         "tools": "pythonic <|tool_call_start|> parser + forced-call grammar (unqualified)",
         "speculation": "prompt lookup (exact ShortConv rollback); no draft head",
+        "external_draft": "LiquidAI DSpark head, implemented candidate (unqualified)",
         "batching": "mixed-length lanes (ragged ShortConv state)",
         "moe_experts": "shared switch_layers SwitchGLU (rhs pad floor; M5 NAX sorted gather default)",
         "fused_shortconv": "MLX2_LFM25_FUSED_SHORTCONV opt-in, one-token B1 BF16",
@@ -334,7 +337,7 @@ class LFM25MoECacheBudget:
         }
 
 
-class LFM25MoEAdapter:
+class LFM25MoEAdapter(ExternalDraftAdapterMixin):
     default_route = "ordinary"
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING
@@ -347,10 +350,28 @@ class LFM25MoEAdapter:
             self, lambda: self._init_lfm25(model_path, execution_policy=execution_policy)
         )
 
+    # Candidate external route: LiquidAI's DSpark head (9 trained proposals).
+    # Every verify row is a full MoE forward on the target; depth 3 follows
+    # the Laguna MoE sweep's shallow optimum and is not measured here.
+    EXTERNAL_DEFAULT_NUM_DRAFT = 3
+    EXTERNAL_ROUTE_TAG = "external-lfm25-dspark-v1"
+    EXTERNAL_PROFILE = "lfm25-24b-a2b-8bit-apcv2-dspark"
+
     def _init_lfm25(self, model_path: str, *, execution_policy=None):
-        if execution_policy:
-            raise ValueError("LFM2.5 24B-A2B accepts no execution policy")
+        external = self._parse_external_policy(execution_policy, family="LFM2.5 24B-A2B")
         artifact = inspect_artifact(model_path)
+        draft_record = None
+        if external:
+            # Header-only drafter inspection before any target tensor loads.
+            from .external_drafter_formats import drafter_format
+
+            draft_format = drafter_format(self.external_policy["draft_model"])
+            if draft_format.name != "dspark":
+                raise ValueError("LFM2.5 24B-A2B external drafting requires a DSpark head")
+            draft_record = draft_format.inspect_drafter(
+                self.external_policy["draft_model"], artifact["identity"]["path"]
+            )
+            self._check_num_draft(draft_record)
         self.identity = artifact["identity"]
         self.layout = CACHE_LAYOUT
         # Refuse an explicit TF32 value before the profile overwrites it.
@@ -426,6 +447,10 @@ class LFM25MoEAdapter:
             eos_token_ids=artifact_eos_token_ids(path, self.config, tokenizer),
         )
         self.max_context = artifact["max_context"]
+        if draft_record is not None:
+            from .dspark import load_drafter
+
+            self._bind_external_drafter(draft_record, load_drafter, DESCRIPTOR)
 
     def _claim_moe_globals(self):
         """Claim the shared sorted-MoE globals this model's experts read.
@@ -509,14 +534,21 @@ class LFM25MoEAdapter:
 
     def execution_config(self, *, max_lanes, prefill_step):
         counters = getattr(self, "fused_shortconv_counters", None)
+        route = (
+            self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
+            if getattr(self, "draft_model", None) is not None
+            else {
+                "persistent": True,
+                "num_draft": 0,
+                "backend": "ordinary",
+                "rate_gate": False,
+                "prefill_step_size": prefill_step,
+                "segment_aware_live_tip": False,
+                "segment_aware_cohort_size": max_lanes,
+            }
+        )
         return {
-            "persistent": True,
-            "num_draft": 0,
-            "backend": "ordinary",
-            "rate_gate": False,
-            "prefill_step_size": prefill_step,
-            "segment_aware_live_tip": False,
-            "segment_aware_cohort_size": max_lanes,
+            **route,
             "lfm_shortconv": (
                 "fused-metal-candidate"
                 if counters is not None and counters.installed
@@ -593,10 +625,16 @@ class LFM25MoEAdapter:
         return make_tool_constraint(request)
 
     def diagnostics(self):
+        external = getattr(self, "draft_model", None) is not None
         return {
             "architecture": "lfm2_moe",
             "cache_layout": self.layout,
-            "route": "ordinary",
+            "route": "external_draft" if external else "ordinary",
+            **(
+                {"speculation": "external-lfm25-dspark-implemented-unqualified"}
+                if external
+                else {}
+            ),
             "quantization": self.config["quantization"],
             "moe_nax_gather": getattr(self, "moe_nax_gather", "off"),
             "moe_rhs_pad_policy": getattr(self, "moe_rhs_pad_policy", None),
@@ -617,4 +655,5 @@ class LFM25MoEAdapter:
 
         release(self)
         self.model = None
+        self.draft_model = None
         self.tokenizer = None

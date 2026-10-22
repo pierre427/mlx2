@@ -7,6 +7,13 @@ Qwen3-backbone DSpark heads (``architectures: ["Qwen3DSparkModel"]``, e.g.
 DimInfer/Qwen3.8-27B-Dspark-v1) to any target whose hidden width, vocabulary
 and layer count match.  Provenance: provenance/qwen38-dspark-drafter.json.
 
+LiquidAI's SGLang-format heads (``architectures: ["Lfm2DSparkDraftModel"]``,
+e.g. LiquidAI/LFM2.5-24B-A2B-DSpark) carry the same Qwen3 backbone, block and
+tap contract (pinned mlx-vlm ``speculative/drafters/dspark/config.py`` maps
+both the same way) with two spelling differences: the mask token and target
+layers live under ``dflash_config``, and RoPE uses interleaved pairing
+(``rope_is_neox_style: false``).  Provenance: provenance/lfm25-24b-a2b-dspark.json.
+
 Block contract of a DFlash-format head (llama.cpp ``draft-dspark``; no
 ``dflash.sample_from_anchor``/``dflash.attention.causal`` keys means anchor
 sampling and non-causal attention): the block is the anchor plus
@@ -25,6 +32,7 @@ from .xpress import XPressConfig
 from .xpress import expected_weight_shapes as xpress_shapes
 
 QWEN_DSPARK_ARCHITECTURE = "Qwen3DSparkModel"
+LFM_DSPARK_ARCHITECTURE = "Lfm2DSparkDraftModel"
 QWEN_TAP_CONVENTION = "dflash-target-layer-ids-are-post-layer-v1"
 QWEN_BLOCK_CONTRACT = "dflash-format-dspark-anchor-sampled-noncausal-v1"
 PROPOSAL_ATTENTION = ("causal", "bidirectional")
@@ -112,6 +120,73 @@ def qwen_dspark_config(config):
     return DSparkConfig(**fields)
 
 
+@dataclass
+class InterleavedRopeDSparkConfig(DSparkConfig):
+    """DSpark head whose RoPE pairs adjacent dimensions (MLX "traditional")."""
+
+    rope_is_neox_style: bool = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.rope_is_neox_style is not False:
+            raise ValueError("Unsupported DSpark RoPE pairing")
+
+
+def lfm_dspark_config(config):
+    """Strict DSparkConfig of a LiquidAI SGLang-format LFM2 DSpark head."""
+    dflash = config.get("dflash_config")
+    layers = config.get("num_hidden_layers")
+    if (config.get("architectures") != [LFM_DSPARK_ARCHITECTURE]
+            or config.get("model_type") != "qwen3"
+            or not isinstance(dflash, dict)
+            or set(dflash) != {"mask_token_id", "target_layer_ids", "num_target_layers"}
+            or config.get("markov_head_type") != "vanilla"
+            or config.get("enable_confidence_head") is not True
+            # Absent keys are the pinned mlx-vlm defaults this binding implements.
+            or config.get("confidence_head_with_markov", True) is not True
+            or config.get("rope_is_neox_style") is not False
+            or config.get("layer_types") != ["full_attention"] * (layers or 0)
+            or config.get("hidden_act") != "silu"
+            or config.get("attention_bias", False) is not False
+            or config.get("sliding_window") is not None
+            or config.get("rope_scaling") is not None
+            or config.get("rope_parameters") is not None
+            or config.get("quantization") or config.get("quantization_config")
+            or type(config.get("block_size")) is not int or config["block_size"] < 1
+            or type(config.get("rope_theta")) not in (int, float) or not config["rope_theta"] > 0):
+        raise ValueError("Unsupported LFM DSpark source contract")
+    fields = {key: config[key] for key in (
+        "hidden_size", "intermediate_size", "num_hidden_layers", "num_attention_heads",
+        "num_key_value_heads", "head_dim", "rms_norm_eps", "vocab_size",
+        "max_position_embeddings", "markov_rank",
+    )}
+    fields.update(
+        # Same anchor count as the Qwen format: rows = block_size - 1.
+        block_size=config["block_size"] + 1,
+        mask_token_id=dflash["mask_token_id"],
+        num_target_layers=dflash["num_target_layers"],
+        target_layer_ids=list(dflash["target_layer_ids"]),
+        rope_theta=float(config["rope_theta"]), layer_types=["full_attention"] * layers,
+        sliding_window=None, tie_word_embeddings=False,
+        enable_confidence_head=True, confidence_head_with_markov=True,
+        sample_from_anchor=True, proposal_attention="bidirectional",
+    )
+    return InterleavedRopeDSparkConfig(**fields)
+
+
+_CONFIG_PARSERS = {QWEN_DSPARK_ARCHITECTURE: qwen_dspark_config, LFM_DSPARK_ARCHITECTURE: lfm_dspark_config}
+
+
+def dspark_config(config):
+    """Strict DSparkConfig of a DFlash-backbone DSpark head, by declared architecture."""
+    architectures = config.get("architectures")
+    parser = (_CONFIG_PARSERS.get(architectures[0])
+              if isinstance(architectures, list) and len(architectures) == 1 else None)
+    if parser is None:
+        raise ValueError("Unsupported DSpark source contract")
+    return parser(config)
+
+
 def _target_geometry(target):
     from .dflash2 import _decode_unique_json
 
@@ -133,7 +208,7 @@ def inspect_drafter(path, target):
     path = Path(path).expanduser().resolve()
     config_raw, config_binding = _read_bytes_with_binding(path / "config.json")
     config = _decode_unique_json(config_raw, "draft config.json")
-    args = qwen_dspark_config(config)
+    args = dspark_config(config)
     text = _target_geometry(target)
     for name in ("hidden_size", "vocab_size"):
         if text[name] != getattr(args, name):
@@ -238,7 +313,7 @@ def load_drafter(record, target_model, *, runtime_quantization=None):
                                     label="DSpark target artifact")
 
     verify_sources()
-    if qwen_dspark_config(record["config"]) != record["args"]:
+    if dspark_config(record["config"]) != record["args"]:
         raise ValueError("DSpark config changed since inspection")
     import mlx.core as mx
 
@@ -258,13 +333,17 @@ def load_drafter(record, target_model, *, runtime_quantization=None):
 
 
 __all__ = [
+    "LFM_DSPARK_ARCHITECTURE",
     "QWEN_DSPARK_ARCHITECTURE",
     "DSparkConfig",
+    "InterleavedRopeDSparkConfig",
     "apply_runtime_quantization",
     "content_revision",
+    "dspark_config",
     "expected_weight_shapes",
     "inspect_drafter",
     "legacy_content_revision",
+    "lfm_dspark_config",
     "load_drafter",
     "qwen_dspark_config",
 ]

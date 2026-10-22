@@ -52,7 +52,7 @@ def server_env() -> dict:
     ]
     environment["PYTHONPATH"] = os.pathsep.join(parts)
     return environment
-KINDS = {"north": "external_cohere_eagle", "laguna": "external_laguna_dflash"}
+KINDS = {"north": "external_cohere_eagle", "laguna": "external_laguna_dflash", "lfm25": "external_dspark"}
 PROMPTS = [
     "Write a Python function that checks whether a string is a palindrome.",
     "Explain what a mutex is in two sentences.",
@@ -70,6 +70,9 @@ def build_parser():
     p.add_argument("--port", type=int, default=8297)
     p.add_argument("--max-tokens", type=int, default=128)
     p.add_argument("--startup-timeout", type=float, default=900)
+    # Smaller hosts (a 36 GB M3 under a 24 GB target) need a tighter envelope.
+    p.add_argument("--max-context", type=int, default=32768)
+    p.add_argument("--cache-gib", type=int, default=4)
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--out", type=Path)
     p.add_argument("--i-own-the-gpu", action="store_true")
@@ -146,7 +149,8 @@ def main(argv=None):
     command = [args.python, "-m", "mlx2.server", "--model", args.model, "--port", str(args.port),
                "--external-draft", "--execution-policy", str(workdir / "policy.json"),
                "--qualification-mode", "--max-lanes", "4", "--max-inflight", "8",
-               "--max-context", "32768", "--cache-bytes", str(4 << 30), "--cache-dir", str(workdir / "cache")]
+               "--max-context", str(args.max_context), "--cache-bytes", str(args.cache_gib << 30),
+               "--cache-dir", str(workdir / "cache")]
     plan = {"schema": SCHEMA, "family": args.family, "expected_kind": KINDS[args.family], "policy": policy,
             "server_command": command,
             "server_pythonpath": server_env()["PYTHONPATH"].split(os.pathsep)[0],
