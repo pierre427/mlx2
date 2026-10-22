@@ -81,6 +81,9 @@ class DFlash2DecoderLayer(DFlashDecoderLayer):
         )
 
     def __call__(self, x, x_ctx, rope, cache):
+        fused = self.__dict__.get("_fused_layer")
+        if fused is not None:
+            return fused(self, x, x_ctx, rope, cache)
         fold = getattr(self.self_attn, "fold_policy", None) is not None
         residual = x
         normalized = (
@@ -973,6 +976,7 @@ from .dflash2_kernel import (  # noqa: E402 - the law lives in a model-free modu
     DRAFT_KERNELS,
     DRAFT_LANE_MAX_ROWS,
     DRAFT_LANE_SUFFIX,
+    DRAFT_FUSED_SUFFIX,
     draft_kernel_law,
 )
 
@@ -1026,17 +1030,22 @@ def configure_draft_kernel(model, kernel):
     backend does not cover a projection (the M1-M4 simd kernels have no bf16
     path: quantize the drafter first).  The target's shared embedding and
     head are never touched: they are bound after this and follow the target's
-    own lane policy.
+    own lane policy. ``"fused"`` adds opt-in non-matmul layer kernels;
+    FOLD and attention sinks are refused before installing anything.
     """
     expected = draft_kernel_law(kernel)
     if expected is None:
         return None
     if getattr(model, "lm_head", None) is not None or getattr(model, "embed_tokens", None) is not None:
         raise ValueError("configure the draft kernel before binding the target head")
+    if kernel == "fused":
+        from . import dflash2_fused
+
+        dflash2_fused.validate_model(model)
     from ..lane import available, installer
 
     if not available():
-        raise ValueError("draft_kernel 'lane' needs a lane matmul backend on this device")
+        raise ValueError(f"draft_kernel {kernel!r} needs a lane matmul backend on this device")
     receipt = installer.install(
         model, min_rows=1, max_rows=DRAFT_LANE_MAX_ROWS, chunk_above_max=False,
         unquantized=True,
@@ -1049,10 +1058,12 @@ def configure_draft_kernel(model, kernel):
     if uncovered:
         installer.uninstall(model)
         raise ValueError(
-            f"draft_kernel 'lane' does not cover {len(uncovered)} drafter projections "
+            f"draft_kernel {kernel!r} does not cover {len(uncovered)} drafter projections "
             f"on this backend (first {uncovered[0]!r}): {receipt.get('refused')}"
         )
     law = receipt["law_id"] + DRAFT_LANE_SUFFIX
+    if kernel == "fused":
+        law += DRAFT_FUSED_SUFFIX
     if law != expected:
         installer.uninstall(model)
         raise ValueError(f"draft lane law {law!r} differs from the bound {expected!r}")
@@ -1060,12 +1071,16 @@ def configure_draft_kernel(model, kernel):
         object.__setattr__(layer.self_attn, "_fused_projections", _fused_context_projections)
     # The lattice's top-k over the vocabulary through block maxima.
     object.__setattr__(model, "_block_topk", True)
+    if kernel == "fused":
+        dflash2_fused.install(model)
     return {
-        "kernel": "lane",
+        "kernel": kernel,
         "law_id": law,
         "backend": receipt["backend"],
         "covered": receipt["covered"],
         "groups": receipt["groups"],
         "fused_context_projections": True,
         "lattice_topk": "block256",
+        **({"fused_stages": list(dflash2_fused.STAGES),
+            "qualified": False} if kernel == "fused" else {}),
     }

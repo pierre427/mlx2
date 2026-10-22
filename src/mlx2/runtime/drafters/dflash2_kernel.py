@@ -6,13 +6,14 @@ identity while inspecting a policy, before the target adapter pins its import
 environment: this module imports only the lane package, never a model module.
 """
 
-DRAFT_KERNELS = ("stock", "lane")
+DRAFT_KERNELS = ("stock", "lane", "fused")
 # One launch serves up to this many rows; longer calls (a long first context
 # append) take the stock kernel.  Part of the drafter's law.
 DRAFT_LANE_MAX_ROWS = 128
 # Lattice-side changes that ride with the lane kernel: context and proposal
 # rows fused per projection, and the block-maxima vocabulary top-k.
 DRAFT_LANE_SUFFIX = "+fused-context-v1+blocktopk-v1"
+DRAFT_FUSED_SUFFIX = "+fused-layer-v2"
 
 
 def draft_kernel_law(kernel):
@@ -30,8 +31,9 @@ def draft_kernel_law(kernel):
 
     name = lane.backend()
     if name is None:
-        raise ValueError("draft_kernel 'lane' needs a lane matmul backend on this device")
-    return f"{lane.LAW_IDS[name]}+rows-le-{DRAFT_LANE_MAX_ROWS}+grouped{DRAFT_LANE_SUFFIX}"
+        raise ValueError(f"draft_kernel {kernel!r} needs a lane matmul backend on this device")
+    law = f"{lane.LAW_IDS[name]}+rows-le-{DRAFT_LANE_MAX_ROWS}+grouped{DRAFT_LANE_SUFFIX}"
+    return law + (DRAFT_FUSED_SUFFIX if kernel == "fused" else "")
 
 
-__all__ = ["DRAFT_KERNELS", "DRAFT_LANE_MAX_ROWS", "DRAFT_LANE_SUFFIX", "draft_kernel_law"]
+__all__ = ["DRAFT_KERNELS", "DRAFT_LANE_MAX_ROWS", "DRAFT_LANE_SUFFIX", "DRAFT_FUSED_SUFFIX", "draft_kernel_law"]

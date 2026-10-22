@@ -100,6 +100,9 @@ class DFlashAttention(nn.Module):
         )
 
     def __call__(self, x: mx.array, x_ctx: mx.array, rope, cache: KVCache):
+        fused = self.__dict__.get("_fused_forward")
+        if fused is not None:
+            return fused(self, x, x_ctx, rope, cache)
         B, L, _ = x.shape
         S = x_ctx.shape[1]
         queries, ctx_keys, ctx_values, prop_keys, prop_values = self._projections(

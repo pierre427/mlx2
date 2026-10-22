@@ -243,7 +243,8 @@ def test_draft_vocab_needs_the_draft_eos(tmp_path):
         )
 
 
-def test_policy_inspection_imports_no_model_module(tmp_path):
+@pytest.mark.parametrize("kernel", ["lane", "fused"])
+def test_policy_inspection_imports_no_model_module(tmp_path, kernel):
     """The server inspects the policy before the adapter pins its import
     environment; a model module imported there fails the load (ImportOrderError)."""
     import subprocess
@@ -259,7 +260,7 @@ from mlx2.runtime import lane
 lane.backend = lambda: "mpp"
 from mlx2.adapters.qwen38_27b import inspect_external_policy
 from test_qwen38_dflash2_adapter import _pins
-policy = {{**_pins({str(target)!r}, {str(draft)!r}), "draft_kernel": "lane",
+policy = {{**_pins({str(target)!r}, {str(draft)!r}), "draft_kernel": {kernel!r},
           "draft_quantization": {{"bits": 4, "group_size": 64}},
           "draft_vocab": {{"order": "id", "rows": 20}}}}
 before = "mlx2.runtime.models.base" in sys.modules
@@ -271,7 +272,7 @@ print(before, "mlx2.runtime.models.base" in sys.modules, "mlx2.runtime.drafters.
 
 
 def test_module_constants_are_stable():
-    assert runtime.DRAFT_KERNELS == ("stock", "lane")
+    assert runtime.DRAFT_KERNELS == ("stock", "lane", "fused")
     assert runtime.DRAFT_LANE_MAX_ROWS == 128
     assert json.dumps(runtime.DRAFT_KERNELS)
 

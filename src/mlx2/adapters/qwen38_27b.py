@@ -1184,7 +1184,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         AST-DRAFTER-KERNEL-2026-10-21.md).  Only where it was measured: this
         descriptor (not the Qwen subclasses) and the M5 tensor-unit backend.
         ``"draft_kernel": "stock"`` and ``"draft_quantization": null`` restore
-        the bf16 stock drafter.
+        the bf16 stock drafter. ``"draft_kernel": "fused"`` is an opt-in
+        layer-fusion law; it does not change these measured defaults.
         """
         if cls.descriptor is not QWEN38_27B or drafter in ("mtp", "pld"):
             return {}

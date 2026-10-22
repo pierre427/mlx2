@@ -306,11 +306,11 @@ def validate_runtime_quantization(value):
 
 
 def validate_draft_kernel(value):
-    """Drafter projection kernel (mlx2): None/"stock" or "lane"."""
+    """Drafter kernel (mlx2): None/"stock", "lane", or opt-in "fused"."""
     if value is None or value == 'stock':
         return None
-    if value != 'lane':
-        raise ValueError('draft_kernel must be "stock" or "lane"')
+    if value not in ('lane', 'fused'):
+        raise ValueError('draft_kernel must be "stock", "lane", or "fused"')
     return value
 
 
