@@ -352,11 +352,44 @@ def test_lane_matmul_and_tensorfold_tree_have_one_projection_owner():
     flips = re.compile(
         r"lane_qmm\.install|lane_attention\.install|lane_fuse\.build\(|"
         r"lane_(?:qmm|fuse|attention)\.enabled\s*=")
+
+    # The one sanctioned installer: the opt-in ``--lane-matmul tensorfold``
+    # mode (2c3d36219) puts TensorFold's lane kernels in place of mlx2's lane
+    # law.  Its body is exempt from the scan; its only call must sit in the
+    # engine's exclusive ``tensorfold`` branch, with mlx2's lane law in the
+    # ``elif``, so the two still never own the same projections.
+    def outside_installer(path):
+        text = path.read_text()
+        if path.name != "serving.py":
+            return text
+        import ast
+
+        tree = ast.parse(text)
+        lines = text.splitlines(keepends=True)
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "install_tensorfold_lane":
+                del lines[node.lineno - 1:node.end_lineno]
+                break
+        else:
+            raise AssertionError("serving.install_tensorfold_lane is gone; update this test")
+        return "".join(lines)
+
     offenders = [
         str(path.relative_to(src)) for path in src.rglob("*.py")
-        if vendored not in path.parents and flips.search(path.read_text())
+        if vendored not in path.parents and flips.search(outside_installer(path))
     ]
     assert offenders == []
+    callers = [
+        (path, match.start())
+        for path in src.rglob("*.py")
+        for match in re.finditer(r"install_tensorfold_lane\(adapter", path.read_text())
+    ]
+    assert [path.name for path, _ in callers] == ["serving.py"]
+    serving = callers[0][0].read_text()
+    branch = serving[:callers[0][1]].rsplit("\n            if ", 1)[1]
+    assert branch.startswith('self.lane_matmul == "tensorfold":'), branch[:80]
+    after = serving[callers[0][1]:].split("\n", 2)[1]
+    assert after.strip().startswith('elif self.lane_matmul != "off"'), after
     weight = mx.zeros((8, 8), dtype=mx.uint32)
     parent = SimpleNamespace(k_proj={"weight": weight}, v_proj={"weight": weight})
     assert lane_fuse.attn_kv(parent, mx.zeros((1, 15, 64), dtype=mx.bfloat16)) is None

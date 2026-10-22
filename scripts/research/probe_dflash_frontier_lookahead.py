@@ -177,12 +177,37 @@ def audit_exact_frontier_capability() -> dict[str, Any]:
         "def _append_context(self, hidden, cache):" in dflash_text
         and "self.fc(hidden)" in dflash_text
     )
+    commit_call = "self._commit(\n                cohort,"
     commit_precedes_prelaunch = (
-        "self._commit(\n                cohort," in executor_text
+        commit_call in executor_text
         and "self._prelaunch_tree(cohort[0], decisions[0])" in executor_text
-        and executor_text.index("self._commit(\n                cohort,")
+        and executor_text.index(commit_call)
         < executor_text.index("self._prelaunch_tree(cohort[0], decisions[0])")
     )
+    # Since 5a9b359ef the next lattice may be queued after the verification
+    # walk but before the target commit, from rows the walk already fixed.
+    # It is kept only if it predicted the exact post-commit boundary, and is
+    # otherwise discarded in favour of the post-commit prelaunch.  That is
+    # still a verified boundary, never an uncommitted speculative leaf.
+    early_call = "self._prelaunch_tree_early(cohort[0], decisions[0], features)"
+    bind_call = "self._bind_early_prelaunch(cohort[0], decisions[0], early)"
+    bind_start = executor_text.find("def _bind_early_prelaunch(")
+    bind_body = executor_text[bind_start:executor_text.find("\n    def ", bind_start + 1)]
+    early_at = executor_text.find(early_call)
+    commit_at = executor_text.find(commit_call, early_at) if early_at >= 0 else -1
+    bind_at = executor_text.find(bind_call, commit_at) if commit_at >= 0 else -1
+    verified_early_bound_after_commit = (
+        0 <= early_at < commit_at < bind_at
+        and bind_start >= 0
+        and "record.key == (" in bind_body
+        and "self._prelaunch_tree(lane, decision)" in bind_body
+    )
+    if commit_precedes_prelaunch:
+        pipeline_order = "post_commit"
+    elif verified_early_bound_after_commit:
+        pipeline_order = "verified_pre_commit_bound_post_commit"
+    else:
+        pipeline_order = None
     supports_exact = bool(
         observed_dflash == required_dflash
         and append_uses_target_hidden
@@ -195,7 +220,7 @@ def audit_exact_frontier_capability() -> dict[str, Any]:
         blockers.append("dflash_target_hidden_dependency_not_proven")
     if exact_api_names - generator_methods:
         blockers.append("no_exact_uncommitted_leaf_state_api")
-    if not commit_precedes_prelaunch:
+    if pipeline_order is None:
         blockers.append("committed_boundary_pipeline_order_not_proven")
     return {
         "supports_exact_frontier_lookahead": supports_exact,
@@ -204,6 +229,8 @@ def audit_exact_frontier_capability() -> dict[str, Any]:
         "observed_exact_frontier_apis": observed_exact_apis,
         "dflash_next_tile_requires_target_hidden": append_uses_target_hidden,
         "current_pipeline_begins_after_commit": commit_precedes_prelaunch,
+        "current_pipeline_begins_at_verified_boundary": pipeline_order is not None,
+        "current_pipeline_order": pipeline_order,
         "source_files": {
             str(DFLASH.relative_to(ROOT)): sha256_file(DFLASH),
             str(EXECUTOR.relative_to(ROOT)): sha256_file(EXECUTOR),

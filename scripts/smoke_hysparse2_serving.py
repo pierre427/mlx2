@@ -191,7 +191,8 @@ def research_reference(model_path: Path) -> dict:
         "serving_route_qualified": False,
     }
     adapter.close()
-    del adapter, serving, research, reference, _cache, cache, serving_cache, logits
+    # Rebind rather than del: the decode lambdas above name these.
+    adapter = serving = research = reference = _cache = cache = serving_cache = logits = None
     gc.collect()
     mx.clear_cache()
     return result

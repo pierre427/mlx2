@@ -271,7 +271,10 @@ def _register_sources(group_size: int) -> tuple[str, str]:
                     f"      + (int64_t)(bok{j} ? n0 + bnb + {8 * j} : 0) * (K / 2)) + bqi;\n")
     decl.append("  ushort " + ", ".join(names) + ";\n")
     decl.append("  if (g_begin < g_end) {\n" + load("g_begin", "    ") + "  }\n")
-    body = ["    auto b = op.template get_right_input_cooperative_tensor<XT, half, float>();\n"]
+    # ``cb``, not ``b``: the device-read path binds ``b`` to a tensor slice
+    # and spells a bare ``decltype(b)`` (valid for a tensor); keeping the
+    # cooperative operand distinct keeps the address-space guard exact.
+    body = ["    auto cb = op.template get_right_input_cooperative_tensor<XT, half, float>();\n"]
     for j in range(4):
         for kb in range(0, chunks, 2):
             body.append(f"    {{ const uint v = uint(bw{j}_{kb}) | (uint(bw{j}_{kb + 1}) << 16);\n")
@@ -279,12 +282,12 @@ def _register_sources(group_size: int) -> tuple[str, str]:
                 body.append(
                     f"      const half2 h{kk} = as_type<half2>(((v >> {4 * kk}) & 0x000F000Fu) | 0x64006400u)"
                     " - half2(1024.0h);\n"
-                    f"      b[{kb * 16 + j * 4 + kk}] = h{kk}.x; b[{(kb + 1) * 16 + j * 4 + kk}] = h{kk}.y;\n")
+                    f"      cb[{kb * 16 + j * 4 + kk}] = h{kk}.x; cb[{(kb + 1) * 16 + j * 4 + kk}] = h{kk}.y;\n")
             body.append("    }\n")
     body.append("    if (g + 1 < g_end) {\n" + load("g + 1", "      ") + "    }\n")
     body.append("    auto P = op.template get_destination_cooperative_tensor<decltype(a), "
-                "metal::remove_addrspace_t<decltype(b)>, float>();\n")
-    body.append("    op.run(a, b, P);\n")
+                "metal::remove_addrspace_t<decltype(cb)>, float>();\n")
+    body.append("    op.run(a, cb, P);\n")
     return "".join(decl), "".join(body)
 
 

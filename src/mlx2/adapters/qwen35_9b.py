@@ -523,11 +523,15 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         # installs (fused GDN, fp16 GDN state, invariant prefill, ...) reports
         # itself only while selected, so the qualifier can observe it here.
         # The 27B's always-present speculation fields do not apply (no MTP
-        # or draft route), so the default receipt is unchanged.
+        # or draft route), so the default receipt is unchanged.  Nor does
+        # ``external_mtp_head``: the attach hook is read from Qwen3.8's own
+        # class __dict__, so a Qwen3.5 target can never carry one.
         result = {
             key: value
             for key, value in super().diagnostics().items()
-            if key not in ("speculation", "segmented_mtp", "norm_convention")
+            if key not in (
+                "speculation", "segmented_mtp", "norm_convention", "external_mtp_head",
+            )
         }
         result.update({
             "architecture": "dense-hybrid-gdn-gqa",

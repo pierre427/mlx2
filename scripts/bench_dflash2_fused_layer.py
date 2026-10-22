@@ -29,8 +29,11 @@ import subprocess
 import tempfile
 import time
 
-TARGET = "~/.cache/huggingface/hub/models--rapid-mlx--Qwen3.8-27B-4bit-MTP-MLX/snapshots/aa985c29ff5b334cbfdcbbc787d47e66e9d9e456"
-DRAFTER = "~/mlx-models/Qwen3.8-27B-DFlash2"
+TARGET = str(
+    Path.home() / ".cache/huggingface/hub/models--rapid-mlx--Qwen3.8-27B-4bit-MTP-MLX"
+    / "snapshots/aa985c29ff5b334cbfdcbbc787d47e66e9d9e456"
+)
+DRAFTER = str(Path.home() / "mlx-models/Qwen3.8-27B-DFlash2")
 
 
 def command(*args):
@@ -78,7 +81,6 @@ def stage_forward(layer, x, x_ctx, rope, cache, *, fused_path, measure):
     no zero-cost post-norm measurement is fabricated. Cross-layer fusion is
     intentionally absent.
     """
-    import mlx.core as mx
     from mlx2.runtime.drafters import dflash2_fused as fused
     from mlx2.runtime.drafters.dflash_base import swiglu
 
@@ -314,7 +316,9 @@ def main():
                                       "call_median": result["call"]["median"],
                                       **({"stage_medians": {k: v.get("median", v) for k, v in result["stages"].items()}}
                                          if "stages" in result else {})}), flush=True)
-                    del cache_rows, context, tail, x, hctx
+                    # Drop this profile's buffers before the next one.  Rebind
+                    # rather than del: the closures above name these.
+                    cache_rows = context = tail = x = hctx = None
             finally:
                 draft = layer = factory = call_factory = None
                 gc.collect()

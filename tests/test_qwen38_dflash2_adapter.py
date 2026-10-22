@@ -830,8 +830,12 @@ def test_topology_mismatch_fails_before_pins_matter(tmp_path):
 @pytest.mark.parametrize(
     "extra, error",
     [
-        ({"num_draft": 8}, "below the draft block size"),
-        ({"num_draft": 0}, "below the draft block size"),
+        # f567bfd7a bounds num_draft by the drafter's declared proposal
+        # capacity (DFlash2: fifteen lattice positions), not by its trained
+        # block; see test_num_draft_admits_declared_capacity_beyond_block.
+        ({"num_draft": 16}, "supported proposal length"),
+        ({"num_draft": 0}, "supported proposal length"),
+        ({"num_draft": 8.0}, "supported proposal length"),
         ({"pairwise_selection": "gpu"}, "pairwise_selection"),
         ({"gdn_core": True}, "unknown keys"),
         ({"draft_quantization": {"bits": 3, "group_size": 64}}, "draft_quantization"),
@@ -843,6 +847,24 @@ def test_policy_negative_cases(tmp_path, extra, error):
     target, draft = _write_artifacts(tmp_path)
     with pytest.raises(ValueError, match=error):
         inspect_external_policy({**_pins(target, draft), **extra}, target)
+
+
+def test_num_draft_admits_declared_capacity_beyond_block(tmp_path):
+    from mlx2.adapters.qwen38_27b import inspect_external_policy
+    from mlx2.runtime.drafters.dflash2_config import DFlash2Config
+
+    target, draft = _write_artifacts(tmp_path)
+    capacity = DFlash2Config.maximum_proposal_length
+    assert capacity == 15
+    # The fixture's trained block is 8. Depths 8..15 are an implemented,
+    # untrained and unqualified capacity (provenance
+    # ast-dflash-proposal-capacity-20261020), admitted by policy inspection.
+    for count in (7, 8, capacity):
+        inspect_external_policy({**_pins(target, draft), "num_draft": count}, target)
+    with pytest.raises(ValueError, match="supported proposal length"):
+        inspect_external_policy(
+            {**_pins(target, draft), "num_draft": capacity + 1}, target
+        )
 
 
 def test_runtime_quantization_is_part_of_the_draft_identity(tmp_path):

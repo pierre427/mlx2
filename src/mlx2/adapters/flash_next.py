@@ -1270,9 +1270,11 @@ class FlashNextAdapter:
             raise ValueError("Flash-Next expert arithmetic contract found no MoE blocks")
         switches = [getattr(block, "switch_mlp", None) for block in blocks]
         lane = getattr(getattr(self, "row_exact_verify", None), "lane_layers", None) or {}
+        # A diagnostic snapshot may stand in for the model; the tree law is
+        # bound on the live model only, so read it without assuming one.
+        tree_law = getattr(getattr(self, "model", None), "_mlx2_flash_tree_law", None)
         return {
-            **({"flash_tensorfold_tree_projection_law": dict(self.model._mlx2_flash_tree_law)}
-               if getattr(self.model, "_mlx2_flash_tree_law", None) else {}),
+            **({"flash_tensorfold_tree_projection_law": dict(tree_law)} if tree_law else {}),
             # Present only when low_bit_lane moved layers onto the lane law:
             # their decode and prefill state differ from the stock product's.
             **(

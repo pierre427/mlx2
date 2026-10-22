@@ -139,11 +139,13 @@ def test_loader_admits_only_probed_input_widths_without_hot_canaries(
     )
     admitted.forward(None, [7], [-1], [], (0, 1), cached=False)
     assert observed == [True]
-    with pytest.raises(ValueError, match="qualified chain"):
+    # f567bfd7a generalised the refusal to "qualified geometry" when the
+    # same admission check began to cover AST fast trees.
+    with pytest.raises(ValueError, match="outside its qualified geometry"):
         admitted.forward(None, [7, 8], [-1, 0], [], (0, 1), cached=False)
     with pytest.raises(ValueError, match="linear chain"):
         admitted.forward(None, [7, 8, 9], [-1, 0, 0], [], (0, 1), cached=False)
-    with pytest.raises(ValueError, match="qualified chain"):
+    with pytest.raises(ValueError, match="outside its qualified geometry"):
         admitted.forward(None, [7], [-1], [], (0,), cached=False)
     assert observed == [True]
 

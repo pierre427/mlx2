@@ -568,8 +568,11 @@ def test_external_and_pld_prefill_report_progress():
     generator.decode_time_fairness = DecodeTimeFairness()
     from mlx2.runtime.round_phases import initialize
     initialize(generator, None)
+    # The media fields mirror the real ``_Lane`` defaults: a text lane has
+    # no media chunk, so ``_prefill`` takes the sliced text path.
     lane = NS(uid=1, remaining=deque([5, 6, 7, 8, 9]), history=[1, 2],
-              lookup_history=[1, 2, 5, 6, 7, 8, 9], cache=[])
+              lookup_history=[1, 2, 5, 6, 7, 8, 9], cache=[],
+              prefill_input=None, consumed_prefill_inputs=())
     generator._capture_lane_recovery = lambda lane: None
     generator._arm_lane_speculation = lambda lane: None
     import mlx2.runtime.pld as pld_module

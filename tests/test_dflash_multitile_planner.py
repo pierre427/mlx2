@@ -50,6 +50,11 @@ def test_source_separates_mechanisms_without_claiming_artifact_geometry():
     module = load_module()
     audit = module.audit_source(ROOT)
     assert audit["native_monolithic_ready"] is True
+    # f567bfd7a: the executor bounds the count by declared capacity, whose
+    # default is the trained block. DFlash2 declares a longer, untrained
+    # lattice capacity, so native legality stays on the trained block.
+    assert audit["count_bound_source"] == "declared_capacity_default_trained_block"
+    assert audit["declared_capacity_may_exceed_trained_block"] is True
     assert audit["serial_committed_state_ready"] is True
     assert audit["progressive_same_proposal_api_ready"] is False
     assert audit["eager_frontier_exact_state_ready"] is False

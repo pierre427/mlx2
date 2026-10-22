@@ -82,7 +82,16 @@ def test_source_audit_fails_closed_without_exact_leaf_state_api():
     result = probe.audit_exact_frontier_capability()
 
     assert result["dflash_next_tile_requires_target_hidden"] is True
-    assert result["current_pipeline_begins_after_commit"] is True
+    # 5a9b359ef queues the next lattice after the verification walk and
+    # before the target commit, keeping it only at the exact predicted
+    # post-commit boundary. The pipeline still starts from a verified
+    # boundary, never from an uncommitted leaf.
+    assert result["current_pipeline_begins_after_commit"] is False
+    assert result["current_pipeline_begins_at_verified_boundary"] is True
+    assert result["current_pipeline_order"] == (
+        "verified_pre_commit_bound_post_commit"
+    )
+    assert "committed_boundary_pipeline_order_not_proven" not in result["blockers"]
     assert result["supports_exact_frontier_lookahead"] is False
     assert "no_exact_uncommitted_leaf_state_api" in result["blockers"]
     assert set(result["source_files"]) == {

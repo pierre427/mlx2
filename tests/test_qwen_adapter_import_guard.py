@@ -324,7 +324,7 @@ def test_qwen36_routed_decode_and_topk_applied_live(monkeypatch, latched, kernel
 
 PROFILE_MODULES = [
     "agnes_3_flash", "flash_next", "gpt_oss", "hy_v3", "laguna_xs21",
-    "mellum21", "muse_glimmer", "nemotron3_super", "north_mini_code", "qwen35_9b",
+    "ling3_flash", "mellum21", "muse_glimmer", "nemotron3_super", "north_mini_code", "qwen35_9b",
     "qwen36_27b", "qwen36_35b", "qwen38_27b", "xing",
 ]
 
@@ -352,6 +352,7 @@ def test_tf32_set_after_package_import_is_refused_by_every_profile(monkeypatch, 
 @pytest.mark.parametrize("module,cls", [
     ("olmo_hils", "OlmoHiLSAdapter"), ("granite_swa", "GraniteSWAAdapter"),
     ("lfm25_moe", "LFM25MoEAdapter"), ("flint", "FlintAdapter"),
+    ("hysparse2", "HySparse2Adapter"),
 ])
 def test_tf32_set_after_package_import_is_refused_by_inline_profiles(
     monkeypatch, tmp_path, module, cls
@@ -361,7 +362,7 @@ def test_tf32_set_after_package_import_is_refused_by_inline_profiles(
     mod = importlib.import_module(f"mlx2.adapters.{module}")
     monkeypatch.setattr(mod, "inspect_artifact", lambda _p: {
         "identity": {"path": str(tmp_path), "fingerprint": "f", "files": []},
-        "config": {}, "quantization": None,
+        "config": {}, "quantization": None, "checkpoint": {},
     })
     monkeypatch.setattr(process_env, "_EXPLICIT_AT_IMPORT", None)
     monkeypatch.setenv("MLX_ENABLE_TF32", "1")
@@ -384,6 +385,7 @@ def test_every_profile_that_spreads_process_numerics_is_covered():
     assert spreading <= refusing, sorted(spreading - refusing)
     assert spreading == set(PROFILE_MODULES) | {
         "olmo_hils", "granite_swa", "standard_decoder", "lfm25_moe", "flint",
+        "hysparse2",
     }
 
     # Qwen3.5 9B and dense Qwen3.6 inherit Qwen3.8's guarded constructor;

@@ -33,13 +33,20 @@ def external_class():
         def __init__(self, tokens, laws, width, features=None):
             self.tokens, self.laws, self.width = tokens, laws, width
 
+    class TreeRow:
+        # Mirrors ``TreeDraftRow``: parents index ``tokens``; calibrated
+        # drafters add per-node ``info`` (ed7e9f9cd).
+        def __init__(self, tokens, parents, width=1, info=None):
+            self.tokens, self.parents, self.width = tokens, parents, width
+            self.info = info
+
     class Unavailable(Exception):
         pass
 
     ns = {
         "__package__": "mlx2.runtime",
         "HostDraftRow": Row,
-        "TreeDraftRow": type("TreeRow", (Row,), {}),
+        "TreeDraftRow": TreeRow,
         "CompactDraftRow": type("CompactRow", (), {}),
         "DraftUnavailable": Unavailable,
         "_bump": lambda d, k, v=1: d.update({k: d[k] + v}),

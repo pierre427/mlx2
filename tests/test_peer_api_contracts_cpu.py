@@ -33,6 +33,10 @@ def test_authenticated_feature_scope_overrides_both_caller_and_adapter_fields():
     engine.counts = Counter()
     engine.apc_reuse_disabled_reason = None
     engine.adapter = SimpleNamespace(prepare_multimodal_request=prepare)
+    # A loaded engine's snapshot names its route; media routing reads it.
+    # This adapter declares no media route contract, so the request goes to
+    # its media hook (``route_native``).
+    engine.snapshot = {"state": "ready", "settings": {"route": "ordinary"}}
     job = engine._prepare_job(
         {
             "messages": [

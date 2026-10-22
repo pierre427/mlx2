@@ -229,6 +229,8 @@ def test_prompt_lookup_rejects_sample_before_emitted_or_cache_commit(invalid):
         generated=0,
         config={},
         cost_latch=None,
+        # The real ``_Lane`` defaults this to None (a speculating PLD lane).
+        plain_only=None,
         ordinary=True,
         anchor=7,
         processors=[],
@@ -273,8 +275,11 @@ def test_prompt_lookup_lane_failure_keeps_peer_and_executor_live(batched):
     from mlx2.runtime.round_phases import initialize
     initialize(generator, None)
     generator.scheduler_stats = {}
+    # ``__init__`` sets this from the model's ``pld_verify_max_lanes``; an
+    # unbounded model leaves it None (one forward for the whole cohort).
+    generator._verify_max_lanes = None
     if batched:
-        generator._round_batched = lambda lanes: (_ for _ in ()).throw(
+        generator._round_batched = lambda lanes, pipeline=False: (_ for _ in ()).throw(
             PromptLookupLaneFailure(29, "invalid sampled token")
         )
     else:

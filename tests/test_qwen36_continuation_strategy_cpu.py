@@ -83,14 +83,16 @@ def test_dflash2_is_a_bound_complete_path_source_not_target_state():
         limit=8,
     )
     assert source.mechanism == "dflash2"
-    assert [path.tokens for path in paths] == [
-        (10,),
-        (10, 11),
-        (10, 11, 12),
-        (20,),
-        (20, 21),
-        (20, 21, 22),
-    ]
+    # Multi-path offers keep only prefix-nondominated paths (e54dabcb9): a
+    # longer supplied path already covers every ancestor prefix under
+    # target-draw-then-prefix-match verification. All six tree nodes are
+    # still enumerated as prefix-closed candidates first.
+    assert [path.tokens for path in paths] == [(10, 11, 12), (20, 21, 22)]
+    assert [path.ranking_score for path in paths] == [-2.0, -5.0]
+    receipt = source.last_diagnostics
+    assert receipt["path_selection"] == "prefix_nondominated"
+    assert receipt["nodes"] == receipt["candidate_paths"] == 6
+    assert receipt["prefix_dominated_paths_removed"] == 4
     assert all(
         path.confidence_features == (None,) * len(path.tokens) for path in paths
     )
@@ -110,14 +112,30 @@ def test_dflash2_enumerates_all_fifteen_prefix_closed_tree_nodes_before_limit():
             parents = [-1, 0, 1, -1, 3, 4, -1, 6, 7, -1, 9, 10, -1, 12, 13]
             return (tokens, parents), None
 
-    paths = ExternalContinuationSource(Draft())(
+    source = ExternalContinuationSource(Draft())
+    paths = source(
         SimpleNamespace(depth=3, anchor=17, pending_features=None, draft_cache=[]),
         limit=15,
     )
-    assert len(paths) == 15
-    assert [len(path.tokens) for path in paths] == [1, 2, 3] * 5
-    assert paths[0].tokens == (10,)
+    # All fifteen prefix-closed nodes are enumerated before the limit is
+    # applied; the multi-path offer then drops the ten ancestor prefixes that
+    # the five full-depth leaves already cover (e54dabcb9).
+    receipt = source.last_diagnostics
+    assert receipt["nodes"] == receipt["candidate_paths"] == 15
+    assert receipt["depth_hist"] == {"1": 5, "2": 5, "3": 5}
+    assert receipt["prefix_dominated_paths_removed"] == 10
+    assert receipt["offered_paths"] == len(paths) == 5
+    assert [len(path.tokens) for path in paths] == [3] * 5
+    assert paths[0].tokens == (10, 11, 12)
     assert paths[-1].tokens == (22, 23, 24)
+    assert receipt["offered_node_ordinals"] == [2, 5, 8, 11, 14]
+
+    # The single-path control still sees the first prefix-closed node.
+    single = ExternalContinuationSource(Draft())(
+        SimpleNamespace(depth=3, anchor=17, pending_features=None, draft_cache=[]),
+        limit=1,
+    )
+    assert [path.tokens for path in single] == [(10,)]
 
 
 def test_fold_keeps_dflash2_complete_path_protocol_with_distinct_identity():
@@ -140,7 +158,9 @@ def test_fold_keeps_dflash2_complete_path_protocol_with_distinct_identity():
         limit=8,
     )
     assert source.mechanism == "dflash2_fold"
-    assert [path.tokens for path in paths] == [(10,), (10, 11)]
+    # Prefix-nondominated multi-path offer (e54dabcb9): (10, 11) covers (10,).
+    assert [path.tokens for path in paths] == [(10, 11)]
+    assert source.last_diagnostics["candidate_paths"] == 2
 
 
 def test_dspark_complete_path_bridge_is_a_supported_provider_contract():

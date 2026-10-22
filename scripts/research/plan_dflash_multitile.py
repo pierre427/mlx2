@@ -193,7 +193,8 @@ def audit_source(root: Path = ROOT) -> dict[str, Any]:
     dflash = root / "src/mlx2/runtime/drafters/dflash2.py"
     executor = root / "src/mlx2/runtime/external_speculative.py"
     config = root / "src/mlx2/runtime/drafters/dflash2_config.py"
-    required = (dflash, executor, config)
+    capabilities = root / "src/mlx2/runtime/draft_capabilities.py"
+    required = (dflash, executor, config, capabilities)
     missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
     if missing:
         return {
@@ -212,7 +213,20 @@ def audit_source(root: Path = ROOT) -> dict[str, Any]:
     executor_text = executor.read_text()
     config_text = config.read_text()
     native_contracts = {"draft_distributions", "append_context", "batch_caches"}
-    count_bound = "1 <= self.num_draft < draft_model.config.block_size" in executor_text
+    capabilities_text = capabilities.read_text()
+    legacy_count_bound = (
+        "1 <= self.num_draft < draft_model.config.block_size" in executor_text
+    )
+    # f567bfd7a bounds the executor's draft count by the drafter's declared
+    # implementation capacity; undeclared drafters keep block_size - 1.
+    # DFlash2 declares a fifteen-position lattice capacity that can exceed
+    # a short trained block.  That depth is untrained, so this planner keeps
+    # its own trained-block rule (K < artifact block) for native legality.
+    capacity_count_bound = (
+        "1 <= self.num_draft <= maximum_proposal_length(draft_model)" in executor_text
+        and "return block - 1" in capabilities_text
+    )
+    count_bound = legacy_count_bound or capacity_count_bound
     trained_block_bound = (
         "runtime_block_size must be between 2 and block_size" in config_text
         and 'flat["runtime_block_size"] = min(5, int(flat["block_size"]))' in config_text
@@ -243,6 +257,15 @@ def audit_source(root: Path = ROOT) -> dict[str, Any]:
         "required_progressive_apis": sorted(PROGRESSIVE_APIS),
         "required_eager_apis": sorted(EAGER_APIS),
         "trained_block_count_bound": count_bound,
+        "count_bound_source": (
+            "trained_block_size" if legacy_count_bound
+            else "declared_capacity_default_trained_block" if capacity_count_bound
+            else None
+        ),
+        "declared_capacity_may_exceed_trained_block": (
+            "maximum_proposal_length = DFlash2Config.maximum_proposal_length"
+            in dflash.read_text()
+        ),
         "runtime_block_bound": trained_block_bound,
         "source_files": {
             str(path.relative_to(root)): _sha256(path) for path in required

@@ -314,20 +314,32 @@ def test_adapter_constructs_four_request_slots_with_one_private_tree_provider(
         "ExternalDraftBatchGenerator",
         lambda model, **kwargs: SimpleNamespace(model=model, kwargs=kwargs),
     )
-    adapter = SimpleNamespace(
-        model=batch.model,
-        draft_model=batch.draft,
-        external_policy={**_policy(), "ast_target_tree_oracle": "cpu-oracle"},
-        identity={"fingerprint": "cpu-private-tree"},
-        _initialize_external_feedback=lambda: None,
-        _external_num_draft=lambda: 15,
-        _progressive_external_binding=progressive_target_protocol_binding(
-            batch.model, "exact"
-        ),
-    )
+    def adapter_for(model):
+        return SimpleNamespace(
+            model=model,
+            draft_model=batch.draft,
+            external_policy={**_policy(), "ast_target_tree_oracle": "cpu-oracle"},
+            identity={"fingerprint": "cpu-private-tree"},
+            _initialize_external_feedback=lambda: None,
+            _external_num_draft=lambda: 15,
+            _progressive_external_binding=progressive_target_protocol_binding(
+                model, "exact"
+            ),
+        )
+
     try:
+        # 44071e7fd: tree tiles reproduce bf16 arithmetic, so an AST oracle
+        # route on a target whose norm/conv tensors are not bf16 is refused
+        # before a batch is created. The tiny fixture is float32.
+        with pytest.raises(ValueError, match="tree tiles need bf16"):
+            Qwen3827BAdapter.create_external_batch(
+                adapter_for(batch.model), completion_batch_size=4
+            )
+        calls.clear()
+        # Served Qwen3.8 artifacts store these tensors in bf16.
+        batch.model.set_dtype(mx.bfloat16)
         created = Qwen3827BAdapter.create_external_batch(
-            adapter, completion_batch_size=4
+            adapter_for(batch.model), completion_batch_size=4
         )
         assert created.kwargs["completion_batch_size"] == 4
         assert created.kwargs["ast_target_tree_executor_provider"] is provider

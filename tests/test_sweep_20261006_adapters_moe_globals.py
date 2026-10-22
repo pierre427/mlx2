@@ -196,6 +196,10 @@ def test_qwen36_35b_claims_the_rhs_pad_policy():
 # switch_layers only for the MoE helpers they never build (Qwen3.8-27B and
 # the dense Qwen3 / Qwen3.8 flat AST correctness targets).
 _DENSE_EXEMPT = {"qwen38_27b", "qwen38_hybrid_native_flat", "dense_qwen3_flat"}
+# Executor modules that run inside another adapter's model and construct no
+# model themselves: the owning adapter must claim the globals instead.
+_EXECUTOR_OWNER = {"flash_next_tree": "flash_next"}
+_CLAIMS = ("claim_stock_moe(self", "claim_moe(self", "MOE_RHS_PAD_POLICY")
 
 
 def test_every_adapter_building_switch_layers_claims_the_globals():
@@ -213,8 +217,11 @@ def test_every_adapter_building_switch_layers_claims_the_globals():
         built = set(re.findall(r"runtime\.models\.(\w+) import", source)) | set(
             re.findall(r"runtime\.models import (\w+)", source)
         )
-        if built & users and path.stem not in _DENSE_EXEMPT and not (
-            "claim_stock_moe(self" in source or "MOE_RHS_PAD_POLICY" in source
+        owner = _EXECUTOR_OWNER.get(path.stem)
+        if owner is not None:
+            source = (ADAPTERS / f"{owner}.py").read_text()
+        if built & users and path.stem not in _DENSE_EXEMPT and not any(
+            marker in source for marker in _CLAIMS
         ):
             missing.append(path.stem)
     assert missing == []

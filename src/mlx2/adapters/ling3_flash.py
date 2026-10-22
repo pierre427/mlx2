@@ -9,6 +9,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..process_env import (
     PROCESS_NUMERICS,
+    assert_process_profile_applied,
     clear_inherited_profile,
     require_process_numerics,
 )
@@ -165,6 +166,7 @@ def configure_environment():
     }
     clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
     os.environ.update(profile)
+    assert_process_profile_applied("the Ling 3 Flash profile")
     return profile
 
 
@@ -211,6 +213,11 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.identity = artifact["identity"]
         self.layout = CACHE_LAYOUT
         self.environment = configure_environment()
+        # bailing_hybrid builds mlx2 switch_layers experts (stock sorted
+        # gather, no NAX scope): pin the MoE process globals for this load.
+        from .process_globals import claim_stock_moe
+
+        claim_stock_moe(self, "the Ling 3 Flash adapter")
         draft_record = draft_format = None
         if external:
             from .external_drafter_formats import drafter_format

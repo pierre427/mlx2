@@ -1847,9 +1847,11 @@ def test_continuation_ast_bridge_refuses_approximate_target_fidelity():
     model, base = pair("xpress")
     model.progressive_external_verify_protocol = PROGRESSIVE_TARGET_PROTOCOL_VERSION
     wrapper = wrapped(model, base, {"sources": ["external"]})
+    # d83edfeee admitted only a primary-only (one branch) near-tie AST and
+    # reworded the refusal; a two-branch near-tie bridge is still refused.
     with pytest.raises(
         ValueError,
-        match="requires exact progressive ordered alternatives",
+        match="requires exact ordered alternatives or explicit primary-only",
     ):
         ExternalDraftBatchGenerator(
             model,
