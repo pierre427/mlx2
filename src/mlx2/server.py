@@ -6379,6 +6379,12 @@ def build_parser():
             "/Volumes/T7/models and the Hugging Face hub cache)"
         ),
     )
+    parser.add_argument(
+        "--mtp-head",
+        help="attach a separately shipped MTP head directory as the target's "
+        "native head (adapters that declare external_mtp_head; the head is "
+        "verified against the target before any tensor loads)",
+    )
     owned = parser.add_argument_group("experimental TensorFold-owned token-ID route")
     owned.add_argument("--tensorfold-owned-live", action="store_true",
                        help="enable unqualified, default-off native worker endpoint")
@@ -6736,6 +6742,49 @@ def apply_best_route_default(args, adapter_resolution, *, table=None, streaming=
     elif record.get("failover"):
         log.warning("best-route default not applied: %s", record["failover"])
     return record
+
+
+def apply_external_mtp_head(args, policy, adapter_resolution):
+    """Bind an external MTP head (``--mtp-head``, policy ``mtp_head`` or an
+    MTP-head artifact named by ``--ast-drafter``) before route selection.
+
+    Returns ``(policy, adapter_resolution)``; the resolution then reports the
+    target+head pair (native MTP capability, combined identity).  The adapter
+    verifies the head; an adapter without the hook refuses.
+    """
+    resolved = {} if policy is None else dict(policy)
+    head = resolved.get("mtp_head")
+    flag = getattr(args, "mtp_head", None)
+    if flag is not None:
+        if head is not None and str(Path(head).expanduser().resolve()) != str(
+            Path(flag).expanduser().resolve()
+        ):
+            raise ValueError("--mtp-head and the execution policy's mtp_head differ")
+        head = flag
+    adapter_type = getattr(adapter_resolution, "adapter_type", None)
+    drafter = getattr(args, "ast_drafter", None)
+    probe = getattr(adapter_type, "is_external_mtp_head", None)
+    if (
+        getattr(args, "ast", False) and drafter not in (None, "auto", "mtp", "pld")
+        and callable(probe) and probe(drafter)
+    ):
+        if head is not None and str(Path(head).expanduser().resolve()) != str(
+            Path(drafter).expanduser().resolve()
+        ):
+            raise ValueError("--ast-drafter names a different MTP head than --mtp-head")
+        head = drafter
+        # The attached head drafts as the target's native head.
+        args.ast_drafter = "mtp"
+    if head is None:
+        return policy, adapter_resolution
+    hook = getattr(adapter_type, "external_mtp_head_resolution", None)
+    if not callable(hook):
+        name = getattr(adapter_type, "__name__", "this adapter")
+        raise ValueError(f"{name} does not attach external MTP heads")
+    adapter_resolution = hook(adapter_resolution, head)
+    resolved["mtp_head"] = str(Path(head).expanduser().resolve())
+    args.mtp_head = resolved["mtp_head"]
+    return resolved, adapter_resolution
 
 
 def apply_ast_invocation(args, policy, adapter_resolution):
@@ -7391,6 +7440,11 @@ def main():
         # reads, but a resident-load-only route must not be auto-selected
         # when the engine is going to stream experts single-lane.
         apply_best_route_default(args, adapter_resolution, streaming=streaming)
+        # After the best-route seam: --mtp-head (or an MTP-head --ast-drafter)
+        # is an explicit route option there, so the auto default stands down.
+        policy, adapter_resolution = apply_external_mtp_head(
+            args, policy, adapter_resolution
+        )
         policy = apply_ast_invocation(args, policy, adapter_resolution)
         if getattr(args, "ast_route", {}).get("tree_tiles_refused"):
             logging.getLogger("mlx2.server").warning(

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Checkpoint normalization mined from bstnxbt/dflash-mlx (Apache-2.0,
-# models/muse_glimmer_draft.py and model.py DFlashAttention mask law); see
-# provenance/muse-dflash-assistant.json.  The external-route contract
-# (committed-only context KV, exact per-position laws, row batching) follows
-# mlx2's own laguna_dflash drafter.
+# models/muse_glimmer_draft.py); the block mask law and the proposal logits
+# follow the Hugging Face transformers reference (Apache-2.0,
+# models/muse_glimmer_assistant and generation/candidate_generator.py
+# DFlashTokenCandidateGenerator); see provenance/muse-dflash-assistant.json.
+# The external-route contract (committed-only context KV, exact per-position
+# laws, row batching) follows mlx2's own laguna_dflash drafter.
 """Muse Glimmer's original DFlash drafter (``MuseGlimmerAssistantModel``).
 
 Meta ships Muse Glimmer 30B with a five-layer DFlash block drafter (BF16,
@@ -12,13 +14,23 @@ RMSNorm, SwiGLU MLP, NeoX RoPE, every layer sliding-window 2048 -- with the
 target-tap projection named ``encoder.fc`` / ``encoder.output_norm_enc`` and
 ``target_layer_ids`` / ``mask_token_id`` / ``block_size`` at the config root.
 It has no vocabulary head: proposals are projected through the target's
-logits tail (lm_head, output multiplier, final softcap).
+raw ``lm_head`` -- not the target's logits tail.  The reference candidate
+generator (transformers ``DFlashTokenCandidateGenerator``) applies only the
+output embedding; the drafter was trained against those logits.  Muse's
+tail multiplies by ``output_multiplier`` (~0.196) and softcaps, which leaves
+the argmax unchanged but flattens the sampled draft law about five-fold: at
+the model card's default sampling the drafter then put ~0.1% of its mass on
+the target's support and no sampled draft was ever accepted.
+
+The proposal block is the anchor plus ``block_size - 1`` mask tokens with
+bidirectional attention inside the block (the reference's
+``create_bidirectional_sliding_window_mask``); rows past ``num_draft`` are
+computed and discarded.  Block inputs are fixed (anchor and mask tokens), so
+position ``j`` never depends on the drafts sampled at other positions and
+``softmax(logits_j / T)`` is the exact law ``verify_proposals`` needs.
 
 It is distinct from the DFlash2 closure (no candidate selector, no dynamic
-convolutions).  Sliding layers attend causally inside the proposal block
-(dflash-mlx's default for sliding DFlash layers); since block inputs are the
-anchor plus mask tokens, position ``j`` never depends on drafts ``< j``, so
-``softmax(logits_j / T)`` is the exact law ``verify_proposals`` needs.
+convolutions).
 
 No capability is qualified by importing or constructing this module.
 """
@@ -34,6 +46,9 @@ import numpy as np
 from .cohere_eagle import EagleWindowKVCache, _Rows
 
 ARCHITECTURE = "MuseGlimmerAssistantModel"
+# v2: raw lm_head logits and the bidirectional full block (reference law);
+# v1 projected through the target's logits tail with a causal block.
+MUSE_ASSISTANT_LAW_VERSION = "muse-assistant-raw-head-bidirectional-v2"
 MODEL_TYPE = "muse_glimmer_assistant"
 _ENCODER_KEY_REMAP = (
     ("encoder.fc.", "fc."),
@@ -211,9 +226,11 @@ class MuseDFlashAttention(nn.Module):
     def block(self, x, cache):
         """One row's proposal block over committed context (not stored).
 
-        dflash-mlx sliding-layer law: a context key at position ``p`` is
-        visible to a query at ``q`` only when ``q - p < window``; block keys
-        are causal.  The resident ring holds the last ``window - 1`` keys.
+        Reference sliding-layer law: a context key at position ``p`` is
+        visible to a query at ``q`` only when ``q - p < window``; every block
+        key is visible to every block query (bidirectional; the block is far
+        shorter than the window).  The resident ring holds the last
+        ``window - 1`` keys.
         """
         batch, length, _ = x.shape
         q = self.q_proj(x).reshape(batch, length, self.n_heads, self.head_dim)
@@ -224,15 +241,15 @@ class MuseDFlashAttention(nn.Module):
         resident = int(ctx_k.shape[2])
         keys = mx.concatenate([ctx_k.astype(k.dtype), k], axis=2) if resident else k
         values = mx.concatenate([ctx_v.astype(v.dtype), v], axis=2) if resident else v
-        rows = mx.arange(length)[:, None]
         if resident:
             # Context column c holds absolute position offset - resident + c.
+            rows = mx.arange(length)[:, None]
             columns = mx.arange(resident)[None, :]
             context = columns > rows + resident - self.window
-            causal = mx.arange(length)[None, :] <= rows
-            mask = mx.concatenate([context, causal], axis=-1)
+            block = mx.ones((length, length), dtype=mx.bool_)
+            mask = mx.concatenate([context, block], axis=-1)
         else:
-            mask = mx.arange(length)[None, :] <= rows
+            mask = None
         out = mx.fast.scaled_dot_product_attention(q, keys, values, scale=self.scale, mask=mask)
         return self.o_proj(out.transpose(0, 2, 1, 3).reshape(batch, length, -1))
 
@@ -279,8 +296,10 @@ class MuseDFlashDraftModel(nn.Module):
             "trained_block_size": self.config.block_size,
             "target_layer_ids": list(self.config.target_layer_ids),
             "sliding_window": self.config.sliding_window,
-            "block_attention": "causal",
+            "block_attention": "bidirectional_full_block",
+            "proposal_logits": "target_lm_head_raw",
             "proposal_distribution": "dense_target_head_law",
+            "law_version": MUSE_ASSISTANT_LAW_VERSION,
             "quantization": self.config.quantization,
         }
 
@@ -340,19 +359,25 @@ class MuseDFlashDraftModel(nn.Module):
         self.stats["committed_positions"] += int(hidden.shape[1]) * len(rows)
 
     def _logits(self, hidden):
+        """The reference candidate logits: the target's output embedding only.
+
+        Not the target's logits tail: ``output_multiplier`` and the final
+        softcap belong to the target's own head, not to the drafter's.
+        """
         target = self._target
         if target.tie_word_embeddings:
-            logits = target.model.embed_tokens.as_linear(hidden)
-        else:
-            logits = target.lm_head(hidden)
-        logits = logits * target.args.output_multiplier
-        cap = target.args.final_logit_softcapping
-        return mx.tanh(logits / cap) * cap
+            return target.model.embed_tokens.as_linear(hidden)
+        return target.lm_head(hidden)
 
     def _block_logits(self, anchors, rows, count):
+        count = int(count)
+        if not 1 <= count < self.config.block_size:
+            raise ValueError("Muse DFlash proposal length must be below the trained block size")
+        # The trained block: anchor plus block_size - 1 mask tokens.
         tokens = mx.concatenate(
             [mx.array(anchors, dtype=mx.int32)[:, None],
-             mx.full((len(anchors), count), self.config.mask_token_id, dtype=mx.int32)], axis=1
+             mx.full((len(anchors), self.config.block_size - 1), self.config.mask_token_id,
+                     dtype=mx.int32)], axis=1
         )
         # The drafter consumes the target's raw token embedding (the target's
         # scaleless embedding RMSNorm belongs to the target trunk).
@@ -365,7 +390,7 @@ class MuseDFlashDraftModel(nn.Module):
             )
             x = x + attn
             x = x + layer.mlp(layer.post_attention_layernorm(x))
-        return self._logits(self.norm(x)[:, 1:])
+        return self._logits(self.norm(x)[:, 1:1 + count])
 
     def draft_distributions(
         self, anchors, hidden, cache, proposal_length, rngs, temperatures, *,
@@ -406,4 +431,4 @@ class MuseDFlashDraftModel(nn.Module):
 
 Model = MuseDFlashDraftModel
 
-__all__ = ["ARCHITECTURE", "MuseDFlashConfig", "MuseDFlashDraftModel", "Model", "expected_weights"]
+__all__ = ["ARCHITECTURE", "MUSE_ASSISTANT_LAW_VERSION", "Model", "MuseDFlashConfig", "MuseDFlashDraftModel", "expected_weights"]

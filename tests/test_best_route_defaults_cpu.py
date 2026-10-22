@@ -176,6 +176,18 @@ def test_explicit_route_options_always_win(override):
     assert vars(args) == {**before, "route_default_selection": record}
 
 
+def test_mtp_head_flag_disables_the_auto_default():
+    # --mtp-head names the route (native MTP on the attached head); the
+    # measured no-flag default must not replace it.
+    args = _args(mtp_head="/m/head")
+    before = dict(vars(args))
+    record = apply_best_route_default(args, _resolution(), table=_table(_entry(DFLASH)))
+    assert record["status"] == "explicit_route" and not record["applied"]
+    assert record["explicit_options"] == ["mtp_head"]
+    assert vars(args) == {**before, "route_default_selection": record}
+    assert not args.ast and not args.native_mtp
+
+
 def test_no_auto_route_opts_out():
     args = _args(no_auto_route=True)
     record = apply_best_route_default(args, _resolution(), table=_table(_entry({"kind": "native_mtp"})))

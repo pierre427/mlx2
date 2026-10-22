@@ -60,6 +60,8 @@ FEATURES = (
     "exact_prefill_projection_law", "native_mtp_packed_paths",
     "shared_root_tensorfold_tree_target", "ast_native_mtp_packed_3x5",
     "ast_native_mtp_packed_5x3", "best_route_default",
+    "external_draft_dspark_ast", "external_mtp_head", "external_mtp_head_ast",
+    "external_draft_assistant_sampled_law", "external_draft_lilicorr_native_nvfp4",
 )
 
 

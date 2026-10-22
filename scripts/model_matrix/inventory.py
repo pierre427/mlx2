@@ -143,12 +143,38 @@ def _pair(target: dict, draft: dict, cache: dict) -> dict:
     """Ask the target adapter's own inspector whether ``draft`` binds.
 
     The pairing logic lives in ``mlx2.adapters.drafter_pairing`` and is
-    shared with the server's best-route defaults.
+    shared with the server's best-route defaults.  A separately shipped MTP
+    head binds through the adapter's own head hook instead.
     """
+    if draft.get("mtp_head"):
+        return _pair_mtp_head(target, draft)
     pairing = pair_drafter(target, draft, cache)
     pairing.pop("identity", None)
     pairing.pop("pins", None)
     return pairing
+
+
+def _pair_mtp_head(target: dict, draft: dict) -> dict:
+    """A separately shipped MTP head, bound by the adapter's own hook."""
+    from mlx2.adapters.registry import inspect_model
+
+    resolution = inspect_model(target["path"])
+    hook = getattr(resolution.adapter_type, "external_mtp_head_resolution", None)
+    if not callable(hook):
+        raise ValueError(f"{target['adapter']} does not attach external MTP heads")
+    bound = hook(resolution, draft["path"])
+    head = bound.artifact["identity"]["mtp_head"]
+    return {
+        "draft": f"{draft['name']}@sha256:{head['fingerprint']}",
+        "draft_path": draft["path"],
+        "draft_weight_bytes": draft.get("weight_bytes"),
+        "draft_kind": "MTPHead",
+        "route": "native_mtp",
+        "server_flags": ["--native-mtp", "--mtp-head", draft["path"]],
+        "execution_policy": None,
+        "pair_fingerprint": bound.artifact["identity"]["fingerprint"],
+        "head_quantization": head["quantization"],
+    }
 
 
 def plausible_family(target: dict, draft: dict) -> bool:
@@ -197,8 +223,11 @@ AST_ROUTE_KIND = {
 AST_TILE_ADAPTERS = frozenset(k for k, v in AST_ROUTE_KIND.items() if v == "external_draft")
 
 
+AST_DRAFT_KINDS = frozenset({"DFlash2DraftModel", "Qwen3DSparkModel", "MTPHead"})
+
+
 def ast_drafter_route(target: dict, pairing: dict, slug: str) -> dict | None:
-    if target.get("adapter") not in AST_TILE_ADAPTERS or pairing.get("draft_kind") != "DFlash2DraftModel":
+    if target.get("adapter") not in AST_TILE_ADAPTERS or pairing.get("draft_kind") not in AST_DRAFT_KINDS:
         return None
     return {"route": "ast_" + slug, "server_flags": ["--ast", "--ast-drafter", pairing["draft_path"]],
             "expected_route_kind": "external_draft", "draft": pairing["draft"],
@@ -223,7 +252,18 @@ def build(roots: list[Path], include_hf: bool, host: str, revision_cache: dict) 
 
     started = time.time()
     raw = []
+    from mlx2.adapters.qwen38_external_mtp_head import is_mtp_head_artifact
+
     for path in discover(roots, include_hf):
+        if not (path / "config.json").is_file() and is_mtp_head_artifact(path):
+            file = path / "mtp.safetensors"
+            raw.append({
+                "path": str(path), "name": display_name(path), "model_type": "qwen3_5_mtp",
+                "architectures": [], "complete": True, "status": "drafter", "mtp_head": True,
+                "weight_bytes": file.stat().st_size, "quant": "packed-per-module",
+                "parameters": None,
+            })
+            continue
         try:
             config = json.loads((path / "config.json").read_text())
         except Exception as error:  # noqa: BLE001
@@ -247,6 +287,8 @@ def build(roots: list[Path], include_hf: bool, host: str, revision_cache: dict) 
         row["physical"] = physical_identity(path, names)
         lane = classify(path, config)
         row["quant"] = quant_label(config)
+        if config.get("model_type") == "qwen3_5_mtp":
+            row["mtp_head"] = True
         if lane == "drafter":
             row["status"] = "drafter"
         elif lane is not None:
@@ -364,13 +406,23 @@ def build(roots: list[Path], include_hf: bool, host: str, revision_cache: dict) 
                 continue
             pairing["wirable"] = True
             target["drafters"].append(pairing)
-            target["routes"].append({
-                "route": "external_" + _route_slug(draft),
-                "server_flags": ["--external-draft", "--execution-policy", "<policy.json>"],
-                "execution_policy": pairing["execution_policy"],
-                "draft": pairing["draft"],
-                "draft_weight_bytes": pairing["draft_weight_bytes"],
-            })
+            if pairing["route"] == "native_mtp":
+                # An attached external MTP head serves the native-MTP route.
+                target["routes"].append({
+                    "route": "mtphead_" + _route_slug(draft),
+                    "server_flags": pairing["server_flags"],
+                    "expected_route_kind": "native_mtp",
+                    "draft": pairing["draft"],
+                    "draft_weight_bytes": pairing["draft_weight_bytes"],
+                })
+            else:
+                target["routes"].append({
+                    "route": "external_" + _route_slug(draft),
+                    "server_flags": ["--external-draft", "--execution-policy", "<policy.json>"],
+                    "execution_policy": pairing["execution_policy"],
+                    "draft": pairing["draft"],
+                    "draft_weight_bytes": pairing["draft_weight_bytes"],
+                })
             ast_route = ast_drafter_route(target, pairing, _route_slug(draft))
             if ast_route:
                 target["routes"].append(ast_route)

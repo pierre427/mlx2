@@ -1,8 +1,10 @@
 """Pinned Nemotron LiLiCorr export inspection and BF16 execution contract.
 
-The BF16 export is executable only after strict payload, owned-head, trained
-sliding-window and target-state binding. Native NVFP4 and ModelOpt packed
-exports remain metadata-only and fail before allocation.
+The BF16 export and the native NVFP4 conversion are executable only after
+strict payload, owned-head, trained sliding-window and target-state binding.
+The native export's declared modules load as global-scaled NVFP4 linears
+(runtime/nvfp4_linear.py); the ModelOpt-packed source export stays
+metadata-only and fails before allocation.
 """
 
 from __future__ import annotations
@@ -272,10 +274,14 @@ def inspect_export_plan(draft_path, target_path):
 
 def _inspect_drafter(path, target):
     plan = _inspect_export(path, target)
-    if plan["variant"] != "bf16":
+    if plan["variant"] == "modelopt":
         raise ValueError(
-            "Nemotron LiLiCorr native/modelopt quantized exports are not executable"
+            "Nemotron LiLiCorr ModelOpt-packed NVFP4 export is not loadable as "
+            "shipped (F8_E4M3 scales, byte-packed E2M1); load its mlx2 "
+            "conversion (conversion/nvfp4.py --mode native or bf16) instead"
         )
+    if plan["variant"] not in ("bf16", "native"):
+        raise ValueError("Nemotron LiLiCorr export is not executable")
     path = Path(path).expanduser().resolve()
     raw_config = _metadata_bytes(path / "config.json")
     config = _decode_unique_json(raw_config, "LiLiCorr export config")
@@ -292,8 +298,13 @@ def _inspect_drafter(path, target):
         "runtime_load_supported": True,
         "remaining": [
             "full-artifact CPU/Metal load and decode are not qualified",
-            "native/modelopt quantized exports remain refused",
-        ],
+            "the ModelOpt-packed source export remains refused (load a conversion)",
+        ]
+        + (
+            ["native NVFP4: global scale applied to the product (runtime/nvfp4_linear.py); unqualified"]
+            if plan["variant"] == "native"
+            else []
+        ),
     }
 
 
@@ -358,8 +369,16 @@ def load_drafter(
     runtime_quantization = normalize_runtime_quantization(runtime_quantization)
     if draft_attention_windows is not None:
         raise ValueError("Nemotron LiLiCorr trained sliding windows are immutable")
-    if record.get("variant") != "bf16" or record.get("runtime_load_supported") is not True:
+    if (
+        record.get("variant") not in ("bf16", "native")
+        or record.get("runtime_load_supported") is not True
+    ):
         raise ValueError("Nemotron LiLiCorr export is not executable")
+    if record["variant"] == "native" and runtime_quantization is not None:
+        raise ValueError(
+            "the native NVFP4 LiLiCorr export is already quantized; runtime "
+            "draft quantization applies to the BF16 export only"
+        )
     _validate_target_contract(record, target_contract)
     if record.get("args") != executable_config(record.get("config")):
         raise ValueError("Nemotron LiLiCorr load configuration differs")
@@ -379,6 +398,12 @@ def load_drafter(
     from ..runtime.drafters.lilicorr import LiLiCorrDraftModel
 
     model = LiLiCorrDraftModel(record["args"])
+    if record["variant"] == "native":
+        from ..runtime import nvfp4_linear
+
+        # Exactly the modules the pinned export declares (checked against
+        # its tensor inventory at inspection); everything else stays BF16.
+        nvfp4_linear.install(model, record["config"]["quantization"]["modules"])
     weights = model.sanitize(mx.load(str(file)))
     mx.eval(list(weights.values()))
     model.load_weights(list(weights.items()), strict=True)

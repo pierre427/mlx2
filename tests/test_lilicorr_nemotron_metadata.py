@@ -350,10 +350,87 @@ def test_bf16_binding_contract_fails_closed_before_load(executable_bf16):
         plans.load_drafter(record, target, target_contract=changed)
 
 
-def test_quantized_exports_fail_closed_at_executable_inspection(exported):
+def test_modelopt_export_fails_closed_and_native_is_executable(exported, monkeypatch):
     quantized_path, _, quantized_target, variant, _ = exported
-    if variant != "bf16":
-        with pytest.raises(ValueError, match="quantized exports"):
+    monkeypatch.setattr(plans, "TRAINED_SLIDING_WINDOW", 32)
+    if variant == "modelopt":
+        with pytest.raises(ValueError, match="ModelOpt-packed NVFP4 export"):
             plans.inspect_drafter(
                 quantized_path, target_artifact=quantized_target
             )
+    else:
+        record = plans.inspect_drafter(quantized_path, target_artifact=quantized_target)
+        assert record["variant"] == variant and record["runtime_load_supported"]
+
+
+def test_global_scaled_nvfp4_linear_equals_its_dequantized_law():
+    from mlx2.runtime.nvfp4_linear import GlobalScaledNVFP4Linear
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        mx.random.seed(5)
+        weight = mx.random.normal((24, 64))
+        scale = mx.array(0.0125, dtype=mx.float32)
+        packed, scales = mx.quantize(weight / scale, group_size=16, bits=4, mode="nvfp4")
+        layer = GlobalScaledNVFP4Linear(64, 24, bias=True)
+        layer.load_weights([("weight", packed), ("scales", scales), ("global_scale", scale),
+                            ("bias", mx.arange(24, dtype=mx.float32))], strict=True)
+        dense = mx.dequantize(packed, scales, None, group_size=16, bits=4, mode="nvfp4") * scale
+        x = mx.random.normal((3, 64))
+        np.testing.assert_allclose(np.asarray(layer(x)), np.asarray(x @ dense.T + mx.arange(24)),
+                                   rtol=1e-5, atol=1e-4)
+        plain = GlobalScaledNVFP4Linear(64, 24)
+        plain.load_weights([("weight", packed), ("scales", scales), ("global_scale", scale)])
+        # The float32 global scale does not promote a bf16 activation stream.
+        assert plain(x.astype(mx.bfloat16)).dtype == mx.bfloat16
+    finally:
+        mx.set_default_device(previous)
+
+
+def test_native_nvfp4_export_loads_strictly_as_global_scaled_modules(executable_bf16, monkeypatch):
+    from mlx2.runtime.nvfp4_linear import GlobalScaledNVFP4Linear
+
+    path, source, target, target_artifact = executable_bf16
+    config = export_config("native")
+    modules = config["quantization"]["modules"]
+    flat = dict(tree_flatten(source.parameters()))
+    native, dense = {}, {}
+    for name, value in flat.items():
+        module = name.removesuffix(".weight")
+        if name.endswith(".weight") and module in modules:
+            weight = value.astype(mx.float32)
+            scale = mx.max(mx.abs(weight)) / (6.0 * 448.0)
+            packed, scales = mx.quantize(weight / scale, group_size=16, bits=4, mode="nvfp4")
+            native[name], native[module + ".scales"] = packed, scales
+            native[module + ".global_scale"] = scale.astype(mx.float32)
+            dense[name] = (mx.dequantize(packed, scales, None, group_size=16, bits=4,
+                                         mode="nvfp4") * scale).astype(mx.bfloat16)
+        else:
+            native[name] = dense[name] = value
+    raw = json.dumps(config).encode()
+    (path / "config.json").write_bytes(raw)
+    file = path / "model.safetensors"
+    mx.save_safetensors(str(file), native)
+    weight_hash = hashlib.sha256(file.read_bytes()).hexdigest()
+    monkeypatch.setattr(plans, "EXPORTS", {hashlib.sha256(raw).hexdigest(): ("native", weight_hash)})
+    _, _, payload_size = plans._read_safetensors_header(file)
+    conversion = json.loads((path / "mlx2-conversion.json").read_text())
+    conversion.update(mode="native", output_weight_sha256=weight_hash, output_tensor_bytes=payload_size)
+    (path / "mlx2-conversion.json").write_text(json.dumps(conversion))
+    record = plans.inspect_drafter(path, target_artifact=target_artifact)
+    assert record["variant"] == "native" and record["runtime_load_supported"]
+    with pytest.raises(ValueError, match="already quantized"):
+        plans.load_drafter(record, target, target_contract=_target_contract(record),
+                           runtime_quantization="affine_q8_g64")
+    loaded = plans.load_drafter(record, target, target_contract=_target_contract(record))
+    assert isinstance(loaded.lm_head, GlobalScaledNVFP4Linear)
+    assert isinstance(loaded.layers[0].mlp.down_proj, GlobalScaledNVFP4Linear)
+    assert loaded.receipt_settings["weight_quantization"]["mode"] == "nvfp4"
+    reference = type(source)(source.config)
+    reference.load_weights(list(dense.items()), strict=True)
+    probe = mx.random.normal((1, 2, record["args"].hidden_size))
+    np.testing.assert_allclose(
+        np.asarray(loaded.lm_head(probe)), np.asarray(reference.lm_head(probe).astype(mx.float32)),
+        rtol=2e-2, atol=2e-2,
+    )

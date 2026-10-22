@@ -737,7 +737,7 @@ class MuseGlimmerAdapter:
 
             if is_assistant_artifact(self.external_policy["draft_model"]):
                 self._draft_kind = "assistant"
-                self._external_route_tag = "external-muse-dflash-assistant-v1"
+                self._external_route_tag = "external-muse-dflash-assistant-v2"
                 unsupported = {
                     "continuation_pool", "progressive_verification_tile",
                     "progressive_multilane_draft_cap", "target_verify_row_exact",

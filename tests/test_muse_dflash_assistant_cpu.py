@@ -76,17 +76,87 @@ def test_laws_are_exact_and_only_committed_context_is_stored():
     assert all(entry.offset == 6 and entry.keys.shape[2] == 6 for entry in cache)
 
 
-def test_block_is_causal_and_honours_the_sliding_window():
+def test_full_block_is_bidirectional_and_honours_the_sliding_window():
     target, draft = tiny(window=4)
     features = target.prefill_body(mx.array([[1, 2, 3, 4, 5, 6, 7]]), target.make_cache(), [1, 3])
     short, long = draft.make_cache(), draft.make_cache()
     draft.append_context(features, short)
     draft.append_context(features, long)
+    # Every proposal length runs the trained block (anchor + block_size - 1
+    # masks), so a shorter request is a prefix of a longer one.
     a = draft._block_logits([4], [short], 2)
     b = draft._block_logits([4], [long], 4)
+    assert a.shape[1] == 2 and b.shape[1] == 4
     np.testing.assert_allclose(np.asarray(a), np.asarray(b[:, :2]), atol=1e-5)
-    # Resident ring holds window - 1 keys; later block rows see fewer of them.
+    # Resident ring holds window - 1 keys.
     assert short[0].keys.shape[2] == 3
+    # Bidirectional inside the block: an earlier row sees a later row's input.
+    attn = draft.layers[0].self_attn
+    x = mx.random.normal((1, 5, 16))
+    changed = mx.concatenate([x[:, :3], x[:, 3:4] + 1.0, x[:, 4:]], axis=1)
+    first, second = attn.block(x, short[0]), attn.block(changed, short[0])
+    assert float(mx.max(mx.abs(first[:, 0] - second[:, 0])).item()) > 1e-4
+    with pytest.raises(ValueError, match="below the trained block size"):
+        draft._block_logits([4], [short], draft.config.block_size)
+
+
+def test_proposal_logits_are_the_raw_target_head_not_its_tail():
+    """Reference law: candidate logits = target output embedding(hidden).
+
+    The target's output multiplier and softcap must not reach the drafter:
+    they keep the argmax but flatten the sampled law (the 0-accepted defect).
+    """
+    target, draft = tiny()
+    hidden = mx.random.normal((1, 3, 16))
+    raw = target.lm_head(hidden)
+    np.testing.assert_array_equal(np.asarray(draft._logits(hidden)), np.asarray(raw))
+    target.args.output_multiplier, target.args.final_logit_softcapping = 0.01, 3.0
+    np.testing.assert_array_equal(np.asarray(draft._logits(hidden)), np.asarray(raw))
+    assert draft.receipt_settings["proposal_logits"] == "target_lm_head_raw"
+
+
+class _SpikedHead(nn.Module):
+    """Target head with a hidden-magnitude-proportional spike on one token."""
+
+    def __init__(self, base, token, beta):
+        super().__init__()
+        self.base = base
+        self.token, self.beta = token, beta
+
+    def __call__(self, hidden):
+        rms = mx.sqrt(mx.mean(hidden.astype(mx.float32) ** 2, axis=-1, keepdims=True))
+        spike = (mx.arange(VOCAB) == self.token).astype(mx.float32) * self.beta * rms
+        return self.base(hidden) + spike.astype(hidden.dtype)
+
+
+def _spiked_pair():
+    """Muse geometry in miniature: a large-gain target final norm with a small
+    output multiplier, and a unit-gain drafter norm (the drafter was trained
+    against raw head logits at its own hidden scale)."""
+    target, draft = tiny()
+    target.args.output_multiplier, target.args.final_logit_softcapping = 0.05, 30.0
+    target.model.norm.weight = mx.full(target.model.norm.weight.shape, 19.0)
+    draft.norm.weight = mx.ones(draft.norm.weight.shape)
+    target.lm_head = _SpikedHead(target.lm_head, token=17, beta=10.0)
+    mx.eval(target.parameters(), draft.parameters())
+    return target, draft
+
+
+def test_sampled_drafts_are_accepted_under_default_sampling():
+    target, draft = _spiked_pair()
+    sampling = {"sampling_temp": 1.0, "top_p": 0.95, "top_k": 64}
+    batch = ExternalDraftBatchGenerator(
+        target, draft_model=draft, binding="test", num_draft=4, prefill_step_size=3
+    )
+    uid = batch.insert([[1, 2, 3, 4, 5, 6]], max_tokens=[24], sampling_configs=[sampling],
+                       lane_rngs=[type("Seed", (), {"key": mx.array([5])})()])[0]
+    got, final = drain(batch)
+    stats = batch.scheduler_stats
+    assert len(got[uid]) == 24 and stats["proposed_tokens"] > 0
+    # The tail-projected law (v1) put ~2% on the spiked token and accepted
+    # almost nothing; the raw-head law agrees with the target's.
+    assert stats["accepted_proposals"] / stats["proposed_tokens"] > 0.5
+    final[uid].cache_sidecar.validate("test", len(final[uid].all_tokens))
 
 
 def test_external_assistant_greedy_matches_ordinary():

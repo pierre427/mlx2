@@ -153,3 +153,83 @@ def test_adapter_drafter_defaults_fill_only_unnamed_keys():
     assert apply_ast_invocation(args, None, resolution) == {"draft_model": "/m/target"}
     assert "drafter_policy_defaults" not in args.ast_route
     assert seen == ["/m/dflash", "mtp"]
+
+
+def _head_resolution(tmp_path, *, hook=True):
+    from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
+
+    head = tmp_path / "head"
+    head.mkdir(exist_ok=True)
+    (head / "config.json").write_text('{"model_type": "qwen3_5_mtp"}')
+    seen = {}
+
+    def resolve(resolution, path):
+        seen["head"] = str(path)
+        return SimpleNamespace(adapter_type=resolution.adapter_type, artifact={"has_mtp": True},
+                               default_route="native_mtp")
+
+    attributes = {"ast_tree_tiles": True,
+                  "is_external_mtp_head": staticmethod(Qwen3827BAdapter.is_external_mtp_head)}
+    if hook:
+        attributes["external_mtp_head_resolution"] = staticmethod(resolve)
+    adapter = type("Adapter", (), attributes)
+    resolution = SimpleNamespace(adapter_type=adapter, artifact={"has_mtp": False},
+                                 default_route="ordinary")
+    return head, resolution, seen
+
+
+def test_ast_drafter_naming_an_mtp_head_attaches_it_as_the_native_head(tmp_path):
+    from mlx2.server import apply_external_mtp_head
+
+    head, resolution, seen = _head_resolution(tmp_path)
+    args = _args(ast_drafter=str(head), mtp_head=None)
+    policy, resolution = apply_external_mtp_head(args, None, resolution)
+    assert seen["head"] == str(head) and policy == {"mtp_head": str(head.resolve())}
+    assert args.ast_drafter == "mtp" and resolution.artifact["has_mtp"]
+    policy = apply_ast_invocation(args, policy, resolution)
+    # The tile drafter is the target's (now attached) native head.
+    assert policy == {"mtp_head": str(head.resolve()), "draft_model": "/m/target"}
+    assert args.external_draft
+
+
+def test_mtp_head_flag_without_a_hook_or_with_a_conflict_fails_closed(tmp_path):
+    from mlx2.server import apply_external_mtp_head
+
+    head, resolution, _ = _head_resolution(tmp_path, hook=False)
+    with pytest.raises(ValueError, match="does not attach external MTP heads"):
+        apply_external_mtp_head(_args(ast=False, mtp_head=str(head)), None, resolution)
+    head, resolution, _ = _head_resolution(tmp_path)
+    with pytest.raises(ValueError, match="differ"):
+        apply_external_mtp_head(_args(ast=False, mtp_head=str(head)), {"mtp_head": "/elsewhere"}, resolution)
+    # An ordinary DFlash2 path after --ast-drafter is not an MTP head.
+    args = _args(ast_drafter=str(tmp_path), mtp_head=None)
+    assert apply_external_mtp_head(args, None, resolution) == (None, resolution)
+    assert args.ast_drafter == str(tmp_path)
+
+
+def test_attached_head_on_the_27b_target_takes_no_artifact_drafter_defaults(tmp_path):
+    # Qwen3.8-27B's --ast drafter defaults (q4 lane DFlash2) are measured for
+    # an artifact drafter only.  A head named by --ast-drafter becomes the
+    # native head ("mtp"), so it must get the same (empty) defaults as a
+    # colocated head, not the DFlash2 lane arithmetic.
+    from mlx2.adapters.qwen38_27b import QWEN38_27B, Qwen3827BAdapter
+    from mlx2.server import apply_external_mtp_head
+
+    head, resolution, _ = _head_resolution(tmp_path)
+    seen = []
+    real = Qwen3827BAdapter.__dict__["ast_drafter_policy_defaults"].__func__
+
+    def defaults(cls, drafter):
+        seen.append(drafter)
+        return real(cls, drafter)
+
+    adapter = resolution.adapter_type
+    adapter.descriptor = QWEN38_27B
+    adapter.ast_drafter_policy_defaults = classmethod(defaults)
+    args = _args(ast_drafter=str(head), mtp_head=None)
+    policy, resolution = apply_external_mtp_head(args, None, resolution)
+    policy = apply_ast_invocation(args, policy, resolution)
+    assert seen == ["mtp"]
+    assert policy == {"mtp_head": str(head.resolve()), "draft_model": "/m/target"}
+    assert "drafter_policy_defaults" not in args.ast_route
+    assert args.ast_route["drafter"] == "mtp" and args.ast_route["tree_tiles"]

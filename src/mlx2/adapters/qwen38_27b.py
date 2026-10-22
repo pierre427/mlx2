@@ -265,6 +265,41 @@ def _load_target_weights(files, *, external_draft: bool, sanitize, mtp_sidecar=N
     return sanitize(weights)
 
 
+def _quantize_target(model, quant, weights, head_quantization=None):
+    """Quantize the target as its config declares; an attached external MTP
+    head (``head_quantization``: module -> {bits, group_size}) follows its own
+    per-module entries and stays float where it has none."""
+    import mlx.nn as nn
+
+    if not quant and not head_quantization:
+        return
+    decide = None
+    if head_quantization is not None:
+        from .qwen38_external_mtp_head import head_quantization_predicate
+
+        decide = head_quantization_predicate(head_quantization)
+    defaults = quant or next(iter(head_quantization.values()))
+
+    def predicate(name, module):
+        if decide is not None:
+            decision = decide(name)
+            if decision is not None:
+                return decision
+        if not quant:
+            return False
+        if name in quant:
+            return quant[name]
+        return hasattr(module, "to_quantized") and f"{name}.scales" in weights
+
+    nn.quantize(
+        model,
+        group_size=defaults["group_size"],
+        bits=defaults["bits"],
+        mode=defaults.get("mode", "affine"),
+        class_predicate=predicate,
+    )
+
+
 def _mtp_sidecar(path):
     """A separately shipped MTP head inside the artifact directory.
 
@@ -1251,6 +1286,32 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if not (config.get("quantization") or config.get("quantization_config")):
             defaults["draft_quantization"] = {"bits": 4, "group_size": 64}
         return defaults
+
+    # A separately shipped MTP head directory may be attached as the native
+    # head (policy ``mtp_head``, ``--mtp-head`` or ``--ast-drafter <head>``;
+    # adapters/qwen38_external_mtp_head.py).  Read from this class's own
+    # __dict__: the Qwen3.6 and Qwen3.5 subclasses do not inherit it.
+    external_mtp_head = True
+
+    @staticmethod
+    def is_external_mtp_head(path) -> bool:
+        from .qwen38_external_mtp_head import is_mtp_head_artifact
+
+        return is_mtp_head_artifact(path)
+
+    @classmethod
+    def external_mtp_head_resolution(cls, resolution, head_path):
+        """The pre-load resolution with ``head_path`` bound as the native head."""
+        if not vars(cls).get("external_mtp_head", False):
+            raise ValueError(f"{cls.__name__} does not attach external MTP heads")
+        from .qwen38_external_mtp_head import attach_mtp_head, inspect_mtp_head
+
+        artifact = attach_mtp_head(
+            resolution.artifact, inspect_mtp_head(head_path, resolution.artifact)
+        )
+        return replace(
+            resolution, descriptor=cls.descriptor_builder(has_mtp=True), artifact=artifact
+        )
     # Explicit because Qwen3.8 retains its independently measured threshold
     # instead of inheriting Flash-Next's width-three default.
     default_mtp_ordinary_handoff_max_width = (
@@ -1519,6 +1580,23 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         native_tree_draft = "draft_model" in policy and (
             prompt_lookup_draft or _names_target(policy["draft_model"], model_path)
         )
+        # A separately shipped MTP head directory attached as this target's
+        # native head (native MTP and the native-MTP tree tiles).
+        mtp_head = policy.pop("mtp_head", None)
+        if mtp_head is not None:
+            if type(mtp_head) is not str or not mtp_head:
+                raise ValueError("mtp_head must name an MTP head artifact directory")
+            if not vars(type(self)).get("external_mtp_head", False):
+                raise ValueError(
+                    f"{type(self).__name__} does not attach external MTP heads"
+                )
+            if "draft_model" in policy and (prompt_lookup_draft or not native_tree_draft):
+                raise ValueError(
+                    "mtp_head attaches a native MTP head; it cannot be combined "
+                    "with an external or prompt-lookup drafter"
+                )
+            if stream_request is not None:
+                raise ValueError("dense weight streaming does not load an external MTP head")
         graft_prompt_lookup = bool(policy.pop("ast_graft_prompt_lookup", False))
         if native_tree_draft:
             if require_mtp:
@@ -1582,6 +1660,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if gdn_core is not None and type(gdn_core) is not bool:
             raise ValueError("gdn_core must be boolean")
         artifact = self.artifact_inspector(model_path)
+        if mtp_head is not None:
+            from .qwen38_external_mtp_head import attach_mtp_head, inspect_mtp_head
+
+            # Fails closed before any tensor loads: geometry, schema,
+            # quantization, degenerate payload, or a target that has a head.
+            artifact = attach_mtp_head(artifact, inspect_mtp_head(mtp_head, artifact))
         if native_tree_draft and not prompt_lookup_draft and not artifact["has_mtp"]:
             raise ValueError(
                 "draft_model names this artifact (its native MTP head), but the "
@@ -1631,7 +1715,6 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         path = Path(self.identity["path"])
         config = artifact["config"]
         import mlx.core as mx
-        import mlx.nn as nn
         from transformers import AutoTokenizer
         from ..runtime.models.qwen38_27b import Model, ModelArgs
         from ..runtime.tokenizer_utils import TokenizerWrapper, BPEStreamingDetokenizer
@@ -1647,23 +1730,15 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         names = sorted(set(artifact["weight_map"].values()))
         files = [path / name for name in names]
         quant = config.get("quantization", config.get("quantization_config"))
+        sidecar_record = artifact.get("mtp_sidecar") or {}
+        # An attached external head's projections follow its own packed
+        # shapes, never the target's global bits.
+        head_quantization = (
+            sidecar_record["quantization"] if sidecar_record.get("external") else None
+        )
 
         def quantize(weights):
-            if not quant:
-                return
-
-            def predicate(name, module):
-                if name in quant:
-                    return quant[name]
-                return hasattr(module, "to_quantized") and f"{name}.scales" in weights
-
-            nn.quantize(
-                self.model,
-                group_size=quant["group_size"],
-                bits=quant["bits"],
-                mode=quant.get("mode", "affine"),
-                class_predicate=predicate,
-            )
+            _quantize_target(self.model, quant, weights, head_quantization)
 
         if draft_record is not None:
             _verify_target_source_bindings(
@@ -2464,6 +2539,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             "architecture": "dense-hybrid-gdn-gqa",
             "layout": self.layout,
             "mtp_head_present": Capability.MTP in self.descriptor.capabilities,
+            # A separately shipped head attached to this target: its content
+            # identity (also folded into the adapter fingerprint).  Unqualified.
+            "external_mtp_head": (
+                None if not isinstance(getattr(self, "identity", None), dict)
+                else self.identity.get("mtp_head")
+            ),
             "speculation": (
                 _external_speculation_label(self.draft_model)
                 if getattr(self, "draft_model", None) is not None

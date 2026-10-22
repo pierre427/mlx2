@@ -546,10 +546,20 @@ def inspect_audio_model(model_path: str | Path) -> AdapterResolution:
 def resolve_adapter(
     model_path: str | Path, *, mtp: bool = False,
     qualification_mode: bool = False, qualification: str | Path | None = None,
+    mtp_head: str | Path | None = None,
 ) -> type:
     if type(mtp) is not bool:
         raise ValueError("mtp selection must be boolean")
     result = inspect_model(model_path)
+    if mtp_head is not None:
+        # A separately shipped MTP head (policy ``mtp_head``) is bound and
+        # verified by the adapter that declares the hook; others refuse.
+        hook = getattr(result.adapter_type, "external_mtp_head_resolution", None)
+        if not callable(hook):
+            raise ValueError(
+                f"{result.adapter_type.__name__} does not attach external MTP heads"
+            )
+        result = hook(result, mtp_head)
     if mtp and Capability.MTP not in result.descriptor.capabilities:
         raise ValueError(
             f"{result.descriptor.family} artifact has no implemented native MTP route"

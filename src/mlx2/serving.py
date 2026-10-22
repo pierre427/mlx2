@@ -4607,6 +4607,7 @@ class ServingEngine:
             adapter_factory = resolve_adapter(
                 model_path, mtp=mtp, qualification_mode=qualification_mode,
                 qualification=qualification,
+                mtp_head=(execution_policy or {}).get("mtp_head"),
             )
         self.adapter_factory = adapter_factory
         self._select_automatic_expert_streaming(adapter_factory, max_lanes)

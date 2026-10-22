@@ -607,6 +607,12 @@ def lilicorr_executable_config(config: dict):
 def inspect_lilicorr_drafter(draft_path, *, target_artifact: dict) -> dict:
     """Pinned BF16 LiLiCorr import bound to the converted target identity."""
     path = Path(draft_path).expanduser().resolve()
+    if not (path / "mlx2-conversion.json").is_file() and (path / "hf_quant_config.json").is_file():
+        raise ValueError(
+            "Nemotron 3.5 Bolt LiLiCorr ModelOpt-packed source is not loadable as "
+            "shipped; serve its pinned BF16 import (conversion/nvfp4.py --mode bf16). "
+            "No native NVFP4 import of the Bolt head is pinned"
+        )
     config_raw, config = _read_json(path / "config.json", "Bolt LiLiCorr export config")
     _, receipt = _read_json(path / "mlx2-conversion.json", "Bolt LiLiCorr import receipt")
     if hashlib.sha256(config_raw).hexdigest() != LILICORR_EXPORT_CONFIG_SHA256:

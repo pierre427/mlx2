@@ -66,6 +66,9 @@ def discover(roots, include_hf: bool) -> list[Path]:
             dirs[:] = [d for d in dirs if not d.startswith((".", "_"))] if depth < 4 else []
             if "config.json" in files:
                 found.append(Path(directory))
+            elif files and set(files) - {".DS_Store"} == {"mtp.safetensors"}:
+                # A bare MTP head (no config): a drafter, never a target.
+                found.append(Path(directory))
     if include_hf and HF_HUB.is_dir():
         for snapshot in sorted(HF_HUB.glob("models--*/snapshots/*")):
             for directory, dirs, files in os.walk(snapshot, followlinks=True):
@@ -165,14 +168,17 @@ def pair_drafter(
     record = None
     if adapter in {"Qwen3827BAdapter", "Qwen3627BAdapter", "Qwen3635BA3BAdapter",
                    "Qwen359BAdapter"}:
-        if archs != ["DFlash2DraftModel"]:
-            raise ValueError(f"{adapter} external route accepts only DFlash2DraftModel")
         if adapter == "Qwen359BAdapter":
             raise ValueError("Qwen3.5-9B adapter refuses external drafts")
-        from . import dflash2, qwen38_27b
+        from . import qwen38_27b
+        from .external_drafter_formats import drafter_format
 
-        record = dflash2.inspect_drafter(dpath, tpath)
-        pins["draft_revision"] = dflash2.content_revision(record)
+        # The adapter's own dispatch: DFlash2 or DFlash-format DSpark by the
+        # artifact's declared architecture (anything else fails DFlash2's
+        # inspector with its precise reason).
+        draft_format = drafter_format(dpath)
+        record = draft_format.inspect_drafter(dpath, tpath)
+        pins["draft_revision"] = draft_format.content_revision(record)
         if target_revision:
             key = ("qwen38_target", tpath)
             if key not in cache:
@@ -181,7 +187,10 @@ def pair_drafter(
         policy.update(pins)
     elif adapter == "FlashNextAdapter":
         if archs != ["DFlash2DraftModel"]:
-            raise ValueError("Flash-Next external route accepts DFlash2DraftModel or its own MTP head")
+            raise ValueError(
+                "Flash-Next external route accepts DFlash2DraftModel or its own MTP head; "
+                "FlashNextAdapter attaches no separately shipped head"
+            )
         from . import dflash2, flash_next
 
         record = dflash2.inspect_drafter(dpath, tpath)
