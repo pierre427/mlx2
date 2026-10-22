@@ -366,10 +366,27 @@ def test_parked_hybrid_lane_with_a_cost_latch_pipelines_too():
     assert finals[0].speculative_receipt["cost_latch"]["state"] == "parked"
 
 
-def test_concurrent_cost_lanes_keep_their_serial_width_one_rounds():
+def test_concurrent_cost_lanes_decode_in_one_batched_cohort():
     model = _tiny_gpt_oss()
-    outputs, _finals, stats, _forwards = _run(model, NOVEL[:2], [20, 20])
+    outputs, _finals, stats, forwards = _run(model, NOVEL[:2], [20, 20])
     for prompt, output in zip(NOVEL[:2], outputs):
         assert output == _greedy(model, prompt, 20)
-    assert stats["pld_batched_max_width"] <= 1
-    assert stats["pld_cost_width1_cohort_splits"] > 0
+    assert stats["pld_batched_max_width"] == 2
+    assert stats.get("pld_cost_width1_cohort_splits", 0) == 0
+    # Both lanes decode in shared two-row forwards, not one row at a time.
+    assert forwards.widths.count((2, 1)) >= 19
+
+
+def test_concurrent_cost_latched_hybrid_lanes_pipeline_as_one_cohort():
+    from test_segmented_mtp import _tiny_hybrid_mtp_model
+    from test_sweep_20261006_spec_pld_hybrid import _greedy as hybrid_greedy
+
+    model = _tiny_hybrid_mtp_model()
+    prompts = [[(17 * i + 7 + 5 * lane) % 120 + 1 for i in range(40)] for lane in range(3)]
+    outputs, finals, stats, _forwards = _run(model, prompts, [24, 24, 24])
+    for prompt, output in zip(prompts, outputs):
+        assert output == hybrid_greedy(model, prompt, 24)
+    assert stats["pld_batched_max_width"] == 3
+    assert stats["pld_pipelined_rounds"] >= 20
+    assert stats.get("pld_cost_width1_cohort_splits", 0) == 0
+    assert all(final.speculative_receipt["cost_latch"]["state"] == "parked" for final in finals)

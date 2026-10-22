@@ -3412,6 +3412,13 @@ class MTPGenerationBatch:
         """Paused lanes waiting on the scheduler rather than on memory."""
         return [uid for uid in self._paused if uid not in self._memory_queued]
 
+    def memory_waiting_uids(self):
+        """Lanes the memory controller has queued (the stall watchdog's 429)."""
+        uids = set(self._memory_queued)
+        if self._atomic_memory_wait is not None:
+            uids.update(self._atomic_memory_wait["uids"])
+        return tuple(sorted(uids))
+
     def take_atomic_cohort_failure(self):
         failure = self._atomic_cohort_failure
         self._atomic_cohort_failure = None
@@ -7095,6 +7102,20 @@ class BatchGenerator:
             # must not be mistaken for a memory-starved lane by serving.
             waiting.extend(held[0].uids)
         return waiting
+
+    def memory_waiting_uids(self):
+        """Lanes waiting on memory admission, not on the scheduler.
+
+        The serving stall watchdog reports a stalled lane listed here as a
+        memory refusal (429) and any other stalled lane as scheduler
+        starvation.
+        """
+        uids = set(getattr(self, "_memory_queued_prefill", ()) or ())
+        for wait in self.atomic_memory_waits():
+            uids.update(wait.get("uids", ()))
+        if self.self_mtp is not None:
+            uids.update(self._generation_batch.memory_waiting_uids())
+        return tuple(sorted(uids))
 
     def _find_uids(self, uids):
         uids = set(uids)

@@ -387,7 +387,10 @@ def test_cost_latch_does_not_activate_when_admission_cannot_fit_shadow_span():
     assert receipt["cost_latch"]["memory_blocked_rounds"] == 12
 
 
-def test_cost_latch_keeps_concurrent_lanes_at_physical_width_one():
+def test_concurrent_cost_lanes_decode_plain_in_one_batched_cohort():
+    """The cost latch is B1-only: in a wider cohort it is suspended for width
+    and its lane decodes plain alongside its peers, as ordinary decode does,
+    instead of B sequential one-row forwards (the 2026-09-26 candidate)."""
     generator = PromptLookupBatchGenerator(
         _PatternModel(), completion_batch_size=2, prefill_step_size=16,
         prompt_lookup={
@@ -413,14 +416,19 @@ def test_cost_latch_keeps_concurrent_lanes_at_physical_width_one():
             break
     assert len(finals) == 2
     assert all(tokens[uid] == [1, 2] * 10 for uid in uids)
-    assert all(finals[uid].speculative_receipt["target_width"] == 1 for uid in uids)
+    assert all(finals[uid].speculative_receipt["target_width"] == 2 for uid in uids)
     assert all(
-        finals[uid].speculative_receipt["cost_width1_cohort_splits"] > 0
+        finals[uid].speculative_receipt["cost_width1_cohort_splits"] == 0
         for uid in uids
     )
-    assert generator.scheduler_stats["pld_cost_width1_cohort_splits"] > 0
-    assert generator.scheduler_stats["pld_batched_max_width"] <= 1
-    assert generator.scheduler_stats["pld_proposed"] > 0
+    assert generator.scheduler_stats.get("pld_cost_width1_cohort_splits", 0) == 0
+    assert generator.scheduler_stats["pld_batched_max_width"] == 2
+    # Suspended for width: no latch probed, activated or proposed.
+    assert generator.scheduler_stats["pld_proposed"] == 0
+    assert all(
+        finals[uid].speculative_receipt["cost_latch"]["activations"] == 0
+        for uid in uids
+    )
 
 
 def test_cliff_aware_pld_extends_past_the_configured_plateau():

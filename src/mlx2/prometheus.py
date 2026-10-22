@@ -374,6 +374,9 @@ _ENGINE_EVENTS = {
     "memory_admission_deferred": ("memory_admission", "deferred"),
     "memory_admission_retries": ("memory_admission", "retry"),
     "memory_admission_timeouts": ("memory_admission", "timeout"),
+    # The stall watchdog retired an active lane the scheduler never advanced
+    # (not memory-queued): scheduler starvation, reported as 503.
+    "stall_watchdog_scheduler_starvation": ("stall_watchdog", "scheduler_starvation"),
     "memory_admission_depth_floor_admits": ("memory_admission", "depth_floor_admit"),
     "memory_pressure_evictions": ("memory_admission", "cache_eviction"),
     "memory_cache_reclaims_before_reject": (

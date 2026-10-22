@@ -911,3 +911,33 @@ def test_qualification_requires_observed_preemption_only_when_enabled():
         assert "feature_memory_preemption" not in required_feature_checks(base)
         enabled = {**base, "memory_preemption": {"enabled": True}}
         assert "feature_memory_preemption" in required_feature_checks(enabled)
+
+
+@pytest.mark.parametrize("memory_queued", [False, True])
+def test_stall_watchdog_names_scheduler_starvation_for_active_lanes(
+    scripted, monkeypatch, memory_queued
+):
+    """An active lane that never advances is scheduler starvation (503), not a
+    memory refusal; only a lane the executor reports as memory-queued keeps
+    the 429 (Qwen3.8-27B-MLX-8bit PLD B4, 2026-10-21)."""
+    state, start, submit = scripted
+    base = generate.BatchGenerator
+
+    class Reporting(base):
+        def memory_waiting_uids(self):
+            return tuple(self.lanes) if memory_queued else ()
+
+    monkeypatch.setattr(generate, "BatchGenerator", Reporting)
+    engine = start(max_lanes=2)
+    lone = submit(engine, "lone", max_tokens=4)
+    result = lone.events.get(timeout=10)
+    if memory_queued:
+        assert result["status"] == 429
+        assert result["error"] == "memory admission did not permit progress"
+        assert engine.counts.get("stall_watchdog_scheduler_starvation", 0) == 0
+    else:
+        assert result["status"] == 503
+        assert result["code"] == "scheduler_starvation"
+        assert result["error"].startswith("scheduler starvation")
+        assert "memory" not in result["error"]
+        assert engine.counts["stall_watchdog_scheduler_starvation"] == 1

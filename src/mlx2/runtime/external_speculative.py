@@ -13525,6 +13525,10 @@ class ExternalDraftBatchGenerator:
         )
         return tuple(sorted(waiting))
 
+    def memory_waiting_uids(self):
+        """Lanes whose prefill slice or decode fit failed memory admission."""
+        return tuple(sorted(self._memory_waiting_uids))
+
     def disable_speculation(self, uid):
         if self._open: raise RuntimeError("Cannot change route inside a transaction")
         inflight = getattr(self, "_parked_inflight", None)

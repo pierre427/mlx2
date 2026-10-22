@@ -13586,15 +13586,37 @@ class ServingEngine:
                 if expired_atomic:
                     stalled = [uid for uid in stalled if uid not in expired_atomic]
                 if stalled:
+                    # Only a lane the executor reports as memory-queued was
+                    # refused by memory admission.  Any other stalled lane was
+                    # active and simply never advanced: scheduler starvation,
+                    # a server fault, not a capacity answer.  An executor
+                    # without the hook keeps the historical memory label.
+                    memory_waiting = getattr(batch, "memory_waiting_uids", None)
+                    memory_waiting = (
+                        None if memory_waiting is None else set(memory_waiting())
+                    )
                     batch.remove(stalled)
                     for uid in stalled:
-                        self._finish(
-                            active.pop(uid),
-                            {
+                        if memory_waiting is None or uid in memory_waiting:
+                            event = {
                                 "error": "memory admission did not permit progress",
                                 "status": 429,
-                            },
-                        )
+                            }
+                        else:
+                            count_add(self.counts, "stall_watchdog_scheduler_starvation", 1)
+                            log.warning(
+                                "active lane %s made no progress for %.0f s: "
+                                "scheduler starvation", active[uid].id, stall_seconds,
+                            )
+                            event = {
+                                "error": (
+                                    "scheduler starvation: active lane made no "
+                                    f"progress for {stall_seconds:.0f} s"
+                                ),
+                                "status": 503,
+                                "code": "scheduler_starvation",
+                            }
+                        self._finish(active.pop(uid), event)
                 cohort_receipt = None
                 cohort_jobs = ()
                 if coalescer.mechanism != "ordinary" and coalescer.attached:

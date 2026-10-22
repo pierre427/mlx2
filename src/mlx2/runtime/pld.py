@@ -763,6 +763,7 @@ class PromptLookupBatchGenerator:
             "pld_pipeline_dropped_proposals": 0,
             "pld_pipeline_refuted_proposals": 0,
             "pld_pipeline_released_rows": 0,
+            "pld_pipeline_refused_occupied": 0,
             "pld_pipeline_untimed_rounds": 0,
             "pld_parked_direct_rounds": 0,
             "pld_cost_width1_cohort_splits": 0,
@@ -1664,12 +1665,21 @@ class PromptLookupBatchGenerator:
         lengths = [len(inputs) for inputs, _proposal in plans]
         width = max(lengths)
         if width == 1 and pipeline and self._pipeline_eligible(lanes):
-            # A proposal-free round of a hybrid cohort: dispatch it now and
-            # read it next poll, after the round that follows is dispatched.
-            self._inflight = self._dispatch_plain(
-                lanes, steps, [inputs[0] for inputs, _proposal in plans]
-            )
-            return
+            # At most one plain round is ever in flight.  Overwriting a
+            # dispatched round orphaned it: never read, never committed or
+            # released, while its forward had already advanced the lane's
+            # caches, so that lane re-fed the same anchor next poll and
+            # decoded from a corrupted state (or not at all).  An occupied
+            # slot runs this round synchronously (counter and guard as in
+            # the unmerged edcc0adc8, which diagnosed the same mechanism).
+            if self._inflight is None:
+                # A proposal-free round of a hybrid cohort: dispatch it now
+                # and read it next poll, after the following round dispatches.
+                self._inflight = self._dispatch_plain(
+                    lanes, steps, [inputs[0] for inputs, _proposal in plans]
+                )
+                return
+            self.scheduler_stats["pld_pipeline_refused_occupied"] += 1
         transaction = self._begin_verify(lanes, lengths)
         # One forward serves the cohort: a lane without a proposal still runs
         # as a verify row unless the whole round is one plain decode step.
@@ -1749,8 +1759,9 @@ class PromptLookupBatchGenerator:
         """Lanes whose anchor-only round may run before the host reads them.
 
         Never with processors (they read host tokens or steer the forward).
-        A cohort of hybrid lanes without cost latches pipelines whatever its
-        width (its plain transaction can release a finished row).  So does a
+        A cohort of hybrid lanes pipelines whatever its width (its plain
+        transaction can release a finished row) when every cost-latched
+        member is parked by its width suspension.  So does a
         lone cost-latched lane while its latch is parked (or handed off), on
         hybrid planes or on plain/rotating KV planes (``PlainKVStep``): it
         proposes nothing then, and its plain rounds are timed between reads,
@@ -1764,10 +1775,23 @@ class PromptLookupBatchGenerator:
             return False
         if any(not getattr(lane, "batched", False) or lane.processors for lane in lanes):
             return False
-        if all(lane.hybrid_rows and lane.cost_latch is None for lane in lanes):
+        if len(lanes) > 1:
+            # A cost-latched lane in a wider cohort is suspended for width
+            # (``_round_steps``): parked and proposal-free, so it pipelines
+            # with its peers.
+            return all(
+                lane.hybrid_rows
+                and (
+                    lane.cost_latch is None
+                    or (
+                        lane.ordinary
+                        and lane.cost_latch.state in ("parked", "handed_off")
+                    )
+                )
+                for lane in lanes
+            )
+        if lanes[0].hybrid_rows and lanes[0].cost_latch is None:
             return True
-        if len(lanes) != 1:
-            return False
         (lane,) = lanes
         cost = lane.cost_latch
         return (
@@ -2441,13 +2465,18 @@ class PromptLookupBatchGenerator:
 
     def _decode_phase(self, pending):
         decode_started = time.perf_counter()
-        # The cost latch measures one physical target row. Keep that geometry
-        # when several PLD requests coexist: a width-two segmented target is
-        # numerically distinct from the ordinary B1 path and has no matched
-        # cost baseline. Other PLD lanes retain their batched verify route.
+        # The cost latch is B1-only: it never probes or activates in a cohort
+        # wider than one (``_round_steps`` suspends it for width).  When
+        # several PLD requests coexist, a cost-latched lane therefore decodes
+        # plain in the batched cohort like any other lane, as ordinary decode
+        # does at that width.  Serialising such lanes one target row at a time
+        # (the 2026-09-26 width-one candidate) ran B lanes as B sequential B1
+        # forwards: about 1/B of ordinary's batched throughput, with no
+        # speculation either, since the latch stays parked at B > 1.
         together = [
             lane for lane in pending
-            if getattr(lane, "batched", False) and lane.cost_latch is None
+            if getattr(lane, "batched", False)
+            and (lane.cost_latch is None or len(pending) > 1)
         ]
         if (
             len(pending) == 1
@@ -2491,6 +2520,8 @@ class PromptLookupBatchGenerator:
                 try:
                     if lane.cost_latch is not None:
                         if len(pending) > 1:
+                            # Only a lane without a batched transaction is
+                            # split from a wider cohort now.
                             lane.cost_width1_cohort_splits += 1
                             self.scheduler_stats["pld_cost_width1_cohort_splits"] += 1
                         if getattr(lane, "batched", False) and (
@@ -2501,7 +2532,10 @@ class PromptLookupBatchGenerator:
                             # An unarmed hybrid lane has no snapshot epoch for
                             # the direct driver; its one-lane transaction is
                             # the ordinary B1 forward on its own caches.
-                            self._round_batched([lane])
+                            # Never pipelined: this loop runs one round per
+                            # lane, and a dispatched round must be read before
+                            # another lane's round is dispatched.
+                            self._round_batched([lane], pipeline=False)
                         else:
                             if lane.ordinary:
                                 self.scheduler_stats["pld_parked_direct_rounds"] += 1
@@ -2549,6 +2583,11 @@ class PromptLookupBatchGenerator:
         """Lanes still prefilling: they wait on the prefill round-robin, not
         on memory, so the serving stall watchdog must not fail them."""
         return [uid for uid, lane in self.lanes.items() if lane.anchor is None]
+
+    def memory_waiting_uids(self):
+        """Prompt lookup queues no lane on memory: a stalled lane here is
+        scheduler starvation, never a memory refusal."""
+        return ()
 
     def take_lane_failures(self):
         failures, self._lane_failures = self._lane_failures, []
