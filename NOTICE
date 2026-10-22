@@ -733,3 +733,67 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+------------------------------------------------------------------------------
+Flint (https://huggingface.co/RecursiveSI/flint, revision
+2a247be0c0aec895ccb0ac7ca92229ec6df37288) — Apache License 2.0
+
+The Recursive Flint model law in src/mlx2/runtime/models/flint.py and the
+artifact gate and serving adapter in src/mlx2/adapters/flint.py are ported to
+MLX from the released checkpoint configuration and from the flint_sglang 0.1.4
+wheel embedded in that repository (sglang/flint_sglang-0.1.4-py3-none-any.whl:
+flint_sglang/configuration_flint.py, model.py, reasoning_parser.py and
+tool_parser.py). src/mlx2/runtime/models/flint_routed_decode.py is mlx2's own
+routed-decode kernel path for that model. The flint_sglang wheel is licensed
+under the Apache License, Version 2.0, and its NOTICE reads, in the part that
+applies to the ported code:
+
+  flint_sglang builds on SGLang (https://github.com/sgl-project/sglang).
+  Copyright 2023-2024 SGLang Team. Licensed under the Apache License, Version
+  2.0 (see LICENSE).
+  Portions of flint_sglang/model.py are adapted from SGLang and modified.
+
+mlx2 is an independent MLX implementation of the documented model law. It does
+not copy the CUDA or FlashAttention-4 kernel patch (BSD-3-Clause) shipped in
+the source serving kit, nor its install script. The full Apache-2.0 text is
+this repository's LICENSE.
+
+------------------------------------------------------------------------------
+Ling 3 Flash target and UBTree drafter — MIT License
+
+- src/mlx2/runtime/models/bailing_hybrid.py maps the bailing_hybrid model
+  adapter of TensorFold/Ling-3.0-flash-oQ4
+  (https://huggingface.co/TensorFold/Ling-3.0-flash-oQ4, revision
+  c00a8c3074236b713f15e12db59f0158d29f3b13, bailing_hybrid.py; a community
+  MLX conversion of inclusionAI/Ling-3.0-flash) onto mlx2's runtime and adds
+  target taps for the external drafter.
+- src/mlx2/runtime/drafters/ubtree.py, ubtree_config.py, ubtree_tree.py and
+  src/mlx2/adapters/ubtree.py implement the released inclusionAI
+  Ling-3.0-flash-UBTree drafter (https://huggingface.co/inclusionAI/
+  Ling-3.0-flash-UBTree, revision 59ced6e1e8fa434570be038e262c3e62552cf9a4,
+  declared MIT) from its configuration, checkpoint and paper
+  (arXiv:2609.39972).
+
+The TensorFold repository's LICENSE reads:
+
+MIT License
+
+Copyright (c) 2026 inclusionAI contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
