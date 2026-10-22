@@ -361,9 +361,15 @@ def test_shipped_table_is_valid_and_cites_committed_evidence():
     table = brd.load_table()
     assert table["rule"]["min_geomean"] == brd.RULE["min_geomean"] == 1.05
     assert table["rule"]["min_cell"] == brd.RULE["min_cell"] == 0.85
-    for entry in table["entries"]:
-        for path in entry["evidence"]["files"]:
+    cited = [path for entry in table["entries"] for path in entry["evidence"]["files"]]
+    # The public code mirror ships no run evidence or research notes: when
+    # none of the cited private evidence is present, check only the rest.
+    private = ("qualification/runs/", "docs/research/")
+    evidence_present = any((ROOT / path).exists() for path in cited if path.startswith(private))
+    for path in cited:
+        if evidence_present or not path.startswith(private):
             assert (ROOT / path).exists(), path
+    for entry in table["entries"]:
         if entry["status"] == "selected_unqualified":
             assert entry["default"]["kind"] != "adapter_default"
             if entry["evidence"].get("decision_row"):

@@ -220,7 +220,10 @@ def test_optional_reasoning_and_matching_tool_wire_format():
 
 def test_provenance_pins_released_source():
     root = Path(__file__).resolve().parents[1]
-    record = json.loads((root / "provenance" / "flint.json").read_text())
+    path = root / "provenance" / "flint.json"
+    if not path.is_file():
+        pytest.skip("private material absent: Flint provenance (not exported to the public mirror)")
+    record = json.loads(path.read_text())
     assert record["source_revision"] == flint.SOURCE_REVISION
     assert record["source_index_sha256"] == flint.SOURCE_INDEX_SHA256
     assert record["source_wheel_sha256"] == flint.SGLANG_WHEEL_SHA256

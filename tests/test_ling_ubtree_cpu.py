@@ -125,7 +125,10 @@ def test_depth_calibration_changes_the_selected_root():
 
 def test_provenance_records_both_checkpoint_sources():
     root = Path(__file__).resolve().parents[1]
-    document = json.loads((root / "provenance/ling3-ubtree.json").read_text())
+    path = root / "provenance/ling3-ubtree.json"
+    if not path.is_file():
+        pytest.skip("private material absent: Ling 3 UBTree provenance (not exported to the public mirror)")
+    document = json.loads(path.read_text())
     assert document["target"]["revision"] == "c00a8c3074236b713f15e12db59f0158d29f3b13"
     assert document["drafter"]["revision"] == "59ced6e1e8fa434570be038e262c3e62552cf9a4"
     assert document["license"] == "MIT"
