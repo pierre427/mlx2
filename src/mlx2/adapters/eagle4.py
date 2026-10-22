@@ -12,7 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from ..runtime.drafters.eagle4 import (
+from ..runtime.drafters.eagle4_config import (
     ARCHITECTURE,
     Eagle4Config,
     expected_weight_schema,
@@ -97,7 +97,8 @@ def validate_runtime_quantization(value):
 
 
 def load_drafter(
-    record, target_model, *, runtime_quantization=None, draft_attention_windows=None
+    record, target_model, *, runtime_quantization=None, draft_attention_windows=None,
+    eagle4_tree=None,
 ):
     validate_runtime_quantization(runtime_quantization)
     if draft_attention_windows is not None:
@@ -119,7 +120,7 @@ def load_drafter(
 
     from ..runtime.drafters.eagle4 import Eagle4DraftModel
 
-    model = Eagle4DraftModel(record["args"])
+    model = Eagle4DraftModel(record["args"], tree=eagle4_tree)
     weights = mx.load(str(root / "model.safetensors"))
     model.load_weights(list(weights.items()), strict=True)
     model.eval()

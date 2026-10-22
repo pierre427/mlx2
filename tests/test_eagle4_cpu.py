@@ -212,3 +212,105 @@ def test_artifact_inspection_load_and_qwen_format_dispatch(tmp_path):
     )
     loaded = load_drafter(record, target)
     assert loaded.receipt_kind == "external_eagle4"
+
+
+def test_eagle4_inspection_imports_no_model_module(tmp_path):
+    """The Qwen3.8 27B adapter inspects the drafter before pinning its environment.
+
+    Live 2026-10-21: ``--ast --ast-drafter <EAGLE-4>`` refused to load the
+    target (ImportOrderError), first through ``ast_drafter_policy_defaults``
+    at CLI time, then through ``inspect_external_policy`` at adapter init,
+    because the EAGLE-4 format module imported ``runtime.models``.
+    """
+    import subprocess
+    import sys
+
+    (tmp_path / "config.json").write_text(json.dumps({"architectures": ["LlamaForCausalLMEagle4"]}))
+    code = (
+        "import sys\n"
+        "from mlx2.adapters.external_drafter_formats import drafter_format, drafter_format_name\n"
+        f"assert drafter_format_name({str(tmp_path)!r}) == 'eagle4'\n"
+        f"assert drafter_format({str(tmp_path)!r}).name == 'eagle4'\n"
+        "from mlx2.adapters.qwen38_27b import Qwen3827BAdapter\n"
+        f"assert Qwen3827BAdapter.ast_drafter_policy_defaults({str(tmp_path)!r}) == {{}}\n"
+        "bad = sorted(m for m in sys.modules if m.startswith('mlx2.runtime.models'))\n"
+        "assert not bad, bad\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def _tree_depths(parents):
+    depths = []
+    for parent in parents:
+        depths.append(0 if parent < 0 else depths[parent] + 1)
+    return depths
+
+
+def test_eagle4_tree_policy_is_validated():
+    from mlx2.runtime.drafters.eagle4_config import EAGLE4_TREE_DEFAULT, validate_eagle4_tree
+
+    assert validate_eagle4_tree(None) == EAGLE4_TREE_DEFAULT == {
+        "children": 4, "depth": None, "max_nodes": None,
+    }
+    assert validate_eagle4_tree({"children": 1, "depth": 7}) == {
+        "children": 1, "depth": 7, "max_nodes": None,
+    }
+    for bad, match in (
+        ([1], "object"),
+        ({"width": 2}, "unknown"),
+        ({"children": 0}, "children"),
+        ({"children": 9}, "children"),
+        ({"children": True}, "children"),
+        ({"depth": 0}, "depth"),
+        ({"depth": 32}, "depth"),
+        ({"max_nodes": 65}, "max_nodes"),
+        ({"max_nodes": 2.0}, "max_nodes"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            validate_eagle4_tree(bad, num_candidates=8)
+
+
+@pytest.mark.parametrize(
+    ("tree", "budget", "length", "max_depth", "max_children"),
+    [
+        ({"children": 1, "depth": 4}, 11, 4, 3, 1),       # MTP-like chain
+        ({"children": 1, "depth": 10}, 15, 10, 9, 1),
+        ({"children": 2, "depth": 2}, 11, 6, 1, 2),       # full binary, two levels
+        ({"children": 8, "depth": 2, "max_nodes": 5}, 15, 5, 0, 8),  # wide: all roots
+    ],
+)
+def test_eagle4_tree_shape_follows_policy(tree, budget, length, max_depth, max_children):
+    from mlx2.runtime.drafters.eagle4_config import validate_eagle4_tree
+
+    _, draft = tiny()
+    draft.tree = validate_eagle4_tree(tree, num_candidates=draft.config.num_candidates)
+    cache = draft.make_cache()
+    hidden = mx.random.normal((1, 1, 3 * HIDDEN))
+    ((tokens, parents),) = draft.propose_tree(
+        [5], hidden, draft.batch_caches([cache]), budget, context_tokens=[[5]],
+    )
+    assert len(tokens) == len(parents) == length
+    assert all(parent < row for row, parent in enumerate(parents))
+    assert max(_tree_depths(parents)) == max_depth
+    fanout = {}
+    for parent in parents:
+        fanout[parent] = fanout.get(parent, 0) + 1
+    assert max(fanout.values()) <= max_children
+    settings = draft.receipt_settings
+    assert settings["tree_children"] == draft.tree["children"]
+    assert settings["tree_depth"] == draft.tree["depth"]
+    assert settings["tree_max_nodes"] == draft.tree["max_nodes"]
+
+
+def test_eagle4_default_tree_is_unchanged():
+    """The policy default reproduces the pre-policy shape (children 4, budget-bound)."""
+    _, draft = tiny()
+    assert draft.tree == {"children": 4, "depth": None, "max_nodes": None}
+    hidden = mx.random.normal((1, 1, 3 * HIDDEN))
+    ((tokens, parents),) = draft.propose_tree(
+        [5], hidden, draft.batch_caches([draft.make_cache()]), 15, context_tokens=[[5]],
+    )
+    fanout = {}
+    for parent in parents:
+        fanout[parent] = fanout.get(parent, 0) + 1
+    assert len(tokens) == 15 and fanout[-1] == 4

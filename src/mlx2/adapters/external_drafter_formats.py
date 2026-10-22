@@ -74,15 +74,36 @@ _FORMATS = {
     "LlamaForCausalLMEagle4": _eagle4,
     "Ling3UBTreeModel": _ubtree,
 }
+_FORMAT_NAMES = {"Qwen3DSparkModel": "dspark", "LlamaForCausalLMEagle4": "eagle4"}
+
+
+def _architecture(config):
+    architectures = config.get("architectures") if isinstance(config, dict) else None
+    if isinstance(architectures, list) and len(architectures) == 1:
+        return architectures[0]
+    return None
 
 
 def format_for_config(config):
-    architectures = config.get("architectures") if isinstance(config, dict) else None
-    if isinstance(architectures, list) and len(architectures) == 1:
-        factory = _FORMATS.get(architectures[0])
-        if factory is not None:
-            return factory()
-    return _dflash2()
+    factory = _FORMATS.get(_architecture(config))
+    return factory() if factory is not None else _dflash2()
+
+
+def drafter_format_name(draft_model):
+    """Format name of the artifact at ``draft_model``, importing no format module.
+
+    Safe before an adapter pins its import-time environment (CLI policy
+    resolution): the EAGLE-4 format module imports ``runtime.models``, so
+    resolving it through :func:`drafter_format` at that point made the
+    Qwen3.8 27B adapter refuse to load with ImportOrderError.
+    """
+    try:
+        config = json.loads(
+            (Path(str(draft_model)).expanduser() / "config.json").read_text()
+        )
+    except (OSError, ValueError, TypeError):
+        return "dflash2"
+    return _FORMAT_NAMES.get(_architecture(config), "dflash2")
 
 
 def drafter_format(draft_model):
@@ -101,4 +122,4 @@ def drafter_format_for_record(record):
     return format_for_config(record.get("config"))
 
 
-__all__ = ["drafter_format", "drafter_format_for_record", "format_for_config"]
+__all__ = ["drafter_format", "drafter_format_for_record", "drafter_format_name", "format_for_config"]

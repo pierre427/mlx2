@@ -383,6 +383,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "draft_quantization",
         "draft_kernel",
         "draft_vocab",
+        "eagle4_tree",
         "tensorfold_prefill",
         "tensorfold_prefill_backend",
         "varlen_dense_mlp",
@@ -1006,6 +1007,27 @@ def inspect_external_policy(
                 )).encode()
             ).hexdigest(),
         }
+    eagle4_tree = policy.get("eagle4_tree")
+    if eagle4_tree is not None:
+        if draft_format.name != "eagle4":
+            raise ValueError("eagle4_tree applies to EAGLE-4 drafters only")
+        # Model-free module (inspection runs before the environment pin).
+        from ..runtime.drafters.eagle4_config import validate_eagle4_tree
+
+        eagle4_tree = validate_eagle4_tree(
+            eagle4_tree, num_candidates=record["args"].num_candidates
+        )
+        # The proposal tree decides which near-tie path a round commits, so a
+        # shape is part of the route identity (receipt, APCv2 namespace).
+        record = {
+            **record,
+            "fingerprint": hashlib.sha256(
+                (record["fingerprint"] + json.dumps(
+                    {"eagle4_tree": eagle4_tree, "schema": "mlx2.eagle4-tree.v1"},
+                    sort_keys=True,
+                )).encode()
+            ).hexdigest(),
+        }
     return {
         **record,
         "draft_revision": draft_revision,
@@ -1015,6 +1037,7 @@ def inspect_external_policy(
         "runtime_quantization": quantization,
         "draft_kernel": kernel,
         "draft_vocab": vocab,
+        "eagle4_tree": eagle4_tree,
     }
 
 
@@ -1210,9 +1233,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         """
         if cls.descriptor is not QWEN38_27B or drafter in ("mtp", "pld"):
             return {}
-        from .external_drafter_formats import drafter_format
+        # Name only: this runs at CLI time, before the adapter pins its
+        # import-time environment, and a format module may import the models.
+        from .external_drafter_formats import drafter_format_name
 
-        if drafter_format(drafter).name != "dflash2":
+        if drafter_format_name(drafter) != "dflash2":
             return {}
         from ..runtime.lane import backend
 
@@ -1714,10 +1739,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 lambda record, target: load_drafter(
                     record, target,
                     runtime_quantization=record["runtime_quantization"],
-                    # Only DFlash2 takes a projection kernel (checked above).
+                    # Only DFlash2 takes a projection kernel and only EAGLE-4
+                    # a tree shape (both checked at inspection).
                     **{
                         key: record[key]
-                        for key in ("draft_kernel", "draft_vocab")
+                        for key in ("draft_kernel", "draft_vocab", "eagle4_tree")
                         if record.get(key) is not None
                     },
                 ),
