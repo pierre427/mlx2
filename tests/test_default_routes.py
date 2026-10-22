@@ -529,3 +529,25 @@ def test_ast_on_qwen35_9b_maps_to_its_chain_route():
     assert not (policy or {}).get("draft_model")
     assert args.prompt_lookup and not args.external_draft
     assert args.ast_route["tree_tiles"] is False
+
+
+def test_flint_no_flag_default_is_ordinary_after_the_measured_pld_regression():
+    # flint-e2e-20261021 (flint-2a247be0-oq4e, M5 Max): latched adaptive PLD
+    # ran 1.02-1.15x of ordinary at B1 but 0.30-0.42x at B4 (every latched
+    # lane decoded width-1, pld_batched_max_width=1), geomean 0.61; AST
+    # prompt-lookup tiles 0.51.  Neither meets the best-route rule (geomean
+    # >= 1.05, no cell < 0.85), so the measured-best no-flag route is ordinary;
+    # --prompt-lookup and --ast stay explicit.
+    from mlx2.adapters.flint import DESCRIPTOR, FlintAdapter
+    from mlx2.contracts import Capability
+    from mlx2.server import build_parser, resolve_route_selection
+
+    assert Capability.PROMPT_LOOKUP in DESCRIPTOR.capabilities
+    resolution = _resolution(FlintAdapter, DESCRIPTOR)
+    parser = build_parser()
+    selected = resolve_route_selection(parser.parse_args(["--model", "fixture"]), None, resolution)
+    assert (selected.route, selected.source) == ("ordinary", "adapter_default")
+    selected = resolve_route_selection(
+        parser.parse_args(["--model", "fixture", "--prompt-lookup"]), None, resolution
+    )
+    assert (selected.route, selected.source) == ("prompt_lookup", "explicit_flag")

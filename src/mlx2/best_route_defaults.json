@@ -714,6 +714,70 @@
    }
   },
   {
+   "checkpoint": "flint-2a247be0-bf16@sha256:8efb69b21244911f3813a6326200e9c0b3fd73036f3e22c8c07f2af10d304418",
+   "fingerprint": "8efb69b21244911f3813a6326200e9c0b3fd73036f3e22c8c07f2af10d304418",
+   "adapter": "FlintAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ordinary",
+    "kind": "ordinary"
+   },
+   "reason": "decision row from another lane: Route: ordinary adapter=FlintAdapter. Best-route rule (Pierre 2026-10-21): geomean over ordinary >= 1.05 across code/chat/long/copy x B1/B4 and no cell < 0.85x. No candidate qualifies: prompt_lookup geomean 0.630 (min 0.344 chat/B4), --ast-drafter pld tiles 0.526 (min 0.319 chat/B4). Ordinary is the measured-best no-flag route (the expert kernels do not apply to BF16 experts). Unqualified.",
+   "evidence": {
+    "files": [
+     "qualification/runs/flint-e2e-20261021/verdicts/bf16-route-verdict.json",
+     "qualification/runs/flint-e2e-20261021/evidence/bf16-ord-r2",
+     "qualification/runs/flint-e2e-20261021/evidence/bf16-pld-r2",
+     "qualification/runs/flint-e2e-20261021/evidence/bf16-astpld-r2"
+    ],
+    "source_revision": "6267d00308e1799f243ad12e3882ce2b6a699086",
+    "decision_row": true
+   }
+  },
+  {
+   "checkpoint": "flint-2a247be0-oq4e@sha256:7601d391482daf7157c787a58a4069bc822973fd15f66c0277e9ac5ea7486a83",
+   "fingerprint": "7601d391482daf7157c787a58a4069bc822973fd15f66c0277e9ac5ea7486a83",
+   "adapter": "FlintAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ordinary",
+    "kind": "ordinary"
+   },
+   "reason": "decision row from another lane: Route: ordinary adapter=FlintAdapter. Best-route rule (Pierre 2026-10-21): geomean over ordinary >= 1.05 across code/chat/long/copy x B1/B4 and no cell < 0.85x. No candidate qualifies: prompt_lookup geomean 0.614 (min 0.298 code/B4), --ast resolves to prompt_lookup, --ast-drafter pld tiles 0.509 (min 0.310 code/B4). Ordinary with the NAX prefill gather and one-token routed decode is the measured-best no-flag route. Verified on 8d483f8f6: a no-flag server resolved route=ordinary source=adapter_default receipt=unqualified, correctness 9/9; against the kernels-off control B1 133.0/124.9/116.7/127",
+   "evidence": {
+    "files": [
+     "qualification/runs/flint-e2e-20261021/verdicts/oq4e-route-verdict.json",
+     "qualification/runs/flint-e2e-20261021/evidence/oq4e-ord-r3",
+     "qualification/runs/flint-e2e-20261021/evidence/oq4e-pld-r2",
+     "qualification/runs/flint-e2e-20261021/evidence/oq4e-astpld-r2",
+     "qualification/runs/flint-e2e-20261021/evidence/oq4e-default-r2",
+     "qualification/runs/flint-e2e-20261021/evidence/oq4e-default-kernelsoff-r2"
+    ],
+    "source_revision": "8d483f8f63e32e28aab42106f488ae04acf5b74b",
+    "decision_row": true
+   }
+  },
+  {
+   "checkpoint": "flint-int4@sha256:9fed7dc03fdf4603323ade9f955ee7d9e39dd2a7ad5f5ab49022d121dc28fcbb",
+   "fingerprint": "9fed7dc03fdf4603323ade9f955ee7d9e39dd2a7ad5f5ab49022d121dc28fcbb",
+   "adapter": "FlintAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ordinary",
+    "kind": "ordinary"
+   },
+   "reason": "decision row from another lane: Route: ordinary adapter=FlintAdapter. Prompt lookup and AST tiles were not re-measured on this checkpoint; on both other Flint checkpoints they lost the best-route rule at B4 (geomean 0.61-0.63 and 0.51-0.53, min cell 0.30-0.34), and the no-flag route is ordinary with the NAX prefill gather and routed decode, both engaged here. Unqualified.",
+   "evidence": {
+    "files": [
+     "qualification/runs/flint-int4-20261021/evidence/int4-ord-a",
+     "qualification/runs/flint-e2e-20261021/verdicts/oq4e-route-verdict.json",
+     "qualification/runs/flint-e2e-20261021/verdicts/bf16-route-verdict.json"
+    ],
+    "source_revision": "79a4d8c90ab180764e0efb3db7e27662c7bb566c",
+    "decision_row": true
+   }
+  },
+  {
    "family": "Qwen3635BA3BAdapter",
    "status": "kept_current_default",
    "default": {

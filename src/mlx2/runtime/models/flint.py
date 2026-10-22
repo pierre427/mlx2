@@ -16,6 +16,7 @@ import mlx.core as mx
 from mlx import nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from . import moe_nax_gather as _moe_nax
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
@@ -136,6 +137,32 @@ class SparseMoE(nn.Module):
             args.hidden_size, args.moe_intermediate_size, args.num_experts
         )
         self.shared_expert = MLP(args.hidden_size, args.shared_expert_intermediate_size)
+        # One-token routed experts from one-expert views (flint_routed_decode):
+        # "off" (stock gathers), "gate_up" or "gate_up_down".  The adapter
+        # selects it; the kernels prove themselves bitwise against the stock
+        # gathers on the first call, else every call stays stock.
+        self.routed_decode = "off"
+        self.routed_decode_calls = 0
+        self.routed_decode_fallbacks = 0
+        self.routed_decode_last_fallback = None
+
+    def _routed_rows(self, x, indices):
+        if self.routed_decode == "off" or x.size != x.shape[-1]:
+            return None
+        from . import flint_routed_decode as FR
+
+        reason = FR.admission(x, self.switch_mlp)
+        rows = None if reason else FR.routed_rows(x, indices, self.switch_mlp, self.routed_decode)
+        if rows is None:
+            self.routed_decode_fallbacks += 1
+            self.routed_decode_last_fallback = reason or FR.status()["verdict"]
+            if reason is not None and reason not in FR.TRANSIENT_REFUSALS:
+                # The expert tables (or the runtime) can never admit it: stop
+                # re-checking on every token; the stock gathers serve.
+                self.routed_decode = "off"
+            return None
+        self.routed_decode_calls += 1
+        return rows.reshape(*indices.shape, -1)
 
     def __call__(self, x):
         # SGLang routes in fp32: bias-free sigmoid scores choose the experts,
@@ -144,7 +171,10 @@ class SparseMoE(nn.Module):
         indices = mx.argpartition(scores, kth=-self.top_k, axis=-1)[..., -self.top_k :]
         weights = mx.take_along_axis(scores, indices, axis=-1)
         weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
-        routed = mx.sum(self.switch_mlp(x, indices) * weights[..., None], axis=-2)
+        expert_rows = self._routed_rows(x, indices)
+        if expert_rows is None:
+            expert_rows = self.switch_mlp(x, indices)
+        routed = mx.sum(expert_rows * weights[..., None], axis=-2)
         return routed.astype(x.dtype) + self.shared_expert(x)
 
 
@@ -180,7 +210,14 @@ class Decoder(nn.Module):
         self._full = args.layer_types.index("full_attention")
         self._sliding = args.layer_types.index("sliding_attention")
 
-    def __call__(self, inputs, cache=None):
+    def __call__(self, inputs, cache=None, capture=None):
+        # The M5 NAX sorted expert gather (bit-identical to the stock sorted
+        # kernel) is prefill-only: the trunk forward decides the phase once.
+        # A no-op while its mode is off.
+        with _moe_nax.forward_scope(inputs, cache):
+            return self._forward(inputs, cache, capture)
+
+    def _forward(self, inputs, cache, capture):
         hidden = self.embed_tokens(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
@@ -188,9 +225,12 @@ class Decoder(nn.Module):
         sliding_mask = create_attention_mask(
             hidden, cache[self._sliding], window_size=self.args.sliding_window
         )
-        for layer, layer_cache in zip(self.layers, cache, strict=True):
+        for index, (layer, layer_cache) in enumerate(zip(self.layers, cache, strict=True)):
             mask = full_mask if layer.layer_type == "full_attention" else sliding_mask
             hidden = layer(hidden, mask, layer_cache)
+            if capture is not None and index in capture:
+                # Post-block residual stream, before the final norm.
+                capture[index] = hidden
         return self.norm(hidden)
 
 
@@ -209,17 +249,46 @@ class Model(nn.Module):
 
     def __call__(self, inputs, cache=None):
         hidden = select_checkpoint_rows(self.model(inputs, cache))
-        logits = (
-            self.model.embed_tokens.as_linear(hidden)
-            if self.args.tie_word_embeddings
-            else self.lm_head(hidden)
-        )
+        logits = self._head(hidden)
         self.completed_forwards += 1
         return logits
 
     @property
     def layers(self):
         return self.model.layers
+
+    @property
+    def speculative_args(self):
+        return self.args
+
+    def _head(self, hidden):
+        return (
+            self.model.embed_tokens.as_linear(hidden)
+            if self.args.tie_word_embeddings
+            else self.lm_head(hidden)
+        )
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        """Logits plus ascending post-block taps for external/tree drafting."""
+        capture_layers = tuple(int(index) for index in capture_layers)
+        if (
+            not capture_layers
+            or tuple(sorted(set(capture_layers))) != capture_layers
+            or capture_layers[0] < 0
+            or capture_layers[-1] >= len(self.model.layers)
+        ):
+            raise ValueError("Invalid target capture layers")
+        taps = {index: None for index in capture_layers}
+        hidden = self.model(inputs, cache, capture=taps)
+        features = mx.concatenate([taps[index] for index in capture_layers], axis=-1)
+        if body_only:
+            return None, features
+        logits = self._head(hidden)
+        self.completed_forwards += 1
+        return logits, features
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     def sanitize(self, weights, *, eager=False):
         """Pack 256 per-expert tensors into the native SwitchGLU layout."""

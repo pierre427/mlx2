@@ -11,6 +11,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .artifact_paths import shard_within_artifact
+from .external_draft_policy import ExternalDraftAdapterMixin
 
 SOURCE_REPOSITORY = "RecursiveSI/flint"
 SOURCE_REVISION = "2a247be0c0aec895ccb0ac7ca92229ec6df37288"
@@ -48,7 +49,9 @@ DESCRIPTOR = ModelDescriptor(
     metadata={
         "execution": "mlx2.adapters.flint.FlintAdapter",
         "qualification": "pending",
-        "scope": "ordinary text decode; model-selected optional reasoning and tools",
+        "scope": "ordinary text decode; target-verified prompt lookup; prompt-lookup "
+        "AST tree tiles on the generic attention target; model-selected optional "
+        "reasoning and tools",
     },
 )
 
@@ -139,6 +142,84 @@ def _quantization(config: dict, weights: dict) -> dict | None:
     return quant
 
 
+UPSTREAM_INT4_MANIFEST = "flint-int4.json"
+UPSTREAM_INT4_REPOSITORY = "RecursiveSI/flint-int4"
+UPSTREAM_INT4_REVISION = "3b93f9053b530488405ae9fca51d4900d6ce21f0"
+UPSTREAM_INT4_FORMAT = "mlx-affine-int4"
+_SAFETENSORS_BYTES = {"U8": 1, "U32": 4}
+
+
+def _shard_headers(path: Path, names) -> dict:
+    """{tensor: (dtype, shape, shard)} from safetensors headers only."""
+    import struct
+
+    tensors = {}
+    for name in names:
+        with open(path / name, "rb") as handle:
+            size = struct.unpack("<Q", handle.read(8))[0]
+            header = json.loads(handle.read(size))
+        metadata = header.pop("__metadata__", None) or {}
+        if metadata.get("format") != "mlx":
+            raise ValueError(f"Flint upstream INT4 shard {name} is not an MLX export")
+        for tensor, entry in header.items():
+            if tensor in tensors:
+                raise ValueError(f"Flint tensor {tensor} appears in two shards")
+            tensors[tensor] = (entry["dtype"], tuple(entry["shape"]), name)
+    return tensors
+
+
+def _upstream_int4_layout(path: Path, config: dict) -> tuple[dict, dict]:
+    """Weight map and quantization law for ``RecursiveSI/flint-int4``.
+
+    The upstream MLX export (``RecursiveSI/flint-int4@3b93f905``) ships no
+    safetensors index, stores packed weights as ``uint8`` rows (the same
+    little-endian nibble order as MLX's ``uint32`` packing; viewed back at
+    load) and names its quantization without ``mode`` and without the INT8
+    embedding override, which ``config.mlx_export`` records instead.  Accept
+    exactly that layout, fail closed otherwise: the manifest must name the
+    format and every shard, config.json must match its manifest digest, and
+    every quantized tensor's packed width must imply the declared bits.
+    """
+    manifest = _json(path / UPSTREAM_INT4_MANIFEST)
+    export = config.get("mlx_export")
+    if manifest.get("weight_format") != UPSTREAM_INT4_FORMAT or not isinstance(export, dict):
+        raise ValueError("Flint artifact has no safetensors index and is not the upstream INT4 export")
+    declared = manifest.get("checkpoint_files") or {}
+    shards = sorted(name for name in declared if name.endswith(".safetensors"))
+    present = sorted(item.name for item in path.glob("*.safetensors"))
+    if not shards or shards != present:
+        raise ValueError("Flint upstream INT4 shards differ from its manifest")
+    if hashlib.sha256((path / "config.json").read_bytes()).hexdigest() != declared.get("config.json"):
+        raise ValueError("Flint upstream INT4 config.json differs from its manifest digest")
+    quant = config.get("quantization") or {}
+    group, bits = quant.get("group_size"), quant.get("bits")
+    if quant.get("mode", "affine") != "affine" or set(quant) - {"group_size", "bits", "mode"}:
+        raise ValueError("Flint upstream INT4 quantization is not the uniform affine export")
+    if bits != export.get("bits") or bits != export.get("routed_expert_bits"):
+        raise ValueError("Flint upstream INT4 bits disagree with mlx_export")
+    tensors = _shard_headers(path, shards)
+    law = {"group_size": group, "bits": bits, "mode": "affine"}
+    for name, (dtype, shape, _) in tensors.items():
+        if not name.endswith(".scales"):
+            continue
+        module = name[: -len(".scales")]
+        weight = tensors.get(module + ".weight")
+        if weight is None or weight[0] not in _SAFETENSORS_BYTES or module + ".biases" not in tensors:
+            raise ValueError(f"Flint upstream INT4 tensor {module} is not affine packed")
+        packed_bits = weight[1][-1] * _SAFETENSORS_BYTES[weight[0]] * 8
+        implied = packed_bits // (shape[-1] * group)
+        if implied * shape[-1] * group != packed_bits:
+            raise ValueError(f"Flint upstream INT4 tensor {module} has a ragged packing")
+        expected = export.get("embedding_bits") if module == "model.embed_tokens" else bits
+        if implied != expected:
+            raise ValueError(
+                f"Flint upstream INT4 tensor {module} packs {implied}-bit values, declared {expected}"
+            )
+        if implied != bits:
+            law[module] = {"group_size": group, "bits": implied, "mode": "affine"}
+    return {name: entry[2] for name, entry in tensors.items()}, law
+
+
 def inspect_artifact(model_path: str | Path) -> dict:
     path = Path(model_path).expanduser().resolve()
     config = _json(path / "config.json")
@@ -155,8 +236,12 @@ def inspect_artifact(model_path: str | Path) -> dict:
     if config.get("rms_norm_eps") != 1e-6:
         raise ValueError("Flint RMSNorm epsilon differs")
     index_path = path / "model.safetensors.index.json"
-    index = _json(index_path)
-    weights = index.get("weight_map")
+    upstream_law = None
+    if not index_path.is_file() and (path / UPSTREAM_INT4_MANIFEST).is_file():
+        weights, upstream_law = _upstream_int4_layout(path, config)
+    else:
+        index = _json(index_path)
+        weights = index.get("weight_map")
     if not isinstance(weights, dict) or not weights:
         raise ValueError("Flint weight index is empty")
     files = []
@@ -227,7 +312,9 @@ def inspect_artifact(model_path: str | Path) -> dict:
             "Flint indexed tensor topology is incomplete: "
             + ", ".join(sorted(missing)[:5])
         )
-    quant = _quantization(config, weights)
+    quant = _quantization(
+        {**config, "quantization": upstream_law} if upstream_law else config, weights
+    )
     digest = hashlib.sha256()
     for name in (
         "config.json",
@@ -236,6 +323,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "tokenizer_config.json",
         "chat_template.jinja",
         "generation_config.json",
+        UPSTREAM_INT4_MANIFEST,
     ):
         item = path / name
         if item.is_file():
@@ -247,6 +335,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "config": config,
         "weight_map": weights,
         "quantization": quant,
+        "packed_uint8": upstream_law is not None,
         "source_layout": "packed"
         if any(".switch_mlp." in key for key in weights)
         else "hf-per-expert",
@@ -255,16 +344,98 @@ def inspect_artifact(model_path: str | Path) -> dict:
             "fingerprint": digest.hexdigest(),
             "files": files,
         },
-        "source_repository": SOURCE_REPOSITORY,
-        "source_revision": config.get("mlx2_conversion", {}).get(
-            "source_revision", SOURCE_REVISION
-        ),
+        "source_repository": UPSTREAM_INT4_REPOSITORY if upstream_law else SOURCE_REPOSITORY,
+        "source_revision": UPSTREAM_INT4_REVISION if upstream_law
+        else config.get("mlx2_conversion", {}).get("source_revision", SOURCE_REVISION),
         "qualification": "pending",
     }
 
 
-class FlintAdapter:
+def _validate_execution_policy(execution_policy) -> dict:
+    """Reject unsupported Flint routes before artifact or tensor access.
+
+    The only external policy is the AST tree-tile route with the model-free
+    prompt-lookup drafter (``--ast-drafter pld`` writes it); its knobs are
+    validated here and its tile defaults filled.
+    """
+    if execution_policy in (None, {}):
+        return {}
+    if not isinstance(execution_policy, dict):
+        raise TypeError("Flint execution policy must be an object")
+    from .qwen38_27b import PROMPT_LOOKUP_DRAFT_NAMES, _native_mtp_tree_policy
+
+    if execution_policy.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES:
+        if execution_policy.get("ast_graft_prompt_lookup"):
+            raise ValueError("Flint prompt-lookup tiles have no base drafter to graft onto")
+        return _native_mtp_tree_policy(execution_policy)
+    if execution_policy.get("draft_model"):
+        raise ValueError(
+            "Flint external drafting is implemented for the prompt-lookup "
+            "tree-tile drafter only (draft_model \"prompt_lookup\")"
+        )
+    raise ValueError(
+        "Flint supports ordinary decode, request-scoped prompt lookup and "
+        "prompt-lookup AST tiles; it has no other execution-policy overrides"
+    )
+
+
+NAX_GATHER_ENV = "MLX2_MOE_NAX_GATHER"
+ROUTED_DECODE_ENV = "MLX2_FLINT_ROUTED_DECODE"
+# Adapter defaults for the two expert-kernel selections.  Both are
+# bit-identical to the stock gathers (the NAX sorted gather by its per-kernel
+# canary; the routed decode by its first-call bitwise probe), and both fall
+# back to the stock op when not admitted.
+#
+# Measured on flint-2a247be0-oq4e (M5 Max, qualification/runs/
+# flint-e2e-20261021/evidence/oq4e-kernels-ab-r2): the NAX gather prefilled a
+# cold 4,096-token prompt at 2,631 vs 2,558 tok/s median (3/3 interleaved
+# reps no slower, final logits bitwise equal), so it is the default; hosts
+# without NAX fall back to the stock kernel.  Routed decode was bitwise equal
+# on 64/64 rows in that direct loop (host-synchronized per token, where it
+# showed no gain); served at B1 (oq4e-w2-r2: oq4e-rd-r2 between two ordinary
+# controls) gate_up_down decoded 135.1/133.8 tok/s (code/chat) against
+# 121.7/120.7 and 121.6/121.3, +11%, 144,384 routed calls, no fallback, and
+# greedy outputs identical to both controls.  It serves one-token rows only
+# (B>1 rows keep the stock gathers) and refuses itself for the process unless
+# its first call proves bitwise, so it is the default.  Unqualified.
+DEFAULT_NAX_GATHER = "gather"
+DEFAULT_ROUTED_DECODE = "gate_up_down"
+
+
+def kernel_defaults(environ=None) -> tuple[str, str]:
+    """(NAX gather mode, routed-decode mode): operator env, else defaults."""
+    from ..runtime.models import flint_routed_decode, moe_nax_gather
+
+    environ = os.environ if environ is None else environ
+    nax = environ.get(NAX_GATHER_ENV, "").strip().lower() or DEFAULT_NAX_GATHER
+    if nax not in ("off", "gather"):
+        raise ValueError(f"Flint supports {NAX_GATHER_ENV}=off or gather, not {nax!r}")
+    routed = environ.get(ROUTED_DECODE_ENV, "").strip().lower() or DEFAULT_ROUTED_DECODE
+    if routed not in flint_routed_decode.MODES:
+        raise ValueError(
+            f"{ROUTED_DECODE_ENV} must be one of {flint_routed_decode.MODES}, not {routed!r}"
+        )
+    assert nax in moe_nax_gather.MODES
+    return nax, routed
+
+
+class FlintAdapter(ExternalDraftAdapterMixin):
     default_route = "ordinary"
+    # Best-route rule (Pierre 2026-10-21; geomean >= 1.05 over ordinary, no
+    # cell < 0.85x).  flint-e2e-20261021 on flint-2a247be0-oq4e: latched
+    # adaptive PLD 1.02-1.15x at B1 but 0.30-0.42x at B4 (latched lanes decode
+    # one target row at a time; pld_batched_max_width=1), geomean 0.61; AST
+    # prompt-lookup tiles 0.51.  Ordinary is the measured-best no-flag route;
+    # --prompt-lookup and --ast stay explicit.  Unqualified.
+    prompt_lookup_default = False
+    # AST tree tiles on the attention-only target (no recurrent state):
+    # ``--ast-drafter pld`` runs the external route with the prompt-lookup
+    # tree drafter, verified by the generic AttentionTreeExecutor.
+    ast_tree_tiles = True
+    attention_tree_tiles = True
+    EXTERNAL_DEFAULT_NUM_DRAFT = 15
+    EXTERNAL_ROUTE_TAG = "external-flint-ast-tiles-v1"
+    EXTERNAL_PROFILE = "flint-apcv2-ast-prompt-lookup"
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
@@ -284,6 +455,10 @@ class FlintAdapter:
         return self.profile
 
     def execution_config(self, *, max_lanes, prefill_step):
+        if getattr(self, "draft_model", None) is not None:
+            return self._external_execution_config(
+                max_lanes=max_lanes, prefill_step=prefill_step
+            )
         return {
             "persistent": True,
             "num_draft": 0,
@@ -305,8 +480,9 @@ class FlintAdapter:
         )
 
     def _init_flint(self, model_path: str, *, execution_policy=None):
-        if execution_policy not in (None, {}):
-            raise ValueError("Flint accepts no adapter-owned execution policy")
+        external_policy = _validate_execution_policy(execution_policy)
+        self.external_policy = {}
+        self.draft_model = None
         artifact = inspect_artifact(model_path)
         self.identity = artifact["identity"]
         self.config = artifact["config"]
@@ -327,9 +503,12 @@ class FlintAdapter:
         }
         os.environ.update(self.environment)
         assert_process_profile_applied("the Flint profile")
-        from .process_globals import claim_stock_moe
+        from .process_globals import claim_moe
 
-        claim_stock_moe(self, "the Flint adapter")
+        # Expert-kernel selections (see ``kernel_defaults``); an explicit
+        # operator value wins.  Both are bit-identical to the stock gathers.
+        self.moe_nax_gather, self.routed_decode = kernel_defaults()
+        claim_moe(self, "the Flint adapter", self.moe_nax_gather)
 
         import mlx.core as mx
         from mlx import nn
@@ -344,6 +523,16 @@ class FlintAdapter:
         self.model = Model(ModelArgs.from_dict(self.config))
         files = [path / name for name, _, _ in self.identity["files"]]
         weights = load_shards_evicting(files)
+        if artifact.get("packed_uint8"):
+            # Upstream INT4 rows are uint8 bytes in MLX's little-endian
+            # nibble order: the same bits as the uint32 words MLX expects.
+            weights = {
+                name: value.view(mx.uint32)
+                if value.dtype == mx.uint8 and name.endswith(".weight")
+                and name[: -len(".weight")] + ".scales" in weights
+                else value
+                for name, value in weights.items()
+            }
         weights = self.model.sanitize(weights, eager=True)
         quant = artifact["quantization"]
         if quant:
@@ -371,6 +560,9 @@ class FlintAdapter:
         mx.eval(self.model.parameters())
         weights.clear()
         mx.clear_cache()
+        for layer in self.model.layers:
+            if hasattr(layer.mlp, "routed_decode"):
+                layer.mlp.routed_decode = self.routed_decode
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -383,6 +575,18 @@ class FlintAdapter:
             eos_token_ids=eos_ids,
         )
         self.max_context = int(self.config["max_position_embeddings"])
+        if external_policy:
+            from ..runtime.drafters.prompt_lookup_draft import load_prompt_lookup_drafter
+            from .qwen38_27b import _prompt_lookup_record
+
+            self.external_policy = external_policy
+            record = _prompt_lookup_record(self.external_policy, self.identity["fingerprint"])
+            self.identity = {
+                **self.identity,
+                "draft_revision": record["draft_revision"],
+                "target_revision": record["target_revision"],
+            }
+            self._bind_external_drafter(record, load_prompt_lookup_drafter, self.descriptor)
 
     def prompt_tokens(self, request: dict) -> list[int]:
         if "messages" not in request:
@@ -468,6 +672,67 @@ class FlintAdapter:
             "adapter_implemented": True,
             "adapter_default_route": "ordinary",
             "target_forward_observed": getattr(self.model, "completed_forwards", 0) > 0,
+            "capability_receipts": self.capability_receipts(),
+            "moe_kernels": self.moe_kernel_status(),
+        }
+
+    def moe_kernel_status(self):
+        """Selected and observed expert-kernel use (counters are cumulative)."""
+        from ..runtime.models import flint_routed_decode, moe_nax_gather
+
+        blocks = [layer.mlp for layer in getattr(self.model, "layers", ()) or ()
+                  if hasattr(layer.mlp, "routed_decode")]
+        nax = moe_nax_gather.status()
+        return {
+            "nax_gather": {
+                "selected": getattr(self, "moe_nax_gather", "off"),
+                "mode": nax.get("mode"),
+                "nax_host": nax.get("nax_host"),
+                "calls": nax.get("calls"),
+                "calls_by_format": nax.get("calls_by_format"),
+                "fallbacks": nax.get("fallbacks"),
+                "not_candidates": nax.get("not_candidates"),
+            },
+            "routed_decode": {
+                "selected": getattr(self, "routed_decode", "off"),
+                "calls": sum(block.routed_decode_calls for block in blocks),
+                "fallbacks": sum(block.routed_decode_fallbacks for block in blocks),
+                "last_fallback": next((block.routed_decode_last_fallback for block in blocks
+                                       if block.routed_decode_last_fallback), None),
+                "probe": flint_routed_decode.status(),
+            },
+        }
+
+    def capability_receipts(self):
+        """Adapter-local feature states; runtime receipts own observations."""
+        return {
+            "ordinary_reference": {
+                "implemented": True, "qualified": False, "selected": None,
+                "observed_used": False, "default": False,
+                "selection_authority": "serving_route_receipt", "profile": self.profile,
+            },
+            "apcv2": {
+                "implemented": True, "qualified": False, "selected": None,
+                "observed_used": False, "selection_authority": "serving_route_receipt",
+                "observation_authority": "serving_route_receipt", "cache_layout": self.layout,
+            },
+            "prompt_lookup": {
+                "implemented": True, "qualified": False, "selected": None,
+                "observed_used": False, "selection": "explicit_flag_only",
+                "selection_authority": "serving_route_receipt",
+                "observation_authority": "speculative_route_receipt",
+            },
+            "external_draft": {
+                "implemented": True, "qualified": False,
+                "selected": getattr(self, "draft_model", None) is not None,
+                "observed_used": False, "drafters": ["prompt_lookup_tree_tiles"],
+                "tree_target": "attention_tree_v1",
+            },
+            "approximate_kv": {
+                "implemented": False, "qualified": False, "selected": False,
+                "observed_used": False,
+                "refusal": "quantized SDPA has no learned-sink path",
+            },
         }
 
     def close(self):

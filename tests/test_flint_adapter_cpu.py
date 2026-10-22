@@ -264,3 +264,24 @@ def test_oq4e_profile_protects_routing_and_uses_fidelity_tiers():
         None,
         "protected_bf16",
     )
+
+
+@pytest.mark.parametrize("chunk", [3, 7, 16, 33])
+def test_chunked_prefill_then_decode_matches_full_forward_past_the_window(chunk):
+    # Chunks shorter and longer than the sliding window, then one-token
+    # decode, against one cache-free forward with the window in the mask.
+    mx.random.seed(0)
+    model = Model(tiny_args())
+    mx.eval(model.parameters())
+    tokens = [(index * 7 + 3) % 31 + 1 for index in range(40)]
+    full = model(mx.array([tokens]))
+    cache = model.make_cache()
+    prompt = 30
+    rows = [
+        model(mx.array([tokens[start : min(start + chunk, prompt)]]), cache=cache)
+        for start in range(0, prompt, chunk)
+    ]
+    rows += [model(mx.array([[token]]), cache=cache) for token in tokens[prompt:]]
+    incremental = mx.concatenate(rows, axis=1)
+    mx.eval(full, incremental)
+    assert mx.allclose(full, incremental, atol=1e-5, rtol=1e-5).item()
