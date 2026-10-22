@@ -205,3 +205,23 @@ raise SystemExit(module.main([
                 os.kill(child_pid, 9)
             except ProcessLookupError:
                 pass
+
+
+def test_long_queued_live_waiter_keeps_its_place(tmp_path, monkeypatch):
+    import os
+    import time
+
+    module = _load_module()
+    waiters = tmp_path / "waiters"
+    waiters.mkdir()
+    monkeypatch.setattr(module, "WAITERS", waiters)
+    now = int(time.time())
+    # Queued two hours ago by a live process and touched recently.
+    old = waiters / f"lane-a.label.{os.getpid()}.{now - 7200}"
+    old.touch()
+    mine = waiters / f"lane-b.label.{os.getpid()}.{now}"
+    mine.touch()
+    assert module.earlier_waiter(mine, now) == old.name
+    # An abandoned file (stale mtime) is still skipped.
+    os.utime(old, (now - 600, now - 600))
+    assert module.earlier_waiter(mine, now) is None

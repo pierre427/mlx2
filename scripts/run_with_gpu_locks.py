@@ -102,7 +102,11 @@ def earlier_waiter(mine: Path, mine_time: int) -> str | None:
             os.kill(pid, 0)
         except (ValueError, ProcessLookupError, PermissionError):
             continue
-        if now - path.stat().st_mtime > 300 or now - created > 5400:
+        # A live wrapper touches its waiter every 15 s, so a dead pid or a
+        # stale mtime already marks an abandoned file.  No age cap: one made
+        # a waiter that had queued for 90 minutes invisible, and every newer
+        # waiter then went ahead of it forever.
+        if now - path.stat().st_mtime > 300:
             continue
         if created < mine_time:
             return path.name
