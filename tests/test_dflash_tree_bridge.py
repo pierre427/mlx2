@@ -1095,6 +1095,14 @@ def test_phase_timing_receipt_without_extra_syncs(monkeypatch):
         assert f"external_phase_{phase}_ns" in phases
         assert isinstance(stats[f"external_phase_{phase}_ns"], int)
     assert stats["external_phase_rounds"] == stats["external_tree_rounds"]
+    # The executor poll and the serving side between polls are attributed,
+    # and the executor's explicit evals are counted (the count equals the
+    # untimed run's: timing adds no sync point).
+    for phase in ("executor_next", "executor_outside", "sched_decode_phase",
+                  "sched_drain_ready", "sched_reclaim"):
+        assert isinstance(stats[f"external_phase_{phase}_ns"], int)
+    assert 0 < stats["external_sync_eval_calls"] <= evals["1"]
+    assert stats["external_sync_eval_ns"] > 0
 
 
 def test_phase_timing_sync_is_explicit_and_fences_each_boundary(monkeypatch):

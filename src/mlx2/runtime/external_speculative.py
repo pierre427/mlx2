@@ -466,6 +466,121 @@ def _target_tree_execution_mode(*, default_provider=False):
 _SPARSE_LAW_LIMIT = 256
 
 
+# Integer round-timing counters that are counts, not nanoseconds.
+_ROUND_TIMING_COUNTS = frozenset({
+    "external_phase_synchronizations",
+    "external_phase_rounds",
+    "external_phase_executor_polls",
+})
+
+
+# Diagnostic (default off): cProfile the executor's polls and dump the
+# cumulative stats to ``MLX2_EXTERNAL_ROUND_PROFILE`` every 200 polls.
+_PROFILE_PATH = os.environ.get("MLX2_EXTERNAL_ROUND_PROFILE") or None
+_PROFILE = None
+_PROFILE_POLLS = 0
+
+
+def _round_profiler():
+    global _PROFILE
+    if _PROFILE_PATH is None:
+        return None
+    if _PROFILE is None:
+        import cProfile
+
+        _PROFILE = cProfile.Profile()
+    return _PROFILE
+
+
+def _round_profile_tick():
+    global _PROFILE_POLLS
+    _PROFILE_POLLS += 1
+    if _PROFILE_POLLS % 200 == 0:
+        with suppress(OSError):
+            _PROFILE.dump_stats(_PROFILE_PATH)
+
+
+def _install_gc_timing(owner):
+    """Time the interpreter's cyclic collections (diagnostic timing only).
+
+    A collection stops every Python thread, the serving loop included, so a
+    long one shows up as a host gap between device submissions.  Counts
+    are process-wide (any thread may trigger them).  The callback only
+    touches its own totals (a collection can start inside any allocation,
+    including one that is mutating ``scheduler_stats``); ``next()`` copies
+    them into the ``external_gc_gen{N}_calls/_ns`` counters.
+    """
+    import gc
+    import weakref
+
+    ref = weakref.ref(owner)
+    started = [0]
+    totals = owner._gc_totals = {}
+
+    def callback(phase, info):
+        if phase == "start":
+            started[0] = time.perf_counter_ns()
+            return
+        if ref() is None:
+            # Never edit gc.callbacks from inside a callback: the
+            # interpreter iterates it by index and would skip the next one.
+            return
+        generation = info.get("generation", -1)
+        entry = totals.setdefault(generation, [0, 0])
+        entry[0] += 1
+        entry[1] += time.perf_counter_ns() - started[0]
+
+    gc.callbacks.append(callback)
+
+
+def _publish_gc_timing(owner):
+    totals = getattr(owner, "_gc_totals", None)
+    if not totals:
+        return
+    for generation, (calls, nanoseconds) in list(totals.items()):
+        owner.scheduler_stats[f"external_gc_gen{generation}_calls"] = calls
+        owner.scheduler_stats[f"external_gc_gen{generation}_ns"] = nanoseconds
+
+
+class _TimedMx:
+    """``mlx.core`` with the executor's explicit sync points timed.
+
+    Installed as ``executor.mx`` only under ``MLX2_EXTERNAL_ROUND_TIMING``.
+    ``eval`` and ``synchronize`` block the host until the device catches up,
+    so their wall time (command encoding plus the device wait) is the part of
+    a round the host spends blocked rather than building work.  Everything
+    else forwards to ``mlx.core`` unchanged.  Implicit reads (``.item()``,
+    ``.tolist()``, ``int(array)``) are not seen here.
+    """
+
+    __slots__ = ("_mx", "_stats")
+
+    def __init__(self, mx, stats_owner):
+        object.__setattr__(self, "_mx", mx)
+        object.__setattr__(self, "_stats", stats_owner)
+
+    def __getattr__(self, name):
+        return getattr(self._mx, name)
+
+    def _timed(self, kind, function, args, kwargs):
+        started = time.perf_counter_ns()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            stats = self._stats.scheduler_stats
+            _bump(stats, f"external_sync_{kind}_calls")
+            _bump(stats, f"external_sync_{kind}_ns", time.perf_counter_ns() - started)
+
+    def eval(self, *args, **kwargs):
+        return self._timed("eval", self._mx.eval, args, kwargs)
+
+    def synchronize(self, *args, **kwargs):
+        return self._timed("synchronize", self._mx.synchronize, args, kwargs)
+
+    def async_eval(self, *args, **kwargs):
+        return self._timed("async_eval", self._mx.async_eval, args, kwargs)
+
+
 class _PhaseClock:
     """Accumulate time between phase boundaries (diagnostic timing only)."""
 
@@ -1917,6 +2032,12 @@ class ExternalDraftBatchGenerator:
             os.environ.get("MLX2_EXTERNAL_ROUND_TIMING_SYNC")
         )
         self.round_times = defaultdict(float)
+        # Wall boundary of the previous ``next()`` return: the serving loop's
+        # time outside the executor is charged to ``executor_outside``.
+        self._next_returned = None
+        if self.round_timing:
+            self.mx = _TimedMx(self.mx, self)
+            _install_gc_timing(self)
 
     @property
     def _target_args(self):
@@ -2263,10 +2384,15 @@ class ExternalDraftBatchGenerator:
                 lane.external_timing_start = {
                     key: int(value)
                     for key, value in self.scheduler_stats.items()
-                    if key.startswith("external_phase_")
+                    if (
+                        key.startswith("external_phase_")
+                        or key.startswith("external_sync_")
+                        or key.startswith("external_gc_")
+                    )
                     and (
                         key.endswith("_ns")
-                        or key == "external_phase_synchronizations"
+                        or key.endswith("_calls")
+                        or key in _ROUND_TIMING_COUNTS
                     )
                     and type(value) is int
                 }
@@ -9322,9 +9448,45 @@ class ExternalDraftBatchGenerator:
             and type(value) is int
             and int(value) >= int(baseline.get(key, 0))
         }
+        def delta(key):
+            return int(self.scheduler_stats.get(key, 0) or 0) - int(baseline.get(key, 0))
+
+        rounds = delta("external_phase_rounds")
+        syncs, collections = {}, {}
+        for key in list(self.scheduler_stats):
+            for prefix, into in (("external_sync_", syncs), ("external_gc_", collections)):
+                if key.startswith(prefix) and key.endswith("_calls"):
+                    kind = key.removeprefix(prefix).removesuffix("_calls")
+                    into[kind] = {
+                        "calls": delta(key),
+                        "nanoseconds": delta(f"{prefix}{kind}_ns"),
+                    }
         return {
             "round_timing": {
                 "enabled": True,
+                # Unfenced: host wall time between phase boundaries; queued
+                # device work lands in whichever phase next blocks on it.
+                # Fenced: every boundary waits for the device, so a phase is
+                # charged its own device work but the route is serialized.
+                "clock": "device_fenced" if self.round_timing_sync else "host_wall",
+                "tree_rounds": rounds,
+                "executor_polls": delta("external_phase_executor_polls"),
+                # Phases nest (tree_round holds the tree_* phases,
+                # executor_next holds sched_*), so they do not sum.
+                "phase_ms_per_tree_round": (
+                    {
+                        name: round(value / rounds / 1e6, 4)
+                        for name, value in sorted(phases.items())
+                    }
+                    if rounds > 0
+                    else {}
+                ),
+                # Host time blocked in the executor's explicit mx.eval /
+                # mx.synchronize / mx.async_eval calls (encode + any device
+                # wait); implicit .item()/.tolist() reads are not included.
+                "explicit_syncs": dict(sorted(syncs.items())),
+                # Cyclic GC pauses by generation, process-wide (all threads).
+                "python_gc": dict(sorted(collections.items())),
                 "device_synchronized": self.round_timing_sync,
                 "device_synchronizations": int(self.scheduler_stats.get(
                     "external_phase_synchronizations", 0
@@ -13377,9 +13539,45 @@ class ExternalDraftBatchGenerator:
     def next(self):
         mode = self.decode_first.mode()
         self._decode_first_round_mode = mode
-        return round_phases.publish_round(
-            self, mode, lambda: self._scheduler_round(mode)
-        )
+        profiler = _round_profiler()
+        if profiler is not None:
+            profiler.enable()
+            try:
+                return self._next_timed(mode)
+            finally:
+                profiler.disable()
+                _round_profile_tick()
+        return self._next_timed(mode)
+
+    def _next_timed(self, mode):
+        if not self.round_timing:
+            return round_phases.publish_round(
+                self, mode, lambda: self._scheduler_round(mode)
+            )
+        # Diagnostic: the serving loop's time between two polls (response
+        # publication, detokenization, APCv2 bookkeeping, receipts) and the
+        # executor's own poll, so a round period is fully attributed.
+        entered = time.perf_counter()
+        returned = self._next_returned
+        if returned is not None and entered - returned < 1.0 and self.lanes:
+            _bump(
+                self.scheduler_stats,
+                "external_phase_executor_outside_ns",
+                int((entered - returned) * 1e9),
+            )
+        try:
+            return round_phases.publish_round(
+                self, mode, lambda: self._scheduler_round(mode)
+            )
+        finally:
+            self._next_returned = time.perf_counter()
+            _bump(
+                self.scheduler_stats,
+                "external_phase_executor_next_ns",
+                int((self._next_returned - entered) * 1e9),
+            )
+            _bump(self.scheduler_stats, "external_phase_executor_polls")
+            _publish_gc_timing(self)
 
     def _prefill_phase(self, candidates):
         # A published phase may be resumed after cancellation or new arrivals.
@@ -13542,9 +13740,16 @@ class ExternalDraftBatchGenerator:
         candidates = tuple(lane.uid for lane in ordered)
         if mode == "off":
             prompts.extend(self._prefill_phase(candidates))
+        clock = self._phase_time() if self.round_timing else None
         self._decode_phase(ordered)
+        if clock is not None:
+            clock = self._mark("sched_decode_phase", clock)
         responses.extend(self._drain_ready(prompts))
+        if clock is not None:
+            clock = self._mark("sched_drain_ready", clock)
         self._reclaim_after_emission(len(responses))
+        if clock is not None:
+            self._mark("sched_reclaim", clock)
         if mode != "off":
             # No speculative transaction is open across the publication point.
             ordered.clear()

@@ -118,6 +118,34 @@ def test_opt_in_round_timing_survives_a_short_request(monkeypatch):
     assert timing["phase_total_nanoseconds"] > 0
     assert timing["phase_nanoseconds"]["draft"] > 0
     assert timing["phase_nanoseconds"]["emit"] > 0
+    assert timing["clock"] == "host_wall"
+    assert timing["executor_polls"] > 0
+    assert timing["phase_nanoseconds"]["executor_next"] > 0
+    assert timing["explicit_syncs"]["eval"]["calls"] > 0
+    if timing["tree_rounds"]:
+        assert timing["phase_ms_per_tree_round"]["emit"] > 0
+    assert isinstance(timing["python_gc"], dict)
+
+
+def test_round_timing_gc_callback_counts_collections():
+    import gc
+
+    from mlx2.runtime import external_speculative as es
+
+    class Owner:
+        def __init__(self):
+            self.scheduler_stats = {}
+
+    owner = Owner()
+    before = len(gc.callbacks)
+    es._install_gc_timing(owner)
+    try:
+        gc.collect(1)
+        es._publish_gc_timing(owner)
+        assert owner.scheduler_stats["external_gc_gen1_calls"] >= 1
+        assert owner.scheduler_stats["external_gc_gen1_ns"] > 0
+    finally:
+        del gc.callbacks[before:]
 
 
 def test_opt_in_synchronized_round_timing_is_labelled(monkeypatch):
