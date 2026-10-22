@@ -435,10 +435,13 @@ class Qwen38TargetTreeExecutor:
         *,
         cached: bool,
         configured_limit: int,
+        ragged: bool = False,
     ):
         if self.ast_chain:
             raise ValueError("AST TensorFold chain provider is B1-only")
         self.validate_cohort(len(caches), configured_limit)
+        if ragged and self.ast_fast_tree:
+            raise ValueError("AST TensorFold fast provider takes uniform cohort widths only")
         if self.ast_fast_tree:
             width = len(caches)
             if not self.ast_cohort_probe and self.ast_oracle_document is None:
@@ -492,8 +495,15 @@ class Qwen38TargetTreeExecutor:
             layers,
             cached=cached,
             validated_token=self.source_revision_token,
+            **({"ragged": True} if ragged else {}),
         )
         return self._bind_transaction(result)
+
+    @property
+    def supports_ragged_cohort(self):
+        """Lanes of different tree widths in one packed forward (not the
+        fast AST provider, whose qualified geometry is uniform)."""
+        return not self.ast_fast_tree and not self.ast_chain
 
     @property
     def ast_tree_max_sessions(self):

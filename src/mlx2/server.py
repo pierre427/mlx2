@@ -6339,7 +6339,19 @@ def build_parser():
     parser.add_argument("--ast-tiles", type=int, help="AST tiles per round: 1 (default) or 2")
     parser.add_argument(
         "--ast-tile-rows", type=int,
-        help="AST rows per tile, anchor included (default 16, at most 16)",
+        help="AST rows per tile, anchor included (4..16; default: the adapter's, "
+        "16 on Qwen3.8 27B)",
+    )
+    parser.add_argument(
+        "--ast-tree-calibration", choices=("order", "order_size"),
+        help="per-depth drafter calibration of the AST tree (DFlash2 tiles): "
+        "'order' orders nodes by calibrated acceptance, 'order_size' also cuts "
+        "each round's tree to the rows that pay for themselves (default off)",
+    )
+    parser.add_argument(
+        "--ast-batch-row-sharing", action="store_true",
+        help="batched AST rounds give the tile's rows to the lanes' most likely "
+        "nodes (calibrated) instead of an equal split; needs --ast-tree-calibration",
     )
     parser.add_argument(
         "--ast-graft-pld",
@@ -6684,10 +6696,14 @@ def apply_ast_invocation(args, policy, adapter_resolution):
         getattr(args, "ast_drafter", None), getattr(args, "ast_topology", None),
         getattr(args, "ast_graft_pld", False), getattr(args, "ast_tiles", None),
         getattr(args, "ast_tile_rows", None),
+        getattr(args, "ast_tree_calibration", None),
+        getattr(args, "ast_batch_row_sharing", False),
     )
     if not getattr(args, "ast", False):
         if any(ast_options):
-            raise ValueError("--ast-drafter/--ast-topology/--ast-graft-pld/--ast-tiles/--ast-tile-rows require --ast")
+            raise ValueError("--ast-drafter/--ast-topology/--ast-graft-pld/--ast-tiles/"
+                             "--ast-tile-rows/--ast-tree-calibration/--ast-batch-row-sharing "
+                             "require --ast")
         return policy
     resolved = {} if policy is None else dict(policy)
     if resolved.get("draft_model") or resolved.get("draft_models"):
@@ -6736,6 +6752,10 @@ def apply_ast_invocation(args, policy, adapter_resolution):
             resolved["ast_tiles"] = ast_options[3]
         if ast_options[4] is not None:
             resolved["ast_tile_rows"] = ast_options[4]
+        if ast_options[5] is not None:
+            resolved["ast_tree_calibration"] = ast_options[5]
+        if ast_options[6]:
+            resolved["ast_batch_row_sharing"] = True
         if drafter not in ("mtp", "pld"):
             resolved.setdefault("batch_size_route", "tree15_b1_b4_chain_b5plus_v1")
         # Adapter-measured drafter arithmetic (e.g. a quantized lane drafter);
@@ -6755,12 +6775,20 @@ def apply_ast_invocation(args, policy, adapter_resolution):
     else:
         resolved["draft_model"] = drafter
         args.external_draft = True
+    if ast_options[6] and ast_options[5] is None and not resolved.get("ast_tree_calibration"):
+        raise ValueError("--ast-batch-row-sharing needs --ast-tree-calibration")
+    if (ast_options[5] is not None or ast_options[6]) and (
+        not tiles or drafter in ("mtp", "pld")
+    ):
+        raise ValueError("--ast-tree-calibration needs tree tiles with a lattice "
+                         "drafter (DFlash2)")
     if not tiles and (ast_options[3] is not None or ast_options[4] is not None):
         raise ValueError("--ast-tiles/--ast-tile-rows need a family with tree tiles"
                          + (f": {tiles_refused}" if tiles_refused else ""))
     args.ast_route = {"tree_tiles": tiles, "drafter": drafter, "topology": ast_options[1],
                       "graft_pld": bool(ast_options[2]), "tiles": ast_options[3],
-                      "tile_rows": ast_options[4]}
+                      "tile_rows": ast_options[4], "tree_calibration": ast_options[5],
+                      "batch_row_sharing": bool(ast_options[6])}
     if applied:
         args.ast_route["drafter_policy_defaults"] = applied
     if tiles_refused is not None:

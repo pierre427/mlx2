@@ -678,6 +678,9 @@ class TreeDraftRow:
     tokens: list
     parents: list
     width: int = 1
+    # Calibrated drafters report per node its depth, own log q and the
+    # calibrated path log-probability (``calibrated_best_first_tree``).
+    info: object = None
 
     @property
     def lengths(self):
@@ -874,6 +877,8 @@ class ExternalDraftBatchGenerator:
                  draft_tail_equalize=None,
                  ast_topology=None,
                  ast_adaptive_rows=None,
+                 ast_tree_calibration=None,
+                 ast_batch_row_sharing=False,
                  **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
@@ -887,6 +892,9 @@ class ExternalDraftBatchGenerator:
         if ast_adaptive_rows not in (None, True, False):
             raise ValueError("ast_adaptive_rows must be a boolean")
         self._ast_adaptive_rows = ast_adaptive_rows
+        from .ast_tree_calibration import parse_mode as _calibration_mode
+
+        self._ast_tree_calibration_mode = _calibration_mode(ast_tree_calibration)
         round_phases.initialize(self, decode_first)
         self.memory_headroom = memory_headroom
         self.reclaim_memory = reclaim_memory; self.evict_checkpoint = evict_checkpoint
@@ -1096,6 +1104,40 @@ class ExternalDraftBatchGenerator:
             from .ast_tile_budget import TileBudgetController
 
             self.tile_budget = TileBudgetController()
+        # Per-depth drafter calibration (Kapitsa KfBudget): orders, and with
+        # "order_size" sizes, each lattice's tree from learned acceptance.
+        # Proposal-only; the verification law is unchanged.
+        self.tree_calibration = None
+        if self._ast_tree_calibration_mode is not None:
+            if not dynamic_singleton_tree or not getattr(
+                draft_model, "supports_tree_calibration", False
+            ):
+                raise ValueError(
+                    "ast_tree_calibration requires the tree route and a drafter "
+                    "that reports calibrated trees (DFlash2)"
+                )
+            if self._ast_tree_calibration_mode == "order_size" and self.tile_budget is None:
+                raise ValueError(
+                    "ast_tree_calibration order_size needs measured tile costs "
+                    "(ast_adaptive_rows must stay on)"
+                )
+            from .ast_tree_calibration import DepthCalibration
+
+            self.tree_calibration = DepthCalibration(self._ast_tree_calibration_mode)
+        # Rows per request in batched tree rounds (Kapitsa #207): a cohort's
+        # tile rows go to its lanes' nodes in decreasing calibrated survival
+        # instead of an equal split; lanes then verify ragged trees.
+        if type(ast_batch_row_sharing) is not bool:
+            raise ValueError("ast_batch_row_sharing must be a boolean")
+        if ast_batch_row_sharing and (
+            self.tree_calibration is None
+            or not getattr(target_tree_executor_provider, "supports_ragged_cohort", False)
+        ):
+            raise ValueError(
+                "ast_batch_row_sharing requires ast_tree_calibration and a target-tree "
+                "provider that verifies ragged cohorts"
+            )
+        self.ast_batch_row_sharing = ast_batch_row_sharing
         self._auto_last_mode = None
         self._auto_active_width = 0
         self._auto_cohort_width = 0
@@ -1659,6 +1701,26 @@ class ExternalDraftBatchGenerator:
             external_minimum_draft_proposals=self.minimum_draft_proposals,
             external_proposal_floor_raises=0,
         )
+        if getattr(self, "dynamic_singleton_tree", False):
+            # The tree tile's row mode and proposal knobs, published from the
+            # start (plain numbers and strings, for metrics).  The adaptive
+            # controller's per-round choices are in external_tree_tile_budget.
+            calibration = getattr(self, "tree_calibration", None)
+            self.scheduler_stats["external_tree_tile_mode"] = {
+                "mode": "adaptive" if getattr(self, "tile_budget", None) else "fixed",
+                "tile_rows": int(self.tree_node_budget_by_lanes.get(1, 15)) + 1,
+                "maximum_nodes_by_lanes": {
+                    str(lanes): int(nodes)
+                    for lanes, nodes in sorted(self.tree_node_budget_by_lanes.items())
+                },
+                "calibration": None if calibration is None else calibration.mode,
+                "batch_row_sharing": bool(getattr(self, "ast_batch_row_sharing", False)),
+            }
+            if calibration is not None:
+                self.scheduler_stats["external_tree_calibration"] = calibration.receipt()
+            if getattr(self, "ast_batch_row_sharing", False):
+                self.scheduler_stats["external_tree_row_sharing_rounds"] = 0
+                self.scheduler_stats["external_tree_row_sharing_lane_nodes"] = {}
         if self.progressive_verification_tile is not None:
             self.scheduler_stats.update(
                 external_progressive_verify_rounds=0,
@@ -4148,7 +4210,7 @@ class ExternalDraftBatchGenerator:
                             lanes, requested_count, forbidden
                         )
                     if trees is None:
-                        tree_options = self._tree_options(count_hits=True)
+                        tree_options = self._tree_options(count_hits=True, lanes=lanes)
                         if self._tree_clock is not None:
                             self._tree_clock("tree_draft_setup")
                             tree_options["mark"] = self._tree_clock
@@ -4165,7 +4227,10 @@ class ExternalDraftBatchGenerator:
                         )
                     tokens = [tree[0] for tree in trees]
                     q = [
-                        TreeDraftRow(tree[0], tree[1], len(lanes))
+                        TreeDraftRow(
+                            tree[0], tree[1], len(lanes),
+                            info=tree[2] if len(tree) > 2 else None,
+                        )
                         for tree in trees
                     ]
                 else:
@@ -7434,7 +7499,9 @@ class ExternalDraftBatchGenerator:
         if len(cohort) > self.target_tree_cohort_limit:
             raise ValueError("target-tree cohort exceeds its bounded lane limit")
         cached = self.tree_gates["cache_executor"]
-        inputs, parents = _pad_cohort_trees(inputs, parents)
+        ragged = bool(getattr(self, "ast_batch_row_sharing", False))
+        if not ragged:
+            inputs, parents = _pad_cohort_trees(inputs, parents)
         result = self.target_tree_executor_provider.forward_many(
             self.model,
             inputs,
@@ -7443,6 +7510,7 @@ class ExternalDraftBatchGenerator:
             self.layers,
             cached=cached,
             configured_limit=self.target_tree_cohort_limit,
+            **({"ragged": True} if ragged else {}),
         )
         return self._finish_target_tree_dispatch(cohort, result, cached=cached)
 
@@ -7624,8 +7692,20 @@ class ExternalDraftBatchGenerator:
             ids.update(int(token) for token in rule(length + 1))
         return tuple(sorted(ids))
 
-    def _tree_options(self, *, count_hits):
+    @staticmethod
+    def _calibration_key(lane):
+        """Greedy and sampled lanes accept by different events: own tables."""
+
+        sampling = getattr(lane, "sampling", None) or {}
+        return "sampled" if float(sampling.get("sampling_temp", 0) or 0) != 0.0 else "greedy"
+
+    def _tree_options(self, *, count_hits, lanes=None):
         options = {}
+        calibration = getattr(self, "tree_calibration", None)
+        if calibration is not None and lanes is not None:
+            options["calibration"] = [
+                calibration.params(self._calibration_key(lane)) for lane in lanes
+            ]
         if getattr(self.draft, "tree_topology_aware", False):
             from .ast_tree_proposals import DEFAULT_TOPOLOGY
 
@@ -7650,10 +7730,53 @@ class ExternalDraftBatchGenerator:
             "tree_node_budget_by_lanes",
             {candidate: 15 for candidate in range(1, self.dynamic_tree_max_width + 1)},
         )
+        if width > 1 and getattr(self, "ast_batch_row_sharing", False):
+            # Each lane drafts deep enough to take the cohort's whole share;
+            # ``_share_cohort_rows`` then cuts the trees to the tile.
+            return min(15, self._shared_cohort_rows(width) - width)
         controller = getattr(self, "tile_budget", None)
         if controller is not None:
             return controller.choose(width, budgets[width])
         return budgets[width]
+
+    def _shared_cohort_rows(self, width):
+        """Physical rows of a ``width``-lane tile: the equal split's total."""
+
+        budgets = self.tree_node_budget_by_lanes
+        return int(width) * (int(budgets[int(width)]) + 1)
+
+    def _share_cohort_rows(self, cohort, blocks):
+        """Give the tile's rows to the cohort's most likely nodes.
+
+        Every lane keeps its anchor.  The other rows go to nodes in
+        decreasing calibrated path probability across the cohort (ties: lane
+        then node order), so each lane keeps a best-first prefix of its own
+        tree.  Which rows are verified depends only on the drafter's trees,
+        never on the target, so the verification law is unchanged.
+        """
+
+        if len(cohort) < 2 or any(block.info is None for block in blocks):
+            return blocks
+        capacity = self._shared_cohort_rows(len(cohort)) - len(cohort)
+        ranked = sorted(
+            (-value, lane, node)
+            for lane, block in enumerate(blocks)
+            for node, value in enumerate(block.info["path_log_p"])
+        )
+        keep = [0] * len(blocks)
+        for _value, lane, _node in ranked[:capacity]:
+            keep[lane] += 1
+        shared = [
+            TreeDraftRow(
+                list(block.tokens[:count]), list(block.parents[:count]), block.width,
+                info={key: list(value[:count]) for key, value in block.info.items()},
+            )
+            for block, count in zip(blocks, keep)
+        ]
+        _bump(self.scheduler_stats, "external_tree_row_sharing_rounds")
+        for count in keep:
+            _bump_map(self.scheduler_stats, "external_tree_row_sharing_lane_nodes", int(count))
+        return shared
 
     def _chain_draft_cap(self, active_width=None):
         width = self._auto_active_width if active_width is None else active_width
@@ -7715,7 +7838,11 @@ class ExternalDraftBatchGenerator:
                 # packs at most its cohort limit of lanes into one forward.
                 tree_lanes = lanes if getattr(self, "target_execution", None) == "provider" else 1
                 tree_lanes = min(tree_lanes, int(getattr(self, "target_tree_cohort_limit", lanes)))
-                width_rows = tree_lanes * (self._tree_node_budget(lanes) + 1)
+                if tree_lanes > 1 and getattr(self, "ast_batch_row_sharing", False):
+                    # Shared rows: the cohort's tile keeps the equal split's total.
+                    width_rows = self._shared_cohort_rows(tree_lanes)
+                else:
+                    width_rows = tree_lanes * (self._tree_node_budget(lanes) + 1)
             else:
                 cap = self._chain_draft_cap(lanes)
                 depth = self.num_draft if cap is None else min(self.num_draft, cap)
@@ -7812,7 +7939,7 @@ class ExternalDraftBatchGenerator:
         """Snapshot the draft plane and queue one lattice on the copy."""
 
         mark = self._tree_clock
-        options = self._tree_options(count_hits=False)
+        options = self._tree_options(count_hits=False, lanes=[lane])
         if mark is not None:
             mark("tree_prelaunch_setup")
         pre = getattr(self, "_draft_presnapshot", None)
@@ -8008,7 +8135,7 @@ class ExternalDraftBatchGenerator:
             try:
                 count = min(budget, min(l.maximum - v.generated - 1 for l, v in members))
                 forbidden = [self._tree_forbidden(lane, view.history) for lane, view in members]
-                options = self._tree_options(count_hits=False)
+                options = self._tree_options(count_hits=False, lanes=lanes)
                 snapshots = [
                     self._snapshot_draft_state(lane.draft_cache, view.tail)
                     for lane, view in members
@@ -12362,6 +12489,8 @@ class ExternalDraftBatchGenerator:
         if phase is not None:
             phase("tree_stats_snapshot")
         budget_backup = None
+        calibration = getattr(self, "tree_calibration", None)
+        calibration_backup = None if calibration is None else calibration.snapshot()
         self._open = True
         transaction = None
         self._tree_clock = phase
@@ -12369,6 +12498,14 @@ class ExternalDraftBatchGenerator:
             blocks = self._propose(cohort)
             if any(not isinstance(block, TreeDraftRow) for block in blocks):
                 raise RuntimeError("tree15 proposal did not return a tree")
+            if calibration is not None and calibration.sizes:
+                blocks = self._calibrated_live_blocks(cohort, blocks)
+            if len(cohort) > 1 and getattr(self, "ast_batch_row_sharing", False):
+                blocks = self._share_cohort_rows(cohort, blocks)
+            # Verified nodes per lane-round, after any calibrated cut or row
+            # sharing (keys are node counts, at most 31).
+            for block in blocks:
+                _bump_map(self.scheduler_stats, "external_tree_verified_nodes", len(block.tokens))
             inputs = [
                 [lane.anchor] + list(block.tokens)
                 for lane, block in zip(cohort, blocks)
@@ -12462,6 +12599,11 @@ class ExternalDraftBatchGenerator:
                         [row - 1 for row in rows[1:]], seconds,
                     )
                 self.scheduler_stats["external_tree_tile_budget"] = self.tile_budget.receipt()
+            if calibration is not None:
+                self._observe_tree_calibration(
+                    cohort, blocks, decisions,
+                    None if tile_started is None else time.perf_counter() - tile_started,
+                )
             if phase is not None:
                 phase("tree_tile_budget")
             early = None
@@ -12522,11 +12664,76 @@ class ExternalDraftBatchGenerator:
             self._discard_prelaunched([lane.uid for lane in cohort])
             if budget_backup is not None:
                 self.tile_budget.restore(budget_backup)
+            if calibration_backup is not None:
+                calibration.restore(calibration_backup)
             raise
         finally:
             self._tree_clock = None
             self._draft_presnapshot = None
             self._open = False
+
+    def _calibrated_live_blocks(self, cohort, blocks):
+        """Kapitsa's live-row rule: keep the prefix that pays for its rows.
+
+        A calibrated best-first tree's prefixes are parent-closed and its
+        path probabilities give each prefix's expected tokens; the tile cost
+        per verified size comes from the measured tile budget.  Only a lone
+        lane is cut here (a cohort's trees are padded to one width).  Which
+        rows are verified depends only on the drafter's tree, never on the
+        target, so the verification law is unchanged.
+        """
+
+        from .ast_tree_calibration import live_nodes
+
+        calibration = self.tree_calibration
+        controller = getattr(self, "tile_budget", None)
+        if len(cohort) != 1 or controller is None:
+            return blocks
+        block = blocks[0]
+        info = block.info
+        if info is None or len(block.tokens) < 2:
+            return blocks
+        curve = controller.cost_curve(1)
+        if curve is None:
+            return blocks
+        intercept, slope = curve
+        live = live_nodes(
+            info["path_log_p"], lambda n: intercept + slope * (n + 1),
+            rate=calibration.rate(),
+        )
+        if not 1 <= live < len(block.tokens):
+            return blocks
+        calibration.truncated_rounds += 1
+        calibration.truncated_nodes += len(block.tokens) - live
+        return [TreeDraftRow(
+            list(block.tokens[:live]), list(block.parents[:live]), block.width,
+            info={key: list(value[:live]) for key, value in info.items()},
+        )]
+
+    def _observe_tree_calibration(self, cohort, blocks, decisions, seconds):
+        """Feed each verified tree's trials to the per-depth calibration."""
+
+        from .ast_tree_calibration import expected_tokens, tree_records
+
+        calibration = self.tree_calibration
+        committed = 0
+        for lane, block, decision in zip(cohort, blocks, decisions):
+            rows = decision.commit_rows or [0]
+            committed += len(decision.emitted)
+            info = block.info
+            if info is None or not block.tokens:
+                continue
+            calibration.observe(
+                self._calibration_key(lane),
+                tree_records(block.parents, info["depths"], info["log_q"], rows),
+                predicted=expected_tokens(info["path_log_p"], len(block.tokens)),
+                realized=len(rows),
+            )
+        if seconds is not None and not any(
+            getattr(lane, "external_rounds", 0) < 2 for lane in cohort
+        ):
+            calibration.observe_rate(committed, seconds)
+        self.scheduler_stats["external_tree_calibration"] = calibration.receipt()
 
     def _ordinary_pipeline_eligible(self, cohort, *, following=False):
         """Whether a permanent B1 lane may use native target pipelining.

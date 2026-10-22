@@ -31,6 +31,8 @@ class _Width:
     cost: dict = field(default_factory=dict)        # verified size -> EWMA seconds
     cost_samples: dict = field(default_factory=dict)
     chosen: int | None = None
+    maximum: int | None = None                      # the knob's node maximum
+    verified: dict = field(default_factory=dict)    # verified nodes -> lane rounds
 
 
 class TileBudgetController:
@@ -50,6 +52,7 @@ class TileBudgetController:
 
         maximum = int(maximum)
         state = self._state(width)
+        state.maximum = maximum
         sizes = [n for n in CANDIDATES if n < maximum] + [maximum]
         if state.rounds < self.warmup or state.rounds % self.refresh == 0:
             return maximum
@@ -86,6 +89,12 @@ class TileBudgetController:
         slope = max(0.0, sum((x - mean_x) * (y - mean_y) for x, y in points) / var)
         return mean_y - slope * mean_x, slope
 
+    def cost_curve(self, width):
+        """``(a, b)`` of the fitted round seconds ``a + b * rows``, or None."""
+
+        state = self._widths.get(int(width))
+        return None if state is None else self._fit(state)
+
     def observe(self, width, nodes, path_ranks, seconds):
         """Record one lane's round: verified ``nodes``, committed node ranks.
 
@@ -95,6 +104,7 @@ class TileBudgetController:
 
         state = self._state(width)
         state.rounds += 1
+        state.verified[int(nodes)] = state.verified.get(int(nodes), 0) + 1
         ranks = sorted(int(rank) for rank in path_ranks)
         for n in sorted({n for n in CANDIDATES if n <= nodes} | {int(nodes)}):
             state.tokens[n] = state.tokens.get(n, 0) + 1 + sum(1 for rank in ranks if rank < n)
@@ -110,32 +120,45 @@ class TileBudgetController:
         """An independent copy of the learned state, for round rollback."""
 
         return (
-            {
-                width: _Width(
-                    state.rounds, dict(state.tokens), dict(state.samples),
-                    dict(state.cost), dict(state.cost_samples), state.chosen,
-                )
-                for width, state in self._widths.items()
-            },
+            {width: self._copy(state) for width, state in self._widths.items()},
             dict(self.decisions),
+        )
+
+    @staticmethod
+    def _copy(state):
+        return _Width(
+            state.rounds, dict(state.tokens), dict(state.samples),
+            dict(state.cost), dict(state.cost_samples), state.chosen,
+            state.maximum, dict(state.verified),
         )
 
     def restore(self, snapshot):
         """Return to a ``snapshot()``; the snapshot itself stays reusable."""
 
         widths, decisions = snapshot
-        self._widths = {
-            width: _Width(
-                state.rounds, dict(state.tokens), dict(state.samples),
-                dict(state.cost), dict(state.cost_samples), state.chosen,
-            )
-            for width, state in widths.items()
-        }
+        self._widths = {width: self._copy(state) for width, state in widths.items()}
         self.decisions = dict(decisions)
 
+    def _fit_receipt(self, state):
+        fit = self._fit(state)
+        if fit is None:
+            return None
+        return {"intercept_ms": round(fit[0] * 1e3, 4), "slope_ms_per_row": round(fit[1] * 1e3, 4)}
+
     def receipt(self):
+        """Per lane width: plain numbers and short strings (metrics-ready).
+
+        ``tile_rows`` is the knob's tile (maximum nodes + anchor: 16 or 8 at
+        B1), ``mode`` says the size is chosen adaptively within it, and
+        ``verified_nodes`` counts lane rounds by the node count verified.
+        """
         return {
             str(width): {
+                "mode": "adaptive",
+                "maximum_nodes": state.maximum,
+                "tile_rows": None if state.maximum is None else state.maximum + 1,
+                "verified_nodes": {str(n): c for n, c in sorted(state.verified.items())},
+                "fit": self._fit_receipt(state),
                 "rounds": state.rounds,
                 "chosen": state.chosen,
                 "cost_ms": {str(n): round(s * 1e3, 3) for n, s in sorted(state.cost.items())},

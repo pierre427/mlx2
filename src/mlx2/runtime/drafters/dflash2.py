@@ -846,6 +846,7 @@ def _start_tree(
     lattice_positions=16,
     codebooks=None,
     submit=False,
+    calibration=None,
 ):
     """Queue the lattice graph (draft-context append included) on ``cache``.
 
@@ -899,12 +900,16 @@ def _start_tree(
             selector.predecessor_codebook.weight.astype(mx.float32),
             selector.successor_codebook.weight.astype(mx.float32),
         ]
+    if calibration is not None and len(calibration) != batch:
+        raise ValueError("DFlash2 tree calibration rows must match the batch")
     return {
         "anchors": anchors_list,
         "max_nodes": int(max_nodes),
         "pending": pending,
         "codebooks": codebooks,
         "cache": cache,
+        # Per-row (alpha, beta) depth tables captured at launch, or None.
+        "calibration": None if calibration is None else tuple(calibration),
     }
 
 
@@ -913,7 +918,7 @@ def _finish_tree(self, state, *, mark=None):
 
     import numpy as np
 
-    from .dflash_tree import best_first_tree
+    from .dflash_tree import best_first_tree, calibrated_best_first_tree
 
     mx.eval(*state["pending"])
     if state["codebooks"] is None:
@@ -928,7 +933,22 @@ def _finish_tree(self, state, *, mark=None):
     unary_rows = np.asarray(unary)
     projected_rows = np.asarray(projected)
     result = []
+    calibration = state.get("calibration")
     for row, anchor in enumerate(state["anchors"]):
+        if calibration is not None and calibration[row] is not None:
+            result.append(
+                calibrated_best_first_tree(
+                    candidate_rows[row],
+                    unary_rows[row],
+                    projected_rows[row],
+                    anchor,
+                    pred_rows,
+                    succ_rows,
+                    calibration=calibration[row],
+                    max_nodes=state["max_nodes"],
+                )
+            )
+            continue
         result.append(
             best_first_tree(
                 candidate_rows[row],
@@ -966,6 +986,9 @@ DFlash2DraftModel.start_tree = _start_tree
 DFlash2DraftModel.start_tree_submits = True
 DFlash2DraftModel.finish_tree = _finish_tree
 DFlash2DraftModel.tree_codebooks = tree_codebooks
+# ``start_tree(..., calibration=[(alpha, beta) | None per row])`` orders and
+# reports the tree by calibrated acceptance (runtime/ast_tree_calibration.py).
+DFlash2DraftModel.supports_tree_calibration = True
 
 
 # Drafter projection kernels (original mlx2).  The drafter only proposes; the

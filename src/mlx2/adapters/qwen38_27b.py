@@ -398,6 +398,8 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "ast_tile_rows",
         "ast_multilane_tile_rows",
         "ast_adaptive_rows",
+        "ast_tree_calibration",
+        "ast_batch_row_sharing",
         "minimum_draft_proposals",
         "exact_verification",
         "progressive_verification_tile",
@@ -492,17 +494,18 @@ def _tree_node_budgets(value, width):
     return normalized
 
 
-def _tile_node_budgets(policy, width, default_multilane_rows=None):
+def _tile_node_budgets(policy, width, default_multilane_rows=None, default_rows=16):
     """Per-lane tree node budgets: explicit, or from the tile knobs.
 
     ``ast_tiles`` (1 or 2) tiles of ``ast_tile_rows`` (4..16) rows are
     shared by the lanes of a round: each lane gets ``tiles * rows // lanes``
     rows, one of them its anchor.  One 16-row tile reproduces the measured
     15/7/4/3 budgets; two tiles give 31/15/9/7 (the kernels hold 32 rows per
-    stream).
+    stream); an 8-row tile gives 7/3/1/1.  ``default_rows`` is the adapter's
+    ``default_ast_tile_rows`` (the operator's ``ast_tile_rows`` wins).
     """
     tiles = policy.get("ast_tiles", 1)
-    rows = policy.get("ast_tile_rows", 16)
+    rows = policy.get("ast_tile_rows", default_rows)
     shared = policy.get("ast_multilane_tile_rows", default_multilane_rows)
     if type(tiles) is not int or not 1 <= tiles <= 2:
         raise ValueError("ast_tiles must be 1 or 2")
@@ -885,6 +888,14 @@ def inspect_external_policy(
 
         validate_source()
         _tile_node_budgets(policy, _TREE_BATCH_ROUTES[batch_route])
+        from ..runtime.ast_tree_calibration import parse_mode
+
+        sharing = policy.get("ast_batch_row_sharing", False)
+        if type(sharing) is not bool:
+            raise ValueError("ast_batch_row_sharing must be a boolean")
+        if sharing and parse_mode(policy.get("ast_tree_calibration")) is None:
+            raise ValueError("ast_batch_row_sharing requires ast_tree_calibration")
+        parse_mode(policy.get("ast_tree_calibration"))
         cohort_limit = policy.get("tensorfold_cohort_limit")
         if cohort_limit is not None and (
             type(cohort_limit) is not int
@@ -896,6 +907,12 @@ def inspect_external_policy(
             )
     elif "tree_node_budget_by_lanes" in policy:
         raise ValueError("tree node budgets require a batch_size_route")
+    elif policy.get("ast_tree_calibration") not in (None, False) or policy.get(
+        "ast_batch_row_sharing"
+    ):
+        raise ValueError(
+            "ast_tree_calibration/ast_batch_row_sharing require the tree batch_size_route"
+        )
     elif "tensorfold_cohort_limit" in policy:
         raise ValueError("tensorfold_cohort_limit requires a batch_size_route")
     if "target_revision" not in autopin and policy["target_revision"] == _legacy_content_revision(model_path):
@@ -1173,6 +1190,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     default_route = "native_mtp"
     # TensorFold tree tiles (tree15 B1-B4) for any drafter (``--ast``).
     ast_tree_tiles = True
+    # Rows of a lone lane's tree tile, anchor included (``ast_tile_rows`` /
+    # ``--ast-tile-rows`` override it).  16 vs 8 decided by the paired A/B in
+    # docs/experiments/AST-KAPITSA-TILE-CALIBRATION-2026-10-21.md.
+    default_ast_tile_rows = 16
 
     @classmethod
     def ast_drafter_policy_defaults(cls, drafter):
@@ -2002,6 +2023,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             kwargs.setdefault("ast_topology", self.external_policy["ast_topology"])
         if "ast_adaptive_rows" in self.external_policy:
             kwargs.setdefault("ast_adaptive_rows", self.external_policy["ast_adaptive_rows"])
+        if self.external_policy.get("ast_tree_calibration") not in (None, False):
+            kwargs.setdefault(
+                "ast_tree_calibration", self.external_policy["ast_tree_calibration"]
+            )
+        if self.external_policy.get("ast_batch_row_sharing"):
+            kwargs.setdefault("ast_batch_row_sharing", True)
         if self.external_policy.get("ast_b1_tile_policy") is not None:
             kwargs.setdefault("ast_b1_tile_policy", self.external_policy["ast_b1_tile_policy"])
         if oracle_path is not None:
@@ -2077,6 +2104,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 _tile_node_budgets(
                     self.external_policy, tree_width,
                     getattr(self, "default_ast_multilane_tile_rows", None),
+                    getattr(self, "default_ast_tile_rows", 16),
                 ),
             )
         return ExternalDraftBatchGenerator(
@@ -2231,7 +2259,34 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                     self.external_policy,
                     _TREE_BATCH_ROUTES[self.external_policy["batch_size_route"]],
                     getattr(self, "default_ast_multilane_tile_rows", None),
+                    getattr(self, "default_ast_tile_rows", 16),
                 )
+                config["ast_tile_rows"] = {
+                    "rows": self.external_policy.get(
+                        "ast_tile_rows", getattr(self, "default_ast_tile_rows", 16)
+                    ),
+                    "authority": (
+                        "operator_policy" if "ast_tile_rows" in self.external_policy
+                        else "adapter_default"
+                    ),
+                    "adaptive_rows": self.external_policy.get("ast_adaptive_rows") is not False,
+                }
+                from ..runtime.ast_tree_calibration import parse_mode
+
+                calibration = parse_mode(self.external_policy.get("ast_tree_calibration"))
+                if calibration is not None:
+                    config["ast_tree_calibration"] = {
+                        "mode": calibration,
+                        "law": "sigmoid(alpha_d+beta_d*logit(q))",
+                        "proposal_only": True,
+                    }
+                if self.external_policy.get("ast_batch_row_sharing"):
+                    config["ast_batch_row_sharing"] = {
+                        "enabled": True,
+                        "rule": "cohort tile rows to nodes by calibrated path probability",
+                        "cohort_rows": "equal-split total",
+                        "ragged_verify": True,
+                    }
             return config
         config = {
             "persistent": True,

@@ -384,6 +384,10 @@ _ROW_SHARING_NODES = (
     "mlx2_ast_row_sharing_lane_nodes_total",
     "Lanes of row-shared AST rounds by the proposal nodes each lane kept.",
 )
+_VERIFIED_NODES = (
+    "mlx2_ast_tree_verified_nodes_total",
+    "AST lane-rounds by tree nodes sent to the target verify (after calibration and row sharing).",
+)
 _PLANNER_SOURCE = (
     "mlx2_ast_planner_source_budgets_total",
     "AST planner source-budget outcomes per lane-round, by bounded planner reason.",
@@ -515,6 +519,9 @@ SCHEDULER_RECEIPTS = {
     ),
     "external_tree_row_sharing_lane_nodes": lambda raw: _walk_counter_map(
         raw, _ROW_SHARING_NODES, "nodes", node_label
+    ),
+    "external_tree_verified_nodes": lambda raw: _walk_counter_map(
+        raw, _VERIFIED_NODES, "nodes", node_label
     ),
     "ast_planner_source_budgets": lambda raw: _walk_counter_map(
         raw, _PLANNER_SOURCE, "reason", _closed(PLANNER_SOURCE_REASONS)

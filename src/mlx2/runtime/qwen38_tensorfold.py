@@ -397,6 +397,7 @@ def forward_many(
     *,
     cached=False,
     validated_token=None,
+    ragged=False,
 ):
     """Execute a bounded cohort as one packed, lane-owned target trunk.
 
@@ -405,6 +406,11 @@ def forward_many(
     independent caches.  Logits and captured features are reshaped back to the
     scheduler's uniform ``[lanes, rows, ...]`` contract.  Commit remains exact
     and lane-owned, but recurrent replay is grouped across streams.
+
+    ``ragged=True`` admits lanes of different tree widths (rows shared among
+    lanes by expected tokens): the packed row axis holds only real rows, and
+    each lane's rows are returned zero-padded to the widest lane (padding
+    rows are never read: the walk and commit read a lane's own tree rows).
     """
 
     token_rows = tuple(token_rows)
@@ -420,10 +426,10 @@ def forward_many(
     if len({id(cache) for cache in caches}) != width:
         raise ValueError("TensorFold cohort requires one cache owner per lane")
     lengths = {len(tokens) for tokens in token_rows}
-    if len(lengths) != 1 or any(
-        len(tokens) != len(parents)
+    if any(
+        len(tokens) != len(parents) or not tokens
         for tokens, parents in zip(token_rows, parent_rows)
-    ):
+    ) or (len(lengths) != 1 and not ragged):
         raise ValueError("TensorFold cohort requires uniform token/parent widths")
 
     root = None if source_root is None else Path(source_root).resolve()
@@ -441,7 +447,8 @@ def forward_many(
     capture_layers = tuple(int(index) for index in capture_layers)
     storage = _capture_storage(model, capture_layers, cached)
     starts = [_offset(cache) for cache in caches]
-    row_width = next(iter(lengths))
+    widths = [len(tokens) for tokens in token_rows]
+    row_width = max(widths)
     with _PostNormSink(lane_tree, _mtp_seed(model)) as sink:
         logits, records, offsets = lane_multi.multi_tree_forward(
             model.model,
@@ -451,7 +458,7 @@ def forward_many(
             caches,
             starts,
         )
-    expected_offsets = [row * row_width for row in range(width)]
+    expected_offsets = [sum(widths[:row]) for row in range(width)]
     if list(offsets) != expected_offsets or len(records) != width:
         raise RuntimeError("TensorFold packed target returned misaligned lane records")
     if sink.enabled:
@@ -461,25 +468,37 @@ def forward_many(
         if any(value is None for value in taps):
             raise RuntimeError("TensorFold packed target did not capture every draft tap")
         features = mx.concatenate(taps, axis=-1)
-    logits = mx.reshape(logits, (width, row_width, int(logits.shape[-1])))
-    features = mx.reshape(
-        features,
-        (width, row_width, int(features.shape[-1])),
-    )
+    if len(set(widths)) == 1:
+        logits = mx.reshape(logits, (width, row_width, int(logits.shape[-1])))
+        features = mx.reshape(
+            features,
+            (width, row_width, int(features.shape[-1])),
+        )
+    else:
+        logits, features = (
+            mx.stack([
+                mx.pad(
+                    packed[0, offset:offset + lane_width],
+                    [(0, row_width - lane_width), (0, 0)],
+                )
+                for offset, lane_width in zip(offsets, widths)
+            ])
+            for packed in (logits, features)
+        )
     transactions = [
         TensorfoldTransaction(
             lane_tree,
             cache,
             record,
-            row_width,
+            lane_width,
             start,
         )
-        for cache, record, start in zip(caches, records, starts)
+        for cache, record, start, lane_width in zip(caches, records, starts, widths)
     ]
     transaction = TensorfoldCohortTransaction(
         transactions,
         executor_cached=hit,
-        packed_commit=(lane_multi, caches, records, [row_width] * width, starts),
+        packed_commit=(lane_multi, caches, records, list(widths), starts),
     )
     return logits, features, transaction
 

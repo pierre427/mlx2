@@ -500,6 +500,8 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "ast_tile_rows",
         "ast_multilane_tile_rows",
         "ast_adaptive_rows",
+        "ast_tree_calibration",
+        "ast_batch_row_sharing",
         *EXTERNAL_TARGET_KERNEL_KEYS,
     }
 )

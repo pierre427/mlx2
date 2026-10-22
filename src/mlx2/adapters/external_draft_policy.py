@@ -1140,9 +1140,11 @@ class ExternalDraftAdapterMixin:
                 "tree_node_budget_by_lanes", _tile_node_budgets(
                     self.external_policy, width,
                     getattr(self, "default_ast_multilane_tile_rows", None),
+                    getattr(self, "default_ast_tile_rows", 16),
                 )
             )
-            for key in ("ast_topology", "ast_adaptive_rows"):
+            for key in ("ast_topology", "ast_adaptive_rows", "ast_tree_calibration",
+                        "ast_batch_row_sharing"):
                 if key in self.external_policy:
                     kwargs.setdefault(key, self.external_policy[key])
         return ExternalDraftBatchGenerator(
