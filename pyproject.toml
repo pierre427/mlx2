@@ -73,7 +73,7 @@ addopts = "-q"
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
-"mlx2" = ["route_dispatch.json"]
+"mlx2" = ["route_dispatch.json", "best_route_defaults.json"]
 "mlx2.adapters" = ["assets/*.npz", "assets/*.json", "vlm_contracts/*.json"]
 "mlx2.runtime" = ["data/*.json"]
 "mlx2.runtime.row_exact" = ["tables/*.json"]

@@ -1932,6 +1932,10 @@ def required_descriptor_checks(descriptor, settings=None):
 PROVENANCE_ONLY_SETTINGS = frozenset(
     {
         "route_selection_source",
+        # Why a no-flag route is the served one (best_route_defaults.py):
+        # the table entry, evidence and paired drafter it was chosen from.
+        # The route it selected is recorded by the settings it explains.
+        "route_default_selection",
         # Why an adapter default was left unselected; derived from the
         # bound max_lanes and policy settings it explains.
         "skipped_route_defaults",

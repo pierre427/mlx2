@@ -6358,6 +6358,27 @@ def build_parser():
         action="store_true",
         help="graft prompt-lookup copy paths onto the AST drafter's tile",
     )
+    parser.add_argument(
+        "--no-auto-route",
+        action="store_true",
+        help=(
+            "do not apply the artifact's measured best-route default "
+            "(src/mlx2/best_route_defaults.json); serve the adapter's plain "
+            "default route instead"
+        ),
+    )
+    parser.add_argument(
+        "--drafter-root",
+        action="append",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "directory searched for drafters a best-route default auto-pairs; "
+            "repeatable, replaces the default roots (~/mlx-models, ~/models, "
+            "/Volumes/T7/models and the Hugging Face hub cache)"
+        ),
+    )
     owned = parser.add_argument_group("experimental TensorFold-owned token-ID route")
     owned.add_argument("--tensorfold-owned-live", action="store_true",
                        help="enable unqualified, default-off native worker endpoint")
@@ -6635,7 +6656,9 @@ def merge_invocation_draft_models(args, policy):
 
     Artifact drafters are deliberately invocation-selected.  The server never
     scans beside the target model, resolves a hub name, or downloads a missing
-    head.  Even one CLI drafter is represented as ``draft_models`` so adapters
+    head.  (The only drafter the server finds by itself is a measured
+    best-route default's, verified against its evidence identity; see
+    ``apply_best_route_default``.)  Even one CLI drafter is represented as ``draft_models`` so adapters
     that implement the portfolio contract use the same coordinator for one
     provider and for many.  Adapter validation remains the authority on which
     target/drafter combinations are implemented.
@@ -6680,6 +6703,39 @@ def validate_invocation_draft_adapter(args, adapter_resolution):
             "adapter does not implement; use --execution-policy with its "
             "singular draft_model contract"
         )
+
+
+def apply_best_route_default(args, adapter_resolution, *, table=None, streaming=None):
+    """Select the artifact's measured best route when no route flag is given.
+
+    See ``best_route_defaults``: the table entry becomes the CLI intent an
+    operator would type (for example ``--ast --ast-drafter <paired path>``),
+    so it is validated exactly like explicit flags.  Explicit route options
+    and ``--no-auto-route`` keep today's resolution.  The selection record
+    lands on ``args.route_default_selection`` for status and receipts.
+    """
+    from .best_route_defaults import resolve_best_route_default
+
+    roots = getattr(args, "drafter_root", None)
+    record = resolve_best_route_default(
+        args,
+        adapter_resolution,
+        table=table,
+        roots=list(roots) if roots else None,
+        include_hf=None if not roots else False,
+        streaming_selected=bool((streaming or {}).get("selected")),
+    )
+    log = logging.getLogger("mlx2.server")
+    if record.get("applied"):
+        drafter = record.get("drafter") or {}
+        log.info(
+            "best-route default %s selected for %s (%s; UNQUALIFIED)%s",
+            record.get("default"), record.get("checkpoint"), record.get("reason"),
+            f"; paired drafter {drafter.get('identity')}" if drafter else "",
+        )
+    elif record.get("failover"):
+        log.warning("best-route default not applied: %s", record["failover"])
+    return record
 
 
 def apply_ast_invocation(args, policy, adapter_resolution):
@@ -7054,6 +7110,7 @@ def serving_engine_kwargs(
         "batch_cohort_timeout_ms": args.batch_cohort_timeout_ms,
         "mtp": native_mtp,
         "route_selection_source": route_selection_source,
+        "route_default_selection": getattr(args, "route_default_selection", None),
         "skipped_route_defaults": getattr(args, "skipped_route_defaults", None),
         "prompt_lookup": args.prompt_lookup,
         "tenant_scoped_cache": args.tenant_scoped_cache,
@@ -7328,11 +7385,19 @@ def main():
             parser.error(f"cannot inspect --model {args.model}: {error}")
         validate_invocation_draft_adapter(args, adapter_resolution)
         apply_adapter_lane_default(args, adapter_resolution)
-        apply_auto_streaming_lane_default(args, adapter_resolution, policy)
+        streaming = apply_auto_streaming_lane_default(args, adapter_resolution, policy)
+        # After the streaming decision: a best-route entry only sets route
+        # intent (ast/ast_drafter/native_mtp ...), none of which that decision
+        # reads, but a resident-load-only route must not be auto-selected
+        # when the engine is going to stream experts single-lane.
+        apply_best_route_default(args, adapter_resolution, streaming=streaming)
         policy = apply_ast_invocation(args, policy, adapter_resolution)
         if getattr(args, "ast_route", {}).get("tree_tiles_refused"):
             logging.getLogger("mlx2.server").warning(
                 "--ast: chain route selected; %s", args.ast_route["tree_tiles_refused"])
+        from .best_route_defaults import finish_best_route_default
+
+        policy = finish_best_route_default(args, policy)
         if getattr(args, "ast_route", None) is not None:
             from .ast_observability import route_status as ast_route_status
 
@@ -7341,6 +7406,8 @@ def main():
                 getattr(adapter_resolution, "adapter_type", None),
             )
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
+        if args.route_default_selection.get("applied"):
+            route_selection = RouteSelection(route_selection.route, "best_route_default")
         native_mtp = route_selection.native_mtp
         # Route resolution, rather than only the spelling of the CLI, is the
         # authority.  In particular a capability-default prompt-lookup route

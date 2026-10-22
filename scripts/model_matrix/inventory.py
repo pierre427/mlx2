@@ -31,48 +31,37 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-DEFAULT_ROOTS = (
-    Path.home() / "mlx-models",
-    Path("/Volumes/T7/models"),
-    Path.home() / "models",
+from mlx2.adapters.drafter_pairing import (
+    DEFAULT_ROOTS,
+    DRAFT_ARCH_MARKERS,
+    DRAFT_MODEL_TYPES,
+    HF_HUB,
+    MEDIA_MODEL_TYPES,
+    PIPELINE_COMPONENTS,
+    classify,
+    discover,
+    display_name,
+    pair_drafter,
+    shard_names,
 )
-HF_HUB = Path.home() / ".cache/huggingface/hub"
+from mlx2.adapters.drafter_pairing import (
+    route_slug as _route_slug,
+)
+
 MIN_PARAMS = 8_000_000_000
 SCHEMA = "mlx2.model-matrix-inventory.v1"
 
-# Non-text modalities and pipeline parts.  These are a separate lane.
-MEDIA_MODEL_TYPES = frozenset({
-    "llada", "diffusion_gemma", "AudioVideo", "t5", "clip_text_model",
-    "whisper", "moonshine", "moonshine_streaming", "qwen3_asr", "qwen3_tts",
-    "qwen3_tts_tokenizer_12hz", "nemotron_asr", "nemotron_asr_streaming",
-    "melotts", "pocket_tts", "silero_vad", "sam", "sam_audio", "stt", "tts",
-    "voxtral_realtime", "chatterbox_turbo", "wav2vec2-bert",
-    "nemotron3_diarization", "style_text_to_speech_2",
-})
-PIPELINE_COMPONENTS = frozenset({"text_encoder", "text_encoder_2", "transformer", "vae"})
-DRAFT_MODEL_TYPES = frozenset({
-    "qwen3_5_mtp", "qwen4_exp_mtp", "muse_glimmer_assistant", "qwen3_5_text",
-})
-DRAFT_ARCH_MARKERS = ("Draft", "XPress", "DSpark", "Eagle", "LiLiCorr")
+__all__ = [
+    "DEFAULT_ROOTS", "DRAFT_ARCH_MARKERS", "DRAFT_MODEL_TYPES", "HF_HUB",
+    "MEDIA_MODEL_TYPES", "PIPELINE_COMPONENTS", "classify", "discover",
+    "display_name", "shard_names",
+]
 
 
 def _read_header(path: Path) -> dict:
     with path.open("rb") as stream:
         (length,) = struct.unpack("<Q", stream.read(8))
         return json.loads(stream.read(length))
-
-
-def shard_names(path: Path) -> tuple[list[str], bool]:
-    index = path / "model.safetensors.index.json"
-    if index.is_file():
-        try:
-            mapping = json.loads(index.read_text())["weight_map"]
-            names = sorted(set(mapping.values()))
-        except Exception:  # noqa: BLE001 - a broken index is an incomplete artifact
-            return [], False
-        return names, bool(names) and all((path / name).is_file() for name in names)
-    names = sorted(p.name for p in path.glob("*.safetensors"))
-    return names, bool(names) and all((path / name).is_file() for name in names)
 
 
 def _quant_bits(config: dict, module: str) -> int:
@@ -140,24 +129,6 @@ def quant_label(config: dict) -> str:
     return str(text.get("torch_dtype") or config.get("torch_dtype") or config.get("dtype") or "unquantized")
 
 
-def discover(roots: list[Path], include_hf: bool) -> list[Path]:
-    found = []
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for directory, dirs, files in os.walk(root, followlinks=True):
-            depth = len(Path(directory).relative_to(root).parts)
-            dirs[:] = [d for d in dirs if not d.startswith((".", "_"))] if depth < 4 else []
-            if "config.json" in files:
-                found.append(Path(directory))
-    if include_hf and HF_HUB.is_dir():
-        for snapshot in sorted(HF_HUB.glob("models--*/snapshots/*")):
-            for directory, dirs, files in os.walk(snapshot, followlinks=True):
-                if "config.json" in files:
-                    found.append(Path(directory))
-    return found
-
-
 def physical_identity(path: Path, names: list[str]) -> tuple:
     rows = []
     for name in names:
@@ -166,137 +137,18 @@ def physical_identity(path: Path, names: list[str]) -> tuple:
     return tuple(sorted(rows))
 
 
-def display_name(path: Path) -> str:
-    parts = path.parts
-    if "snapshots" in parts:
-        repo = parts[parts.index("snapshots") - 1]
-        return repo.removeprefix("models--").split("--", 1)[-1]
-    return path.name
-
-
-def classify(path: Path, config: dict) -> str | None:
-    if PIPELINE_COMPONENTS & set(path.parts[-1:]):
-        return "media_pipeline_component"
-    model_type = config.get("model_type")
-    if model_type in MEDIA_MODEL_TYPES:
-        return "media_or_non_text_model"
-    if not model_type and not config.get("architectures"):
-        return "media_or_non_text_model"
-    archs = config.get("architectures") or []
-    if (
-        "dflash_config" in config
-        or model_type in DRAFT_MODEL_TYPES
-        or any(marker in name for name in archs for marker in DRAFT_ARCH_MARKERS)
-    ):
-        return "drafter"
-    return None
-
-
 # ---------------------------------------------------------------- pairing --
 
 def _pair(target: dict, draft: dict, cache: dict) -> dict:
-    """Ask the target adapter's own inspector whether ``draft`` binds."""
-    adapter = target["adapter"]
-    tpath, dpath = target["path"], draft["path"]
-    archs = draft["architectures"]
-    policy: dict = {"draft_model": dpath}
-    extra_flags: list[str] = []
-    record = None
-    if adapter in {"Qwen3827BAdapter", "Qwen3627BAdapter", "Qwen3635BA3BAdapter",
-                   "Qwen359BAdapter"}:
-        if archs != ["DFlash2DraftModel"]:
-            raise ValueError(f"{adapter} external route accepts only DFlash2DraftModel")
-        if adapter == "Qwen359BAdapter":
-            raise ValueError("Qwen3.5-9B adapter refuses external drafts")
-        from mlx2.adapters import dflash2, qwen38_27b
+    """Ask the target adapter's own inspector whether ``draft`` binds.
 
-        record = dflash2.inspect_drafter(dpath, tpath)
-        key = ("qwen38_target", tpath)
-        if key not in cache:
-            cache[key] = qwen38_27b.content_revision(tpath)
-        policy.update(
-            draft_revision=dflash2.content_revision(record),
-            target_revision=cache[key],
-        )
-    elif adapter == "FlashNextAdapter":
-        if archs != ["DFlash2DraftModel"]:
-            raise ValueError("Flash-Next external route accepts DFlash2DraftModel or its own MTP head")
-        from mlx2.adapters import dflash2, flash_next
-
-        record = dflash2.inspect_drafter(dpath, tpath)
-        policy.update(
-            draft_revision=dflash2.content_revision(record),
-            target_revision=flash_next.artifact_identity(Path(tpath))["fingerprint"],
-            num_draft=3,
-            row_exact_verify=True,
-            progressive_verification_tile=2,
-        )
-    elif adapter == "MuseGlimmerAdapter" and archs == ["MuseGlimmerAssistantModel"]:
-        from mlx2.adapters import muse_dflash
-
-        record = muse_dflash.inspect_drafter(dpath, tpath)
-        policy["num_draft"] = 4
-    elif adapter == "MuseGlimmerAdapter":
-        if archs != ["DFlash2DraftModel"]:
-            raise ValueError(
-                "Muse Glimmer external route accepts only DFlash2DraftModel "
-                f"(artifact declares {archs})"
-            )
-        from mlx2.adapters import dflash2
-
-        record = dflash2.inspect_drafter(dpath, tpath)
-        policy["num_draft"] = 4
-    elif adapter == "NorthMiniCodeAdapter":
-        from mlx2.adapters import cohere_eagle
-
-        record = cohere_eagle.inspect_drafter(dpath, target_path=tpath)
-    elif adapter == "LagunaXS21Adapter":
-        from mlx2.adapters import laguna_dflash
-
-        record = laguna_dflash.inspect_drafter(dpath, target_path=tpath)
-    elif adapter in {"Nemotron35SuperAdapter", "Nemotron35SuperVLAdapter", "Nemotron35BoltAdapter"}:
-        if archs == ["DSparkDraftModel"]:
-            if adapter != "Nemotron35SuperAdapter":
-                raise ValueError(f"{adapter} accepts only LiLiCoRR drafters")
-            from mlx2.adapters import nemotron35_dspark
-
-            record = nemotron35_dspark.inspect_drafter(dpath, tpath)
-        elif archs == ["LiLiCorrDraftModel"] and adapter == "Nemotron35BoltAdapter":
-            from mlx2.adapters import nemotron35_bolt
-            from mlx2.adapters.registry import inspect_model
-
-            record = nemotron35_bolt.inspect_lilicorr_drafter(
-                dpath, target_artifact=inspect_model(tpath).artifact)
-        elif archs == ["LiLiCorrDraftModel"]:
-            from mlx2.adapters import lilicorr_nemotron
-
-            record = lilicorr_nemotron.inspect_drafter(dpath, target_path=tpath)
-        else:
-            raise ValueError(f"{adapter} accepts DSpark/LiLiCoRR drafters only")
-    elif adapter == "StandardDecoderAdapter":
-        if archs == ["Qwen3XPressModel"]:
-            from mlx2.adapters import xpress as module
-        elif archs == ["LiLiCorrDraftModel"]:
-            from mlx2.adapters import lilicorr as module
-        elif archs == ["Eagle3Speculator"]:
-            from mlx2.adapters import eagle3 as module
-        else:
-            raise ValueError("standard decoder accepts XPress/LiLiCoRR/EAGLE-3 drafters only")
-        record = module.inspect_drafter(dpath, tpath)
-        policy["draft_revision"] = module.content_revision(record)
-    else:
-        raise ValueError(f"{adapter} declares no external-draft route")
-    identity = policy.get("draft_revision") or (record or {}).get("draft_revision") \
-        or (record or {}).get("fingerprint")
-    return {
-        "draft": f"{draft['name']}@sha256:{identity}" if identity else draft["checkpoint"],
-        "draft_path": dpath,
-        "draft_weight_bytes": draft.get("weight_bytes"),
-        "draft_kind": archs[0] if archs else draft.get("model_type"),
-        "route": "external_draft",
-        "server_flags": ["--external-draft", "--execution-policy", "<policy.json>", *extra_flags],
-        "execution_policy": policy,
-    }
+    The pairing logic lives in ``mlx2.adapters.drafter_pairing`` and is
+    shared with the server's best-route defaults.
+    """
+    pairing = pair_drafter(target, draft, cache)
+    pairing.pop("identity", None)
+    pairing.pop("pins", None)
+    return pairing
 
 
 def plausible_family(target: dict, draft: dict) -> bool:
@@ -543,13 +395,6 @@ def build(roots: list[Path], include_hf: bool, host: str, revision_cache: dict) 
         "pairing_refusals": pair_errors,
         "skipped": skipped,
     }
-
-
-def _route_slug(draft: dict) -> str:
-    kind = (draft["architectures"] or [draft.get("model_type") or "draft"])[0]
-    kind = kind.replace("DraftModel", "").replace("ForCausalLM", "").replace("Model", "")
-    name = draft["name"].lower().replace(".", "").replace("_", "-")
-    return f"{kind.lower()}-{name}"[:80]
 
 
 def main(argv: list[str] | None = None) -> int:

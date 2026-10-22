@@ -1,0 +1,911 @@
+{
+ "schema": "mlx2.best-route-defaults.v1",
+ "decision": "Pierre 2026-10-21: build the per-artifact best-route defaults now (auto-pair verified on-disk drafters, --ast where it wins), labelled unqualified in receipts; queue qualification afterwards",
+ "rule": {
+  "baseline": "ordinary",
+  "min_geomean": 1.05,
+  "min_cell": 0.85,
+  "prompts": [
+   "code",
+   "chat",
+   "long",
+   "copy"
+  ],
+  "widths": [
+   "B1",
+   "B4"
+  ],
+  "metric": "B1 median decode tok/s; B4 per-rep sum of lane decode tok/s, median over reps"
+ },
+ "campaign": "qualification/runs/best-route-defaults-20261021",
+ "entries": [
+  {
+   "checkpoint": "Laguna-XS-2.1-MLX-8bit@sha256:7a4efe9fd2bea7996212fa3ce6d872455e960694d56c5c034af5a95d18fac401",
+   "fingerprint": "7a4efe9fd2bea7996212fa3ce6d872455e960694d56c5c034af5a95d18fac401",
+   "adapter": "LagunaXS21Adapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ordinary",
+    "kind": "ordinary"
+   },
+   "reason": "decision row from another lane: Operator decision: Pierre 2026-10-21 switched the no-flag default to plain decode. Route: ordinary adapter=LagunaXS21Adapter. The rule kept prompt lookup because no route qualified, but prompt lookup itself measured 0.81x geomean (B4 cells 0.29-0.41x) and Laguna DFlash 0.78x / 0.46x against plain decode on Laguna-XS-2.1-MLX-8bit (best-route-defaults-20261021-r2, tree 90935a35c). Follow-up: find why prompt lookup and DFlash lose at B4 on Laguna (likely the same B4 batching defect as the Qwen3.8-27B 8-bit prompt-lookup B4 stall) and revisit this default. Unqualified.",
+   "evidence": {
+    "files": [
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/laguna-xs21-8bit__ordinary.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/laguna-xs21-8bit__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/laguna-xs21-8bit__ast_dflash.json.gz"
+    ],
+    "source_revision": "5de3aefef2360ef3ec7915db747ae13123274d3f",
+    "decision_row": true,
+    "measured_scores": {
+     "ast_dflash": {
+      "qualifies": false,
+      "missing": [],
+      "ratios": {
+       "code/B1": 1.2973,
+       "code/B4": 0.5479,
+       "chat/B1": 0.9236,
+       "chat/B4": 0.4576,
+       "long/B1": 0.9986,
+       "long/B4": 0.5407,
+       "copy/B1": 1.3751,
+       "copy/B4": 0.5998
+      },
+      "geomean": 0.7777,
+      "min_cell": 0.4576,
+      "min_cell_name": "chat/B4"
+     },
+     "default": {
+      "qualifies": false,
+      "missing": [],
+      "ratios": {
+       "code/B1": 0.9475,
+       "code/B4": 0.2856,
+       "chat/B1": 1.0364,
+       "chat/B4": 0.3567,
+       "long/B1": 1.0202,
+       "long/B4": 0.4125,
+       "copy/B1": 3.3965,
+       "copy/B4": 1.2531
+      },
+      "geomean": 0.8066,
+      "min_cell": 0.2856,
+      "min_cell_name": "code/B4"
+     }
+    }
+   }
+  },
+  {
+   "checkpoint": "Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit@sha256:f8ea6b7f09c9cc7b3835554d0e27b43c05571185bca0d69c25c8b4e6e2620915",
+   "fingerprint": "f8ea6b7f09c9cc7b3835554d0e27b43c05571185bca0d69c25c8b4e6e2620915",
+   "adapter": "Qwen3635BA3BAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "current default (prompt_lookup) kept: ast_dflash2 geomean 1.0526x min 0.8508x; default geomean 1.2877x min 0.855x",
+   "evidence": {
+    "files": [
+     "qualification/runs/best-route-defaults-20261021/h2h/q36-35b-a3b-heretic-4bit__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021/h2h/q36-35b-a3b-heretic-4bit__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021/h2h/q36-35b-a3b-heretic-4bit__ordinary.json.gz",
+     "qualification/runs/best-route-defaults-20261021/h2h/q36-35b-a3b-heretic-4bit__ordinary2.json.gz"
+    ],
+    "source_revision": "7ad53cc86d49f5ae509dbb919ded235b6db6fa55",
+    "baseline": "ordinary",
+    "current_default_route": "prompt_lookup",
+    "scores": {
+     "ast_dflash2": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 1.529,
+       "code/B4": 0.8691,
+       "chat/B1": 0.8538,
+       "chat/B4": 0.9287,
+       "long/B1": 0.8508,
+       "long/B4": 0.882,
+       "copy/B1": 2.0484,
+       "copy/B4": 0.9304
+      },
+      "geomean": 1.0526,
+      "min_cell": 0.8508,
+      "min_cell_name": "long/B1"
+     },
+     "default": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 1.0151,
+       "code/B4": 1.5562,
+       "chat/B1": 0.9206,
+       "chat/B4": 1.1524,
+       "long/B1": 0.855,
+       "long/B4": 1.1626,
+       "copy/B1": 2.5179,
+       "copy/B4": 1.802
+      },
+      "geomean": 1.2877,
+      "min_cell": 0.855,
+      "min_cell_name": "long/B1"
+     }
+    },
+    "cells_tok_s": {
+     "ast_dflash2": {
+      "chat/B1": 146.541,
+      "chat/B4": 315.346,
+      "code/B1": 259.005,
+      "code/B4": 301.6,
+      "copy/B1": 281.583,
+      "copy/B4": 260.186,
+      "long/B1": 130.684,
+      "long/B4": 242.51
+     },
+     "default": {
+      "chat/B1": 158.016,
+      "chat/B4": 391.337,
+      "code/B1": 171.944,
+      "code/B4": 540.031,
+      "copy/B1": 346.126,
+      "copy/B4": 503.927,
+      "long/B1": 131.317,
+      "long/B4": 319.662
+     },
+     "ordinary": {
+      "chat/B1": 170.873,
+      "chat/B4": 358.596,
+      "code/B1": 179.056,
+      "code/B4": 379.75,
+      "copy/B1": 140.629,
+      "copy/B4": 279.645,
+      "long/B1": 155.784,
+      "long/B4": 301.56
+     },
+     "ordinary2": {
+      "chat/B1": 172.403,
+      "chat/B4": 320.55,
+      "code/B1": 159.725,
+      "code/B4": 314.286,
+      "copy/B1": 134.307,
+      "copy/B4": 279.663,
+      "long/B1": 151.401,
+      "long/B4": 248.355
+     }
+    },
+    "drafter_kernel": {
+     "ast_dflash2": {
+      "projection_kernel": "stock",
+      "law_id": null,
+      "runtime_quantization": null
+     }
+    }
+   }
+  },
+  {
+   "checkpoint": "Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-q4@sha256:0fd5d88bc93d053fcc8868a0e9c681debb70872efd7a6958ae784ee1e8350ed7",
+   "fingerprint": "0fd5d88bc93d053fcc8868a0e9c681debb70872efd7a6958ae784ee1e8350ed7",
+   "adapter": "Qwen3635BA3BAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "current default (prompt_lookup) kept: ast_dflash2 geomean 1.0977x min 0.8357x; default geomean 1.3343x min 0.8844x",
+   "evidence": {
+    "files": [
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q36-35b-a3b-heretic-q4__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q36-35b-a3b-heretic-q4__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q36-35b-a3b-heretic-q4__ordinary.json.gz"
+    ],
+    "source_revision": "da3ddf15d2dbec482d5f11fd2b816c6bde39f6e7",
+    "baseline": "ordinary",
+    "current_default_route": "prompt_lookup",
+    "scores": {
+     "ast_dflash2": {
+      "qualifies": false,
+      "missing": [],
+      "ratios": {
+       "code/B1": 1.4725,
+       "code/B4": 0.9853,
+       "chat/B1": 1.0265,
+       "chat/B4": 1.0633,
+       "long/B1": 0.8357,
+       "long/B4": 0.9085,
+       "copy/B1": 1.7246,
+       "copy/B4": 1.0166
+      },
+      "geomean": 1.0977,
+      "min_cell": 0.8357,
+      "min_cell_name": "long/B1"
+     },
+     "default": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 1.0537,
+       "code/B4": 1.8561,
+       "chat/B1": 1.0983,
+       "chat/B4": 1.3055,
+       "long/B1": 0.8899,
+       "long/B4": 0.8844,
+       "copy/B1": 2.4591,
+       "copy/B4": 1.8515
+      },
+      "geomean": 1.3343,
+      "min_cell": 0.8844,
+      "min_cell_name": "long/B4"
+     }
+    },
+    "cells_tok_s": {
+     "ast_dflash2": {
+      "chat/B1": 147.363,
+      "chat/B4": 347.017,
+      "code/B1": 247.528,
+      "code/B4": 317.185,
+      "copy/B1": 259.231,
+      "copy/B4": 311.973,
+      "long/B1": 142.296,
+      "long/B4": 283.664
+     },
+     "default": {
+      "chat/B1": 157.67,
+      "chat/B4": 426.047,
+      "code/B1": 177.137,
+      "code/B4": 597.525,
+      "copy/B1": 369.634,
+      "copy/B4": 568.164,
+      "long/B1": 151.527,
+      "long/B4": 276.141
+     },
+     "ordinary": {
+      "chat/B1": 143.563,
+      "chat/B4": 326.36,
+      "code/B1": 168.106,
+      "code/B4": 321.923,
+      "copy/B1": 150.314,
+      "copy/B4": 306.871,
+      "long/B1": 170.267,
+      "long/B4": 312.236
+     }
+    },
+    "drafter_kernel": {
+     "ast_dflash2": {
+      "projection_kernel": "stock",
+      "law_id": null,
+      "runtime_quantization": null
+     }
+    }
+   }
+  },
+  {
+   "checkpoint": "Qwen3.8-27B-4bit-MTP-MLX@sha256:80b8f5b5ac8cea60a2ac191dd8136cd7c60071e3359c03affc3509ac9acdc4a9",
+   "fingerprint": "80b8f5b5ac8cea60a2ac191dd8136cd7c60071e3359c03affc3509ac9acdc4a9",
+   "adapter": "Qwen3827BAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ast_dflash2",
+    "kind": "ast",
+    "drafter": {
+     "name": "Qwen3.8-27B-DFlash2",
+     "architectures": [
+      "DFlash2DraftModel"
+     ],
+     "identities": [
+      "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90"
+     ],
+     "config_sha256": [
+      "873e3556509b0da06e29654ba00d4944888d4b5e8a33afde25f7eb27d321e980"
+     ]
+    }
+   },
+   "reason": "ast_dflash2: geomean 2.28x plain decode, minimum cell 1.32x (long/B4) over 8 cells; rule >= 1.05 and floor >= 0.85",
+   "evidence": {
+    "files": [
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-u4__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-u4__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-u4__ordinary.json.gz"
+    ],
+    "source_revision": "720af34afa1edd4f8994d405c844034ea4099097",
+    "baseline": "ordinary",
+    "current_default_route": "native_mtp",
+    "scores": {
+     "ast_dflash2": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 4.5012,
+       "code/B4": 2.1967,
+       "chat/B1": 1.8879,
+       "chat/B4": 1.6898,
+       "long/B1": 2.1428,
+       "long/B4": 1.32,
+       "copy/B1": 5.9445,
+       "copy/B4": 1.3989
+      },
+      "geomean": 2.2845,
+      "min_cell": 1.32,
+      "min_cell_name": "long/B4"
+     },
+     "default": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 1.981,
+       "code/B4": 1.8056,
+       "chat/B1": 1.2996,
+       "chat/B4": 1.3447,
+       "long/B1": 1.8064,
+       "long/B4": 1.6701,
+       "copy/B1": 4.1033,
+       "copy/B4": 1.9735
+      },
+      "geomean": 1.8749,
+      "min_cell": 1.2996,
+      "min_cell_name": "chat/B1"
+     }
+    },
+    "cells_tok_s": {
+     "ast_dflash2": {
+      "chat/B1": 63.314,
+      "chat/B4": 134.307,
+      "code/B1": 153.049,
+      "code/B4": 184.491,
+      "copy/B1": 189.172,
+      "copy/B4": 99.0,
+      "long/B1": 70.696,
+      "long/B4": 92.781
+     },
+     "default": {
+      "chat/B1": 43.586,
+      "chat/B4": 106.876,
+      "code/B1": 67.358,
+      "code/B4": 151.644,
+      "copy/B1": 130.579,
+      "copy/B4": 139.665,
+      "long/B1": 59.598,
+      "long/B4": 117.383
+     },
+     "ordinary": {
+      "chat/B1": 33.537,
+      "chat/B4": 79.482,
+      "code/B1": 34.002,
+      "code/B4": 83.985,
+      "copy/B1": 31.823,
+      "copy/B4": 70.769,
+      "long/B1": 32.992,
+      "long/B4": 70.286
+     }
+    },
+    "drafter_kernel": {
+     "ast_dflash2": {
+      "projection_kernel": "lane",
+      "law_id": "lane-matmul-v1+rows-le-128+grouped+fused-context-v1+blocktopk-v1",
+      "runtime_quantization": {
+       "bits": 4,
+       "group_size": 64
+      }
+     }
+    }
+   }
+  },
+  {
+   "checkpoint": "Qwen3.8-27B-MLX-8bit@sha256:08ac8d9e71b4951b9d04e1d428bab3f4cc66218241c071d626f191b97a797265",
+   "fingerprint": "08ac8d9e71b4951b9d04e1d428bab3f4cc66218241c071d626f191b97a797265",
+   "adapter": "Qwen3827BAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ast_dflash2",
+    "kind": "ast",
+    "drafter": {
+     "name": "Qwen3.8-27B-DFlash2",
+     "architectures": [
+      "DFlash2DraftModel"
+     ],
+     "identities": [
+      "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90"
+     ],
+     "config_sha256": [
+      "873e3556509b0da06e29654ba00d4944888d4b5e8a33afde25f7eb27d321e980"
+     ]
+    }
+   },
+   "reason": "ast_dflash2: geomean 3.27x plain decode, minimum cell 1.84x (long/B4) over 8 cells; rule >= 1.05 and floor >= 0.85",
+   "evidence": {
+    "files": [
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-8bit__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-8bit__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-8bit__ordinary.json.gz"
+    ],
+    "source_revision": "da3ddf15d2dbec482d5f11fd2b816c6bde39f6e7",
+    "baseline": "ordinary",
+    "current_default_route": "prompt_lookup",
+    "scores": {
+     "ast_dflash2": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 6.2113,
+       "code/B4": 3.0306,
+       "chat/B1": 2.9337,
+       "chat/B4": 1.9782,
+       "long/B1": 3.0544,
+       "long/B4": 1.8385,
+       "copy/B1": 6.9787,
+       "copy/B4": 3.0541
+      },
+      "geomean": 3.2701,
+      "min_cell": 1.8385,
+      "min_cell_name": "long/B4"
+     },
+     "default": {
+      "qualifies": false,
+      "missing": [
+       "code/B4",
+       "chat/B4"
+      ],
+      "ratios": {},
+      "geomean": null,
+      "min_cell": null
+     }
+    },
+    "cells_tok_s": {
+     "ast_dflash2": {
+      "chat/B1": 47.837,
+      "chat/B4": 90.763,
+      "code/B1": 104.419,
+      "code/B4": 137.786,
+      "copy/B1": 115.392,
+      "copy/B4": 128.937,
+      "long/B1": 49.704,
+      "long/B4": 75.13
+     },
+     "default": {
+      "chat/B1": 18.788,
+      "chat/B4": null,
+      "code/B1": 18.87,
+      "code/B4": null,
+      "copy/B1": 83.243,
+      "copy/B4": 102.012,
+      "long/B1": 18.617,
+      "long/B4": 47.965
+     },
+     "ordinary": {
+      "chat/B1": 16.306,
+      "chat/B4": 45.882,
+      "code/B1": 16.811,
+      "code/B4": 45.465,
+      "copy/B1": 16.535,
+      "copy/B4": 42.217,
+      "long/B1": 16.273,
+      "long/B4": 40.864
+     }
+    },
+    "drafter_kernel": {
+     "ast_dflash2": {
+      "projection_kernel": "lane",
+      "law_id": "lane-matmul-v1+rows-le-128+grouped+fused-context-v1+blocktopk-v1",
+      "runtime_quantization": {
+       "bits": 4,
+       "group_size": 64
+      }
+     }
+    }
+   }
+  },
+  {
+   "checkpoint": "Qwen3.8-27B-oQ4e-mtp@sha256:fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+   "fingerprint": "fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+   "adapter": "Qwen3827BAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ast_dflash2",
+    "kind": "ast",
+    "drafter": {
+     "name": "Qwen3.8-27B-DFlash2",
+     "architectures": [
+      "DFlash2DraftModel"
+     ],
+     "identities": [
+      "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90"
+     ],
+     "config_sha256": [
+      "873e3556509b0da06e29654ba00d4944888d4b5e8a33afde25f7eb27d321e980"
+     ]
+    }
+   },
+   "reason": "ast_dflash2: geomean 2.73x plain decode, minimum cell 1.59x (long/B4) over 8 cells; rule >= 1.05 and floor >= 0.85",
+   "evidence": {
+    "files": [
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-oq4e__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-oq4e__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-oq4e__ordinary.json.gz"
+    ],
+    "source_revision": "720af34afa1edd4f8994d405c844034ea4099097",
+    "baseline": "ordinary",
+    "current_default_route": "native_mtp",
+    "scores": {
+     "ast_dflash2": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 4.9212,
+       "code/B4": 2.5609,
+       "chat/B1": 2.0319,
+       "chat/B4": 1.9291,
+       "long/B1": 2.2168,
+       "long/B4": 1.5886,
+       "copy/B1": 6.6005,
+       "copy/B4": 2.6891
+      },
+      "geomean": 2.7303,
+      "min_cell": 1.5886,
+      "min_cell_name": "long/B4"
+     },
+     "default": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 2.1734,
+       "code/B4": 2.1485,
+       "chat/B1": 1.3451,
+       "chat/B4": 1.588,
+       "long/B1": 1.8057,
+       "long/B4": 1.6321,
+       "copy/B1": 4.9587,
+       "copy/B4": 2.5752
+      },
+      "geomean": 2.098,
+      "min_cell": 1.3451,
+      "min_cell_name": "chat/B1"
+     }
+    },
+    "cells_tok_s": {
+     "ast_dflash2": {
+      "chat/B1": 59.075,
+      "chat/B4": 133.404,
+      "code/B1": 144.625,
+      "code/B4": 173.772,
+      "copy/B1": 176.531,
+      "copy/B4": 170.659,
+      "long/B1": 64.67,
+      "long/B4": 101.156
+     },
+     "default": {
+      "chat/B1": 39.108,
+      "chat/B4": 109.819,
+      "code/B1": 63.873,
+      "code/B4": 145.785,
+      "copy/B1": 132.621,
+      "copy/B4": 163.428,
+      "long/B1": 52.678,
+      "long/B4": 103.932
+     },
+     "ordinary": {
+      "chat/B1": 29.074,
+      "chat/B4": 69.154,
+      "code/B1": 29.388,
+      "code/B4": 67.855,
+      "copy/B1": 26.745,
+      "copy/B4": 63.463,
+      "long/B1": 29.173,
+      "long/B4": 63.678
+     }
+    },
+    "drafter_kernel": {
+     "ast_dflash2": {
+      "projection_kernel": "lane",
+      "law_id": "lane-matmul-v1+rows-le-128+grouped+fused-context-v1+blocktopk-v1",
+      "runtime_quantization": {
+       "bits": 4,
+       "group_size": 64
+      }
+     }
+    }
+   }
+  },
+  {
+   "checkpoint": "Qwen3.8-27B@sha256:6e7d3a4d3be8ea3eafc8195bf3541cb63a3eabc232537a7bc0c7c7521d6df9bf",
+   "fingerprint": "6e7d3a4d3be8ea3eafc8195bf3541cb63a3eabc232537a7bc0c7c7521d6df9bf",
+   "adapter": "Qwen3827BAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ast_dflash2",
+    "kind": "ast",
+    "drafter": {
+     "name": "Qwen3.8-27B-DFlash2",
+     "architectures": [
+      "DFlash2DraftModel"
+     ],
+     "identities": [
+      "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90"
+     ],
+     "config_sha256": [
+      "873e3556509b0da06e29654ba00d4944888d4b5e8a33afde25f7eb27d321e980"
+     ]
+    }
+   },
+   "reason": "ast_dflash2: geomean 2.85x plain decode, minimum cell 1.58x (copy/B4) over 8 cells; rule >= 1.05 and floor >= 0.85",
+   "evidence": {
+    "files": [
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-bf16__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-bf16__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-bf16__ordinary.json.gz"
+    ],
+    "source_revision": "5de3aefef2360ef3ec7915db747ae13123274d3f",
+    "baseline": "ordinary",
+    "current_default_route": "native_mtp",
+    "scores": {
+     "ast_dflash2": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 6.4312,
+       "code/B4": 2.3518,
+       "chat/B1": 3.0216,
+       "chat/B4": 1.644,
+       "long/B1": 2.9286,
+       "long/B4": 1.7034,
+       "copy/B1": 7.4154,
+       "copy/B4": 1.5758
+      },
+      "geomean": 2.8522,
+      "min_cell": 1.5758,
+      "min_cell_name": "copy/B4"
+     },
+     "default": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {
+       "code/B1": 3.4728,
+       "code/B4": 2.0465,
+       "chat/B1": 2.3681,
+       "chat/B4": 1.5739,
+       "long/B1": 3.2585,
+       "long/B4": 2.3593,
+       "copy/B1": 6.5972,
+       "copy/B4": 2.3668
+      },
+      "geomean": 2.7403,
+      "min_cell": 1.5739,
+      "min_cell_name": "chat/B4"
+     }
+    },
+    "cells_tok_s": {
+     "ast_dflash2": {
+      "chat/B1": 29.261,
+      "chat/B4": 67.87,
+      "code/B1": 66.627,
+      "code/B4": 95.546,
+      "copy/B1": 74.91,
+      "copy/B4": 57.91,
+      "long/B1": 30.203,
+      "long/B4": 48.639
+     },
+     "default": {
+      "chat/B1": 22.933,
+      "chat/B4": 64.977,
+      "code/B1": 35.978,
+      "code/B4": 83.142,
+      "copy/B1": 66.645,
+      "copy/B4": 86.979,
+      "long/B1": 33.605,
+      "long/B4": 67.368
+     },
+     "ordinary": {
+      "chat/B1": 9.684,
+      "chat/B4": 41.284,
+      "code/B1": 10.36,
+      "code/B4": 40.626,
+      "copy/B1": 10.102,
+      "copy/B4": 36.749,
+      "long/B1": 10.313,
+      "long/B4": 28.554
+     }
+    },
+    "drafter_kernel": {
+     "ast_dflash2": {
+      "projection_kernel": "lane",
+      "law_id": "lane-matmul-v1+rows-le-128+grouped+fused-context-v1+blocktopk-v1",
+      "runtime_quantization": {
+       "bits": 4,
+       "group_size": 64
+      }
+     }
+    }
+   }
+  },
+  {
+   "family": "Qwen3635BA3BAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "family: all 2 measured Qwen3635BA3BAdapter checkpoints kept their current default under the rule",
+   "evidence": {
+    "files": [
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q36-35b-a3b-heretic-q4__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q36-35b-a3b-heretic-q4__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q36-35b-a3b-heretic-q4__ordinary.json.gz",
+     "qualification/runs/best-route-defaults-20261021/h2h/q36-35b-a3b-heretic-4bit__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021/h2h/q36-35b-a3b-heretic-4bit__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021/h2h/q36-35b-a3b-heretic-4bit__ordinary.json.gz",
+     "qualification/runs/best-route-defaults-20261021/h2h/q36-35b-a3b-heretic-4bit__ordinary2.json.gz"
+    ],
+    "source_revision": "7ad53cc86d49f5ae509dbb919ded235b6db6fa55;da3ddf15d2dbec482d5f11fd2b816c6bde39f6e7",
+    "checkpoints": [
+     "Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit@sha256:f8ea6b7f09c9cc7b3835554d0e27b43c05571185bca0d69c25c8b4e6e2620915",
+     "Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-q4@sha256:0fd5d88bc93d053fcc8868a0e9c681debb70872efd7a6958ae784ee1e8350ed7"
+    ]
+   }
+  },
+  {
+   "family": "Qwen3827BAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ast_dflash2",
+    "kind": "ast",
+    "drafter": {
+     "name": "Qwen3.8-27B-DFlash2",
+     "architectures": [
+      "DFlash2DraftModel"
+     ],
+     "identities": [
+      "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90"
+     ],
+     "config_sha256": [
+      "873e3556509b0da06e29654ba00d4944888d4b5e8a33afde25f7eb27d321e980"
+     ]
+    }
+   },
+   "reason": "family fallback: all 4 measured Qwen3827BAdapter checkpoints selected ast_dflash2 (geomean 2.28-3.27x, worst minimum cell 1.32x); unmeasured checkpoints of the class take it, with the drafter verified on the served checkpoint",
+   "evidence": {
+    "files": [
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-8bit__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-8bit__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-8bit__ordinary.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-bf16__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-bf16__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-bf16__ordinary.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-oq4e__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-oq4e__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-oq4e__ordinary.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-u4__ast_dflash2.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-u4__default.json.gz",
+     "qualification/runs/best-route-defaults-20261021-r2/h2h/q38-27b-u4__ordinary.json.gz"
+    ],
+    "source_revision": "5de3aefef2360ef3ec7915db747ae13123274d3f;720af34afa1edd4f8994d405c844034ea4099097;da3ddf15d2dbec482d5f11fd2b816c6bde39f6e7",
+    "checkpoints": [
+     "Qwen3.8-27B-MLX-8bit@sha256:08ac8d9e71b4951b9d04e1d428bab3f4cc66218241c071d626f191b97a797265",
+     "Qwen3.8-27B@sha256:6e7d3a4d3be8ea3eafc8195bf3541cb63a3eabc232537a7bc0c7c7521d6df9bf",
+     "Qwen3.8-27B-oQ4e-mtp@sha256:fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+     "Qwen3.8-27B-4bit-MTP-MLX@sha256:80b8f5b5ac8cea60a2ac191dd8136cd7c60071e3359c03affc3509ac9acdc4a9"
+    ],
+    "scores": {
+     "ast_dflash2": {
+      "qualifies": true,
+      "missing": [],
+      "ratios": {},
+      "geomean": 2.2845,
+      "min_cell": 1.32,
+      "min_cell_name": "long/B4"
+     }
+    }
+   }
+  },
+  {
+   "family": "FlashNextAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "native MTP stays: DFlash2 external lost to native MTP on every B1 smoke cell (Flash-Next 4bit code 80 vs 113, explain 65 vs 90) and Flash-Next packed AST lost to ordinary (23.7 vs 63.1); B4 rule cells not measured",
+   "evidence": {
+    "files": [
+     "qualification/runs/model-matrix-20261021/SUMMARY.md",
+     "docs/research/RETRO-2026-10-18-to-21.md"
+    ],
+    "source_revision": "ca786630c6c48cd07cc9d384a2747cb2331d3acd"
+   }
+  },
+  {
+   "family": "GptOssAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "latched adaptive prompt lookup stays (capability default): pipelined parked PLD runs at ordinary speed with nothing to copy and ~2x on copy; PLD tree tiles lost (75-89 vs 116 tok/s), so --ast auto routes here to PLD too",
+   "evidence": {
+    "files": [
+     "docs/research/RETRO-2026-10-18-to-21.md",
+     "docs/SERVING.md",
+     "qualification/runs/model-matrix-20261021/SUMMARY.md"
+    ],
+    "source_revision": "5020f4f9d937005dbce22f7c8277486ab164ad97"
+   }
+  },
+  {
+   "family": "Nemotron35SuperAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "native MTP stays (1.2-1.4x ordinary on B1 smoke cells); DSpark and LiLiCoRR drafters ran below native MTP and below ordinary on prose",
+   "evidence": {
+    "files": [
+     "qualification/runs/model-matrix-20261021/SUMMARY.md"
+    ],
+    "source_revision": "67dbd6fc6e140917273deba4a792c2e0780c164d"
+   }
+  },
+  {
+   "family": "Nemotron35SuperVLAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "adapter default kept; no drafter route measured above it",
+   "evidence": {
+    "files": [
+     "qualification/runs/model-matrix-20261021/SUMMARY.md"
+    ],
+    "source_revision": "67dbd6fc6e140917273deba4a792c2e0780c164d"
+   }
+  },
+  {
+   "family": "Nemotron35BoltAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "ordinary stays: LiLiCoRR external ran below ordinary on every B1 smoke cell except tool calls (code 27 vs 47)",
+   "evidence": {
+    "files": [
+     "qualification/runs/model-matrix-20261021/SUMMARY.md"
+    ],
+    "source_revision": "67dbd6fc6e140917273deba4a792c2e0780c164d"
+   }
+  },
+  {
+   "family": "Nemotron35LightningAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "ordinary stays: native MTP ran below ordinary on every B1 smoke cell (70-94 vs 115-119)",
+   "evidence": {
+    "files": [
+     "qualification/runs/model-matrix-20261021/SUMMARY.md"
+    ],
+    "source_revision": "67dbd6fc6e140917273deba4a792c2e0780c164d"
+   }
+  },
+  {
+   "family": "Nemotron3SuperAdapter",
+   "status": "kept_current_default",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "ordinary stays: native MTP ran below ordinary on every B1 smoke cell (28-37 vs 42-44)",
+   "evidence": {
+    "files": [
+     "qualification/runs/model-matrix-20261021/SUMMARY.md"
+    ],
+    "source_revision": "67dbd6fc6e140917273deba4a792c2e0780c164d"
+   }
+  },
+  {
+   "family": "MuseGlimmerAdapter",
+   "status": "pending",
+   "default": {
+    "kind": "adapter_default"
+   },
+   "reason": "pending: the Muse assistant drafter accepts ~75% on code but 0 of ~450 proposals on the 4K transcript and has an open sampled-acceptance defect (being fixed on another branch); re-measure against the rule once that fix lands on main",
+   "evidence": {
+    "files": [
+     "qualification/runs/model-matrix-20261021/SUMMARY.md",
+     "docs/research/RETRO-2026-10-18-to-21.md"
+    ],
+    "source_revision": "67dbd6fc6e140917273deba4a792c2e0780c164d"
+   }
+  }
+ ]
+}

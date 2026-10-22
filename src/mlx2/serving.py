@@ -7,6 +7,7 @@ from .host_counters import HostCounters, count_add, count_max, counter_snapshot
 from collections import Counter, OrderedDict, deque
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from functools import partial
 import hashlib
@@ -26,6 +27,7 @@ import threading
 import time
 import uuid
 
+from .best_route_defaults import receipt_view
 from .logprobs import distribution_contract, token_logprob, wants_logprobs, wants_logprobs_at
 from .generation_trace import GeneratedTokenTrace
 from .request_limits import (
@@ -3782,6 +3784,7 @@ class ServingEngine:
         mtp=True,
         prompt_lookup=False,
         route_selection_source="engine_argument",
+        route_default_selection=None,
         skipped_route_defaults=None,
         qualification_mode=False,
         qualification=None,
@@ -3882,8 +3885,13 @@ class ServingEngine:
             "execution_policy_default",
             "explicit_flag",
             "engine_argument",
+            # A per-artifact measured best-route default
+            # (best_route_defaults.py), selected unqualified.
+            "best_route_default",
         }:
             raise ValueError("invalid route selection source")
+        if route_default_selection is not None and not isinstance(route_default_selection, dict):
+            raise ValueError("route default selection must be a JSON object")
         self.started_at = time.monotonic()
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
@@ -4390,6 +4398,11 @@ class ServingEngine:
         self.mtp = mtp
         self.prompt_lookup = bool(prompt_lookup)
         self.route_selection_source = route_selection_source
+        # Why the served route is what it is when no route flag chose it
+        # (best_route_defaults.py); provenance, never route identity.
+        self.route_default_selection = (
+            None if route_default_selection is None else deepcopy(route_default_selection)
+        )
         # {policy key: reason} for adapter defaults the server left unselected
         # because they cannot engage on this shape (server.py
         # resolve_execution_policy_defaults).
@@ -9931,6 +9944,8 @@ class ServingEngine:
                 else settings["speculation"]
             )
             settings["route_selection_source"] = self.route_selection_source
+            if self.route_default_selection is not None:
+                settings["route_default_selection"] = deepcopy(self.route_default_selection)
             from .runtime.env_switches import serving_env_switches
 
             process_env = serving_env_switches()
@@ -14357,6 +14372,13 @@ class ServingEngine:
                                     "route_selection_source": (
                                         "explicit_request" if native_route else
                                         self.route_selection_source),
+                                    **(
+                                        {"route_default_selection": receipt_view(
+                                            self.route_default_selection)}
+                                        if self.route_default_selection is not None
+                                        and not native_route
+                                        else {}
+                                    ),
                                     "ingress_cohort": job.ingress_cohort_receipt,
                                     "request_controls": {
                                         "max_tokens": job.effective_max_tokens,
