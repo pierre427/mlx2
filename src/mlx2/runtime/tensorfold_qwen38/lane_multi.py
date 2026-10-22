@@ -56,9 +56,50 @@ def _ordinary_qkv_rows(
 _BATCHED_ROPE = [os.environ.get("MLX2_TREE_ROPE", "batched") != "rows"]
 # "masked" (default): one fused SDPA per stream over prefix + window.
 # "ordinary": the per-node one-query reference law with ancestor gathers.
-_TREE_ATTENTION = os.environ.get("MLX2_TREE_ATTENTION", "masked")
-if _TREE_ATTENTION not in ("masked", "ordinary"):
-    raise ValueError("MLX2_TREE_ATTENTION must be masked or ordinary")
+# "position": stream_attention.position_tree_sdpa (a row's attention reduction
+#   order follows its absolute position alone), the GDN step's explicit fma
+#   order, and every covered projection on the lane arithmetic at every row
+#   count: a row's logits do not depend on the tree's size, shape or anchor.
+# The default for the Qwen3.8 tree path (Pierre, 2026-10-21).  An adapter
+# whose tree path the position law does not make invariant declares its own
+# default through select_default_law (Qwen3.6-35B: masked).  An explicit
+# MLX2_TREE_ATTENTION always wins.
+DEFAULT_TREE_LAW = "position"
+_ENV_TREE_ATTENTION = os.environ.get("MLX2_TREE_ATTENTION")
+_TREE_ATTENTION = _ENV_TREE_ATTENTION or DEFAULT_TREE_LAW
+TREE_LAWS = {
+    "masked": "tensorfold-tree-masked-sdpa-v1",
+    "ordinary": "tensorfold-tree-ordinary-sdpa-v1",
+    "position": "tensorfold-tree-position-v1",
+}
+if _TREE_ATTENTION not in TREE_LAWS:
+    raise ValueError("MLX2_TREE_ATTENTION must be masked, ordinary or position")
+
+
+def select_default_law(name: str) -> str:
+    """An adapter's default law for this process, unless MLX2_TREE_ATTENTION chose one; returns the law in force."""
+
+    global _TREE_ATTENTION
+    if name not in TREE_LAWS:
+        raise ValueError(f"tree law must be one of {sorted(TREE_LAWS)}")
+    if _ENV_TREE_ATTENTION is None:
+        _TREE_ATTENTION = name
+    return _TREE_ATTENTION
+# The owned GDN tree walk and commit replay (models/qwen38_tree_gdn) take one
+# step order for both; the position law pins it with explicit fma.
+def _gdn_order() -> dict:
+    return {"order": "fma"} if _TREE_ATTENTION == "position" else {}
+
+
+def tree_law() -> dict:
+    """The selected tree-verify law: its id and whether it promises tree-size invariance."""
+
+    name = _TREE_ATTENTION
+    position = name == "position"
+    return {"attention": name, "law_id": TREE_LAWS[name], "tree_size_invariant": position,
+            "selected_by": "environment" if _ENV_TREE_ATTENTION is not None else "default",
+            "projection_rows": "lane_all_rows" if position else "installed_crossover",
+            "gdn_update": "explicit_fma" if position else "served"}
 
 
 def _attention(attn: Any, x: mx.array, caches: Sequence[Any], positions: list[int], offsets: Sequence[int],
@@ -85,10 +126,14 @@ def _attention(attn: Any, x: mx.array, caches: Sequence[Any], positions: list[in
         k_s, v_s = keys[:, :, a:a + w], values[:, :, a:a + w]
         records[s].append(("kv", k_s, v_s))
         kv.append(cache.update_and_fetch(k_s, v_s))
+    if _TREE_ATTENTION == "position":
+        # the whole buffers: window rows at each stream's start, history below
+        kv = [(cache.keys, cache.values) for cache in caches]
     outs = []
     for first, plan in plans:
         span = queries if len(plans) == 1 else queries[:, :, offsets[first]:offsets[first] + plan.rows]
         sdpa = (stream_attention.masked_tree_sdpa if _TREE_ATTENTION == "masked"
+                else stream_attention.position_tree_sdpa if _TREE_ATTENTION == "position"
                 else stream_attention.ordinary_tree_sdpa)
         outs.append(sdpa(span, kv[first:first + plan.streams], attn.scale, plan))
     output = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
@@ -138,7 +183,7 @@ def _gdn(gdn: Any, x: mx.array, caches: Sequence[Any], parents: Sequence[Sequenc
         a = int(offsets[first])
         rows = slice(a, a + tree_plan.rows)
         ys.append(stream_gdn.tree(q[:, rows], k[:, rows], v[:, rows], g[:, rows], beta[:, rows],
-                                  recurrent[first:first + tree_plan.streams], tree_plan))
+                                  recurrent[first:first + tree_plan.streams], tree_plan, **_gdn_order()))
     y = ys[0] if len(ys) == 1 else mx.concatenate(ys, axis=1)
     if zba is None:
         out = lane_glue.gdn_post(y, z, gdn.norm.weight, gdn.norm.eps)
@@ -168,6 +213,19 @@ def multi_tree_forward(core: Any, head: Any, windows: Sequence[Sequence[int]], p
                        first_alone: bool = True, last_only: bool = False) -> tuple[mx.array, list[list[Any]], list[int]]:
     """Return tree logits [1, R, V], commit records and first-row offsets; roots have parent -1, attention caches receive rows, and recurrent states await commit replay."""
 
+    if _TREE_ATTENTION != "position":
+        return _multi_tree_forward(core, head, windows, parents, caches, starts, pipeline_layers=pipeline_layers,
+                                   first_alone=first_alone, last_only=last_only)
+    from mlx2.runtime.lane import all_rows
+
+    with all_rows():
+        return _multi_tree_forward(core, head, windows, parents, caches, starts, pipeline_layers=pipeline_layers,
+                                   first_alone=first_alone, last_only=last_only)
+
+
+def _multi_tree_forward(core: Any, head: Any, windows: Sequence[Sequence[int]], parents: Sequence[Sequence[int]],
+                        caches: Sequence[list[Any]], starts: Sequence[int], *, pipeline_layers: int = 4,
+                        first_alone: bool = True, last_only: bool = False) -> tuple[mx.array, list[list[Any]], list[int]]:
     from . import lane_fuse, lane_glue, lane_tree, stream_attention, stream_gdn
 
     widths = [len(w) for w in windows]
@@ -263,7 +321,8 @@ def commit_streams(caches: Sequence[list[Any]], records: Sequence[list[Any]], pa
                 plans[(first, n_keep)] = stream_gdn.CommitPlan([paths[s] for s in group],
                                                                [records[s][index][4] for s in group], n_keep)
             plan = plans[(first, n_keep)]
-            states = stream_gdn.replay(q, k, v, g, beta, [records[s][index][2] for s in group], plan)
+            states = stream_gdn.replay(q, k, v, g, beta, [records[s][index][2] for s in group], plan,
+                                       **_gdn_order())
             tails = stream_gdn.conv_tails([records[s][index][3] for s in group], qkv, plan)
             for s, state, tail in zip(group, states, tails):
                 caches[s][index][1] = state
@@ -271,4 +330,4 @@ def commit_streams(caches: Sequence[list[Any]], records: Sequence[list[Any]], pa
                 caches[s][index].advance(len(paths[s]))
 
 
-__all__ = ["commit_streams", "multi_tree_forward"]
+__all__ = ["DEFAULT_TREE_LAW", "TREE_LAWS", "commit_streams", "multi_tree_forward", "select_default_law", "tree_law"]

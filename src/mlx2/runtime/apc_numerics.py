@@ -56,6 +56,10 @@ CANDIDATE_ENV = {
     # Xing's fused mHC kernels are on by default and differ from the compiled
     # path in summation order; switching them off is the other law.
     "MLX2_XING_MHC_KERNEL": "default_on",
+    # Qwen3.8 TensorFold tree-verify law (lane_multi.TREE_LAWS): its rows
+    # write KV/GDN state, so a state made under one law is never served as
+    # another's.  Bound by law id whenever it is not the legacy masked law.
+    "MLX2_TREE_ATTENTION": "tree_law",
 }
 _FALSE = {"", "0", "false", "off", "no"}
 
@@ -168,6 +172,14 @@ def _bound_value(kind: str, raw: str):
     value = raw.strip()
     if kind == "flag":
         return None if value.lower() in _FALSE else "1"
+    if kind == "tree_law":
+        from .tensorfold_qwen38.lane_multi import TREE_LAWS
+
+        if value not in TREE_LAWS:
+            raise ValueError("MLX2_TREE_ATTENTION must be masked, ordinary or position")
+        # masked is the legacy namespace; adapters running the tree forward
+        # also bind the effective law (qwen38_tensorfold.tree_law_numerics).
+        return None if value == "masked" else TREE_LAWS[value]
     if kind == "default_on":
         # Bound only when switched off (the module reads exactly "1" as on).
         return None if value == "1" else "0"

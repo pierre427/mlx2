@@ -178,6 +178,10 @@ def configure_environment() -> dict[str, str]:
 class Qwen3627BAdapter(Qwen3827BAdapter):
     """Dense Qwen3.6 adapter with family-owned serving decisions."""
 
+    # The position tree law is the Qwen3.8 default (verified on that artifact);
+    # this family keeps the masked law until its own checkpoint is checked.
+    TENSORFOLD_TREE_LAW_DEFAULT = "masked"
+
     # Explicit operator-selected continuation strategies remain available,
     # but automatic draft-loop selection needs a family-bound acceptance
     # prior.  Never consume the Qwen3.8 prior inherited from the code-sharing

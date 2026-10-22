@@ -186,6 +186,9 @@ def inspect_artifact(
 class Qwen359BAdapter(Qwen3827BAdapter):
     """Ordinary-decode, text-only adapter for the dense Qwen3.5 9B artifact."""
 
+    # Not a Qwen3.8 tree path: keep the masked tree law (declines tiles anyway).
+    TENSORFOLD_TREE_LAW_DEFAULT = "masked"
+
     # The only bundled automatic draft-loop prior was measured on Qwen3.8.
     # Keep this explicit even though the current artifact is ordinary-only:
     # a future adapter-owned draft route must not silently inherit another

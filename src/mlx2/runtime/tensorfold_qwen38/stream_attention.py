@@ -539,4 +539,39 @@ def tree_sdpa(queries: mx.array, kv: Sequence[tuple[mx.array, mx.array]], scale:
         output_shapes=[(1, H, NT, D)], output_dtypes=[mx.bfloat16])[0]
 
 
-__all__ = ["MAX_STREAMS", "Plan", "masked_tree_sdpa", "ordinary_tree_sdpa", "sources", "tree_sdpa"]
+def position_tree_sdpa(queries: mx.array, buffers: Sequence[tuple[mx.array, mx.array]], scale: float,
+                       plan: Plan) -> mx.array:
+    """``tree_sdpa`` over each stream's whole cache buffers: a row's reduction order follows its position alone.
+
+    Keys below the tile-aligned anchor go through the shared kernel in
+    absolute ``CHUNK``-key chunks of ``TILE``-key tiles; the tail kernel
+    continues the same chunk from the same tile boundary through the row's
+    ancestor path; chunks merge in position order.  Which tiles each kernel
+    takes moves with the anchor, their arithmetic does not, so a row's bits
+    depend on its absolute position and its path only -- not on the tree's
+    size, shape, slot order or anchor (``tensorfold-tree-position-v1``).
+
+    ``buffers`` are each stream's full ``[1, HKV, capacity, 256]`` bf16 key
+    and value buffers with the window rows written at ``start``; anything
+    else fails closed rather than reading a layout the kernel does not take.
+    """
+
+    checked = []
+    for (keys, values), start, parents in zip(buffers, plan.starts, plan.parents):
+        for name, buf in (("keys", keys), ("values", values)):
+            if not isinstance(buf, mx.array) or buf.ndim != 4 or int(buf.shape[0]) != 1:
+                raise ValueError(f"position tree attention: {name} is not one [1, HKV, capacity, D] buffer")
+            if buf.dtype != mx.bfloat16 or int(buf.shape[3]) != 256 or int(buf.shape[1]) != plan.kv_heads:
+                raise ValueError(f"position tree attention: {name} {buf.dtype} {tuple(buf.shape)} unsupported")
+            if int(buf.shape[2]) < start + len(parents):
+                raise ValueError(f"position tree attention: {name} buffer does not hold every window row")
+        # The kernels read raw rows at the buffer's own head stride: a
+        # row-contiguous buffer passes through without a copy.
+        checked.append((mx.contiguous(keys), mx.contiguous(values)))
+    if queries.dtype != mx.bfloat16:
+        raise ValueError(f"position tree attention: {queries.dtype} queries unsupported")
+    return tree_sdpa(queries, checked, scale, plan)
+
+
+__all__ = ["MAX_STREAMS", "Plan", "masked_tree_sdpa", "ordinary_tree_sdpa", "position_tree_sdpa", "sources",
+           "tree_sdpa"]

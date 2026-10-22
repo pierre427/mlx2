@@ -12,7 +12,7 @@
       "reason": "revision-bound cache classes supplied by the selected adapter"
     },
     "mlx2.runtime.qwen38_tensorfold": {
-      "sha256": "fac221b5b69387e43720c368380848c531aab5d969ebeb8d4e6079808c2422be",
+      "sha256": "355bc0d2536e7305208f11e69573d2603f2e1fcf4c6a74f232788141a3048b67",
       "targets": [
         "mlx2.runtime.tensorfold_qwen38.inputs",
         "mlx2.runtime.tensorfold_qwen38.lane_attention",

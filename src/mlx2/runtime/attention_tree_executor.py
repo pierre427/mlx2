@@ -31,6 +31,7 @@ from .models.cache import KVCache, RotatingKVCache
 from .target_tree_executor import TargetTreeDispatchMetrics
 
 PROTOCOL = "attention_tree_v1"
+TREE_LAW_ID = "attention-tree-module-masked-sdpa-v1"
 _ABSENT = object()
 MAX_TILE_ROWS = 32
 
@@ -357,6 +358,16 @@ class AttentionTreeExecutor:
             "source_revision_token": self.source_revision_token,
             "dispatches": self.dispatches,
             "qualified": False,
+            # The module's own masked SDPA over prefix + tile: its kernel and
+            # split follow the key count (anchor + tile width) and the row
+            # count, and projections keep their installed crossover.  The
+            # position-determined law (tensorfold-tree-position-v1) exists
+            # for the Qwen3.8 hybrid tiles only; MLX2_TREE_ATTENTION does
+            # not select anything here.
+            "tree_law": {
+                "law_id": TREE_LAW_ID,
+                "tree_size_invariant": False,
+            },
         }
 
 

@@ -19,7 +19,9 @@ stock kernels and are reported.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -82,7 +84,7 @@ def module_weight_passes(module, rows: int) -> int | None:
     lw = _prepared(module)
     if lw is None or not ENABLED[0] or not available() or rows < 1:
         return None
-    if rows < int(getattr(module, "_lane_min_rows", 1)):
+    if rows < int(getattr(module, "_lane_min_rows", 1)) and not all_rows_active():
         return None
     limit = int(getattr(module, "_lane_max_rows", MAX_ROWS))
     if rows > limit and not bool(getattr(module, "_lane_chunk_above_max", False)):
@@ -162,6 +164,27 @@ class _Group:
 ENABLED = [True]
 GROUPING = [True]
 
+# Calls inside ``all_rows()`` on this thread take the lane arithmetic at every
+# row count from 1 to ``max_rows``, below each module's crossover too.  A tree
+# verify whose law must not depend on its row count (``tensorfold-tree-
+# position-v1``) runs its whole forward in this scope; ordinary decode and
+# prefill outside it keep the installed crossover.
+_ALL_ROWS = threading.local()
+
+
+def all_rows_active() -> bool:
+    return getattr(_ALL_ROWS, "depth", 0) > 0
+
+
+@contextlib.contextmanager
+def all_rows():
+    """Lane arithmetic for every covered call of 1..max_rows rows in this scope (this thread)."""
+    _ALL_ROWS.depth = getattr(_ALL_ROWS, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _ALL_ROWS.depth -= 1
+
 # Host-side call counters for covered projections (status and /metrics).
 # Row buckets keep label cardinality bounded.
 ROW_BUCKETS = ((1, 3), (4, 7), (8, 15), (16, 32), (33, MAX_ROWS))
@@ -224,7 +247,7 @@ class _LaneMixin:
         rows = _rows(x)
         if lw is None or not ENABLED[0] or not available():
             STATS["stock_disabled"] += 1
-        elif rows < self._lane_min_rows:
+        elif rows < self._lane_min_rows and not all_rows_active():
             STATS["stock_below_min_rows"] += 1
             STATS[f"rows_{_bucket(rows)}"] += 1
             group = _group(self)

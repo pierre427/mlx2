@@ -17,6 +17,26 @@ from mlx2.runtime.models.qwen38_fused_gdn import GatedDeltaNet
 from mlx2.serving import adapter_numerical_contract, apc_semantic_namespace
 
 
+@pytest.fixture(autouse=True)
+def masked_tree_law(monkeypatch):
+    """These checks pin the other switches, so they opt out of the default
+    position tree law (which binds itself into the contract, see below)."""
+    from mlx2.runtime.tensorfold_qwen38 import lane_multi
+
+    monkeypatch.setattr(lane_multi, "_TREE_ATTENTION", "masked")
+
+
+def test_default_position_tree_law_joins_the_contract(monkeypatch):
+    """Masked-made state must not be served under the position default."""
+    from mlx2.runtime.tensorfold_qwen38 import lane_multi
+
+    monkeypatch.setattr(lane_multi, "_TREE_ATTENTION", "position")
+    contract = selected_contract(False)
+    assert contract["tensorfold_tree_law"]["law_id"] == "tensorfold-tree-position-v1"
+    monkeypatch.setattr(lane_multi, "_TREE_ATTENTION", "masked")
+    assert selected_contract(False) is None
+
+
 def selected_contract(enabled, *, state_dtype=None, fp32_head=False):
     layer = GatedDeltaNet(
         TextModelArgs(

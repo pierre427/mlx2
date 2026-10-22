@@ -1601,6 +1601,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         # under another profile would run a route this receipt does not name.
         assert_profile_applied(f"the {type(self).__name__} adapter")
         self.layout = self.descriptor.cache_layout
+        self._bind_tensorfold_tree_law()
         self._tables = []
         path = Path(self.identity["path"])
         config = artifact["config"]
@@ -2501,6 +2502,16 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             ),
         }
 
+    # The TensorFold tree law this adapter's tree path defaults to
+    # (tensorfold-tree-position-v1: row logits follow absolute position only;
+    # default by Pierre's decision, 2026-10-21; MLX2_TREE_ATTENTION opts out).
+    TENSORFOLD_TREE_LAW_DEFAULT = "position"
+
+    def _bind_tensorfold_tree_law(self):
+        from ..runtime.tensorfold_qwen38 import lane_multi
+
+        lane_multi.select_default_law(self.TENSORFOLD_TREE_LAW_DEFAULT)
+
     def execution_numerics_contract(self):
         """Selected target math for APCv2 and external learning identities."""
         import mlx.core as mx
@@ -2611,6 +2622,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "algorithm": self.external_policy["batch_size_route"].replace("_", "-"),
                 "tensorfold_revision": EXPECTED_REVISION,
             }
+        from ..runtime.qwen38_tensorfold import tree_law_numerics
+
+        tree_law = tree_law_numerics()
+        if tree_law is not None:
+            # Tree rows write this route's KV/GDN state: a state made under the
+            # masked law must never be served as position-law output.
+            contract["tensorfold_tree_law"] = tree_law
         if not contract:
             return None
         # Retain the existing fused-only schema spelling and identity; selected

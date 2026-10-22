@@ -90,6 +90,30 @@ def gdn_backend_stats() -> dict:
     return stats()
 
 
+def tree_law() -> dict:
+    """The tree-verify law the vendored forward runs (``MLX2_TREE_ATTENTION``)."""
+
+    from .tensorfold_qwen38 import lane_multi
+
+    return lane_multi.tree_law()
+
+
+def tree_law_numerics() -> dict | None:
+    """The tree law for an adapter's numerics contract; None for the masked law.
+
+    The masked law keeps every existing namespace.  Any other law binds its
+    id, whether selected by the environment or by the module default, so
+    state made under one law is never served as another's.
+    """
+
+    from .tensorfold_qwen38 import lane_multi
+
+    law = lane_multi.tree_law()
+    if law["attention"] == "masked":
+        return None
+    return {"law_id": law["law_id"], "tree_size_invariant": law["tree_size_invariant"]}
+
+
 def glue_backend_stats() -> dict:
     """Served-spelling state of the vendored mlp_act/gdn_post kernels.
 
@@ -513,4 +537,6 @@ __all__ = [
     "gdn_backend_stats",
     "glue_backend_stats",
     "prepare_validated_source",
+    "tree_law",
+    "tree_law_numerics",
 ]

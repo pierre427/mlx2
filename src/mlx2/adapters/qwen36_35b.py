@@ -795,6 +795,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             },
         )
         self.layout = CACHE_LAYOUT
+        self._bind_tensorfold_tree_law()
         self._tables = []
         path = Path(self.identity["path"])
         config = dict(artifact["config"])
@@ -907,6 +908,12 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             routed_moe_layers=40,
         )
 
+    # The position law does not make this MoE tree path invariant: the sparse
+    # block runs the model's own expert gathers over all tree rows (stock
+    # kernels chosen by row count; lane MoE is off), so tiny-model checks
+    # still differ across tree sizes (22 of 28 schedule pairs).  Keep masked.
+    TENSORFOLD_TREE_LAW_DEFAULT = "masked"
+
     def execution_numerics_contract(self):
         """Bind the external route to this adapter's live target arithmetic."""
         from ..runtime.models.qwen36_35b import GatedDeltaNet
@@ -949,6 +956,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             target["target_verify_row_exact"] = target_verify_row_exact_numerics(
                 self.model
             )
+        from ..runtime.qwen38_tensorfold import tree_law_numerics
+
+        tree_law = tree_law_numerics()
+        if tree_law is not None:
+            target["tensorfold_tree_law"] = tree_law
         return {"qwen36_target": target}
 
     def _load_weights(

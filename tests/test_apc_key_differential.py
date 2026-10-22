@@ -175,7 +175,7 @@ BOUND = {
     ),
     **{
         f"env: {name}": (
-            {"env": {name: {"flag": "1", "default_on": "0"}.get(kind, "65536")}},
+            {"env": {name: {"flag": "1", "default_on": "0", "tree_law": "position"}.get(kind, "65536")}},
             "candidate or reduced-precision kernel law",
         )
         for name, kind in CANDIDATE_ENV.items()
@@ -273,10 +273,23 @@ def test_default_environment_keeps_existing_namespaces():
     """All-default switches add no wrapper, so persisted default blocks keep
     their identity; explicit defaults count as default."""
     assert execution_numerics_identity({}) is None
-    defaults = {name: ("1" if kind == "default_on" else "0") for name, kind in CANDIDATE_ENV.items()}
+    defaults = {name: ("1" if kind == "default_on" else "masked" if kind == "tree_law" else "0")
+                for name, kind in CANDIDATE_ENV.items()}
     assert execution_numerics_identity(defaults) is None
     assert execution_numerics_identity({"MLX_GDN_CORE": "off", "MLX_ENABLE_TF32": ""}) is None
     assert apc_semantic_namespace("text-token-v1") == "text-token-v1"
+
+
+def test_tree_laws_get_distinct_namespaces():
+    """masked (the default) adds nothing; ordinary and position bind their law ids."""
+    from mlx2.runtime.tensorfold_qwen38.lane_multi import TREE_LAWS
+
+    assert execution_numerics_identity({"MLX2_TREE_ATTENTION": "masked"}) is None
+    ids = {law: execution_numerics_identity({"MLX2_TREE_ATTENTION": law}) for law in ("ordinary", "position")}
+    assert ids["position"]["MLX2_TREE_ATTENTION"] == TREE_LAWS["position"]
+    assert ids["ordinary"] != ids["position"]
+    with pytest.raises(ValueError):
+        execution_numerics_identity({"MLX2_TREE_ATTENTION": "other"})
 
 
 def test_qsa_batch_decode_sparse_modes_get_distinct_namespaces(tmp_path):

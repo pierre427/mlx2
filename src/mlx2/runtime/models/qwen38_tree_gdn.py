@@ -599,46 +599,72 @@ _TAILS = (
 """
 )
 
+def _fma_order(source: str) -> str:
+    """The same step with every multiply-add an explicit ``metal::fma`` in loop order.
+
+    Served sources leave contraction and reassociation of the step to the
+    compiler, which compiles the tree walk (two state-slot variants) and the
+    commit replay as separate kernels.  Spelled out, the walk's step and the
+    replay's step are one sequence of roundings, so a position's recurrent
+    state does not depend on whether a commit replay or an in-tree step
+    produced it (``tensorfold-tree-position-v1``; Kapitsa 55b6153's GDN
+    update order, ported).
+    """
+
+    steps = (
+        ("kv_mem += state[i] * k_[s_idx];",
+         "kv_mem = metal::fma(state[i], static_cast<float>(k_[s_idx]), kv_mem);"),
+        ("auto delta = (v_[dv_idx] - kv_mem) * beta_;",
+         "const float delta = (static_cast<float>(v_[dv_idx]) - kv_mem) * beta_;"),
+        ("state[i] = state[i] + k_[s_idx] * delta;",
+         "state[i] = metal::fma(static_cast<float>(k_[s_idx]), delta, state[i]);"),
+        ("out += state[i] * q_[s_idx];",
+         "out = metal::fma(state[i], static_cast<float>(q_[s_idx]), out);"),
+    )
+    for old, new in steps:
+        if old in source:
+            source = source.replace(old, new)
+        elif "out +=" not in old:
+            raise RuntimeError(f"GDN step source lost {old!r}")
+    if "metal::fma(state[i], static_cast<float>(k_" not in source:
+        raise RuntimeError("GDN fma order did not apply")
+    return source
+
+
+GDN_ORDERS = ("served", "fma")
 _commit_kernels: dict[str, Any] = {}
 
 
-def _commit_kernel(name: str) -> Any:
-    if name not in _commit_kernels:
-        if name == "tree":
-            inputs = [
-                "q",
-                "k",
-                "v",
-                "g",
-                "beta",
-                *[f"S{i}" for i in range(MAX_STREAMS)],
-                "parents",
-                "meta",
-            ]
-            source, outputs = _TREE, ["y"]
-        elif name == "replay":
-            inputs = [
-                "q",
-                "k",
-                "v",
-                "g",
-                "beta",
-                *[f"S{i}" for i in range(MAX_STREAMS)],
-                "rows",
-                "meta",
-            ]
-            source, outputs = _REPLAY, [f"O{i}" for i in range(MAX_STREAMS)]
-        else:
-            inputs = [*[f"CS{i}" for i in range(MAX_STREAMS)], "QKV", "tails"]
-            source, outputs = _TAILS, [f"T{i}" for i in range(MAX_STREAMS)]
-        digest = hashlib.sha256(source.encode()).hexdigest()[:16]
-        _commit_kernels[name] = mx.fast.metal_kernel(
-            name=f"stream_gdn_{name}_{digest}",
-            input_names=inputs,
-            output_names=outputs,
-            source=source,
-        )
-    return _commit_kernels[name]
+def _commit_kernel(name: str, order: str = "served") -> Any:
+    if order not in GDN_ORDERS:
+        raise ValueError(f"GDN step order must be one of {GDN_ORDERS}")
+    key = name if order == "served" else f"{name}:{order}"
+    if key not in _commit_kernels:
+        _commit_kernels[key] = _build_commit_kernel(name, order)
+    return _commit_kernels[key]
+
+
+def _build_commit_kernel(name: str, order: str) -> Any:
+    if name == "tree":
+        inputs = ["q", "k", "v", "g", "beta", *[f"S{i}" for i in range(MAX_STREAMS)], "parents", "meta"]
+        source, outputs = _TREE, ["y"]
+    elif name == "replay":
+        inputs = ["q", "k", "v", "g", "beta", *[f"S{i}" for i in range(MAX_STREAMS)], "rows", "meta"]
+        source, outputs = _REPLAY, [f"O{i}" for i in range(MAX_STREAMS)]
+    else:
+        if order != "served":
+            raise ValueError("conv tails are copies: they have no step order")
+        inputs = [*[f"CS{i}" for i in range(MAX_STREAMS)], "QKV", "tails"]
+        source, outputs = _TAILS, [f"T{i}" for i in range(MAX_STREAMS)]
+    if order == "fma":
+        source = _fma_order(source)
+    digest = hashlib.sha256(source.encode()).hexdigest()[:16]
+    return mx.fast.metal_kernel(
+        name=f"stream_gdn_{name}_{digest}",
+        input_names=inputs,
+        output_names=outputs,
+        source=source,
+    )
 
 
 class TreePlan:
@@ -676,6 +702,8 @@ def tree(
     beta: mx.array,
     states: Sequence[mx.array],
     plan: TreePlan,
+    *,
+    order: str = "served",
 ) -> mx.array:
     """Return recurrence outputs [1, R, Hv, Dv] by walking each row's path from its stream's own fp32 state."""
 
@@ -684,7 +712,7 @@ def tree(
     if R != plan.rows or any(s.dtype != mx.float32 for s in states):
         raise ValueError("stream_gdn.tree: rows or state dtype do not match")
     S = len(states)
-    result = _commit_kernel("tree")(
+    result = _commit_kernel("tree", order)(
         inputs=[
             q,
             k,
@@ -745,6 +773,8 @@ def replay(
     beta: mx.array,
     states: Sequence[mx.array],
     plan: CommitPlan,
+    *,
+    order: str = "served",
 ) -> list[mx.array]:
     """Return each stream's state after serial steps over its kept rows using lane_tree replay arithmetic."""
 
@@ -754,7 +784,7 @@ def replay(
         raise ValueError("stream_gdn.replay: fp32 states")
     S = len(states)
     spare = states[0]
-    outs = _commit_kernel("replay")(
+    outs = _commit_kernel("replay", order)(
         inputs=[
             q,
             k,
@@ -798,11 +828,16 @@ def conv_tails(
     return list(outs[:S])
 
 
-def sources() -> dict[str, str]:
+def sources(order: str = "served") -> dict[str, str]:
+    if order not in GDN_ORDERS:
+        raise ValueError(f"GDN step order must be one of {GDN_ORDERS}")
+    if order == "fma":
+        return {"pre": _PRE, "tree": _fma_order(_TREE), "replay": _fma_order(_REPLAY), "tails": _TAILS}
     return {"pre": _PRE, "tree": _TREE, "replay": _REPLAY, "tails": _TAILS}
 
 
 __all__ = [
+    "GDN_ORDERS",
     "MAX_STREAMS",
     "MAX_TREE",
     "CommitPlan",
