@@ -1,0 +1,18 @@
+{
+  "mechanism": "Native desktop client and source-bound supervisor of the canonical Studio media job service",
+  "source_repository": "mlx2 local canonical media development worktree",
+  "source_revision": "29d009b33e2d1bd59658d2c92064be87e5d0f5ad",
+  "source_paths": [
+    "src/mlx2/media/api.py",
+    "src/mlx2/media/server.py",
+    "src/mlx2/media/service.py",
+    "src/mlx2/media/registry.py",
+    "src/mlx2/media/families/audio/indextts.py"
+  ],
+  "license": "Apache-2.0",
+  "modifications": "No source implementation copied. Original bounded loopback HTTP client maps advertised routes to the existing durable job API. Original supervisor freezes operator-selected canonical mlx2 source through RunnerManager, prepares only media and observability dependencies and launches its fixed media entrypoint. Existing canonical job, artifact, source, isolated-worker and accelerator ownership contracts remain authoritative. No text serving fallback.",
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

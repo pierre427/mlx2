@@ -1,0 +1,18 @@
+{
+  "mechanism": "Optional isolated calibrated oMLX quantization API integration",
+  "source_repository": "https://github.com/jundot/omlx",
+  "source_revision": "d76292753cd61faab831cc5677d1262764d1bed3",
+  "source_paths": [
+    "omlx/oq.py",
+    "docs/oQ_Quantization.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "source_oq_sha256": "ceacbddd9ad83e2f4339c825ebe86f862f501b860780dcd075ec5e59937f1c92",
+  "modifications": "No upstream code copied. Original mlx2 subprocess client invokes quantize_oq_streaming from an operator-prepared clean pinned source checkout. Calibration and mixed allocation remain with upstream converter. No legacy serving backend is loaded.",
+  "dependency_policy": "Preparation fetches only this source. No upstream dependency installer is run. Operator selects a compatible isolated environment. No interactions with prohibited ml-explore repositories.",
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}
