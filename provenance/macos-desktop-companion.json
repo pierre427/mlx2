@@ -1,0 +1,44 @@
+{
+  "implementation": "MLX2 native macOS desktop companion",
+  "license": "Apache-2.0",
+  "origin": "Original MLX2 implementation; no external application source copied",
+  "internal_mechanisms": [
+    {
+      "repository": "mlx2",
+      "source_revision": "4121b5c0a3edff463e7b77fd13c1c90291b612e5",
+      "paths": [
+        "src/mlx2/inference_monitor.py",
+        "src/mlx2/system_monitor.py"
+      ],
+      "use": "Direct reuse of read-only telemetry collectors and rate calculations"
+    },
+    {
+      "repository": "mlx2",
+      "source_revision": "4121b5c0a3edff463e7b77fd13c1c90291b612e5",
+      "paths": [
+        "scripts/run_with_gpu_locks.py"
+      ],
+      "use": "Paired directory ownership receipt and idle-sentinel interoperability",
+      "modifications": "Interactive fail-fast admission; rollback on partial acquisition; owner-bound release; no campaign, CPG, qualification, or performance claim"
+    },
+    {
+      "repository": "mlx2",
+      "source_revision": "6bbb52ba65c6f8b4cd84945620bbc45b3fa676f3",
+      "paths": [
+        "src/mlx2/server.py",
+        "src/mlx2/http_security.py",
+        "src/mlx2/inference_monitor.py"
+      ],
+      "use": "Existing streaming Chat Completions API, owner-only key loader and local listener discovery for native text chat",
+      "modifications": "Original SwiftUI client; ephemeral URLSession with redirect refusal, cancellation, separate in-memory histories and no generation on bridge queue; no server changes"
+    }
+  ],
+  "platform_references": [
+    "https://developer.apple.com/documentation/swiftui/menubarextra",
+    "https://developer.apple.com/documentation/foundation/urlresourcevalues"
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

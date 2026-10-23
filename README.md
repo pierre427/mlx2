@@ -190,6 +190,22 @@ PEFT adapter with `mlx2.runtime.media_lora.convert_media_lora` (or
 `LTX25Adapter` or `mlx2.adapters.music3.Music3Adapter`. Only one adapter may be
 active at a time, and unsupported tensor layouts fail closed.
 
+## macOS companion
+
+The native companion provides local model controls, streamed chat, bounded agent
+workflows and profile-specific settings. On macOS with Xcode command line tools,
+prepare the project virtualenv and build the development app with:
+
+```sh
+python scripts/build_macos_app.py --python .venv/bin/python
+open build/macos/MLX2.app
+```
+
+Built-in web search and fetching use the optional `.[desktop-web]` dependencies.
+The public distribution omits the built-in image service; configured external
+media services remain available. Private campaign fixtures are not distributed,
+and synthetic desktop checks do not establish model or route qualification.
+
 ## Third-party code
 
 Code adapted from other projects is listed, with its license and notices, in
