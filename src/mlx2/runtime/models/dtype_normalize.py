@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Targeted float32 -> compute-dtype normalization of RMSNorm gammas.
+"""Targeted float32 -> compute-dtype normalization of selected compute weights.
 
 Some community conversions (the Qwen3.8-27B CRACK 4/8-bit and bf16 artifacts)
 store the RMSNorm gammas as float32 where the official MLX conversions store
@@ -20,6 +20,9 @@ The cast is deliberately targeted, not a blanket ``astype``:
   ``tests/test_norm_dtype_normalization.py``).
 * Other families carry intentional float32 tensors (Xing4.0 / DeepSeek-V4 /
   glm52 routing biases and hyper-connection scales); they never call this.
+* Sparse Qwen adapters also explicitly select converted F32 convolutions and
+  dense router/shared gates. Those weights promote residuals independently
+  of norms; their normalization is receipted separately from the norm fold.
 * The cast runs after the +1 norm-convention fold, so the fold is done in
   float32 and rounded once.
 """
@@ -61,6 +64,18 @@ def normalize_norm_dtypes(
     Returns the load receipt ``{"cast": N, "from": "float32", "to": ...}``
     (``cast`` may be 0), or ``None`` when ``target`` is unknown or is itself
     float32 (a genuinely float32 model is left alone).
+    """
+    return normalize_weight_dtypes(weights, suffixes, target)
+
+
+def normalize_weight_dtypes(
+    weights: MutableMapping, suffixes: Iterable[str], target
+) -> Optional[dict]:
+    """Normalize only explicitly named FP32 compute weights, preserving state.
+
+    GGUF exports can widen convolutions and dense MoE gates as well as norms.
+    A caller must name its promoting weights; recurrent state parameters,
+    routing biases and unrelated families are never selected implicitly.
     """
     import mlx.core as mx
 

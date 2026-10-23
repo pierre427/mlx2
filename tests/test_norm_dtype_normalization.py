@@ -92,7 +92,7 @@ def _module(moe: bool):
     return Model, ModelArgs, {"model_type": "qwen3_5", "text_config": TEXT}
 
 
-def _artifact(moe: bool, fp32_suffixes=CRACK_FP32_SUFFIXES):
+def _artifact(moe: bool, fp32_suffixes=CRACK_FP32_SUFFIXES, *, dense_moe_gates=False):
     """bf16 weights with the CRACK float32 groups, as a converted artifact."""
     Model, ModelArgs, config = _module(moe)
     mx.random.seed(11)
@@ -100,7 +100,13 @@ def _artifact(moe: bool, fp32_suffixes=CRACK_FP32_SUFFIXES):
     if moe:
         # MLX's CPU GatherMM is float32-only; a quantized artifact (as the
         # 35B-A3B ships) runs bf16 through gather_qmm on the CPU.
-        nn.quantize(source, group_size=32, bits=4)
+        nn.quantize(
+            source, group_size=32, bits=4,
+            class_predicate=(
+                lambda name, module: hasattr(module, "to_quantized")
+                and not name.endswith((".mlp.gate", ".mlp.shared_expert_gate"))
+            ) if dense_moe_gates else None,
+        )
     weights = {}
     for key, value in tree_flatten(source.parameters()):
         if key.endswith(("norm.weight", "layernorm.weight")):
@@ -323,3 +329,54 @@ def test_adapter_records_the_receipt_and_load_check():
                 "observed": {"hidden": "bfloat16", "kv": ["bfloat16"]},
             },
         }
+
+
+RESIDUAL_COMPUTE = (
+    '.linear_attn.conv1d.weight',
+    '.mlp.gate.weight',
+    '.mlp.shared_expert_gate.weight',
+)
+
+
+@pytest.mark.parametrize('suffixes', [(s,) for s in RESIDUAL_COMPUTE] + [RESIDUAL_COMPUTE])
+def test_moe_float32_residual_weights_do_not_widen_compute(suffixes):
+    weights = _artifact(True, fp32_suffixes=(*CRACK_FP32_SUFFIXES, *suffixes), dense_moe_gates=True)
+    model = _load(True, weights)
+    assert _trunk_dtypes(model) == (mx.bfloat16, {mx.bfloat16})
+    report = model.language_model.residual_weight_dtype_normalization
+    expected = sum(v.dtype == mx.float32 and k.endswith(RESIDUAL_COMPUTE) for k,v in weights.items())
+    assert report == {'cast': expected, 'from': 'float32', 'to': 'bfloat16'}
+    params = dict(tree_flatten(model.parameters()))
+    for key, value in params.items():
+        if key.endswith(RESIDUAL_COMPUTE):
+            assert value.dtype == mx.bfloat16, key
+        elif key.endswith(GDN_FP32):
+            assert value.dtype == mx.float32, key
+
+
+def test_moe_residual_normalization_matches_bf16_stored_weights():
+    wide = _artifact(True, fp32_suffixes=(*CRACK_FP32_SUFFIXES, *RESIDUAL_COMPUTE), dense_moe_gates=True)
+    narrow = {k:v.astype(mx.bfloat16) if k.endswith(RESIDUAL_COMPUTE) else v for k,v in wide.items()}
+    a,b = _load(True,wide),_load(True,narrow)
+    tokens_a,logits_a = _greedy(a)
+    tokens_b,logits_b = _greedy(b)
+    assert tokens_a == tokens_b
+    assert mx.array_equal(logits_a,logits_b).item()
+    assert b.language_model.residual_weight_dtype_normalization['cast'] == 0
+
+
+def test_promoting_residual_precision_uses_a_distinct_cache_layout():
+    from mlx2.adapters.qwen36_35b import CACHE_LAYOUT, Qwen3635BA3BAdapter
+    for suffixes, changed in [(RESIDUAL_COMPUTE, True), ((), False)]:
+        model = _load(True,_artifact(True,fp32_suffixes=(*CRACK_FP32_SUFFIXES,*suffixes),dense_moe_gates=True))
+        adapter = object.__new__(Qwen3635BA3BAdapter)
+        adapter.model = model
+        adapter.layout = CACHE_LAYOUT
+        adapter._record_load_dtype()
+        assert adapter.load_dtype_check['ok']
+        assert (adapter.layout != CACHE_LAYOUT) is changed
+        cast = adapter.dtype_diagnostics()['residual_weights_dtype_normalized']['cast']
+        assert (cast > 0) is changed
+        layout = adapter.layout
+        adapter._record_load_dtype()
+        assert adapter.layout == layout

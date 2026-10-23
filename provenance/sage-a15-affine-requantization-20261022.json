@@ -1,0 +1,23 @@
+{
+  "component": "Sage-A1.5 streamed affine requantization candidates",
+  "source_repository": "local mlx2",
+  "source_revision": "04baf754c3641b0eb8e5deefb95fe8fcb7846709",
+  "source_paths": [
+    "src/mlx2/conversion/affine.py",
+    "scripts/convert_flint.py",
+    "scripts/convert_sage_a15_gguf.py"
+  ],
+  "license": "Original orchestration MIT; affine fitting Apache-2.0 per provenance/nemotron35-super-vl.json",
+  "modifications": [
+    "Stream pinned BF16-expanded GGUF weights through existing bounded affine fitter",
+    "Q8/group64 candidate and explicit mixed-Q4 weight-MSE candidate; retain routers, norms, convolution and recurrent state parameters",
+    "Preserve source artifact and source hashes, MTP tensors, tokenizer and template; publish a separate unqualified artifact atomically",
+    "No activation calibration or claim of recovering original full-precision weights",
+    "Optional bounded CPU shard workers; each shard owns separate output files and the main thread atomically publishes ordered progress and final metadata",
+    "Use spawned CPU processes rather than threads: bounded fitter probe found five threads slower than serial due Python overhead, whereas five spawned processes completed the identical work about6.8x faster than threads"
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

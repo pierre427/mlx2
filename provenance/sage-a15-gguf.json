@@ -1,0 +1,66 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "implementation": [
+    "scripts/convert_sage_a15_gguf.py",
+    "tests/test_sage_a15_gguf_cpu.py",
+    "src/mlx2/adapters/qwen36_35b.py",
+    "src/mlx2/runtime/models/qwen36_35b.py",
+    "src/mlx2/runtime/models/dtype_normalize.py",
+    "tests/test_norm_dtype_normalization.py"
+  ],
+  "source_artifact": {
+    "repository": "InternScience/Sage-A1.5-Q4_K_M-GGUF",
+    "revision": "10b179b52f2c841030db327627e707d076b4c8cf",
+    "file": "Sage-A1.5-Q4_K_M.gguf",
+    "sha256": "a64fe0bbf936db3eb54f66f142c2b2eee569ade83673649f549a21daef8ca395",
+    "license": "apache-2.0"
+  },
+  "support_artifact": {
+    "repository": "InternScience/Sage-A1.5",
+    "revision": "0e3205cf441cf01df0c0d238cc4738d0e43b4ca7",
+    "paths": [
+      "config.json",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "chat_template.jinja"
+    ],
+    "license": "apache-2.0"
+  },
+  "mechanism_sources": [
+    {
+      "repository": "local mlx2",
+      "revision": "3856a9db61a959934fae3e1ec66aa721e0f639ff",
+      "paths": [
+        "scripts/convert_orcasaq_qwen38_gguf.py",
+        "src/mlx2/adapters/qwen36_35b.py"
+      ],
+      "license": "MIT",
+      "modifications": "Reuse CPU conversion receipts and tokenizer validation; adapt inverse layout to 32 GDN value heads, 40 trunk layers, sparse experts, and the single MTP block. Reuse existing Qwen3.6 adapter by topology."
+    },
+    {
+      "repository": "ggml-org/llama.cpp",
+      "revision": "836d57176dc699a726c55418e4f96b8ca628e1bf",
+      "paths": [
+        "conversion/qwen.py",
+        "gguf-py/gguf/tensor_mapping.py"
+      ],
+      "license": "MIT",
+      "modifications": "Consulted forward Qwen3.5 MoE conversion for inverse GDN permutations, negative-exp A, shifted RMSNorm, expert names and flattened shared-expert gate. No external code copied."
+    }
+  ],
+  "scope": "text plus embedded MTP conversion; separate mmproj downloaded but vision conversion not implemented",
+  "modifications_20261022": {
+    "source_revision": "3856a9db61a959934fae3e1ec66aa721e0f639ff",
+    "source_paths": [
+      "src/mlx2/runtime/models/dtype_normalize.py",
+      "src/mlx2/runtime/models/qwen36_35b.py"
+    ],
+    "license": "MIT",
+    "change": "Generalized the existing explicit-suffix dtype normalizer; Qwen MoE sanitize normalizes F32 convolution/router/shared-gate weights to configured compute dtype, preserving F32 GDN state parameters. Changed loads get a distinct APCv2 layout; no artifact bytes are modified.",
+    "status": "65 focused CPU tests, actual-artifact4K probe and matched one-repetition cold/warm128K ladder passed; no full qualification"
+  },
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}
