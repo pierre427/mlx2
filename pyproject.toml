@@ -14,6 +14,7 @@ authors = [{ name = "Pierre Lamy" }]
 dependencies = []
 
 [project.optional-dependencies]
+desktop-web = ["ddgs==9.14.4", "primp==1.3.1", "curl_cffi>=0.15.0", "trafilatura>=2.0.0", "extruct>=0.18.0", "markdownify>=1.2.2", "beautifulsoup4>=4.14.0", "lxml>=6.0.0", "httpx>=0.28.0", "pymupdf>=1.24.0", "camoufox>=0.4.11", "nodriver>=0.39"]
 dev = ["pytest>=8", "ruff>=0.16"]
 mlx = ["mlx>=0.32"]
 hysparse2-research = ["mlx>=0.32", "numpy>=2", "tokenizers>=0.22"]
@@ -73,8 +74,9 @@ addopts = "-q"
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
-"mlx2" = ["route_dispatch.json", "best_route_defaults.json"]
+"mlx2" = ["route_dispatch.json", "best_route_defaults.json", "prompts/*.md"]
 "mlx2.adapters" = ["assets/*.npz", "assets/*.json", "vlm_contracts/*.json"]
 "mlx2.runtime" = ["data/*.json"]
 "mlx2.runtime.row_exact" = ["tables/*.json"]
 "mlx2.runtime.models" = ["exl3_kernels/*.metal", "exl3_kernels/LICENSE"]
+"mlx2.runtime.models.flint_fused" = ["*.metal", "LICENSE"]
