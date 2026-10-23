@@ -99,7 +99,7 @@ def test_rejects_different_top_two_set():
     row["first_divergence"]["warm"]["top_two"][1]["token_id"] = 17
     result = MODULE.verdict(_evidence([row]))
     assert result["passed"] is False
-    assert any("top-two token sets differ" in failure for failure in result["failures"])
+    assert any("near-tie clause" in failure for failure in result["failures"])
 
 
 def test_rejects_failed_functional_oracle():
@@ -136,3 +136,28 @@ def test_state_checks_fail_closed():
     result = MODULE.verdict(evidence)
     assert result["passed"] is False
     assert any("warm_hit" in failure for failure in result["failures"])
+
+
+def test_exact_tie_clause_allows_third_token_in_other_second_slot():
+    row = _row(cold_margin=0.0, warm_margin=0.3)
+    row["first_divergence"]["warm"]["top_two"][1]["token_id"] = 17
+    assert MODULE.verdict(_evidence([row]))["passed"]
+
+
+def test_multi_way_clause_uses_cross_token_window_and_requires_both_windows():
+    row = _row(cold_margin=0.05, warm_margin=0.04)
+    d = row["first_divergence"]
+    d["cold"]["top_two"][1]["token_id"] = 17
+    d["warm"]["top_two"][1]["token_id"] = 17
+    d["cold"]["window"] = [[11,-0.7],[17,-0.75],[13,-0.8]]
+    d["warm"]["window"] = [[13,-0.8],[17,-0.84],[11,-0.92]]
+    assert MODULE.verdict(_evidence([row]))["passed"]
+    del d["warm"]["window"]
+    assert not MODULE.verdict(_evidence([row]))["passed"]
+
+
+def test_window_must_agree_with_declared_top_two_and_ceiling_cannot_expand():
+    row = _row()
+    row["first_divergence"]["cold"]["window"] = [[11,-0.7],[13,-0.8]]
+    assert not MODULE.verdict(_evidence([row]))["passed"]
+    assert MODULE._classify_row(_row(), 0.6)["classification"] == "failed"

@@ -1977,3 +1977,20 @@ def test_full_preflight_refuses_source_changes_during_passing_tests(tmp_path, mu
     assert receipt["passed"] is False
     assert receipt["source_stable"] is False
     assert receipt["returncode"] == receipt["guard_returncode"] == 0
+
+
+def test_existing_live_receipt_is_refused_before_any_runtime_work(tmp_path, monkeypatch):
+    path = tmp_path / "passing.json"
+    path.write_text('{"passed":true}\n')
+    monkeypatch.setattr(sys, "argv", ["qualify_serving.py", "--output", str(path)])
+    with pytest.raises(SystemExit):
+        qualify.main()
+    assert path.read_text() == '{"passed":true}\n'
+
+
+def test_receipt_writer_excludes_concurrent_overwrites(tmp_path):
+    path = tmp_path / "receipt.json"
+    qualify._write_receipt_exclusive(path, {"passed": True})
+    with pytest.raises(FileExistsError):
+        qualify._write_receipt_exclusive(path, {"passed": False})
+    assert json.loads(path.read_text())["passed"] is True

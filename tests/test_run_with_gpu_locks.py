@@ -16,6 +16,7 @@ def _load_module():
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    module.observe_cpg = lambda *args: ({"cpg_task": "task", "cpg_session": "session", "cpg_generation": 1, "agent_id": "agent"}, {"status": "leased"})
     return module
 
 
@@ -120,6 +121,8 @@ def test_retries_keep_immutable_attempts_and_update_legacy(
         module.uuid, "uuid4", lambda: SimpleNamespace(hex=next(attempt_ids))
     )
     legacy = tmp_path / "run.json"
+    monkeypatch.setenv("CPG_OWNER_LOCK", str(tmp_path / "cpg.lock"))
+    monkeypatch.setenv("CPG_TASK", "task")
     argv = [
         "--session",
         "session-1",
@@ -173,7 +176,9 @@ spec.loader.exec_module(module)
 module.LOCKS = tuple(Path(p) for p in {tuple(map(str, locks))!r})
 module.WAITERS = Path({str(tmp_path / 'waiters')!r})
 module.foreign_model_processes = list
+module.observe_cpg = lambda *args: (dict(cpg_task="task", cpg_session="session", cpg_generation=1, agent_id="agent"), dict(status="leased"))
 raise SystemExit(module.main([
+    "--cpg-owner-lock", "unused", "--cpg-task", "task",
     "--session", "cpu-signal-test", "--label", "cleanup", "--receipt", {str(receipt)!r},
     "--", sys.executable, "-c", {child_code!r},
 ]))
@@ -225,3 +230,43 @@ def test_long_queued_live_waiter_keeps_its_place(tmp_path, monkeypatch):
     # An abandoned file (stale mtime) is still skipped.
     os.utime(old, (now - 600, now - 600))
     assert module.earlier_waiter(mine, now) is None
+
+
+def test_gpu_wrapper_requires_explicit_cpg_owner_and_task(tmp_path):
+    module = _load_module()
+    with pytest.raises(SystemExit):
+        module.main(["--label", "test", "--receipt", str(tmp_path / "r.json"), "--", "unused"])
+    assert not (tmp_path / "r.json").exists()
+
+
+def test_desktop_lease_matches_ancestor_job_and_live_radio(tmp_path, monkeypatch):
+    import os
+    import time
+
+    from mlx2 import desktop_campaign_worker
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    import qualification_gpu_ownership
+    monkeypatch.setattr(qualification_gpu_ownership, '_ancestor_pids', lambda pid: {os.getpid()})
+    expiry = time.time() + 180
+    owner = {'agent':'mlx2_desktop_campaign', 'pid':os.getpid(), 'job_id':'job',
+             'cpg_task':'task', 'cpg_session':'session', 'cpg_generation':1,
+             'agent_id':'agent', 'expires':expiry,
+             'claim':{'claimed':True, 'task_id':'task', 'lease_generation':1,
+                      'owner_agent_id':'agent', 'lease_expires_at':expiry}}
+    path = tmp_path / 'desktop-lease.json'; path.write_text(json.dumps(owner))
+    payload = {'status':'in_progress', 'owner_agent_id':'agent', 'lease_generation':1,
+               'lease_expires_at':expiry}
+    class Radio:
+        def __init__(self, url): pass
+        def call(self, name, arguments):
+            if name == 'join_session': return {'session_id':'session'}
+            return {'nodes':[{'id':'task', 'session_id':'session', 'type':'TASK', 'payload':payload}]}
+    monkeypatch.setattr(desktop_campaign_worker, 'Radio', Radio)
+    module = _load_module()
+    observed, live = module.observe_desktop_lease(path, 'session', 'job', 'unused')
+    assert observed == owner and live['lease_generation'] == 1
+    with pytest.raises(RuntimeError, match='ancestor/job'):
+        module.observe_desktop_lease(path, 'session', 'foreign-job', 'unused')
+    payload['owner_agent_id'] = 'reassigned'
+    with pytest.raises(RuntimeError, match='owner'):
+        module.observe_desktop_lease(path, 'session', 'job', 'unused')

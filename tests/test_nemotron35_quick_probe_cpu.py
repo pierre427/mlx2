@@ -1,5 +1,6 @@
 import importlib
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -476,9 +477,9 @@ def test_cleanup_kills_children_even_after_group_leader_exits(probe):
     # This CPU-only process fixture catches cleanup that checks only poll().
     code = (
         "import subprocess,sys\n"
-        'child=subprocess.Popen([sys.executable,"-c",'
-        '"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(90)"])\n'
-        "print(child.pid,flush=True)\n"
+        'subprocess.Popen([sys.executable,"-c",'
+        '"import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); '
+        'print(os.getpid(),flush=True); time.sleep(90)"])\n'
     )
     process = subprocess.Popen(
         [sys.executable, "-c", code],
@@ -511,6 +512,34 @@ def test_cleanup_kills_children_even_after_group_leader_exits(probe):
             os.kill(child, 9)
         except ProcessLookupError:
             pass
+
+
+def test_cleanup_tolerates_permission_errors_only_after_group_exit(probe, monkeypatch):
+    process = SimpleNamespace(pid=123456789, wait=lambda **kw: 0, poll=lambda: 0)
+    calls = []
+
+    def denied(pgid, signum):
+        calls.append((pgid, signum))
+        raise PermissionError("group contains only unreaped dead members")
+
+    monkeypatch.setattr(probe.common.os, "killpg", denied)
+    monkeypatch.setattr(probe.common, "group_running", lambda pgid: [])
+    probe.common.stop_group(process)
+    assert calls == [(process.pid, signal.SIGTERM), (process.pid, signal.SIGKILL)]
+
+
+@pytest.mark.parametrize("denied_signal", [signal.SIGTERM, signal.SIGKILL])
+def test_cleanup_does_not_hide_denied_live_group(probe, monkeypatch, denied_signal):
+    process = SimpleNamespace(pid=123456789, wait=lambda **kw: 0, poll=lambda: 0)
+
+    def signal_group(pgid, signum):
+        if signum == denied_signal:
+            raise PermissionError("live group cannot be signaled")
+
+    monkeypatch.setattr(probe.common.os, "killpg", signal_group)
+    monkeypatch.setattr(probe.common, "group_running", lambda pgid: [process.pid + 1])
+    with pytest.raises(PermissionError, match="live group"):
+        probe.common.stop_group(process)
 
 
 def test_native_binary_identity_detects_payload_changes_at_the_same_version(

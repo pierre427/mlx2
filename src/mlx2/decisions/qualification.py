@@ -11,11 +11,13 @@ from typing import Any
 
 SCHEMA = "mlx2.decision-serving-qualification.v1"
 PRODUCER = "mlx2-decision-qualification"
-# Frozen after the qualification producer is finalized. A receipt from any
-# other producer revision is data, not authority to advertise a qualified route.
+# Historical receipts cite this digest, but the reviewed producer source is
+# absent from this checkout. Loading fails closed until that exact producer
+# is recovered and verified; copying this constant is not qualification.
 APPROVED_PRODUCER_SHA256 = (
     "a6addcf209f28f35f31934df9bf8787a17d916f173dfd62f786945f2cd9513bb"
 )
+APPROVED_PRODUCER_PATH = Path(__file__).resolve().parents[3] / "scripts/qualify_decision_serving.py"
 REQUIRED_CHECKS = frozenset(
     {
         "artifact_identity",
@@ -144,6 +146,10 @@ def qualification_basis(engine, settings: dict) -> dict[str, Any]:
 
 
 def load_qualification(path: str | Path, *, engine, settings: dict) -> dict[str, Any]:
+    producer_path = APPROVED_PRODUCER_PATH
+    if (not producer_path.is_file()
+            or hashlib.sha256(producer_path.read_bytes()).hexdigest() != APPROVED_PRODUCER_SHA256):
+        raise ValueError("decision qualification producer source is absent or does not match its approved pin")
     receipt_path = Path(path)
     payload = receipt_path.read_bytes()
     record = _read_object(payload)

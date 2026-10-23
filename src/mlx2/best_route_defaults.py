@@ -58,7 +58,7 @@ ROUTE_FLAGS = ("ordinary", "native_mtp", "external_draft", "prompt_lookup", "ast
 ROUTE_CONSTRAINING_OPTIONS = (
     "draft_model", "execution_policy", "adaptive_mtp_depth", "mtp_acceptance_log",
     "approximate_kv", "ast_drafter", "ast_topology", "ast_graft_pld", "ast_tiles",
-    "ast_tile_rows", "mtp_head",
+    "ast_tile_rows", "ast_tree_calibration", "ast_batch_row_sharing", "mtp_head",
 )
 
 

@@ -19,7 +19,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-
 INPUT_SCHEMA = "mlx2.apcv2-replay-equivalence-input.v1"
 OUTPUT_SCHEMA = "mlx2.apcv2-replay-equivalence-verdict.v1"
 DEFAULT_MARGIN_NATS = 0.5
@@ -113,6 +112,8 @@ def _classify_row(row: Any, margin_ceiling: float) -> dict[str, Any]:
     problems: list[str] = []
     if not isinstance(row, dict):
         return {"classification": "failed", "problems": ["row is not an object"]}
+    if not _finite(margin_ceiling) or not 0 <= margin_ceiling <= DEFAULT_MARGIN_NATS:
+        problems.append("near-tie ceiling must remain within the established 0.5-nat bound")
     width = row.get("physical_width")
     cold = row.get("cold_token_ids")
     warm = row.get("warm_token_ids")
@@ -159,11 +160,35 @@ def _classify_row(row: Any, margin_ceiling: float) -> dict[str, Any]:
     warm_top = _top_two(divergence.get("warm"), "warm", problems)
     margins: dict[str, float] = {}
     if cold_top and warm_top:
-        cold_selected, cold_set, cold_margin = cold_top
-        warm_selected, warm_set, warm_margin = warm_top
+        cold_selected, _cold_set, cold_margin = cold_top
+        warm_selected, _warm_set, warm_margin = warm_top
         margins = {"cold": cold_margin, "warm": warm_margin}
-        if cold_set != warm_set:
-            problems.append("cold and warm unordered top-two token sets differ")
+        from mlx2.near_tie import near_tie_equivalent
+        def window(arm):
+            rows = arm.get("window") or arm.get("top_logprobs") or arm.get("top_two")
+            values = {}
+            if not isinstance(rows, list):
+                return values
+            for entry in rows:
+                if isinstance(entry, dict):
+                    token, value = entry.get("token_id"), entry.get("logprob")
+                elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    token, value = entry
+                else:
+                    return {}
+                if type(token) is not int or not _finite(value) or token in values:
+                    return {}
+                values[token] = float(value)
+            declared = arm.get("top_two") or []
+            for entry in declared:
+                token, value = entry.get("token_id"), entry.get("logprob")
+                if token not in values or abs(values[token] - value) > 1e-6:
+                    return {}
+            return values
+        if not near_tie_equivalent(cold_selected, window(divergence["cold"]),
+                                   warm_selected, window(divergence["warm"]),
+                                   ceiling=margin_ceiling):
+            problems.append("first divergence does not satisfy a bounded near-tie clause")
         if cold_selected == warm_selected:
             problems.append("recorded selections do not describe a token flip")
         if type(index) is int and 0 <= index < min(len(cold), len(warm)):
@@ -219,7 +244,7 @@ def verdict(evidence: dict[str, Any], *, margin_ceiling: float = DEFAULT_MARGIN_
     if not isinstance(rows, list) or not rows:
         failures.append("rows must be a nonempty list")
         rows = []
-    classified = [_classify_row(row, margin_ceiling) for row in rows]
+    classified = [{**row, **_classify_row(row, margin_ceiling)} if isinstance(row, dict) else _classify_row(row, margin_ceiling) for row in rows]
     for index, row in enumerate(classified):
         failures.extend(f"row {index}: {problem}" for problem in row["problems"])
 

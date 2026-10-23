@@ -309,7 +309,8 @@ def test_provisional_excludes_g5_and_binds_execution_digest(monkeypatch):
     _handoff_contract(monkeypatch)
     comparison = _comparison(_verdict_cell("short", 1500))
     record, cells = _build(comparison, provisional=True)
-    assert record["verdict"] == "qualified"
+    assert record["verdict"] == "provisional"
+    assert record["model_checkpoint"] == "artifact@sha256:" + "f" * 64
     assert record["provisional"] is True
     assert record["gates"]["G5"]["pass"] is None
     assert cells[0]["gates"]["G5"]["status"] == "pending"

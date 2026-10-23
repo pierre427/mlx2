@@ -1,0 +1,21 @@
+{
+  "schema": "mlx2.original-implementation-provenance.v1",
+  "source": {
+    "repository": "mlx2",
+    "revision": "3856a9db61a959934fae3e1ec66aa721e0f639ff",
+    "external_implementation_mined": false,
+    "license": "Existing per-file licenses retained"
+  },
+  "modifications": [
+    "Ignore process-group signal PermissionError only after a fresh process-table check proves no live group members remain; propagate live-group and process-table failures.",
+    "Make CPU child cleanup test wait for its installed SIGTERM handler; cover dead-group permission errors and refusal to hide live-group failures."
+  ],
+  "source_sha256": {
+    "scripts/nemotron35_probe_common.py": "1e13c095acc70cca933087928feccb0583f16fc6b62b77f8ce1bdfedda6950e3",
+    "tests/test_nemotron35_quick_probe_cpu.py": "1eb5181d0213c50c4846e6d7eb6698c3a260120a9c6ff94b9e68dc237c320548"
+  },
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

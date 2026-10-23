@@ -1,0 +1,20 @@
+{
+  "component": "Source-bound focused preflight over a verified full-suite base",
+  "source_repository": "local mlx2",
+  "source_revision": "d93433bf2fa6a84b3a03acd8b730661902a67285",
+  "source_paths": [
+    "scripts/qualify_serving.py",
+    "src/mlx2/serving.py:runtime_identity",
+    "src/mlx2/source_dependencies.py"
+  ],
+  "license": "MIT; original receipt orchestration",
+  "modifications": [
+    "Verify a historical approved full receipt, unchanged interpreter/native runtime/pytest configuration, and an exact Git reconstruction of its recorded runtime digest",
+    "Bind every current source/resource and test/script change to an exact reviewed coverage profile; independently recompute all changes and required focused tests in writer and validator",
+    "Run only affected CPU tests and import guards; retain strict return-code, source-stability, command/interpreter and base-receipt hash gates"
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

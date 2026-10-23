@@ -29,9 +29,10 @@ def _row(**overrides):
     return row
 
 
-def test_family_and_checkpoint_decisions_coexist():
+def test_family_and_checkpoint_decisions_coexist(monkeypatch):
     builder = _builder()
     checkpoint = "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-mlx-affine4-protected8@c9750f0f"
+    monkeypatch.setattr(builder, "strong_claim_problems", lambda row: [])
     index = builder.validate_decisions([
         _row(),
         _row(checkpoint=checkpoint, qualified="yes", observed_used="yes"),
@@ -72,3 +73,28 @@ def test_the_committed_decisions_carry_the_checkpoint_dimension():
         rows = list(csv.DictReader(handle, delimiter="\t"))
     assert rows and "checkpoint" in rows[0]
     _builder().validate_decisions(rows)
+
+
+def test_invalid_inventory_preserves_existing_grid(tmp_path, monkeypatch):
+    module = _builder()
+    path = tmp_path / 'grid.tsv'; path.write_text('retained evidence\n')
+    decisions = tmp_path / 'decisions.tsv'
+    decisions.write_text('model\tcheckpoint\tscope\tfeature_or_flag\timplemented\tqualified\tselected\tobserved_used\tdecision\treason\tevidence\tsource_revision\tartifact_profile\n'
+        'missing:base\t*\tfeature\tunknown\tyes\tno\tno\tno\treview\ttest\ttest\tsynthetic\ttest\n')
+    monkeypatch.setattr(module, 'DECISIONS', decisions)
+    with pytest.raises(ValueError, match='absent from inventory'):
+        module.main(['--output', str(path)])
+    assert path.read_text() == 'retained evidence\n'
+
+
+@pytest.mark.parametrize("claim", ["yes_explicit_qualification", "yes_ab_arms_only", "qualified"])
+def test_family_level_strong_claim_variants_are_refused(claim):
+    with pytest.raises(ValueError, match="checkpoint"):
+        _builder().validate_decisions([_row(qualified=claim)])
+
+
+def test_strong_claim_rejects_unfingerprinted_artifact_and_bogus_commit():
+    with pytest.raises(ValueError, match="fingerprint"):
+        _builder().validate_decisions([_row(checkpoint="model local", qualified="yes")])
+    with pytest.raises(ValueError, match="revision"):
+        _builder().validate_decisions([_row(checkpoint="model@0123abcd", qualified="yes", source_revision="zzzz")])

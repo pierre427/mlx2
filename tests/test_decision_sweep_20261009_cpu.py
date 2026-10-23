@@ -637,6 +637,10 @@ def test_decision_settings_record_explicit_serving_env_switches(monkeypatch):
 def test_decision_receipt_is_refused_after_an_execution_switch_changes(
     monkeypatch, tmp_path
 ):
+    producer = tmp_path / "reviewed-producer.py"
+    producer.write_text("# synthetic reviewed producer")
+    monkeypatch.setattr(qualification, "APPROVED_PRODUCER_PATH", producer)
+    monkeypatch.setattr(qualification, "APPROVED_PRODUCER_SHA256", hashlib.sha256(producer.read_bytes()).hexdigest())
     engine = _settings_engine()
     monkeypatch.setenv(SWITCH, "256")
     settings = _settings(engine)

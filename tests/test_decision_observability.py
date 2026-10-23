@@ -112,7 +112,12 @@ def test_decision_metrics_endpoint_uses_prometheus_content_type():
         thread.join()
 
 
-def test_decision_qualification_is_exact_and_fail_closed(tmp_path):
+def test_decision_qualification_is_exact_and_fail_closed(tmp_path, monkeypatch):
+    from mlx2.decisions import qualification
+    producer = tmp_path / "reviewed-producer.py"
+    producer.write_text("# synthetic reviewed test producer")
+    monkeypatch.setattr(qualification, "APPROVED_PRODUCER_PATH", producer)
+    monkeypatch.setattr(qualification, "APPROVED_PRODUCER_SHA256", hashlib.sha256(producer.read_bytes()).hexdigest())
     engine = FakeDecisionEngine()
     settings = {
         "served_model_name": engine.model_name,
@@ -146,3 +151,10 @@ def test_decision_qualification_is_exact_and_fail_closed(tmp_path):
     with pytest.raises(ValueError, match="artifact"):
         install_qualification(path, engine=engine, settings=settings)
     assert engine.route_receipt(observed_used=False)["qualified"] is False
+
+
+def test_absent_decision_producer_cannot_qualify_a_handwritten_receipt(tmp_path, monkeypatch):
+    from mlx2.decisions import qualification
+    monkeypatch.setattr(qualification, "APPROVED_PRODUCER_PATH", tmp_path / "absent.py")
+    with pytest.raises(ValueError, match="producer source is absent"):
+        qualification.load_qualification(tmp_path / "receipt.json", engine=None, settings={})

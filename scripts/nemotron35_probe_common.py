@@ -200,18 +200,25 @@ def stop_group(process):
     """Clean the whole owned group even when its original leader has exited."""
     if process is None:
         return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+
+    def signal_group(signum):
+        try:
+            os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            # Darwin can retain an unsignalable group containing only dead
+            # members while launchd reaps them. Never hide denied cleanup of
+            # a live member; the fresh process-table check must prove exit.
+            if group_running(process.pid):
+                raise
+
+    signal_group(signal.SIGTERM)
     try:
         process.wait(timeout=15)
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    signal_group(signal.SIGKILL)
     if process.poll() is None:
         process.wait(timeout=15)
     deadline = time.monotonic() + 2

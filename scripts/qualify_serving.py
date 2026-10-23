@@ -13,6 +13,7 @@ import platform
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -26,12 +27,14 @@ APPROVED_ADAPTIVE_BENCHMARK_SHA256 = (
 )
 PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v2"
 PREFLIGHT_DELTA_SCHEMA = "mlx2.qualification-preflight-delta.v1"
+SOURCE_DELTA_SCHEMA = "mlx2.qualification-preflight-source-delta.v1"
+SOURCE_DELTA_HELPER_SHA256 = "5b9d04c6ba078bb8dcff40c85617aea9c76f90108175df8dfbab4f218ade85a9"
 CROSS_HOST_PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v3"
 PREFLIGHT_TENSORFOLD_OWNED_SOURCE = (
-    Path.home() / ".codex/worktrees/tensorfold-upstream-parity-20260928"
+    Path(os.environ.get("MLX2_TENSORFOLD_SOURCE", str(Path.home() / "src/tensorfold")))
 )
 PREFLIGHT_TENSORFOLD_OWNED_MLX_LM_SOURCE = (
-    Path.home() / "Desktop/mlx-uag/mlx-lm-unified"
+    Path(os.environ.get("MLX2_UNIFIED_SOURCE", str(Path.home() / "src/mlx-lm-unified")))
 )
 QUALIFICATION_COVERAGE = {
     "response_format_json_object": False,
@@ -1161,8 +1164,20 @@ def _preflight_snapshot(identity_fn, tree_fn):
     return json.loads(json.dumps(identity)), tree
 
 
+def _write_receipt_exclusive(path, receipt):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x") as handle:
+        json.dump(receipt, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
                             identity_fn=preflight_identity, tree_fn=preflight_tree):
+    if Path(path).exists():
+        raise FileExistsError(f"refusing to overwrite {path}")
     preflight_started = time.perf_counter()
     command, guard_command = preflight_test_commands(pytest_args=pytest_args)
     env = {**os.environ, **PREFLIGHT_CPU_ENV}
@@ -1224,7 +1239,7 @@ def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    _write_receipt_exclusive(path, receipt)
     if not receipt["passed"]:
         raise AssertionError(f"full unit suite/import guards failed or source changed during testing; see {path}")
     return receipt
@@ -1308,6 +1323,17 @@ def _delta_test_commands(impacted):
     )
 
 
+def source_delta_helper():
+    import importlib.util
+    path = Path(__file__).resolve().parent / "preflight_source_delta.py"
+    if hashlib.sha256(path.read_bytes()).hexdigest() != SOURCE_DELTA_HELPER_SHA256:
+        raise AssertionError("approved source-delta helper changed")
+    spec = importlib.util.spec_from_file_location("approved_preflight_source_delta", path)
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper
+
+
 def validate_preflight_receipt(path, active_runtime, *, identity_fn=preflight_identity,
                                tree_fn=preflight_tree):
     """Trust a full-suite receipt for the current tree, or a delta over one.
@@ -1320,6 +1346,8 @@ def validate_preflight_receipt(path, active_runtime, *, identity_fn=preflight_id
     path = Path(path)
     receipt = json.loads(path.read_text())
     expected = identity_fn()
+    if receipt.get("schema") == SOURCE_DELTA_SCHEMA:
+        return source_delta_helper().validate(SimpleNamespace(**globals()), path, receipt, expected, tree_fn)
     if receipt.get("schema") == PREFLIGHT_DELTA_SCHEMA:
         return _validate_preflight_delta(path, receipt, active_runtime, expected, tree_fn)
     full = _validate_full_preflight(path, active_runtime, expected)
@@ -1421,6 +1449,8 @@ def write_preflight_delta(path, base_path, *, run=subprocess.run, identity_fn=pr
     Refuses (full preflight needed) when the binding moved -- any change under
     src/, the mlx build, the harness or the pytest configuration -- when a
     conftest.py changed, or when a touched file reaches no test module."""
+    if Path(path).exists():
+        raise FileExistsError(f"refusing to overwrite {path}")
     base_path = Path(base_path).resolve()
     expected = identity_fn()
     base = _validate_full_preflight(base_path, expected.get("runtime"), expected)
@@ -1471,7 +1501,7 @@ def write_preflight_delta(path, base_path, *, run=subprocess.run, identity_fn=pr
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    _write_receipt_exclusive(path, receipt)
     if not receipt["passed"]:
         raise AssertionError(f"impacted tests failed; see {path}")
     return receipt
@@ -2377,6 +2407,20 @@ def rolling_probe_prompt_words(settings):
     """
     from mlx2.runtime.state_boundaries import rolling_reuse_prompt_tokens
 
+    settings = dict(settings)
+    policy = dict(settings.get("apc_rolling_checkpoints") or {})
+    count = int((settings.get("apc_interior_checkpoints") or {}).get("count", 0))
+    if type(policy.get("interval_tokens")) is int and count > 0:
+        # Interior checkpoints outrank a rolling checkpoint at the same
+        # boundary. A longer forcing prompt separates those planned points.
+        extended = rolling_reuse_prompt_tokens(
+            interval_tokens=policy["interval_tokens"] * (count + 1),
+            prefill_step=settings.get("prefill_step"),
+            max_context=settings.get("max_context"),
+            autoscale=settings.get("prefill_step_source") == "prompt_length_autoscale",
+        )
+        if extended is not None:
+            return extended
     return rolling_reuse_prompt_tokens(
         interval_tokens=(settings.get("apc_rolling_checkpoints") or {}).get(
             "interval_tokens"
@@ -2499,7 +2543,10 @@ def run_rolling_checkpoint_probe(
             if "error" in chunk:
                 return fail(f"probe stream failed: {chunk['error']}")
             progress = chunk.get("prompt_progress") or {}
-            if int(progress.get("processed") or 0) >= interval:
+            # Finish one more chunk before cancelling: its predecessor's
+            # rolling publication must no longer be in the progress cycle.
+            extra = int(settings.get("prefill_step") or 1) if (settings.get("apc_interior_checkpoints") or {}).get("count", 0) else 0
+            if int(progress.get("processed") or 0) >= interval + extra:
                 seen = {
                     "processed": int(progress["processed"]),
                     "total": int(progress.get("total") or 0),
@@ -3964,6 +4011,9 @@ def main():
     parser.add_argument("--preflight-delta", action="store_true",
                         help=("Rerun only the test modules a tests/scripts change since "
                               "--base-preflight can reach; write a delta receipt to --output"))
+    parser.add_argument("--preflight-source-delta", action="store_true",
+                        help="Focused source/test preflight over a verified historical full-suite receipt")
+    parser.add_argument("--base-source-revision", help="Immutable Git commit exactly reproducing the base receipt runtime digest")
     parser.add_argument("--base-preflight", type=Path,
                         help="Full preflight receipt a --preflight-delta builds on")
     parser.add_argument("--adapter-qualification", type=Path,
@@ -3988,10 +4038,18 @@ def main():
     )
     parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "ple_early_dispatch", "qsa_stage1_direct_selector", "ple_read_policy", "tensorfold_qmv_rows", "row_exact_verify", "row_exact_attn_window", "row_exact_low_bit_lane", "moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify", "qsa_batch_decode_sparse", "qsa_nax_batched", "mtp_draft_vocab", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "mtp_ordinary_handoff", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions", "cache_capsules", "persistent_blocks"], help="Fail this candidate unless its mechanism actually executed")
     args = parser.parse_args()
+    if args.output.exists():
+        parser.error(f"refusing to overwrite existing qualification receipt: {args.output}")
 
     if args.preflight_only:
         write_preflight_receipt(args.output, pytest_args=args.preflight_pytest_arg)
         print(f"Preflight evidence: {args.output}", flush=True)
+        return
+    if args.preflight_source_delta:
+        if args.preflight_delta or args.preflight_only or not args.base_preflight or not args.base_source_revision:
+            parser.error("--preflight-source-delta needs --base-preflight and --base-source-revision exclusively")
+        delta = source_delta_helper().write(SimpleNamespace(**globals()), args.output, args.base_preflight, args.base_source_revision)
+        print(f"Source preflight delta evidence: {args.output} ({len(delta['impacted'])} impacted modules)", flush=True)
         return
     if args.preflight_delta:
         if args.base_preflight is None:
@@ -5114,7 +5172,7 @@ def main():
             except Exception as exc:
                 report["failure_status_error"] = str(exc)
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, indent=2) + "\n")
+        _write_receipt_exclusive(args.output, report)
         print(f"Evidence: {args.output}", flush=True)
 
 

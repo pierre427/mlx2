@@ -77,3 +77,15 @@ def test_a_skip_superseded_by_a_later_run_is_dropped():
                   "finished_at": "2026-10-21T13:00:00Z"})
     kept = record_tsv.drop_superseded_skips([skipped, rerun, lone])
     assert [path for path, _ in kept] == ["b", "c"]
+
+
+def test_old_passing_speculative_cell_without_proposals_is_not_observed():
+    cell = {"verdict":"pass_with_warnings", "expected_route_kind":"native_mtp",
+            "routes_seen":["native_mtp"], "speculation_observed":False}
+    assert record_tsv.effective_verdict(cell) == "fail"
+    cell["speculation_observed"] = True
+    assert record_tsv.effective_verdict(cell) == "pass_with_warnings"
+
+
+def test_cell_warning_is_retained_in_summary():
+    assert "no proposals" in record_tsv.cell_summary({"route":"native_mtp", "warnings":["no proposals"]}, Path("cell.json"))

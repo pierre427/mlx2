@@ -889,3 +889,17 @@ def test_native_stream_drain_captures_per_token_top_two_evidence():
         {"id": 7, "logprob": -0.1, "top": [[7, -0.1], [8, -0.3]]},
         {"id": None, "logprob": None, "top": None},
     ]
+
+
+def test_native_batch_exact_tie_clause_accepts_third_alternative():
+    report, expected = _flip_report(margin=0.0, batched_top=[[22,-0.5],[77,-0.6]])
+    assert _eval(report, expected)["continuous_batch"] is True
+
+
+def test_native_batch_multi_way_clause_uses_cross_token_window():
+    report, expected = _flip_report(margin=0.1)
+    report["batch"]["reference_rows"][0]["tokens"][1]["top"] = [[21,-0.5],[77,-0.55],[22,-0.6]]
+    report["batch"]["rows"][0]["tokens"][1]["top"] = [[22,-0.5],[77,-0.54],[21,-0.62]]
+    assert _eval(report, expected)["continuous_batch"] is True
+    report["batch"]["rows"][0]["tokens"][1]["top"][-1][1] = -1.1
+    assert _eval(report, expected)["continuous_batch"] is False

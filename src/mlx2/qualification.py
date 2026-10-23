@@ -310,7 +310,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # CPU, suppress ambient pytest plugins/options, report slow-test and phase
     # timings, and reuse each captured tree for its identity digest instead of
     # hashing it twice. Existing receipts must be regenerated.
-    "sha256": "b7212bf33b2d06bc191cfc7e585ebdf208f33c0cba861b38aa3040b4ce6560a4",
+    "sha256": "b1657e14329b89ef65a01da2cf1156c5ffff54ce6bcfce3c141119417aef0b77",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -400,7 +400,7 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-15: native SETUP prefill_step 256 -> 512 so
             # int8 prefill (row threshold 512) engages on the Gemma 4 31B.
             "sha256": "0ddb47b12b384cbfc7115a14b1e8518c9a3358f792e9ace6a49c718ec12b9f55",
-            "evaluator_sha256": "8aec3672a5485347364d809da47aeee2cdbb1c2a99772d59fefa82745e375088",  # 2026-10-16 sweep QUAL-1: near-tie rows need the answer oracle (bc0b5924... companions: all rows exact, regenerate)
+            "evaluator_sha256": "6a821f75bc234ed683ce2049ba078d4148c55c4719d173929395b92b145a2864",  # 2026-10-16 sweep QUAL-1: near-tie rows need the answer oracle (bc0b5924... companions: all rows exact, regenerate)
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-14: debd7c639 made the mlx-vlm chat render
@@ -428,7 +428,7 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-15: native SETUP prefill_step 256 -> 512 so
             # int8 prefill (row threshold 512) engages on the Gemma 4 31B.
             "sha256": "0ddb47b12b384cbfc7115a14b1e8518c9a3358f792e9ace6a49c718ec12b9f55",
-            "evaluator_sha256": "8aec3672a5485347364d809da47aeee2cdbb1c2a99772d59fefa82745e375088",  # 2026-10-16 sweep QUAL-1: near-tie rows need the answer oracle (bc0b5924... companions: all rows exact, regenerate)
+            "evaluator_sha256": "6a821f75bc234ed683ce2049ba078d4148c55c4719d173929395b92b145a2864",  # 2026-10-16 sweep QUAL-1: near-tie rows need the answer oracle (bc0b5924... companions: all rows exact, regenerate)
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-12 (sweep 10-12 L5-03): e3c19168e changed
@@ -472,7 +472,7 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-15: native SETUP prefill_step 256 -> 512 so
             # int8 prefill (row threshold 512) engages on the Gemma 4 31B.
             "sha256": "0ddb47b12b384cbfc7115a14b1e8518c9a3358f792e9ace6a49c718ec12b9f55",
-            "evaluator_sha256": "8aec3672a5485347364d809da47aeee2cdbb1c2a99772d59fefa82745e375088",  # 2026-10-16 sweep QUAL-1: near-tie rows need the answer oracle (bc0b5924... companions: all rows exact, regenerate)
+            "evaluator_sha256": "6a821f75bc234ed683ce2049ba078d4148c55c4719d173929395b92b145a2864",  # 2026-10-16 sweep QUAL-1: near-tie rows need the answer oracle (bc0b5924... companions: all rows exact, regenerate)
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-14 with gemma3n (debd7c639, adapters/mlx_vlm.py).

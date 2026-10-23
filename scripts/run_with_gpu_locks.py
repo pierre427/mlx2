@@ -232,13 +232,64 @@ def stop_child(child: subprocess.Popen | None, receipt: dict) -> None:
     receipt["command_returncode"] = child.returncode
 
 
+def observe_cpg(lock, task, url):
+    try:
+        from .run_qualification_owned import observe
+    except ImportError:
+        from run_qualification_owned import observe
+    return observe(lock, task, url)
+
+
+def observe_desktop_lease(path, session, label, url):
+    import math
+
+    from mlx2.desktop_campaign_worker import Radio, verify_claim
+    try:
+        from .qualification_gpu_ownership import _ancestor_pids
+        from .run_qualification_owned import validate_live_lease
+    except ImportError:
+        from qualification_gpu_ownership import _ancestor_pids
+        from run_qualification_owned import validate_live_lease
+    owner = json.loads(Path(path).read_text())
+    if (owner.get("agent") != "mlx2_desktop_campaign"
+            or type(owner.get("pid")) is not int
+            or owner["pid"] not in _ancestor_pids(os.getpid())
+            or owner.get("job_id") != label or owner.get("cpg_session") != session
+            or "release_task" in owner or "complete_worker" in owner or "finished_at" in owner):
+        raise RuntimeError("desktop CPG lease does not match this live ancestor/job")
+    expiry = owner.get("expires")
+    if type(expiry) not in (int, float) or not math.isfinite(expiry) or expiry <= time.time() + 15:
+        raise RuntimeError("desktop CPG lease is expired")
+    verify_claim(owner.get("claim") or {}, task=owner.get("cpg_task"),
+                 agent=owner.get("agent_id"), generation=owner.get("cpg_generation"), now=0)
+    if "renewal" in owner:
+        verify_claim(owner["renewal"], task=owner["cpg_task"],
+                     generation=owner["cpg_generation"], renewed=True)
+    radio = Radio(url)
+    radio.call("join_session", {"session_id": owner["cpg_session"], "agent_id": owner["agent_id"]})
+    live = radio.call("get_nodes", {"node_ids": [owner["cpg_task"]]})
+    return owner, validate_live_lease(live, owner)
+
+
+def observe_ownership(args):
+    if args.desktop_cpg_lease is not None:
+        return observe_desktop_lease(args.desktop_cpg_lease, args.session, args.label, args.mcp_url)
+    return observe_cpg(args.cpg_owner_lock, args.cpg_task, args.mcp_url)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", default=DEFAULT_SESSION)
     parser.add_argument("--label", required=True)
+    parser.add_argument("--cpg-owner-lock", type=Path, default=os.environ.get("CPG_OWNER_LOCK"))
+    parser.add_argument("--cpg-task", default=os.environ.get("CPG_TASK"))
+    parser.add_argument("--desktop-cpg-lease", type=Path)
+    parser.add_argument("--mcp-url", default=os.environ.get("CPG_MCP_URL", "http://127.0.0.1:8766/mcp"))
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    if args.desktop_cpg_lease is None and (args.cpg_owner_lock is None or not args.cpg_task):
+        parser.error("a CPG owner lock/task or desktop CPG lease is required")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a command is required after --")
@@ -303,13 +354,20 @@ def main(argv: list[str] | None = None) -> int:
         foreign = foreign_model_processes()
         if foreign:
             raise RuntimeError(f"foreign model process present: {foreign[:5]}")
+        cpg_owner, live_lease = observe_ownership(args)
         owner = {
             "lease_id": f"{args.session}-{args.label}",
             "session": args.session,
             "label": args.label,
             "pid": os.getpid(),
             "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "cpg_used": False,
+            "cpg_used": True,
+            "cpg_owner": cpg_owner,
+            "live_lease": live_lease,
+            "cpg_task": cpg_owner["cpg_task"],
+            "cpg_session": cpg_owner["cpg_session"],
+            "cpg_generation": cpg_owner["cpg_generation"],
+            "agent_id": cpg_owner["agent_id"],
         }
         receipt["lock_state_before"], backups = acquire(owner)
         receipt["owner"] = owner
@@ -319,7 +377,17 @@ def main(argv: list[str] | None = None) -> int:
         child = subprocess.Popen(command, start_new_session=True)
         receipt["child_pid"] = child.pid
         save()
-        rc = child.wait()
+        while True:
+            try:
+                rc = child.wait(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                renewed_owner, live = observe_ownership(args)
+                if any(renewed_owner.get(key) != cpg_owner.get(key)
+                       for key in ("pid", "agent_id", "cpg_task", "cpg_session", "cpg_generation")):
+                    raise RuntimeError("CPG ownership changed during GPU unit")
+                receipt["live_lease"] = live
+                save()
         receipt["command_returncode"] = rc
         receipt["status"] = "command_completed" if rc == 0 else "command_failed"
     except KeyboardInterrupt:

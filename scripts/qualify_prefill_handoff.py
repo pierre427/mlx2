@@ -126,7 +126,7 @@ def _model_identity(model_path: Path, commit: str | None = None) -> dict[str, st
     model_path = model_path.expanduser().resolve()
     fingerprint = inspect_model(model_path).artifact_fingerprint
     return {
-        "model_checkpoint": f"{model_path.name}@{fingerprint[:8]}",
+        "model_checkpoint": f"{model_path.name}@sha256:{fingerprint}",
         "artifact_name": model_path.name,
         "artifact_fingerprint": fingerprint,
         "mlx2_commit": git_commit(commit),
@@ -1570,10 +1570,10 @@ def build_verdict(
         "record_id": record_id,
         "operation": handoff.OPERATION,
         "operation_revision": handoff.OPERATION_REVISION,
-        "verdict": "qualified" if qualified else "failed",
+        "verdict": ("provisional" if provisional else "qualified") if qualified else "failed",
         "artifact_fingerprint": comparison["artifact_fingerprint"],
         "artifact_name": comparison["artifact_name"],
-        "model_checkpoint": comparison["model_checkpoint"],
+        "model_checkpoint": f"{comparison['artifact_name']}@sha256:{comparison['artifact_fingerprint']}",
         "producer": producer,
         "receiver": receiver,
         "plan_chunks": sorted({int(cell["plan"]["chunk"]) for cell in cells}),

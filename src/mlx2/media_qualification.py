@@ -530,7 +530,7 @@ def _continuous_batch_token_trace(row):
             or token < 0
             or not _finite_number(logprob)
             or not isinstance(top, list)
-            or len(top) != 2
+            or len(top) < 2
         ):
             return None
         alternatives = {}
@@ -592,26 +592,28 @@ def _classify_continuous_batch_row(prompt, reference, batched):
         return failed("token traces do not contain a token flip")
     reference_token, reference_top = reference_trace[index]
     batched_token, batched_top = batched_trace[index]
-    flip = {reference_token, batched_token}
     evidence = {
         "first_divergence_index": index,
         "reference_token_id": reference_token,
         "batched_token_id": batched_token,
     }
-    if set(reference_top) != flip or set(batched_top) != flip:
-        return failed(
-            "flipped tokens are not each other's recorded top-2 alternatives",
-            **evidence,
-        )
-    margins = {
-        "reference": reference_top[reference_token] - reference_top[batched_token],
-        "batched": batched_top[batched_token] - batched_top[reference_token],
-    }
-    evidence["margins_nats"] = margins
-    if any(margin < -_LOGPROB_TOLERANCE for margin in margins.values()):
-        return failed("a selected token is below its recorded alternative", **evidence)
-    if any(margin > CONTINUOUS_BATCH_NEAR_TIE_NATS for margin in margins.values()):
+    import hashlib
+    from pathlib import Path
+
+    from .near_tie import near_tie_equivalent
+    if hashlib.sha256(Path(__file__).with_name("near_tie.py").read_bytes()).hexdigest() != "ad1e4f09000fdc47400a1a4be87726d1be76d0ccdf8fd9c2c9c7225ba7c24a9a":
+        return failed("near-tie evaluator dependency changed")
+    if not near_tie_equivalent(reference_token, reference_top, batched_token, batched_top,
+                               ceiling=CONTINUOUS_BATCH_NEAR_TIE_NATS):
+        if max(reference_top.values()) > reference_top.get(reference_token, float("-inf")) + _LOGPROB_TOLERANCE or max(batched_top.values()) > batched_top.get(batched_token, float("-inf")) + _LOGPROB_TOLERANCE:
+            return failed("a selected token is below its recorded alternative", **evidence)
+        if reference_token not in batched_top or batched_token not in reference_top:
+            return failed("flipped tokens are not each other's recorded top-2 alternatives", **evidence)
         return failed("first divergence is not a near tie", **evidence)
+    evidence["margins_nats"] = {
+        "reference": reference_top[reference_token] - sorted(reference_top.values(), reverse=True)[1],
+        "batched": batched_top[batched_token] - sorted(batched_top.values(), reverse=True)[1],
+    }
     if not (
         _continuous_batch_answer_ok(prompt, reference["text"])
         and _continuous_batch_answer_ok(prompt, batched["text"])

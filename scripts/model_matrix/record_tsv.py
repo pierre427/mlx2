@@ -161,6 +161,8 @@ def cell_summary(cell: dict, path: Path) -> str:
         parts.append(f"spomin4K oracle {'pass' if all(oracle) else 'miss'}")
     if cell.get("peak_phys_footprint_bytes"):
         parts.append(f"peak {cell['peak_phys_footprint_bytes'] / 2**30:.1f}GiB")
+    if cell.get("warnings"):
+        parts.append("warnings: " + " | ".join(map(str, cell["warnings"])))
     failures = cell.get("failures") or []
     if failures:
         parts.append("failures: " + " | ".join(str(f)[:160] for f in failures[:3]))
@@ -228,7 +230,6 @@ def main(argv: list[str] | None = None) -> int:
         if history:
             summary += " || earlier or superseded cells: " + "; ".join(
                 f"{c['route']}={c.get('verdict')}@{str(c.get('source_revision'))[:10]}" for _, c in history)
-        cells = all_cells
         passed = [v in {"pass", "pass_with_warnings"} for v in verdicts]
         fail_closed = all(v == "fail_closed_expected" for v in verdicts)
         skipped = all(v == "skipped" for v in verdicts)

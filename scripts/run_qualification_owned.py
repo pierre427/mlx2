@@ -173,7 +173,9 @@ def main(argv=None):
             str(owner["cpg_generation"]) if value == "@CPG_GENERATION@" else value
             for value in command
         ]
-        child = subprocess.Popen(command, start_new_session=True)
+        environment = {**os.environ, "CPG_OWNER_LOCK": str(args.cpg_owner_lock.resolve()),
+                       "CPG_TASK": args.cpg_task, "CPG_MCP_URL": args.mcp_url}
+        child = subprocess.Popen(command, start_new_session=True, env=environment)
         report["child_pid"] = child.pid
         deadline = time.monotonic() + args.timeout
         while child.poll() is None:

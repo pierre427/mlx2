@@ -367,6 +367,7 @@ def unit_command(args, unit: dict) -> list[str]:
     locked = [
         python, str(ROOT / "scripts/run_with_gpu_locks.py"),
         "--session", unit["session"], "--label", unit["label"],
+        "--cpg-owner-lock", str(unit_dir / "cpg-owner"), "--cpg-task", args.cpg_task,
         "--receipt", str(unit_dir / "gpu-lock.json"), "--", *child,
     ]
     owned = [

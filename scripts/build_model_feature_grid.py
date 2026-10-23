@@ -14,9 +14,15 @@ are dimensions of every test and qualification record).  A row that claims
 
 from __future__ import annotations
 
+import argparse
 import ast
 import csv
+import hashlib
+import io
+import json
 import re
+import subprocess
+from functools import cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +68,26 @@ FEATURES = (
     "ast_native_mtp_packed_5x3", "best_route_default",
     "external_draft_dspark_ast", "external_mtp_head", "external_mtp_head_ast",
     "external_draft_assistant_sampled_law", "external_draft_lilicorr_native_nvfp4",
+    "gguf_text_conversion_adapter", "ordinary_direct_smoke", "prefill_step_256",
+    "native_mtp_context_ladder_128k_before_residual_repair",
+    "residual_compute_dtype_normalization", "native_mtp_context_ladder_128k",
+    "ast_native_mtp_mixed_f32_gdn",
+    "ast_ling_packed32_pld_cohort4_apcv2", "ast_ling_packed_raw_tensorfold",
+    "ast_ling_packed_tensorfold_completion", "ast_ling_packed_tensorfold_http",
+    "ast_ubtree_adaptive_b15", "ast_ubtree_fixed_b3",
+    "ast_prompt_lookup", "prompt_lookup_default_policy", "prompt_lookup_span2", "q4_fused_v1",
+    "verification_mode", "spawn_subagent", "agentic_chat_profile_256k",
+    "desktop_tool_discovery_readable_roundtrip",
+    "desktop_tool_snapshot_readable_roundtrip",
+    "desktop_media_tool_schema_declaration",
+    "desktop_autostart_health_loading",
+    "desktop_round_budget_and_result_context_controls",
+    "desktop_chat_multiple_images",
+    "desktop_chat_context_meter",
+    "desktop_prompt_presets_and_stable_apcv2_requests",
+    "desktop_same_model_delegation_and_health",
+    "desktop_agent_history_code_and_scroll",
+
 )
 
 
@@ -108,6 +134,47 @@ FAMILY = "*"
 UNRECORDED = {"", "not_recorded", "unreviewed"}
 
 
+def strong_claim(value):
+    return str(value).lower().startswith(("yes", "qualified"))
+
+
+def row_digest(row):
+    return hashlib.sha256(json.dumps(row, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+@cache
+def _commit_exists_and_reachable(revision):
+    result = subprocess.run(["git", "rev-parse", "--verify", revision + "^{commit}"], cwd=ROOT,
+                            capture_output=True, text=True, check=False)
+    if result.returncode:
+        return False
+    refs = subprocess.check_output(["git", "for-each-ref", "--contains", result.stdout.strip(),
+                                    "--format=%(refname)"], cwd=ROOT, text=True)
+    return bool(refs.strip())
+
+
+def strong_claim_problems(row):
+    problems = []
+    if re.fullmatch(r".+@(sha256:)?[0-9a-f]{8,64}", row["checkpoint"]) is None:
+        problems.append("checkpoint must name an artifact fingerprint")
+    revision = row.get("source_revision", "")
+    revisions = re.findall(r"\b[0-9a-f]{7,40}\b", revision)
+    if not revisions or any(not _commit_exists_and_reachable(value) for value in revisions):
+        problems.append("source revision is absent, invalid or unreachable from a ref")
+    evidence = row.get("evidence", "")
+    paths = []
+    for item in evidence.split(";"):
+        item = item.strip()
+        # Historical branch:path and file:symbol notation are read-only citations.
+        if ":qualification/" in item:
+            item = item.split(":", 1)[1]
+        if item.startswith(("qualification/", "docs/", "scripts/", "src/", "tests/", "provenance/", "output/", "/")):
+            paths.append(item.split(":", 1)[0])
+    if not paths or any(not (ROOT / item).exists() for item in paths):
+        problems.append("evidence path is absent or not recorded")
+    return problems
+
+
 def validate_decisions(rows) -> dict:
     """Index reviewed rows by (model, checkpoint, scope, feature); refuse
     duplicates and strong claims without their checkpoint and commit."""
@@ -119,16 +186,26 @@ def validate_decisions(rows) -> dict:
         key = (row["model"], checkpoint, row["scope"], row["feature_or_flag"])
         if key in overrides:
             raise ValueError(f"duplicate reviewed decision: {key}")
-        strong = row["qualified"] == "yes" or row["observed_used"] == "yes"
+        strong = strong_claim(row["qualified"]) or strong_claim(row["observed_used"])
         if strong and checkpoint == FAMILY:
             raise ValueError(f"qualified/observed decision must name its checkpoint: {key}")
         if strong and row.get("source_revision", "").strip() in UNRECORDED:
             raise ValueError(f"qualified/observed decision must name its mlx2 commit: {key}")
+        if strong:
+            problems = strong_claim_problems(row)
+            if problems:
+                legacy_path = ROOT / "docs/research/model-feature-legacy-exceptions.json"
+                legacy = json.loads(legacy_path.read_text()) if legacy_path.is_file() else {}
+                if row_digest(row) not in legacy.get("rows", {}):
+                    raise ValueError(f"invalid qualified/observed decision {key}: {'; '.join(problems)}")
         overrides[key] = row
     return overrides
 
 
-def main() -> None:
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=OUT)
+    args = parser.parse_args(argv)
     models = [
         f"{model_type}:{variant}"
         for model_type in registered_types()
@@ -147,8 +224,8 @@ def main() -> None:
         "selected", "observed_used", "decision", "reason", "evidence",
         "source_revision", "artifact_profile",
     )
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    with OUT.open("w", newline="") as handle:
+    buffer = io.StringIO(newline="")
+    with buffer as handle:
         writer = csv.DictWriter(handle, fieldnames=columns, delimiter="\t", lineterminator="\n")
         writer.writeheader()
         for model in models:
@@ -170,9 +247,20 @@ def main() -> None:
                                 "decision": "review_needed"})
                     row.update(overrides.pop(key, {}))
                     writer.writerow(row)
+        rendered = handle.getvalue()
     if overrides:
         raise ValueError(f"reviewed decisions absent from inventory: {sorted(overrides)}")
-    print(f"{OUT}: {len(models)} model variants x {len(flags)} switches = {len(models) * len(flags)} review cells; {len(decisions)} reviewed")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    import os
+    import tempfile
+    descriptor, temporary = tempfile.mkstemp(dir=args.output.parent, prefix=".feature-grid-")
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(rendered)
+        os.replace(temporary, args.output)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    print(f"{args.output}: {len(models)} model variants x {len(flags)} switches = {len(models) * len(flags)} review cells; {len(decisions)} reviewed")
 
 
 if __name__ == "__main__":

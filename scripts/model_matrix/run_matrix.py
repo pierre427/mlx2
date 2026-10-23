@@ -679,6 +679,12 @@ def effective_verdict(receipt: dict) -> str | None:
     """Verdict for readers of older receipts: an offline artifact is not a route failure."""
     if receipt.get("verdict") == "fail" and not receipt.get("load_ok") and artifact_offline(receipt):
         return "artifact_offline"
+    expected = receipt.get("expected_route_kind")
+    if receipt.get("verdict") in {"pass", "pass_with_warnings"} and expected and expected != "any":
+        if expected not in (receipt.get("routes_seen") or []):
+            return "fail"
+        if expected != "ordinary" and receipt.get("speculation_observed") is not True:
+            return "fail"
     return receipt.get("verdict")
 
 
@@ -720,10 +726,10 @@ def verdict_for(receipt: dict, route: dict, expected_kind: str) -> dict:
         oracle = entry.get("functional_oracle")
         if oracle and not oracle.get("all_found"):
             warnings.append("spomin_4k: functional oracle incomplete " + json.dumps(oracle["needles_found"]))
-    if expected_kind != "any" and routes_seen and expected_kind not in routes_seen:
+    if expected_kind != "any" and expected_kind not in routes_seen:
         failures.append(f"route receipt {sorted(routes_seen)} != expected {expected_kind}")
-    if expected_kind != "ordinary" and not speculation_seen:
-        warnings.append("no speculation/MTP proposal observed in any response receipt")
+    if expected_kind not in {"ordinary", "any"} and not speculation_seen:
+        failures.append("no speculation/MTP proposal observed in any response receipt")
     if expected_fail_closed:
         warnings.append("route expected to fail closed but loaded")
     verdict = "fail" if failures else ("pass_with_warnings" if warnings else "pass")
