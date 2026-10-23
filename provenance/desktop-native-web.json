@@ -1,0 +1,27 @@
+{
+  "source": "local user-owned web_tools implementation",
+  "source_revision": "unversioned local snapshot; exact per-file SHA-256 below",
+  "license": "Apache-2.0; owner explicitly authorized public distribution on 2026-10-23. Third-party dependencies retain their respective licenses.",
+  "source_hashes": {
+    "search.py": "170b04f597e21852e0f7b2a646dce5646557ce5f2a841e276fffd4d494fa6171",
+    "fetcher.py": "811fa911a1725b1993a2723e214a30cc60abda8b0e3a3f5b50070f6d7722b4aa",
+    "headers.py": "f3cb087aa4adb93886139c9aa66508c20d113ba5566c5599111d72516c2ba0ec",
+    "http_session.py": "3c20993dd89979b45ec293c25e4f438c663a94f868cac4cb658d1388b71ab891",
+    "rate_limiter.py": "78c8d0b748264f7f468f3552f0112b3473fa9b3e0d3a3a0b0dad12678934ee96",
+    "parser.py": "aa1fe11736e25727593ac39ce4e6f026ca8547014434532380b7b69ac314469e",
+    "pdf.py": "8add9df79ab60103b6a0ebe1e68f509719041c7c5af99d06a084809c594605b8",
+    "robots.py": "f9304131831fa50e80da1cf20b82f5884d4c4d97437bcd6a43c2d7d34846ce9f",
+    "cache.py": "1e0260d630f20f90fbc2a8e6cb05ff9c4ddeebd1d9fdd09c399fa151cd7b08f1",
+    "server.py": "b650e0f8d50db94ba74c703c4a63a25b37dbaaa79e13731cdc9028327b3438a6",
+    "requirements.txt": "f03eacca4a83e948f3692ac5147ab9df34394bd97296b3f1bcff155f85458675"
+  },
+  "modifications": [
+    "Package-local imports; no MCP server or MCP transport.",
+    "Native desktop web_search/fetch_page wrappers; bounded results, dedicated local event loop and app-owned cache.",
+    "Search/fetch/parsing mechanisms retained from local source."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

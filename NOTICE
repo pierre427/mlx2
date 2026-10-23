@@ -826,3 +826,7 @@ and the modification notice and change log (MODIFICATIONS.md).
 EAGLE, Eagle 4, EAGLE-Harness, and EAGLE Efficient LM Head are trademarks or
 claimed trademarks of Eagle AI Corp. mlx2 is not affiliated with, certified
 by, sponsored by, or endorsed by Eagle AI Corp.
+
+The built-in web_tools backend contains user-owned code released under the
+project Apache-2.0 license with the owner's explicit authorization on 2026-10-23.
+Third-party dependencies retain their respective licenses.
