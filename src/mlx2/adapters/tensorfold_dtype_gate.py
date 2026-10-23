@@ -5,8 +5,10 @@ served bf16 arithmetic: the GDN conv-state buffers are typed ``bfloat16_t``
 and the glue rounds through bf16.  An artifact whose norm, conv or gate
 tensors are stored in another float dtype (GGUF conversions keep them in
 F32; some exports are all F16) promotes the residual stream away from bf16,
-so its tiles would neither compile nor match ordinary decoding.  Such a
-target keeps its chain route.
+so its tiles would neither compile nor match ordinary decoding. Such a
+target keeps its chain route unless its adapter declares the exact loader
+normalization contract and the owned mixed-F32 GDN implementation. A second
+gate checks actual loaded parameters, without header conversion allowances.
 """
 
 from __future__ import annotations
@@ -31,7 +33,18 @@ def _relevant(name: str) -> bool:
     return name.endswith(_TAILS) and not any(part in name for part in _SKIP)
 
 
-def _issue(found: dict[str, str]) -> str | None:
+def _issue(found: dict[str, str], *, normalized_f32_suffixes=(), mixed_gdn_f32=False) -> str | None:
+    # Header allowances describe a loader contract, never an unchecked cast.
+    # The loaded-model gate does not receive the normalization allowance.
+    found = {
+        name: dtype for name, dtype in found.items()
+        if not (dtype in ("F32", "mlx.core.float32") and (
+            (normalized_f32_suffixes and name.endswith(tuple(normalized_f32_suffixes)))
+            or (mixed_gdn_f32 and name.endswith((
+                ".linear_attn.dt_bias", ".linear_attn.norm.weight",
+            )))
+        ))
+    }
     other = sorted({dtype for dtype in found.values() if dtype not in ("BF16", "bfloat16")})
     if not found or not other:
         return None
@@ -39,7 +52,7 @@ def _issue(found: dict[str, str]) -> str | None:
     return f"tree tiles need bf16 norm/conv tensors; artifact stores {'/'.join(other)} (e.g. {example})"
 
 
-def artifact_tree_tile_dtype_issue(model_path) -> str | None:
+def artifact_tree_tile_dtype_issue(model_path, *, normalized_f32_suffixes=(), mixed_gdn_f32=False) -> str | None:
     """Read safetensors headers only; None when every relevant tensor is bf16."""
     found: dict[str, str] = {}
     for shard in sorted(Path(model_path).glob("*.safetensors")):
@@ -52,10 +65,19 @@ def artifact_tree_tile_dtype_issue(model_path) -> str | None:
         for name, entry in header.items():
             if name != "__metadata__" and _relevant(name):
                 found[name] = str(entry.get("dtype"))
-    return _issue(found)
+    if normalized_f32_suffixes:
+        try:
+            config = json.loads((Path(model_path) / "config.json").read_text())
+            config = config.get("text_config", config)
+            if config.get("dtype") != "bfloat16":
+                normalized_f32_suffixes = ()
+        except (OSError, ValueError, TypeError):
+            normalized_f32_suffixes = ()
+    return _issue(found, normalized_f32_suffixes=normalized_f32_suffixes,
+                  mixed_gdn_f32=mixed_gdn_f32)
 
 
-def model_tree_tile_dtype_issue(model) -> str | None:
+def model_tree_tile_dtype_issue(model, *, mixed_gdn_f32=False) -> str | None:
     """The same check on a loaded model's parameters."""
     from mlx.utils import tree_flatten
 
@@ -66,4 +88,4 @@ def model_tree_tile_dtype_issue(model) -> str | None:
         for name, value in tree_flatten(model.parameters())
         if _relevant(name)
     }
-    return _issue(found)
+    return _issue(found, mixed_gdn_f32=mixed_gdn_f32)

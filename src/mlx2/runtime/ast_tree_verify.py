@@ -275,7 +275,7 @@ def _execute_group(generator, group):
         launched, fences = [], []
         for index, (work, _tile, block) in enumerate(group):
             fence, state = generator._launch_tree_laws(
-                work.private, block, logits[index : index + 1]
+                work.private, block, logits[index : index + 1], logprobs_on_request=True
             )
             launched.append(state)
             fences.extend(fence)
@@ -499,12 +499,12 @@ def _finish_request(work):
     feature_rows = (
         feature_row
         if len(blocks) == 1
-        else generator.mx.concatenate(
-            [
-                feature_row if index == winner else generator.mx.zeros_like(feature_row)
-                for index in range(len(blocks))
-            ],
-            axis=0,
+        # Only the winner has a publishable cache/RNG. Keep the branch-row
+        # ABI as a broadcast view; the caller immediately selects the winner.
+        # Constructing zero tensors for losers then concatenating copied an
+        # entire feature slab solely to discard those rows.
+        else generator.mx.broadcast_to(
+            feature_row, (len(blocks), *feature_row.shape[1:])
         )
     )
     rows = sum(tile["physical_rows"] for tile in tiles)

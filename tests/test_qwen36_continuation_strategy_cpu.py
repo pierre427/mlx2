@@ -13,19 +13,32 @@ from mlx2.runtime.continuation_strategy import (
 from mlx2.runtime.proposal_providers import ContinuationContext
 
 
-def test_qwen36_owns_measured_prefill_step_instead_of_dense_autoscale():
+@pytest.mark.parametrize("fingerprint,expected", [
+    ("other-checkpoint", 2048),
+    ("a2fa43d0942e24f2e0ef3041a7ffe88ae0e4d3f39de56f0f4c8e8c94664b144c", 256),
+    ("204ca8991ab03cb1d78066b295185c78ab3b07367f3fc453680fe36d3058c83c", 256),
+    ("ba62aaf8bbd40762c67b16fa012947b52b5f5e35f8d73d69101d401a0dc27b71", 256),
+])
+def test_qwen36_owns_measured_prefill_step_instead_of_dense_autoscale(fingerprint, expected):
     adapter = object.__new__(Qwen3635BA3BAdapter)
-    assert adapter.prefill_step_default() == 2048
+    adapter.identity = {"fingerprint": fingerprint}
+    assert adapter.prefill_step_default() == expected
+    # AST binds target + drafter + numerical laws into a new route identity;
+    # its target's operator-selected chunk preference must survive that bind.
+    adapter.identity = {"fingerprint": "composite-route", "target_fingerprint": fingerprint}
+    assert adapter.prefill_step_default() == expected
 
 
-def test_qwen36_strategy_pins_exact_target_and_routed_expert_cost():
+@pytest.mark.parametrize("layout", [CACHE_LAYOUT, CACHE_LAYOUT + "-residual-bfloat16-v1"])
+def test_qwen36_strategy_pins_exact_target_and_routed_expert_cost(layout):
     adapter = object.__new__(Qwen3635BA3BAdapter)
+    adapter.layout = layout
     adapter.external_policy = {
         "continuation_strategy": "longest_first_exact_prefix"
     }
     strategy = adapter.continuation_verification_strategy()
     assert strategy.algorithm == "longest_first_exact_prefix_v1"
-    assert strategy.cache_layout == CACHE_LAYOUT
+    assert strategy.cache_layout == layout
     assert strategy.proposal_state == "bound_source_only"
     assert strategy.target_state == "authoritative_exact"
     assert strategy.routed_experts_per_token == 8

@@ -1,0 +1,25 @@
+{
+  "component": "Adapter-declared mixed-dtype AST compatibility",
+  "date": "2026-10-22",
+  "source_repository": "local mlx2",
+  "source_revision": "a1493b8d73885f757af2539235914d03283d4b3d",
+  "source_paths": [
+    "src/mlx2/runtime/models/gated_delta.py",
+    "src/mlx2/runtime/models/qwen3_next.py",
+    "src/mlx2/runtime/models/qwen38_tree_gdn.py",
+    "src/mlx2/runtime/qwen38_tensorfold.py",
+    "src/mlx2/adapters/tensorfold_dtype_gate.py"
+  ],
+  "license": "MIT; existing TensorFold ancestry remains in provenance/qwen38-unified-tree-gdn.json",
+  "modifications": [
+    "Declare adapter-owned header normalization and mixed GDN dtype contracts while retaining a loaded-model gate",
+    "Use the ordinary compute_g operation for F32 dt_bias instead of rounding its addition and softplus through BF16",
+    "Use the ordinary gated RMSNorm operation for F32 GDN norm weights while retaining the BF16 tree fast path",
+    "Preserve original parameter values, recurrent F32 state, vendored kernel hashes and ordinary decode",
+    "Resolve artifact-specific prefill defaults through the target fingerprint after an AST composite bind, and expose target/draft/composite fingerprints in adapter diagnostics"
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

@@ -509,14 +509,24 @@ This bounds starvation while allowing live-frontier refill and retirement.
         blocks = []
         for prior, seconds, rows, weight in points:
             blocks.append([prior, seconds, rows, weight, seconds * weight, weight, prior * weight])
-            while len(blocks) > 1 and blocks[-2][1] > blocks[-1][1]:
+            # Equal geometry priors are one abscissa, even when different
+            # row buckets measured different times. Pool them before using
+            # the curve for interpolation or receipt slopes.
+            while len(blocks) > 1 and (
+                blocks[-2][0] == blocks[-1][0]
+                or blocks[-2][1] > blocks[-1][1]
+            ):
                 tail = blocks.pop()
                 head = blocks[-1]
+                same_prior = head[0] == tail[0]
                 head[4] += tail[4]
                 head[5] += tail[5]
                 head[6] += tail[6]
                 head[1] = head[4] / head[5]
-                head[0] = head[6] / head[5]
+                # Preserve an equal knot exactly: averaging e.g. 0.1 with
+                # unequal weights can round above the next equal knot.
+                if not same_prior:
+                    head[0] = head[6] / head[5]
                 head[3] += tail[3]
                 head[2] = (head[2], tail[2]) if type(head[2]) is int else head[2] + (tail[2],)
         levels = {round(block[1], 12) for block in blocks}

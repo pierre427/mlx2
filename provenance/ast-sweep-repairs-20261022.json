@@ -1,0 +1,47 @@
+{
+  "source_repository": "mlx2",
+  "source_revision": "63e48f3bec357311e2206799c4c18dbc13dbc85e",
+  "source_paths": [
+    "src/mlx2/runtime",
+    "src/mlx2/server.py",
+    "src/mlx2/ast_observability.py"
+  ],
+  "license": "Original mlx2 repairs; existing file licenses and upstream provenance retained",
+  "modifications": [
+    "Repair AST calibration, source-depth constraints, adaptive tile sizing, generator admission, and effective configuration reporting.",
+    "Implement Puzzle capture/prefill through the existing local GPT-OSS contract.",
+    "Remove redundant attention-mask host matrices, tile-depth tensors, branch feature allocations, greedy normalization, and admission bookkeeping.",
+    "Repair short-window ancestry and standalone attention transaction rollback."
+  ],
+  "destination_paths": [
+    "src/mlx2/adapters/flash_next.py",
+    "src/mlx2/adapters/flash_next_policy.py",
+    "src/mlx2/ast_observability.py",
+    "src/mlx2/best_route_defaults.py",
+    "src/mlx2/runtime/ast_planner.py",
+    "src/mlx2/runtime/ast_tile_budget.py",
+    "src/mlx2/runtime/ast_tree_tuning.py",
+    "src/mlx2/runtime/ast_tree_verify.py",
+    "src/mlx2/runtime/attention_tree_executor.py",
+    "src/mlx2/runtime/batch_admission.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/models/flash_tensorfold_qmv.py",
+    "src/mlx2/runtime/models/gpt_oss_puzzle.py",
+    "src/mlx2/server.py",
+    "tests/test_ast_planner_host.py",
+    "tests/test_ast_sweep_config_cpu.py",
+    "tests/test_ast_tile_budget.py",
+    "tests/test_ast_tree_cohort_flow_cpu.py",
+    "tests/test_ast_tree_tuning_host.py",
+    "tests/test_ast_tree_verify_host.py",
+    "tests/test_attention_tree_executor_cpu.py",
+    "tests/test_flash_tensorfold_qmv.py",
+    "tests/test_puzzle_ast_cpu.py",
+    "tests/test_scheduler_admission_regressions.py"
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

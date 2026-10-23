@@ -226,3 +226,25 @@ def test_long_source_seeds_chain_probes_sparsely_and_needs_four_incumbent_sample
     assert all(b - a >= 8 for a, b in itertools.pairwise(probe_starts))
     shapes = {(plan.depth, plan.branches) for plan in plans}
     assert len(shapes) <= 5
+
+
+
+def test_source_cap_learns_without_terminal_censoring_and_keeps_separate_champions():
+    tuner = ASTTreeTuner("capped-source", max_depth=15)
+    for _ in range(4):
+        plan = tuner.plan(remaining_tokens=128, ready_sessions=2, target_sessions=2,
+                          source_depth_limit=4)
+        assert plan.depth == 4 and not plan.terminal_censored
+        assert _observe(tuner, plan)
+    plan = tuner.plan(remaining_tokens=128, ready_sessions=2, target_sessions=2,
+                      source_depth_limit=4)
+    assert plan.cost_samples == 4 and plan.reason != "startup_measurement"
+    released = tuner.plan(remaining_tokens=128, ready_sessions=2, target_sessions=2)
+    assert released.depth == 15 and released.cost_samples == 0
+    capped = tuner.plan(remaining_tokens=128, ready_sessions=2, target_sessions=2,
+                        source_depth_limit=4)
+    assert capped.cost_samples == 4
+    tail = tuner.plan(remaining_tokens=3, ready_sessions=2, target_sessions=2,
+                      source_depth_limit=4)
+    assert tail.depth == 2 and tail.terminal_censored
+    assert not _observe(tuner, tail)

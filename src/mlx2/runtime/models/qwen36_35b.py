@@ -692,7 +692,25 @@ class Model(nn.Module):
             fuse_gate_up=qwen3_next._MOE_FUSED_GATE_UP,
             fold_shared=qwen3_next._MOE_SHARED_IN_GATHER,
         )
-        return self.language_model.sanitize(normalized)
+        normalized = self.language_model.sanitize(normalized)
+        from .dtype_normalize import normalize_weight_dtypes
+
+        # GGUF keeps these weights in F32 even when the declared compute
+        # dtype is BF16. Each can independently widen the residual stream
+        # and KV. A_log/dt_bias/GDN norm remain deliberately F32.
+        report = normalize_weight_dtypes(
+            normalized,
+            (
+                ".linear_attn.conv1d.weight",
+                ".mlp.gate.weight",
+                ".mlp.shared_expert_gate.weight",
+            ),
+            self.language_model.compute_dtype,
+        )
+        object.__setattr__(
+            self.language_model, "residual_weight_dtype_normalization", report
+        )
+        return normalized
 
     @property
     def quant_predicate(self):

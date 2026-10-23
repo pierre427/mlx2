@@ -693,7 +693,7 @@ NATIVE_MTP_TREE_POLICY_KEYS = frozenset({
     "draft_model", "num_draft", "batch_size_route", "tree_node_budget_by_lanes",
     "tensorfold_cohort_limit", "ast_topology", "pairwise_selection",
     "ast_graft_prompt_lookup", "ast_tiles", "ast_tile_rows", "ast_adaptive_rows",
-    "ast_multilane_tile_rows",
+    "ast_multilane_tile_rows", "cost_per_commit_handoff",
 })
 
 
@@ -763,7 +763,7 @@ def graft_prompt_lookup_drafter(adapter, *, prompt_lookup):
     adapter.external_policy["ast_graft_prompt_lookup"] = True
 
 
-def _native_mtp_tree_policy(policy):
+def _native_mtp_tree_policy(policy, *, numerical_defaults=None):
     """Validate the native-MTP tree policy and fill the tile defaults.
 
     One 16-row TensorFold tile per round at B1 (anchor plus ``ast_topology``,
@@ -775,7 +775,8 @@ def _native_mtp_tree_policy(policy):
     unknown = set(policy) - NATIVE_MTP_TREE_POLICY_KEYS
     if unknown:
         raise ValueError(f"native-MTP tree policy has unknown keys: {sorted(unknown)}")
-    value = dict(policy)
+    value = {**(numerical_defaults or {}), **policy}
+    _normalize_external_cost_policy_entry(value)
     # A copy source pays off as one long run; a head's branches as 3x5.
     default = "chain" if value.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES else DEFAULT_TOPOLOGY
     topology = parse_topology(value.setdefault("ast_topology", default))
@@ -803,6 +804,9 @@ def inspect_external_policy(
     """Static drafter inspection and payload-bound revision check; no tensor loads."""
     from .external_drafter_formats import drafter_format
 
+    _tile_node_budgets({key: policy[key] for key in (
+        "ast_tiles", "ast_tile_rows", "ast_multilane_tile_rows"
+    ) if key in policy}, 4)
     # DFlash2 or DSpark, chosen by the artifact's declared architecture.
     draft_format = drafter_format(policy.get("draft_model"))
     draft_legacy_revision = draft_format.legacy_content_revision
@@ -2004,6 +2008,20 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
 
+        # Refuse unsupported loaded arithmetic before feedback, source installs,
+        # oracle I/O, model hashing, or process-global executor registration.
+        route = self.external_policy.get("batch_size_route")
+        oracle_path = self.external_policy.get("ast_target_tree_oracle")
+        if (type(route) is str and route in _TREE_BATCH_ROUTES) or oracle_path is not None:
+            from .tensorfold_dtype_gate import model_tree_tile_dtype_issue
+
+            issue = model_tree_tile_dtype_issue(
+                self.model, mixed_gdn_f32=getattr(
+                    self, "ast_tree_tile_dtype_contract", {}
+                ).get("mixed_gdn_f32", False),
+            )
+            if issue is not None:
+                raise ValueError(f"Qwen3.8 TensorFold {route or 'AST'} route refused: {issue}")
         self._initialize_external_feedback()
         self._external_execution_started = True
         collision_feature = self.external_policy.get(
@@ -2184,12 +2202,6 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         ):
             raise ValueError("tree15 requires an explicit batch_size_route policy")
         kwargs.setdefault("dynamic_singleton_tree", tree_width is not None)
-        if tree_width is not None or oracle_path is not None:
-            from .tensorfold_dtype_gate import model_tree_tile_dtype_issue
-
-            issue = model_tree_tile_dtype_issue(self.model)
-            if issue is not None:
-                raise ValueError(f"Qwen3.8 TensorFold {route or 'AST'} route refused: {issue}")
         if tree_width is not None:
             from .qwen38_target_tree_executor import Qwen38TargetTreeExecutor
 
@@ -2538,6 +2550,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         return {
             "architecture": "dense-hybrid-gdn-gqa",
             "layout": self.layout,
+            "artifact_binding": {
+                key: getattr(self, "identity", {}).get(key)
+                for key in (
+                    "fingerprint", "target_fingerprint", "draft_fingerprint",
+                    "typed_point_mass_sampling_law",
+                )
+            },
             "mtp_head_present": Capability.MTP in self.descriptor.capabilities,
             # A separately shipped head attached to this target: its content
             # identity (also folded into the adapter fingerprint).  Unqualified.

@@ -32,8 +32,10 @@ class PromptLookupDraftModel:
     requires_processor_histories = True
     supports_logits_processors = True
     proposal_distribution = "deterministic_point_mass"
-    receipt_kind = "external_prompt_lookup"
     tree_topology_aware = True
+    # Grafting reorders complete paths as the node budget changes. Its first
+    # N rows need not reproduce a separately constructed N-node graft.
+    tree_budget_prefix_invariant = False
 
     def __init__(self, target, *, num_draft, ngram_min=2, ngram_max=6, base=None,
                  copy_first_ngram=3):
@@ -78,6 +80,11 @@ class PromptLookupDraftModel:
 
     # -- receipts ----------------------------------------------------------
     @property
+    def receipt_kind(self):
+        return (getattr(self.base, "receipt_kind", "external_draft")
+                if self.base is not None else "external_prompt_lookup")
+
+    @property
     def receipt_settings(self):
         settings = {
             "kind": "prompt_lookup",
@@ -87,7 +94,9 @@ class PromptLookupDraftModel:
             "qualified": False,
         }
         if self.base is not None:
-            settings["base"] = getattr(self.base, "receipt_settings", {"kind": type(self.base).__name__})
+            base = dict(getattr(self.base, "receipt_settings", {"kind": type(self.base).__name__}))
+            base["graft"] = settings
+            return base
         return settings
 
     # -- cache contract (empty: the index is drafter-owned) ------------------
@@ -112,7 +121,14 @@ class PromptLookupDraftModel:
         n = len(tokens)
         for position, index in enumerate(self._indexes):
             m = len(index.tokens)
-            if m <= n and index.tokens[-_TAIL_CHECK:] == tokens[max(0, m - _TAIL_CHECK):m]:
+            # A common suffix is only a cheap rejection filter. Independent
+            # requests can share that suffix while having different n-gram
+            # sites earlier in their histories; reuse needs an exact prefix.
+            if (
+                m <= n
+                and index.tokens[-_TAIL_CHECK:] == tokens[max(0, m - _TAIL_CHECK):m]
+                and index.tokens == (tokens if m == n else tokens[:m])
+            ):
                 for token in tokens[m:]:
                     index.observe(token)
                 self._indexes.append(self._indexes.pop(position))
@@ -180,13 +196,20 @@ class PromptLookupDraftModel:
         forbidden = forbidden_token_ids or [() for _ in anchors]
         max_nodes = int(max_nodes)
         pattern = pattern_for_budget(topology, max_nodes)
-        depth = min(max(pattern, default=1), self.num_draft)
+        # A graft's exact-copy branch uses its available tile budget; the
+        # base drafter's default topology must not silently truncate it.
+        depth = min(max_nodes if self.base is not None else max(pattern, default=1),
+                    self.num_draft)
         base_trees = None
         if self.base is not None:
+            base_options = dict(options)
+            if getattr(self.base, "tree_topology_aware", False):
+                base_options["topology"] = topology
+            if getattr(self.base, "requires_processor_histories", False):
+                base_options["processor_histories"] = processor_histories
             base_trees = self.base.propose_tree(
                 anchors, hidden, cache, max_nodes, forbidden_token_ids=forbidden,
-                topology=topology, mark=mark, processor_histories=processor_histories,
-                **options,
+                mark=mark, **base_options,
             )
         self.stats["tree_calls"] += 1
         result = []
@@ -199,7 +222,7 @@ class PromptLookupDraftModel:
                 continue
             tokens, parents = base_trees[row]
             node_paths = tree_paths(list(parents))
-            interior = set(int(parent) for parent in parents)
+            interior = {int(parent) for parent in parents}
             leaves = [path for node, path in enumerate(node_paths) if node not in interior]
             base_paths = [tuple(tokens[i] for i in path) for path in leaves]
             if copies and ngram >= self.copy_first_ngram:

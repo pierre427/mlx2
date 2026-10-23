@@ -104,16 +104,88 @@ _KERNELS = {}
 _COUNTS = Counter()
 
 
-def _kernel(bits):
-    source = _SOURCE_Q4 if bits == 4 else _SOURCE_Q8
-    if bits not in _KERNELS:
+def _shared_source(bits):
+    """Two rows share each decoded block; per-row arithmetic stays ordered.
+
+    Original mlx2 candidate over the existing TensorFold dot-product law.
+    Register reuse avoids a threadgroup staging buffer and barriers. A lone
+    tail row performs exactly the same arithmetic without an out-of-bounds
+    activation read. This is not a measured performance improvement.
+    """
+    if bits == 4:
+        decode = """
+      const device uint16_t* packed = (const device uint16_t*)(w + j * KB);
+      for (int i = 0; i < 4; i++) {
+        const uint16_t word = packed[i];
+        qw[4*i] = float(word & 0x000f); qw[4*i+1] = float(word & 0x00f0);
+        qw[4*i+2] = float(word & 0x0f00); qw[4*i+3] = float(word & 0xf000);
+      }
+"""
+        dot = """
+        for (int i = 0; i < 4; i++)
+          accum += xt[r][4*i] * qw[4*i] + xt[r][4*i+1] * qw[4*i+1] +
+                   xt[r][4*i+2] * qw[4*i+2] + xt[r][4*i+3] * qw[4*i+3];
+"""
+    elif bits == 8:
+        decode = "for (int i = 0; i < 16; i++) qw[i] = float(w[j * KB + i]);"
+        dot = "for (int i = 0; i < 16; i++) accum += xt[r][i] * qw[i];"
+    else:
+        raise ValueError("shared Flash row matvec supports q4 and q8")
+    return """
+  const uint lane = thread_index_in_simdgroup;
+  const int first = int(simdgroup_index_in_threadgroup) * 2;
+  const int row0 = int(threadgroup_position_in_grid.y) * RPS;
+  constexpr int KB = K * BITS / 8;
+  constexpr int KG = K / GS;
+  const device uint8_t* w = (const device uint8_t*)W + size_t(row0) * KB + lane * (2 * BITS);
+  const device bfloat* sc = S + size_t(row0) * KG + (lane * 16) / GS;
+  const device bfloat* bi = B + size_t(row0) * KG + (lane * 16) / GS;
+  float acc[2][RPS];
+  for (int r = 0; r < 2; r++)
+    for (int j = 0; j < RPS; j++) acc[r][j] = 0.0f;
+  for (int k0 = 0; k0 < K; k0 += 512) {
+    float xt[2][16], sums[2];
+    for (int r = 0; r < 2; r++) {
+      if (first + r < ROWS) {
+        const device bfloat* x = X + (first + r) * K + k0 + lane * 16;
+        sums[r] = LOAD(x, xt[r]);
+      }
+    }
+    for (int j = 0; j < RPS; j++) {
+      float qw[16];
+      DECODE
+      const float scale = float(sc[j * KG]), bias = float(bi[j * KG]);
+      for (int r = 0; r < 2; r++) {
+        if (first + r >= ROWS) continue;
+        float accum = 0.0f;
+        DOT
+        acc[r][j] += scale * accum + sums[r] * bias;
+      }
+    }
+    w += 64 * BITS; sc += 512 / GS; bi += 512 / GS;
+  }
+  for (int r = 0; r < 2; r++) {
+    if (first + r >= ROWS) continue;
+    for (int j = 0; j < RPS; j++) {
+      const float value = simd_sum(acc[r][j]);
+      if (lane == 0) OUT[(first + r) * N + row0 + j] = bfloat(value);
+    }
+  }
+""".replace("BITS", str(bits)).replace("LOAD", "load16" if bits == 4 else "load16_q8").replace(
+        "DECODE", decode).replace("DOT", dot)
+
+
+def _kernel(bits, *, shared_weights=False):
+    source = _shared_source(bits) if shared_weights else _SOURCE_Q4 if bits == 4 else _SOURCE_Q8
+    key = (bits, bool(shared_weights))
+    if key not in _KERNELS:
         digest = hashlib.sha256((_HEADER + source).encode()).hexdigest()[:16]
-        _KERNELS[bits] = mx.fast.metal_kernel(
+        _KERNELS[key] = mx.fast.metal_kernel(
             name=f"mlx2_flash_tensorfold_qmv_q{bits}_{digest}",
             input_names=["X", "W", "S", "B"], output_names=["OUT"],
             source=source, header=_HEADER,
         )
-    return _KERNELS[bits]
+    return _KERNELS[key]
 
 
 def eligible(module) -> bool:
@@ -127,7 +199,7 @@ def eligible(module) -> bool:
     return k % 512 == 0 and n % 4 == 0 and module.scales.dtype == mx.bfloat16
 
 
-def qmv_rows(x, module):
+def qmv_rows(x, module, *, shared_weights=False):
     """Compute 1..17 rows with the same arithmetic for every row width."""
     shape = x.shape
     rows = x.size // shape[-1]
@@ -137,10 +209,16 @@ def qmv_rows(x, module):
     bits = int(module.bits)
     if k != int(module.weight.shape[1]) * (32 // bits):
         raise ValueError("TensorFold Flash row matvec activation width mismatch")
-    out = _kernel(bits)(
+    if type(shared_weights) is not bool:
+        raise ValueError("shared_weights must be boolean")
+    groups = (rows + 1) // 2 if shared_weights else rows
+    template = [("K", k), ("N", n), ("RPS", 4), ("GS", 64)]
+    if shared_weights:
+        template.append(("ROWS", rows))
+    out = _kernel(bits, shared_weights=shared_weights)(
         inputs=[x.reshape(rows, k), module.weight, module.scales, module.biases],
-        template=[("K", k), ("N", n), ("RPS", 4), ("GS", 64)],
-        grid=(32 * rows, n // 4, 1), threadgroup=(32 * rows, 1, 1),
+        template=template,
+        grid=(32 * groups, n // 4, 1), threadgroup=(32 * groups, 1, 1),
         output_shapes=[(rows, n)], output_dtypes=[mx.bfloat16],
     )[0].reshape(*shape[:-1], n)
     if "bias" in module:
@@ -158,7 +236,10 @@ class TensorFoldQMVLinear(nn.QuantizedLinear):
         ):
             _COUNTS["kernel_calls"] += 1
             _COUNTS["kernel_rows"] += rows
-            return qmv_rows(x, self)
+            shared = getattr(self, "_tensorfold_qmv_shared_weights", False)
+            if shared:
+                _COUNTS["shared_weight_calls"] += 1
+            return qmv_rows(x, self, shared_weights=shared)
         _COUNTS["stock_calls"] += 1
         return nn.QuantizedLinear.__call__(self, x)
 
@@ -179,8 +260,10 @@ def hc_owned_projection_ids(model) -> set[int]:
     }
 
 
-def install(model) -> dict:
+def install(model, *, shared_weights=False) -> dict:
     """Install on affine q4/q8-g64 dense projections without copying weights."""
+    if type(shared_weights) is not bool:
+        raise ValueError("shared_weights must be boolean")
     installed = []
     hc_owned = hc_owned_projection_ids(model)
     for name, module in model.named_modules():
@@ -193,11 +276,14 @@ def install(model) -> dict:
         if eligible(module):
             module.__class__ = TensorFoldQMVLinear
             object.__setattr__(module, "_tensorfold_qmv_enabled", True)
+            object.__setattr__(module, "_tensorfold_qmv_shared_weights", shared_weights)
             installed.append(name)
     if not installed:
         raise ValueError("TensorFold Flash qmv found no eligible affine q4/q8-g64 projections")
     return {"source_revision": "bb4b4a35863af562fc4ccb2586300d8f94b5d6de",
-            "kernel": "qmv_rows_q4q8g64", "installed": len(installed),
+            "kernel": "qmv_rows_q4q8g64_shared2" if shared_weights else "qmv_rows_q4q8g64",
+            **({"shared_weights": True, "qualified": False} if shared_weights else {}),
+            "installed": len(installed),
             "names_sha256": hashlib.sha256("\n".join(sorted(installed)).encode()).hexdigest()}
 
 

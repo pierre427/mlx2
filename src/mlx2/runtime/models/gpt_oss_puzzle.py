@@ -83,6 +83,7 @@ class PuzzleModel(nn.Module):
         inputs: mx.array,
         cache=None,
         input_embeddings: Optional[mx.array] = None,
+        capture=None,
     ):
         if input_embeddings is not None:
             x = input_embeddings
@@ -102,6 +103,8 @@ class PuzzleModel(nn.Module):
 
         for i, (layer, c, w) in enumerate(zip(self.layers, cache, self.windows)):
             x = layer(x, masks[w], c)
+            if capture is not None and i in capture:
+                capture[i] = x
         return self.norm(x)
 
 
@@ -141,6 +144,19 @@ class Model(nn.Module):
             if not (k.endswith(".k_scale") or k.endswith(".v_scale"))
         }
         return GptOssModel.sanitize(self, weights)
+
+    @property
+    def speculative_args(self):
+        return self.args
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        """Use the shared GPT-OSS capture contract over heterogeneous layers."""
+        return GptOssModel.forward_with_taps(
+            self, inputs, cache, capture_layers, body_only=body_only
+        )
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     @property
     def layers(self):

@@ -348,7 +348,10 @@ class NativeMTPDraftModel:
             tokens_out.append(drafted)
             laws_out.append([PointMassLaw(token) for token in drafted])
             if histories[row] is not None:
-                self._remember(histories[row], anchors[row], drafted, ranked)
+                self._remember(
+                    histories[row], anchors[row], drafted, ranked,
+                    processors=processors,
+                )
         return tokens_out, laws_out
 
     def draft_packed_paths(
@@ -619,9 +622,22 @@ class NativeMTPDraftModel:
         ]
 
     # -- complete paths for the continuation pool ------------------------------
-    def _remember(self, history, anchor, drafted, ranked):
-        key = (len(history), tuple(history[-64:]), int(anchor))
-        self._stash[key] = (tuple(drafted), tuple(ranked))
+    def _stash_key(self, history, anchor, processors):
+        from ..proposal_providers import continuation_context_revision
+
+        # Equal suffixes do not imply equal recurrent/KV state. Processor
+        # owners also differ between lanes with otherwise identical tokens.
+        return (
+            continuation_context_revision(self.revision, history, anchor),
+            tuple(id(processor) for processor in processors),
+        )
+
+    def _remember(self, history, anchor, drafted, ranked, *, processors=()):
+        processors = tuple(processors)
+        key = self._stash_key(history, anchor, processors)
+        # Retain owners until eviction so Python cannot recycle an identity
+        # into a stale entry belonging to an earlier request.
+        self._stash[key] = (tuple(drafted), tuple(ranked), processors)
         while len(self._stash) > _STASH_LIMIT:
             self._stash.pop(next(iter(self._stash)))
 
@@ -636,13 +652,12 @@ class NativeMTPDraftModel:
         from ...adapters.proposal_path_sources import SourceContinuation
 
         self.stats["complete_path_calls"] += 1
-        history = tuple(context.history)
-        key = (len(history), history[-64:], int(context.anchor))
+        key = self._stash_key(context.history, context.anchor, context.processors)
         stored = self._stash.get(key)
         if stored is None or len(stored[0]) < 1:
             self.stats["complete_path_stash_misses"] += 1
             return []
-        drafted, ranked = stored
+        drafted, ranked, _processors = stored
         depth = min(int(context.depth), len(drafted))
         drafted, ranked = drafted[:depth], ranked[:depth]
         primary_lp = [entry[0][1] for entry in ranked]

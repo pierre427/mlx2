@@ -2401,6 +2401,31 @@ def test_compact_verifier_disables_fly_for_processor_lane(monkeypatch):
     assert observed==[None]
 
 
+def test_typed_point_mass_sampling_uses_the_target_coupled_verifier(monkeypatch):
+    import mlx2.runtime.external_speculative as module
+    from mlx2.runtime.proposal_providers import PointMassLaw
+    from mlx2.runtime.speculative_sampling import verify_point_mass_proposals
+
+    model, draft = tiny()
+    batch = generator(model, draft)
+    uid = batch.insert([[1, 2, 3]], max_tokens=[8])[0]
+    lane = batch.lanes[uid]
+    while lane.anchor is None:
+        batch._prefill(lane)
+    lane.sampling["sampling_temp"] = .7
+    law = np.arange(1, 33, dtype=np.float64)
+    law /= law.sum()
+    block = HostDraftRow([4, 5], [PointMassLaw(4), PointMassLaw(5)])
+    monkeypatch.setattr(batch, "_target_law", lambda *_args, **_kwargs: law)
+    reference = RequestRNG(state=lane.rng.snapshot())
+    expected = verify_point_mass_proposals(block.tokens, [law] * 3, reference)
+    decision = batch._verify([lane], [block], mx.zeros((1, 3, 32)))[0]
+    assert decision.emitted == list(expected.emitted)
+    assert decision.accepted == expected.accepted
+    assert lane.rng.snapshot() == reference.snapshot()
+    assert batch.scheduler_stats["external_point_mass_target_sample_rounds"] == 1
+
+
 def test_apcv2_disk_pairs_external_revision_and_tail(tmp_path, monkeypatch):
     from mlx2.runtime.apc_v2 import APCKey, APCv2
     monkeypatch.setattr(mx,'clear_cache',lambda:None)

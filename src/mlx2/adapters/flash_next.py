@@ -85,6 +85,13 @@ def split_native_mtp_external_policy(execution_policy):
         )
     if "num_draft" in native:
         external["num_draft"] = native.pop("num_draft")
+    pool = external.get("continuation_pool")
+    if (isinstance(pool, dict) and pool.get("packed_pattern") is not None
+        and native.get("tensorfold_qmv_rows")):
+        raise ValueError(
+            "packed Flash AST owns its projection law and cannot be combined "
+            "with tensorfold_qmv_rows"
+        )
     return native, external
 
 
@@ -257,6 +264,8 @@ def chat_template(tokenizer, request: dict, *, tokenize: bool):
             if not isinstance(arguments, dict):
                 raise ValueError("tool call arguments must be a JSON object")
             function["arguments"] = arguments
+    from ..agentic_chat import verification_template_kwargs
+    template_options = verification_template_kwargs(tokenizer, request)
     return tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
@@ -265,10 +274,15 @@ def chat_template(tokenizer, request: dict, *, tokenize: bool):
         tools=request.get("tools")
         if request.get("tool_choice") != "none"
         else None,
+        **template_options,
     )
 
 
 class FlashNextAdapter:
+    def chat_template_options(self):
+        from ..agentic_chat import template_options
+        return template_options(self.tokenizer)
+
     # Complete native self-MTP row contract.  The selected copy policy reaches
     # 15 rows (14 copied tokens plus the pending target token); the installed
     # Qwen4 verifier and every rollback plane are validated through 17.  Keep
@@ -631,7 +645,8 @@ class FlashNextAdapter:
             if self.policy.tensorfold_qmv_rows:
                 from ..runtime.models.flash_tensorfold_qmv import install
 
-                self.tensorfold_qmv = install(self.model)
+                self.tensorfold_qmv = install(
+                    self.model, shared_weights=self.policy.tensorfold_qmv_shared_weights)
             self.tensorfold_prefill = None
             if self.policy.tensorfold_prefill:
                 weights.clear()

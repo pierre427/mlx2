@@ -26,6 +26,11 @@ class _HostArrays:
     take = staticmethod(np.take)
     concatenate = staticmethod(np.concatenate)
     zeros_like = staticmethod(np.zeros_like)
+    broadcast_to = staticmethod(np.broadcast_to)
+    take_along_axis = staticmethod(np.take_along_axis)
+    any = staticmethod(np.any)
+    isfinite = staticmethod(np.isfinite)
+    isnan = staticmethod(np.isnan)
     argmax = staticmethod(np.argmax)
     logsumexp = staticmethod(np.logaddexp.reduce)
     eval = staticmethod(lambda *args: None)
@@ -892,3 +897,52 @@ def test_full_tiles_counts_continued_tiles_like_the_linear_path():
     assert stat["launches"] == 2
     assert stat["full_tiles"] == stat["rollback_base_tile"] == 1
     assert result[1].shape[0] == 2 and single[1].shape[0] == 1
+
+
+@pytest.mark.parametrize("values, valid", [
+    ([0.0, -float("inf"), -1.0], True),
+    ([-float("inf")] * 3, False),
+    ([0.0, float("inf"), -1.0], False),
+    ([0.0, float("nan"), -1.0], False),
+])
+def test_token_only_greedy_skips_normalization_preserving_invalid_law_rejection(values, valid):
+    from mlx2.runtime.external_speculative import LaneFailure
+
+    class TokenOnlyArrays(_HostArrays):
+        @staticmethod
+        def logsumexp(*args, **kwargs):
+            raise AssertionError("token-only verification normalized vocabulary")
+
+    generator, lane = _Generator(()), _lane()
+    generator.mx = TokenOnlyArrays
+    block = TreeDraftRow([], [])
+    _, state = generator._launch_tree_laws(lane, block, np.asarray([[values]]))
+    if valid:
+        decision = generator._verify_tree_batched(lane, block, state)
+        assert decision.emitted == [0]
+        assert lane.rng.draws == 1
+        assert decision.target_laws is decision.response_logprobs is None
+    else:
+        with pytest.raises(LaneFailure, match="not a probability"):
+            generator._verify_tree_batched(lane, block, state)
+        assert lane.rng.draws == 0
+
+
+def test_winner_features_are_broadcast_without_allocating_loser_slabs():
+    class Arrays(_HostArrays):
+        @staticmethod
+        def zeros_like(*args, **kwargs):
+            raise AssertionError("allocated unused losing-branch features")
+
+    paths = ((9, 8), (1, 2, 3), (4, 5))
+    generator, lane = _Generator((1, 2, 3)), _lane()
+    generator.mx = Arrays
+    result = verify_tree_tiles(generator, lane, _blocks(paths))
+    winner = _winner(result, paths)
+    assert winner == 1
+    assert result[1].shape[0] == len(paths)
+    assert result[1].strides[0] == 0
+    reference = verify_tree_tiles(_Generator((1, 2, 3)), _lane(), _blocks((paths[winner],)))
+    np.testing.assert_array_equal(result[1][winner:winner + 1], reference[1])
+    assert all(cache is None for i, cache in enumerate(result[2]) if i != winner)
+    assert all(rng is None for i, rng in enumerate(result[3]) if i != winner)

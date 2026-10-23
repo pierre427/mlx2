@@ -1,0 +1,21 @@
+{
+  "schema": "mlx2.mined-implementation-provenance.v1",
+  "source": {
+    "repository": "mlx2",
+    "revision": "3c779a79e70ebc300ef79fac204d49cbe0a8499f",
+    "paths": [
+      "src/mlx2/runtime/ast_tile_budget.py",
+      "src/mlx2/runtime/drafters/prompt_lookup_draft.py"
+    ],
+    "license": "Apache-2.0; original mlx2 repairs, existing provenance retained"
+  },
+  "modifications": [
+    "Explore every candidate budget when graft yield is measured only at verified budgets, then rotate a bounded smaller-budget probe each refresh epoch.",
+    "Preserve exploration epochs and frozen prelaunch choices across budget snapshot/restore and deferred cost feedback.",
+    "Require exact full-prefix equality before extending a shared prompt-lookup index; keep the32-token suffix as a quick rejection filter only."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

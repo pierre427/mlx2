@@ -41,6 +41,8 @@ def tree_paths(parents: Sequence[int]) -> tuple[list[int], list[list[int]]]:
 _COUNTERS = {
     "pre_calls": 0,
     "pre_rows": 0,
+    "mixed_decay_calls": 0,
+    "mixed_post_calls": 0,
     "tree_calls": 0,
     "tree_rows": 0,
     "tree_streams": 0,
@@ -313,7 +315,9 @@ def _launch(kernel, qkv, states, conv_weight, windows, a, b, a_log, dt_bias, row
     cs = [s.reshape(taps - 1, channels) for s in states] + [spare.reshape(taps - 1, channels)] * (
         MAX_STREAMS - len(states)
     )
-    return tuple(
+    if dt_bias.dtype not in (mx.bfloat16, mx.float32):
+        raise ValueError("stream_gdn pre requires bf16 or float32 dt_bias")
+    result = tuple(
         kernel(
             inputs=[
                 qkv.reshape(rows, channels),
@@ -348,6 +352,47 @@ def _launch(kernel, qkv, states, conv_weight, windows, a, b, a_log, dt_bias, row
             output_dtypes=[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, mx.float32],
         )
     )
+    if dt_bias.dtype == mx.float32:
+        # The fused BF16 law rounds a + dt_bias and softplus through BF16.
+        # Ordinary decode intentionally keeps both operations F32 when the
+        # stored bias is F32. Reuse that exact compiled operation; do not
+        # round the parameter to make it fit the BF16 kernel law.
+        from .gated_delta import compute_g
+
+        decay = compute_g(a_log, a.reshape(1, rows, zs)[..., ao:ao + nv], dt_bias)
+        result = (*result[:3], decay.astype(mx.float32), result[4])
+        _COUNTERS["mixed_decay_calls"] += 1
+    return result
+
+
+def install_mixed_post_hooks(lane_glue, lane_fuse):
+    """Retain the BF16 fast path and the served F32 gated-norm arithmetic.
+
+    Installed beside the existing owned GDN pre/replay hooks. Originals are
+    retained once, so repeated executor validation never stacks wrappers.
+    """
+    for module, packed in ((lane_glue, False), (lane_fuse, True)):
+        if hasattr(module, "_mlx2_bf16_gdn_post"):
+            continue
+        original = module.gdn_post
+        module._mlx2_bf16_gdn_post = original
+
+        def post(y, z, weight, eps, *, _original=original, _packed=packed):
+            if weight.dtype == mx.bfloat16:
+                return _original(y, z, weight, eps)
+            if weight.dtype != mx.float32 or y.dtype != mx.bfloat16:
+                raise ValueError("tree GDN gated norm requires bf16 compute and bf16/F32 weight")
+            from .qwen3_next import _precise_swiglu
+
+            batch, rows, nv, dv = map(int, y.shape)
+            if _packed:
+                z = z[..., :nv * dv]
+            normed = mx.fast.rms_norm(y, weight, eps)
+            out = _precise_swiglu(y, z.reshape(batch, rows, nv, dv), normed)
+            _COUNTERS["mixed_post_calls"] += 1
+            return out.reshape(batch, rows, nv * dv)
+
+        module.gdn_post = post
 
 
 class ConvPlan:

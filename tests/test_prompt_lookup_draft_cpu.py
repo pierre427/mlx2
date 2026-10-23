@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from mlx2.runtime.drafters.prompt_lookup_draft import PromptLookupDraftModel
 
 
@@ -30,6 +32,37 @@ def test_tree_tile_from_several_copy_sources_and_incremental_index():
     assert draft.stats["index_rebuilds"] == 1 and draft.stats["index_extends"] == 1
 
 
+@pytest.mark.parametrize("extension", [[], [9, 10]])
+def test_matching_suffix_does_not_reuse_an_unrelated_prefix(extension):
+    draft = PromptLookupDraftModel(_target(), num_draft=5, ngram_min=3, ngram_max=3)
+    suffix = [7] * 29 + [1, 2, 3]
+    first = [1, 2, 3, 42] + suffix
+    second = [8, 8, 8, 77] + suffix + extension
+    draft.copy_paths(first[:-1], first[-1], 5, 1)
+    fresh = PromptLookupDraftModel(_target(), num_draft=5, ngram_min=3, ngram_max=3)
+    assert draft.copy_paths(second[:-1], second[-1], 5, 1) == fresh.copy_paths(
+        second[:-1], second[-1], 5, 1,
+    ) == ([], 0)
+    assert draft.stats["index_rebuilds"] == 2
+
+
+def test_bogus_suffix_match_cannot_displace_the_learned_graft():
+    class Base:
+        config = SimpleNamespace(block_size=16)
+
+        def propose_tree(self, *args, **kwargs):
+            return [([50, 51], [-1, 0])]
+
+    draft = PromptLookupDraftModel(_target(), num_draft=5, base=Base(), ngram_min=3, ngram_max=3)
+    suffix = [7] * 29 + [1, 2, 3]
+    first, second = [1, 2, 3, 42] + suffix, [8, 8, 8, 77] + suffix
+    draft.copy_paths(first[:-1], first[-1], 5, 1)
+    assert draft.propose_tree(
+        [second[-1]], None, [], 5, processor_histories=[second[:-1]],
+    ) == [([50, 51], [-1, 0])]
+    assert draft.stats["copy_first"] == 0
+
+
 def test_grafted_copy_branch_leads_when_the_match_is_specific():
     class Base:
         config = SimpleNamespace(block_size=16, target_layer_ids=(3,))
@@ -47,3 +80,21 @@ def test_grafted_copy_branch_leads_when_the_match_is_specific():
     assert tokens[5:] == [50, 51, 52] and parents[5:] == [-1, 5, 5]
     tokens, _ = draft.propose_tree([99], None, [], 15, processor_histories=[history])[0]
     assert tokens == [50, 51, 52]               # no match: base tree only
+
+
+def test_graft_forwards_metadata_to_a_declaring_base():
+    class Base:
+        config = SimpleNamespace(block_size=16)
+        tree_topology_aware = True
+        requires_processor_histories = True
+
+        def propose_tree(self, anchors, hidden, cache, max_nodes, **options):
+            assert options["topology"] == "3x5"
+            assert options["processor_histories"] == [[1, 2]]
+            return [([50], [-1])]
+
+    graft = PromptLookupDraftModel(_target(), num_draft=5, base=Base())
+    tokens, _ = graft.propose_tree(
+        [99], None, [], 15, processor_histories=[[1, 2]], topology="3x5",
+    )[0]
+    assert tokens == [50]

@@ -200,6 +200,8 @@ class FlashNextPolicy:
     mtp_draft_vocab_coverage_window: int = 16
     # Candidate TensorFold Flash row matvec generalized for q4/group-64.
     tensorfold_qmv_rows: bool = False
+    # Unqualified register-sharing candidate; unchanged default kernel.
+    tensorfold_qmv_shared_weights: bool = False
     # Prefill-specific tiled projections and bounded core recurrence scans.
     # Candidate policies have a separate qualification/cache identity.
     tensorfold_prefill: bool = False
@@ -444,6 +446,7 @@ class FlashNextPolicy:
             "fp32_head_logits",
             "mtp_draft_vocab",
             "tensorfold_qmv_rows",
+            "tensorfold_qmv_shared_weights",
             "tensorfold_prefill",
             "hc_decode_kernels",
             "attn_fused_rows",
@@ -521,6 +524,8 @@ class FlashNextPolicy:
             raise ValueError("gdn_prefill_segment_rows requires gdn_prefill_chunk")
         if self.row_exact_low_bit_lane and not self.row_exact_verify:
             raise ValueError("row_exact_low_bit_lane requires row_exact_verify")
+        if self.tensorfold_qmv_shared_weights and not self.tensorfold_qmv_rows:
+            raise ValueError("tensorfold_qmv_shared_weights requires tensorfold_qmv_rows")
         if self.row_exact_low_bit_lane and self.tensorfold_prefill:
             # TensorFold prefill reads projection weights with its own stock
             # product, which would bypass the lane law of a prepared layer.
@@ -600,6 +605,8 @@ class FlashNextPolicy:
             del values["mtp_draft_vocab_coverage_window"]
         if not self.tensorfold_qmv_rows:
             del values["tensorfold_qmv_rows"]
+        if not self.tensorfold_qmv_shared_weights:
+            del values["tensorfold_qmv_shared_weights"]
         if not self.tensorfold_prefill:
             del values["tensorfold_prefill"]
         if not self.row_exact_verify:

@@ -26,6 +26,7 @@ class ASTTreeSourcePlan:
     cost_samples: int
     terminal_censored: bool
     target_sessions: int = 1
+    source_depth_limit: int | None = None
 
     def receipt(self):
         return asdict(self)
@@ -101,10 +102,10 @@ class ASTTreeTuner:
         # Dividing by ready pressure again would starve the second tile.
         return quota, 2, max(self.minimum_depth, 2 * quota - 1)
 
-    def _legal(self, choice, budget):
+    def _legal(self, choice, budget, depth_limit):
         depth, branches = choice
         return (
-            self.minimum_depth <= depth <= self.max_depth
+            self.minimum_depth <= depth <= depth_limit
             and 1 <= branches <= self.max_branches
             and depth * branches <= budget
         )
@@ -121,7 +122,7 @@ class ASTTreeTuner:
         # full extra tile per round and must earn their place by measurement;
         # seeding the most expensive legal shape spent the startup rounds on
         # the widest tree and kept re-electing it from noisy samples.
-        depth = min(self.max_depth, budget)
+        depth = min(group[2], budget)
         seed = (
             depth,
             1
@@ -131,11 +132,11 @@ class ASTTreeTuner:
         incumbent = self._champions.setdefault(group, seed)
         current = self._sample(group, incumbent)
         measured = [
-            (key[2:], value)
+            (key[3:], value)
             for key, value in self._stats.items()
-            if key[:2] == group
+            if key[:3] == group
             and value["samples"] >= self.CANDIDATE_SAMPLES
-            and self._legal(key[2:], budget)
+            and self._legal(key[3:], budget, group[2])
         ]
         if current and current["samples"] >= self.INCUMBENT_SAMPLES and measured:
             best, sample = max(measured, key=lambda item: self._rate(item[1]))
@@ -167,7 +168,7 @@ class ASTTreeTuner:
                 item
                 for item in neighbors
                 if item != incumbent
-                and self._legal(item, budget)
+                and self._legal(item, budget, group[2])
                 and (group[1] == 1 or item[1] == 1)
             )
         )
@@ -194,7 +195,8 @@ class ASTTreeTuner:
             return candidate, "adjacent_recheck"
         return incumbent, "measured_throughput_hysteresis"
 
-    def plan(self, *, remaining_tokens, ready_sessions=1, target_sessions=1):
+    def plan(self, *, remaining_tokens, ready_sessions=1, target_sessions=1,
+             source_depth_limit=None):
         if (
             not _integer(remaining_tokens, 0, 2**63 - 1)
             or not _integer(ready_sessions, 1, 2**31 - 1)
@@ -203,14 +205,19 @@ class ASTTreeTuner:
             raise ValueError(
                 "AST source planning needs nonnegative headroom and live pressure"
             )
+        depth_limit = self.max_depth if source_depth_limit is None else source_depth_limit
+        if not _integer(depth_limit, self.minimum_depth, self.max_depth):
+            raise ValueError("AST source depth limit must preserve the proposal floor")
+        # A configured work cap is not a terminal response budget. Scope the
+        # champion to that cap so clipped proposals train their actual shape.
         # Beyond sixteen ready sessions the configured source floor is binding.
         pressure = min(ready_sessions, 16)
-        group = (pressure, target_sessions)
+        group = (pressure, target_sessions, depth_limit)
         tile_rows, max_tiles, budget = self._budget(pressure, target_sessions)
         if self.fixed is None:
             choice, reason = self._choose(group, budget)
         else:
-            choice, reason = self.fixed, "explicit_fixed"
+            choice, reason = (min(self.fixed[0], depth_limit), self.fixed[1]), "explicit_fixed"
             max_tiles = max(2, math.ceil((1 + choice[0] * choice[1]) / tile_rows))
         depth = min(choice[0], max(0, remaining_tokens - 1))
         branches = choice[1] if depth else 1
@@ -224,8 +231,9 @@ class ASTTreeTuner:
             ready_sessions,
             "terminal_anchor" if not depth else reason,
             0 if sample is None else sample["samples"],
-            remaining_tokens < self.max_depth + 1,
+            remaining_tokens < depth_limit + 1,
             target_sessions,
+            depth_limit,
         )
         self._pending = self._last_plan = result
         return result
@@ -277,7 +285,7 @@ class ASTTreeTuner:
         if reason is not None:
             self._skipped[reason] = self._skipped.get(reason, 0) + 1
             return False
-        group = (min(plan.ready_sessions, 16), plan.target_sessions)
+        group = (min(plan.ready_sessions, 16), plan.target_sessions, plan.source_depth_limit)
         self._rounds[group] = self._rounds.get(group, 0) + 1
         key = (*group, plan.depth, plan.branches)
         old = self._stats.get(key)
@@ -321,8 +329,9 @@ class ASTTreeTuner:
                 dict(
                     ready_sessions=key[0],
                     target_sessions=key[1],
-                    depth=key[2],
-                    branches=key[3],
+                    source_depth_limit=key[2],
+                    depth=key[3],
+                    branches=key[4],
                     **value,
                     emitted_tokens_per_second=self._rate(value),
                 )

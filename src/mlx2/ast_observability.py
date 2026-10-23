@@ -66,7 +66,7 @@ PLANNER_SOURCE_REASONS = frozenset(
     }
 )
 
-_TOPOLOGY_RE = re.compile(r"^(chain|[0-9]{1,2}(x[0-9]{1,2}|(/[0-9]{1,2}){0,15}))$")
+_TOPOLOGY_RE = re.compile(r"^(chain|drafter|[0-9]{1,2}(x[0-9]{1,2}|(/[0-9]{1,2}){0,15}))$")
 _HEX_RE = re.compile(r"^[0-9a-f]+$")
 
 
@@ -133,16 +133,17 @@ def route_status(route: Mapping[str, Any] | None, policy: Mapping[str, Any] | No
     refused = route.get("tree_tiles_refused")
     tiles = bool(route.get("tree_tiles"))
     tree_tiles = "on" if tiles else "refused" if refused else "off"
-    topology = route.get("topology")
+    # The policy already includes explicit CLI overrides and adapter defaults.
+    # Invocation records retain None/False placeholders for omitted flags;
+    # those placeholders must not conceal an effective policy selection.
+    topology = policy.get("ast_topology", route.get("topology"))
     if topology is None:
         topology_label = "default"
     elif isinstance(topology, str) and _TOPOLOGY_RE.fullmatch(topology):
         topology_label = topology
     else:
         topology_label = "other"
-    explicit_rows = route.get("tile_rows")
-    if explicit_rows is None:
-        explicit_rows = policy.get("ast_tile_rows")
+    explicit_rows = policy.get("ast_tile_rows", route.get("tile_rows"))
     rows_authority = "operator" if explicit_rows is not None else "default"
     if explicit_rows is None and tiles:
         adapter_rows = getattr(adapter_type, "default_ast_tile_rows", None)
@@ -158,7 +159,7 @@ def route_status(route: Mapping[str, Any] | None, policy: Mapping[str, Any] | No
     kernel_label = (
         "default" if kernel is None else kernel if kernel in DRAFTER_KERNELS else "other"
     )
-    calibration = route.get("tree_calibration", policy.get("ast_tree_calibration"))
+    calibration = policy.get("ast_tree_calibration", route.get("tree_calibration"))
     if calibration in (None, False):
         calibration_label = "off"
     elif calibration is True:
@@ -175,18 +176,19 @@ def route_status(route: Mapping[str, Any] | None, policy: Mapping[str, Any] | No
         "tree_tiles": tree_tiles,
         "tree_tiles_refused_reason": None if refused is None else str(refused),
         "topology": topology_label,
-        "tiles": route.get("tiles") if type(route.get("tiles")) is int else None,
+        "tiles": (policy.get("ast_tiles", route.get("tiles"))
+                  if type(policy.get("ast_tiles", route.get("tiles"))) is int else None),
         "tile_rows": _tile_rows_label(explicit_rows),
         "tile_rows_authority": rows_authority,
         "tile_rows_mode": rows_mode,
-        "graft_pld": bool(route.get("graft_pld")),
+        "graft_pld": bool(policy.get("ast_graft_prompt_lookup", route.get("graft_pld"))),
         "drafter_kernel": kernel_label,
         "drafter_quantization": _quantization_label(
             policy.get("draft_quantization"), "draft_quantization" in policy
         ),
         "tree_calibration": calibration_label,
         "batch_row_sharing": bool(
-            route.get("batch_row_sharing", policy.get("ast_batch_row_sharing", False))
+            policy.get("ast_batch_row_sharing", route.get("batch_row_sharing", False))
         ),
         "drafter_policy_defaults": sorted(
             str(key) for key in defaults if isinstance(key, str)

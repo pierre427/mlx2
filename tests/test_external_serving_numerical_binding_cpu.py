@@ -1,6 +1,7 @@
 """Merged serving laws bind learning and guard selected math before writes."""
 
 import copy
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,22 @@ def cpu():
 
 def namespace(**laws):
     return apc_semantic_namespace("external-learning-v1", **laws)
+
+
+@pytest.mark.parametrize("pool", [False, True])
+def test_point_mass_verifier_law_separates_route_cache_and_critic_session(monkeypatch, pool):
+    from mlx2.runtime import speculative_sampling
+
+    first = bind(pool=pool)
+    assert first.identity["typed_point_mass_sampling_law"] == speculative_sampling.POINT_MASS_SAMPLING_LAW
+    monkeypatch.setattr(speculative_sampling, "POINT_MASS_SAMPLING_LAW", "other-verifier-law")
+    second = bind(pool=pool)
+    assert first.identity["target_fingerprint"] == second.identity["target_fingerprint"]
+    assert first.identity["draft_fingerprint"] == second.identity["draft_fingerprint"]
+    assert first.identity["fingerprint"] != second.identity["fingerprint"]
+    assert first.layout != second.layout
+    if pool:
+        assert first.draft_model.session.session_revision != second.draft_model.session.session_revision
 
 
 @pytest.mark.parametrize("pool", [False, True])
@@ -217,6 +234,7 @@ def test_lane_guard_is_before_mutation_and_preserves_stock_device_skip_noops(
 
 def test_lora_guard_is_reached_before_actual_service_install(monkeypatch):
     engine = ServingEngine.__new__(ServingEngine)
+    engine.lock = threading.RLock()
     engine.adapter = selected_target()
     engine.model_path = Path("tiny")
     engine.lora_session = engine.multi_lora = None

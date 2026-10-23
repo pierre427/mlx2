@@ -33,14 +33,18 @@ class _Width:
     chosen: int | None = None
     maximum: int | None = None                      # the knob's node maximum
     verified: dict = field(default_factory=dict)    # verified nodes -> lane rounds
+    pending_choice: tuple | None = None             # immutable within one observed round
+    probe_epoch: int = -1                          # measured-yield refresh already probed
 
 
 class TileBudgetController:
     """Choose proposal nodes per lane from counterfactual acceptance and cost."""
 
-    def __init__(self, *, warmup=6, probe=3, refresh=48, alpha=0.25, margin=1.08):
+    def __init__(self, *, warmup=6, probe=3, refresh=48, alpha=0.25, margin=1.08,
+                 counterfactual=True):
         self.warmup, self.probe, self.refresh = int(warmup), int(probe), int(refresh)
         self.alpha, self.margin = float(alpha), float(margin)
+        self.counterfactual = bool(counterfactual)
         self._widths: dict[int, _Width] = {}
         self.decisions: dict[int, int] = {}
 
@@ -50,27 +54,59 @@ class TileBudgetController:
     def choose(self, width, maximum):
         """Proposal nodes for one lane of a round at ``width`` lanes."""
 
+        state = self._state(width)
+        key = (state.rounds, int(maximum))
+        if state.pending_choice is None or state.pending_choice[:2] != key:
+            state.pending_choice = (*key, self._choose(width, maximum))
+        return state.pending_choice[2]
+
+    def _choose(self, width, maximum):
+
         maximum = int(maximum)
         state = self._state(width)
         state.maximum = maximum
         sizes = [n for n in CANDIDATES if n < maximum] + [maximum]
         if state.rounds < self.warmup or state.rounds % self.refresh == 0:
             return maximum
-        probe = sizes[max(0, len(sizes) // 2 - 1)]
-        if len(state.cost) < 2 and state.cost_samples.get(probe, 0) < self.probe:
-            return probe
+        if not self.counterfactual:
+            # Rebuilt grafts cannot infer smaller-budget yields from a large
+            # tree. Measure each candidate before comparing its expected rate.
+            epoch = state.rounds // self.refresh
+            for size in sizes:
+                if state.samples.get(size, 0) < self.probe:
+                    state.probe_epoch = epoch
+                    return size
+            # Keep learning when copy opportunities change. One rotating
+            # smaller-budget probe per refresh epoch also works when cohort
+            # observations advance the round count by more than one.
+            if sizes[:-1] and epoch > state.probe_epoch:
+                state.probe_epoch = epoch
+                return sizes[:-1][epoch % (len(sizes) - 1)]
+        else:
+            probe = sizes[max(0, len(sizes) // 2 - 1)]
+            if probe != maximum and state.cost_samples.get(probe, 0) < self.probe:
+                return probe
         fit = self._fit(state)
         if fit is None:
             return maximum
         a, b = fit
-        best, best_rate = maximum, None
+        rates = {}
         for n in sizes:
             seen = state.samples.get(n, 0)
             if not seen:
                 continue
             expected = state.tokens[n] / seen
-            rate = expected / max(a + b * (n + 1), 1e-6)
-            if best_rate is None or rate > best_rate * (self.margin if n < best else 1.0):
+            rates[n] = expected / max(a + b * (n + 1), 1e-6)
+        if maximum not in rates:
+            return maximum
+        # The reduction margin is relative to the configured maximum once,
+        # not compounded at every intermediate candidate. Among candidates
+        # clearing it, use the best expected rate (prefer larger on ties).
+        best, best_rate = maximum, rates[maximum]
+        threshold = best_rate * self.margin
+        for n in reversed(sizes):
+            rate = rates.get(n, 0.0)
+            if rate > threshold and rate > best_rate:
                 best, best_rate = n, rate
         state.chosen = best
         self.decisions[int(width)] = best
@@ -104,11 +140,22 @@ class TileBudgetController:
 
         state = self._state(width)
         state.rounds += 1
+        state.pending_choice = None
         state.verified[int(nodes)] = state.verified.get(int(nodes), 0) + 1
         ranks = sorted(int(rank) for rank in path_ranks)
-        for n in sorted({n for n in CANDIDATES if n <= nodes} | {int(nodes)}):
+        sizes = ({n for n in CANDIDATES if n <= nodes} if self.counterfactual else set()) | {int(nodes)}
+        for n in sorted(sizes):
             state.tokens[n] = state.tokens.get(n, 0) + 1 + sum(1 for rank in ranks if rank < n)
             state.samples[n] = state.samples.get(n, 0) + 1
+        self.observe_cost(width, nodes, seconds)
+
+    def observe_cost(self, width, nodes, seconds):
+        """Complete a deferred round cost without counting acceptance twice.
+
+        A prelaunched lattice keeps its chosen budget until the next accepted
+        observation, even when commit-time cost completes after prelaunch.
+        """
+        state = self._state(width)
         if seconds is not None and seconds > 0:
             previous = state.cost.get(nodes)
             state.cost[nodes] = (
@@ -129,7 +176,7 @@ class TileBudgetController:
         return _Width(
             state.rounds, dict(state.tokens), dict(state.samples),
             dict(state.cost), dict(state.cost_samples), state.chosen,
-            state.maximum, dict(state.verified),
+            state.maximum, dict(state.verified), state.pending_choice, state.probe_epoch,
         )
 
     def restore(self, snapshot):
@@ -155,6 +202,7 @@ class TileBudgetController:
         return {
             str(width): {
                 "mode": "adaptive",
+                "yield_observation": "prefix_counterfactual" if self.counterfactual else "verified_budget_only",
                 "maximum_nodes": state.maximum,
                 "tile_rows": None if state.maximum is None else state.maximum + 1,
                 "verified_nodes": {str(n): c for n, c in sorted(state.verified.items())},

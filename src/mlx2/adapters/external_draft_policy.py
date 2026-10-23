@@ -671,6 +671,14 @@ class ExternalDraftAdapterMixin:
                     COMPOSITION_DEFAULT_SKIPPED_NO_EXACT_LAW
                 )
                 self.skipped_route_defaults = skipped
+        from ..runtime.speculative_sampling import POINT_MASS_SAMPLING_LAW
+
+        # Typed point-mass rows may come from a native head, PLD or a
+        # composition wrapper. Pin the verifier and RNG law before creating
+        # critic sessions, and bind it into route/cache identity below.
+        verification_identity = json.dumps(
+            {"typed_point_mass_sampling": POINT_MASS_SAMPLING_LAW}, sort_keys=True
+        )
         # Capture effective head geometry before wrappers add policy receipts.
         # Artifact bytes alone do not pin refinement passes or retained context.
         effective_draft_settings = (
@@ -772,6 +780,7 @@ class ExternalDraftAdapterMixin:
                             "continuation_strategy"
                         ),
                         "draft_settings": effective_draft_settings,
+                        "typed_point_mass_sampling": POINT_MASS_SAMPLING_LAW,
                         "num_draft": self._external_num_draft(),
                         "adaptive_verification": adaptive_settings,
                     },
@@ -824,6 +833,7 @@ class ExternalDraftAdapterMixin:
                 # Wrapper policy must not erase the drafter cache's FOLD law.
                 + fold_identity
                 + numerical_identity
+                + verification_identity
             ).encode()
         ).hexdigest()
         self.identity = {
@@ -831,6 +841,7 @@ class ExternalDraftAdapterMixin:
             "target_fingerprint": self.identity["fingerprint"],
             "draft_fingerprint": record["fingerprint"],
             "fingerprint": digest,
+            "typed_point_mass_sampling_law": POINT_MASS_SAMPLING_LAW,
             **(
                 {"target_execution_fingerprint": self._external_target_revision}
                 if numerical_identity else {}

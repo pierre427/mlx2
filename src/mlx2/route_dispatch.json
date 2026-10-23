@@ -12,7 +12,7 @@
       "reason": "revision-bound cache classes supplied by the selected adapter"
     },
     "mlx2.runtime.qwen38_tensorfold": {
-      "sha256": "355bc0d2536e7305208f11e69573d2603f2e1fcf4c6a74f232788141a3048b67",
+      "sha256": "4344a13dbbde65343d42561998b2ef7fdf84720c723a150e8e7252e1483716d3",
       "targets": [
         "mlx2.runtime.tensorfold_qwen38.inputs",
         "mlx2.runtime.tensorfold_qwen38.lane_attention",
@@ -25,7 +25,7 @@
         "mlx2.runtime.tensorfold_qwen38.stream_attention",
         "mlx2.runtime.tensorfold_qwen38.stream_gdn"
       ],
-      "reason": "validated vendored module list; external research sources retain their own exact source gate"
+      "reason": "Validated module list including owned mixed-F32 GDN pre/post hooks; both lane_glue and lane_fuse remain under the same source-root gate. Dynamic targets unchanged; external research sources retain their exact source gate."
     }
   }
 }

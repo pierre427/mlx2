@@ -37,6 +37,7 @@ def _latched(monkeypatch, seen):
 def _artifact(tmp_path):
     return {
         "has_mtp": False,
+        "weight_map": {},
         "identity": {"path": str(tmp_path), "fingerprint": "f", "files": []},
         "config": {"text_config": {"mtp_num_hidden_layers": 0}},
     }

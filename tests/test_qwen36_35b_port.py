@@ -767,3 +767,91 @@ def test_qwen36_defaults_to_the_fused_nax_gather_and_applies_it_at_load(tmp_path
     assert "default_moe_nax_gather" not in vars(
         __import__("mlx2.adapters.qwen35_122b", fromlist=["x"]).Qwen35122BA10BAdapter
     )
+
+
+def test_unquantized_experts_do_not_select_affine_defaults(tmp_path, monkeypatch):
+    from mlx2.adapters import qwen36_35b
+    from mlx2.runtime import ubc_evict
+    from mlx2.runtime.models import import_env
+    from mlx2.runtime.models import qwen36_35b as tensors
+
+    _chat_tokenizer(tmp_path)
+    make_artifact(tmp_path)
+    index = tmp_path / "model.safetensors.index.json"
+    payload = json.loads(index.read_text())
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        payload["weight_map"][f"language_model.model.layers.0.mlp.switch_mlp.{projection}.weight"] = "model.safetensors"
+    index.write_text(json.dumps(payload))
+    monkeypatch.setattr(tensors, "Model", _LoadedModel)
+    monkeypatch.setattr(ubc_evict, "load_shards_evicting", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_env, "assert_profile_applied", lambda *_a, **_k: None)
+    adapter = Qwen3635BA3BAdapter(str(tmp_path))
+    try:
+        assert adapter.environment["MLX2_MOE_NAX_GATHER"] == "off"
+        assert "MLX_QWEN4_MOE_ROUTED_DECODE" not in adapter.environment
+        assert "MLX_QWEN4_MOE_TOPK_FOLD" not in adapter.environment
+        assert adapter.environment["MLX_QWEN36_FUSED_GDN_DECODE"] == "1"
+        assert adapter.environment["MLX_QWEN36_FUSED_GDN_BATCH_DECODE"] == "1"
+        assert set(adapter.diagnostics()["skipped_affine_moe_defaults"]) == {
+            "moe_nax_gather", "moe_routed_decode", "moe_topk_fold",
+        }
+    finally:
+        adapter.close()
+    for policy in ({"moe_nax_gather":"fused"}, {"moe_routed_decode":"gate_up_down"}):
+        with pytest.raises(ValueError, match="requires affine expert tables"):
+            Qwen3635BA3BAdapter(str(tmp_path), execution_policy=policy)
+    standalone = Qwen3635BA3BAdapter(str(tmp_path), execution_policy={"moe_topk_fold":"launch"})
+    try:
+        assert standalone.environment["MLX_QWEN4_MOE_TOPK_FOLD"] == "launch"
+    finally:
+        standalone.close()
+
+
+def test_affine_expert_format_comes_from_projection_metadata():
+    from mlx2.adapters.qwen36_35b import expert_tables_lack_affine_format
+    root = "language_model.model.layers.0.mlp.switch_mlp.gate_proj"
+    assert not expert_tables_lack_affine_format({"embed_tokens.weight":"shard"})
+    assert expert_tables_lack_affine_format({root + ".weight":"shard"})
+    assert expert_tables_lack_affine_format({root + ".weight":"shard", root + ".scales":"shard"})
+    assert not expert_tables_lack_affine_format({root + ".weight":"shard", root + ".scales":"shard", root + ".biases":"shard"})
+
+
+@pytest.mark.parametrize("parameter_dtype", ["float32", "bfloat16"])
+def test_fused_gdn_defaults_preserve_state_parameter_dtype(monkeypatch, parameter_dtype):
+    from types import SimpleNamespace
+    import mlx.core as mx
+    from mlx2.adapters import qwen36_35b as adapter_module
+    from mlx2.runtime.models import qwen36_35b as tensors
+
+    class Layer:
+        def __init__(self):
+            self.conv1d = SimpleNamespace(weight=mx.ones((2,), mx.bfloat16))
+            self.dt_bias = mx.array([0.1234567], getattr(mx, parameter_dtype))
+            self.norm = SimpleNamespace(weight=mx.ones((2,), getattr(mx, parameter_dtype)))
+
+    monkeypatch.setattr(tensors, "GatedDeltaNet", Layer)
+    layer = Layer()
+    stored = layer.dt_bias
+    adapter = object.__new__(Qwen3635BA3BAdapter)
+    adapter.model = SimpleNamespace(language_model=SimpleNamespace(compute_dtype=mx.bfloat16),
+                                    named_modules=lambda: [("gdn", layer)])
+    keys = ("fused_gdn_decode", "fused_gdn_batch_decode", "fused_gdn_verify")
+    adapter._kernels = {key:True for key in keys}
+    adapter.environment = {adapter_module.KERNEL_POLICY_ENV[key]:"1" for key in keys}
+    adapter._explicit_kernel_choices = frozenset()
+    for key in keys:
+        monkeypatch.setenv(adapter_module.KERNEL_POLICY_ENV[key], "1")
+    adapter._gate_fused_gdn_defaults()
+    assert layer.dt_bias is stored
+    assert layer.dt_bias.dtype == getattr(mx, parameter_dtype)
+    if parameter_dtype == "float32":
+        assert set(adapter.skipped_gdn_defaults) == set(keys)
+        assert all(adapter.environment[adapter_module.KERNEL_POLICY_ENV[key]] == "0" for key in keys)
+        adapter._kernels["fused_gdn_decode"] = True
+        adapter.environment[adapter_module.KERNEL_POLICY_ENV["fused_gdn_decode"]] = "1"
+        adapter._explicit_kernel_choices = frozenset({"fused_gdn_decode"})
+        with pytest.raises(ValueError, match="fused_gdn_decode unavailable"):
+            adapter._gate_fused_gdn_defaults()
+    else:
+        assert not adapter.skipped_gdn_defaults
+        assert all(adapter._kernels[key] for key in keys)

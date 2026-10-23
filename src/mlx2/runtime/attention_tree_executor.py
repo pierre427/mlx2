@@ -10,7 +10,7 @@ own forward, unchanged, if for that one forward
 * RoPE sees one position per row (``offset + depth``, rows as the batch axis
   with an offset per row: the same per-element law as one call per row), and
 * each cache's ``make_mask`` returns the prefix-plus-ancestor mask, with the
-  sliding-window bound applied to prefix keys for windowed layers.
+  sliding-window bound applied to prefix and ancestor keys for windowed layers.
 
 Commit keeps the accepted root path by compaction: a full ``KVCache`` moves
 the path's rows to the front of the window in place; a ``RotatingKVCache``
@@ -102,7 +102,7 @@ class _RowRope:
 
     def __init__(self, rope, depths):
         self.rope = rope
-        self.depths = mx.array(depths, dtype=mx.int32)
+        self.depths = depths
 
     def __call__(self, x, offset=0):
         batch, heads, rows, dim = x.shape
@@ -118,8 +118,9 @@ class _TileScope:
 
     def __init__(self, model, cache, parents):
         self.model, self.cache, self.parents = model, cache, list(parents)
-        self.depths = _depths(self.parents)
-        self.ancestors = _ancestors(self.parents)
+        self.depths = mx.array(_depths(self.parents), dtype=mx.int32)
+        self.ancestors = mx.array(_ancestors(self.parents), dtype=mx.bool_)
+        self.masks = {}
         self.installed_rope = []
         self.installed_mask = []
 
@@ -131,46 +132,76 @@ class _TileScope:
         def make_mask(n, return_array=False, window_size=None):
             if n != width:
                 raise ValueError("tree tile mask requested for a different row count")
-            rows = []
-            for row in range(width):
-                position = start + self.depths[row]
+            key = (start, prefix, window_size)
+            if key not in self.masks:
+                ancestors = self.ancestors
                 if window_size is None:
-                    head = [True] * prefix
+                    head = mx.broadcast_to(mx.array(True), (width, prefix))
                 else:
-                    head = [position - (start - prefix + column) < window_size
-                            for column in range(prefix)]
-                rows.append(head + self.ancestors[row])
-            return mx.array(rows, dtype=mx.bool_)
+                    # Positions are relative to the committed boundary. Keep
+                    # the host topology bounded by W*W, never W*context.
+                    head = (
+                        self.depths[:, None] + prefix - mx.arange(prefix)[None, :]
+                        < window_size
+                    )
+                    ancestors = ancestors & (
+                        self.depths[:, None] - self.depths[None, :] < window_size
+                    )
+                self.masks[key] = mx.concatenate([head, ancestors], axis=1)
+            return self.masks[key]
 
         return make_mask
 
     def __enter__(self):
-        for module in attention_modules(self.model):
-            original = module.rope
-            # A module child lives in the Module dict; a plain RoPE object in
-            # the instance __dict__, which must be put back, not deleted.
-            shadowed = module.__dict__.get("rope", _ABSENT)
-            object.__setattr__(module, "rope", _RowRope(original, self.depths))
-            self.installed_rope.append((module, shadowed))
-        for item in self.cache:
-            item.make_mask = self._mask_for(item)
-            self.installed_mask.append(item)
+        try:
+            for module in attention_modules(self.model):
+                original = module.rope
+                # Module children and plain attributes have distinct storage.
+                shadowed = module.__dict__.get("rope", _ABSENT)
+                object.__setattr__(module, "rope", _RowRope(original, self.depths))
+                self.installed_rope.append((module, shadowed))
+            for item in self.cache:
+                shadowed = item.__dict__.get("make_mask", _ABSENT)
+                item.make_mask = self._mask_for(item)
+                self.installed_mask.append((item, shadowed))
+        except BaseException:
+            self.__exit__()
+            raise
         return self
 
     def __exit__(self, *_exc):
-        for module, shadowed in self.installed_rope:
+        for module, shadowed in reversed(self.installed_rope):
             if shadowed is _ABSENT:
                 object.__delattr__(module, "rope")
             else:
                 object.__setattr__(module, "rope", shadowed)
-        for item in self.installed_mask:
-            item.__dict__.pop("make_mask", None)
+        for item, shadowed in reversed(self.installed_mask):
+            if shadowed is _ABSENT:
+                item.__dict__.pop("make_mask", None)
+            else:
+                item.make_mask = shadowed
+        self.installed_rope.clear()
+        self.installed_mask.clear()
         return False
 
 
 def _snapshot(cache):
-    return [(item, item.keys, item.values, int(item.offset), getattr(item, "_idx", None))
-            for item in cache]
+    def saved(item, value):
+        # Ring updates overwrite committed positions. A distinct descriptor
+        # pins the old graph without an eager copy; a Python object reference
+        # alone follows __setitem__ mutations and cannot restore the ring.
+        # Plain KV only appends beyond its boundary, so keep its buffer lent.
+        return (
+            mx.stop_gradient(value)
+            if type(item) is RotatingKVCache and value is not None
+            else value
+        )
+
+    return [
+        (item, saved(item, item.keys), saved(item, item.values),
+         int(item.offset), getattr(item, "_idx", None))
+        for item in cache
+    ]
 
 
 def _restore(snapshot):
@@ -206,18 +237,40 @@ def _compact(snapshot, width, path):
 
 
 class AttentionTreeTransaction:
-    def __init__(self, cache, snapshot, width, *, protocol, token):
+    def __init__(self, cache, snapshot, width, *, protocol, token, parents=None):
         self.cache, self.snapshot, self.width = cache, snapshot, int(width)
+        self.parents = None if parents is None else tuple(parents)
         self.closed = False
         self.executor_cached = False
         self.physical_packed = False
         self.provider_protocol, self.provider_revision_token = protocol, token
 
+    def validate_path(self, path):
+        if self.closed:
+            raise RuntimeError("attention tree transaction is closed")
+        path = tuple(path)
+        if (
+            not path
+            or any(type(row) is not int or not 0 <= row < self.width for row in path)
+            or path[0] != 0
+            or any(left >= right for left, right in zip(path, path[1:]))
+            or (self.parents is not None and any(
+                self.parents[row] != parent
+                for parent, row in zip((-1, *path[:-1]), path)
+            ))
+        ):
+            raise ValueError("attention tree publication needs one root-connected path")
+        return path
+
     def commit_paths(self, paths):
         if self.closed or len(paths) != 1:
             raise RuntimeError("attention tree transaction is single-lane")
+        path = self.validate_path(paths[0])
         try:
-            _compact(self.snapshot, self.width, list(paths[0]))
+            _compact(self.snapshot, self.width, path)
+        except BaseException:
+            _restore(self.snapshot)
+            raise
         finally:
             self.closed = True
         return [self.cache]
@@ -244,10 +297,19 @@ class AttentionTreeCohortTransaction:
     def commit_paths(self, paths):
         if self.closed or len(paths) != len(self.transactions):
             raise RuntimeError("attention tree cohort path count mismatch")
+        # Validate every owner before publishing any lane. If a later
+        # compaction fails, earlier lanes must return to their original state.
+        paths = [transaction.validate_path(path)
+                 for transaction, path in zip(self.transactions, paths, strict=True)]
         caches = []
         try:
-            for transaction, path in zip(self.transactions, paths):
+            for transaction, path in zip(self.transactions, paths, strict=True):
                 caches.extend(transaction.commit_paths([path]))
+        except BaseException:
+            for transaction in self.transactions:
+                _restore(transaction.snapshot)
+                transaction.closed = True
+            raise
         finally:
             self.closed = True
         return caches
@@ -316,10 +378,17 @@ class AttentionTreeExecutor:
         self.dispatches += 1
         return logits, features, AttentionTreeTransaction(
             cache, snapshot, len(inputs), protocol=self.protocol, token=self.source_revision_token,
+            parents=parents,
         )
 
     def forward_many(self, model, inputs, parents, caches, layers, *, cached, configured_limit):
         self.validate_cohort(len(caches), configured_limit)
+        if len(inputs) != len(caches) or len(parents) != len(caches):
+            raise ValueError("attention tree cohort rows, parents and owners must align")
+        if (len({id(cache) for cache in caches}) != len(caches)
+            or len({id(item) for cache in caches for item in cache})
+            != sum(len(cache) for cache in caches)):
+            raise ValueError("attention tree cohort requires independent cache owners")
         if len({len(row) for row in inputs}) != 1:
             raise ValueError("attention tree cohort requires uniform tile widths")
         outputs, transactions = [], []
@@ -329,20 +398,21 @@ class AttentionTreeExecutor:
                 outputs.append((logits, features))
                 transactions.append(AttentionTreeTransaction(
                     cache, snapshot, len(row), protocol=self.protocol,
-                    token=self.source_revision_token,
+                    token=self.source_revision_token, parents=tree,
                 ))
+            result = (
+                mx.concatenate([logits for logits, _ in outputs], axis=0),
+                mx.concatenate([features for _, features in outputs], axis=0),
+                AttentionTreeCohortTransaction(
+                    transactions, protocol=self.protocol, token=self.source_revision_token,
+                ),
+            )
         except BaseException:
             for transaction in transactions:
                 transaction.abort()
             raise
         self.dispatches += 1
-        return (
-            mx.concatenate([logits for logits, _ in outputs], axis=0),
-            mx.concatenate([features for _, features in outputs], axis=0),
-            AttentionTreeCohortTransaction(
-                transactions, protocol=self.protocol, token=self.source_revision_token,
-            ),
-        )
+        return result
 
     def dispatch_metrics(self, width, transaction, *, cached):
         self.validate_cohort(width, self.maximum_cohort_width)

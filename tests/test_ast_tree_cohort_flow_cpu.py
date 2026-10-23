@@ -312,3 +312,24 @@ def test_cohort_round_stop_and_post_publication_recovery_preserve_private_lanes(
         assert not batch._open
     finally:
         batch.close()
+
+
+
+def test_configured_multilane_cap_trains_tree_tuner_with_actual_response_headroom():
+    _draft, batch, lanes = _cohort()
+    batch.multilane_draft_cap = 4
+    try:
+        before = {lane.uid: (lane.generated, lane.accepted,
+                            dict(getattr(lane, "ast_tree_tiles_receipt", {})),
+                            lane.maximum - lane.generated)
+                  for lane in lanes}
+        batch._run_round(lanes)
+        batch._observe_ast_tree_round(lanes, before, 0.1)
+        for lane in lanes:
+            plan = lane.ast_tree_source_plan
+            assert plan.source_depth_limit == 4 and plan.depth == 4
+            assert not plan.terminal_censored
+            assert lane.ast_tree_tuning["cost_samples"] == 1
+            assert "terminal" not in lane.ast_tree_tuning["skipped"]
+    finally:
+        batch.close()

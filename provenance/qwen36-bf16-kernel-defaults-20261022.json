@@ -1,0 +1,22 @@
+{
+  "schema": "mlx2.original-implementation-provenance.v1",
+  "source": {
+    "repository": "mlx2",
+    "revision": "e62d5aaa980ba8b4ebf3b021e08cf320ed3f1ecd",
+    "external_implementation_mined": false,
+    "license": "Existing per-file licenses retained",
+    "paths": [
+      "src/mlx2/adapters/qwen36_35b.py"
+    ]
+  },
+  "modifications": [
+    "Inspect known expert projection metadata before selecting affine MoE defaults. With no affine expert tables, leave NAX gather, routed decode and its top-k fold off; retain applicable GDN defaults.",
+    "Reject explicit affine-kernel requests for such artifacts before model loading or process-global claims; expose skipped defaults in adapter diagnostics. No model-name branches.",
+    "Gate implicit fused GDN selections on loaded compute/parameter dtypes; preserve F32 state parameters and select stock when no layer can engage. Explicit incompatible policy selections fail closed.",
+    "The routed default top-k bundle steps aside with affine routed decode; explicitly selected standalone BF16 top-k routing remains available."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

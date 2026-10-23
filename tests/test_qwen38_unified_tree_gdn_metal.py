@@ -115,11 +115,36 @@ def test_tree_pre_matches_served_eager_prework_on_a_silu_value_sweep():
         _equal(left, right, f"gdn_pre {name} (sweep)")
 
 
-def test_owned_tree_backend_matches_served_eager_ops_all_operations():
+@pytest.mark.parametrize("packed", [False, True])
+def test_mixed_f32_norm_tree_post_matches_ordinary(packed):
+    from mlx2.runtime import qwen38_tensorfold
+    from mlx2.runtime.models.qwen3_next import Qwen3NextRMSNormGated
+    from mlx2.runtime.tensorfold_qwen38 import lane_fuse, lane_glue
+
+    qwen38_tensorfold._install_owned_gdn()
+    rows = 4
+    y = _draw((1, rows, NV, DV), 9161, scale=2.0)
+    z = _draw((1, rows, NV * DV), 9162, scale=3.0)
+    norm = Qwen3NextRMSNormGated(DV)
+    norm.weight = mx.linspace(0.897123, 1.271236, DV)
+    weight_bits = norm.weight.view(mx.uint32)
+    expected = norm(y, z.reshape(y.shape)).reshape(1, rows, NV * DV)
+    if packed:
+        z = mx.concatenate([z, mx.zeros((1, rows, 2 * NV), dtype=mx.bfloat16)], -1)
+    actual = (lane_fuse if packed else lane_glue).gdn_post(y, z, norm.weight, norm.eps)
+    _equal(actual, expected, "mixed GDN post")
+    _equal(norm.weight.view(mx.uint32), weight_bits, "preserved F32 norm")
+
+
+@pytest.mark.parametrize("mixed_f32", [False, True])
+def test_owned_tree_backend_matches_served_eager_ops_all_operations(mixed_f32):
     rows = sum(len(p) for p in PARENTS)
     qkv = _draw((1, rows, C), 1, scale=1.0)
     weight = _draw((C, TAPS, 1), 3, scale=0.5)
     zba, states, a_log, dt_bias = _inputs(qkv)
+    if mixed_f32:
+        a_log = mx.linspace(-1.912345, 0.987654, NV)
+        dt_bias = mx.linspace(-0.712345, 0.934567, NV)
     recurrent = [_draw((1, NV, DV, DK), 20 + lane, mx.float32) for lane in range(len(PARENTS))]
 
     pre = _run_pre(qkv, weight, zba, states, a_log, dt_bias)

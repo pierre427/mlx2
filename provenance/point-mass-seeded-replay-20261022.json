@@ -1,0 +1,22 @@
+{
+  "component": "Proposal-independent seeded sampling for typed point-mass drafts",
+  "date": "2026-10-22",
+  "source_repository": "local mlx2",
+  "source_revision": "4dc20f67bf076c7aa00505f7cc0434d0d95fc556",
+  "source_paths": [
+    "src/mlx2/runtime/speculative_sampling.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/adapters/external_draft_policy.py"
+  ],
+  "license": "MIT; original mlx2 implementation",
+  "modifications": [
+    "For typed deterministic point-mass proposals, sample each reachable target law once and accept a proposal only when that target sample equals it",
+    "Stop at the first mismatch; unvisited target rows remain provisional and consume no RNG draws",
+    "Retain general rejection/residual verification for stochastic proposal laws",
+    "Bind the new verifier law into external route/cache identity so prior RNG snapshots cannot silently cross the change"
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

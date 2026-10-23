@@ -525,3 +525,36 @@ def test_reprobe_declines_shape_that_cannot_beat_primary_even_if_perfect():
     ]
     assert all(row.reason != "bounded_reprobe" for row in probed)
     assert all(row.branches == 1 for row in probed)
+
+
+@pytest.mark.parametrize("samples", [
+    ((1, 0.01), (2, 0.02), (3, 0.03)),
+    ((1, 0.01), (3, 0.03), (4, 0.04)),
+    ((1, 0.04), (2, 0.02), (3, 0.03), (4, 0.05)),
+])
+def test_equal_geometry_priors_merge_before_receipt_slopes_and_extrapolation(samples):
+    p = planner(profile(row_costs=(1.0, 1.0, 2.0, 2.0) + (3.0,) * 28, launch_cost=0))
+    for _ in range(LAUNCH_FIT_MIN_SAMPLES):
+        for rows, seconds in samples:
+            cost = p.profile.cost((rows,), (0,))
+            p.observe_launch(LaunchPlan((0,), 3, (rows,), cost, cost, cost, 1,
+                                        p.profile.backend, (0,)), seconds)
+    curve = p.receipt()["launch_curve"]
+    assert curve is not None
+    assert all(a["prior"] < b["prior"] for a, b in zip(curve, curve[1:]))
+    assert sum(point["samples"] for point in curve) == len(samples) * LAUNCH_FIT_MIN_SAMPLES
+    assert math.isfinite(p.cost((5,), (0,)))
+    assert math.isfinite(p._curve_seconds(10.0))
+
+
+
+def test_equal_nonbinary_priors_keep_exact_abscissa_with_unequal_bucket_weights():
+    p = planner(profile(row_costs=(0.1, 0.1, 0.1, 1.0) + (2.0,) * 28, launch_cost=0))
+    for rows, count in ((1, 4), (2, 8), (3, 12), (4, 4)):
+        cost = p.profile.cost((rows,), (0,))
+        for _ in range(count):
+            p.observe_launch(LaunchPlan((0,), 3, (rows,), cost, cost, cost, 1,
+                                        p.profile.backend, (0,)), rows * 0.01)
+    curve = p.receipt()["launch_curve"]
+    assert [point["prior"] for point in curve] == [0.1, 1.0]
+    assert curve[0]["samples"] == 24

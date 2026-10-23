@@ -221,6 +221,8 @@ def commit_streams(caches, records, paths, widths, starts):
                 if leaf == "lane_tree"
                 else lane_multi_source
                 if leaf == "lane_multi"
+                else "def gdn_post(*args, **kwargs):\n    raise AssertionError('synthetic tree fixture must not execute GDN math')\n"
+                if leaf in {"lane_glue", "lane_fuse"}
                 else ""
             )
             (base / f"{leaf}.py").write_text(source)

@@ -82,6 +82,10 @@ def _install_owned_gdn(source_root: Path | None = None) -> None:
             "TensorFold GDN glue module was not imported from the validated source"
         )
     lane_glue.gdn_pre = owned.gdn_pre_split
+    lane_fuse = importlib.import_module(f"{package}.lane_fuse")
+    if not Path(lane_fuse.__file__).resolve().is_relative_to(expected):
+        raise RuntimeError("TensorFold GDN fuse was not imported from the validated source")
+    owned.install_mixed_post_hooks(lane_glue, lane_fuse)
 
 
 def gdn_backend_stats() -> dict:

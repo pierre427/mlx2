@@ -1,0 +1,20 @@
+{
+  "component": "Qwen3.6 AST fixed numerical geometry defaults",
+  "source_repository": "local mlx2",
+  "source_revision": "d93433bf2fa6a84b3a03acd8b730661902a67285",
+  "source_paths": [
+    "src/mlx2/adapters/qwen36_35b.py",
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/runtime/cost_per_commit_handoff.py"
+  ],
+  "license": "MIT; original mlx2 policy wiring",
+  "modifications": [
+    "Select fixed AST tile rows and disable timing-based cost switching through adapter-owned numerical defaults",
+    "Keep explicit opt-ins, other adapters and native-MTP default behavior unchanged",
+    "Use existing tensor math; bind effective options into existing external route/cache identity"
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

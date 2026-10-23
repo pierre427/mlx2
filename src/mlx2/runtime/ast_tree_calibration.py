@@ -85,19 +85,25 @@ def fit_logistic(xs, ys, alpha=0.0, beta=1.0, *, iters=4, lam=1.0):
     return a, b
 
 
-def tree_records(parents, depths, log_qs, commit_rows):
+def tree_records(parents, depths, log_qs, commit_rows, *, accepted_rows=None):
     """Calibration trials of one verified tree.
 
     ``parents`` index the tree's nodes (-1: the anchor), ``commit_rows`` are
     verify rows (row 0 the anchor, row ``i + 1`` node ``i``).  Every node
-    whose parent was accepted is a trial; its outcome is its own acceptance.
+    whose parent row was evaluated is a trial; its outcome is its own
+    acceptance. ``accepted_rows`` may additionally name a confirmed terminal
+    child whose input state was never committed or evaluated. Its descendants
+    are censored rather than recorded as failed trials.
     """
 
-    accepted = {int(row) - 1 for row in commit_rows if int(row) > 0}
+    evaluated = {int(row) - 1 for row in commit_rows if int(row) > 0}
+    accepted = evaluated if accepted_rows is None else {
+        int(row) - 1 for row in accepted_rows if int(row) > 0
+    }
     records = []
     for node, parent in enumerate(parents):
         parent = int(parent)
-        if parent >= 0 and parent not in accepted:
+        if parent >= 0 and parent not in evaluated:
             continue
         records.append((int(depths[node]), float(log_qs[node]), node in accepted))
     return records

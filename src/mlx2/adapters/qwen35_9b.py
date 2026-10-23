@@ -525,12 +525,14 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         # The 27B's always-present speculation fields do not apply (no MTP
         # or draft route), so the default receipt is unchanged.  Nor does
         # ``external_mtp_head``: the attach hook is read from Qwen3.8's own
-        # class __dict__, so a Qwen3.5 target can never carry one.
+        # class __dict__, so a Qwen3.5 target can never carry one. Typed
+        # external artifact bindings also do not apply: external drafts are refused.
         result = {
             key: value
             for key, value in super().diagnostics().items()
             if key not in (
                 "speculation", "segmented_mtp", "norm_convention", "external_mtp_head",
+                "artifact_binding",
             )
         }
         result.update({

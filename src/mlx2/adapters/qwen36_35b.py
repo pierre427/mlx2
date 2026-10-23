@@ -7,6 +7,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import ClassVar
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..process_env import (
@@ -41,6 +42,14 @@ CACHE_LAYOUT = "qwen36-35b-a3b-hybrid-layer-segments-v1"
 # qwen36-width4-vs-width3.json).  Width 4 passed the earlier Qwen3.6
 # 131K/16-GiB handoff campaign for explicitly selected native MTP.
 DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 1
+
+# Operator-selected artifact defaults; other checkpoints retain the family step.
+# Sage-A1.5-MLX-BF16-from-GGUF, Pierre 2026-10-22. Not a qualification claim.
+PREFILL_STEP_BY_ARTIFACT = {
+    "ba62aaf8bbd40762c67b16fa012947b52b5f5e35f8d73d69101d401a0dc27b71": 256,
+    "204ca8991ab03cb1d78066b295185c78ab3b07367f3fc453680fe36d3058c83c": 256,
+    "a2fa43d0942e24f2e0ef3041a7ffe88ae0e4d3f39de56f0f4c8e8c94664b144c": 256,
+}
 
 
 def descriptor_for(*, has_mtp: bool) -> ModelDescriptor:
@@ -305,6 +314,22 @@ MOE_NAX_GATHER_MODES = ("off", "gather", "fused")
 DEFAULT_MOE_NAX_GATHER = "fused"
 
 
+def expert_tables_lack_affine_format(weight_map):
+    """Prove the known expert projections have no affine table consumer.
+
+    Partial metadata without expert projections leaves structural admission
+    to the loader. Quantization metadata alone does not prove table format.
+    """
+    roots = [name[:-len(".weight")] for name in weight_map
+             if name.endswith(".weight") and any(
+                 part in name for part in (".mlp.switch_mlp.", ".mlp.experts.")
+             )]
+    return bool(roots) and not any(
+        root + ".scales" in weight_map and root + ".biases" in weight_map
+        for root in roots
+    )
+
+
 # Decode wins the adapter selects when the execution policy does not name the
 # key, on both routes, since 2026-10-02 (Pierre): greedy tokens identical in
 # every cell on both artifacts, per-call gate 1488/1488 bit-equal; ordinary
@@ -519,6 +544,16 @@ def default_external_policy(policy: dict) -> dict:
 
 
 class Qwen3635BA3BAdapter(Qwen3827BAdapter):
+    # sanitize normalizes only these promoting compute weights. GDN decay
+    # and gated-norm parameters stay F32 and use the owned mixed-dtype path.
+    ast_tree_tile_dtype_contract: ClassVar[dict] = {
+        "normalized_f32_suffixes": (
+            ".input_layernorm.weight", ".post_attention_layernorm.weight",
+            "model.norm.weight", ".q_norm.weight", ".k_norm.weight",
+            ".linear_attn.conv1d.weight",
+        ),
+        "mixed_gdn_f32": True,
+    }
     # Qwen3.6 inherits shared self-MTP machinery from the dense Qwen3.8
     # adapter, but its proposal acceptance distribution has not been measured.
     # Keep an explicitly configured loop available while refusing auto tuning
@@ -634,6 +669,13 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             ),
         )
 
+    # The masked MoE target law is not invariant across tree sizes. Keep
+    # request arithmetic independent of wall-clock feedback by default.
+    native_tree_numerical_defaults: ClassVar[dict] = {
+        "ast_adaptive_rows": False,
+        "cost_per_commit_handoff": False,
+    }
+
     def _init_qwen36(
         self,
         model_path: str,
@@ -663,7 +705,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 raise ValueError("External draft is not native MTP")
             if stream_request is not None:
                 raise ValueError("Qwen3.6 expert streaming refuses the external draft route")
-            self.external_policy = _native_mtp_tree_policy(policy)
+            self.external_policy = _native_mtp_tree_policy(
+                policy, numerical_defaults=self.native_tree_numerical_defaults
+            )
             policy = {}
         elif "draft_model" in policy:
             if require_mtp:
@@ -720,6 +764,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 f"Qwen3.6 moe_nax_gather must be one of {MOE_NAX_GATHER_MODES}"
             )
         self._kernels = {}
+        self._explicit_kernel_choices = frozenset(key for key in KERNEL_POLICY_ENV if key in policy)
         for key in KERNEL_POLICY_ENV:
             if key in policy:
                 self._kernels[key] = validate_kernel_choice(key, policy[key])
@@ -755,6 +800,30 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             )
         self.weight_stream = None
         artifact = inspect_artifact(model_path)
+        self.skipped_affine_moe_defaults = {}
+        if artifact["config"].get("mlx2_exl3") is None and expert_tables_lack_affine_format(artifact["weight_map"]):
+            reason = "expert projections have no affine quantized tables"
+            if moe_nax_explicit and self.moe_nax_gather != "off":
+                raise ValueError(f"moe_nax_gather requires affine expert tables: {reason}")
+            if self.moe_nax_gather != "off":
+                self.skipped_affine_moe_defaults["moe_nax_gather"] = reason
+                self.moe_nax_gather = "off"
+            affine_keys = {"moe_routed_decode", "moe_routed_candidate",
+                           "moe_grouped_rows", *MOE_WINDOW_POLICY_KEYS}
+            for key in affine_keys:
+                if key not in self._kernels or not choice_selected(key, self._kernels[key]):
+                    continue
+                if key in policy:
+                    raise ValueError(f"{key} requires affine expert tables: {reason}")
+                self.skipped_affine_moe_defaults[key] = reason
+                self._kernels.pop(key, None)
+            if "moe_topk_fold" not in policy and self._kernels.get("moe_topk_fold") == "launch":
+                # The measured default is the routed-decode bundle. The
+                # standalone BF16 router remains explicitly selectable.
+                self._kernels.pop("moe_topk_fold")
+                self.skipped_affine_moe_defaults["moe_topk_fold"] = (
+                    "default paired with affine routed decode; standalone selection remains available"
+                )
         if artifact["config"].get("mlx2_exl3") is not None:
             # Trellis packs use their own ordinary projection contract. Only
             # implicit affine defaults step aside; explicit choices fail closed.
@@ -821,6 +890,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             self._record_load_dtype()
             self._select_gdn_state(gdn_state_dtype)
             self._select_routed_candidate()
+            self._gate_fused_gdn_defaults()
             self._select_decode_wins()
             # After every load-time target mutation, before the drafter binds.
             self._select_target_verify_row_exact()
@@ -886,8 +956,31 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             raise
 
     def prefill_step_default(self):
-        """Keep the measured routed-MoE chunk instead of dense autoscaling."""
-        return 2048
+        """Use an artifact preference, otherwise the routed-MoE family chunk."""
+        target = self.identity.get("target_fingerprint", self.identity["fingerprint"])
+        return PREFILL_STEP_BY_ARTIFACT.get(target, 2048)
+
+    def _record_load_dtype(self):
+        super()._record_load_dtype()
+        self.residual_weights_dtype_normalized = getattr(
+            getattr(self.model, "language_model", None),
+            "residual_weight_dtype_normalization", None,
+        )
+        report = self.residual_weights_dtype_normalized
+        if report and report["cast"]:
+            # Precision changes the state law even though the artifact bytes
+            # are unchanged. Keep every serving route out of old namespaces.
+            suffix = f"-residual-{report['to']}-v1"
+            if suffix not in self.layout:
+                self.layout += suffix
+
+    def dtype_diagnostics(self):
+        return {
+            **super().dtype_diagnostics(),
+            "residual_weights_dtype_normalized": getattr(
+                self, "residual_weights_dtype_normalized", None
+            ),
+        }
 
     def continuation_verification_strategy(self):
         """Exact-prefix strategy for an explicitly bound Qwen3.6 pool."""
@@ -901,7 +994,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             shared_prefix_reuse=True,
             state_scope="request_private_exact_qwen36_hybrid_segments",
             qualified=False,
-            cache_layout=CACHE_LAYOUT,
+            cache_layout=self.layout,
             proposal_state="bound_source_only",
             target_state="authoritative_exact",
             routed_experts_per_token=8,
@@ -1185,6 +1278,39 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 raise ValueError(f"moe_routed_candidate refused: {admission.reason}")
             block.set_moe_routed_candidate_mode("two_launch")
 
+    def _gate_fused_gdn_defaults(self):
+        """Select fused GDN only when a loaded layer has its parameter dtypes."""
+        import mlx.core as mx
+
+        from ..runtime.models.qwen36_35b import GatedDeltaNet
+
+        layers = [module for _, module in self.model.named_modules()
+                  if isinstance(module, GatedDeltaNet)]
+        self.skipped_gdn_defaults = {}
+        if not layers:
+            return  # Metadata-only fixtures have no tensor admission evidence.
+        compute = getattr(getattr(self.model, "language_model", None), "compute_dtype", None)
+        if compute is None:
+            return
+        if compute == mx.bfloat16 and any(
+            all(weight.dtype == compute for weight in (
+                layer.conv1d.weight, layer.dt_bias, layer.norm.weight,
+            )) for layer in layers
+        ):
+            return
+        reason = "no GDN layer has BF16 conv/dt_bias/norm weights required by fused kernels"
+        for key in ("fused_gdn_decode", "fused_gdn_batch_decode", "fused_gdn_verify", "fused_gdn_batch_verify"):
+            selected = (self.environment.get(KERNEL_POLICY_ENV[key]) == "1"
+                        if key == "fused_gdn_decode" else self._kernels.get(key, False))
+            if not selected:
+                continue
+            if key in self._explicit_kernel_choices:
+                raise ValueError(f"{key} unavailable: {reason}")
+            self._kernels[key] = False
+            self.environment[KERNEL_POLICY_ENV[key]] = "0"
+            os.environ[KERNEL_POLICY_ENV[key]] = "0"
+            self.skipped_gdn_defaults[key] = reason
+
     def _select_decode_wins(self):
         # Live setters make the selection independent of import-time latches.
         from ..runtime.models.qwen36_35b import GatedDeltaNet
@@ -1215,6 +1341,10 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
 
     def diagnostics(self):
         result = super().diagnostics()
+        if getattr(self, "skipped_affine_moe_defaults", None):
+            result["skipped_affine_moe_defaults"] = dict(self.skipped_affine_moe_defaults)
+        if getattr(self, "skipped_gdn_defaults", None):
+            result["skipped_gdn_defaults"] = dict(self.skipped_gdn_defaults)
         from ..runtime.models.switch_layers import moe_pad_reportable, moe_pad_status
 
         pad_status = moe_pad_status()

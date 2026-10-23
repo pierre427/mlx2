@@ -595,6 +595,7 @@ class MultiLoRAManager:
                 "enabled": True,
                 **self.settings(),
                 "registered": sorted(self.registry),
+                "registered_fingerprints": {name: self.registry[name].fingerprint for name in sorted(self.registry)},
                 "resident": {
                     str(slot): name for slot, name in self.resident.items()
                 },

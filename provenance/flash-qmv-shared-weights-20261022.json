@@ -1,0 +1,29 @@
+{
+  "source_repository": "https://github.com/ashhart/TensorFold.git",
+  "source_revision": "bb4b4a35863af562fc4ccb2586300d8f94b5d6de",
+  "source_paths": [
+    "src/tensorfold/kernels/qwen/flash_next/v1/kernels.py:_QMV_ROWS,load16,qdot16,qmv_rows"
+  ],
+  "license": "MIT",
+  "notice": "provenance/LICENSE.TensorFold-MIT",
+  "local_source_revision": "63e48f3bec357311e2206799c4c18dbc13dbc85e",
+  "local_source_paths": [
+    "src/mlx2/runtime/models/flash_tensorfold_qmv.py"
+  ],
+  "destination_paths": [
+    "src/mlx2/runtime/models/flash_tensorfold_qmv.py",
+    "src/mlx2/adapters/flash_next_policy.py",
+    "src/mlx2/adapters/flash_next.py",
+    "tests/test_flash_tensorfold_qmv.py"
+  ],
+  "modifications": [
+    "Original mlx2 opt-in candidate processes two activation rows per SIMD group, loading and decoding each quantized weight block once for the pair.",
+    "Preserves the existing per-row dot-product expression order and SIMD reduction; does not copy or repack model weights.",
+    "Retains the existing kernel by default; independently keys the candidate kernel and includes selection in policy/installer receipts.",
+    "Reject combining the generic QMV installer with packed Flash AST before artifact loading; packed AST retains its separately bound projection law."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}
