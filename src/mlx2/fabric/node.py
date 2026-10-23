@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
+import hmac
 import http.client
 import json
 import os
+import re
 import socket
 import ssl
 import tempfile
@@ -16,7 +19,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from . import FabricError
 from .capability import (
@@ -215,6 +218,9 @@ class FabricNode:
         self._local: list[dict] = []
         self._peers: dict[str, _Peer] = {}
         self._join_failures: dict[str, list[float]] = {}
+        self._desktop_token = os.urandom(32).hex()
+        self._desktop_shares: dict[str, dict] = {}
+        self._owner_handle = None
 
     @property
     def actual_front_port(self) -> int:
@@ -231,6 +237,22 @@ class FabricNode:
     def start(self) -> FabricNode:
         if self.community is not None:
             return self
+        load_community(self.home)  # Validate admission before creating an owner lock.
+        descriptor = os.open(self.home / "node-owner.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        handle = os.fdopen(descriptor, "a")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            raise FabricError("community identity already has a live node owner") from None
+        self._owner_handle = handle
+        try:
+            return self._start_owned()
+        except BaseException:
+            self.close()
+            raise
+
+    def _start_owned(self) -> FabricNode:
         self.community = load_community(self.home)
         self._addresses = allowed_addresses(self.include_loopback)
         if not self._addresses:
@@ -267,7 +289,108 @@ class FabricNode:
         self._last_address_scan = time.monotonic()
         self._maintenance = threading.Thread(target=self._maintain, daemon=True)
         self._maintenance.start()
+        self._write_desktop_descriptor()
         return self
+
+    def _write_desktop_descriptor(self):
+        import psutil
+
+        from .registry import _atomic_json
+        assert self.community is not None
+        _atomic_json(self.home / "desktop-control.json", {
+            "version": 1, "pid": os.getpid(), "created": psutil.Process(os.getpid()).create_time(),
+            "url": f"http://{self.front_host if self.front_host != '::1' else '[::1]'}:{self.actual_front_port}",
+            "nid": self.community.nid, "community_id": self.community.community_id,
+            "token": self._desktop_token})
+
+    def _desktop_set_shares(self, client_id, entries):
+        from .registry import pid_alive
+        if not isinstance(client_id, str) or not re.fullmatch(r"[a-f0-9]{32}", client_id):
+            raise ValueError("Invalid desktop client identity")
+        if not isinstance(entries, list) or len(entries) > 128:
+            raise ValueError("Desktop shares must be a bounded list")
+        checked = []
+        for item in entries:
+            if not isinstance(item, dict) or set(item) != {"url", "pid", "api_key_file"}:
+                raise ValueError("Invalid desktop share fields")
+            parsed = urlsplit(item["url"])
+            if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"} or not parsed.port or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+                raise ValueError("Desktop shares must identify loopback inference servers")
+            if type(item["pid"]) is not int or not pid_alive(item["pid"]):
+                raise ValueError("Desktop share process is not running")
+            if item["api_key_file"] is not None:
+                from mlx2.http_security import load_secret_file
+                load_secret_file(item["api_key_file"], flag="Desktop share API key")
+            checked.append(dict(item))
+        with self._lock:
+            previous = self._desktop_shares.get(client_id)
+            changed = (previous["entries"] if previous else []) != checked
+            if checked:
+                self._desktop_shares[client_id] = {"expires": time.monotonic() + 30, "entries": checked}
+            else:
+                self._desktop_shares.pop(client_id, None)
+            if changed:
+                self._last_local_poll = 0.0
+        return {"shared": len(checked), "lease_seconds": 30}
+
+    def _desktop_open(self, nid, model, method, path, payload=None):
+        if not isinstance(nid, str) or not isinstance(model, str) or len(model) > 2048:
+            raise ValueError("Invalid exact node/model target")
+        if method == "GET" and path not in {"/metrics", "/v1/status", "/v1/status/batching"} or method == "POST" and path not in {"/v1/chat/completions", "/tokenize"} or method not in {"GET", "POST"}:
+            raise ValueError("Unsupported desktop request path")
+        body = None
+        if method == "POST":
+            if not isinstance(payload, dict):
+                raise ValueError("Inference body must be an object")
+            payload = {**payload, "model": model}
+            body = canonical_json(payload)
+            if len(body) > 64 * 1024 * 1024:
+                raise ValueError("Inference body exceeds 64 MiB")
+        assert self.community is not None
+        if nid == self.community.nid:
+            entry = self._local_map().get(model)
+            if entry is None:
+                raise ValueError("Exact local model is not shared")
+            if method == "POST":
+                return self._open_local(path, body, model)
+            parsed = urlsplit(entry["server_url"])
+            connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+            connection = connection_type(parsed.hostname, parsed.port, timeout=5)
+            server = next((s for s in self._servers() if s["url"].rstrip("/") == entry["server_url"].rstrip("/")), None)
+            key = _api_key(server.get("api_key_file")) if server else None
+            headers = {"Authorization": "Bearer " + key} if key else {}
+            connection.request("GET", path, headers=headers)
+        else:
+            with self._lock:
+                peer = self._peers.get(nid)
+                if peer is None or peer.state != "alive" or model not in self._peer_view(peer).models:
+                    raise ValueError("Exact peer/model is unavailable")
+            connection = self._connect(peer, operation_timeout_s=600 if method == "POST" else 5)
+            if method == "GET":
+                from urllib.parse import urlencode
+                connection.request("GET", "/fabric/desktop/telemetry?" + urlencode({"model": model, "path": path}))
+            else:
+                connection.request("POST", "/fabric" + path, body=body, headers={"Content-Type": "application/json"})
+        try:
+            return connection, connection.getresponse()
+        except BaseException:
+            connection.close()
+            raise
+
+    @staticmethod
+    def _desktop_stream(handler, connection, response):
+        try:
+            handler.send_response(response.status)
+            handler.send_header("Content-Type", response.getheader("Content-Type", "application/json"))
+            handler.send_header("Transfer-Encoding", "chunked")
+            handler.end_headers()
+            while chunk := response.read1(64 << 10):
+                handler.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                handler.wfile.flush()
+            handler.wfile.write(b"0\r\n\r\n")
+            handler.wfile.flush()
+        finally:
+            connection.close()
 
     def _bind_fabric(self, address: str) -> _Server:
         assert self.community is not None
@@ -338,7 +461,9 @@ class FabricNode:
             self._advertiser = None
         for server in [*self._fabric_servers, self._front_server]:
             if server is not None:
-                server.shutdown()
+                thread = self._server_threads.get(id(server))
+                if thread is not None and thread.is_alive():
+                    server.shutdown()
                 server.server_close()
         if (
             self._maintenance is not None
@@ -349,10 +474,24 @@ class FabricNode:
             thread.join(timeout=2)
         self._fabric_servers.clear()
         self._front_server = None
+        descriptor = self.home / "desktop-control.json"
+        try:
+            if json.loads(descriptor.read_text()).get("token") == self._desktop_token:
+                descriptor.unlink()
+        except (OSError, ValueError):
+            pass
         self.community = None
+        if self._owner_handle is not None:
+            self._owner_handle.close()
+            self._owner_handle = None
 
     def _servers(self) -> list[dict]:
         servers = list_local_servers(self.home)
+        with self._lock:
+            now = time.monotonic()
+            for identity in [k for k, value in self._desktop_shares.items() if value["expires"] <= now]:
+                self._desktop_shares.pop(identity, None)
+            servers.extend(dict(entry) for value in self._desktop_shares.values() for entry in value["entries"])
         for value in self.extra_local_servers:
             if isinstance(value, str):
                 servers.append(
@@ -1374,7 +1513,7 @@ class FabricNode:
         handler.send_header("X-Mlx2-Fabric-Route", _b64(canonical_json(receipt)))
         handler.end_headers()
         try:
-            while chunk := response.read(64 << 10):
+            while chunk := response.read1(64 << 10):
                 self._write_chunk(handler, chunk)
             handler.wfile.write(b"0\r\n\r\n")
             handler.wfile.flush()
@@ -1419,6 +1558,31 @@ class FabricNode:
                 verdict = self._peer_verdict()
                 if not verdict.ok:
                     node._json_response(self, 403, {"error": verdict.reason})
+                    return
+                if urlsplit(self.path).path == "/fabric/desktop/telemetry":
+                    query = parse_qs(urlsplit(self.path).query)
+                    model = (query.get("model") or [""])[0]
+                    path = (query.get("path") or [""])[0]
+                    if path not in {"/metrics", "/v1/status", "/v1/status/batching"}:
+                        node._json_response(self, 400, {"error": "unsupported telemetry route"})
+                        return
+                    entry = node._local_map().get(model)
+                    if entry is None:
+                        node._json_response(self, 404, {"error": "model not shared"})
+                        return
+                    server = next((s for s in node._servers() if s["url"].rstrip("/") == entry["server_url"].rstrip("/")), None)
+                    from mlx2.inference_monitor import _get
+                    try:
+                        output = _get(entry["server_url"], path,
+                                      _api_key(server.get("api_key_file")) if server else None, 5)
+                    except (OSError, ValueError):
+                        node._json_response(self, 502, {"error": "telemetry unavailable"})
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain" if path == "/metrics" else "application/json")
+                    self.send_header("Content-Length", str(len(output)))
+                    self.end_headers()
+                    self.wfile.write(output)
                     return
                 if self.path == "/fabric/advert":
                     with node._lock:
@@ -1512,6 +1676,7 @@ class FabricNode:
                 if self.path in {
                     "/fabric/v1/chat/completions",
                     "/fabric/v1/completions",
+                    "/fabric/tokenize",
                 }:
                     model = ""
                     try:
@@ -1546,7 +1711,7 @@ class FabricNode:
                             self.send_header("Transfer-Encoding", "chunked")
                             self.end_headers()
                             try:
-                                while chunk := local_response.read(64 << 10):
+                                while chunk := local_response.read1(64 << 10):
                                     node._write_chunk(self, chunk)
                                 self.wfile.write(b"0\r\n\r\n")
                                 self.wfile.flush()
@@ -1645,11 +1810,38 @@ class FabricNode:
 
     def _front_handler(self):
         node = self
+        from mlx2.http_security import GateRejection, authorize, policy_for_bind
+        policy = policy_for_bind("127.0.0.1")
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
+            def _gate(self):
+                try:
+                    authorize(policy, self.command, self.path, self.headers,
+                              local_address=self.connection.getsockname()[0])
+                    return True
+                except GateRejection as error:
+                    self.close_connection = True
+                    node._json_response(self, error.status, error.payload(), error.headers)
+                    return False
+
+            def _desktop_gate(self):
+                if self.headers.get("Origin") or not hmac.compare_digest(self.headers.get("Authorization", "").encode("utf-8"), ("Bearer " + node._desktop_token).encode("utf-8")):
+                    self.close_connection = True
+                    node._json_response(self, 403, {"error": "private desktop authorization required"})
+                    return False
+                return True
+
             def do_GET(self):
+                if not self._gate():
+                    return
+                if self.path == "/v1/fabric/desktop/state":
+                    if not self._desktop_gate():
+                        return
+                    node._json_response(self, 200, {"version": 1, "nid": node.community.nid,
+                        "community_id": node.community.community_id, "nodes": node._nodes()})
+                    return
                 if self.path == "/v1/models":
                     entries = [
                         {
@@ -1702,6 +1894,34 @@ class FabricNode:
                 node._json_response(self, 404, {"error": "not found"})
 
             def do_POST(self):
+                if not self._gate():
+                    return
+                if self.path in {"/v1/fabric/desktop/shares", "/v1/fabric/desktop/request"}:
+                    if not self._desktop_gate():
+                        return
+                    streaming_started = False
+                    try:
+                        length = int(self.headers.get("Content-Length", "0"))
+                        if not 0 < length <= 65 * 1024 * 1024:
+                            raise ValueError("Invalid desktop body length")
+                        body = json.loads(self.rfile.read(length))
+                        if not isinstance(body, dict):
+                            raise TypeError("Desktop body must be an object")
+                        if self.path.endswith("/shares"):
+                            if set(body) != {"client_id", "entries"}:
+                                raise ValueError("Invalid share request")
+                            node._json_response(self, 200, node._desktop_set_shares(body["client_id"], body["entries"]))
+                        else:
+                            if set(body) != {"nid", "model", "method", "path", "body"}:
+                                raise ValueError("Invalid desktop request")
+                            connection, response = node._desktop_open(body["nid"], body["model"], body["method"], body["path"], body["body"])
+                            streaming_started = True
+                            node._desktop_stream(self, connection, response)
+                    except (OSError, ValueError, TypeError, KeyError, FabricError, http.client.HTTPException):
+                        self.close_connection = True
+                        if not streaming_started:
+                            node._json_response(self, 400, {"error": "desktop request refused"})
+                    return
                 if self.path not in {"/v1/chat/completions", "/v1/completions"}:
                     node._json_response(self, 404, {"error": "not found"})
                     return

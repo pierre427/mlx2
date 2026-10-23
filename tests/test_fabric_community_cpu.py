@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import socket
@@ -7,6 +8,7 @@ import ssl
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -183,9 +185,9 @@ def test_forged_admissions_are_rejected(tmp_path):
     valid = admission_entries(first)[-1]
 
     tampered = copy.deepcopy(valid)
-    raw = bytearray(tampered["signature"].encode())
-    raw[-2] = ord("A") if raw[-2] != ord("A") else ord("B")
-    tampered["signature"] = raw.decode()
+    raw = bytearray(base64.b64decode(tampered["signature"], validate=True))
+    raw[-1] ^= 1
+    tampered["signature"] = base64.b64encode(raw).decode("ascii")
     result = merge_admission_log(second, [tampered])
     assert result["added"] == 0
     assert result["rejected"][0]["reason"] == "invalid admission signature"
@@ -209,6 +211,55 @@ def test_forged_admissions_are_rejected(tmp_path):
     result = merge_admission_log(second, [forged])
     assert result["added"] == 0
     assert result["rejected"][0]["reason"] == "admitter not admitted"
+
+
+@pytest.mark.parametrize("canonical,alias", [("YQ==", "YR=="), ("YWI=", "YWJ="), ("YWJj", "YWJj=")])
+def test_signature_verification_rejects_noncanonical_base64(tmp_path, monkeypatch, canonical, alias):
+    # Both pad-bit forms pass validate=True; redundant-padding handling
+    # differs by Python version. Stub only cryptography, leaving decoding real.
+    assert base64.b64decode(alias) == base64.b64decode(canonical, validate=True)
+    if canonical.endswith("="):
+        assert base64.b64decode(alias, validate=True) == base64.b64decode(canonical, validate=True)
+    calls = []
+
+    def checked(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(community_module.subprocess, "run", checked)
+    monkeypatch.setattr(community_module, "_run", lambda *args, **kwargs: b"public key")
+    arguments = ("certificate", b"payload")
+    assert community_module.verify(*arguments, canonical, ca_cert=tmp_path / "ca.pem")
+    assert len(calls) == 2
+    assert not community_module.verify(*arguments, alias, ca_cert=tmp_path / "ca.pem")
+    assert len(calls) == 2  # Reject the alias before invoking cryptography.
+
+
+def test_admission_signature_alias_does_not_create_another_log_identity(tmp_path):
+    first = create_community(tmp_path / "first")
+    second, _ = _join(first, tmp_path / "second")
+    _, csr = make_csr(tmp_path / "third")
+    admit(first, csr)
+    valid = admission_entries(first)[-1]
+    assert merge_admission_log(second, [valid]) == {"added": 1, "rejected": []}
+    before = admission_entries(second)
+
+    signature = valid["signature"]
+    if signature.endswith("="):
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        last = len(signature.rstrip("=")) - 1
+        alias = signature[:last] + alphabet[alphabet.index(signature[last]) | 1] + signature[last + 1:]
+    else:
+        alias = signature + "="
+    assert alias != signature
+    assert base64.b64decode(alias) == base64.b64decode(signature, validate=True)
+    alternate = {**valid, "signature": alias}
+    assert community_module._entry_digest(alternate) != community_module._entry_digest(valid)
+
+    result = merge_admission_log(second, [alternate])
+    assert result["added"] == 0
+    assert result["rejected"][0]["reason"] == "invalid admission signature"
+    assert admission_entries(second) == before
 
 
 def test_revocation_by_unadmitted_signer_is_rejected(tmp_path):

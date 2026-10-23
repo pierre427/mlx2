@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 import time
@@ -23,7 +24,10 @@ import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+import psutil
 
 _SAMPLE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{(.*)\})?\s+(\S+)")
 _LABEL = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"')
@@ -406,12 +410,65 @@ def parse_lsof_listeners(
     return tuple(sorted(result.values(), key=lambda endpoint: endpoint.url))
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def local_server_api_key(endpoint: ServerEndpoint) -> str | None:
+    """Resolve auth for a fresh, same-user loopback listener only.
+
+    Credentials stay out of endpoint/readout dataclasses and are never cached.
+    Explicit URLs without a discovered PID cannot opt into local credential reads.
+    """
+    from .http_security import load_secret_file
+
+    parsed = urllib.parse.urlsplit(endpoint.url)
+    if (
+        not endpoint.discovered
+        or endpoint.pid is None
+        or parsed.scheme != "http"
+        or not _is_loopback(endpoint.url)
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    if not any(
+        fresh.url == endpoint.url and fresh.pid == endpoint.pid
+        for fresh in discover_servers()
+    ):
+        return None
+    process = psutil.Process(endpoint.pid)
+    if process.uids().real != os.getuid():
+        return None
+    args = process.cmdline()
+    for index, argument in enumerate(args):
+        flag, _, inline = argument.partition("=")
+        if flag not in {"--api-key-file", "--api-key-env"}:
+            continue
+        value = inline or (args[index + 1] if index + 1 < len(args) else "")
+        if not value:
+            return None
+        if flag == "--api-key-env":
+            return process.environ().get(value)
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = Path(process.cwd()) / path
+        return load_secret_file(path, flag="--api-key-file")
+    return None
+
+
 def _get(url: str, path: str, api_key: str | None, timeout: float) -> bytes:
     headers = {"Accept": "application/json, text/plain"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(url.rstrip("/") + path, headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    # A redirect must never forward a discovered server's private credential.
+    opener = urllib.request.build_opener(_NoRedirect())
+    with opener.open(request, timeout=timeout) as response:
         return response.read()
 
 
@@ -497,11 +554,24 @@ class InferenceCollector:
 
     def _sample_one(self, endpoint: ServerEndpoint) -> ServerReading:
         state = self._states.setdefault(endpoint.url, _ServerState())
+        api_key = self.api_key
         try:
+            try:
+                raw = _get(endpoint.url, "/metrics", api_key, self.timeout_seconds)
+            except urllib.error.HTTPError as error:
+                if error.code != 401 or api_key is not None:
+                    raise
+                try:
+                    api_key = local_server_api_key(endpoint)
+                except (OSError, ValueError, psutil.Error):
+                    # Never include credential paths, values or process environment
+                    # in a public reading when local resolution is unavailable.
+                    api_key = None
+                if not api_key:
+                    raise
+                raw = _get(endpoint.url, "/metrics", api_key, self.timeout_seconds)
             metrics = Metrics.parse(
-                _get(endpoint.url, "/metrics", self.api_key, self.timeout_seconds).decode(
-                    "utf-8", "replace"
-                )
+                raw.decode("utf-8", "replace")
             )
         except (OSError, ValueError) as error:
             state.history.clear()
@@ -513,7 +583,7 @@ class InferenceCollector:
         batching = None
         try:
             batching = json.loads(
-                _get(endpoint.url, "/v1/status/batching", self.api_key, self.timeout_seconds)
+                _get(endpoint.url, "/v1/status/batching", api_key, self.timeout_seconds)
             )
         except (OSError, ValueError):
             batching = None
@@ -521,7 +591,7 @@ class InferenceCollector:
         if state.status_at is None or now - state.status_at >= self.status_every_seconds:
             try:
                 state.status = json.loads(
-                    _get(endpoint.url, "/v1/status", self.api_key, 2 * self.timeout_seconds)
+                    _get(endpoint.url, "/v1/status", api_key, 2 * self.timeout_seconds)
                 )
                 state.status_error = None
             except (OSError, ValueError) as error:

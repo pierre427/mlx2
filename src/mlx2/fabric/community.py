@@ -503,7 +503,14 @@ def _verify_at(
     attime: float | None,
 ) -> bool:
     try:
+        if not isinstance(signature_b64, str):
+            return False
         signature = base64.b64decode(signature_b64, validate=True)
+        # Strict decoding still permits nonzero pad bits. Log digests
+        # include this text, so reject byte-equivalent
+        # aliases instead of giving one signed entry multiple identities.
+        if base64.b64encode(signature).decode("ascii") != signature_b64:
+            return False
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             cert = root / "cert.pem"

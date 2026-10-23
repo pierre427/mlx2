@@ -1,0 +1,23 @@
+{
+  "schema": "mlx2.original-implementation-provenance.v1",
+  "source": {
+    "repository": "mlx2",
+    "revision": "3856a9db61a959934fae3e1ec66aa721e0f639ff",
+    "external_implementation_mined": false,
+    "license": "Apache-2.0"
+  },
+  "modifications": [
+    "Require canonical padded Base64 strings at the shared signature verification boundary; reject equivalent pad-bit encodings before certificate or signature verification.",
+    "Preserve one textual signature identity for admission and revocation digests, capability adverts, and serve receipts.",
+    "Tamper decoded signature bytes deterministically in the forged-admission regression.",
+    "Cover both ignored-pad-bit forms, redundant padding, canonical acceptance, and rejection of a duplicate admission identity encoded with an equivalent signature."
+  ],
+  "source_sha256": {
+    "src/mlx2/fabric/community.py": "d2059f957fdf1a61a23bea4a45f46dcaccb424e553ffa3cb561e00a39df13608",
+    "tests/test_fabric_community_cpu.py": "06395ab50d90eeb5af33840260e099cbbc1322c5574ef375c60ed0cdcad76960"
+  },
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}
