@@ -1,0 +1,33 @@
+{
+  "component": "Recursive Flint 40B-A2.5B ordinary serving adapter",
+  "source_repository": "https://huggingface.co/RecursiveSI/flint",
+  "source_revision": "2a247be0c0aec895ccb0ac7ca92229ec6df37288",
+  "source_paths": [
+    "config.json",
+    "chat_template.jinja",
+    "model.safetensors.index.json",
+    "sglang/flint_sglang-0.1.4-py3-none-any.whl:flint_sglang/configuration_flint.py",
+    "sglang/flint_sglang-0.1.4-py3-none-any.whl:flint_sglang/model.py",
+    "sglang/flint_sglang-0.1.4-py3-none-any.whl:flint_sglang/reasoning_parser.py",
+    "sglang/flint_sglang-0.1.4-py3-none-any.whl:flint_sglang/tool_parser.py"
+  ],
+  "source_index_sha256": "e5e9c492685f84c8d2d8369f36c74674b03410715f23f6179313f6f1feb90311",
+  "source_wheel_sha256": "f9d1ba4ec8ddfb1d09d386e7995f56732431066587a73e0fb458d80de6e605cb",
+  "license": "Apache-2.0",
+  "notice": "provenance/flint.NOTICE",
+  "modifications": [
+    "ported the released SGLang numerical law to MLX behind a dedicated adapter",
+    "preserved learned attention sinks, QK RMSNorm, RoPE-free full-attention layers, and the 513-token hybrid sliding window",
+    "preserved fp32 sigmoid top-6 routing with renormalized selected weights and an ungated shared expert",
+    "packed per-expert checkpoint tensors into MLX SwitchGLU tables without changing the ordinary decode route",
+    "added strict topology, index closure, shard containment, tokenizer integrity, sampling-default and artifact identity checks",
+    "added exact mixed full/sliding cache construction and APCv2 prefix-reuse geometry checks",
+    "reused mlx2's hardened Laguna parser for Flint's matching arg_key/arg_value tool-call wire format",
+    "kept implementation, qualification, selection and observed use separate",
+    "added an adapter-owned full/sliding cache bound using existing SlidingKVCacheBudget; retained the generic workspace and host reserves, including APC restore snapshots and oversized-prefill accounting"
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

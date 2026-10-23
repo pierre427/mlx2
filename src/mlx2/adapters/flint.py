@@ -362,6 +362,13 @@ def _validate_execution_policy(execution_policy) -> dict:
         return {}
     if not isinstance(execution_policy, dict):
         raise TypeError("Flint execution policy must be an object")
+    if "fused_decode" in execution_policy:
+        from ..runtime.models.flint_fused import MODE
+        if set(execution_policy) != {"fused_decode"}:
+            raise ValueError("Flint fused decode cannot combine with another execution policy")
+        if execution_policy["fused_decode"] not in ("off", MODE):
+            raise ValueError(f"Flint fused_decode must be off or {MODE}")
+        return {}
     from .qwen38_27b import PROMPT_LOOKUP_DRAFT_NAMES, _native_mtp_tree_policy
 
     if execution_policy.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES:
@@ -455,6 +462,8 @@ class FlintAdapter(ExternalDraftAdapterMixin):
         return self.profile
 
     def execution_config(self, *, max_lanes, prefill_step):
+        if getattr(self, "fused_decode", "off") != "off" and max_lanes != 1:
+            raise ValueError("Flint fused decode candidate requires max_lanes=1")
         if getattr(self, "draft_model", None) is not None:
             return self._external_execution_config(
                 max_lanes=max_lanes, prefill_step=prefill_step
@@ -471,6 +480,39 @@ class FlintAdapter(ExternalDraftAdapterMixin):
     def prefill_step_default(self):
         return 512
 
+    def cache_budget(self, *, mtp):
+        """Bound the actual full/sliding K/V, including APC restore windows."""
+        if mtp:
+            raise ValueError("Flint has no native MTP route")
+        from ..runtime.memory_policy import SelfMTPLaneAdmissionController
+        from .mlx_vlm_memory import (
+            SlidingKVCacheBudget,
+            _kv_item_bytes,
+            _mlx2_rotating_checkpoint_policy,
+        )
+
+        config = self.config
+        layers = config["layer_types"]
+        copies, stride = _mlx2_rotating_checkpoint_policy()
+        return SlidingKVCacheBudget(
+            global_layers=layers.count("full_attention"),
+            global_kv_heads=int(config["num_key_value_heads"]),
+            global_head_dim=int(config["head_dim"]),
+            sliding_layers=layers.count("sliding_attention"),
+            sliding_kv_heads=int(config["num_key_value_heads"]),
+            sliding_head_dim=int(config["head_dim"]),
+            sliding_window=int(config["sliding_window"]),
+            prefill_step=self.prefill_step_default(),
+            checkpoint_copies=copies,
+            checkpoint_stride=stride,
+            item_bytes=_kv_item_bytes(config),
+            # Preserve the existing generic workspace allowance. Only replace
+            # its unrelated dense-model K/V growth estimate with our geometry.
+            transient_gib_per_lane=SelfMTPLaneAdmissionController.K2_TRANSIENT_GIB_PER_LANE,
+            transient_basis="provisional generic workspace; Flint not measured",
+            schema="flint-full-sliding-cache-geometry-v1",
+        )._validated()
+
     def __init__(self, model_path: str, *, execution_policy=None):
         from .process_globals import guarded_construction
 
@@ -481,11 +523,16 @@ class FlintAdapter(ExternalDraftAdapterMixin):
 
     def _init_flint(self, model_path: str, *, execution_policy=None):
         external_policy = _validate_execution_policy(execution_policy)
+        self.fused_decode = (execution_policy or {}).get("fused_decode", "off")
         self.external_policy = {}
         self.draft_model = None
         artifact = inspect_artifact(model_path)
         self.identity = artifact["identity"]
         self.config = artifact["config"]
+        if self.fused_decode != "off":
+            from ..runtime.models.flint_fused import validate_config, validate_device
+            validate_config(self.config)
+            validate_device()
         self.layout = CACHE_LAYOUT
         from ..process_env import (
             PROCESS_NUMERICS,
@@ -563,6 +610,9 @@ class FlintAdapter(ExternalDraftAdapterMixin):
         for layer in self.model.layers:
             if hasattr(layer.mlp, "routed_decode"):
                 layer.mlp.routed_decode = self.routed_decode
+        if self.fused_decode != "off":
+            from ..runtime.models.flint_fused import install
+            install(self.model.model)
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -576,7 +626,9 @@ class FlintAdapter(ExternalDraftAdapterMixin):
         )
         self.max_context = int(self.config["max_position_embeddings"])
         if external_policy:
-            from ..runtime.drafters.prompt_lookup_draft import load_prompt_lookup_drafter
+            from ..runtime.drafters.prompt_lookup_draft import (
+                load_prompt_lookup_drafter,
+            )
             from .qwen38_27b import _prompt_lookup_record
 
             self.external_policy = external_policy
@@ -674,7 +726,25 @@ class FlintAdapter(ExternalDraftAdapterMixin):
             "target_forward_observed": getattr(self.model, "completed_forwards", 0) > 0,
             "capability_receipts": self.capability_receipts(),
             "moe_kernels": self.moe_kernel_status(),
+            "fused_decode": self.fused_decode_status(),
         }
+
+    def execution_numerics_contract(self):
+        if getattr(self, "fused_decode", "off") == "off":
+            return None
+        from ..runtime.models.flint_fused import SCHEMA, shader_identity
+        return {"operation": SCHEMA, "mode": self.fused_decode,
+                "shader_sha256": shader_identity(), "scope": "B1 one-token decode",
+                "prefill": "ordinary_reference", "qualified": False}
+
+    def fused_decode_status(self):
+        blocks = getattr(getattr(getattr(self, "model", None), "model", None), "fused_blocks", ())
+        calls = sum(block.calls for block in blocks)
+        return {"implemented": True, "qualified": False,
+                "selected": getattr(self, "fused_decode", "off"),
+                "observed_used": calls > 0, "layer_calls": calls,
+                "scope": "M3 Pro; B1; uniform affine Q4g64 layers; BF16 KV",
+                "numerics": self.execution_numerics_contract()}
 
     def moe_kernel_status(self):
         """Selected and observed expert-kernel use (counters are cumulative)."""

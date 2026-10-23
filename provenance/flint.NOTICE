@@ -1,0 +1,11 @@
+Flint model behavior was ported from the RecursiveSI/flint release at revision
+2a247be0c0aec895ccb0ac7ca92229ec6df37288, including the Apache-2.0
+flint_sglang 0.1.4 wheel embedded in that repository.
+
+flint_sglang builds on SGLang (https://github.com/sgl-project/sglang).
+Copyright 2023-2024 SGLang Team. Licensed under the Apache License, Version 2.0.
+Portions of flint_sglang/model.py are adapted from SGLang and modified.
+
+The mlx2 port is an independent MLX implementation of the documented model
+law. It does not copy the CUDA or FlashAttention-4 kernel patch shipped in the
+source serving kit.

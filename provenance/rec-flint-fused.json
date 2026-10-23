@@ -1,0 +1,25 @@
+{
+  "component": "Flint B1 Q4 fused QKV and routed/shared expert decode candidate",
+  "source_repository": "https://github.com/recursive-oss/rec",
+  "source_revision": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+  "source_paths": [
+    "engine/src/rec_mlx/kernels/megakernel.py:_HEADER,_BODY",
+    "engine/src/rec_mlx/kernels/resident_optimizations.py",
+    "engine/src/rec_mlx/kernels/expert_teams.py"
+  ],
+  "license": "Apache-2.0",
+  "notice": "provenance/rec-flint-fused.LICENSE",
+  "modifications": [
+    "Mined shader arithmetic only; no rec server, scheduler, model loader or prefix-cache engine.",
+    "Independent thread groups fuse RMS/QKV/QK-norm/RoPE, routed and shared gate/up/activation, and down/weighted-combine/residual. No grid barriers, spin loops or mutable kernel inputs.",
+    "Native mlx2 attention, sigmoid/argpartition router, dense first-two-layer MLPs, prefill and canonical APCv2 cache update remain the reference contracts.",
+    "FP32 affine input sums and single-round BF16 RMS output match the mlx2 fork transcription; explicit native top-k order and FP32 weighting preserve Flint combine semantics.",
+    "Own four-layer packed weight banks with aliasing ordinary parameters; bind bounded views of owned allocations using the existing one-expert-view resource-accounting mechanism.",
+    "First slice: BF16 activations/KV, uniform affine INT4g64 layers, B1 one-token decode, M3 Pro only; mixed-bit layers fail closed.",
+    "Failed resident-grid prototypes are retained only in exploratory evidence; no longer part of the runtime."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

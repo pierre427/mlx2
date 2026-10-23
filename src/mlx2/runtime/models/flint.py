@@ -210,15 +210,26 @@ class Decoder(nn.Module):
         self._full = args.layer_types.index("full_attention")
         self._sliding = args.layer_types.index("sliding_attention")
 
-    def __call__(self, inputs, cache=None, capture=None):
+    def __call__(self, inputs, cache=None, capture=None, *, decode=False):
         # The M5 NAX sorted expert gather (bit-identical to the stock sorted
         # kernel) is prefill-only: the trunk forward decides the phase once.
         # A no-op while its mode is off.
         with _moe_nax.forward_scope(inputs, cache):
-            return self._forward(inputs, cache, capture)
+            return self._forward(inputs, cache, capture, decode=decode)
 
-    def _forward(self, inputs, cache, capture):
+    def _forward(self, inputs, cache, capture, *, decode=False):
         hidden = self.embed_tokens(inputs)
+        fused = getattr(self, "fused_blocks", None)
+        if fused and inputs.shape[0] != 1:
+            raise ValueError("Flint fused decode candidate requires B1")
+        if fused and decode and inputs.shape[1] == 1 and not _moe_nax.prefill_active():
+            if capture is not None or cache is None or any(c is None for c in cache):
+                raise ValueError("Flint fused decode requires ordinary cache state and no taps")
+            offset = 0
+            for block in fused:
+                hidden = block(hidden, cache[offset:offset+len(block.layers)])
+                offset += len(block.layers)
+            return self.norm(hidden)
         if cache is None:
             cache = [None] * len(self.layers)
         full_mask = create_attention_mask(hidden, cache[self._full])
@@ -248,10 +259,22 @@ class Model(nn.Module):
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def __call__(self, inputs, cache=None):
-        hidden = select_checkpoint_rows(self.model(inputs, cache))
+        # The serving prompt path calls prefill_forward explicitly. A bare
+        # cold call also remains ordinary; populated-cache calls are decode.
+        decode = (
+            bool(getattr(self.model, "fused_blocks", None))
+            and inputs.shape[0] == 1 and bool(cache)
+            and all(c is not None and c.offset > 0 for c in cache)
+        )
+        hidden = select_checkpoint_rows(self.model(inputs, cache, decode=decode))
         logits = self._head(hidden)
         self.completed_forwards += 1
         return logits
+
+    def prefill_forward(self, inputs, cache=None):
+        """Prompt chunks, including one-token tails, use reference arithmetic."""
+        with _moe_nax.prefill_scope(True):
+            return self(inputs, cache=cache)
 
     @property
     def layers(self):
