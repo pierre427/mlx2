@@ -46,6 +46,7 @@ class PagedAPCIndex:
         self.max_tokens_per_entry = max_tokens_per_entry
         self.max_payload_bytes = max_payload_bytes
         self._entries: list[dict] = []
+        self._metadata_indeterminate = False
         path = self.directory / self.FILE
         if path.exists() or path.is_symlink():
             if path.is_symlink() or not path.is_file() or path.stat().st_size > 8_000_000:
@@ -126,15 +127,24 @@ class PagedAPCIndex:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def _indexed_on_disk(self, name: str) -> bool:
+    def _indexed_on_disk(self, name: str) -> bool | None:
         try:
             document = json.loads((self.directory / self.FILE).read_text())
             return any(entry.get("name") == name for entry in document["entries"])
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        except FileNotFoundError:
             return False
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            # An unreadable index does not prove the rename failed. Its newly
+            # referenced payload must survive until a fresh owner can reload.
+            return None
+
+    def _ensure_available(self) -> None:
+        if self._metadata_indeterminate:
+            raise RuntimeError("paged APCv2 index publication is indeterminate; reload required")
 
     def store(self, *, key: APCKey, tokens: tuple[int, ...],
               source: PagedKVPrivateCache) -> Path:
+        self._ensure_available()
         identity = _identity(key, tokens)
         if len(tokens) > self.max_tokens_per_entry:
             raise ValueError("paged APCv2 index token bound exceeded")
@@ -160,13 +170,21 @@ class PagedAPCIndex:
             # the name taken and a restart finds an unindexed checkpoint.  A
             # failure after the index file was replaced (its directory fsync)
             # keeps the checkpoint the file now names.
-            if not self._indexed_on_disk(name):
+            published = self._indexed_on_disk(name)
+            if published is False:
                 shutil.rmtree(path, ignore_errors=True)
+            elif published is True:
+                # A post-rename error must not leave the next store using a
+                # stale ledger and dropping this checkpoint from the index.
+                self._entries = updated
+            else:
+                self._metadata_indeterminate = True
             raise
         self._entries = updated
         return path
 
     def lookup(self, *, key: APCKey, tokens: tuple[int, ...]) -> tuple[Path, int] | None:
+        self._ensure_available()
         identity = _identity(key, tokens)
         matches = [entry for entry in self._entries
                    if entry["identity"] == identity["key"] and

@@ -1,0 +1,23 @@
+{
+  "schema": "mlx2.original-implementation-provenance.v1",
+  "source": {
+    "repository": "mlx2",
+    "revision": "3856a9db61a959934fae3e1ec66aa721e0f639ff",
+    "external_implementation_mined": false
+  },
+  "modifications": [
+    "Apply provider cohort limits after admission, so inadmissible oldest lanes cannot hide smaller admissible overflow lanes.",
+    "Preserve proposal counts and service-age order while bounding reservation width and physical execution to the provider lane limit.",
+    "Capture the standard-library GC timing clock at installation, ignore dead owners before reading it, and detach only the owned callback on close, including exceptional cleanup.",
+    "Add real unequal-cache admission regressions across ten rotated polls, provider width/rotation checks, and GC callback ownership/clock lifecycle tests."
+  ],
+  "source_sha256": {
+    "src/mlx2/runtime/external_speculative.py": "46586bcde48ff618c892b36bb48aa29590457f7a2ecb18c0718668b21ddd6159",
+    "tests/test_external_cohort_admission_cpu.py": "b730ba72457aeecc27858aed9995b490f64b4ecd7ec36a533c737413217bb590",
+    "tests/test_external_gc_timing_cpu.py": "28f96ca9566eb43daeb950041991257a4945b220602891d2f43d0bfac2b03a63"
+  },
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

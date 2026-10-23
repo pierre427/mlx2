@@ -149,7 +149,10 @@ def test_final_route_fingerprint_binds_selected_proposal_arbitration(pool):
         )
     )
     expected = hashlib.sha256(
-        (TARGET + DRAFT + adapter.EXTERNAL_ROUTE_TAG + composition).encode()
+        (TARGET + DRAFT + adapter.EXTERNAL_ROUTE_TAG + composition + json.dumps(
+            {"typed_point_mass_sampling": "target-categorical-point-mass-v1"},
+            sort_keys=True,
+        )).encode()
     ).hexdigest()
     assert adapter.identity["fingerprint"] == expected
     assert adapter.identity["target_fingerprint"] == TARGET

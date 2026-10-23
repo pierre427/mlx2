@@ -1,0 +1,17 @@
+{
+  "schema": "mlx2.original-implementation-provenance.v1",
+  "source": {
+    "repository": "mlx2",
+    "revision": "008adaed78dbc168d440f5fa627744eef5322894",
+    "external_implementation_mined": false,
+    "license": "Existing per-file licenses retained"
+  },
+  "modifications": [
+    "Size the HTTP listen backlog to at least the existing bounded connection limit, preserving the handler semaphore and refusal behavior.",
+    "Add a model-free regression that queues sixteen HTTP requests while accept is briefly unavailable and requires all responses to complete."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

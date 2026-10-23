@@ -68,6 +68,7 @@ from .speculative_sampling import (
     verify_compact_block_proposals,
     verify_compact_proposals,
     verify_greedy_proposals,
+    verify_point_mass_proposals,
     verify_proposals,
 )
 from .speculative_topology import (
@@ -314,6 +315,18 @@ def _first_tiles_pairwise_disjoint(token_rows, tile):
     )
 
 
+def _tree_accepted_rows(block, commit_rows, emitted):
+    rows = list(commit_rows[1:])
+    if commit_rows and emitted:
+        parent = int(commit_rows[-1]) - 1
+        child = next((node + 1 for node, (token, ancestor) in enumerate(
+            zip(block.tokens, block.parents)
+        ) if int(ancestor) == parent and int(token) == int(emitted[-1])), None)
+        if child is not None:
+            rows.append(child)
+    return rows
+
+
 def _delivered_accepts(decision):
     """Accepted proposals that were delivered.  ``emitted`` normally ends
     with the target's correction or bonus token, but a stop can cut delivery
@@ -512,25 +525,38 @@ def _install_gc_timing(owner):
     """
     import gc
     import weakref
+    from time import perf_counter_ns
 
+    _remove_gc_timing(owner)
     ref = weakref.ref(owner)
     started = [0]
     totals = owner._gc_totals = {}
 
     def callback(phase, info):
-        if phase == "start":
-            started[0] = time.perf_counter_ns()
-            return
         if ref() is None:
             # Never edit gc.callbacks from inside a callback: the
             # interpreter iterates it by index and would skip the next one.
             return
+        if phase == "start":
+            started[0] = perf_counter_ns()
+            return
         generation = info.get("generation", -1)
         entry = totals.setdefault(generation, [0, 0])
         entry[0] += 1
-        entry[1] += time.perf_counter_ns() - started[0]
+        entry[1] += perf_counter_ns() - started[0]
 
+    owner._gc_callback = callback
     gc.callbacks.append(callback)
+
+
+def _remove_gc_timing(owner):
+    callback = getattr(owner, "_gc_callback", None)
+    if callback is not None:
+        import gc
+
+        with suppress(ValueError):
+            gc.callbacks.remove(callback)
+        owner._gc_callback = None
 
 
 def _publish_gc_timing(owner):
@@ -828,6 +854,9 @@ class RoundDecision:
     # Tree rounds only: the committed feature rows, built once before commit
     # so the next round's lattice can start from the very same array.
     committed_tail: object = None
+    # Confirmed tree nodes can include a terminal child whose input state is
+    # deliberately not committed (stop token or response length boundary).
+    accepted_rows: object = None
 
 
 def _greedy_proposal_supported(block, laws, drafts, vocab):
@@ -960,7 +989,8 @@ class ExternalDraftBatchGenerator:
                  continuation_pool=None, continuation_verification_strategy=None,
                  continuation_pool_ast_bridge=False,
                  dynamic_singleton_tree=False,
-                 dynamic_tree_max_width=1, external_varlen_prefill=False,
+                 dynamic_tree_max_width=1, dynamic_tree_overflow="chain",
+                 external_varlen_prefill=False,
                  tree_node_budget_by_lanes=None,
                  tensorfold_cohort_limit=None,
                  target_tree_executor_provider=None,
@@ -1174,6 +1204,11 @@ class ExternalDraftBatchGenerator:
             raise ValueError("dynamic_tree_max_width must be 1 or the bounded candidate width 4")
         if dynamic_tree_max_width != 1 and not dynamic_singleton_tree:
             raise ValueError("bounded dynamic tree requires an enabled tree route")
+        if dynamic_tree_overflow not in ("chain", "cohort"):
+            raise ValueError("dynamic_tree_overflow must be 'chain' or 'cohort'")
+        if dynamic_tree_overflow == "cohort" and not dynamic_singleton_tree:
+            raise ValueError("cohort overflow requires an enabled dynamic tree route")
+        self.dynamic_tree_overflow = dynamic_tree_overflow
         self.dynamic_singleton_tree = dynamic_singleton_tree
         self.dynamic_tree_max_width = dynamic_tree_max_width
         if tree_node_budget_by_lanes is None:
@@ -1218,7 +1253,9 @@ class ExternalDraftBatchGenerator:
         if dynamic_singleton_tree and self._ast_adaptive_rows is not False:
             from .ast_tile_budget import TileBudgetController
 
-            self.tile_budget = TileBudgetController()
+            self.tile_budget = TileBudgetController(
+                counterfactual=getattr(draft_model, "tree_budget_prefix_invariant", True),
+            )
         # Per-depth drafter calibration (Kapitsa KfBudget): orders, and with
         # "order_size" sizes, each lattice's tree from learned acceptance.
         # Proposal-only; the verification law is unchanged.
@@ -3307,11 +3344,15 @@ class ExternalDraftBatchGenerator:
             )
             result["batch_size_route"] = {
                 "policy": (
-                    "tree15_b1_b4_chain_b5plus_v1"
+                    "tree15_bounded_cohorts_v1"
+                    if getattr(self, "dynamic_tree_overflow", "chain") == "cohort"
+                    else "tree15_b1_b4_chain_b5plus_v1"
                     if self.dynamic_tree_max_width == 4
                     else "tree15_b1_chain_b2plus_v1"
                 ),
                 "max_tree_width": self.dynamic_tree_max_width,
+                **({"overflow": "cohort"}
+                   if getattr(self, "dynamic_tree_overflow", "chain") == "cohort" else {}),
                 "tree_node_budget_by_lanes": {
                     str(width): nodes
                     for width, nodes in tree_budgets.items()
@@ -3326,7 +3367,10 @@ class ExternalDraftBatchGenerator:
                 ),
                 "qualified": False,
             }
-            if self.dynamic_tree_max_width == 4:
+            if (
+                self.dynamic_tree_max_width == 4
+                and getattr(self, "dynamic_tree_overflow", "chain") == "chain"
+            ):
                 result["batch_size_route"]["chain_draft_cap"] = _chain_draft_cap(
                     tree_budgets, 4, self._auto_active_width
                 )
@@ -3969,10 +4013,13 @@ class ExternalDraftBatchGenerator:
             self._tree_node_budget() if self.draft_topology == "tree15" else None
         )
         chain_cap = None if tree_budget is not None else self._chain_draft_cap()
-        requested_count = min(
+        source_depth_limit = (
             tree_budget if tree_budget is not None
             else self.num_draft if chain_cap is None
-            else min(self.num_draft, chain_cap),
+            else min(self.num_draft, chain_cap)
+        )
+        requested_count = min(
+            source_depth_limit,
             (max if ast_planner is not None else min)(l.maximum-l.generated-1 for l in cohort),
         )
         multilane_draft_cap = getattr(self, "multilane_draft_cap", None)
@@ -3999,6 +4046,8 @@ class ExternalDraftBatchGenerator:
                 "external_multilane_draft_cap_lanes",
                 len(cohort),
             )
+        if multilane_draft_cap is not None and active_width > 1:
+            source_depth_limit = min(source_depth_limit, multilane_draft_cap)
         if tree_budget is not None:
             self.scheduler_stats["external_tree_node_budget_last"] = requested_count
             histogram = self.scheduler_stats["external_tree_node_budget_histogram"]
@@ -4203,7 +4252,8 @@ class ExternalDraftBatchGenerator:
                                 max_tile_rows=self.ast_tree_tile_rows,
                             )
                         plan = tuner.plan(
-                            remaining_tokens=item.maximum_depth + 1,
+                            remaining_tokens=lane.maximum - lane.generated,
+                            source_depth_limit=source_depth_limit,
                             ready_sessions=max(self._ast_tree_ready_sessions, len(cohort)),
                             target_sessions=min(len(cohort), self._ast_tree_cohort_limit()),
                         )
@@ -7393,17 +7443,10 @@ class ExternalDraftBatchGenerator:
             elif isinstance(laws, (list, tuple)) and all(
                 isinstance(law, PointMassLaw) for law in laws
             ):
-                candidate_ids = np.asarray(
-                    [[law.token] for law in laws], dtype=np.int64
-                )
-                candidate_probs = np.ones((len(laws), 1), dtype=np.float64)
-                result = verify_compact_proposals(
-                    drafts,
-                    candidate_ids,
-                    candidate_probs,
-                    targets,
-                    lane.rng,
-                )
+                if any(law.token != token for law, token in zip(laws, drafts, strict=True)):
+                    raise ValueError("Point-mass law differs from proposal token")
+                result = verify_point_mass_proposals(drafts, targets, lane.rng)
+                _bump(self.scheduler_stats, "external_point_mass_target_sample_rounds")
             elif getattr(self, "exact_verification", "token") == "block":
                 # A draft the processed target forbids zeroes P from its row
                 # on, so the unprocessed rows past it cannot change tau.
@@ -7906,7 +7949,10 @@ class ExternalDraftBatchGenerator:
 
     def _chain_draft_cap(self, active_width=None):
         width = self._auto_active_width if active_width is None else active_width
-        if not getattr(self, "dynamic_singleton_tree", False):
+        if (
+            not getattr(self, "dynamic_singleton_tree", False)
+            or getattr(self, "dynamic_tree_overflow", "chain") == "cohort"
+        ):
             return None
         return _chain_draft_cap(
             self.tree_node_budget_by_lanes, self.dynamic_tree_max_width, width
@@ -7918,7 +7964,8 @@ class ExternalDraftBatchGenerator:
         A tree round verifies the width's node budget plus the root a lane --
         one lane a forward under reference execution, up to the provider's
         cohort limit otherwise: the fixed ``tree15`` topology at every width,
-        the dynamic route only up to its widest tree.  A chain verifies ``num_draft + 1`` rows a lane,
+        the dynamic route uses bounded tree cohorts beyond that width when
+        the adapter selects cohort overflow. A chain verifies ``num_draft + 1`` rows a lane,
         capped past the widest tree as ``_chain_draft_cap`` caps it.  A
         continuation-pool round verifies one lane's paths in one forward --
         up to ``limit`` paths of ``num_draft`` tokens plus the anchor -- or,
@@ -7955,7 +8002,8 @@ class ExternalDraftBatchGenerator:
                 else continuation_rows
             )
             tree = (
-                lanes <= self.dynamic_tree_max_width
+                (lanes <= self.dynamic_tree_max_width
+                 or getattr(self, "dynamic_tree_overflow", "chain") == "cohort")
                 if dynamic
                 else self.draft_topology == "tree15"
             )
@@ -8471,8 +8519,10 @@ class ExternalDraftBatchGenerator:
                 "external_tree_logprob_rows_skipped",
                 len(commit_rows),
             )
+        accepted_rows = _tree_accepted_rows(block, commit_rows, emitted)
         return RoundDecision(
-            accepted=max(0, len(commit_rows) - 1),
+            accepted=len(accepted_rows),
+            accepted_rows=accepted_rows,
             emitted=emitted,
             target_laws=target_laws,
             response_logprobs=response_rows,
@@ -8501,7 +8551,7 @@ class ExternalDraftBatchGenerator:
             for processor in lane.processors
         )
 
-    def _launch_tree_laws(self, lane, block, logits):
+    def _launch_tree_laws(self, lane, block, logits, *, logprobs_on_request=None):
         """Queue every tree row's processed target law as one batched tensor.
 
         Returns ``(fence, state)``: the lazy arrays to evaluate in the round's
@@ -8559,10 +8609,20 @@ class ExternalDraftBatchGenerator:
         state = {"temp": temp, "vocab": vocab, "width": width}
         if temp == 0:
             values = rows.astype(mx.float32)
-            normalizer = mx.logsumexp(values, axis=-1)
             selected = mx.argmax(values, axis=-1)
-            state.update(values=values, normalizer=normalizer, selected=selected)
-            return (normalizer, selected), state
+            if logprobs_on_request is None:
+                logprobs_on_request = self.tree_gates["logprobs_on_request"]
+            if lane.sampling.get("emit_logprobs", True) or not logprobs_on_request:
+                normalizer = mx.logsumexp(values, axis=-1)
+                state.update(values=values, normalizer=normalizer, selected=selected)
+                return (normalizer, selected), state
+            # Greedy token-only verification needs no exponentials or dense
+            # normalized law. Preserve the law's refusal semantics: -inf is
+            # legal masking, but NaN, +inf and an all-masked row are invalid.
+            peak = mx.take_along_axis(values, selected[:, None], axis=-1)[:, 0]
+            valid = mx.isfinite(peak) & ~mx.any(mx.isnan(values), axis=-1)
+            state.update(valid=valid, selected=selected)
+            return (valid, selected), state
         from .sample_utils import make_transformed_logprobs
 
         transform = make_transformed_logprobs(
@@ -8605,11 +8665,14 @@ class ExternalDraftBatchGenerator:
         response_rows = []
         vocab = state["vocab"]
         if state["temp"] == 0:
-            normalizer = np.asarray(state["normalizer"])
+            valid = (
+                np.isfinite(np.asarray(state["normalizer"]))
+                if "normalizer" in state else np.asarray(state["valid"])
+            )
             selected = np.asarray(state["selected"])
 
             def sample_row(row, _prefix_rows):
-                if not np.isfinite(float(normalizer[row])):
+                if not bool(valid[row]):
                     raise LaneFailure(
                         lane.uid,
                         "external draft target law is not a probability distribution",
@@ -8671,8 +8734,10 @@ class ExternalDraftBatchGenerator:
                 "external_tree_logprob_rows_skipped",
                 len(commit_rows),
             )
+        accepted_rows = _tree_accepted_rows(block, commit_rows, emitted)
         return RoundDecision(
-            accepted=max(0, len(commit_rows) - 1),
+            accepted=len(accepted_rows),
+            accepted_rows=accepted_rows,
             emitted=emitted,
             target_laws=target_laws,
             response_logprobs=response_rows,
@@ -12664,10 +12729,13 @@ class ExternalDraftBatchGenerator:
                 blocks = self._calibrated_live_blocks(cohort, blocks)
             if len(cohort) > 1 and getattr(self, "ast_batch_row_sharing", False):
                 blocks = self._share_cohort_rows(cohort, blocks)
-            # Verified nodes per lane-round, after any calibrated cut or row
-            # sharing (keys are node counts, at most 31).
-            for block in blocks:
-                _bump_map(self.scheduler_stats, "external_tree_verified_nodes", len(block.tokens))
+            # Uniform cohorts compute the widest lane for every member. Keep
+            # physical work/cost separate from lane-local acceptance trials.
+            physical_nodes = [len(block.tokens) for block in blocks]
+            if len(cohort) > 1 and not getattr(self, "ast_batch_row_sharing", False):
+                physical_nodes = [max(physical_nodes)] * len(cohort)
+            for nodes in physical_nodes:
+                _bump_map(self.scheduler_stats, "external_tree_verified_nodes", nodes)
             inputs = [
                 [lane.anchor] + list(block.tokens)
                 for lane, block in zip(cohort, blocks)
@@ -12751,20 +12819,21 @@ class ExternalDraftBatchGenerator:
                 # next lattice's node budget must already be the one the
                 # next round will ask for when it is queued below.
                 budget_backup = self.tile_budget.snapshot()
-                seconds = time.perf_counter() - tile_started
-                if any(getattr(lane, "external_rounds", 0) < 2 for lane in cohort):
-                    seconds = None          # prompt ingest is not tile cost
+                cost_eligible = not any(
+                    getattr(lane, "external_rounds", 0) < 2 for lane in cohort
+                )  # prompt ingest is not tile cost
                 for block, decision in zip(blocks, decisions):
-                    rows = decision.commit_rows or [0]
+                    rows = decision.accepted_rows
+                    if rows is None:
+                        rows = (decision.commit_rows or [0])[1:]
                     self.tile_budget.observe(
                         len(cohort), len(block.tokens),
-                        [row - 1 for row in rows[1:]], seconds,
+                        [row - 1 for row in rows], None,
                     )
                 self.scheduler_stats["external_tree_tile_budget"] = self.tile_budget.receipt()
             if calibration is not None:
                 self._observe_tree_calibration(
-                    cohort, blocks, decisions,
-                    None if tile_started is None else time.perf_counter() - tile_started,
+                    cohort, blocks, decisions, None,
                 )
             if phase is not None:
                 phase("tree_tile_budget")
@@ -12784,6 +12853,15 @@ class ExternalDraftBatchGenerator:
                 blocks=blocks,
                 transaction=transaction,
             )
+            if tile_started is not None and cost_eligible:
+                seconds = time.perf_counter() - tile_started
+                for nodes in physical_nodes:
+                    self.tile_budget.observe_cost(len(cohort), nodes, seconds)
+                if calibration is not None:
+                    calibration.observe_rate(sum(len(d.emitted) for d in decisions), seconds)
+                    self.scheduler_stats["external_tree_calibration"] = calibration.receipt()
+                self.scheduler_stats["external_tree_tile_budget"] = self.tile_budget.receipt()
+                self.scheduler_stats["external_tree_tile_cost_scope"] = "round_through_commit_return"
             if phase is not None:
                 phase("tree_commit")
             # ``_propose`` adopts a queued lattice only for a singleton group,
@@ -12802,7 +12880,7 @@ class ExternalDraftBatchGenerator:
             _bump(
                 self.scheduler_stats,
                 "external_tree_nodes",
-                sum(len(block.tokens) for block in blocks),
+                sum(physical_nodes),
             )
             _bump(
                 self.scheduler_stats,
@@ -12887,7 +12965,8 @@ class ExternalDraftBatchGenerator:
                 continue
             calibration.observe(
                 self._calibration_key(lane),
-                tree_records(block.parents, info["depths"], info["log_q"], rows),
+                tree_records(block.parents, info["depths"], info["log_q"], rows,
+                             accepted_rows=decision.accepted_rows),
                 predicted=expected_tokens(info["path_log_p"], len(block.tokens)),
                 realized=len(rows),
             )
@@ -13400,7 +13479,7 @@ class ExternalDraftBatchGenerator:
                 return True
         return False
 
-    def _fit_cohort(self, candidates, append, *, prefill=False):
+    def _fit_cohort(self, candidates, append, *, prefill=False, max_lanes=None):
         # A failed B4 reservation must not block B1/B2 work. Retain each lane's
         # own proposal count; changing width never changes its random schedule.
         while True:
@@ -13408,6 +13487,8 @@ class ExternalDraftBatchGenerator:
             for lane in candidates:
                 if self._admit(selected + [lane], append, prefill=prefill):
                     selected.append(lane)
+                    if max_lanes is not None and len(selected) >= max_lanes:
+                        break
             if selected or not self._reclaim_for_admission():
                 return selected
 
@@ -13778,7 +13859,7 @@ class ExternalDraftBatchGenerator:
                 unique_rows=receipt.get("target_rows", 0)
                 - previous[2].get("target_rows", 0),
                 launches=launches,
-                terminal=previous[3] < self.num_draft + 1
+                terminal=plan.terminal_censored
                 or receipt.get("last", {}).get("termination_reason") in ("stop", "limit"),
             )
             lane.ast_tree_tuning = tuner.receipt()
@@ -13835,7 +13916,11 @@ class ExternalDraftBatchGenerator:
             return
         self._apply_ast_cost_prior_scope(ready, execution_width=active_width)
         self._apply_width_park_prior(active_width)
-        concurrent = self.dynamic_singleton_tree and active_width > self.dynamic_tree_max_width
+        concurrent = (
+            self.dynamic_singleton_tree
+            and active_width > self.dynamic_tree_max_width
+            and getattr(self, "dynamic_tree_overflow", "chain") == "chain"
+        )
         chain_cap = self._chain_draft_cap(active_width) if concurrent else None
         depth = self.num_draft if chain_cap is None else min(self.num_draft, chain_cap)
         multilane_draft_cap = getattr(self, "multilane_draft_cap", None)
@@ -13892,11 +13977,6 @@ class ExternalDraftBatchGenerator:
                 key=lambda lane: getattr(lane, "decode_service_epoch", -1)
             )
             group_candidates = candidates
-            if self.target_execution == "provider" and not concurrent:
-                candidates = group_candidates[: self.target_tree_cohort_limit]
-                self._decode_fit_waiting_uids.update(
-                    lane.uid for lane in group_candidates[len(candidates):]
-                )
             # Bound total target rows as lane pressure rises.  The adapter
             # declares the tree-node budget; admission prices that exact
             # verify shape rather than assuming 16 rows for every lane.
@@ -13905,7 +13985,15 @@ class ExternalDraftBatchGenerator:
                 if self.dynamic_singleton_tree and not concurrent and count
                 else count + 1
             )
-            cohort = self._fit_cohort(candidates, append)
+            # Limit admitted lanes, not candidates: an old unfit cohort must
+            # not hide a newer lane whose smaller private state can progress.
+            cohort = (
+                self._fit_cohort(
+                    candidates, append, max_lanes=self.target_tree_cohort_limit
+                )
+                if self.target_execution == "provider" and not concurrent
+                else self._fit_cohort(candidates, append)
+            )
             if not cohort:
                 self._memory_waiting_uids.update(lane.uid for lane in candidates)
                 continue
@@ -14134,5 +14222,8 @@ class ExternalDraftBatchGenerator:
         return result
 
     def close(self):
-        round_phases.close_pending(self)
-        self.remove(list(self.lanes)); self.boundaries.clear()
+        try:
+            round_phases.close_pending(self)
+            self.remove(list(self.lanes)); self.boundaries.clear()
+        finally:
+            _remove_gc_timing(self)

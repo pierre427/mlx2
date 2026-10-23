@@ -111,6 +111,31 @@ class LinearStateCost:
         allocated_units = self._allocated_units(max_units)
         return len(states) * (self.fixed_bytes + self.bytes_per_unit * allocated_units)
 
+    def cohort_prefix_bytes(
+        self, active: Iterable[AdmissionState], candidates: Iterable[AdmissionState]
+    ):
+        """Yield the active charge, then each successive candidate prefix.
+
+        Shared allocation grows at the cohort maximum, so extending a cohort
+        can increase every existing row's charge. Retain that maximum and the
+        row count instead of rescanning every prior state for each candidate.
+        """
+        active = tuple(active)
+        count = len(active)
+        maximum = max((self._capped_units(state) for state in active), default=0)
+        total = self.cohort_bytes(active)
+        yield total
+        for state in candidates:
+            count += 1
+            if self.allocation_step_units is None:
+                total += self(state)
+            else:
+                maximum = max(maximum, self._capped_units(state))
+                total = count * (
+                    self.fixed_bytes + self.bytes_per_unit * self._allocated_units(maximum)
+                )
+            yield total
+
 
 class StateBudget:
     """Admission policy over arbitrary model state.

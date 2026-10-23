@@ -1,0 +1,24 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "subject": "AST adaptive row controls and exact ordinary scheduler admission repairs",
+  "recorded_at": "2026-10-22",
+  "origin": "Original mlx2 repairs; no external implementation copied.",
+  "license": "Existing per-file licenses preserved; MIT notices in generate.py and batch_admission.py unchanged.",
+  "source_repository": "mlx2",
+  "source_revision": "63e48f3bec357311e2206799c4c18dbc13dbc85e",
+  "source_paths": [
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/batch_admission.py",
+    "src/mlx2/runtime/ast_tile_budget.py"
+  ],
+  "modifications": [
+    "Apply the adaptive row reduction margin once against the configured maximum, then select the best eligible rate; complete all configured smaller-size probes.",
+    "Expose host-only prefix lengths on both ordinary and MTP batches.",
+    "Budget the exact padding-selected cohort and reserve completion slots for already-prefilling lanes.",
+    "Snapshot resident queue and active state once and incrementally preserve non-additive shared cache width for candidate prefixes."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

@@ -215,7 +215,7 @@ class _PreparedCapacityReservation:
         with self._lock:
             if self._released or self.pool is not pool:
                 raise CacheCapsuleError("prepared capacity reservation is invalid")
-            if self.generation != int(generation):
+            if self.generation != int(generation) or self.generation != pool.generation.current:
                 raise StaleCacheCapsule("prepared capacity generation changed")
 
     def claim(self, pool, generation, nbytes):
@@ -223,7 +223,7 @@ class _PreparedCapacityReservation:
         with self._lock:
             if self._released or self.pool is not pool:
                 raise CacheCapsuleError("prepared capacity reservation is invalid")
-            if self.generation != int(generation):
+            if self.generation != int(generation) or self.generation != pool.generation.current:
                 raise StaleCacheCapsule("prepared capacity generation changed")
             if nbytes < 0 or nbytes > self._remaining_bytes:
                 raise CacheCapsuleError(

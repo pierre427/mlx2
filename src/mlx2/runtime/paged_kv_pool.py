@@ -125,9 +125,13 @@ class PagedKVPool:
         _uint("last use epoch", after_epoch, (1 << 64) - 1)
         slots = self._validate_unique_active(handles)
         for handle, slot in zip(handles, slots):
+            # Shared owners can release out of submission order. Keep every
+            # lease's fence until the final reference retires this generation.
+            slot.retired_after = max(
+                slot.retired_after or 0, after_epoch, self._completed_epoch
+            )
             slot.references -= 1
             if slot.references == 0:
-                slot.retired_after = max(after_epoch, self._completed_epoch)
                 self._pending.append((slot.retired_after, handle))
 
     def copy_on_write(self, handle: PageHandle, *, after_epoch: int) -> PageHandle:

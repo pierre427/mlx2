@@ -1245,6 +1245,7 @@ class APCv2(PrefixIndex):
         self._rescan = {
             "registered": 0,
             "registered_bytes": 0,
+            "suspension_epochs": {},
             "skipped": 0,
             "discarded": {},
             "elapsed_seconds": 0.0,
@@ -1546,6 +1547,7 @@ class APCv2(PrefixIndex):
         token_bytes = json.dumps(list(tokens), separators=(",", ":")).encode("utf-8")
         return {
             "schema": self._PERSIST_SCHEMA,
+            "suspension": getattr(entry, "_apc_suspension", None),
             "key": _key_manifest(key),
             "layout_name": self.layout_name,
             "tokens": list(tokens),
@@ -1779,9 +1781,25 @@ class APCv2(PrefixIndex):
                     path = self._strict_child(self._persist_dir, record.get("name"))
                     if not path.is_file() or path.is_symlink() or path.stat().st_size != int(record.get("size", -1)):
                         raise ValueError("missing or wrong-sized persisted file")
+                    if value.get("suspension") is not None and self._sha256_file(path) != record.get("sha256"):
+                        from .apc_suspension import SuspensionRestoreError
+                        raise SuspensionRestoreError("Suspended APCv2 payload digest mismatch; resume refused")
                     referenced.add(path.name)
                     disk[kind] = str(path)
                     disk_bytes += path.stat().st_size
+                suspension_epoch = (value.get("suspension") or {}).get("id")
+                if value.get("suspension") is not None:
+                    from .apc_suspension import consume_epoch
+                    value, _suspended_seconds = consume_epoch(value, now)
+                    temporary = manifest.with_name(f".{manifest.name}.{uuid.uuid4().hex}.tmp")
+                    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+                    try:
+                        self._run_metadata_mutation_locked(
+                            "suspension_resume", _write_manifest_payload, manifest, temporary,
+                            payload, self._persist_dir, self._fsync_directory, payload_bytes=len(payload))
+                    except Exception as error:
+                        from .apc_suspension import SuspensionRestoreError
+                        raise SuspensionRestoreError("Suspension epoch commit failed; refusing partial resume") from error
                 role = value.get("retention_role", self._RETENTION_DEFAULT)
                 cache_type = value.get("cache_type", "assistant")
                 if role not in self._RETENTION_ROLES or cache_type not in self._lru._lrus:
@@ -1804,8 +1822,8 @@ class APCv2(PrefixIndex):
                 entry._apc_next_turn_boundary = (
                     value.get("next_turn_boundary") is True
                 )
-                entry._apc_inserted_at = self._now()
-                entry._apc_last_access_at = self._now()
+                entry._apc_inserted_at = self._now() - max(0, now - float(value.get("created_at", now)))
+                entry._apc_last_access_at = self._now() - max(0, now - float(value.get("last_access_at", now)))
                 entry._apc_created_wall = float(value.get("created_at", now))
                 entry._apc_last_access_wall = float(value.get("last_access_at", now))
                 entry._apc_hit_count = int(value.get("hit_count", 0))
@@ -1856,6 +1874,9 @@ class APCv2(PrefixIndex):
                 self._disk_bytes += disk_bytes
                 self._rescan["registered"] += 1
                 self._rescan["registered_bytes"] += disk_bytes
+                if suspension_epoch:
+                    epochs = self._rescan["suspension_epochs"]
+                    epochs[suspension_epoch] = epochs.get(suspension_epoch, 0) + 1
             except _PersistedPinCapacityError:
                 raise
             except (OSError, MemoryError):
@@ -1864,7 +1885,10 @@ class APCv2(PrefixIndex):
                 log.exception("APCv2 rescan skipped %s", manifest.name)
                 self._rescan["skipped"] += 1
                 skipped_transiently = True
-            except Exception:
+            except Exception as error:
+                from .apc_suspension import SuspensionRestoreError
+                if isinstance(error, (SuspensionRestoreError, APCMetadataIndeterminate)):
+                    raise
                 self._discard_manifest(manifest, value, "corruption")
         # Final payload names without a manifest are interrupted writes -- but
         # a manifest skipped over a transient read error names payloads this
@@ -1873,6 +1897,7 @@ class APCv2(PrefixIndex):
             for path in self._persist_dir.glob("apc-idle-*.safetensors"):
                 if path.name not in referenced:
                     path.unlink(missing_ok=True)
+        self._rescan["inventory_sha256"] = self._suspension_inventory_locked()
         self._rescan["elapsed_seconds"] = time.monotonic() - started
         log.info(
             "APCv2 persistence rescan registered=%d bytes=%d discarded=%s elapsed=%.6fs",
@@ -4265,6 +4290,155 @@ class APCv2(PrefixIndex):
         return {
             "spilled": spilled, "skipped": skipped, "pinned_skipped": pinned_skipped,
         }
+
+    def _suspension_inventory_locked(self):
+        leaves = []
+        for key, tokens, entry in self._entry_records_locked():
+            value = {"key": _key_manifest(key), "tokens": list(tokens), "cache_type": entry.cache_type,
+                     "files": (getattr(entry, "_apc_disk", None) or {}).get("files"),
+                     "retention_role": getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT),
+                     "session_tags": sorted(getattr(entry, "_apc_session_tags", set()), key=repr)}
+            leaves.append(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+        return hashlib.sha256("".join(sorted(leaves)).encode()).hexdigest()
+
+    def freeze_suspension(self, suspension_id: str) -> dict:
+        """Commit TTL/retention suspension after the worker has drained/spilled."""
+        if (not isinstance(suspension_id, str) or not 1 <= len(suspension_id) <= 128
+                or not all(char.isalnum() or char in "-_" for char in suspension_id)):
+            raise ValueError("suspension_id must be a bounded identifier")
+        with self._apc_lock:
+            self._ensure_metadata_available()
+            if self._persist_dir is None:
+                raise ValueError("Process suspension requires durable APCv2 persistence")
+            prior = getattr(self, "_suspension_clock", None)
+            if prior:
+                if prior["id"] != suspension_id:
+                    raise ValueError("A different suspension epoch is already committed")
+                if prior["receipt"].get("incomplete"):
+                    raise RuntimeError("Incomplete suspension must be resumed before retry")
+                return dict(prior["receipt"])
+            self._sweep_retirements_locked()
+            records = tuple(self._entry_records_locked())
+            if any(entry.prompt_cache or not getattr(entry, "_apc_disk", None)
+                   for _key, _tokens, entry in records):
+                raise ValueError("Every APCv2 entry must be durably suspended before export")
+            frozen = self._wall_time()
+            monotonic = self._now()
+            marker = {"id": suspension_id, "frozen_at": frozen}
+            # Freeze both clocks before another idle sweep can expire anything.
+            state = {"id": suspension_id, "wall": self._wall_time, "mono": self._now}
+            self._wall_time = lambda: frozen
+            self._now = lambda: monotonic
+            self._suspension_clock = state
+            receipt = {"suspension_id": suspension_id, "frozen_at": frozen,
+                       "entries": len(records), "clock_frozen": True,
+                       "persistence_dir": str(self._persist_dir), "incomplete": True,
+                       "inventory_sha256": self._suspension_inventory_locked()}
+            state["receipt"] = receipt
+            for _key, _tokens, entry in records:
+                entry._apc_suspension = dict(marker)
+            for _key, _tokens, entry in records:
+                try:
+                    self._verify_persisted_files(entry._apc_disk)
+                except Exception as error:
+                    raise RuntimeError("Suspended APCv2 payload verification failed") from error
+            for key, tokens, entry in records:
+                if not self._write_manifest_locked(key, tokens, entry):
+                    # No successful export receipt: caller must keep the server
+                    # alive and explicitly resume before trying a new epoch.
+                    state["receipt"]["incomplete"] = True
+                    raise RuntimeError("APCv2 suspension metadata commit failed")
+            receipt.pop("incomplete", None)
+            return dict(receipt)
+
+    def thaw_suspension(self) -> dict:
+        from .apc_suspension import consume_epoch
+        with self._apc_lock:
+            state = getattr(self, "_suspension_clock", None)
+            if not state:
+                return {"clock_frozen": False, "entries": 0}
+            self._ensure_metadata_available()
+            now = state["wall"]()
+            updates = []
+            try:
+                for key, tokens, entry in tuple(self._entry_records_locked()):
+                    if getattr(entry, "_apc_suspension", None) is None:
+                        continue
+                    value, delta = consume_epoch(self._manifest_for_entry(key, tokens, entry), now)
+                    previous = {name: (hasattr(entry, name), getattr(entry, name, None)) for name in (
+                        "_apc_created_wall", "_apc_last_access_wall", "_apc_disk_pin_expiries",
+                        "_apc_resident_pin_expiries", "_apc_suspension", "_apc_inserted_at", "_apc_last_access_at")}
+                    updates.append((entry, previous))
+                    entry._apc_created_wall = value["created_at"]
+                    entry._apc_last_access_wall = value["last_access_at"]
+                    for attr in ("_apc_disk_pin_expiries", "_apc_resident_pin_expiries"):
+                        setattr(entry, attr, {tag: expiry + delta for tag, expiry in getattr(entry, attr, {}).items()})
+                    entry._apc_suspension = None
+                    if not self._write_manifest_locked(key, tokens, entry):
+                        raise RuntimeError("APCv2 resume metadata commit failed")
+                    for attr in ("_apc_inserted_at", "_apc_last_access_at"):
+                        if hasattr(entry, attr):
+                            setattr(entry, attr, getattr(entry, attr) + max(0, state["mono"]() - self._now()))
+            except Exception:
+                # A retry starts from original remaining TTLs, never already
+                # shifted values. Indeterminate metadata stays gated until reload.
+                for entry, previous in updates:
+                    for attr, (existed, old) in previous.items():
+                        if existed:
+                            setattr(entry, attr, old)
+                        elif hasattr(entry, attr):
+                            delattr(entry, attr)
+                raise
+            self._wall_time, self._now = state["wall"], state["mono"]
+            self._suspension_clock = None
+            return {"clock_frozen": False, "entries": len(updates)}
+
+    def branch_diagnostics(self, limit=200) -> dict:
+        """Bounded metadata; prefix parentage is inferred, never execution history."""
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("branch limit must be an integer in 1..500")
+        with self._apc_lock:
+            now = self._wall_time()
+            records = tuple(self._entry_records_locked())
+            selected = sorted(records, key=lambda item: (len(item[1]), repr(item[0])))[:limit]
+            rows = []
+            identities = {}
+            for key, tokens, entry in selected:
+                identity = getattr(entry, "_apc_diagnostic_id", None)
+                if identity is None:
+                    identity = entry._apc_diagnostic_id = uuid.uuid4().hex
+                identities[(key, tuple(tokens))] = identity
+            for key, tokens, entry in selected:
+                identity = identities[(key, tuple(tokens))]
+                parents = [(candidate, path) for candidate, path, _other in selected
+                           if candidate == key and len(path) < len(tokens) and tuple(tokens[:len(path)]) == tuple(path)]
+                parent = max(parents, key=lambda item: len(item[1]), default=None)
+                shared, peer_id = (len(parent[1]), None) if parent else (0, None)
+                if parent is None:
+                    for candidate, path, _other in selected:
+                        if candidate != key or tuple(path) == tuple(tokens):
+                            continue
+                        common = 0
+                        for left, right in zip(tokens, path):
+                            if left != right:
+                                break
+                            common += 1
+                        if common > shared:
+                            shared, peer_id = common, identities[(candidate, tuple(path))]
+                expiries = [expiry for attr in ("_apc_disk_pin_expiries", "_apc_resident_pin_expiries")
+                            for expiry in getattr(entry, attr, {}).values() if expiry > now]
+                pins = {tag for attr in ("_apc_disk_pin_expiries", "_apc_resident_pin_expiries")
+                        for tag, expiry in getattr(entry, attr, {}).items() if expiry > now}
+                rows.append({"id": identity, "parent_id": identities.get((parent[0], tuple(parent[1]))) if parent else None,
+                             "relation": "inferred_prefix" if parent else "inferred_shared_prefix" if shared else "root_or_unretained_parent",
+                             "token_count": len(tokens), "shared_prefix_tokens": shared,
+                             "shared_prefix_entry_id": peer_id,
+                             "tier": "resident" if entry.prompt_cache else "disk", "pin_count": len(pins),
+                             "remaining_ttl_seconds": max(0, max(expiries) - now) if expiries else None,
+                             "retention_role": getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT)})
+            return {"entries": rows, "revision": self._capsule_generation.current,
+                    "clock_frozen": bool(getattr(self, "_suspension_clock", None)),
+                    "truncated": len(records) > limit, "total_entries": len(records)}
 
     def suspend_resident(self) -> dict:
         """Spill every exact resident entry, dropping only individual failures.

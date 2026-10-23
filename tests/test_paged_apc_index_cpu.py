@@ -1,6 +1,7 @@
 """CPU-only index and restart checks with fake native completion events."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -79,3 +80,52 @@ def test_unindexed_checkpoint_rejected_instead_of_escaping_capacity(tmp_path):
     with pytest.raises(ValueError, match="unindexed"):
         PagedAPCIndex(tmp_path, max_entries=1, max_tokens_per_entry=1,
                       max_payload_bytes=2 * TOKEN_BYTES, permit_candidate=True)
+
+
+def test_postpublication_index_error_keeps_memory_and_next_store_consistent(tmp_path, monkeypatch):
+    key = APCKey(model="test", revision="weight-v1")
+    index = PagedAPCIndex(tmp_path, permit_candidate=True)
+    original_write = index._write
+
+    def published_then_failed(entries):
+        original_write(entries)
+        raise OSError("directory fsync failed after index publication")
+
+    monkeypatch.setattr(index, "_write", published_then_failed)
+    with pytest.raises(OSError, match="fsync"):
+        index.store(key=key, tokens=(1,), source=saved_source((1,)))
+    assert index.lookup(key=key, tokens=(1,))[1] == 1
+    monkeypatch.setattr(index, "_write", original_write)
+    index.store(key=key, tokens=(2,), source=saved_source((2,)))
+    restarted = PagedAPCIndex(tmp_path, permit_candidate=True)
+    assert restarted.lookup(key=key, tokens=(1,))[1] == 1
+    assert restarted.lookup(key=key, tokens=(2,))[1] == 1
+
+
+def test_unknown_index_publication_preserves_payload_and_gates_until_reload(tmp_path, monkeypatch):
+    key = APCKey(model="test", revision="weight-v1")
+    index = PagedAPCIndex(tmp_path, permit_candidate=True)
+    original_write = index._write
+    original_read = Path.read_text
+
+    def published_then_unreadable(entries):
+        original_write(entries)
+
+        def unreadable(path, *args, **kwargs):
+            if path.name == PagedAPCIndex.FILE:
+                raise OSError("transient index read failure")
+            return original_read(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", unreadable)
+        raise OSError("directory fsync failed after index publication")
+
+    monkeypatch.setattr(index, "_write", published_then_unreadable)
+    with pytest.raises(OSError, match="fsync"):
+        index.store(key=key, tokens=(1,), source=saved_source((1,)))
+    with pytest.raises(RuntimeError, match="reload"):
+        index.lookup(key=key, tokens=(1,))
+    with pytest.raises(RuntimeError, match="reload"):
+        index.store(key=key, tokens=(2,), source=saved_source((2,)))
+    monkeypatch.setattr(Path, "read_text", original_read)
+    restarted = PagedAPCIndex(tmp_path, permit_candidate=True)
+    assert restarted.lookup(key=key, tokens=(1,))[1] == 1

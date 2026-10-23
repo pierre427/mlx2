@@ -421,6 +421,33 @@ def test_prepared_reservation_cannot_undercharge_a_capsule_source():
     pool.close()
 
 
+def test_mixed_capsule_generation_change_during_ordinary_merge_rejects_publication():
+    apc = APCv2(max_bytes=1 << 20, layout_name="layout")
+    backing = _Reservation()
+    pool = CacheCapsulePool(
+        apc.capsule_generation, enabled=True, reserve=lambda _nbytes: backing
+    )
+
+    class InvalidatingPlane:
+        nbytes = 96
+
+        def merge(self, _planes):
+            apc.capsule_generation.advance()
+            return self
+
+    try:
+        with pytest.raises(StaleCacheCapsule):
+            prepare_prompt_cache_capsules(
+                [_cache(3), InvalidatingPlane()], target_batch=2,
+                generation=0, pool=pool, compatibility_signature=("exact",),
+                backend="cpu", fallback=None,
+            )
+        assert backing.releases == 1
+    finally:
+        pool.close()
+        apc.close()
+
+
 def test_capsule_changed_compatibility_signature_fails_closed():
     apc = APCv2(max_bytes=1 << 20, layout_name="layout")
     source = capture_kv_cache_plane(

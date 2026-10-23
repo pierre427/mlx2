@@ -13,6 +13,7 @@ import time
 import weakref
 from collections import deque
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 import mlx.core as mx
 import mlx.nn as nn
@@ -1336,6 +1337,11 @@ class GenerationBatch:
         return len(self.uids)
 
     @property
+    def prefix_lengths(self):
+        """Host-only committed lengths for scheduler state accounting."""
+        return [len(tokens) for tokens in self.tokens]
+
+    @property
     def has_persistent_inputs(self):
         return any(value is not None for value in self.persistent_inputs)
 
@@ -2461,6 +2467,11 @@ class MTPGenerationBatch:
     @property
     def tokens(self):
         return [self._prefix_tokens(lane) for lane in self.state.lanes]
+
+    @property
+    def prefix_lengths(self):
+        """Read shapes without materializing any lane's token prefix."""
+        return [self._prefix_length(lane) for lane in self.state.lanes]
 
     @property
     def max_tokens(self):
@@ -7734,7 +7745,7 @@ class BatchGenerator:
         window = min(
             len(self._unprocessed_sequences), max(n, self.prefill_batch_window)
         )
-        candidates = list(self._unprocessed_sequences)[:window]
+        candidates = list(islice(self._unprocessed_sequences, window))
         media = [
             index
             for index, sequence in enumerate(candidates)
@@ -8035,15 +8046,14 @@ class BatchGenerator:
 
         Shared batch caches (BatchKVCache) allocate every row at the
         cohort-max step-rounded width, so cost is NON-ADDITIVE: each prefix
-        length is evaluated by recomputing the full cohort projection at
-        final extents (via the policy's ``cohort_bytes``), floored by actual
-        live bytes. No per-row resident credit is granted under stepped
+        updates the full cohort projection at final extents, floored by
+        actual live bytes. No per-row resident credit is granted under stepped
         geometry — a supplied cache's bytes cannot reduce the shared width.
         """
         if self.state_budget is None or n <= 0:
             return n
         self._sync_budget_mutation()
-        queued = list(self._unprocessed_sequences)[:n]
+        queued = list(islice(self._unprocessed_sequences, n))
         return self._admit_states(
             [self._candidate_admission_state(seq) for seq in queued]
         )
@@ -8079,13 +8089,13 @@ class BatchGenerator:
         shared-width cohort projection."""
         states = []
         gb = self._generation_batch
-        for i in range(len(gb)):
-            # ``gb.tokens`` converts every lane's whole context per access.
-            current = MTPGenerationBatch._prefix_length(gb.state.lanes[i])
-            final = current + max(gb.max_tokens[i] - gb._num_tokens[i], 0)
+        for uid, current, maximum, completed in zip(
+            gb.uids, gb.prefix_lengths, gb.max_tokens, gb._num_tokens
+        ):
+            final = current + max(maximum - completed, 0)
             states.append(
                 AdmissionState(
-                    gb.uids[i], final, current, metadata={"phase": "generation"}
+                    uid, final, current, metadata={"phase": "generation"}
                 )
             )
         for i, seq in enumerate(self._currently_processing):
@@ -8126,39 +8136,66 @@ class BatchGenerator:
         peak-memory guarantee (split/extend allocator transients are out of
         scope).
         """
+        committed = 0.0
+        for committed in self._cohort_commitments(candidate_states):
+            pass
+        return committed
+
+    def _cohort_commitments(self, candidate_states):
+        """Charges for zero then successive candidates at one queue boundary.
+
+        Snapshot live extents and cache bytes once. Selected queue residents
+        leave the unselected total only as that exact candidate is added;
+        unverifiable supplied caches remain an additional charge.
+        """
         cost = self.state_budget.project
-        cands = list(candidate_states)
-        all_states = self._final_extent_states() + cands
-        if hasattr(cost, "cohort_bytes"):
-            projected = cost.cohort_bytes(all_states)
-        else:
-            projected = sum((self.state_budget.projected_bytes(s) for s in all_states))
-        selected_unverified = sum(
-            (s.metadata.get("unverified_bytes", 0.0) for s in cands)
-        )
-        selected_uids = {s.uid for s in cands}
-        unselected_live = sum(
-            (
-                float(sum((c.nbytes for c in seq[3])))
-                for seq in self._unprocessed_sequences
-                if seq[0] not in selected_uids
+        candidates = tuple(candidate_states)
+        active = self._final_extent_states()
+        queued_live = {}
+        for sequence in self._unprocessed_sequences:
+            uid = sequence[0]
+            queued_live[uid] = queued_live.get(uid, 0.0) + sum(
+                cache.nbytes for cache in sequence[3]
             )
-        )
+        unselected_live = sum(queued_live.values())
         admitted_live = float(
             sum((c.nbytes for c in self._generation_batch.prompt_cache))
         ) + float(sum((c.nbytes for c in self._prompt_batch.prompt_cache)))
         held = getattr(self, "_ordinary_held", None)
         if held is not None:
             admitted_live += sum(c.nbytes for c in held[0].prompt_cache)
-        return max(projected, admitted_live) + selected_unverified + unselected_live
+        if type(cost) is LinearStateCost:
+            projections = cost.cohort_prefix_bytes(active, candidates)
+        else:
+            # Preserve custom-policy behavior for callers that replace the
+            # policy after construction; its projection may be non-additive.
+            def project_prefixes():
+                states = list(active)
+                for index in range(len(candidates) + 1):
+                    if index:
+                        states.append(candidates[index - 1])
+                    yield (
+                        cost.cohort_bytes(states) if hasattr(cost, "cohort_bytes")
+                        else sum(self.state_budget.projected_bytes(s) for s in states)
+                    )
+            projections = project_prefixes()
+        selected_unverified = 0.0
+        yield max(next(projections), admitted_live) + unselected_live
+        for state, projected in zip(candidates, projections):
+            unselected_live -= queued_live.pop(state.uid, 0.0)
+            selected_unverified += state.metadata.get("unverified_bytes", 0.0)
+            yield max(projected, admitted_live) + selected_unverified + unselected_live
 
     def _admit_states(self, states):
-        """How many of ``states`` fit, in order — recomputing the full
-        non-additive cohort cost for each exact prefix length."""
-        states = list(states)
+        """How many exact candidate rows fit at one consistent boundary."""
+        states = tuple(states)
+        if not states:
+            return 0
         admitted = 0
-        for k in range(1, len(states) + 1):
-            if self._cohort_committed(states[:k]) > self.state_budget.budget_bytes:
+        commitments = self._cohort_commitments(states)
+        next(commitments)  # The existing cohort cannot be evicted here.
+        for k, committed in enumerate(commitments, 1):
+            if committed > self.state_budget.budget_bytes:
                 break
             admitted = k
         return admitted
@@ -9446,7 +9483,8 @@ class BatchGenerator:
         contended = self._has_active_decode()
         n = min(
             self.prefill_batch_size - len(self._prompt_batch),
-            self.completion_batch_size - len(self._generation_batch),
+            self.completion_batch_size - len(self._generation_batch)
+            - len(self._prompt_batch),
             len(self._unprocessed_sequences),
         )
         persistent_head = False
@@ -9483,7 +9521,8 @@ class BatchGenerator:
             n = 0
         if n > 0 and self._prefill_order().enabled and not persistent_head:
             (n, ordered) = self._order_prefill_queue(n)
-        n = self._budget_admissible(n)
+        if ordered is not None:
+            n = self._budget_admissible(n)
         if n > 0 and ordered is not None:
             # The ordered picks are the queue head, so the budget above
             # measured exactly the rows admitted here.
@@ -9505,6 +9544,14 @@ class BatchGenerator:
                     else None
                 ),
             )
+            if indices and self.state_budget is not None:
+                self._sync_budget_mutation()
+                candidates = list(islice(self._unprocessed_sequences, max(indices) + 1))
+                admitted = self._admit_states([
+                    self._candidate_admission_state(candidates[index])
+                    for index in indices
+                ])
+                indices = indices[:admitted]
             if indices:
                 self._prompt_batch.extend(
                     self._make_batch(len(indices), indices=indices)

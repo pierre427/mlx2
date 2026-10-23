@@ -47,6 +47,26 @@ def test_atomic_reservation_and_double_release():
     assert pool.free_count == 2
 
 
+def test_shared_releases_preserve_the_latest_use_epoch_until_retirement():
+    pool = PagedKVPool(1)
+    handle = pool.reserve()[0]
+    pool.retain((handle,))
+    # A GPU reader releases before a lower-epoch host owner. Both releases
+    # must contribute to the generation's retirement fence.
+    pool.release((handle,), after_epoch=8)
+    pool.release((handle,), after_epoch=2)
+    pool.retire(2)
+    assert pool.pending_count == 1
+    with pytest.raises(MemoryError):
+        pool.reserve()
+    pool.retire(8)
+    replacement = pool.reserve()[0]
+    assert replacement.generation == handle.generation + 1
+    pool.release((replacement,), after_epoch=8)
+    pool.retire(8)
+    assert pool.free_count == 1
+
+
 def test_terminal_failure_quarantines_only_touched_generation_for_arena_lifetime():
     pool = PagedKVPool(2)
     failed, clean = pool.reserve(2)
