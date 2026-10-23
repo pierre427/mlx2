@@ -133,3 +133,12 @@ def test_probe_refuses_unselected_rolling_and_a_short_explicit_context():
     assert rolling_reuse_prompt_tokens(
         interval_tokens=8192, prefill_step=8192, max_context=8192
     ) is None
+
+
+def test_probe_separates_interior_and_rolling_boundaries():
+    settings = {"apc_rolling_checkpoints": {"interval_tokens": 4096},
+                "apc_interior_checkpoints": {"count": 4},
+                "prefill_step": 256, "max_context": 262144}
+    assert qualify.rolling_probe_prompt_words(settings) > 4 * 4096
+    settings["apc_interior_checkpoints"] = {"count": 0}
+    assert qualify.rolling_probe_prompt_words(settings) < 2 * 4096

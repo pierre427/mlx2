@@ -190,6 +190,8 @@ class MultiLatentAttention(nn.Module):
         x: mx.array,
         mask: mx.array | None = None,
         cache: KVCache | None = None,
+        *,
+        tree=None,
     ) -> mx.array:
         batch, length, _ = x.shape
 
@@ -213,38 +215,36 @@ class MultiLatentAttention(nn.Module):
         kv_latent = self.kv_a_layernorm(compressed_kv)
 
         offset = _cache_offset(cache)
-        q_pe = self.rope(q_pe, offset=offset)
-        k_pe = self.rope(k_pe, offset=offset)
+        q_pe = self.rope(q_pe, offset=offset) if tree is None else tree.rope(self.rope, q_pe, offset)
+        k_pe = self.rope(k_pe, offset=offset) if tree is None else tree.rope(self.rope, k_pe, offset)
 
         kv_latent = mx.expand_dims(kv_latent, axis=1)
         if cache is not None:
             kv_latent, k_pe = cache.update_and_fetch(kv_latent, k_pe)
 
-        pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
-        if mask is not None:
+        pe_scores = None if tree is not None else (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
+        if mask is not None and tree is None:
             pe_scores = mx.where(
                 mask,
                 pe_scores,
                 mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype),
             )
 
-        if length == 1:
+        if tree is not None:
+            output = tree.mla(self, q_nope, q_pe, kv_latent, k_pe, cache, int(offset))
+        elif length == 1:
             q_nope = self.embed_q(q_nope)
             keys = values = kv_latent
         else:
             keys = self.embed_q(kv_latent, transpose=False)
             values = self.unembed_out(kv_latent)
 
-        output = scaled_dot_product_attention(
-            q_nope,
-            keys,
-            values,
-            cache=cache,
-            scale=self.scale,
-            mask=pe_scores,
-        )
-        if length == 1:
-            output = self.unembed_out(output)
+        if tree is None:
+            output = scaled_dot_product_attention(
+                q_nope, keys, values, cache=cache, scale=self.scale, mask=pe_scores,
+            )
+            if length == 1:
+                output = self.unembed_out(output)
 
         output = output.transpose(0, 2, 1, 3)
         if self.g_proj is not None:
@@ -313,6 +313,9 @@ class KimiDeltaAttention(nn.Module):
         self.conv_kernel = args.short_conv_kernel_size
         self.projection_dim = self.num_heads * self.head_dim
         self.no_kda_lora = args.no_kda_lora
+        # The released recurrent reference passes this bound into the gate.
+        # Omitting it changes the recurrence even though every shape matches.
+        self.lower_bound = args.kda_lower_bound
         self.scale = float(self.head_dim) ** -0.5
 
         hidden = args.hidden_size
@@ -353,7 +356,11 @@ class KimiDeltaAttention(nn.Module):
         x: mx.array,
         mask: mx.array | None = None,
         cache: ArraysCache | None = None,
+        *,
+        tree=None,
     ) -> mx.array:
+        if tree is not None:
+            return tree.kda(self, x, cache)
         batch, length, _ = x.shape
         dtype = x.dtype
 
@@ -410,6 +417,7 @@ class KimiDeltaAttention(nn.Module):
             state=recurrent_state,
             mask=mask,
             use_kernel=not self.training,
+            lower_bound=self.lower_bound,
         )
 
         if cache is not None:
@@ -560,11 +568,14 @@ class DecoderLayer(nn.Module):
         x: mx.array,
         mask: mx.array | None = None,
         cache: Any | None = None,
+        *,
+        tree=None,
     ) -> mx.array:
         attention_output = self.attention(
             self.input_layernorm(x),
             mask,
             cache,
+            tree=tree,
         )
         hidden = x + attention_output
         mlp_output = self.mlp(self.post_attention_layernorm(hidden))
@@ -702,6 +713,28 @@ class Model(nn.Module):
 
     def prefill_body(self, inputs, cache, capture_layers):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
+
+    def forward_tree_with_taps(self, inputs, tree, capture_layers):
+        """One layer traversal for all nodes, using parent-indexed state math."""
+        capture_layers = tuple(capture_layers)
+        if (
+            inputs.shape != (1, len(tree.parents)) or not capture_layers
+            or tuple(sorted(set(capture_layers))) != capture_layers
+            or capture_layers[0] < 0 or capture_layers[-1] >= len(self.layers)
+        ):
+            raise ValueError("invalid Ling tree input or capture layers")
+        hidden = self.model.word_embeddings(inputs)
+        taps = []
+        for index, (layer, cache) in enumerate(zip(self.layers, tree.private, strict=True)):
+            hidden = layer(hidden, cache=cache, tree=tree)
+            if index in capture_layers:
+                taps.append(hidden)
+        output = self.model.norm(hidden)
+        logits = (
+            self.model.word_embeddings.as_linear(output)
+            if self.args.tie_word_embeddings else self.lm_head(output)
+        )
+        return logits, mx.concatenate(taps, axis=-1)
 
     def make_cache(self) -> list[Any]:
         return [

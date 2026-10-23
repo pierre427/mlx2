@@ -22,9 +22,9 @@ class _Node:
 
 def _log_softmax(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
-    peak = np.max(values)
+    peak = np.max(values, axis=-1, keepdims=True)
     shifted = values - peak
-    return shifted - np.log(np.exp(shifted).sum())
+    return shifted - np.log(np.exp(shifted).sum(axis=-1, keepdims=True))
 
 
 def build_ubtree(
@@ -52,8 +52,10 @@ def build_ubtree(
     candidates = np.asarray(candidates)
     unary = np.asarray(unary, dtype=np.float64)
     projected = np.asarray(projected, dtype=np.float64)
-    pred = np.asarray(predecessor_codebook, dtype=np.float64)
-    succ = np.asarray(successor_codebook, dtype=np.float64)
+    # Vocabulary tables stay in their cached dtype. Widen only selected
+    # rows, rather than copying hundreds of MiB on every proposal.
+    pred = np.asarray(predecessor_codebook)
+    succ = np.asarray(successor_codebook)
     if codebook_ids is None:
         codebook_row = None
     else:
@@ -81,18 +83,18 @@ def build_ubtree(
     frontier = [root]
     supertree = []
     order = 1
-    for depth in range(depth_count):
+    # A B-node prefix-closed result cannot contain a path deeper than B or
+    # a depth's node ranked below B. This prunes host work without changing
+    # the bidirectional neural lattice or the selected global top-B tree.
+    for depth in range(min(depth_count, int(max_nodes))):
         extensions = []
         successor_ids = candidates[depth].astype(np.int64)
-        successor_rows = np.stack([lookup(succ, token) for token in successor_ids])
-        for parent in frontier:
-            correction = successor_rows @ (
-                lookup(pred, parent.token) * projected[depth]
-            )
-            combined = (
-                unary_scale[depth] * unary[depth] + correction_scale[depth] * correction
-            )
-            conditional = _log_softmax(combined)
+        successor_rows = np.stack([lookup(succ, token) for token in successor_ids]).astype(np.float64)
+        parent_rows = np.stack([lookup(pred, parent.token) for parent in frontier]).astype(np.float64)
+        correction = (parent_rows * projected[depth]) @ successor_rows.T
+        combined = unary_scale[depth] * unary[depth] + correction_scale[depth] * correction
+        conditionals = _log_softmax(combined)
+        for parent, conditional in zip(frontier, conditionals, strict=True):
             for column in range(candidate_count):
                 extensions.append(
                     _Node(
@@ -105,7 +107,7 @@ def build_ubtree(
                 )
                 order += 1
         extensions.sort(key=lambda node: (-node.score, node.depth, node.order))
-        frontier = extensions[: int(frontier_width)]
+        frontier = extensions[: min(int(frontier_width), int(max_nodes))]
         supertree.extend(frontier)
 
     # Path probabilities cannot increase with depth.  Ancestor-first tie
@@ -124,8 +126,9 @@ def build_ubtree(
                 )
             parent = parent.parent
 
-    # AST requires parent-first rows, independent of score order.
-    selected.sort(key=lambda node: (node.depth, node.order))
+    # Monotone cumulative scores and ancestor-first ties already put parents
+    # first. Preserve this ranking: AST's adaptive budget treats each prefix
+    # as the corresponding smaller-budget tree.
     row = {node: index for index, node in enumerate(selected)}
     tokens = [node.token for node in selected]
     parents = [-1 if node.parent is root else row[node.parent] for node in selected]

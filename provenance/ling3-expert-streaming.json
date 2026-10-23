@@ -1,0 +1,36 @@
+{
+  "schema": "mlx2.mined-implementation-provenance.v1",
+  "source": {
+    "repository": "https://huggingface.co/TensorFold/Ling-3.0-flash-oQ4",
+    "revision": "c00a8c3074236b713f15e12db59f0158d29f3b13",
+    "source_paths": [
+      "bailing_hybrid.py",
+      "modeling_bailing_moe_v3.py",
+      "config.json",
+      "model.safetensors.index.json",
+      "LICENSE"
+    ],
+    "license": "MIT"
+  },
+  "local_mechanism": {
+    "revision": "6bbb52ba65c6f8b4cd84945620bbc45b3fa676f3",
+    "paths": [
+      "src/mlx2/runtime/streamed_load.py",
+      "src/mlx2/runtime/weight_stream.py",
+      "src/mlx2/adapters/laguna_s21.py"
+    ],
+    "license": "Apache-2.0"
+  },
+  "modifications": [
+    "Expose bounded pre-materialization MoE expert streaming through the Ling adapter-owned load contract.",
+    "Reuse the resident quantization predicate for the checkpoint's 4/6/8-bit affine overrides and strict loading.",
+    "Close the streaming manager on post-load failures and normal adapter shutdown; preserve the resident ordinary reference.",
+    "Repair dropped kda_lower_bound: pass the checkpoint's -5 bound to the existing gated-delta primitive, matching the repository's PyTorch recurrent reference.",
+    "Version the Ling cache identity to prevent reuse of state produced by the former unbounded recurrence.",
+    "Retain absorbed MLA, compiled router, sorted expert gathers, APCv2 and explicit UBTree execution."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

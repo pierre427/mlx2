@@ -1,0 +1,22 @@
+{
+  "schema": "mlx2.mined-implementation-provenance.v1",
+  "source": {
+    "repository": "mlx2",
+    "revision": "3856a9db61a959934fae3e1ec66aa721e0f639ff",
+    "source_paths": [
+      "src/mlx2/runtime/external_speculative.py",
+      "src/mlx2/runtime/ast_tile_budget.py",
+      "src/mlx2/adapters/qwen38_27b.py"
+    ],
+    "license": "Apache-2.0"
+  },
+  "modifications": [
+    "Expose existing fixed/adaptive AST row controls through the Ling adapter for isolated indicative tuning.",
+    "Validate bounds before model loading, cap per-lane tree budgets, and bind the controls into route/cache identity.",
+    "Record the effective tree ceiling in drafter receipts; do not change the default or verifier math."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

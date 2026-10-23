@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -18,7 +19,23 @@ from .external_draft_policy import ExternalDraftAdapterMixin
 from .ordinary_artifact import inspect_indexed_artifact
 from .ordinary_text import OrdinaryTextAdapter
 
-CACHE_LAYOUT = "ling3-flash-hybrid-kda-mla-v1"
+CACHE_LAYOUT = "ling3-flash-hybrid-kda-bounded-mla-v3"
+
+
+def _tree_controls(policy):
+    rows = policy.get("ast_tile_rows", 16)
+    if type(rows) is not int or not 4 <= rows <= 32:
+        raise ValueError("Ling AST tile rows must be an integer from 4 to 32")
+    adaptive = policy.get("ast_adaptive_rows")
+    if adaptive is not None and type(adaptive) is not bool:
+        raise ValueError("Ling adaptive tree rows must be boolean")
+    if policy.get("ast_target_executor", "packed") not in ("packed", "serial"):
+        raise ValueError("Ling AST target executor must be packed or serial")
+    if policy.get("ast_target_executor") == "serial" and rows > 16:
+        raise ValueError("Ling serial reference supports at most 16 tile rows")
+    return rows, adaptive
+
+
 DESCRIPTOR = ModelDescriptor(
     model_type="bailing_hybrid",
     family="ling-3.0-flash",
@@ -94,6 +111,8 @@ def inspect_artifact(model_path):
         "v_head_dim": 128,
         "short_conv_kernel_size": 4,
         "no_kda_lora": True,
+        "kda_safe_gate": True,
+        "kda_lower_bound": -5.0,
         "gated_attention_proj_granularity_type": "head_wise",
         "tie_word_embeddings": False,
     }
@@ -176,38 +195,69 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     artifact_inspector = staticmethod(inspect_artifact)
     profile = "ling3-flash-oq4-apcv2-ordinary"
     default_route = "ordinary"
+    # Stacked affine expert rows retain checkpoint byte identity. The shared
+    # loader installs bounded row caches before materializing any expert table.
+    weight_streaming_modes = frozenset({"moe_experts"})
+    ast_prompt_lookup_tiles = False
+    ast_tile_rows_max = 32
     ast_tree_tiles = True
     # The generic header gate protects Qwen TensorFold kernels whose private
-    # state is hard-coded to bf16. Ling verifies ordinary quantized modules
-    # through the exact serial mixed-state executor instead.
+    # state is hard-coded to bf16. Ling's provider owns its KDA/MLA math and
+    # uses the generic installed projection law, including TensorFold lanes.
     ast_tree_tile_dtype_gate = False
     EXTERNAL_DEFAULT_NUM_DRAFT = 15
     EXTERNAL_ROUTE_TAG = "external-ubtree-ling3-v1"
     EXTERNAL_PROFILE = "ling3-flash-oq4-apcv2-ubtree"
+    ast_external_batch_size_route = "tree15_bounded_cohorts_v1"
     # ``server.apply_ast_invocation`` adds this exact tree-tile selection for
     # an explicit ``--ast-drafter`` artifact.
-    EXTERNAL_POLICY_EXTENSIONS = frozenset({"batch_size_route"})
+    EXTERNAL_POLICY_EXTENSIONS = frozenset({
+        "batch_size_route", "ast_graft_prompt_lookup", "ast_tile_rows", "ast_adaptive_rows",
+        "ast_target_executor",
+    })
 
-    def __init__(self, model_path, *, execution_policy=None):
+    def __init__(self, model_path, *, execution_policy=None, weight_streaming=None):
         from .process_globals import guarded_construction
 
-        guarded_construction(
-            self,
-            lambda: self._init_ling(model_path, execution_policy=execution_policy),
-        )
+        self.weight_stream = None
+        try:
+            guarded_construction(
+                self,
+                lambda: self._init_ling(
+                    model_path, execution_policy=execution_policy,
+                    weight_streaming=weight_streaming,
+                ),
+            )
+        except BaseException:
+            self.close()
+            raise
 
-    def _init_ling(self, model_path, *, execution_policy=None):
+    def _parse_external_policy(self, execution_policy, *, family):
+        external = super()._parse_external_policy(execution_policy, family=family)
+        if external:
+            route = self.external_policy.get("batch_size_route")
+            if route not in (
+                None, "tree15_b1_b4_chain_b5plus_v1", self.ast_external_batch_size_route,
+            ):
+                raise ValueError("Ling UBTree supports only the bounded tree15 AST route")
+            # Accept the former generic CLI selection as a compatibility alias;
+            # expose the actual tree-only policy before identity/config binding.
+            self.external_policy["batch_size_route"] = self.ast_external_batch_size_route
+        return external
+
+    def _init_ling(self, model_path, *, execution_policy=None, weight_streaming=None):
+        from ..runtime.streamed_load import require_declared
+
+        stream_request = require_declared(type(self), weight_streaming)
         external = self._parse_external_policy(execution_policy, family="Ling 3 Flash")
+        _tree_controls(self.external_policy)
+        if type(self.external_policy.get("ast_graft_prompt_lookup", False)) is not bool:
+            raise ValueError("Ling AST prompt-lookup graft must be boolean")
         if external:
             # Current AST hardware tiles hold an anchor plus 15 nodes.  The
             # checkpoint's B64 search stays represented in its config/receipt;
             # serving uses an explicit prefix-closed B15 projection.
             self.external_policy.setdefault("num_draft", 15)
-            route = self.external_policy.get("batch_size_route")
-            if route not in (None, "tree15_b1_b4_chain_b5plus_v1"):
-                raise ValueError(
-                    "Ling UBTree supports only the bounded tree15 AST route"
-                )
         artifact = inspect_artifact(model_path)
         self.config = artifact["config"]
         self.identity = artifact["identity"]
@@ -243,23 +293,47 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
         self.model = Model(ModelArgs.from_dict(self.config))
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        weights = self.model.sanitize(load_shards_evicting(files))
         quant = self.config["quantization"]
 
-        def predicate(name, module):
-            override = quant.get(name)
-            if isinstance(override, dict):
-                return override
-            return hasattr(module, "to_quantized") and f"{name}.scales" in weights
+        def quantize(weights):
+            def predicate(name, module):
+                override = quant.get(name)
+                if isinstance(override, dict):
+                    return override
+                return hasattr(module, "to_quantized") and f"{name}.scales" in weights
 
-        nn.quantize(
-            self.model,
-            group_size=quant["group_size"],
-            bits=quant["bits"],
-            mode=quant["mode"],
-            class_predicate=predicate,
-        )
-        self.model.load_weights(list(weights.items()), strict=True)
+            nn.quantize(
+                self.model,
+                group_size=quant["group_size"],
+                bits=quant["bits"],
+                mode=quant["mode"],
+                class_predicate=predicate,
+            )
+
+        if stream_request is None:
+            weights = self.model.sanitize(load_shards_evicting(files))
+            quantize(weights)
+            self.model.load_weights(list(weights.items()), strict=True)
+        else:
+            from ..runtime.streamed_load import (
+                force_stock_expert_arithmetic,
+                load_streamed,
+            )
+
+            loaded = load_streamed(
+                self.model, path, [file.name for file in files],
+                request=stream_request,
+                sanitize=self.model.sanitize,
+                quantize=quantize,
+                records=self.identity["files"],
+                weight_map=artifact["weight_map"],
+                top_k=int(self.config["num_experts_per_tok"]),
+                on_installed=lambda manager: setattr(
+                    manager, "forced_stock", force_stock_expert_arithmetic(self.model)
+                ),
+            )
+            weights = loaded.weights
+            self.weight_stream = loaded.manager
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
@@ -291,20 +365,170 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                     "observed_used": False,
                     "checkpoint_tree_budget": 64,
                     "served_tree_budget": 15,
-                    "target_tree_executor": "serial-exact-reference",
+                    "target_tree_executor": self.external_policy.get("ast_target_executor", "packed"),
                 },
             )
+            if self.external_policy.get("ast_graft_prompt_lookup", False):
+                self._graft_prompt_lookup()
+            self._bind_tree_controls()
+        if self.weight_stream is not None:
+            self.weight_stream.begin_serving()
+
+    def close(self):
+        try:
+            stream = getattr(self, "weight_stream", None)
+            if stream is not None:
+                stream.close()
+                self.weight_stream = None
+        finally:
+            super().close()
+
+    def execution_config(self, *, max_lanes, prefill_step):
+        if self.draft_model is not None:
+            return {
+                **self._external_execution_config(
+                    max_lanes=max_lanes, prefill_step=prefill_step
+                ),
+                "batch_size_route": self.ast_external_batch_size_route,
+                "dynamic_tree_overflow": "cohort",
+                "tree_node_budget_by_lanes": {
+                    width: max(1, _tree_controls(self.external_policy)[0] // width - 1)
+                    for width in range(1, 5)
+                },
+            }
+        return super().execution_config(
+            max_lanes=max_lanes, prefill_step=prefill_step
+        )
+
+    def bind_serving_lane_matmul(self, receipt):
+        """Complete raw TensorFold's coverage with the owned MPP format lane.
+
+        The released target has q8-g128 shared experts. Raw TensorFold leaves
+        these on MLX's width-dependent stock law; the owned lane covers them
+        without changing any of TensorFold's already tiled weight storage.
+        Both ordinary and AST calls receive the same installed arithmetic.
+        """
+        from mlx import nn
+
+        from ..runtime.lane import install, installed_lane
+        from ..runtime.tensorfold_qwen38 import lane_qmm
+
+        raw_tensorfold = (receipt or {}).get("law_id") == "tensorfold-lane-qmm-v1+fused-groups"
+        if raw_tensorfold:
+            gaps = install(
+                self.model, min_rows=1, max_rows=32,
+                skip=lambda _name, module: not isinstance(module, (nn.QuantizedLinear, nn.Linear))
+                or (isinstance(module, nn.QuantizedLinear) and lane_qmm.takes(module)),
+            )
+            receipt["format_completion"] = gaps
+            receipt["law_id"] += ":ling-format-completion:" + gaps["law_id"]
+        packed = getattr(self, "draft_model", None) is not None and (
+            self.external_policy.get("ast_target_executor", "packed") == "packed"
+        )
+        if packed:
+            rows, _adaptive = _tree_controls(self.external_policy)
+            missing = []
+            for name, module in self.model.named_modules():
+                if not isinstance(module, (nn.QuantizedLinear, nn.Linear)):
+                    continue
+                raw = raw_tensorfold and isinstance(module, nn.QuantizedLinear) and lane_qmm.takes(module)
+                owned = installed_lane(module) is not None and (
+                    getattr(module, "_lane_min_rows", None) == 1
+                    and getattr(module, "_lane_max_rows", 0) >= rows
+                )
+                if not (raw or owned):
+                    missing.append(name)
+            if not receipt or missing:
+                raise ValueError(
+                    "Packed Ling AST requires a complete row-invariant projection law; "
+                    "use --lane-matmul exact or tensorfold, or ast_target_executor=serial. "
+                    f"Uncovered projections: {missing[:4]}"
+                )
+        self.packed_projection_law = None if receipt is None else {
+            "law_id": receipt.get("law_id"),
+            "format_completion": receipt.get("format_completion"),
+        }
+
+    def lane_policy_defaults(self):
+        if self.draft_model is not None and self.external_policy.get("ast_target_executor", "packed") == "packed":
+            return {"mode": "exact", "moe": {"mode": "exact"}}
+        return {}
+
+    def _graft_prompt_lookup(self):
+        from ..runtime.drafters.prompt_lookup_draft import PromptLookupDraftModel
+
+        if getattr(self.draft_model, "receipt_kind", None) != "external_ubtree":
+            raise ValueError("Ling prompt lookup graft requires its UBTree drafter")
+        self.draft_model = PromptLookupDraftModel(
+            self.model, num_draft=self._external_num_draft(), base=self.draft_model
+        )
+        digest = hashlib.sha256(
+            (self.identity["fingerprint"] + ":ling-ubtree-pld-graft-v1").encode()
+        ).hexdigest()
+        self.identity = {**self.identity, "fingerprint": digest}
+        self.layout += ":pld-graft-v1:" + digest
+        self.descriptor = replace(
+            self.descriptor, variant="oq4-ubtree-ast-b15-pld",
+            cache_layout=self.layout,
+            metadata={**self.descriptor.metadata, "prompt_lookup_graft": True},
+        )
 
     def create_external_batch(self, **kwargs):
-        if getattr(self.draft_model, "receipt_kind", None) != "external_ubtree":
+        from ..runtime.drafters.prompt_lookup_draft import PromptLookupDraftModel
+
+        draft = self.draft_model
+        if isinstance(draft, PromptLookupDraftModel):
+            draft = draft.base
+        if getattr(draft, "receipt_kind", None) != "external_ubtree":
             raise ValueError("Ling AST requires a bound UBTree drafter")
         from ..runtime.hybrid_tree_executor import HybridTreeExecutor
+        from ..runtime.ling_tree_executor import LingTreeExecutor
 
+        # UBTree supplies learned trees, not categorical chain proposal laws.
+        # Keep excess sessions on bounded provider cohorts at every pressure.
+        if kwargs.get("dynamic_tree_overflow", "cohort") != "cohort":
+            raise ValueError("Ling UBTree requires bounded tree cohort overflow")
+        kwargs.setdefault("dynamic_tree_overflow", "cohort")
         kwargs.setdefault("dynamic_singleton_tree", True)
         kwargs.setdefault("dynamic_tree_max_width", 4)
-        kwargs.setdefault("tree_node_budget_by_lanes", {1: 15, 2: 7, 3: 4, 4: 3})
-        kwargs.setdefault("target_tree_executor_provider", HybridTreeExecutor.create())
+        kwargs.setdefault("tensorfold_cohort_limit", 4)
+        rows, adaptive = _tree_controls(self.external_policy)
+        kwargs.setdefault("tree_node_budget_by_lanes", {
+            width: max(1, rows // width - 1) for width in range(1, 5)
+        })
+        if adaptive is not None:
+            kwargs.setdefault("ast_adaptive_rows", adaptive)
+        provider = (
+            HybridTreeExecutor if self.external_policy.get("ast_target_executor", "packed") == "serial"
+            else LingTreeExecutor
+        )
+        if provider is HybridTreeExecutor and rows > 16:
+            raise ValueError("Ling serial reference supports at most 16 tile rows")
+        kwargs.setdefault("target_tree_executor_provider", provider.create())
         return super().create_external_batch(**kwargs)
+
+    def _bind_tree_controls(self):
+        import json
+
+        rows, adaptive = _tree_controls(self.external_policy)
+        value = {"tile_rows": rows, "adaptive_rows": adaptive,
+                 "target_executor": self.external_policy.get("ast_target_executor", "packed")}
+        digest = hashlib.sha256((self.identity["fingerprint"] + json.dumps(
+            value, sort_keys=True, separators=(",", ":")
+        )).encode()).hexdigest()
+        self.identity = {**self.identity, "fingerprint": digest}
+        self.layout += ":tree-controls-v1:" + digest
+        base = getattr(self.draft_model, "base", None) or self.draft_model
+        base.served_tree_budget = rows - 1
+        self.descriptor = replace(
+            self.descriptor,
+            variant=f"oq4-ubtree-ast-b{rows - 1}" + (
+                "-pld" if self.external_policy.get("ast_graft_prompt_lookup", False) else ""
+            ),
+            cache_layout=self.layout,
+            metadata={**self.descriptor.metadata, "served_tree_budget": rows - 1,
+                      "tree_controls": value},
+        )
 
     def diagnostics(self):
         if self.draft_model is None:
@@ -316,6 +540,10 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "selected": True,
             "observed_used": False,
             "draft": self.draft_model.receipt_settings,
+            "tree_controls": dict(zip(("tile_rows", "adaptive_rows"), _tree_controls(self.external_policy))),
+            "projection_law": getattr(self, "packed_projection_law", None),
+            **({"prompt_lookup_graft": dict(self.draft_model.stats)}
+               if self.external_policy.get("ast_graft_prompt_lookup", False) else {}),
         }
 
 

@@ -1,0 +1,22 @@
+{
+  "schema": "mlx2.mined-implementation-provenance.v1",
+  "source": {
+    "repository": "mlx2",
+    "revision": "63e48f3bec357311e2206799c4c18dbc13dbc85e",
+    "source_paths": [
+      "src/mlx2/runtime/drafters/prompt_lookup_draft.py",
+      "src/mlx2/adapters/qwen38_27b.py"
+    ],
+    "license": "Apache-2.0"
+  },
+  "modifications": [
+    "Expose the existing deterministic prompt-lookup tree graft for Ling's bound UBTree drafter.",
+    "Bind graft selection into adapter identity and cache layout; preserve the ordinary and UBTree-only routes.",
+    "Report live graft counters through adapter diagnostics without adding scheduler family branches.",
+    "Forward history and copy-topology metadata from the shared graft only to bases declaring those capabilities; preserve UBTree's strict learned-tree protocol."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

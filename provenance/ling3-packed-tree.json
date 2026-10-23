@@ -1,0 +1,41 @@
+{
+  "schema": "mlx2.mined-implementation-provenance.v1",
+  "sources": [
+    {
+      "repository": "mlx2",
+      "revision": "693eec203",
+      "paths": [
+        "src/mlx2/runtime/models/bailing_hybrid.py",
+        "src/mlx2/runtime/hybrid_tree_executor.py",
+        "src/mlx2/runtime/attention_tree_executor.py",
+        "src/mlx2/runtime/lane/installer.py"
+      ],
+      "license": "MIT; upstream TensorFold provenance retained in existing manifests"
+    },
+    {
+      "repository": "https://huggingface.co/inclusionAI/Ling-3.0-flash-UBTree",
+      "revision": "59ced6e1e8fa434570be038e262c3e62552cf9a4",
+      "paths": [
+        "config.json",
+        "README.md",
+        "model.safetensors"
+      ],
+      "license": "MIT"
+    }
+  ],
+  "modifications": [
+    "Original adapter-owned layerwise packed Ling tree verification; reuse installed projection arithmetic, including TensorFold lane matmul.",
+    "Parent-indexed convolution windows and depth-cohort KDA updates preserve the ordinary bounded channel-gate recurrence.",
+    "MLA retains absorbed one-query attention over the exact prefix and ancestor keys; commit only the accepted state and KV path.",
+    "Cache immutable selector codebooks once per drafter binding; vectorize frontier edge scoring.",
+    "Keep serial exact verification as an explicit reference and distinguish physical cross-request packing from within-request projection packing.",
+    "Compose raw TensorFold on its supported formats with the existing owned row-invariant MPP installer on uncovered affine formats, including released q8-g128 shared experts; version the composite serving law.",
+    "Default explicit packed Ling AST to the exact projection policy; fail closed on incomplete coverage, retaining an explicit serial reference selection.",
+    "Bound multi-request Ling provider cohorts to four independent descriptors and prepare all lane commits before publishing any.",
+    "Use verified-budget-only yield observations for prompt-lookup grafts whose row prefixes are not invariant across rebuilt node budgets."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

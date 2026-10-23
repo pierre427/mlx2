@@ -65,6 +65,8 @@ class UBTreeDraftModel(DFlashDraftModel):
     def __init__(self, config: UBTreeConfig):
         super().__init__(config)
         self.ubtree_selector = UBTreeSelector(config)
+        object.__setattr__(self, "_codebook_tables", None)
+        object.__setattr__(self, "_codebook_builds", 0)
 
     @property
     def receipt_settings(self):
@@ -73,9 +75,11 @@ class UBTreeDraftModel(DFlashDraftModel):
             "candidate_k": self.config.selector_top_k,
             "frontier_width": self.config.tree_supertree_width,
             "checkpoint_tree_budget": self.config.tree_budget,
-            "served_tree_budget": 15,
+            "served_tree_budget": getattr(self, "served_tree_budget", 15),
             "depth_bonus": 0.0,
-            "ast_projection": "top15-prefix-closed-from-checkpoint-supertree",
+            "ast_projection": "score_ranked_prefix_closed",
+            "codebook_cache": "binding_owned_vocabulary_fp32",
+            "codebook_builds": self._codebook_builds,
         }
 
     def validate_target_compatibility(self, target_model):
@@ -100,7 +104,28 @@ class UBTreeDraftModel(DFlashDraftModel):
         self.embed_tokens = embedding
         self.embed_scale = getattr(embedding, "embed_scale", 1.0)
         self.lm_head = getattr(target_model, "lm_head", None) or embedding.as_linear
+        object.__setattr__(self, "_codebook_tables", None)
         return self
+
+    def _precompute_codebooks(self):
+        if self._codebook_tables is None:
+            predecessor, successor = [], []
+            # Bound temporary embedding/MLP buffers; cache only immutable
+            # derived tables outside the Module parameter tree.
+            for start in range(0, self.config.vocab_size, 2048):
+                ids = mx.arange(start, min(start + 2048, self.config.vocab_size), dtype=mx.int32)
+                embeddings = self.embed_tokens(ids).astype(mx.float32)
+                pred = self.ubtree_selector.predecessor_factorizer(embeddings).astype(mx.float32)
+                succ = self.ubtree_selector.successor_factorizer(embeddings).astype(mx.float32)
+                mx.eval(pred, succ)
+                predecessor.append(np.asarray(pred))
+                successor.append(np.asarray(succ))
+            tables = (np.concatenate(predecessor), np.concatenate(successor))
+            for table in tables:
+                table.setflags(write=False)
+            object.__setattr__(self, "_codebook_tables", tables)
+            object.__setattr__(self, "_codebook_builds", self._codebook_builds + 1)
+        return self._codebook_tables
 
     def _embed_input_tokens(self, inputs):
         return self.embed_tokens(inputs) * self.embed_scale
@@ -202,8 +227,8 @@ class UBTreeDraftModel(DFlashDraftModel):
             )
             - 1
         )
-        if not 1 <= int(max_nodes) <= 15 or positions < 1:
-            raise ValueError("mlx2 UBTree AST serves 1..15 non-root nodes")
+        if not 1 <= int(max_nodes) <= 31 or positions < 1:
+            raise ValueError("mlx2 UBTree AST serves 1..31 non-root nodes")
         candidates, unary, projected = self._lattice(anchors, hidden, cache, positions)
         forbidden = options.get("forbidden_token_ids")
         if forbidden is not None:
@@ -226,18 +251,7 @@ class UBTreeDraftModel(DFlashDraftModel):
         if mark is not None:
             mark("tree_draft_wait")
         candidate_rows = np.asarray(candidates)
-        ids = np.unique(
-            np.concatenate(
-                ([int(value) for value in anchors], candidate_rows.reshape(-1).tolist())
-            )
-        ).astype(np.int32)
-        embeddings = self.embed_tokens(mx.array(ids, dtype=mx.int32)).astype(mx.float32)
-        predecessor = self.ubtree_selector.predecessor_factorizer(embeddings).astype(
-            mx.float32
-        )
-        successor = self.ubtree_selector.successor_factorizer(embeddings).astype(
-            mx.float32
-        )
+        predecessor, successor = self._precompute_codebooks()
         unary_scale = self.ubtree_selector.depth_conditioner.unary_log_scale.astype(
             mx.float32
         )
@@ -246,7 +260,7 @@ class UBTreeDraftModel(DFlashDraftModel):
                 mx.float32
             )
         )
-        mx.eval(predecessor, successor, unary_scale, correction_scale)
+        mx.eval(unary_scale, correction_scale)
         result = []
         for row, anchor in enumerate(anchors):
             result.append(
@@ -255,11 +269,10 @@ class UBTreeDraftModel(DFlashDraftModel):
                     np.asarray(unary)[row],
                     np.asarray(projected)[row],
                     int(anchor),
-                    np.asarray(predecessor),
-                    np.asarray(successor),
+                    predecessor,
+                    successor,
                     np.asarray(unary_scale),
                     np.asarray(correction_scale),
-                    codebook_ids=ids,
                     frontier_width=self.config.tree_supertree_width,
                     max_nodes=int(max_nodes),
                     depth_bonus=0.0,

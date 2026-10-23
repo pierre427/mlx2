@@ -1,0 +1,39 @@
+{
+  "schema": "mlx2.mined-implementation-provenance.v1",
+  "target": {
+    "repository": "https://huggingface.co/TensorFold/Ling-3.0-flash-oQ4",
+    "revision": "c00a8c3074236b713f15e12db59f0158d29f3b13",
+    "source_paths": [
+      "bailing_hybrid.py",
+      "config.json",
+      "LICENSE"
+    ]
+  },
+  "drafter": {
+    "repository": "https://huggingface.co/inclusionAI/Ling-3.0-flash-UBTree",
+    "revision": "59ced6e1e8fa434570be038e262c3e62552cf9a4",
+    "source_paths": [
+      "config.json",
+      "model.safetensors",
+      "README.md",
+      "LICENSE"
+    ],
+    "paper": "https://arxiv.org/abs/2609.39972"
+  },
+  "license": "MIT",
+  "modifications": [
+    "Mapped the target architecture onto mlx2 runtime primitives.",
+    "Added post-layer target taps for UBTree layers 1, 11, 23, 29, and 35.",
+    "Implemented the released deep-codebook, depth-calibrated UBTree selector.",
+    "Implemented the paper's width-12 frontier and prefix-closed global pruning.",
+    "Projected the checkpoint B64 tree to the current AST tile's B15 non-root budget.",
+    "Added a correctness-first exact serial target-tree executor for mixed KV and recurrent state.",
+    "Added strict artifact topology, tensor-header, payload-revision, and role checks.",
+    "Select the shared external serving backend when UBTree is bound; preserve ordinary decoding otherwise.",
+    "Preserve cumulative-score publication order (already parent-first under nonpositive depth bonus), so AST adaptive-budget counterfactuals refer to actual smaller-budget trees."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

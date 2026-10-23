@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+POINT_MASS_SAMPLING_LAW = "target-categorical-point-mass-v1"
+
 
 def probability(values):
     p = np.asarray(values, dtype=np.float64)
@@ -221,6 +223,36 @@ class VerifiedBlock:
     rejected: bool
     relaxed_accepts: int = 0
     relaxed_positions: tuple[int, ...] = ()
+
+
+def verify_point_mass_proposals(tokens, targets, rng):
+    """Sample p once per emitted token, independently of draft/block shape.
+
+    A deterministic proposal needs no proposal draw. Sampling p and accepting
+    exactly when that sample matches the proposal has acceptance probability
+    p[proposal]; a mismatch is already a valid correction. The target rows
+    after it belong to an uncommitted history and must never draw randomness.
+    This couples identical seeded target laws across different draft paths,
+    unlike separate acceptance and residual draws. No stochastic q law may
+    use this verifier. Validate every provisional law before the first draw.
+    """
+    tokens = tuple(int(token) for token in tokens)
+    laws = tuple(probability(row) for row in targets)
+    if len(laws) != len(tokens) + 1:
+        raise ValueError("Proposal/target count mismatch")
+    vocab = len(laws[0])
+    if any(row.shape != laws[0].shape for row in laws):
+        raise ValueError("Vocabulary mismatch")
+    if any(not 0 <= token < vocab for token in tokens):
+        raise ValueError("Point-mass proposal outside vocabulary")
+    emitted = []
+    for index, proposal in enumerate(tokens):
+        selected = rng.sample(laws[index])
+        emitted.append(selected)
+        if selected != proposal:
+            return VerifiedBlock(index, tuple(emitted), laws[:index + 1], True)
+    emitted.append(rng.sample(laws[-1]))
+    return VerifiedBlock(len(tokens), tuple(emitted), laws, False)
 
 
 def verify_proposals(tokens, proposals, targets, rng, *, fly_verification=None):

@@ -1,0 +1,28 @@
+{
+  "schema": "mlx2.original-implementation-provenance.v1",
+  "source": {
+    "repository": "mlx2",
+    "revision": "3856a9db61a959934fae3e1ec66aa721e0f639ff",
+    "external_implementation_mined": false
+  },
+  "modifications": [
+    "Add adapter-owned dynamic_tree_overflow=cohort while preserving the default chain overflow route.",
+    "Ling UBTree keeps overflow requests on fair bounded tree cohorts because its drafter has no categorical chain-law API; PLD graft follows the same contract.",
+    "Align widest-verify row bounds, chain-cap exclusion and executed-route receipts with bounded cohorts.",
+    "Add CPU synthetic bare/grafted UBTree B5/B8 output parity, two-cohort fairness, row-bound and route-policy regressions.",
+    "Declare canonical bounded-cohort route through adapter capability; generic CLI honors that declaration while preserving other route defaults.",
+    "Accept former Ling chain-named route as an input alias, canonicalize before binding, and publish accurate effective execution settings.",
+    "Close synthetic test batches in finally through contextlib.closing."
+  ],
+  "source_sha256": {
+    "src/mlx2/runtime/external_speculative.py": "46586bcde48ff618c892b36bb48aa29590457f7a2ecb18c0718668b21ddd6159",
+    "src/mlx2/adapters/ling3_flash.py": "404bff5c4d31aefca0ceef88e44b8f1bb6a749749b954d6ff99c7d25af10a83a",
+    "src/mlx2/server.py": "97645ce95a6f9788fdd70f49b6462ee5fea21d2334ef90c237f0d2a0f598ebbb",
+    "tests/test_ling_tree_overflow_cpu.py": "80dc615d7990f3e7fdd65c0fce604c628de7a43945a01829182dc7c64bed469f",
+    "tests/test_ling_ubtree_cpu.py": "f0cbfad043e32defc9fba2ed8c3547b609c83382c2e215b0c52c8ecfe0da036f"
+  },
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}
