@@ -1,0 +1,33 @@
+{
+  "component": "desktop independent-context local agent orchestration",
+  "implementation": "original mlx2 implementation; no Artex code copied, imported or executed",
+  "methodology_reference": {
+    "repository": "artex-global (local Downloads checkout)",
+    "revision": "fdfb7a17b7da5e2de716c0e98475ec77a41c64c6",
+    "paths": [
+      "README.md"
+    ],
+    "license": "AGPL-3.0",
+    "idea": "one explicit goal per worker; worker reports return to the orchestrator",
+    "modifications": "Independent bounded inference HTTP requests, no offensive workflow or command runner, no shared worker conversations, immutable parent/task/worker identities, scoped read-only memory and explicit sibling mailboxes only for tools-capable routes."
+  },
+  "paths": [
+    "src/mlx2/desktop_agents.py",
+    "native/macos/AgentsView.swift",
+    "src/mlx2/desktop_planning.py"
+  ],
+  "planning_reference": {
+    "source": "CPGv2 (local source checkout)",
+    "revision": "unversioned local source; no Git metadata",
+    "license": "not determined; no source code copied",
+    "paths": {
+      "AGENTS.md": "sha256:e93de96b753aef07f47b73d5be3af69f5694675c85b796ad5a4d5c62949950d7",
+      "tests/integration/test_session_lifecycle.py": "sha256:2f086d8335eb8afe1a088da72cf8642851725f92f65cdcc12a93dca3ae1cc457"
+    },
+    "modifications": "Original small SQLite planning ledger, explicit sessions, immutable goals, fenced expiring task leases, model claims separate from human verification; no live CPG imports or changes."
+  },
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

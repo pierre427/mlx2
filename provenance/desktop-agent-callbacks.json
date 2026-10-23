@@ -1,0 +1,21 @@
+{
+  "implementation": "Original mlx2 native completion delivery, failure recurrence guard, scoped mailbox coordination and payload layout repair. No Codex or Claude source copied.",
+  "source_revision": "04baf754c3641b0eb8e5deefb95fe8fcb7846709 plus current dirty source snapshot",
+  "reference": {
+    "paper": "Harness^2: Recursive Agent Harnessing for an Open World",
+    "url": "https://arxiv.org/html/2610.14224v1",
+    "revision": "arXiv:2610.14224v1, 2026-10-09",
+    "license": "CC BY 4.0",
+    "sections": [
+      "2.2.1",
+      "2.3",
+      "E.6",
+      "F"
+    ],
+    "use": "Methodological reference only; no paper prompts or code copied. Match observed failure to a narrow change and validate behavioral effects; retain uncertainty."
+  },
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

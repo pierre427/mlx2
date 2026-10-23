@@ -1,0 +1,16 @@
+{
+  "component": "desktop procedural skills and self-management",
+  "implementation": "Original MLX2 implementation; no Hermes source copied or executed",
+  "license": "Apache-2.0",
+  "methodology_references": [
+    "https://hermes-agent.nousresearch.com/docs/guides/work-with-skills/",
+    "https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/skills.md"
+  ],
+  "consulted": "2026-10-23",
+  "mechanisms": "Progressive discovery, procedural versus factual memory, targeted edits and optional write approval",
+  "modifications": "Private profile-bound SQLite revisions, compare-and-swap edits, recoverable archival, disabled imports, bounded text references, no script execution or implicit authority, explicit scoped child tool grants",
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}
