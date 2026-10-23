@@ -3485,6 +3485,14 @@ def engine_request(request):
     return view
 
 
+def validate_template_request(adapter, request):
+    """Refuse opt-in template capabilities on both token and text endpoints."""
+    if request.get("verification"):
+        options = getattr(adapter, "chat_template_options", None)
+        if not callable(options) or "verification" not in options():
+            raise ValueError("verification is not supported by the selected adapter template")
+
+
 def render_prompt_tokens(adapter, request):
     """Render one request to prompt tokens, shaping template failures.
 
@@ -3496,6 +3504,7 @@ def render_prompt_tokens(adapter, request):
     """
     from .runtime.literal_control_text import protect_control_text
 
+    validate_template_request(adapter, request)
     if "_mlx2_prompt_tokens" not in request:
         # Prepared media prompts were protected before their encoder ran.
         request = protect_control_text(getattr(adapter, "tokenizer", None), request)
@@ -4343,6 +4352,7 @@ class ServingEngine:
             Path(lora_root).expanduser().resolve() if lora_root is not None else None
         )
         self.lora_session = None
+        self._lora_lifecycle_lock = threading.RLock()
         self.multi_lora_policy = multi_lora_policy(
             max_loras,
             max_lora_rank,
@@ -4700,6 +4710,43 @@ class ServingEngine:
             },
         }
 
+    def export_suspension(self, suspension_id):
+        """Metadata-only commit, after the worker has drained every request."""
+        from .runtime.apc_suspension import lora_file_receipt
+        lifecycle = getattr(self, "_lora_lifecycle_lock", None)
+        if lifecycle is None:
+            lifecycle = self._lora_lifecycle_lock = threading.RLock()
+        with lifecycle:
+            with self._admission_section():
+                with self.lock:
+                    report = self._last_service_transition.get("result", {}).get("suspend") or {}
+                    if (self._service_state != "suspended" or not self._quiesce_complete.is_set()
+                            or report.get("failures") != 0 or report.get("resident_entries_after") != 0):
+                        raise SuspendUnavailable("Suspend export requires a fully drained, successfully persisted cache")
+                    apc = self.apc
+                    identity = {name: self.snapshot.get(name) for name in ("artifact", "runtime")}
+                    if apc is None or not identity["artifact"] or not identity["runtime"]:
+                        raise SuspendUnavailable("Exact runtime/cache identity is unavailable")
+                    if getattr(self, "lora_session", None) is not None:
+                        raise SuspendUnavailable("Global-mutation LoRA suspension is unsupported; use concurrent ordinary-route LoRA")
+                loras = []
+                manager = getattr(self, "multi_lora", None)
+                if manager is not None:
+                    with manager.lock:
+                        for name, adapter in sorted(manager.registry.items()):
+                            current = lora_file_receipt(self._resolve_lora_path(adapter.path))
+                            if current["fingerprint"] != adapter.fingerprint:
+                                raise SuspendUnavailable("Registered LoRA source changed since load")
+                            loras.append({"name": name, **current})
+                result = apc.freeze_suspension(suspension_id)
+                return {**result, **identity, "process_id": os.getpid(), "loras": loras, "branches": apc.branch_diagnostics(200)}
+
+    def cache_branches(self, limit=200):
+        apc = self.apc
+        if apc is None:
+            raise SuspendUnavailable("APCv2 cache is unavailable for this model route")
+        return apc.branch_diagnostics(limit)
+
     def service_state(self):
         with self.lock:
             return self._service_state_locked()
@@ -4844,6 +4891,9 @@ class ServingEngine:
             )
         if prefetch_sessions:
             self._ensure_apc_prefetch_available()
+        with self._admission_section():
+            if getattr(self.apc, "_suspension_clock", None):
+                self.apc.thaw_suspension()
         # Holding submission_lock and lock makes drain cancellation atomic with
         # the worker's claim of the idle boundary. If the worker has already
         # claimed it (state is quiesced/suspended but completion is not set),
@@ -5307,6 +5357,7 @@ class ServingEngine:
             adapter = self.adapter
             if adapter is None:
                 raise RuntimeError("model adapter is not ready")
+            validate_template_request(adapter, request)
             render = getattr(adapter, "render_prompt", None)
             if not callable(render):
                 return None
@@ -6011,19 +6062,31 @@ class ServingEngine:
         if not self.ready.is_set() or self.error or not self.thread.is_alive():
             raise RuntimeError(self.error or "model is not ready")
         reservations = self._usage_admit(requests, tenant_id)
+        preparing = False
         try:
+            with self._admission_section():
+                self._ensure_admission(admission_class, admitted=admitted)
+                # Media loading and prompt rendering use the live adapter.
+                # Own that preparation before an exclusive operation or
+                # quiesce can claim an otherwise idle engine.
+                self._admissions_preparing += 1
+                preparing = True
             return self._submit_many_held(
                 requests,
                 reservations,
                 tenant_id=tenant_id,
                 admission_class=admission_class,
-                admitted=admitted,
+                admitted=True,
             )
         except BaseException as error:
             # A failed parallel submission unregisters its jobs, so none of
             # them reaches _finish's record.
             self._usage_failed(tenant_id, requests, reservations, error)
             raise
+        finally:
+            if preparing:
+                with self.submission_lock:
+                    self._admissions_preparing -= 1
 
     def _submit_many_held(
         self, requests, reservations, *, tenant_id, admission_class, admitted
@@ -6058,7 +6121,10 @@ class ServingEngine:
             job.fanout_group = fanout_group
             job.fanout_role = "prefill_leader" if index == 0 else "apcv2_sibling"
         reserved = 0
-        with self._admission_section():
+        # Already admitted before preparation: an exclusive operation may
+        # now be waiting for us to drain. Publish under submission_lock as
+        # submit() does, without waiting on that operation and deadlocking it.
+        with self.submission_lock:
             self._ensure_admission(admission_class, admitted=admitted)
             for _ in jobs:
                 if not self.slots.acquire(blocking=False):
@@ -7258,7 +7324,23 @@ class ServingEngine:
             "model_revision": self.model_revision,
         }
 
+    @contextmanager
+    def _lora_control_section(self):
+        lifecycle = getattr(self, "_lora_lifecycle_lock", None)
+        if lifecycle is None:
+            lifecycle = self._lora_lifecycle_lock = threading.RLock()
+        with lifecycle:
+            with self.lock:
+                state = getattr(self, "_service_state", "serving")
+                if state != "serving":
+                    raise AdmissionClosed(state, "lora_control")
+            yield
+
     def load_lora_adapter(self, name, path, *, base_model_name=None):
+        with self._lora_control_section():
+            return self._load_lora_adapter(name, path, base_model_name=base_model_name)
+
+    def _load_lora_adapter(self, name, path, *, base_model_name=None):
         candidate = self._resolve_lora_path(path)
         model_name = self.status().get("model")
         if base_model_name is not None and base_model_name not in {
@@ -7291,6 +7373,10 @@ class ServingEngine:
         return self._exclusive_adapter_operation("lora_load", install)
 
     def unload_lora_adapter(self, name, *, lora_int_id=None):
+        with self._lora_control_section():
+            return self._unload_lora_adapter(name, lora_int_id=lora_int_id)
+
+    def _unload_lora_adapter(self, name, *, lora_int_id=None):
         if lora_int_id is not None and (
             isinstance(lora_int_id, bool) or not isinstance(lora_int_id, int)
         ):
@@ -11041,6 +11127,10 @@ class ServingEngine:
                     "artifact": adapter.identity["fingerprint"],
                     "profile": profile_name,
                     "settings": settings,
+                    "chat_template_options": (
+                        adapter.chat_template_options()
+                        if callable(getattr(adapter, "chat_template_options", None)) else {}
+                    ),
                     "weight_residency": getattr(self, "weight_residency", None),
                     "mlx_build": getattr(self, "mlx_build", None),
                     "route_receipt": route_receipt,

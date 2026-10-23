@@ -849,7 +849,7 @@ def enforce_tool_contract(
         function = call.get("function", {})
         definition = declared.get(function.get("name"))
         if definition is None:
-            raise ToolContractError("model called an undeclared function")
+            raise ToolContractError("model called an undeclared function: " + (json.dumps(function.get("name")) if isinstance(function.get("name"), str) and len(function.get("name").encode("utf-8")) <= 128 else "[name exceeds diagnostic limit]"))
         if definition.get("strict") is not True:
             continue
         try:

@@ -1,0 +1,19 @@
+{
+  "source_repository": "https://huggingface.co/InternScience/Sage-A1.5",
+  "source_revision": "0e3205cf441cf01df0c0d238cc4738d0e43b4ca7",
+  "paths": [
+    "README.md",
+    "chat_template.jinja",
+    "tokenizer_config.json"
+  ],
+  "license": "Apache-2.0",
+  "modifications": [
+    "Canonical spawn_subagent task schema adapted to bounded local workers with explicitly scoped tools and operator approval.",
+    "Verification flag passed to pinned model template; ordinary rendering unchanged.",
+    "Per-model UI profile: 262144 context, 65536 output, 32768 reasoning; verification opt-in."
+  ],
+  "public_validation": {
+    "scope": "Source integration and focused synthetic CPU regressions; no model qualification or performance claim.",
+    "evidence": "Focused synthetic test modules distributed with this implementation; private campaign evidence is not distributed."
+  }
+}

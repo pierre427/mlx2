@@ -488,7 +488,7 @@ def test_constrained_tool_parse_failure_stays_fail_closed():
         parse_tool=parse_tool_call,
         constrained_tools=True,
     )
-    with pytest.raises(ValueError, match="undeclared"):
+    with pytest.raises(ValueError, match='undeclared tool: "missing"'):
         parser.push(
             "<tool_call><function=missing></function></tool_call>", final=True
         )
@@ -1060,3 +1060,12 @@ def test_unfinished_tool_call_at_the_end(chunked):
         _content_after_calls(text, chunked)
     content, calls = _content_after_calls(text, chunked, tolerant_tool_markers=True)
     assert (content, calls) == ("<tool_call>\n<function=sum", ["sum"])
+
+
+def test_constrained_tool_null_name_is_never_admitted():
+    parser = OutputParser(chat=True, thinking=False,
+                          tools=[{"type": "function", "function": {"name": "declared"}}],
+                          constrained_tools=True,
+                          parse_tool=lambda *_: {"name": None, "arguments": {}})
+    with pytest.raises(ValueError, match="undeclared tool"):
+        parser.push("<tool_call><function=invalid></function></tool_call>", final=True)

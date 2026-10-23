@@ -578,6 +578,10 @@ class BoundedHTTPServer(ThreadingHTTPServer):
     def __init__(
         self, server_address, *args, max_connections=DEFAULT_MAX_CONNECTIONS, **kwargs
     ):
+        # The stdlib's five-connection listen backlog can reset a valid
+        # concurrent cohort before the bounded handler admission runs. Keep
+        # room for the supported connection burst while accept is busy.
+        self.request_queue_size = max(self.request_queue_size, max_connections)
         self.connections = threading.BoundedSemaphore(max_connections)
         self.refusals = threading.BoundedSemaphore(self.max_refusals)
         # (deadline, socket) answered by _refuse_now; accept thread only.
@@ -819,6 +823,7 @@ def validate_request(
         "n",
         "stream",
         "enable_thinking",
+        "verification",
         "tools",
         "tool_choice",
         "parallel_tool_calls",
@@ -950,6 +955,15 @@ def validate_request(
                     for c in calls
                 ):
                     raise ValueError("invalid tool call history")
+                for call in calls:
+                    arguments = call["function"].get("arguments", {})
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except (ValueError, RecursionError) as error:
+                            raise ValueError("tool call history arguments must be a JSON object") from error
+                    if not isinstance(arguments, dict):
+                        raise ValueError("tool call history arguments must be a JSON object")
         if any(
             isinstance(message.get("content"), list)
             and any(
@@ -1367,8 +1381,14 @@ def normalize_client_options(body):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("options.num_ctx must be a positive integer")
     template = result.pop("chat_template_kwargs", {})
-    if not isinstance(template, dict) or set(template) - {"enable_thinking"}:
-        raise ValueError("chat_template_kwargs only supports enable_thinking")
+    if not isinstance(template, dict) or set(template) - {"enable_thinking", "verification"}:
+        raise ValueError("chat_template_kwargs only supports enable_thinking and verification")
+    if "verification" in template:
+        if "verification" in result and result["verification"] != template["verification"]:
+            raise ValueError("verification toggles disagree")
+        result["verification"] = template["verification"]
+    if "verification" in result and type(result["verification"]) is not bool:
+        raise ValueError("verification must be boolean")
     toggles = []
     for name, value in (
         ("enable_thinking", result.get("enable_thinking")),
@@ -1391,6 +1411,19 @@ def normalize_client_options(body):
         result["enable_thinking"] = toggles[0]
     elif effort is not None:
         result["enable_thinking"] = effort != "none"
+    if result.get("verification"):
+        if result.get("enable_thinking") is False or effort == "none":
+            raise ValueError("verification requires thinking enabled")
+        result["enable_thinking"] = True
+        messages = result.get("messages") or []
+        if isinstance(messages, list):
+            messages = flatten_text_messages(messages)
+            result["messages"] = messages
+        if (not isinstance(messages, list) or not messages or not isinstance(messages[0], dict)
+                or messages[0].get("role") != "system"
+                or not isinstance(messages[0].get("content"), str)
+                or not messages[0]["content"].strip()):
+            raise ValueError("verification requires a non-empty initial system message")
     return result
 
 
@@ -1782,8 +1815,32 @@ def tensorfold_owned_client_disconnected(connection):
         return True
 
 
+def metered_owned_generate(router, prompt_ids, budget, *, ledger=None,
+                           tenant_id="default", **options):
+    """Apply the ordinary tenant reservation and terminal accounting contract."""
+    if type(budget) is not int or not 1 <= budget <= 192:
+        raise ValueError("TensorFold-owned route supports max_new_tokens 1..192")
+    if ledger is None:
+        return router.generate(prompt_ids, budget, **options)
+    reservation = ledger.admit(tenant_id, requested_output=budget)
+    started = time.monotonic()
+    try:
+        cap = getattr(reservation, "output_cap", None)
+        if cap is not None:
+            budget = min(budget, cap)
+        result = router.generate(prompt_ids, budget, **options)
+    except BaseException as error:
+        ledger.record(tenant_id, status="cancelled" if isinstance(error, ConnectionAbortedError) else "failed",
+                      reservation=reservation, service_ms=(time.monotonic() - started) * 1000)
+        raise
+    ledger.record(tenant_id, status="completed", prompt_tokens=len(prompt_ids),
+                  completion_tokens=len(result["token_ids"]), reservation=reservation,
+                  service_ms=(time.monotonic() - started) * 1000)
+    return result
+
+
 def tensorfold_owned_completion_payload(engine, router, body, path, *, route="auto",
-                                        disconnect_probe=None):
+                                        disconnect_probe=None, ledger=None, tenant_id="default"):
     """Explicit greedy text bridge into a cache-isolated native worker."""
 
     if path not in {"/v1/completions", "/v1/chat/completions"}:
@@ -1820,7 +1877,8 @@ def tensorfold_owned_completion_payload(engine, router, body, path, *, route="au
     with engine.prompt_lock:
         tokenizer = engine.adapter.tokenizer
         eos_ids = sorted(int(token) for token in tokenizer.eos_token_ids)
-    generated = router.generate(prompt_ids, budget, route=route, eos_ids=eos_ids,
+    generated = metered_owned_generate(router, prompt_ids, budget, ledger=ledger,
+                                tenant_id=tenant_id, route=route, eos_ids=eos_ids,
                                 timeout=840, allow_long=True,
                                 disconnect_probe=disconnect_probe)
     token_ids = generated["token_ids"]
@@ -3006,10 +3064,25 @@ def handler_for(
             if not self._authorize_request():
                 return
             path = self.path.split("?", 1)[0]
+            if path == "/v1/admin/apc/branches":
+                if admin_token is None:
+                    self.api_error(403, "APCv2 branches require --admin-token-file")
+                    return
+                if not self._authorize_admin():
+                    return
+                try:
+                    query = parse_qs(urlsplit(self.path).query)
+                    if set(query) - {"limit"} or len(query.get("limit", [])) > 1:
+                        raise ValueError("branches accepts only one limit")
+                    limit = int(query.get("limit", ["200"])[0])
+                    self.send_json(200, engine.cache_branches(limit))
+                except (ValueError, SuspendUnavailable) as error:
+                    self.api_error(400, str(error))
+                return
             if path == "/v1/admin/state":
                 if not self._authorize_admin():
                     return
-                self.send_json(200, engine.service_state())
+                self.send_json(200, {**engine.service_state(), "process_id": os.getpid()})
                 return
             if path == "/v1/admin/usage":
                 if not self._authorize_admin():
@@ -3475,6 +3548,22 @@ def handler_for(
             if not self._authorize_request():
                 return
             path = self.path.split("?", 1)[0]
+            if path == "/v1/admin/apc/suspend-export":
+                if admin_token is None:
+                    self.api_error(403, "Suspend export requires --admin-token-file")
+                    return
+                if not self._authorize_admin():
+                    return
+                try:
+                    body = self._read_json_body(max_bytes=65536)
+                    if not isinstance(body, dict) or set(body) != {"suspension_id"}:
+                        raise ValueError("Suspend export accepts only suspension_id")
+                    self.send_json(200, engine.export_suspension(body["suspension_id"]))
+                except (ValueError, json.JSONDecodeError) as error:
+                    self.api_error(400, str(error))
+                except (SuspendUnavailable, RuntimeError) as error:
+                    self.api_error(409, str(error))
+                return
             if path in {"/v1/admin/quiesce", "/v1/admin/resume"}:
                 if not self._authorize_admin():
                     return
@@ -3487,7 +3576,7 @@ def handler_for(
                         sessions = validate_resume_body(body)
                         value = engine.resume(prefetch_sessions=sessions)
                     self.send_json(202, value)
-                except (APCReuseDisabled, SuspendUnavailable) as error:
+                except (APCReuseDisabled, SuspendUnavailable, RuntimeError) as error:
                     self.api_error(409, str(error))
                 except (ValueError, json.JSONDecodeError) as error:
                     self.api_error(400, str(error))
@@ -3733,9 +3822,14 @@ def handler_for(
                     route = self.headers.get("X-MLX2-TensorFold-Route", "auto")
                     result = tensorfold_owned_completion_payload(
                         engine, tensorfold_owned_router, body, path, route=route,
+                        ledger=usage_ledger, tenant_id=self._tenant_id,
                         disconnect_probe=lambda: tensorfold_owned_client_disconnected(
                             self.connection))
                     self.send_json(200, result)
+                except UsageLimitExceeded as error:
+                    self.api_error(429, str(error), code=error.code,
+                                   retry_after=error.retry_after,
+                                   mlx2={"usage_limit": error.receipt()})
                 except ConnectionAbortedError:
                     return
                 except (ValueError, json.JSONDecodeError) as error:
@@ -3755,12 +3849,17 @@ def handler_for(
                             or not {"token_ids", "max_new_tokens"} <= set(body)
                             or set(body) - {"token_ids", "max_new_tokens", "route"}):
                         raise ValueError("TensorFold-owned request requires token_ids and max_new_tokens; route is optional")
-                    result = tensorfold_owned_router.generate(
-                        body["token_ids"], body["max_new_tokens"],
+                    result = metered_owned_generate(
+                        tensorfold_owned_router, body["token_ids"], body["max_new_tokens"],
+                        ledger=usage_ledger, tenant_id=self._tenant_id,
                         route=body.get("route", "auto"),
                         disconnect_probe=lambda: tensorfold_owned_client_disconnected(
                             self.connection))
                     self.send_json(200, result)
+                except UsageLimitExceeded as error:
+                    self.api_error(429, str(error), code=error.code,
+                                   retry_after=error.retry_after,
+                                   mlx2={"usage_limit": error.receipt()})
                 except ConnectionAbortedError:
                     return
                 except (ValueError, json.JSONDecodeError) as error:
@@ -6827,7 +6926,9 @@ def apply_ast_invocation(args, policy, adapter_resolution):
     if tiles and getattr(adapter_type, "ast_tree_tile_dtype_gate", True):
         from .adapters.tensorfold_dtype_gate import artifact_tree_tile_dtype_issue
 
-        tiles_refused = artifact_tree_tile_dtype_issue(args.model)
+        tiles_refused = artifact_tree_tile_dtype_issue(
+            args.model, **getattr(adapter_type, "ast_tree_tile_dtype_contract", {})
+        )
         tiles = tiles_refused is None
     if drafter == "auto":
         drafter = "mtp" if has_mtp else "pld"
@@ -6837,12 +6938,29 @@ def apply_ast_invocation(args, policy, adapter_resolution):
             # prompt-lookup tiles on the generic attention target paid tile
             # overhead on every round. Explicit --ast-drafter pld keeps tiles.
             tiles = False
+    if drafter == "pld" and not getattr(adapter_type, "ast_prompt_lookup_tiles", True):
+        # Some tree adapters bind a learned drafter only. Keep their model-free
+        # selection on the ordinary prompt-lookup contract.
+        tiles = False
+    if tiles and drafter == "pld" and ast_options[2]:
+        raise ValueError("--ast-graft-pld cannot graft prompt lookup onto itself")
+    for name, value, lower, upper in (
+        ("ast_tiles", ast_options[3], 1, 2),
+        ("ast_tile_rows", ast_options[4], 4,
+         getattr(adapter_type, "ast_tile_rows_max", 16)),
+    ):
+        value = resolved.get(name) if value is None else value
+        if value is not None and (type(value) is not int or not lower <= value <= upper):
+            raise ValueError(f"{name} must be an integer from {lower} to {upper}")
     if drafter == "mtp" and not has_mtp:
         raise ValueError("--ast-drafter mtp: this artifact has no native MTP head")
     if ast_options[1] is not None:
         from .runtime.ast_tree_proposals import parse_topology
 
         parse_topology(ast_options[1])
+    if not tiles and (ast_options[1] is not None or ast_options[2]):
+        raise ValueError("--ast-topology/--ast-graft-pld require tree tiles"
+                         + (f": {tiles_refused}" if tiles_refused else ""))
     applied = {}
     if tiles:
         resolved["draft_model"] = (
@@ -6862,7 +6980,11 @@ def apply_ast_invocation(args, policy, adapter_resolution):
         if ast_options[6]:
             resolved["ast_batch_row_sharing"] = True
         if drafter not in ("mtp", "pld"):
-            resolved.setdefault("batch_size_route", "tree15_b1_b4_chain_b5plus_v1")
+            resolved.setdefault(
+                "batch_size_route",
+                getattr(adapter_type, "ast_external_batch_size_route",
+                        "tree15_b1_b4_chain_b5plus_v1"),
+            )
         # Adapter-measured drafter arithmetic (e.g. a quantized lane drafter);
         # keys the operator's policy names, null included, win.
         drafter_defaults = getattr(adapter_type, "ast_drafter_policy_defaults", None)
@@ -6872,6 +6994,11 @@ def apply_ast_invocation(args, policy, adapter_resolution):
                 if key not in resolved
             }
             resolved.update(applied)
+        if drafter in ("mtp", "pld"):
+            numerical = getattr(adapter_type, "native_tree_numerical_defaults", {})
+            defaults = {key: value for key, value in numerical.items() if key not in resolved}
+            applied.update(defaults)
+            resolved.update(defaults)
         args.external_draft = True
     elif drafter == "mtp":
         args.native_mtp = True
@@ -7064,8 +7191,13 @@ def resolve_execution_policy_defaults(
         external_route = route_selection.route == "external_draft"
         tree_geometry_overridden = (
             external_route
-            and "batch_size_route" in resolved
-            and resolved["batch_size_route"] != declared.get("batch_size_route")
+            and (
+                bool({"ast_tiles", "ast_tile_rows", "ast_multilane_tile_rows"} & set(resolved))
+                or (
+                    "batch_size_route" in resolved
+                    and resolved["batch_size_route"] != declared.get("batch_size_route")
+                )
+            )
         )
         # The external varlen pair is one default group: external varlen
         # prefill requires the varlen dense MLP selection, so an operator who
@@ -7452,13 +7584,6 @@ def main():
         from .best_route_defaults import finish_best_route_default
 
         policy = finish_best_route_default(args, policy)
-        if getattr(args, "ast_route", None) is not None:
-            from .ast_observability import route_status as ast_route_status
-
-            args.ast_route_status = ast_route_status(
-                args.ast_route, policy,
-                getattr(adapter_resolution, "adapter_type", None),
-            )
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
         if args.route_default_selection.get("applied"):
             route_selection = RouteSelection(route_selection.route, "best_route_default")
@@ -7477,6 +7602,13 @@ def main():
             skipped=skipped_route_defaults,
         )
         args.skipped_route_defaults = skipped_route_defaults
+        if getattr(args, "ast_route", None) is not None:
+            from .ast_observability import route_status as ast_route_status
+
+            args.ast_route_status = ast_route_status(
+                args.ast_route, policy,
+                getattr(adapter_resolution, "adapter_type", None),
+            )
     except ValueError as error:
         parser.error(str(error))
     from .runtime.adaptive_policy import (

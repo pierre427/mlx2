@@ -2,6 +2,27 @@
 
 from __future__ import annotations
 
+import copy
+import json
+
+
+def _template_history(messages):
+    """Translate OpenAI argument strings at the HF template boundary only."""
+    history = copy.deepcopy(messages)
+    for index, message in enumerate(history):
+        for call in message.get("tool_calls", []):
+            function = call.get("function", {})
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (ValueError, RecursionError) as error:
+                    raise ValueError(f"messages[{index}] tool call arguments must be a JSON object") from error
+            if not isinstance(arguments, dict):
+                raise ValueError(f"messages[{index}] tool call arguments must be a JSON object")
+            function["arguments"] = arguments
+    return history
+
 
 class OrdinaryTextAdapter:
     default_route = "ordinary"
@@ -36,7 +57,7 @@ class OrdinaryTextAdapter:
     def prompt_tokens(self, request):
         if "messages" in request:
             return self.tokenizer.apply_chat_template(
-                request["messages"], add_generation_prompt=True, tokenize=True,
+                _template_history(request["messages"]), add_generation_prompt=True, tokenize=True,
                 enable_thinking=False,
             )
         return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
@@ -44,7 +65,7 @@ class OrdinaryTextAdapter:
     def render_prompt(self, request):
         if "messages" in request:
             return self.tokenizer.apply_chat_template(
-                request["messages"], add_generation_prompt=True, tokenize=False,
+                _template_history(request["messages"]), add_generation_prompt=True, tokenize=False,
                 enable_thinking=False,
             )
         return request["prompt"]

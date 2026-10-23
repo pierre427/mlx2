@@ -17,6 +17,13 @@ import pytest
 from mlx2.openai_compat import ToolContractError, enforce_tool_contract
 from mlx2.server import validate_request
 
+
+def test_undeclared_function_names_are_diagnostic_but_never_admitted():
+    name = 'not_available"\\n'
+    with pytest.raises(ToolContractError) as error:
+        enforce_tool_contract({"tools": []}, [{"function": {"name": name, "arguments": "{}"}}])
+    assert str(error.value) == "model called an undeclared function: " + json.dumps(name)
+
 _BOUNDED = {
     "type": "object",
     "properties": {

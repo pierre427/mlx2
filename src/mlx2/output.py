@@ -122,6 +122,7 @@ class _CodeSpans:
 
     def __init__(self):
         self.fence = None  # (character, run length) of the open fenced block
+        self._closing_fence = False
         self.inline = 0  # backtick-run length of the open inline span
         self.line_start, self.indent = True, 0
         self.run_char, self.run, self.run_at_line_start = "", 0, False
@@ -132,6 +133,12 @@ class _CodeSpans:
                 self.run += 1
                 continue
             self._end_run()
+            if self._closing_fence:
+                if char == "\n":
+                    self.fence = None
+                    self._closing_fence = False
+                elif char not in " \t\r":
+                    self._closing_fence = False
             if char in "`~":
                 self.run_char, self.run = char, 1
                 self.run_at_line_start, self.line_start = self.line_start, False
@@ -149,7 +156,10 @@ class _CodeSpans:
             return
         if self.fence is not None:
             if at_line_start and char == self.fence[0] and length >= self.fence[1]:
-                self.fence = None
+                # A closing fence may only have whitespace after its run.
+                # Keep the code block open until the newline confirms that:
+                # a tool marker later on this line is still quoted code.
+                self._closing_fence = True
         elif at_line_start and length >= 3 and not self.inline:
             self.fence = (char, length)
         elif char == "`":
@@ -498,8 +508,10 @@ class OutputParser:
                         and isinstance(tool.get("function"), dict)
                         and isinstance(tool["function"].get("name"), str)
                     }
-                    if any(call["name"] not in names for call in calls):
-                        raise ValueError("model called an undeclared tool")
+                    undeclared_call = next((call for call in calls if call["name"] not in names), None)
+                    if undeclared_call is not None:
+                        undeclared = undeclared_call["name"]
+                        raise ValueError("model called an undeclared tool: " + (json.dumps(undeclared) if isinstance(undeclared, str) and len(undeclared.encode("utf-8")) <= 128 else "[name exceeds diagnostic limit]"))
                     calls = within_parallel_bound(self, calls)
                     parsed_events = []
                     for index, call in enumerate(calls):
