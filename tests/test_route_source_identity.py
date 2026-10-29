@@ -211,3 +211,21 @@ def test_repository_manifest_and_standard_decoder_ordinary_scope():
     )
     assert status["mode"] == "route_source", status
     assert runtime["source_scope"]["roots"] == expected
+
+
+def test_deepseek_unresolved_desktop_dependency_still_uses_whole_build():
+    # Reviewing the added lazy registry resolver must not approve the unrelated
+    # dynamic desktop campaign loader reached by DSpark source verification.
+    package = Path(__file__).resolve().parents[1] / "src" / "mlx2"
+    adapter_type = type("DeepSeekV4GGUFAdapter", (), {
+        "__module__": "mlx2.adapters.deepseek_v4_gguf"})
+    draft_type = type("DeepSeekV4DSparkDraftModel", (), {
+        "__module__": "mlx2.adapters.deepseek_v4_external"})
+    adapter = adapter_type()
+    adapter.draft_model = draft_type()
+    build = {"source_sha256": "full-test-build", "mlx": "test"}
+    runtime, status = bind_route_runtime(build, adapter, "external_draft", root=package)
+    assert runtime == build and "source_scope" not in runtime
+    assert status["mode"] == "full_source"
+    assert "unresolved dynamic import" in status["reason"]
+    assert "mlx2.desktop_campaign_worker" in status["reason"]

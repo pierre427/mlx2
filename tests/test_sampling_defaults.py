@@ -49,6 +49,7 @@ def _adapter_classes():
     from mlx2.adapters.lfm25_moe import LFM25MoEAdapter
     from mlx2.adapters.ling3_flash import Ling3FlashAdapter
     from mlx2.adapters.flint import FlintAdapter
+    from mlx2.adapters.deepseek_v4_gguf import DeepSeekV4GGUFAdapter
     from mlx2.adapters.xing import XingAdapter
 
     return {
@@ -71,6 +72,7 @@ def _adapter_classes():
         "lfm2_moe": LFM25MoEAdapter,
         "flint": FlintAdapter,
         "bailing_hybrid": Ling3FlashAdapter,
+        "deepseek4_gguf": DeepSeekV4GGUFAdapter,
     }
 
 
@@ -200,6 +202,9 @@ def test_sampling_profile_is_generation_only_for_prompt_caching():
 # --- per-adapter declarations ------------------------------------------------
 
 EXPECTED = {
+    # Exact pinned GGUF metadata general.sampling.temp/top_p; top_k0 is the
+    # adapter's explicitly cited neutral policy, not a fabricated card value.
+    "deepseek4_gguf": {"general": dict(temperature=1.0, top_p=1.0, top_k=0)},
     # model_type: {profile: values}
     "qwen4_exp": {
         "thinking": dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, repetition_penalty=1.0, presence_penalty=0.0),
@@ -277,6 +282,20 @@ def test_every_target_adapter_declares_cited_vendor_defaults():
     for model_type in ("qwen4_exp", "qwen3_5", "qwen3_5_moe"):
         vendor = vendor_sampling(classes[model_type])
         assert (vendor.general, vendor.thinking, vendor.non_thinking) == ("thinking", "thinking", "instruct")
+
+
+def test_deepseek_card_defaults_and_external_greedy_domain_are_distinct_and_cited():
+    from mlx2.adapters.deepseek_v4_gguf import SAMPLING,EXTERNAL_SAMPLING
+    ordinary=SAMPLING.profiles["general"]
+    assert ordinary.values()=={"temperature":1.0,"top_p":1.0,"top_k":0}
+    assert "GGUF general.sampling.temp/top_p" in ordinary.source_of("temperature")
+    assert "neutral top_k" in ordinary.source_of("top_k")
+    external=EXTERNAL_SAMPLING.profiles["general"]
+    assert external.values()=={"temperature":0.0,"top_p":1.0,"top_k":0}
+    assert "greedy only" in external.source_of("temperature")
+    # Sidecar's supported domain cannot overwrite the target card profile.
+    effective,_=resolve_sampling({},EXTERNAL_SAMPLING,thinking=False)
+    assert effective["temperature"]==0 and ordinary.values()["temperature"]==1.0
 
 
 def test_generation_config_drift_is_reported_not_applied(tmp_path):

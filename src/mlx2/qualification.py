@@ -67,7 +67,12 @@ def required_generic_checks(descriptor, *, capabilities=None):
     a reviewed media producer exists.
     """
     capabilities = descriptor.capabilities if capabilities is None else capabilities
+    from .sampling_contract import GREEDY_SAMPLING_CHECKS, descriptor_sampling_contract
+
     required = set(REQUIRED_CHECKS)
+    if descriptor_sampling_contract(descriptor) is not None:
+        required.discard("sampling_controls")
+        required.update(GREEDY_SAMPLING_CHECKS)
     if Capability.TOOLS not in capabilities:
         required.discard("tools")
     if Capability.REASONING not in capabilities:
@@ -310,7 +315,10 @@ APPROVED_QUALIFICATION_HARNESS = {
     # CPU, suppress ambient pytest plugins/options, report slow-test and phase
     # timings, and reuse each captured tree for its identity digest instead of
     # hashing it twice. Existing receipts must be regenerated.
-    "sha256": "b1657e14329b89ef65a01da2cf1156c5ffff54ce6bcfce3c141119417aef0b77",
+    # Re-pinned 2026-10-24: explicit source-owned greedy/refusal sampling
+    # scope requires named controls/repeat/refusal evidence and cannot claim
+    # stochastic coverage; absence preserves the historical sampling suite.
+    "sha256": "8f975f0355d1053a05d2a10f0b0922df1d1808a6643903834cec98a8236ef9c5",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -2047,6 +2055,9 @@ def load_qualified_route(
                 "--ordinary to use an ordinary-route receipt"
             )
         raise ValueError(message)
+    from .sampling_contract import validate_sampling_qualification
+
+    validate_sampling_qualification(record, descriptor, settings=settings, runtime=runtime, artifact=artifact)
     checks = record.get("checks", {})
     selected_for_checks = effective_route_capabilities(
         descriptor.capabilities,

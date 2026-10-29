@@ -830,3 +830,236 @@ by, sponsored by, or endorsed by Eagle AI Corp.
 The built-in web_tools backend contains user-owned code released under the
 project Apache-2.0 license with the owner's explicit authorization on 2026-10-23.
 Third-party dependencies retain their respective licenses.
+
+mlx-tree-spec mechanism intake
+Copyright 2026 Aditya Gajbhiye. Apache-2.0.
+The tiled prefill loader in src/mlx2/runtime/lane/tiled_prefill.py
+is adapted from AdiGajbhiye/mlx-tree-spec at 8c8ec886addb0ab4fd99aa5c460de58804222e80.
+Its NAX GEMM algorithm and installed MLX headers are MIT-licensed MLX code;
+the existing MLX notices apply. Shared-history drafting and leaf-state lifetime
+ideas are reimplemented for mlx2 ownership and arithmetic contracts.
+
+------------------------------------------------------------------------------
+DwarfStar / ds4 (https://github.com/antirez/ds4, revision
+ee7e8405232c8971000cc7ba2b945b00bf6d20d3) and its fork audreyt/ds4
+(https://github.com/audreyt/ds4, revision
+0dff39f91721bcf3472813c6d2bebf9353df2a1a) — MIT License
+
+Adapted in:
+- src/mlx2/runtime/gguf/blocks.py and src/mlx2/runtime/gguf/iq2_codebook.py:
+  Q8_0, Q2_K and IQ2_XXS block semantics and the IQ2_XXS grid (ds4.c,
+  metal/moe.metal), transcribed.
+- src/mlx2/runtime/gguf/iq1_codebook.py: the GGML IQ1_S codebook, taken from
+  audreyt/ds4 metal/iq1s_grid.metal.
+- src/mlx2/runtime/gguf/cooperative_metal.py: SIMD chunking and codebook
+  staging, transcribed.
+- src/mlx2/runtime/models/deepseek_v4_hc.py: the HC4 Sinkhorn coefficient
+  schedule (metal/dsv4_hc.metal).
+- src/mlx2/runtime/models/deepseek_v4.py: FP8 non-RoPE KV and Hadamard/FP4
+  indexer activation-simulation equations (metal/dsv4_kv.metal, ds4.c),
+  transcribed to MLX operations.
+- src/mlx2/runtime/drafters/deepseek_v4_dspark.py: DSpark stage, Markov and
+  confidence equations and tensor layouts (ds4.c).
+- src/mlx2/runtime/models/deepseek_v41_dwarfstar_attention.py,
+  src/mlx2/runtime/models/deepseek_v41_dwarfstar_staging.py and
+  scripts/research/ds41_dwarfstar_attention_components.py: the FlashAttention
+  template bodies of metal/flash_attn.metal and the packed copy/cast pattern of
+  metal/cpy.metal, copied with only kernel and argument declarations changed.
+The GGUF reader, packed Metal dot kernels, caches and serving glue around them
+are mlx2's own.
+
+MIT License
+
+Copyright (c) 2026 The ds4.c authors
+Copyright (c) 2023-2026 The ggml authors
+Copyright (c) 2023 DeepSeek
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+DeepSeek V4.1 reference inference code
+(https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017, revision
+1bae0e1088993b9b82de08f59de5be5a34e42170) — MIT License
+
+- src/mlx2/runtime/models/deepseek_v41_encoding.py is encoding/encoding.py,
+  preserved verbatim.
+- src/mlx2/runtime/models/deepseek_v41.py, deepseek_v41_quant.py and
+  deepseek_v41_engram.py (under src/mlx2/runtime/models/) port the
+  inference/model.py, inference/kernel.py and inference/engram.py model,
+  activation-quantization and Engram laws to MLX.
+- src/mlx2/adapters/deepseek_v41_vision.py follows inference/vision.py and
+  inference/image_processor.py.
+Storage, caches, scheduling and serving are mlx2's own. The license text is
+also kept at third_party/deepseek-v41-source/LICENSE.
+
+MIT License
+
+Copyright (c) 2023 DeepSeek
+
+The MIT permission notice and warranty disclaimer are as in the DwarfStar /
+ds4 section above.
+
+------------------------------------------------------------------------------
+mlx-vlm (https://github.com/Blaizzy/mlx-vlm) — MIT License
+
+- Revision 8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5
+  (mlx_vlm/models/deepseek_v4/language.py, hyper_connection.py, config.py,
+  mlx_vlm/models/mla.py): the DeepSeek V4 ordinary text equations, extracted
+  into src/mlx2/runtime/models/deepseek_v4.py. No mlx-vlm serving or cache
+  engine is used.
+- The packed affine one-bit QMV SIMD kernel, as carried by the fork
+  https://github.com/pierre427/mlx-vlm at the same revision
+  8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5, adapted in
+  src/mlx2/runtime/gguf/source_q1.py and reused in
+  src/mlx2/runtime/gguf/source_q1_few_rows.py and
+  src/mlx2/runtime/gguf/source_q1_down_owner.py. The group64 converter,
+  residency policy and other kernels are mlx2's own. The license text is also
+  kept at third_party/mlx-vlm-one-bit/LICENSE.
+
+MIT License
+
+Copyright © 2025 Prince Canuma
+
+The MIT permission notice and warranty disclaimer are as in the DwarfStar /
+ds4 section above.
+
+------------------------------------------------------------------------------
+Scoped notices for the DeepSeek V4/V4.1 attention kernels adapted from
+jundot/omlx.
+
+1. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx pull request #4808, revision
+   7f90ac3f1677a6fd8ff7dce8114885dd1caa2ae6 (merged as
+   78c9acb936b6219a648dfca686ac56d9b9decbd9),
+   omlx/patches/deepseek_v4/sparse_attention_nax.py.
+   The NAX QK/PV products, online F32 softmax and FP16 hi+lo probability
+   tiles in src/mlx2/runtime/models/deepseek_v41_omlx_nax_attention.py are
+   adapted from that file. mlx2 replaces the ratio-based visibility with
+   explicit local/selected-row masks and returns F32 before its own BF16
+   boundary; no oMLX indexer, compressor, cache or settings are used.
+
+2. omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx, revision
+   3df94603c047ec77f5381d11d1d6daff75794870,
+   omlx/patches/deepseek_v4/wsdpa_attention.py.
+   The visible local/pooled row traversal and SIMD-group FP32 online-softmax
+   mechanism in src/mlx2/runtime/models/deepseek_v4_visible_attention.py are
+   extracted from that file, with physical FP32 inputs instead of BF16 type
+   punning and a stable final sink merge. The same traversal is reused in
+   src/mlx2/runtime/models/deepseek_v4_packed_visible_attention.py and
+   src/mlx2/runtime/models/deepseek_v41_head_group_attention.py.
+
+The full Apache-2.0 text is this repository's LICENSE. oMLX ships no NOTICE
+file at these revisions.
+
+------------------------------------------------------------------------------
+Rapid-MLX (https://github.com/raullenchai/Rapid-MLX, revision
+8e1dc9461f7614d45b11ef62f021c480b7f708cf) — Apache License 2.0,
+Copyright 2025-2026 the Rapid-MLX contributors.
+
+src/mlx2/runtime/models/deepseek_v41_quant.py is derived from the DeepSeek
+reference kernels (see the DeepSeek section above) and from
+rapid_mlx/models/deepseek_v41_native/fakequant.py. The NOTICE of that
+Rapid-MLX directory reads, in the part that applies:
+
+  This directory contains code derived from PipeNetwork/deepseek-v41-mlx,
+  revision 8bdd543c7160800f3451d9595c996129b7abecdf, licensed under the
+  Apache License 2.0.
+
+The full Apache-2.0 text is this repository's LICENSE.
+
+------------------------------------------------------------------------------
+Splash (https://github.com/incoai/splash, revision
+3135ab45b3da525a8a2dbb8a1aa72ce095dda8a9) — Apache License 2.0,
+Copyright the Splash contributors (the upstream LICENSE names no copyright
+holder; it ships no NOTICE file).
+
+src/mlx2/runtime/gguf/v41_iq1_tiled.py adapts Splash's lossless
+[N/64][K/32][64] IQ1_S plane layout and slot-addressed expert dispatch, and
+src/mlx2/runtime/gguf/v41_iq1_column.py adapts its one-output-column-per-lane
+32-value register decode with payload prefetch. mlx2 keeps its own F32 IQ1
+arithmetic, BF16 epilogues and route-slot reduction; no Splash epilogue,
+score placement or table literal is copied. The IQ1_S grid comes from the
+ggml codebook covered by the DwarfStar / ds4 section above. The full
+Apache-2.0 text is this repository's LICENSE.
+
+------------------------------------------------------------------------------
+PLA (https://github.com/t-head/pla, revision
+dfd7eb2b5fd10e078d2d56e14b0c68e9007bfd24) — BSD 3-Clause License
+
+src/mlx2/runtime/models/gdn_chunk32.py adapts the algorithm of PLA's FlashQLA
+chunk/WY pipeline (pla/prefill/flashqla/ops.py, src/prefill/flashqla/kernels/)
+as an original MLX chunk32 gated-delta recurrence with full FP32 state; no PPU
+intrinsics or approximate warm-up truncation are carried over.
+
+Copyright (c) 2022-2026 T-Head (Shanghai) Semiconductor Co., Ltd.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+------------------------------------------------------------------------------
+MLX installed Metal kernel headers (MLX 0.32.4, as installed; no upstream
+repository revision was read) — MIT License
+
+The following files transcribe, copy or derive arithmetic from the installed
+MLX kernel headers (steel/gemm, fp_quantized.h, gemv.h, fp8.h and helpers);
+the generated helper text keeps the attribution line "Derived helpers:
+Copyright © 2025-2026 Apple Inc. MIT license.":
+- src/mlx2/runtime/gguf/source_dense.py
+- src/mlx2/runtime/gguf/source_dense_legacy.py
+- src/mlx2/runtime/gguf/source_dense_mxfp8.py
+- src/mlx2/runtime/gguf/source_down_fusion.py
+- src/mlx2/runtime/gguf/source_multirow_dense.py
+- src/mlx2/runtime/gguf/source_mxfp4_pair.py
+- src/mlx2/runtime/gguf/source_prefill_legacy_tiles.py
+- src/mlx2/runtime/gguf/source_ast_batched_splitk.py
+- src/mlx2/runtime/lane/tiled_prefill.py (NAX prefill helpers; see the
+  mlx-tree-spec block above)
+- scripts/research/ds41_stock_mxfp4_pair_candidate.py
+No Apple copyright header is added to mlx2 source files.
+
+MIT License
+
+Copyright © 2023 Apple Inc.
+
+The MIT permission notice and warranty disclaimer are as in the DwarfStar /
+ds4 section above.

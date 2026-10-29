@@ -326,7 +326,55 @@ def sample_thermal(command: list[str] | None = None) -> dict[str, Any]:
     return sample
 
 
+HID_SENSOR_PROFILE = "m5_hid_v1"
+
+
+def sample_thermal_for_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    """Opt-in named HID telemetry; never relabel die temperature as VirtualTemperature."""
+    sample = sample_thermal(policy.get("command"))
+    profile = policy.get("sensor_profile", "legacy_ioreg")
+    if profile == "legacy_ioreg":
+        return sample
+    if profile != HID_SENSOR_PROFILE:
+        raise ValueError("unknown thermal sensor profile")
+    sample["sensor_profile"] = profile
+    sample["hid_read_started_unix"] = time.time()
+    sampler = None
+    try:
+        from mlx2.apple_telemetry import TemperatureSampler
+        sampler = TemperatureSampler()
+        sample["hid_raw_sensors_c"] = sampler.read()
+        sample["hid_read_completed_unix"] = time.time()
+        sample["hid_timestamp_scope"] = "host retrieval timestamps; hardware sensor timestamps unavailable"
+    except Exception as error:
+        sample["hid_error"] = {"type": type(error).__name__, "message": str(error)}
+    finally:
+        if sampler is not None:
+            sampler.close()
+    return sample
+
+
+def hid_temperature_values(sample: dict[str, Any], policy: dict[str, Any], *, now=None):
+    """Return fresh finite named temperatures, or None (including malformed telemetry)."""
+    now = time.time() if now is None else now
+    raw = sample.get("hid_raw_sensors_c")
+    if sample.get("sensor_profile") != HID_SENSOR_PROFILE or not isinstance(raw, dict) or sample.get("hid_error"):
+        return None
+    start, end = sample.get("hid_read_started_unix"), sample.get("hid_read_completed_unix")
+    def finite(value):
+        return type(value) in (int, float) and math.isfinite(value)
+    if not finite(start) or not finite(end) or not start <= end <= now or now-start > float(policy.get("max_sample_age_seconds", 10)):
+        return None
+    dies = [value for name, value in raw.items() if isinstance(name, str) and "tdie" in name.lower()]
+    battery = raw.get("gas gauge battery")
+    if not dies or not finite(battery) or not all(finite(value) for value in dies):
+        return None
+    return {"die_max_c": max(dies), "hid_battery_temperature_c": battery}
+
+
 def thermally_stable(sample: dict[str, Any], policy: dict[str, Any]) -> bool:
+    if policy.get("sensor_profile") == HID_SENSOR_PROFILE and type(sample.get("thermal_state")) is not int:
+        return False
     if "thermal_state" not in sample:
         return False
     if int(sample["thermal_state"]) != int(policy.get("required_thermal_state", 0)):
@@ -334,6 +382,12 @@ def thermally_stable(sample: dict[str, Any], policy: dict[str, Any]) -> bool:
     for key in ("pmset_no_thermal_warning", "pmset_no_performance_warning", "pmset_no_cpu_power_warning"):
         if sample.get(key) is not True:
             return False
+    profile = policy.get("sensor_profile", "legacy_ioreg")
+    if profile == HID_SENSOR_PROFILE:
+        values = hid_temperature_values(sample, policy)
+        return values is not None and values["die_max_c"] <= policy["max_die_temperature_c"] and values["hid_battery_temperature_c"] <= policy["max_hid_battery_temperature_c"]
+    if profile != "legacy_ioreg":
+        return False
     if policy.get("require_temperatures", True):
         if "battery_temperature_c" not in sample or "virtual_temperature_c" not in sample:
             return False
@@ -342,14 +396,13 @@ def thermally_stable(sample: dict[str, Any], policy: dict[str, Any]) -> bool:
 
 
 def stabilize_thermal(policy: dict[str, Any], sleep=time.sleep) -> list[dict[str, Any]]:
-    command = policy.get("command")
     consecutive = int(policy.get("consecutive_samples", 3))
     interval = float(policy.get("sample_interval_seconds", 15))
     deadline = time.monotonic() + float(policy.get("max_wait_seconds", 900))
     samples: list[dict[str, Any]] = []
     stable_samples: list[dict[str, Any]] = []
     while time.monotonic() <= deadline:
-        sample = sample_thermal(command)
+        sample = sample_thermal_for_policy(policy)
         samples.append(sample)
         stable_samples = stable_samples + [sample] if thermally_stable(sample, policy) else []
         stable_samples = stable_samples[-consecutive:]
@@ -358,20 +411,28 @@ def stabilize_thermal(policy: dict[str, Any], sleep=time.sleep) -> list[dict[str
         settled = (len(temperatures) == consecutive
                    and max(temperatures) - min(temperatures)
                    <= float(policy.get("max_temperature_delta_c", 0.5)))
+        if policy.get("sensor_profile") == HID_SENSOR_PROFILE:
+            # Each row was checked fresh when collected. The15s cohort spacing
+            # must not make its earlier valid reads stale retroactively.
+            values = [hid_temperature_values(row, policy, now=row.get("hid_read_completed_unix")) for row in stable_samples]
+            settled = len(values) == consecutive and all(value is not None for value in values) and all(
+                max(value[key] for value in values)-min(value[key] for value in values) <= float(policy.get("max_temperature_delta_c", .5))
+                for key in ("die_max_c", "hid_battery_temperature_c"))
         if len(stable_samples) >= consecutive and (settled or not policy.get("require_temperatures", True)):
             return samples
         sleep(interval)
-    raise TimeoutError(f"thermal stabilization timed out after {len(samples)} samples")
+    error = TimeoutError(f"thermal stabilization timed out after {len(samples)} samples")
+    error.samples = samples
+    raise error
 
 
 def post_thermal_samples(policy: dict[str, Any], sleep=time.sleep) -> list[dict[str, Any]]:
     """Apply the overnight rule: invalidate only two consecutive bad samples."""
-    command = policy.get("command")
-    samples = [sample_thermal(command)]
+    samples = [sample_thermal_for_policy(policy)]
     if not thermally_stable(samples[0], policy):
         sleep(float(policy.get("post_sample_interval_seconds",
                                policy.get("sample_interval_seconds", 15))))
-        samples.append(sample_thermal(command))
+        samples.append(sample_thermal_for_policy(policy))
     if len(samples) == 2 and all(not thermally_stable(row, policy) for row in samples):
         raise AssertionError(f"thermal state breached twice after measured cell: {samples}")
     return samples
@@ -406,7 +467,7 @@ def sample_swap(command: list[str] | None = None) -> dict[str, Any]:
 def diagnostic_thermal(policy: dict[str, Any]) -> dict[str, Any]:
     """Collect batch-suite telemetry without turning it into admission control."""
     try:
-        return {"sample": sample_thermal(policy.get("command")), "available": True}
+        return {"sample": sample_thermal_for_policy(policy), "available": True}
     except Exception as exc:
         return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
 

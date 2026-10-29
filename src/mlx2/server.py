@@ -42,6 +42,9 @@ from .serving import (
 )
 from .power_governor import PowerSignalUnavailable
 from .usage import UsageLimitExceeded, UsageReloadBusy, metered_pooled
+from .generation_timeout import (
+    DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS, validate_generation_event_timeout,
+)
 from .host_counters import count_add
 from .batch_metrics import http_metric_route
 from .runtime.int8_prefill import cli_value as int8_prefill_cli_value
@@ -1470,7 +1473,7 @@ def wait_event(
     events,
     *,
     connection=None,
-    deadline_seconds=1800.0,
+    deadline_seconds=DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS,
     poll_seconds=0.5,
     idle_seconds=None,
     on_idle=None,
@@ -1483,7 +1486,7 @@ def wait_event(
     since the last engine event, which a buffered stream consumes without
     writing.  The overall deadline is unchanged.
     """
-    deadline = time.monotonic() + deadline_seconds
+    deadline = time.monotonic() + validate_generation_event_timeout(deadline_seconds)
     watching = on_idle is not None and bool(idle_seconds) and idle_since is not None
     # ``on_idle`` may decline to write (a request not yet on a lane); the
     # next attempt then waits a full interval instead of retrying at once,
@@ -1949,7 +1952,10 @@ def lora_control_payload(engine, body, *, load):
     return {"id": name, "object": "lora.adapter", **result}
 
 
-def collect_nonstream_job(job, body, *, chat, responses=False):
+def collect_nonstream_job(
+    job, body, *, chat, responses=False,
+    generation_event_timeout_seconds=DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS,
+):
     """Collect one already-submitted sample without writing an HTTP response.
 
     ``responses`` keeps only the output-text tokens' logprobs, the ones a
@@ -1957,11 +1963,9 @@ def collect_nonstream_job(job, body, *, chat, responses=False):
     """
     parts, reasoning, calls, probabilities = [], [], [], []
     text_logprobs = ResponsesTextLogprobs()
+    generation_event_timeout_seconds = validate_generation_event_timeout(generation_event_timeout_seconds)
     while True:
-        try:
-            event = job.events.get(timeout=1800)
-        except queue.Empty as exc:
-            raise TimeoutError("generation timed out") from exc
+        event = wait_event(job.events, deadline_seconds=generation_event_timeout_seconds)
         if "error" in event:
             raise SampleFailed(
                 event["error"],
@@ -2017,7 +2021,10 @@ def collect_nonstream_job(job, body, *, chat, responses=False):
         }, event["receipt"]
 
 
-def score_choice_tokens_via_engine(engine, prompt, token_ids, *, tenant_id):
+def score_choice_tokens_via_engine(
+    engine, prompt, token_ids, *, tenant_id,
+    generation_event_timeout_seconds=DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS,
+):
     """Score a bounded choice set through the ordinary serving lifecycle."""
     if not isinstance(token_ids, dict) or not 2 <= len(token_ids) <= MAX_CLASSIFIER_LABELS:
         raise ValueError(f"classifier requires 2..{MAX_CLASSIFIER_LABELS} labeled token ids")
@@ -2033,7 +2040,10 @@ def score_choice_tokens_via_engine(engine, prompt, token_ids, *, tenant_id):
     }
     job = engine.submit(request, tenant_id=tenant_id)
     try:
-        choice, _usage, _receipt = collect_nonstream_job(job, request, chat=False)
+        choice, _usage, _receipt = collect_nonstream_job(
+            job, request, chat=False,
+            generation_event_timeout_seconds=generation_event_timeout_seconds,
+        )
     finally:
         job.cancelled.set()
     content = choice.get("logprobs", {}).get("content", [])
@@ -2048,7 +2058,10 @@ def score_choice_tokens_via_engine(engine, prompt, token_ids, *, tenant_id):
     return {label: by_id[token] for label, token in token_ids.items()}
 
 
-def collect_parallel_samples(jobs, body, *, chat, connection=None):
+def collect_parallel_samples(
+    jobs, body, *, chat, connection=None,
+    generation_event_timeout_seconds=DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS,
+):
     """Drain every sample's event queue concurrently.
 
     Samples decode in lockstep once the siblings join the leader's batch, and
@@ -2058,12 +2071,16 @@ def collect_parallel_samples(jobs, body, *, chat, connection=None):
     sample keeps every queue drained; the first failure wins and the caller
     cancels the rest.
     """
+    generation_event_timeout_seconds = validate_generation_event_timeout(generation_event_timeout_seconds)
     results = [None] * len(jobs)
     errors = [None] * len(jobs)
 
     def collect(index, job):
         try:
-            results[index] = collect_nonstream_job(job, body, chat=chat)
+            results[index] = collect_nonstream_job(
+                job, body, chat=chat,
+                generation_event_timeout_seconds=generation_event_timeout_seconds,
+            )
         except BaseException as exc:  # propagated to the HTTP thread below
             errors[index] = exc
             # The response is already lost; stop paying for the other samples.
@@ -2203,6 +2220,7 @@ def handler_for(
     semantic_middleware=None,
     tensorfold_owned_router=None,
     sse_keepalive_seconds: float | None = DEFAULT_SSE_KEEPALIVE_SECONDS,
+    generation_event_timeout_seconds=None,
     usage_ledger=None,
     prefill_handoff="off",
     prefill_handoff_records=None,
@@ -2213,6 +2231,12 @@ def handler_for(
         and getattr(http_security, "api_key", None) is not None
     ):
         raise ValueError(TENANT_AUTH_GATE_KEY_CONFLICT)
+    engine_event_timeout = getattr(engine, "generation_event_timeout_seconds", DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS)
+    generation_event_timeout_seconds = validate_generation_event_timeout(
+        engine_event_timeout if generation_event_timeout_seconds is None else generation_event_timeout_seconds
+    )
+    if hasattr(engine, "generation_event_timeout_seconds") and generation_event_timeout_seconds != engine_event_timeout:
+        raise ValueError("handler generation event timeout must match engine serving profile")
     compat_policy = AgentCompatPolicy.coerce(agent_compat)
     engine.agent_compat = compat_policy
     # The serving worker uses this bit to decide whether a job's tenant id was
@@ -2455,7 +2479,8 @@ def handler_for(
         job = engine.submit(body, **submit_kwargs)
         try:
             choice, usage, receipt = collect_nonstream_job(
-                job, body, chat=chat, responses=responses_api
+                job, body, chat=chat, responses=responses_api,
+                generation_event_timeout_seconds=generation_event_timeout_seconds,
             )
         finally:
             job.cancelled.set()
@@ -3947,7 +3972,8 @@ def handler_for(
             agent_compat = None
             semantic_state = None
             semantic_score_tokens = lambda prompt, token_ids: score_choice_tokens_via_engine(
-                engine, prompt, token_ids, tenant_id=tenant_id
+                engine, prompt, token_ids, tenant_id=tenant_id,
+                generation_event_timeout_seconds=generation_event_timeout_seconds,
             )
             # Item 12: tool calls streamed as they complete because the decode
             # grammar is engaged (tool_grammar_streaming); Responses ids and
@@ -4283,7 +4309,8 @@ def handler_for(
                         submit_many_kwargs["admitted"] = True
                     jobs.extend(engine.submit_many(samples, **submit_many_kwargs))
                     results = collect_parallel_samples(
-                        jobs, body, chat=chat, connection=self.connection
+                        jobs, body, chat=chat, connection=self.connection,
+                        generation_event_timeout_seconds=generation_event_timeout_seconds,
                     )
                     choices, usages, receipts = zip(*results)
                     for index, choice in enumerate(choices):
@@ -4470,6 +4497,7 @@ def handler_for(
                     event = wait_event(
                         job.events,
                         connection=self.connection,
+                        deadline_seconds=generation_event_timeout_seconds,
                         idle_seconds=sse_keepalive_seconds,
                         on_idle=keepalive if body.get("stream") else None,
                         idle_since=lambda: self._last_stream_write,
@@ -5886,6 +5914,15 @@ def apply_auto_streaming_lane_default(args, adapter_resolution, policy, *, admis
     return decision
 
 
+def generation_event_timeout_arg(value):
+    if isinstance(value, bool):
+        raise argparse.ArgumentTypeError("generation event timeout must not be a boolean")
+    try:
+        return validate_generation_event_timeout(float(value))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="mlx2 APCv2 Flash-Next server")
     parser.add_argument("--model", required=True)
@@ -5985,6 +6022,12 @@ def build_parser():
         type=float,
         metavar="SECONDS",
         help="drain accepted work before SIGTERM/SIGINT shutdown (default: immediate)",
+    )
+    parser.add_argument(
+        "--generation-event-timeout-seconds", type=generation_event_timeout_arg,
+        default=DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS,
+        help="maximum wait for each engine event, 1..28800 seconds (default 1800); "
+             "independent of client timeout, body deadline and SSE keepalive",
     )
     parser.add_argument(
         "--sse-keepalive-seconds",
@@ -7270,6 +7313,9 @@ def serving_engine_kwargs(
         "prefill_step": getattr(args, "prefill_step", None),
         "prefill_depth_budget": getattr(args, "prefill_depth_budget", None),
         "default_max_tokens": args.default_max_tokens,
+        "generation_event_timeout_seconds": validate_generation_event_timeout(
+            getattr(args, "generation_event_timeout_seconds", DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS)
+        ),
         "max_request_bytes": max_request_bytes,
         "cache_bytes": args.cache_bytes,
         # A namespace built without the parser has no source; treat its value
@@ -7856,6 +7902,7 @@ def main():
             semantic_middleware=semantic_middleware,
             tensorfold_owned_router=tensorfold_owned_router,
             sse_keepalive_seconds=args.sse_keepalive_seconds or None,
+            generation_event_timeout_seconds=args.generation_event_timeout_seconds,
             usage_ledger=usage_ledger,
             prefill_handoff=args.prefill_handoff,
             prefill_handoff_records=args.prefill_handoff_records,

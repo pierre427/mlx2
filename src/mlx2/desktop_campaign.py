@@ -18,7 +18,8 @@ from .desktop_records import digest
 
 _HARNESS = "qualification/runs/qualify-1010-correctness"
 QUALIFICATION_SOURCE_FILES = tuple(f"{_HARNESS}/{name}" for name in (
-    "thermal_ladder.py", "thermal-policy.json", "ladder.py", "needle_match.py",
+    "thermal_ladder.py", "thermal-policy.json", "thermal-policy-m5-hid.json",
+    "ladder.py", "needle_match.py",
     "qualification_verdict.py", "performance_assessment.py",
 ))
 DEFAULT_PROFILE = {"route": "auto", "context": 32768, "lanes": 4, "inflight": 4,

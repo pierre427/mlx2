@@ -323,6 +323,14 @@ def test_qwen36_routed_decode_and_topk_applied_live(monkeypatch, latched, kernel
 
 # --- review item 6: TF32 enabled after package import ----------------------
 
+INLINE_PROFILE_MODULES = [
+    ("olmo_hils", "OlmoHiLSAdapter"), ("granite_swa", "GraniteSWAAdapter"),
+    ("lfm25_moe", "LFM25MoEAdapter"), ("flint", "FlintAdapter"),
+    ("hysparse2", "HySparse2Adapter"),
+    ("deepseek_v4_gguf", "DeepSeekV4GGUFAdapter"),
+]
+
+
 PROFILE_MODULES = [
     "agnes_3_flash", "flash_next", "gpt_oss", "hy_v3", "laguna_xs21",
     "ling3_flash", "mellum21", "muse_glimmer", "nemotron3_super", "north_mini_code", "qwen35_9b",
@@ -350,11 +358,7 @@ def test_tf32_set_after_package_import_is_refused_by_every_profile(monkeypatch, 
     assert os.environ["MLX_ENABLE_TF32"] == "1"
 
 
-@pytest.mark.parametrize("module,cls", [
-    ("olmo_hils", "OlmoHiLSAdapter"), ("granite_swa", "GraniteSWAAdapter"),
-    ("lfm25_moe", "LFM25MoEAdapter"), ("flint", "FlintAdapter"),
-    ("hysparse2", "HySparse2Adapter"),
-])
+@pytest.mark.parametrize("module,cls", INLINE_PROFILE_MODULES)
 def test_tf32_set_after_package_import_is_refused_by_inline_profiles(
     monkeypatch, tmp_path, module, cls
 ):
@@ -372,6 +376,26 @@ def test_tf32_set_after_package_import_is_refused_by_inline_profiles(
     assert os.environ["MLX_ENABLE_TF32"] == "1"
 
 
+def test_deepseek_matching_numerics_reaches_inspection_without_tensor_load(monkeypatch,tmp_path):
+    from mlx2.adapters import deepseek_v4_gguf
+    monkeypatch.setattr(process_env,"_EXPLICIT_AT_IMPORT",None)
+    monkeypatch.setenv("MLX_ENABLE_TF32","0")
+    _latched(monkeypatch,{"MLX_ENABLE_TF32":"0"})
+    def inspected(_):raise _Loaded("guard passed before actual artifact inspection")
+    monkeypatch.setattr(deepseek_v4_gguf,"inspect_artifact",inspected)
+    with pytest.raises(_Loaded):deepseek_v4_gguf.DeepSeekV4GGUFAdapter(str(tmp_path))
+
+
+def test_deepseek_stale_import_latch_refuses_before_inspection(monkeypatch,tmp_path):
+    from mlx2.adapters import deepseek_v4_gguf
+    monkeypatch.setattr(process_env,"_EXPLICIT_AT_IMPORT",None)
+    monkeypatch.setenv("MLX_ENABLE_TF32","0")
+    _latched(monkeypatch,{"MLX_ENABLE_TF32":"1"})
+    monkeypatch.setattr(deepseek_v4_gguf,"inspect_artifact",lambda _:pytest.fail("stale numerics reached artifact inspection"))
+    with pytest.raises(import_env.ImportOrderError,match="MLX_ENABLE_TF32"):
+        deepseek_v4_gguf.DeepSeekV4GGUFAdapter(str(tmp_path))
+
+
 def test_every_profile_that_spreads_process_numerics_is_covered():
     """A new adapter that spreads PROCESS_NUMERICS must refuse explicit TF32."""
     from pathlib import Path
@@ -384,10 +408,9 @@ def test_every_profile_that_spreads_process_numerics_is_covered():
         p.stem for p in adapters.glob("*.py") if "require_process_numerics(" in p.read_text()
     }
     assert spreading <= refusing, sorted(spreading - refusing)
-    assert spreading == set(PROFILE_MODULES) | {
-        "olmo_hils", "granite_swa", "standard_decoder", "lfm25_moe", "flint",
-        "hysparse2",
-    }
+    # The inventory is tied to the actual parametrized construction tests,
+    # not a second hand-maintained exception set.
+    assert spreading == set(PROFILE_MODULES) | {name for name, _ in INLINE_PROFILE_MODULES} | {"standard_decoder"}
 
     # Qwen3.5 9B and dense Qwen3.6 inherit Qwen3.8's guarded constructor;
     # every other profile owner must enforce the import latch in its module.

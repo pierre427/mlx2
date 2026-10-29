@@ -427,6 +427,37 @@ def run_reasoning_probe(post, *, thinking_budget=None):
     return attempts[-1], attempts
 
 
+def run_greedy_sampling_probe(post):
+    """Test a declared greedy domain and real stochastic refusal, never sampling."""
+    neutral = {"temperature": 0, "top_p": 1.0, "top_k": 0, "min_p": 0.0,
+               "repetition_penalty": 1.0, "presence_penalty": 0.0, "frequency_penalty": 0.0}
+    request = {"messages": [{"role": "user", "content": "Name three fruits."}],
+               "enable_thinking": False, "max_tokens": 64, "seed": 237, **neutral}
+    a, b = post(request), post(request)
+    def text(row):
+        return normalize_chat_content(row["choices"][0]["message"].get("content"))
+    controls = [((r.get("mlx2") or {}).get("request_controls") or {}).get("effective_sampling") or {} for r in (a,b)]
+    outcomes = {"greedy_sampling_controls": {
+        "passed": all(all(c.get(k) == v for k,v in neutral.items()) for c in controls) and bool(text(a)),
+        "evidence": {"request": request, "effective_sampling": controls, "scope": "greedy controls only; stochastic unsupported"}},
+        "greedy_repeat": {"passed": bool(text(a)) and text(a) == text(b),
+            "evidence": {"request": request, "responses": [a,b], "scope": "deterministic greedy repeat; not stochastic seed repeat"}}}
+    refused_request = {**request, "temperature": 0.7}
+    refusal = None
+    try:
+        unexpected = post(refused_request)
+    except HTTPError as error:
+        raw = error.read((1 << 20) + 1)
+        refusal = {"status": error.code, "body_utf8": raw.decode("utf-8", errors="replace"),
+                   "body_sha256": hashlib.sha256(raw).hexdigest(), "body_oversized": len(raw) > 1 << 20}
+        unexpected = None
+    outcomes["sampling_refusal"] = {
+        "passed": bool(refusal and refusal["status"] == 400 and refusal["body_utf8"].strip() and not refusal["body_oversized"]),
+        "evidence": {"request": refused_request, "refusal": refusal, "unexpected_response": unexpected,
+                     "scope": "actual HTTP400 unsupported stochastic request; no stochastic result claimed"}}
+    return outcomes
+
+
 def run_structured_thinking_probe(post, status):
     """Thinking-enabled chat with ``json_object``: the grammar defers past </think>.
 
@@ -4129,6 +4160,9 @@ def main():
     if not (initial["healthy"] and initial["inflight"] == 0):
         raise AssertionError("server must start healthy and idle")
     selected_capabilities, scope_valid = selected_capability_scope(initial)
+    from mlx2.sampling_contract import status_sampling_contract, sampling_coverage
+
+    sampling_contract = status_sampling_contract(initial)
     from mlx2.qualification import required_feature_checks
 
     selected_features = {
@@ -4178,6 +4212,9 @@ def main():
         "core_serving": "inline",
         "long_context": context_delegation or {"mode": "inline", "checks": list(LONG_CONTEXT_CHECKS)},
     }
+    if sampling_contract is not None:
+        report["coverage_scope"]["sampling"] = sampling_coverage(
+            sampling_contract,runtime=initial["runtime"],artifact=initial["artifact"])
     trusted_preflight = (validate_preflight_receipt(args.preflight_receipt, initial["runtime"])
                          if args.preflight_receipt else None)
     if trusted_preflight:
@@ -4280,14 +4317,18 @@ def main():
               and probability_wire.rstrip().endswith("data: [DONE]"),
               {"reference": probability_reference, "response": probability_response,
                "stream_entries": streamed_entries, "stream_usage": streamed_usage})
-        sampling_request = prompt("Name three fruits.", temperature=0.7, top_p=0.9, top_k=24,
-            min_p=0.05, repetition_penalty=1.05, presence_penalty=0.1,
-            frequency_penalty=0.1, seed=237)
-        sampling_a, sampling_b = post(sampling_request), post(sampling_request)
-        report["responses"]["sampling_controls"] = [sampling_a, sampling_b]
-        check("sampling_controls", content(sampling_a) == content(sampling_b) and bool(content(sampling_a))
-            and sampling_b["mlx2"]["request_controls"]["sampling"].get("min_p") == 0.05,
-            [sampling_a["mlx2"], sampling_b["mlx2"]])
+        if sampling_contract is not None:
+            for name, outcome in run_greedy_sampling_probe(post).items():
+                check(name,outcome["passed"],outcome["evidence"])
+        else:
+            sampling_request = prompt("Name three fruits.", temperature=0.7, top_p=0.9, top_k=24,
+                min_p=0.05, repetition_penalty=1.05, presence_penalty=0.1,
+                frequency_penalty=0.1, seed=237)
+            sampling_a, sampling_b = post(sampling_request), post(sampling_request)
+            report["responses"]["sampling_controls"] = [sampling_a, sampling_b]
+            check("sampling_controls", content(sampling_a) == content(sampling_b) and bool(content(sampling_a))
+                and sampling_b["mlx2"]["request_controls"]["sampling"].get("min_p") == 0.05,
+                [sampling_a["mlx2"], sampling_b["mlx2"]])
         # Vendor sampling defaults: a request that sets no sampling field gets
         # the adapter's declared profile, recorded with its sources.
         declared = initial.get("sampling_defaults")
@@ -4573,18 +4614,19 @@ def main():
                      and stopped["choices"][0]["finish_reason"] == "stop")),
             stopped,
         )
-        seeded = prompt(
-            "Give three short facts about stars.",
-            temperature=0.7,
-            seed=123,
-            max_tokens=64,
-        )
-        first, second = post(seeded), post(seeded)
-        check(
-            "seed_repeat",
-            content(first) == content(second),
-            {"first": first, "second": second},
-        )
+        if sampling_contract is None:
+            seeded = prompt(
+                "Give three short facts about stars.",
+                temperature=0.7,
+                seed=123,
+                max_tokens=64,
+            )
+            first, second = post(seeded), post(seeded)
+            check(
+                "seed_repeat",
+                content(first) == content(second),
+                {"first": first, "second": second},
+            )
         if "continuous_batch" in selected_capabilities:
             # Four concurrent requests cover row lifetimes and observed compute width.
             # Fixed 160-token lanes measure batching, not reasoning: thinking is

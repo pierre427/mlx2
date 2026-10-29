@@ -30,6 +30,9 @@ import uuid
 from .best_route_defaults import receipt_view
 from .logprobs import distribution_contract, token_logprob, wants_logprobs, wants_logprobs_at
 from .generation_trace import GeneratedTokenTrace
+from .generation_timeout import (
+    DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS, validate_generation_event_timeout,
+)
 from .request_limits import (
     DEFAULT_OUTPUT_TOKENS,
     ContextLengthExceeded,
@@ -3778,6 +3781,7 @@ class ServingEngine:
         max_lanes=4,
         max_context=16384,
         default_max_tokens=DEFAULT_OUTPUT_TOKENS,
+        generation_event_timeout_seconds=DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS,
         max_request_bytes=2 << 20,
         prefill_step=None,
         cache_bytes=12 << 30,
@@ -3845,6 +3849,7 @@ class ServingEngine:
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
+        self.generation_event_timeout_seconds = validate_generation_event_timeout(generation_event_timeout_seconds)
         if ast_route is not None and not isinstance(ast_route, Mapping):
             raise TypeError("ast_route must be a mapping or None")
         # Bounded --ast route configuration (ast_observability.route_status);
@@ -9420,6 +9425,9 @@ class ServingEngine:
                 ),
                 "max_context": self.max_context,
                 "default_max_tokens": self.default_max_tokens,
+                "generation_event_timeout_seconds": getattr(
+                    self, "generation_event_timeout_seconds", DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS
+                ),
                 "max_lanes": self.max_lanes,
                 "max_inflight": self.max_inflight,
                 "prefill_step": self.prefill_step,
@@ -9510,6 +9518,11 @@ class ServingEngine:
             }
             descriptor = getattr(adapter, "descriptor", None)
             descriptor_metadata = getattr(descriptor, "metadata", {})
+            from .sampling_contract import descriptor_sampling_contract
+
+            sampling_contract = descriptor_sampling_contract(descriptor)
+            if sampling_contract is not None:
+                settings["sampling_contract"] = sampling_contract
             required_media_checks = descriptor_metadata.get(
                 "required_qualification_checks"
             )
