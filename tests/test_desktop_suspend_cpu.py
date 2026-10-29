@@ -59,8 +59,16 @@ def join(helper):
     assert not helper.busy()
 
 
-def test_suspend_requires_confirmed_disk_save_before_retiring_and_recovers_cpu_only(lifecycle):
+@pytest.mark.parametrize("live_state", ["suspended", "parked"])
+def test_suspend_requires_confirmed_disk_save_before_retiring_and_recovers_cpu_only(lifecycle, live_state):
     helper, owner = lifecycle
+    original = helper.request.side_effect
+    def request(method, route, body=None):
+        result = original(method, route, body)
+        if route.endswith("/state"):
+            result["state"] = live_state
+        return result
+    helper.request.side_effect = request
     helper.begin_suspend()
     join(helper)
     assert owner.child is None

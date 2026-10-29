@@ -150,6 +150,11 @@ def prompt_cache_payload(cache: List[Any], metadata: Optional[Dict[str, str]] = 
     """
     if metadata is None:
         metadata = {}
+    if not cache:
+        # A model-free drafter has zero cache layers. tree_flatten drops all
+        # three empty containers, so preserve this legitimate empty envelope
+        # explicitly rather than interpreting an arbitrary empty file as one.
+        return {}, {"mlx2.empty_prompt_cache.v1": json.dumps(metadata, sort_keys=True)}
     cache_data = [c.state for c in cache]
     cache_info = [c.meta_state for c in cache]
     cache_data = dict(tree_flatten(cache_data))
@@ -216,6 +221,16 @@ def load_prompt_cache(file_name, return_metadata=False):
     # model thread. File-like inputs have no suffix for MLX format dispatch.
     options = {"format": "safetensors"} if hasattr(file_name, "read") else {}
     (arrays, cache_metadata) = mx.load(file_name, return_metadata=True, **options)
+    if "mlx2.empty_prompt_cache.v1" in cache_metadata:
+        if arrays or set(cache_metadata) != {"mlx2.empty_prompt_cache.v1"}:
+            raise ValueError("empty prompt-cache envelope carries unexpected data")
+        metadata = json.loads(cache_metadata["mlx2.empty_prompt_cache.v1"])
+        if not isinstance(metadata, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in metadata.items()
+        ):
+            raise ValueError("invalid empty prompt-cache metadata")
+        return ([], metadata) if return_metadata else []
     cache_metadata = tree_unflatten(list(cache_metadata.items()))
     (info, metadata, classes) = cache_metadata[:3]
     arrays = dict(arrays)

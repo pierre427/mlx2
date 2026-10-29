@@ -310,6 +310,35 @@ class ReadPool:
                 "io_finalizer_inflight": int(self._finalizer is not None and not self._finalizer.done()),
             }
 
+    def retirement_receipt(self):
+        """Prove that an externally owned reader finished final teardown.
+
+        A deadline or a completed failed finalizer does not release ownership.
+        No registered finalizer also cannot prove descriptor release: fail()
+        closes submission before the owner supplies its CloseAction. Callers
+        that own no handles need no such proof; external weight owners must
+        register their ordinary finalizer before retiring memory reservations.
+        """
+        with self._lock:
+            finalizer = self._finalizer
+            complete = finalizer is not None and finalizer.done()
+            succeeded = bool(complete and not finalizer.cancelled() and finalizer.exception() is None)
+            with _READ_POOLS_LOCK:
+                quarantined = self in _QUARANTINED_READ_POOLS
+            registered = self._handles_owner is not None
+            pending = len(self._pending)
+            drained = bool(self._closed and not pending and registered and succeeded and not quarantined)
+            return {
+                "ownership_drained": drained,
+                "closed": self._closed,
+                "pending_reads": pending,
+                "finalizer_registered": registered,
+                "finalizer_complete": bool(complete),
+                "finalizer_succeeded": succeeded,
+                "quarantined": quarantined,
+                "failure": self._failure,
+            }
+
     def close(self, handles=None, *, timeout=None):
         """Revoke work and finalize descriptors once, with bounded caller wait.
 

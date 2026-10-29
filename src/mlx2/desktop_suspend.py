@@ -149,7 +149,11 @@ class Suspension:
                 self._assert_operation()
                 if status.get("process_id") != owner.child.pid:
                     raise ValueError("Managed drain receipt belongs to another process")
-                if status.get("state") == "suspended":
+                # An explicitly parked live worker has already completed the
+                # same exact APCv2 suspension. This lifecycle still exports
+                # expiry-frozen state and stops the owned process, releasing
+                # its CPG/GPU lease; weight parking alone does not do that.
+                if status.get("state") in {"suspended", "parked"}:
                     break
                 if status.get("state") in {"failed", "error"} or time.monotonic() >= deadline:
                     raise ValueError("Model could not finish draining and saving APCv2; process remains owned")

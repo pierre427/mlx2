@@ -11,6 +11,7 @@ import struct
 
 import numpy as np
 
+from .iq1_codebook import IQ1_GRID
 from .iq2_codebook import IQ2_GRID
 from .reader import FORMATS, GGUFError
 
@@ -18,7 +19,7 @@ from .reader import FORMATS, GGUFError
 def decode_blocks(
     data: bytes | memoryview, ggml_type: int, *, max_elements: int = 262144
 ) -> np.ndarray:
-    if ggml_type not in (0, 1, 8, 10, 16, 30):
+    if ggml_type not in (0, 1, 8, 10, 16, 19, 30):
         raise GGUFError(f"no reference decoder for GGML type {ggml_type}")
     _, count, size = FORMATS[ggml_type]
     if len(data) % size:
@@ -52,6 +53,18 @@ def decode_blocks(
                 dest[group * 16 : (group + 1) * 16] = d * np.float32(scale & 15) * (
                     (q >> shift) & 3
                 ).astype(np.float32) - dmin * np.float32(scale >> 4)
+        elif ggml_type == 19:
+            d = np.float32(struct.unpack_from("<e", block, 0)[0])
+            for group in range(8):
+                qh = struct.unpack_from("<H", block, 34 + group * 2)[0]
+                scale = d * np.float32(2 * ((qh >> 12) & 7) + 1)
+                delta = np.float32(-0.125 if qh & 0x8000 else 0.125)
+                for j in range(4):
+                    grid = IQ1_GRID[block[2 + group * 4 + j] | (((qh >> (3 * j)) & 7) << 8)]
+                    for lane in range(8):
+                        value = (grid >> (8 * lane)) & 255
+                        value = value - 256 if value > 127 else value
+                        dest[group * 32 + j * 8 + lane] = scale * (np.float32(value) + delta)
         else:
             d = np.float32(struct.unpack_from("<e", block, 0)[0])
             for group in range(8):

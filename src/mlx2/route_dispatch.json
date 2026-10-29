@@ -2,12 +2,12 @@
   "schema": 1,
   "dispatchers": {
     "mlx2.adapters.registry": {
-      "sha256": "c2c696e7ec74ed12283770fdfdc7c8a1a98e9a9ec294dfb57eef26490b6702f9",
+      "sha256": "edd51d56c4ac346ac9d5dd0fb998e46079c30e01f128190406cf00f88e9f652f",
       "targets": [],
       "reason": "Selected-adapter dispatch reviewed through native DeepSeek V4 MLX registration and Nanbeige Llama topology refinement. New targets are literal internal adapter modules; the constructed adapter/model roots still define the dynamic closure. Unrelated unknown loaders remain unresolved."
     },
     "mlx2.runtime.models.cache": {
-      "sha256": "4b0eba5dcd04a156e3724ebf210f557aa25f3adaeda4af6dabd7abd42fa42361",
+      "sha256": "a0a8b2929e90d396f509fa4a1aad44d4a9939f0fe4bc58b86c9f5a78f3d8b27c",
       "targets": [],
       "reason": "Revision-bound cache classes supplied by the selected adapter. Reviewed bounded KV reservation, capacity-plan propagation and independent committed-descriptor cloning; no new dynamic loader or cache-class target. Default unreserved cache behavior is unchanged."
     },

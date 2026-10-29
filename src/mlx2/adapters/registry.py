@@ -446,6 +446,30 @@ def _flint(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.FlintAdapter, module.DESCRIPTOR, artifact)
 
 
+def _deepseek_v41(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".deepseek_v41", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.DeepSeekV41Adapter, module.DESCRIPTOR, artifact)
+
+
+def _deepseek_v41_mlx(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".deepseek_v41_mlx", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.DeepSeekV41MLXAdapter, module.DESCRIPTOR, artifact)
+
+
+def _deepseek_v41_iq1(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".deepseek_v41_iq1", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.DeepSeekV41IQ1Adapter, module.DESCRIPTOR, artifact)
+
+
+def _deepseek_v41_source(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".deepseek_v41_source", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.DeepSeekV41SourceAdapter, module.DESCRIPTOR, artifact)
+
+
 def _deepseek_v4_gguf(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".deepseek_v4_gguf", __package__)
     artifact = module.inspect_artifact(path)
@@ -517,6 +541,10 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "flint": _flint,
     "deepseek4_gguf": _deepseek_v4_gguf,
     "deepseek4_mlx": _deepseek_v4_mlx,
+    "deepseek41_gguf": _deepseek_v41,
+    "deepseek41_mlx": _deepseek_v41_mlx,
+    "deepseek41_iq1": _deepseek_v41_iq1,
+    "deepseek_v41": _deepseek_v41_source,
     "lfm2_moe": _lfm25_moe,
     "lfm2_vl": _lfm25_vl,
     "smolvlm": _smolvlm2,

@@ -3600,6 +3600,29 @@ def handler_for(
                 except (SuspendUnavailable, RuntimeError) as error:
                     self.api_error(409, str(error))
                 return
+            if path in {"/v1/admin/residency/park", "/v1/admin/residency/activate", "/v1/admin/residency/cancel"}:
+                if not self._authorize_admin():
+                    return
+                try:
+                    body = self._read_json_body(allow_empty=True, max_bytes=65536)
+                    body = {} if body is None else body
+                    if not isinstance(body, dict):
+                        raise ValueError("model residency body must be an object")
+                    if path.endswith("/park"):
+                        if set(body)-{"drain_timeout_seconds"}:
+                            raise ValueError("model park accepts only drain_timeout_seconds")
+                        value = engine.park_model(**body)
+                    else:
+                        if body:
+                            raise ValueError("model activate/cancel accepts an empty body")
+                        value = (engine.cancel_model_activation() if path.endswith("/cancel")
+                                 else engine.activate_model())
+                    self.send_json(202, value)
+                except (APCReuseDisabled, SuspendUnavailable, RuntimeError) as error:
+                    self.api_error(409, str(error))
+                except (ValueError, json.JSONDecodeError) as error:
+                    self.api_error(400, str(error))
+                return
             if path in {"/v1/admin/quiesce", "/v1/admin/resume"}:
                 if not self._authorize_admin():
                     return

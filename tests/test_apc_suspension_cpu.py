@@ -91,7 +91,8 @@ def test_invalid_clock_or_epoch_never_silently_resets_expiry():
     assert consume_epoch(thawed, 3000)[1] == 0
 
 
-def test_engine_export_refuses_active_failed_or_incomplete_drain():
+@pytest.mark.parametrize("completed_state", ["suspended", "parked"])
+def test_engine_export_refuses_active_failed_or_incomplete_drain(completed_state):
     engine = _engine()
     calls = []
     engine.apc = SimpleNamespace(freeze_suspension=lambda identity: calls.append(identity) or {"suspension_id": identity},
@@ -105,6 +106,7 @@ def test_engine_export_refuses_active_failed_or_incomplete_drain():
         with pytest.raises(Exception, match="fully drained"):
             engine.export_suspension("epoch")
     assert calls == []
+    engine._service_state = completed_state
     engine._quiesce_complete.set()
     result = engine.export_suspension("epoch")
     assert calls == ["epoch"]

@@ -3826,6 +3826,7 @@ class ServingEngine:
         model_path,
         *,
         adapter_factory=None,
+        model_residency_budget=None,
         max_inflight=8,
         max_lanes=4,
         max_context=16384,
@@ -4424,7 +4425,7 @@ class ServingEngine:
         )
         self.multi_lora = None
         if self.weight_streaming_enabled():
-            self._refuse_unevidenced_weight_streaming(execution_policy)
+            self._refuse_unevidenced_weight_streaming(execution_policy, defer_external=True)
         self.max_inflight, self.max_lanes = max_inflight, max_lanes
         self.max_context, self.max_request_bytes = max_context, max_request_bytes
         self.prefill_step = prefill_step
@@ -4508,6 +4509,11 @@ class ServingEngine:
         self.power_governor = None
         if self.power_governor_policy.enabled and not self.power_telemetry_policy.enabled:
             raise ValueError("power_governor requires power_telemetry")
+        if model_residency_budget is not None:
+            from .runtime.model_residency import ResidencyBudget
+            if not isinstance(model_residency_budget, ResidencyBudget):
+                raise ValueError("model_residency_budget must be a shared ResidencyBudget")
+        self.model_residency_budget = model_residency_budget
         if _validate_only:
             return
         from .reasoning_signatures import ReasoningSigner
@@ -4540,6 +4546,11 @@ class ServingEngine:
         }
         self._drain_deadline = None
         self._drain_suspend = False
+        self._drain_park_model = False
+        self._model_residency = None
+        self._residency_activation_owned = False
+        self._residency_activation_cancel = False
+        self._residency_prefetch_sessions = ()
         self._drain_started_monotonic = None
         self._quiesce_worker_owned = False
         self._admin_prefetch_queue = deque()
@@ -4674,6 +4685,8 @@ class ServingEngine:
                 mtp_head=(execution_policy or {}).get("mtp_head"),
             )
         self.adapter_factory = adapter_factory
+        if self.weight_streaming_enabled():
+            self._refuse_unevidenced_weight_streaming(execution_policy)
         self._select_automatic_expert_streaming(adapter_factory, max_lanes)
         if self.weight_streaming_enabled():
             from .runtime.streamed_load import declared_stream_modes
@@ -4762,6 +4775,8 @@ class ServingEngine:
                 **self._last_service_transition,
                 "result": dict(self._last_service_transition.get("result") or {}),
             },
+            "model_residency": (self._model_residency.receipt()
+                                if getattr(self, "_model_residency", None) is not None else None),
         }
 
     def export_suspension(self, suspension_id):
@@ -4774,7 +4789,7 @@ class ServingEngine:
             with self._admission_section():
                 with self.lock:
                     report = self._last_service_transition.get("result", {}).get("suspend") or {}
-                    if (self._service_state != "suspended" or not self._quiesce_complete.is_set()
+                    if (self._service_state not in {"suspended", "parked"} or not self._quiesce_complete.is_set()
                             or report.get("failures") != 0 or report.get("resident_entries_after") != 0):
                         raise SuspendUnavailable("Suspend export requires a fully drained, successfully persisted cache")
                     apc = self.apc
@@ -4900,7 +4915,7 @@ class ServingEngine:
         count_add(self.counts, "apc_admin_clears", 1)
         return report
 
-    def quiesce(self, *, drain_timeout_seconds=600.0, suspend=True):
+    def quiesce(self, *, drain_timeout_seconds=600.0, suspend=True, park_model=False):
         if isinstance(drain_timeout_seconds, bool) or not isinstance(
             drain_timeout_seconds, (int, float)
         ):
@@ -4912,19 +4927,26 @@ class ServingEngine:
             )
         if not isinstance(suspend, bool):
             raise ValueError("suspend must be boolean")
+        if type(park_model) is not bool or (park_model and not suspend):
+            raise ValueError("model parking requires cache suspension")
         with self._admission_section():
             with self.lock:
                 count_add(self.counts, "quiesce_requests", 1)
-                if self._service_state != "serving":
+                if self._service_state != "serving" and not (
+                    park_model and self._service_state in {"quiesced", "suspended"}
+                ):
                     return self._service_state_locked()
                 if suspend and not (self.apc_persist_dir or self.cache_dir):
                     raise SuspendUnavailable(
                         "cache suspension requires --apc-persist-dir or --cache-dir"
                     )
+                if park_model and getattr(getattr(self, "adapter", None), "model_residency", None) is None:
+                    raise SuspendUnavailable("adapter does not declare model residency parking")
                 now = time.monotonic()
                 self._drain_deadline = now + drain_timeout_seconds
                 self._drain_started_monotonic = now
                 self._drain_suspend = suspend
+                self._drain_park_model = park_model
                 self._quiesce_worker_owned = False
                 self._quiesce_complete.clear()
                 self._transition_service_locked(
@@ -4933,6 +4955,7 @@ class ServingEngine:
                         "status": "accepted",
                         "drain_timeout_seconds": drain_timeout_seconds,
                         "suspend": suspend,
+                        "park_model": park_model,
                     },
                 )
                 return self._service_state_locked()
@@ -4945,6 +4968,10 @@ class ServingEngine:
             )
         if prefetch_sessions:
             self._ensure_apc_prefetch_available()
+        with self.lock:
+            parked = self._service_state in {"parked", "activating", "park_failed"}
+        if parked:
+            return self.activate_model(prefetch_sessions=prefetch_sessions)
         with self._admission_section():
             if getattr(self.apc, "_suspension_clock", None):
                 self.apc.thaw_suspension()
@@ -4954,6 +4981,7 @@ class ServingEngine:
         # release both locks and wait until cache ownership is stable.
         while True:
             wait_for_worker = False
+            activate_parked = False
             with self._admission_section():
                 with self.lock:
                     if (
@@ -4962,7 +4990,12 @@ class ServingEngine:
                     ):
                         raise ValueError("admin prefetch queue is full")
                     previous = self._service_state
-                    if (
+                    if previous in {"parked", "activating", "park_failed"}:
+                        # Parking may have completed while this resume waited
+                        # for the worker's already-owned drain. Never reopen
+                        # admission through the ordinary cache-only path.
+                        activate_parked = True
+                    elif (
                         (previous != "draining" or self._quiesce_worker_owned)
                         and not self._quiesce_complete.is_set()
                     ):
@@ -4973,6 +5006,7 @@ class ServingEngine:
                             self._drain_deadline = None
                             self._drain_started_monotonic = None
                             self._drain_suspend = False
+                            self._drain_park_model = False
                             self._quiesce_worker_owned = False
                             self._transition_service_locked(
                                 "serving",
@@ -4987,11 +5021,121 @@ class ServingEngine:
                         self._admin_prefetch_queue.extend(prefetch_sessions)
                         count_add(self.counts, "prefetches_queued", len(prefetch_sessions))
                         return self._service_state_locked()
+            if activate_parked:
+                return self.activate_model(prefetch_sessions=prefetch_sessions)
             if wait_for_worker:
                 self._quiesce_complete.wait()
 
     def wait_for_quiesce(self, timeout=None):
         return self._quiesce_complete.wait(timeout)
+
+    def park_model(self, *, drain_timeout_seconds=600.0):
+        """Persist APCv2 and release adapter weights on the evaluation owner."""
+        return self.quiesce(drain_timeout_seconds=drain_timeout_seconds,
+                            suspend=True, park_model=True)
+
+    def activate_model(self, *, prefetch_sessions=()):
+        prefetch_sessions = tuple(prefetch_sessions)
+        with self._admission_section():
+            with self.lock:
+                if self._service_state == "park_failed":
+                    raise RuntimeError("model parking failed; reload the model before serving")
+                if self._service_state == "activating":
+                    return self._service_state_locked()
+                if self._service_state == "serving":
+                    return self._service_state_locked()
+                if self._service_state != "parked":
+                    raise RuntimeError("model activation requires completed model parking")
+                if len(self._admin_prefetch_queue)+len(prefetch_sessions) > self._admin_prefetch_limit:
+                    raise ValueError("admin prefetch queue is full")
+                self._residency_prefetch_sessions = prefetch_sessions
+                self._residency_activation_cancel = False
+                self._residency_activation_owned = False
+                self._quiesce_complete.clear()
+                self._transition_service_locked("activating", {"status": "accepted"})
+                return self._service_state_locked()
+
+    def cancel_model_activation(self):
+        with self._admission_section():
+            with self.lock:
+                if self._service_state == "activating":
+                    if self._residency_activation_owned:
+                        raise RuntimeError("model activation already owns evaluation; wait for its receipt")
+                    self._residency_activation_cancel = True
+                return self._service_state_locked()
+
+    def _model_residency_controller(self, mx):
+        identity = {name: self.snapshot.get(name) for name in ("artifact", "runtime")}
+        if not all(identity.values()):
+            raise RuntimeError("model residency requires exact artifact/runtime identity")
+        identity["model_revision"] = self.model_revision
+        if getattr(self, "_model_residency", None) is None:
+            from .runtime.model_residency import ModelResidency
+            provider = getattr(self.adapter, "model_residency", None)
+            self._model_residency = ModelResidency(
+                provider, identity=identity,
+                synchronize=getattr(self, "_model_residency_sync", mx.synchronize),
+                measure=lambda: {"active_bytes": int(mx.get_active_memory()),
+                                 "cached_bytes": int(mx.get_cache_memory())},
+                budget=getattr(self, "model_residency_budget", None),
+            )
+        elif self._model_residency.identity != identity:
+            raise RuntimeError("model residency runtime/revision changed; reload required")
+        return self._model_residency
+
+    def _worker_activate_model(self, mx):
+        """One nonblocking activation attempt; admission remains closed."""
+        with self.lock:
+            if self._service_state != "activating" or self._residency_activation_owned:
+                return
+            self._residency_activation_owned = True
+        controller = self._model_residency
+        target, result, completed = "parked", {}, True
+        try:
+            if self._residency_activation_cancel:
+                result = {"status": "cancelled", "model_residency": controller.cancel_activation()}
+            else:
+                receipt = controller.activate()
+                if receipt.get("status") == "waiting_for_budget":
+                    completed = False
+                    return
+                if self._residency_activation_cancel:
+                    result = {"status": "cancelled", "model_residency": controller.park()}
+                else:
+                    if getattr(self.apc, "_suspension_clock", None):
+                        self.apc.thaw_suspension()
+                    target, result = "serving", {"status": "activated", "model_residency": receipt}
+        except Exception as error:  # keep the exact cache and admission closed
+            # APCv2 clock restoration can fail after weights loaded. Preserve
+            # the parked invariant before allowing a later activation retry.
+            cleanup_error = None
+            if controller.state == "active":
+                try:
+                    controller.park()
+                except Exception as cleanup:
+                    cleanup_error = f"{type(cleanup).__name__}: {cleanup}"
+            target = "park_failed" if controller.state == "failed" else "parked"
+            if cleanup_error is not None:
+                target = "park_failed"
+            result = {"status": "activation_failed", "error": f"{type(error).__name__}: {error}",
+                      "model_residency": controller.receipt()}
+            if cleanup_error is not None:
+                result["cleanup_error"] = cleanup_error
+            count_add(self.counts, "model_activation_failures", 1)
+        finally:
+            with self.lock:
+                self._residency_activation_owned = False
+                if completed:
+                    if target == "serving":
+                        self._admin_prefetch_queue.extend(self._residency_prefetch_sessions)
+                        count_add(self.counts, "prefetches_queued", len(self._residency_prefetch_sessions))
+                        count_add(self.counts, "model_activations", 1)
+                        self._parked_apc_suspend = None
+                    elif target == "parked" and getattr(self, "_parked_apc_suspend", None) is not None:
+                        result["suspend"] = dict(self._parked_apc_suspend)
+                    self._residency_prefetch_sessions = ()
+                    self._transition_service_locked(target, result)
+                    self._quiesce_complete.set()
 
     def acquire_admission(self, endpoint_class="generation"):
         """Own one accepted multi-round HTTP lifecycle until its final reply."""
@@ -5088,6 +5232,7 @@ class ServingEngine:
                     "target": target,
                     "timed_out": timed_out,
                     "suspend": self._drain_suspend,
+                    "park_model": getattr(self, "_drain_park_model", False),
                     "drain_duration_seconds": elapsed,
                 }
             if action["timed_out"]:
@@ -5103,10 +5248,13 @@ class ServingEngine:
             }
             if suspend_report is not None:
                 result["suspend"] = dict(suspend_report)
+            if action.get("model_residency") is not None:
+                result["model_residency"] = action["model_residency"]
             self._transition_service_locked(action["target"], result)
             self._drain_deadline = None
             self._drain_started_monotonic = None
             self._drain_suspend = False
+            self._drain_park_model = False
             self._quiesce_worker_owned = False
             self._quiesce_complete.set()
 
@@ -6318,7 +6466,7 @@ class ServingEngine:
                 detail["lane_need_bytes"],
             )
 
-    def _refuse_unevidenced_weight_streaming(self, execution_policy) -> None:
+    def _refuse_unevidenced_weight_streaming(self, execution_policy, *, defer_external=False) -> None:
         """Refuse every mechanism with no streamed-weight evidence, pre-load."""
         refused = weight_streaming_refusals(
             lane_matmul=self.lane_matmul,
@@ -6329,6 +6477,12 @@ class ServingEngine:
             lora_root=self.lora_root,
             execution_policy=execution_policy,
         )
+        factory = getattr(self, "adapter_factory", None)
+        contract = getattr(factory, "__dict__", {}).get("weight_streaming_external_draft")
+        if defer_external or (callable(contract) and contract(execution_policy or {}) is True):
+            # An adapter may prove a narrow external route uses its same
+            # ordinary target arithmetic and owns no streamed draft weights.
+            refused = [reason for reason in refused if reason != "external draft"]
         if refused:
             raise ValueError(
                 "weight streaming has no evidence with "
@@ -11180,18 +11334,23 @@ class ServingEngine:
                     )
 
             batch = build_batch()
+            from .runtime.generation_stream import generation_stream
+
+            def synchronize_streamed_memory():
+                # Admission/parking runs outside batch.next's stream context.
+                # Drain the actual executor stream, not just the default.
+                mx.synchronize()
+                mx.synchronize(generation_stream)
+                executor_stream = getattr(batch, "stream", None)
+                if executor_stream is not None and executor_stream != generation_stream:
+                    mx.synchronize(executor_stream)
+
+            self._model_residency_sync = synchronize_streamed_memory
+            bind_residency = getattr(getattr(adapter, "model_residency", None),
+                                     "bind_execution_synchronizer", None)
+            if callable(bind_residency):
+                bind_residency(synchronize_streamed_memory)
             if getattr(self.expert_stream, "elastic", None) is not None:
-                from .runtime.generation_stream import generation_stream
-
-                def synchronize_streamed_memory():
-                    # Admission runs outside batch.next's stream context.
-                    # Drain the actual executor stream, not just the default.
-                    mx.synchronize()
-                    mx.synchronize(generation_stream)
-                    executor_stream = getattr(batch, "stream", None)
-                    if executor_stream is not None and executor_stream != generation_stream:
-                        mx.synchronize(executor_stream)
-
                 self.expert_stream.bind_execution_synchronizer(synchronize_streamed_memory)
             lane_policy = (self.lane_matmul_receipt or {}).get("policy") or {}
             if external_draft and lane_policy.get("mode") == "exact":
@@ -11337,6 +11496,8 @@ class ServingEngine:
             # once during load. Admission still checks all mutable file
             # signatures and Git cleanliness before reusing the attestation.
             preverify_explicit_native_qwen3_price_identity(adapter)
+            if getattr(adapter, "model_residency", None) is not None:
+                self._model_residency_controller(mx)
             self.ready.set()
             last_snapshot = 0
             last_reclaim = 0
@@ -11833,9 +11994,28 @@ class ServingEngine:
                                 "error": f"{type(error).__name__}: {error}",
                             }
                             quiesce_action["target"] = "quiesced"
+                    if quiesce_action.get("park_model"):
+                        try:
+                            if (not suspend_report or suspend_report.get("failures") != 0
+                                    or suspend_report.get("resident_entries_after") != 0
+                                    or suspend_report.get("pinned_lost", 0) != 0):
+                                raise RuntimeError("model park requires successful exact APCv2 suspension")
+                            residency = self._model_residency_controller(mx)
+                            quiesce_action["model_residency"] = residency.park()
+                            quiesce_action["target"] = "parked"
+                            self._parked_apc_suspend = dict(suspend_report)
+                            count_add(self.counts, "model_parks", 1)
+                        except Exception as error:
+                            log.exception("model weight parking failed")
+                            count_add(self.counts, "model_park_failures", 1)
+                            quiesce_action["target"] = "park_failed"
+                            quiesce_action["model_residency"] = {
+                                "status": "failed", "error": f"{type(error).__name__}: {error}",
+                            }
                     self._complete_worker_quiesce(
                         quiesce_action, suspend_report=suspend_report
                     )
+                self._worker_activate_model(mx)
                 self._expire_pending_cohorts()
                 # Memory preemption recovery: a preempted job waits for replay
                 # or a replay is re-prefilling.  Ordinary admission pauses
@@ -15110,6 +15290,12 @@ class ServingEngine:
                     if callable(close_tokenizer):
                         close_tokenizer()
                     adapter.close()
+                    if getattr(self, "_model_residency", None) is not None:
+                        try:
+                            self._model_residency.retire()
+                        except Exception:
+                            # Retain the reservation if release is uncertain.
+                            log.exception("model residency accounting retained after adapter teardown")
 
     def _start_residency_heartbeat(self):
         """Start the idle residency heartbeat on its own thread and stream."""

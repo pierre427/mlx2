@@ -276,7 +276,12 @@ def auto_expert_streaming_decision(
     declared = "moe_experts" in declared_stream_modes(adapter_class)
     if declared:
         try:
-            decision["weight_bytes"] = artifact_weight_bytes(model_path)
+            # Native packed adapters exclude disk-only tables and file padding.
+            measure = getattr(adapter_class, "resident_weight_bytes", None)
+            weight = measure(model_path) if callable(measure) else artifact_weight_bytes(model_path)
+            if type(weight) is not int or weight <= 0:
+                raise ValueError("adapter weight byte measurement must be a positive integer")
+            decision["weight_bytes"] = weight
         except (OSError, ValueError, TypeError):
             decision["weight_bytes"] = None
     weight = decision["weight_bytes"]

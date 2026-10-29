@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from functools import lru_cache
 
+from .iq1_codebook import IQ1_GRID
 from .iq2_codebook import IQ2_GRID
 from .reader import FORMATS, GGUFError, GGUFTensor
 
@@ -20,6 +21,7 @@ HEADER = (
     "constant ulong iq2_grid[256] = {"
     + ",".join(f"0x{x:016x}ul" for x in IQ2_GRID)
     + "};\n"
+    + "constant ulong iq1_grid[2048] = {" + ",".join(f"0x{x:016x}ul" for x in IQ1_GRID) + "};\n"
     + r"""
 inline float gguf_half(device const uchar *p) {
     const ushort bits = ushort(p[0]) | (ushort(p[1]) << 8);
@@ -39,6 +41,15 @@ inline float gguf_value(device const uchar *row, uint k, uint format) {
         uint q=(uint(p[16+32*(group/8)+16*(group&1)+l]) >> (((group/2)&3)*2))&3;
         uint sc=p[group];
         return gguf_half(p+80)*float(sc&15)*float(q)-gguf_half(p+82)*float(sc>>4);
+    }
+    if (format == 19) {
+        device const uchar *p = row + (k / 256) * 50;
+        uint i=k%256, group=i/32, j=(i%32)/8, lane=i%8;
+        uint qh=uint(p[34+2*group]) | (uint(p[35+2*group])<<8);
+        uint index=uint(p[2+4*group+j]) | (((qh>>(3*j))&7)<<8);
+        char value=as_type<char>(uchar((iq1_grid[index]>>(lane*8))&255));
+        float delta=(qh&0x8000) ? -0.125f : 0.125f;
+        return gguf_half(p)*float(2*((qh>>12)&7)+1)*(float(value)+delta);
     }
     device const uchar *p = row + (k / 256) * 66;
     uint i=k%256, group=i/32, j=(i%32)/8, lane=i%8;
@@ -126,8 +137,8 @@ def _kernel(kind):
 
 
 def row_bytes(ggml_type: int, width: int) -> int:
-    if ggml_type not in (8, 10, 16):
-        raise GGUFError("packed Metal only implements Q8_0/Q2_K/IQ2_XXS")
+    if ggml_type not in (8, 10, 16, 19):
+        raise GGUFError("packed Metal only implements Q8_0/Q2_K/IQ2_XXS/IQ1_S")
     _, block, size = FORMATS[ggml_type]
     if width < 1 or width % block:
         raise GGUFError("packed matrix row is not block-aligned")

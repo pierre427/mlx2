@@ -293,8 +293,8 @@ def test_qwen36_routed_decode_and_topk_applied_live(monkeypatch, latched, kernel
 
     from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter
     from mlx2.runtime.models import qwen3_next
-    from mlx2.runtime.models.qwen36_moe_decode import Qwen36SparseMoeBlock
     from mlx2.runtime.models.qwen3_5 import TextModelArgs
+    from mlx2.runtime.models.qwen36_moe_decode import Qwen36SparseMoeBlock
 
     mx.set_default_device(mx.cpu)
     monkeypatch.setattr(qwen3_next, "_MOE_ROUTED_DECODE", latched[0])
@@ -328,6 +328,15 @@ INLINE_PROFILE_MODULES = [
     ("lfm25_moe", "LFM25MoEAdapter"), ("flint", "FlintAdapter"),
     ("hysparse2", "HySparse2Adapter"),
     ("deepseek_v4_gguf", "DeepSeekV4GGUFAdapter"),
+    ("deepseek_v41", "DeepSeekV41Adapter"),
+    ("deepseek_v41_mlx", "DeepSeekV41MLXAdapter"),
+    ("deepseek_v41_source", "DeepSeekV41SourceAdapter"),
+]
+
+# These adapters inherit the guarded loader instead of defining a separate
+# PROCESS_NUMERICS environment spread. Exercise their public constructors too.
+INHERITED_PROFILE_MODULES = [
+    ("deepseek_v41_iq1", "DeepSeekV41IQ1Adapter"),
 ]
 
 
@@ -358,7 +367,7 @@ def test_tf32_set_after_package_import_is_refused_by_every_profile(monkeypatch, 
     assert os.environ["MLX_ENABLE_TF32"] == "1"
 
 
-@pytest.mark.parametrize("module,cls", INLINE_PROFILE_MODULES)
+@pytest.mark.parametrize("module,cls", INLINE_PROFILE_MODULES + INHERITED_PROFILE_MODULES)
 def test_tf32_set_after_package_import_is_refused_by_inline_profiles(
     monkeypatch, tmp_path, module, cls
 ):
