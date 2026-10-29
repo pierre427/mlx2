@@ -94,6 +94,8 @@ from .qwen4_gate_inject import (
 from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
 from . import qwen4_fused_gdn_prefill as _gdn_prefill
 from . import qwen4_attn_rows as _attn_rows
+from . import qwen4_qsa_visibility as _qsa_visibility
+from .qwen4_qsa_visibility import QSAVisibility
 from . import qwen4_qsa_scores as _qsa_scores
 from .qsdpa_verify_metal import (
     lift_causal_mask,
@@ -565,6 +567,7 @@ def qwen4_eager_dispatch_status() -> dict:
 
 
 _QSA_DENSE_SHORTCIRCUIT = _env_flag("MLX_QWEN4_QSA_DENSE_SHORTCIRCUIT")
+_QSA_LAZY_CAUSAL_MASK = _env_flag("MLX_QWEN4_QSA_LAZY_CAUSAL_MASK")
 _QSA_FUSED_PROJ = _env_flag("MLX_QWEN4_QSA_FUSED_PROJ")
 
 
@@ -701,6 +704,11 @@ def _qsa_nax_plain_mask(selection) -> bool:
     if getattr(selection, "passthrough_mask", None) is not None:
         return False
     mask = getattr(selection, "causal_mask", None)
+    if isinstance(mask, QSAVisibility):
+        # Preserve the original admission of cache-less forwards: their
+        # reference array is unregistered, so they must not gain a new NAX
+        # arithmetic route merely by selecting a representation change.
+        return mask.register
     if mask is None:
         return True
     if isinstance(mask, str):
@@ -5162,6 +5170,28 @@ class BatchQSAQuantizedKVCache(BatchQSAKVCache):
         )
 
 
+def qsa_attention_mask(hidden, cache):
+    """Use metadata only for the exact ordinary caches whose mask we own."""
+    if _QSA_LAZY_CAUSAL_MASK:
+        batch, length = hidden.shape[:2]
+        ordinary = type(cache) in (QSAKVCache, BatchQSAKVCache)
+        special = getattr(cache, "_pld_ordinary_mask_padding", None) is not None
+        # Ordinary unbatched decode already has no mask; preserve it.
+        if ((ordinary or cache is None) and not special and not _invariant.active()
+                and (length > 1 or type(cache) is BatchQSAKVCache)):
+            batched = type(cache) is BatchQSAKVCache
+            offset = cache._idx if batched else (0 if cache is None else cache.offset)
+            _qsa_visibility.record("metadata_forwards")
+            return QSAVisibility(
+                length=length, physical_width=int(offset) + length,
+                batch=batch,
+                left_padding=cache.left_padding if batched else None,
+                register=cache is not None,
+            )
+        _qsa_visibility.record("reference_forwards")
+    return lift_causal_mask(create_attention_mask(hidden, cache, return_array=True))
+
+
 @dataclass(frozen=True)
 class QSACompactBlocks:
     """Sorted, prefix-packed block ids, the shape a gather kernel wants.
@@ -5169,9 +5199,9 @@ class QSACompactBlocks:
     Ids are LOGICAL.  Row ``b``'s physical block start is
     ``left_padding[b] + block_id * block_size``, or just ``block_id *
     block_size`` without left padding.  ``[tail_start, tail_stop)`` is the
-    incomplete block no selection names, and may be empty.  ``causal_mask``
-    stays attached because blocks alone are NOT causally complete; see
-    ``QSASelection.dense_mask``.
+    incomplete block no selection names, and may be empty. Arbitrary masks
+    stay attached: blocks alone do not capture custom exclusions. Proven
+    plain causality is carried by tail/query coordinates and left padding.
     """
 
     block_ids: mx.array
@@ -5216,8 +5246,8 @@ def _compact_qsa_block_ids(
 class QSASelection:
     """What the indexer chose, before it becomes an attention mask.
 
-    ``dense_mask()`` rebuilds today's mask array operation for operation, so
-    nothing observable changes.  ``compact_blocks()`` is the gather-shaped
+    ``dense_mask()`` preserves the reference mask, either from its array or
+    proven plain-causal geometry. ``compact_blocks()`` is the gather-shaped
     view and is LAZY: the mask path never calls it and pays nothing.
 
     Kinds: ``explicit`` is the normal sparse selection, ``implicit_all`` is a
@@ -5233,7 +5263,7 @@ class QSASelection:
     valid_blocks: Optional[mx.array] = None
     q_positions: Optional[mx.array] = None
     token_positions: Optional[mx.array] = None
-    causal_mask: Optional[mx.array] = None
+    causal_mask: mx.array | QSAVisibility | None = None
     passthrough_mask: Optional[mx.array] = None
     left_padding: Optional[mx.array] = None
     offset: Union[int, mx.array] = 0
@@ -5246,6 +5276,8 @@ class QSASelection:
             raise ValueError(f"unknown QSA selection kind {self.kind!r}")
         if self.kind == "mask_only":
             return
+        if isinstance(self.causal_mask, QSAVisibility) and self.causal_mask.batch != self.batch:
+            raise ValueError("QSA visibility batch does not match selection")
         if self.physical_width // self.block_size != self.n_blocks:
             raise ValueError("block grid does not match the physical width")
         if self.left_padding is not None and self.left_padding.shape != (self.batch,):
@@ -5271,11 +5303,15 @@ class QSASelection:
             raise ValueError("token positions must span the physical width")
 
     def dense_mask(self) -> Optional[mx.array]:
-        """Today's QSA mask, rebuilt operation for operation."""
+        """Reference QSA visibility with an optional metadata-only input."""
         if self.kind == "mask_only":
             return self.passthrough_mask
         if self.kind == "implicit_all":
-            return self.causal_mask
+            return (
+                self.causal_mask.materialize()
+                if isinstance(self.causal_mask, QSAVisibility)
+                else self.causal_mask
+            )
         (batch, length) = (self.batch, self.length)
         (n_blocks, total) = (self.n_blocks, self.physical_width)
         (selected, valid_blocks) = (self.raw_block_ids, self.valid_blocks)
@@ -5308,6 +5344,11 @@ class QSASelection:
         if self.left_padding is not None:
             sparse = sparse & (token_logical[:, None, :] >= 0)
         sparse = sparse[:, None, :, :]
+        if isinstance(self.causal_mask, QSAVisibility):
+            _qsa_visibility.record("dense_mask_calls")
+            # Clipped block ids can alias the incomplete final block. The
+            # causal tail alone does not prevent those future cells leaking.
+            return sparse & (token_logical[:, None, None, :] <= q_pos[:, None, :, None])
         return sparse if self.causal_mask is None else self.causal_mask & sparse
 
     def _logical_coordinates(self):
@@ -5335,6 +5376,8 @@ class QSASelection:
         """
         if self.kind == "mask_only":
             return None
+        if isinstance(self.causal_mask, QSAVisibility):
+            _qsa_visibility.record("compact_calls")
         if self.kind == "implicit_all":
             (q_pos, _) = self._logical_coordinates()
             starts = mx.arange(self.n_blocks) * self.block_size
@@ -5372,7 +5415,8 @@ class QSASelection:
             left_padding=self.left_padding,
             block_size=self.block_size,
             physical_width=self.physical_width,
-            causal_mask=self.causal_mask,
+            causal_mask=(None if isinstance(self.causal_mask, QSAVisibility)
+                         else self.causal_mask),
         )
 
 
@@ -7312,9 +7356,7 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
         fa_mask = None
         if self.fa_idx is not None:
             fa_cache = cache[self.fa_idx]
-            fa_mask = lift_causal_mask(
-                create_attention_mask(hidden, fa_cache, return_array=True)
-            )
+            fa_mask = qsa_attention_mask(hidden, fa_cache)
         ssm_mask = (
             create_ssm_mask(hidden, cache[self.ssm_idx])
             if self.ssm_idx is not None
@@ -7906,7 +7948,7 @@ class Model(nn.Module):
         embeddings = self.language_model.model.embed_tokens(tokens)
         multi = self.mtp.fuse(embeddings, hidden)
         cache = mtp_cache[0]
-        mask = lift_causal_mask(create_attention_mask(multi, cache, return_array=True))
+        mask = qsa_attention_mask(multi, cache)
         multi = self.mtp.layers[0](multi, tokens, mask, cache, None)
         sample = self.mtp.hyper_connection_mixer(multi)
         draft_head = getattr(self, "mtp_draft_head", None)

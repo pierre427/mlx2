@@ -9,6 +9,7 @@ verify call the route can issue and refuses an exact route whose window
 does not hold it, with a receipt naming the rows and the fixes.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -171,8 +172,26 @@ def test_an_external_route_wider_than_the_window_is_refused():
 
 def test_serving_binds_the_external_window_after_the_generator_exists():
     source = Path(__file__).resolve().parents[1].joinpath("src/mlx2/serving.py").read_text()
-    built = source.index("batch = build_batch()\n")
-    tail = source[built:built + 1500]
-    assert "if external_draft and lane_policy.get(\"mode\") == \"exact\":" in tail
-    assert "rows_by_width=" in tail
-    assert re.search(r'raise ValueError\(window\["refused"\]\)', tail)
+    module = ast.parse(source)
+    built = [node for node in ast.walk(module) if isinstance(node, ast.Assign)
+             and any(isinstance(target, ast.Name) and target.id == "batch" for target in node.targets)
+             and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+             and node.value.func.id == "build_batch"]
+    assert len(built) == 1
+    # Find its lexical statement block. Unrelated setup may grow between the
+    # build and guard, but the exact external-route guard must remain after
+    # construction in the same block, before request execution.
+    blocks = [value for parent in ast.walk(module) for _name, value in ast.iter_fields(parent)
+              if isinstance(value, list) and built[0] in value]
+    assert len(blocks) == 1
+    block = blocks[0]
+    condition = ast.parse('external_draft and lane_policy.get("mode") == "exact"', mode="eval").body
+    guards = [node for node in block[block.index(built[0])+1:] if isinstance(node, ast.If)
+              and ast.dump(node.test) == ast.dump(condition)]
+    assert len(guards) == 1
+    calls = [node for node in ast.walk(guards[0]) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name) and node.func.id == "lane_exact_verify_window"]
+    assert len(calls) == 1 and any(arg.arg == "rows_by_width" for arg in calls[0].keywords)
+    refusal = ast.parse('raise ValueError(window["refused"])').body[0]
+    assert any(isinstance(node, ast.Raise) and ast.dump(node) == ast.dump(refusal)
+               for node in ast.walk(guards[0]))

@@ -172,7 +172,10 @@ def test_expected_external_binding_matches_real_adapter_wrapper_without_gpu(monk
     monkeypatch.setattr(DeepSeekV4Config,'from_gguf',lambda _:target_config)
     monkeypatch.setattr(draft.DeepSeekV4DSparkConfig,'from_index',lambda *_:side_config)
     class EmptySideWeights:
-        def __init__(self,*a,**kw):self.metadata={};self.tensors={};self._dense={}
+        def __init__(self,*a,**kw):
+            self.metadata={};self.tensors={};self._dense={};self.storage_verified=False
+        def verify_storage(self):
+            self.storage_verified=True
     monkeypatch.setattr(weights_module,'GGUFWeights',EmptySideWeights)
     OriginalBackbone=draft.DeepSeekV4DSparkBackbone
     def make_backbone(c,target,w,target_weights,**kw):
@@ -192,6 +195,7 @@ def test_expected_external_binding_matches_real_adapter_wrapper_without_gpu(monk
     adapter.model=SimpleNamespace(args=target_config,weights=adapter.weights,
         identity='target-fingerprint:native-packed-fp32-qat-stable-index-v2:compute=cooperative:hc=fused_fp32')
     adapter._load_external() # production adapter + real wrapper.bind(), mocked weight upload only
+    assert adapter.draft_weights.storage_verified
     expected=probe.expected_external_identity({'identity':target_identity,'metadata':metadata},policy,{'source_snapshot_sha256':'f'*64})
     assert expected['fingerprint']==adapter.identity['fingerprint']
     assert expected['execution_binding']==adapter.draft_model.execution_binding

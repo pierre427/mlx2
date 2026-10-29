@@ -86,6 +86,7 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-10-26: lazy QSA visibility requires run-local engagement.
     # Re-pinned 2026-10-14: the rolling probe sizes its prompt with the
     # engine's shared reach rule (state_boundaries.rolling_reuse_prompt_tokens),
     # so a default selection always admits it.  Receipts from 08753e31...
@@ -318,7 +319,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-24: explicit source-owned greedy/refusal sampling
     # scope requires named controls/repeat/refusal evidence and cannot claim
     # stochastic coverage; absence preserves the historical sampling suite.
-    "sha256": "8f975f0355d1053a05d2a10f0b0922df1d1808a6643903834cec98a8236ef9c5",
+    "sha256": "83e097e6ffeca08f4af8aa8e1f1d47fd617eaae7995edb5b6906a0d9cf05ef50",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -1235,6 +1236,8 @@ def _default_on_mechanisms(settings):
     # enough: an unsupported geometry may silently keep the reference path.
     if adapter_policy.get("ple_early_dispatch") is True:
         required.add("ple_early_dispatch")
+    if adapter_policy.get("qsa_lazy_causal_mask") is True:
+        required.add("qsa_lazy_causal_mask")
     if adapter_policy.get("qsa_stage1_direct_selector") in {
         "direct8",
         "direct4",

@@ -15,6 +15,7 @@ quantized SDPA helper; nothing here touches arrays except through
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass
 from typing import Mapping, Protocol, runtime_checkable
@@ -26,6 +27,33 @@ _POLICY_KEYS = frozenset(
 )
 _SUPPORTED_BITS = (2, 3, 4, 5, 6, 8)
 _SUPPORTED_GROUPS = (32, 64, 128)
+
+
+def external_composition_contract(adapter, operation):
+    """Admit only an explicitly declared, operation-bound target-only route.
+
+    This capability never authorizes approximate APC publication. Its caller
+    retains the existing qualification/evidence and publication gates.
+    """
+    try:
+        declared = inspect.getattr_static(adapter, "approximate_external_kv_contract")
+    except AttributeError:
+        return None
+    if declared is None:
+        return None
+    callback = adapter.approximate_external_kv_contract
+    if not callable(callback):
+        raise TypeError("approximate external KV contract must be callable")
+    result = callback(operation)
+    if result is None:
+        return None
+    if operation is None:
+        raise ValueError("external KV composition requires an explicit approximate operation")
+    expected = {"schema": "mlx2.approximate-external-kv.v1", "operation_revision": operation.revision,
+                "apcv2_publication": "skipped", "draft_cache": "exact", "qualified": False}
+    if not isinstance(result, dict) or result != expected or result.get("qualified") is not False:
+        raise ValueError("approximate external KV contract is not bound to the selected operation")
+    return dict(result)
 
 
 def _plain_int(value, label, *, minimum=0):

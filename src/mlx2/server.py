@@ -826,6 +826,8 @@ def validate_request(
         "n",
         "stream",
         "enable_thinking",
+        "preserve_thinking",
+        "tool_call_format",
         "verification",
         "tools",
         "tool_choice",
@@ -1384,8 +1386,17 @@ def normalize_client_options(body):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("options.num_ctx must be a positive integer")
     template = result.pop("chat_template_kwargs", {})
-    if not isinstance(template, dict) or set(template) - {"enable_thinking", "verification"}:
-        raise ValueError("chat_template_kwargs only supports enable_thinking and verification")
+    if not isinstance(template, dict) or set(template) - {"enable_thinking", "verification", "preserve_thinking", "tool_call_format"}:
+        raise ValueError("unsupported chat_template_kwargs")
+    for key in ("preserve_thinking", "tool_call_format"):
+        if key in template:
+            if key in result and result[key] != template[key]:
+                raise ValueError(f"{key} options disagree")
+            result[key] = template[key]
+    if "preserve_thinking" in result and type(result["preserve_thinking"]) is not bool:
+        raise ValueError("preserve_thinking must be boolean")
+    if "tool_call_format" in result and result["tool_call_format"] not in ("xml", "json"):
+        raise ValueError("tool_call_format must be xml or json")
     if "verification" in template:
         if "verification" in result and result["verification"] != template["verification"]:
             raise ValueError("verification toggles disagree")
@@ -6747,7 +6758,7 @@ def build_parser():
     return parser
 
 
-def approximate_kv_mode(args, native_mtp, *, route_selection=None):
+def approximate_kv_mode(args, native_mtp, *, route_selection=None, adapter_resolution=None, execution_policy=None):
     """Parse ``--approximate-kv`` and refuse unqualified or speculative use."""
     raw = getattr(args, "approximate_kv", None)
     if raw is None:
@@ -6765,7 +6776,16 @@ def approximate_kv_mode(args, native_mtp, *, route_selection=None):
                 "--approximate-kv requires --qualification-mode or a "
                 "--qualification record carrying its evidence"
             )
-        if (
+        external = bool(args.external_draft) or (
+            route_selection is not None and route_selection.route == "external_draft"
+        )
+        adapter_type = getattr(adapter_resolution, "adapter_type", None)
+        admit = getattr(adapter_type, "admits_approximate_external_policy", None)
+        external_admitted = (
+            external and not getattr(args, "prompt_lookup", False)
+            and callable(admit) and admit(execution_policy, policy) is True
+        )
+        if not external_admitted and (
             args.external_draft or getattr(args, "prompt_lookup", False)
             or (
                 route_selection is not None
@@ -7696,6 +7716,7 @@ def main():
     try:
         approximate_kv = approximate_kv_mode(
             args, native_mtp, route_selection=route_selection,
+            adapter_resolution=adapter_resolution, execution_policy=policy,
         )
     except ValueError as error:
         parser.error(str(error))

@@ -14,6 +14,7 @@ from .mtp_depth_cap import validate_self_mtp_num_draft
 _QSA_NAX_MODULE_MIN_PHYSICAL_KV = 16384
 
 _OPTIONAL_KERNEL_ENV = {
+    "qsa_lazy_causal_mask": "MLX_QWEN4_QSA_LAZY_CAUSAL_MASK",
     "hc_prefill_kernels": "MLX_QWEN4_HC_PREFILL",
     "qsa_prefetch_partials": "MLX_QWEN4_QSA_PREFETCH_PARTIALS",
     "compact_moe_prefill": "MLX_QWEN4_COMPACT_MOE_PREFILL",
@@ -82,6 +83,8 @@ class FlashNextPolicy:
     #     (MLX_GDN_CORE); parity on this geometry unestablished.
     moe_router_kernel: bool = False
     qsa_nax_decode: bool = False
+    # llama.cpp #30965 mechanism; no full-model/GPU qualification yet.
+    qsa_lazy_causal_mask: bool = False
     gdn_core: bool = False
     # TensorFold 0.6.1 keys-stationary block scores (MLX_QWEN4_QSA_FUSED_SCORES,
     # runtime/models/qwen4_qsa_scores.py): past the indexer budget a decode

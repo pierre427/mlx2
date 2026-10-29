@@ -6,6 +6,8 @@ tokenizer and output parser.  Detokenized text is the token ids separated by
 spaces, so a response's content round-trips to its token list.
 """
 
+import time
+
 import mlx.core as mx
 
 from mlx2 import memory, serving
@@ -177,6 +179,18 @@ def make_adapter(model, vocab, *, eos=(), num_draft=2, extra=None, close_id=None
     return Adapter
 
 
+def _wait_engine_ready(engine, timeout=120):
+    """Retain the startup bound while surfacing terminal refusals promptly."""
+    deadline = time.monotonic() + timeout
+    while not engine.ready.wait(min(0.05, max(0.0, deadline - time.monotonic()))):
+        if engine.error:
+            raise RuntimeError(engine.error)
+        if time.monotonic() >= deadline:
+            raise AssertionError(engine.error)
+    if engine.error:
+        raise RuntimeError(engine.error)
+
+
 def make_engine(model, vocab, *, mtp=True, prompt_lookup=False, max_lanes=1,
                 eos=(), num_draft=2, extra=None, close_id=None, adapter_mixin=None, **kw):
     engine = ServingEngine(
@@ -187,9 +201,7 @@ def make_engine(model, vocab, *, mtp=True, prompt_lookup=False, max_lanes=1,
         ),
         qualification_mode=True, mtp=mtp, prompt_lookup=prompt_lookup,
         max_lanes=max_lanes, max_inflight=max(32, max_lanes), prefill_step=16, **kw)
-    assert engine.ready.wait(120), engine.error
-    if engine.error:
-        raise RuntimeError(engine.error)
+    _wait_engine_ready(engine)
     return engine
 
 
@@ -225,9 +237,7 @@ def make_external_engine(model, draft, vocab, *, num_draft=2, max_lanes=1, eos=(
         adapter_factory=make_adapter(model, vocab, eos=eos, close_id=close_id, adapter_mixin=Mixin),
         qualification_mode=True, mtp=False, max_lanes=max_lanes,
         max_inflight=max(32, max_lanes), prefill_step=16, **kw)
-    assert engine.ready.wait(120), engine.error
-    if engine.error:
-        raise RuntimeError(engine.error)
+    _wait_engine_ready(engine)
     return engine
 
 

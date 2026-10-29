@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -15,11 +16,20 @@ from collections import deque
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+
 from .batch_admission import AdmissionState, LinearStateCost, StateBudget
 from .cohort_ownership import declared_cohort_key
+from .greedy_scores import LazyLogprobs, greedy_scores, score_eval_targets
+from .greedy_scores import admitted as lean_greedy_admitted
+from .mixed_step import (
+    aligned_prompt_rows,
+    mixed_prefill_decode_enabled,
+    model_supports_mixed_forward,
+)
 from .models import cache
 from .models.cache import (
     BatchRotatingKVCache,
@@ -30,11 +40,6 @@ from .models.cache import (
     compact_prompt_cache_windows,
     record_state_checkpoints,
     release_window_checkpoints,
-)
-from .mixed_step import (
-    aligned_prompt_rows,
-    mixed_prefill_decode_enabled,
-    model_supports_mixed_forward,
 )
 from .multi_lora import bind_lora_rows, clear_lora_rows
 from .prefill_checkpoint_rows import prefill_checkpoint_rows
@@ -47,10 +52,11 @@ from .prefill_plan import (
     shared_prefill_budget_width,
     single_round_prefill_rows,
 )
+from .round_phases import drive_round as _drive_round
+from .round_phases import publish_round
 from .sample_utils import LaneRNG, draw_key
 from .speculative_sampling import count_delivered_relaxed_accepts
 from .state_boundaries import BoundaryPurpose, StateBoundary
-from .round_phases import drive_round as _drive_round, publish_round
 from .weight_stream import expert_prefill_admission
 
 DEFAULT_MAX_TOKENS = 100
@@ -79,7 +85,31 @@ _COUNTER_MAX = (1 << 63) - 1
 _PERSISTENT_DECODE_INPUTS = "_mlx2_persistent_decode_inputs"
 # Defined in a model-free module so the serving thread can bind it before an
 # adapter pins its import-time environment (runtime/generation_stream.py).
-from .generation_stream import bind_generation_thread_stream, generation_stream  # noqa: E402,F401
+from .generation_stream import (  # noqa: E402,F401
+    bind_generation_thread_stream,
+    generation_stream,
+)
+
+
+def _declared_model_callback(model, name):
+    """Resolve only an explicitly declared optional executor callback.
+
+    Dynamic ``__getattr__`` proxies (including test mocks) must not synthesize
+    capabilities. Static presence permits ordinary descriptors and real bound
+    methods while instance-installed adapter callbacks remain supported.
+    """
+    if model is None:
+        return None
+    try:
+        declaration = inspect.getattr_static(model, name)
+    except AttributeError:
+        return None
+    if declaration is None:
+        return None
+    callback = getattr(model, name)
+    if not callable(callback):
+        raise TypeError(f"declared model callback {name!r} must be callable")
+    return callback
 
 
 def prefill_model_forward(model):
@@ -336,9 +366,14 @@ def _corrupt_rows(tokens: mx.array, logprobs: List[mx.array]):
     """
     vocab = int(logprobs[0].shape[-1])
     safe_ids = mx.minimum(tokens.astype(mx.uint32), vocab - 1)
-    selected_finite = mx.isfinite(
-        mx.take_along_axis(mx.stack(logprobs), safe_ids[:, None], axis=-1)[:, 0]
-    )
+    if any(isinstance(row, LazyLogprobs) for row in logprobs):
+        selected_finite = mx.isfinite(mx.stack([
+            row[safe_ids[index]] for index, row in enumerate(logprobs)
+        ]))
+    else:
+        selected_finite = mx.isfinite(
+            mx.take_along_axis(mx.stack(logprobs), safe_ids[:, None], axis=-1)[:, 0]
+        )
     return vocab, selected_finite
 
 
@@ -1270,6 +1305,9 @@ class GenerationBatch:
         self.model = model
         self.uids = uids
         self.prompt_cache = prompt_cache
+        prepare_cache = _declared_model_callback(model, "_mlx2_prepare_decode_cache")
+        if prepare_cache is not None:
+            prepare_cache(self.prompt_cache)
         self.tokens = tokens
         self.samplers = samplers
         self.fallback_sampler = fallback_sampler
@@ -1546,8 +1584,19 @@ class GenerationBatch:
                 processed_logits.append(sample_logits)
             logits = mx.concatenate(processed_logits, axis=0)
         logits = logits.astype(mx.float32)
-        logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-        if any(self.samplers):
+        active_samplers = self.samplers or [None] * len(self.uids)
+        lean = lean_greedy_admitted(self.model, active_samplers, self.fallback_sampler)
+        if lean:
+            sampled, lazy_logprobs = greedy_scores(logits)
+            self.model._mlx2_lean_greedy_scheduled_steps = (
+                getattr(self.model, "_mlx2_lean_greedy_scheduled_steps", 0) + 1
+            )
+            logprobs = None
+        else:
+            logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+        if lean:
+            pass
+        elif any(self.samplers):
             groups = {}
             order = []
             for e in range(len(self.uids)):
@@ -1577,10 +1626,10 @@ class GenerationBatch:
         else:
             sampled = self.fallback_sampler(logprobs)
         self._next_tokens = sampled
-        self._next_logprobs = list(logprobs)
+        self._next_logprobs = lazy_logprobs if lean else list(logprobs)
         self._next_execution_widths = [len(self.uids)] * len(self.uids)
         self._decode_steps += 1
-        eval_targets = [self._next_tokens, self._next_logprobs, token_context]
+        eval_targets = [self._next_tokens, score_eval_targets(self._next_logprobs), token_context]
         if validity == "deferred" or (validity is None and step_validity_mode() == "deferred"):
             # Part of this step's graph, so the next step's tail check waits
             # only for this step, never on a fresh graph queued behind the
@@ -1606,7 +1655,7 @@ class GenerationBatch:
                 )
             else:
                 vocab, selected_finite = _corrupt_rows(inputs, self._current_logprobs)
-            mx.eval(inputs, self._current_logprobs, selected_finite)
+            mx.eval(inputs, score_eval_targets(self._current_logprobs), selected_finite)
             keep, failures = _resolve_corrupt_rows(
                 vocab, inputs, selected_finite, self.uids
             )
@@ -1621,7 +1670,7 @@ class GenerationBatch:
                 if not self.uids:
                     return ([], [])
         else:
-            mx.eval(inputs, self._current_logprobs)
+            mx.eval(inputs, score_eval_targets(self._current_logprobs))
         if STEP_TRACE is not None:
             trace_t3 = time.perf_counter()
             STEP_TRACE.append((
@@ -1722,7 +1771,7 @@ class GenerationBatch:
         pending_tokens = self._next_tokens[terminal]
         pending_logprobs = [self._next_logprobs[index] for index in terminal]
         vocab, selected_finite = _corrupt_rows(pending_tokens, pending_logprobs)
-        mx.eval(pending_tokens, pending_logprobs, selected_finite)
+        mx.eval(pending_tokens, score_eval_targets(pending_logprobs), selected_finite)
         keep_local, failures = _resolve_corrupt_rows(
             vocab,
             pending_tokens,
@@ -3974,8 +4023,8 @@ class MTPGenerationBatch:
             return []
         from .hybrid_speculative import (
             ZeroDepthFastUnavailable,
-            advance_batched_self_mtp_zero,
             abort_batched_self_mtp,
+            advance_batched_self_mtp_zero,
             commit_batched_self_mtp,
             propose_batched_self_mtp,
         )
@@ -4233,6 +4282,7 @@ class MTPGenerationBatch:
                     )
                 else:
                     from dataclasses import asdict
+
                     from .segmented_physical_promotion import (
                         SegmentedPhysicalPromotionDeclined,
                     )
@@ -4528,7 +4578,10 @@ class BatchGenerator:
                     "quantized KV caches are not MTP batchable unless allow_quantized_kv is set in the self-MTP config"
                 )
         self.max_tokens = max_tokens
-        self.sampler = sampler or (lambda x: mx.argmax(x, axis=-1))
+        self.sampler = sampler
+        if self.sampler is None:
+            self.sampler = lambda x: mx.argmax(x, axis=-1)
+            self.sampler.greedy_argmax = True
         self.logits_processors = logits_processors or []
         self.uid_count = 0
         self.prefill_step_size = prefill_step_size
@@ -5293,9 +5346,9 @@ class BatchGenerator:
         All potentially failing validation and continuation construction happen
         before the queue is changed. The route is opt-in and remains unqualified.
         """
-        from .paged_native_batch_lifecycle import NativeQueuedHandoffPreparation
-        from .paged_native_atomic_owner import NativeAtomicRequestOwner
         from .native_continuation_provider import NativeContinuationProvider
+        from .paged_native_atomic_owner import NativeAtomicRequestOwner
+        from .paged_native_batch_lifecycle import NativeQueuedHandoffPreparation
 
         provider = getattr(candidate, "_native_continuation_provider", None)
 
@@ -5388,9 +5441,9 @@ class BatchGenerator:
         Candidate-bound evidence attributes actual prefill dispatches.
         Samplers/RNG remain private and are first invoked only by next().
         """
-        from .paged_native_contract import supports_native_checkpoint_candidate
-        from .paged_native_atomic_owner import NativeAtomicRequestOwner
         from .native_continuation_provider import NativeContinuationProvider
+        from .paged_native_atomic_owner import NativeAtomicRequestOwner
+        from .paged_native_contract import supports_native_checkpoint_candidate
         provider = getattr(candidate, "_native_continuation_provider", None)
         if not permit_native:
             raise ValueError("hybrid native serving disabled")
@@ -5469,9 +5522,9 @@ class BatchGenerator:
         Candidate-bound evidence attributes actual prefill dispatches.
         Samplers/RNG remain private and are first invoked only by next().
         """
-        from .paged_native_contract import supports_native_checkpoint_candidate
-        from .paged_native_atomic_owner import NativeAtomicRequestOwner
         from .native_continuation_provider import NativeContinuationProvider
+        from .paged_native_atomic_owner import NativeAtomicRequestOwner
+        from .paged_native_contract import supports_native_checkpoint_candidate
         provider = getattr(candidate, "_native_continuation_provider", None)
         if not permit_native:
             raise ValueError("hybrid native serving disabled")
@@ -6067,8 +6120,8 @@ class BatchGenerator:
         return failures
 
     def _make_mtp_batch(self, n: int):
-        from .hybrid_speculative import prepare_self_mtp_lane
         from .adaptive_policy import CohortAdaptiveMTPDepth
+        from .hybrid_speculative import prepare_self_mtp_lane
 
         batch_admission = self.mtp_admission
         cohort_keys = []
@@ -7610,6 +7663,18 @@ class BatchGenerator:
         return rows
 
     def _prompt_prefill_step(self, total_tokens: int) -> int:
+        planner = _declared_model_callback(
+            getattr(self, "model", None), "_mlx2_prefill_plan"
+        )
+        if planner is not None:
+            planned = planner(
+                total_tokens=int(total_tokens),
+                active_decode_lanes=len(self._generation_batch),
+                maximum=self.prefill_step_size,
+            )
+            if type(planned) is not int or not 1 <= planned <= self.prefill_step_size:
+                raise ValueError("adapter prefill plan must fit the configured positive maximum")
+            return planned
         if not self.prefill_step_autoscale:
             return self.prefill_step_size
         return prompt_length_prefill_step(
@@ -9171,7 +9236,7 @@ class BatchGenerator:
             if prompt_tail_inputs:
                 # Evidence only after the prompt-tail forward evaluated
                 # (isolated B=1 persistent lanes; one host sync).
-                mx.eval(gen_batch._next_tokens, gen_batch._next_logprobs)
+                mx.eval(gen_batch._next_tokens, score_eval_targets(gen_batch._next_logprobs))
                 gen_batch._prompt_tail_inputs = {}
             for i, p in enumerate(progress):
                 uid = gen_batch.uids[i]
@@ -9830,7 +9895,9 @@ class BatchGenerator:
                 if getattr(getattr(continuation, "candidate", None),
                            "_research_staged_graph", False):
                     from .paged_native_graph_group import (
-                        can_run_research_graph_b2, run_research_graph_b2)
+                        can_run_research_graph_b2,
+                        run_research_graph_b2,
+                    )
                     partner = next((
                         (other_uid, other) for other_uid, other in native_items
                         if other_uid != uid and other_uid not in processed_native and

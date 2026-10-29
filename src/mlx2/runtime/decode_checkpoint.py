@@ -16,6 +16,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 
 import mlx.core as mx
 
+from .greedy_scores import score_eval_targets
 from .io_ownership import ReadPool, ReadTimeout
 from .models.cache import load_prompt_cache, save_prompt_cache
 
@@ -152,7 +153,7 @@ class OrdinaryDecodeCheckpoint:
             # Drain the complete committed boundary and the already sampled
             # next output before releasing any KV backing arrays.
             mx.eval([cache.state for cache in batch.prompt_cache], batch._next_tokens,
-                    batch._next_logprobs, [context.state for context in batch._token_context],
+                    score_eval_targets(batch._next_logprobs), [context.state for context in batch._token_context],
                     [rng.key for rng in batch.lane_rngs if rng is not None])
             output = io.BytesIO()
             save_prompt_cache(output, batch.prompt_cache)
@@ -203,6 +204,9 @@ class OrdinaryDecodeCheckpoint:
                 raise TypeError("exact decode checkpoint cache capability changed")
             restore(contract)
         batch = self.control
+        prepare_cache = getattr(model, "_mlx2_prepare_decode_cache", None)
+        if prepare_cache is not None:
+            prepare_cache(cache)
         batch.prompt_cache = cache
         self.control = None
         self.consumed = True

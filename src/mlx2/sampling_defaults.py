@@ -227,9 +227,13 @@ class VendorSampling:
         }
 
 
-def vendor_sampling(adapter) -> Optional[VendorSampling]:
+def vendor_sampling(adapter, request=None) -> Optional[VendorSampling]:
     """The adapter's declared ``VendorSampling``, or ``None``."""
-    declared = getattr(adapter, "sampling_defaults", None)
+    select = getattr(adapter, "request_sampling_defaults", None)
+    declared = (
+        select(request) if request is not None and callable(select)
+        else getattr(adapter, "sampling_defaults", None)
+    )
     if declared is None:
         return None
     if callable(declared):

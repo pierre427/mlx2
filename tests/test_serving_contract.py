@@ -2496,6 +2496,7 @@ def test_flash_next_diagnostics_do_not_rewalk_a_mutating_model_tree():
     from types import SimpleNamespace
 
     from mlx2.adapters.flash_next import FlashNextAdapter
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
     class MutatingModel:
         def named_modules(self):
@@ -2510,7 +2511,9 @@ def test_flash_next_diagnostics_do_not_rewalk_a_mutating_model_tree():
     )
     adapter = object.__new__(FlashNextAdapter)
     adapter.model = MutatingModel()
-    adapter.policy = SimpleNamespace(as_dict=dict)
+    # Use the owning policy defaults, so newly reported optional mechanisms
+    # remain present without weakening the no-model-tree-rewalk assertion.
+    adapter.policy = FlashNextPolicy()
     adapter._tables = []
     adapter._diagnostic_modules = (moe,)
 

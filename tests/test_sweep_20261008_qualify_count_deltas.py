@@ -279,6 +279,10 @@ ENGAGED = _merged(HISTORY, {
     },
     "host_memory_available_bytes": 8 << 30,
     "execution": {
+        "qsa_lazy_causal_mask": {"counts": {
+            "dense_mask_calls": 5, "fused_mask_calls": 4, "compact_calls": 3,
+            "metadata_forwards": 20,
+        }},
         "indexed_qsa": {
             "counts": {"engaged": 5},
             "fused_merge": {"engaged": True, "gate_engaged": True},
@@ -381,6 +385,10 @@ _X = ("execution",)
 _S = ("scheduler",)
 # The run-local growth that engages each counter-backed gate: {path: amount}.
 GROWTH = {
+    "qsa_lazy_causal_mask": {
+        _X + ("qsa_lazy_causal_mask", "counts", name): 1
+        for name in ("dense_mask_calls", "fused_mask_calls", "compact_calls")
+    },
     **{gate: {path: 1} for gate, path in {
         "verify_bitexact": ("verify_bitexact", "dispatches"),
         "approximate_kv": ("approximate_kv", "applied"),
@@ -632,3 +640,16 @@ def test_fused_moe_counts_run_dispatches_only_with_fused_layers():
     assert feature_observations(final, initial=ENGAGED)["fused_moe"] == 6
     final["execution"]["moe"]["fused_gate_up_layers"] = 0
     assert feature_observations(final, initial=ENGAGED)["fused_moe"] == 0
+
+
+@pytest.mark.parametrize("counter", ["dense_mask_calls", "fused_mask_calls", "compact_calls"])
+def test_each_lazy_qsa_execution_counter_is_run_local(counter):
+    final = copy.deepcopy(ENGAGED)
+    _grow(final, "execution", "qsa_lazy_causal_mask", "counts", counter, by=2)
+    assert feature_observations(final, initial=ENGAGED)["qsa_lazy_causal_mask"] == 2
+
+
+def test_lazy_qsa_metadata_growth_is_not_execution():
+    final = copy.deepcopy(ENGAGED)
+    _grow(final, "execution", "qsa_lazy_causal_mask", "counts", "metadata_forwards")
+    assert feature_observations(final, initial=ENGAGED)["qsa_lazy_causal_mask"] == 0

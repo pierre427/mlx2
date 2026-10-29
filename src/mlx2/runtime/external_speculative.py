@@ -213,6 +213,16 @@ def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
 
 
+def _future_tree_proposal_history(lane, decision):
+    """The input boundary `_commit` will publish, excluding the new bonus."""
+    inputs = getattr(decision, "committed_inputs", None)
+    if inputs is None:
+        inputs = [lane.anchor, *decision.emitted[:-1]] if decision.emitted else []
+    if len(inputs) != len(decision.emitted):
+        raise ValueError("future proposal history does not match committed input count")
+    return [*lane.history, *inputs]
+
+
 def _bump_map(stats, key, field, amount=1):
     """Bump ``stats[key][field]`` copy-on-write.
 
@@ -2391,7 +2401,17 @@ class ExternalDraftBatchGenerator:
                 # both planes from transcript instead of pairing stale caches.
                 # This includes a zero-length hit: its branch still holds the
                 # APC's hooked cache objects, which the lane must not adopt.
-                todo = prefix + todo; prefix = []; target = None
+                provider = getattr(self, "target_tree_executor_provider", None)
+                # Only a provider-declared fresh representation may survive
+                # without a sidecar. Never adopt a warm ordinary APC plane.
+                import inspect
+
+                declared = None if provider is None else inspect.getattr_static(
+                    provider, "preserve_fresh_target_cache", None
+                )
+                preserve = declared is not None and provider.preserve_fresh_target_cache(target, prefix) is True
+                if not preserve:
+                    todo = prefix + todo; prefix = []; target = None
             cuts = tuple(prefill_cuts[i] or ())
             if any(
                 isinstance(position, bool) or not isinstance(position, int)
@@ -7870,6 +7890,9 @@ class ExternalDraftBatchGenerator:
 
     def _tree_options(self, *, count_hits, lanes=None):
         options = {}
+        if getattr(self.draft, "requires_tree_proposal_contexts", False) is True and lanes is not None:
+            options["proposal_histories"] = [list(lane.history) for lane in lanes]
+            options["proposal_has_processors"] = [bool(lane.processors) for lane in lanes]
         calibration = getattr(self, "tree_calibration", None)
         if calibration is not None and lanes is not None:
             options["calibration"] = [
@@ -8109,11 +8132,13 @@ class ExternalDraftBatchGenerator:
             return
         self._draft_presnapshot = (lane, lane.draft_cache, draft_cache)
 
-    def _start_lattice(self, lane, anchor, tail, count, forbidden):
+    def _start_lattice(self, lane, anchor, tail, count, forbidden, *, history_tokens=None):
         """Snapshot the draft plane and queue one lattice on the copy."""
 
         mark = self._tree_clock
         options = self._tree_options(count_hits=False, lanes=[lane])
+        if history_tokens is not None and getattr(self.draft, "requires_tree_proposal_contexts", False) is True:
+            options["proposal_histories"] = [list(history_tokens)]
         if mark is not None:
             mark("tree_prelaunch_setup")
         pre = getattr(self, "_draft_presnapshot", None)
@@ -8209,7 +8234,11 @@ class ExternalDraftBatchGenerator:
         try:
             count = min(self._tree_node_budget(), lane.maximum - generated - 1)
             forbidden = self._tree_forbidden(lane, history)
-            record = self._start_lattice(lane, anchor, tail, count, forbidden)
+            if getattr(self.draft, "requires_tree_proposal_contexts", False) is True:
+                record = self._start_lattice(lane, anchor, tail, count, forbidden,
+                                             history_tokens=_future_tree_proposal_history(lane, decision))
+            else:
+                record = self._start_lattice(lane, anchor, tail, count, forbidden)
         except Exception:
             _bump(self.scheduler_stats, "external_tree_pipeline_discards")
             return None
@@ -8291,6 +8320,11 @@ class ExternalDraftBatchGenerator:
                 for lane in cohort
             ]
         records = {}
+        future_histories = (
+            {lane.uid: _future_tree_proposal_history(lane, decision) if early else list(lane.history)
+             for lane, decision in zip(cohort, decisions, strict=True)}
+            if getattr(self.draft, "requires_tree_proposal_contexts", False) is True else None
+        )
         if any(
             lane.ordinary or lane.cancelled or lane.maximum - view.generated <= 1
             or (decision.emitted and decision.emitted[-1] in self.stops)
@@ -8310,6 +8344,8 @@ class ExternalDraftBatchGenerator:
                 count = min(budget, min(l.maximum - v.generated - 1 for l, v in members))
                 forbidden = [self._tree_forbidden(lane, view.history) for lane, view in members]
                 options = self._tree_options(count_hits=False, lanes=lanes)
+                if future_histories is not None:
+                    options["proposal_histories"] = [future_histories[lane.uid] for lane in lanes]
                 snapshots = [
                     self._snapshot_draft_state(lane.draft_cache, view.tail)
                     for lane, view in members

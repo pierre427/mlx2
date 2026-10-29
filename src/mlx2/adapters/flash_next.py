@@ -1034,6 +1034,7 @@ class FlashNextAdapter:
         return {"gdn_core": core} if selected or calls else {}
 
     def diagnostics(self) -> dict:
+        from ..runtime.models.qwen4_qsa_visibility import status as qsa_visibility_status
         from ..runtime.models.flash_tensorfold_qmv import counters as tensorfold_qmv_counters
         from ..runtime.models.varlen_dense_mlp import status as varlen_mlp_status
         from ..runtime.models.qwen4_ple_nvme import ple_table_diagnostics
@@ -1216,6 +1217,11 @@ class FlashNextAdapter:
             # NAX block-sparse QSA prefill (default auto): admission counts by
             # reason, the crossover and batch selection in force, host gate.
             "qsa_nax_prefill": qsa_nax_status(),
+            **(
+                {"qsa_lazy_causal_mask": qsa_visibility_status()}
+                if getattr(self.policy, "qsa_lazy_causal_mask", False)
+                else {}
+            ),
             # Opt-in NAX decode rows (measured slower on Flash-Next, -15.6% at
             # 32K ordinary); absent while off and unused so default receipts
             # are unchanged.

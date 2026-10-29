@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Caller-owned synthetic FP4 exactness/timing probe; no checkpoint load."""
-from pathlib import Path
 import hashlib
 import time
 import numpy as np

@@ -3705,6 +3705,10 @@ def default_on_observations(final, initial=None):
     return {
         # Flash-Next fused GDN prefill prework: multi-token prefill forwards.
         "fused_gdn_prefill": delta("fused_gdn", "prefill_calls"),
+        "qsa_lazy_causal_mask": sum(
+            delta("qsa_lazy_causal_mask", "counts", name)
+            for name in ("dense_mask_calls", "fused_mask_calls", "compact_calls")
+        ),
         # Flash-Next sorted-order MoE weighted sum: sorted prefill tails.
         "moe_weighted_sum": delta("moe", "weighted_sum", "calls"),
         # Covered projections that ran the lane kernel (status["lane_matmul"]).
@@ -4067,7 +4071,7 @@ def main():
         help=("Measured KV-quantization fidelity report "
               "(scripts/measure_kv_quant_fidelity.py) for an approximate-KV route"),
     )
-    parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "ple_early_dispatch", "qsa_stage1_direct_selector", "ple_read_policy", "tensorfold_qmv_rows", "row_exact_verify", "row_exact_attn_window", "row_exact_low_bit_lane", "moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify", "qsa_batch_decode_sparse", "qsa_nax_batched", "mtp_draft_vocab", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "mtp_ordinary_handoff", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions", "cache_capsules", "persistent_blocks"], help="Fail this candidate unless its mechanism actually executed")
+    parser.add_argument("--require-feature", action="append", default=[], choices=["qsa_lazy_causal_mask", "shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "ple_early_dispatch", "qsa_stage1_direct_selector", "ple_read_policy", "tensorfold_qmv_rows", "row_exact_verify", "row_exact_attn_window", "row_exact_low_bit_lane", "moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify", "qsa_batch_decode_sparse", "qsa_nax_batched", "mtp_draft_vocab", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "mtp_ordinary_handoff", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions", "cache_capsules", "persistent_blocks"], help="Fail this candidate unless its mechanism actually executed")
     args = parser.parse_args()
     if args.output.exists():
         parser.error(f"refusing to overwrite existing qualification receipt: {args.output}")

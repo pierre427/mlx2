@@ -66,6 +66,9 @@ target verifier rows. Never substitute draft or residual-sampling probabilities.
 MTP target rows include its sampling transform; ordinary rows precede sampling,
 matching the unified runtime's existing response contract.
 """
+    materialize = getattr(logprobs, "materialize_logprobs", None)
+    if materialize is not None and top_n:
+        logprobs = materialize()
     if len(logprobs.shape) != 1:
         raise ValueError("token logprobs require one vocabulary row")
     vocab = int(logprobs.shape[0])

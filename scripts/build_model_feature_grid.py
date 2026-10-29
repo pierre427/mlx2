@@ -40,6 +40,7 @@ VARIANTS = {
     "nemotron_h": ("super", "lightning"),
     "qwen4_exp": ("base", "flash-next"),
     "flint": ("40b-a2.5b",),
+    "llama": ("base", "33b"),
 }
 
 # Features that are selected through execution policy or adapter configuration
@@ -79,6 +80,15 @@ FEATURES = (
     "ast_ubtree_adaptive_b15", "ast_ubtree_fixed_b3",
     "ast_prompt_lookup", "prompt_lookup_default_policy", "prompt_lookup_span2", "q4_fused_v1",
     "verification_mode", "spawn_subagent", "agentic_chat_profile_256k",
+    "q8_packed_residual_rms", "artifact_quantization",
+    "decode_component_profile", "q8_projection_policy", "packed_attention_ast",
+    "lean_greedy_scores", "w8a8_prefill", "q8_swiglu_epilogue",
+    "compiled_rope_append", "compiled_decoder_blocks", "bounded_kv_reservation",
+    "implicit_tree_mask", "gqa7_attention", "context_load_prefill",
+    "match_aware_pld", "external_dflash2", "fixed_ast_geometry",
+    "draft_precision_kernel_joint", "guarded_draft_vocab", "gqa7_shared_kv_rows",
+    "segmented_lane_kv", "four_row_q8_weight_reuse", "physical_rope_kv_append",
+    "packed_ast_cohort_tuning", "external_dflash2_q8_kv",
     "desktop_tool_discovery_readable_roundtrip",
     "desktop_tool_snapshot_readable_roundtrip",
     "desktop_media_tool_schema_declaration",

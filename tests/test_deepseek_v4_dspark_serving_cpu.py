@@ -122,6 +122,11 @@ def test_selected_external_descriptor_source_profile_and_resident_preload(
         def packed(self, name):
             events.append(name)
 
+        def verify_storage(self):
+            # The production owner verifies source storage again after
+            # resident support planes are materialized and before publication.
+            events.append("verified-storage")
+
     monkeypatch.setattr(weights, "GGUFWeights", Weights)
 
     def backbone(*a, **kw):
@@ -135,6 +140,7 @@ def test_selected_external_descriptor_source_profile_and_resident_preload(
         def __init__(self, backbone, verification_mode, confidence_threshold):
             assert confidence_threshold == 0.6
             assert "support-preloaded" in events
+            assert events.index("support-preloaded") < events.index("verified-storage")
             self.execution_binding = verification_mode + "-bound"
             self.receipt_settings = {"verification": verification_mode}
 

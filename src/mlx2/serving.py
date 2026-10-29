@@ -2987,6 +2987,7 @@ _greedy_batch_sampler.batch_groupable = True
 # Draws nothing, so prompt lookup may sample verify rows past the accept
 # point in the same sync as its forward.
 _greedy_batch_sampler.deterministic = True
+_greedy_batch_sampler.greedy_argmax = True
 _GREEDY_BATCH_SAMPLER = _greedy_batch_sampler
 
 
@@ -3532,6 +3533,12 @@ def engine_request(request):
 
 def validate_template_request(adapter, request):
     """Refuse opt-in template capabilities on both token and text endpoints."""
+    requested = {key for key in ("preserve_thinking", "tool_call_format") if key in request}
+    if requested:
+        options = getattr(adapter, "chat_template_options", None)
+        supported = options() if callable(options) else ()
+        if requested - set(supported):
+            raise ValueError("requested chat template controls are not supported by the selected adapter")
     if request.get("verification"):
         options = getattr(adapter, "chat_template_options", None)
         if not callable(options) or "verification" not in options():
@@ -9786,8 +9793,18 @@ class ServingEngine:
                 )
             if self.cache_capsule_policy["enabled"] and external_draft:
                 raise ValueError("cache capsules are incompatible with external draft")
-            if self.approximate_kv_policy.enabled and external_draft:
-                raise ValueError("approximate KV is incompatible with external draft")
+            if external_draft:
+                from .runtime.approximate_kv import external_composition_contract
+
+                composition = external_composition_contract(adapter, approximate_operation)
+                if self.approximate_kv_policy.enabled and composition is None:
+                    raise ValueError("approximate KV is incompatible with external draft")
+                if composition is not None:
+                    if not self.approximate_kv_policy.enabled:
+                        raise ValueError("external KV composition requires the explicit approximate KV policy")
+                    if self.approximate_kv_policy.start_tokens != 0:
+                        raise ValueError("external KV composition requires start_tokens=0")
+                    settings["approximate_kv_external"] = composition
             if self.memory_preemption_policy["enabled"] and (
                 self.approximate_kv_policy.enabled or self.spomin_policy.enabled
             ):
@@ -10464,7 +10481,7 @@ class ServingEngine:
                     "revision": approximate_operation.revision,
                     "start_tokens": self.approximate_kv_policy.start_tokens,
                     "compose_mtp": self.approximate_kv_policy.compose_mtp,
-                    "draft_cache": "exact" if self.mtp else None,
+                    "draft_cache": "exact" if self.mtp or external_draft else None,
                 }
             # APCv2 must be able to retain at least one committed prompt
             # boundary per execution lane.  Otherwise a configured B20 server
@@ -12920,7 +12937,7 @@ class ServingEngine:
                         # sample the same penalized distribution.
                         sampling, job.sampling_defaults = resolve_sampling(
                             job.request,
-                            vendor_sampling(adapter),
+                            vendor_sampling(adapter, job.request),
                             thinking=(
                                 thinking_enabled(adapter, job.request)
                                 if "messages" in job.request
@@ -13322,8 +13339,8 @@ class ServingEngine:
                                     apcv2_publication="skipped",
                                     # compose_mtp quantizes target planes only;
                                     # the MTP head's draft cache stays exact.
-                                    route="mtp" if self.mtp else "ordinary",
-                                    draft_cache="exact" if self.mtp else None,
+                                    route="external_draft" if external_draft else "mtp" if self.mtp else "ordinary",
+                                    draft_cache="exact" if self.mtp or external_draft else None,
                                 )
                                 count_add(self.counts, "approximate_kv_applied", 1)
                                 count_add(self.counts, "approximate_kv_mtp_lanes", int(

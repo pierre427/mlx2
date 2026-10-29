@@ -371,6 +371,13 @@ def _gemma4(path: Path, config: dict) -> AdapterResolution:
 
 
 def _standard_decoder(path: Path, config: dict) -> AdapterResolution:
+    if config.get("model_type") == "llama":
+        candidate = importlib.import_module(".nanbeige43", __package__)
+        if candidate.matches_config(config):
+            return AdapterResolution(
+                candidate.Nanbeige43Adapter, candidate.DESCRIPTOR,
+                candidate.inspect_artifact(path),
+            )
     module = importlib.import_module(".standard_decoder", __package__)
     model_type = config["model_type"]
     artifact = module.inspect_artifact(path, expected=model_type)

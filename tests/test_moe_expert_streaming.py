@@ -315,9 +315,8 @@ def test_streamed_output_is_bit_identical_to_resident(checkpoint, capacity):
 
 
 def test_flash_next_diagnostic_snapshot_does_not_pin_replaced_experts(checkpoint):
-    from types import SimpleNamespace
-
     from mlx2.adapters.flash_next import FlashNextAdapter
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
     from mlx2.runtime.models.switch_layers import QuantizedSwitchLinear
 
     class CounterOwner(nn.Module):
@@ -341,7 +340,9 @@ def test_flash_next_diagnostic_snapshot_does_not_pin_replaced_experts(checkpoint
 
     adapter = object.__new__(FlashNextAdapter)
     adapter.model = model
-    adapter.policy = SimpleNamespace(as_dict=dict)
+    # Diagnostic additions must use owning defaults while the weak-reference
+    # assertion continues to catch replaced expert arrays being retained.
+    adapter.policy = FlashNextPolicy()
     adapter._tables = []
     adapter._diagnostic_modules = adapter._snapshot_diagnostic_modules(model)
     assert adapter._diagnostic_modules == (owner,)

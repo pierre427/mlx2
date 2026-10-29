@@ -1263,22 +1263,48 @@ class KVCache(_BaseCache):
 
     def committed_descriptor_clone(self):
         """Independent B1 descriptors; immutable tensor storage remains COW."""
+        metadata = ("offset",)
+        if "_reserve_tokens" in self.__dict__:
+            metadata += ("_reserve_tokens",)
         return _committed_kv_descriptor(
-            self, KVCache, ("keys", "values"), ("offset",)
+            self, KVCache, ("keys", "values"), metadata
         )
+
+    def reserve(self, tokens: int):
+        """Reserve bounded append capacity without advancing committed state.
+
+        The caller owns memory admission. An empty cache defers allocation until
+        its first append supplies dtype/head geometry. Existing storage grows
+        once; default caches retain their original 256-token growth policy.
+        """
+        if type(tokens) is not int or tokens < 0:
+            raise ValueError("KV reservation must be a nonnegative integer")
+        self._reserve_tokens = max(tokens, getattr(self, "_reserve_tokens", 0))
+        if self.keys is not None and tokens > self.keys.shape[2]:
+            capacity = ((tokens + self.step - 1) // self.step) * self.step
+            extra = capacity - self.keys.shape[2]
+            for name in ("keys", "values"):
+                value = getattr(self, name)
+                shape = (*value.shape[:2], extra, value.shape[-1])
+                setattr(self, name, mx.concatenate([value, mx.zeros(shape, value.dtype)], axis=2))
+        return self
 
     def update_and_fetch(self, keys, values):
         prev = self.offset
         if self.keys is None or prev + keys.shape[2] > self.keys.shape[2]:
             (B, n_kv_heads, _, k_head_dim) = keys.shape
             v_head_dim = values.shape[3]
-            n_steps = (self.step + keys.shape[2] - 1) // self.step
-            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
-            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
+            growth = ((self.step + keys.shape[2] - 1) // self.step) * self.step
+            reservation = getattr(self, "_reserve_tokens", 0)
+            if reservation:
+                target = ((max(reservation, prev + keys.shape[2]) + self.step - 1) // self.step) * self.step
+                growth = target - prev
+            k_shape = (B, n_kv_heads, growth, k_head_dim)
+            v_shape = (B, n_kv_heads, growth, v_head_dim)
             new_k = mx.zeros(k_shape, keys.dtype)
             new_v = mx.zeros(v_shape, values.dtype)
             if self.keys is not None:
-                if prev % self.step != 0:
+                if reservation or prev % self.step != 0:
                     self.keys = self.keys[..., :prev, :]
                     self.values = self.values[..., :prev, :]
                 self.keys = mx.concatenate([self.keys, new_k], axis=2)
@@ -4058,13 +4084,17 @@ class BatchKVCache(_BaseCache):
         if self.keys is None or prev + keys.shape[2] > self.keys.shape[2]:
             (B, n_kv_heads, _, k_head_dim) = keys.shape
             v_head_dim = values.shape[3]
-            n_steps = (self.step + keys.shape[2] - 1) // self.step
-            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
-            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
+            growth = ((self.step + keys.shape[2] - 1) // self.step) * self.step
+            reservation = getattr(self, "_reserve_tokens", 0)
+            if reservation:
+                target = ((max(reservation, prev + keys.shape[2]) + self.step - 1) // self.step) * self.step
+                growth = target - prev
+            k_shape = (B, n_kv_heads, growth, k_head_dim)
+            v_shape = (B, n_kv_heads, growth, v_head_dim)
             new_k = mx.zeros(k_shape, keys.dtype)
             new_v = mx.zeros(v_shape, values.dtype)
             if self.keys is not None:
-                if prev % self.step != 0:
+                if reservation or prev % self.step != 0:
                     self.keys = self.keys[..., :prev, :]
                     self.values = self.values[..., :prev, :]
                 self.keys = mx.concatenate([self.keys, new_k], axis=2)
@@ -4535,8 +4565,17 @@ class BatchKVCache(_BaseCache):
     def merge(cls, caches):
         lengths = [c.size() for c in caches]
         max_length = max(lengths)
+        reservation = max((getattr(c, "_reserve_tokens", 0) for c in caches), default=0)
+
+        def planned(batch):
+            # Carry only the capacity plan. APC source spare storage remains
+            # unborrowed; the next append creates a private grown allocation.
+            if reservation:
+                batch._reserve_tokens = reservation
+            return batch
+
         if max_length == 0:
-            return BatchKVCache([0] * len(caches))
+            return planned(BatchKVCache([0] * len(caches)))
         if (
             len(caches) == 1
             and type(caches[0]) is KVCache
@@ -4553,7 +4592,7 @@ class BatchKVCache(_BaseCache):
             cache.values = mx.stop_gradient(source.values[..., : source.offset, :])
             cache.offset = mx.array([source.offset])
             cache._idx = source.offset
-            return cache
+            return planned(cache)
         padding = [max_length - l for l in lengths]
         B = len(caches)
         H = max((c.keys.shape[1] for c in caches if c.keys is not None))
@@ -4572,7 +4611,7 @@ class BatchKVCache(_BaseCache):
         cache.values = values
         cache.offset += keys.shape[2]
         cache._idx = keys.shape[2]
-        return cache
+        return planned(cache)
 
     def size(self):
         return self._idx

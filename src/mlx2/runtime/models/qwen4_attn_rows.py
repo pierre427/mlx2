@@ -891,6 +891,7 @@ _MASK_SOURCE = r"""
         const bool sel =
             (atomic_load_explicit(&bits[blk >> 5], memory_order_relaxed) >> (blk & 31)) & 1u;
         bool v = sel || (tl >= complete && tl <= qp);
+        @VISIBILITY@
         @LEFT_PAD@
         @CAUSAL@
         out[t] = v;
@@ -910,12 +911,15 @@ inline int floor_div(int x, int y) {
 _MASK_MAX_BLOCKS = 131072
 
 
-def _mask_kernel(left_pad: bool, causal: bool):
-    name = f"mask_{int(left_pad)}{int(causal)}"
+def _mask_kernel(left_pad: bool, causal: bool, visibility: bool = False):
+    suffix = "_visibility" if visibility else ""
+    name = f"mask_{int(left_pad)}{int(causal)}{suffix}"
     kernel = _KERNELS.get(name)
     if kernel is not None:
         return kernel
     source = _MASK_SOURCE.replace(
+        "@VISIBILITY@", "v = v && (tl <= qp);" if visibility else ""
+    ).replace(
         "@LEFT_PAD@", "v = v && (tl >= 0);" if left_pad else ""
     ).replace(
         "@CAUSAL@",
@@ -928,7 +932,7 @@ def _mask_kernel(left_pad: bool, causal: bool):
         else "",
     )
     kernel = mx.fast.metal_kernel(
-        name=f"mlx2_qwen4_attn_rows_qsa_mask_{int(left_pad)}{int(causal)}",
+        name=f"mlx2_qwen4_attn_rows_qsa_mask_{int(left_pad)}{int(causal)}{suffix}",
         input_names=["selected", "valid", "q_pos", "tokens"] + (["causal"] if causal else []),
         output_names=["mask"],
         header=_MASK_HEADER,
@@ -965,6 +969,9 @@ def qsa_mask_supported(selection) -> Optional[str]:
         if a.dtype not in (mx.int32, mx.uint32):
             return "position_dtype"
     causal = selection.causal_mask
+    from .qwen4_qsa_visibility import QSAVisibility
+    if isinstance(causal, QSAVisibility):
+        causal = None
     if causal is not None:
         if not isinstance(causal, mx.array) or causal.dtype != mx.bool_ or causal.ndim != 4:
             return "causal"
@@ -983,6 +990,11 @@ def qsa_mask(selection) -> mx.array:
     ``[B, 1, L, physical_width]`` bool."""
     batch, length, total = selection.batch, selection.length, selection.physical_width
     causal = selection.causal_mask
+    from .qwen4_qsa_visibility import QSAVisibility, record
+    visibility = isinstance(causal, QSAVisibility)
+    if visibility:
+        record("fused_mask_calls")
+        causal = None
     out_batch = batch if causal is None else max(batch, causal.shape[0])
     selected = selection.raw_block_ids
     if selected.dtype in (mx.int64, mx.uint64):
@@ -996,7 +1008,7 @@ def qsa_mask(selection) -> mx.array:
     if causal is not None:
         inputs.append(causal)
     threads = 1024 if total >= 1024 else max(32, ((total + 31) // 32) * 32)
-    return _mask_kernel(selection.left_padding is not None, causal is not None)(
+    return _mask_kernel(selection.left_padding is not None, causal is not None, visibility)(
         inputs=inputs,
         template=[("BS", int(selection.block_size)), ("MAX_WORDS", _MASK_MAX_BLOCKS // 32)],
         grid=(threads, length, out_batch),
