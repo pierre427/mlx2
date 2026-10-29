@@ -30,6 +30,9 @@ from mlx import nn
 
 MODES = ("auto", "off", "crossover", "exact")
 FORMAT_CLASSES = ("q2", "q3", "q4", "q5", "q6", "q8", "bf16", "fp16")
+# Format classes with no builtin threshold: the lane runs them only when a
+# policy names a min_rows for them.
+OPT_IN_FORMAT_CLASSES = ("mxfp8", "mxfp4")
 
 BUILTIN = {
     "mode": "crossover",
@@ -82,7 +85,10 @@ def format_class(module) -> str | None:
     import mlx.core as mx
 
     if isinstance(module, nn.QuantizedLinear):
-        return f"q{int(module.bits)}"
+        mode = getattr(module, "mode", "affine")
+        # Non-affine modes are their own class: no affine threshold applies
+        # to them (an MX lane is opt-in until measured).
+        return f"q{int(module.bits)}" if mode == "affine" else str(mode)
     if isinstance(module, nn.Linear):
         dtype = module["weight"].dtype
         return {mx.bfloat16: "bf16", mx.float16: "fp16"}.get(dtype)
@@ -152,8 +158,9 @@ def _validate(partial: dict, where: str) -> None:
     if "mode" in partial and partial["mode"] not in MODES:
         raise ValueError(f"{where}: mode must be one of {MODES}")
     rows = partial.get("min_rows", {})
-    if not isinstance(rows, dict) or set(rows) - set(FORMAT_CLASSES):
-        raise ValueError(f"{where}: min_rows keys must be among {FORMAT_CLASSES}")
+    if not isinstance(rows, dict) or set(rows) - set(FORMAT_CLASSES + OPT_IN_FORMAT_CLASSES):
+        raise ValueError(
+            f"{where}: min_rows keys must be among {FORMAT_CLASSES + OPT_IN_FORMAT_CLASSES}")
     for fmt, value in rows.items():
         if type(value) is not int or value < 1:
             raise ValueError(f"{where}: min_rows[{fmt}] must be a positive integer")

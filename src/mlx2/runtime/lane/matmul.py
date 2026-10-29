@@ -24,9 +24,18 @@ The weight format only changes how ``q`` reaches the tensor units:
 * 4-bit: MPP's ``uint4b_format`` reads MLX's packed nibbles in place.
 * 8-bit: MPP's ``uint8_t`` reads MLX's packed bytes in place.
 * bf16/fp16 (``bits == 16``): read in place.
-* 2/3/5/6-bit: no native format.  Each simdgroup unpacks its group's
+* 2-bit: MPP's ``uint2b_format`` reads MLX's packed codes in place where the
+  OS Metal compiler has the type (macOS 27); otherwise it is unpacked like
+  3/5/6-bit.  Both feed the same integer codes to the same op with the same
+  K slices, so the law does not depend on which read ran.
+* 3/5/6-bit: no native format.  Each simdgroup unpacks its group's
   ``NT x GS`` values from MLX's LSB-first bitstream into threadgroup memory
   as ``uint8`` and runs the same ``uint8`` product.
+* MX (``mxfp8``/``mxfp4``, group 32, E8M0 scales, no biases): MPP takes
+  FP8/FP4 right inputs only against fp16 activations, so each lane decodes
+  its E4M3/E2M1 elements to half in registers (exact for both formats) and
+  hands them to the op as a right-input cooperative tensor.  ``P`` is the
+  unscaled group product and ``y = sum over g, in order, of 2^e[n, g] * P``.
 
 This is not bitwise equal to MLX's own kernels.  It defines a numerical law,
 and a caller that needs serial/verify equality must use it for one-row decode
@@ -48,6 +57,9 @@ import mlx.core as mx
 from . import simd
 
 QUANT_BITS = (2, 3, 4, 5, 6, 8)
+# MX modes: element format and bits per element; group 32, E8M0 scales.
+MX_MODES = {"mxfp8": ("e4m3", 8), "mxfp4": ("e2m1", 4)}
+MX_GROUP_SIZE = 32
 UNQUANTIZED_BITS = 16
 GROUP_SIZES = (32, 64, 128)
 NT = 32               # output columns per simdgroup tile (one column per lane when unpacking)
@@ -58,6 +70,28 @@ NT = 32               # output columns per simdgroup tile (one column per lane w
 ROW_BLOCK = 16
 MAX_ROWS = 128        # rows accepted by one call
 _NATIVE = {4: "uint4b_format", 8: "uint8_t"}
+# Formats whose split-K is fixed by the threadgroup staging budget.  2-bit
+# keeps that split when read natively, so its law is the staged one.
+_STAGED = (2, 3, 5, 6)
+
+
+def _os_major() -> int:
+    import platform
+
+    try:
+        return int(platform.mac_ver()[0].split(".")[0])
+    except ValueError:
+        return 0
+
+
+# Native 2-bit reads: on where the OS Metal compiler declares uint2b_format.
+NATIVE_2BIT = [_os_major() >= 27]
+
+
+def _native_type(bits: int) -> str | None:
+    if bits == 2:
+        return "uint2b_format" if NATIVE_2BIT[0] else None
+    return _NATIVE.get(bits)
 _TYPES = {mx.bfloat16: "bfloat", mx.float16: "half"}
 
 _HEADER = r"""
@@ -132,6 +166,33 @@ _SB_LOAD = r"""
     }
 """
 
+# MX: one E8M0 exponent byte per (g, n), transposed to [g][n].  2^(e - 127);
+# e = 0 is 2^-127 (subnormal), e = 255 is NaN, as MLX dequantizes.
+_SE_DECL = r"""
+  const device uchar4* sev = (const device uchar4*)SBt;   // E8M0 exponents, [g][n]
+  bool colok[NF];
+  for (int f = 0; f < NF; f++) colok[f] = n0 + f * 16 + fn < N;
+"""
+
+_SE_LOAD = r"""
+    float s[NF][4];
+    for (int f = 0; f < NF; f++) {
+      const uchar4 e = colok[f] ? sev[(g * N + n0 + f * 16 + fn) / 4] : uchar4(127);
+      for (int j = 0; j < 4; j++)
+        s[f][j] = e[j] == 255 ? NAN : (e[j] ? as_type<float>(uint(e[j]) << 23) : 0x1p-127f);
+    }
+"""
+
+_ACCUM_SCALE = r"""
+    for (int t = 0; t < TMR; t++)
+      for (int f = 0; f < NF; f++)
+        for (int r = 0; r < 2; r++)
+          for (int j = 0; j < 4; j++) {
+            const int i = f * 8 + r * 4 + j;
+            C[t][i] = fma(s[f][j], P[t * NF * 8 + i], C[t][i]);
+          }
+"""
+
 # The group sums of x are computed in the kernel (no second launch).  The four
 # lanes that share fragment row fm (lane bits 0 and 3) each add a quarter of
 # the group in index order, then combine as (q0 + q1) + (q2 + q3) with two
@@ -171,7 +232,7 @@ _ACCUM_PLAIN = r"""
 # column tile's view starts at its own rows (64-bit offset), so weights over
 # 2 GB stay within the tensor's 32-bit indexing.
 _B_DECL_NATIVE = r"""
-  constexpr int64_t ROW_UNITS = (BITS == 4) ? K / 2 : K;   // WP elements per weight row
+  constexpr int64_t ROW_UNITS = (BITS == 16) ? K : K * BITS / 8;   // WP elements per weight row
   tensor<device WT, dextents<int32_t, 2>, tensor_inline> tB(
       (device WP*)W + (int64_t)n0 * ROW_UNITS, dextents<int32_t, 2>(K, N - n0));
 """
@@ -291,6 +352,44 @@ def _register_sources(group_size: int) -> tuple[str, str]:
     return "".join(decl), "".join(body)
 
 
+def _mx_register_sources(mode: str) -> tuple[str, str]:
+    """(declarations, per-group body) of the register-decoded MX path.
+
+    Same right-input fragment layout as the q4 register path (see above): per
+    (column, 16-k chunk) a lane holds four consecutive k, which are one
+    ushort of E2M1 nibbles or one uint of E4M3 bytes.  Each element becomes
+    half by placing its exponent/mantissa bits in a half and multiplying by
+    a power of two (2^14 for E2M1, 2^8 for E4M3); subnormals land exactly too.
+    """
+    bits = MX_MODES[mode][1]
+    word = "ushort" if bits == 4 else "uint"
+    chunks = MX_GROUP_SIZE // 16
+    if bits == 4:
+        decode = ("as_type<half>(ushort(((c & 8u) << 12) | ((c & 7u) << 9))) * 16384.0h")
+    else:
+        decode = ("as_type<half>(ushort(((c & 0x80u) << 8) | ((c & 0x7Fu) << 7))) * 256.0h")
+    decl = [
+        "  const int bqi = (lane & 1) | (((lane >> 3) & 1) << 1);     // k quarter of this lane's codes\n",
+        "  const int bnb = ((lane >> 1) & 3) | (((lane >> 4) & 1) << 2);   // first of its four columns\n",
+    ]
+    for j in range(4):
+        decl.append(f"  const bool bok{j} = n0 + bnb + {8 * j} < N;\n")
+        decl.append(f"  const device {word}* bwp{j} = (const device {word}*)((const device uchar*)W\n"
+                    f"      + (int64_t)(bok{j} ? n0 + bnb + {8 * j} : 0) * (K * BITS / 8)) + bqi;\n")
+    body = ["    auto cb = op.template get_right_input_cooperative_tensor<XT, half, float>();\n"]
+    for j in range(4):
+        for kb in range(chunks):
+            body.append(f"    {{ const uint v = bok{j} ? uint(bwp{j}[g * (GS / 4) + {kb * 4}]) : 0u;\n")
+            for kk in range(4):
+                body.append(f"      {{ const uint c = (v >> {bits * kk}) & {(1 << bits) - 1}u; "
+                            f"cb[{kb * 16 + j * 4 + kk}] = {decode}; }}\n")
+            body.append("    }\n")
+    body.append("    auto P = op.template get_destination_cooperative_tensor<decltype(a), "
+                "metal::remove_addrspace_t<decltype(cb)>, float>();\n")
+    body.append("    op.run(a, cb, P);\n")
+    return "".join(decl), "".join(body)
+
+
 _RUN_DEVICE = (
     "    auto P = op.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();\n"
     "    op.run(a, b, P);\n"
@@ -316,6 +415,7 @@ class LaneWeights:
     backend: str = "mpp"        # "mpp" (M5 tensor units) or "simd" (M1-M4, see simd.py)
     scales: Any = None          # simd only: MLX's own (N, K/GS) scales and biases, shared
     biases: Any = None
+    mode: str = "affine"        # "affine" or an MX mode (scale_bias holds [g][n] E8M0 bytes)
 
     @property
     def scales_dtype(self):
@@ -324,7 +424,11 @@ class LaneWeights:
 
     @property
     def format(self) -> str:
-        return "unquantized" if self.bits == UNQUANTIZED_BITS else f"affine-q{self.bits}-g{self.group_size}"
+        if self.bits == UNQUANTIZED_BITS:
+            return "unquantized"
+        if self.mode in MX_MODES:
+            return f"{self.mode}-g{self.group_size}"
+        return f"affine-q{self.bits}-g{self.group_size}"
 
 
 def split_k(n: int, k: int, group_size: int, bits: int) -> int:
@@ -334,7 +438,7 @@ def split_k(n: int, k: int, group_size: int, bits: int) -> int:
     # Unpacking stages SK x NT x GS bytes; keep it within 16 KB so two
     # threadgroups fit on a core (the slice buffer reuses the same memory).
     cap = 8
-    if bits not in _NATIVE and bits != UNQUANTIZED_BITS:
+    if bits in _STAGED:
         while cap > 1 and cap * NT * group_size > 16 * 1024:
             cap //= 2
     sk = 1
@@ -351,9 +455,20 @@ def check_geometry(*, bits: int, group_size: int, mode: str, n: int, k: int,
             raise LaneUnsupported("unquantized weights must be bf16 or fp16")
         if k % 64:
             raise LaneUnsupported("unquantized K must be a multiple of 64")
+    elif mode in MX_MODES:
+        if bits != MX_MODES[mode][1]:
+            raise LaneUnsupported(f"{mode} weights must be {MX_MODES[mode][1]}-bit")
+        if group_size != MX_GROUP_SIZE:
+            raise LaneUnsupported(f"{mode} group size must be {MX_GROUP_SIZE}")
+        if weight_dtype != mx.uint32:
+            raise LaneUnsupported("packed weights must be uint32")
+        if scales_dtype != mx.uint8:
+            raise LaneUnsupported(f"{mode} scales must be uint8 E8M0")
+        if k % group_size:
+            raise LaneUnsupported("K must be a multiple of the group size")
     else:
         if mode != "affine":
-            raise LaneUnsupported(f"quantization mode {mode!r} is not affine")
+            raise LaneUnsupported(f"quantization mode {mode!r} is not affine or MX")
         if bits not in QUANT_BITS:
             raise LaneUnsupported(f"{bits}-bit affine weights are not supported")
         if group_size not in GROUP_SIZES:
@@ -382,10 +497,19 @@ def prepare(module, backend_name: str | None = None) -> LaneWeights:
         weight, scales, biases = module["weight"], module["scales"], module.get("biases")
         bits, group_size = int(module.bits), int(module.group_size)
         mode = getattr(module, "mode", "affine")
-        if biases is None:
-            raise LaneUnsupported("affine lane matmul needs quantization biases")
         n = int(weight.shape[0])
         k = int(weight.shape[1]) * 32 // bits
+        if mode in MX_MODES:
+            if backend_name == "simd":
+                raise LaneUnsupported("MX weights need the M5 tensor units")
+            check_geometry(bits=bits, group_size=group_size, mode=mode, n=n, k=k,
+                           weight_dtype=weight.dtype, scales_dtype=scales.dtype)
+            if biases is not None or tuple(scales.shape) != (n, k // group_size):
+                raise LaneUnsupported("MX scale geometry does not match the packed weight")
+            return LaneWeights(bits, group_size, n, k, split_k(n, k, group_size, bits),
+                               weight, mx.contiguous(scales.T), module.get("bias"), mode=mode)
+        if biases is None:
+            raise LaneUnsupported("affine lane matmul needs quantization biases")
         if backend_name == "simd":
             try:
                 simd.check_geometry(bits=bits, group_size=group_size, mode=mode, n=n, k=k,
@@ -423,19 +547,23 @@ def prepare(module, backend_name: str | None = None) -> LaneWeights:
     raise LaneUnsupported(f"{type(module).__name__} is not a linear projection")
 
 
-def main_source(bits: int, group_size: int, register_b: bool | None = None) -> str:
+def main_source(bits: int, group_size: int, register_b: bool | None = None,
+                mode: str = "affine") -> str:
     """The main kernel body for one weight format (placeholders substituted).
 
     ``register_b`` (default ``REGISTER_B[0]``) feeds the codes of the formats
     in ``REGISTER_B_FORMATS`` to the tensor op from registers; False keeps
     MPP's device-tensor read.  Both give the same bits.
     """
-    affine = bits != UNQUANTIZED_BITS
+    mx_mode = mode in MX_MODES
+    affine = bits != UNQUANTIZED_BITS and not mx_mode
     register_b = REGISTER_B[0] if register_b is None else register_b
     run = _RUN_DEVICE
-    if register_b and (bits, group_size) in REGISTER_B_FORMATS:
+    if mx_mode:
+        (b_decl, b_group), after, run = _mx_register_sources(mode), "", ""
+    elif register_b and (bits, group_size) in REGISTER_B_FORMATS:
         (b_decl, b_group), after, run = _register_sources(group_size), "", ""
-    elif bits in _NATIVE or not affine:
+    elif _native_type(bits) is not None or not affine:
         b_decl, b_group, after = _B_DECL_NATIVE, _B_GROUP_NATIVE, ""
     else:
         b_decl, after = _B_DECL_UNPACK, _AFTER_UNPACK
@@ -447,11 +575,11 @@ def main_source(bits: int, group_size: int, register_b: bool | None = None) -> s
     parts = {
         "@@PART@@": part,
         "@@B_DECL@@": b_decl,
-        "@@SB_DECL@@": _SB_DECL if affine else "",
-        "@@SB_LOAD@@": _SB_LOAD if affine else "",
+        "@@SB_DECL@@": _SB_DECL if affine else _SE_DECL if mx_mode else "",
+        "@@SB_LOAD@@": _SB_LOAD if affine else _SE_LOAD if mx_mode else "",
         "@@B_GROUP@@": b_group,
         "@@RUN@@": run,
-        "@@ACCUM@@": _ACCUM_AFFINE if affine else _ACCUM_PLAIN,
+        "@@ACCUM@@": _ACCUM_AFFINE if affine else _ACCUM_SCALE if mx_mode else _ACCUM_PLAIN,
         "@@AFTER@@": after,
     }
     source = _MAIN
@@ -471,17 +599,19 @@ def _named(base: str, source: str) -> str:
     return f"mlx2_lane_{base}_{hashlib.sha256((_HEADER + source).encode()).hexdigest()[:16]}"
 
 
-def _kernel(bits: int, group_size: int, xt: str, wt: str, st: str) -> Any:
-    register_b = REGISTER_B[0] and (bits, group_size) in REGISTER_B_FORMATS
-    key = (bits, group_size, xt, wt, st, register_b)
+def _kernel(bits: int, group_size: int, xt: str, wt: str, st: str, mode: str = "affine") -> Any:
+    mx_mode = mode in MX_MODES
+    register_b = not mx_mode and REGISTER_B[0] and (bits, group_size) in REGISTER_B_FORMATS
+    native = None if mx_mode else _native_type(bits)
+    key = (bits, group_size, xt, wt, st, register_b, mode, native)
     if key not in _KERNELS:
-        source = main_source(bits, group_size, register_b)
+        source = main_source(bits, group_size, register_b, mode)
         wp = "uchar" if bits != UNQUANTIZED_BITS else wt
-        wtype = _NATIVE.get(bits, wt if bits == UNQUANTIZED_BITS else "uchar")
+        wtype = native or (wt if bits == UNQUANTIZED_BITS else "uchar")
         header = (_HEADER + f"typedef {xt} XT;\ntypedef {wtype} WT;\ntypedef {wp} WP;\n"
                   f"typedef {st} ST;\nconstexpr constant int BITS = {bits};\n")
         _KERNELS[key] = mx.fast.metal_kernel(
-            name=_named(f"q{bits}g{group_size}_{xt}_{wt}_{st}", header + source),
+            name=_named(f"{mode if mx_mode else 'q'}{bits}g{group_size}_{xt}_{wt}_{st}", header + source),
             input_names=["X", "W", "SBt", "mdims"], output_names=["Y"],
             source=source, header=header, ensure_row_contiguous=True,
         )
@@ -546,11 +676,14 @@ def lane_matmul(x, lw: LaneWeights):
         wt = _TYPES[lw.weight.dtype]
         st = "bfloat"
         sbt = mdims                      # unused by the plain accumulator
+    elif lw.mode in MX_MODES:
+        wt, st = "uchar", "uchar"
+        sbt = lw.scale_bias
     else:
         wt = "uchar"
         st = _TYPES[lw.scale_bias.dtype]
         sbt = lw.scale_bias
-    y = _kernel(lw.bits, lw.group_size, xt, wt, st)(
+    y = _kernel(lw.bits, lw.group_size, xt, wt, st, lw.mode)(
         inputs=[x2, lw.weight, sbt, mdims],
         template=[("TMR", block // 16), ("N", lw.n), ("K", k), ("NT", NT),
                   ("SK", lw.split_k), ("GS", lw.group_size)],

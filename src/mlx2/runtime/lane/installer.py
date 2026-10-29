@@ -31,6 +31,7 @@ from mlx import nn
 from . import simd
 from .matmul import (
     MAX_ROWS,
+    MX_MODES,
     UNQUANTIZED_BITS,
     LaneUnsupported,
     LaneWeights,
@@ -315,7 +316,7 @@ def _stock_matmul(group: _Group, x):
     stack, call = group.stack, group.call
     if "scales" not in stack:
         return x @ stack["weight"].T
-    return mx.quantized_matmul(x, stack["weight"], stack["scales"], stack["biases"],
+    return mx.quantized_matmul(x, stack["weight"], stack["scales"], stack.get("biases"),
                                transpose=True, group_size=call["group_size"],
                                bits=call["bits"], mode=call["mode"])
 
@@ -401,14 +402,15 @@ _RESTORE = {new: old for old, new in _SWAP.items()}
 
 
 def _format_key(lw: LaneWeights) -> tuple:
-    return (lw.backend, lw.bits, lw.group_size, lw.k, lw.weight.dtype, lw.scales_dtype)
+    return (lw.backend, lw.mode, lw.bits, lw.group_size, lw.k, lw.weight.dtype, lw.scales_dtype)
 
 
 def _stack(members) -> _Group:
     """Stack same-format siblings; each module's arrays become views of the stack."""
     first = _prepared(members[0])
     quantized = first.bits != UNQUANTIZED_BITS
-    names = ("weight", "scales", "biases") if quantized else ("weight",)
+    mx_mode = first.mode in MX_MODES
+    names = ("weight", "scales") if mx_mode else ("weight", "scales", "biases") if quantized else ("weight",)
     stacked = {name: mx.concatenate([m[name] for m in members], axis=0) for name in names}
     mx.eval(*stacked.values())
     start = 0
@@ -424,6 +426,11 @@ def _stack(members) -> _Group:
         # The simd kernels read MLX's scale/bias layout: the stack is enough.
         lw = LaneWeights(first.bits, first.group_size, n, first.k, simd.splits(n, first.k),
                          stacked["weight"], None, None, "simd", stacked["scales"], stacked["biases"])
+    elif mx_mode:
+        # E8M0 exponents transposed to [g][n], as prepare() lays them out.
+        lw = LaneWeights(first.bits, first.group_size, n, first.k,
+                         split_k(n, first.k, first.group_size, first.bits),
+                         stacked["weight"], mx.contiguous(stacked["scales"].T), None, mode=first.mode)
     else:
         pairs = (mx.contiguous(mx.stack([stacked["scales"].T, stacked["biases"].T], axis=-1))
                  if quantized else None)

@@ -53,7 +53,7 @@ def timed(fn, reps=7, batch=20):
     return round(statistics.median(out), 4)
 
 
-def case(bits, gs, k, n, dtype, key):
+def case(bits, gs, k, n, dtype, key, mode="affine"):
     kw, kx = mx.random.split(key)
     w = (mx.random.normal((n, k), key=kw) * 0.02).astype(dtype)
     x = mx.random.normal((max(ROWS), k), key=kx).astype(dtype)
@@ -63,6 +63,14 @@ def case(bits, gs, k, n, dtype, key):
         module.weight = w
         stock = lambda rows: rows @ w.T
         ref_w = w.astype(mx.float32)
+    elif mode != "affine":
+        wq, scales = mx.quantize(w, group_size=gs, bits=bits, mode=mode)
+        from mlx import nn
+        module = nn.QuantizedLinear(k, n, bias=False, group_size=gs, bits=bits, mode=mode)
+        module.weight, module.scales = wq, scales
+        stock = lambda rows: mx.quantized_matmul(
+            rows, wq, scales, None, transpose=True, group_size=gs, bits=bits, mode=mode)
+        ref_w = mx.dequantize(wq, scales, None, group_size=gs, bits=bits, mode=mode).astype(mx.float32)
     else:
         wq, scales, biases = mx.quantize(w, group_size=gs, bits=bits)
         from mlx import nn
@@ -72,7 +80,7 @@ def case(bits, gs, k, n, dtype, key):
             rows, wq, scales, biases, transpose=True, group_size=gs, bits=bits)
         ref_w = mx.dequantize(wq, scales, biases, group_size=gs, bits=bits).astype(mx.float32)
     lw = lane.prepare(module)
-    rec = {"bits": bits, "group_size": gs, "k": k, "n": n, "dtype": str(dtype),
+    rec = {"bits": bits, "group_size": gs, "mode": mode, "k": k, "n": n, "dtype": str(dtype),
            "split_k": lw.split_k, "backend": lw.backend}
     if lw.backend == "simd":
         from mlx2.runtime.lane import simd
@@ -100,6 +108,19 @@ def case(bits, gs, k, n, dtype, key):
         rec["register_parity_fail_rows"] = [
             r for r, d in zip(ROWS, device) if not bool(mx.array_equal(d, alone[:r]).item())]
         bad = bad + rec["register_parity_fail_rows"]
+    if lw.backend == "mpp" and bits == 2 and lane.NATIVE_2BIT[0]:
+        # Native uint2b reads must give the staged unpack's bits exactly.
+        try:
+            lane.NATIVE_2BIT[0] = False
+            staged = [lane.lane_matmul(x[:r], lw) for r in ROWS]
+            mx.eval(staged)
+            rec["ms_staged"] = {f"lane_{r}": timed(lambda r=r: lane.lane_matmul(x[:r], lw))
+                                for r in (1, 4, 8, 16)}
+        finally:
+            lane.NATIVE_2BIT[0] = True
+        rec["native_2bit_parity_fail_rows"] = [
+            r for r, d in zip(ROWS, staged) if not bool(mx.array_equal(d, alone[:r]).item())]
+        bad = bad + rec["native_2bit_parity_fail_rows"]
     ref = x[:16].astype(mx.float32) @ ref_w.T
     lane_err = float(mx.max(mx.abs(alone[:16].astype(mx.float32) - ref)).item())
     stock_err = float(mx.max(mx.abs(stock(x[:16]).astype(mx.float32) - ref)).item())
@@ -122,6 +143,8 @@ def main():
     p.add_argument("--group-sizes", default="32,64,128")
     p.add_argument("--dtypes", default="bfloat16")
     p.add_argument("--backend", choices=("auto", "mpp", "simd"), default="auto")
+    p.add_argument("--modes", default="affine",
+                   help="comma list of affine, mxfp8, mxfp4 (MX: group 32, mpp only)")
     args = p.parse_args()
     if args.backend != "auto":
         lane.force_backend(args.backend)
@@ -133,18 +156,26 @@ def main():
     records = []
     for dname in args.dtypes.split(","):
         dtype = getattr(mx, dname)
-        for bits in (int(b) for b in args.bits.split(",")):
-            for gs in ((64,) if bits == 16 else tuple(int(g) for g in args.group_sizes.split(","))):
+        formats = []
+        for mode in args.modes.split(","):
+            if mode == "affine":
+                formats += [(bits, gs, mode) for bits in (int(b) for b in args.bits.split(","))
+                            for gs in ((64,) if bits == 16 else
+                                       tuple(int(g) for g in args.group_sizes.split(",")))]
+            else:
+                formats.append((lane.MX_MODES[mode][1], lane.MX_GROUP_SIZE, mode))
+        for bits, gs, mode in formats:
                 for k, n in SHAPES[args.shapes]:
                     key, sub = mx.random.split(key)
                     try:
-                        rec = case(bits, gs, k, n, dtype, sub)
+                        rec = case(bits, gs, k, n, dtype, sub, mode)
                     except Exception as exc:  # noqa: BLE001 - record and keep going
-                        rec = {"bits": bits, "group_size": gs, "k": k, "n": n,
+                        rec = {"bits": bits, "group_size": gs, "mode": mode, "k": k, "n": n,
                                "dtype": dname, "passed": False, "error": repr(exc)[:400]}
                     records.append(rec)
                     print(json.dumps({key2: rec.get(key2) for key2 in (
-                        "bits", "group_size", "k", "n", "dtype", "passed", "invariant_fail_rows", "register_parity_fail_rows",
+                        "bits", "group_size", "mode", "k", "n", "dtype", "passed", "invariant_fail_rows",
+                        "register_parity_fail_rows", "native_2bit_parity_fail_rows",
                         "lane_max_err", "stock_max_err", "ms", "error")}), flush=True)
     summary = {"cases": len(records), "passed": sum(r["passed"] for r in records)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
