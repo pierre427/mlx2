@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mlx2.runtime.expert_atlas import load_trace_sequence
 from mlx2.runtime.expert_residency_probe import (
+    replay_adaptive,
     replay_hybrid,
     replay_per_projection_lru,
 )
@@ -56,6 +57,7 @@ def main() -> None:
 
     results = [
         replay_per_projection_lru(sequence, capacities=capacities, **common),
+        replay_adaptive(sequence, capacities=capacities, num_experts=units, **common),
         replay_hybrid(
             sequence, row_bytes=row_bytes, total_budget_bytes=budget,
             floor_entries=args.floor_entries, **common,

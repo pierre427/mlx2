@@ -7,8 +7,9 @@ SIMDgroup computes one independent query/head with fixed chronological row
 order. A synthetic first-use self-check is not model qualification.
 """
 from __future__ import annotations
-from functools import lru_cache
+
 import threading
+from functools import lru_cache
 
 HEADER = "#include <metal_stdlib>\nusing namespace metal;\n"
 SOURCE = r'''
@@ -38,7 +39,7 @@ SOURCE = r'''
         else {
             const uint pindex=uint(row-local_count);
             index=K==0 ? pindex : topk[ulong(query_row)*K+pindex];
-            if(index>=uint(P)) {
+            if(index>=uint(P) || (K>0 && pindex>0 && topk[ulong(query_row)*K+pindex-1]==index)) {
                 // Invalid indices are a request/kernel contract failure, never
                 // silently substituted with another compressed vector.
                 device float4 *output=(device float4 *)(out+(ulong(head)*L+query_row)*512);
@@ -92,6 +93,8 @@ def validate_geometry(q, local, pooled, indices, sinks, offset, window, ratio):
     if local.ndim!=4 or local.shape[:2]!=(1,1) or local.shape[-1]!=512:
         raise ValueError("visible attention requires one shared local KV tensor")
     length=q.shape[2]; rows=local.shape[2]
+    if window > 2**31 - 1 or offset + length > 2**31 - 1:
+        raise ValueError("attention logical positions exceed int32 kernel contract")
     if rows<length or rows>offset+length or offset+length-rows>max(0,offset-window+1):
         raise ValueError("local band does not contain every query's causal window")
     if sinks.shape!=(q.shape[1],):

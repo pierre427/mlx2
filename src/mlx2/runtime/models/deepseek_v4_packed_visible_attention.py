@@ -76,10 +76,7 @@ if VISIBLE_SOURCE.count(_OLD_LOAD) != 1:
     raise RuntimeError(
         "ordinary visible-attention load source changed; explicit review required"
     )
-SOURCE = VISIBLE_SOURCE.replace(_OLD_LOAD, _NEW_LOAD).replace(
-    "if(index>=uint(P)) {",
-    "if(index>=uint(P) || (K>0 && pindex>0 && topk[ulong(query_row)*K+pindex-1]==index)) {",
-)
+SOURCE = VISIBLE_SOURCE.replace(_OLD_LOAD, _NEW_LOAD)
 
 
 def validate_packed_geometry(q, local, packed, indices, sinks, offset, window, ratio):
@@ -99,10 +96,6 @@ def validate_packed_geometry(q, local, packed, indices, sinks, offset, window, r
             )
         pooled = SimpleNamespace(ndim=3, shape=(1, packed.codes.shape[1], 512))
     validate_geometry(q, local, pooled, indices, sinks, offset, window, ratio)
-    if window > 2**31 - 1 or offset + q.shape[2] > 2**31 - 1:
-        raise ValueError(
-            "packed attention logical positions exceed int32 kernel contract"
-        )
 
 
 def reference_packed_visible_attention(

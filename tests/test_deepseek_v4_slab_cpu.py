@@ -1,13 +1,15 @@
 """Causal-slab transaction and exact compressed rollback, synthetic CPU only."""
+import mlx.core as mx
 import numpy as np
 import pytest
-import mlx.core as mx
+
 mx.set_default_device(mx.cpu)
+
+from test_deepseek_v4_forward_cpu import SmallWeights, config
 
 from mlx2.adapters.deepseek_v4_slab import DeepSeekV4CausalSlabVerifyRows
 from mlx2.runtime.drafters.deepseek_v4_dspark import DSparkContractError
 from mlx2.runtime.models.deepseek_v4 import DeepSeekV4Model
-from test_deepseek_v4_forward_cpu import config,SmallWeights
 
 
 class ObservedModel(DeepSeekV4Model):
@@ -18,6 +20,12 @@ class ObservedModel(DeepSeekV4Model):
     def forward_with_taps(self,inputs,*args,**kwargs):
         self.widths.append(inputs.shape[1])
         result=super().forward_with_taps(inputs,*args,**kwargs)
+        if self.fail:
+            raise RuntimeError('injected slab mutation failure')
+        return result
+    def verify_rows(self,inputs,*args,**kwargs):
+        self.widths.append(inputs.shape[1])
+        result=super().verify_rows(inputs,*args,**kwargs)
         if self.fail:
             raise RuntimeError('injected slab mutation failure')
         return result
@@ -63,9 +71,8 @@ def test_slab_crosses_ratio4_and128_boundaries_and_replays_exact_accepted_prefix
         assert model.widths==[6]
     for a,b in zip(cache,expected):
         assert a.meta_state==b.meta_state
-        # Partial commits restore and replay exactly. Full-slab vs sequential
-        # shape equivalence here is a CPU tolerance diagnostic, not GPU parity.
-        equal_state(a.state,b.state,exact=accepted<6)
+        # Both full and partial commits use identical ordinary row arithmetic.
+        equal_state(a.state,b.state)
     assert tx.closed and owner._active is None
     assert owner.receipt_settings['scheduled_slab_forwards']==1
     assert owner.receipt_settings['logical_batch_width']==owner.receipt_settings['physical_batch_width']==1

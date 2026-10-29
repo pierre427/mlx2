@@ -18,14 +18,16 @@ def _arrays(packed):
     return None if packed is None else (packed.codes, packed.scales, packed.rope)
 
 
-def _restore(xp, arrays):
+def _validate_packed_arrays(xp, arrays):
     if arrays is None:
-        return None
+        return
     if not isinstance(arrays, (tuple, list)) or len(arrays) != 3:
         raise ValueError("invalid packed KV state")
-    codes, scales, rope = _copy(xp, arrays)
+    codes, scales, rope = arrays
     if (
-        codes.dtype != xp.uint8
+        any(value is None for value in arrays)
+        or codes.ndim < 1
+        or codes.dtype != xp.uint8
         or codes.shape[-1] != 448
         or scales.dtype != xp.float32
         or rope.dtype != xp.float32
@@ -33,7 +35,11 @@ def _restore(xp, arrays):
         or rope.shape != (*codes.shape[:-1], 64)
     ):
         raise ValueError("invalid packed KV state geometry")
-    return PackedKV(codes, scales, rope)
+
+
+def _restore(xp, arrays):
+    _validate_packed_arrays(xp, arrays)
+    return None if arrays is None else PackedKV(*_copy(xp, arrays))
 
 
 class DeepSeekV4PackedPoolCache(DeepSeekV4PoolCache):
@@ -203,6 +209,19 @@ class DeepSeekV4PackedLayerCache(DeepSeekV4LayerCache):
             None if self.compressor is None else self.compressor.state,
             None if self.indexer is None else self.indexer.state,
         )
+
+    def validate_storage(self):
+        # Reading keys/pooled would reconstruct the entire compressed history.
+        _validate_packed_arrays(self.xp, _arrays(self._packed_local))
+        if self.compressor is not None:
+            _validate_packed_arrays(self.xp, _arrays(self.compressor.packed_pool))
+        values = []
+        if self.compressor is not None:
+            values.extend(self.compressor.state[:4])
+        if self.indexer is not None:
+            values.extend(self.indexer.state)
+        if any(value is not None and value.dtype != self.xp.float32 for value in values):
+            raise ValueError("DeepSeek compressor/indexer state requires physical FP32 dtype")
 
     @state.setter
     def state(self, arrays):

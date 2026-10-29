@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
 """Owned causal-slab numerical/rollback fixtures; not AST qualification."""
 from __future__ import annotations
-import argparse,dataclasses,hashlib,importlib.util,sys,time
+
+import argparse
+import dataclasses
+import hashlib
+import importlib.util
+import sys
+import time
 from pathlib import Path
+
 import numpy as np
+
 ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT/'src'))
-from probe_deepseek_v4_packed import atomic,compare,source_receipt,verify_ownership,synthetic
+from probe_deepseek_v4_packed import (
+    atomic,
+    compare,
+    source_receipt,
+    synthetic,
+    verify_ownership,
+)
 
 
 def fixture(gpu,packed):
@@ -29,8 +43,8 @@ def fixture(gpu,packed):
                     if value.ndim>=2 and 'tid2eid' not in name:
                         self.data[name]=value.astype(mx.float16)
         def matrix(self,name,shape,kind):
-            from mlx2.runtime.gguf.reader import GGUFTensor
             from mlx2.runtime.gguf.packed_metal import PackedMatrix
+            from mlx2.runtime.gguf.reader import GGUFTensor
             if name not in self.packed:
                 seed=int.from_bytes(hashlib.sha256(name.encode()).digest()[:4],'little')
                 raw=synthetic(shape,kind,seed)
@@ -70,7 +84,7 @@ def divergence(a,b):
             'equivalence_verdict':'not_assessed: synthetic fixture has no functional continuation oracle'}
     if differing.size:
         row=int(differing[0]);ar=a.reshape(-1,a.shape[-1])[row];br=b.reshape(-1,b.shape[-1])[row]
-        selected=set([int(aa.ravel()[row]),int(bb.ravel()[row])]);window=sorted(selected|set(map(int,np.argsort(-ar)[:4]))|set(map(int,np.argsort(-br)[:4])))
+        selected={int(aa.ravel()[row]),int(bb.ravel()[row])};window=sorted(selected|set(map(int,np.argsort(-ar)[:4]))|set(map(int,np.argsort(-br)[:4])))
         result['first_selected_token_divergence']={'row':row,'shared_selected_prefix':aa.ravel()[:row].tolist(),
             'slab_selected':int(aa.ravel()[row]),'ordinary_selected':int(bb.ravel()[row]),
             'bounded_window':[{'id':i,'slab_logit':float(ar[i]),'ordinary_logit':float(br[i])} for i in window],
@@ -82,8 +96,9 @@ def divergence(a,b):
 
 def run_fixtures(*,gpu,packed,guard=lambda:None,policies=None,on_case=None):
     import mlx.core as mx
-    from mlx2.runtime.models.deepseek_v4 import DeepSeekV4Model
+
     from mlx2.adapters.deepseek_v4_slab import DeepSeekV4CausalSlabVerifyRows
+    from mlx2.runtime.models.deepseek_v4 import DeepSeekV4Model
     previous=mx.default_device();mx.set_default_device(mx.gpu if gpu else mx.cpu)
     try:
         c,w,fixture_hash=fixture(gpu,packed)
@@ -181,7 +196,7 @@ def main(argv=None):
     except BaseException as error:
         receipt.update(status='failed',error={'type':type(error).__name__,'message':str(error)});raise
     finally:atomic(args.output/'results.json',receipt)
-    return 0 if receipt['transaction_checks_passed'] else 1
+    return 0 if receipt['transaction_checks_passed'] and receipt['row_invariance_bitwise_established'] else 1
 
 
 if __name__=='__main__':raise SystemExit(main())

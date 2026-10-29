@@ -43,6 +43,7 @@ from .weight_stream import (
     install_expert_streaming,
     is_mtp_path,
 )
+from .expert_residency import AdaptiveResidencySettings
 
 DECLARATION = "weight_streaming_modes"
 BUDGET_MODES = ("explicit", "auto")
@@ -76,8 +77,20 @@ class WeightStreamRequest:
     # engine sets it for the automatic selection; explicit routes keep the
     # kernel page cache as before.
     bypass_page_cache: bool = False
+    adaptive_residency: AdaptiveResidencySettings | dict | None = None
+    elastic: bool = False
 
     def __post_init__(self):
+        residency = AdaptiveResidencySettings.parse(self.adaptive_residency)
+        object.__setattr__(self, "adaptive_residency", residency)
+        if type(self.elastic) is not bool:
+            raise ValueError("elastic expert memory must be boolean")
+        if (residency.enabled or self.elastic) and self.mode != "moe_experts":
+            raise ValueError("adaptive/elastic expert memory requires moe_experts")
+        if (residency.enabled or self.elastic) and (self.expert_overlap or self.router_hint != "off"):
+            raise ValueError("adaptive/elastic expert memory requires synchronous demand gathers")
+        if residency.enabled and self.prefill_admission != "lru":
+            raise ValueError("adaptive residency replaces terminal_hot admission")
         if self.mode not in STREAM_MODES:
             raise ValueError(f"unknown weight streaming mode {self.mode!r}")
         if self.budget_mode not in BUDGET_MODES:
@@ -358,6 +371,8 @@ def load_streamed(
                 overlap=request.expert_overlap,
                 prefill_admission=request.prefill_admission,
                 router_hint=request.router_hint,
+                adaptive_residency=request.adaptive_residency,
+                elastic=request.elastic,
                 shards=shards,
                 resolver=origins.resolve_expert,
             )

@@ -31,8 +31,8 @@ Deliberate non-goals, each measured or argued in the design note:
   Fetch is reactive: a miss is resolved when the router names it.
 * **No mmap demand paging.**  Metal wires the whole buffer on first kernel use,
   so a 2.6 MiB expert would fault its entire ~1.2 GiB stacked tensor.
-* **No pinned hot set.**  The atlas in :mod:`mlx2.runtime.expert_atlas` collects
-  access counts but must not influence residency in this iteration.
+* The atlas remains collection-only. Explicit adaptive residency uses its own
+  bounded demand counters and never changes the gather arithmetic.
 * **No chunking of wide gathers.**  Splitting a call changes its geometry and
   therefore MLX's kernel choice and bits.  A wide call is served whole and its
   worst-case transient is *reserved* (``transient_bound_bytes``).
@@ -78,6 +78,7 @@ from .io_ownership import (
     close_read_pool as _close_read_pool,
 )
 from .io_ownership import call_io, storage_owner
+from .expert_residency import AdaptiveExpertResidency, AdaptiveResidencySettings
 
 logger = logging.getLogger(__name__)
 
@@ -1215,7 +1216,7 @@ class ExpertLRU:
 
     def __init__(self, reader: ExpertSliceReader, *, capacity_experts: int,
                  stats: StreamStats, group=None, path=None,
-                 prefill_admission: str = "lru"):
+                 prefill_admission: str = "lru", adaptive_residency=None):
         if capacity_experts < 1:
             raise WorkingSetTooSmall("expert cache capacity must be at least 1")
         self.reader = reader
@@ -1230,6 +1231,9 @@ class ExpertLRU:
         self._last_ephemeral = 0
         self._router_hints = None
         self._router_hint_target = None
+        settings = AdaptiveResidencySettings.parse(adaptive_residency)
+        self.adaptive = AdaptiveExpertResidency(reader.num_experts, settings) if settings.enabled else None
+        self._busy = False
 
     @property
     def resident(self) -> int:
@@ -1292,12 +1296,25 @@ class ExpertLRU:
         return entries
 
     def acquire(self, experts: Sequence[int]) -> Dict[int, Tuple["object", ...]]:
+        if self._busy:
+            raise RuntimeError("expert cache acquisition is already active")
+        self._busy = True
+        try:
+            return self._acquire(experts)
+        finally:
+            self._busy = False
+
+    def _acquire(self, experts):
         """Resident rows for every id in ``experts``, fetching what is missing.
 
         The whole request set is held for the duration of the call: eviction
         only ever considers entries outside it.
         """
         wanted = list(dict.fromkeys(int(expert) for expert in experts))
+        if any(not 0 <= expert < self.reader.num_experts for expert in wanted):
+            raise ValueError("expert id outside projection")
+        if self.adaptive is not None:
+            return self._acquire_adaptive(wanted)
         phase = self._prefill_mode(wanted)
         self._last_ephemeral = 0
         if phase == "intermediate":
@@ -1367,6 +1384,39 @@ class ExpertLRU:
             self._router_hints.schedule(self._router_hint_target, wanted)
         return result
 
+    def _acquire_adaptive(self, wanted):
+        # Demand is resolved in full before retention changes. Cold candidates
+        # can stay ephemeral instead of forcing eviction of a hotter expert.
+        # The installer reserves this bank + every demand row + every gather.
+        self.adaptive.observe(wanted, prefill=_EXPERT_PREFILL.get() is not None)
+        result = {expert: self._entries[expert] for expert in wanted if expert in self._entries}
+        missing = [expert for expert in wanted if expert not in result]
+        self.stats.bump("hits", len(result))
+        self.stats.bump("misses", len(missing))
+        if len(wanted) > self.capacity:
+            self.stats.bump("overflows")
+        self.reader.check_sources()
+        for expert, payload in self.reader.iter_many(missing):
+            self.stats.note_staging(self.reader.outstanding_bytes())
+            result[expert] = self.reader.materialize(payload)
+            self.stats.bump("page_ins")
+            self.stats.bump("page_in_bytes", self.reader.expert_bytes)
+            del payload
+        self.reader.check_sources()
+        keep = self.adaptive.retain(self._entries, wanted, self.capacity)
+        for expert in list(self._entries):
+            if expert not in keep:
+                self._drop(expert)
+        for expert in wanted:
+            if expert not in keep:
+                continue
+            if expert not in self._entries:
+                self._entries[expert] = result[expert]
+                self.stats.add_resident(self.reader.expert_bytes)
+            self._entries.move_to_end(expert)
+        self._last_ephemeral = len(set(wanted) - keep)
+        return result
+
     def note_gather(self, unique: int, *, ephemeral: int | None = None) -> None:
         """Account one call's gather copy plus the rows it holds outside the cache.
 
@@ -1396,7 +1446,9 @@ class ExpertLRU:
 
     def _trim_to_capacity(self) -> None:
         while self.resident > self.capacity:
-            self._drop(next(iter(self._entries)))
+            victim = (min(self._entries, key=lambda expert: self.adaptive.scores[expert])
+                      if self.adaptive else next(iter(self._entries)))
+            self._drop(victim)
 
     def clear(self) -> None:
         self._reset_prefill(count=False)
@@ -2025,6 +2077,8 @@ class ExpertStreamManager(_ManagerBase):
         overlaps=(),
         prefill_admission: str = "lru",
         router_hint: str = "off",
+        adaptive_residency=None,
+        elastic: bool = False,
     ):
         self.overlaps = tuple(overlaps)
         self.plan = plan
@@ -2044,6 +2098,136 @@ class ExpertStreamManager(_ManagerBase):
         self._pool = pool
         self._handles = handles
         self._closed = False
+        self.adaptive_residency = AdaptiveResidencySettings.parse(adaptive_residency)
+        self.residency_profile_status = "disabled"
+        self.elastic = None
+        self._maximum_capacities = {path: cache.capacity for path, cache in caches.items()}
+        if elastic:
+            from .elastic_memory import ElasticMemoryCoordinator, ReclaimableMemory
+
+            maximum = sum(cache.capacity * cache.reader.expert_bytes for cache in caches.values())
+            minimum = sum(min(max(1, plan.top_k), cache.capacity) * cache.reader.expert_bytes for cache in caches.values())
+            self._elastic_ceiling = maximum
+            self.elastic = ElasticMemoryCoordinator(maximum, {
+                "experts": ReclaimableMemory(minimum, maximum, self._resize_cache_budget)
+            }, synchronize=self._synchronize_resize)
+        if self.adaptive_residency.profile_path:
+            self.load_residency_profile()
+
+    @staticmethod
+    def _synchronize_resize():
+        import mlx.core as mx
+
+        mx.synchronize()
+
+    def bind_execution_synchronizer(self, synchronize):
+        """Bind the executor's actual streams before serving any loans."""
+        if self._closed or self.elastic is None or not callable(synchronize):
+            raise StreamingUnavailable("elastic memory needs an execution synchronizer")
+        self.elastic.bind_owner()
+        self.elastic.synchronize = synchronize
+
+    def _resize_cache_budget(self, budget):
+        if any(cache._busy for cache in self.caches.values()):
+            raise RuntimeError("cannot resize an acquired expert bank")
+        floors = {path: min(max(1, self.plan.top_k), limit) for path, limit in self._maximum_capacities.items()}
+        minimum = sum(floors[path] * cache.reader.expert_bytes for path, cache in self.caches.items())
+        maximum = sum(self._maximum_capacities[path] * cache.reader.expert_bytes for path, cache in self.caches.items())
+        room = budget - minimum
+        span = maximum - minimum
+        capacities = {path: floors[path] + (room * (limit - floors[path]) // span if span else 0)
+                      for path, limit in self._maximum_capacities.items()}
+        actual = sum(capacities[path] * cache.reader.expert_bytes for path, cache in self.caches.items())
+        for path, cache in sorted(self.caches.items()):
+            if capacities[path] < self._maximum_capacities[path] and actual + cache.reader.expert_bytes <= budget:
+                capacities[path] += 1
+                actual += cache.reader.expert_bytes
+        for path, cache in self.caches.items():
+            cache.capacity = capacities[path]
+            cache._trim_to_capacity()
+        self._elastic_ceiling = actual
+        # Allocator scratch is not reclaimed weight storage; let the caller
+        # measure the backend after both array release and allocator release.
+        import mlx.core as mx
+
+        mx.clear_cache()
+        return actual
+
+    def rebalance_headroom(self, *, available_bytes, protected_bytes):
+        """Lend/recover capacity for KV/workspace demand, with no byte credit.
+
+        available_bytes already excludes resident expert arrays. The fixed
+        gather/staging reserve is always retained. The engine remeasures after
+        this method and its normal admission makes the final fit decision.
+        """
+        if self._closed or self.elastic is None:
+            raise StreamingUnavailable("elastic expert memory was not selected")
+        from .elastic_memory import byte_count
+
+        byte_count(available_bytes, "available_bytes")
+        byte_count(protected_bytes, "protected_bytes")
+        resource = self.elastic.resources["experts"]
+        ceiling = available_bytes + self.live_bytes() - self.plan.transient_bound_bytes - protected_bytes
+        ceiling = max(resource.minimum_bytes, min(resource.maximum_bytes, ceiling))
+        return self.elastic.set_claim("execution", resource.maximum_bytes - ceiling)
+
+    def _profile_binding(self):
+        return {"manifest_sha256": self.plan.manifest_sha256,
+                "policy": {key: value for key, value in self.adaptive_residency.as_dict().items()
+                           if key != "profile_path"},
+                "projections": {path: cache.reader.num_experts for path, cache in self.caches.items()}}
+
+    def load_residency_profile(self):
+        from pathlib import Path
+
+        path = Path(self.adaptive_residency.profile_path)
+        if not path.exists():
+            self.residency_profile_status = "missing"
+            return
+        try:
+            limit = 4096 + sum(cache.reader.num_experts for cache in self.caches.values()) * 32
+            metadata = path.stat()
+            if not stat_module.S_ISREG(metadata.st_mode) or metadata.st_size > limit:
+                raise ValueError("profile exceeds geometry bound")
+            data = json.loads(path.read_text())
+            if data.get("schema") != "mlx2.expert-residency.v1" or data.get("binding") != self._profile_binding():
+                raise ValueError("profile identity mismatch")
+            if set(data["scores"]) != set(self.caches):
+                raise ValueError("profile projection mismatch")
+            staged = {}
+            for name, cache in self.caches.items():
+                policy = AdaptiveExpertResidency(cache.reader.num_experts, self.adaptive_residency)
+                policy.restore_scores(data["scores"][name])
+                staged[name] = policy.scores
+            for name, scores in staged.items():
+                self.caches[name].adaptive.restore_scores(scores)
+            self.residency_profile_status = "loaded"
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            self.residency_profile_status = "rejected"
+
+    def save_residency_profile(self):
+        import tempfile
+        from pathlib import Path
+
+        path_value = self.adaptive_residency.profile_path
+        if not path_value:
+            return
+        path = Path(path_value)
+        payload = {"schema": "mlx2.expert-residency.v1", "binding": self._profile_binding(),
+                   "scores": {name: cache.adaptive.scores for name, cache in self.caches.items()}}
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=path.name + ".", delete=False) as output:
+                temporary = output.name
+                json.dump(payload, output, allow_nan=False)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+            temporary = None
+            self.residency_profile_status = "saved"
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
 
     def configure_router_hint_order(
         self, groups: Sequence[str], *, trigger_paths: Sequence[str]
@@ -2077,8 +2261,14 @@ class ExpertStreamManager(_ManagerBase):
                 "selected router hint has no adapter-declared forward group order"
             )
         super().begin_serving()
+        if self.elastic is not None:
+            self.elastic.bind_owner()
 
     def reserved_bytes(self) -> int:
+        if self.elastic is not None:
+            if self.elastic.error:
+                raise RuntimeError("elastic memory resource failed")
+            return self._elastic_ceiling + int(self.plan.transient_bound_bytes)
         return int(self.plan.ceiling_bytes) + int(self.plan.transient_bound_bytes)
 
     def live_bytes(self) -> int:
@@ -2098,10 +2288,22 @@ class ExpertStreamManager(_ManagerBase):
         if self.overlaps:
             for key in ("attempts", "accepted", "rebuilds", "declined"):
                 counters[f"stream_overlap_{key}_total"] = sum(o.counts[key] for o in self.overlaps)
+        if self.adaptive_residency.enabled:
+            counters["stream_adaptive_swaps_total"] = sum(cache.adaptive.swaps for cache in self.caches.values())
+            counters["stream_adaptive_ephemeral_total"] = sum(cache.adaptive.ephemeral for cache in self.caches.values())
         return counters
 
     def receipt(self):
         receipt = super().receipt()
+        if self.adaptive_residency.enabled:
+            receipt["adaptive_residency"] = {**self.adaptive_residency.as_dict(),
+                "profile_status": self.residency_profile_status, "qualification": "unqualified",
+                "arithmetic": "stock_gather", "admission": "demand_only"}
+        if self.elastic is not None:
+            receipt["elastic_memory"] = self.elastic.receipt()
+            receipt["elastic_memory"]["capacities"] = {
+                path: cache.capacity for path, cache in self.caches.items()
+            }
         receipt["prefill_admission"] = {
             "policy": self.prefill_admission,
             "qualification": "unqualified" if self.prefill_admission != "lru" else "stock",
@@ -2123,6 +2325,10 @@ class ExpertStreamManager(_ManagerBase):
 
     def apc_revision(self):
         revision = super().apc_revision()
+        if self.adaptive_residency.enabled:
+            revision += ":adaptive-residency-v1"
+        if self.elastic is not None:
+            revision += ":elastic-memory-v1"
         if self.prefill_admission != "lru":
             revision += f":prefill-{self.prefill_admission}"
         if self.router_hint != "off":
@@ -2137,6 +2343,15 @@ class ExpertStreamManager(_ManagerBase):
         self._pool = self._handles = None
         if not self._closed:
             self._closed = True
+            if self.elastic is not None:
+                # The executor synchronizer may close over a generator and
+                # its live KV state. Do not retain it after the route closes.
+                self.elastic.synchronize = self._synchronize_resize
+            try:
+                self.save_residency_profile()
+            except OSError as exc:
+                self.residency_profile_status = "save_failed"
+                logger.warning("expert residency profile save failed: %s", exc)
             for cache in self.caches.values():
                 cache.clear()
             if self.collector is not None:
@@ -2253,6 +2468,8 @@ def install_expert_streaming(
     shards: Optional[BoundShards] = None,
     resolver: Optional[Callable] = None,
     auto_ceiling: Optional[Callable[[Dict[str, int]], int]] = None,
+    adaptive_residency=None,
+    elastic: bool = False,
 ) -> ExpertStreamManager:
     """Replace every streamable routed-expert table with a streamed one.
 
@@ -2299,6 +2516,13 @@ def install_expert_streaming(
         raise ValueError(f"unknown expert prefill admission {prefill_admission!r}")
     if router_hint not in ROUTER_HINT_POLICIES:
         raise ValueError(f"unknown expert router hint {router_hint!r}")
+    residency = AdaptiveResidencySettings.parse(adaptive_residency)
+    if type(elastic) is not bool:
+        raise ValueError("elastic expert memory must be boolean")
+    if (residency.enabled or elastic) and (overlap or router_hint != "off"):
+        raise StreamingUnavailable("adaptive/elastic expert memory requires synchronous demand gathers")
+    if residency.enabled and prefill_admission != "lru":
+        raise StreamingUnavailable("adaptive residency replaces terminal_hot admission; select one policy")
     early = shards is not None
     if early and resolver is None:
         raise ValueError("early-load expert streaming needs a source resolver")
@@ -2389,6 +2613,11 @@ def install_expert_streaming(
             bound = expert_transient_bound(
                 groups, capacity=capacity_experts, staging_bytes=window * expert_bytes
             )
+            if residency.enabled:
+                # Hot resident rows can be retained while cold demand rows
+                # are ephemeral. Reserve every demand row AND its gather.
+                bound = max(2 * sum(experts * size for experts, size in members)
+                            for members in groups.values()) + window * expert_bytes
             # The first speculative bank of the next layer may materialize
             # before its router sync releases the previous layer's gather
             # copies. Reserve that one immutable bank explicitly; subsequent
@@ -2437,7 +2666,7 @@ def install_expert_streaming(
             # offered: the resident-fraction curve usually sizes it smaller,
             # and the rest stays with the page cache, KV and the APCv2 cache.
             ceiling_bytes = capacity * len(targets) * expert_bytes
-        transient = transient_for(capacity)
+        transient = transient_for(max(int(top_k), 1) if elastic else capacity)
         manifest = _manifest(
             [
                 [
@@ -2467,6 +2696,7 @@ def install_expert_streaming(
                 reader, capacity_experts=capacity, stats=stats,
                 group=path.rpartition(".")[0], path=path,
                 prefill_admission=prefill_admission,
+                adaptive_residency=residency,
             )
             caches[path] = cache
             if isinstance(module, QuantizedSwitchLinear):
@@ -2527,7 +2757,7 @@ def install_expert_streaming(
         )
         if collector is not None:
             collector.bind(num_layers=plan.layers, num_units=plan.experts_per_layer,
-                           prefill_admission=prefill_admission)
+                           prefill_admission="adaptive_residency" if residency.enabled else prefill_admission)
         return ExpertStreamManager(
             plan=plan,
             stats=stats,
@@ -2539,6 +2769,8 @@ def install_expert_streaming(
             overlaps=overlaps,
             prefill_admission=prefill_admission,
             router_hint=router_hint,
+            adaptive_residency=residency,
+            elastic=elastic,
         )
     except BaseException:
         _close_read_pool(pool, handles)

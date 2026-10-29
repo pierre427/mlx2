@@ -712,16 +712,18 @@ def moe_expert_streaming_policy(value) -> dict:
         "mtp_resident": False,
         "prefill_admission": "lru",
         "router_hint": "off",
+        "adaptive_residency": None,
+        "elastic": False,
     }
     if value is None:
-        return {k: v for (k, v) in defaults.items() if k != "mtp_resident"}
+        return {k: v for (k, v) in defaults.items() if k not in {"mtp_resident", "adaptive_residency", "elastic"}}
     if not isinstance(value, dict):
         raise ValueError("moe_expert_streaming must be an object")
     unknown = set(value) - set(defaults)
     if unknown:
         raise ValueError(f"unknown MoE expert streaming settings: {sorted(unknown)}")
     policy = {**defaults, **value}
-    for flag in ("enabled", "atlas", "mtp_resident"):
+    for flag in ("enabled", "atlas", "mtp_resident", "elastic"):
         if type(policy[flag]) is not bool:
             raise ValueError(f"moe_expert_streaming.{flag} must be boolean")
     cache_gib = policy["cache_gib"]
@@ -757,6 +759,15 @@ def moe_expert_streaming_policy(value) -> dict:
         )
     if policy["trace_path"] and not policy["atlas"]:
         raise ValueError("moe_expert_streaming.trace_path requires atlas collection")
+    from .runtime.expert_residency import AdaptiveResidencySettings
+
+    residency = AdaptiveResidencySettings.parse(policy["adaptive_residency"])
+    if residency.enabled and policy["prefill_admission"] != "lru":
+        raise ValueError("adaptive residency replaces terminal_hot admission")
+    if (residency.enabled or policy["elastic"]) and policy["router_hint"] != "off":
+        raise ValueError("adaptive/elastic expert memory requires synchronous demand gathers")
+    if (residency.enabled or policy["elastic"]) and not policy["enabled"]:
+        raise ValueError("adaptive/elastic expert memory requires enabled expert streaming")
     resolved = {
         "enabled": policy["enabled"],
         "cache_gib": float(cache_gib),
@@ -769,6 +780,10 @@ def moe_expert_streaming_policy(value) -> dict:
     }
     if policy["mtp_resident"]:
         resolved["mtp_resident"] = True
+    if residency.enabled:
+        resolved["adaptive_residency"] = residency.as_dict()
+    if policy["elastic"]:
+        resolved["elastic"] = True
     return resolved
 
 
@@ -2721,6 +2736,7 @@ def admit_lane_headroom(
     settle = bounded_settle(settle)
 
     def attempt(depth, *, allow_eviction=False):
+        reserve_before = controller.hard_reserve_gib
         required = lane_admission_required_gib(
             controller,
             context_tokens=context_tokens,
@@ -2737,6 +2753,10 @@ def admit_lane_headroom(
             evictable=evictable if allow_eviction else lambda: 0,
             settle=settle,
         )
+        # Elastic preparation can change the unfilled streaming reservation.
+        # The grant must describe the requirement actually tested, rather
+        # than retaining the former expert capacity as fictitious lazy KV.
+        required += controller.hard_reserve_gib - reserve_before
         return (fits, required)
 
     (fits, required) = attempt(draft_depth)
@@ -2829,6 +2849,9 @@ def ensure_admission_headroom(
     exactly the measured headroom eviction returns, so the test carries slack
     and only rules out eviction when it would fall clearly short.
     """
+    prepare = getattr(headroom, "prepare", None)
+    if callable(prepare):
+        required_bytes = prepare(required_bytes)
     if headroom() >= required_bytes:
         return True
     from .memory import bounded_settle
@@ -2858,6 +2881,25 @@ def ensure_admission_headroom(
         if reclaimed_fits() >= required_bytes:
             return True
     return False
+
+
+def prepare_elastic_execution(headroom, controller, rows, *, draft_depth=0, workspace_gib=0.0):
+    """Protect projected KV growth and workspace before an ordinary round.
+
+    Rows are (context length, cache bytes, resident). Estimation stays with
+    the adapter/controller. Only the registered reconstructible weight pool
+    lends memory; APCv2 entries and request-owned KV remain untouched.
+    """
+    prepare = getattr(headroom, "prepare", None)
+    if not callable(prepare):
+        return
+    required = controller.hard_reserve_gib + workspace_gib + sum(
+        controller.lane_gib(context, draft_depth, cache_bytes / (1 << 30), resident_cache=resident)
+        for context, cache_bytes, resident in rows
+    )
+    effective = prepare(math.ceil(required * (1 << 30)))
+    if headroom() < effective:
+        raise Overloaded("elastic execution memory does not fit after measured expert reclamation")
 
 
 def reclaim_deferred_cache(apc, admission, clear_scratch):
@@ -6362,11 +6404,17 @@ class ServingEngine:
         """Selection, decision and plan of the weight stream (streamed routes only)."""
         stream = getattr(self, "expert_stream", None)
         policy = self.moe_expert_streaming_policy
-        return {
+        status = {
             "selection": policy.get("selection", "explicit"),
             "decision": self.weight_streaming_auto,
             "plan": stream.plan.as_dict() if stream is not None else None,
         }
+        if stream is not None and (
+            getattr(stream, "elastic", None) is not None
+            or policy.get("adaptive_residency", {}).get("enabled", False)
+        ):
+            status["receipt"] = stream.receipt()
+        return status
 
     def weight_streaming_enabled(self) -> bool:
         dense = getattr(self, "dense_weight_streaming_policy", None) or {}
@@ -6474,6 +6522,8 @@ class ServingEngine:
             admission_limit_bytes=limit,
             prefill_admission=policy["prefill_admission"],
             router_hint=policy["router_hint"],
+            adaptive_residency=policy.get("adaptive_residency"),
+            elastic=policy.get("elastic", False),
         )
 
     def _bind_adapter_stream(self, adapter) -> None:
@@ -6539,6 +6589,10 @@ class ServingEngine:
             read_workers=policy["read_workers"],
             collector=collector,
             mtp_resident=bool(policy.get("mtp_resident", False)),
+            prefill_admission=policy["prefill_admission"],
+            router_hint=policy["router_hint"],
+            adaptive_residency=policy.get("adaptive_residency"),
+            elastic=policy.get("elastic", False),
         )
         self._expert_stream_engine_owned = True
         self.expert_stream.forced_stock = force_stock_expert_arithmetic(model)
@@ -7584,15 +7638,19 @@ class ServingEngine:
         from .memory import execution_headroom
 
         policy = getattr(self, "host_memory_signals_policy", None) or {}
-        if not policy.get("enabled"):
-            return execution_headroom
         floor_gib = policy.get("minimum_host_available_gib", 0.0)
-        return partial(
+        measure = partial(
             execution_headroom,
             host_signals=True,
             **({"minimum_host_available_bytes": int(floor_gib * (1 << 30))}
                if floor_gib else {}),
-        )
+        ) if policy.get("enabled") else execution_headroom
+        stream = getattr(self, "expert_stream", None)
+        if getattr(stream, "elastic", None) is None:
+            return measure
+        from .runtime.elastic_memory import ElasticHeadroom
+
+        return ElasticHeadroom(measure, stream.unfilled_reserve_bytes, stream.rebalance_headroom)
 
     def admit_parallel_samples(self, count):
         """Guard opt-in fanout by lane count and measured physical headroom."""
@@ -11095,6 +11153,7 @@ class ServingEngine:
                             reclaim_memory=reclaim_allocator,
                             settle_memory=settle_footprint,
                             evict_unused_cache=evict_unused_checkpoint,
+                            rebalance_memory=getattr(execution_headroom, "prepare", None),
                             max_draft=config["num_draft"],
                         )
                         if self.mtp
@@ -11104,6 +11163,19 @@ class ServingEngine:
                     )
 
             batch = build_batch()
+            if getattr(self.expert_stream, "elastic", None) is not None:
+                from .runtime.generation_stream import generation_stream
+
+                def synchronize_streamed_memory():
+                    # Admission runs outside batch.next's stream context.
+                    # Drain the actual executor stream, not just the default.
+                    mx.synchronize()
+                    mx.synchronize(generation_stream)
+                    executor_stream = getattr(batch, "stream", None)
+                    if executor_stream is not None and executor_stream != generation_stream:
+                        mx.synchronize(executor_stream)
+
+                self.expert_stream.bind_execution_synchronizer(synchronize_streamed_memory)
             lane_policy = (self.lane_matmul_receipt or {}).get("policy") or {}
             if external_draft and lane_policy.get("mode") == "exact":
                 # The self-MTP bound above skips this route: its tree and chain
@@ -13793,6 +13865,27 @@ class ServingEngine:
                     count_add(self.counts, "multi_request_cycles", int(len(active) > 1))
                     self.batch_metrics.batch_cycle(len(active), len(deferred))
                     try:
+                        if callable(getattr(execution_headroom, "prepare", None)) and not self.mtp:
+                            elastic_rows = []
+                            elastic_workspace = 0.0
+                            for lane in active.values():
+                                context = lane.prompt_tokens + lane.completion_tokens
+                                resident = lane.first_token is not None
+                                projected = int(cache_budget.project(context)) if cache_budget and resident else 0
+                                elastic_rows.append((context, projected, resident))
+                                if not resident:
+                                    elastic_workspace += prefill_transient_gib(
+                                        cache_budget, context_tokens=context,
+                                        uncached_tokens=max(0, lane.prompt_tokens - lane.cached_tokens),
+                                        prefill_step=self.prefill_step,
+                                        prefill_step_autoscale=self.prefill_step_autoscale,
+                                    )
+                            if prompt_lookup:
+                                elastic_workspace += prompt_lookup_verification_gib(
+                                    controller, getattr(batch, "max_proposal_span", getattr(batch, "num_draft", 8))
+                                )
+                            prepare_elastic_execution(execution_headroom, controller, elastic_rows,
+                                                      workspace_gib=elastic_workspace)
                         self._inject_device_fault(active)
                         if _loop_trace.enabled():
                             trace_iteration["next0"] = _loop_trace.now()

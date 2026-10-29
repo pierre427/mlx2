@@ -80,3 +80,32 @@ def test_grouped_geometry_and_dispatch(monkeypatch):
             coop.cooperative_grouped(x, w, rows=3)
     finally:
         mx.set_default_device(prior)
+
+
+def test_paired_q8_preserves_both_outputs_and_refuses_mismatched_weights(monkeypatch):
+    import mlx.core as mx
+
+    prior = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        calls = []
+        def kernel(kind):
+            def dispatch(**kw):
+                calls.append((kind, kw))
+                return [mx.full(shape, i + 1, dtype=mx.float32)
+                        for i, shape in enumerate(kw['output_shapes'])]
+            return dispatch
+        monkeypatch.setattr(coop, '_kernel', kernel)
+        w = SimpleNamespace(ggml_type=8, shape=(33, 256), row_bytes=272,
+                            data=mx.zeros((33 * 272,), dtype=mx.uint8))
+        gate, up = coop.cooperative_gate_up(mx.zeros((3, 256)), w, w)
+        assert gate.shape == up.shape == (3, 33)
+        assert bool(mx.all(gate == 1)) and bool(mx.all(up == 2))
+        assert calls[0][0] == 'paired_q8'
+        bad = SimpleNamespace(**{**vars(w), 'ggml_type': 16})
+        with pytest.raises(GGUFError, match='matching rank2 Q8'):
+            coop.cooperative_gate_up(mx.zeros((3, 256)), w, bad)
+        with pytest.raises(GGUFError, match='nonempty rank2'):
+            coop.cooperative_gate_up(mx.zeros((0, 256)), w, w)
+    finally:
+        mx.set_default_device(prior)

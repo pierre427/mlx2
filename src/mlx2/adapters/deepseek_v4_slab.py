@@ -1,19 +1,19 @@
-"""Opt-in causal K+1 target slab candidate; no tree-AST or parity claim.
+"""Opt-in row-exact causal K+1 chain; no packed tree-AST claim.
 
 The ordinary compressed-cache transaction supplies complete snapshots. A full
-causal target forward evaluates anchor plus proposed inputs once, including
-every row's own local/pool/indexer mask and post-FFN HC features. Partial accept
+layer-major target forward evaluates every row with ordinary width-one math,
+including its local/pool/indexer state and post-FFN HC features. Partial accept
 restores all state planes and replays its accepted inputs at ordinary width one;
 generic KV trimming cannot repair compressor carry or completed pooled windows.
 
-This route is intentionally separate from the sequential reference and requires
-profile-bound GPU row-invariance/cold-warm/functional evidence before selection.
-Source-shape sensitivity in activation QAT must not be mistaken for exact AST.
+The previous vectorized slab was not row-invariant. It must not choose accepted
+tokens or publish features from a different arithmetic path than replay.
+Full route qualification is separate from this width-one execution contract.
 """
 from __future__ import annotations
 
-from .deepseek_v4_external import DeepSeekV4VerifyRows, DeepSeekV4VerifyTransaction
 from ..runtime.drafters.deepseek_v4_dspark import DSparkContractError
+from .deepseek_v4_external import DeepSeekV4VerifyRows, DeepSeekV4VerifyTransaction
 
 
 class DeepSeekV4CausalSlabVerifyRows(DeepSeekV4VerifyRows):
@@ -30,13 +30,14 @@ class DeepSeekV4CausalSlabVerifyRows(DeepSeekV4VerifyRows):
 
     @property
     def receipt_settings(self):
-        return {'verification':'causal_kplus1_slab_snapshot_ordinary_replay',
+        return {'verification':'causal_kplus1_layer_major_width_one_v2',
                 'maximum_width':self.maximum_width,'qualified':False,
                 'logical_batch_width':1,'physical_batch_width':1,
                 'target_width_semantics':'logical batch width, not causal verification rows',
                 'maximum_causal_target_rows':self.maximum_width,
                 'scheduled_max_causal_target_rows':self.scheduled_max_causal_target_rows,
                 'packed_tree_ast':False,'target_row_invariance_established':False,
+                'arithmetic_rows':1,'execution_order':'layer_major',
                 'scheduled_slab_forwards':self.scheduled_slab_forwards,
                 'scheduled_slab_rows':self.scheduled_slab_rows,
                 'counter_scope':'scheduled Python forwards; not GPU completion or qualification'}
@@ -54,7 +55,7 @@ class DeepSeekV4CausalSlabVerifyRows(DeepSeekV4VerifyRows):
 
 
 class DeepSeekV4CausalSlabVerifyTransaction(DeepSeekV4VerifyTransaction):
-    """One slab forward; inherited partial-commit replay stays width one."""
+    """One layer-major chain; inherited partial-commit replay stays width one."""
 
     def forward(self,inputs,*,taps=True):
         if self.closed or self.owner._active is not self or self._inputs is not None:
@@ -64,11 +65,8 @@ class DeepSeekV4CausalSlabVerifyTransaction(DeepSeekV4VerifyTransaction):
         import mlx.core as mx
         self._inputs=mx.asarray(inputs,copy=True)
         try:
-            if taps:
-                logits,features=self.owner.model.forward_with_taps(inputs,self.caches,self.owner.layers)
-            else:
-                logits=self.owner.model(inputs,self.caches,logits_to_keep=0)
-                features=None
+            logits,features=self.owner.model.verify_rows(
+                inputs,self.caches,self.owner.layers if taps else ())
             if (tuple(logits.shape[:2])!=(1,self.width)
                     or taps and (features is None or tuple(features.shape[:2])!=(1,self.width))):
                 raise DSparkContractError('causal slab must preserve every verification row')

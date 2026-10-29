@@ -21,6 +21,7 @@ from .deepseek_v4_gguf_artifact import (
 from .ordinary_text import OrdinaryTextAdapter
 
 CACHE_LAYOUT = "deepseek-v4-local-overlap-pooled-b1-v1"
+SUPPORTED_CONTEXT = 65536
 DESCRIPTOR = ModelDescriptor(
     model_type=MODEL_TYPE,
     family="deepseek_v4",
@@ -258,11 +259,13 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
             dense_prefill_policy=self.kernel_policy["deepseek_dense_prefill"],
         )
         validate_weight_inventory(args, self.weights.tensors)
+        from ..runtime.models.deepseek_v4_identity import NATIVE_NUMERICS_REVISION
+
         self.model = DeepSeekV4Model(
             args,
             self.weights,
             identity=self.identity["fingerprint"]
-            + ":native-packed-fp32-qat-v1:compute="
+            + ":" + NATIVE_NUMERICS_REVISION + ":compute="
             + self.kernel_policy["deepseek_packed"],
             attention_policy=self.kernel_policy["deepseek_attention"],
             cache_policy=self.kernel_policy["deepseek_kv"],
@@ -275,7 +278,7 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
         # Admission observes real resident weight storage, never a lazy model
         # whose first request unexpectedly uploads another eighty GiB.
         self.model.preload().eval()
-        self.max_context = args.max_position_embeddings
+        self.max_context = min(args.max_position_embeddings, SUPPORTED_CONTEXT)
         if self.external_policy:
             self._load_external()
 
@@ -513,6 +516,7 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
             "qualification": "unqualified",
             "weights": "IQ2_XXS/Q2_K/Q8_0 native blocks",
             "physical_width": 1,
+            "supported_context": self.max_context,
             "kv_storage": self.kernel_policy["deepseek_kv"],
             "execution_policy": dict(self.kernel_policy),
             "embedding": self.kernel_policy["deepseek_embedding"],

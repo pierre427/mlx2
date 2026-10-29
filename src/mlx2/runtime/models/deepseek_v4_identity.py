@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+NATIVE_NUMERICS_REVISION = "native-packed-fp32-qat-stable-index-v2"
+
 
 def model_execution_identity(
     identity,
@@ -33,7 +35,7 @@ def model_execution_identity(
 
 def native_target_identity(fingerprint, policy):
     return model_execution_identity(
-        fingerprint + ":native-packed-fp32-qat-v1:compute=" + policy["deepseek_packed"],
+        fingerprint + ":" + NATIVE_NUMERICS_REVISION + ":compute=" + policy["deepseek_packed"],
         attention_policy=policy["deepseek_attention"],
         cache_policy=policy["deepseek_kv"],
         hc_policy=policy["deepseek_hc"],
@@ -58,7 +60,7 @@ def dspark_execution_binding(backbone_identity, target_identity, verifier):
     return hashlib.sha256(
         json.dumps(
             [
-                "deepseek-v4-dspark-chain-greedy-v1",
+                "deepseek-v4-dspark-chain-greedy-v2",
                 verifier,
                 backbone_identity,
                 target_identity,

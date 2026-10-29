@@ -1,8 +1,15 @@
 """HTTP harness process ownership and receipt laws; no model or GPU."""
-import importlib.util,io,json,signal,subprocess,sys
+import importlib.util
+import io
+import json
+import signal
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
 import pytest
+
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'scripts/research'))
 spec=importlib.util.spec_from_file_location('http_probe',ROOT/'scripts/research/probe_deepseek_v4_http.py')
 probe=importlib.util.module_from_spec(spec);sys.modules[spec.name]=probe;spec.loader.exec_module(probe)
@@ -53,7 +60,7 @@ def test_owned_stop_escalates_only_recorded_group_and_closes_log(monkeypatch):
     monkeypatch.setattr(probe.os,'getpgrp',lambda:123)
     log=io.StringIO();result=probe.stop_owned(probe.OwnedServer(Process(),log,987654,['python','-m','mlx2.server']),grace=0)
     assert result['process_group_absent'] and result['returncode']==-9 and log.closed
-    assert set(pid for pid,_ in calls)=={987654}
+    assert {pid for pid,_ in calls}=={987654}
     assert signal.SIGTERM in [s for _,s in calls] and signal.SIGKILL in [s for _,s in calls]
     with pytest.raises(RuntimeError,match='foreign'):
         probe.stop_owned(probe.OwnedServer(Process(),io.StringIO(),123,['foreign']))
@@ -138,10 +145,16 @@ def test_failed_identity_persists_ready_status_and_per_field_diagnostics(tmp_pat
 @pytest.mark.parametrize('confidence',[0.,0.6])
 def test_expected_external_binding_matches_real_adapter_wrapper_without_gpu(monkeypatch,confidence):
     from dataclasses import asdict
+
     import mlx.core as mx
     mx.set_default_device(mx.cpu)
-    from mlx2.adapters import deepseek_v4_dspark_artifact as seal,deepseek_v4_gguf as adapter_module
-    from mlx2.adapters.deepseek_v4_gguf import DeepSeekV4GGUFAdapter,DESCRIPTOR,CACHE_LAYOUT,split_execution_policy
+    from mlx2.adapters import deepseek_v4_dspark_artifact as seal
+    from mlx2.adapters.deepseek_v4_gguf import (
+        CACHE_LAYOUT,
+        DESCRIPTOR,
+        DeepSeekV4GGUFAdapter,
+        split_execution_policy,
+    )
     from mlx2.runtime.drafters import deepseek_v4_dspark as draft
     from mlx2.runtime.gguf import weights as weights_module
     from mlx2.runtime.models.deepseek_v4 import DeepSeekV4Config
@@ -177,7 +190,7 @@ def test_expected_external_binding_matches_real_adapter_wrapper_without_gpu(monk
     adapter.weights=SimpleNamespace(compute_policy='cooperative',embedding_policy='file_rows')
     # Independent explicit old model identity equation, not server status.
     adapter.model=SimpleNamespace(args=target_config,weights=adapter.weights,
-        identity='target-fingerprint:native-packed-fp32-qat-v1:compute=cooperative:hc=fused_fp32')
+        identity='target-fingerprint:native-packed-fp32-qat-stable-index-v2:compute=cooperative:hc=fused_fp32')
     adapter._load_external() # production adapter + real wrapper.bind(), mocked weight upload only
     expected=probe.expected_external_identity({'identity':target_identity,'metadata':metadata},policy,{'source_snapshot_sha256':'f'*64})
     assert expected['fingerprint']==adapter.identity['fingerprint']

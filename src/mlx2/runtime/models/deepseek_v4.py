@@ -497,8 +497,32 @@ def index_select(
         else:
             valid = mask[:, 0, start:end]
         score = mx.where(valid, score, -mx.inf)
-        selected.append(mx.argpartition(-score, kth=top_k - 1, axis=-1)[..., :top_k])
+        selected.append(stable_pool_topk(score, top_k))
     return mx.concatenate(selected, axis=1)
+
+
+def stable_pool_topk(scores, top_k):
+    """Select exact scores with a chronological cutoff tie-break and order.
+
+    ReLU indexer scores have exact zero ties. Partition's unspecified ordering
+    must not change the attended set or summation order across replay shapes.
+    See provenance/deepseek-v4-audit-64k.json for the peer mechanism review.
+    """
+    count = scores.shape[-1]
+    if type(top_k) is not int or not 1 <= top_k <= count:
+        raise ValueError("pool top-k must fit the available rows")
+    candidates = mx.argpartition(-scores, kth=top_k - 1, axis=-1)[..., :top_k]
+    cutoff = mx.min(
+        mx.take_along_axis(scores, candidates, axis=-1), axis=-1, keepdims=True
+    )
+    better = scores > cutoff
+    tied = scores == cutoff
+    remaining = top_k - mx.sum(better, axis=-1, keepdims=True)
+    keep = better | (tied & (mx.cumsum(tied.astype(mx.int32), axis=-1) <= remaining))
+    positions = mx.arange(count, dtype=mx.int32)
+    ordered = mx.where(keep, positions, count)
+    selected = mx.argpartition(ordered, kth=top_k - 1, axis=-1)[..., :top_k]
+    return mx.sort(selected, axis=-1)
 
 
 class Compressor:
@@ -794,8 +818,16 @@ class Block:
             scores.reshape(-1, self.c.num_experts_per_tok),
             self.prefix[:-1],
         ).reshape(x.shape)
-        gate = self.w.linear(self.prefix + "ffn_gate_shexp.weight")(x)
-        up = self.w.linear(self.prefix + "ffn_up_shexp.weight")(x)
+        names = (
+            self.prefix + "ffn_gate_shexp.weight",
+            self.prefix + "ffn_up_shexp.weight",
+        )
+        pair = getattr(self.w, "gate_up", None)
+        gate, up = (
+            pair(x, *names)
+            if callable(pair)
+            else tuple(self.w.linear(n)(x) for n in names)
+        )
         shared = self.w.linear(self.prefix + "ffn_down_shexp.weight")(
             limited_swiglu(gate, up, self.c.swiglu_limit)
         )
@@ -844,10 +876,12 @@ class DeepSeekV4Model:
         if cache_policy not in ("fp32", "fp8_mixed"):
             raise ValueError("unknown DeepSeek V4 physical cache policy")
         if cache_policy == "fp8_mixed" and (
-            config.head_dim != 512 or not config.simulate_quantization
+            config.head_dim != 512
+            or config.qk_rope_head_dim != 64
+            or not config.simulate_quantization
         ):
             raise ValueError(
-                "physical FP8 cache requires checkpoint D512 and required QAT enabled"
+                "physical FP8 cache requires checkpoint D512, rotary64 and required QAT enabled"
             )
         if attention_policy not in (
             "reference",
@@ -862,6 +896,8 @@ class DeepSeekV4Model:
             raise ValueError(
                 "direct packed attention requires explicit fp8_mixed cache"
             )
+        if attention_policy != "reference" and config.head_dim != 512:
+            raise ValueError("visible attention requires checkpoint D512")
         self.args, self.weights = config, weights
         from .deepseek_v4_identity import model_execution_identity
 
@@ -930,6 +966,7 @@ class DeepSeekV4Model:
         logits_to_keep=None,
         capture_layers=(),
         body_only=False,
+        row_exact=False,
     ):
         if logits_to_keep is not None and (
             type(logits_to_keep) is not int or logits_to_keep < 0
@@ -943,9 +980,16 @@ class DeepSeekV4Model:
             cache = self.make_cache()
         if len(cache) != len(self.layers):
             raise ValueError("DeepSeek V4 cache layer count mismatch")
+        if len({id(item) for item in cache}) != len(cache):
+            raise ValueError("DeepSeek V4 requires independent cache objects per layer")
+        expected_type = DeepSeekV4LayerCache
+        if self.cache_policy == "fp8_mixed":
+            from .deepseek_v4_packed_cache import DeepSeekV4PackedLayerCache
+
+            expected_type = DeepSeekV4PackedLayerCache
         for ratio, item in zip(self.args.compress_ratios, cache):
             if (
-                not isinstance(item, DeepSeekV4LayerCache)
+                type(item) is not expected_type
                 or item.identity != self.identity
                 or item.ratio != ratio
                 or item.head_dim != self.args.head_dim
@@ -954,8 +998,9 @@ class DeepSeekV4Model:
                 or item.pending
             ):
                 raise ValueError(
-                    "DeepSeek V4 cache identity, geometry or boundary mismatch"
+                    "DeepSeek V4 cache identity, layout, geometry or boundary mismatch"
                 )
+            item.validate_state()
         offsets = {item.offset for item in cache}
         if len(offsets) != 1:
             raise ValueError("DeepSeek V4 cache layers must represent one prefix")
@@ -965,14 +1010,39 @@ class DeepSeekV4Model:
         )
         taps = []
         for index, (block, state) in enumerate(zip(self.layers, cache)):
-            h = block(h, inputs, state)
+            if row_exact:
+                # Layer-major verification keeps each stateful operation at
+                # the ordinary decode shape. No M>1 projection, compressed
+                # attention reduction or HC mix may choose the target law.
+                rows = [
+                    block(h[:, row : row + 1], inputs[:, row : row + 1], state)
+                    for row in range(inputs.shape[1])
+                ]
+                h = mx.concatenate(rows, axis=1)
+            else:
+                h = block(h, inputs, state)
             if index in capture_layers:
                 # DSpark target features are the uniform mean across four
                 # POST-FFN HC streams, not the learned output HC head.
-                taps.append(mx.mean(h.astype(mx.float32), axis=-2))
+                taps.append(
+                    mx.concatenate(
+                        [mx.mean(row.astype(mx.float32), axis=-2) for row in rows],
+                        axis=1,
+                    )
+                    if row_exact
+                    else mx.mean(h.astype(mx.float32), axis=-2)
+                )
         features = mx.concatenate(taps, axis=-1) if taps else None
         if body_only:
             return None, features
+        if row_exact:
+            logits = []
+            for row in range(inputs.shape[1]):
+                hidden = mx.fast.rms_norm(
+                    self.hc_head(h[:, row : row + 1]), self.norm, self.args.rms_norm_eps
+                )
+                logits.append(self.weights.linear("output.weight")(hidden))
+            return mx.concatenate(logits, axis=1), features
         hidden = mx.fast.rms_norm(self.hc_head(h), self.norm, self.args.rms_norm_eps)
         if logits_to_keep is None:
             hidden = select_checkpoint_rows(hidden)
@@ -1018,6 +1088,30 @@ class DeepSeekV4Model:
                 "physical_width": 1,
                 "feature_width": len(capture_layers) * self.args.hidden_size,
             },
+        )
+
+    def verify_rows(self, inputs, cache, capture_layers=()):
+        """Bounded causal verification with ordinary width-one math per layer.
+
+        This is a chain executor, not a packed tree or a fused M>1 kernel.
+        Prefill's numerical profile and checkpoint-head thinning never enter
+        verification. Return every target logit and every requested HC tap.
+        """
+        capture_layers = tuple(capture_layers)
+        if inputs.ndim != 2 or inputs.shape[0] != 1 or not 1 <= inputs.shape[1] <= 6:
+            raise ValueError("DeepSeek verification requires bounded B1 rows1..6")
+        if (
+            any(type(i) is not int for i in capture_layers)
+            or tuple(sorted(set(capture_layers))) != capture_layers
+            or any(i < 0 or i >= len(self.layers) for i in capture_layers)
+        ):
+            raise ValueError("target tap layers must be unique ascending valid IDs")
+        return self._forward(
+            inputs,
+            cache,
+            logits_to_keep=0,
+            capture_layers=capture_layers,
+            row_exact=True,
         )
 
     def prefill_body(self, inputs, cache, capture_layers):

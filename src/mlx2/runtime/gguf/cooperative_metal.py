@@ -175,7 +175,39 @@ GROUPED = DENSE.replace(
 )
 
 
-@lru_cache(maxsize=5)
+# Original paired Q8 projection. Keep two outputs so the checkpoint's ordinary
+# SwiGLU expression retains its exact arithmetic; no hand-written exp substitute.
+# Provenance: provenance/deepseek-v4-audit-64k.json.
+PAIRED_Q8 = r"""
+const uint lane=thread_index_in_simdgroup,sg=simdgroup_index_in_threadgroup;
+const uint token=threadgroup_position_in_grid.z;
+const uint row0=(threadgroup_position_in_grid.x*4+sg)*ROWS;
+float sums_g[ROWS]={0.0f},sums_u[ROWS]={0.0f};
+for(uint chunk=lane;chunk<K/32;chunk+=32) {
+    float a[32];
+    #pragma unroll
+    for(uint i=0;i<32;i++) a[i]=x[size_t(token)*K+chunk*32+i];
+    #pragma unroll
+    for(uint r=0;r<ROWS;r++) {
+        if(row0+r<N) {
+            size_t offset=size_t(row0+r)*ROW_BYTES;
+            sums_g[r]+=q8_dot32(gate+offset,chunk,a);
+            sums_u[r]+=q8_dot32(up+offset,chunk,a);
+        }
+    }
+}
+#pragma unroll
+for(uint r=0;r<ROWS;r++) {
+    float g=simd_sum(sums_g[r]),u=simd_sum(sums_u[r]);
+    if(lane==0 && row0+r<N) {
+        gate_out[size_t(token)*N+row0+r]=g;
+        up_out[size_t(token)*N+row0+r]=u;
+    }
+}
+"""
+
+
+@lru_cache(maxsize=6)
 def _kernel(kind):
     import mlx.core as mx
 
@@ -185,6 +217,7 @@ def _kernel(kind):
         "combine": (["expert_out", "scores"], ["y"], COMBINE),
         "dense": (["x", "w"], ["y"], DENSE),
         "grouped": (["x", "w"], ["y"], GROUPED),
+        "paired_q8": (["x", "gate", "up"], ["gate_out", "up_out"], PAIRED_Q8),
     }
     inputs, outputs, source = args[kind]
     return mx.fast.metal_kernel(
@@ -194,6 +227,43 @@ def _kernel(kind):
         header=BLOCK_HEADER,
         source=source,
         ensure_row_contiguous=True,
+    )
+
+
+def cooperative_gate_up(x, gate: PackedMatrix, up: PackedMatrix, *, rows=4):
+    """Share activation reads for two Q8 linears, preserving their reductions."""
+    import mlx.core as mx
+
+    if (
+        rows not in (1, 2, 4)
+        or gate.ggml_type != 8
+        or up.ggml_type != 8
+        or len(gate.shape) != 2
+        or gate.shape != up.shape
+        or gate.row_bytes != up.row_bytes
+    ):
+        raise GGUFError(
+            "paired cooperative projection requires matching rank2 Q8 weights"
+        )
+    n, k = gate.shape
+    if x.ndim != 2 or x.shape[-1] != k or x.shape[0] < 1:
+        raise GGUFError(
+            "paired cooperative projection needs matching nonempty rank2 input"
+        )
+    return tuple(
+        _kernel("paired_q8")(
+            inputs=[x.astype(mx.float32), gate.data, up.data],
+            template=[
+                ("K", k),
+                ("N", n),
+                ("ROW_BYTES", gate.row_bytes),
+                ("ROWS", rows),
+            ],
+            grid=(((n + 4 * rows - 1) // (4 * rows)) * 128, 1, x.shape[0]),
+            threadgroup=(128, 1, 1),
+            output_shapes=[(x.shape[0], n)] * 2,
+            output_dtypes=[mx.float32] * 2,
+        )
     )
 
 

@@ -16,6 +16,8 @@ from collections import Counter, OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from .expert_residency import AdaptiveExpertResidency, AdaptiveResidencySettings
+
 
 @dataclass
 class ReplayStats:
@@ -96,6 +98,32 @@ def replay_per_projection_lru(
             stats.evictions += 1
         stats.note(_phase(index, decode_start=decode_start, terminal_start=terminal_start, serving_start=serving_start), hits, len(missing))
     return {"policy": "per_projection_lru", **stats.as_dict()}
+
+
+def replay_adaptive(
+    sequence, *, capacities, num_experts, decode_start, terminal_start,
+    serving_start=0, settings=None,
+):
+    """Counterfactual for the same demand-only policy the live cache uses."""
+    settings = AdaptiveResidencySettings.parse(settings or {"enabled": True})
+    policies = {layer: AdaptiveExpertResidency(num_experts, settings) for layer in capacities}
+    resident = {layer: [] for layer in capacities}
+    stats = ReplayStats()
+    for index, (layer, values) in enumerate(sequence):
+        phase = _phase(index, decode_start=decode_start, terminal_start=terminal_start,
+                       serving_start=serving_start)
+        wanted = list(dict.fromkeys(int(value) for value in values))
+        policy = policies[layer]
+        policy.observe(wanted, prefill=phase in {"intermediate_prefill", "terminal_prefill"})
+        bank = resident[layer]
+        hits = len(set(wanted) & set(bank))
+        keep = policy.retain(bank, wanted, capacities[layer])
+        stats.evictions += len(set(bank) - keep)
+        resident[layer] = [expert for expert in bank if expert in keep and expert not in wanted]
+        resident[layer].extend(expert for expert in wanted if expert in keep)
+        stats.note(phase, hits, len(wanted) - hits)
+    return {"policy": "adaptive_frequency", **stats.as_dict(),
+            "settings": settings.as_dict(), "swaps": sum(p.swaps for p in policies.values())}
 
 
 def replay_hybrid(

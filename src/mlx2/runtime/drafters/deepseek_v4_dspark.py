@@ -453,11 +453,10 @@ class DSparkStage:
             scores.reshape(-1, c.num_experts_per_tok),
             self.prefix[:-1],
         ).reshape(x.shape)
-        shared = limited_swiglu(
-            self.linear(x, "ffn_gate_shexp"),
-            self.linear(x, "ffn_up_shexp"),
-            c.swiglu_limit,
-        )
+        names = (self.prefix + "ffn_gate_shexp.weight", self.prefix + "ffn_up_shexp.weight")
+        pair = getattr(self.w, "gate_up", None)
+        gate, up = pair(x, *names) if callable(pair) else tuple(self.w.linear(n)(x) for n in names)
+        shared = limited_swiglu(gate, up, c.swiglu_limit)
         return hc_expand(routed + self.linear(shared, "ffn_down_shexp"), h, post, comb)
 
 

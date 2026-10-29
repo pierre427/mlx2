@@ -1,9 +1,11 @@
 """Guarded slab harness CPU checks; no Metal device dispatch."""
 import importlib.util
-from pathlib import Path
 import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
+
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts/research'))
 spec=importlib.util.spec_from_file_location('slab_probe',ROOT/'scripts/research/probe_deepseek_v4_slab.py')
@@ -44,6 +46,9 @@ def test_cpu_qat_slab_fixture_preserves_transaction_and_shape_diagnostics():
     assert len(cases)==27 and len(digest)==64
     assert all(c['owner_closed'] and c['offsets_correct'] for c in cases)
     assert all(c['partial_replay_exact'] is not False for c in cases)
+    assert all(c['slab']['logits_bitwise_equal'] for c in cases)
+    assert all(c['hc_features_bitwise_equal'] for c in cases)
+    assert all(c['committed_state_bitwise_vs_ordinary'] for c in cases)
     assert all(not c['route']['target_row_invariance_established'] for c in cases)
     assert all(c['physical_batch_width']==1 and c['causal_target_rows']==c['width'] for c in cases)
     assert causality['earlier_logits_bitwise_unchanged']

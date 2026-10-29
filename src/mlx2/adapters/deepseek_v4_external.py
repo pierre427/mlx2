@@ -196,9 +196,11 @@ class DeepSeekV4DSparkDraftModel:
             "verification": (
                 "ordinary_width_one_snapshot_replay"
                 if self.verification_mode == "sequential"
-                else "causal_kplus1_slab_snapshot_ordinary_replay"
+                else "causal_kplus1_layer_major_width_one_v2"
             ),
             "target_row_invariance_established": False,
+            "arithmetic_rows": 1,
+            "execution_order": "token_major" if self.verification_mode == "sequential" else "layer_major",
             "packed_ast": False,
             "sampling": "greedy_only",
         }

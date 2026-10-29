@@ -1,9 +1,11 @@
 """Controlled comparison logic and actual tiny B1 generator paths, CPU only."""
+import copy
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
-import copy
+
 import pytest
+
 ROOT=Path(__file__).resolve().parents[1]
 
 @pytest.fixture
@@ -65,6 +67,7 @@ def test_bounds_refuse_warm_cache_policy_and_small_output(probe,tmp_path):
 def test_actual_three_arm_cpu_paths_have_fresh_exact_tokens(probe,monkeypatch):
     import mlx.core as mx
     from test_deepseek_v4_external_cpu import Backbone
+
     from mlx2.adapters import deepseek_v4_external as external
     from mlx2.runtime.models.deepseek_v4_cache import DeepSeekV4LayerCache
     old=mx.default_device();mx.set_default_device(mx.cpu)
@@ -85,6 +88,9 @@ def test_actual_three_arm_cpu_paths_have_fresh_exact_tokens(probe,monkeypatch):
                 logits=mx.put_along_axis(logits,((inputs+1)%16)[:,:,None],mx.full((1,inputs.shape[1],1),10.),axis=-1)
                 return logits,mx.broadcast_to(inputs[:,:,None],(1,inputs.shape[1],2)).astype(mx.float32)
             def forward_with_taps(self,inputs,cache,layers):return self._forward(inputs,cache)
+            def verify_rows(self,inputs,cache,layers):
+                rows=[self._forward(inputs[:,i:i+1],cache) for i in range(inputs.shape[1])]
+                return tuple(mx.concatenate([row[j] for row in rows],axis=1) for j in (0,1))
             def prefill_body(self,inputs,cache,layers):return self._forward(inputs,cache)[1]
             def __call__(self,inputs,cache,**kwargs):return self._forward(inputs,cache)[0]
         model=Model();draft=external.DeepSeekV4DSparkDraftModel(ToyBackbone()).bind(model)

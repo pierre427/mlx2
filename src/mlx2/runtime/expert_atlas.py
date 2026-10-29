@@ -3,8 +3,9 @@
 The atlas accumulates decay-weighted per-(layer, expert) access counts while a
 streamed model serves, persists them atomically, and validates them against the
 checkpoint they were built from.  In this iteration it **must not influence
-residency**: the cache in :mod:`mlx2.runtime.weight_stream` runs a plain LRU
-whatever the atlas says.
+residency**: the default cache runs a plain LRU whatever the atlas says. The
+explicit adaptive policy uses separate bounded counters, never this atlas;
+its traces are marked so a counterfactual cannot claim an exact LRU baseline.
 
 The reason the counts are collected at all is
 :func:`replay_counterfactual`, which replays a recorded access trace and
@@ -52,7 +53,7 @@ _TRACE_END = 0xFFFFFFFD  # (END, dropped calls): written once, at close
 # Plain-LRU traces carry no such row and are unchanged.
 _TRACE_ADMISSION = 0xFFFFFFFC
 _TRACE_MARKER_MIN = _TRACE_ADMISSION
-_ADMISSION_CODES = {"terminal_hot": 1}
+_ADMISSION_CODES = {"terminal_hot": 1, "adaptive_residency": 2}
 ATLAS_MAGIC = b"MLX2ATL1"
 ATLAS_SENTINEL = b"ENDATLAS"
 

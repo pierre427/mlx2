@@ -185,6 +185,34 @@ class GGUFWeights:
         else:
             self.packed(name)
 
+    def gate_up(self, x, gate_name, up_name):
+        """Pair compatible Q8 projections within the selected compute profile."""
+        from .prefill_scope import dense_prefill_active
+
+        gate, up = self.tensors[gate_name], self.tensors[up_name]
+        if (
+            self.compute_policy == "cooperative"
+            and gate.ggml_type == up.ggml_type == 8
+            and gate.shape == up.shape
+            and len(gate.shape) == 2
+            and not (
+                self.dense_prefill_policy == "nax_fp16"
+                and dense_prefill_active(math.prod(x.shape[:-1]))
+            )
+        ):
+            from .cooperative_metal import cooperative_gate_up
+
+            g, u = cooperative_gate_up(
+                x.reshape(-1, x.shape[-1]), self.packed(gate_name), self.packed(up_name)
+            )
+            route = "cooperative_paired_gate_up"
+            self.scheduled_dense_calls[route] = (
+                self.scheduled_dense_calls.get(route, 0) + 1
+            )
+            shape = (*x.shape[:-1], gate.shape[1])
+            return g.reshape(shape), u.reshape(shape)
+        return self.linear(gate_name)(x), self.linear(up_name)(x)
+
     def embedding(self, ids, name="token_embd.weight"):
         if self.embedding_policy == "file_rows":
             import mlx.core as mx

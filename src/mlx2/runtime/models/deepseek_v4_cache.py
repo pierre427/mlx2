@@ -10,9 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..cache_operations import (
-    CacheOperationsContract, CachePlaneDeclaration, CheckpointPublicationCondition,
+    CacheOperationsContract,
+    CachePlaneDeclaration,
+    CheckpointPublicationCondition,
 )
-
 
 STATE_REVISION = "mlx2.deepseek-v4-cache.v2"
 
@@ -272,10 +273,12 @@ class DeepSeekV4LayerCache(_BackendOwner):
         offsets = tuple(_parse_meta_int(v, nullable=True) for v in value[6:])
         if offsets[0] is None:
             raise ValueError("invalid cache offset")
-        self.offset = offsets[0]
         for pool, offset in zip((self.compressor, self.indexer), offsets[1:]):
             if (pool is None) != (offset is None):
                 raise ValueError("cache pool topology mismatch")
+        # Validate the entire record before changing any live frontier.
+        self.offset = offsets[0]
+        for pool, offset in zip((self.compressor, self.indexer), offsets[1:]):
             if pool is not None:
                 pool.offset = offset
 
@@ -295,6 +298,8 @@ class DeepSeekV4LayerCache(_BackendOwner):
         result.meta_state = meta_state
         result.state = state
         result.validate_state()
+        if result.pending:
+            raise ValueError("persisted cache has an incomplete pool frontier or count")
         return result
 
     def snapshot(self):
@@ -303,6 +308,8 @@ class DeepSeekV4LayerCache(_BackendOwner):
         return DeepSeekV4Snapshot(self.meta_state, _copy(self.xp, self.state))
 
     def restore(self, snapshot):
+        if self._closed:
+            raise ValueError("cache row is closed")
         restored = self.from_state(snapshot.arrays, snapshot.metadata, xp=self.xp)
         if restored.meta_state[:6] != self.meta_state[:6]:
             raise ValueError("snapshot revision, identity or geometry mismatch")
@@ -327,6 +334,7 @@ class DeepSeekV4LayerCache(_BackendOwner):
         return None if self.keys is None else self.keys.shape
 
     def validate_state(self):
+        self.validate_storage()
         expected = min(self.offset, self.window_size)
         if self.local_shape is None:
             if expected:
@@ -354,6 +362,17 @@ class DeepSeekV4LayerCache(_BackendOwner):
             if shape is not None and (len(shape) != 3 or
                     shape[0] != 1 or shape[2] != pool.head_dim):
                 raise ValueError("completed pool shape differs")
+
+    def validate_storage(self):
+        """Check physical dtypes without evaluating tensors or unpacking pools."""
+        def check(value):
+            if isinstance(value, (tuple, list)):
+                for item in value:
+                    check(item)
+            elif value is not None and value.dtype != self.xp.float32:
+                raise ValueError("DeepSeek cache state requires physical FP32 dtype")
+
+        check(self.state)
 
     def is_trimmable(self):
         return False
@@ -394,6 +413,7 @@ class DeepSeekV4LayerCache(_BackendOwner):
     def finalize(self):
         if self._closed:
             raise ValueError("cache row is closed")
+        self.validate_state()
         self.cache_operations_contract.validate_publication(self)
 
     def extend(self, other):

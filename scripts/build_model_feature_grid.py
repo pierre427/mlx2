@@ -57,6 +57,7 @@ FEATURES = (
     "ast_ubtree_b15",
     "fused_gdn", "fused_gdn_batch_verify", "moe_rhs_pad",
     "moe_nax_gather", "moe_routed_decode", "moe_topk_fold", "moe_grouped_rows",
+    "paired_shared_expert_q8", "gguf_nax_prefill",
     "moe_window_row_exact", "attention_window_row_exact",
     "progressive_ast_rootless_fallback",
     "qsa_nax_prefill", "qsa_nax_batched", "qsa_nax_decode",

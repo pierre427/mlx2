@@ -828,6 +828,7 @@ def _make_self_mtp_admission_callback(
     reclaim_memory: Optional[Callable[[], None]] = None,
     evict_unused_cache: Optional[Callable[[], bool]] = None,
     settle_memory: Optional[Callable[[], object]] = None,
+    rebalance_memory: Callable[[int], object] | None = None,
     shortfall_recheck_seconds: float = 1.0,
     clock: Callable[[], float] = time.monotonic,
 ) -> Callable[
@@ -940,6 +941,20 @@ def _make_self_mtp_admission_callback(
             if callable(max_draft)
             else max_draft
         )
+        if rebalance_memory is not None:
+            # The generator promises this seam is a closed execution boundary.
+            # Price live/pending KV and the chosen verify workspace through the
+            # same model-neutral estimator used below, then remeasure. Never
+            # credit the rebalancer's reported logical eviction bytes.
+            required = controller.hard_reserve_gib + sum(
+                controller.lane_gib(context, depth_cap, cache,
+                    resident_cache=is_resident, pending_gib=pending)
+                for context, cache, is_resident, pending in zip(contexts, cache_gib, resident, pending_gib)
+            )
+            rebalance_memory(math.ceil(required * (1 << 30)))
+            current_free = free_memory()
+            free = math.nan if current_free is None else current_free
+            initial_free = free
 
         def plan(free_gib):
             return controller.decide(
