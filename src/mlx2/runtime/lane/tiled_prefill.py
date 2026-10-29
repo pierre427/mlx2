@@ -23,12 +23,23 @@ def enabled():
         raise ValueError(f"{ENV} must be 0 or 1")
     return value == "1"
 
+def device_admits():
+    """The NAX kernel runs only on an M5 GPU; elsewhere project() declines."""
+    return (mx.default_device() == mx.gpu and mx.metal.is_available()
+            and "M5" in mx.device_info().get("device_name", ""))
+
 def status():
-    return {"implemented": True, "selected": enabled(), "qualified": False, **STATS}
+    selected = enabled()
+    return {"implemented": True, "selected": selected,
+            "device_admitted": selected and device_admits(), "qualified": False, **STATS}
 
 def admit_model(model):
-    """Adapter-owned admission; no other model inherits this environment flag."""
-    selected = enabled()
+    """Adapter-owned admission; no other model inherits this environment flag.
+
+    Returns True only when the flag is set and this device can run the
+    kernel, so a declining device never claims the tiled-prefill law.
+    """
+    selected = enabled() and device_admits()
     for _, module in model.named_modules():
         object.__setattr__(module, "_direct_prefill_candidate", selected)
     return selected
@@ -42,8 +53,7 @@ def project(x, module, nt):
     if (module.bits != 4 or module.group_size != 64 or nt not in (0, 32, 64)
             or n % 64 or k != kw * 8 or k % 64
             or x.dtype not in _MSL_TYPE or module.scales.dtype != x.dtype
-            or module.biases.dtype != x.dtype or mx.default_device() != mx.gpu
-            or not mx.metal.is_available() or "M5" not in mx.device_info().get("device_name", "")):
+            or module.biases.dtype != x.dtype or not device_admits()):
         STATS["declined"] += 1
         return None
     tile = (64, 64, 128 if k >= 16384 and k % 128 == 0 else 64, 2, 2)

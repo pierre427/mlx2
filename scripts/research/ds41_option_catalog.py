@@ -143,7 +143,7 @@ def catalog(*, oracle=None):
             validation_policy = dict(policy)
             if key == 'deepseek_source_native_mx':
                 validation_policy['deepseek_source_experts'] = {'mode':'original_lfu','budget_bytes':75_000_000_000}
-            parsed = source_policy(validation_policy)
+            source_policy(validation_policy)  # raises on an invalid arm
             arms.append(dict(id=key.removeprefix('deepseek_')+'__'+value,
                 option=key,value=value,policy=policy,lane=lane,coverage_trigger=trigger,
                 resources=resources,policy_parser_passed=True,

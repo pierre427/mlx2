@@ -234,12 +234,22 @@ def test_model_gate_hybrid_binding_uses_source_q1_hotmap_and_default_json_separa
     store=SimpleNamespace(binding='c30fd25e3cc79ba7044686fa3f9a7a1c0f514f77ee6293d2f5f62bc409e02ddb',
         q1_binding='09508a4061700fbfc06f37f024e4dbee027e7bd90bd1fe6ecc38ec8b3fc27289',
         hot_binding='371051887455ccaf61f60c8e3fb74f41c7f53a2f389c88c581991007ff4024e8')
-    adapter=SimpleNamespace(weights=SimpleNamespace(expert_stream=store),identity={'fingerprint':store.binding})
+    from mlx2.adapters.deepseek_v41_identity import effective_source_identity
+    base={'fingerprint':store.binding}
+    verified=[True]
+    weights=SimpleNamespace(expert_stream=store,artifact={'identity':base},verify_source=lambda:verified[0])
+    adapter=SimpleNamespace(weights=weights,identity=effective_source_identity(
+        base,q1_bank=store.q1_binding,hot_map=store.hot_binding))
     assert gate._checkpoint(adapter)==gate.CHECKPOINT
+    verified[0]=False
+    with pytest.raises(ValueError,match='source/stat verification'):gate._checkpoint(adapter)
+    verified[0]=True
     store.hot_binding='0'*64
+    with pytest.raises(ValueError,match='effective derivative identity'):gate._checkpoint(adapter)
+    adapter.identity=effective_source_identity(base,q1_bank=store.q1_binding,hot_map=store.hot_binding)
     with pytest.raises(ValueError,match='hybrid checkpoint'):gate._checkpoint(adapter)
-    adapter.identity['fingerprint']='927325be8884e00a7bf60b9aa7d540b167a5efec569b9c7c30b1d34c2793d000'
-    with pytest.raises(ValueError,match='original-source identity'):gate._checkpoint(adapter)
+    weights.artifact={'identity':{'fingerprint':'1'*64}}
+    with pytest.raises(ValueError,match='source provider differs'):gate._checkpoint(adapter)
 
 
 def test_persistent_task_wrapper_preserves_entire_body_and_adds_final_scratch_barrier():

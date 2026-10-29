@@ -146,6 +146,7 @@ from .qwen3_next import (
     compile_glue_enabled,
     check_materialization_budget,
     table_bytes,
+    rename_packed_experts,
     transform_moe_weights,
 )
 from .rope_utils import Llama3RoPE, YarnRoPE, initialize_rope
@@ -7602,6 +7603,13 @@ class Qwen4ExpMTP(nn.Module):
 
     def __init__(self, args: TextModelArgs):
         super().__init__()
+        if args.mtp_num_hidden_layers > 1:
+            # The draft step runs only layers[0]; a deeper head would silently
+            # reuse its first module for every step (vllm #62111).
+            raise ValueError(
+                f"mtp_num_hidden_layers={args.mtp_num_hidden_layers} is unsupported; "
+                "this MTP head runs exactly one layer"
+            )
         self.hidden_size = args.hidden_size
         self.hc_count = args.hc_count
         hc_hidden = args.hc_count * args.hidden_size
@@ -8099,24 +8107,9 @@ class Model(nn.Module):
                     )
                 )
             )
-        for prefix in mlp_prefixes:
-            gate_up_key = f"{prefix}.experts.gate_up_proj"
-            if gate_up_key not in sanitized:
-                continue
-            gate_up = sanitized.pop(gate_up_key)
-            if qwen3_next._MOE_FUSED_GATE_UP:
-                sanitized[f"{prefix}.switch_mlp.gate_up_proj.weight"] = gate_up
-            else:
-                midpoint = gate_up.shape[-2] // 2
-                sanitized[f"{prefix}.switch_mlp.gate_proj.weight"] = gate_up[
-                    ..., :midpoint, :
-                ]
-                sanitized[f"{prefix}.switch_mlp.up_proj.weight"] = gate_up[
-                    ..., midpoint:, :
-                ]
-            sanitized[f"{prefix}.switch_mlp.down_proj.weight"] = sanitized.pop(
-                f"{prefix}.experts.down_proj"
-            )
+        rename_packed_experts(
+            sanitized, mlp_prefixes, fuse_gate_up=qwen3_next._MOE_FUSED_GATE_UP
+        )
         transform_moe_weights(
             sanitized,
             mlp_prefixes,

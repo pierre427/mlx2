@@ -11,7 +11,6 @@ import atexit
 from collections import Counter
 from functools import wraps
 import importlib
-import json
 from pathlib import Path
 import threading
 import time

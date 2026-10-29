@@ -17,7 +17,6 @@ import re
 import struct
 import sys
 import threading
-import time
 import unicodedata
 import zlib
 

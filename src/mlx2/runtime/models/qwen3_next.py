@@ -1395,6 +1395,37 @@ def _concat_parts(parts_list, axis: int):
     return fused
 
 
+def rename_packed_experts(weights: dict, prefixes, *, fuse_gate_up: bool) -> None:
+    """Move packed ``experts.{gate_up,down}_proj`` tensors to ``switch_mlp``.
+
+    A quantized packed export keeps ``.scales``/``.biases`` beside each packed
+    weight; they follow the same rename, and the fused gate/up parameters split
+    on the same output axis as the weight (omlx #4897).
+    """
+    for prefix in prefixes:
+        gate_up_key = f"{prefix}.experts.gate_up_proj"
+        if gate_up_key not in weights:
+            continue
+        down_key = f"{prefix}.experts.down_proj"
+        for suffix in ("", ".scales", ".biases"):
+            gate_up = weights.pop(gate_up_key + suffix, None)
+            if gate_up is not None:
+                param = suffix or ".weight"
+                if fuse_gate_up:
+                    weights[f"{prefix}.switch_mlp.gate_up_proj{param}"] = gate_up
+                else:
+                    midpoint = gate_up.shape[-2] // 2
+                    weights[f"{prefix}.switch_mlp.gate_proj{param}"] = gate_up[
+                        ..., :midpoint, :
+                    ]
+                    weights[f"{prefix}.switch_mlp.up_proj{param}"] = gate_up[
+                        ..., midpoint:, :
+                    ]
+            down = weights.pop(down_key + suffix, None)
+            if down is not None:
+                weights[f"{prefix}.switch_mlp.down_proj{suffix or '.weight'}"] = down
+
+
 def transform_moe_weights(
     weights: dict, prefixes, *, fuse_gate_up: bool, fold_shared: bool
 ) -> int:

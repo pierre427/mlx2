@@ -4,7 +4,7 @@
     "mlx2.adapters.registry": {
       "sha256": "aa330f1a4cf8cc613adffd02ba1311c39c82191d1d201c2fc95a7f90f92a9cb0",
       "targets": [],
-      "reason": "Selected-adapter dispatch reviewed through DeepSeek V4.1 GGUF, MLX, IQ1 and Source registration. New targets are literal internal adapter modules; the constructed adapter/model roots still define the dynamic closure. Unrelated unknown loaders remain unresolved."
+      "reason": "Selected-adapter dispatch reviewed through DeepSeek V4.1 GGUF, MLX, IQ1 and Source registration. New targets are literal internal adapter modules; the constructed adapter/model roots still define the dynamic closure. Unrelated unknown loaders remain unresolved. Re-reviewed 2026-10-28 (4a09b0836, 31f5df129): adapter-own default_route_policy_applies / default_route_policy_filter hooks only decline or drop default keys; no import or dispatch target added."
     },
     "mlx2.runtime.models.cache": {
       "sha256": "a0a8b2929e90d396f509fa4a1aad44d4a9939f0fe4bc58b86c9f5a78f3d8b27c",

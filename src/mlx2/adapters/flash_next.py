@@ -987,10 +987,11 @@ class FlashNextAdapter:
         return ids
 
     def output_parser(self, request):
-        from ..output import OutputParser, constrained_tool_choice
+        from ..output import TokenBoundOutputParser, constrained_tool_choice
         from ..runtime.tool_parsers.qwen3_coder import parse_tool_call
 
-        return OutputParser(
+        return TokenBoundOutputParser(
+            tokenizer=getattr(self, "tokenizer", None),
             chat="messages" in request,
             thinking=request.get("enable_thinking", False),
             tools=request.get("tools")

@@ -21,8 +21,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT/"src"), str(ROOT/"scripts/research")]
 from mlx2.desktop_campaign_worker import atomic, check_ownership
 
-MODEL = Path(str(Path.home() / 'mlx-models/DeepSeek-V4.1-Flash-1017-Maya-XS-Abliterated-MLX-IQ1S'))
-
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -191,15 +189,20 @@ def main():
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--column", action="store_true")
     parser.add_argument("--reference-column", type=Path)
+    # No default: the 10-25 Maya-XS IQ1S artifact was deleted on 2026-10-28.
+    parser.add_argument("--model", type=Path, help="mlx2 V4.1 IQ1S artifact directory (owned mode)")
     args = parser.parse_args(); out = args.output.resolve()
     if args.mode == "unit": return unit(out)
+    if args.model is None or not args.model.is_dir():
+        parser.error("owned mode needs --model pointing at an existing V4.1 IQ1S artifact directory")
+    model = args.model.expanduser().resolve()
     if args.repetitions not in (0, 3, 5): raise ValueError("bounded repetitions are0/3/5")
     if out.exists() and any(out.iterdir()): raise ValueError("refusing nonempty evidence")
     out.mkdir(parents=True, exist_ok=True)
     from mlx2.adapters.deepseek_v41_iq1_artifact import inspect_artifact
     from mlx2.desktop_campaign_lease import DesktopCPGLease
     from mlx2.desktop_campaign_process import spawn
-    artifact = inspect_artifact(MODEL)
+    artifact = inspect_artifact(model)
     names = ["scripts/research/probe_deepseek_v41_tiled_gpu.py", "src/mlx2/runtime/gguf/v41_iq1_tiled.py",
              "src/mlx2/runtime/gguf/v41_iq1_splash.py", "src/mlx2/runtime/gguf/v41_row_exact.py",
              "src/mlx2/runtime/gguf/v41_row_prefill.py", "src/mlx2/runtime/gguf/v41_prefill.py",
@@ -215,8 +218,8 @@ def main():
         names.append(name); sources[name] = sha(ROOT/name)
     for name in names:
         target = out/"source"/name; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes((ROOT/name).read_bytes())
-    spec = dict(model=str(MODEL), fingerprint=artifact["identity"]["fingerprint"],
-        checkpoint=MODEL.name+"@"+artifact["identity"]["fingerprint"], source_hashes=sources,
+    spec = dict(model=str(model), fingerprint=artifact["identity"]["fingerprint"],
+        checkpoint=model.name+"@"+artifact["identity"]["fingerprint"], source_hashes=sources,
         source_revision=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         driver_sha256=sha(__file__), repetitions=args.repetitions, column=args.column,
         reference_column=str(args.reference_column.resolve()) if args.reference_column else None,

@@ -20,7 +20,7 @@ from .import_env import snapshot as _import_env_snapshot
 from .pipeline import PipelineMixin
 from .qwen3_5 import GatedDeltaNet as ReferenceGatedDeltaNet
 from .qwen3_5 import TextModelArgs
-from .qwen3_next import transform_moe_weights
+from .qwen3_next import rename_packed_experts, transform_moe_weights
 from .qwen4_fused_gdn import (
     _THREADGROUP_Y_CANDIDATES,
     admit_qwen4_fused_gdn_batch_decode,
@@ -509,6 +509,13 @@ class Qwen36TextModel(DenseTextModel):
 class MTPModule(nn.Module):
     def __init__(self, args: TextModelArgs):
         super().__init__()
+        if args.mtp_num_hidden_layers > 1:
+            # The draft step runs only layers[0]; a deeper head would silently
+            # reuse its first module for every step (vllm #62111).
+            raise ValueError(
+                f"mtp_num_hidden_layers={args.mtp_num_hidden_layers} is unsupported; "
+                "this MTP head runs exactly one layer"
+            )
         self.fc = nn.Linear(2 * args.hidden_size, args.hidden_size, bias=False)
         self.pre_fc_norm_embedding = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.pre_fc_norm_hidden = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
@@ -668,24 +675,9 @@ class Model(nn.Module):
                 f"language_model.mtp.layers.{index}.mlp"
                 for index in range(args.mtp_num_hidden_layers)
             )
-        for prefix in prefixes:
-            gate_up_key = f"{prefix}.experts.gate_up_proj"
-            if gate_up_key not in normalized:
-                continue
-            gate_up = normalized.pop(gate_up_key)
-            if qwen3_next._MOE_FUSED_GATE_UP:
-                normalized[f"{prefix}.switch_mlp.gate_up_proj.weight"] = gate_up
-            else:
-                midpoint = gate_up.shape[-2] // 2
-                normalized[f"{prefix}.switch_mlp.gate_proj.weight"] = gate_up[
-                    ..., :midpoint, :
-                ]
-                normalized[f"{prefix}.switch_mlp.up_proj.weight"] = gate_up[
-                    ..., midpoint:, :
-                ]
-            normalized[f"{prefix}.switch_mlp.down_proj.weight"] = normalized.pop(
-                f"{prefix}.experts.down_proj"
-            )
+        rename_packed_experts(
+            normalized, prefixes, fuse_gate_up=qwen3_next._MOE_FUSED_GATE_UP
+        )
         transform_moe_weights(
             normalized,
             prefixes,

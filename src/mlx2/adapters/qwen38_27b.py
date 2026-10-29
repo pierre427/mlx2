@@ -763,6 +763,25 @@ def graft_prompt_lookup_drafter(adapter, *, prompt_lookup):
     adapter.external_policy["ast_graft_prompt_lookup"] = True
 
 
+def _bind_adaptive_rows(kwargs, policy_value, *, invariant):
+    """Pass ``ast_adaptive_rows`` on, declining it under a size-variant tree law.
+
+    Wall-cost history must not change the verifier's physical width when row
+    logits depend on the tree's size (masked/ordinary law): a warm replay
+    would diverge from its cold request.  Unset becomes false there; an
+    explicit true is refused.
+    """
+    if policy_value is not False and not invariant:
+        if policy_value is not None or kwargs.get("ast_adaptive_rows") not in (None, False):
+            raise ValueError(
+                "ast_adaptive_rows requires a tree-size-invariant tree law; "
+                "the selected law is not invariant"
+            )
+        policy_value = False
+    if policy_value is not None:
+        kwargs.setdefault("ast_adaptive_rows", policy_value)
+
+
 def _native_mtp_tree_policy(policy, *, numerical_defaults=None):
     """Validate the native-MTP tree policy and fill the tile defaults.
 
@@ -1909,6 +1928,14 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 prefill_policy.gdn_prefill_chunk,
                 prefill_policy.gdn_prefill_segment_rows,
             )
+        if self.direct_prefill_candidate and (
+            prefill_policy.tensorfold_prefill or prefill_policy.invariant_prefill
+        ):
+            # Each prefill law owns the large-row projections exclusively.
+            raise ValueError(
+                "MLX2_TILED_PREFILL=1 cannot combine with tensorfold_prefill "
+                "or invariant_prefill"
+            )
         self.invariant_prefill = None
         if prefill_policy.invariant_prefill:
             from ..runtime.models.invariant_prefill import install as install_invariant
@@ -2167,8 +2194,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         oracle_path = self.external_policy.get("ast_target_tree_oracle")
         if self.external_policy.get("ast_topology") is not None:
             kwargs.setdefault("ast_topology", self.external_policy["ast_topology"])
-        if "ast_adaptive_rows" in self.external_policy:
-            kwargs.setdefault("ast_adaptive_rows", self.external_policy["ast_adaptive_rows"])
+        _bind_adaptive_rows(
+            kwargs, self.external_policy.get("ast_adaptive_rows"),
+            invariant=self._tree_law_size_invariant(),
+        )
         if self.external_policy.get("ast_tree_calibration") not in (None, False):
             kwargs.setdefault(
                 "ast_tree_calibration", self.external_policy["ast_tree_calibration"]
@@ -2409,7 +2438,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                         "operator_policy" if "ast_tile_rows" in self.external_policy
                         else "adapter_default"
                     ),
-                    "adaptive_rows": self.external_policy.get("ast_adaptive_rows") is not False,
+                    "adaptive_rows": (
+                        self.external_policy.get("ast_adaptive_rows") is not False
+                        and self._tree_law_size_invariant()
+                    ),
                 }
                 from ..runtime.ast_tree_calibration import parse_mode
 
@@ -2672,6 +2704,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
 
         lane_multi.select_default_law(self.TENSORFOLD_TREE_LAW_DEFAULT)
 
+    def _tree_law_size_invariant(self):
+        from ..runtime.tensorfold_qwen38 import lane_multi
+
+        return bool(lane_multi.tree_law()["tree_size_invariant"])
+
     def execution_numerics_contract(self):
         """Selected target math for APCv2 and external learning identities."""
         import mlx.core as mx
@@ -2708,11 +2745,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             )
         contract = self._external_execution_numerics()
         from ..runtime.models.qwen38_shared_draft import enabled as shared_history_enabled
-        from ..runtime.lane.tiled_prefill import enabled as tiled_prefill_enabled
         from ..runtime.models.qwen38_tree_gdn import compact_enabled
         intake = {name: True for name, active in (
             ("shared_history_split_fp32_v1", shared_history_enabled()),
-            ("tiled_prefill_nax_v1", tiled_prefill_enabled()),
+            # The law this load admitted, not the flag: a declining device
+            # runs stock projections and keeps the stock namespace.
+            ("tiled_prefill_nax_v1", bool(getattr(self, "direct_prefill_candidate", False))),
             ("gdn_live_parent_slots_v1", compact_enabled()),
         ) if active}
         if intake:

@@ -614,3 +614,62 @@ class OutputParser:
         if final:
             self._pending_space = ""
         return events
+
+
+class TokenBoundOutputParser(OutputParser):
+    """Structural markers count only where the model emitted their special token.
+
+    A tokenizer that keeps ``<tool_call>``/``</tool_call>``/``<think>``/
+    ``</think>`` as dedicated tokens lets the parser tell a generated marker
+    from the same characters spelled out of ordinary pieces (a model quoting
+    tool syntax in prose).  Markers the tokenizer does not keep as one token
+    stay text-matched.  A constrained tool choice keeps text matching: its
+    grammar, not the token, owns the structure.  Input fed without
+    :meth:`record_output_token` is matched as text, as before.
+    """
+
+    def __init__(self, *, tokenizer=None, **kwargs):
+        super().__init__(**kwargs)
+        self._special_ids = {}
+        if tokenizer is not None and not self.constrained_tools:
+            for spelling in {self.tool_open, self.tool_close,
+                             THINKING_OPEN_MARKER, THINKING_CLOSE_MARKER}:
+                ids = tokenizer.encode(spelling, add_special_tokens=False)
+                if len(ids) == 1:
+                    self._special_ids[int(ids[0])] = spelling
+        self._bound = frozenset(self._special_ids.values())
+        self._special_spans = set()
+        self._received_chars = 0
+        self._token_aware = False
+
+    def record_output_token(self, text, token):
+        """Record where a dedicated marker token's spelling lands in the stream.
+
+        The streaming detokenizer emits a special token as the suffix of its
+        segment (delayed plain bytes precede it).  A segment that breaks that
+        shape returns this parser to text matching rather than guessing.
+        """
+        spelling = self._special_ids.get(token)
+        if spelling is not None and self._special_ids:
+            if text.endswith(spelling):
+                self._special_spans.add(
+                    (self._received_chars + len(text) - len(spelling), spelling)
+                )
+            else:
+                self._special_ids = {}
+                self._bound = frozenset()
+        self._token_aware = bool(self._special_ids)
+        self._received_chars += len(text)
+
+    def _marker_allowed(self, marker, absolute_offset):
+        if not self._token_aware or marker not in self._bound:
+            return True
+        return (absolute_offset, marker) in self._special_spans
+
+    def push(self, text, *, final=False):
+        events = super().push(text, final=final)
+        if self.channel != "tool":
+            self._special_spans = {
+                span for span in self._special_spans if span[0] >= self._buffer_origin
+            }
+        return events

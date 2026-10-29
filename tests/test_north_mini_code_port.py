@@ -60,12 +60,18 @@ def north_config():
 
 
 def test_north_declares_only_early_moe_expert_streaming():
-    from mlx2.runtime.streamed_load import WeightStreamRequest, declared_stream_modes
+    from mlx2.runtime.streamed_load import (
+        WeightStreamRequest, accepts_streaming_request, declared_stream_modes, require_declared,
+    )
 
+    # Inventory metadata only (c797f1ed1): the mode is proven by the loader, not
+    # refused by a class allowlist. Only the typed request is checked pre-load.
     assert declared_stream_modes(NorthMiniCodeAdapter) == frozenset({"moe_experts"})
+    assert accepts_streaming_request(NorthMiniCodeAdapter)
     dense = WeightStreamRequest(mode="dense_mlp", budget_bytes=1 << 20)
-    with pytest.raises(ValueError, match="does not declare dense_mlp"):
-        NorthMiniCodeAdapter("/missing", weight_streaming=dense)
+    assert require_declared(NorthMiniCodeAdapter, dense) is dense
+    with pytest.raises(ValueError, match="must be a WeightStreamRequest"):
+        NorthMiniCodeAdapter("/missing", weight_streaming={"mode": "dense_mlp"})
 
 
 def artifact(path: Path):

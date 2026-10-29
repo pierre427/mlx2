@@ -134,12 +134,12 @@ def test_stream_is_closed_if_tokenizer_load_fails(tiny_ling, monkeypatch):
     assert live_selections() == []
 
 
-def test_unsupported_stream_mode_refused_before_artifact_load(monkeypatch):
+def test_untyped_stream_request_refused_before_artifact_load(monkeypatch):
+    # No per-adapter mode allowlist since c797f1ed1; the typed request is still
+    # validated before any artifact is opened.
     monkeypatch.setattr(ling3_flash, "inspect_artifact", lambda *a: pytest.fail("artifact opened"))
-    with pytest.raises(ValueError, match="does not declare dense_mlp"):
-        ling3_flash.Ling3FlashAdapter("/absent", weight_streaming=WeightStreamRequest(
-            mode="dense_mlp", budget_bytes=1 << 20,
-        ))
+    with pytest.raises(ValueError, match="must be a WeightStreamRequest"):
+        ling3_flash.Ling3FlashAdapter("/absent", weight_streaming={"mode": "dense_mlp"})
 
 
 def test_bound_ubtree_selects_external_serving_backend():

@@ -445,6 +445,13 @@ class MTPModule(nn.Module):
 
     def __init__(self, args: TextModelArgs):
         super().__init__()
+        if args.mtp_num_hidden_layers > 1:
+            # The draft step runs only layers[0]; a deeper head would silently
+            # reuse its first module for every step (vllm #62111).
+            raise ValueError(
+                f"mtp_num_hidden_layers={args.mtp_num_hidden_layers} is unsupported; "
+                "this MTP head runs exactly one layer"
+            )
         self.fc = nn.Linear(2 * args.hidden_size, args.hidden_size, bias=False)
         self.pre_fc_norm_embedding = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.pre_fc_norm_hidden = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
