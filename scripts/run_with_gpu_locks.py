@@ -26,6 +26,12 @@ WAITERS = Path("/Users/Shared/mlxuag/gpu.lock.waiters")
 DEFAULT_SESSION = "codex-hils-declared-groups-20260930"
 # How long the head of the queue waits for a held lock before failing.
 HEAD_WAIT_SECONDS = 4 * 3600
+# A radio read that fails in transport (timeout, refused connection) while
+# the child runs is retried for this long, bounded by the last confirmed
+# lease expiry.  An ownership verdict (RuntimeError from validation) is never
+# retried.  2026-10-29: one 15 s timeout right after a reboot tore down a
+# Flash-Next ladder.
+OBSERVE_TRANSIENT_GRACE_SECONDS = 180
 MODEL_PROCESS = re.compile(
     r"-m\s+mlx2\.(?:server|decisions\.server)(?:\s|$)|mlx_lm\.server|mlx_vlm\.server|rapid-mlx|llama-server|"
     r"qualify_hils_declared_groups\.py",
@@ -214,21 +220,79 @@ def release(backups: list[tuple[Path, Path | None]]) -> list[dict]:
     return [{"path": str(path), **snapshot(path)} for path in LOCKS]
 
 
+def descendant_pids(root: int) -> list[int]:
+    """Every live descendant of ``root``, whatever session or group it is in.
+
+    A stage may start its own children with ``start_new_session``; those
+    leave the wrapper's process group, so ``killpg`` alone cannot reach them.
+    Snapshot the tree before signalling: once a parent dies its children are
+    reparented to launchd and no longer trace back to ``root``.
+    """
+    try:
+        rows = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True,
+                              text=True, check=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children: dict[int, list[int]] = {}
+    for row in rows.splitlines():
+        fields = row.split()
+        if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    found, stack = [], [root]
+    while stack:
+        for pid in children.get(stack.pop(), []):
+            if pid not in found:
+                found.append(pid)
+                stack.append(pid)
+    return found
+
+
+def _signal_tree(child: subprocess.Popen, tree: list[int], sig: int) -> None:
+    try:
+        os.killpg(child.pid, sig)
+    except ProcessLookupError:
+        pass
+    for pid in tree:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+def _alive(pids: list[int]) -> list[int]:
+    alive = []
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+            alive.append(pid)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            alive.append(pid)
+    return alive
+
+
 def stop_child(child: subprocess.Popen | None, receipt: dict) -> None:
-    """Stop the whole child session before releasing shared GPU ownership."""
+    """Stop the child and every descendant before releasing GPU ownership."""
     if child is None or child.poll() is not None:
         return
     receipt["child_terminated_by_wrapper"] = True
-    try:
-        os.killpg(child.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        child.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=30)
+    tree = descendant_pids(child.pid)
+    receipt["child_descendants_signalled"] = tree
+    _signal_tree(child, tree, signal.SIGTERM)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and (child.poll() is None or _alive(tree)):
+        time.sleep(0.5)
+    if child.poll() is None or _alive(tree):
+        _signal_tree(child, _alive(tree), signal.SIGKILL)
         receipt["child_killed_by_wrapper"] = True
+        try:
+            child.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+    survivors = _alive(tree)
+    if survivors:
+        receipt["child_descendants_surviving"] = survivors
     receipt["command_returncode"] = child.returncode
 
 
@@ -377,12 +441,29 @@ def main(argv: list[str] | None = None) -> int:
         child = subprocess.Popen(command, start_new_session=True)
         receipt["child_pid"] = child.pid
         save()
+        last_confirmed = time.time()
         while True:
             try:
                 rc = child.wait(timeout=10)
                 break
             except subprocess.TimeoutExpired:
-                renewed_owner, live = observe_ownership(args)
+                try:
+                    renewed_owner, live = observe_ownership(args)
+                except RuntimeError:
+                    raise  # an ownership verdict, never transient
+                except Exception as exc:  # noqa: BLE001 - transport failure
+                    now = time.time()
+                    expiry = (receipt.get("live_lease") or live_lease or {}).get(
+                        "lease_expires_at")
+                    if (now - last_confirmed > OBSERVE_TRANSIENT_GRACE_SECONDS
+                            or type(expiry) not in (int, float) or expiry <= now + 15):
+                        raise
+                    errors = receipt.setdefault("transient_observe_errors", [])
+                    errors.append({"at": now, "error": f"{type(exc).__name__}: {exc}"[:300]})
+                    del errors[:-20]
+                    save()
+                    continue
+                last_confirmed = time.time()
                 if any(renewed_owner.get(key) != cpg_owner.get(key)
                        for key in ("pid", "agent_id", "cpg_task", "cpg_session", "cpg_generation")):
                     raise RuntimeError("CPG ownership changed during GPU unit")

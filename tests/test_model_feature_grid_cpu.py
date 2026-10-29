@@ -75,6 +75,8 @@ def test_the_committed_decisions_carry_the_checkpoint_dimension():
     _builder().validate_decisions(rows)
 
 
+@pytest.mark.skipif(not (ROOT / 'docs/research/model-feature-decisions.tsv').is_file(),
+                    reason='the decision ledger is private evidence')
 def test_source_reviewed_features_have_explicit_inventory_slots():
     builder = _builder()
     with (ROOT / 'docs/research/model-feature-decisions.tsv').open(newline='') as handle:

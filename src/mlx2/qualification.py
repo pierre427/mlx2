@@ -86,6 +86,8 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-10-29: run-local qsa_b1_selected observation (the
+    # one-token selected-block QSA candidate).
     # Re-pinned 2026-10-29: adaptive benchmark settings binding ignores
     # PROVENANCE_ONLY_SETTINGS (live cache_bytes_headroom readings).
     # Re-pinned 2026-10-26: lazy QSA visibility requires run-local engagement.
@@ -321,7 +323,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-24: explicit source-owned greedy/refusal sampling
     # scope requires named controls/repeat/refusal evidence and cannot claim
     # stochastic coverage; absence preserves the historical sampling suite.
-    "sha256": "e20fdbd0a03bd5bcfe5b10c403a8c05b42e6ecabaa8d55fe15585c2237438e48",
+    "sha256": "060f083608355976b8f94deff6679fba3be04167a83d91bc8f90eb97a9eb742e",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -1302,6 +1304,16 @@ def _default_on_mechanisms(settings):
             )
         else:
             batch_decode("qsa_batch_decode_sparse")
+    if adapter_policy.get("qsa_b1_selected") is True:
+        # One-token rows with an explicit selection: the qualifier's B=1
+        # near-limit decode once it passes the indexer budget.
+        if indexer["probe_blocks"] > (indexer["topk_blocks"] if indexer["fused_shortcircuit"] else 0):
+            required.add("qsa_b1_selected")
+        else:
+            not_observed["qsa_b1_selected"] = (
+                f"near-limit probe context {indexer['probe_context']} stays within "
+                f"the indexer budget {indexer['budget']}: no explicit one-token selection"
+            )
     if adapter_policy.get("qsa_nax_batched") is True:
         if width < 2:
             not_observed["qsa_nax_batched"] = (

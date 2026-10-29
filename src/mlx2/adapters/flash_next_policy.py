@@ -29,6 +29,11 @@ _OPTIONAL_KERNEL_ENV = {
     # each selection, so TTFT measured with it on is not comparable).
     "qsa_stage1_select_timing": "MLX_QWEN4_QSA_STAGE1_SELECT_TIMING",
     "qsa_stage1_gvr_count_paths": "MLX_QWEN4_QSA_STAGE1_GVR_COUNT_PATHS",
+    # One-token QSA decode over the selected blocks only
+    # (runtime/models/qwen4_qsa_b1_selected.py).  Not bit-exact with the
+    # masked SDPA; unqualified.  Clean decode A/B: 4K neutral, 32K -0.88
+    # ms/token, 64K -1.72 ms/token (qualification/runs/fn-lily-b1-ab-clean-20261029).
+    "qsa_b1_selected": "MLX_QWEN4_QSA_B1_SELECTED",
 }
 
 
@@ -125,6 +130,7 @@ class FlashNextPolicy:
     #     (MLX_GDN_CORE); parity on this geometry unestablished.
     moe_router_kernel: bool = False
     qsa_nax_decode: bool = False
+    qsa_b1_selected: bool = False
     # llama.cpp #30965 mechanism; no full-model/GPU qualification yet.
     qsa_lazy_causal_mask: bool = False
     gdn_core: bool = False

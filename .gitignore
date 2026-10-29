@@ -27,3 +27,6 @@ qualification/runs/ds41-options-*/source/
 qualification/runs/ds41-options-*/rejected-source-attempt-*/
 qualification/runs/ds41-options-*/admin-token
 qualification/runs/ds41-options-*/apcv2/
+
+# Per-run loopback admin tokens and signing keys written by campaign drivers.
+qualification/runs/**/.runtime/

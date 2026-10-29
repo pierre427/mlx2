@@ -359,6 +359,7 @@ ENGAGED = _merged(HISTORY, {
             "low_bit_lane": {"count": 2, "intended": 2, "refused": {}},
         },
         "qsa_batch_decode_sparse": {"engagements": 3},
+        "qsa_b1_selected": {"calls": 12},
         "moe_nax_gather": {"mode": "gather", "calls": {"gather": 3}},
         "fused_gdn_decode": {"fused_calls": 5},
         "decode_wins": {
@@ -448,6 +449,7 @@ GROWTH = {
             "moe", "moe_window", "calls", "batch_decode"),
         "moe_window_verify": _X + ("moe", "moe_window", "calls", "verify"),
         "qsa_batch_decode_sparse": _X + ("qsa_batch_decode_sparse", "engagements"),
+        "qsa_b1_selected": _X + ("qsa_b1_selected", "calls"),
         "qsa_nax_batched": _X + (
             "qsa_nax_prefill", "counts", "engaged_auto_batched"),
         "mtp_draft_vocab": _X + ("mtp_draft_vocab", "reduced_head_calls"),

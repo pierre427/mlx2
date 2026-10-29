@@ -270,3 +270,155 @@ def test_desktop_lease_matches_ancestor_job_and_live_radio(tmp_path, monkeypatch
     payload['owner_agent_id'] = 'reassigned'
     with pytest.raises(RuntimeError, match='owner'):
         module.observe_desktop_lease(path, 'session', 'job', 'unused')
+
+
+def test_signal_stops_a_grandchild_in_its_own_session(tmp_path):
+    # 2026-10-29: campaign.py died on the wrapper's SIGTERM while run_profile
+    # and its server, each started with start_new_session, kept running
+    # unlocked.  killpg on the child's group cannot reach them.
+    import os
+    import subprocess
+    import sys
+    import time
+
+    locks = (tmp_path / "shared.lock", tmp_path / "tmp.lock")
+    for lock in locks:
+        lock.touch()
+    ready = tmp_path / "grandchild-ready"
+    receipt = tmp_path / "receipt.json"
+    grandchild_code = (
+        "import os,time; from pathlib import Path; "
+        f"Path({str(ready)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    )
+    child_code = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {grandchild_code!r}], start_new_session=True); "
+        "time.sleep(60)"
+    )
+    bootstrap = f"""
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("wrapper", {str(SCRIPT)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.LOCKS = tuple(Path(p) for p in {tuple(map(str, locks))!r})
+module.WAITERS = Path({str(tmp_path / 'waiters')!r})
+module.foreign_model_processes = list
+module.observe_cpg = lambda *args: (dict(cpg_task="task", cpg_session="session", cpg_generation=1, agent_id="agent"), dict(status="leased"))
+raise SystemExit(module.main([
+    "--cpg-owner-lock", "unused", "--cpg-task", "task",
+    "--session", "cpu-grandchild-test", "--label", "cleanup", "--receipt", {str(receipt)!r},
+    "--", sys.executable, "-c", {child_code!r},
+]))
+"""
+    wrapper = subprocess.Popen([sys.executable, "-c", bootstrap])
+    grandchild_pid = None
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and wrapper.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "CPU grandchild did not start"
+        grandchild_pid = int(ready.read_text())
+        os.kill(wrapper.pid, 15)
+        assert wrapper.wait(timeout=60) == 130
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        with pytest.raises(ProcessLookupError):
+            os.kill(grandchild_pid, 0)
+        recorded = json.loads(receipt.read_text())
+        assert grandchild_pid in recorded["child_descendants_signalled"]
+        assert "child_descendants_surviving" not in recorded
+    finally:
+        if wrapper.poll() is None:
+            wrapper.kill()
+            wrapper.wait(timeout=10)
+        if grandchild_pid is not None:
+            try:
+                os.kill(grandchild_pid, 9)
+            except ProcessLookupError:
+                pass
+
+
+def _watch_run(monkeypatch, tmp_path, observations, grace=None):
+    """Run main in-process: the child waits three 10 s ticks, then exits 0.
+
+    ``observations`` yields the result (or exception) of each ownership
+    observation; the first is the pre-acquire check.
+    """
+    import time as real_time
+
+    module = _load_module()
+    if grace is not None:
+        monkeypatch.setattr(module, "OBSERVE_TRANSIENT_GRACE_SECONDS", grace)
+    locks = (tmp_path / "shared.lock", tmp_path / "tmp.lock")
+    for lock in locks:
+        lock.touch()
+    monkeypatch.setattr(module, "WAITERS", tmp_path / "waiters")
+    monkeypatch.setattr(module, "LOCKS", locks)
+    monkeypatch.setattr(module, "foreign_model_processes", list)
+    stopped = []
+    monkeypatch.setattr(module, "stop_child", lambda child, receipt: stopped.append(child))
+
+    class FakeChild:
+        pid = 4242
+        returncode = None
+        ticks = 3
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            if self.ticks:
+                self.ticks -= 1
+                raise module.subprocess.TimeoutExpired("child", timeout)
+            self.returncode = 0
+            return 0
+
+    child = FakeChild()
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *args, **kwargs: child)
+    owner = dict(cpg_task="task", cpg_session="session", cpg_generation=1, agent_id="agent")
+    lease = dict(status="leased", lease_expires_at=real_time.time() + 600)
+    results = iter(observations)
+
+    def observe(*args):
+        result = next(results)
+        if isinstance(result, BaseException):
+            raise result
+        return owner, lease
+
+    monkeypatch.setattr(module, "observe_cpg", observe)
+    receipt = tmp_path / "receipt.json"
+    rc = module.main([
+        "--cpg-owner-lock", "unused", "--cpg-task", "task",
+        "--session", "watch-test", "--label", "cell", "--receipt", str(receipt),
+        "--", "ignored-command",
+    ])
+    return module, rc, json.loads(receipt.read_text()), stopped
+
+
+def test_transient_radio_timeout_does_not_tear_down_the_unit(monkeypatch, tmp_path):
+    _, rc, recorded, _ = _watch_run(
+        monkeypatch, tmp_path, [None, TimeoutError("radio"), None, None])
+    assert rc == 0
+    assert recorded["status"] == "command_completed"
+    assert [e["error"] for e in recorded["transient_observe_errors"]] == ["TimeoutError: radio"]
+
+
+def test_ownership_verdict_is_never_treated_as_transient(monkeypatch, tmp_path):
+    _, rc, recorded, stopped = _watch_run(
+        monkeypatch, tmp_path, [None, RuntimeError("live CPG lease is expired or malformed")])
+    assert rc != 0
+    assert recorded["status"] == "error"
+    assert "RuntimeError" in recorded["error"] and stopped
+
+
+def test_transport_failure_past_the_grace_window_stops_the_unit(monkeypatch, tmp_path):
+    _, rc, recorded, stopped = _watch_run(
+        monkeypatch, tmp_path, [None, TimeoutError("radio")], grace=-1)
+    assert rc != 0
+    assert recorded["error"] == "TimeoutError: radio" and stopped

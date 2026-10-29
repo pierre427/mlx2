@@ -424,14 +424,25 @@ class FlashNextAdapter:
         "num_draft": 3,
         "lane_dense": True,
     }
+    # Ordinary-route default since 2026-10-29 (Pierre): one-token QSA decode
+    # over the selected blocks only.  Clean decode A/B on 25c2da42: 4K
+    # neutral, 32K -0.88 ms/token, 64K -1.72 ms/token
+    # (qualification/runs/fn-lily-b1-ab-clean-20261029); the ordinary
+    # qualification smoke passed with it (fn-lily-b1-smoke-20261029).  Native MTP
+    # does not take it: its verify steps are multi-row and the kernel only
+    # admits one row, so it was never tested there.  Unqualified.
+    _ORDINARY_DECODE = {
+        "qsa_b1_selected": True,
+    }
     adapter_owned_default_policy_keys = frozenset(
-        {*_SELECTED_KERNELS, *_NATIVE_MTP_DECODE}
+        {*_SELECTED_KERNELS, *_NATIVE_MTP_DECODE, *_ORDINARY_DECODE}
     )
     default_route_execution_policy = {
         "ordinary": {
             "host_memory_signals": {"enabled": True},
             "decode_first": {"enabled": True, "shared_prefill_budget": False},
             **_SELECTED_KERNELS,
+            **_ORDINARY_DECODE,
         },
         "native_mtp": {
             "host_memory_signals": {"enabled": True},
@@ -1166,6 +1177,7 @@ class FlashNextAdapter:
         from ..runtime.models.flash_tensorfold_qmv import counters as tensorfold_qmv_counters
         from ..runtime.models.varlen_dense_mlp import status as varlen_mlp_status
         from ..runtime.models.qwen4_ple_nvme import ple_table_diagnostics
+        from ..runtime.models.qwen4_qsa_b1_selected import status as _qsa_b1_status
 
         from ..runtime.models.qwen4_exp import (
             qwen4_eager_dispatch_status,
@@ -1363,6 +1375,14 @@ class FlashNextAdapter:
                 {"qsa_nax_decode": nax_decode}
                 if (nax_decode := qsa_nax_decode_status())["attempts"]
                 or getattr(self.policy, "qsa_nax_decode", False)
+                else {}
+            ),
+            # One-token selected-block QSA (opt-in candidate): absent while
+            # off and unused so default receipts are unchanged.
+            **(
+                {"qsa_b1_selected": b1_status}
+                if (b1_status := _qsa_b1_status())["calls"]
+                or getattr(self.policy, "qsa_b1_selected", False)
                 else {}
             ),
             # oMLX #4070 batched one-token sparse arm: absent while off and

@@ -4957,7 +4957,8 @@ class BatchRotatingKVCache(_BaseCache):
         quant_cache = BatchRotatingQuantizedKVCache(
             self.max_size, self.left_padding.tolist(), group_size=group_size, bits=bits
         )
-        quant_cache.offset = self.offset
+        # A copy: each cache advances its own offset in place.
+        quant_cache.offset = mx.array(self.offset)
         quant_cache._idx = self._idx
         quant_cache._offset = self._offset
         quant_cache.rotated = self.rotated

@@ -968,6 +968,18 @@ def test_flash_next_defaults_its_selected_kernels_on_both_routes(route):
     assert "varlen_sparse_moe" not in policy
 
 
+def test_flash_next_selected_block_decode_is_an_ordinary_default_only():
+    # fn-lily-b1-ab-clean-20261029; default on the ordinary route (Pierre).
+    ordinary = resolve_execution_policy_defaults(
+        None, ORDINARY, _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
+    )
+    assert ordinary["qsa_b1_selected"] is True
+    mtp = resolve_execution_policy_defaults(
+        None, MTP, _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
+    )
+    assert "qsa_b1_selected" not in mtp
+
+
 @pytest.mark.parametrize(
     ("adapter_type", "descriptor"),
     [(Qwen3827BAdapter, QWEN38_27B), (Qwen3635BA3BAdapter, qwen36(has_mtp=True))],
@@ -975,6 +987,7 @@ def test_flash_next_defaults_its_selected_kernels_on_both_routes(route):
 def test_flash_next_selected_kernels_are_not_inherited(adapter_type, descriptor):
     policy = resolve_execution_policy_defaults(None, MTP, _resolution(adapter_type, descriptor))
     assert not set(FN_SELECTED_KERNELS) & set(policy)
+    assert "qsa_b1_selected" not in policy
 
 
 def test_operator_value_wins_over_a_selected_kernel_default():

@@ -1018,6 +1018,8 @@ def test_historical_sparse_qsa_smoke_no_longer_passes_without_engagement(qualify
     assert qualify.feature_observations(final)["qsa_batch_decode_sparse"] == 0
 
 
+@pytest.mark.skipif(not (FN / "qsa_sparse_indexed--mtp2" / "status-final.json").is_file(),
+                    reason="private campaign evidence is not distributed")
 def test_historical_native_mtp_sparse_qsa_smoke_is_labelled_unreachable():
     # Width-3 static handoff: the qualifier's B2 long-context cohort stays on
     # MTP verify, so the run is "selected, not observed", never a pass.

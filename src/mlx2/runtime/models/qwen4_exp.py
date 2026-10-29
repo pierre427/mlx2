@@ -94,6 +94,7 @@ from .qwen4_gate_inject import (
 from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
 from . import qwen4_fused_gdn_prefill as _gdn_prefill
 from . import qwen4_attn_rows as _attn_rows
+from . import qwen4_qsa_b1_selected as _qsa_b1
 from . import qwen4_qsa_visibility as _qsa_visibility
 from .qwen4_qsa_visibility import QSAVisibility
 from . import qwen4_qsa_scores as _qsa_scores
@@ -4956,8 +4957,10 @@ class BatchQSAQuantizedKVCache(BatchQSAKVCache):
             value_bits=value_bits,
             rotate=rotate,
         )
-        cache.left_padding = source.left_padding
-        cache.offset = source.offset
+        # Copies: each cache advances its own offset in place, and a shared
+        # array would move the source's cursor past its K/V.
+        cache.left_padding = mx.array(source.left_padding)
+        cache.offset = mx.array(source.offset)
         cache._idx = source._idx
         cache._right_padding = source._right_padding
         if source.keys is not None:
@@ -6562,6 +6565,11 @@ class QSAIndexer(nn.Module):
         offset = 0 if cache is None else cache.offset
         left_pad = None
         if isinstance(offset, mx.array):
+            # A snapshot, not the cache's own array: update_and_fetch advances
+            # a batch cache's offset in place, and positions derived from
+            # this selection after that update would count the new rows
+            # (fn-b1-coldwarm-20261029).
+            offset = mx.array(offset)
             left_pad = cache.left_padding.astype(offset.dtype)
         shared_topk = (
             getattr(cache, "_mtp_shared_topk", None) if cache is not None else None
@@ -7120,6 +7128,33 @@ class Attention(nn.Module):
             (k, v) = _fetched_kv
         elif cache is not None:
             (k, v) = cache.update_and_fetch(k, v)
+        if _qsa_b1.enabled() and length == 1:
+            reason = (
+                "batch" if batch != 1
+                else "selection not explicit" if selection.kind != "explicit"
+                else "nax or gather arm" if (use_nax or use_gather)
+                else "fetched or deferred call" if (
+                    _fetched_kv is not None or _defer_sdpa is not None or _return_pre_o)
+                else "invariant lane or training" if (lane or self.training)
+                else "quantized cache" if quantized_indexed is not None
+                else "no cache buffers" if (cache is None or getattr(cache, "keys", None) is None)
+                else None
+            )
+            pad = selection.left_padding if selection.left_padding is not None else 0
+            if reason is None:
+                reason = _qsa_b1.refusal(
+                    q, cache.keys, cache.values, selection.raw_block_ids, selection.offset
+                )
+            if reason is None:
+                # It also takes the one-row indexed arm (64K+), whose exact
+                # two-pass kernel is slower at B1 (fn-lily-indexed-profile).
+                out = _qsa_b1.attention(
+                    q, cache.keys, cache.values, selection.raw_block_ids,
+                    q_pos=_qsa_b1.own_position(cache, pad), left_pad=pad,
+                    scale=self.scale, gate=mx.sigmoid(gate_heads),
+                )
+                return self.o_proj(out)
+            _qsa_b1.decline(reason)
         if use_nax:
             (ids, counts, n_sel, u_width, q_pos, left_pad, total) = (
                 compact_blocks_to_kernel_inputs(selection.compact_blocks())
