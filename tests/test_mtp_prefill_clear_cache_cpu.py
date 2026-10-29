@@ -84,4 +84,5 @@ def test_batch_generator_passes_the_prefill_clear_cache_decision():
     from mlx2.runtime import generate
 
     source = inspect.getsource(generate.BatchGenerator)
-    assert source.count("clear_cache=prefill_clear_cache(self._has_active_decode())") == 2
+    # Lane preparation, one-lane slices and batched cold slices.
+    assert source.count("clear_cache=prefill_clear_cache(self._has_active_decode())") == 3

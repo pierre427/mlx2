@@ -380,6 +380,12 @@ _ENGINE_EVENTS = {
     "stall_watchdog_scheduler_starvation": ("stall_watchdog", "scheduler_starvation"),
     "memory_admission_depth_floor_admits": ("memory_admission", "depth_floor_admit"),
     "memory_pressure_evictions": ("memory_admission", "cache_eviction"),
+    "memory_pressure_evictions_queued_protected": (
+        "memory_admission", "cache_eviction_queued_protected"
+    ),
+    "memory_pressure_evictions_deferred_preparing": (
+        "memory_admission", "cache_eviction_deferred_preparing"
+    ),
     "memory_cache_reclaims_before_reject": (
         "memory_admission", "allocator_reclaim_before_reject"
     ),
@@ -559,6 +565,7 @@ _SCHEDULER_GAUGES = frozenset(
         "decode_fairness_contended_forward_max_us",
         "decode_fairness_contended_gap_max_us",
         "decode_fairness_contended_gap_other_max_us",
+        "mtp_batched_prefill_max_width",
     }
 )
 
@@ -576,6 +583,14 @@ _SCHEDULER_EVENTS = frozenset(
         "adaptive_prefill_deadline_forced_rounds",
         "adaptive_prefill_apc_priority_admissions",
         "mtp_short_prefill_interleaved",
+        "mtp_prefill_plan_exact_reshaped",
+        "mtp_batched_prefill_rounds",
+        "mtp_batched_prefill_lanes",
+        "mtp_batched_prefill_rows",
+        "mtp_batched_prefill_one_chunk_lanes",
+        "mtp_batched_prefill_refused",
+        "mtp_batched_prefill_declined_contended",
+        "ordinary_prefill_plan_exact_reshaped",
         "short_prefill_overflow_admissions",
         "cache_capsule_fallbacks",
         "cache_capsule_engaged",

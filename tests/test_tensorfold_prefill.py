@@ -406,6 +406,7 @@ def test_scan_carry_matches_the_actual_delta_recurrence_on_cpu(monkeypatch):
     gate, beta = mx.full((2, 273, 1), 0.98), mx.full((2, 273, 1), 0.5)
     state = mx.ones((2, 1, 3, 2)) * 0.2
     monkeypatch.setattr(gdn, "_core_layout_supported", lambda *args: True)
+    monkeypatch.setattr(gdn, "_CORE_ACCEPTS_CHUNK_SIZE", True)
 
     def core(q, k, v, g, beta, *, initial_state, **kw):
         return gdn.gated_delta_ops(q, k, v, g, beta, initial_state)
@@ -451,6 +452,7 @@ def test_scan_continuation_consumes_each_segment_and_carries_state(monkeypatch):
     state = mx.array([3.0])
     stats, seen = Counter(), []
     monkeypatch.setattr(gdn, "_core_layout_supported", lambda *a: True)
+    monkeypatch.setattr(gdn, "_CORE_ACCEPTS_CHUNK_SIZE", True)
 
     def core(q, k, v, g, beta, *, initial_state, stream, chunk_size):
         seen.append((int(q[0, 0, 0, 0].item()), q.shape[1], initial_state.item()))
@@ -487,6 +489,7 @@ def test_scan_refusal_does_not_call_core_or_mutate_state(monkeypatch, case, reas
     gate = mx.ones((1, n, 1))
     state, stats = mx.array([7.0]), Counter()
     monkeypatch.setattr(gdn, "_core_layout_supported", lambda *a: case != "layout")
+    monkeypatch.setattr(gdn, "_CORE_ACCEPTS_CHUNK_SIZE", True)
     monkeypatch.setattr(mx, "device_info", lambda: {"device_name": "Apple M3 Pro"})
 
     def forbidden(*a, **kw):

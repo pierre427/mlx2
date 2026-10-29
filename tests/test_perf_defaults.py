@@ -945,3 +945,58 @@ def test_flash_next_diagnostics_expose_qsa_nax_decode_counters():
         }
     finally:
         QE.qsa_nax_decode_status(reset=True)
+
+
+FN_SELECTED_KERNELS = {
+    "hc_prefill_kernels": True,
+    "ple_read_policy": "adaptive",
+    "qsa_lazy_causal_mask": True,
+    "qsa_batch_decode_sparse": "indexed",
+}
+
+
+@pytest.mark.parametrize("route", [MTP, ORDINARY])
+def test_flash_next_defaults_its_selected_kernels_on_both_routes(route):
+    # fn-composed-20261028: B1 prefill +39..+57%, no regression (Pierre).
+    policy = resolve_execution_policy_defaults(
+        None, route, _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
+    )
+    for key, value in FN_SELECTED_KERNELS.items():
+        assert policy[key] == value
+    # Withdrawn 2026-10-29: Flash-Next never pads a batched prefill, so the
+    # qualifier refused varlen sparse MoE as selected but unused.
+    assert "varlen_sparse_moe" not in policy
+
+
+@pytest.mark.parametrize(
+    ("adapter_type", "descriptor"),
+    [(Qwen3827BAdapter, QWEN38_27B), (Qwen3635BA3BAdapter, qwen36(has_mtp=True))],
+)
+def test_flash_next_selected_kernels_are_not_inherited(adapter_type, descriptor):
+    policy = resolve_execution_policy_defaults(None, MTP, _resolution(adapter_type, descriptor))
+    assert not set(FN_SELECTED_KERNELS) & set(policy)
+
+
+def test_operator_value_wins_over_a_selected_kernel_default():
+    policy = resolve_execution_policy_defaults(
+        {"hc_prefill_kernels": False}, MTP, _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
+    )
+    assert policy["hc_prefill_kernels"] is False
+    assert policy["qsa_lazy_causal_mask"] is True
+
+
+def test_flash_next_native_mtp_defaults_lane_dense_with_num_draft_three():
+    # fn-lane-dense-20261028 / fn-phase1-20261028 (seeded): B1 decode +19% at
+    # 1K and +17% at 32K over num_draft 2; width 4 flat.
+    resolution = _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
+    mtp = resolve_execution_policy_defaults(None, MTP, resolution)
+    assert (mtp["num_draft"], mtp["lane_dense"]) == (3, True)
+    assert "draft_loop_prior" not in mtp
+    ordinary = resolve_execution_policy_defaults(None, ORDINARY, resolution) or {}
+    assert not {"num_draft", "lane_dense", "draft_loop_prior"} & set(ordinary)
+    explicit = resolve_execution_policy_defaults({"num_draft": 2}, MTP, resolution)
+    assert explicit["num_draft"] == 2 and explicit["lane_dense"] is True
+    # A pinned num_draft 2 with the defaulted lane must still validate.
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    FlashNextPolicy.from_mapping({"num_draft": 2, "lane_dense": True})

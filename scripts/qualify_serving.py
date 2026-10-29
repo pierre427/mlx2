@@ -4010,8 +4010,18 @@ def validate_adaptive_benchmark(path, initial):
         benchmark.get("arms", {}).get(qualification_arm, {}).get("final_status")
         or {}
     )
+    from mlx2.qualification import PROVENANCE_ONLY_SETTINGS
+
+    def bound(key, status):
+        value = status.get(key)
+        if key != "settings" or not isinstance(value, dict):
+            return value
+        # Live readings such as cache_bytes_headroom change between the
+        # benchmark arm and the candidate server; only route identity binds.
+        return {k: v for k, v in value.items() if k not in PROVENANCE_ONLY_SETTINGS}
+
     for key in ("runtime", "artifact", "settings"):
-        if candidate_status.get(key) != initial.get(key):
+        if bound(key, candidate_status) != bound(key, initial):
             raise ValueError(
                 f"benchmark {qualification_arm} arm {key} does not match "
                 "the candidate server"

@@ -86,6 +86,8 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-10-29: adaptive benchmark settings binding ignores
+    # PROVENANCE_ONLY_SETTINGS (live cache_bytes_headroom readings).
     # Re-pinned 2026-10-26: lazy QSA visibility requires run-local engagement.
     # Re-pinned 2026-10-14: the rolling probe sizes its prompt with the
     # engine's shared reach rule (state_boundaries.rolling_reuse_prompt_tokens),
@@ -319,7 +321,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-24: explicit source-owned greedy/refusal sampling
     # scope requires named controls/repeat/refusal evidence and cannot claim
     # stochastic coverage; absence preserves the historical sampling suite.
-    "sha256": "83e097e6ffeca08f4af8aa8e1f1d47fd617eaae7995edb5b6906a0d9cf05ef50",
+    "sha256": "e20fdbd0a03bd5bcfe5b10c403a8c05b42e6ecabaa8d55fe15585c2237438e48",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -779,6 +781,9 @@ def required_feature_checks(settings):
 # The qualifier's batch probe sends this many concurrent requests (the widest
 # deterministic cohort it drives; scripts/qualify_serving.py "batch" check).
 QUALIFIER_BATCH_WIDTH = 4
+# Width of the qualifier's long-context shared cohort (qualify_serving.py
+# shared_pair): the only concurrent request set at or above 32K tokens.
+QUALIFIER_LONG_CONTEXT_COHORT_WIDTH = 2
 # The qualifier's one-request near-limit probe renders a prompt above
 # max_context - LONG_CONTEXT_HEADROOM (scripts/qualify_serving.py
 # near_limit_prompt_floor) and decodes from there, so every decode step of it
@@ -1275,6 +1280,25 @@ def _default_on_mechanisms(settings):
             not_observed["qsa_batch_decode_sparse"] = (
                 f"max_context {settings.get('max_context')} is below its "
                 f"selected {minimum}-token floor"
+            )
+        elif (
+            native_mtp
+            and handoff_width is not None
+            and handoff.get("adaptive_park") is None
+            and not _cost_per_commit_selected(handoff)
+            and handoff_width >= QUALIFIER_LONG_CONTEXT_COHORT_WIDTH
+        ):
+            # Its domain is batched one-token decode at or above the floor.
+            # The qualifier's only long-context concurrent workload is the
+            # B2 shared cohort; a static handoff at this width keeps it on
+            # MTP verify, so no qualifier request can reach the domain here
+            # (Flash-Next adac448c handoff-qualify: 1908 attempts, all dense
+            # by construction).  The ordinary-route smoke covers it.
+            not_observed["qsa_batch_decode_sparse"] = (
+                f"native MTP stays MTP up to width {handoff_width}; the "
+                f"qualifier's long-context cohort is B"
+                f"{QUALIFIER_LONG_CONTEXT_COHORT_WIDTH} and never reaches "
+                f"batched one-token decode at {minimum} tokens"
             )
         else:
             batch_decode("qsa_batch_decode_sparse")

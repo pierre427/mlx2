@@ -20,6 +20,22 @@ _CORE_GDN_HEADS = frozenset(
     {(24, 24), (32, 32), (16, 16), (16, 32), (16, 48), (16, 64)}
 )
 _core_gated_delta_update = getattr(mx.fast, "gated_delta_update", None)
+
+
+def _accepts_chunk_size(fn) -> bool:
+    """Whether this MLX build's primitive takes ``chunk_size``.
+
+    Stock MLX 0.32.4 does not (its signature ends at ``mask, stream``); the
+    custom 39400a0d4 build did. The nanobind signature is only visible in
+    the docstring's first line.
+    """
+    doc = getattr(fn, "__doc__", None) or ""
+    return "chunk_size" in doc.split("\n", 1)[0]
+
+
+_CORE_ACCEPTS_CHUNK_SIZE = (
+    _core_gated_delta_update is not None and _accepts_chunk_size(_core_gated_delta_update)
+)
 # Observed-use counter of MLX_GDN_CORE (graph-build count, no device sync):
 # recurrences routed to mx.fast.gated_delta_update by the 17..256-row rule.
 _GDN_CORE_CALLS = 0
@@ -35,6 +51,7 @@ def gdn_core_status() -> dict:
     return {
         "enabled": _ENABLE_GDN_CORE,
         "available": _core_gated_delta_update is not None,
+        "chunk_size": _CORE_GDN_CHUNK_SIZE if _CORE_ACCEPTS_CHUNK_SIZE else "primitive_default",
         "calls": _GDN_CORE_CALLS,
     }
 
@@ -138,6 +155,8 @@ def _chunked_prefill(
     reason = None
     if _core_gated_delta_update is None:
         reason = "primitive_unavailable"
+    elif not _CORE_ACCEPTS_CHUNK_SIZE:
+        reason = "chunk_size_unsupported"
     elif mask is not None or g.ndim != 3:
         reason = "masked_or_vector_gate"
     elif q.shape[1] < _CORE_GDN_MIN_T:
@@ -192,6 +211,11 @@ def install_prefill_scan(model, chunk_size, segment_rows=2048):
         )
     if chunk_size != 32 and _core_gated_delta_update is None:
         raise ValueError("prefill scan requires mx.fast.gated_delta_update")
+    if chunk_size != 32 and not _CORE_ACCEPTS_CHUNK_SIZE:
+        raise ValueError(
+            f"prefill scan chunk {chunk_size} requires an mx.fast.gated_delta_update "
+            "that accepts chunk_size; this MLX build does not"
+        )
     from .gdn_chunk32 import HEAD_CONFIGS
     heads = HEAD_CONFIGS if chunk_size == 32 else _CORE_GDN_HEADS
     stats, count = Counter(), 0
@@ -633,6 +657,7 @@ def gated_delta_update(
             return result
     if _can_use_core_gated_delta(q, k, v, g, state, mask):
         _count_gdn_core_call()
+        chunking = {"chunk_size": _CORE_GDN_CHUNK_SIZE} if _CORE_ACCEPTS_CHUNK_SIZE else {}
         return _core_gated_delta_update(
             q,
             k,
@@ -641,6 +666,6 @@ def gated_delta_update(
             beta,
             initial_state=state,
             stream=mx.gpu,
-            chunk_size=_CORE_GDN_CHUNK_SIZE,
+            **chunking,
         )
     return gated_delta_kernel(q, k, v, g, beta, state, mask)

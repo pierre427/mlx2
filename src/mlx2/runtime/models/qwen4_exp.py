@@ -7461,6 +7461,123 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
         mixed = self.hyper_connection_mixer(hidden)
         return (mixed, hidden) if return_hyper else mixed
 
+    def mixed_refusal(self):
+        """Why the current process cannot run :meth:`mixed`, or None.
+
+        The shape-stable and invariant modes split or re-law every forward
+        by width; packing rows across segments would void what they claim.
+        """
+        if self.pipeline_size != 1:
+            return "pipeline parallelism"
+        if _SHAPE_STABLE_SHORT_FORWARD or _GDN_SHAPE_STABLE_PROJECTIONS:
+            return "shape-stable forward mode"
+        if _invariant.active():
+            return "invariant prefill"
+        return None
+
+    def mixed(self, segments):
+        """One trunk forward over several ``(tokens [rows, length], caches)``.
+
+        Per-token work runs once on the packed ``[1, N, hc*D]`` stream: the
+        embedding, both hyper-connection splits and injects, the sparse MoE
+        and the final mixer.  Everything that reads a cache or a lane's token
+        history runs per segment against that segment's own cache and masks,
+        through the same modules as the ordinary forward: the PLE n-gram
+        layer (host-side id windows and its conv/token history), the gated
+        delta recurrence, and QSA attention with its indexer.  So each lane's
+        GDN, PLE and QSA state advances exactly as in its own forward given
+        the same layer inputs; only the packed MoE/HC rows may round
+        differently (prefill-width kernels).  Returns the mixer output per
+        segment as ``[rows, length, D]``, as ``__call__`` returns it.
+        """
+        refusal = self.mixed_refusal()
+        if refusal is not None:
+            raise ValueError(f"mixed forward is not available under {refusal}")
+        if not segments:
+            raise ValueError("mixed forward needs at least one segment")
+        n_layers = len(self.layers)
+        plan, embeds, start = [], [], 0
+        for tokens, caches in segments:
+            if not isinstance(tokens, mx.array) or tokens.ndim != 2 or tokens.size == 0:
+                raise ValueError(
+                    "each mixed segment needs a nonempty [rows, length] token array"
+                )
+            if caches is None or len(caches) != n_layers:
+                raise ValueError("each mixed segment needs one cache per layer")
+            if any(bool(getattr(c, "speculating", False)) for c in caches):
+                raise ValueError("mixed forward cannot run inside a speculative transaction")
+            if any(getattr(c, "_step_lengths", None) is not None for c in caches):
+                raise ValueError("mixed forward cannot carry a prepared verify block")
+            rows, length = tokens.shape
+            hidden = mx.tile(self.embed_tokens(tokens), (1, 1, self.args.hc_count))
+            fa_mask = (
+                qsa_attention_mask(hidden, caches[self.fa_idx])
+                if self.fa_idx is not None else None
+            )
+            ssm_mask = (
+                create_ssm_mask(hidden, caches[self.ssm_idx])
+                if self.ssm_idx is not None else None
+            )
+            plan.append((rows, length, start, tokens, caches, fa_mask, ssm_mask))
+            embeds.append(hidden.reshape(1, rows * length, -1))
+            start += rows * length
+        x = mx.concatenate(embeds, axis=1)
+
+        def per_segment(packed, fn):
+            outs = []
+            for (rows, length, begin, tokens, caches, fa_mask, ssm_mask) in plan:
+                part = packed[:, begin : begin + rows * length].reshape(rows, length, -1)
+                out = fn(part, tokens, caches, fa_mask, ssm_mask)
+                outs.append(out.reshape(1, rows * length, -1))
+            return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=1)
+
+        gate_inject = fused_gate_inject_enabled()
+        # The prompt slice decides the MoE phase (NAX gather admission) for
+        # the packed stream, as its own forward would.
+        lead = max(plan, key=lambda entry: entry[1])
+        with _moe_nax.forward_scope(lead[3], lead[4]), _hc_prefill.scope(
+            not self.training and x.shape[1] >= 9
+        ):
+            for index, layer in enumerate(self.layers):
+                if layer.ple is not None:
+                    x = x + per_segment(
+                        x,
+                        lambda part, tokens, caches, _fa, ssm, ple=layer.ple, i=index:
+                            ple(part, tokens, caches[i], ssm),
+                    )
+                (mixed, residual, inject, raw) = _split_hyper(
+                    layer.attn_hyper_connection, x, gate_inject
+                )
+                if layer.is_linear:
+                    branch = per_segment(
+                        mixed,
+                        lambda part, _t, caches, _fa, ssm, mod=layer.linear_attn, i=index:
+                            mod(part, ssm, caches[i]),
+                    )
+                else:
+                    branch = per_segment(
+                        mixed,
+                        lambda part, _t, caches, fa, _ssm, mod=layer.self_attn, i=index:
+                            mod(part, fa, caches[i]),
+                    )
+                x = (
+                    _apply_raw_gate_inject(residual, branch, inject, training=self.training)
+                    if raw else _apply_inject(residual, branch, inject)
+                )
+                (mixed, residual, inject, raw) = _split_hyper(
+                    layer.mlp_hyper_connection, x, gate_inject
+                )
+                branch = layer.mlp(mixed)
+                x = (
+                    _apply_raw_gate_inject(residual, branch, inject, training=self.training)
+                    if raw else _apply_inject(residual, branch, inject)
+                )
+            out = self.hyper_connection_mixer(x)
+        return [
+            out[:, begin : begin + rows * length].reshape(rows, length, -1)
+            for (rows, length, begin, *_rest) in plan
+        ]
+
 
 class TextModel(nn.Module):
     apc_v2_layout = "qwen4-exp-layer-segments-v1"
@@ -7508,6 +7625,11 @@ class TextModel(nn.Module):
     def logits(self, hidden):
         return (self.model.embed_tokens.as_linear(hidden)
                 if self.args.tie_word_embeddings else self.lm_head(hidden))
+
+    def mixed_forward(self, segments):
+        """Prefill slices and decode cohorts in one forward; see
+        ``Qwen4ExpTextModel.mixed``.  Logits are left to the caller."""
+        return self.model.mixed(segments)
 
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
         layers = tuple(capture_layers)
@@ -7653,6 +7775,11 @@ class ModelArgs(BaseModelArgs):
 class Model(nn.Module):
     apc_v2_layout = "qwen4-exp-layer-segments-v1"
     supports_speculative_rollback = True
+    # Adapter-owned selection of the mixed prefill + decode round
+    # (runtime/mixed_step.mixed_prefill_decode_selected): off unless the
+    # Flash-Next execution policy sets ``mixed_prefill_decode``; the
+    # process switch MLX2_MIXED_PREFILL_DECODE alone never selects it here.
+    mixed_prefill_decode_selected = False
     external_feature_convention = "post_layer_shared_hc_mixer"
     external_execution_receipt = TextModel.external_execution_receipt
 
@@ -7917,6 +8044,18 @@ class Model(nn.Module):
             if self.language_model.args.tie_word_embeddings
             else self.language_model.lm_head(hidden)
         )
+
+    def mixed_forward(self, segments):
+        """Prefill slices and decode cohorts in one trunk forward.
+
+        ``segments`` is a sequence of ``(tokens [rows, length], caches)``;
+        returns the final hidden states per segment (``logits`` projects the
+        rows a caller needs).  See ``Qwen4ExpTextModel.mixed``.
+        """
+        return self.language_model.mixed_forward(segments)
+
+    def mixed_forward_refusal(self):
+        return self.language_model.model.mixed_refusal()
 
     def mtp_backbone(self, inputs, cache=None):
         """Return LM-head and scheme-A HC hiddens from one trunk forward."""

@@ -774,6 +774,43 @@ def test_qualifier_binds_adaptive_benchmark_to_exact_candidate(tmp_path):
         validate_adaptive_benchmark(path, mismatched)
 
 
+def test_qualifier_benchmark_settings_ignore_provenance_only_readings(tmp_path):
+    # A live cache_bytes_headroom reading differs between the benchmark arm
+    # and the candidate server; it is provenance, not route identity.
+    from scripts.qualify_serving import validate_adaptive_benchmark
+
+    report = _bind_correctness_samples(_qualification_report())
+    final = report["arms"]["adaptive"]["final_status"]
+    final.update(runtime={"source_sha256": "abc"}, artifact="weights")
+    final["settings"]["cache_bytes_headroom"] = {"resident_bytes": 1}
+    report.update(
+        schema=benchmark.SCHEMA,
+        passed=True,
+        benchmark_harness={
+            "name": "scripts/benchmark_adaptive_mtp.py",
+            "sha256": benchmark.hashlib.sha256(
+                benchmark.Path(benchmark.__file__).read_bytes()
+            ).hexdigest(),
+        },
+        adaptive_qualification=benchmark.adaptive_qualification_evidence(report),
+    )
+    adaptive_status = report["arms"]["adaptive"]["final_status"]
+    path = tmp_path / "adaptive.json"
+    path.write_text(json.dumps(report))
+    live = {
+        **adaptive_status,
+        "settings": {
+            **adaptive_status["settings"],
+            "cache_bytes_headroom": {"resident_bytes": 2},
+        },
+    }
+    loaded, _ = validate_adaptive_benchmark(path, live)
+    assert loaded["passed"]
+    changed = {**live, "settings": {**live["settings"], "mtp_ordinary_handoff": {"enabled": True}}}
+    with pytest.raises(ValueError, match="settings does not match"):
+        validate_adaptive_benchmark(path, changed)
+
+
 def test_qualifier_binds_handoff_only_benchmark_to_handoff_arm(tmp_path):
     from scripts.qualify_serving import validate_adaptive_benchmark
 

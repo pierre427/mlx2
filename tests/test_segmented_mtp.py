@@ -1477,16 +1477,19 @@ def test_generation_batch_promotes_after_one_uniform_segmented_cycle():
                 advance=1,
             )
 
-    def begin(state, **_kwargs):
+    def begin(state, **kwargs):
         holder["state"] = state
+        holder["stream"] = kwargs["stream"]
         return Ticket()
 
     detached = [_detached(0), _detached(1)]
     with patch(
         "mlx2.runtime.segmented_physical_promotion.begin_segmented_physical_promotion",
         side_effect=begin,
-    ), patch("mlx2.runtime.generate.mx.new_stream", return_value=None):
-        # The fake promotion ticket does not execute tensors or need a GPU stream.
+    ), patch(
+        "mlx2.runtime.generate.mx.new_stream",
+        side_effect=AssertionError("promotion must not open a second GPU stream"),
+    ):
         batch = MTPGenerationBatch(
             object(),
             detached,
@@ -1503,6 +1506,10 @@ def test_generation_batch_promotes_after_one_uniform_segmented_cycle():
         responses = batch.next()
 
     assert len(responses) == 4
+    # Queued on the thread's own (generation) stream: a second stream would
+    # need a cross-stream fence, a GPU spin under fast synch
+    # (fn-phase0-20261028/hang-32k-w1).
+    assert holder["stream"] == mx.default_stream(mx.default_device())
     assert batch.segmented_live_tip is False
     assert batch._async_qsa_receipt["advance"] == 1
     counters = segmented_self_mtp_stats()

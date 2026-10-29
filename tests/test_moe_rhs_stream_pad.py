@@ -204,17 +204,17 @@ def test_installed_fit_never_transfers_to_another_host(monkeypatch):
                             num_experts=512, output_dims=2560, input_dims=640)
     monkeypatch.setattr(SL, "_RHS_PAD_POLICY", "adaptive")
     monkeypatch.setattr(SL, "_RHS_PAD_MIN_ROWS_PER_EXPERT", 3)
-    # This test isolates the host boundary.  The installed 0.32.4 release
-    # correctly invalidates the older 39400a0d4 timing fit; runtime-build
-    # invalidation has its own assertion below.
+    # This test isolates the host boundary; runtime-build invalidation has
+    # its own assertion below.
     monkeypatch.setattr(SL, "_pad_cost_runtime", lambda: True)
     monkeypatch.setattr(SL, "_pad_cost_host", lambda: False)
-    # The installed M5 fit picks streaming at 320 assignments; the fixed
-    # floor on an uncalibrated host does not. At 1600 both choose streaming.
-    assert SL._adaptive_pad(320, layer) == (0, "uncalibrated_host_qmv")
+    # The installed M5 fit (mlx 0.32.4) picks streaming at 640 assignments;
+    # the fixed floor on an uncalibrated host does not. At 1600 both choose
+    # streaming.
+    assert SL._adaptive_pad(640, layer) == (0, "uncalibrated_host_qmv")
     assert SL._adaptive_pad(1600, layer) == (448, "uncalibrated_host_rhs")
     monkeypatch.setattr(SL, "_pad_cost_host", lambda: True)
-    assert SL._adaptive_pad(320, layer) == (1728, "cost_rhs")
+    assert SL._adaptive_pad(640, layer) == (1408, "cost_rhs")
 
 
 def test_installed_fit_does_not_extrapolate_beyond_measured_assignments(monkeypatch):
@@ -241,10 +241,13 @@ def test_calibration_runtime_requires_measured_build_and_tf32(monkeypatch):
     assert not SL._pad_cost_runtime()
 
 
-def test_mlx_0324_does_not_reuse_the_39400a0d4_timing_fit(monkeypatch):
-    monkeypatch.setattr(SL, "version", lambda package: "0.32.4")
+def test_other_mlx_builds_do_not_reuse_the_0324_timing_fit(monkeypatch):
     SL._pad_cost_build.cache_clear()
     try:
+        monkeypatch.setattr(SL, "version", lambda package: "0.32.4")
+        assert SL._pad_cost_build()
+        SL._pad_cost_build.cache_clear()
+        monkeypatch.setattr(SL, "version", lambda package: "0.32.2.dev20260919+39400a0d4")
         assert not SL._pad_cost_build()
     finally:
         SL._pad_cost_build.cache_clear()

@@ -27,7 +27,7 @@ from .greedy_scores import LazyLogprobs, greedy_scores, score_eval_targets
 from .greedy_scores import admitted as lean_greedy_admitted
 from .mixed_step import (
     aligned_prompt_rows,
-    mixed_prefill_decode_enabled,
+    mixed_prefill_decode_selected,
     model_supports_mixed_forward,
 )
 from .models import cache
@@ -423,6 +423,29 @@ def _name_nonfinite_states(prompt_cache, uids, failures):
             failure["reason"] += (
                 f"; non-finite recurrent state in cache layers {layers}"
             )
+
+
+def _batched_prefill_receipt(lane):
+    """Per-request evidence that batched cold MTP prefill ran (or None).
+
+    ``exact`` is false: batched rows are not proven equal to B=1 prefill, so
+    the slice schedule carries the ``batched_lanes`` deviation and APCv2
+    refuses the prompt state from the first batched slice on.
+    """
+    record = getattr(lane, "_batched_prefill", None)
+    if not record:
+        return None
+    return {
+        "implemented": True,
+        "selected": True,
+        "qualified": False,
+        "observed_used": record["slices"] > 0,
+        "slices": int(record["slices"]),
+        "rows": int(record["rows"]),
+        "max_width": int(record["max_width"]),
+        "exact_vs_b1": False,
+        "schedule_deviation_reason": "batched_lanes",
+    }
 
 
 def _bump_bounded_counter(counters, key, amount=1):
@@ -2430,7 +2453,13 @@ class MTPGenerationBatch:
             self._async_qsa_ticket = begin_segmented_physical_promotion(
                 self.state,
                 reserve_tail=reserve_tail,
-                stream=mx.new_stream(mx.gpu),
+                # The generation thread's own stream, never a new one: the
+                # promotion reads caches that stream is still producing, and a
+                # cross-stream fence under MLX_METAL_FAST_SYNCH=1 is a GPU spin
+                # kernel whose producer need not run (Flash-Next 32K B1 wedged
+                # the GPU at 100%, fn-phase0-20261028/hang-32k-w1; same class as
+                # apc-warm-hit-hang-20261021).  Same kernels, one command queue.
+                stream=mx.default_stream(mx.default_device()),
                 note=note_segmented_self_mtp,
             )
         except SegmentedPhysicalPromotionDeclined as error:
@@ -3909,6 +3938,7 @@ class MTPGenerationBatch:
                 "async_qsa_promotion": self._async_qsa_receipts_by_uid.pop(
                     lane.uid, None
                 ),
+                "batched_prefill": _batched_prefill_receipt(lane),
                 "adaptive_depth": (
                     _adaptive_depth_receipt(self.adaptive_depth_policy)
                 ),
@@ -4478,6 +4508,7 @@ class BatchGenerator:
         prefill_depth_budget: Optional[int] = None,
         decode_first: Optional[Union[bool, Mapping[str, Any]]] = None,
         batch_geometry: Optional[Union[bool, Mapping[str, Any]]] = None,
+        prefill_plan_exact: bool = False,
     ):
         if decode_priority_cadence < 1:
             raise ValueError("decode_priority_cadence must be positive")
@@ -4590,7 +4621,17 @@ class BatchGenerator:
         # (prefill_plan.depth_bounded_prefill_rows).
         depth_bounded_prefill_rows(prefill_step_size, 0, prefill_depth_budget)
         self.prefill_depth_budget = prefill_depth_budget
-        self.prefill_batch_size = prefill_batch_size
+        # Adapter route law (execution_config ``prefill_plan_exact``): an
+        # ordinary prompt slice runs at exactly its idle-plan rows.  Load may
+        # defer a slice, never reshape it, so the prompt state stays the bits
+        # an idle server publishes to APCv2.  The self-MTP path reads the same
+        # key from its own config.
+        self.prefill_plan_exact = bool(prefill_plan_exact)
+        # The idle plan prefills one prompt per forward.  Which prompts share
+        # a forward is load dependent and changes each row's state bits (tiny
+        # hybrid model, 2026-10-29: a B=2 row differs from its B=1 state), so
+        # the law defers the second prompt instead of batching it.
+        self.prefill_batch_size = 1 if self.prefill_plan_exact else prefill_batch_size
         from .batch_geometry import GeometrySchedulerPolicy
 
         self.batch_geometry = GeometrySchedulerPolicy.from_value(batch_geometry)
@@ -4680,6 +4721,8 @@ class BatchGenerator:
             "adaptive_prefill_deadline_forced_rounds",
             "adaptive_prefill_apc_priority_admissions",
             "mtp_short_prefill_interleaved",
+            "mtp_prefill_plan_exact_reshaped",
+            "ordinary_prefill_plan_exact_reshaped",
             "short_prefill_overflow_admissions",
             "apc_interior_checkpoints_captured",
             "apc_interior_checkpoints_skipped_trimmable",
@@ -6309,6 +6352,9 @@ class BatchGenerator:
             )
             lane.lane._requested_num_draft = config.get("requested_num_draft")
             lane.lane._batch_cohort = config.get("batch_cohort")
+            lane.lane._batched_prefill = getattr(
+                self, "_mtp_batched_prefill_by_uid", {}
+            ).pop(uid, None)
             copy_policy = getattr(self, "copy_draft", None)
             if copy_policy is not None and copy_policy.enabled:
                 from .copy_draft import CopyDraftState
@@ -6412,6 +6458,17 @@ class BatchGenerator:
                 progress.extend(chunk)
                 _bump_bounded_counter(
                     self.scheduler_stats, "mtp_one_chunk_boundary_advances"
+                )
+        if self._batched_mtp_prefill_policy() is not None:
+            if self._has_active_decode():
+                _bump_bounded_counter(
+                    self.scheduler_stats, "mtp_batched_prefill_declined_contended"
+                )
+            else:
+                progress.extend(
+                    self._batch_one_chunk_mtp_rows(
+                        min(n, len(self._unprocessed_sequences))
+                    )
                 )
         (batch, prepared) = self._make_mtp_batch(n)
         return (batch, progress + list(prepared))
@@ -6629,27 +6686,18 @@ class BatchGenerator:
             )
             covered += executed
 
-    def _advance_mtp_prefill(self, index: int, max_tokens: int):
-        """Advance one queued self-MTP lane without blocking live decode."""
-        from .hybrid_speculative import advance_self_mtp_prefill
+    def _mtp_prefill_slice_setup(self, index: int, max_tokens: int):
+        """Plan one queued self-MTP lane's next slice (no forward yet).
 
-        queued = list(self._unprocessed_sequences)
-        sequence = queued[index]
-        (
-            uid,
-            segments,
-            maximum,
-            prompt_cache,
-            history,
-            sampler,
-            processors,
-            matcher,
-            _queued_at,
-        ) = sequence[:9]
-        prefill_input = sequence[9] if len(sequence) > 9 else None
+        Returns ``None`` when the residual is the final prompt token only;
+        otherwise the slice context ``_advance_mtp_prefill`` and its batched
+        twin both run from.
+        """
+        sequence = list(self._unprocessed_sequences)[index]
+        (uid, segments, _maximum, prompt_cache, history) = sequence[:5]
         prompt = [token for segment in segments for token in segment]
         if len(prompt) <= 1:
-            return self._release_prefilled_mtp_lane(index, [])
+            return None
         config = dict(self.self_mtp or {})
         config.update(self._mtp_configs.get(uid, {}))
         self._validate_mtp_config(config)
@@ -6666,35 +6714,82 @@ class BatchGenerator:
             len(prompt) - 1,
             next_checkpoint,
         )
+        reshaped = False
+        if (
+            config.get("prefill_plan_exact")
+            and max_tokens != planned_rows
+            and self._prompt_prefill_step(len(history) + len(prompt)) >= planned_rows
+        ):
+            # Route law: decode fairness may defer a slice, never reshape it,
+            # so the prompt state stays the bits an idle server publishes.  A
+            # live memory cap below the plan still wins (that state is then
+            # refused, not risked).
+            reshaped = True
+            max_tokens = planned_rows
+        return {
+            "index": index,
+            "uid": uid,
+            "prompt": prompt,
+            "prompt_cache": prompt_cache,
+            "history": history,
+            "config": config,
+            "slice_start": slice_start,
+            "planned_rows": planned_rows,
+            "max_tokens": int(max_tokens),
+            # Rows the slice actually runs (the final token stays queued).
+            "rows": min(int(max_tokens), len(prompt) - 1),
+            "reshaped": reshaped,
+        }
+
+    def _mtp_prefill_slice_stage(self, context) -> None:
+        """Host-side staging every slice does before its forward."""
+        if context["reshaped"]:
+            self.scheduler_stats["mtp_prefill_plan_exact_reshaped"] += 1
         # Stage this slice's rows and the next one's.  Resubmitting the whole
         # remaining prompt every slice cost O(prompt^2) host work beside live
         # decode (Flash-Next 16K: 3.0 M rows staged for 0.24 M looked up).
         _prefetch_known_mtp_tail(
-            self.model, history, prompt[: 2 * max(int(max_tokens), 1)], config
+            self.model,
+            context["history"],
+            context["prompt"][: 2 * max(context["max_tokens"], 1)],
+            context["config"],
         )
-        tic = time.perf_counter()
+        uid = context["uid"]
         if not hasattr(self, "_mtp_prefill_initial_bytes"):
             self._mtp_prefill_initial_bytes = {}
             self._mtp_prefill_materialized_bytes = {}
         if uid not in self._mtp_prefill_initial_bytes:
             self._mtp_prefill_initial_bytes[uid] = self._mtp_prefill_resident_bytes(
-                uid, prompt_cache
+                uid, context["prompt_cache"]
             )
-        (remaining, prompt_cache, mtp_state, processed) = advance_self_mtp_prefill(
-            mx.array(prompt, dtype=mx.uint32),
-            self.model,
-            uid=uid,
-            prompt_cache=prompt_cache,
-            mtp_state=self._mtp_states.get(uid),
-            max_tokens=max_tokens,
-            fused_gdn_catchup=bool(config.get("fused_gdn_catchup", False)),
-            clear_cache=prefill_clear_cache(self._has_active_decode()),
+
+    def _mtp_prefill_slice_commit(
+        self, context, remaining, prompt_cache, mtp_state, processed, toc,
+        reason=None,
+    ):
+        """Book one executed slice and requeue the lane's residual.
+
+        Returns the lane's progress responses and its residual length.
+        ``reason`` names a load-dependent law the slice ran under (see
+        ``prefill_slice_schedule``): the schedule then records a deviation
+        even at the planned width.
+        """
+        index = context["index"]
+        uid = context["uid"]
+        prompt = context["prompt"]
+        queued = list(self._unprocessed_sequences)
+        sequence = queued[index]
+        (_uid, _segments, maximum, _cache, _history, sampler, processors, matcher) = (
+            sequence[:8]
         )
-        toc = time.perf_counter()
+        prefill_input = sequence[9] if len(sequence) > 9 else None
         remaining = remaining.tolist()
-        history = list(history) + prompt[:processed]
+        history = list(context["history"]) + prompt[:processed]
         self._record_prefill_chunk(uid, int(processed))
-        self._record_prefill_slice(uid, slice_start, int(processed), planned_rows)
+        self._record_prefill_slice(
+            uid, context["slice_start"], int(processed), context["planned_rows"],
+            reason,
+        )
         self._mtp_states[uid] = mtp_state
         from . import loop_trace
 
@@ -6752,48 +6847,254 @@ class BatchGenerator:
         )
         self._unprocessed_sequences = deque(queued)
         self._prompt_tokens_counter += processed
-        self._prompt_time_counter += toc - tic
+        histogram = self.scheduler_stats["adaptive_prefill_chunk_histogram"]
+        key = str(processed)
+        histogram[key] = int(histogram.get(key, 0)) + 1
+        total = len(history) + len(remaining)
+        progress = [
+            PromptProcessingBatch.Response(uid, (len(history), total), False, False)
+        ]
+        return (progress, len(remaining))
+
+    def _observe_mtp_prefill_forward(self, rows, elapsed, depth):
+        """One rate sample and one round per prefill forward, any width."""
+        self._prompt_time_counter += elapsed
         slice_contended = self._prefill_contends_decode()
         self._fairness().observe_prefill(
-            processed,
-            toc - tic,
+            rows,
+            elapsed,
             contended=slice_contended,
-            depth=len(history) - int(processed),
+            depth=depth,
             kind="mtp",
         )
         self.scheduler_stats["prefill_rounds"] += 1
         self.scheduler_stats["adaptive_prefill_release_rounds"] += 1
-        histogram = self.scheduler_stats["adaptive_prefill_chunk_histogram"]
-        key = str(processed)
-        histogram[key] = int(histogram.get(key, 0)) + 1
-        measured = (toc - tic) * 1000 / max(processed, 1)
+        measured = elapsed * 1000 / max(rows, 1)
         if self._prefill_ms_per_token_ewma is None:
             self._prefill_ms_per_token_ewma = measured
         else:
             self._prefill_ms_per_token_ewma = (
                 0.75 * self._prefill_ms_per_token_ewma + 0.25 * measured
             )
-        total = len(history) + len(remaining)
-        progress = [
-            PromptProcessingBatch.Response(uid, (len(history), total), False, False)
-        ]
-        if len(remaining) == 1:
-            if (
-                processed
-                and slice_contended
-                and (self.adaptive_prefill or self._fairness().enabled)
-            ):
-                # The slice was sized to the stall target on its own; the
-                # lane preparation (target + draft forward of the final
-                # token, first-token sampling, cohort join) would extend the
-                # same neighbour gap past it.  The next round prepares the
-                # one-token residual alone (one-call path).
-                _bump_bounded_counter(
-                    self.scheduler_stats, "mtp_release_deferred_rounds"
-                )
-                return (None, progress)
-            return self._release_prefilled_mtp_lane(index, progress)
+        return slice_contended
+
+    def _finish_mtp_prefill_release(self, index, progress, processed, slice_contended):
+        if (
+            processed
+            and slice_contended
+            and (self.adaptive_prefill or self._fairness().enabled)
+        ):
+            # The slice was sized to the stall target on its own; the
+            # lane preparation (target + draft forward of the final
+            # token, first-token sampling, cohort join) would extend the
+            # same neighbour gap past it.  The next round prepares the
+            # one-token residual alone (one-call path).
+            _bump_bounded_counter(
+                self.scheduler_stats, "mtp_release_deferred_rounds"
+            )
+            return (None, progress)
+        return self._release_prefilled_mtp_lane(index, progress)
+
+    def _advance_mtp_prefill(self, index: int, max_tokens: int):
+        """Advance one queued self-MTP lane without blocking live decode."""
+        from .hybrid_speculative import advance_self_mtp_prefill
+
+        context = self._mtp_prefill_slice_setup(index, max_tokens)
+        if context is None:
+            return self._release_prefilled_mtp_lane(index, [])
+        self._mtp_prefill_slice_stage(context)
+        tic = time.perf_counter()
+        (remaining, prompt_cache, mtp_state, processed) = advance_self_mtp_prefill(
+            mx.array(context["prompt"], dtype=mx.uint32),
+            self.model,
+            uid=context["uid"],
+            prompt_cache=context["prompt_cache"],
+            mtp_state=self._mtp_states.get(context["uid"]),
+            max_tokens=context["max_tokens"],
+            fused_gdn_catchup=bool(
+                context["config"].get("fused_gdn_catchup", False)
+            ),
+            clear_cache=prefill_clear_cache(self._has_active_decode()),
+        )
+        toc = time.perf_counter()
+        (progress, residual) = self._mtp_prefill_slice_commit(
+            context, remaining, prompt_cache, mtp_state, processed, toc
+        )
+        slice_contended = self._observe_mtp_prefill_forward(
+            processed, toc - tic, context["slice_start"]
+        )
+        if residual == 1:
+            return self._finish_mtp_prefill_release(
+                index, progress, processed, slice_contended
+            )
         return (None, progress)
+
+    def _batched_mtp_prefill_policy(self):
+        """Route-declared batched cold prefill: ``(lanes, max_rows)`` or None."""
+        config = self.self_mtp or {}
+        lanes = int(config.get("batched_prefill_lanes", 0) or 0)
+        if lanes < 2:
+            return None
+        return (lanes, int(config.get("batched_prefill_max_rows", 16384)))
+
+    def _batched_mtp_prefill_peers(self, selected, indices, max_tokens_for):
+        """Queue rows that can share ``selected``'s next slice in one forward.
+
+        A peer sits at the same covered offset, runs a slice of exactly the
+        same planned row count (so the merged caches carry no padding and
+        every lane's slice stays on its idle plan), and shares the per-route
+        catch-up switch.  Returns the peer contexts, ``selected`` first, or
+        ``None`` when fewer than two lanes qualify.
+        """
+        policy = self._batched_mtp_prefill_policy()
+        if policy is None:
+            return None
+        (max_lanes, max_rows) = policy
+        head = self._mtp_prefill_slice_setup(selected, max_tokens_for(selected))
+        if head is None or head["rows"] <= 0:
+            return None
+        if head["rows"] != head["planned_rows"]:
+            # Off-plan slices are already load dependent; keep them serial.
+            return None
+        contexts = [head]
+        catchup = bool(head["config"].get("fused_gdn_catchup", False))
+        for index in indices:
+            if len(contexts) >= max_lanes:
+                break
+            if (len(contexts) + 1) * head["rows"] > max_rows:
+                break
+            if index == selected:
+                continue
+            context = self._mtp_prefill_slice_setup(index, max_tokens_for(index))
+            if (
+                context is None
+                or context["slice_start"] != head["slice_start"]
+                or context["rows"] != head["rows"]
+                or context["planned_rows"] != context["rows"]
+                or bool(context["config"].get("fused_gdn_catchup", False))
+                != catchup
+            ):
+                continue
+            contexts.append(context)
+        if len(contexts) < 2:
+            return None
+        return contexts
+
+    def _batch_one_chunk_mtp_rows(self, count: int):
+        """Teacher-force equal one-chunk residuals together before preparation.
+
+        Each of the first ``count`` queued rows would otherwise run its
+        ``residual - 1`` teacher-forced rows inside its own
+        ``prepare_self_mtp_lane``.  Rows at the same covered offset with the
+        same planned single slice run it in one batched forward here; lane
+        preparation then consumes only the final token.
+        """
+        (max_lanes, max_rows) = self._batched_mtp_prefill_policy()
+        groups = {}
+        for index in range(count):
+            sequence = self._unprocessed_sequences[index]
+            residual = sum(len(segment) for segment in sequence[1])
+            if residual <= 1:
+                continue
+            context = self._mtp_prefill_slice_setup(index, residual - 1)
+            if (
+                context is None
+                or context["rows"] != residual - 1
+                or context["rows"] != context["planned_rows"]
+            ):
+                continue
+            key = (
+                context["slice_start"],
+                context["rows"],
+                bool(context["config"].get("fused_gdn_catchup", False)),
+            )
+            groups.setdefault(key, []).append(context)
+        progress = []
+        for (_start, rows, _catchup), contexts in groups.items():
+            width = min(max_lanes, max(1, max_rows // max(rows, 1)))
+            while width >= 2 and len(contexts) >= 2:
+                (chunk, contexts) = (contexts[:width], contexts[width:])
+                if len(chunk) < 2:
+                    break
+                result = self._advance_mtp_prefill_batched(chunk)
+                if result is None:
+                    break
+                progress.extend(result[0])
+                _bump_bounded_counter(
+                    self.scheduler_stats, "mtp_batched_prefill_one_chunk_lanes",
+                    len(chunk),
+                )
+        return progress
+
+    def _advance_mtp_prefill_batched(self, contexts):
+        """Run one planned slice for several queued lanes in one forward.
+
+        Returns ``(progress, residuals)`` or ``None`` when the model refused
+        the batch before any forward (the caller then prefills serially).
+        The rows are not proven bitwise equal to B=1 prefill (a lane's state
+        depends on its batch neighbours through row-variant kernels), so each
+        lane's slice schedule records the ``batched_lanes`` deviation and
+        APCv2 refuses its state from this slice on.
+        """
+        from .hybrid_speculative import (
+            BatchedMTPPrefillRefused,
+            advance_self_mtp_prefill_batched,
+        )
+
+        rows = contexts[0]["rows"]
+        for context in contexts:
+            self._mtp_prefill_slice_stage(context)
+        tic = time.perf_counter()
+        try:
+            results = advance_self_mtp_prefill_batched(
+                [mx.array(c["prompt"], dtype=mx.uint32) for c in contexts],
+                self.model,
+                prompt_caches=[c["prompt_cache"] for c in contexts],
+                mtp_states=[self._mtp_states.get(c["uid"]) for c in contexts],
+                max_tokens=rows,
+                fused_gdn_catchup=bool(
+                    contexts[0]["config"].get("fused_gdn_catchup", False)
+                ),
+                clear_cache=prefill_clear_cache(self._has_active_decode()),
+                uids=[c["uid"] for c in contexts],
+            )
+        except BatchedMTPPrefillRefused as error:
+            _bump_bounded_counter(
+                self.scheduler_stats, "mtp_batched_prefill_refused"
+            )
+            self._mtp_batched_prefill_last_refusal = str(error)
+            return None
+        toc = time.perf_counter()
+        progress = []
+        residuals = []
+        for context, (remaining, prompt_cache, mtp_state, processed) in zip(
+            contexts, results
+        ):
+            record = self.__dict__.setdefault(
+                "_mtp_batched_prefill_by_uid", {}
+            ).setdefault(context["uid"], {"slices": 0, "rows": 0, "max_width": 0})
+            record["slices"] += 1
+            record["rows"] += int(processed)
+            record["max_width"] = max(record["max_width"], len(contexts))
+            (lane_progress, residual) = self._mtp_prefill_slice_commit(
+                context, remaining, prompt_cache, mtp_state, processed, toc,
+                reason="batched_lanes",
+            )
+            progress.extend(lane_progress)
+            residuals.append(residual)
+        self._observe_mtp_prefill_forward(
+            rows * len(contexts), toc - tic, contexts[0]["slice_start"]
+        )
+        stats = self.scheduler_stats
+        _bump_bounded_counter(stats, "mtp_batched_prefill_rounds")
+        _bump_bounded_counter(stats, "mtp_batched_prefill_lanes", len(contexts))
+        _bump_bounded_counter(
+            stats, "mtp_batched_prefill_rows", rows * len(contexts)
+        )
+        stats["mtp_batched_prefill_max_width"] = max(
+            int(stats.get("mtp_batched_prefill_max_width", 0)), len(contexts)
+        )
+        return (progress, residuals)
 
     def _mtp_coarrival_hold(self, index: int) -> bool:
         """Whether queued row ``index`` waits for co-arrived siblings.
@@ -6988,6 +7289,7 @@ class BatchGenerator:
                     "numerical_schedule_changed", "numerical_initial_geometry",
                     "numerical_last_geometry", "numerical_schedule_cache_contract",
                 ) if name in transition})
+                receipt["batched_prefill"] = _batched_prefill_receipt(lane)
             matcher_state = package.matcher_state
             initial = package.initial_output
             if initial is not None:
@@ -7522,6 +7824,7 @@ class BatchGenerator:
                 getattr(self, "_mtp_initial_prefill_tokens", {}).pop(uid, None)
                 getattr(self, "_mtp_prefill_initial_bytes", {}).pop(uid, None)
                 getattr(self, "_mtp_prefill_materialized_bytes", {}).pop(uid, None)
+                getattr(self, "_mtp_batched_prefill_by_uid", {}).pop(uid, None)
         first_error = None
 
         def cleanup(action):
@@ -7805,6 +8108,9 @@ class BatchGenerator:
         it overflowed.
         """
         if getattr(self, "post_prefill_transform", None) is not None:
+            return False
+        if getattr(self, "prefill_plan_exact", False):
+            # An overflow lane would share the forward with the long prompt.
             return False
         if len(self._prompt_batch) != self.prefill_batch_size:
             return False
@@ -8922,8 +9228,36 @@ class BatchGenerator:
                     if adaptive_residual
                     else self.prefill_step_size
                 )
+                slice_bound = adaptive_chunk
                 adaptive_chunk = min(adaptive_chunk, candidate_steps[selected])
-                (batch, progress) = self._advance_mtp_prefill(selected, adaptive_chunk)
+                batched = None
+                if self._batched_mtp_prefill_policy() is not None:
+                    if active_decode or deadline_forced:
+                        # One B x rows forward beside live decode stalls it
+                        # B times longer than the slice fairness sized.
+                        _bump_bounded_counter(
+                            self.scheduler_stats,
+                            "mtp_batched_prefill_declined_contended",
+                        )
+                    else:
+                        contexts = self._batched_mtp_prefill_peers(
+                            selected,
+                            incremental_indices,
+                            lambda i: min(slice_bound, candidate_steps[i]),
+                        )
+                        if contexts is not None:
+                            batched = self._advance_mtp_prefill_batched(contexts)
+                if batched is not None:
+                    (progress, residuals) = batched
+                    batch = None
+                    if residuals[0] == 1:
+                        (batch, progress) = self._release_prefilled_mtp_lane(
+                            selected, progress
+                        )
+                else:
+                    (batch, progress) = self._advance_mtp_prefill(
+                        selected, adaptive_chunk
+                    )
                 if batch is not None:
                     self._generation_batch.extend(batch)
             else:
@@ -9371,7 +9705,11 @@ class BatchGenerator:
         persistent lanes, multi-row prompt batches and interior checkpoint
         boundaries keep the ordinary round.
         """
-        if not mixed_prefill_decode_enabled():
+        if not mixed_prefill_decode_selected(getattr(self, "model", None)):
+            return False
+        if getattr(self, "prefill_plan_exact", False):
+            # A mixed forward is off-plan at any width (``mixed_forward``):
+            # under the plan-exact law the slice runs as a plain planned one.
             return False
         if len(self._generation_batch) == 0 or len(self._prompt_batch) != 1:
             return False
@@ -9799,6 +10137,19 @@ class BatchGenerator:
                     planned_step, covered, len(segments[0]), next_checkpoint
                 )
             )
+            if (
+                getattr(self, "prefill_plan_exact", False)
+                and not media_row
+                and n != planned_rows
+                and self._prompt_prefill_step(prompt_total) >= planned_rows
+            ):
+                # Route law: the decode-fairness cap, contended floor,
+                # one-slice bound, adaptive slice and shared decode-first
+                # budget may defer this slice (the round's admission and
+                # deferral above), never reshape it.  A live memory cap below
+                # the plan still wins; that state is then refused, not risked.
+                self.scheduler_stats["ordinary_prefill_plan_exact_reshaped"] += 1
+                n = planned_rows
             self._record_prefill_slice(
                 self._prompt_batch.uids[i], covered, n, planned_rows
             )

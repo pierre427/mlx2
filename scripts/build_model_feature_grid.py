@@ -47,6 +47,9 @@ VARIANTS = {
 # rather than a dedicated command-line switch. This is a review vocabulary,
 # not a statement that every registered model implements each feature.
 FEATURES = (
+    "ordinary_prefill_plan_exact", "lane_dense", "native_mtp_num_draft", "mtp_batched_prefill",
+    "qsa_batch_decode_sparse", "varlen_sparse_moe", "fp32_head_logits", "gdn_state_dtype_float16", "qsa_lazy_causal_mask", "qsa_stage1_direct_selector", "ple_read_policy_adaptive", "mtp_draft_vocab", "compact_moe_prefill", "qsa_prefetch_partials", "tensorfold_qmv_rows", "tensorfold_prefill", "gdn_core",
+    "prefill_plan_exact_slices", "async_qsa_promotion", "apc_eviction_queued_protection",
     "ordinary_reference", "apc_v2", "apc_interior_checkpoints", "apc_junction_checkpoints",
     "apc_rolling_checkpoints", "apc_session_persistence", "tools",
     "vision_input", "video_input", "audio_input", "native_mtp",

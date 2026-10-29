@@ -1010,15 +1010,26 @@ def test_row_exact_observation_fails_closed_on_any_fallback(qualify):
     assert qualify.feature_observations(final, initial=initial)["row_exact_verify"] == 0
 
 
-@pytest.mark.parametrize("route", ["ordinary", "mtp2"])
-def test_historical_sparse_qsa_smoke_no_longer_passes_without_engagement(
-    qualify, route
-):
-    final = _private_json(FN / f"qsa_sparse_indexed--{route}" / "status-final.json")
+def test_historical_sparse_qsa_smoke_no_longer_passes_without_engagement(qualify):
+    final = _private_json(FN / "qsa_sparse_indexed--ordinary" / "status-final.json")
     assert "feature_qsa_batch_decode_sparse" in required_feature_checks(
         final["settings"]
     )
     assert qualify.feature_observations(final)["qsa_batch_decode_sparse"] == 0
+
+
+def test_historical_native_mtp_sparse_qsa_smoke_is_labelled_unreachable():
+    # Width-3 static handoff: the qualifier's B2 long-context cohort stays on
+    # MTP verify, so the run is "selected, not observed", never a pass.
+    from mlx2.qualification import selected_not_observed_features
+
+    settings = json.loads(
+        (FN / "qsa_sparse_indexed--mtp2" / "status-final.json").read_text()
+    )["settings"]
+    assert "feature_qsa_batch_decode_sparse" not in required_feature_checks(settings)
+    assert "long-context cohort is B2" in selected_not_observed_features(settings)[
+        "feature_qsa_batch_decode_sparse"
+    ]
 
 
 def test_historical_row_exact_smoke_no_longer_hides_fallbacks(qualify):

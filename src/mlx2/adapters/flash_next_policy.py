@@ -55,7 +55,49 @@ class FlashNextPolicy:
     fused_gdn_dynamic_accept: bool = False
     # 8192-token prefill chunks: -9..11% prefill at 16K/64K with the same KL
     # to the unchunked result as 2048, +5 GiB peak (triage-20260925).
+    # With prefill_plan_exact_slices every slice is a whole plan cell even
+    # beside live decode, so the cell is also the longest decode stall a cold
+    # prefill causes.  4096 was tried on 2026-10-28 and lost: 16K B4 mean
+    # completion 47.4-52.6 s and first TTFT 21.6-34.0 s vs 45.8-46.5 s and
+    # 21.3-29.9 s at 8192, B1 neutral (qualification/runs/fn-fixes-20261028,
+    # ab-plan-exact-on-8192 vs retest2-l4); Pierre kept 8192.
     prefill_step: int = 8192
+    # Prefill slices are exactly the idle plan's slices on the self-MTP and
+    # the ordinary (--ordinary) route: live decode may defer a slice but
+    # never shorten it.  Prefill state follows its slice ends bitwise, so a
+    # load-shortened slice made the prompt state unpublishable
+    # (apcv2_store_skipped_slice_schedule) and every cold prompt prefilled
+    # beside decoding lanes lost its warm APCv2 hit (ordinary 4-lane, GPU
+    # 2026-10-28: warm hits 2/4).  False restores the decode-fairness slicing.
+    prefill_plan_exact_slices: bool = True
+    # Opt-in batched cold self-MTP prefill (2026-10-28): up to this many queued
+    # lanes at the same covered offset whose next planned slice has the same
+    # row count run that slice in ONE trunk + draft-head forward instead of one
+    # lane per round; equal one-chunk residuals are teacher-forced together
+    # before preparation.  0 (default) keeps one lane per round.  Only on an
+    # idle decode (no live lane to stall) and only for plan-exact slices.  The
+    # rows are not bit-identical to B=1 prefill (row-variant kernels make a
+    # lane's state depend on its batch neighbours; CPU tiny model differs at
+    # 1e-7), so each batched lane's slice schedule records the
+    # "batched_lanes" deviation and APCv2 refuses its state from that slice
+    # on: a cold-burst TTFT lever that gives up warm reuse of those prompts.
+    mtp_batched_prefill_lanes: int = 0
+    # Row cap per batched forward (lanes x slice rows) bounding peak memory.
+    mtp_batched_prefill_max_rows: int = 16384
+    # Opt-in mixed prefill + decode round (2026-10-28, runtime/mixed_step.py):
+    # on the ORDINARY route (mtp off) a prompt mid-prefill beside decoding
+    # lanes runs its slice and every lane's next token in one trunk forward
+    # (qwen4_exp ``mixed_forward``: packed embedding, HC, MoE and mixer;
+    # PLE, GDN and QSA attention per segment against each segment's cache).
+    # Default off and unqualified: decode rows go through prefill-width MoE
+    # and projection kernels, so they are not bit-identical to a decode step
+    # (batch-composition class), and each mixed slice records the
+    # "mixed_forward" deviation so APCv2 refuses that prompt's state from it
+    # on.  The native self-MTP route never mixes (its prompts are prepared
+    # through MTP lane preparation): the adapter refuses the MTP profile
+    # with this field set.  Enters the environment as
+    # MLX2_MIXED_PREFILL_DECODE=1, which binds the APCv2 numerics namespace.
+    mixed_prefill_decode: bool = False
     # rows x (KV depth + rows) cap per prefill chunk (jundot/omlx#4149):
     # None keeps prefill_step at every depth.  The engine applies it via
     # prefill_depth_budget_default(); --prefill-depth-budget overrides.
@@ -364,6 +406,26 @@ class FlashNextPolicy:
     # live after load (switch_layers.set_pad_policy).  Recorded in receipts
     # only when not "adaptive".
     moe_rhs_pad_policy: str = "adaptive"
+    # Opt-in (default off, implemented, unqualified): the lane matmul
+    # (runtime/lane) on the dense projections only -- attention q/k/v/o, the
+    # QSA indexer projection, GDN input/output projections, the MTP fusion
+    # projections and lm_head -- while the mixture-of-experts block (router,
+    # shared expert and its gate), the hyper-connection projections and the
+    # PLE projections keep their kernels (adapters/flash_next_lane.py declares
+    # each exclusion and its reason).  ``--lane-matmul auto`` otherwise
+    # resolves MoE models to off.  A different numerical law for the covered
+    # projections, bound into the lane receipt and APCv2 by the serving
+    # install; with it the load-time draft-loop probe can run.  Not an
+    # environment switch; enters receipts only when enabled.
+    lane_dense: bool = False
+    # Acceptance prior for the auto draft loop (``--draft-loop auto``), by
+    # bundled grid name.  Flash-Next has no prior of its own, so the auto loop
+    # stays unavailable unless one is named here; "qwen38_27b" borrows the
+    # Qwen3.8-27B grid (another model's acceptance, reported as borrowed in
+    # the lane_dense diagnostics).  Requires lane_dense (the loop is selected
+    # only when the lane matmul covers the model) and num_draft equal to the
+    # grid's base depth.  Enters receipts only when set.
+    draft_loop_prior: Optional[str] = None
 
     def __post_init__(self):
         from ..runtime.models.varlen_dense_mlp import VarlenSparseMoEPolicy
@@ -474,10 +536,12 @@ class FlashNextPolicy:
             "moe_window_batch_decode",
             "moe_window_verify",
             "qsa_nax_batched",
+            "lane_dense",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
+        self._validate_lane_dense()
         if self.q4_gate_three_rows and not self.row_exact_verify:
             raise ValueError("q4_gate_three_rows requires row_exact_verify")
         fold_windows = (
@@ -589,6 +653,37 @@ class FlashNextPolicy:
             raise ValueError("ple_read_policy must be pooled, serial, or adaptive")
         if type(self.ple_adaptive_warm) is not bool:
             raise ValueError("ple_adaptive_warm must be boolean")
+        lanes = self.mtp_batched_prefill_lanes
+        if type(lanes) is not int or lanes < 0 or lanes == 1:
+            raise ValueError(
+                "mtp_batched_prefill_lanes must be 0 (off) or an integer >= 2"
+            )
+        if type(self.mixed_prefill_decode) is not bool:
+            raise ValueError("mixed_prefill_decode must be boolean")
+        if self.mixed_prefill_decode:
+            clashing = [
+                name for name in ("invariant_prefill", "tensorfold_prefill")
+                if getattr(self, name)
+            ]
+            if clashing:
+                # Both replace the prefill forward's law; the mixed forward
+                # would bypass it for the prompt rows it carries.
+                raise ValueError(
+                    "mixed_prefill_decode cannot be combined with "
+                    + ", ".join(clashing)
+                )
+            if self.prefill_plan_exact_slices:
+                # A mixed forward is always off-plan, so the generator never
+                # mixes under the plan-exact law: refuse instead of silently
+                # serving an inert opt-in.
+                raise ValueError(
+                    "mixed_prefill_decode requires prefill_plan_exact_slices false"
+                )
+        rows = self.mtp_batched_prefill_max_rows
+        if type(rows) is not int or rows < 2:
+            raise ValueError(
+                "mtp_batched_prefill_max_rows must be an integer >= 2"
+            )
         for name in ("eager_dispatch_max_rows", "eager_dispatch_stride", "prefill_step"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
@@ -602,6 +697,42 @@ class FlashNextPolicy:
             type(self.prefill_depth_budget) is not int or self.prefill_depth_budget < 1
         ):
             raise ValueError("prefill_depth_budget must be a positive integer or null")
+
+    def _validate_lane_dense(self):
+        from .flash_next_lane import DRAFT_LOOP_PRIORS, prior_base
+
+        if self.lane_dense:
+            # Each of these owns the projections the lane would cover (the
+            # serving install would step aside under auto, or refuse), or
+            # replaces lm_head's arithmetic with its own law.
+            clashing = [
+                name
+                for name, on in (
+                    ("row_exact_verify", self.row_exact_verify),
+                    ("invariant_prefill", self.invariant_prefill),
+                    ("tensorfold_qmv_rows", self.tensorfold_qmv_rows),
+                    ("tensorfold_prefill", self.tensorfold_prefill),
+                    ("fp32_head_logits", self.fp32_head_logits),
+                )
+                if on
+            ]
+            if clashing:
+                raise ValueError("lane_dense cannot be combined with " + ", ".join(clashing))
+        if self.draft_loop_prior is None:
+            return
+        if self.draft_loop_prior not in DRAFT_LOOP_PRIORS:
+            raise ValueError(
+                f"draft_loop_prior must be one of {sorted(DRAFT_LOOP_PRIORS)} or null"
+            )
+        if not self.lane_dense:
+            # The auto loop is selected only when the lane covers the model.
+            raise ValueError("draft_loop_prior requires lane_dense")
+        base = prior_base(self.draft_loop_prior)
+        if self.num_draft != base:
+            raise ValueError(
+                f"draft_loop_prior {self.draft_loop_prior!r} is a grid for base depth "
+                f"{base}; set num_draft to {base} (got {self.num_draft})"
+            )
 
     @classmethod
     def from_mapping(cls, value=None):
@@ -691,8 +822,20 @@ class FlashNextPolicy:
             del values["moe_rhs_pad_policy"]
         if self.prefill_depth_budget is None:
             del values["prefill_depth_budget"]
+        if not self.mtp_batched_prefill_lanes:
+            del values["mtp_batched_prefill_lanes"]
+            if self.mtp_batched_prefill_max_rows == _DEFAULTS[
+                "mtp_batched_prefill_max_rows"
+            ]:
+                del values["mtp_batched_prefill_max_rows"]
+        if not self.mixed_prefill_decode:
+            del values["mixed_prefill_decode"]
         if self.gdn_state_dtype == "float32":
             del values["gdn_state_dtype"]
+        if not self.lane_dense:
+            del values["lane_dense"]
+        if self.draft_loop_prior is None:
+            del values["draft_loop_prior"]
         if self.qsa_batch_decode_sparse == "off":
             del values["qsa_batch_decode_sparse"]
             del values["qsa_batch_decode_sparse_min_context"]
@@ -788,6 +931,11 @@ class FlashNextPolicy:
             )
         if self.qsa_nax_batched:
             environment["MLX_QWEN4_QSA_NAX_BATCHED"] = "1"
+        if self.mixed_prefill_decode:
+            # Binds the APCv2 numerics namespace (apc_numerics.CANDIDATE_ENV).
+            # The model's own declaration, not this variable, selects the
+            # round, so an inherited value cannot select it with the field off.
+            environment["MLX2_MIXED_PREFILL_DECODE"] = "1"
         if self.ple_read_policy != "pooled":
             environment["MLX_QWEN4_PLE_NVME_READ_POLICY"] = self.ple_read_policy
         if self.ple_read_policy == "adaptive":
@@ -806,6 +954,11 @@ class FlashNextPolicy:
         }
         if self.fp32_head_logits:
             config["fp32_head_logits"] = True
+        if self.prefill_plan_exact_slices:
+            config["prefill_plan_exact"] = True
+        if self.mtp_batched_prefill_lanes:
+            config["batched_prefill_lanes"] = self.mtp_batched_prefill_lanes
+            config["batched_prefill_max_rows"] = self.mtp_batched_prefill_max_rows
         return config
 
 

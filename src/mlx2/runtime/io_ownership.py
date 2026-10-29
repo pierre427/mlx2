@@ -304,7 +304,10 @@ class ReadPool:
     def counters(self):
         with self._lock:
             return {
-                "weight_read_inflight": len(self._pending),
+                # A finished future can sit in _pending until its done
+                # callback runs (after result() woke its caller): it owns no
+                # I/O, so it is not in flight (Engram park() raced on it).
+                "weight_read_inflight": sum(not item.done() for item in self._pending),
                 "weight_read_failed": int(self._failure is not None),
                 "weight_read_timeouts_total": self._timeouts,
                 "io_finalizer_inflight": int(self._finalizer is not None and not self._finalizer.done()),

@@ -306,6 +306,39 @@ class FlashNextAdapter:
     # adapter contract without branching on model names.
     apc_cache_headroom_guard = True
 
+    # No draft-loop acceptance prior of its own; the policy's
+    # ``draft_loop_prior`` (lane_dense only) sets an instance value at load.
+    draft_loop_prior_resource = None
+
+    # ``lane_dense`` (FlashNextPolicy, default off): the lane matmul on the
+    # dense projections only (adapters/flash_next_lane.py).  Inert without the
+    # policy field, and for subclasses that own no Flash-Next policy.
+    def _bind_draft_loop_prior(self):
+        """The policy's named prior, as an instance value (unset: the class's)."""
+        from .flash_next_lane import prior_resource
+
+        resource = prior_resource(getattr(self, "policy", None))
+        if resource is not None:
+            self.draft_loop_prior_resource = resource
+
+    def lane_policy_defaults(self):
+        from .flash_next_lane import lane_policy_defaults
+
+        return lane_policy_defaults(getattr(self, "policy", None))
+
+    def validate_serving_lane_policy(self, policy):
+        from .flash_next_lane import validate_lane_policy
+
+        validate_lane_policy(getattr(self, "policy", None), self.model, policy)
+
+    def bind_serving_lane_matmul(self, receipt):
+        from .flash_next_lane import bind_lane_receipt
+
+        self.lane_dense_receipt = bind_lane_receipt(
+            getattr(self, "policy", None), getattr(self, "model", None), receipt
+        )
+        return self.lane_dense_receipt
+
     @staticmethod
     def _snapshot_diagnostic_modules(model):
         """Keep only live counter owners, never replaceable expert tables.
@@ -357,10 +390,48 @@ class FlashNextAdapter:
     # (options-sweep-flashnext-20261002, item 4a).  MLX2_DECODE_FIRST=0 is
     # the kill switch; an explicit "decode_first" in the execution policy
     # (false included) wins.
+    #
+    # Five FlashNextPolicy kernels default on since 2026-10-28 (Pierre:
+    # "if there's no regression mark them all qualified and default
+    # enabled").  Composed on checkpoint 25c2da42 at 25415f37b, B1 against a
+    # matched baseline: prefill +57/+50/+39% at 4K/16K/32K, decode
+    # +21/+6/-2%, needles and cold/warm parity pass
+    # (qualification/runs/fn-composed-20261028).  Declared here, not as
+    # FlashNextPolicy field defaults, so subclasses sharing that policy do not
+    # inherit them.  hc_prefill_kernels is the adapter's selected prefill
+    # law.  varlen_sparse_moe was composed here too but withdrawn on
+    # 2026-10-29: it only compacts padded batched prefill, Flash-Next serving
+    # never pads one (its counters stayed empty in the composed run and the
+    # adac448c qualification smoke refused it as selected-but-unused), so it
+    # stays an explicit opt-in.
+    _SELECTED_KERNELS = {
+        "hc_prefill_kernels": True,
+        "ple_read_policy": "adaptive",
+        "qsa_lazy_causal_mask": True,
+        "qsa_batch_decode_sparse": "indexed",
+    }
+    # Native-MTP decode defaults since 2026-10-29 (Pierre's "all good settings
+    # as defaults" campaign): lane matmul on the dense projections with
+    # num_draft 3 measured B1 decode +19% at 1K and +17% at 32K over the
+    # num_draft 2 default, width 4 flat (handoff), needles and warm hits pass
+    # (qualification/runs/fn-lane-dense-20261028); num_draft 3 alone +3.7% at
+    # 1K and +12% at 16K with seeded prompts (fn-phase1-20261028). The draft
+    # loop probe selected no loop there, so no borrowed draft_loop_prior is
+    # defaulted: without one, auto selection records "unavailable" and serves
+    # the same lane + num_draft 3 configuration, and an operator who pins
+    # num_draft 2 is not refused by a depth-3 prior they never asked for.
+    _NATIVE_MTP_DECODE = {
+        "num_draft": 3,
+        "lane_dense": True,
+    }
+    adapter_owned_default_policy_keys = frozenset(
+        {*_SELECTED_KERNELS, *_NATIVE_MTP_DECODE}
+    )
     default_route_execution_policy = {
         "ordinary": {
             "host_memory_signals": {"enabled": True},
             "decode_first": {"enabled": True, "shared_prefill_budget": False},
+            **_SELECTED_KERNELS,
         },
         "native_mtp": {
             "host_memory_signals": {"enabled": True},
@@ -370,6 +441,8 @@ class FlashNextAdapter:
                 "strong_match": 32, "strong_max_span": 14, "initial_span": 7,
             },
             "decode_first": {"enabled": True, "shared_prefill_budget": False},
+            **_SELECTED_KERNELS,
+            **_NATIVE_MTP_DECODE,
         },
     }
     # Vendor sampling defaults: Qwen/Qwen3.8-Flash-Next model card and the
@@ -384,7 +457,36 @@ class FlashNextAdapter:
         return Qwen4SpominSurgeryBackend(model, prompt_cache)
 
     def profile_name(self, mtp):
-        return f"flash-next-apcv2-mtp{self.policy.num_draft}" if mtp else "flash-next-apcv2-ordinary"
+        mixed = bool(getattr(self.policy, "mixed_prefill_decode", False))
+        if mtp:
+            if mixed:
+                # Fail closed: self-MTP rounds prepare prompts through MTP
+                # lane preparation and never run the mixed round, so the
+                # selected capability would silently not exist.
+                raise ValueError(
+                    "mixed_prefill_decode is available only on the ordinary "
+                    "Flash-Next route (mtp off); the native self-MTP route "
+                    "never mixes prefill and decode"
+                )
+            return f"flash-next-apcv2-mtp{self.policy.num_draft}"
+        # A distinct, unqualified profile: decode rows leave the decode law.
+        return "flash-next-apcv2-ordinary" + ("-mixed" if mixed else "")
+
+    def mixed_prefill_decode_status(self):
+        """Route applicability of the mixed round (implemented, not qualified)."""
+        policy = getattr(self, "policy", None)
+        selected = bool(getattr(policy, "mixed_prefill_decode", False))
+        return {
+            "implemented": True,
+            "qualified": False,
+            "selected": selected,
+            "routes": {
+                "ordinary": "available" if selected else "not_selected",
+                "native_self_mtp": "refused",
+            },
+            "decode_rows": "packed MoE/HC rows; batch-composition numerics, not bit-identical",
+            "prompt_state": "each mixed slice records deviation mixed_forward (APCv2 refuses it)",
+        }
 
     @staticmethod
     def planning_cache_budget(config, *, mtp):
@@ -513,6 +615,7 @@ class FlashNextAdapter:
             execution_policy
         )
         self.policy = FlashNextPolicy.from_mapping(execution_policy)
+        self._bind_draft_loop_prior()
         self.external_policy = {}
         self.draft_model = None
         path = Path(model_path).expanduser().resolve()
@@ -631,6 +734,11 @@ class FlashNextAdapter:
             )
             self.model.load_weights(list(weights.items()), strict=True)
             self.model.eval()
+            # Adapter-owned opt-in for the mixed prefill + decode round; the
+            # scheduler reads this declaration (mixed_step), never the name.
+            self.model.mixed_prefill_decode_selected = bool(
+                self.policy.mixed_prefill_decode
+            )
             from ..runtime.models.varlen_dense_mlp import (
                 VarlenSparseMoEPolicy,
                 install as install_varlen_mlp,
@@ -686,6 +794,20 @@ class FlashNextAdapter:
                 varlen_identity(self.varlen_sparse_moe),
                 hc=({"schema": "mlx2.hc-prefill.v1", "law": "rounded-combine-f32-norm-storage-gate-mix"}
                     if self.policy.hc_prefill_kernels else None),
+            )
+            # The selected prefill law (route defaults above): HC prefill.  It
+            # loads without qualification mode; every other prefill
+            # candidate, varlen sparse MoE included, still needs it or a
+            # matching receipt.
+            # Bound to this exact identity: a subclass that later recomputes
+            # its own prefill identity does not inherit the exemption.
+            self.selected_prefill_execution_identity = (
+                self.prefill_execution_identity
+                if self.tensorfold_prefill is None
+                and self.gdn_prefill_scan is None
+                and self.invariant_prefill is None
+                and self.varlen_sparse_moe is None
+                else None
             )
             self.row_exact_verify = None
             if self.policy.row_exact_verify:
@@ -1154,6 +1276,12 @@ class FlashNextAdapter:
         return {
             "moe": moe,
             "policy": self.policy.as_dict(),
+            # Absent while off so default receipts are unchanged.
+            **(
+                {"mixed_prefill_decode": self.mixed_prefill_decode_status()}
+                if getattr(self.policy, "mixed_prefill_decode", False)
+                else {}
+            ),
             **(
                 {"varlen_sparse_moe": varlen_mlp_status(self.varlen_sparse_moe)}
                 if getattr(self, "varlen_sparse_moe", None) is not None
@@ -1269,6 +1397,11 @@ class FlashNextAdapter:
             **(
                 {"row_exact_verify": self.row_exact_verify.status()}
                 if getattr(self, "row_exact_verify", None) is not None
+                else {}
+            ),
+            **(
+                {"lane_dense": self.lane_dense_receipt}
+                if getattr(self, "lane_dense_receipt", None)
                 else {}
             ),
             **({"q4_gate_three_rows": self.q4_gate_three_rows.status()}

@@ -2968,6 +2968,41 @@ def prepare_elastic_execution(headroom, controller, rows, *, draft_depth=0, work
         raise Overloaded("elastic execution memory does not fit after measured expert reclamation")
 
 
+def queued_prefix_protector(jobs, key_for):
+    """``protect(key, tokens)`` for APCv2 entries a waiting job will hit.
+
+    Warm requests are admitted one at a time, and each admission may evict
+    unleased entries for headroom.  Oldest-first eviction then took the very
+    prefixes the next queued requests were about to look up (Flash-Next 4K
+    B4 warm burst: 1/4 hits, memory_pressure_evictions +61), so they paid a
+    full cold prefill and more memory than the hit would have.  ``None`` when
+    no waiting job carries pre-rendered tokens.
+    """
+    wanted = []
+    for job in jobs:
+        tokens = getattr(job, "admission_tokens", None)
+        cancelled = getattr(job, "cancelled", None)
+        if not tokens or (cancelled is not None and cancelled.is_set()):
+            continue
+        try:
+            wanted.append((key_for(job), tokens))
+        except Exception:  # noqa: BLE001 - an unkeyable job protects nothing
+            continue
+    if not wanted:
+        return None
+
+    def protect(key, tokens):
+        length = len(tokens)
+        return any(
+            wanted_key == key
+            and len(prompt) >= length
+            and tuple(prompt[:length]) == tuple(tokens)
+            for wanted_key, prompt in wanted
+        )
+
+    return protect
+
+
 def reclaim_deferred_cache(apc, admission, clear_scratch):
     """An empty scheduler poll is not evidence of memory pressure.
 
@@ -3933,6 +3968,8 @@ DEFAULT_PREFILL_STEP = 2048
 
 
 class ServingEngine:
+    # Longest pressure-eviction pause while a submission renders its prompt.
+    PREPARING_EVICTION_HOLD_SECONDS = 0.25
     MEMORY_ADMISSION_TIMEOUT = 60.0
     MEMORY_ADMISSION_RETRY = 0.25
     # Admission state shared through submission_lock.  Class defaults keep the
@@ -9593,6 +9630,8 @@ class ServingEngine:
             )
             if (
                 prefill_execution_identity is not None
+                and prefill_execution_identity
+                != getattr(adapter, "selected_prefill_execution_identity", None)
                 and not self.qualification_mode
                 and not self.qualification
             ):
@@ -11251,8 +11290,56 @@ class ServingEngine:
             def observe_admission(decision):
                 admission.update(asdict(decision))
 
+            def waiting_jobs():
+                with self.incoming.mutex:
+                    items = list(self.incoming.queue)
+                jobs = [*published, *deferred, *prefix_waiting]
+                for item in items:
+                    jobs.extend(item.jobs if isinstance(item, PublishedCohort) else (item,))
+                with self.submission_lock:
+                    for pending in self.pending_cohorts.values():
+                        jobs.extend(pending["jobs"])
+                return [job for job in jobs if isinstance(job, Job)]
+
+            preparing_hold = {"since": None}
+
             def evict_unused_checkpoint():
-                evicted = apc.evict_oldest_unleased()
+                # A submission still rendering its prompt is not in any queue
+                # yet, so its prefix cannot be protected: the 4K B4 warm burst
+                # lost 2/4 hits this way.  Skip pressure eviction while one
+                # prepares (rendering takes milliseconds), bounded so a busy
+                # stream cannot starve admission.
+                if self._admissions_preparing > 0:
+                    now = time.monotonic()
+                    if preparing_hold["since"] is None:
+                        preparing_hold["since"] = now
+                    if now - preparing_hold["since"] < self.PREPARING_EVICTION_HOLD_SECONDS:
+                        count_add(self.counts, "memory_pressure_evictions_deferred_preparing", 1)
+                        return False
+                preparing_hold["since"] = None
+                protect = queued_prefix_protector(
+                    waiting_jobs(),
+                    lambda job: cache_key_for(
+                        job.tenant_id, request_apc_lookup_scope(job.request)
+                    ),
+                )
+                if protect is None:
+                    evicted = apc.evict_oldest_unleased()
+                else:
+                    protected = []
+
+                    def counted(key, tokens):
+                        keep = protect(key, tokens)
+                        if keep:
+                            protected.append(1)
+                        return keep
+
+                    evicted = apc.evict_oldest_unleased(protect=counted)
+                    if protected:
+                        count_add(
+                            self.counts, "memory_pressure_evictions_queued_protected",
+                            len(protected),
+                        )
                 if evicted:
                     count_add(self.counts, "memory_pressure_evictions", 1)
                     self._permit_allocator_reclaim_after_eviction()
@@ -11553,6 +11640,9 @@ class ServingEngine:
                         prefill_scheduling=self.prefill_scheduling_policy,
                         decode_first=self.decode_first_policy,
                         batch_geometry=self.batch_geometry_policy,
+                        # Adapter-declared route law: ordinary prompt slices
+                        # keep their idle-plan rows beside live decode.
+                        prefill_plan_exact=bool(config.get("prefill_plan_exact")),
                         self_mtp=config if self.mtp else None,
                         mtp_admission=_make_self_mtp_admission_callback(
                             controller,

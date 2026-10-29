@@ -6568,18 +6568,22 @@ class APCv2(PrefixIndex):
                         total -= record[0]
             return max(0, total)
 
-    def evict_oldest_unleased(self) -> bool:
+    def evict_oldest_unleased(self, protect=None) -> bool:
         """Reclaim one resident checkpoint without invalidating active branches.
 
         A configured disk tier keeps the checkpoint as a disk-only placeholder
         before releasing its resident arrays. Disk pins protect the entry and
         its files through expiry; an unpinned spill failure may still fall back
         to destructive resident eviction so memory pressure can make progress.
+        ``protect(key, tokens)`` true keeps that entry resident: admission
+        passes the prefixes queued requests are about to look up.
         """
         with self._apc_lock:
             self._ensure_metadata_available()
             records = self._pressure_candidates_locked()
             for _rank, _last_access, key, tokens, entry in records:
+                if protect is not None and protect(key, tokens):
+                    continue
                 if self._idle_disk_dir is not None and self._spill_entry_locked(
                     key, tokens, entry, reason="pressure"
                 ):

@@ -113,23 +113,23 @@ def set_pad_policy(policy: str) -> str:
     old, _RHS_PAD_POLICY = _RHS_PAD_POLICY, value
     return old
 # (mode, bits, group_size, experts, output_dims, input_dims) -> (q0, q1, r0, r1),
-# ms per call.  Fitted in-model on M5 Max (mlx 39400a0d4) from real weights
+# ms per call.  Fitted in-model on M5 Max (mlx 0.32.4) from real weights
 # and real routing, every sorted gather of one forward replayed both ways at
 # 16..204 token rows / 160..2040 sorted assignments
-# (scripts/calibrate_moe_pad_inmodel.py, Flash-Next 4-bit
-# experts; qualification/runs/moe-adaptive-pad-20261001).  The touched term
-# assumes uniform routing; real routing touches fewer experts, which the
-# fitted r0/r1 absorb for this table.
+# (scripts/calibrate_moe_pad_inmodel.py, Flash-Next 4-bit experts;
+# qualification/runs/fn-loop-20261028/padcal-0324b; the 39400a0d4 fit is in
+# moe-adaptive-pad-20261001).  The touched term assumes uniform routing; real
+# routing touches fewer experts, which the fitted r0/r1 absorb for this table.
 _PAD_COST_MODELS = {
-    # Flash-Next gate/up: 512 experts, 2560 -> 640.  rhs wins from ~1130
-    # sorted rows (~113 tokens at top-10).
-    ("affine", 4, 64, 512, 640, 2560): (-0.091401, 0.00096, 0.163268, 0.001819),
-    # Flash-Next down: 512 experts, 640 -> 2560.  rhs wins from ~310 sorted
-    # rows (~31 tokens).
-    ("affine", 4, 64, 512, 2560, 640): (-0.26367, 0.002081, -0.009772, 0.001673),
+    # Flash-Next gate/up: 512 experts, 2560 -> 640.  rhs wins from ~880-960
+    # sorted rows (~88-96 tokens at top-10).
+    ("affine", 4, 64, 512, 640, 2560): (-0.030588, 0.000847, 0.159162, 0.001403),
+    # Flash-Next down: 512 experts, 640 -> 2560.  rhs wins from ~500-560
+    # sorted rows (~50-56 tokens).
+    ("affine", 4, 64, 512, 2560, 640): (-0.148178, 0.001845, 0.490368, 0.000924),
 }
 _PAD_COST_ASSIGNMENTS = (160, 2040)
-_PAD_COST_MLX = "0.32.2.dev20260919+39400a0d4"
+_PAD_COST_MLX = "0.32.4"
 
 
 @lru_cache(maxsize=1)

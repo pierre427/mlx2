@@ -6293,7 +6293,18 @@ def build_parser():
         ),
     )
     parser.set_defaults(cache_bytes_source="host_default")
-    parser.add_argument("--cache-dir")
+    parser.add_argument(
+        "--cache-dir",
+        help=(
+            "APCv2 idle/pressure disk tier (process-local scratch). Default: a "
+            "private per-port directory under ~/Library/Caches/mlx2/apcv2-idle"
+        ),
+    )
+    parser.add_argument(
+        "--no-cache-dir",
+        action="store_true",
+        help="disable the default APCv2 disk tier (pressure evictions drop entries)",
+    )
     parser.add_argument(
         "--apc-persist-dir",
         help="private 0700 APCv2 disk tier retained and rescanned across restarts",
@@ -7361,6 +7372,37 @@ def native_mtp_mode(args, policy, adapter_resolution=None):
     return resolve_route_selection(args, policy, adapter_resolution).native_mtp
 
 
+DEFAULT_CACHE_DIR_ROOT = Path.home() / "Library/Caches/mlx2/apcv2-idle"
+
+
+def resolve_cache_dir(args):
+    """``(cache_dir, source)`` for the APCv2 disk tier.
+
+    Without a disk tier a pressure eviction destroys the entry, so warm
+    reuse at long context depends on free memory alone: Flash-Next 16K B4
+    warm hits were 1/4 without one and 4/4 with one (warm TTFT ~25 s vs
+    0.3-3.2 s, fn-fixes-20261028/cachedir-l4).  The default directory is per
+    bind address and port because a non-persistent tier sweeps its
+    directory's spill files at startup: two live servers cannot share one,
+    and a restart on the same port reclaims its predecessor's scratch.  An
+    ephemeral port (0) has no stable name, so it gets no default.
+    """
+    if getattr(args, "no_cache_dir", False):
+        if args.cache_dir:
+            raise ValueError("--no-cache-dir conflicts with --cache-dir")
+        return None, "disabled"
+    if args.cache_dir or getattr(args, "apc_persist_dir", None):
+        return args.cache_dir, "explicit"
+    port = int(getattr(args, "port", 0) or 0)
+    if port <= 0:
+        return None, "none_ephemeral_port"
+    host = "".join(
+        char if char.isalnum() or char in "-." else "_"
+        for char in str(getattr(args, "host", "") or "local")
+    )
+    return str(DEFAULT_CACHE_DIR_ROOT / f"{host}-{port}"), "default_per_port"
+
+
 def serving_engine_kwargs(
     args,
     policy,
@@ -7623,6 +7665,10 @@ def main():
             "--neural-concept-artifact requires --semantic-bridge neural or hybrid"
         )
     try:
+        args.cache_dir, args.cache_dir_source = resolve_cache_dir(args)
+    except ValueError as error:
+        parser.error(str(error))
+    try:
         admin_token = (
             load_admin_token(args.admin_token_file)
             if args.admin_token_file is not None
@@ -7779,6 +7825,9 @@ def main():
             parser.error(str(error))
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    logging.getLogger("mlx2.server").info(
+        "APCv2 disk tier: %s (%s)", args.cache_dir or "off", args.cache_dir_source
     )
     from .exit_trace import ExitTrace
 

@@ -6,7 +6,8 @@ import types
 import pytest
 
 
-def _engine_settings(monkeypatch, adapter_step, *, prefill_identity=None, expect_error=None, **overrides):
+def _engine_settings(monkeypatch, adapter_step, *, prefill_identity=None, expect_error=None,
+                     selected_identity=None, qualification_mode=None, **overrides):
     from types import SimpleNamespace as NS
 
     from mlx2 import memory, serving
@@ -53,6 +54,7 @@ def _engine_settings(monkeypatch, adapter_step, *, prefill_identity=None, expect
 
         def __init__(self, _path):
             self.prefill_execution_identity = prefill_identity
+            self.selected_prefill_execution_identity = selected_identity
 
         def profile_name(self, _mtp):
             return "fake"
@@ -76,7 +78,9 @@ def _engine_settings(monkeypatch, adapter_step, *, prefill_identity=None, expect
     monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
     monkeypatch.setattr(apc_v2, "APCv2", APC)
     monkeypatch.setattr(generate, "BatchGenerator", Batch)
-    engine = serving.ServingEngine("fake", adapter_factory=Adapter, qualification_mode=expect_error is None, mtp=False,
+    engine = serving.ServingEngine("fake", adapter_factory=Adapter, qualification_mode=(
+                                       expect_error is None if qualification_mode is None else qualification_mode),
+                                   mtp=False,
                                    max_lanes=2, max_inflight=2, **overrides)
     try:
         if expect_error is not None:
@@ -284,6 +288,18 @@ def test_prefill_identity_reaches_settings_and_both_cache_namespaces(monkeypatch
 
 def test_prefill_candidate_fails_closed_without_qualification(monkeypatch):
     _engine_settings(monkeypatch, 512, prefill_identity={"scan": {"chunk_size": 8}},
+                     expect_error="prefill candidates require qualification")
+
+
+def test_adapter_selected_prefill_law_loads_without_qualification(monkeypatch):
+    law = {"version": 1, "hc": {"schema": "mlx2.hc-prefill.v1", "law": "x"}}
+    settings, _, _ = _engine_settings(
+        monkeypatch, 512, prefill_identity=law, selected_identity=dict(law),
+        qualification_mode=False)
+    assert settings["prefill_execution"] == law
+    # Any other identity still fails closed, even beside a selected law.
+    _engine_settings(monkeypatch, 512, prefill_identity={"scan": {"chunk_size": 8}},
+                     selected_identity=law,
                      expect_error="prefill candidates require qualification")
 
 

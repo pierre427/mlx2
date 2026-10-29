@@ -24,15 +24,40 @@ def mixed_prefill_decode_enabled() -> bool:
     return os.environ.get("MLX2_MIXED_PREFILL_DECODE", "0").strip() == "1"
 
 
+def mixed_prefill_decode_selected(model) -> bool:
+    """Whether the mixed round is selected for ``model``.
+
+    A model that declares ``mixed_prefill_decode_selected`` (a bool its
+    adapter sets from its execution policy) decides for itself and ignores
+    the process switch: an adapter-owned opt-in cannot be turned on, or
+    off, behind its receipt by an inherited environment variable.  Other
+    models follow ``MLX2_MIXED_PREFILL_DECODE``.
+    """
+    declared = getattr(model, "mixed_prefill_decode_selected", None)
+    if declared is not None:
+        return declared is True
+    return mixed_prefill_decode_enabled()
+
+
 def model_supports_mixed_forward(model) -> bool:
     """A model opts in by exposing ``mixed_forward`` and ``logits`` and no
-    special prefill entry the mixed path would bypass."""
-    return (
+    special prefill entry the mixed path would bypass.
+
+    A ``prefill_prefetch_hook`` (Flash-Next's NVMe PLE readahead) does not
+    exclude a model: ``PromptProcessingBatch.prompt`` fires it only between
+    two chunks of one call, and both the ordinary round and the mixed round
+    hand it exactly one slice per call, so the hook never runs in either.
+    A model may refuse its current configuration through
+    ``mixed_forward_refusal()`` (a reason string, or None).
+    """
+    if not (
         callable(getattr(model, "mixed_forward", None))
         and callable(getattr(model, "logits", None))
         and getattr(model, "prefill_forward", None) is None
-        and getattr(model, "prefill_prefetch_hook", None) is None
-    )
+    ):
+        return False
+    refusal = getattr(model, "mixed_forward_refusal", None)
+    return not callable(refusal) or refusal() is None
 
 
 def aligned_prompt_rows(budget_rows: int, decode_rows: int, *, tile: int = MATMUL_ROW_TILE) -> int:
@@ -60,5 +85,6 @@ __all__ = [
     "MATMUL_ROW_TILE",
     "aligned_prompt_rows",
     "mixed_prefill_decode_enabled",
+    "mixed_prefill_decode_selected",
     "model_supports_mixed_forward",
 ]

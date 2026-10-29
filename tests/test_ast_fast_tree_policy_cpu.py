@@ -322,6 +322,10 @@ def test_adapter_constructs_four_request_slots_with_one_private_tree_provider(
             identity={"fingerprint": "cpu-private-tree"},
             _initialize_external_feedback=lambda: None,
             _external_num_draft=lambda: 15,
+            # 0a4bf7ff2: adaptive rows are bound against the selected tree law.
+            _tree_law_size_invariant=lambda: Qwen3827BAdapter._tree_law_size_invariant(
+                None
+            ),
             _progressive_external_binding=progressive_target_protocol_binding(
                 model, "exact"
             ),

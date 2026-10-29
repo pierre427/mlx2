@@ -42,6 +42,10 @@ ABOVE_M1_FLOOR = {
     # launch 1024; the fused window runs only on device classes s/d
     # (_serial_plan returns None elsewhere), so M1-M4 keep the stock SDPA.
     "runtime/models/muse_attn_window.py": 2,
+    # DeepSeek V4.1 Source mHC ``mega_v1`` pre kernel (ea78d82ff): one
+    # 1024-thread threadgroup matching MLX's 1024-lane reduction laws. Opt-in,
+    # not selected by default, behind a first-use bitwise self-check.
+    "runtime/models/deepseek_v41_source_hc_mega.py": 1,
 }
 
 

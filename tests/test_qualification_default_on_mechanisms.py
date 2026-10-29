@@ -626,3 +626,38 @@ def test_loader_qualifies_the_combined_route_without_nax_engagement(tmp_path):
     assert load_qualified_route(
         path, runtime=record["runtime"], artifact="weights", settings=settings,
         descriptor=QWEN4_FLASH_NEXT, name="nax+invariant").profile
+
+
+def _sparse_decode_settings(**overrides):
+    return _settings(max_context=65536, max_lanes=16,
+                     adapter_policy={"qsa_batch_decode_sparse": "indexed"}, **overrides)
+
+
+def test_native_mtp_static_handoff_labels_sparse_batch_decode_unreachable():
+    # Flash-Next adac448c handoff-qualify: the only long-context concurrent
+    # workload is the B2 shared cohort, which a width-3 static handoff keeps
+    # on MTP verify (1908 attempts, all dense by construction).
+    settings = _sparse_decode_settings(
+        mtp=True, speculation="self_mtp",
+        mtp_ordinary_handoff={"enabled": True, "max_mtp_width": 3})
+    assert "feature_qsa_batch_decode_sparse" not in required_feature_checks(settings)
+    reason = selected_not_observed_features(settings)["feature_qsa_batch_decode_sparse"]
+    assert "long-context cohort is B2" in reason
+
+
+def test_sparse_batch_decode_stays_required_where_the_b2_cohort_decodes_batched():
+    assert "feature_qsa_batch_decode_sparse" in required_feature_checks(
+        _sparse_decode_settings())
+    # A per-lane cost handoff fires at any width, so the cohort can hand off.
+    cost = _sparse_decode_settings(
+        mtp=True, speculation="self_mtp",
+        mtp_ordinary_handoff={"enabled": True, "max_mtp_width": 3, "cost_per_commit": True})
+    assert "feature_qsa_batch_decode_sparse" in required_feature_checks(cost)
+
+
+def test_qualifier_long_context_cohort_width_matches_the_rule():
+    from mlx2.qualification import QUALIFIER_LONG_CONTEXT_COHORT_WIDTH
+
+    source = (SCRIPTS / "qualify_serving.py").read_text()
+    assert '"requested_width": 2,' in source
+    assert QUALIFIER_LONG_CONTEXT_COHORT_WIDTH == 2

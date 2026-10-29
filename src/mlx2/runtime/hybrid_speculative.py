@@ -1311,6 +1311,137 @@ def advance_self_mtp_prefill(
     return (prompt[n:], target_cache, (draft_cache, prev_h), n)
 
 
+class BatchedMTPPrefillRefused(ValueError):
+    """A batched self-MTP prefill slice cannot run; nothing was mutated."""
+
+
+def advance_self_mtp_prefill_batched(
+    prompts: Sequence[mx.array],
+    model: nn.Module,
+    *,
+    prompt_caches: Sequence[Optional[List[Any]]],
+    mtp_states: Sequence[Optional[Tuple[List[Any], mx.array]]],
+    max_tokens: int,
+    fused_gdn_catchup: bool = False,
+    clear_cache: bool = True,
+    uids: Optional[Sequence[int]] = None,
+):
+    """Advance several lanes by one equal teacher-forced slice in one forward.
+
+    The batched twin of :func:`advance_self_mtp_prefill` for lanes that sit at
+    the same covered offset and run the same slice length, so the merged
+    target and draft caches carry no padding.  Each lane's caches are merged
+    (copy-built: the inputs are not mutated), one trunk forward and one
+    draft-head step run at ``B = len(prompts)``, and every row is extracted
+    back into a private B=1 cache pair.
+
+    Raises :class:`BatchedMTPPrefillRefused` before any forward when a lane's
+    geometry differs or a cache type cannot merge/extract rows (fail closed:
+    the caller prefills serially).  Returns one
+    ``(remaining, target_cache, (draft_cache, seed_h), processed)`` per lane,
+    the same tuple :func:`advance_self_mtp_prefill` returns.
+
+    Whether the rows equal B=1 prefill bitwise is a property of the kernels
+    the model runs at B > 1, not of this function; the caller records it
+    through the route's declared law.
+    """
+    prompts = list(prompts)
+    rows = len(prompts)
+    if rows < 2:
+        raise BatchedMTPPrefillRefused("batched prefill needs at least two lanes")
+    if len(prompt_caches) != rows or len(mtp_states) != rows:
+        raise BatchedMTPPrefillRefused("lane argument lengths differ")
+    uids = list(uids) if uids is not None else [None] * rows
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+    for prompt in prompts:
+        if prompt.ndim != 1 or int(prompt.size) == 0:
+            raise ValueError("prompt must be a non-empty rank-1 token array")
+    n = int(max_tokens)
+    if any(int(prompt.size) - 1 < n for prompt in prompts):
+        # A slice that would reach a lane's final token belongs to lane
+        # preparation, and a shorter one would make the rows ragged.
+        raise BatchedMTPPrefillRefused("a lane cannot run the full slice")
+    targets = []
+    drafts = []
+    seeds = []
+    for prompt_cache, mtp_state, uid in zip(prompt_caches, mtp_states, uids):
+        target = prompt_cache if prompt_cache is not None else make_prompt_cache(model)
+        _reject_unsupported_self_mtp_caches(target)
+        if mtp_state is None:
+            (draft, seed) = (model.make_mtp_cache(), None)
+        else:
+            (draft, seed) = _restore_mtp_state(target, mtp_state, uid=uid)
+        _reject_unsupported_self_mtp_caches(draft)
+        targets.append(target)
+        drafts.append(draft)
+        seeds.append(seed)
+    offsets = {_self_mtp_group_offset(target) for target in targets}
+    if len(offsets) != 1:
+        raise BatchedMTPPrefillRefused("lanes sit at different covered offsets")
+    if len({seed is None for seed in seeds}) != 1:
+        raise BatchedMTPPrefillRefused("lanes disagree on the boundary seed")
+    for group in (*targets, *drafts):
+        for cache in group:
+            if getattr(type(cache), "merge", None) is None:
+                raise BatchedMTPPrefillRefused(
+                    f"{type(cache).__name__} cannot merge cache rows"
+                )
+    try:
+        merged_target = _merge_self_mtp_cache_groups(targets)
+        merged_draft = _merge_self_mtp_cache_groups(drafts)
+    except Exception as error:  # noqa: BLE001 - refusal, inputs untouched
+        raise BatchedMTPPrefillRefused(f"cache merge refused: {error}") from error
+    for cache in (*merged_target, *merged_draft):
+        if not callable(getattr(cache, "extract", None)):
+            raise BatchedMTPPrefillRefused(
+                f"{type(cache).__name__} cannot extract cache rows"
+            )
+        padding = getattr(cache, "left_padding", None)
+        if isinstance(padding, mx.array) and bool(mx.any(padding != 0).item()):
+            raise BatchedMTPPrefillRefused("merged lanes carry left padding")
+    tokens = mx.stack([prompt[:n] for prompt in prompts])
+    with mx.stream(generation_stream):
+        scope = getattr(model, "gdn_catchup_scope", None)
+        context = scope(fused_gdn_catchup) if callable(scope) else nullcontext()
+        with context:
+            (_, h_chunk) = _mtp_backbone(model, tokens, merged_target)
+        for row, uid in enumerate(uids):
+            _validate_mtp_checkpoint_hidden(h_chunk[row : row + 1], rows=n, uid=uid)
+        if seeds[0] is None:
+            (hs, ts) = (
+                h_chunk[:, :-1],
+                mx.stack([prompt[1:n] for prompt in prompts]),
+            )
+        else:
+            hs = mx.concatenate(
+                [mx.concatenate(seeds, axis=0), h_chunk[:, :-1]], axis=1
+            )
+            ts = tokens
+        if ts.size > 0:
+            model.mtp_step(hs, ts, merged_draft)
+        lanes = []
+        for row in range(rows):
+            target = [cache.extract(row) for cache in merged_target]
+            draft = [cache.extract(row) for cache in merged_draft]
+            seed = mx.contiguous(h_chunk[row : row + 1, -1:, :])
+            lanes.append((target, draft, seed))
+        mx.eval(
+            [[c.state for c in target] for (target, _, _) in lanes],
+            [[c.state for c in draft] for (_, draft, _) in lanes],
+            [seed for (_, _, seed) in lanes],
+        )
+        if clear_cache:
+            mx.clear_cache()
+    results = []
+    for prompt, (target, draft, seed) in zip(prompts, lanes):
+        mtp_state_trace.state(
+            "prefill_slice_catchup", target=target, draft=draft, seed=seed
+        )
+        results.append((prompt[n:], target, (draft, seed), n))
+    return results
+
+
 def capture_self_mtp_checkpoint(
     target_cache,
     mtp_state,
