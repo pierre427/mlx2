@@ -163,6 +163,10 @@ def prepare_artifact(model_path, reference_tokenizer):
 def inspect_artifact(model_path):
     path = Path(model_path).expanduser().resolve()
     config = json.loads(_regular_asset(path / "config.json").read_text())
+    if isinstance(config, dict) and config.get("mlx2_weight_format") == "mlx-packed-v1":
+        from .deepseek_v4_mlx_artifact import inspect_artifact as inspect_mlx
+
+        return inspect_mlx(path)
     if config != {
         "model_type": MODEL_TYPE,
         "mlx2_weight_format": "gguf-packed-v1",

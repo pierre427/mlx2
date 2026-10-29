@@ -310,6 +310,10 @@ class KimiDeltaAttention(nn.Module):
         super().__init__()
         self.num_heads = args.num_attention_heads
         self.head_dim = args.head_dim
+        # Structural recurrence contract shared by the explicit chunk32
+        # installer; vector gates retain their own per-channel decay math.
+        self.num_k_heads = self.num_v_heads = self.num_heads
+        self.head_k_dim = self.head_v_dim = self.head_dim
         self.conv_kernel = args.short_conv_kernel_size
         self.projection_dim = self.num_heads * self.head_dim
         self.no_kda_lora = args.no_kda_lora
@@ -406,7 +410,7 @@ class KimiDeltaAttention(nn.Module):
         )
         beta_logits = self.b_proj(x).reshape(batch, length, self.num_heads)
 
-        output, recurrent_state = gated_delta_update(
+        output, recurrent_state = self._gated_delta_update(
             q,
             k,
             v,
@@ -418,6 +422,9 @@ class KimiDeltaAttention(nn.Module):
             mask=mask,
             use_kernel=not self.training,
             lower_bound=self.lower_bound,
+            prefill_chunk_size=(getattr(self, "_prefill_scan_chunk", 0)
+                if length >= 17 and not bool(getattr(cache, "speculating", False)) else 0),
+            prefill_stats=getattr(self, "_prefill_scan_stats", None),
         )
 
         if cache is not None:
@@ -431,6 +438,9 @@ class KimiDeltaAttention(nn.Module):
         gate = gate.reshape(batch, length, self.num_heads, self.head_dim)
         output = self.o_norm(output) * mx.sigmoid(gate)
         return self.o_proj(output.reshape(batch, length, -1))
+
+    def _gated_delta_update(self, *args, **kwargs):
+        return gated_delta_update(*args, **kwargs)
 
 
 @mx.compile

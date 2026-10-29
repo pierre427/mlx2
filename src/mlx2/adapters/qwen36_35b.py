@@ -693,7 +693,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         self.external_policy = {}
         self.draft_model = None
         draft_record = None
-        from .qwen38_27b import PROMPT_LOOKUP_DRAFT_NAMES, _names_target, _native_mtp_tree_policy
+        from .qwen38_27b import (
+            PROMPT_LOOKUP_DRAFT_NAMES,
+            _names_target,
+            _native_mtp_tree_policy,
+        )
 
         prompt_lookup_draft = policy.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES
         native_tree_draft = "draft_model" in policy and (
@@ -736,12 +740,17 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             "num_draft",
             "gdn_state_dtype",
             "moe_nax_gather",
+            "tensorfold_prefill",
+            "tensorfold_prefill_backend",
+            "gdn_prefill_chunk",
+            "gdn_prefill_segment_rows",
             *KERNEL_POLICY_ENV,
             *EAGER_DISPATCH_POLICY_KEYS,
         }:
             raise ValueError(
                 "Qwen3.6 execution policy supports only num_draft, gdn_state_dtype, "
-                "moe_nax_gather, "
+                "moe_nax_gather, tensorfold_prefill, tensorfold_prefill_backend, "
+                "gdn_prefill_chunk, gdn_prefill_segment_rows, "
                 "the eager-dispatch keys and the kernel switches "
                 + ", ".join(sorted(KERNEL_POLICY_ENV))
             )
@@ -750,6 +759,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         )
         from .flash_next_policy import FlashNextPolicy
 
+        prefill_policy = FlashNextPolicy.from_mapping({key: policy[key] for key in (
+            "tensorfold_prefill", "tensorfold_prefill_backend", "gdn_prefill_chunk",
+            "gdn_prefill_segment_rows", "gdn_core") if key in policy})
+        if stream_request is not None and prefill_policy.tensorfold_prefill:
+            raise ValueError("TensorFold prefill requires resident target projections")
         # GDN recurrent-state storage class (runtime/models/gdn_state.py).
         gdn_state_dtype = FlashNextPolicy(
             gdn_state_dtype=policy.pop("gdn_state_dtype", "float32")
@@ -892,6 +906,25 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             self._select_routed_candidate()
             self._gate_fused_gdn_defaults()
             self._select_decode_wins()
+            self.tensorfold_prefill = None
+            self.gdn_prefill_scan = None
+            if prefill_policy.tensorfold_prefill:
+                from ..runtime.models.tensorfold_prefill import (
+                    install as install_prefill,
+                )
+
+                self.tensorfold_prefill = install_prefill(
+                    self.model, backend=prefill_policy.tensorfold_prefill_backend)
+            if prefill_policy.gdn_prefill_chunk:
+                from ..runtime.models.gated_delta import install_prefill_scan
+
+                self.gdn_prefill_scan = install_prefill_scan(
+                    self.model, prefill_policy.gdn_prefill_chunk,
+                    prefill_policy.gdn_prefill_segment_rows)
+            from ..runtime.prefill_plan import execution_identity
+
+            self.prefill_execution_identity = execution_identity(
+                self.tensorfold_prefill, self.gdn_prefill_scan)
             # After every load-time target mutation, before the drafter binds.
             self._select_target_verify_row_exact()
             tokenizer = AutoTokenizer.from_pretrained(

@@ -88,6 +88,7 @@ POLICY_CHOICES = {
     "deepseek_rope_qat": ("reference", "fused_fp32"),
     "deepseek_expert_prefill": ("reference", "segmented_nax_fp16"),
     "deepseek_dense_prefill": ("reference", "nax_fp16"),
+    "deepseek_index_qat": ("reference", "fused_fp32"),
 }
 
 
@@ -181,6 +182,9 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
                 )
             raise
 
+    def _inspect_model_artifact(self, model_path):
+        return inspect_artifact(model_path)
+
     def _load(self, model_path):
         from ..process_env import (
             PROCESS_NUMERICS,
@@ -198,7 +202,9 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
         }
         os.environ.update(self.environment)
         assert_process_profile_applied("the native DeepSeek V4 packed profile")
-        artifact = inspect_artifact(model_path)
+        artifact = self._inspect_model_artifact(model_path)
+        if artifact.get("weight_format") == "MLX-safetensors-native-packed":
+            self.profile = self.profile.replace("native-gguf", "packed-mlx")
         if self.external_policy:
             from .deepseek_v4_dspark_artifact import (
                 inspect_sidecar,
@@ -224,7 +230,7 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
             )
 
             self.layout = packed_layout
-        self.descriptor = replace(DESCRIPTOR, cache_layout=self.layout)
+        self.descriptor = replace(type(self).descriptor, cache_layout=self.layout)
         self.metadata = artifact["metadata"]
         self.config = dict(artifact["config"])
         from ..runtime.gguf.weights import GGUFWeights
@@ -251,7 +257,7 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
             eos_token_ids=[int(self.metadata["tokenizer.ggml.eos_token_id"])],
         )
         self.weights = GGUFWeights(
-            path / FILENAME,
+            path if artifact.get("weight_format") == "MLX-safetensors-native-packed" else path / FILENAME,
             embedding_policy=self.kernel_policy["deepseek_embedding"],
             expected_stat=artifact["weight_stat"],
             compute_policy=self.kernel_policy["deepseek_packed"],
@@ -272,12 +278,14 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
             hc_policy=self.kernel_policy["deepseek_hc"],
             hc_projection_policy=self.kernel_policy["deepseek_hc_projection"],
             rope_qat_policy=self.kernel_policy["deepseek_rope_qat"],
+            index_qat_policy=self.kernel_policy["deepseek_index_qat"],
             expert_prefill_policy=self.kernel_policy["deepseek_expert_prefill"],
             dense_prefill_policy=self.kernel_policy["deepseek_dense_prefill"],
         )
         # Admission observes real resident weight storage, never a lazy model
         # whose first request unexpectedly uploads another eighty GiB.
         self.model.preload().eval()
+        self.weights.verify_storage()
         self.max_context = min(args.max_position_embeddings, SUPPORTED_CONTEXT)
         if self.external_policy:
             self._load_external()
@@ -304,7 +312,15 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
         record = self.external_record
         from .deepseek_v4_dspark_artifact import file_stat
 
-        if file_stat(Path(record["path"])) != record["stat"]:
+        sidecar_stat_path = Path(record["path"])
+        if record.get("weight_format") == "mlx-packed-v1":
+            from ..runtime.gguf.mlx_storage import MANIFEST, stamp
+
+            sidecar_stat_path /= MANIFEST
+            current_stat = lambda: stamp(sidecar_stat_path)
+        else:
+            current_stat = lambda: file_stat(sidecar_stat_path)
+        if current_stat() != record["stat"]:
             raise ValueError("sidecar changed before packed preload")
         self.draft_weights = GGUFWeights(
             record["path"],
@@ -323,7 +339,7 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
             else:
                 self.draft_weights.packed(name)
         mx.eval(list(self.draft_weights._dense.values()))
-        if file_stat(Path(record["path"])) != record["stat"]:
+        if current_stat() != record["stat"]:
             raise ValueError("sidecar changed during packed preload")
         backbone = DeepSeekV4DSparkBackbone(
             config,
@@ -338,6 +354,7 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
         # Constructor creates HC staging and rotary arrays after raw uploads.
         # Account/materialize every support plane before serving is published.
         backbone.preload()
+        self.draft_weights.verify_storage()
         self.draft_model = DeepSeekV4DSparkDraftModel(
             backbone,
             verification_mode=self.external_policy["deepseek_verifier"],
@@ -507,6 +524,11 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
             )
 
             direct_status = route_status()
+        index_status = None
+        if self.kernel_policy["deepseek_index_qat"] == "fused_fp32":
+            from ..runtime.models.deepseek_v4_index_qat import route_status
+
+            index_status = route_status()
         return {
             "packed_visible_attention": direct_status,
             "hc_projection_status": projection_status,
@@ -528,6 +550,8 @@ class DeepSeekV4GGUFAdapter(OrdinaryTextAdapter):
             "tensorfold": "not selected",
             "nax_prefill": self.kernel_policy["deepseek_expert_prefill"],
             "dense_nax_prefill": self.kernel_policy["deepseek_dense_prefill"],
+            "index_quantization": self.kernel_policy["deepseek_index_qat"],
+            "index_quantization_route": index_status,
             "hc_projection": self.kernel_policy["deepseek_hc_projection"],
             "vision": "unavailable",
             "speculation": self.draft_model.receipt_settings

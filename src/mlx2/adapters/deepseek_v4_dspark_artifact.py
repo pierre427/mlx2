@@ -34,6 +34,10 @@ def file_stat(path):
 
 
 def seal_path(path):
+    if Path(path).is_dir():
+        from ..runtime.gguf.mlx_storage import SEAL
+
+        return Path(path) / SEAL
     return Path(str(path) + ".mlx2-integrity.json")
 
 
@@ -110,6 +114,10 @@ def prepare_sidecar(value):
 
 def inspect_sidecar(value):
     """Bounded route inspection; fail closed on missing/stale/foreign seals."""
+    if Path(value).is_dir():
+        from .deepseek_v4_mlx_artifact import inspect_sidecar as inspect_mlx_sidecar
+
+        return inspect_mlx_sidecar(value)
     path = _path(value)
     before = file_stat(path)
     seal_bytes = _seal_bytes(seal_path(path))

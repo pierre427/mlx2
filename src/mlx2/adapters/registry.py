@@ -445,6 +445,12 @@ def _deepseek_v4_gguf(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.DeepSeekV4GGUFAdapter, module.DESCRIPTOR, artifact)
 
 
+def _deepseek_v4_mlx(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".deepseek_v4_mlx", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.DeepSeekV4MLXAdapter, module.DESCRIPTOR, artifact)
+
+
 def _lfm25_vl(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".lfm25_vl", __package__)
     artifact = module.inspect_artifact(path)
@@ -503,6 +509,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "granitemoe_swa": _granite_swa,
     "flint": _flint,
     "deepseek4_gguf": _deepseek_v4_gguf,
+    "deepseek4_mlx": _deepseek_v4_mlx,
     "lfm2_moe": _lfm25_moe,
     "lfm2_vl": _lfm25_vl,
     "smolvlm": _smolvlm2,

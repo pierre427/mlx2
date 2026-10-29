@@ -2,7 +2,7 @@
   "schema": 1,
   "dispatchers": {
     "mlx2.adapters.registry": {
-      "sha256": "2de21a81640683df7aafee2033a5117e2a9c4b4000fe3075f341ac835c7f3fe5",
+      "sha256": "58b230e98495d1289d287c5c25218a181da7ae7da403249fa0e12a5edef6eca9",
       "targets": [],
       "reason": "selected-adapter dispatch"
     },

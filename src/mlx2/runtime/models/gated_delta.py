@@ -120,6 +120,21 @@ def _chunked_prefill(
     """
     from ..prefill_plan import recurrence_segments
 
+    if chunk_size == 32:
+        from .gdn_chunk32 import chunk32, refusal
+
+        reason = "short_sequence" if q.shape[1] < _CORE_GDN_MIN_T else refusal(q, k, v, g, beta, state, mask)
+        if reason:
+            if stats is not None:
+                stats["fallback_" + reason] += 1
+            return None
+        result = chunk32(q, k, v, g, beta, state)
+        if stats is not None:
+            stats["calls"] += 1
+            stats["chunk32_calls"] += 1
+            stats["tokens"] += int(q.shape[0]) * int(q.shape[1])
+        return result
+
     reason = None
     if _core_gated_delta_update is None:
         reason = "primitive_unavailable"
@@ -165,8 +180,8 @@ def install_prefill_scan(model, chunk_size, segment_rows=2048):
     """Bind candidate scan geometry to each recurrent layer, not process env."""
     from collections import Counter
 
-    if type(chunk_size) is not int or chunk_size not in (8, 16):
-        raise ValueError("prefill scan chunk_size must be 8 or 16")
+    if type(chunk_size) is not int or chunk_size not in (8, 16, 32):
+        raise ValueError("prefill scan chunk_size must be 8, 16 or 32")
     if (
         type(segment_rows) is not int
         or not 64 <= segment_rows <= 8192
@@ -175,8 +190,10 @@ def install_prefill_scan(model, chunk_size, segment_rows=2048):
         raise ValueError(
             "prefill scan segment_rows must be a multiple of 16 in 64..8192"
         )
-    if _core_gated_delta_update is None:
+    if chunk_size != 32 and _core_gated_delta_update is None:
         raise ValueError("prefill scan requires mx.fast.gated_delta_update")
+    from .gdn_chunk32 import HEAD_CONFIGS
+    heads = HEAD_CONFIGS if chunk_size == 32 else _CORE_GDN_HEADS
     stats, count = Counter(), 0
     for name, layer in model.named_modules():
         if "mtp" in name.split("."):
@@ -186,7 +203,7 @@ def install_prefill_scan(model, chunk_size, segment_rows=2048):
             and getattr(layer, "head_k_dim", 0) == 128
             and getattr(layer, "head_v_dim", 0) == 128
             and (getattr(layer, "num_k_heads", 0), getattr(layer, "num_v_heads", 0))
-            in _CORE_GDN_HEADS
+            in heads
         ):
             object.__setattr__(layer, "_prefill_scan_chunk", chunk_size)
             object.__setattr__(layer, "_prefill_scan_segment", segment_rows)
@@ -598,8 +615,8 @@ def gated_delta_update(
     if not use_kernel or mx.default_device() != mx.gpu or (not mx.metal.is_available()):
         return gated_delta_ops(q, k, v, g, beta, state, mask)
     if prefill_chunk_size:
-        if type(prefill_chunk_size) is not int or prefill_chunk_size not in (8, 16):
-            raise ValueError("prefill_chunk_size must be 0, 8 or 16")
+        if type(prefill_chunk_size) is not int or prefill_chunk_size not in (8, 16, 32):
+            raise ValueError("prefill_chunk_size must be 0, 8, 16 or 32")
         result = _chunked_prefill(
             q,
             k,

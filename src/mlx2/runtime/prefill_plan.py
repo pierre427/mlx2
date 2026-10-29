@@ -144,6 +144,7 @@ def execution_identity(
     invariant=None,
     varlen=None,
     external_varlen_prefill=None,
+    hc=None,
 ):
     """Numerical law identity, excluding counters that change during a run."""
     if (
@@ -152,9 +153,12 @@ def execution_identity(
         and not invariant
         and not varlen
         and not external_varlen_prefill
+        and not hc
     ):
         return None
     result = {"version": 1}
+    if hc:
+        result["hc"] = {key: hc[key] for key in ("schema", "law")}
     if invariant:
         result["invariant"] = {key: invariant[key] for key in ("schema", "law")}
     if projection:

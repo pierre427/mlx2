@@ -386,6 +386,18 @@ def test_deepseek_matching_numerics_reaches_inspection_without_tensor_load(monke
     with pytest.raises(_Loaded):deepseek_v4_gguf.DeepSeekV4GGUFAdapter(str(tmp_path))
 
 
+@pytest.mark.parametrize('explicit,latched', [('1','0'),('0','1'),('0','0')])
+def test_mlx_deepseek_inherits_guard_before_artifact_inspection(monkeypatch,tmp_path,explicit,latched):
+    from mlx2.adapters import deepseek_v4_mlx
+    monkeypatch.setattr(process_env,'_EXPLICIT_AT_IMPORT',None)
+    monkeypatch.setenv('MLX_ENABLE_TF32',explicit)
+    _latched(monkeypatch,{'MLX_ENABLE_TF32':latched})
+    def inspected(_):raise _Loaded('matched guard reached native inspection')
+    monkeypatch.setattr(deepseek_v4_mlx,'inspect_artifact',inspected)
+    expected=(_Loaded if explicit==latched=='0' else import_env.ImportOrderError if explicit=='0' else process_env.ProcessNumericsConflict)
+    with pytest.raises(expected):deepseek_v4_mlx.DeepSeekV4MLXAdapter(str(tmp_path))
+
+
 def test_deepseek_stale_import_latch_refuses_before_inspection(monkeypatch,tmp_path):
     from mlx2.adapters import deepseek_v4_gguf
     monkeypatch.setattr(process_env,"_EXPLICIT_AT_IMPORT",None)

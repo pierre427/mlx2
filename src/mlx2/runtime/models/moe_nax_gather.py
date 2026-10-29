@@ -1445,6 +1445,13 @@ def _plan(rows: int, experts: int, K: int, N: int) -> Plan:
             return plan
     if K % 64 or N % 64:
         return Plan(_SCHED_SEG, 64, 64, 0, 0)
+    # XPU #22's compact-expert scheduling principle, adapted to MLX's
+    # affine layout and existing 64x64 Metal tile. Opt-in: Intel's signed-S4
+    # layout and 32x64 dispatch thresholds are deliberately not transplanted.
+    if (os.environ.get("MLX_QWEN4_COMPACT_MOE_PREFILL") == "1"
+            and experts == 512 and K == 2560 and N in (160, 320, 640)
+            and 128 * experts < rows <= 81920):
+        return Plan(_SCHED_SEG, 64, 64, _GX, 0)
     per_expert = rows / max(1, experts)
     if per_expert < 36 or (K < 1024 and per_expert < 120):
         return Plan(_SCHED_DB, 64, 64, 0, 0)

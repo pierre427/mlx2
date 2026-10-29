@@ -18,6 +18,7 @@ def model_execution_identity(
     expert_prefill_policy="reference",
     dense_prefill_policy="reference",
     rope_qat_policy="reference",
+    index_qat_policy="reference",
 ):
     for name, value, default in (
         ("attention", attention_policy, "reference"),
@@ -27,6 +28,7 @@ def model_execution_identity(
         ("expert_prefill", expert_prefill_policy, "reference"),
         ("dense_prefill", dense_prefill_policy, "reference"),
         ("rope_qat", rope_qat_policy, "reference"),
+        ("index_qat", index_qat_policy, "reference"),
     ):
         if value != default:
             identity += ":" + name + "=" + value
@@ -43,6 +45,7 @@ def native_target_identity(fingerprint, policy):
         expert_prefill_policy=policy["deepseek_expert_prefill"],
         dense_prefill_policy=policy["deepseek_dense_prefill"],
         rope_qat_policy=policy["deepseek_rope_qat"],
+        index_qat_policy=policy.get("deepseek_index_qat", "reference"),
     )
 
 

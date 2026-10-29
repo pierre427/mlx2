@@ -50,6 +50,7 @@ def _adapter_classes():
     from mlx2.adapters.ling3_flash import Ling3FlashAdapter
     from mlx2.adapters.flint import FlintAdapter
     from mlx2.adapters.deepseek_v4_gguf import DeepSeekV4GGUFAdapter
+    from mlx2.adapters.deepseek_v4_mlx import DeepSeekV4MLXAdapter
     from mlx2.adapters.xing import XingAdapter
 
     return {
@@ -73,6 +74,7 @@ def _adapter_classes():
         "flint": FlintAdapter,
         "bailing_hybrid": Ling3FlashAdapter,
         "deepseek4_gguf": DeepSeekV4GGUFAdapter,
+        "deepseek4_mlx": DeepSeekV4MLXAdapter,
     }
 
 
@@ -202,6 +204,7 @@ def test_sampling_profile_is_generation_only_for_prompt_caching():
 # --- per-adapter declarations ------------------------------------------------
 
 EXPECTED = {
+    "deepseek4_mlx": {"general": dict(temperature=1.0,top_p=1.0,top_k=0)},
     # Exact pinned GGUF metadata general.sampling.temp/top_p; top_k0 is the
     # adapter's explicitly cited neutral policy, not a fabricated card value.
     "deepseek4_gguf": {"general": dict(temperature=1.0, top_p=1.0, top_k=0)},

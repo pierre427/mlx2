@@ -38,7 +38,13 @@ class GGUFWeights:
             raise GGUFError("unsupported packed expert prefill policy")
         if dense_prefill_policy not in ("reference", "nax_fp16"):
             raise GGUFError("unsupported packed dense prefill policy")
-        self.file = GGUFFile(path)
+        from pathlib import Path
+        if Path(path).is_dir():
+            from .mlx_storage import MLXPackedFile
+
+            self.file = MLXPackedFile(path)
+        else:
+            self.file = GGUFFile(path)
         self.metadata = self.file.metadata
         self.tensors = self.file.tensors
         self.max_dense_elements = max_dense_elements
@@ -58,7 +64,11 @@ class GGUFWeights:
 
     def packed(self, name):
         if name not in self._packed:
-            self._packed[name] = PackedMatrix.upload(self.file, name)
+            direct = getattr(self.file, "device_array", None)
+            self._packed[name] = (
+                PackedMatrix(direct(name), self.tensors[name])
+                if callable(direct) else PackedMatrix.upload(self.file, name)
+            )
         return self._packed[name]
 
     def _native(self, name):
@@ -70,6 +80,9 @@ class GGUFWeights:
             raise GGUFError(
                 "native upload only permits supported unquantized scalar types"
             )
+        direct = getattr(self.file, "device_array", None)
+        if callable(direct):
+            return direct(name)
         view = self.file.packed_view(name)
         try:
             dtype = {
@@ -107,6 +120,7 @@ class GGUFWeights:
                     )
                 finally:
                     view.release()
+                    self.file.release_mapping()
                 self._dense[name] = mx.array(data.reshape(tensor.numpy_shape))
         return self._dense[name]
 
@@ -125,7 +139,9 @@ class GGUFWeights:
                 # Match the original Matmul promotion graph exactly: transpose
                 # native storage first, then promote that operand. Casting the
                 # base then transposing could select a different GPU layout.
-                cache[name] = weight.T.astype(mx.float32)
+                prepared = getattr(getattr(self, "file", None), "linear_fp32", None)
+                operand = prepared(name) if callable(prepared) else None
+                cache[name] = weight.T.astype(mx.float32) if operand is None else operand
             fp32_operand = cache[name]
             return lambda x: x @ (fp32_operand if x.dtype == mx.float32 else weight.T)
         weight = self.packed(name)
@@ -174,11 +190,16 @@ class GGUFWeights:
             if name not in self._embedding_rows:
                 from .embedding_rows import F16EmbeddingRows
 
+                location = getattr(self.file, "embedding_location", None)
+                if callable(location):
+                    path, tensor, offset, expected = location(name)
+                else:
+                    path, offset, expected = self.file.path, self.file.data_offset, self._expected_stat
                 self._embedding_rows[name] = F16EmbeddingRows(
-                    self.file.path,
+                    path,
                     tensor,
-                    data_offset=self.file.data_offset,
-                    expected_stat=self._expected_stat,
+                    data_offset=offset,
+                    expected_stat=expected,
                 )
         elif tensor.ggml_type in (0, 1, 30):
             self.array(name)
@@ -328,3 +349,8 @@ class GGUFWeights:
             self._grouped.clear()
             getattr(self, "_native_linear_fp32", {}).clear()
             self.file.close()
+
+    def verify_storage(self):
+        verify = getattr(self.file, "verify", None)
+        if callable(verify):
+            verify()

@@ -14,6 +14,9 @@ from .mtp_depth_cap import validate_self_mtp_num_draft
 _QSA_NAX_MODULE_MIN_PHYSICAL_KV = 16384
 
 _OPTIONAL_KERNEL_ENV = {
+    "hc_prefill_kernels": "MLX_QWEN4_HC_PREFILL",
+    "qsa_prefetch_partials": "MLX_QWEN4_QSA_PREFETCH_PARTIALS",
+    "compact_moe_prefill": "MLX_QWEN4_COMPACT_MOE_PREFILL",
     "moe_router_kernel": "MLX_QWEN4_MOE_ROUTER_KERNEL",
     "qsa_nax_decode": "MLX_QWEN4_QSA_NAX_DECODE",
     "gdn_core": "MLX_GDN_CORE",
@@ -153,6 +156,9 @@ class FlashNextPolicy:
     # False restores the composed ops; it enters the environment and receipts
     # only when enabled.
     hc_decode_kernels: bool = True
+    hc_prefill_kernels: bool = False
+    qsa_prefetch_partials: bool = False
+    compact_moe_prefill: bool = False
     # 2..8-row HC calls outside a row-exact window (MTP verify rows,
     # multi-lane decode; MLX_QWEN4_HC_MULTI_ROW). The launches read the
     # weights once per row: on the all-4-bit artifact that wins (switching it
@@ -415,6 +421,10 @@ class FlashNextPolicy:
             )
         if self.moe_nax_gather not in {"off", "gather", "fused"}:
             raise ValueError("moe_nax_gather must be off, gather or fused")
+        if self.compact_moe_prefill and self.moe_nax_gather == "off":
+            raise ValueError("compact_moe_prefill requires moe_nax_gather")
+        if self.qsa_prefetch_partials and not self.indexed_fused_merge:
+            raise ValueError("qsa_prefetch_partials requires indexed_fused_merge")
         if self.moe_rhs_pad_policy not in {"floor", "adaptive", "always"}:
             raise ValueError("moe_rhs_pad_policy must be floor, adaptive or always")
         if self.qsa_nax_decode and self.attn_fused_rows:
@@ -511,8 +521,9 @@ class FlashNextPolicy:
             0,
             8,
             16,
+            32,
         ):
-            raise ValueError("gdn_prefill_chunk must be 0, 8 or 16")
+            raise ValueError("gdn_prefill_chunk must be 0, 8, 16 or 32")
         if self.gdn_core and self.gdn_prefill_chunk:
             raise ValueError("choose either gdn_core or gdn_prefill_chunk")
         segment = self.gdn_prefill_segment_rows

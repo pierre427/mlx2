@@ -395,6 +395,7 @@ def install(model, *, backend="native"):
     from .qwen3_5 import GatedDeltaNet
     from .qwen3_next import Qwen3NextMLP
     from .qwen4_exp import DecoderLayer as FlashDecoder
+    from .qwen36_35b import DecoderLayer as MoeDecoder
     from .qwen38_27b import DecoderLayer as DenseDecoder
 
     if backend not in ("native", "metal"):
@@ -431,7 +432,7 @@ def install(model, *, backend="native"):
             object.__setattr__(module, "_prefill_counts", counts)
             object.__setattr__(module, "_prefill_backend", backend)
             installed.append(name)
-        if isinstance(module, (DenseDecoder, FlashDecoder)):
+        if isinstance(module, (DenseDecoder, FlashDecoder, MoeDecoder)):
             module.__class__ = _scoped_decoder_type(type(module))
         candidate = native_eligible if backend == "native" else eligible
         if isinstance(module, GatedDeltaNet) and all(
@@ -440,6 +441,13 @@ def install(model, *, backend="native"):
             and candidate(getattr(module, part))
             for part in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
         ):
+            pair = (module.in_proj_qkv, module.in_proj_z)
+            if backend == "native" and len({
+                (part.bits, part.group_size, getattr(part, "mode", "affine"))
+                for part in pair
+            }) != 1:
+                counts["mixed_format_group_skips"] += 1
+                continue
             object.__setattr__(module, "_prefill_counts", counts)
             object.__setattr__(module, "_prefill_backend", backend)
             if backend == "native":
@@ -467,6 +475,12 @@ def install(model, *, backend="native"):
             and candidate(getattr(module, part))
             for part in ("gate_proj", "up_proj")
         ):
+            if backend == "native" and len({
+                (part.bits, part.group_size, getattr(part, "mode", "affine"))
+                for part in (module.gate_proj, module.up_proj)
+            }) != 1:
+                counts["mixed_format_mlp_skips"] += 1
+                continue
             # Only the explicit Qwen3NextMLP hook consumes this marker.
             object.__setattr__(module, "_prefill_counts", counts)
             object.__setattr__(module, "_prefill_backend", backend)

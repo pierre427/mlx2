@@ -20,6 +20,24 @@ def quantized(k=64, n=33, bias=False, bits=4):
     return nn.QuantizedLinear.from_linear(layer, group_size=64, bits=bits)
 
 
+def test_native_install_skips_mixed_formats_without_touching_their_weights():
+    from mlx2.runtime.models.qwen3_next import Qwen3NextMLP
+
+    model = nn.Module()
+    for name, up_bits in (("mixed", 8), ("uniform", 4)):
+        mlp = Qwen3NextMLP(64, 128)
+        mlp.gate_proj = quantized(n=128)
+        mlp.up_proj = quantized(n=128, bits=up_bits)
+        mlp.down_proj = quantized(k=128, n=64)
+        setattr(model, name, mlp)
+    original = model.mixed.up_proj.weight
+    receipt = prefill.install(model, backend="native")
+    assert receipt["counters"]["mixed_format_mlp_skips"] == 1
+    assert model.mixed.up_proj.weight is original
+    assert not hasattr(model.mixed, "_prefill_mlp_group")
+    assert model.uniform._prefill_mlp_group.matches((model.uniform.gate_proj, model.uniform.up_proj))
+
+
 @pytest.mark.parametrize("alignment", [8, 16])
 def test_scan_partition_covers_every_token_and_avoids_short_tail(alignment):
     for length in [*range(1050), 4097, 8192, 8193, 32769]:
@@ -71,7 +89,7 @@ def test_policy_is_explicit_and_receipted():
     for values in (
         {"tensorfold_prefill": 1},
         {"gdn_prefill_chunk": True},
-        {"gdn_prefill_chunk": 32},
+        {"gdn_prefill_chunk": 24},
         {"gdn_prefill_chunk": 8, "gdn_core": True},
     ):
         with pytest.raises(ValueError):

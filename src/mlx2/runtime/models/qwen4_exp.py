@@ -83,6 +83,7 @@ from .qwen4_fused_gdn_verify import (
     validate_qwen4_gdn_replay_acceptance,
 )
 from .qwen4_fused_group_norm import fused_group_norm_enabled, try_fused_group_norm
+from . import qwen_hc_prefill as _hc_prefill
 from . import qwen4_hc_decode as _hc_decode
 from .qwen4_gate_inject import (
     eager_qwen4_gate_inject,
@@ -1290,6 +1291,10 @@ class GroupRMSNorm(nn.Module):
         # arithmetic below, which is the same math at a different reduction
         # order.  try_fused_group_norm counts every call and every decline
         # reason, so a route can show which path ran rather than assert a flag.
+        if _hc_prefill.active() and not _invariant.active() and not self._use_fast(x):
+            fused = _hc_prefill.try_norm(x, self.weight, self.group_size, self.eps)
+            if fused is not None:
+                return fused
         fused = try_fused_group_norm(x, self.weight, self.group_size, self.eps)
         if fused is not None:
             return fused
@@ -2756,8 +2761,9 @@ class GatedResidual(nn.Module):
             return (*fused, False)
         return (*self._composed(hyper_input, glue, True), True)
 
-    def _composed(self, hyper_input, glue, raw_inject):
-        normed = self.hc_norm(hyper_input)
+    def _composed(self, hyper_input, glue, raw_inject, *, normed=None):
+        if normed is None:
+            normed = self.hc_norm(hyper_input)
         gate_input = self.input_mix_weight_down(normed)
         weights = None
         if glue:
@@ -2768,11 +2774,14 @@ class GatedResidual(nn.Module):
             )
         if weights is None:
             weights = nn.silu(gate_input / self.hc_count)
-        weights = mx.sigmoid(self.input_mix_weight_up(weights))
+        raw_mix = self.input_mix_weight_up(weights)
+        mixed = None
+        if _hc_prefill.active() and not _invariant.active():
+            mixed = _hc_prefill.try_gate_mix(normed, raw_mix, self.hidden_size)
+        weights = mx.sigmoid(raw_mix)
         weights = weights.reshape(*weights.shape[:-1], self.hc_count, self.hidden_size)
         streams = normed.reshape(*normed.shape[:-1], self.hc_count, self.hidden_size)
-        mixed = None
-        if glue:
+        if mixed is None and glue:
             mixed = _run_glue(("hyper_mix",), _build_hyper_mix, weights, streams)
         if mixed is None:
             mixed = mx.mean(weights * streams, axis=-2)
@@ -7180,6 +7189,12 @@ class DecoderLayer(nn.Module):
         self.mlp_hyper_connection = GatedResidual(args)
 
     def __call__(self, x, input_ids, mask=None, cache=None, ssm_mask=None):
+        with _hc_prefill.scope(not self.training and x.shape[1] >= 9
+                and not _row_exact_window_active()
+                and not bool(getattr(cache, "speculating", False))):
+            return self._forward(x, input_ids, mask, cache, ssm_mask)
+
+    def _forward(self, x, input_ids, mask=None, cache=None, ssm_mask=None):
         if self.ple is not None:
             x = x + self.ple(x, input_ids, cache, ssm_mask)
         gate_inject = fused_gate_inject_enabled()
@@ -7190,16 +7205,25 @@ class DecoderLayer(nn.Module):
             branch = self.linear_attn(mixed, ssm_mask, cache)
         else:
             branch = self.self_attn(mixed, mask, cache)
-        x = (
+        combined_norm = None
+        connection = self.mlp_hyper_connection
+        if _hc_prefill.active() and not raw and not _invariant.active() and not _GDN_SHAPE_STABLE_PROJECTIONS:
+            combined_norm = _hc_prefill.try_combine_norm(
+                residual, branch, inject, connection.hc_norm.weight,
+                connection.hidden_size, connection.hc_norm.eps)
+        x = combined_norm[0] if combined_norm is not None else (
             _apply_raw_gate_inject(
                 residual, branch, inject, training=self.training
             )
             if raw
             else _apply_inject(residual, branch, inject)
         )
-        (mixed, residual, inject, raw) = _split_hyper(
-            self.mlp_hyper_connection, x, gate_inject
-        )
+        if combined_norm is None:
+            (mixed, residual, inject, raw) = _split_hyper(connection, x, gate_inject)
+        else:
+            mixed, residual, inject = connection._composed(
+                x, compile_glue_enabled(), gate_inject, normed=combined_norm[1])
+            raw = gate_inject
         branch = self.mlp(mixed)
         if raw:
             return _apply_raw_gate_inject(

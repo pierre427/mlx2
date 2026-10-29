@@ -232,11 +232,19 @@ def simulate_fp8_kv(value, rope_dims=64, group_size=64):
     return mx.concatenate((result, value[..., dim:]), axis=-1)
 
 
-def simulate_index_fp4(value, group_size=32):
+def simulate_index_fp4(value, group_size=32, *, policy="reference"):
     """Normalized Hadamard then E2M1 QAT, power-of-two scaling and even ties."""
     dim = value.shape[-1]
-    if dim != 128 or dim % group_size:
+    if dim != 128 or type(group_size) is not int or group_size <= 0 or dim % group_size:
         raise ValueError("DeepSeek V4 indexer QAT requires 128 coordinates")
+    if policy == "fused_fp32":
+        if group_size != 32:
+            raise ValueError("fused index QAT requires group32")
+        from .deepseek_v4_index_qat import index_fp4
+
+        return index_fp4(value)
+    if policy != "reference":
+        raise ValueError("unknown DeepSeek V4 index QAT policy")
     rotated = mx.hadamard_transform(value.astype(mx.float32), scale=dim**-0.5)
     groups = rotated.reshape(*value.shape[:-1], dim // group_size, group_size)
     amax = mx.maximum(
@@ -536,10 +544,12 @@ class Compressor:
         *,
         indexer=False,
         rope_qat_policy="reference",
+        index_qat_policy="reference",
     ):
         self.config, self.weights, self.prefix = config, weights, prefix
         self.dim, self.ratio, self.is_indexer = dim, ratio, indexer
         self.rope_qat_policy = rope_qat_policy
+        self.index_qat_policy = index_qat_policy
         self.ape = weights.array(prefix + "_ape.weight").astype(mx.float32)
         self.norm = weights.array(prefix + "_norm.weight")
         self.rope = Rotary(
@@ -571,7 +581,7 @@ class Compressor:
             pooled = self.rope(pooled[:, None], positions=starts).squeeze(1)
         if pooled.shape[1] and self.config.simulate_quantization:
             pooled = (
-                simulate_index_fp4(pooled)
+                simulate_index_fp4(pooled, policy=self.index_qat_policy)
                 if self.is_indexer
                 else simulate_fp8_kv(pooled, self.config.qk_rope_head_dim)
             )
@@ -587,9 +597,11 @@ class Attention:
         *,
         attention_policy="reference",
         rope_qat_policy="reference",
+        index_qat_policy="reference",
     ):
         self.c, self.w, self.attention_policy = config, weights, attention_policy
         self.rope_qat_policy = rope_qat_policy
+        self.index_qat_policy = index_qat_policy
         self.prefix = f"blk.{layer}."
         self.ratio = config.compress_ratios[layer]
         self.rope = Rotary(
@@ -617,6 +629,7 @@ class Attention:
                 config.index_head_dim,
                 self.ratio,
                 indexer=True,
+                index_qat_policy=index_qat_policy,
             )
 
     def linear(self, x, suffix):
@@ -679,7 +692,7 @@ class Attention:
                         )
                         iq = self.rope(iq, offset)
                         if c.simulate_quantization:
-                            iq = simulate_index_fp4(iq)
+                            iq = simulate_index_fp4(iq, policy=self.index_qat_policy)
                         iw = (
                             self.linear(x, "indexer.proj").astype(mx.float32)
                             * c.index_n_heads**-0.5
@@ -756,6 +769,7 @@ class Block:
         hc_policy="reference",
         hc_projection_policy="reference",
         rope_qat_policy="reference",
+        index_qat_policy="reference",
     ):
         self.c, self.w, self.layer = config, weights, layer
         self.hc_policy = hc_policy
@@ -766,6 +780,7 @@ class Block:
             layer,
             attention_policy=attention_policy,
             rope_qat_policy=rope_qat_policy,
+            index_qat_policy=index_qat_policy,
         )
         self.attn_hc = HyperConnection(
             config,
@@ -850,7 +865,12 @@ class DeepSeekV4Model:
         expert_prefill_policy="reference",
         rope_qat_policy="reference",
         dense_prefill_policy="reference",
+        index_qat_policy="reference",
     ):
+        if index_qat_policy not in ("reference", "fused_fp32"):
+            raise ValueError("unknown DeepSeek V4 index QAT policy")
+        if index_qat_policy == "fused_fp32" and (config.index_head_dim != 128 or not config.simulate_quantization):
+            raise ValueError("fused index QAT requires indexD128 and mandatory QAT")
         if hc_projection_policy not in ("reference", "fixed_fp32"):
             raise ValueError("unknown DeepSeek V4 HC projection arithmetic policy")
         if hc_projection_policy == "fixed_fp32" and (
@@ -910,10 +930,12 @@ class DeepSeekV4Model:
             expert_prefill_policy=expert_prefill_policy,
             dense_prefill_policy=dense_prefill_policy,
             rope_qat_policy=rope_qat_policy,
+            index_qat_policy=index_qat_policy,
         )
         self.hc_projection_policy = hc_projection_policy
         self.dense_prefill_policy = dense_prefill_policy
         self.rope_qat_policy = rope_qat_policy
+        self.index_qat_policy = index_qat_policy
         self.expert_prefill_policy = expert_prefill_policy
         self.cache_policy = cache_policy
         self.hc_policy = hc_policy
@@ -927,6 +949,7 @@ class DeepSeekV4Model:
                 hc_policy=hc_policy,
                 hc_projection_policy=hc_projection_policy,
                 rope_qat_policy=rope_qat_policy,
+                index_qat_policy=index_qat_policy,
             )
             for i in range(config.num_hidden_layers)
         ]

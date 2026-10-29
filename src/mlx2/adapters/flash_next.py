@@ -684,6 +684,8 @@ class FlashNextAdapter:
                 self.gdn_prefill_scan,
                 None if self.invariant_prefill is None else self.invariant_prefill.identity(),
                 varlen_identity(self.varlen_sparse_moe),
+                hc=({"schema": "mlx2.hc-prefill.v1", "law": "rounded-combine-f32-norm-storage-gate-mix"}
+                    if self.policy.hc_prefill_kernels else None),
             )
             self.row_exact_verify = None
             if self.policy.row_exact_verify:
@@ -1048,6 +1050,7 @@ class FlashNextAdapter:
             qsa_stage1_status,
         )
         from ..runtime.models.qwen4_hc_decode import hc_decode_status
+        from ..runtime.models.qwen_hc_prefill import status as hc_prefill_status
         from ..runtime.models.switch_layers import moe_pad_reportable, moe_pad_status
         from ..runtime.models import moe_nax_gather as _moe_nax
         from ..runtime.models.qwen4_gate_inject import qwen4_gate_inject_stats
@@ -1187,6 +1190,7 @@ class FlashNextAdapter:
                 else {}
             ),
             "round_levers": lever_snapshot(),
+            **({"hc_prefill": hc_prefill_status()} if self.policy.hc_prefill_kernels else {}),
             # Sorted-MoE kernel choice (gather_qmv vs padded gather_qmm_rhs);
             # absent only under the default floor law while no pad has run.
             **(
@@ -1327,6 +1331,38 @@ class FlashNextAdapter:
                 ),
             }
         }
+
+    def prepare_tensorfold_decode_block(self, layer_index, hidden, caches, token_ids):
+        """Explicit diagnostic tile; private successors, no serving/APC promotion.
+
+        The caller must cold-select the existing TensorFold projection law
+        before constructing its reference/prefix state.
+        """
+        from .flash_next_decode_tile import prepare_gdn_decode_tile
+        from .flash_next_tree import _source_binding
+
+        law = getattr(self.model, "_mlx2_flash_tree_law", None)
+        if not law or self.model._progressive_row_exact:
+            raise ValueError("decode block tile requires the cold TensorFold law without REV")
+        layers = self.model.language_model.model.layers
+        if type(layer_index) is not int or not 0 <= layer_index < len(layers):
+            raise ValueError("invalid decode tile layer")
+        paths = ("src/mlx2/adapters/flash_next_decode_tile.py",
+                 "src/mlx2/adapters/flash_next_tree.py",
+                 "src/mlx2/runtime/models/qwen4_exp.py",
+                 "src/mlx2/runtime/models/flash_tensorfold_qmv.py",
+                 "src/mlx2/runtime/models/qwen4_hc_decode.py",
+                 "src/mlx2/runtime/models/qwen4_fused_gdn.py",
+                 "src/mlx2/runtime/models/qwen4_moe_window.py",
+                 "src/mlx2/runtime/models/qwen3_next.py",
+                 "src/mlx2/runtime/models/gated_delta.py",
+                 "src/mlx2/runtime/models/cache.py",
+                 "src/mlx2/runtime/cow_cache.py",
+                 "src/mlx2/adapters/flash_next.py")
+        identity, revision = _source_binding(Path(__file__).resolve().parents[3], paths)
+        token = hashlib.sha256(json.dumps([identity, revision, law, self.identity["fingerprint"]],
+                                         sort_keys=True).encode()).hexdigest()
+        return prepare_gdn_decode_tile(layers[layer_index], hidden, caches, token_ids, revision=token)
 
     def close(self):
         from .process_globals import release

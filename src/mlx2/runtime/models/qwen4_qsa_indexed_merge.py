@@ -11,6 +11,7 @@ from .served_exp import ServedExpGate, is_device_fault
 
 _ENV_NAME = "MLX_QWEN4_QSA_INDEXED_FUSED_MERGE"
 _GATE_ENV_NAME = "MLX_QWEN4_QSA_INDEXED_FUSED_GATE"
+_PREFETCH_ENV_NAME = "MLX_QWEN4_QSA_PREFETCH_PARTIALS"
 _THREAD_CANDIDATES = (256, 128)
 _STATUS_LOCK = threading.Lock()
 _STATUS_ENGAGED = False
@@ -180,7 +181,7 @@ def mlx_apply_output_gate(out, output_gate):
 
 
 _HEADER = "\n#include <metal_stdlib>\nusing namespace metal;\n"
-_SOURCE = "\n    const uint tid = thread_position_in_threadgroup.x;\n    const uint row = threadgroup_position_in_grid.y;\n    const device float* row_m = part_m + (size_t)row * P;\n    const device float* row_l = part_l + (size_t)row * P;\n    const device O* row_o = part_o + (size_t)row * P * D;\n    device TO* row_out = out + (size_t)row * D;\n\n    threadgroup float alphas[P];\n    threadgroup float betas[P];\n    threadgroup uchar live[P];\n    threadgroup float denominator;\n\n    if (tid == 0) {\n        float state_m = -INFINITY;\n        float state_l = 0.0f;\n        for (uint partial = 0; partial < P; ++partial) {\n            const float chunk_m = row_m[partial];\n            const float chunk_l = row_l[partial];\n            const bool chunk_live = metal::isfinite(chunk_m);\n            const bool state_live = metal::isfinite(state_m);\n            const float merged_m = metal::max(state_m, chunk_m);\n            const float safe_m = chunk_live ? merged_m : 0.0f;\n            const float alpha = state_live\n                ? metal::precise::exp(state_m - safe_m) : 0.0f;\n            const float beta = chunk_live\n                ? metal::precise::exp(chunk_m - safe_m) : 0.0f;\n            // Preserve the separate MLX multiply and add rounding boundaries.\n            volatile float state_l_product = state_l * alpha;\n            volatile float chunk_l_product = chunk_l * beta;\n            const float merged_l = state_l_product + chunk_l_product;\n            alphas[partial] = alpha;\n            betas[partial] = beta;\n            live[partial] = chunk_live ? 1 : 0;\n            if (chunk_live) {\n                state_m = merged_m;\n                state_l = merged_l;\n            }\n        }\n        denominator = state_l;\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    for (uint d = tid; d < D; d += THREADS) {\n        float state_o = 0.0f;\n        for (uint partial = 0; partial < P; ++partial) {\n            volatile float state_o_product = state_o * alphas[partial];\n            volatile float chunk_o_product =\n                float(row_o[(size_t)partial * D + d]) * betas[partial];\n            const float merged_o = state_o_product + chunk_o_product;\n            if (live[partial])\n                state_o = merged_o;\n        }\n        row_out[d] = denominator > 0.0f\n            ? TO(state_o / metal::max(denominator, 1.0e-30f)) : TO(0.0f);\n    }\n"
+_SOURCE = "\n    const uint tid = thread_position_in_threadgroup.x;\n    const uint row = threadgroup_position_in_grid.y;\n    auto row_m = part_m + (size_t)row * P;\n    auto row_l = part_l + (size_t)row * P;\n    auto row_o = part_o + (size_t)row * P * D;\n    device TO* row_out = out + (size_t)row * D;\n\n    threadgroup float alphas[P];\n    threadgroup float betas[P];\n    threadgroup uchar live[P];\n    threadgroup float denominator;\n\n    if (tid == 0) {\n        float state_m = -INFINITY;\n        float state_l = 0.0f;\n        for (uint partial = 0; partial < P; ++partial) {\n            const float chunk_m = row_m[partial];\n            const float chunk_l = row_l[partial];\n            const bool chunk_live = metal::isfinite(chunk_m);\n            const bool state_live = metal::isfinite(state_m);\n            const float merged_m = metal::max(state_m, chunk_m);\n            const float safe_m = chunk_live ? merged_m : 0.0f;\n            const float alpha = state_live\n                ? metal::precise::exp(state_m - safe_m) : 0.0f;\n            const float beta = chunk_live\n                ? metal::precise::exp(chunk_m - safe_m) : 0.0f;\n            // Preserve the separate MLX multiply and add rounding boundaries.\n            volatile float state_l_product = state_l * alpha;\n            volatile float chunk_l_product = chunk_l * beta;\n            const float merged_l = state_l_product + chunk_l_product;\n            alphas[partial] = alpha;\n            betas[partial] = beta;\n            live[partial] = chunk_live ? 1 : 0;\n            if (chunk_live) {\n                state_m = merged_m;\n                state_l = merged_l;\n            }\n        }\n        denominator = state_l;\n    }\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n\n    for (uint d = tid; d < D; d += THREADS) {\n        float state_o = 0.0f;\n        for (uint partial = 0; partial < P; ++partial) {\n            volatile float state_o_product = state_o * alphas[partial];\n            volatile float chunk_o_product =\n                float(row_o[(size_t)partial * D + d]) * betas[partial];\n            const float merged_o = state_o_product + chunk_o_product;\n            if (live[partial])\n                state_o = merged_o;\n        }\n        row_out[d] = denominator > 0.0f\n            ? TO(state_o / metal::max(denominator, 1.0e-30f)) : TO(0.0f);\n    }\n"
 _SOURCE_GATED = _SOURCE.replace(
     "        row_out[d] = denominator > 0.0f\n            ? TO(state_o / metal::max(denominator, 1.0e-30f)) : TO(0.0f);",
     "        const TO attention = denominator > 0.0f\n            ? TO(state_o / metal::max(denominator, 1.0e-30f)) : TO(0.0f);\n        const uint b = row / (H * L);\n        const uint rem = row - b * H * L;\n        const uint h = rem / L;\n        const uint q = rem - h * L;\n        const TO gate_x = output_gate[\n            ((size_t)b * L * H + (size_t)q * H + h) * D + d];\n        // Match MLX's unary Sigmoid<T> at the storage dtype.  Promoting these\n        // intermediates to float changes bf16 rounding before the multiply.\n        const TO gate_y = TO(1) / (TO(1) + metal::exp(metal::abs(gate_x)));\n        TO gate_sigmoid = gate_x < TO(0) ? gate_y : TO(1) - gate_y;\n        // The standalone vectorized bf16 unary has one scalar edge where the\n        // Metal compiler rounds exp differently from this scalar epilogue.\n        if constexpr (metal::is_same_v<TO, bfloat>) {\n            if (gate_x == TO(-6.84375f)) {\n                gate_sigmoid = TO(0.00106048583984375f);\n            }\n        }\n        row_out[d] = attention * gate_sigmoid;",
@@ -223,20 +224,53 @@ def fused_gate_refusal(dtype) -> str | None:
     return refusal
 
 
+def prefetch_source(source):
+    """XPU #22 read-ahead idea; retain the exact sequential FP32 fold.
+
+    Only loads move. No masked partial is dereferenced beyond P, and the
+    original multiply/add and live-mask order stays intact.
+    """
+    old = """        for (uint partial = 0; partial < P; ++partial) {
+            volatile float state_o_product = state_o * alphas[partial];
+            volatile float chunk_o_product =
+                float(row_o[(size_t)partial * D + d]) * betas[partial];
+            const float merged_o = state_o_product + chunk_o_product;
+            if (live[partial])
+                state_o = merged_o;
+        }"""
+    new = """        for (uint base = 0; base < P; base += 4u) {
+            float next_o[4];
+            for (uint j = 0; j < 4u; ++j)
+                next_o[j] = base + j < P ? float(row_o[(size_t)(base + j) * D + d]) : 0.0f;
+            for (uint j = 0; j < 4u && base + j < P; ++j) {
+                uint partial = base + j;
+                volatile float state_o_product = state_o * alphas[partial];
+                volatile float chunk_o_product = next_o[j] * betas[partial];
+                const float merged_o = state_o_product + chunk_o_product;
+                if (live[partial]) state_o = merged_o;
+            }
+        }"""
+    if source.count(old) != 1:
+        raise ValueError("QSA prefetch source seam changed")
+    return source.replace(old, new)
+
+
 @lru_cache(maxsize=None)
-def _fused_merge_kernel(gated: bool = False, gate_dtype=None):
+def _fused_merge_kernel(gated: bool = False, gate_dtype=None, prefetch=False):
     source = _SOURCE_GATED if gated else _SOURCE
-    suffix = ""
+    if prefetch:
+        source = prefetch_source(source)
+    suffix = "_prefetch4" if prefetch else ""
     if gated and gate_dtype is not None:
         spelling = OUTPUT_GATE_GATE.spelling(gate_dtype)
         if spelling is None:
             raise RuntimeError("served eager sigmoid matches no kernel form")
         source = OUTPUT_GATE_GATE.adapt(source, gate_dtype)
-        suffix = "_precise" if "precise" in spelling else "_fast"
+        suffix += "_precise" if "precise" in spelling else "_fast"
     return mx.fast.metal_kernel(
         name="qwen4_qsa_indexed_fused_merge_gate_v1" + suffix
         if gated
-        else "qwen4_qsa_indexed_fused_merge_v1",
+        else "qwen4_qsa_indexed_fused_merge_v1" + suffix,
         input_names=["part_m", "part_l", "part_o", "output_gate"]
         if gated
         else ["part_m", "part_l", "part_o"],
@@ -259,7 +293,8 @@ def _dispatch_candidate(m, l, o, *, output_dtype, threads: int, output_gate=None
                 f"QSA output gate must be {expected} with dtype {output_dtype}"
             )
         inputs.append(mx.contiguous(output_gate))
-    return _fused_merge_kernel(gated, output_dtype if gated else None)(
+    return _fused_merge_kernel(gated, output_dtype if gated else None,
+        os.environ.get(_PREFETCH_ENV_NAME) == "1")(
         inputs=inputs,
         template=[
             ("O", o.dtype),
