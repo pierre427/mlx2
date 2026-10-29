@@ -100,7 +100,7 @@ READ_TIMEOUT_SECONDS = 60.0
 # bound into the APCv2 numerics namespace and the settings receipt.
 MECHANISM_REVISION = "weight-stream-v2"
 
-STREAM_MODES = ("moe_experts", "dense_mlp")
+STREAM_MODES = ("moe_experts", "dense_mlp", "dense_layers")
 PREFILL_ADMISSION_POLICIES = ("lru", "terminal_hot")
 ROUTER_HINT_POLICIES = ("off", "next_layer_reuse")
 

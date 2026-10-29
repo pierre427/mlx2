@@ -465,6 +465,9 @@ _ENGINE_EVENTS = {
     # when the engine holds the key, so a default scrape is unchanged.
     "stream_load_page_ins_total": ("expert_stream_load", "page_in"),
     "stream_load_page_in_bytes_total": ("expert_stream_load", "page_in_byte"),
+    "dense_layer_cache_hits_total": ("dense_stream", "layer_cache_hit"),
+    "dense_layer_evictions_total": ("dense_stream", "layer_eviction"),
+    "dense_layer_cache_bypasses_total": ("dense_stream", "layer_cache_bypass"),
     "dense_stream_page_ins_total": ("dense_stream", "page_in"),
     "dense_stream_page_in_bytes_total": ("dense_stream", "page_in_byte"),
     "dense_stream_load_page_ins_total": ("dense_stream_load", "page_in"),

@@ -729,13 +729,9 @@ def test_declarations_are_never_inherited():
     for undeclared in (Qwen359BAdapter, FlashNextAdapter, Nemotron3SuperAdapter):
         assert declared_stream_modes(undeclared) == frozenset()
     dense = WeightStreamRequest(mode="dense_mlp", budget_bytes=1 << 20)
-    with pytest.raises(ValueError, match="does not declare"):
-        require_declared(Qwen359BAdapter, dense)
-    with pytest.raises(ValueError, match="does not declare"):
-        # Refused before the (missing) artifact is touched.
-        Qwen359BAdapter("/missing/artifact", weight_streaming=dense)
-    with pytest.raises(ValueError, match="does not declare"):
-        Qwen3635BA3BAdapter("/missing/artifact", weight_streaming=dense)
+    # The inherited early loader is eligible without an own-class mode flag.
+    assert require_declared(Qwen359BAdapter, dense) is dense
+    assert require_declared(Qwen3635BA3BAdapter, dense) is dense
     hinted = WeightStreamRequest(
         mode="moe_experts", budget_bytes=1 << 20,
         router_hint="next_layer_reuse",
@@ -1243,7 +1239,7 @@ def test_qwen38_adapter_dense_seam_and_refusals(tmp_path, monkeypatch, bound_sha
     with pytest.raises(ValueError, match="TensorFold"):
         Qwen3827BAdapter(str(root), execution_policy={"tensorfold_prefill": True},
                          weight_streaming=request)
-    with pytest.raises(ValueError, match="does not declare"):
+    with pytest.raises(StreamingUnavailable):
         Qwen3827BAdapter(str(root), weight_streaming=_moe_request(1 << 30))
     spy = _EvalSpy(monkeypatch, _is_trunk_mlp)
     adapter = Qwen3827BAdapter(str(root), require_mtp=False, weight_streaming=request,
@@ -1387,7 +1383,9 @@ class _DeclaredDense:
     weight_streaming_modes = frozenset({"dense_mlp"})
     calls = []
 
-    def __init__(self, model_path, **kwargs):
+    def __init__(self, model_path, *, weight_streaming=None, **kwargs):
+        if weight_streaming is not None:
+            kwargs["weight_streaming"] = weight_streaming
         type(self).calls.append(kwargs)
         raise RuntimeError("stop after delivery")
 
@@ -1468,8 +1466,12 @@ def test_validate_only_checks_the_own_declared_external_stream_contract():
 def test_engine_refuses_dense_on_undeclared_and_mixed_or_multilane():
     from mlx2.serving import ServingEngine
 
-    with pytest.raises(ValueError, match="not declared"):
-        ServingEngine("unused", adapter_factory=_Undeclared, max_lanes=1,
+    class EagerOnly:
+        def __init__(self, path):
+            pass
+
+    with pytest.raises(ValueError, match="early-loading interface"):
+        ServingEngine("unused", adapter_factory=EagerOnly, max_lanes=1,
                       max_inflight=1, execution_policy=DENSE_POLICY)
     with pytest.raises(ValueError, match="mutually exclusive"):
         ServingEngine.validate_arguments(
@@ -1508,9 +1510,9 @@ def test_engine_delivers_a_typed_request_only_to_declaring_classes():
     _Undeclared.calls.clear()
     engine = _engine(_Undeclared, MOE_POLICY)
     try:
-        # Inherited declarations do not count: legacy post-materialization.
-        assert engine.weight_streaming_route == "legacy"
-        assert "weight_streaming" not in _Undeclared.calls[0]
+        # The inherited early-loading interface needs no own-class mode flag.
+        assert engine.weight_streaming_route == "early"
+        assert _Undeclared.calls[0]["weight_streaming"].mode == "moe_experts"
     finally:
         engine.close()
 

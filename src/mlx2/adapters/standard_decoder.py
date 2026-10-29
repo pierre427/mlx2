@@ -660,28 +660,42 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         try:
             self._close_external_feedback()
         finally:
+            if getattr(self, "weight_stream", None) is not None:
+                self.weight_stream.close()
             if getattr(self, "_process_claim", None) is not None:
                 from .process_globals import release
 
                 release(self)
 
-    def __init__(self, model_path: str, *, execution_policy=None):
+    def __init__(self, model_path: str, *, execution_policy=None, weight_streaming=None):
         # Every standard family pins process numerics and clears inherited
         # model selectors.  Keep that transition rollback-safe even for dense
         # models that do not need a process-global MoE claim.
         from .process_globals import guarded_construction
 
-        guarded_construction(
-            self,
-            lambda: self._initialize(model_path, execution_policy=execution_policy),
-        )
+        try:
+            guarded_construction(
+                self,
+                lambda: self._initialize(model_path, execution_policy=execution_policy,
+                                         weight_streaming=weight_streaming),
+            )
+        except BaseException:
+            if getattr(self, "weight_stream", None) is not None:
+                self.weight_stream.close()
+            raise
 
     def _claim_moe_globals(self):
         from .process_globals import claim_stock_moe
 
         claim_stock_moe(self, "the Qwen3 MoE ordinary adapter")
 
-    def _initialize(self, model_path: str, *, execution_policy=None):
+    def _initialize(self, model_path: str, *, execution_policy=None, weight_streaming=None):
+        from ..runtime.streamed_load import require_declared
+
+        stream_request = require_declared(type(self), weight_streaming)
+        self.weight_stream = None
+        if stream_request is not None and any((execution_policy or {}).values()):
+            raise ValueError("dense layer streaming requires ordinary standard decoder arithmetic")
         # Refuse an explicitly enabled TF32 switch, as every pinned
         # profile does (process_env.require_process_numerics): this adapter
         # pins no profile, so such a value used to run fp32 matmuls at TF32
@@ -968,9 +982,11 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
 
         self.model = Model(ModelArgs.from_dict(self.config))
         files = [path / name for name, _, _ in self.identity["files"]]
-        weights = self.model.sanitize(load_shards_evicting(files))
         quant = self.config.get("quantization", self.config.get("quantization_config"))
-        if quant:
+
+        def quantize(weights):
+            if not quant:
+                return
 
             def predicate(name, module):
                 override = quant.get(name)
@@ -979,13 +995,31 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                 return hasattr(module, "to_quantized") and f"{name}.scales" in weights
 
             nn.quantize(
-                self.model,
-                group_size=quant["group_size"],
-                bits=quant["bits"],
-                mode=quant.get("mode", "affine"),
-                class_predicate=predicate,
+                self.model, group_size=quant["group_size"], bits=quant["bits"],
+                mode=quant.get("mode", "affine"), class_predicate=predicate,
             )
-        self.model.load_weights(list(weights.items()), strict=True)
+
+        if stream_request is None:
+            weights = self.model.sanitize(load_shards_evicting(files))
+            quantize(weights)
+            self.model.load_weights(list(weights.items()), strict=True)
+        else:
+            from ..runtime.streamed_load import (
+                force_stock_expert_arithmetic,
+                load_streamed,
+            )
+
+            loaded = load_streamed(
+                self.model, path, [file.name for file in files], request=stream_request,
+                sanitize=self.model.sanitize, quantize=quantize,
+                records=self.identity["files"], weight_map=artifact.get("weight_map"),
+                top_k=int(self.config.get("num_experts_per_tok", 1)),
+                on_installed=(lambda manager: setattr(
+                    manager, "forced_stock", force_stock_expert_arithmetic(self.model)
+                )) if stream_request.mode == "moe_experts" else None,
+            )
+            weights = loaded.weights
+            self.weight_stream = loaded.manager
         if row_exact:
             from ..runtime.models.standard_decoder import (
                 TARGET_VERIFY_ROW_EXACT_VERSION,
@@ -1044,6 +1078,8 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
             eos_token_ids=artifact_eos_token_ids(path, self.config, tokenizer),
         )
         self.max_context = self.config["max_position_embeddings"]
+        if self.weight_stream is not None:
+            self.weight_stream.begin_serving()
         if draft_record is not None:
 
             def loader(record, target):

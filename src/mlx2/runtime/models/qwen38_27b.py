@@ -109,6 +109,11 @@ class Qwen3NextAttention(nn.Module):
         if cache is not None:
             queries = self.rope(queries, offset=cache.offset)
             keys = self.rope(keys, offset=cache.offset)
+            from .qwen38_shared_draft import SharedDraftKV
+            if isinstance(cache, SharedDraftKV):
+                output = cache.append_and_attend(queries, keys, values, self.scale)
+                output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
+                return output * gate_sigmoid(gate)
             (keys, values) = cache.update_and_fetch(keys, values)
         else:
             queries = self.rope(queries)
@@ -615,6 +620,12 @@ class TextModel(nn.Module):
     def make_mtp_cache(self):
         return [KVCache() for _ in self.mtp.layers]
 
+    def make_shared_mtp_draft_cache(self, committed, branches):
+        from .qwen38_shared_draft import SharedDraftKV, enabled
+        if not enabled():
+            return None
+        return [SharedDraftKV(layer, branches) for layer in committed]
+
     def mtp_step(self, hidden, tokens, mtp_cache):
         """One MTP forward over S positions.
 
@@ -825,6 +836,9 @@ class Model(nn.Module):
 
     def make_mtp_cache(self):
         return self.language_model.make_mtp_cache()
+
+    def make_shared_mtp_draft_cache(self, committed, branches):
+        return self.language_model.make_shared_mtp_draft_cache(committed, branches)
 
     def mtp_step(self, hidden, tokens, mtp_cache):
         return self.language_model.mtp_step(hidden, tokens, mtp_cache)

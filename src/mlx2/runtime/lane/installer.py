@@ -255,6 +255,12 @@ class _LaneMixin:
                 STATS["stock_stacked_calls"] += 1
                 return _stock_stacked(self, group, x)
         elif rows > self._lane_max_rows and not self._lane_chunk_above_max:
+            if self.__dict__.get("_direct_prefill_candidate", False) and isinstance(self, nn.QuantizedLinear):
+                from .tiled_prefill import project
+                y = project(x, self, 0)
+                if y is not None:
+                    STATS["direct_prefill_calls"] += 1
+                    return y if lw.bias is None else y + lw.bias
             STATS["stock_above_max_rows"] += 1
         else:
             group = _group(self) if GROUPING[0] else None

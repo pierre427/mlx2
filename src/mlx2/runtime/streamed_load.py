@@ -17,10 +17,11 @@ it bounds only steady-state residency.  :func:`load_streamed` instead:
 6. only then evaluates the retained remainder and verifies the paths still
    name the bound files.
 
-The adapter declares support with a class attribute read from the class's own
-``__dict__`` (:func:`declared_stream_modes`), so subclasses never inherit it.
-The model-specific choices -- sanitize, quantization predicate, which dense
-projections stream, the routed ``top_k`` -- stay in the adapter.
+The early-loading interface accepts a typed ``weight_streaming`` request.
+No per-adapter mode allowlist is required. Dense decoder lists and ordinary
+linear storage are discovered structurally; every streamed tensor still needs
+proven checkpoint bytes. Sanitization, quantization and optional execution
+specializations stay in the adapter.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ MIN_LANE_HEADROOM_BYTES = 1 << 30
 
 @dataclass(frozen=True, eq=False)
 class WeightStreamRequest:
-    """What the engine asks a declaring adapter to stream, before it loads."""
+    """What the engine asks an early loader to stream, before it materializes."""
 
     mode: str
     budget_bytes: int
@@ -131,13 +132,45 @@ class WeightStreamRequest:
 
 
 def declared_stream_modes(adapter_class) -> frozenset:
-    """Modes the class itself declares -- never a parent's declaration."""
+    """Historical inventory metadata; not a streaming eligibility gate."""
     try:
         own = vars(adapter_class)
     except TypeError:
         return frozenset()
     value = own.get(DECLARATION, ())
     return frozenset(value) & frozenset(STREAM_MODES)
+
+
+def accepts_streaming_request(adapter_factory) -> bool:
+    """An early loader accepts the typed request, including through inheritance.
+
+    A catch-all **kwargs is insufficient: it could silently ignore the request
+    and materialize the whole model. No per-adapter mode declaration is needed.
+    The loader proves tensor eligibility; the engine verifies the installed mode.
+    """
+    import inspect
+
+    try:
+        parameter = inspect.signature(adapter_factory).parameters.get("weight_streaming")
+    except (TypeError, ValueError):
+        return False
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+def artifact_has_experts(model_path) -> bool:
+    """Conservative config-based candidate check; byte/module proof comes later."""
+    import json
+    from pathlib import Path
+
+    try:
+        config = json.loads((Path(model_path).expanduser() / "config.json").read_text())
+        config = config.get("text_config", config)
+        return any(type(config.get(key)) is int and config[key] > 1
+                   for key in ("num_experts", "num_local_experts", "n_routed_experts"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
 
 
 def declared_router_hints(adapter_class) -> frozenset:
@@ -151,16 +184,15 @@ def declared_router_hints(adapter_class) -> frozenset:
 
 
 def require_declared(adapter_class, request: Optional[WeightStreamRequest]):
-    """Validate a request against the adapter's own declaration, pre-load."""
+    """Validate the typed request and optional router hint contract.
+
+    Historical name retained for adapter call-site compatibility. Basic weight
+    streaming is proven by the loader, not by a class mode allowlist.
+    """
     if request is None:
         return None
     if not isinstance(request, WeightStreamRequest):
         raise ValueError("weight_streaming must be a WeightStreamRequest")
-    if request.mode not in declared_stream_modes(adapter_class):
-        raise ValueError(
-            f"{adapter_class.__name__} does not declare {request.mode} weight "
-            "streaming; refusing before any weight is loaded"
-        )
     if request.router_hint != "off":
         hints = declared_router_hints(adapter_class)
         if request.router_hint not in hints:
@@ -240,7 +272,8 @@ def artifact_weight_bytes(model_path) -> int:
 
 AUTO_REASONS = (
     "explicit_policy",
-    "undeclared",
+    "early_loader_unavailable",
+    "expert_geometry_unavailable",
     "admission_limit_unmeasured",
     "artifact_unmeasured",
     "fits_resident",
@@ -258,8 +291,8 @@ def auto_expert_streaming_decision(
 ) -> Dict[str, object]:
     """Whether a resident load fits; select expert streaming when it does not.
 
-    The rule (Pierre, 2026-10-21): an adapter that declares ``moe_experts`` on
-    its own class, whose artifact weights plus one lane's headroom floor
+    An early-loading adapter with expert geometry in its artifact config,
+    whose artifact weights plus one lane's headroom floor
     exceed the admission limit (Metal advisory minus the service and driver
     reserves), streams its experts.  Everything else keeps the resident path.
     An explicit ``moe_expert_streaming`` policy always wins; ``fits`` is still
@@ -273,8 +306,9 @@ def auto_expert_streaming_decision(
         "weight_bytes": None,
         "fits": None,
     }
-    declared = "moe_experts" in declared_stream_modes(adapter_class)
-    if declared:
+    early_loader = accepts_streaming_request(adapter_class)
+    candidate = artifact_has_experts(model_path)
+    if early_loader and candidate:
         try:
             # Native packed adapters exclude disk-only tables and file padding.
             measure = getattr(adapter_class, "resident_weight_bytes", None)
@@ -289,8 +323,10 @@ def auto_expert_streaming_decision(
         decision["fits"] = weight + int(headroom_bytes) <= int(admission_limit_bytes)
     if explicit:
         reason = "explicit_policy"
-    elif not declared:
-        reason = "undeclared"
+    elif not early_loader:
+        reason = "early_loader_unavailable"
+    elif not candidate:
+        reason = "expert_geometry_unavailable"
     elif admission_limit_bytes is None:
         reason = "admission_limit_unmeasured"
     elif weight is None:
@@ -324,12 +360,17 @@ def load_streamed(
     shard_prune: Optional[Callable[[dict], dict]] = None,
     top_k: int = 1,
     dense_targets: Optional[Callable[[object], Sequence[str]]] = None,
+    layer_targets: Callable[[object], Sequence[str]] | None = None,
+    layer_resident_tensor: Callable[[str, str], bool] | None = None,
     on_installed: Optional[Callable[[object], None]] = None,
 ) -> StreamedLoad:
     """Build, stream and materialize ``model`` without evaluating streamed tables.
 
     ``quantize(weights)`` applies the adapter's own ``nn.quantize`` predicate;
     ``dense_targets(model)`` returns module paths for ``dense_mlp``.
+    ``layer_targets(model)`` returns whole decoder block paths for ``dense_layers``;
+    ``layer_resident_tensor(path, key)`` retains adapter-declared small tensors
+    needed by sanitization or deferred state operations.
     ``on_installed(manager)`` runs after the swap and before evaluation (the
     adapter forces stock arithmetic there).  Every failure closes what was
     opened; on success the returned manager owns the bound descriptors.
@@ -380,6 +421,16 @@ def load_streamed(
                 elastic=request.elastic,
                 shards=shards,
                 resolver=origins.resolve_expert,
+            )
+        elif request.mode == "dense_layers":
+            from .layer_stream import discover_layer_targets, install_layer_streaming
+
+            selected_layers = layer_targets(model) if layer_targets else discover_layer_targets(model)
+            manager = install_layer_streaming(
+                model, targets=tuple(selected_layers), shards=shards,
+                resolver=origins.resolve_tensor, ceiling_bytes=request.budget_bytes,
+                resident_tensor=layer_resident_tensor,
+                read_workers=request.read_workers,
             )
         else:
             if dense_targets is None:

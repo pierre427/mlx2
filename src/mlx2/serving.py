@@ -788,20 +788,22 @@ def moe_expert_streaming_policy(value) -> dict:
 
 
 def dense_weight_streaming_policy(value) -> dict:
-    """Validate the default-off dense trunk-MLP weight streaming policy.
+    """Validate default-off dense MLP paging or whole-layer caching.
 
     When enabled, an adapter that declares ``dense_mlp`` streaming leaves its
     quantized trunk MLP projections on disk and reads each one per call.
     ``staging_gib`` is the reserved budget for one projection in flight (host
     buffer plus device copy); it must hold the largest selected projection
     twice, which the loader checks before anything is evaluated.
+    ``mode=dense_layers`` instead uses ``cache_gib`` for cached blocks plus
+    a complete host/device read window, with decoder layer zero resident.
     """
     defaults = {"enabled": False, "staging_gib": 0.0, "read_workers": 16}
     if value is None:
         return dict(defaults)
     if not isinstance(value, dict):
         raise ValueError("dense_weight_streaming must be an object")
-    unknown = set(value) - set(defaults)
+    unknown = set(value) - set(defaults) - {"mode", "cache_gib"}
     if unknown:
         raise ValueError(f"unknown dense weight streaming settings: {sorted(unknown)}")
     policy = {**defaults, **value}
@@ -822,6 +824,21 @@ def dense_weight_streaming_policy(value) -> dict:
         raise ValueError(
             "dense_weight_streaming.read_workers must be an integer from 1 to 64"
         )
+    mode = policy.get("mode", "dense_mlp")
+    if mode not in ("dense_mlp", "dense_layers"):
+        raise ValueError("dense_weight_streaming.mode must be dense_mlp or dense_layers")
+    if mode == "dense_layers":
+        cache = policy.get("cache_gib", 0.0)
+        if (isinstance(cache, bool) or not isinstance(cache, (int, float))
+                or not math.isfinite(cache) or not 0 <= cache <= 1024
+                or (policy["enabled"] and cache <= 0)):
+            raise ValueError("dense_weight_streaming.cache_gib must be positive when layer caching is enabled")
+        if staging != 0:
+            raise ValueError("dense_layers uses cache_gib including staging; omit staging_gib")
+        return {"enabled": policy["enabled"], "mode": mode, "cache_gib": float(cache),
+                "staging_gib": 0.0, "read_workers": int(workers)}
+    if "cache_gib" in value:
+        raise ValueError("cache_gib requires dense_layers mode")
     if policy["enabled"] and staging <= 0:
         raise ValueError(
             "dense_weight_streaming.staging_gib must be positive when enabled"
@@ -4118,7 +4135,7 @@ class ServingEngine:
                 )
             if streaming_factory_known:
                 self.weight_streaming_lane_bound = validate_weight_streaming_lanes(
-                    adapter_factory, execution_policy, mode="dense_mlp", max_lanes=max_lanes)
+                    adapter_factory, execution_policy, mode=self.dense_weight_streaming_policy.get("mode", "dense_mlp"), max_lanes=max_lanes)
         # The streaming manager.  Adapter-owned (and closed by the adapter)
         # on the early-load path; engine-owned only on the legacy path.
         self.expert_stream = None
@@ -4739,27 +4756,27 @@ class ServingEngine:
         if self.weight_streaming_enabled():
             self.weight_streaming_lane_bound = validate_weight_streaming_lanes(
                 adapter_factory, execution_policy,
-                mode="dense_mlp" if self.dense_weight_streaming_policy["enabled"] else "moe_experts",
+                mode=self.dense_weight_streaming_policy.get("mode", "dense_mlp") if self.dense_weight_streaming_policy["enabled"] else "moe_experts",
                 max_lanes=max_lanes)
             self._refuse_unevidenced_weight_streaming(execution_policy)
         self._select_automatic_expert_streaming(adapter_factory, max_lanes)
         if self.weight_streaming_enabled():
-            from .runtime.streamed_load import declared_stream_modes
+            from .runtime.streamed_load import accepts_streaming_request
 
-            declared = declared_stream_modes(adapter_factory)
+            early_loader = accepts_streaming_request(adapter_factory)
             if self.dense_weight_streaming_policy["enabled"]:
-                if "dense_mlp" not in declared:
+                if not early_loader:
                     raise ValueError(
-                        "dense weight streaming is not declared by "
+                        "dense weight streaming needs an early-loading interface on "
                         f"{getattr(adapter_factory, '__name__', adapter_factory)!r}; "
                         "refusing before any weight is loaded"
                     )
                 self.weight_streaming_route = "early"
             else:
-                # Undeclared adapters keep the legacy post-materialization
-                # install, whose receipt says the load peak is unbounded.
+                # Loaders without an early request interface keep the legacy
+                # post-materialization install, with an unbounded load peak.
                 self.weight_streaming_route = (
-                    "early" if "moe_experts" in declared else "legacy"
+                    "early" if early_loader else "legacy"
                 )
         # Adapter-owned candidates (default-off, unqualified kernels) are
         # selectable only in qualification mode; neither the unqualified
@@ -6556,7 +6573,7 @@ class ServingEngine:
             self.weight_streaming_lane_matmul = "auto->off (weight streaming)"
 
     def _select_automatic_expert_streaming(self, adapter_factory, max_lanes) -> None:
-        """Stream a declaring adapter's experts when its resident load cannot fit.
+        """Stream eligible experts when their resident load cannot fit.
 
         Decided before any weight is read, from the artifact's shard bytes
         and the same admission limit the streamed loader checks
@@ -6593,7 +6610,7 @@ class ServingEngine:
                 )
             )
         if not decision["selected"]:
-            if decision["reason"] not in ("undeclared", "explicit_policy"):
+            if decision["reason"] not in ("early_loader_unavailable", "expert_geometry_unavailable", "explicit_policy"):
                 self.weight_streaming_auto = decision
             return
         message = (
@@ -6629,7 +6646,8 @@ class ServingEngine:
             "maximum_lanes": getattr(self, "weight_streaming_lane_bound", 1),
         }
         if stream is not None and (
-            getattr(stream, "elastic", None) is not None
+            getattr(stream, "mode", None) == "dense_layers"
+            or getattr(stream, "elastic", None) is not None
             or policy.get("adaptive_residency", {}).get("enabled", False)
         ):
             status["receipt"] = stream.receipt()
@@ -6659,7 +6677,7 @@ class ServingEngine:
             return float(self.moe_expert_streaming_policy["cache_gib"])
         dense = getattr(self, "dense_weight_streaming_policy", None) or {}
         if dense.get("enabled"):
-            return float(dense["staging_gib"])
+            return float(dense.get("cache_gib", dense["staging_gib"]))
         return 0.0
 
     def stream_unfilled_reserve_gib(self) -> float:
@@ -6722,8 +6740,8 @@ class ServingEngine:
         dense = self.dense_weight_streaming_policy
         if dense["enabled"]:
             return WeightStreamRequest(
-                mode="dense_mlp",
-                budget_bytes=int(dense["staging_gib"] * (1 << 30)),
+                mode=dense.get("mode", "dense_mlp"),
+                budget_bytes=int(dense.get("cache_gib", dense["staging_gib"]) * (1 << 30)),
                 read_workers=dense["read_workers"],
                 admission_limit_bytes=limit,
             )
@@ -6746,12 +6764,16 @@ class ServingEngine:
         )
 
     def _bind_adapter_stream(self, adapter) -> None:
-        """Adopt the manager an early-load adapter installed (never install twice)."""
+        """Adopt a matching manager from the early loader (never install twice)."""
         stream = getattr(adapter, "weight_stream", None)
         if stream is None:
             raise RuntimeError(
                 "adapter accepted a weight streaming request but installed nothing"
             )
+        dense = self.dense_weight_streaming_policy
+        expected = dense.get("mode", "dense_mlp") if dense["enabled"] else "moe_experts"
+        if getattr(stream, "mode", None) != expected:
+            raise RuntimeError("adapter installed a different weight streaming mode than requested")
         self.expert_stream = stream
         self._expert_stream_engine_owned = False
         policy = self.moe_expert_streaming_policy
@@ -9449,7 +9471,7 @@ class ServingEngine:
             if adapter_execution_policy is not None:
                 factory_kwargs["execution_policy"] = adapter_execution_policy
             if getattr(self, "weight_streaming_route", None) == "early":
-                # Only a class that declares the mode receives the request;
+                # Only a loader accepting the typed request receives it;
                 # it streams before materializing and owns the manager.
                 factory_kwargs["weight_streaming"] = self._weight_stream_request()
             adapter = self.adapter_factory(self.model_path, **factory_kwargs)

@@ -1428,7 +1428,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # Dense trunk-MLP paging (runtime/streamed_load.py).  Read from this
     # class's own __dict__: the Qwen3.5 9B and Qwen3.6 subclasses do not
     # inherit it.
-    weight_streaming_modes = frozenset({"dense_mlp"})
+    weight_streaming_modes = frozenset({"dense_mlp"})  # historical inventory only
 
     # Per-layer eager dispatch stays off on the dense 27B: bit-exact, but
     # neutral end to end (native MTP B1 1.001x, ordinary B1 0.996x, B4
@@ -1552,6 +1552,16 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                     "TensorFold prefill repacks MLP projections and cannot run "
                     "with dense weight streaming"
                 )
+        if stream_request is not None and stream_request.mode == "dense_layers":
+            # Layer templates are opaque to installers that retain/repack weights.
+            incompatible = ("fused_gdn", "fused_gdn_prefill", "fused_gdn_compact_replay",
+                            "varlen_dense_mlp", "gdn_prefill_chunk", "invariant_prefill",
+                            "target_verify_row_exact")
+            if any(execution_policy and execution_policy.get(key) for key in incompatible):
+                raise ValueError("dense layer streaming requires ordinary layer arithmetic")
+            if policy.get("gdn_state_dtype", "float32") != "float32":
+                raise ValueError("dense layer streaming requires float32 GDN state")
+            self.fused_gdn = self.fused_gdn_prefill = self.fused_gdn_compact_replay = False
         self.weight_stream = None
         from .flash_next_policy import FlashNextPolicy
 
@@ -1862,6 +1872,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         import mlx.core as mx
 
         self.model.eval()
+        from ..runtime.lane.tiled_prefill import admit_model as admit_direct_prefill
+        self.direct_prefill_candidate = admit_direct_prefill(self.model)
         from ..runtime.models.varlen_dense_mlp import (
             install as install_varlen_dense_mlp,
         )
@@ -2547,6 +2559,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         from ..runtime.models.varlen_dense_mlp import status as varlen_dense_mlp_status
         from ..runtime.segmented_self_mtp import segmented_self_mtp_stats
 
+        from ..runtime.models.qwen38_shared_draft import status as shared_draft_status
+        from ..runtime.lane.tiled_prefill import status as tiled_prefill_status
+        from ..runtime.models.qwen38_tree_gdn import stats as tree_gdn_status
         core = gdn_core_status()
         initial_core = getattr(self, "_gdn_core_initial", None)
         if initial_core is not None:
@@ -2563,6 +2578,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
 
         return {
             "architecture": "dense-hybrid-gdn-gqa",
+            "tree_spec_intake": {"qualified": False, "counter_scope": "process",
+                "shared_draft": shared_draft_status(), "tiled_prefill": tiled_prefill_status(),
+                "tree_gdn": tree_gdn_status()},
             "layout": self.layout,
             "artifact_binding": {
                 key: getattr(self, "identity", {}).get(key)
@@ -2689,6 +2707,16 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "selected fused_gdn_compact_replay policy disagrees with live target layers"
             )
         contract = self._external_execution_numerics()
+        from ..runtime.models.qwen38_shared_draft import enabled as shared_history_enabled
+        from ..runtime.lane.tiled_prefill import enabled as tiled_prefill_enabled
+        from ..runtime.models.qwen38_tree_gdn import compact_enabled
+        intake = {name: True for name, active in (
+            ("shared_history_split_fp32_v1", shared_history_enabled()),
+            ("tiled_prefill_nax_v1", tiled_prefill_enabled()),
+            ("gdn_live_parent_slots_v1", compact_enabled()),
+        ) if active}
+        if intake:
+            contract["tree_spec_intake"] = intake
         if getattr(self, "q4_gate_three_rows", None) is not None:
             contract["q4_gate_three_rows"] = self.q4_gate_three_rows.identity()
         if enabled:

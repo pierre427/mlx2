@@ -7,6 +7,7 @@ Ported from the pinned corrected TensorFold source; see
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Sequence
 from typing import Any
 
@@ -62,6 +63,7 @@ def stats() -> dict[str, int | str | None]:
     return {
         "backend": "mlx2_qwen38_unified_tree_gdn_v1",
         **_COUNTERS,
+        "compact_parent_slots_selected": compact_enabled(),
         "pre_silu_exp": built,
         "pre_parity": None if built is None else ("exact" if parity is None else parity),
     }
@@ -572,6 +574,54 @@ _TREE = (
 """
 )
 
+# Only live parent states need persistent registers. A leaf produces its
+# readout from transient registers and never occupies a retained state slot.
+# Same step arithmetic, order and row ownership as the existing kernel.
+_COMPACT_TREE = _TREE.replace(
+    "const int parent = parents[first + node];",
+    "const int parent = parents[first + node]; const int parent_slot = parent_slots[first + node];"
+).replace(
+    "states[CHAIN ? 0 : parent][i]", "states[parent_slot][i]"
+).replace(
+    "for (int i = 0; i < n_per_t; ++i) states[CHAIN ? 0 : node][i] = state[i];",
+    "const int keep = write_slots[first + node]; if (keep >= 0) for (int i = 0; i < n_per_t; ++i) states[keep][i] = state[i];"
+)
+
+
+def compact_enabled():
+    value = os.environ.get("MLX2_GDN_LIVE_SLOTS", "0")
+    if value not in ("0", "1"):
+        raise ValueError("MLX2_GDN_LIVE_SLOTS must be 0 or 1")
+    return value == "1"
+
+
+def live_parent_slots(parents):
+    """Return read/write register indices and peak slots, preserving row order."""
+    tree_paths(parents)
+    remaining = [0] * len(parents)
+    for parent in parents:
+        if parent >= 0:
+            remaining[parent] += 1
+    live, free, reads, writes = {}, [], [], []
+    allocated = 0
+    for row, parent in enumerate(parents):
+        reads.append(-1 if parent < 0 else live[parent])
+        if parent >= 0:
+            remaining[parent] -= 1
+            if not remaining[parent]:
+                free.append(live.pop(parent))
+        if remaining[row]:
+            if free:
+                slot = free.pop()
+            else:
+                slot, allocated = allocated, allocated + 1
+            live[row] = slot
+            writes.append(slot)
+        else:
+            writes.append(-1)
+    return reads, writes, max(1, allocated)
+
+
 MAX_TREE = (
     32  # a branching window's rows (per-thread state slots); chains take up to 128
 )
@@ -690,9 +740,12 @@ def _commit_kernel(name: str, order: str = "served") -> Any:
 
 
 def _build_commit_kernel(name: str, order: str) -> Any:
-    if name == "tree":
+    if name in ("tree", "tree_compact"):
         inputs = ["q", "k", "v", "g", "beta", *[f"S{i}" for i in range(MAX_STREAMS)], "parents", "meta"]
         source, outputs = _TREE, ["y"]
+        if name == "tree_compact":
+            inputs += ["parent_slots", "write_slots"]
+            source = _COMPACT_TREE
     elif name == "replay":
         inputs = ["q", "k", "v", "g", "beta", *[f"S{i}" for i in range(MAX_STREAMS)], "rows", "meta"]
         source, outputs = _REPLAY, [f"O{i}" for i in range(MAX_STREAMS)]
@@ -737,6 +790,10 @@ class TreePlan:
             1 if chain else (16 if widest <= 16 else MAX_TREE)
         )  # per-thread state slots (compiled variants)
         self.parents, self.meta = ints(flat), ints(meta)
+        schedules = [live_parent_slots(rp) for rp in parents]
+        self.parent_slots = ints([slot for reads, _, _ in schedules for slot in reads])
+        self.write_slots = ints([slot for _, writes, _ in schedules for slot in writes])
+        self.compact_slots = max(slots for _, _, slots in schedules)
 
 
 def tree(
@@ -757,7 +814,8 @@ def tree(
     if R != plan.rows or any(s.dtype != mx.float32 for s in states):
         raise ValueError("stream_gdn.tree: rows or state dtype do not match")
     S = len(states)
-    result = _commit_kernel("tree", order)(
+    compact = compact_enabled()
+    result = _commit_kernel("tree_compact" if compact else "tree", order)(
         inputs=[
             q,
             k,
@@ -768,6 +826,7 @@ def tree(
             *[states[0]] * (MAX_STREAMS - S),
             plan.parents,
             plan.meta,
+            *([plan.parent_slots, plan.write_slots] if compact else []),
         ],
         template=[
             ("InT", q.dtype),
@@ -775,7 +834,7 @@ def tree(
             ("Dv", Dv),
             ("Hk", Hk),
             ("Hv", Hv),
-            ("MAXW", plan.slots),
+            ("MAXW", plan.compact_slots if compact else plan.slots),
             ("CHAIN", plan.chain),
         ],
         grid=(32, Dv, Hv * S),
@@ -786,6 +845,9 @@ def tree(
     _COUNTERS["tree_calls"] += 1
     _COUNTERS["tree_rows"] += R
     _COUNTERS["tree_streams"] += S
+    if compact:
+        _COUNTERS["compact_tree_calls"] = _COUNTERS.get("compact_tree_calls", 0) + 1
+        _COUNTERS["compact_slot_peak"] = max(_COUNTERS.get("compact_slot_peak", 0), plan.compact_slots)
     return result
 
 

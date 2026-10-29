@@ -70,6 +70,9 @@ def _rooted_tree(inputs, parents):
 
 
 _AST_SOURCE_PATHS = (
+    "src/mlx2/runtime/models/qwen38_shared_draft.py",
+    "src/mlx2/runtime/lane/tiled_prefill.py",
+    "src/mlx2/runtime/drafters/native_mtp.py",
     "src/mlx2/runtime/ast_private_state.py",
     "src/mlx2/runtime/cow_cache.py",
     "src/mlx2/runtime/drafters/fold.py",

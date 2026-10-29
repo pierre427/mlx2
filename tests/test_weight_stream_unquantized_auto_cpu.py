@@ -482,7 +482,9 @@ class _Declared:
     weight_streaming_modes = frozenset({"moe_experts"})
     calls = []
 
-    def __init__(self, model_path, **kwargs):
+    def __init__(self, model_path, *, weight_streaming=None, **kwargs):
+        if weight_streaming is not None:
+            kwargs["weight_streaming"] = weight_streaming
         type(self).calls.append(kwargs)
         raise RuntimeError("stop after delivery")
 
@@ -494,6 +496,7 @@ class _Undeclared(_Declared):  # inherits a declaration it must not get
 def _artifact(tmp_path, sizes=(3000, 5000), *, stray=True):
     root = tmp_path / "artifact"
     root.mkdir()
+    (root / "config.json").write_text(json.dumps({"num_experts": 8}))
     weight_map = {}
     for index, size in enumerate(sizes):
         name = f"model-{index + 1:05d}-of-{len(sizes):05d}.safetensors"
@@ -530,9 +533,9 @@ def test_auto_decision_rule(tmp_path):
     explicit = decide(limit=head + 7999, explicit=True)
     assert (explicit["selected"], explicit["reason"], explicit["fits"]) == (
         False, "explicit_policy", False)
-    assert decide(adapter=_Undeclared, limit=1)["reason"] == "undeclared"
+    assert decide(adapter=_Undeclared, limit=1)["selected"]
     assert decide(limit=None)["reason"] == "admission_limit_unmeasured"
-    assert decide(path=tmp_path / "absent", limit=1)["reason"] == "artifact_unmeasured"
+    assert decide(path=tmp_path / "absent", limit=1)["reason"] == "expert_geometry_unavailable"
 
 
 def _engine(tmp_path, monkeypatch, factory, policy, *, limit, max_lanes=1, **kwargs):
@@ -642,15 +645,14 @@ def test_auto_selection_fails_closed_on_lanes_and_unevidenced_mechanisms(tmp_pat
     with pytest.raises(ValueError, match="lane_matmul=exact"):
         serving.ServingEngine(str(root), adapter_factory=_Declared, max_lanes=1,
                               max_inflight=1, lane_matmul="exact")
-    # An undeclared adapter is never auto-streamed (inherited declarations
-    # do not count), so the engine starts its ordinary load.
+    # A compatible inherited early loader is eligible without an own-class flag.
     _Undeclared.calls.clear()
     engine = serving.ServingEngine(str(root), adapter_factory=_Undeclared, max_lanes=1,
                                    max_inflight=1)
     engine.thread.join(timeout=30)
     try:
-        assert not engine.weight_streaming_enabled()
-        assert "weight_streaming" not in _Undeclared.calls[0]
+        assert engine.weight_streaming_enabled()
+        assert _Undeclared.calls[0]["weight_streaming"].mode == "moe_experts"
     finally:
         engine.close()
 

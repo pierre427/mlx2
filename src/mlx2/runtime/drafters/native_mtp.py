@@ -171,6 +171,8 @@ class NativeMTPDraftModel:
             "selection": "greedy_argmax",
             "alternatives_per_position": ALTERNATIVES_PER_POSITION,
             "qsa_index_sharing": False,
+            "shared_history_candidate": callable(getattr(self.target, "make_shared_mtp_draft_cache", None))
+                and __import__("os").environ.get("MLX2_MTP_SHARED_HISTORY", "0") == "1",
             "qualified": False,
         }
 
@@ -589,7 +591,12 @@ class NativeMTPDraftModel:
             # Rank the roots on the device: best root first (the primary).
             roots = roots[mx.argsort(-values[roots])]
             seed = seed[:, -1:]
-            batched = self._branch_batch_cache(rows[row], branches) if not callable(start) else None
+            shared_factory = getattr(self.target, "make_shared_mtp_draft_cache", None)
+            batched = shared_factory(rows[row], branches) if callable(shared_factory) else None
+            if batched is not None:
+                self.stats["shared_history_tree_calls"] = self.stats.get("shared_history_tree_calls", 0) + 1
+            elif not callable(start):
+                batched = self._branch_batch_cache(rows[row], branches)
             if batched is not None:
                 # All branches advance together: one head step per depth.
                 tokens = roots.reshape(branches, 1).astype(mx.uint32)

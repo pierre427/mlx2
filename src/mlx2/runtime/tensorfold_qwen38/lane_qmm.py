@@ -356,9 +356,12 @@ def _call(self: Any, x: mx.array) -> mx.array:
         y = lane_matmul(x, self["weight"], sbt, tiled=tiled, nt=nt, group=self.group_size)
     elif tiled:
         # wider than the lane kernel takes (MLX's chunked prefill): MLX's layout, rebuilt for this call
-        weight = untile_weight(self["weight"], nt, self.group_size, bits=self.bits)
-        y = mx.quantized_matmul(x, weight, self["scales"], self["biases"], transpose=True, group_size=self.group_size,
-                                bits=self.bits)
+        from ..lane.tiled_prefill import project
+        y = project(x, self, nt)
+        if y is None:
+            weight = untile_weight(self["weight"], nt, self.group_size, bits=self.bits)
+            y = mx.quantized_matmul(x, weight, self["scales"], self["biases"], transpose=True, group_size=self.group_size,
+                                    bits=self.bits)
     else:
         return _ORIG(self, x)
     if "bias" in self:
