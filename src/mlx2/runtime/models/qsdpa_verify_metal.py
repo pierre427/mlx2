@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from threading import Lock
 from typing import Optional
 
 import mlx.core as mx
@@ -343,6 +344,94 @@ def note(path: str, rows: int, count: int = 1) -> None:
     STATS[path + "_calls"] = STATS.get(path + "_calls", 0) + count
     key = f"{path}_L{rows}"
     STATS_BY_ROWS[key] = STATS_BY_ROWS.get(key, 0) + count
+
+
+# Finite, process-wide observations at the quantized attention dispatch seam.
+# These count selected host graph branches, including a branch whose later
+# construction/evaluation fails. They do not prove GPU launch or completion,
+# nor identify one request when requests overlap. Keep legacy counters above
+# separate: their fallback/tile events are not mutually exclusive branches.
+SELECTED_HOST_BRANCHES = (
+    "direct_decode", "direct_verify", "composed", "composed_tiled",
+    "dequantized_flash",
+)
+_SELECTED_HOST_BRANCH_COUNTS = dict.fromkeys(SELECTED_HOST_BRANCHES, 0)
+_SELECTED_HOST_BRANCH_LOCK = Lock()
+_SELECTED_HOST_BRANCH_EPOCH = 0
+
+
+def _reset_selected_host_branches_after_fork() -> None:
+    # A parent thread may have held the old lock at fork. Never acquire it in
+    # the child, and do not attribute inherited parent selections to the child.
+    global _SELECTED_HOST_BRANCH_LOCK, _SELECTED_HOST_BRANCH_COUNTS
+    global _SELECTED_HOST_BRANCH_EPOCH
+    _SELECTED_HOST_BRANCH_LOCK = Lock()
+    _SELECTED_HOST_BRANCH_COUNTS = dict.fromkeys(SELECTED_HOST_BRANCHES, 0)
+    _SELECTED_HOST_BRANCH_EPOCH += 1
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_selected_host_branches_after_fork)
+
+
+def note_selected_host_branch(branch: str) -> None:
+    """Count one terminal selection; never create shape/request labels."""
+    with _SELECTED_HOST_BRANCH_LOCK:
+        # Index before assignment so an unknown label cannot grow the map.
+        _SELECTED_HOST_BRANCH_COUNTS[branch] += 1
+
+
+def _selected_host_branch_snapshot_unlocked() -> dict:
+    return {
+        "scope": "process",
+        "process_id": os.getpid(),
+        "basis": "selected_host_graph_branch",
+        "epoch": _SELECTED_HOST_BRANCH_EPOCH,
+        "counts": dict(_SELECTED_HOST_BRANCH_COUNTS),
+    }
+
+
+def selected_host_branch_snapshot() -> dict:
+    """Return a detached coherent snapshot; reading does not reset counts."""
+    with _SELECTED_HOST_BRANCH_LOCK:
+        return _selected_host_branch_snapshot_unlocked()
+
+
+def reset_selected_host_branches() -> dict:
+    """Reset only these observations and invalidate pre-reset delta baselines."""
+    global _SELECTED_HOST_BRANCH_EPOCH
+    with _SELECTED_HOST_BRANCH_LOCK:
+        _SELECTED_HOST_BRANCH_EPOCH += 1
+        for branch in SELECTED_HOST_BRANCHES:
+            _SELECTED_HOST_BRANCH_COUNTS[branch] = 0
+        return _selected_host_branch_snapshot_unlocked()
+
+
+def selected_host_branch_delta(baseline: dict) -> dict:
+    """Observe process-wide selections since a same-epoch snapshot.
+
+    A reset or a future/malformed baseline refuses rather than reporting a
+    misleading negative delta. This does not isolate concurrent requests.
+    """
+    current = selected_host_branch_snapshot()
+    if (
+        not isinstance(baseline, dict)
+        or baseline.get("scope") != current["scope"]
+        or baseline.get("process_id") != current["process_id"]
+        or baseline.get("basis") != current["basis"]
+        or type(baseline.get("epoch")) is not int
+        or baseline["epoch"] != current["epoch"]
+        or not isinstance(baseline.get("counts"), dict)
+        or baseline["counts"].keys() != current["counts"].keys()
+    ):
+        raise ValueError("selected host branch baseline is incompatible or reset")
+    delta = {}
+    for branch, count in current["counts"].items():
+        before = baseline["counts"][branch]
+        if type(before) is not int or not 0 <= before <= count:
+            raise ValueError("selected host branch baseline is invalid or in the future")
+        delta[branch] = count - before
+    return {**current, "counts": delta}
 
 
 # ------------------------------------------------------------------ planning

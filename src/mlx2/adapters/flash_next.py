@@ -695,6 +695,11 @@ class FlashNextAdapter:
                     self.model, low_bit_lane=self.policy.row_exact_low_bit_lane
                 )
                 self.row_exact_verify.enable(True)
+            self.q4_gate_three_rows = None
+            if self.policy.q4_gate_three_rows:
+                from ..runtime.row_exact.gate_rows import install as install_gate_rows
+
+                self.q4_gate_three_rows = install_gate_rows(self.model.language_model)
             self.fp32_head = None
             if self.policy.fp32_head_logits:
                 from ..runtime.fp32_head import enable_fp32_head_logits
@@ -1265,6 +1270,8 @@ class FlashNextAdapter:
                 if getattr(self, "row_exact_verify", None) is not None
                 else {}
             ),
+            **({"q4_gate_three_rows": self.q4_gate_three_rows.status()}
+               if getattr(self, "q4_gate_three_rows", None) is not None else {}),
             **(
                 {"invariant_prefill": self.invariant_prefill.status()}
                 if getattr(self, "invariant_prefill", None) is not None
@@ -1299,6 +1306,8 @@ class FlashNextAdapter:
         # bound on the live model only, so read it without assuming one.
         tree_law = getattr(getattr(self, "model", None), "_mlx2_flash_tree_law", None)
         return {
+            **({"q4_gate_three_rows": self.q4_gate_three_rows.identity()}
+               if getattr(self, "q4_gate_three_rows", None) is not None else {}),
             **({"flash_tensorfold_tree_projection_law": dict(tree_law)} if tree_law else {}),
             # Present only when low_bit_lane moved layers onto the lane law:
             # their decode and prefill state differ from the stock product's.
@@ -1373,6 +1382,9 @@ class FlashNextAdapter:
     def close(self):
         from .process_globals import release
 
+        gate_rows = getattr(self, "q4_gate_three_rows", None)
+        if gate_rows is not None:
+            gate_rows.remove()
         release(self)
         tables = getattr(self, "_tables", [])
         for table in tables:

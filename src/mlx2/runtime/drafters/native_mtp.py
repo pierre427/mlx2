@@ -105,6 +105,11 @@ class NativeMTPDraftModel:
     tree_topology_aware = True
 
     @property
+    def ast_execution_geometry_owner(self):
+        """The resident head intentionally uses its bound target's geometry."""
+        return self.target
+
+    @property
     def ast_execution_modules(self):
         language = getattr(self.target, "language_model", self.target)
         return tuple(module for module in (self.target.mtp, getattr(language, "lm_head", None)) if module is not None)

@@ -275,10 +275,22 @@ class SamplingAndReceiptTests(unittest.TestCase):
         def post(_url, body, _timeout):
             captured.update(body)
             return {
+                "usage": {"completion_tokens": 2},
                 "mlx2": {
                     "route": "ordinary",
                     "cached_tokens": 0,
                     "completion_tokens": 2,
+                    "token_trace": {
+                        "schema": "mlx2.generated-token-trace.v1",
+                        "source": "generation_response",
+                        "start_completion_token": 1,
+                        "completion_tokens": 2,
+                        "token_ids": [7, 7],
+                        "execution_widths": [1, 1],
+                        "ordinary_execution_widths": [1, 1],
+                        "limit": 4096,
+                        "truncated": False,
+                    },
                     "prompt_tokens": 3,
                     "ttft_seconds": 0.1,
                     "elapsed_seconds": 0.2,
@@ -307,6 +319,8 @@ class SamplingAndReceiptTests(unittest.TestCase):
         self.assertEqual(captured["temperature"], 0.7)
         self.assertEqual(captured["seed"], 7)
         self.assertIs(captured["skip_writing_prefix_cache"], True)
+        self.assertIs(captured["return_token_trace"], True)
+        self.assertTrue(row["token_accounting"]["passed"])
         self.assertEqual(row["request_controls"]["effective_sampling"], sampling)
 
     def test_request_receipt_refuses_any_apcv2_reuse(self):

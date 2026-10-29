@@ -2893,6 +2893,15 @@ class NGramEmbedding(nn.Module):
         self.layer_multipliers = mx.array(multipliers, dtype=mx.int64)
         self.ngram_heads_vocab_sizes = mx.array(sizes, dtype=mx.int64)
         self.ngram_heads_offsets = mx.array(offsets, dtype=mx.int64)
+        object.__setattr__(self, "_window_ranges", tuple(
+            (int(offset), int(offset + size)) for offset, size in zip(offsets, sizes)
+        ))
+        object.__setattr__(self, "_window_constants", (
+            self.ngram_heads_vocab_sizes, self.ngram_heads_offsets
+        ))
+        self.windowed_gather = os.getenv("MLX_QWEN4_PLE_WINDOWED_GATHER", "0") == "1"
+        self._window_ready = False
+        object.__setattr__(self, "_window_binding", None)
         self._np_constants = None
         self._np_constants_src = None
         self.ngram_embedding = ShardedEmbedding(
@@ -3173,10 +3182,63 @@ class NGramEmbedding(nn.Module):
         _lv.bump("ple_prefetch_submitted")
         return True
 
+    def prepare_windowed_gather(self, *, resident_shards_prepared=False):
+        """Rebind the small hash metadata after loading, never table residency.
+
+        Caller must have independently prepared resident shards in a bounded
+        ownership window. This metadata method neither establishes residency
+        nor evaluates the table. Not called by a request. Replacing
+        hash sizes/offsets afterwards invalidates admission until re-prepared.
+        """
+        from .qwen4_ple_window import ResidentBinding, plan_windows
+
+        self._window_ready = False
+        object.__setattr__(self, "_window_binding", None)
+        if resident_shards_prepared is not True:
+            raise ValueError("independent resident shard preparation is required")
+        if self.file_backed or type(self.ngram_embedding) is not ShardedEmbedding:
+            raise ValueError("windowed gather requires an existing resident shard table")
+        sizes, offsets = self.ngram_heads_vocab_sizes, self.ngram_heads_offsets
+        if (sizes.shape != (self.ngram_heads,) or offsets.shape != sizes.shape
+                or sizes.dtype not in (mx.int32, mx.int64)
+                or offsets.dtype not in (mx.int32, mx.int64)):
+            raise ValueError("invalid PLE hash metadata")
+        mx.eval(sizes, offsets)
+        ranges = tuple((int(low), int(low + size))
+                       for size, low in zip(sizes.tolist(), offsets.tolist()))
+        plan_windows(self.ngram_embedding.vocab_size,
+                     self.ngram_embedding.num_shards, ranges)
+        binding = ResidentBinding(self.ngram_embedding)
+        object.__setattr__(self, "_window_ranges", ranges)
+        object.__setattr__(self, "_window_constants", (sizes, offsets))
+        object.__setattr__(self, "_window_binding", binding)
+        self._window_ready = True
+
+    def _window_eligible(self, input_ids):
+        from .qwen4_ple_window import eligible
+
+        supported = (
+            self.windowed_gather and self._window_ready and not self.file_backed
+            and self.hash_backend == "metal" and self.ngram_size == 3
+            and self._window_constants[0] is self.ngram_heads_vocab_sizes
+            and self._window_constants[1] is self.ngram_heads_offsets
+            and type(self.ngram_embedding) is ShardedEmbedding
+        )
+        if not supported:
+            return False
+        if self._window_binding is None or not self._window_binding.matches(self.ngram_embedding):
+            self._window_ready = False
+            object.__setattr__(self, "_window_binding", None)
+            return False
+        return eligible(self.ngram_embedding,
+                        (*input_ids.shape, self.ngram_heads), self._window_ranges)
+
     def reads_host_ids(self, input_ids: mx.array) -> bool:
         """Whether ``__call__`` reads ``input_ids`` on the host (a sync when
         they are unevaluated device arrays), by the same route choice."""
         table = self.ngram_embedding
+        if self._window_eligible(input_ids):
+            return False
         if (
             self.file_backed
             and input_ids.shape == (1, 3)
@@ -3200,6 +3262,14 @@ class NGramEmbedding(nn.Module):
         mask: Optional[mx.array] = None,
     ):
         table = self.ngram_embedding
+        if self._window_eligible(input_ids):
+            from .qwen4_ple_window import lookup
+
+            ids = self._ngram_ids_metal(input_ids, cache, mask)
+            values = lookup(table, ids, self._window_ranges)
+            if values is None:
+                raise RuntimeError("PLE window eligibility changed during forward")
+            return values.reshape(*input_ids.shape, -1)
         device_verify = (
             self.file_backed
             and input_ids.shape == (1, 3)

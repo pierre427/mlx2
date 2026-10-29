@@ -693,6 +693,11 @@ class RowExactVerify:
             "windows": max(0, windows),
             "windows_not_exact": max(0, not_exact),
         }
+        language = getattr(self.model, "language_model", None)
+        if language is not None and "_mlx2_q4_gate_rows_handle" in language.__dict__:
+            from ..row_exact.gate_rows import receipt as gate_receipt
+
+            receipt.update(gate_receipt(language))
         if (self.per_row_layers or {}).get("slow_path"):
             # Only when some layer takes the per-row path, so receipts of
             # fully covered models are unchanged.

@@ -358,6 +358,10 @@ class LFM25MoEAdapter(ExternalDraftAdapterMixin):
     EXTERNAL_PROFILE = "lfm25-24b-a2b-8bit-apcv2-dspark"
 
     def _init_lfm25(self, model_path: str, *, execution_policy=None):
+        from ..runtime.models.lfm25_moe_decode import parse_policy
+
+        execution_policy = dict(execution_policy or {})
+        self.moe_decode_mode = parse_policy(execution_policy.pop("lfm_moe_decode", None))
         external = self._parse_external_policy(execution_policy, family="LFM2.5 24B-A2B")
         artifact = inspect_artifact(model_path)
         draft_record = None
@@ -432,6 +436,11 @@ class LFM25MoEAdapter(ExternalDraftAdapterMixin):
         self.fused_shortconv_counters = ShortConvCounters()
         self.fused_shortconv_opt_in_requested = fused_shortconv_enabled()
         install_shortconv(self.model, self.fused_shortconv_counters)
+        self.moe_decode_handle = None
+        if self.moe_decode_mode != "off":
+            from ..runtime.models.lfm25_moe_decode import install
+
+            self.moe_decode_handle = install(self.model)
 
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
@@ -532,6 +541,15 @@ class LFM25MoEAdapter(ExternalDraftAdapterMixin):
             raise ValueError("LFM2.5 24B-A2B has no implemented MTP route")
         return "lfm25-24b-a2b-8bit-apcv2-ordinary"
 
+    def execution_numerics_contract(self):
+        if getattr(self, "moe_decode_mode", "off") == "off":
+            return None
+        from ..runtime.models.lfm25_moe_decode import SCHEMA, identity
+
+        return {"operation": SCHEMA, "mode": self.moe_decode_mode,
+                "shader_sha256": identity(), "qualified": False,
+                "scope": "B1 one-token sigmoid routing and combine"}
+
     def execution_config(self, *, max_lanes, prefill_step):
         counters = getattr(self, "fused_shortconv_counters", None)
         route = (
@@ -555,6 +573,8 @@ class LFM25MoEAdapter(ExternalDraftAdapterMixin):
                 else "source"
             ),
             "moe_nax_gather": getattr(self, "moe_nax_gather", "off"),
+            **({"lfm_moe_decode": self.moe_decode_mode}
+               if getattr(self, "moe_decode_mode", "off") != "off" else {}),
         }
 
     def cache_budget(self, *, mtp):
@@ -628,6 +648,10 @@ class LFM25MoEAdapter(ExternalDraftAdapterMixin):
         external = getattr(self, "draft_model", None) is not None
         return {
             "architecture": "lfm2_moe",
+            "moe_decode_fusion": (
+                self.moe_decode_handle.status()
+                if getattr(self, "moe_decode_handle", None) is not None else None
+            ),
             "cache_layout": self.layout,
             "route": "external_draft" if external else "ordinary",
             **(

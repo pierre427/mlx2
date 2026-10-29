@@ -256,6 +256,11 @@ class SparseMoE(nn.Module):
         return indices, scores.astype(x.dtype)
 
     def __call__(self, x):
+        handle = getattr(self, "_mlx2_decode_fusion", None)
+        if handle is not None:
+            fused = handle.forward(self, x)
+            if fused is not None:
+                return fused
         indices, scores = self.routing(x)
         expert_outputs = self.switch_mlp(x, indices)
         return mx.sum(expert_outputs * scores[..., None], axis=-2)

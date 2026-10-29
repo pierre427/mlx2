@@ -6,13 +6,13 @@ owns the model/window. No additional expert acquisition or coefficient copy.
 Provenance: provenance/deepseek-v41-native-ffn-capture.json.
 """
 from contextlib import contextmanager
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
 import re
 import threading
 import time
-import zipfile
 
 import numpy as np
 
@@ -20,6 +20,17 @@ SCHEMA = 'mlx2.native-ffn-actual-capture.v1'
 MAX_ARRAY_BYTES = 32 << 20
 MAX_CASES = 2
 _LOCK = threading.Lock()
+_EVIDENCE_SHA256 = '7b90f06e4acd3017fd53c06eaec8209ecc0c893056946e0d436bbf751d60f40f'
+
+
+@lru_cache(maxsize=1)
+def _evidence():
+    # The existing parser-source seal transitively binds this exact helper.
+    # Copied research parsers must not acquire an unpinned mutable dependency.
+    from mlx2 import research_evidence
+    if hashlib.sha256(Path(research_evidence.__file__).read_bytes()).hexdigest() != _EVIDENCE_SHA256:
+        raise ValueError('Native FFN research evidence dependency seal differs')
+    return research_evidence
 
 
 def digest(value):
@@ -63,7 +74,10 @@ def bf16(value):
 
 
 def _same(a, b):
-    return a.shape == b.shape and a.dtype == b.dtype and a.tobytes() == b.tobytes()
+    evidence = _evidence()
+    left = evidence.array_atom(dtype=str(a.dtype), shape=a.shape, payload=a.tobytes())
+    right = evidence.array_atom(dtype=str(b.dtype), shape=b.shape, payload=b.tobytes())
+    return not evidence.diff_atoms({'value': left}, {'value': right})
 
 
 def validate_arrays(case, arrays):
@@ -180,33 +194,15 @@ def load_capture(path, *, checkpoint=None, source_snapshot=None):
             raise ValueError('Native FFN unsafe/duplicate case path')
         names.add(name)
         file = path.parent/name
-        if file.is_symlink() or file.stat().st_size > MAX_ARRAY_BYTES+16384:
-            raise ValueError('Native FFN file size/symlink')
-        if hashlib.sha256(file.read_bytes()).hexdigest() != case['sha256']:
-            raise ValueError('Native FFN NPZ hash')
-        expected_names = {k+'.npy' for k in shapes(case['rows'])}
-        with zipfile.ZipFile(file) as archive:
-            entries = archive.infolist()
-            if (len(entries) != len(expected_names) or {e.filename for e in entries} != expected_names
-                    or sum(e.file_size for e in entries) > MAX_ARRAY_BYTES+16384):
-                raise ValueError('Native FFN decompression inventory/budget')
-            # Reject a tiny malformed file claiming a huge allocation before
-            # NumPy creates an array. ZIP byte ceilings alone cannot do this.
-            for entry in entries:
-                key = entry.filename[:-4]
-                with archive.open(entry) as value:
-                    version = np.lib.format.read_magic(value)
-                    if version == (1, 0):
-                        shape, _, dtype = np.lib.format.read_array_header_1_0(value, max_header_size=4096)
-                    elif version == (2, 0):
-                        shape, _, dtype = np.lib.format.read_array_header_2_0(value, max_header_size=4096)
-                    else:
-                        raise ValueError('Native FFN unsupported NPY version')
-                    if (shape != shapes(case['rows'])[key] or dtype != np.dtype(np.uint32 if key in UINT_ARRAYS else np.float32)
-                            or entry.file_size-value.tell() != int(np.prod(shape))*4):
-                        raise ValueError('Native FFN NPY header geometry/dtype/payload')
-        with np.load(file, allow_pickle=False) as archive:
-            arrays = {k: np.array(archive[k], copy=True) for k in archive.files}
+        arrays = _evidence().load_array_archive(
+            file, specs={key: (shape, np.uint32 if key in UINT_ARRAYS else np.float32)
+                         for key, shape in shapes(case['rows']).items()},
+            sha256=case['sha256'],
+            identity={key: report[key] for key in ('checkpoint', 'source_snapshot_sha256')},
+            expected_identity={'checkpoint': checkpoint or report['checkpoint'],
+                               'source_snapshot_sha256': source_snapshot or report['source_snapshot_sha256']},
+            max_archive_bytes=MAX_ARRAY_BYTES+16384, max_container_bytes=MAX_ARRAY_BYTES+16384,
+            max_array_bytes=MAX_ARRAY_BYTES-total, backend=np)
         size = validate_arrays(case, arrays)
         records = {k: dict(shape=list(a.shape), dtype=str(a.dtype), sha256=digest(a)) for k, a in arrays.items()}
         if records != case.get('arrays') or size != case.get('captured_array_bytes'):

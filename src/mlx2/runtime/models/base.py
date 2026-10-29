@@ -182,6 +182,8 @@ def quantized_scaled_dot_product_attention(
     key_bits: Optional[int] = None,
     value_bits: Optional[int] = None,
 ) -> mx.array:
+    from . import qsdpa_verify_metal as qvm
+
     (B, n_q_heads, L, D) = queries.shape
     n_kv_heads = q_keys[0].shape[-3]
     n_repeats = n_q_heads // n_kv_heads
@@ -197,24 +199,25 @@ def quantized_scaled_dot_product_attention(
         row_mask = None if isinstance(mask, str) else mask
         if use_decode_kernel(queries, q_keys, q_values, group_size=group_size,
                              key_bits=key_bits, value_bits=value_bits, mask=row_mask):
+            qvm.note_selected_host_branch("direct_decode")
             return gqa_quantized_decode_attention(
                 queries, q_keys, q_values, scale=scale, group_size=group_size,
                 key_bits=key_bits, value_bits=value_bits)
     if L <= 8:
         # Verify blocks (and left-padded batched decode): one pass over the
         # int8 K/V for every query head and row of each KV head.
-        from . import qsdpa_verify_metal as qvm
-
         left_padding = qvm.causal_left_padding(mask, B, L, q_keys[0].shape[-2])
         if left_padding is not qvm.NOT_CAUSAL and qvm.use_verify_kernel(
             queries, q_keys, q_values, group_size=group_size,
             key_bits=key_bits, value_bits=value_bits,
         ):
+            qvm.note_selected_host_branch("direct_verify")
             return qvm.gqa_quantized_verify_attention(
                 queries, q_keys, q_values, scale=scale, group_size=group_size,
                 key_bits=key_bits, value_bits=value_bits, left_padding=left_padding)
         qvm.note("composed", L)
     if L >= flash_min_l:
+        qvm.note_selected_host_branch("dequantized_flash")
         keys = mx.dequantize(
             *_contiguous_quant(q_keys), group_size=group_size, bits=key_bits
         )
@@ -224,11 +227,11 @@ def quantized_scaled_dot_product_attention(
         return fast_sdpa(queries, keys, values, scale=scale, mask=mask)
     rows = _scores_tile_rows(queries, q_keys, mask, n_repeats)
     if rows is None:
+        qvm.note_selected_host_branch("composed")
         return _composed_qsdpa(
             queries, q_keys, q_values, scale, mask, group_size, key_bits, value_bits
         )
-    from . import qsdpa_verify_metal as qvm
-
+    qvm.note_selected_host_branch("composed_tiled")
     qvm.note("composed_tiled", L)
     S = q_keys[0].shape[-2]
     outputs = []

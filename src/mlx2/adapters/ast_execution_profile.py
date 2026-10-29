@@ -16,6 +16,23 @@ import json
 from ..runtime.ast_planner import ExecutionProfile
 
 
+def _expert_geometry(owner):
+    """Resolve this owner's geometry; missing/invalid top-k stays unknown.
+
+    Unknown expert work is conservatively charged as a full bank. In
+    particular, an independent drafter never inherits the target's top-k.
+    """
+    for name in ("speculative_args", "args", "config"):
+        args = getattr(owner, name, None)
+        if args is None:
+            continue
+        count = (args.get("num_experts_per_tok") if isinstance(args, dict)
+                 else getattr(args, "num_experts_per_tok", None))
+        if count is not None:
+            return (count, name) if type(count) is int and count > 0 else (None, name + "_unknown")
+    return None, "undeclared"
+
+
 def build_execution_profile(
     model,
     draft,
@@ -83,7 +100,8 @@ def build_execution_profile(
     row_capacity = None
     compact = exact and bool(getattr(model, "progressive_external_compact_exact_rows", False))
     args = getattr(model, "speculative_args", getattr(model, "args", None))
-    active_experts = getattr(args, "num_experts_per_tok", None)
+    active_experts, target_geometry_authority = _expert_geometry(model)
+    target_has_experts = False
     named = getattr(model, "named_modules", None)
     named = list(named()) if callable(named) else []
     roots = getattr(model, "progressive_external_target_modules", None)
@@ -97,15 +115,19 @@ def build_execution_profile(
         weight = getattr(module, "weight", None)
         if weight is None or id(weight) in seen or getattr(weight, "ndim", 0) < 2:
             continue
-        seen.add(id(weight))
         # Embeddings are indexed lookups, not a full weight pass per token.
         if isinstance(module, nn.Embedding) or "embed_tokens" in name:
             continue
+        # A tied output projection still performs a full pass. Skipping an
+        # embedding must not hide that later consumer of the same payload.
+        seen.add(id(weight))
         size = int(weight.nbytes)
-        if isinstance(module, (QuantizedSwitchLinear, SwitchLinear)) and active_experts:
+        if isinstance(module, (QuantizedSwitchLinear, SwitchLinear)):
+            target_has_experts = True
             # Expert-bank traffic is bounded by the adapter's active expert
-            # geometry, never charged as a dense pass over every expert.
-            size = size * min(int(active_experts), weight.shape[0]) / weight.shape[0]
+            # geometry, or a labelled full-bank bound when it is unknown.
+            if active_experts is not None:
+                size = size * min(active_experts, weight.shape[0]) / weight.shape[0]
         bits = getattr(module, "bits", None)
         groups = getattr(module, "group_size", None)
         # Which exact law serves this projection inside the verify window:
@@ -164,20 +186,39 @@ def build_execution_profile(
     build = installed_mlx_build()
     device = str(info.get("device_name", "unknown"))
     backend = getattr(draft, "backend", draft)
+    # A resident-head backend may explicitly declare its bound owner. This
+    # is an adapter capability, not an assumption that draft == target.
+    draft_owner = getattr(backend, "ast_execution_geometry_owner", backend)
+    draft_experts, draft_geometry_authority = _expert_geometry(draft_owner)
+    draft_relationship = "shared_target" if draft_owner is model else "independent"
     draft_named = getattr(backend, "named_modules", None)
     draft_roots = getattr(backend, "ast_execution_modules", None)
     draft_modules = ([(name, module) for root in draft_roots for name, module in root.named_modules()]
                      if draft_roots is not None else list(draft_named()) if callable(draft_named) else [])
     draft_bytes, draft_seen = 0, set()
+    draft_has_experts = False
     for _, module in draft_modules:
         weight = getattr(module, "weight", None)
         if (weight is not None and getattr(weight, "ndim", 0) >= 2
                 and id(weight) not in draft_seen and not isinstance(module, nn.Embedding)):
             draft_seen.add(id(weight))
             size = int(weight.nbytes)
-            if isinstance(module, (QuantizedSwitchLinear, SwitchLinear)) and active_experts:
-                size *= min(int(active_experts), weight.shape[0]) / weight.shape[0]
+            if isinstance(module, (QuantizedSwitchLinear, SwitchLinear)):
+                draft_has_experts = True
+                if draft_experts is not None:
+                    size *= min(draft_experts, weight.shape[0]) / weight.shape[0]
             draft_bytes += size
+    def geometry_coverage(has_experts, count, authority):
+        if not has_experts:
+            return "not_applicable"
+        return authority + (":full_bank_unknown" if count is None else f":top_k={count}")
+
+    weight_authority = (
+        "weight_payload_only"
+        + "+target_experts=" + geometry_coverage(target_has_experts, active_experts, target_geometry_authority)
+        + "+draft_experts=" + draft_relationship + ":"
+        + geometry_coverage(draft_has_experts, draft_experts, draft_geometry_authority)
+    )
     # KV traffic per valid query/context token. An adapter that declares its
     # attention geometry is authoritative; otherwise the module tree is
     # scanned for KV attention modules (fused or unconventional projections
@@ -222,7 +263,7 @@ def build_execution_profile(
     identity = hashlib.sha256(json.dumps(
         [binding, getattr(getattr(draft, "session", None), "session_revision", None),
          getattr(backend, "revision", None), build, info, shapes, tiles, terminal,
-         maximum, compact, active_experts, kv_bytes, draft_bytes,
+         maximum, compact, active_experts, draft_experts, weight_authority, kv_bytes, draft_bytes,
          row_capacity, windows, attention_authority,
          costs, compact_costs,
          getattr(draft, "policy", None),
@@ -246,7 +287,7 @@ def build_execution_profile(
             ("device_build_kernel_geometry_prior" if shapes else "undeclared_geometry_independent_row_prior")
             if exact else "stock_unmeasured_independent_row_prior"
         )
-        + "+" + attention_authority,
+        + "+" + weight_authority + "+" + attention_authority,
         backend=(
             ("padded_state_compact_exact_stages" if compact else "padded_row_exact")
             if exact else "padded_stock_near_tie_bounded"

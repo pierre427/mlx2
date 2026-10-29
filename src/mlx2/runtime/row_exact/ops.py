@@ -33,6 +33,12 @@ _REQ = None
 _VERDICTS = "_mlx2_row_exact_verdicts"
 
 
+def _gate_schedule(module):
+    ref = module.__dict__.get("_mlx2_q4_gate_three_rows")
+    handle = None if ref is None else ref()
+    return () if handle is None else (("q4_gate_rows", handle.revision, handle.enabled),)
+
+
 def _req():
     """``models.row_exact_qmv``, imported once (not per call)."""
     global _REQ
@@ -294,7 +300,7 @@ def quantized_linear_route(
             str(x.dtype),
             "bias" in linear,
             REQ.lane_preparation(linear) is not None,
-        )
+        ) + _gate_schedule(linear)
 
     def probe():
         def run(probe_rows):
@@ -304,7 +310,7 @@ def quantized_linear_route(
         return run
 
     slot = ("quantized_rows", x.dtype, x.shape[-1], call is not None,
-            REQ.lane_preparation(linear) is not None)
+            REQ.lane_preparation(linear) is not None) + _gate_schedule(linear)
     if not _module_verdict(linear, slot, key, probe, rows):
         _note(stage, "per_row_canary")
         return per_row(stock, x), "per_row_canary"
@@ -336,7 +342,7 @@ def _quantized_group_key(linears, x: mx.array) -> tuple:
             )
             for module in linears
         ),
-    )
+    ) + tuple(token for module in linears for token in _gate_schedule(module))
 
 
 def quantized_linears_route(linears, x: mx.array, *, stage: str = "quantized"):
@@ -393,7 +399,7 @@ def _quantized_linears(linears, x: mx.array, *, stage: str = "quantized"):
         tuple(map(id, linears)),
         x.dtype,
         x.shape[-1],
-    )
+    ) + tuple(token for module in linears for token in _gate_schedule(module))
     arrays = tuple(array for module in linears for array in _module_arrays(module))
     if not _module_verdict(
         linears[0], slot, lambda: _quantized_group_key(linears, x), probe, rows,

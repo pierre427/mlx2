@@ -7,7 +7,6 @@ synchronizing the device. Only an explicit request retains per-token evidence.
 
 from dataclasses import dataclass, field
 
-
 TOKEN_TRACE_SCHEMA = "mlx2.generated-token-trace.v1"
 MAX_TOKEN_TRACE_TOKENS = 4096
 
@@ -67,3 +66,37 @@ def read_token_trace(receipt: dict, *, expected_tokens: int | None = None) -> di
     ):
         raise ValueError("malformed or incomplete generated-token trace")
     return trace
+
+
+def reconcile_completion_tokens(result: dict, *, maximum: int) -> dict:
+    """Reconcile HTTP usage with sampled output, before reporting a rate.
+
+    Stop tokens are included when the generation-response seam emitted them;
+    rendered text and SSE event counts are deliberately not counted. Repeated
+    token IDs are legitimate: conservation is about events, not unique values.
+    No logits or device values are read.
+    """
+    if type(maximum) is not int or not 1 <= maximum <= MAX_TOKEN_TRACE_TOKENS:
+        raise ValueError("token accounting requires a bounded positive maximum")
+    if not isinstance(result, dict):
+        raise ValueError("HTTP response object required for token accounting")  # noqa: TRY004
+    receipt = result.get("mlx2")
+    usage = result.get("usage")
+    if not isinstance(receipt, dict) or not isinstance(usage, dict):
+        raise ValueError("mlx2 receipt and HTTP usage required for token accounting")  # noqa: TRY004
+    count = receipt.get("completion_tokens")
+    if type(count) is not int or not 0 <= count <= maximum:
+        raise ValueError("receipt completion count exceeds the request bound")
+    wire_count = usage.get("completion_tokens")
+    if type(wire_count) is not int or wire_count != count:
+        raise ValueError("HTTP usage differs from the receipt completion count")
+    trace = read_token_trace(receipt, expected_tokens=count)
+    return {
+        "schema": "mlx2.completion-accounting.v1",
+        "source": trace["source"],
+        "completion_tokens": count,
+        "trace_tokens": len(trace["token_ids"]),
+        "usage_tokens": wire_count,
+        "maximum": maximum,
+        "passed": True,
+    }

@@ -7,12 +7,12 @@ Serialization/evaluation are interventions, not ordinary latency measurements.
 """
 from collections import Counter
 from contextlib import contextmanager
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
 import re
 import time
-import zipfile
 
 import numpy as np
 
@@ -21,8 +21,17 @@ MAX_CASES = 10
 MAX_ARRAY_BYTES = 64 << 20
 MAX_CASE_BYTES = 6 << 20
 _ACTIVE = False
+_EVIDENCE_SHA256 = '7b90f06e4acd3017fd53c06eaec8209ecc0c893056946e0d436bbf751d60f40f'
 ALL_STRATA = tuple([f'original-m{a}-{b}' for a, b in ((1, 1), (2, 3), (4, 7), (8, 12), (13, 32), (33, 96), (97, 99))]
                    + [f'q1-m{a}-{b}' for a, b in ((1, 1), (2, 3), (4, 99))])
+
+
+@lru_cache(maxsize=1)
+def _evidence():
+    from mlx2 import research_evidence
+    if hashlib.sha256(Path(research_evidence.__file__).read_bytes()).hexdigest() != _EVIDENCE_SHA256:
+        raise ValueError('DOWN research evidence dependency seal differs')
+    return research_evidence
 
 
 def digest(value):
@@ -175,16 +184,16 @@ def load_capture(path, *, checkpoint=None, source_snapshot=None):
         if not re.fullmatch(r'[A-Za-z0-9_.-]+\.npz', name):
             raise ValueError('Unsafe DOWN capture path')
         file = path.parent/name
-        if file.is_symlink() or file.stat().st_size > MAX_CASE_BYTES+4096:
-            raise ValueError('DOWN capture file budget/symlink')
-        if hashlib.sha256(file.read_bytes()).hexdigest() != case['sha256']:
-            raise ValueError('DOWN capture file hash mismatch')
-        with zipfile.ZipFile(file) as archive:
-            if (len(archive.infolist()) != 3 or len({v.filename for v in archive.infolist()}) != 3
-                    or sum(v.file_size for v in archive.infolist()) > MAX_CASE_BYTES+4096):
-                raise ValueError('DOWN capture decompression budget/inventory')
-        with np.load(file, allow_pickle=False) as data:
-            arrays = {k: np.array(data[k], copy=True) for k in data.files}
+        arrays = _evidence().load_array_archive(
+            file, specs={key: ((case['rows'], 2304 if key == 'activation' else 5120), np.float32)
+                         for key in ('activation', 'reference_raw', 'reference_boundary')},
+            sha256=case['sha256'],
+            identity={key: report[key] for key in ('checkpoint', 'source_snapshot_sha256')},
+            expected_identity={'checkpoint': checkpoint or report['checkpoint'],
+                               'source_snapshot_sha256': source_snapshot or report['source_snapshot_sha256']},
+            max_archive_bytes=MAX_CASE_BYTES+4096, max_container_bytes=MAX_CASE_BYTES+4096,
+            max_array_bytes=min(MAX_CASE_BYTES, MAX_ARRAY_BYTES-total), backend=np,
+            allowed_versions=((1, 0), (2, 0), (3, 0)))
         _validate_case(case, arrays)
         total += sum(v.nbytes for v in arrays.values())
         if total > MAX_ARRAY_BYTES:

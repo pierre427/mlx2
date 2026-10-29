@@ -42,6 +42,7 @@ CANDIDATE_ENV = {
     "MLX_GDN_CORE": "flag",
     # Opt-in A/B kernels with no mlx2 full-model evidence (flash_next_policy).
     "MLX_QWEN4_MOE_ROUTER_KERNEL": "flag",
+    "MLX_QWEN4_PLE_WINDOWED_GATHER": "flag",
     "MLX_QWEN4_QSA_NAX_DECODE": "flag",
     # NAX block-sparse QSA prefill on B > 1 slices (flash_next_policy
     # qsa_nax_batched): those slices leave the masked SDPA's rounding.

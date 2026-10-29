@@ -1174,7 +1174,10 @@ class QwenHybridRowExactRoute:
     def receipt(self):
         status = self.status()
         counts = status["counts"]
+        from ..row_exact.gate_rows import receipt as gate_receipt
+
         return {
+            **gate_receipt(self.model.language_model),
             "target_verify_row_exact": {
                 "algorithm": ALGORITHM,
                 "implemented": True,

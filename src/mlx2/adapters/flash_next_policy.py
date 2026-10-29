@@ -235,6 +235,8 @@ class FlashNextPolicy:
     # Not an environment switch; installed on the loaded model and entered
     # in receipts only when enabled.
     row_exact_verify: bool = False
+    # Explicit scheduling candidate for existing row-exact Q4 gate consumers.
+    q4_gate_three_rows: bool = False
     # Opt-in (default off, unqualified): the layers the row-exact kernel
     # declines (2/3-bit above all; row_exact_qmv covers 4/5/6/8 bits) run the
     # TensorFold-derived lane matmul for their one-token calls and verify
@@ -464,6 +466,7 @@ class FlashNextPolicy:
             "hc_decode_kernels",
             "attn_fused_rows",
             "row_exact_verify",
+            "q4_gate_three_rows",
             "row_exact_low_bit_lane",
             "row_exact_window_kernels",
             "invariant_prefill",
@@ -475,6 +478,8 @@ class FlashNextPolicy:
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
+        if self.q4_gate_three_rows and not self.row_exact_verify:
+            raise ValueError("q4_gate_three_rows requires row_exact_verify")
         fold_windows = (
             self.moe_window_batch_decode
             or self.moe_window_verify
@@ -625,6 +630,8 @@ class FlashNextPolicy:
             del values["tensorfold_prefill"]
         if not self.row_exact_verify:
             del values["row_exact_verify"]
+        if not self.q4_gate_three_rows:
+            del values["q4_gate_three_rows"]
         if not self.row_exact_low_bit_lane:
             del values["row_exact_low_bit_lane"]
         if not self.invariant_prefill:

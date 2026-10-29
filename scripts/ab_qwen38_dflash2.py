@@ -873,9 +873,17 @@ def _messages(item, nonce):
 
 
 def _request(url, item, *, arm, max_tokens, temperature, timeout, nonce, seed):
+    from mlx2.generation_trace import (
+        MAX_TOKEN_TRACE_TOKENS,
+        reconcile_completion_tokens,
+    )
+
+    if type(max_tokens) is not int or not 1 <= max_tokens <= MAX_TOKEN_TRACE_TOKENS:
+        raise ValueError("A/B output must fit a complete authoritative token trace")
     expected_sampling = sampling_controls(temperature)
     body = {"messages": _messages(item, nonce), "max_tokens": max_tokens,
             "enable_thinking": False, "skip_writing_prefix_cache": True,
+            "return_token_trace": True,
             **expected_sampling}
     if expected_sampling["temperature"] > 0:
         body["seed"] = seed
@@ -888,13 +896,16 @@ def _request(url, item, *, arm, max_tokens, temperature, timeout, nonce, seed):
     request_controls = validate_request_receipt(
         arm, receipt, expected_sampling
     )
-    tokens = int(receipt["completion_tokens"])
+    accounting = reconcile_completion_tokens(result, maximum=max_tokens)
+    tokens = accounting["completion_tokens"]
     ttft = float(receipt["ttft_seconds"])
     decode_s = float(receipt["elapsed_seconds"]) - ttft
     content = result["choices"][0]["message"].get("content") or ""
     reasoning = result["choices"][0]["message"].get("reasoning_content") or ""
     return {
         "completion_tokens": tokens,
+        "token_accounting": accounting,
+        "token_trace": receipt["token_trace"],
         "prompt_tokens": receipt.get("prompt_tokens"),
         "cached_tokens": receipt.get("cached_tokens"),
         "ttft_s": ttft,

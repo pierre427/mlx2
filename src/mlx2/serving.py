@@ -6857,6 +6857,7 @@ class ServingEngine:
                 "qsdpa_verify": {
                     "counts": dict(qvm.STATS),
                     "by_rows": dict(qvm.STATS_BY_ROWS),
+                    "selected_host_branches": qvm.selected_host_branch_snapshot(),
                 },
                 "recent_receipts": receipts,
                 "recent_operation_receipts": list(self.operation_receipts),

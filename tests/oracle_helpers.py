@@ -1,15 +1,15 @@
 # Adapted from unified tests/test_verify_state_oracle.py at 1e2bc604, Apache-2.0.
 import copy
 import os
-import struct
 from collections import deque
-from dataclasses import dataclass
 from itertools import product
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 from unittest.mock import patch
 
 import numpy as np
 import pytest
+
+from mlx2.research_evidence import OracleAtom, array_atom, host_atom
 
 
 os.environ.setdefault("MLX_ENABLE_TF32", "0")
@@ -48,22 +48,6 @@ RAGGED_ACCEPTS = tuple(product(range(M + 1), repeat=2))
 DETAIL_ACCEPTS = (1, 3)
 
 
-@dataclass(frozen=True)
-class OracleAtom:
-    kind: str
-    dtype: str = ""
-    shape: Tuple[int, ...] = ()
-    payload: Any = None
-
-    def summary(self) -> str:
-        if self.kind == "array":
-            return (
-                f"array(dtype={self.dtype}, shape={self.shape}, "
-                f"bytes={len(self.payload)})"
-            )
-        return f"{self.kind}({self.payload!r})"
-
-
 Capture = Dict[str, OracleAtom]
 
 
@@ -72,21 +56,13 @@ def _array_atom(value: mx.array) -> OracleAtom:
     bits = mx.view(value, getattr(mx, uint_name))
     mx.eval(bits)
     payload = np.array(bits, copy=True).tobytes()
-    return OracleAtom("array", str(value.dtype), tuple(value.shape), payload)
+    return array_atom(dtype=str(value.dtype), shape=tuple(value.shape), payload=payload)
 
 
 def _host_atom(value: Any) -> OracleAtom:
-    if value is None:
-        return OracleAtom("none")
     if isinstance(value, np.generic):
         value = value.item()
-    if isinstance(value, float):
-        payload = struct.pack("!d", value)
-    elif isinstance(value, (bool, int, str, bytes)):
-        payload = value
-    else:
-        payload = repr(value)
-    return OracleAtom("host", type(value).__name__, payload=payload)
+    return host_atom(value)
 
 
 def _put(capture: Capture, path: str, value: Any) -> None:

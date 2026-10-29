@@ -1516,6 +1516,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
+        q4_gate_three_rows = policy.pop("q4_gate_three_rows", False)
+        if type(q4_gate_three_rows) is not bool:
+            raise ValueError("q4_gate_three_rows must be boolean")
+        if q4_gate_three_rows and policy.get("target_verify_row_exact") is not True:
+            raise ValueError("q4_gate_three_rows requires target_verify_row_exact")
+        self._q4_gate_three_rows_requested = q4_gate_three_rows
         self._kernels = {
             "attention_window_row_exact": pop_attention_window_row_exact(policy)
         }
@@ -1930,6 +1936,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         self._record_load_dtype()
         self._select_gdn_state(gdn_state_dtype)
         self._select_target_verify_row_exact()
+        self._select_q4_gate_three_rows()
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -1947,6 +1954,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         self._gdn_core_initial = gdn_core_status()
         if getattr(self, "weight_stream", None) is not None:
             self.weight_stream.begin_serving()
+
+    def _select_q4_gate_three_rows(self):
+        self.q4_gate_three_rows = None
+        if getattr(self, "_q4_gate_three_rows_requested", False):
+            from ..runtime.row_exact.gate_rows import install as install_gate_rows
+
+            self.q4_gate_three_rows = install_gate_rows(self.model.language_model)
 
     def _select_target_verify_row_exact(self):
         """Install the explicitly selected row-exact target executor.
@@ -2626,6 +2640,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 if getattr(self, "target_verify_row_exact", None) is not None
                 else {}
             ),
+            **({"q4_gate_three_rows": self.q4_gate_three_rows.status()}
+               if getattr(self, "q4_gate_three_rows", None) is not None else {}),
         }
 
     # The TensorFold tree law this adapter's tree path defaults to
@@ -2673,6 +2689,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "selected fused_gdn_compact_replay policy disagrees with live target layers"
             )
         contract = self._external_execution_numerics()
+        if getattr(self, "q4_gate_three_rows", None) is not None:
+            contract["q4_gate_three_rows"] = self.q4_gate_three_rows.identity()
         if enabled:
             architecture = getattr(self, "fused_gdn_architecture", "qwen38")
             contract["fused_gdn"] = {

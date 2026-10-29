@@ -249,3 +249,115 @@ def test_declared_attention_geometry_overrides_the_module_scan():
     kinds = ["linear_attention", "full_attention", "sliding_attention", "linear_attention"]
     g = geometry_from_layer_types(kinds, kv_heads=2, head_dim=4, sliding_window=32)
     assert (g["full_attention_layers"], g["sliding_attention_layers"], g["windows"]) == (1, 1, {32: 32})
+
+
+def _expert_prior_fixture():
+    from mlx2.runtime.models.switch_layers import SwitchLinear
+
+    target_experts = SwitchLinear(4, 4, 8, bias=False)
+    draft_experts = SwitchLinear(4, 4, 8, bias=False)
+    target = SimpleNamespace(
+        args=SimpleNamespace(num_experts_per_tok=2),
+        named_modules=lambda: [("experts", target_experts)],
+    )
+    draft = SimpleNamespace(
+        args=SimpleNamespace(num_experts_per_tok=6),
+        named_modules=lambda: [("experts", draft_experts)],
+    )
+
+    def profile(drafter=draft):
+        return build_execution_profile(
+            target, drafter, binding="host-expert-prior", tile_cap=3,
+            max_lanes=1, num_draft=7,
+        )
+
+    return target, draft, profile
+
+
+def test_independent_drafter_top_k_changes_only_its_prior_and_binding():
+    target, draft, profile = _expert_prior_fixture()
+    six = profile()
+    assert six.draft_cost == 3  # same bank bytes, six draft experts / two target experts
+    draft.args.num_experts_per_tok = 1
+    one = profile()
+    assert one.draft_cost == 0.5
+    assert one.row_costs == six.row_costs and one.context_row_cost == six.context_row_cost
+    assert one.binding != six.binding
+    assert target.args.num_experts_per_tok == 2
+    assert "draft_experts=independent:args:top_k=1" in one.cost_authority
+
+
+def test_unknown_target_geometry_does_not_hide_known_drafter_geometry():
+    target, _draft, profile = _expert_prior_fixture()
+    target.args.num_experts_per_tok = None
+    prior = profile()
+    assert prior.draft_cost == 0.75  # six known draft experts / eight possible target experts
+    assert "target_experts=undeclared:full_bank_unknown" in prior.cost_authority
+    assert "draft_experts=independent:args:top_k=6" in prior.cost_authority
+
+
+@pytest.mark.parametrize("field", ["speculative_args", "args", "config"])
+def test_equal_independent_expert_geometry_uses_its_own_configuration(field):
+    _target, draft, profile = _expert_prior_fixture()
+    del draft.args
+    setattr(draft, field, {"num_experts_per_tok": 2})
+    equal = profile()
+    assert equal.draft_cost == 1
+    assert f"draft_experts=independent:{field}:top_k=2" in equal.cost_authority
+
+
+@pytest.mark.parametrize("unknown", [None, 0, -1, True, "2"])
+def test_unknown_independent_drafter_geometry_keeps_labelled_full_bank_bound(unknown):
+    _target, draft, profile = _expert_prior_fixture()
+    draft.args.num_experts_per_tok = unknown
+    prior = profile()
+    assert prior.draft_cost == 4  # eight possible draft experts / two target experts
+    assert "draft_experts=independent:" in prior.cost_authority
+    assert "full_bank_unknown" in prior.cost_authority
+    assert "weight_payload_only" in prior.cost_authority
+
+
+def test_native_mtp_explicitly_shares_bound_target_geometry():
+    from mlx2.runtime.drafters.native_mtp import NativeMTPDraftModel
+
+    target, _draft, profile = _expert_prior_fixture()
+    target.mtp = target.named_modules()[0][1]
+    # Only the geometry/module protocol is exercised, not a loaded model or MTP forward.
+    native = NativeMTPDraftModel.__new__(NativeMTPDraftModel)
+    native.target = target
+    native.revision = "host-native-mtp-prior"
+    first = profile(native)
+    assert native.ast_execution_geometry_owner is target
+    assert first.draft_cost == 1
+    assert "draft_experts=shared_target:args:top_k=2" in first.cost_authority
+    target.args.num_experts_per_tok = 4
+    second = profile(native)
+    assert second.draft_cost == 1
+    assert first.binding != second.binding
+
+
+def test_geometry_authority_and_clamped_top_k_remain_identity_bound():
+    from mlx2.runtime.ast_planner import ASTExecutionPlanner
+
+    _target, draft, profile = _expert_prior_fixture()
+    draft.args.num_experts_per_tok = 8
+    eight = profile()
+    draft.args.num_experts_per_tok = 16
+    sixteen = profile()
+    assert eight.draft_cost == sixteen.draft_cost == 4
+    assert eight.binding != sixteen.binding
+    assert ASTExecutionPlanner(sixteen, tile_cap=3).receipt()["cost_authority"] == sixteen.cost_authority
+    draft.args.num_experts_per_tok = None
+    unknown = profile()
+    assert unknown.draft_cost == eight.draft_cost
+    assert unknown.binding != eight.binding
+
+
+def test_dense_drafter_does_not_inherit_expert_geometry():
+    target, _draft, profile = _expert_prior_fixture()
+    dense = nn.Linear(4, 4, bias=False)
+    drafter = SimpleNamespace(named_modules=lambda: [("projection", dense)])
+    expected = dense.weight.nbytes / (target.named_modules()[0][1].weight.nbytes * 2 / 8)
+    prior = profile(drafter)
+    assert prior.draft_cost == expected
+    assert "draft_experts=independent:not_applicable" in prior.cost_authority

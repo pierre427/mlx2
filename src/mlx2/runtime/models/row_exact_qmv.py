@@ -27,6 +27,7 @@ the serial arithmetic) and is counted as such.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import cache
 
 import mlx.core as mx
@@ -51,6 +52,38 @@ _ROW_VALUES_BUDGET = 32
 # two-row register budget for the causal end-to-end control; the grouped
 # launch planner and every other traversal's geometry remain unchanged.
 _WIDE_ROW_VALUES_BUDGET = 32
+
+
+@dataclass(frozen=True)
+class TileGeometry:
+    """Explicit research geometry; ordinary dispatch keeps its measured policy.
+
+    Uzu's bounded input/output tiles inspired this extension of the existing
+    serial-arithmetic kernel. No reduction-lane or K-order change is made.
+    See provenance/uzu-metal-mining-20261027.json.
+    """
+
+    rows_per_group: int
+    results_per_simdgroup: int = 4
+    row_value_budget: int = 32
+
+    def __post_init__(self):
+        if type(self.rows_per_group) is not int or not 1 <= self.rows_per_group <= 8:
+            raise ValueError("QMV rows_per_group must be an integer in 1..8")
+        if type(self.results_per_simdgroup) is not int or self.results_per_simdgroup not in (1, 2, 4, 8):
+            raise ValueError("QMV results_per_simdgroup must be 1, 2, 4 or 8")
+        if type(self.row_value_budget) is not int or self.row_value_budget not in (32, 64):
+            raise ValueError("QMV explicit row_value_budget must be 32 or 64")
+
+    def validate(self, *, bits: int, fast: bool, rows: int):
+        limit = row_group_limit(bits, fast)
+        if self.row_value_budget == 64:
+            # Explicit component research only: twice the register envelope
+            # can remove a head weight pass, or spill and lose. The ordinary
+            # measured planner and its register bound are unchanged.
+            limit = 64 // _values_per_thread(bits, fast)
+        if self.rows_per_group > min(rows, limit):
+            raise ValueError("QMV geometry exceeds the input/register row budget")
 
 # Per row this is qmv_fast_impl (FAST) or qmv_impl; the row loop sits inside
 # each K block so the block's weight bytes are fetched once.  Columns past N
@@ -474,7 +507,11 @@ def weight_passes(linear, rows: int) -> int:
     n = int(linear.weight.shape[0])
     bits = int(linear.bits)
     k = int(linear.scales.shape[-1]) * int(linear.group_size)
-    return -(-rows // _row_groups(bits, qmv_fast_layout(k, n, bits), n, rows, k))
+    ref = linear.__dict__.get("_mlx2_q4_gate_three_rows")
+    handle = None if ref is None else ref()
+    group = 1 if handle is not None and handle.enabled and rows == 3 else _row_groups(
+        bits, qmv_fast_layout(k, n, bits), n, rows, k)
+    return -(-rows // group)
 
 
 class _Plan:
@@ -482,14 +519,15 @@ class _Plan:
 
     __slots__ = ("kernel", "launches", "output_dtypes", "bias")
 
-    def __init__(self, linear, x: mx.array, rows: int):
+    def __init__(self, linear, x: mx.array, rows: int, geometry=None):
         k = int(x.shape[-1])
         n = int(linear.weight.shape[0])
         bits = int(linear.bits)
         fast = qmv_fast_layout(k, n, bits)
         self.kernel = _kernel(bits, int(linear.group_size), fast)
-        tiles = (n + 2 * _RPS - 1) // (2 * _RPS)
-        rows_per_group = _row_groups(bits, fast, n, rows, k)
+        rps = _RPS if geometry is None else geometry.results_per_simdgroup
+        tiles = (n + 2 * rps - 1) // (2 * rps)
+        rows_per_group = _row_groups(bits, fast, n, rows, k) if geometry is None else geometry.rows_per_group
         self.launches = [
             (
                 0,
@@ -499,7 +537,7 @@ class _Plan:
                     ("K_SIZE", k),
                     ("N_SIZE", n),
                     ("ROWS", rows_per_group),
-                    ("RPS", _RPS),
+                    ("RPS", rps),
                     ("TOTAL_ROWS", rows),
                 ],
                 (32, 2 * (-(-rows // rows_per_group)), tiles),
@@ -510,16 +548,16 @@ class _Plan:
         self.bias = "bias" in linear
 
 
-def _plan(linear, x: mx.array, rows: int):
+def _plan(linear, x: mx.array, rows: int, geometry=None):
     # Plans live on the module, so they die with it; weights are read per call.
     plans = linear.__dict__.get("_mlx2_row_exact_plans")
     if plans is None:
         plans = {}
         object.__setattr__(linear, "_mlx2_row_exact_plans", plans)
-    key = (rows, x.dtype, x.shape[-1])
+    key = (rows, x.dtype, x.shape[-1]) if geometry is None else (rows, x.dtype, x.shape[-1], geometry)
     if key not in plans:
         supported = rows <= MAX_ROWS and decline_reason(linear, x) is None
-        plans[key] = _Plan(linear, x, rows) if supported else None
+        plans[key] = _Plan(linear, x, rows, geometry) if supported else None
     return plans[key]
 
 
@@ -560,7 +598,7 @@ def lane_rows(lw, x: mx.array) -> mx.array:
     return mx.concatenate(chunks, axis=0).reshape(*lead, -1)
 
 
-def quantized_linear(linear, x: mx.array, call=None):
+def quantized_linear(linear, x: mx.array, call=None, *, geometry: TileGeometry | None = None):
     """``linear(x)`` for ``x`` of shape [..., K], each row with one-row arithmetic.
 
     Returns ``(y, route)`` where route is ``"kernel"`` or ``"per_row"`` (a
@@ -573,6 +611,22 @@ def quantized_linear(linear, x: mx.array, call=None):
     rows = 1
     for size in lead:
         rows *= size
+    gate_policy = None
+    if geometry is None and "_mlx2_q4_gate_three_rows" in linear.__dict__:
+        from ..row_exact.gate_rows import selected
+
+        gate_policy = selected(linear, x, rows)
+        if gate_policy is not None:
+            geometry = TileGeometry(1, 4)
+    if geometry is not None:
+        if not isinstance(geometry, TileGeometry):
+            raise TypeError("QMV geometry must be TileGeometry")
+        reason = decline_reason(linear, x)
+        if rows < 2 or rows > MAX_ROWS or reason is not None or lane_preparation(linear) is not None:
+            raise ValueError(f"explicit QMV geometry refused: {reason or 'rows_or_lane'}")
+        geometry.validate(bits=int(linear.bits),
+                          fast=qmv_fast_layout(int(x.shape[-1]), int(linear.weight.shape[0]), int(linear.bits)),
+                          rows=rows)
     lane = lane_preparation(linear)
     if lane is not None:
         from ..lane import LaneUnsupported
@@ -586,9 +640,11 @@ def quantized_linear(linear, x: mx.array, call=None):
     stock = linear if call is None else call
     if rows <= 1:
         return stock(x), "one_row"
-    plan = _plan(linear, x, rows)
+    plan = _plan(linear, x, rows, geometry)
     if plan is None:
         return per_row(stock, x), "per_row"
+    if gate_policy is not None:
+        gate_policy.counts["single"] += 1
     flat = x.reshape(rows, x.shape[-1])
     parts = [
         plan.kernel(
@@ -617,7 +673,7 @@ class _GroupPlan:
 
     __slots__ = ("kernel", "template", "grid", "output_shapes", "output_dtypes")
 
-    def __init__(self, linears, x: mx.array, rows: int):
+    def __init__(self, linears, x: mx.array, rows: int, gate_rows=False):
         k = int(x.shape[-1])
         sizes = [int(linear.weight.shape[0]) for linear in linears]
         first = linears[0]
@@ -626,7 +682,7 @@ class _GroupPlan:
         # Existing same-input groups must share the single-projection row
         # planner too.  The legacy geometry forced every narrow projection
         # to reread its weights per row, even for long verify windows.
-        rows_per_group = _row_groups(bits, fast, max(sizes), rows, k)
+        rows_per_group = 1 if gate_rows else _row_groups(bits, fast, max(sizes), rows, k)
         rps = _RPS
         self.kernel = _group_kernel(bits, int(first.group_size), fast, len(linears))
         self.template = [("T", x.dtype), ("K_SIZE", k)]
@@ -644,7 +700,14 @@ def _group_plan(linears, x: mx.array, rows: int):
     if plans is None:
         plans = {}
         object.__setattr__(first, "_mlx2_row_exact_plans", plans)
+    policies = []
+    if any("_mlx2_q4_gate_three_rows" in m.__dict__ for m in linears):
+        from ..row_exact.gate_rows import selected
+
+        policies = [h for m in linears if (h := selected(m, x, rows)) is not None]
     key = (tuple(id(linear) for linear in linears), rows, x.dtype, x.shape[-1])
+    if policies:
+        key += ("q4_gate_rows1",)
     if key not in plans:
         grouped = (
             rows <= MAX_ROWS
@@ -657,7 +720,10 @@ def _group_plan(linears, x: mx.array, rows: int):
                 for linear in linears
             )
         )
-        plans[key] = _GroupPlan(linears, x, rows) if grouped else None
+        plans[key] = _GroupPlan(linears, x, rows, bool(policies)) if grouped else None
+    if plans[key] is not None:
+        for handle in {id(h): h for h in policies}.values():
+            handle.counts["grouped"] += 1
     return plans[key]
 
 
@@ -701,6 +767,7 @@ __all__ = [
     "BITS",
     "GROUP_SIZES",
     "MAX_ROWS",
+    "TileGeometry",
     "decline_reason",
     "LANE_ATTR",
     "header",
