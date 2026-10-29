@@ -136,6 +136,47 @@ def test_qwen38_external_draft_explicit_tensorfold_geometry_survives_defaults():
     assert policy["tree_node_budget_by_lanes"] == budgets
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"batch_size_route": "tree15_b1_chain_b2plus_v1"},
+        {"ast_tile_rows": 8},
+        {"ast_tiles": 2},
+        {"ast_multilane_tile_rows": 8},
+    ],
+)
+def test_qwen38_external_tree_geometry_override_drops_only_the_node_budgets(override):
+    # tree_node_budget_by_lanes is the one 27B external default that depends
+    # on another: it must declare every width of the selected tree route and
+    # conflicts with explicit tile knobs.  Overriding the geometry drops it
+    # (server-level resolution) and leaves every independent default applied.
+    resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
+    policy = resolve_execution_policy_defaults(
+        _qwen38_bound_external_policy(**override), EXTERNAL, resolution,
+    )
+    assert "tree_node_budget_by_lanes" not in policy
+    for key, value in override.items():
+        assert policy[key] == value
+    assert policy["pairwise_selection"] == "host"
+    assert policy["external_varlen_prefill"] is False
+    assert policy["varlen_dense_mlp"] is False
+    assert policy["draft_quantization"] == {"bits": 4, "group_size": 64}
+    if "batch_size_route" not in override:
+        assert policy["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
+
+
+def test_qwen38_external_varlen_pair_is_owned_together():
+    resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
+    policy = resolve_execution_policy_defaults(
+        _qwen38_bound_external_policy(external_varlen_prefill=True),
+        EXTERNAL,
+        resolution,
+    )
+    assert policy["external_varlen_prefill"] is True
+    assert "varlen_dense_mlp" not in policy
+    assert policy["tree_node_budget_by_lanes"] == {"1": 15, "2": 7, "3": 4, "4": 3}
+
+
 @pytest.mark.parametrize(("adapter_type", "descriptor"), HYBRID_MTP)
 def test_checkpoint_defaults_skip_approximate_kv(adapter_type, descriptor):
     policy = resolve_execution_policy_defaults(

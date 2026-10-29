@@ -273,6 +273,11 @@ FEATURES = (
     'source_row_packet_v1',
     'source_short_decode_joint_f32_v1',
     'source_submission_shared_first_v1',
+    # 2026-10-28 GPU campaign rows (integration branch of 2026-10-28).
+    'apcv2_prefill_slice_schedule',
+    'mx_lane_serving_route',
+    'source_prefill_residency_protect_decode_v1',
+    'source_prefill_readahead_layer_ahead_v1',
 )
 
 

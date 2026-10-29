@@ -85,7 +85,7 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
     receipt_kind = "external_deepseek_v41_embedded_dspark_chain"
 
     def __init__(self, backbone, *, confidence_threshold=0.0, verify_schedule="fixed",
-                 verify_costs=None, draft_cost=None):
+                 verify_costs=None, draft_cost=None, admission="off"):
         from ..runtime.drafters.deepseek_v41_dspark import DeepSeekV41DSparkBackbone
         from .deepseek_v41_dspark_schedule import validate
 
@@ -97,6 +97,9 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
         ):
             raise ValueError("draft confidence threshold must be in[0,1]")
         validate(verify_schedule, verify_costs, draft_cost)
+        from .deepseek_v41_dspark_miss_gate import validate as validate_admission
+        self.admission = validate_admission(admission)
+        self.admission_stats = {}
         self.backbone = backbone
         self.confidence_threshold = float(confidence_threshold)
         self.verify_schedule = verify_schedule
@@ -140,6 +143,7 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
                     self.confidence_threshold,
                     *([] if self.verify_schedule == "fixed" else [
                         self.verify_schedule, self.schedule_costs, self.schedule_draft_cost]),
+                    *([] if self.admission == "off" else ["admission", self.admission]),
                 ]
             ).encode()
         ).hexdigest()
@@ -159,6 +163,50 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
         return float(DEFAULT_DRAFT_COST if self._draft_cost is None else self._draft_cost)
 
     def draft_distributions(self, anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs):
+        if self.admission != "off" and proposal_length:
+            return self._admitted_draft(anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs)
+        return self._scheduled_draft(anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs)
+
+    def _admission_gate(self, cache):
+        # Request-local: the gate lives on this request's draft cache plane.
+        from .deepseek_v41_dspark_miss_gate import MissCostGate
+        plane = cache[0]
+        gate = getattr(plane, "_mlx2_dspark_miss_gate", None)
+        if gate is None:
+            stream = getattr(self.backbone.target_weights, "expert_stream", None)
+            gate = MissCostGate(lambda: dict(getattr(stream, "stats", None) or {}))
+            plane._mlx2_dspark_miss_gate = gate
+        return gate
+
+    def _admitted_draft(self, anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs):
+        """expert_miss_cost_v1: plain or speculative round from measured cost."""
+        import time
+        from ..runtime.external_speculative import DraftUnavailable
+        from .deepseek_v41_dspark_miss_gate import REASON
+        gate = self._admission_gate(cache)
+        committed = int(hidden.shape[1]) if len(getattr(hidden, "shape", ())) == 3 else 0
+        gate.observe(committed)
+        decision = gate.decision()
+        stats = self.admission_stats
+        key = "rounds_" + decision["action"]
+        if decision["handoff"]:
+            stats["handoffs"] = stats.get("handoffs", 0) + 1
+            stats["last_handoff"] = gate.receipt()
+            error = DraftUnavailable(REASON + ": " + decision["reason"])
+            error.ordinary_reason = REASON
+            raise error
+        stats[key] = stats.get(key, 0) + 1
+        if decision["priced"]:
+            stats["priced_" + ("admits" if decision["admit"] else "rejections")] = (
+                stats.get("priced_" + ("admits" if decision["admit"] else "rejections"), 0) + 1)
+        started = time.perf_counter()
+        length = proposal_length if decision["action"] == "speculate" else 0
+        result = self._scheduled_draft(anchors, hidden, cache, length, rngs, temperatures, **kwargs)
+        gate.begin("speculative" if result[0] and result[0][0] else "plain", time.perf_counter() - started)
+        stats["last_request"] = gate.receipt()
+        return result
+
+    def _scheduled_draft(self, anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs):
         tokens, laws = super().draft_distributions(anchors, hidden, cache, proposal_length, rngs,
                                                    temperatures, **kwargs)
         if self.verify_schedule == "fixed" or not tokens[0]:
@@ -208,6 +256,11 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
             "target_feature_law": "pre_attention_uniform_hc_mean_layers37_38_39",
             "verification": self.verification_receipt,
             "verify_schedule": self.verify_schedule,
+            "admission": self.admission,
+            **({} if self.admission == "off" else {
+                "admission_law": "speculate iff draft_s+verify_nonread_s+predicted_miss_bytes/read_bandwidth"
+                                 " <= useful_tokens/plain_tokens_per_second (request-measured EWMAs)",
+                "admission_observations": dict(self.admission_stats)}),
             **({} if self.verify_schedule == "fixed" else {
                 "verify_schedule_law": "argmax_k (1+sum_j<=k prod_i<=j sigmoid(c_i))/(draft_cost+cost[k+1])",
                 "verify_costs": self.schedule_costs, "draft_cost": self.schedule_draft_cost,

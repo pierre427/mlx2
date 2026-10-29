@@ -1834,6 +1834,7 @@ class ExternalDraftBatchGenerator:
         self.stops = {int(t[0]) for t in stop_tokens}
         self.layers = tuple(draft_model.config.target_layer_ids)
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
+        self._prefill_slice_schedules = {}
         # A parked cohort's dispatched, unread round (pipelined parked decode).
         self._parked_inflight = None
         self._parked_last_read_ns = None
@@ -2620,10 +2621,12 @@ class ExternalDraftBatchGenerator:
 
     def _prefill(self, lane, *, step=None, contended=False):
         if len(lane.remaining) > 1:
+            planned = min(self._prefill_limit(lane), len(lane.remaining) - 1)
             n = min(
                 self._prefill_limit(lane) if step is None else step,
                 len(lane.remaining) - 1,
             )
+            self._record_prefill_slice(lane, n, planned)
             depth = len(lane.history)
             tic = time.perf_counter()
             if lane.tail.shape[1]:
@@ -2665,6 +2668,10 @@ class ExternalDraftBatchGenerator:
             )
             for lane in lanes
         ]
+        for lane, length in zip(lanes, lengths):
+            self._record_prefill_slice(
+                lane, length, min(self._prefill_limit(lane), len(lane.remaining) - 1)
+            )
         width = max(lengths)
         depth = max(len(lane.history) for lane in lanes)
         tic = time.perf_counter()
@@ -14155,6 +14162,32 @@ class ExternalDraftBatchGenerator:
 
     def pop_prompt_boundary(self, uid): return self.boundaries.pop(uid, None)
 
+    def _record_prefill_slice(self, lane, executed, planned):
+        """Note one executed target prefill slice against the idle plan.
+
+        The idle plan is ``_prefill_limit`` (configured or prompt-length
+        autoscaled step, cut at planned boundaries); fairness caps, the
+        decode-first width and admission halving are load dependent.
+        """
+        from .prefill_slice_schedule import record_slice
+
+        schedules = getattr(self, "_prefill_slice_schedules", None)
+        if schedules is None:
+            schedules = self._prefill_slice_schedules = {}
+        record_slice(schedules, lane.uid, len(lane.history), executed, planned)
+
+    def prefill_slice_schedule(self, uid):
+        from .prefill_slice_schedule import schedule_receipt
+
+        return schedule_receipt(getattr(self, "_prefill_slice_schedules", None), uid)
+
+    def pop_prefill_slice_schedule(self, uid):
+        from .prefill_slice_schedule import schedule_receipt
+
+        return schedule_receipt(
+            getattr(self, "_prefill_slice_schedules", None), uid, pop=True
+        )
+
     def take_lane_failures(self):
         """Transfer lanes that failed on their own; serving fails their requests."""
         failures, self._lane_failures = self._lane_failures, []
@@ -14212,7 +14245,9 @@ class ExternalDraftBatchGenerator:
         self._discard_prelaunched(uids)
         for uid in uids:
             lane = self.lanes.pop(uid,None)
-            if not keep_boundary: self.boundaries.pop(uid,None)
+            if not keep_boundary:
+                self.boundaries.pop(uid,None)
+                getattr(self, "_prefill_slice_schedules", {}).pop(uid, None)
             if lane is not None:
                 removed = True
                 if (
@@ -14261,5 +14296,6 @@ class ExternalDraftBatchGenerator:
         try:
             round_phases.close_pending(self)
             self.remove(list(self.lanes)); self.boundaries.clear()
+            getattr(self, "_prefill_slice_schedules", {}).clear()
         finally:
             _remove_gc_timing(self)

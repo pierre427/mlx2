@@ -747,3 +747,45 @@ def test_catch_up_blocks_and_tree_launches_still_count_for_the_decode_switch():
     assert observed(prefill_calls=2) == 2
     assert observed(prefill_calls=5, prefill_chunk_calls=3) == 2
     assert observed(prefill_calls=3, prefill_chunk_calls=3, tree_calls=7) == 7
+
+
+class _ShapeOnly:
+    """Shape/dtype stand-in so admission sees a huge chunk without allocating it."""
+
+    def __init__(self, shape, dtype=mx.bfloat16):
+        self.shape = tuple(shape)
+        self.dtype = dtype
+
+
+def _shape_only_kwargs(B, S):
+    return _admission_kwargs(
+        B=B,
+        qkv=_ShapeOnly((B, S, C)),
+        z=_ShapeOnly((B, S, HV * DV)),
+        b=_ShapeOnly((B, S, HV)),
+        a=_ShapeOnly((B, S, HV)),
+    )
+
+
+def test_uint_offset_bound_is_the_widest_qkv_index():
+    # (batch * S + row) * C + channel tops out at B * S * C - 1.
+    limit_rows = gdn_prefill.UINT_OFFSET_LIMIT // C
+    assert gdn_prefill.uint_offset_refusal(1, limit_rows) is None
+    assert (limit_rows + 1) * C > 2**32
+    assert gdn_prefill.uint_offset_refusal(1, limit_rows + 1).startswith(
+        "uint offset overflow"
+    )
+    assert gdn_prefill.uint_offset_refusal(4, limit_rows // 4) is None
+    assert gdn_prefill.uint_offset_refusal(4, limit_rows // 4 + 1) is not None
+
+
+@pytest.mark.parametrize("B", [1, 4])
+def test_admission_refuses_chunks_whose_uint_offsets_would_wrap(B):
+    limit_rows = gdn_prefill.UINT_OFFSET_LIMIT // C // B
+    ok = gdn_prefill.admit_qwen4_fused_gdn_prefill(**_shape_only_kwargs(B, limit_rows))
+    assert ok.accepted, ok.reason
+    over = gdn_prefill.admit_qwen4_fused_gdn_prefill(
+        **_shape_only_kwargs(B, limit_rows + 1)
+    )
+    assert not over.accepted
+    assert over.reason.startswith("uint offset overflow"), over.reason

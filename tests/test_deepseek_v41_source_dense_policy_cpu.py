@@ -57,6 +57,9 @@ def test_source_policy_choices_are_explicit_and_reference_default(key,tmp_path):
             policy['deepseek_source_experts']={'mode':'original_lfu','budget_bytes':75_000_000_000}
         if key=='deepseek_source_row_packet' and value!='reference':
             policy['deepseek_source_frame_reuse']='prefill_v1'
+        if key=='deepseek_source_prefill_readahead' and value!='reference':
+            policy.update(deepseek_source_prefill_order='layer_major_v1',
+                          deepseek_source_experts={'mode':'original_lfu','budget_bytes':75_000_000_000})
         assert source_policy(policy)[key]==value
     for value in (None,True,1,[],{},'unknown'):
         with pytest.raises(ValueError):source_policy({key:value})

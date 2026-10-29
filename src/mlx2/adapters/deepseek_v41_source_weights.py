@@ -580,7 +580,8 @@ class SourceV41Weights(NativeV41Weights):
                  ffn_input_policy="reference", prefill_down_policy="reference", native_mx_policy="reference",
                  source_frame_reuse_policy="reference", submission_policy="reference",
                  source_row_packet_policy="reference", resident_gather_policy="reference", resident_prefill_policy="reference",
-                 woa_storage_policy="reference", source_expert_io_policy="reference"):
+                 woa_storage_policy="reference", source_expert_io_policy="reference",
+                 prefill_readahead_policy="reference"):
         if expert_math_policy not in POLICIES:
             raise ValueError("invalid Source expert math policy")
         if type(source_expert_io_policy) is not str or source_expert_io_policy not in ('reference',)+OVERLAP_POLICIES:
@@ -590,6 +591,11 @@ class SourceV41Weights(NativeV41Weights):
             raise ValueError('Source expert overlap_v1 requires bounded LFU experts, no resident bank, '
                              'reference submission and reference FFN input')
         self.source_expert_io_policy=source_expert_io_policy
+        if prefill_readahead_policy not in ('reference','layer_ahead_v1'):
+            raise ValueError('invalid Source prefill read-ahead policy')
+        if prefill_readahead_policy!='reference' and (expert_policy is None or source_expert_io_policy!='reference'):
+            raise ValueError('Source prefill read-ahead requires bounded LFU experts and reference expert I/O')
+        self.source_prefill_readahead_policy=prefill_readahead_policy
         self.expert_math_policy = expert_math_policy
         if resident_gather_policy not in ('reference','resident_bank_v1'):
             raise ValueError('Invalid Source resident gather policy')
@@ -762,6 +768,8 @@ class SourceV41Weights(NativeV41Weights):
                 # The generic early-load hook in the V4.1 block now issues
                 # prepare(); moe() consumes the matching ticket.
                 self.expert_io_policy='overlap'
+            if prefill_readahead_policy!='reference':
+                self.expert_stream.enable_prefill_readahead()
         except BaseException as error:
             if self.expert_stream is not None:
                 try:self.expert_stream.close()
@@ -1392,6 +1400,11 @@ class SourceV41Weights(NativeV41Weights):
                 or values.shape != scores.shape or x.shape != (values.shape[0], self.artifact["args"].hidden_size)
                 or values.shape[1] != self.artifact["args"].num_experts_per_tok):
             raise ValueError("official expert route geometry mismatch")
+        observe=getattr(self.expert_stream,'observe_moe_call',None)
+        if observe is not None:
+            # Opt-in prefill shield / layer-major read-ahead see each call's
+            # width before its acquires; inert under default policies.
+            observe(prefix,int(values.shape[0]))
         memory_plan=self._adaptive_expert_plan(values,prefix)
         sequential=memory_plan is not None and memory_plan['expert_strategy']=='sequential_expert'
         route_plan=None

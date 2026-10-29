@@ -30,7 +30,8 @@ PP_KEYS = {'deepseek_source_prefill_batch', 'deepseek_source_prefill_wide_math',
            'deepseek_source_prefill_wide_dtype', 'deepseek_source_q_b_prefill',
            'deepseek_source_fp8_pp', 'deepseek_source_woa_pp',
            'deepseek_source_native_mx', 'deepseek_source_prefill_down',
-           'deepseek_source_frame_reuse', 'deepseek_source_row_packet'}
+           'deepseek_source_frame_reuse', 'deepseek_source_row_packet',
+           'deepseek_source_prefill_readahead'}
 
 
 def prerequisites(key, value, *, oracle=None):
@@ -56,6 +57,8 @@ def prerequisites(key, value, *, oracle=None):
         p['deepseek_hc'] = 'fused_fp32'
     if key == 'deepseek_source_resident_prefill':
         p.update(F, deepseek_source_resident_gather='resident_bank_v1')
+    if key == 'deepseek_source_prefill_readahead':
+        p['deepseek_source_prefill_order'] = 'layer_major_v1'
     if key in AST_KEYS:
         p.update(F)
         if key in {'deepseek_source_dspark_prepare', 'deepseek_source_ast_kv_preparation'}:
@@ -97,6 +100,8 @@ def describe(key, value):
         else:
             lane = 'adaptive_prefill'
             trigger = 'Multi-row PP with chronological all-retained pooled rows<=512. Larger pools require explicit fallback observation.'
+    if key == 'deepseek_source_prefill_readahead':
+        trigger = 'Layer-major wave of at least two sub-chunks (prompt >1024 tokens, prefill_step >=2048) with a bounded LFU policy; read readahead_* counters.'
     if key == 'deepseek_index_policy':
         trigger = 'Short pool <=512 exercises finite all-retained bypass; long pool >512 exercises selector fallback.'
     if key == 'deepseek_selected_kv_policy':
@@ -141,13 +146,13 @@ def catalog(*, oracle=None):
                 policy.update(draft_model='prompt_lookup', num_draft=5)
             lane, trigger, resources = describe(key, value)
             validation_policy = dict(policy)
-            if key == 'deepseek_source_native_mx':
+            if key in ('deepseek_source_native_mx', 'deepseek_source_prefill_readahead'):
                 validation_policy['deepseek_source_experts'] = {'mode':'original_lfu','budget_bytes':75_000_000_000}
             source_policy(validation_policy)  # raises on an invalid arm
             arms.append(dict(id=key.removeprefix('deepseek_')+'__'+value,
                 option=key,value=value,policy=policy,lane=lane,coverage_trigger=trigger,
                 resources=resources,policy_parser_passed=True,
-                requires_sealed_expert_policy=key=='deepseek_source_native_mx',
+                requires_sealed_expert_policy=key in ('deepseek_source_native_mx','deepseek_source_prefill_readahead'),
                 parser_oracle_placeholder=(key in AST_KEYS and lane=='dspark_ast' and oracle is None),
                 apcv2_reuse='same_exact_profile_only; adaptive default explicitly disables reuse',
                 cross_arm_apcv2='incompatible: policy is included in model identity; never transplant state',

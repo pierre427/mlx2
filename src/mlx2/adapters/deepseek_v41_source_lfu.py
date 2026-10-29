@@ -20,6 +20,7 @@ from .deepseek_v41_source_weights import SourceExpertStore, weight_plan, expert_
 from .deepseek_v41_mlx_weights import _stamp, _verify_file, read_native_file
 from .deepseek_v41_source_buffers import read_original_packed, borrow_q1_packed, materialize
 from . import deepseek_v41_source_residency as residency
+from . import deepseek_v41_source_prefill_residency as prefill_residency
 
 REVISION = 'source-expert-lfu-token-frequency-v1'
 Q1_REVISION = 'source-q1-affine-g64-lloyd4-f16-v1'
@@ -235,6 +236,7 @@ class LFUSourceExpertStore(SourceExpertStore):
         self._miss_ewma={'original':0.0,'q1':0.0};self._miss_snapshot={'original':0,'q1':0}
         self._pre_evict_credit={'original':0,'q1':0};self._last_cycle=None
         self._high_fraction=self._high_fraction_source=None;self._pre_evict_slots=0
+        self._init_prefill_residency()
         if mode==residency.RESIDENCY_SHARED:return
         self._high_fraction,self._high_fraction_source=residency.resolve_high_fraction(
             self.residency['high_fraction'],hot_objects=len(self.hot),original_bytes=ORIGINAL_BYTES,
@@ -271,7 +273,8 @@ class LFUSourceExpertStore(SourceExpertStore):
         return {'original':high,'q1':payload-high}
     def _victim_of_kind(self,kind,protected):
         pinned=getattr(self,'_resident_bank_pinned_keys',frozenset())
-        try:return self.index.victim(self._cache,protected,lambda k:k not in pinned and self.kind(k)==kind)
+        shield=self._active_shield()
+        try:return self.index.victim(self._cache,protected,lambda k:k not in pinned and k not in shield and self.kind(k)==kind)
         except MemoryError:return None
     def _evict_resident(self,key):
         if self._dynamic() and key in self._dyn_high:return self._demote(key)
@@ -302,7 +305,7 @@ class LFUSourceExpertStore(SourceExpertStore):
             # Refuse before changing any target, pool, or precision owner.
             parse_policy(self.policy,adaptive=False)
         # overlap_v1 early reads hold bounded host slabs before their upload.
-        options.setdefault('staging_bytes',ORIGINAL_BYTES+self.overlap_host_reserve_bytes()+self.promotion_host_reserve_bytes())
+        options.setdefault('staging_bytes',ORIGINAL_BYTES+self.overlap_host_reserve_bytes()+self.promotion_host_reserve_bytes()+self.readahead_host_reserve_bytes())
         options.setdefault('staging_within_cache',True)
         result=super().configure_adaptive_residency(enabled,**options)
         if enabled is False:
@@ -313,6 +316,11 @@ class LFUSourceExpertStore(SourceExpertStore):
     def promotion_host_reserve_bytes(self):
         return self.residency['promote_slots']*ORIGINAL_BYTES if self._dynamic() else 0
     def _adaptive_victim(self):
+        # Live-memory pressure eviction is never shielded by protect_decode_v1.
+        shielded=getattr(self,'_shield_on',False);self._shield_on=False
+        try:return self._adaptive_victim_unshielded()
+        finally:self._shield_on=shielded
+    def _adaptive_victim_unshielded(self):
         protected={**self._leased,**self._pending_uploads}
         pinned=getattr(self,'_resident_bank_pinned_keys',frozenset())
         if self._split_active():
@@ -403,8 +411,9 @@ class LFUSourceExpertStore(SourceExpertStore):
             # leases, but the operator's configured maximum remains bounded.
             for _ in range(len(self._cache)+1):
                 if self._cache_bytes+size<=maximum:return
+                shield=self._active_shield()
                 try:victim=self.index.victim(self._cache,{**self._leased,**self._pending_uploads},
-                    (lambda k:k not in getattr(self,'_resident_bank_pinned_keys',frozenset())))
+                    (lambda k:k not in getattr(self,'_resident_bank_pinned_keys',frozenset()) and k not in shield))
                 except MemoryError:raise MemoryError('Configured expert maximum exhausted by protected/active objects; use a sequential completed-expert window')from None
                 self._adaptive_evict_key(victim)
             raise RuntimeError('Adaptive expert eviction made no progress')
@@ -470,15 +479,26 @@ class LFUSourceExpertStore(SourceExpertStore):
                 collector=getattr(self,'_completion_collector',None)
                 if collector is not None:collector(key)
                 return self._leased[key]
+            transient=getattr(self,'_prefill_transient',None)
+            if transient and key[0]!=self._prefill_transient_layer:
+                self._clear_prefill_transient();transient=None
             if key in self._cache:
                 arrays=self._cache[key];self.stats['cache_hits']+=1;self.stats[kind+'_hits']+=1
+                shield=getattr(self,'_prefill_shield',None)
+                if shield is not None and key in shield:self.stats['prefill_shield_retained_hits']+=1
+            elif transient and key in transient:
+                # protect_decode_v1: a same-layer stream-through object; the
+                # identical bytes an ordinary miss would upload again.
+                arrays=transient[key];self.stats['cache_hits']+=1;self.stats[kind+'_hits']+=1
+                self.stats['prefill_transient_hits']+=1
             else:
-                size=Q1_BYTES if kind=='q1' else ORIGINAL_BYTES;self._evict_for(key,size)
+                size=Q1_BYTES if kind=='q1' else ORIGINAL_BYTES;insert=self._admit_miss(key,size)
                 # _read_expert owns demand_wait_ns; overlap_v1 may consume an
                 # early read of these exact bytes instead of reading now.
                 raw=self._read_expert(key,*self._expert_read_job(key))
                 arrays=self._upload_expert(key,kind,size,raw);del raw
-                self._insert_resident(key,kind,size,arrays)
+                if insert:self._insert_resident(key,kind,size,arrays)
+                else:self._hold_prefill_transient(key,size,arrays)
                 self.stats['cache_misses']+=1;self.stats[kind+'_misses']+=1;self.stats['uploaded_experts']+=1;self.stats['upload_batches']+=1
                 read_size=self.q1_records[key]['size'] if kind=='q1' else size
                 self.stats['bytes_read']+=read_size;self.stats[kind+'_bytes_read']+=read_size
@@ -490,6 +510,99 @@ class LFUSourceExpertStore(SourceExpertStore):
             collector=getattr(self,'_completion_collector',None)
             if collector is not None:collector(key)
             return arrays
+    # ---- Opt-in prefill_residency=protect_decode_v1
+    # (provenance/deepseek-v41-source-prefill-residency.json).
+    def _init_prefill_residency(self):
+        self._prefill_residency=self.residency.get('prefill_residency',prefill_residency.EVICT)
+        self._prefill_shield=None;self._shield_on=False
+        self._prefill_transient={};self._prefill_transient_bytes=0;self._prefill_transient_layer=None
+        if self._prefill_residency==prefill_residency.PROTECT:
+            for name in prefill_residency.COUNTERS:self.stats.setdefault(name,0)
+    def _active_shield(self):
+        shield=getattr(self,'_prefill_shield',None)
+        return shield if shield is not None and getattr(self,'_shield_on',False) else frozenset()
+    def observe_moe_call(self,prefix,rows):
+        """Weights hook before a MoE call's acquires: prefill shield and read-ahead."""
+        if type(rows) is not int or rows<1 or prefix not in self.tables:
+            raise ValueError('Source MoE call observation outside admitted layers')
+        with self._lock:
+            if getattr(self,'_prefill_residency',prefill_residency.EVICT)==prefill_residency.PROTECT:
+                if rows>=prefill_residency.PROTECT_MIN_ROWS:
+                    if self._prefill_shield is None:
+                        self._prefill_shield=frozenset(self._cache)
+                        self.stats['prefill_shield_snapshots']+=1
+                        self.stats['prefill_shield_snapshot_objects']+=len(self._prefill_shield)
+                elif self._prefill_shield is not None:
+                    self._release_prefill_shield()
+            readahead=getattr(self,'_prefill_readahead',None)
+            if readahead is not None:readahead.observe_call(prefix,rows)
+    def _release_prefill_shield(self):
+        self._prefill_shield=None;self.stats['prefill_shield_releases']+=1
+        self._clear_prefill_transient()
+    def _clear_prefill_transient(self):
+        self._prefill_transient={};self._prefill_transient_bytes=0;self._prefill_transient_layer=None
+    def _admit_miss(self,key,size):
+        """Evict for a miss; False means serve it as a bounded transient."""
+        if getattr(self,'_prefill_shield',None) is None or not getattr(self,'adaptive_residency_enabled',False):
+            self._evict_for(key,size);return True
+        before=self.stats.get('split_soft_overcommits',0)
+        self._shield_on=True
+        try:
+            self._evict_for(key,size);blocked=self.stats.get('split_soft_overcommits',0)!=before
+        except MemoryError:
+            blocked=True
+        finally:
+            self._shield_on=False
+        if not blocked:return True
+        # Only shielded objects could make room. A shielded soft overcommit
+        # is not the ordinary lease overcommit; do not report it as one.
+        if 'split_soft_overcommits' in self.stats:self.stats['split_soft_overcommits']=before
+        self.stats['prefill_shield_blocks']+=1
+        hard=self.maximum_cache_bytes-ORIGINAL_BYTES
+        if (self._prefill_transient_bytes+size<=prefill_residency.TRANSIENT_MAX_BYTES
+                and self._cache_bytes+self._prefill_transient_bytes+size<=hard):
+            return False
+        # Transients would exceed their bound: the shield yields.
+        evicted=self.stats['evictions'];resident=self._cache_bytes
+        self._evict_for(key,size)
+        self.stats['prefill_shield_yields']+=max(1,self.stats['evictions']-evicted)
+        self.stats['prefill_shield_yield_bytes']+=max(0,resident-self._cache_bytes)
+        return True
+    def _hold_prefill_transient(self,key,size,arrays):
+        if self._prefill_transient_layer!=key[0]:self._clear_prefill_transient()
+        self._prefill_transient_layer=key[0]
+        self._prefill_transient[key]=arrays;self._prefill_transient_bytes+=size
+        self.stats['prefill_transient_uploads']+=1;self.stats['prefill_transient_bytes']+=size
+        self.stats['prefill_transient_peak_bytes']=max(self.stats['prefill_transient_peak_bytes'],self._prefill_transient_bytes)
+    # ---- Opt-in deepseek_source_prefill_readahead=layer_ahead_v1
+    # (provenance/deepseek-v41-source-prefill-readahead.json).
+    def enable_prefill_readahead(self,*,pool=None):
+        from .deepseek_v41_source_prefill_readahead import LayerReadAhead
+        with self._lock:
+            self._ready()
+            if self._active or getattr(self,'_prefill_readahead',None) is not None:
+                raise ValueError('Source prefill read-ahead must be enabled once on an idle provider')
+            if self._dynamic():
+                raise ValueError('Source prefill read-ahead cannot combine with dynamic precision')
+            if self.expert_overlap_enabled():
+                raise ValueError('Source prefill read-ahead cannot combine with overlap_v1')
+            self._prefill_readahead=LayerReadAhead(self,pool=pool)
+            if getattr(self,'_adaptive_residency_enabled',False):
+                self._adaptive_staging=max(self._adaptive_staging,
+                    ORIGINAL_BYTES+self.overlap_host_reserve_bytes()+self.promotion_host_reserve_bytes()+self.readahead_host_reserve_bytes())
+            return self._prefill_readahead.receipt()
+    def readahead_host_reserve_bytes(self):
+        readahead=getattr(self,'_prefill_readahead',None)
+        return 0 if readahead is None else readahead.max_bytes
+    def _read_expert(self,key,function,*args):
+        readahead=getattr(self,'_prefill_readahead',None)
+        if readahead is not None and readahead.reads:
+            started=time.perf_counter_ns()
+            raw=readahead.take(key,function)
+            if raw is not None:
+                self.stats['demand_wait_ns']+=time.perf_counter_ns()-started
+                return raw
+        return super()._read_expert(key,function,*args)
     def apc_revision(self):
         value=REVISION+':'+str(self.q1_binding)+':'+str(self.hot_binding)
         # Exact split pools and a live maximum change residency, not numerics.
@@ -669,6 +782,7 @@ class LFUSourceExpertStore(SourceExpertStore):
             cache_maximum=(bounds.get('expert_cache_maximum') if isinstance(bounds,dict) else None)
                 or {'policy':'explicit','maximum_bytes':getattr(self,'maximum_cache_bytes',None)},
             qualification='unqualified')
+        result['prefill_residency']=prefill_residency.receipt(self)
         if mode==residency.RESIDENCY_SHARED:
             result.update(pools='shared_total_adaptive',precision='frozen hot map')
             return result
@@ -703,9 +817,13 @@ class LFUSourceExpertStore(SourceExpertStore):
                 if identity not in extra:
                     extra.add(identity);count+=1;size+=value.allocation_nbytes
         return count,size
+    def _transient_unleased_bytes(self):
+        transient=getattr(self,'_prefill_transient',None) or {}
+        return sum(getattr(v,'allocation_nbytes',None) or sum(a.nbytes for a in v.values())
+                   for k,v in transient.items() if self._leased.get(k) is not v)
     def live_bytes(self):
-        if not getattr(self,'packed_buffers',False):return super().live_bytes()
-        return self._packed_backing_totals()[1]+sum(len(t._cache)*t.row_bytes for t in self.ple_tables.values())
+        if not getattr(self,'packed_buffers',False):return super().live_bytes()+self._transient_unleased_bytes()
+        return self._packed_backing_totals()[1]+self._transient_unleased_bytes()+sum(len(t._cache)*t.row_bytes for t in self.ple_tables.values())
     resident_bytes=live_bytes
     def receipt(self):
         result=super().receipt()
@@ -713,6 +831,8 @@ class LFUSourceExpertStore(SourceExpertStore):
         result['pool_capacity_policy']='shared_total_adaptive'if self.adaptive_residency_enabled else'legacy_fixed_kind_pools'
         result['hot_budget_role']='immutable_precision_selection_only'if self.adaptive_residency_enabled else'precision_selection_and_kind_pool_limit'
         result['expert_residency']=self.residency_receipt()
+        readahead=getattr(self,'_prefill_readahead',None)
+        if readahead is not None:result['prefill_readahead']=readahead.receipt()
         result['hot_map_provenance']=getattr(self,'hot_map_provenance',None)
         if self._split_active():result['pool_capacity_policy']='split_kind_pools_adaptive'
         if self._dynamic():
@@ -767,6 +887,9 @@ class LFUSourceExpertStore(SourceExpertStore):
             self.atlas_persist_error={'type':type(error).__name__,'message':str(error)}
     def end_context(self):
         super().end_context()
+        readahead=getattr(self,'_prefill_readahead',None)
+        if readahead is not None:
+            with self._lock:readahead.end_wave()
         if getattr(self,'_residency_mode',residency.RESIDENCY_SHARED)!=residency.RESIDENCY_SHARED:
             # The forward is complete. A bounded-completion window may still
             # own leases; then the boundary runs when that window closes.
@@ -875,6 +998,10 @@ class LFUSourceExpertStore(SourceExpertStore):
         return self.preheat_receipt
     def park(self):
         self._drain_promotions()
+        readahead=getattr(self,'_prefill_readahead',None)
+        if readahead is not None:readahead.drain()
+        if getattr(self,'_prefill_shield',None) is not None:self._release_prefill_shield()
+        self._clear_prefill_transient()
         super().park();self.pool_bytes={'original':0,'q1':0}
         if self._dynamic():self._dyn_high=set()
         if hasattr(self,'_pre_evict_credit'):self._pre_evict_credit={'original':0,'q1':0}
@@ -888,7 +1015,10 @@ class LFUSourceExpertStore(SourceExpertStore):
             try:
                 self._drain_promotions(timeout=5.0)
                 if getattr(self,'_promotion_pool',None) is not None:self._promotion_pool.close()
+                readahead=getattr(self,'_prefill_readahead',None)
+                if readahead is not None:readahead.close()
             finally:
+                self._clear_prefill_transient();self._prefill_shield=None
                 super().close()
                 self.pool_bytes={'original':0,'q1':0}
                 if self._dynamic():self._dyn_high=set()

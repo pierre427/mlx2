@@ -20,6 +20,13 @@ def split_chain_policy(value, *, embedded):
             chain["deepseek_dspark_verify_costs"] = [float(v) for v in chain["deepseek_dspark_verify_costs"]]
     if value.get("deepseek_verify_rows") == LOCKSTEP:
         chain["deepseek_verify_rows"] = value.pop("deepseek_verify_rows")
+    if "deepseek_dspark_admission" in value:
+        from .deepseek_v41_dspark_miss_gate import OFF, validate as validate_admission
+        admission = validate_admission(value.pop("deepseek_dspark_admission"))
+        if admission != OFF and not embedded:
+            raise ValueError("DSpark admission requires draft_model=embedded_dspark")
+        if admission != OFF:
+            chain["deepseek_dspark_admission"] = admission
     return chain
 
 

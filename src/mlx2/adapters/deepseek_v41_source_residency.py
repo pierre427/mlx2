@@ -26,7 +26,7 @@ DEFAULTS = dict(high_fraction='auto', pre_evict_slots=0, live_reserve_bytes=16 <
                 promote_slots=8, promote_decay=0.95, promote_min_score=2.0, promote_hysteresis=1.5)
 RESIDENCY_KEYS = frozenset(('residency', 'high_fraction', 'pre_evict_slots', 'cache_maximum',
                             'live_reserve_bytes', 'promote_slots', 'promote_decay',
-                            'promote_min_score', 'promote_hysteresis'))
+                            'promote_min_score', 'promote_hysteresis', 'prefill_residency'))
 SPLIT_KEYS = frozenset(('high_fraction', 'pre_evict_slots'))
 DYNAMIC_KEYS = frozenset(('promote_slots', 'promote_decay', 'promote_min_score', 'promote_hysteresis'))
 # Contracts that assume one fixed precision per expert for a model lifetime,
@@ -80,6 +80,8 @@ def validate(result, *, adaptive, original_bytes):
     if 'promote_hysteresis' in result and (type(result['promote_hysteresis']) is not float
                                            or not 1.0 <= result['promote_hysteresis'] <= 4.0):
         raise ValueError('promote_hysteresis must be a float in [1.0, 4.0]')
+    from .deepseek_v41_source_prefill_residency import validate as validate_prefill_residency
+    validate_prefill_residency(result, adaptive=adaptive)
     maximum = result.get('cache_maximum', 'explicit')
     if maximum not in CACHE_MAXIMUM_POLICIES:
         raise ValueError('cache_maximum must be explicit or live_v1')
@@ -108,6 +110,8 @@ def settings(policy):
         result.update(high_fraction=None, pre_evict_slots=0)
     if residency == RESIDENCY_DYNAMIC:
         result.update({key: policy.get(key, DEFAULTS[key]) for key in DYNAMIC_KEYS})
+    if 'prefill_residency' in policy:
+        result['prefill_residency'] = policy['prefill_residency']
     if result['cache_maximum'] == 'live_v1':
         result['live_reserve_bytes'] = policy.get('live_reserve_bytes', DEFAULTS['live_reserve_bytes'])
     return result

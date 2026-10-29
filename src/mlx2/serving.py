@@ -3380,6 +3380,45 @@ def checkpoint_schedule_changed(batch, owner, tokens, *, checkpoint=None, respon
     return bool((schedule or {}).get("numerical_schedule_changed"))
 
 
+def checkpoint_slice_schedule_changed(batch, owner, tokens, *, uid=None, checkpoint=None):
+    """State at ``len(tokens)`` was prefilled off the route's planned slice grid.
+
+    Prefill state follows its slice boundaries bitwise (GDN chunked
+    recurrence and any order-dependent reduction), so a checkpoint past the
+    first load-chosen slice is valid state for its tokens but not the state an
+    idle server publishes for them.  Unlike ``checkpoint_schedule_changed``
+    this applies to prompt-only state too.  Evidence is the owner's
+    prompt-end snapshot and the generator's live record (a later recovery
+    replay can still taint generated state); a deviation in either refuses.
+    A capture-time ``checkpoint["prefill_slice_schedule_changed"]`` wins.
+    """
+    from .runtime.prefill_slice_schedule import changed_at
+
+    if checkpoint is not None and "prefill_slice_schedule_changed" in checkpoint:
+        return bool(checkpoint["prefill_slice_schedule_changed"])
+    if tokens is None:
+        return False
+    position = len(tokens)
+    if changed_at(getattr(owner, "prefill_slice_schedule", None), position):
+        return True
+    uid = getattr(owner, "uid", None) if uid is None else uid
+    observe = getattr(batch, "prefill_slice_schedule", None)
+    if uid is None or not callable(observe):
+        return False
+    return changed_at(observe(uid), position)
+
+
+def adapter_owns_prefill_partition(adapter) -> bool:
+    """A route-declared partition law decides prefill-schedule exactness.
+
+    DS4.1 ``position_grid_v1`` floors live row caps to whole grid cells and
+    refuses off-grid state itself (``apc_publication_refusal``); its slices
+    legitimately differ from the generic idle plan, so the generic gate
+    defers to the adapter's law.
+    """
+    return callable(getattr(adapter, "apc_partition_checkpoint_position", None))
+
+
 def record_native_bootstrap_progress(jobs,lifecycle_lock,*,clock=time.monotonic):
     """Advance only after complete successful atomic native attachment."""
     with lifecycle_lock:
@@ -3760,6 +3799,9 @@ class Job:
     fanout_role: str | None = None
     spomin_receipt: dict | None = None
     prefill_chunk_receipt: dict | None = None
+    # Executed prefill slice ends against the planned grid, from prompt end.
+    prefill_slice_schedule: dict | None = None
+    apcv2_slice_schedule_refusals: int = 0
     ingress_cohort_receipt: dict | None = None
     ingress_cohort_observation: dict | None = None
     cache_capsule: object = None
@@ -8788,6 +8830,10 @@ class ServingEngine:
                 numerical_schedule_changed=checkpoint_schedule_changed(
                     batch, owner, tokens, checkpoint=checkpoint
                 ),
+                prefill_slice_schedule_changed=checkpoint_slice_schedule_changed(
+                    batch, owner, tokens, uid=uid, checkpoint=checkpoint
+                ),
+                slice_schedule_owner=owner,
                 session_tag=session_tag_for(owner),
             )
             count_add(self.counts, f"apc_{name}_checkpoints_published"
@@ -8864,6 +8910,10 @@ class ServingEngine:
                 prompt_cache,
                 retention_role="prefill_rolling",
                 approximate=job.approximate_kv_applied,
+                prefill_slice_schedule_changed=checkpoint_slice_schedule_changed(
+                    None, job, tokens
+                ),
+                slice_schedule_owner=job,
                 session_tag=session_tag_for(job),
             )
             count_add(self.counts, "apc_rolling_checkpoints_cancel_published"
@@ -8908,7 +8958,8 @@ class ServingEngine:
 
     def _publish_checkpoint(
         self, apc, key, tokens, prompt_cache, *, approximate=False,
-        numerical_schedule_changed=False, **kwargs
+        numerical_schedule_changed=False, prefill_slice_schedule_changed=False,
+        slice_schedule_owner=None, **kwargs
     ):
         """Store a committed checkpoint; a publish failure costs the checkpoint.
 
@@ -8933,6 +8984,17 @@ class ServingEngine:
             return False
         if numerical_schedule_changed:
             count_add(self.counts, "apcv2_store_skipped_numerical_schedule", 1)
+            return False
+        if prefill_slice_schedule_changed and not adapter_owns_prefill_partition(
+            getattr(self, "adapter", None)
+        ):
+            # Load-chosen prefill slicing: valid state, but not the bits the
+            # route's planned grid computes for these tokens.
+            count_add(self.counts, "apcv2_store_skipped_slice_schedule", 1)
+            if slice_schedule_owner is not None:
+                slice_schedule_owner.apcv2_slice_schedule_refusals = 1 + int(
+                    getattr(slice_schedule_owner, "apcv2_slice_schedule_refusals", 0)
+                )
             return False
         partition_refusal = getattr(
             getattr(self, "adapter", None), "apc_publication_refusal", None
@@ -11745,6 +11807,11 @@ class ServingEngine:
                     numerical_schedule_changed=checkpoint_schedule_changed(
                         batch, owner, checkpoint["tokens"], checkpoint=checkpoint, response=response
                     ),
+                    prefill_slice_schedule_changed=checkpoint_slice_schedule_changed(
+                        batch, owner, checkpoint["tokens"],
+                        uid=getattr(response, "uid", None), checkpoint=checkpoint,
+                    ),
+                    slice_schedule_owner=owner,
                     session_tag=session_tag_for(owner),
                     **({"next_turn_boundary": True} if next_turn else {}),
                 ):
@@ -11811,6 +11878,11 @@ class ServingEngine:
                             boundary_job is not None
                             and boundary_job.approximate_kv_applied
                         ),
+                        prefill_slice_schedule_changed=checkpoint_slice_schedule_changed(
+                            batch, boundary_job, boundary["tokens"],
+                            uid=response.uid, checkpoint=boundary,
+                        ),
+                        slice_schedule_owner=boundary_job,
                         session_tag=session_tag_for(boundary_job),
                     )
                     if boundary.get("pre_transform_exact", False):
@@ -14058,6 +14130,13 @@ class ServingEngine:
                 ]
                 if cancelled:
                     if self.apc_rolling_route == "kv":
+                        observe_schedule = getattr(batch, "prefill_slice_schedule", None)
+                        if callable(observe_schedule):
+                            # ``remove`` drops the generator's live record.
+                            for uid in cancelled:
+                                cancelled_job = active[uid]
+                                if cancelled_job.prefill_slice_schedule is None:
+                                    cancelled_job.prefill_slice_schedule = observe_schedule(uid)
                         self._publish_cancelled_prefills(
                             batch.remove(cancelled, return_prompt_caches=True),
                             apc, active, cache_key_for, session_tag_for,
@@ -14491,6 +14570,18 @@ class ServingEngine:
                                 if callable(pop_chunk_trace)
                                 else None
                             )
+                            pop_slice_schedule = getattr(
+                                batch, "pop_prefill_slice_schedule", None
+                            )
+                            slice_schedule = (
+                                pop_slice_schedule(response.uid)
+                                if callable(pop_slice_schedule)
+                                else None
+                            )
+                            if owner is not None and slice_schedule is not None:
+                                owner.prefill_slice_schedule = slice_schedule
+                                if not slice_schedule.get("planned", True):
+                                    count_add(self.counts, "prefill_slice_schedule_off_plan_requests", 1)
                             if owner is not None and chunk_trace is not None:
                                 owner.prefill_chunk_receipt = chunk_trace
                                 if chunk_trace.get("varied"):
@@ -14853,6 +14944,10 @@ class ServingEngine:
                                     numerical_schedule_changed=checkpoint_schedule_changed(
                                         batch, job, response.all_tokens, response=response
                                     ),
+                                    prefill_slice_schedule_changed=checkpoint_slice_schedule_changed(
+                                        batch, job, response.all_tokens
+                                    ),
+                                    slice_schedule_owner=job,
                                     session_tag=session_tag_for(job),
                                 )
                             # Sanity telemetry: always-on host integers, no
@@ -15154,6 +15249,14 @@ class ServingEngine:
                                     ),
                                     "spomin_live_surgery": job.spomin_receipt,
                                     "prefill_chunk": job.prefill_chunk_receipt,
+                                    "prefill_slice_schedule": (
+                                        None
+                                        if job.prefill_slice_schedule is None
+                                        else {
+                                            **job.prefill_slice_schedule,
+                                            "apcv2_publications_refused": job.apcv2_slice_schedule_refusals,
+                                        }
+                                    ),
                                     "approximate_kv": job.approximate_kv_receipt,
                                     "neural_concept_bridge": job.neural_concept_receipt,
                                     "activation_capsule_bridge": (

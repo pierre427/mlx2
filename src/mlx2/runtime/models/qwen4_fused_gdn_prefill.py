@@ -166,6 +166,12 @@ from .qwen4_fused_gdn import (
 PREFILL_ENV = "MLX_QWEN4_FUSED_GDN_PREFILL"
 PREFILL_MIN_ROWS = 64
 NKEEP = CONV_KERNEL - 1
+#: The prework and norm-gate kernels address every tensor with 32-bit
+#: ``uint`` offsets; the widest is ``(batch * S + row) * C + channel`` into
+#: ``qkv`` (``C = CONV_DIM``).  Admission refuses a chunk whose largest
+#: element index could reach this bound (cf. vllm#63761) instead of letting
+#: the offset wrap; the kernel arithmetic itself is unchanged.
+UINT_OFFSET_LIMIT = 2**32
 L2_EPS = 1e-6
 
 
@@ -787,6 +793,23 @@ def _left_padding_refusal(
     return None
 
 
+def uint_offset_refusal(batch: int, rows: int) -> Optional[str]:
+    """Refusal when a ``(batch, rows)`` chunk overflows the kernels' ``uint`` offsets.
+
+    The largest per-row width any kernel addresses is ``CONV_DIM`` (``qkv``,
+    ``conv_state``/``conv_out``); q/k/v/z/out rows are no wider.  Element
+    indices run to ``batch * rows * CONV_DIM - 1``, so the chunk is safe
+    exactly when ``batch * rows * CONV_DIM <= UINT_OFFSET_LIMIT``.
+    """
+    elements = int(batch) * int(rows) * max(CONV_DIM, VALUE_DIM)
+    if elements > UINT_OFFSET_LIMIT:
+        return (
+            f"uint offset overflow: {batch}x{rows}x{CONV_DIM} elements "
+            f"exceeds 2^32"
+        )
+    return None
+
+
 def admit_qwen4_fused_gdn_prefill(
     *,
     qkv: Any,
@@ -883,6 +906,9 @@ def admit_qwen4_fused_gdn_prefill(
             return FusedGdnAdmission(False, "ragged lengths")
     if rows < min_rows:
         return FusedGdnAdmission(False, f"rows {rows} < {min_rows}")
+    refusal = uint_offset_refusal(batch, rows)
+    if refusal is not None:
+        return FusedGdnAdmission(False, refusal)
     expected = {
         "qkv": (batch, rows, CONV_DIM),
         "z": (batch, rows, VALUE_DIM),
@@ -933,11 +959,13 @@ __all__ = [
     "NORM_GATES",
     "PREFILL_ENV",
     "PREFILL_MIN_ROWS",
+    "UINT_OFFSET_LIMIT",
     "PREWORK_NUMERICS",
     "admit_qwen4_fused_gdn_prefill",
     "prefill_enabled_from_env",
     "prefill_norm_gate_source",
     "prefill_prework_source",
+    "uint_offset_refusal",
     "qwen4_gdn_prefill_norm_gate",
     "qwen4_gdn_prefill_prework",
     "runtime_supported",

@@ -246,6 +246,7 @@ _ENGINE_EVENTS = {
     "apcv2_store_failures": ("apcv2", "store_failure"),
     "apcv2_store_skipped_approximate": ("apcv2", "store_skipped_approximate"),
     "apcv2_store_skipped_numerical_schedule": ("apcv2", "store_skipped_numerical_schedule"),
+    "apcv2_store_skipped_slice_schedule": ("apcv2", "store_skipped_slice_schedule"),
     "apcv2_write_suppressed_requests": ("apcv2", "write_suppressed_request"),
     "apcv2_fanout_write_suppressed": ("apcv2_fanout", "write_suppressed"),
     "apc_interior_checkpoints_captured": ("apcv2_interior", "captured"),

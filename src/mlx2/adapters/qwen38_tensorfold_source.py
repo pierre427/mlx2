@@ -12,14 +12,14 @@ VENDORED_ROOT = Path(__file__).resolve().parents[1] / "runtime" / "tensorfold_qw
 QUALIFICATION_MODULE_SHA256 = {
     "__init__.py": "95ab120332366704fc5aeaac38a96c4cd85695e96d151eae6f8374028bdb855c",
     "inputs.py": "e13ffabe1a413781c846f50aeb69181ecb668a2ef8860311ae1222f96fcaf32c",
-    "lane_attention.py": "fc66173e75b660c069011eb15d63ca51368132f017c55fc49d5c91c6529efd91",
+    "lane_attention.py": "6c67b9b8d1f30375ab1f543f8540fcb66f1482ef9f6c7768a93d2b245e4af8cf",
     "lane_fuse.py": "c46846660d619ab6426f52b7f9174d45961a7b0158add33fc7b8f300f75372bb",
     "lane_glue.py": "82bad8f18d1cfe624aaf13eec6179c4955d3a3e45d3d95e686cd5c97214be846",
     "lane_multi.py": "4682d1d91e3fa14d04ec996ab46f8ad2fcd3a65180e4061ab3b05efebafa1f7c",
     "lane_qmm.py": "04984ccdde3ecf68b1994ab8c81c08f82607099ed7febd423057fcc906273f75",
     "lane_tree.py": "e6de53828708e4833fcf390bc1dd330377cbdd26629da235c9728822770b5839",
     "lane_widen.py": "66369189f5300c06af754c0d867b7f50a55519aadb2342fe05785275767e8b77",
-    "stream_attention.py": "61933b0c19c1b72025ce18cce7c2f3969893d5973be7d72efa17c876720d6aff",
+    "stream_attention.py": "ccedc112f5bcdec95626008466542f91953da8367532b5be7163d4014195651a",
     "stream_gdn.py": "f120c8c25c5e2712ee214b770200d621b7d0824acb01cafc8f1a9b04ababc9a0",
 }
 

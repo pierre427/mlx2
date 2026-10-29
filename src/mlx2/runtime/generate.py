@@ -52,6 +52,7 @@ from .prefill_plan import (
     shared_prefill_budget_width,
     single_round_prefill_rows,
 )
+from .prefill_slice_schedule import record_slice as _record_slice
 from .round_phases import drive_round as _drive_round
 from .round_phases import publish_round
 from .sample_utils import LaneRNG, draw_key
@@ -4641,6 +4642,10 @@ class BatchGenerator:
         # answered differently.  A histogram, so it stays bounded by the number
         # of DISTINCT sizes rather than by the number of rounds.
         self._prefill_chunk_trace = {}
+        # Executed slice ends against the idle plan, per request.  Prefill
+        # state follows its slice boundaries bitwise, so APCv2 publication of
+        # a checkpoint past the first load-chosen slice is refused.
+        self._prefill_slice_schedules = {}
         from .adaptive_policy import DecodeTimeFairness
 
         self.decode_time_fairness = DecodeTimeFairness(
@@ -4959,6 +4964,7 @@ class BatchGenerator:
         getattr(self, "_state_checkpoint_declines", []).clear()
         getattr(self, "_post_prefill_receipts", {}).clear()
         getattr(self, "_prefill_chunk_trace", {}).clear()
+        getattr(self, "_prefill_slice_schedules", {}).clear()
         getattr(self, "_mtp_prefill_resident", set()).clear()
         getattr(self, "_mtp_prefill_projection_bytes", {}).clear()
         getattr(self, "_mtp_initial_prefill_tokens", {}).clear()
@@ -6225,6 +6231,7 @@ class BatchGenerator:
                 for processor in processors
             ]
             _prefetch_known_mtp_tail(self.model, history, prompt, config)
+            self._record_mtp_preparation_slices(uid, history, prompt, config)
             prompt_boundary = {}
             prepare_contended = self._prefill_contends_decode()
             tic = time.perf_counter()
@@ -6600,6 +6607,28 @@ class BatchGenerator:
         self._record_state_checkpoint(uid, position, checkpoint)
         return True
 
+    def _record_mtp_preparation_slices(self, uid, history, prompt, config):
+        """Record the slices ``prepare_self_mtp_lane`` runs for this residual.
+
+        It teacher-forces all but the final token at the configured self-MTP
+        step from the lane's covered offset (the final token is the lane's
+        first decode input).  Each slice is compared with the idle plan's
+        step there; planned boundaries were captured before preparation.
+        """
+        step = max(1, int(config.get("prefill_step_size", self.prefill_step_size)))
+        planned_step = min(
+            step, self._planned_prompt_prefill_step(len(history) + len(prompt))
+        )
+        covered = len(history)
+        end = len(history) + len(prompt) - 1
+        while covered < end:
+            executed = min(step, end - covered)
+            self._record_prefill_slice(
+                uid, covered, executed,
+                self._planned_prefill_rows(planned_step, covered, end - covered),
+            )
+            covered += executed
+
     def _advance_mtp_prefill(self, index: int, max_tokens: int):
         """Advance one queued self-MTP lane without blocking live decode."""
         from .hybrid_speculative import advance_self_mtp_prefill
@@ -6627,6 +6656,16 @@ class BatchGenerator:
         next_checkpoint = self._next_interior_checkpoint(uid, len(history))
         if next_checkpoint is not None:
             max_tokens = min(max_tokens, next_checkpoint - len(history))
+        slice_start = len(history)
+        planned_rows = self._planned_prefill_rows(
+            min(
+                int(config.get("prefill_step_size", self.prefill_step_size)),
+                self._planned_prompt_prefill_step(len(history) + len(prompt)),
+            ),
+            slice_start,
+            len(prompt) - 1,
+            next_checkpoint,
+        )
         # Stage this slice's rows and the next one's.  Resubmitting the whole
         # remaining prompt every slice cost O(prompt^2) host work beside live
         # decode (Flash-Next 16K: 3.0 M rows staged for 0.24 M looked up).
@@ -6655,6 +6694,7 @@ class BatchGenerator:
         remaining = remaining.tolist()
         history = list(history) + prompt[:processed]
         self._record_prefill_chunk(uid, int(processed))
+        self._record_prefill_slice(uid, slice_start, int(processed), planned_rows)
         self._mtp_states[uid] = mtp_state
         from . import loop_trace
 
@@ -7462,6 +7502,7 @@ class BatchGenerator:
             # (cancelled, stalled or failed mid-prefill) would leave its
             # entry behind for the worker's lifetime.
             getattr(self, "_prefill_chunk_trace", {}).pop(uid, None)
+            getattr(self, "_prefill_slice_schedules", {}).pop(uid, None)
             getattr(self, "_post_prefill_receipts", {}).pop(uid, None)
             if memory_queued is not None:
                 memory_queued.discard(uid)
@@ -7684,6 +7725,62 @@ class BatchGenerator:
             return step
         from .demand_stream_memory import recommended_prefill_rows
         return recommended_prefill_rows(model, step, context_tokens=int(total_tokens))
+
+    def _planned_prompt_prefill_step(self, total_tokens: int) -> int:
+        """The step an idle server plans for a ``total_tokens`` prompt.
+
+        ``_prompt_prefill_step`` without its load inputs: a declared adapter
+        plan sees no decoding lanes and the live memory cap is not applied.
+        A slice narrower than this for a load reason departs from the grid
+        the route publishes exact prefix state on.
+        """
+        model = getattr(self, "model", None)
+        planner = _declared_model_callback(model, "_mlx2_prefill_plan")
+        if planner is None:
+            return (
+                prompt_length_prefill_step(int(total_tokens), maximum=self.prefill_step_size)
+                if self.prefill_step_autoscale else self.prefill_step_size
+            )
+        step = planner(
+            total_tokens=int(total_tokens),
+            active_decode_lanes=0,
+            maximum=self.prefill_step_size,
+        )
+        if type(step) is not int or not 1 <= step <= self.prefill_step_size:
+            raise ValueError("adapter prefill plan must fit the configured positive maximum")
+        return step
+
+    def _planned_prefill_rows(self, step: int, covered: int, available: int,
+                              next_checkpoint=None) -> int:
+        """Rows the idle plan runs from ``covered``: step, depth, segment, cut."""
+        budget = getattr(self, "prefill_depth_budget", None)
+        if budget is not None:
+            step = depth_bounded_prefill_rows(
+                int(step), int(covered), budget, floor=self.PREFILL_DEPTH_FLOOR
+            )
+        return checkpoint_bounded_prefill_rows(
+            min(int(available), int(step)), int(covered), next_checkpoint
+        )
+
+    def _record_prefill_slice(self, uid, start, executed, planned, reason=None):
+        schedules = getattr(self, "_prefill_slice_schedules", None)
+        if schedules is None:
+            schedules = self._prefill_slice_schedules = {}
+        _record_slice(schedules, uid, start, executed, planned, reason)
+
+    def prefill_slice_schedule(self, uid: int):
+        """One request's slice schedule receipt so far (``None`` untracked)."""
+        from .prefill_slice_schedule import schedule_receipt
+
+        return schedule_receipt(getattr(self, "_prefill_slice_schedules", None), uid)
+
+    def pop_prefill_slice_schedule(self, uid: int):
+        """Transfer one request's slice schedule to the server at prompt end."""
+        from .prefill_slice_schedule import schedule_receipt
+
+        return schedule_receipt(
+            getattr(self, "_prefill_slice_schedules", None), uid, pop=True
+        )
 
     def _prefill_chunk_length(self, segments, total_tokens=None):
         if len(segments) == 1 and len(segments[0]) == 1:
@@ -9339,6 +9436,16 @@ class BatchGenerator:
         response = PromptProcessingBatch.Response(uid, 0, False, False)
         chunk = segments[0][:n]
         self._record_prefill_chunk(uid, len(chunk))
+        # A mixed forward fuses decode rows into the prompt slice and exists
+        # only beside live decode: load dependent at any width.
+        self._record_prefill_slice(
+            uid, covered, len(chunk),
+            self._planned_prefill_rows(
+                self._planned_prompt_prefill_step(int(seq[4] or 0) + int(seq[2])),
+                covered, len(segments[0]), next_checkpoint,
+            ),
+            reason="mixed_forward",
+        )
         segments[0] = segments[0][n:]
         if len(segments[0]) == 0:
             segments.pop(0)
@@ -9669,20 +9776,32 @@ class BatchGenerator:
             )
             segments = seq[0]
             covered = int(seq[4] or 0) + int(seq[1])
+            prompt_total = int(seq[4] or 0) + int(seq[2])
+            planned_step = self._planned_prompt_prefill_step(prompt_total)
             step_size = self._depth_bounded_step(
                 min(
                     round_slice,
-                    self._prompt_prefill_step(int(seq[4] or 0) + int(seq[2])),
+                    self._prompt_prefill_step(prompt_total),
                 ),
                 covered,
             )
-            if len(seq) > 6 and seq[6] is not None:
+            media_row = len(seq) > 6 and seq[6] is not None
+            if media_row:
                 step_size = len(segments[0])
             n = min(len(segments[0]), step_size)
             next_checkpoint = self._next_interior_checkpoint(
                 self._prompt_batch.uids[i], covered
             )
             n = checkpoint_bounded_prefill_rows(n, covered, next_checkpoint)
+            # Media rows run their encoder segment whole on every schedule.
+            planned_rows = (
+                n if media_row else self._planned_prefill_rows(
+                    planned_step, covered, len(segments[0]), next_checkpoint
+                )
+            )
+            self._record_prefill_slice(
+                self._prompt_batch.uids[i], covered, n, planned_rows
+            )
             prompts.append(segments[0][:n])
             self._record_prefill_chunk(
                 self._prompt_batch.uids[i], len(prompts[-1])

@@ -192,7 +192,7 @@ def load_source_dspark(target_model,*,expert_cache_bytes=512<<20,check_live):
 # The serial embedded B1 route has a separate configuration/owner contract.
 def create_source_dspark(
     target, artifact, *, admitted_bytes, num_draft=5, confidence_threshold=0.0, owner_callback=None,
-    verify_schedule="fixed", verify_costs=None, draft_cost=None,
+    verify_schedule="fixed", verify_costs=None, draft_cost=None, admission="off",
 ):
     if type(num_draft) is not int or not 1 <= num_draft <= 5:
         raise ValueError("embedded DSpark num_draft must be1..5")
@@ -213,7 +213,7 @@ def create_source_dspark(
         )
         return DeepSeekV41DSparkDraftModel(
             backbone, confidence_threshold=confidence_threshold, verify_schedule=verify_schedule,
-            verify_costs=verify_costs, draft_cost=draft_cost,
+            verify_costs=verify_costs, draft_cost=draft_cost, admission=admission,
         ).bind(target)
     except BaseException as error:
         try:
@@ -259,6 +259,7 @@ def configure_source_dspark(
         verify_schedule=adapter.kernel_policy.get("deepseek_dspark_verify_schedule", "fixed"),
         verify_costs=adapter.kernel_policy.get("deepseek_dspark_verify_costs"),
         draft_cost=adapter.kernel_policy.get("deepseek_dspark_draft_cost"),
+        admission=adapter.kernel_policy.get("deepseek_dspark_admission", "off"),
     )
     adapter.draft_model = draft
     adapter.draft_weights = draft.backbone.w

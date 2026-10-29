@@ -123,7 +123,33 @@ _PV_THREADGROUP = """    opO.run(tP, bVlo, Olo);
 _PV_REGISTERS = """    opO.run(Pin, bVlo, Olo);
     opO.run(Pin, bVhi, Ohi);"""
 assert _P_STORE in _PARTIAL and _PV_THREADGROUP in _PARTIAL
-_PARTIAL_DIRECT = _PARTIAL.replace(_P_STORE, _P_REGISTERS).replace(_PV_THREADGROUP, _PV_REGISTERS)
+# mlx2: reusing the opS destination as opO's left input is valid only when MPP
+# reports the layouts compatible.  ``is_compatible_as_left_input`` is a runtime
+# TensorOps query (not constexpr), so the guard is a simdgroup-uniform branch;
+# the compatible arm issues exactly the register ops above, the other arm the
+# threadgroup-memory P of ``_PARTIAL`` (same bits).
+_P_GUARDED = (
+    """    auto Pc = opS.template get_destination_cooperative_tensor<decltype(aQ), decltype(bK), half>();
+    for (int i = 0; i < TK / 2; i++) Pc[i] = half(p[i]);
+    // Register P needs the op's left-input layout to accept Pc's layout
+    // (MPP is_compatible_as_left_input); otherwise P goes through threadgroup
+    // memory with the same bits.
+    const bool p_in_registers = opO.template is_compatible_as_left_input<half, bfloat, float>(Pc);
+    if (!p_in_registers) {
+"""
+    + "".join("  " + line + "\n" for line in _P_STORE.splitlines())
+    + "    }\n"
+)
+_PV_GUARDED = """    if (p_in_registers) {
+      auto Pin = opO.template get_left_input_cooperative_tensor<half, bfloat, float>(Pc);
+      opO.run(Pin, bVlo, Olo);
+      opO.run(Pin, bVhi, Ohi);
+    } else {
+      opO.run(tP, bVlo, Olo);
+      opO.run(tP, bVhi, Ohi);
+      simdgroup_barrier(mem_flags::mem_threadgroup);
+    }"""
+_PARTIAL_DIRECT = _PARTIAL.replace(_P_STORE, _P_GUARDED).replace(_PV_THREADGROUP, _PV_GUARDED)
 # TF_ATTN_DIRECT_P=0 uses threadgroup-memory P with the same bits.
 DIRECT_P = os.environ.get("TF_ATTN_DIRECT_P", "1") != "0"
 
@@ -132,6 +158,8 @@ def _single_half(source: str) -> str:
 
     out = source
     for old, new in (
+        ("      opO.run(Pin, bVhi, Ohi);\n", ""),        # mlx2: the guarded register/threadgroup arms
+        ("      opO.run(tP, bVhi, Ohi);\n", ""),
         ("  auto Ohi = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(bV0), float>();\n", ""),
         ("{ Olo[i] = 0.0f; Ohi[i] = 0.0f; }", "{ Olo[i] = 0.0f; }"),
         ("Olo[i] *= f; Ohi[i] *= f; }", "Olo[i] *= f; }"),

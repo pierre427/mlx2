@@ -544,8 +544,15 @@ def default_external_policy(policy: dict) -> dict:
 
 
 class Qwen3635BA3BAdapter(Qwen3827BAdapter):
-    # sanitize normalizes only these promoting compute weights. GDN decay
-    # and gated-norm parameters stay F32 and use the owned mixed-dtype path.
+    # Header allowances: F32 tensors the loader casts to the bf16 compute
+    # dtype before any tile runs. The norm gammas are cast by the inherited
+    # dense sanitize (runtime/models/qwen38_27b.py ``normalize_norm_dtypes``,
+    # ``norm_keys``); conv1d by the 35B sanitize (runtime/models/qwen36_35b.py
+    # ``normalize_weight_dtypes``), which also casts ``.mlp.gate.weight`` and
+    # ``.mlp.shared_expert_gate.weight``. Those two gates are not listed here
+    # because the tree-tile gate never inspects them (tensorfold_dtype_gate
+    # ``_TAILS``). GDN ``dt_bias``/``linear_attn.norm`` stay F32 and use the
+    # owned mixed-dtype path (``mixed_gdn_f32``); ``A_log`` is not gated.
     ast_tree_tile_dtype_contract: ClassVar[dict] = {
         "normalized_f32_suffixes": (
             ".input_layernorm.weight", ".post_attention_layernorm.weight",

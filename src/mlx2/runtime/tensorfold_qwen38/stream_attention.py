@@ -16,7 +16,7 @@ MAX_STREAMS = 8          # K and V buffers per launch (Metal binds at most 31 bu
 MG, MS = 8, 12           # meta: MG global ints, then MS ints per stream
 
 # Reuse lane_attention arithmetic, changing only stream key lookups, key counts and first-row offsets.
-_PARTIAL = r"""
+_PARTIAL_REGISTERS = r"""
   const ushort lane = thread_index_in_simdgroup;
   const ushort sg = simdgroup_index_in_threadgroup;
   const int tile = int(threadgroup_position_in_grid.z) * SG + sg;   // 16-row tile (SGA in all, SG per threadgroup)
@@ -116,6 +116,14 @@ _PARTIAL = r"""
     PM[base + r1] = m1; PL[base + r1] = l1;
   }
 """
+
+# mlx2: the register P reuse is guarded by MPP is_compatible_as_left_input,
+# with lane_attention's threadgroup-memory P as the incompatible arm (see
+# lane_attention._P_GUARDED); the compatible arm issues the same ops.
+assert la._P_REGISTERS in _PARTIAL_REGISTERS and la._PV_REGISTERS in _PARTIAL_REGISTERS
+_PARTIAL = _PARTIAL_REGISTERS.replace(la._P_REGISTERS, la._P_GUARDED).replace(
+    la._PV_REGISTERS, la._PV_GUARDED
+)
 
 _TAIL = r"""
   const ushort lane = thread_index_in_simdgroup;

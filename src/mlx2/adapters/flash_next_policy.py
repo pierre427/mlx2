@@ -579,8 +579,10 @@ class FlashNextPolicy:
             raise ValueError("hc_decode_multi_row must be auto, on, or off")
         if self.hc_decode_multi_row == "on" and not self.hc_decode_kernels:
             raise ValueError("hc_decode_multi_row on requires hc_decode_kernels")
-        if self.tensorfold_prefill_backend not in ("native", "metal"):
-            raise ValueError("tensorfold_prefill_backend must be native or metal")
+        if self.tensorfold_prefill_backend not in ("native", "metal", "metal_q4native"):
+            raise ValueError(
+                "tensorfold_prefill_backend must be native, metal or metal_q4native"
+            )
         if self.tensorfold_prefill_backend != "native" and not self.tensorfold_prefill:
             raise ValueError("tensorfold_prefill_backend requires tensorfold_prefill")
         if self.ple_read_policy not in ("pooled", "serial", "adaptive"):

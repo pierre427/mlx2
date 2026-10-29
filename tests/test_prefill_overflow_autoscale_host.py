@@ -12,11 +12,14 @@ import pytest
 
 from mlx2.runtime.prefill_plan import (
     checkpoint_bounded_prefill_rows,
+    depth_bounded_prefill_rows,
     next_prefill_checkpoint,
     prefill_fits_one_chunk,
+    prompt_length_prefill_step,
     shared_prefill_budget_width,
     single_round_prefill_rows,
 )
+from mlx2.runtime.prefill_slice_schedule import record_slice
 
 SOURCE = (
     Path(__file__).resolve().parents[1]
@@ -47,6 +50,9 @@ def _batch_generator_harness():
             "_admit_one_chunk_overflow",
             "_round",
             "_round_impl",
+            "_planned_prompt_prefill_step",
+            "_planned_prefill_rows",
+            "_record_prefill_slice",
         }
     ]
     harness = ast.ClassDef(
@@ -70,6 +76,10 @@ def _batch_generator_harness():
         "prefill_fits_one_chunk": prefill_fits_one_chunk,
         "shared_prefill_budget_width": shared_prefill_budget_width,
         "single_round_prefill_rows": single_round_prefill_rows,
+        "depth_bounded_prefill_rows": depth_bounded_prefill_rows,
+        "prompt_length_prefill_step": prompt_length_prefill_step,
+        "_declared_model_callback": lambda model, name: None,
+        "_record_slice": record_slice,
     }
     exec(compile(module, str(SOURCE), "exec"), namespace)  # noqa: S102
     return namespace["BatchGenerator"]

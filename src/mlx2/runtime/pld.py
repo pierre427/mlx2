@@ -735,6 +735,10 @@ class PromptLookupBatchGenerator:
         self._lane_failures = []
         self.next_uid = 0
         self.boundaries = {}
+        # Executed target prefill slice ends against the idle plan (see
+        # ``prefill_slice_schedule``); serving refuses APCv2 publication of
+        # state past the first load-chosen slice.
+        self._prefill_slice_schedules = {}
         # Decode rounds that delivered tokens; drives the same allocator
         # reclaim cadence as BatchGenerator (the PLD route had none).
         self._steps_counter = 0
@@ -1088,6 +1092,13 @@ class PromptLookupBatchGenerator:
         so the vision/video embeddings are the model's own, computed once.
         """
         inputs = [lane.remaining.popleft() for _ in range(len(lane.remaining) - 1)]
+        from .prefill_slice_schedule import record_slice
+
+        # Whole on every schedule: the media rule, not a load choice.
+        record_slice(
+            self.__dict__.setdefault("_prefill_slice_schedules", {}), lane.uid, len(lane.history),
+            len(inputs), len(inputs),
+        )
         with mx.stream(generation_stream):
             consumed = isolated_media_prefill(
                 self.model,
@@ -1115,6 +1126,7 @@ class PromptLookupBatchGenerator:
                 if self.prefill_step_autoscale
                 else self.prefill_step
             )
+            planned_step = step
             fairness = self.decode_time_fairness
             if contended:
                 # Beside decoding lanes the slice is stall-bounded, as on the
@@ -1129,6 +1141,12 @@ class PromptLookupBatchGenerator:
             step = round_phases.prefill_width(self, step)
             count = min(step, len(lane.remaining) - 1)
             depth = len(lane.history)
+            from .prefill_slice_schedule import record_slice
+
+            record_slice(
+                self.__dict__.setdefault("_prefill_slice_schedules", {}), lane.uid, depth, count,
+                min(planned_step, len(lane.remaining) - 1),
+            )
             inputs = [lane.remaining.popleft() for _ in range(count)]
             tic = time.perf_counter()
             with mx.stream(generation_stream):
@@ -1321,6 +1339,15 @@ class PromptLookupBatchGenerator:
         # replayed unsteered; this is the last-resort path after a failed
         # transaction.
         steer_from = len(tokens) - len(committed_inputs)
+        from .prefill_slice_schedule import mark_deviation
+
+        # A recovery replay slices from its restore point on a fresh grid,
+        # not the request's planned prefill: every later state is off-plan.
+        mark_deviation(
+            self.__dict__.setdefault("_prefill_slice_schedules", {}), lane.uid,
+            len(lane.history) + len(committed_inputs) - len(tokens),
+            "recovery_replay",
+        )
         with mx.stream(generation_stream):
             step = (
                 prompt_length_prefill_step(len(tokens), maximum=self.prefill_step)
@@ -2596,6 +2623,18 @@ class PromptLookupBatchGenerator:
     def pop_prompt_boundary(self, uid):
         return self.boundaries.pop(int(uid), None)
 
+    def prefill_slice_schedule(self, uid):
+        from .prefill_slice_schedule import schedule_receipt
+
+        return schedule_receipt(getattr(self, "_prefill_slice_schedules", None), uid)
+
+    def pop_prefill_slice_schedule(self, uid):
+        from .prefill_slice_schedule import schedule_receipt
+
+        return schedule_receipt(
+            getattr(self, "_prefill_slice_schedules", None), uid, pop=True
+        )
+
     def remove(self, uids):
         for uid in uids:
             lane = self.lanes.pop(int(uid), None)
@@ -2604,6 +2643,7 @@ class PromptLookupBatchGenerator:
                 self._cohort_owner = None
                 self._close_lane(lane)
             self.boundaries.pop(int(uid), None)
+            getattr(self, "_prefill_slice_schedules", {}).pop(int(uid), None)
 
     def _leave_inflight(self, lane):
         """Take a departing lane out of the dispatched plain round, if any."""
@@ -2635,3 +2675,4 @@ class PromptLookupBatchGenerator:
         self.remove(tuple(self.lanes))
         self._cohort_owner = None
         self.boundaries.clear()
+        getattr(self, "_prefill_slice_schedules", {}).clear()

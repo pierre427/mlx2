@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: MIT
 """Candidate q4/g64 prefill projections; see provenance/tensorfold-prefill.json.
 
-TensorFold-inspired row grouping with two explicit experimental backends.
+TensorFold-inspired row grouping with three explicit experimental backends.
 Native MLX packs large projection weights and makes the original projections
 views of those arrays. The M5 Metal candidate uses 32x64x64 tiles, reusing
 staged activations and dequantized weights without a full dequantized table.
-Its fused SwiGLU writes only the final activation.
+Its fused SwiGLU writes only the final activation. ``metal_q4native`` keeps
+that tile and grid but reads the packed q4 codes in place (MPP
+``uint4b_format``) and applies the affine scale/bias per group in fp32; it is
+a different numerical law with its own kernel identity
+(``prefill_metal_q4native.py``).
 Installation is explicit, default-off, and does not change decode kernels.
 """
 
@@ -19,6 +23,7 @@ import mlx.core as mx
 from mlx import nn
 
 from ..prefill_plan import prefill_rows
+from . import prefill_metal_q4native
 from .prefill_metal import (
     HEADER,
     THREADS,
@@ -28,6 +33,24 @@ from .prefill_metal import (
     source_for,
     swiglu_source,
 )
+
+BACKENDS = ("native", "metal", "metal_q4native")
+# Backends that run an M5 tiled custom kernel (same eligibility and grid).
+METAL_BACKENDS = ("metal", "metal_q4native")
+_GENERATORS = {
+    "metal": (source_for, swiglu_source, HEADER),
+    "metal_q4native": (
+        prefill_metal_q4native.source_for,
+        prefill_metal_q4native.swiglu_source,
+        prefill_metal_q4native.HEADER,
+    ),
+}
+_KERNEL_IDENTITY = {
+    "native": "q4q8g64_prefill_native_qkv_z_swiglu",
+    "metal": "q4g64_prefill_m32n64k64_nax",
+    "metal_q4native": prefill_metal_q4native.KERNEL_IDENTITY,
+}
+_NAME_TAG = {"metal": "", "metal_q4native": "q4native_"}
 
 _PREFILL_SCOPE = ContextVar("mlx2_tensorfold_prefill_scope", default=False)
 
@@ -66,29 +89,60 @@ def _scoped_decoder_type(original):
 
 
 @lru_cache(maxsize=64)
-def _kernel(widths, biases):
-    source, inputs = source_for(widths, biases)
+def _kernel(widths, biases, backend="metal"):
+    generate, _, header = _GENERATORS[backend]
+    source, inputs = generate(widths, biases)
     digest = hashlib.sha256(source.encode()).hexdigest()[:16]
     return mx.fast.metal_kernel(
-        name=f"mlx2_tensorfold_prefill_{digest}",
+        name=f"mlx2_tensorfold_prefill_{_NAME_TAG[backend]}{digest}",
         input_names=inputs,
         output_names=[f"Y{i}" for i in range(len(widths))],
-        header=HEADER,
+        header=header,
         source=source,
     )
 
 
 @lru_cache(maxsize=16)
-def _swiglu_kernel(width, biases):
-    source, inputs = swiglu_source(width, biases)
+def _swiglu_kernel(width, biases, backend="metal"):
+    _, generate, header = _GENERATORS[backend]
+    source, inputs = generate(width, biases)
     digest = hashlib.sha256(source.encode()).hexdigest()[:16]
     return mx.fast.metal_kernel(
-        name=f"mlx2_prefill_swiglu_{digest}",
+        name=f"mlx2_prefill_swiglu_{_NAME_TAG[backend]}{digest}",
         input_names=inputs,
         output_names=["OUT"],
-        header=HEADER,
+        header=header,
         source=source,
     )
+
+
+def _metal_backend(backend):
+    if backend not in METAL_BACKENDS:
+        raise ValueError("Metal prefill backend must be metal or metal_q4native")
+    return backend
+
+
+# The ``metal`` backend keeps its original call shapes (``_kernel(widths,
+# biases)``, ``project(x, modules)``, ``project_swiglu(x, gate, up)``); only
+# the opt-in law passes its backend name.
+def _tile_kernel(widths, biases, backend):
+    return _kernel(widths, biases) if backend == "metal" else _kernel(widths, biases, backend)
+
+
+def _tile_swiglu_kernel(width, biases, backend):
+    if backend == "metal":
+        return _swiglu_kernel(width, biases)
+    return _swiglu_kernel(width, biases, backend)
+
+
+def _project_for(backend, x, modules):
+    return project(x, modules) if backend == "metal" else project(x, modules, backend=backend)
+
+
+def _swiglu_for(backend, x, gate, up):
+    if backend == "metal":
+        return project_swiglu(x, gate, up)
+    return project_swiglu(x, gate, up, backend=backend)
 
 
 def eligible(module):
@@ -149,8 +203,9 @@ def native_eligible(module):
     )
 
 
-def project(x, modules):
+def project(x, modules, backend="metal"):
     """Project arbitrary prefill rows, with masked M/N tails and fused bias."""
+    backend = _metal_backend(backend)
     modules = tuple(modules)
     if not modules or len(modules) > 4 or x.ndim < 2 or x.dtype != mx.bfloat16:
         raise ValueError("prefill projection requires bf16 rows and 1..4 projections")
@@ -171,7 +226,7 @@ def project(x, modules):
         )
         if biased:
             inputs.append(mx.contiguous(m.bias))
-    result = _kernel(widths, biases)(
+    result = _tile_kernel(widths, biases, backend)(
         inputs=inputs,
         template=[("K", k)],
         grid=(
@@ -260,8 +315,9 @@ class PackedProjectionGroup:
         )
 
 
-def project_swiglu(x, gate, up):
+def project_swiglu(x, gate, up, backend="metal"):
     """Fused dense gate/up projection and activation; final output only."""
+    backend = _metal_backend(backend)
     if (
         x.ndim < 2
         or x.dtype != mx.bfloat16
@@ -289,7 +345,7 @@ def project_swiglu(x, gate, up):
             [mx.contiguous(m.weight), mx.contiguous(m.scales), mx.contiguous(m.biases)]
         )
     inputs.extend(mx.contiguous(m.bias) for m in modules if "bias" in m)
-    out = _swiglu_kernel(n, biases)(
+    out = _tile_swiglu_kernel(n, biases, backend)(
         inputs=inputs,
         template=[("K", k)],
         grid=(THREADS * ((rows + TILE_M - 1) // TILE_M), (n + TILE_N - 1) // TILE_N, 1),
@@ -328,7 +384,7 @@ def fused_mlp(layer, x):
         counts["native_swiglu_calls"] += 1
         counts["projection_launches_saved"] += 1
     else:
-        y = project_swiglu(x, gate, up)
+        y = _swiglu_for(getattr(layer, "_prefill_backend", "metal"), x, gate, up)
         counts["swiglu_intermediate_elements_avoided"] += 2 * y.size
     counts["swiglu_calls"] += 1
     return layer.down_proj(y)
@@ -338,12 +394,12 @@ class TensorFoldPrefillLinear(nn.QuantizedLinear):
     def __call__(self, x):
         counts = self._prefill_counts
         if (
-            self._prefill_backend == "metal"
+            self._prefill_backend in METAL_BACKENDS
             and not self.training
             and _admitted(x)
             and eligible(self)
         ):
-            y = project(x, (self,))[0]
+            y = _project_for(self._prefill_backend, x, (self,))[0]
             counts["projection_calls"] += 1
             counts["projection_rows"] += prefill_rows(x.shape)
             return y
@@ -382,7 +438,7 @@ def grouped_input(layer, x):
         counts["native_grouped_calls"] += 1
         counts["projection_launches_saved"] += 1
     else:
-        ys = project(x, modules)
+        ys = _project_for(getattr(layer, "_prefill_backend", "metal"), x, modules)
         counts["projection_launches_saved"] += 3
     counts["grouped_calls"] += 1
     counts["grouped_rows"] += prefill_rows(x.shape)
@@ -398,10 +454,10 @@ def install(model, *, backend="native"):
     from .qwen36_35b import DecoderLayer as MoeDecoder
     from .qwen38_27b import DecoderLayer as DenseDecoder
 
-    if backend not in ("native", "metal"):
-        raise ValueError("prefill backend must be native or metal")
+    if backend not in BACKENDS:
+        raise ValueError("prefill backend must be native, metal or metal_q4native")
     if (
-        backend == "metal"
+        backend in METAL_BACKENDS
         and mx.default_device() == mx.gpu
         and "M5" not in str(mx.device_info().get("device_name", ""))
     ):
@@ -419,7 +475,7 @@ def install(model, *, backend="native"):
         if skip.intersection(name.split(".")):
             continue
         if (
-            backend == "metal"
+            backend in METAL_BACKENDS
             and type(module) in (nn.QuantizedLinear, TensorFoldQMVLinear)
             and id(module) not in hc_owned
             and eligible(module)
@@ -497,9 +553,7 @@ def install(model, *, backend="native"):
     if not installed:
         raise ValueError("prefill candidate found no eligible dense q4/g64 projections")
     return {
-        "kernel": "q4g64_prefill_m32n64k64_nax"
-        if backend == "metal"
-        else "q4q8g64_prefill_native_qkv_z_swiglu",
+        "kernel": _KERNEL_IDENTITY[backend],
         "installed": len(installed),
         "grouped_layers": groups,
         "mlp_layers": mlps,

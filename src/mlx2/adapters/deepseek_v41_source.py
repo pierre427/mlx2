@@ -18,6 +18,7 @@ from .deepseek_v41_mlx import DeepSeekV41MLXAdapter, execution_policy
 from .deepseek_v41_source_artifact import MODEL_TYPE, inspect_artifact
 from .deepseek_v41_source_math import POLICIES
 from .deepseek_v41_source_defaults import default_route_policy_applies, default_route_policy_filter
+from .deepseek_v41_source_approx import POLICY_KEYS as APPROXIMATE_POLICY_KEYS
 
 NUMERICS_REVISION = "mlx2.v41-official-mxfp4-fp8-act32-bf16.v1"
 DESCRIPTOR = replace(NATIVE_DESCRIPTOR, model_type=MODEL_TYPE, variant="flash-1017-official-source-text",
@@ -27,6 +28,7 @@ DESCRIPTOR = replace(NATIVE_DESCRIPTOR, model_type=MODEL_TYPE, variant="flash-10
 SOURCE_POLICY_CHOICES = {
     'deepseek_source_prefill_partition': ('adaptive_v1', 'canonical_m1_v1', 'position_grid_v1'),
     'deepseek_source_prefill_order': ('reference', 'layer_major_v1'),
+    'deepseek_source_prefill_readahead': ('reference', 'layer_ahead_v1'),
     'deepseek_source_dspark_ast': ('off', 'tile3x5_v1'),
     'deepseek_source_dspark_prepare': ('off', 'oracle_v1'),
     'deepseek_source_dspark_target_expert_law': ('ordinary_m16_v1', 'source_ast_m1_rows_v1', 'source_ast_resident_rows_v1', 'source_ast_hybrid_rows_v1'),
@@ -68,6 +70,8 @@ def source_policy(value=None):
     if value is not None and not isinstance(value, dict):
         raise ValueError('Source V4.1 execution policy must be a dictionary')
     value=dict(value or {})
+    from .deepseek_v41_source_approx import split_policy as split_approximate
+    approximate=split_approximate(value)  # opt-in approximate operations; validated last
     from .deepseek_v41_source_compatibility import validate_source_profiles
     validate_source_profiles(value)
     dspark={key:value.pop(key)for key in ('deepseek_source_dspark_oracle','deepseek_source_dspark_cache_bytes')if key in value}
@@ -248,6 +252,10 @@ def source_policy(value=None):
         validate_physical_batch_policy(result, width=int(result['deepseek_physical_batch'][1:]))
     from .deepseek_v41_source_layer_major import validate_policy as validate_prefill_order
     validate_prefill_order(result)
+    from .deepseek_v41_source_prefill_readahead import validate_policy as validate_prefill_readahead
+    validate_prefill_readahead(result)
+    from .deepseek_v41_source_approx import validate_policy as validate_approximate
+    result.update(validate_approximate(approximate,result))
     return result
 
 
@@ -323,7 +331,7 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
     numerics_revision = NUMERICS_REVISION
     weight_format = "official-safetensors-mxfp4-fp8-bf16"
     policy_parser = staticmethod(source_policy)
-    adapter_owned_default_policy_keys = DeepSeekV41MLXAdapter.adapter_owned_default_policy_keys | {'deepseek_source_experts','deepseek_source_expert_math','deepseek_source_dspark_oracle','deepseek_source_dspark_cache_bytes','deepseek_dspark_verify_schedule','deepseek_dspark_verify_costs','deepseek_dspark_draft_cost','deepseek_source_prefill_grid_rows'} | set(SOURCE_POLICY_CHOICES)
+    adapter_owned_default_policy_keys = DeepSeekV41MLXAdapter.adapter_owned_default_policy_keys | {'deepseek_source_experts','deepseek_dspark_admission','deepseek_source_expert_math','deepseek_source_dspark_oracle','deepseek_source_dspark_cache_bytes','deepseek_dspark_verify_schedule','deepseek_dspark_verify_costs','deepseek_dspark_draft_cost','deepseek_source_prefill_grid_rows'} | set(SOURCE_POLICY_CHOICES) | APPROXIMATE_POLICY_KEYS
     weight_streaming_modes = frozenset({"moe_experts"})
 
     @staticmethod
@@ -539,7 +547,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             source_row_packet_policy=self.kernel_policy.get('deepseek_source_row_packet','reference'),
             resident_gather_policy=self.kernel_policy.get('deepseek_source_resident_gather','reference'),
             resident_prefill_policy=self.kernel_policy.get('deepseek_source_resident_prefill','reference'),
-            source_expert_io_policy=self.kernel_policy.get('deepseek_source_expert_io','reference'))
+            source_expert_io_policy=self.kernel_policy.get('deepseek_source_expert_io','reference'),
+            prefill_readahead_policy=self.kernel_policy.get('deepseek_source_prefill_readahead','reference'))
         self.weight_stream = self.weights.expert_stream
         from ..memory import host_available_bytes
         self.weight_stream.configure_adaptive_residency(
@@ -591,6 +600,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         self._bind_short_attention_identity()
         self._bind_hc_mega_identity()
         self._bind_batched_tree_identity()
+        from .deepseek_v41_source_approx import bind_identity as bind_approximate_identity
+        bind_approximate_identity(self)  # no-op unless an approximate operation is selected
         if self.kernel_policy.get('deepseek_verify_rows','serial')=='lockstep_multirow_v1':
             from .deepseek_v41_dspark_chain import POLICY, implementation_identity
             self.numerics_revision+=':verify_rows='+POLICY+':implementation='+implementation_identity()
@@ -619,6 +630,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         elif self.kernel_policy.get('deepseek_source_prefill_order','reference')=='layer_major_v1':
             from .deepseek_v41_source_layer_major import layer_major_model_class
             model_type=layer_major_model_class()
+        from .deepseek_v41_source_approx import approximate_model_class
+        model_type=approximate_model_class(model_type,self.kernel_policy)
         self.model = model_type(args, self.weights, identity=binding, hasher=EngramHasher(self.metadata), engram_tables=self.engram_tables,
             hc_policy=self.kernel_policy["deepseek_hc"], qat_policy=self.kernel_policy["deepseek_qat"],
             hc_coeff_policy=('source_fused_fp32' if self.kernel_policy.get('deepseek_source_hc_coefficients','reference')=='fused_fp32' else 'reference'),
@@ -636,6 +649,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             from .deepseek_v41_source_canonical_prefill import grid_row_cap
             self.model.recommended_prefill_rows = grid_row_cap(
                 self.model.recommended_prefill_rows, self.weights.source_prefill_grid_rows)
+        from .deepseek_v41_source_approx import configure_model as configure_approximate
+        configure_approximate(self)
         self.model.verification_commit_policy = self.kernel_policy["deepseek_verify_commit"]
         self.model.verify_rows_policy = self.kernel_policy["deepseek_verify_rows"]
         self.model.pointwise_policy = self.kernel_policy["deepseek_pointwise"]
@@ -814,11 +829,17 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
                      and getattr(type(self.model),'source_layer_major_rows',None) is None):
             raise ValueError('Source layer-major prefill waves were not bound at load')
         # The ordinary validator admits one chunk; a wave is whole chunks.
-        result = super().execution_config(max_lanes=max_lanes, prefill_step=CHUNK_ROWS if wave else prefill_step)
-        if wave:
+        from .deepseek_v41_source_approx import apc_refusal_reason, YOCO_KEY, YOCO_MIN_ROWS
+        yoco = self.kernel_policy.get(YOCO_KEY,'off')!='off'
+        if yoco and (type(prefill_step) is not int or not self.kernel_policy[YOCO_MIN_ROWS] <= prefill_step <= 1048576):
+            raise ValueError('Source approximate yoco_v1 requires prefill_step >= its minimum prompt rows')
+        result = super().execution_config(max_lanes=max_lanes, prefill_step=CHUNK_ROWS if wave or yoco else prefill_step)
+        if wave or yoco:
             result['prefill_step_size'] = prefill_step
         selected=self.kernel_policy.get('deepseek_source_prefill_partition','adaptive_v1')
-        if self._source_dynamic_precision():
+        if apc_refusal_reason(self.kernel_policy) is not None:
+            result['apcv2_reuse_disabled_reason'] = apc_refusal_reason(self.kernel_policy)
+        elif self._source_dynamic_precision():
             from .deepseek_v41_source_residency import DYNAMIC_APC_REASON
             result['apcv2_reuse_disabled_reason'] = DYNAMIC_APC_REASON
         elif selected not in ('canonical_m1_v1','position_grid_v1'):
@@ -850,6 +871,9 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
 
     def apc_publication_refusal(self, prompt_cache, tokens):
         """Quietly decline off-grid or tainted grid state before APCv2 store."""
+        from .deepseek_v41_source_approx import apc_refusal_reason
+        if apc_refusal_reason(self.kernel_policy) is not None:
+            return apc_refusal_reason(self.kernel_policy)
         if self._source_dynamic_precision():
             from .deepseek_v41_source_residency import DYNAMIC_APC_REASON
             return DYNAMIC_APC_REASON
@@ -998,4 +1022,9 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             value['source_native_mx_counters']={k:v for k,v in self.weights.scheduled_expert_calls.items() if k.startswith('official_source_native_mx_')}
             value['numerical_scope']=value['numerical_scope'].replace('MLX reference reductions;','Existing Source profile;')
             value['numerical_scope']+='; opt-in original PP expert M16..99 native HALF activation consumption (rounding allowed), distinct profile; original coefficient precision/Source middle/owners unchanged; Q1/small-M/decode reference; unqualified'
+        from .deepseek_v41_source_approx import receipt as approximate_receipt, selected_operations
+        value['source_approximate_operations']=approximate_receipt(self.kernel_policy,getattr(self,'model',None))
+        if selected_operations(self.kernel_policy):
+            value['approximate_state']=True
+            value['numerical_scope']+='; APPROXIMATE '+'+'.join(selected_operations(self.kernel_policy))+' (opt-in, salted identity, APCv2 publication refused); unqualified'
         return value
