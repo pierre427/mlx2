@@ -35,7 +35,7 @@ def run_allocations(mx,np,capture_path,out,report,compare,atomic):
                 del value;mx.synchronize();gc.collect();mx.clear_cache()
                 row['active_after_output_release_bytes']=int(mx.get_active_memory());rows.append(row)
                 atomic(out/'results.json',report)
-        del args,gathered;gc.collect();mx.clear_cache()
+        args=None;del gathered;gc.collect();mx.clear_cache()
     report['allocation_scope']='MLX allocator incremental peak for evaluated PP operators, two reversed-order repetitions; not physical DRAM bytes or isolated GPU time'
     report['component_peak_mlx_bytes']=max(report.get('component_peak_mlx_bytes',0),maximum)
     result=dict(complete=len(rows)==12,harness_completed=True,required_reference_controls_exact=controls,

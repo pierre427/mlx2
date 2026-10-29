@@ -195,7 +195,7 @@ def run_components(mx,np,capture_path,out,report,compare,atomic):
             del value,boundary,stages
             observe();write()
         row['timings']=timed_interleaved(mx,np,admitted,repeats=3)
-        mx.synchronize();del args,gathered,reference_stages,admitted
+        mx.synchronize();args=None;gathered=None;del reference_stages,admitted
         mx.clear_cache();observe();write()
     section['required_reference_controls_exact']=all(all(c['exact']for c in r['reference_controls'].values())for r in section['cases'])
     section['verdicts']={variant+'_all_six_exact':all(r['variants'][variant]['all_stage_and_output_exact']for r in section['cases'])for variant in probe.VARIANTS[1:]}

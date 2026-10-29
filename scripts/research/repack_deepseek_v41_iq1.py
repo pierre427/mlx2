@@ -29,7 +29,7 @@ import time
 import numpy as np
 
 from deepseek_v41_native_layer import MAX_CHUNK_ELEMENTS, _iq1_affine_grid, affine_spec, convert_affine
-from convert_deepseek_v41_mlx import (COPY_BYTES, atomic_json, canonical, check_space,
+from convert_deepseek_v41_mlx import (atomic_json, canonical, check_space,
                                      conversion_lock, file_hash, read_exact, safe_path,
                                      stamp, write_at)
 

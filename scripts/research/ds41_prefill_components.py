@@ -112,7 +112,7 @@ def run_gu(mx,np,bank,artifact,out,report,compare,atomic):
                 'output_shape':list(plan['output_shape']),'existing_gu_launches':count,
                 'worklist_gu_launches':1,'stock_oracle':stock_oracle,'variants':variants}
             report['prefill_gu'].append(row);atomic(out/'results.json',report)
-        del experts,actual
+        experts=None;del actual
         mx.synchronize();mx.clear_cache();observe()
     meta['required_raw_exact']=all(v['exact']for row in report['prefill_gu']for v in row['variants'].values())
     meta['cases']=len(report['prefill_gu']);atomic(out/'results.json',report)

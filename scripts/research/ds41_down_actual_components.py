@@ -232,7 +232,7 @@ def run_components(mx, np, captureDir, out, report, compare, atomic):
         # Caller owns this bounded window; all work must finish before the
         # immutable actual backing and input references are released.
         mx.synchronize()
-        del data, q, s, b, x, raw, owner, functions, stock
+        data=None;q=None;s=None;b=None;x=None;stock=None;del raw,owner,functions
         if 'candidate' in locals():
             del candidate
         mx.clear_cache()

@@ -84,7 +84,8 @@ class DeepSeekV41Residency:
         weight_keys += tuple(f"expert_{key}_policy" for key in ("small", "reuse", "iq1", "down", "binding", "io", "groups", "simd"))
         weight_keys += ("dense_epilogue_policy", "dense_pair_policy")
         model_keys = ("hc_policy", "qat_policy", "pointwise_policy", "attention_epilogue_policy",
-                      "hc_epilogue_policy", "verification_commit_policy", "verify_rows_policy")
+                      "hc_epilogue_policy", "verification_commit_policy", "verify_rows_policy",
+                      "kv_storage_policy", "candidate_score_policy", "ced_policy", "context_limit")
         return dict(schema="mlx2.v41-weight-residency.v1", artifact=a.identity["fingerprint"],
                     source_sha256=a.identity["weight_sha256"], path=a.identity["path"],
                     profile=a.profile, cache_layout=a.layout, model_identity=a.model.identity,
@@ -132,6 +133,22 @@ class DeepSeekV41Residency:
     def admit(self):
         self._owner()
         self.binding()
+        from ..runtime.demand_stream_memory import demand_stream_enabled
+        if demand_stream_enabled(self.adapter.weight_stream):
+            from ..memory import host_available_bytes
+            available = int(host_available_bytes(host_signals=True))
+            required = self.reservation_bytes()
+            self.last_admission = {
+                "execution_headroom_bytes": available,
+                "service_driver_workspace_reserve_bytes": 0,
+                "available_payload_bytes": available,
+                "required_resume_bytes": required,
+                "accepted": True,
+                "policy": "attempt_after_reclaim",
+                "advisory_shortfall_bytes": max(0,required-available),
+                "allocator_result": "pending",
+            }
+            return dict(self.last_admission)
         request = self.adapter.weight_streaming_request
         workspace = max(5 << 30, request.headroom_bytes if request is not None else 0)
         reading = resume_headroom(workspace)

@@ -29,7 +29,7 @@ PROJECTIONS = {"gate": "w1", "up": "w3", "down": "w2"}
 Q_B_PREFILL_SOURCE_PINS = {
     'source_fp8_projection_tiles.py': '12e7617134e2dee24be28efd02d1117dee2dfacefa96c476ab916599b80a3c2b',
     'source_prefill_legacy_tiles.py': '004b4f1a8980661dce95f646329fc64c28b8aa7512ca864790b7622b4fa4bb16',
-    'source_dense.py': 'c182fae36b666532e5b712785c991493aee87f0a20e2e05e1886f85cf7beb5ad',
+    'source_dense.py': '11fe30e8f0a58f966fba3fb6c555d88de30f6cd6190a34e1f809137029b35f65',
     'source_dense_legacy.py': '564e7e17bb8c1641f5a26ec1329968de7fad895ae83840793b226909bb023a0d',
 }
 
@@ -136,6 +136,17 @@ class SourceExpertStore(NativeExpertStore):
         self.pool = ReadPool(min(8, read_workers), "v41-source-experts", timeout=60, max_pending=1,
                              owner=storage_owner("v41-source-experts", self.root))
 
+    def _adaptive_victim(self):
+        # Packed bank views share whole backing allocations. A logical expert
+        # eviction cannot reclaim one sibling while that backing is pinned.
+        protected=set(self._leased)|set(self._pending_uploads)|set(getattr(self,'_resident_bank_pinned_keys',()))
+        return next((key for key in self._cache if key not in protected),None)
+
+    def _adaptive_evict_key(self,key):
+        if key in getattr(self,'_resident_bank_pinned_keys',()):
+            raise ValueError('Cannot individually evict an attached Source bank allocation')
+        return super()._adaptive_evict_key(key)
+
     def acquire(self, prefix, expert):
         import mlx.core as mx
         with self._lock:
@@ -149,6 +160,8 @@ class SourceExpertStore(NativeExpertStore):
                 checked_file(self.root, shard, self.artifact["seals"][shard])
             if key in self._leased:
                 return self._leased[key]
+            if self.adaptive_residency_enabled:
+                self.adaptive_residency_update(incoming_bytes=0 if key in self._cache else self.minimum_cache_bytes)
             if (sum(sum(v.nbytes for v in item.values()) for item in self._leased.values())
                     + self.minimum_cache_bytes > self.bounds["expert_active_bound_bytes"]):
                 raise ValueError("official expert leases exceed one-layer bound")
@@ -179,12 +192,16 @@ class SourceExpertStore(NativeExpertStore):
                 self.stats["upload_batches"] += 1
                 self._cache[key] = arrays
                 self._cache_bytes += size
-                while self._cache_bytes > self.cache_budget_bytes:
-                    _, victim = self._cache.popitem(last=False)
-                    self._cache_bytes -= sum(v.nbytes for v in victim.values())
-                    self.stats["evictions"] += 1
             self._leased[key] = arrays
             self._pending_uploads.pop(key, None)
+            if self.adaptive_residency_enabled:
+                self.adaptive_residency_update()
+            else:
+                while self._cache_bytes > self.cache_budget_bytes:
+                    victim=self._adaptive_victim()
+                    if victim is None:
+                        raise MemoryError('Source expert cache maximum exhausted by active leases')
+                    self._adaptive_evict_key(victim)
             return arrays
 
     def apc_revision(self):
@@ -209,10 +226,35 @@ class SourceV41Weights(NativeV41Weights):
                  prefill_wide_dtype="reference", prefill_wide_math="reference", attention_math_policy="reference",
                  qakv_policy="reference", q_b_prefill_policy="reference", fp8_pp_policy="reference", woa_pp_policy="reference",
                  ffn_input_policy="reference", prefill_down_policy="reference", native_mx_policy="reference",
-                 source_frame_reuse_policy="reference"):
+                 source_frame_reuse_policy="reference", submission_policy="reference",
+                 source_row_packet_policy="reference", resident_gather_policy="reference", resident_prefill_policy="reference"):
         if expert_math_policy not in POLICIES:
             raise ValueError("invalid Source expert math policy")
         self.expert_math_policy = expert_math_policy
+        if resident_gather_policy not in ('reference','resident_bank_v1'):
+            raise ValueError('Invalid Source resident gather policy')
+        if resident_gather_policy!='reference' and (expert_math_policy!='routed_fused_fp32' or ffn_input_policy!='reference'):
+            raise ValueError('Source resident bank requires routed_fused_fp32 and reference FFN input')
+        if resident_prefill_policy not in ('reference','expert_major_v1','expert_major_wide_v1'):
+            raise ValueError('Invalid Source resident prefill policy')
+        if resident_prefill_policy!='reference' and resident_gather_policy!='resident_bank_v1':
+            raise ValueError('Source resident prefill requires resident_bank_v1')
+        self.source_resident_prefill_policy=resident_prefill_policy
+        self.source_resident_gather_policy=resident_gather_policy
+        self.source_resident_bank_session=None
+        self._resident_dense_coefficient_views={}
+        if type(submission_policy) is not str or submission_policy not in ('reference','shared_first_v1'):
+            raise ValueError('invalid Source submission policy')
+        self.source_submission_policy = submission_policy
+        if submission_policy=='shared_first_v1' and ffn_input_policy!='reference':
+            raise ValueError('Source shared-first requires reference FFN input; routed/shared reuse consumes routed first')
+        if type(source_row_packet_policy) is not str or source_row_packet_policy not in ('reference','row_packet_v1'):
+            raise ValueError('invalid Source row packet policy')
+        if source_row_packet_policy != 'reference' and source_frame_reuse_policy != 'prefill_v1':
+            raise ValueError('Source row packet requires authoritative prefill_v1 frame reuse')
+        self.source_row_packet_policy=source_row_packet_policy
+        self._source_frame_serial=0
+        self._source_current_frame=None
         if type(source_frame_reuse_policy) is not str or source_frame_reuse_policy not in ('reference','prefill_v1'):
             raise ValueError('invalid Source frame reuse policy')
         if source_frame_reuse_policy!='reference' and (expert_policy is None
@@ -239,7 +281,8 @@ class SourceV41Weights(NativeV41Weights):
             ('FP8 PP', fp8_pp_policy, ('reference','native_bf16_qb_wob_v1')),
             ('Q_b prefill', q_b_prefill_policy, ('reference','tile64x32_raw')),
             ('Qa/KV', qakv_policy, ('reference','qat_reuse')),
-            ('attention math', attention_math_policy, ('reference','all_retained_broadcast','omlx_nax_bf16_online_v1')),
+            ('attention math', attention_math_policy, ('reference','all_retained_broadcast','omlx_nax_bf16_online_v1',
+                'source_short_decode_joint_f32_v1','source_short_decode_grouped_f32_v1')),
             ('dense QAT', dense_qat_policy, ('reference','fused_fp32')),
             ('BF16 loads', bf16_loads_policy, ('reference','woa_f32','direct_f32')),
             ('completion', completion_policy, ('reference','bounded_2')),
@@ -296,6 +339,12 @@ class SourceV41Weights(NativeV41Weights):
             self.compute_policy=self.compute_policy+':source_native_mx='+native_mx_policy+':'+implementation_identity()
         if source_frame_reuse_policy!='reference':
             self.compute_policy=self.compute_policy+':source_frame_reuse='+source_frame_reuse_policy+':route_plan_v1'
+        if submission_policy != 'reference':
+            from .deepseek_v41_source_submission import implementation_identity
+            self.compute_policy=self.compute_policy+':source_submission='+submission_policy+':'+implementation_identity()
+        if source_row_packet_policy != 'reference':
+            from .deepseek_v41_source_row_packet import implementation_identity
+            self.compute_policy=self.compute_policy+':source_row_packet='+source_row_packet_policy+':'+implementation_identity()
         self.dense_pair_policy = 'fused' if qakv_policy == 'qat_reuse' else 'reference'
         self.source_attention_math_policy = attention_math_policy
         self.source_bf16_loads_policy = bf16_loads_policy
@@ -556,7 +605,170 @@ class SourceV41Weights(NativeV41Weights):
         self.scheduled_dense_calls[key] = self.scheduled_dense_calls.get(key,0)+1
         return tuple(outputs)
 
+    def recommended_prefill_rows(self, maximum, *, context_tokens=0):
+        """Live-memory chunk advice; cache maxima are never RAM reservations."""
+        if type(maximum) is not int or maximum < 1 or type(context_tokens) is not int or context_tokens < 0:
+            raise ValueError('Source prefill advice requires positive rows and nonnegative context')
+        maximum=min(maximum,1024)
+        stream=getattr(self,'expert_stream',None)
+        if stream is None or not getattr(stream,'adaptive_residency_enabled',False):
+            return maximum
+        from .deepseek_v41_source_memory import SourceMemorySnapshot,SourceMemoryNeed,plan_source_memory,ORIGINAL_EXPERT_BYTES
+        try:
+            callback=getattr(stream,'_adaptive_available',None)
+            if callback is not None:
+                available=callback();physical=None
+            else:
+                from ..runtime.os_memory import host_memory_snapshot
+                host=host_memory_snapshot()
+                available=None if host is None else host.available_bytes
+                physical=None if host is None else host.physical_bytes
+            if type(available)is not int or available<0:available=None
+            resident=max(0,int(getattr(stream,'_cache_bytes',0)))
+            pinned=min(resident,sum(int(getattr(value,'allocation_nbytes',0)) or
+                sum(int(getattr(v,'nbytes',0))for v in value.values())
+                for value in getattr(stream,'_leased',{}).values()))
+            args=self.artifact['args']
+            dim=getattr(args,'head_dim',512)
+            # Incremental pool/ring growth only, never a whole-context reserve.
+            growth=maximum*dim*4*max(1,len(getattr(args,'kv_source_layer_ids',(2,8,14,20))))
+            snapshot=SourceMemorySnapshot(physical,available,resident,pinned)
+            need=SourceMemoryNeed(cache_ceiling_bytes=int(getattr(stream,'maximum_cache_bytes',75_000_000_000)),
+                expert_payload_bytes=(ORIGINAL_EXPERT_BYTES,)*getattr(args,'num_experts_per_tok',6),
+                expert_staging_bytes=int(getattr(stream,'_adaptive_staging',ORIGINAL_EXPERT_BYTES)),
+                kv_growth_bytes=growth,phase='prefill',requested_prefill_rows=maximum,
+                route_working_set_known=False)
+            advice=plan_source_memory(snapshot,need)
+            self.source_memory_advice=advice
+            return 1 if available is None or advice['pressure_attempt'] else max(1,min(maximum,advice['prefill_chunk_rows']))
+        except Exception:
+            return 1
+
+    def park(self):
+        session=getattr(self,'source_resident_bank_session',None)
+        if session is not None:session.close()
+        result=super().park()
+        getattr(self,'_resident_dense_coefficient_views',{}).clear()
+        return result
+
+    def close(self):
+        # An uncertain bank epoch must retain the entire provider. Never let
+        # native teardown clear cache/accounting before the bank cohort retires.
+        session=getattr(self,'source_resident_bank_session',None)
+        if session is not None:session.close()
+        result=super().close()
+        getattr(self,'_resident_dense_coefficient_views',{}).clear()
+        return result
+
+    def prepare_resident_coefficient_views(self,*,ownercheck):
+        """Prepare immutable WoA alias capabilities once, outside token work."""
+        if not callable(ownercheck)or ownercheck()is False:raise ValueError('Source dense view preparation requires ownership')
+        session=getattr(self,'source_resident_bank_session',None)
+        completion=getattr(self,'_source_completion',None)
+        if (session is None or session.active or session.replaying or session.poisoned
+                or getattr(completion,'active',False)or getattr(self.expert_stream,'_active',False)):
+            raise ValueError('Source dense coefficient views require an idle prepared bank session')
+        if self.source_bf16_loads_policy not in ('woa_f32','direct_f32'):
+            raise ValueError('Source dense coefficient views require an admitted BF16 WoA consumer')
+        self._ensure_dense()
+        from ..runtime.gguf.source_dense import prepare_coefficient_view
+        views=getattr(self,'_resident_dense_coefficient_views',None)
+        if views is None:self._resident_dense_coefficient_views=views={}
+        for name,weight in self._dense.items():
+            if not name.endswith('attn_output_a.weight'):continue
+            if name in views:views[name].operand(weight,'wo_a')
+            else:views[name]=prepare_coefficient_view(weight,'wo_a',ownercheck=ownercheck)
+        if not views:raise ValueError('Source dense coefficient views found no full WoA weights')
+        return dict(prepared_views=len(views),kind='wo_a',coefficient_precision='unchanged BF16')
+
+    def prepare_resident_bank(self,keys,*,ownercheck,cancelled=None,generation=1,
+                              budget_bytes=75_000_000_000,max_bank_bytes=None,prefill=False):
+        """Build/attach a closed bank at an explicitly owned idle boundary."""
+        if type(prefill)is not bool:raise ValueError('Source bank prefill selection must be boolean')
+        if prefill:
+            if getattr(self,'source_resident_prefill_policy','reference')not in ('expert_major_v1','expert_major_wide_v1'):
+                raise ValueError('Source PP bank preparation requires explicit expert-major policy')
+            from .deepseek_v41_source_prefill_session import prepare_prefill_session
+            return prepare_prefill_session(self,keys,ownercheck=ownercheck,cancelled=cancelled,
+                generation=generation,budget_bytes=budget_bytes,
+                max_bank_bytes=(3<<30)if max_bank_bytes is None else max_bank_bytes)
+        from .deepseek_v41_source_bank import build_bank
+        from .deepseek_v41_source_bank_session import PreparedBankSession
+        import mlx.core as mx
+        if self.source_resident_gather_policy!='resident_bank_v1':
+            raise ValueError('Source bank preparation requires resident_bank_v1 policy')
+        if self.source_resident_bank_session is not None:
+            raise ValueError('Source bank session already attached')
+        bank=build_bank(mx,self.expert_stream,keys,ownercheck=ownercheck,generation=generation,
+                        budget_bytes=budget_bytes,max_bank_bytes=(4<<30)if max_bank_bytes is None else max_bank_bytes)
+        session=PreparedBankSession(self,bank,ownercheck=ownercheck,cancelled=cancelled)
+        self.source_resident_bank_session=session
+        return session
+
+    def execution_scope_for_rows(self, rows):
+        """Select completion ownership before any route can acquire experts.
+
+        Unknown routes use the largest original-format payload and include one
+        other pending epoch. This only selects ownership, never token shapes.
+        """
+        if type(rows) is not int or not 1 <= rows <= 1024:
+            raise ValueError('Source completion advice requires rows1..1024')
+        if getattr(getattr(self,'expert_stream',None),'_resident_bank_preparing',None):
+            raise ValueError('Source forward cannot enter during resident bank preparation')
+        session=getattr(self,'source_resident_bank_session',None)
+        if session is not None and session.active:
+            return nullcontext()
+        selected_rows=(rows==1 or getattr(self,'source_resident_prefill_policy','reference')!='reference')
+        if selected_rows and getattr(self,'source_resident_gather_policy','reference')!='reference' and not (session is not None and session.replaying):
+            raise ValueError('Source resident_bank_v1 execution requires an explicitly prepared bank session')
+        stream=getattr(self,'expert_stream',None)
+        if not getattr(stream,'adaptive_residency_enabled',False):
+            return self._ordinary_execution_policy()
+        completion=getattr(self,'_source_completion',None)
+        if completion is not None and completion.active:
+            raise ValueError('Cannot replace active completion ownership')
+        from .deepseek_v41_source_memory import SourceMemorySnapshot,SourceMemoryNeed,plan_source_memory,ORIGINAL_EXPERT_BYTES
+        forced=getattr(self,'_source_adaptive_force_ordinary',False)
+        self._source_adaptive_force_ordinary=False
+        bounded=False
+        try:
+            current=stream.adaptive_residency_update()
+            available=current.get('measured_available_bytes') if current.get('availability_known') else None
+            resident=int(getattr(stream,'_cache_bytes',0))
+            pinned=min(resident,len(getattr(stream,'_leased',{}))*ORIGINAL_EXPERT_BYTES)
+            count=min(384,rows*self.artifact['args'].num_experts_per_tok)
+            # bounded_2 may keep a preceding layer's complete route alive.
+            need=SourceMemoryNeed(cache_ceiling_bytes=int(stream.maximum_cache_bytes),
+                expert_payload_bytes=(ORIGINAL_EXPERT_BYTES,)*count,
+                expert_staging_bytes=int(getattr(stream,'_adaptive_staging',ORIGINAL_EXPERT_BYTES)),
+                kv_growth_bytes=count*ORIGINAL_EXPERT_BYTES,
+                phase='prefill' if rows>1 else 'decode',requested_prefill_rows=rows,
+                route_working_set_known=True)
+            advice=plan_source_memory(SourceMemorySnapshot(None,available,resident,pinned),need)
+            bounded=(not forced and available is not None
+                     and advice['expert_strategy']!='sequential_expert'
+                     and (rows==1 or advice['prefill_chunk_rows']>=rows)
+                     and 2*count*ORIGINAL_EXPERT_BYTES+need.expert_staging_bytes<=stream.maximum_cache_bytes)
+            self.source_completion_memory_advice=dict(advice,worst_unique_experts=count,
+                preceding_epoch_payload_bytes=count*ORIGINAL_EXPERT_BYTES,
+                selected_completion='bounded_2' if bounded else 'reference')
+        except Exception:
+            bounded=False
+        if bounded:
+            key='source_adaptive_bounded_completion_executions'
+            self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
+            return self._ordinary_execution_policy()
+        key='source_adaptive_ordinary_completion_executions'
+        self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
+        return nullcontext()
+
     def execution_scope(self):
+        # Older callers without imminent row geometry stay conservative.
+        if getattr(getattr(self,'expert_stream',None),'adaptive_residency_enabled',False):
+            return self.execution_scope_for_rows(1024)
+        return self._ordinary_execution_policy()
+
+    def _ordinary_execution_policy(self):
         if getattr(self,'source_completion_policy','reference') == 'reference':
             return nullcontext()
         if self._source_completion is None:
@@ -565,12 +777,16 @@ class SourceV41Weights(NativeV41Weights):
         return self._source_completion.execution()
 
     def dense_window(self):
+        session=getattr(self,'source_resident_bank_session',None)
+        if session is not None and session.active:return nullcontext()
         completion=getattr(self,'_source_completion',None)
         if completion is not None and completion.active:
             return completion.scope()
         return super().dense_window()
 
     def evaluate_dense_window(self,*values):
+        session=getattr(self,'source_resident_bank_session',None)
+        if session is not None and session.active:return session.retain(*values)
         completion=getattr(self,'_source_completion',None)
         if completion is not None and completion.active:
             return completion.evaluate(*values)
@@ -586,7 +802,16 @@ class SourceV41Weights(NativeV41Weights):
             if value is not None:return value
         if getattr(self,'source_bf16_loads_policy','reference') in ('woa_f32','direct_f32'):
             from ..runtime.gguf.source_dense import maybe_project
-            value=maybe_project(x.astype(mx.float32),weight,'wo_a') if x.ndim==4 and x.shape[1]==1 else None
+            session=getattr(self,'source_resident_bank_session',None)
+            view_selected=(session is not None and session.active
+                and getattr(session,'operand_policy','full_operands_v1')=='coefficient_views_v1')
+            if x.ndim==4 and x.shape[1]==1 and view_selected:
+                cap=getattr(self,'_resident_dense_coefficient_views',{}).get(name)
+                if cap is None:raise ValueError('Source WoA coefficient alias was not prepared before decode')
+                value=maybe_project(x.astype(mx.float32),weight,'wo_a',operand_policy='coefficient_views_v1',coefficient_view=cap)
+                key='source_bf16_grouped_coefficient_views'
+                self.scheduled_grouped_calls[key]=self.scheduled_grouped_calls.get(key,0)+1
+            else:value=maybe_project(x.astype(mx.float32),weight,'wo_a') if x.ndim==4 and x.shape[1]==1 else None
             legacy=False
             # The exact legacy MMA candidate helps the measured small-row
             # shapes; the 99-row prefill probe regressed versus stock MLX.
@@ -604,11 +829,86 @@ class SourceV41Weights(NativeV41Weights):
         self.scheduled_grouped_calls["official_bf16_grouped_f32"] = self.scheduled_grouped_calls.get("official_bf16_grouped_f32", 0)+1
         return mx.einsum("btgi,goi->btgo", x.astype(mx.float32), weight.astype(mx.float32).reshape(groups, weight.shape[0]//groups, weight.shape[1]))
 
+    def begin_source_frame(self, start, rows):
+        """CPU-only forward identity; no routes/activations persist between frames."""
+        if type(start) is not int or start < 0 or type(rows) is not int or not 1 <= rows <= 1024:
+            raise ValueError('Source frame requires a valid absolute start and live rows')
+        if getattr(self,'_source_current_frame',None) is not None:
+            raise ValueError('Source frame is already active; nested forwards are unsupported')
+        self._source_frame_serial=getattr(self,'_source_frame_serial',0)+1
+        self._source_current_frame=(self._source_frame_serial,start,rows)
+
+    def end_source_frame(self):
+        self._source_current_frame=None
+
+    def _adaptive_expert_plan(self, values, prefix):
+        """Choose a complete current route window or one completed expert.
+
+        This never subdivides token rows or changes an expert's local M. Soft
+        targets can evict unleased cache entries; active roots remain owned.
+        """
+        stream=self.expert_stream
+        if not getattr(stream,'adaptive_residency_enabled',False):return None
+        collector_active=getattr(stream,'_completion_collector',None)is not None
+        from .deepseek_v41_source_memory import SourceMemorySnapshot,SourceMemoryNeed,plan_source_memory,ORIGINAL_EXPERT_BYTES,Q1_EXPERT_BYTES
+        current=stream.adaptive_residency_update()
+        available=current.get('measured_available_bytes')if current.get('availability_known')else None
+        layer=int(prefix.split('.')[1]);expert_ids=tuple(int(e)for e in np.unique(values))
+        def payload(key):
+            return Q1_EXPERT_BYTES if getattr(stream,'kind',lambda k:'original')(key)=='q1'else ORIGINAL_EXPERT_BYTES
+        sizes=tuple(payload((layer,e))for e in expert_ids)
+        resident=int(getattr(stream,'_cache_bytes',0))
+        pinned=min(resident,sum(payload(key)for key in getattr(stream,'_leased',{})))
+        need=SourceMemoryNeed(cache_ceiling_bytes=int(stream.maximum_cache_bytes),
+            expert_payload_bytes=sizes,expert_staging_bytes=int(getattr(stream,'_adaptive_staging',ORIGINAL_EXPERT_BYTES)),
+            phase='prefill'if values.shape[0]>1 else'decode',requested_prefill_rows=values.shape[0],
+            route_working_set_known=True)
+        advice=plan_source_memory(SourceMemorySnapshot(None,available,resident,pinned),need)
+        bulk=(advice['expert_strategy']!='sequential_expert'
+              and (values.shape[0]==1 or advice['prefill_chunk_rows']>=values.shape[0]))
+        updated=stream.set_adaptive_cache_target(advice['target_cache_bytes'],
+            working_set_experts=len(sizes)if bulk else 1)
+        bulk=bulk and sum(sizes)<=updated['effective_payload_target_bytes']
+        if not bulk and collector_active:
+            # A live epoch owns immutable expert generations. Never retire one
+            # early through a key-based collector; select ordinary next forward.
+            self._source_adaptive_force_ordinary=True
+            counts=self.scheduled_expert_calls
+            key='source_adaptive_pressure_deferred_to_next_forward'
+            counts[key]=counts.get(key,0)+1
+            bulk=True
+            advice=dict(advice,completion_pressure_deferred=True)
+        if not bulk and updated.get('imminent_expert_window_bytes',0)>stream.minimum_cache_bytes:
+            stream.set_adaptive_cache_target(advice['target_cache_bytes'],working_set_experts=1)
+        advice=dict(advice,expert_strategy=('batched_experts' if collector_active and advice.get('completion_pressure_deferred') else advice['expert_strategy'])if bulk else'sequential_expert',
+                    actual_unique_experts=len(sizes),actual_route_payload_bytes=sum(sizes),
+                    effective_payload_target_bytes=updated['effective_payload_target_bytes'],
+                    local_expert_M_unchanged=True)
+        self.source_expert_memory_advice=advice
+        counts=self.scheduled_expert_calls
+        key='source_adaptive_bulk_windows'if bulk else'source_adaptive_sequential_windows'
+        counts[key]=counts.get(key,0)+1
+        return advice
+
     def moe(self, x, ids, scores, prefix, *, ticket=None,ffn_input_token=None):
         import mlx.core as mx
         from ..runtime.models.deepseek_v4 import limited_swiglu
         from ..runtime.models.deepseek_v41_quant import quantize
         self._ready()
+        if getattr(getattr(self,'expert_stream',None),'_resident_bank_preparing',None):
+            raise ValueError('Source MoE cannot enter during resident bank preparation')
+        session=getattr(self,'source_resident_bank_session',None)
+        if session is not None and session.active:
+            rows=x.shape[0]if len(x.shape)==2 else 0
+            if (ticket is not None or ffn_input_token is not None or not 1<=rows<=getattr(session,'max_token_rows',1)
+                    or x.shape!=(rows,self.artifact['args'].hidden_size)
+                    or ids.shape!=(rows,self.artifact['args'].num_experts_per_tok) or scores.shape!=ids.shape):
+                raise ValueError('Resident bank Source route geometry exceeds its prepared session')
+            from ..runtime.models.deepseek_v41_quant import fused_quantize
+            prepared=fused_quantize(x.astype(mx.float32),'fp8').astype(x.dtype).astype(mx.float32)
+            key='official_source_resident_bank_gpu_routes'
+            self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
+            return session.moe(prepared,ids.reshape(-1),scores.reshape(-1).astype(mx.float32),prefix)
         if ticket is not None:
             raise ValueError("official source profile has synchronous expert reads")
         if ffn_input_token is not None:
@@ -617,10 +917,13 @@ class SourceV41Weights(NativeV41Weights):
                 raise ValueError('Source FFN input requires an explicit frame token')
             ffn_input_token.validate_routed_request(self,x,prefix)
         values = np.asarray(ids)
+        self.source_route_host_materializations=getattr(self,'source_route_host_materializations',0)+1
         if (values.dtype != np.uint32 or values.ndim != 2 or not 0 < values.shape[0] <= 1024
                 or values.shape != scores.shape or x.shape != (values.shape[0], self.artifact["args"].hidden_size)
                 or values.shape[1] != self.artifact["args"].num_experts_per_tok):
             raise ValueError("official expert route geometry mismatch")
+        memory_plan=self._adaptive_expert_plan(values,prefix)
+        sequential=memory_plan is not None and memory_plan['expert_strategy']=='sequential_expert'
         route_plan=None
         if (values.shape[0]>1 and getattr(self,'source_prefill_batch_policy','reference')!='reference'
                 and getattr(self,'source_frame_reuse_policy','reference')=='prefill_v1'):
@@ -645,7 +948,9 @@ class SourceV41Weights(NativeV41Weights):
             sorted_ids = flat[order]
         fused_policy=self.expert_math_policy in ('epilogue_fused_fp32','routed_fused_fp32')
         fuse_down=(self.expert_math_policy=='routed_fused_fp32' and values.shape[0]==1
-                   and len(np.unique(flat))==values.shape[1])
+                   and len(np.unique(flat))==values.shape[1] and not sequential)
+        if sequential and sorted_ids is None:
+            sorted_ids=flat[order]
         owned = not self.expert_stream._active
         with self.expert_stream.window() if owned else nullcontext():
             parts = []
@@ -665,7 +970,7 @@ class SourceV41Weights(NativeV41Weights):
                 if fused_policy:
                     key='official_source_input_qat'
                     self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
-            if values.shape[0]>1 and getattr(self,'source_prefill_batch_policy','reference')!='reference':
+            if values.shape[0]>1 and getattr(self,'source_prefill_batch_policy','reference')!='reference' and not sequential:
                 if route_plan is None:
                     output=self._prefill_batched_gate_up(all_selected,values,scores,prefix,order)
                 else:
@@ -752,6 +1057,11 @@ class SourceV41Weights(NativeV41Weights):
                         down_inputs.append(down_input);down_experts.append(data);down_ids.append(int(expert))
                     else:
                         parts.append(rounded(project(down_input,'down')))
+                        if sequential:
+                            self.expert_stream.release_completed_experts(((int(prefix.split('.')[1]),int(expert)),),roots=(parts[-1],))
+                            key='source_adaptive_completed_expert_parts'
+                            self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
+                            del data
                     continue
                 # Share the exact reference QAT node across gate and up for
                 # either expert format. See source-activation-reuse provenance.
@@ -779,6 +1089,11 @@ class SourceV41Weights(NativeV41Weights):
                     gate, up = rounded(project(selected, "gate")), rounded(project(selected, "up"))
                 middle = rounded(limited_swiglu(gate, up)*scores.reshape(-1)[slots, None])
                 parts.append(rounded(project(quantize(middle, "fp8").astype(mx.float32), "down")))
+                if sequential:
+                    self.expert_stream.release_completed_experts(((int(prefix.split('.')[1]),int(expert)),),roots=(parts[-1],))
+                    key='source_adaptive_completed_expert_parts'
+                    self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
+                    del data
             if fuse_down:
                 from ..runtime.gguf.source_down_fusion import down_combine
                 output=down_combine(down_inputs,down_experts,down_ids)
@@ -832,7 +1147,28 @@ class SourceV41Weights(NativeV41Weights):
                     or route_plan.order is not order or route_plan.combine_offsets is None):
                 raise ValueError('Source prefill route plan does not own this frame')
             plan=route_plan
+        device_packet=None
+        if getattr(self,'source_row_packet_policy','reference') == 'row_packet_v1':
+            if route_plan is None:
+                raise ValueError('Source row packet requires the current authoritative route plan')
+            frame=getattr(self,'_source_current_frame',None)
+            if frame is None or frame[2] != x.shape[0]:
+                raise ValueError('Source row packet is outside its model forward frame')
+            from .deepseek_v41_source_row_packet import prepare_row_packet
+            packet=prepare_row_packet(plan,frame_key='source-forward-'+str(frame[0]),
+                generation=frame[0],layer=int(prefix.split('.')[1]),position_start=frame[1])
+            device_packet=packet.upload(mx)
+            counters=self.scheduled_expert_calls
+            for key,amount in (('source_row_packet_uploads',1),('source_row_packet_bytes',packet.backing.nbytes)):
+                counters[key]=counters.get(key,0)+int(amount)
+        def validate_packet(*, contents=False):
+            if device_packet is not None:
+                if getattr(self,'_source_current_frame',None) is not frame:
+                    raise ValueError('Source row packet stale model forward frame')
+                packet.validate(plan,frame_key='source-forward-'+str(frame[0]),
+                    generation=frame[0],layer=int(prefix.split('.')[1]),contents=contents)
         experts=[stream.acquire(prefix,job.expert_id) for job in plan.jobs]
+        if device_packet is not None:validate_packet(contents=True)
         middles=[None]*len(plan.jobs)
         batch_down=getattr(self,'source_prefill_batch_policy','reference')=='gate_up_down'
         middle_batches=[]
@@ -841,11 +1177,13 @@ class SourceV41Weights(NativeV41Weights):
         if tiny_selected:
             from .deepseek_v41_source_prefill_down import tiny_prefix,maybe_tiny_project
         flat_scores=scores.reshape(-1)
-        for batch in plan.batches:
-            row_map=mx.array(batch.rows)
-            locations=mx.array(batch.locations)
+        for batch_index,batch in enumerate(plan.batches):
+            if device_packet is not None:validate_packet()
+            row_map,locations=(device_packet.batch(batch_index) if device_packet is not None
+                               else (mx.array(batch.rows),mx.array(batch.locations)))
             packed=gu.pp_middle(x,[experts[j] for j in batch.job_indices],row_map,
-                                flat_scores[locations],batch.row_counts,exp_spelling=exp_spelling())
+                                flat_scores[locations],batch.row_counts,exp_spelling=exp_spelling(),
+                                **({'row_packet':device_packet,'batch_index':batch_index} if device_packet is not None else {}))
             if batch_down:middle_batches.append((batch,packed))
             else:
                 tiny_jobs=0;tiny_output=None
@@ -915,14 +1253,17 @@ class SourceV41Weights(NativeV41Weights):
                     scales=data[name+'.scales'],mode='mxfp4').astype(mx.float32)
             return mx.quantized_matmul(v,data[name+'.qweight'],scales=data[name+'.scales'],mode='mxfp4')
         for j in gu_fallback:
+            if device_packet is not None:validate_packet()
             job,data=plan.jobs[j],experts[j]
-            selected=x[mx.array(job.rows)]
+            job_rows,job_locations=(device_packet.job(j) if device_packet is not None
+                                    else (mx.array(job.rows),mx.array(job.locations)))
+            selected=x[job_rows]
             pair=None
             if getattr(self,'source_native_mx_policy','reference')!='reference':
                 from .deepseek_v41_source_native_mx import maybe_gate_up
                 pair=maybe_gate_up(self,selected,data,prefix,job.expert_id,prefill_rows=x.shape[0])
             gate,up=(project(selected,data,'gate'),project(selected,data,'up')) if pair is None else pair
-            middles[j]=middle(gate,up,flat_scores,mx.array(job.locations))
+            middles[j]=middle(gate,up,flat_scores,job_locations)
         parts=[];part_experts=[]
         owner_down_jobs=0
         native_down_jobs=0
@@ -959,6 +1300,7 @@ class SourceV41Weights(NativeV41Weights):
             output=combine_mapped(parts,values,order,part_experts)
         else:
             for j,(job,data,activation) in enumerate(zip(plan.jobs,experts,middles)):
+                if device_packet is not None:validate_packet()
                 if j in tiny_owned:
                     parts.append(tiny_owned[j])
                     continue
@@ -967,7 +1309,9 @@ class SourceV41Weights(NativeV41Weights):
             if route_plan is None:
                 output=ordered_combine(parts,values,order)
             else:
-                output=ordered_combine(parts,values,order,offsets=plan.combine_offsets)
+                if device_packet is not None:validate_packet(contents=True)
+                output=ordered_combine(parts,values,order,offsets=plan.combine_offsets,
+                    **({'row_packet':device_packet} if device_packet is not None else {}))
                 key='official_source_frame_combine_offsets_reused'
                 self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
         counts={'official_source_prefill_gu_batches':len(plan.batches),
@@ -1003,6 +1347,9 @@ class SourceV41Weights(NativeV41Weights):
         value.update(mode="official_fp8_bf16_resident", numeric_profile=REVISION, original_source_required=True,
                      weight_requantization=False, activation_quantization="FP8/E8M0/group32", grouped_wo_a="source FP8 expanded to BF16 per official convert.py")
         value.update(source_dense_qat=getattr(self,'source_dense_qat_policy','reference'),
+                     source_route_host_materializations=getattr(self,'source_route_host_materializations',0),
+                     source_submission=getattr(self,'source_submission_policy','reference'),
+                     source_row_packet=getattr(self,'source_row_packet_policy','reference'),
                      source_frame_reuse=getattr(self,'source_frame_reuse_policy','reference'),
                      source_native_mx=getattr(self,'source_native_mx_policy','reference'),
                      source_qakv=getattr(self,'source_qakv_policy','reference'),
@@ -1020,6 +1367,10 @@ class SourceV41Weights(NativeV41Weights):
                      source_prefill_wide_math=getattr(self,'source_prefill_wide_math','reference'),
                      source_routed_dot_contract=('original MXFP4 GU M13..96 native BF16 NAX K16/F32; ascending F32 +0 partitions; existing BF16/scored FP8 middle; distinct unqualified numerical profile'
                          if getattr(self,'source_prefill_wide_math','reference')=='nax_k16_ordered_f32_v1' else 'existing selected Source routed numerical law'))
+        if getattr(self,'source_attention_math_policy','reference') in ('source_short_decode_joint_f32_v1','source_short_decode_grouped_f32_v1'):
+            from ..runtime.models.deepseek_v41_short_attention import implementation_identity
+            value['source_attention_implementation_sha256']=implementation_identity()
+            value['source_attention_numerical_contract']='explicit short-band F32 reduction; Source owner BF16; unqualified'
         if getattr(self,'source_attention_math_policy','reference') == 'omlx_nax_bf16_online_v1':
             from ..runtime.models.deepseek_v41_source_attention import implementation_identity
             value['source_attention_implementation_sha256'] = implementation_identity()

@@ -174,9 +174,9 @@ def run_components(mx,np,captureDir,out,report,compare,atomic):
         if row['variants'].get('WoB_input_QAT',{}).get('exact',False):
             row['preparation_timings']['wo_b_input']=compare(mx,np,{'reference':lambda:input_b(ref_product),
                 'WoB_input_QAT':lambda:candidate.prepare_wo_b(ref_product)},repeats=repeats)
-        del ref_a,plain_a,ref_product,ref_b,ref_output,ref_boundary
+        ref_product=None;del ref_a,plain_a,ref_b,ref_output,ref_boundary
         row['timings']=compare(mx,np,functions,repeats=repeats);observe();write()
-        mx.synchronize();del functions,raw,weight;mx.clear_cache()
+        mx.synchronize();raw=None;weight=None;del functions;mx.clear_cache()
     section['required_reference_controls_exact']=all(all(v['exact']for v in r['reference_controls'].values())for r in section['cases'])
     section['verdicts']={name+'_all6_exact':all(r['variants'][name]['exact']for r in section['cases'])for name,a,b in variants}
     section['cross_capture_prepared_inputs_exact']=all(r.get('cross_run_prepared_WoB',{}).get('exact',False)for r in section['cases'])

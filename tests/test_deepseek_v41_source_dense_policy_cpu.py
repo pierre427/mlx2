@@ -8,10 +8,28 @@ from mlx2.adapters.deepseek_v41_source_weights import SourceV41Weights
 
 
 @pytest.mark.parametrize('key',SOURCE_POLICY_CHOICES)
-def test_source_policy_choices_are_explicit_and_reference_default(key):
+def test_source_policy_choices_are_explicit_and_reference_default(key,tmp_path):
     assert key not in source_policy()
     for value in SOURCE_POLICY_CHOICES[key]:
         policy={key:value}
+        if ((key=='deepseek_source_dspark_prepare'and value!='off')
+                or (key=='deepseek_source_ast_kv_preparation'and value!='reference')):
+            policy.update(deepseek_source_dspark_prepare='oracle_v1',
+                deepseek_source_dspark_target_forward='fully_batched_m1_v1',
+                deepseek_source_dspark_target_expert_law='source_ast_m1_rows_v1',
+                deepseek_source_expert_math='routed_fused_fp32')
+        if ((key=='deepseek_source_dspark_ast'and value!='off')
+                or key in ('deepseek_source_dspark_target_expert_law','deepseek_source_dspark_target_forward')):
+            oracle=tmp_path/'dspark-oracle.json';oracle.write_text('{}')
+            policy['deepseek_source_dspark_oracle']=str(oracle)
+            policy['deepseek_source_dspark_ast']='tile3x5_v1'
+            if key=='deepseek_source_dspark_target_expert_law'and value in ('source_ast_m1_rows_v1','source_ast_resident_rows_v1','source_ast_hybrid_rows_v1'):
+                policy['deepseek_source_expert_math']='routed_fused_fp32'
+            if key=='deepseek_source_dspark_target_expert_law'and value=='source_ast_hybrid_rows_v1':
+                policy['deepseek_source_dspark_target_forward']='fully_batched_m1_v1'
+                policy['deepseek_source_prefill_partition']='canonical_m1_v1'
+            if key=='deepseek_source_dspark_target_expert_law'and value=='source_ast_resident_rows_v1':
+                policy['deepseek_source_dspark_target_forward']='fully_batched_v1'
         if key=='deepseek_source_qakv' and value!='reference':
             policy['deepseek_source_dense_qat']='fused_fp32'
         if key=='deepseek_source_ffn_input' and value!='reference':
@@ -20,11 +38,19 @@ def test_source_policy_choices_are_explicit_and_reference_default(key):
             policy['deepseek_index_policy']='finite_all_retained'
         if key=='deepseek_source_prefill_batch' and value!='reference':
             policy['deepseek_source_expert_math']='routed_fused_fp32'
-        if key in ('deepseek_source_prefill_wide_math','deepseek_source_frame_reuse',
+        if key=='deepseek_source_resident_prefill' and value!='reference':
+            policy.update(deepseek_source_resident_gather='resident_bank_v1',deepseek_source_expert_math='routed_fused_fp32')
+        if key=='deepseek_source_resident_gather' and value!='reference':
+            policy['deepseek_source_expert_math']='routed_fused_fp32'
+        if key=='deepseek_source_prefill_wide_math' and value!='reference':
+            policy.update(deepseek_source_expert_math='routed_fused_fp32',deepseek_source_prefill_batch='gate_up')
+        if key in ('deepseek_source_frame_reuse','deepseek_source_row_packet',
                    'deepseek_source_native_mx','deepseek_source_prefill_down') and value!='reference':
             policy.update(deepseek_source_expert_math='routed_fused_fp32',deepseek_source_prefill_batch='gate_up')
         if key=='deepseek_source_native_mx' and value!='reference':
             policy['deepseek_source_experts']={'mode':'original_lfu','budget_bytes':75_000_000_000}
+        if key=='deepseek_source_row_packet' and value!='reference':
+            policy['deepseek_source_frame_reuse']='prefill_v1'
         assert source_policy(policy)[key]==value
     for value in (None,True,1,[],{},'unknown'):
         with pytest.raises(ValueError):source_policy({key:value})

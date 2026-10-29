@@ -73,6 +73,29 @@ def test_source_and_policy_changes_refuse_resume_before_allocation(monkeypatch):
     assert p.resident_bytes() == 0
 
 
+@pytest.mark.parametrize("field,changed", [
+    ("kv_storage_policy", "native_packed"),
+    ("candidate_score_policy", "candidate_only"),
+    ("ced_policy", "dependency_exact"),
+    ("context_limit", 1048576),
+])
+def test_csa_execution_drift_refuses_resume_before_allocation(monkeypatch, field, changed):
+    a, _, _ = provider(monkeypatch)
+    a.model.kv_storage_policy = "reference"
+    a.model.candidate_score_policy = "reference"
+    a.model.ced_policy = "reference"
+    a.model.context_limit = 65536
+    bound = DeepSeekV41Residency(a)
+    controller = ModelResidency(bound, identity={"checkpoint": "synthetic@0123456789abcdef"},
+                                synchronize=lambda: None, measure=lambda: {"active": a.weights.live})
+    controller.park()
+    setattr(a.model, field, changed)
+    with pytest.raises(ValueError, match="binding changed"):
+        controller.activate()
+    assert bound.resident_bytes() == 0
+    assert controller.state == "parked"
+
+
 def test_low_headroom_and_partial_allocation_remain_parked(monkeypatch):
     from mlx2.adapters import deepseek_v41_residency as module
     a,p,c = provider(monkeypatch)

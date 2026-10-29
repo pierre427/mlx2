@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 """Forty-local/four-source KV-only token graphs, synthetic storage."""
-import gc,time,statistics
+import time,statistics
 MODES=('ordinary_kv','skip_owned_local_copy','no_kv_writes')
 
 def run(mx,check_live=None):

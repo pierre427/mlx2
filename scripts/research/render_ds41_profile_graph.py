@@ -3,7 +3,6 @@ from pathlib import Path
 import collections
 import hashlib
 import json
-import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 UNIT = ROOT/'qualification/runs/ds41-source-lfu75-hot60-q1-dispatch-paired-20261025-r1'

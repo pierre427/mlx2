@@ -281,7 +281,7 @@ def run_components(mx, np, capture_dir, out, report, compare, atomic):
         row['timing_scope'] = 'Fresh single-expert gather/casts/GU/existing middle/DOWN/owner/selected-row fold. Other five contributions are prepacked outside timing; layer-global QAT, CPU route planning and global all-expert output packing/concatenation are excluded. Source serving concatenation is not removed or measured here. No eval/item/readbacks inside graph builders; admission/residency excluded. Not complete MoE-layer cost or model rate.'
         write()
         mx.synchronize()
-        del host, views, expert, admission, reference, native, repeated, zero, zero_reference, again, functions, q, scales
+        admission=None;del host,views,expert,reference,native,repeated,zero,zero_reference,again,functions,q,scales
         mx.clear_cache()
     section['verdicts'] = engineering_verdicts(section['cases'])
     section['required_reference_controls_exact'] = section['verdicts']['stock_capture_replay']

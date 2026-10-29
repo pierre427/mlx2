@@ -8,8 +8,8 @@ unqualified until the exact artifact passes the deferred model campaign.
 
 import hashlib
 import json
-from dataclasses import asdict
 from contextlib import nullcontext
+from dataclasses import asdict
 
 import mlx.core as mx
 import numpy as np
@@ -30,6 +30,9 @@ from .deepseek_v41_quant import quantize
 NUMERICS_REVISION = "mlx2.v41-packed-bf16-staggered-csa2-engram.v1"
 INDEX_POLICIES = ("reference", "finite_all_retained")
 SELECTED_KV_POLICIES = ("reference", "decode_reuse")
+KV_STORAGE_POLICIES = ("reference", "native_packed")
+CANDIDATE_SCORE_POLICIES = ("reference", "candidate_only")
+CED_POLICIES = ("reference", "dependency_exact")
 
 
 def candidate_blocks(scores, lens, count, block, *, finite_all_retained=False):
@@ -68,10 +71,12 @@ def decode_selected_kv(source, indices, valid, shared, *, counters=None):
     growth, restoration and verifier-visible frontier changes. Nothing is
     retained on the model or persistent cache after the forward returns.
     """
-    pooled = source.pooled
+    packed = getattr(source, "packed_pooled", None)
+    pooled = packed if packed is not None else source.pooled
+    dtype = mx.float32 if packed is not None else (None if pooled is None else pooled.dtype)
     if (
         pooled is None
-        or pooled.ndim != 3
+        or len(pooled.shape) != 3
         or pooled.shape[0] != 1
         or indices.ndim != 3
         or indices.shape[:2] != (1, 1)
@@ -81,7 +86,7 @@ def decode_selected_kv(source, indices, valid, shared, *, counters=None):
         or not 0 < indices.shape[-1] <= min(512, pooled.shape[1])
     ):
         raise ValueError("V4.1 decode gather requires B1 width-one selected rows")
-    geometry = (pooled.shape, pooled.dtype, indices.shape, indices.dtype,
+    geometry = (pooled.shape, dtype, indices.shape, indices.dtype,
                 valid.shape, valid.dtype, source.offset, source._pool_count)
     generation = shared.get("_index_generation", 0)
     entry = shared.get("_decode_selected_kv")
@@ -95,7 +100,7 @@ def decode_selected_kv(source, indices, valid, shared, *, counters=None):
         return entry["value"]
     # A failed new gather must not leave an old selection available to reuse.
     shared.pop("_decode_selected_kv", None)
-    value = _selected_rows(pooled, indices)
+    value = source.gather_pooled(indices) if packed is not None else _selected_rows(pooled, indices)
     shared["_decode_selected_kv"] = {
         "source": source, "pool": source._pooled, "indices": indices,
         "valid": valid, "geometry": geometry, "generation": generation,
@@ -103,19 +108,23 @@ def decode_selected_kv(source, indices, valid, shared, *, counters=None):
     }
     if counters is not None:
         counters["decode_gather_build"] = counters.get("decode_gather_build", 0) + 1
+        if packed is not None:
+            counters["packed_selected_staging_max_rows"] = max(counters.get("packed_selected_staging_max_rows", 0), indices.shape[-1])
     return value
 
 
 def selected_attention(
     q, local, local_mask, pooled, indices, valid, sinks, *, workspace_bytes=16 << 20,
-    gathered=None, trusted_broadcast=False,
+    gathered=None, trusted_broadcast=False, packed_pooled=None, counters=None,
 ):
     """HySparse2-style bounded selected-row gather, no full-context score/mask.
 
     Attention visits the same local then chronological compressed rows as the
     ordinary V4 reference. Tile bounds include gathered vectors and scores.
     """
-    if pooled is None:
+    if packed_pooled is not None and (pooled is not None or trusted_broadcast):
+        raise ValueError("packed selected attention requires one native source and reference math")
+    if pooled is None and packed_pooled is None:
         if gathered is not None:
             raise ValueError("V4.1 reused gather requires a pooled source")
         return attend(q, local, local_mask, sinks=sinks)
@@ -123,7 +132,7 @@ def selected_attention(
     count = indices.shape[-1]
     if gathered is not None and (
         length != 1 or gathered.shape != (1, 1, count, dim)
-        or gathered.dtype != pooled.dtype
+        or gathered.dtype != (mx.float32 if packed_pooled is not None else pooled.dtype)
     ):
         raise ValueError("V4.1 reused gather must match width-one attention")
     per_row = 4 * (heads * (local.shape[2] + count) + count * dim + 2 * heads * dim)
@@ -132,10 +141,20 @@ def selected_attention(
     for first in range(0, length, tile):
         last = min(length, first + tile)
         query = q[:, :, first:last].astype(mx.float32) * dim**-0.5
-        rows = (mx.broadcast_to(pooled[:, None], (1, last-first, count, dim))
-                if trusted_broadcast and length > 1 and count == pooled.shape[1] <= 512
-                and gathered is None else
-                (_selected_rows(pooled, indices[:, first:last]) if gathered is None else gathered))
+        if gathered is not None:
+            rows = gathered
+        elif packed_pooled is not None:
+            from .deepseek_v41_packed_qat import gather_decode
+
+            rows = gather_decode(packed_pooled, indices[:, first:last])
+            if counters is not None:
+                staged = (last-first)*count
+                counters["packed_selected_decode_rows"] = counters.get("packed_selected_decode_rows", 0) + staged
+                counters["packed_selected_staging_max_rows"] = max(counters.get("packed_selected_staging_max_rows", 0), staged)
+        else:
+            rows = (mx.broadcast_to(pooled[:, None], (1, last-first, count, dim))
+                    if trusted_broadcast and length > 1 and count == pooled.shape[1] <= 512
+                    else _selected_rows(pooled, indices[:, first:last]))
         ls = query @ mx.swapaxes(local.astype(mx.float32), -1, -2)
         ls = mx.where(local_mask[..., first:last, :], ls, -mx.inf)
         ps = mx.einsum("bhld,blkd->bhlk", query, rows)
@@ -200,11 +219,16 @@ class Attention:
         m=self.model
         if (getattr(m,"attention_epilogue_policy","reference") == "fused"
                 and m.qat_policy == "fused_fp32" and self.c.simulate_quantization):
-            from .deepseek_v41_fused import rotate_qat,epilogue_check
+            from .deepseek_v41_fused import epilogue_check, rotate_qat
             epilogue_check()
             phase = self._phase(shared, x, offset, positions, inverse)
             return rotate_qat(x,self.rope,kind,offset,positions=positions,inverse=inverse,phase=phase)
         return m.qat(self.rotate(x,offset,positions=positions,inverse=inverse,shared=shared),kind)
+
+    def rotate_packed(self, x, kind, offset=0, *, positions=None, shared=None):
+        from .deepseek_v41_packed_qat import produce
+
+        return produce(self.rotate(x, offset, positions=positions, shared=shared), kind)
 
     def publish(self, x, state, start, shared=None):
         c, m, ratio = self.c, self.model, self.ratio
@@ -247,19 +271,40 @@ class Attention:
                 self.linear(latent, "indexer.attn_k"),
                 self.w.array(self.prefix + "indexer.k_norm.weight"),
             )
-            key = self.rotate_quantized(key[:, None], "index_fp4",positions=positions,shared=shared).squeeze(1)
-            pooled = self.rotate_quantized(latent[:, None], "compressed_fp4",positions=positions,shared=shared).squeeze(1)
-            state.append_pools(pooled, key)
+            if getattr(m, "kv_storage_policy", "reference") == "native_packed":
+                from .deepseek_v41_packed_qat import PackedQAT
+
+                key = self.rotate_packed(key[:, None], "index_fp4", positions=positions, shared=shared)
+                pooled = self.rotate_packed(latent[:, None], "compressed_fp4", positions=positions, shared=shared)
+                state.append_pools_packed(
+                    PackedQAT(pooled.codes.squeeze(1), pooled.scales.squeeze(1), pooled.kind),
+                    PackedQAT(key.codes.squeeze(1), key.scales.squeeze(1), key.kind),
+                )
+            else:
+                key = self.rotate_quantized(key[:, None], "index_fp4",positions=positions,shared=shared).squeeze(1)
+                pooled = self.rotate_quantized(latent[:, None], "compressed_fp4",positions=positions,shared=shared).squeeze(1)
+                state.append_pools(pooled, key)
         else:
-            state.append_pools(
-                mx.zeros((1, 0, c.head_dim), mx.float32),
-                mx.zeros((1, 0, c.index_head_dim), mx.float32),
-            )
+            if getattr(m, "kv_storage_policy", "reference") == "native_packed":
+                from .deepseek_v41_packed_qat import PackedQAT
+
+                state.append_pools_packed(
+                    PackedQAT(mx.zeros((1, 0, c.head_dim // 2), mx.uint8),
+                              mx.zeros((1, 0, c.head_dim // 16), mx.uint8), "compressed_fp4"),
+                    PackedQAT(mx.zeros((1, 0, c.index_head_dim // 2), mx.uint8),
+                              mx.zeros((1, 0, c.index_head_dim // 32), mx.uint8), "index_fp4"),
+                )
+            else:
+                state.append_pools(
+                    mx.zeros((1, 0, c.head_dim), mx.float32),
+                    mx.zeros((1, 0, c.index_head_dim), mx.float32),
+                )
 
     def select(self, x, qr, source, start, shared):
         """Bound head-score scratch by tiling query rows; selection remains exact."""
         c, m = self.c, self.model
-        length, count = x.shape[1], source.index_keys.shape[1]
+        length = x.shape[1]
+        count = source._pool_count if hasattr(source, "_pool_count") else source.index_keys.shape[1]
         shared["_index_generation"] = shared.get("_index_generation", 0) + 1
         shared.pop("_decode_selected_kv", None)
         shared.pop("indices", None)
@@ -307,15 +352,48 @@ class Attention:
         weight = self.linear(x, "indexer.proj") * (
             c.index_head_dim**-0.5 * c.index_n_heads**-0.5
         )
-        tile = max(1, min(128, (16 << 20) // max(1, c.index_n_heads * count * 4)))
+        candidate_only = (getattr(m, "candidate_score_policy", "reference") == "candidate_only"
+                          and self.layer > c.candidate_source_layer_id >= 0)
+        capacity = min(count, c.candidate_topk_blocks * c.candidate_block_size)
+        per_row = ((c.index_n_heads + c.index_head_dim) * capacity + count
+                   if candidate_only else c.index_n_heads * count)
+        tile = max(1, min(128, (16 << 20) // max(1, per_row * 4)))
         selected, masks = [], []
         prior_candidates = shared.get("candidates")
+        if candidate_only and (prior_candidates is None or prior_candidates.shape != (1, length, count)):
+            raise ValueError("V4.1 candidate source failed to publish matching rows")
+        packed_index = getattr(source, "packed_index_keys", None)
+        all_keys = None if candidate_only or packed_index is not None else source.index_keys
         for first in range(0, length, tile):
             last = min(length, first + tile)
-            score = mx.einsum(
-                "bhsd,btd->bsht", query[:, :, first:last], source.index_keys
-            )
-            score = mx.sum(mx.maximum(score, 0) * weight[:, first:last, :, None], 2)
+            if candidate_only:
+                prior = prior_candidates[:, first:last]
+                positions = mx.arange(count, dtype=mx.uint32)[None, None]
+                # Fixed-capacity chronological gather. Absent candidates are
+                # padding only and are masked before global tie-breaking.
+                ids = mx.sort(mx.argsort(mx.where(prior, positions, count + positions), axis=-1)[..., :capacity], axis=-1)
+                keys = (source.gather_index_keys(ids) if hasattr(source, "gather_index_keys")
+                        else source.index_keys[0, ids[0]][None])
+                small = mx.einsum("bhsd,bstd->bsht", query[:, :, first:last], keys)
+                small = mx.sum(mx.maximum(small, 0) * weight[:, first:last, :, None], 2)
+                small = mx.where(mx.take_along_axis(prior, ids, -1), small, -mx.inf)
+                score = mx.put_along_axis(mx.full((1, last-first, count), -mx.inf), ids, small, -1)
+                m.scheduled_kv_calls["candidate_only_score_rows"] = m.scheduled_kv_calls.get("candidate_only_score_rows", 0) + (last-first)*capacity
+                m.scheduled_kv_calls["candidate_only_unscored_rows"] = m.scheduled_kv_calls.get("candidate_only_unscored_rows", 0) + (last-first)*(count-capacity)
+            elif packed_index is not None:
+                from .deepseek_v41_packed_qat import decode
+
+                parts = []
+                for key_first in range(0, count, 4096):
+                    key_last = min(count, key_first + 4096)
+                    keys = decode(packed_index.sliced((slice(None), slice(key_first, key_last))))
+                    part = mx.einsum("bhsd,btd->bsht", query[:, :, first:last], keys)
+                    parts.append(mx.sum(mx.maximum(part, 0) * weight[:, first:last, :, None], 2))
+                    m.scheduled_kv_calls["packed_index_staging_max_rows"] = max(m.scheduled_kv_calls.get("packed_index_staging_max_rows", 0), key_last-key_first)
+                score = mx.concatenate(parts, -1)
+            else:
+                score = mx.einsum("bhsd,btd->bsht", query[:, :, first:last], all_keys)
+                score = mx.sum(mx.maximum(score, 0) * weight[:, first:last, :, None], 2)
             lens = ((mx.arange(start + first, start + last) + 1) // self.ratio)[
                 None, :, None
             ]
@@ -344,6 +422,9 @@ class Attention:
 
     def __call__(self, x, state, cache, shared):
         c, m, length, start = self.c, self.model, x.shape[1], state.offset
+        if (getattr(m, "kv_storage_policy", "reference") == "native_packed"
+                and getattr(m, "source_attention_math_policy", "reference") != "reference"):
+            raise ValueError("native packed KV requires reference selected attention math")
         if m.can_pair(x, self.prefix+"attn_q_a.weight", self.prefix+"attn_kv.weight"):
             qa, kva = self.w.paired_project(x,self.prefix+"attn_q_a.weight",self.prefix+"attn_kv.weight")
         else:
@@ -356,8 +437,12 @@ class Attention:
         )
         q = self.rotate(q, start, shared=shared)  # V4.1 intentionally has no per-head query RMSNorm.
         kv = m.norm(self.linear(x, "attn_kv") if kva is None else kva, self.kv_norm)[:, None]
-        kv = self.rotate_quantized(kv,"fp8",start,shared=shared)
-        local = state.update_local(kv)
+        if getattr(m, "kv_storage_policy", "reference") == "native_packed":
+            local = state.update_local_packed(self.rotate_packed(kv, "fp8", start, shared=shared))
+            m.scheduled_kv_calls["native_packed_local_rows"] = m.scheduled_kv_calls.get("native_packed_local_rows", 0) + length
+        else:
+            kv = self.rotate_quantized(kv,"fp8",start,shared=shared)
+            local = state.update_local(kv)
         geometry = shared.get("_source_prefill_geometry")
         if geometry is None:
             queries = mx.arange(start, start + length)[:, None]
@@ -366,7 +451,7 @@ class Attention:
         else:
             from .deepseek_v41_frame_geometry import local_mask
             mask = local_mask(geometry, mx, start, length, local.shape[2], c.sliding_window)
-        pooled = indices = valid = None
+        pooled = packed_pooled = indices = valid = None
         if self.ratio:
             owner = cache[c.kv_source_for(self.layer)]
             if self.source:
@@ -377,21 +462,27 @@ class Attention:
             # Binding to the source row works even when a ratio2 group is incomplete.
             if self.index_source:
                 self.select(x, qr, owner, start, shared)
-            pooled = owner.pooled
-            if pooled is None:
+            packed_pooled = getattr(owner, "packed_pooled", None)
+            pooled = None if packed_pooled is not None else owner.pooled
+            source_pool = packed_pooled if packed_pooled is not None else pooled
+            if source_pool is None:
                 raise ValueError("V4.1 compressed source failed to publish")
-            if pooled.shape[1]:
+            if source_pool.shape[1]:
                 indices = shared.get("indices")
                 valid = shared.get("selected_mask")
                 if indices is None or valid is None:
                     raise ValueError("V4.1 index source failed to publish")
             else:
-                pooled = None
+                pooled = packed_pooled = None
         trusted_retained = (m.index_policy == "finite_all_retained" and length > 1 and pooled is not None
                      and pooled.shape[1] <= 512
                      and shared.get("_all_retained_chronological") ==
                      (id(indices), pooled.shape[1], length, start, shared.get("_index_generation")))
-        broadcast = trusted_retained and getattr(m, "source_attention_math_policy", "reference") in ("all_retained_broadcast", "omlx_nax_bf16_online_v1")
+        broadcast = trusted_retained and getattr(m, "source_attention_math_policy", "reference") in ("all_retained_broadcast", "omlx_nax_bf16_online_v1", "source_short_decode_joint_f32_v1", "source_short_decode_grouped_f32_v1")
+        short_policy=getattr(m,'source_attention_math_policy','reference') in (
+            'source_short_decode_joint_f32_v1','source_short_decode_grouped_f32_v1')
+        short_gather=(decode_selected_kv(owner,indices,valid,shared,counters=m.scheduled_kv_calls)
+                      if short_policy and pooled is not None and length==1 and m.selected_kv_policy=='decode_reuse' else None)
         def reference_attention():
             if getattr(m, "source_attention_math_policy", "reference") != "reference":
                 key = "source_all_retained_broadcast_attention" if broadcast else "source_attention_math_reference"
@@ -401,10 +492,12 @@ class Attention:
                     m.scheduled_kv_calls[key] = m.scheduled_kv_calls.get(key, 0) + length*pooled.shape[1]*c.head_dim*4
             return selected_attention(
                 q, local, mask, pooled, indices, valid, self.sinks,
-                gathered=(decode_selected_kv(owner, indices, valid, shared,
+                gathered=(short_gather if short_policy else decode_selected_kv(owner, indices, valid, shared,
                                             counters=m.scheduled_kv_calls)
-                          if pooled is not None and length == 1
+                          if (pooled is not None or packed_pooled is not None) and length == 1
                           and m.selected_kv_policy == "decode_reuse" else None),
+                **({"packed_pooled": packed_pooled, "counters": m.scheduled_kv_calls}
+                   if packed_pooled is not None else {}),
                 **({"trusted_broadcast": True} if broadcast else {}),
             )
         if getattr(m, "source_attention_math_policy", "reference") == "omlx_nax_bf16_online_v1":
@@ -412,6 +505,12 @@ class Attention:
             raw_attention = dispatch(q, local, mask, pooled, indices, valid, self.sinks,
                                      trusted_retained=trusted_retained, reference=reference_attention,
                                      counters=m.scheduled_kv_calls)
+        elif getattr(m, "source_attention_math_policy", "reference") in ('source_short_decode_joint_f32_v1','source_short_decode_grouped_f32_v1'):
+            from .deepseek_v41_short_attention import dispatch
+            raw_attention = dispatch(q,local,mask,pooled,indices,valid,self.sinks,
+                policy=m.source_attention_math_policy,
+                gathered=short_gather,
+                reference=reference_attention,counters=m.scheduled_kv_calls)
         else:
             raw_attention = reference_attention()
         out = m.round(raw_attention)
@@ -488,13 +587,16 @@ class Block:
         )
 
     def attention_half(self, h, pre, state, cache, shared):
-        m, c = self.model, self.c
+        m = self.model
         attn_pre, post, comb = self.mixes(h, "attn")
         x = m.norm(m.collapse(h, pre), self.attn_norm)
         x = self.attn(x, state, cache, shared)
         collapsed = None
         if getattr(m,"source_hc_boundary_policy","reference") == "expand_collapse_seq":
-            from .deepseek_v41_source_hc_boundary import can_expand_collapse,expand_collapse
+            from .deepseek_v41_source_hc_boundary import (
+                can_expand_collapse,
+                expand_collapse,
+            )
             if can_expand_collapse(x,h,post,comb,attn_pre):
                 h,collapsed=expand_collapse(x,h,post,comb,attn_pre)
                 key="source_hc_boundary_expand_collapse"
@@ -508,10 +610,19 @@ class Block:
         x = m.norm(m.collapse(h, attn_pre)if collapsed is None else collapsed, self.ffn_norm)
         return h, x, ffn_pre, post, comb
 
-    def router(self, x):
+    def router(self, x, image_mask=None):
         m, c = self.model, self.c
         route = route_experts
-        if getattr(m,"pointwise_policy","reference") == "fused":
+        correction = self.correction
+        if image_mask is not None:
+            image_mask = np.asarray(image_mask)
+            if image_mask.dtype != np.bool_ or image_mask.shape != (x.shape[1],):
+                raise ValueError("V4.1 image routing mask must match query rows")
+            visual = self.w.array(self.prefix + "exp_probs_b_vl.bias").astype(mx.float32)
+            if visual.shape != self.correction.shape:
+                raise ValueError("V4.1 visual router bias topology mismatch")
+            correction = mx.where(mx.array(image_mask)[None, :, None], visual, self.correction)
+        if image_mask is None and getattr(m,"pointwise_policy","reference") == "fused":
             from .deepseek_v41_fused import router, self_check
             self_check()
             route = router
@@ -519,7 +630,7 @@ class Block:
             m.linear(x, self.prefix + "ffn_gate_inp.weight", rounded=False),
             top_k=c.num_experts_per_tok,
             scale=c.routed_scaling_factor,
-            correction=self.correction,
+            correction=correction,
             normalize=c.norm_topk_prob,
         )
 
@@ -547,7 +658,7 @@ class Block:
     def finish(self, h, routed, shared_out, post, comb):
         m = self.model
         if getattr(m,"hc_epilogue_policy","reference") == "fused" and m.hc_policy == "fused_fp32":
-            from .deepseek_v41_fused import expand,epilogue_check
+            from .deepseek_v41_fused import epilogue_check, expand
             epilogue_check()
             return expand(routed,h,post,comb,shared_out)
         return m.round(hc_expand(m.round(routed + shared_out), h, post, comb, policy=m.hc_policy))
@@ -555,7 +666,8 @@ class Block:
     def __call__(self, h, pre, state, cache, shared):
         c = self.c
         h, x, ffn_pre, post, comb = self.attention_half(h, pre, state, cache, shared)
-        indices, scores = self.router(x)
+        image_mask = shared.get("_image_mask")
+        indices, scores = self.router(x) if image_mask is None else self.router(x, image_mask=image_mask)
         overlap = (getattr(self.w, "expert_io_policy", "blocking") == "overlap"
                    and self.w.expert_stream is not None)
         token=None
@@ -575,11 +687,21 @@ class Block:
         try:
             if overlap:
                 ticket=self.w.expert_stream.prepare(self.prefix[:-1], indices.reshape(-1,c.num_experts_per_tok))
-            routed = None if overlap else routed_experts()
-            shared_out = self.shared_expert(x,**({'ffn_input_token':token}if token is not None else{}))
-            if overlap:
-                mx.async_eval(shared_out)
-                routed = routed_experts()
+            if getattr(self.w,'source_submission_policy','reference') == 'shared_first_v1':
+                if overlap:
+                    raise ValueError('Source shared-first does not admit asynchronous expert tickets')
+                from ...adapters.deepseek_v41_source_submission import (
+                    shared_before_route,
+                )
+                routed, shared_out = shared_before_route(
+                    lambda: self.shared_expert(x,**({'ffn_input_token':token}if token is not None else{})),
+                    routed_experts, submit=mx.async_eval, counters=self.w.scheduled_dense_calls)
+            else:
+                routed = None if overlap else routed_experts()
+                shared_out = self.shared_expert(x,**({'ffn_input_token':token}if token is not None else{}))
+                if overlap:
+                    mx.async_eval(shared_out)
+                    routed = routed_experts()
         except BaseException:
             if ticket is not None:
                 self.w.expert_stream.cancel(ticket)
@@ -605,6 +727,10 @@ class DeepSeekV41Model:
         selected_kv_policy="reference",
         source_attention_math_policy="reference",
         source_hc_boundary_policy="reference",
+        kv_storage_policy="reference",
+        candidate_score_policy="reference",
+        ced_policy="reference",
+        context_limit=None,
     ):
         if hc_policy not in ("reference", "fused_fp32"):
             raise ValueError("unsupported V4.1 HC policy")
@@ -614,9 +740,18 @@ class DeepSeekV41Model:
             raise ValueError("Source HC coefficients cannot combine with legacy fused HC")
         if qat_policy not in ("reference", "fused_fp32"):
             raise ValueError("unknown V4.1 QAT policy")
+        if kv_storage_policy not in KV_STORAGE_POLICIES or candidate_score_policy not in CANDIDATE_SCORE_POLICIES or ced_policy not in CED_POLICIES:
+            raise ValueError("unknown V4.1 CSA2/CED policy")
+        if kv_storage_policy == "native_packed" and (not config.simulate_quantization or config.activation_dtype != "bfloat16" or qat_policy != "reference"):
+            raise ValueError("native packed QAT requires reference QAT and BF16 activation boundaries")
+        if kv_storage_policy == "native_packed" and source_attention_math_policy != "reference":
+            raise ValueError("native packed KV requires reference selected attention math")
+        self.kv_storage_policy = kv_storage_policy
+        self.candidate_score_policy = candidate_score_policy
+        self.ced_policy = ced_policy
         if index_policy not in INDEX_POLICIES or selected_kv_policy not in SELECTED_KV_POLICIES:
             raise ValueError("unknown V4.1 index or selected-KV policy")
-        if source_attention_math_policy not in ("reference", "all_retained_broadcast", "omlx_nax_bf16_online_v1"):
+        if source_attention_math_policy not in ("reference", "all_retained_broadcast", "omlx_nax_bf16_online_v1", "source_short_decode_joint_f32_v1", "source_short_decode_grouped_f32_v1"):
             raise ValueError("unknown Source attention math policy")
         if source_attention_math_policy != "reference" and index_policy != "finite_all_retained":
             raise ValueError("Source attention broadcast requires finite_all_retained index policy")
@@ -632,7 +767,13 @@ class DeepSeekV41Model:
         self.scheduled_hc_calls = {}
         self.qat_policy = qat_policy
         self.args, self.weights, self.hc_policy = config, weights, hc_policy
-        self.context_limit = min(config.max_position_embeddings, 65536)
+        if context_limit is None:
+            context_limit = min(config.max_position_embeddings, 65536)
+        if (type(context_limit) is not int or not 1 <= context_limit <= min(config.max_position_embeddings, 1048576)):
+            raise ValueError("V4.1 context limit must fit configured positions and the 1M route bound")
+        if context_limit > 65536 and (kv_storage_policy != "native_packed" or candidate_score_policy != "candidate_only"):
+            raise ValueError("V4.1 context above 65536 requires native packed KV and candidate-only scoring")
+        self.context_limit = context_limit
         self.identity = (
             identity
             + ":"
@@ -649,8 +790,16 @@ class DeepSeekV41Model:
         if source_attention_math_policy == "omlx_nax_bf16_online_v1":
             from .deepseek_v41_source_attention import implementation_identity
             self.identity += ":source_attention_implementation=" + implementation_identity()
+        if source_attention_math_policy in ('source_short_decode_joint_f32_v1','source_short_decode_grouped_f32_v1'):
+            from .deepseek_v41_short_attention import implementation_identity
+            self.identity += ':source_attention_implementation='+implementation_identity()
         if source_hc_boundary_policy != "reference":
             self.identity += ":source_hc_boundary=" + source_hc_boundary_policy
+        for name, value in (("kv_storage", kv_storage_policy), ("candidate_score", candidate_score_policy), ("ced", ced_policy)):
+            if value != "reference":
+                self.identity += ":" + name + "=" + value
+        if context_limit != min(config.max_position_embeddings, 65536):
+            self.identity += ":context_limit=" + str(context_limit)
         execution_geometry = {
             "config": asdict(config),
             "compute": getattr(weights, "compute_policy", "reference"),
@@ -741,7 +890,7 @@ class DeepSeekV41Model:
 
     def expand(self,branch,residual,post,comb):
         if getattr(self,"hc_epilogue_policy","reference") == "fused" and self.hc_policy == "fused_fp32":
-            from .deepseek_v41_fused import expand,epilogue_check
+            from .deepseek_v41_fused import epilogue_check, expand
             epilogue_check()
             return expand(branch,residual,post,comb)
         return self.round(hc_expand(branch,residual,post,comb,policy=self.hc_policy))
@@ -777,8 +926,9 @@ class DeepSeekV41Model:
 
     def make_cache(self):
         c = self.args
+        cache_class = self.cache_class
         return [
-            DeepSeekV41LayerCache(
+            cache_class(
                 r,
                 xp=mx,
                 identity=self.identity,
@@ -791,6 +941,14 @@ class DeepSeekV41Model:
             )
             for i, r in enumerate(c.compress_ratios)
         ]
+
+    @property
+    def cache_class(self):
+        if getattr(self, "kv_storage_policy", "reference") == "native_packed":
+            from .deepseek_v41_packed_cache import DeepSeekV41PackedLayerCache
+
+            return DeepSeekV41PackedLayerCache
+        return DeepSeekV41LayerCache
 
     def validate_forward(self, inputs, cache, logits_to_keep=None):
         if self._weights_parked:
@@ -812,7 +970,7 @@ class DeepSeekV41Model:
             raise ValueError("V4.1 cache layer count/ownership mismatch")
         for i, state in enumerate(cache):
             if (
-                type(state) is not DeepSeekV41LayerCache
+                type(state) is not self.cache_class
                 or state.identity != self.identity
                 or state.ratio != c.compress_ratios[i]
                 or state.source != (i in c.kv_source_layer_ids)
@@ -845,9 +1003,41 @@ class DeepSeekV41Model:
         logits_to_keep=None,
         capture_layers=(),
         body_only=False,
+        dependency_prefill=False,
+        image_inputs=None,
+        embedding_override=None,
+        image_mask=None,
+        head_hidden_only=False,
     ):
         c = self.args
         cache, ids = self.validate_forward(inputs, cache, logits_to_keep)
+        if image_inputs is not None:
+            if embedding_override is not None or image_mask is not None:
+                raise ValueError("V4.1 duplicate visual embedding input")
+            prepare = getattr(self, "vision_inputs", None)
+            if prepare is None:
+                raise ValueError("V4.1 vision input provider unavailable")
+            embedding_override, image_mask = prepare(inputs, cache, image_inputs)
+        if embedding_override is not None or image_mask is not None:
+            if capture_layers or self.ced_policy != "reference" or dependency_prefill:
+                raise ValueError("V4.1 vision requires ordinary full-depth prefill without DSpark taps")
+            image_mask = np.asarray(image_mask)
+            if (embedding_override is None or embedding_override.shape != (1, inputs.shape[1], c.hidden_size)
+                    or embedding_override.dtype != mx.float32 or image_mask.dtype != np.bool_
+                    or image_mask.shape != (inputs.shape[1],)):
+                raise ValueError("V4.1 visual embeddings/mask geometry mismatch")
+        if dependency_prefill and (capture_layers or body_only or logits_to_keep != 1):
+            raise ValueError("dependency CED requires final-row logits without taps")
+        starts = (0,) * len(self.layers)
+        base_offset = 0
+        if dependency_prefill:
+            from .deepseek_v41_ced import dependency_starts, trim_shared
+
+            starts = dependency_starts(c, inputs.shape[1])
+            base_offset = cache[0].offset
+        begin_frame=getattr(self.weights,'begin_source_frame',None)
+        if begin_frame is not None and getattr(self.weights,'source_row_packet_policy','reference')!='reference':
+            begin_frame(cache[0].offset,inputs.shape[1])
         hashes = tail = None
         stream = getattr(self.weights, "expert_stream", None)
         if stream is not None and stream.atlas is not None:
@@ -856,30 +1046,48 @@ class DeepSeekV41Model:
             stream.begin_context(ExpertStreamAtlas.keys(self.hasher.token_map[ids[0]],
                                                        np.asarray(cache[0].hash_tail)[::-1]))
         if self.hasher is not None:
-            hashes, tail = self.hasher(ids[0], np.asarray(cache[0].hash_tail))
+            hashes, tail = self.hasher(ids[0], np.asarray(cache[0].hash_tail),
+                                       **({"mask": ~image_mask} if image_mask is not None else {}))
             for index, layer in enumerate(c.engram_layer_ids):
                 self.engram_tables[layer].prefetch(hashes[:, index])
         for state in cache:
             state._in_forward = True
         with self._weight_scope():
-            x = self.round(self.weights.embedding(inputs.astype(mx.uint32)))
+            x = self.round(self.weights.embedding(inputs.astype(mx.uint32))
+                           if embedding_override is None else embedding_override)
             h = mx.broadcast_to(
                 x[:, :, None], (1, inputs.shape[1], c.hc_mult, c.hidden_size)
             )
             pre = mx.broadcast_to(mx.array([1.0] + [0.0] * (c.hc_mult - 1)), h.shape[:-1])
             self._weight_eval(h, pre)
         shared = {}
+        if image_mask is not None:
+            shared["_image_mask"] = image_mask
         from .deepseek_v41_frame_geometry import frame_geometry
         geometry = frame_geometry(self.weights, inputs.shape[1], self.scheduled_kv_calls)
         if geometry is not None:
             shared["_source_prefill_geometry"] = geometry
         taps = []
+        active_start = 0
         for i, (block, state) in enumerate(zip(self.layers, cache)):
+            if starts[i] != active_start:
+                delta = starts[i] - active_start
+                h, pre = h[:, delta:], pre[:, delta:]
+                trim_shared(shared, delta)
+                active_start = starts[i]
+            if active_start:
+                # The gap's outputs are outside every future dependency. Its
+                # first W-1 query outputs are warmup, discarded by the next
+                # layer's shrink. The retained W local keys are all exact.
+                state.keys = None
+                state.offset = base_offset + active_start
             with self._weight_scope():
                 if i in c.engram_layer_ids:
-                    h = self.engram(h, i, hashes[:, c.engram_layer_ids.index(i)])
+                    enriched = self.engram(h, i, hashes[active_start:, c.engram_layer_ids.index(i)])
+                    h = (enriched if image_mask is None else
+                         mx.where(mx.array(image_mask)[None, :, None, None], h, enriched))
                 if i in capture_layers:
-                    taps.append(mx.mean(h, axis=-2))
+                    taps.append(self.round(mx.mean(h, axis=-2)))
                 evaluate_block = getattr(self.weights, "evaluate_block", None)
                 if evaluate_block is not None:
                     # Adapter-owned transactions must complete and resolve every
@@ -890,23 +1098,43 @@ class DeepSeekV41Model:
                 else:
                     h, pre = block(h, pre, state, cache, shared)
                     if self.eval_interval and mx.default_device() == mx.gpu:
-                        mx.async_eval(h, pre)
+                        bank = getattr(self.weights, 'source_resident_bank_session', None)
+                        bank_decode = (inputs.shape[1] == 1 and bank is not None
+                                       and getattr(bank, 'active', False))
+                        submission = getattr(bank, 'submission_policy', 'per_layer_async_v1')
+                        deferred = (bank_decode and (submission == 'whole_forward_v1'
+                                    or submission == 'layer_group_2_v1' and (i + 1) % 2 != 0
+                                    or submission == 'layer_group_4_v1' and (i + 1) % 4 != 0))
+                        if bank_decode and isinstance(getattr(bank, 'stats', None), dict):
+                            counter = 'layer_async_deferred' if deferred else 'layer_async_submitted'
+                            bank.stats[counter] = bank.stats.get(counter, 0) + 1
+                        if not deferred:
+                            mx.async_eval(h, pre)
                     self._weight_eval(h, pre, [v.state for v in cache], shared, taps)
+        if dependency_prefill:
+            self.scheduled_kv_calls["ced_prefill_calls"] = self.scheduled_kv_calls.get("ced_prefill_calls", 0) + 1
+            self.scheduled_kv_calls["ced_skipped_layer_rows"] = self.scheduled_kv_calls.get("ced_skipped_layer_rows", 0) + sum(starts)
         if tail is not None:
             cache[0].hash_tail = mx.array(tail, mx.int32)
         features = mx.concatenate(taps, -1) if taps else None
         with self._weight_scope():
             hidden = self.norm(self.collapse(h, pre), self.norm_weight)
-            hidden = (
+            if dependency_prefill:
+                from ..prefill_checkpoint_rows import (
+                    select_checkpoint_rows_from_final_suffix,
+                )
+
+                hidden = select_checkpoint_rows_from_final_suffix(hidden, full_width=inputs.shape[1])
+            else:
+                hidden = (
                 select_checkpoint_rows(hidden)
                 if logits_to_keep is None
                 else hidden[:, -logits_to_keep:]
                 if logits_to_keep
                 else hidden
-            )
-            logits = (
-                None if body_only else self.linear(hidden, "output.weight", rounded=False)
-            )
+                )
+            logits = (hidden if head_hidden_only else None if body_only else
+                      self.linear(hidden, "output.weight", rounded=False))
             # Include the current frontier after the Engram tail assignment;
             # deferred adapter work must finish every branch before publication.
             self._weight_eval(logits, features, hidden, [v.state for v in cache], shared, taps)
@@ -918,18 +1146,59 @@ class DeepSeekV41Model:
             stream.end_context()
         return logits, features
 
-    def _forward(self, inputs, cache=None, *, logits_to_keep=None, capture_layers=(), body_only=False):
+    def _forward(self, inputs, cache=None, *, logits_to_keep=None, capture_layers=(), body_only=False,
+                 dependency_prefill=False, image_inputs=None, embedding_override=None, image_mask=None,
+                 head_hidden_only=False):
+        if (getattr(self,'_mlx2_ds41_ast_active',None) is not None
+                or getattr(self,'_mlx2_ds41_ast_poisoned',False)):
+            raise ValueError('Public Source forward cannot enter an active or poisoned AST transaction')
+        if getattr(self.weights,'_source_current_frame',None) is not None:
+            raise ValueError('Source model cannot enter a nested forward frame')
+        bank_session=getattr(self.weights,'source_resident_bank_session',None)
+        if bank_session is not None and getattr(self, "kv_storage_policy", "reference") == "native_packed":
+            raise ValueError("native packed KV cannot enter a reference-cache bank transaction")
+        if bank_session is not None and (bank_session.active or bank_session.replaying):
+            raise ValueError('Public Source forward cannot reenter an active bank transaction')
+        options = {"logits_to_keep": logits_to_keep, "capture_layers": capture_layers, "body_only": body_only,
+                   "dependency_prefill": dependency_prefill, "image_inputs": image_inputs,
+                   "embedding_override": embedding_override, "image_mask": image_mask,
+                   "head_hidden_only": head_hidden_only}
+        if not body_only and bank_session is not None and bank_session.selected(inputs,cache):
+            return bank_session.forward(self,inputs,cache,
+                lambda private:self._forward_ordinary(inputs,private,**options))
+        return self._forward_ordinary(inputs,cache,**options)
+
+    def _forward_ordinary(self, inputs, cache=None, *, logits_to_keep=None, capture_layers=(), body_only=False,
+                          dependency_prefill=False, image_inputs=None, embedding_override=None, image_mask=None,
+                          head_hidden_only=False):
+        if (getattr(self,'_mlx2_ds41_ast_active',None) is not None
+                or getattr(self,'_mlx2_ds41_ast_poisoned',False)):
+            raise ValueError('Ordinary Source forward cannot enter an active or poisoned AST transaction')
+        # Private bank execution/replay enters the ordinary implementation
+        # directly, so diagnostic wrappers around _forward run exactly once.
+        if getattr(self.weights,'_source_current_frame',None) is not None:
+            raise ValueError('Source model cannot enter a nested forward frame')
         self._weight_executions += 1
         try:
             execution = getattr(self.weights, "execution_scope", None)
-            with execution() if execution is not None else nullcontext():
+            rows_execution = getattr(self.weights, "execution_scope_for_rows", None)
+            scope = (rows_execution(inputs.shape[1]) if callable(rows_execution)
+                     else execution() if execution is not None else nullcontext())
+            with scope:
                 return self._forward_impl(inputs, cache, logits_to_keep=logits_to_keep,
-                                          capture_layers=capture_layers, body_only=body_only)
+                                          capture_layers=capture_layers, body_only=body_only,
+                                          dependency_prefill=dependency_prefill, image_inputs=image_inputs,
+                                          embedding_override=embedding_override, image_mask=image_mask,
+                                          head_hidden_only=head_hidden_only)
         finally:
+            end_frame=getattr(self.weights,'end_source_frame',None)
+            if end_frame is not None:
+                end_frame()
             self._weight_executions -= 1
 
-    def __call__(self, inputs, cache=None, *, logits_to_keep=None):
-        return self._forward(inputs, cache, logits_to_keep=logits_to_keep)[0]
+    def __call__(self, inputs, cache=None, *, logits_to_keep=None, image_inputs=None):
+        return self._forward(inputs, cache, logits_to_keep=logits_to_keep,
+                             **({"image_inputs": image_inputs} if image_inputs is not None else {}))[0]
 
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
         capture_layers = tuple(capture_layers)
@@ -963,10 +1232,40 @@ class DeepSeekV41Model:
                 inputs, cache, capture_layers, body_only=True
             )[1]
 
-    def prefill_forward(self, inputs, cache=None):
+    def prefill_forward(self, inputs, cache=None, *, image_inputs=None):
         from ..gguf.prefill_scope import dense_prefill_context
         from ..gguf.segmented_prefill import expert_prefill_context
 
+        if image_inputs is not None:
+            if self.ced_policy != "reference":
+                raise ValueError("V4.1 vision requires ordinary full-depth prefill")
+            if (inputs.ndim != 2 or inputs.shape[0] != 1 or not inputs.shape[1]
+                    or inputs.shape[1] > self.context_limit):
+                raise ValueError("invalid V4.1 visual prompt geometry")
+            cache = self.make_cache() if cache is None else cache
+            prepare = getattr(self, "vision_inputs", None)
+            if prepare is None:
+                raise ValueError("V4.1 vision input provider unavailable")
+            embeddings, image_mask = prepare(inputs, cache, image_inputs)
+            if (embeddings.shape != (1, inputs.shape[1], self.args.hidden_size)
+                    or embeddings.dtype != mx.float32 or np.asarray(image_mask).dtype != np.bool_
+                    or np.asarray(image_mask).shape != (inputs.shape[1],)):
+                raise ValueError("V4.1 visual embeddings/mask geometry mismatch")
+            image_mask = np.asarray(image_mask)
+            hidden = []
+            for first in range(0, inputs.shape[1], 1024):
+                last = min(inputs.shape[1], first + 1024)
+                with dense_prefill_context(self.weights.dense_prefill_policy, tokens=last-first), expert_prefill_context(
+                    getattr(self.weights, "expert_prefill_policy", "reference"), tokens=last-first
+                ):
+                    value, _ = self._forward(inputs[:, first:last], cache, logits_to_keep=0,
+                                             embedding_override=embeddings[:, first:last],
+                                             image_mask=image_mask[first:last], head_hidden_only=True)
+                    hidden.append(value)
+            with self._weight_scope():
+                output = self.linear(select_checkpoint_rows(mx.concatenate(hidden, 1)), "output.weight", rounded=False)
+                self._weight_eval(output, [v.state for v in cache])
+            return output
         with (
             dense_prefill_context(
                 self.weights.dense_prefill_policy, tokens=inputs.shape[1]
@@ -976,13 +1275,19 @@ class DeepSeekV41Model:
                 tokens=inputs.shape[1],
             ),
         ):
+            if self.ced_policy == "dependency_exact":
+                return self._forward(inputs, cache, logits_to_keep=1, dependency_prefill=True)[0]
             return self(inputs, cache)
 
     def verify_rows(self, inputs, cache, capture_layers=()):
-        if capture_layers or not 1 <= inputs.shape[1] <= 6:
+        if not 1 <= inputs.shape[1] <= 6:
             raise ValueError(
-                "V4.1 verifier supports a B1 ordinary chain of1..6; no foreign DSpark taps"
+                "V4.1 verifier supports a B1 ordinary chain of1..6"
             )
+        if capture_layers:
+            values = [self.forward_with_taps(inputs[:, i:i+1], cache, capture_layers)
+                      for i in range(inputs.shape[1])]
+            return mx.concatenate([v[0] for v in values], 1), mx.concatenate([v[1] for v in values], 1)
         if getattr(self, "verify_rows_policy", "serial") == "layerwise":
             return self.verify_layerwise(inputs, cache)[0], None
         return mx.concatenate(
@@ -1008,7 +1313,11 @@ class DeepSeekV41Model:
         without changing causal state, reductions or rejected-prefix commits.
         """
         from copy import copy
+
         from .deepseek_v4_cache import _copy
+
+        if getattr(self, "kv_storage_policy", "reference") == "native_packed" and retain_frontiers:
+            raise ValueError("native packed KV requires snapshot/replay verification commits")
 
         if not 1 <= inputs.shape[1] <= 6:
             raise ValueError("layerwise verification requires one to six rows")

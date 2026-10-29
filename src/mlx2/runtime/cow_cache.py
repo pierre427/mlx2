@@ -26,6 +26,7 @@ from .cache_planes import (
     CachePlaneOwner,
     CacheSegmentKey,
     CompiledScheduleMetadata,
+    ExpertResidencyHints,
     LayeredCacheManifest,
     LayeredSegmentManifest,
     PLEResidencyHints,
@@ -94,6 +95,7 @@ class COWPromptMetadata:
     transcript_ledger: TranscriptLedgerPlane | None = None
     ple_hints: PLEResidencyHints | None = None
     compiled_schedule: CompiledScheduleMetadata | None = None
+    expert_hints: ExpertResidencyHints | None = None
 
 
 @dataclass(frozen=True)
@@ -1036,6 +1038,14 @@ class COWCacheOwner:
                     ),
                 )
             )
+        if metadata.expert_hints is not None:
+            owners.append(CachePlaneOwner(kind=CachePlaneKind.EXPERT_HINTS,
+                payload=metadata.expert_hints,
+                fingerprint=CachePlaneFingerprint.from_fields(CachePlaneKind.EXPERT_HINTS,
+                    **dict(metadata.expert_hints.binding),
+                    snapshot=metadata.expert_hints.snapshot_revision,
+                    tokens=metadata.expert_hints.token_digest,
+                    hints=hashlib.sha256(repr(metadata.expert_hints.to_manifest()).encode()).hexdigest())))
         if metadata.compiled_schedule is not None:
             owners.append(
                 CachePlaneOwner(
@@ -1141,6 +1151,9 @@ class COWCacheOwner:
             ple_hints=None
             if CachePlaneKind.PLE_HINTS in self._invalid_planes
             else self.metadata.ple_hints,
+            expert_hints=None
+            if CachePlaneKind.EXPERT_HINTS in self._invalid_planes
+            else self.metadata.expert_hints,
             compiled_schedule=None
             if CachePlaneKind.COMPILED_SCHEDULE in self._invalid_planes
             else self.metadata.compiled_schedule,
@@ -1148,11 +1161,17 @@ class COWCacheOwner:
 
     def plane_stats(self) -> dict[str, dict[str, Any]]:
         stats = self.plane_manifest.stats()
+        if CachePlaneKind.EXPERT_HINTS.value in stats:
+            stats[CachePlaneKind.EXPERT_HINTS.value]['logical_bytes']=self.metadata.expert_hints.nbytes
         for kind, descriptor in self._plane_descriptors.items():
             stats[kind.value]["logical_bytes"] = descriptor.logical_bytes
             stats[kind.value]["classes"] = descriptor.classes
             stats[kind.value]["layout_digest"] = descriptor.layout_digest
         return stats
+
+    def expert_hints(self):
+        with self._lock:
+            return self._branch_metadata_locked().expert_hints if self._valid else None
 
     def segment_stats(self) -> dict[str, Any]:
         return self.segment_manifest.summary()
@@ -1381,7 +1400,7 @@ class COWPromptCacheBranch(list):
         self.cow_owner = owner
         self.cow_generation = int(generation)
         self.cow_lineage_id = owner.lineage_id
-        self.cow_metadata = owner.metadata if metadata is None else metadata
+        self._cow_metadata = owner.metadata if metadata is None else metadata
         self.cow_sidecar = sidecar
         self.cow_prep_telemetry = dataclasses.asdict(receipt)
         self.cow_plane_stats = owner.plane_stats()
@@ -1389,6 +1408,21 @@ class COWPromptCacheBranch(list):
         self._close_lock = threading.Lock()
         self._closed = False
         self._finalizer = weakref.finalize(self, owner._release_pin)
+
+    @property
+    def cow_metadata(self):
+        metadata=self._cow_metadata
+        if metadata.expert_hints is None:return metadata
+        available=self.cow_owner.expert_hints()
+        offsets=[getattr(item,'offset',None)for item in self]
+        valid=bool(offsets)and all(type(value)is int and value==offsets[0]for value in offsets)
+        hints=(metadata.expert_hints.for_restore(offsets[0])
+               if available is not None and valid else None)
+        return dataclasses.replace(metadata,expert_hints=hints)
+
+    @cow_metadata.setter
+    def cow_metadata(self,value):
+        self._cow_metadata=value
 
     @property
     def closed(self) -> bool:
@@ -1509,6 +1543,7 @@ def freeze_prompt_cache(
     prompt_host: PromptHostPlane | None = None,
     transcript_ledger: TranscriptLedgerPlane | None = None,
     ple_hints: PLEResidencyHints | None = None,
+    expert_hints: ExpertResidencyHints | None = None,
     compiled_schedule: CompiledScheduleMetadata | None = None,
     telemetry: Optional[COWCacheTelemetry] = None,
     layer_segments: bool = False,
@@ -1545,13 +1580,17 @@ def freeze_prompt_cache(
     source_sidecar = _clone_graph(
         sidecar, telemetry=telemetry, plane="draft_mtp", attach_tokens=False, memo=memo
     )
+    from .expert_residency_hints import stored_expert_hints
+    tokens=tuple((int(token)for token in tokens))
+    expert_hints=stored_expert_hints(expert_hints,tokens)
     metadata = COWPromptMetadata(
         key=key,
-        tokens=tuple((int(token) for token in tokens)),
+        tokens=tokens,
         cache_type=str(cache_type),
         prompt_host=prompt_host,
         transcript_ledger=transcript_ledger,
         ple_hints=ple_hints,
+        expert_hints=expert_hints,
         compiled_schedule=compiled_schedule,
     )
     owner = COWCacheOwner(

@@ -856,6 +856,30 @@ def install_tensorfold_lane(model):
     }
 
 
+def weight_streaming_lane_bound(adapter_factory, execution_policy, *, mode):
+    """Only an adapter's own declaration can widen streamed execution."""
+    declaration = getattr(adapter_factory, "__dict__", {}).get("weight_streaming_max_lanes")
+    if declaration is None:
+        return 1
+    hook = getattr(adapter_factory, "weight_streaming_max_lanes", None)
+    if not callable(hook):
+        raise TypeError("weight_streaming_max_lanes must be an adapter-owned callable")
+    policy = {key: value for key, value in (execution_policy or {}).items()
+              if key not in SERVER_OWNED_EXECUTION_POLICY_KEYS}
+    bound = hook(policy, mode=mode)
+    if type(bound) is not int or bound < 1:
+        raise ValueError("weight_streaming_max_lanes must return a positive integer")
+    return bound
+
+
+def validate_weight_streaming_lanes(adapter_factory, execution_policy, *, mode, max_lanes):
+    bound = weight_streaming_lane_bound(adapter_factory, execution_policy, mode=mode)
+    if type(max_lanes) is not int or not 1 <= max_lanes <= bound:
+        label = "MoE expert" if mode == "moe_experts" else "dense weight"
+        raise ValueError(f"{label} streaming requires max_lanes={bound} or less (got {max_lanes})")
+    return bound
+
+
 def weight_streaming_refusals(
     *, lane_matmul, sp_qmm, int8_prefill, verify_bitexact, multi_lora, lora_root,
     execution_policy,
@@ -2621,6 +2645,9 @@ def prefill_transient_gib(
         if single_chunk
         else min(int(uncached_tokens), int(prefill_step))
     )
+    if not single_chunk:
+        from .runtime.demand_stream_memory import recommended_prefill_rows
+        rows = recommended_prefill_rows(cache_budget, rows, context_tokens=int(context_tokens))
     return float(estimate(int(context_tokens), rows)) / float(1 << 30)
 
 
@@ -2849,6 +2876,8 @@ def ensure_admission_headroom(
     exactly the measured headroom eviction returns, so the test carries slack
     and only rules out eviction when it would fall clearly short.
     """
+    from .runtime.demand_stream_memory import allow_pressure_attempt
+
     prepare = getattr(headroom, "prepare", None)
     if callable(prepare):
         required_bytes = prepare(required_bytes)
@@ -2876,11 +2905,11 @@ def ensure_admission_headroom(
         evictable is not None
         and free + evictable() * EVICTION_ESTIMATE_SLACK < required_bytes
     ):
-        return False
+        return allow_pressure_attempt(headroom, required_bytes)
     while evict():
         if reclaimed_fits() >= required_bytes:
             return True
-    return False
+    return allow_pressure_attempt(headroom, required_bytes)
 
 
 def prepare_elastic_execution(headroom, controller, rows, *, draft_depth=0, workspace_gib=0.0):
@@ -2898,7 +2927,8 @@ def prepare_elastic_execution(headroom, controller, rows, *, draft_depth=0, work
         for context, cache_bytes, resident in rows
     )
     effective = prepare(math.ceil(required * (1 << 30)))
-    if headroom() < effective:
+    from .runtime.demand_stream_memory import allow_pressure_attempt
+    if headroom() < effective and not allow_pressure_attempt(headroom, effective):
         raise Overloaded("elastic execution memory does not fit after measured expert reclamation")
 
 
@@ -3531,6 +3561,18 @@ def engine_request(request):
     return view
 
 
+def normalize_adapter_request(adapter, request):
+    """Apply model-owned public semantics before admission or prompt inspection."""
+    normalize = getattr(adapter, "normalize_request", None)
+    if callable(normalize):
+        request = normalize(request)
+        if not isinstance(request, dict):
+            raise TypeError("adapter normalize_request must return an object")
+    elif type(request.get("reasoning_effort")) is int:
+        raise ValueError("numeric reasoning_effort is not supported by the selected adapter")
+    return request
+
+
 def validate_template_request(adapter, request):
     """Refuse opt-in template capabilities on both token and text endpoints."""
     requested = {key for key in ("preserve_thinking", "tool_call_format") if key in request}
@@ -3556,6 +3598,7 @@ def render_prompt_tokens(adapter, request):
     """
     from .runtime.literal_control_text import protect_control_text
 
+    request = normalize_adapter_request(adapter, request)
     validate_template_request(adapter, request)
     if "_mlx2_prompt_tokens" not in request:
         # Prepared media prompts were protected before their encoder ran.
@@ -4055,13 +4098,15 @@ class ServingEngine:
             execution_policy or {}
         )
         self.weight_streaming_auto = None
-        # A streamed configuration is single lane by construction: two lanes'
-        # expert working sets sum, and a shared cache thrashing between them
-        # makes page-in counts -- the only diagnostic this feature has --
-        # unreproducible.  Output would still be identical; the evidence
-        # would not be.
-        if self.moe_expert_streaming_policy["enabled"] and max_lanes != 1:
-            raise ValueError("MoE expert streaming requires max_lanes=1")
+        # Default streamed routes remain width1. A declaring adapter can own
+        # wider geometry and its summed expert working set before load. For
+        # real unresolved artifacts, defer that decision to registry resolution.
+        self.weight_streaming_lane_bound = 1
+        streaming_factory_known = (adapter_factory is not None or _validate_only
+                                   or not Path(model_path).expanduser().exists())
+        if self.moe_expert_streaming_policy["enabled"] and streaming_factory_known:
+            self.weight_streaming_lane_bound = validate_weight_streaming_lanes(
+                adapter_factory, execution_policy, mode="moe_experts", max_lanes=max_lanes)
         self.dense_weight_streaming_policy = dense_weight_streaming_policy(
             (execution_policy or {}).get("dense_weight_streaming")
         )
@@ -4071,8 +4116,9 @@ class ServingEngine:
                     "MoE expert streaming and dense weight streaming are mutually "
                     "exclusive in this slice"
                 )
-            if max_lanes != 1:
-                raise ValueError("dense weight streaming requires max_lanes=1")
+            if streaming_factory_known:
+                self.weight_streaming_lane_bound = validate_weight_streaming_lanes(
+                    adapter_factory, execution_policy, mode="dense_mlp", max_lanes=max_lanes)
         # The streaming manager.  Adapter-owned (and closed by the adapter)
         # on the early-load path; engine-owned only on the legacy path.
         self.expert_stream = None
@@ -4425,7 +4471,12 @@ class ServingEngine:
         )
         self.multi_lora = None
         if self.weight_streaming_enabled():
-            self._refuse_unevidenced_weight_streaming(execution_policy, defer_external=True)
+            # Validate an explicit adapter's external-draft contract before
+            # the validate-only return; defer only real unresolved artifacts.
+            self.adapter_factory = adapter_factory
+            self._refuse_unevidenced_weight_streaming(
+                execution_policy, defer_external=not streaming_factory_known
+            )
         self.max_inflight, self.max_lanes = max_inflight, max_lanes
         self.max_context, self.max_request_bytes = max_context, max_request_bytes
         self.prefill_step = prefill_step
@@ -4686,6 +4737,10 @@ class ServingEngine:
             )
         self.adapter_factory = adapter_factory
         if self.weight_streaming_enabled():
+            self.weight_streaming_lane_bound = validate_weight_streaming_lanes(
+                adapter_factory, execution_policy,
+                mode="dense_mlp" if self.dense_weight_streaming_policy["enabled"] else "moe_experts",
+                max_lanes=max_lanes)
             self._refuse_unevidenced_weight_streaming(execution_policy)
         self._select_automatic_expert_streaming(adapter_factory, max_lanes)
         if self.weight_streaming_enabled():
@@ -5559,6 +5614,7 @@ class ServingEngine:
             adapter = self.adapter
             if adapter is None:
                 raise RuntimeError("model adapter is not ready")
+            request = normalize_adapter_request(adapter, engine_request(request))
             validate_template_request(adapter, request)
             render = getattr(adapter, "render_prompt", None)
             if not callable(render):
@@ -5586,6 +5642,7 @@ class ServingEngine:
 
                 raise CapabilityUnavailable("the selected adapter does not implement generation")
         request = engine_request(request)
+        request = normalize_adapter_request(getattr(self, "adapter", None), request)
         handle = getattr(self, "verify_bitexact_handle", None)
         check_verify_bitexact(request, handle)
         if (
@@ -6479,9 +6536,12 @@ class ServingEngine:
         )
         factory = getattr(self, "adapter_factory", None)
         contract = getattr(factory, "__dict__", {}).get("weight_streaming_external_draft")
-        if defer_external or (callable(contract) and contract(execution_policy or {}) is True):
+        adapter_policy = {key: value for key, value in (execution_policy or {}).items()
+                          if key not in SERVER_OWNED_EXECUTION_POLICY_KEYS}
+        if defer_external or (callable(contract) and contract(adapter_policy) is True):
             # An adapter may prove a narrow external route uses its same
-            # ordinary target arithmetic and owns no streamed draft weights.
+            # ordinary target arithmetic, with its own explicit auxiliary
+            # admission and lifetime contract when draft weights are present.
             refused = [reason for reason in refused if reason != "external draft"]
         if refused:
             raise ValueError(
@@ -6545,11 +6605,8 @@ class ServingEngine:
                 decision["admission_limit_bytes"] / gib,
             )
         )
-        if max_lanes != 1:
-            raise ValueError(
-                message + f"; streaming requires max_lanes=1 (got {max_lanes}). "
-                "Pass --max-lanes 1, or an explicit moe_expert_streaming policy"
-            )
+        self.weight_streaming_lane_bound = validate_weight_streaming_lanes(
+            adapter_factory, self.execution_policy, mode="moe_experts", max_lanes=max_lanes)
         self._refuse_unevidenced_weight_streaming(self.execution_policy)
         self.moe_expert_streaming_policy = {
             **self.moe_expert_streaming_policy,
@@ -6569,6 +6626,7 @@ class ServingEngine:
             "selection": policy.get("selection", "explicit"),
             "decision": self.weight_streaming_auto,
             "plan": stream.plan.as_dict() if stream is not None else None,
+            "maximum_lanes": getattr(self, "weight_streaming_lane_bound", 1),
         }
         if stream is not None and (
             getattr(stream, "elastic", None) is not None
@@ -6860,6 +6918,8 @@ class ServingEngine:
                     "selected_host_branches": qvm.selected_host_branch_snapshot(),
                 },
                 "recent_receipts": receipts,
+                **({"checkpoint_resources": self._last_checkpoint_resource_receipt}
+                   if hasattr(self, "_last_checkpoint_resource_receipt") else {}),
                 "recent_operation_receipts": list(self.operation_receipts),
                 "model_revision": self.model_revision,
                 "lora": {
@@ -7776,6 +7836,9 @@ class ServingEngine:
         HTTP-thread guards below need the same figure before that exists, so
         the rule is evaluated here from the same one-shot host reading.
         """
+        from .runtime.demand_stream_memory import demand_stream_enabled
+        if demand_stream_enabled(getattr(self, 'expert_stream', None)):
+            return self.stream_unfilled_reserve_gib() + self.projection_workspace_reserve_gib()
         cached = getattr(self, "_hard_reserve_gib", None)
         if cached is None:
             from .memory import host_memory_gib, metal_advisory_gib
@@ -7808,6 +7871,13 @@ class ServingEngine:
                if floor_gib else {}),
         ) if policy.get("enabled") else execution_headroom
         stream = getattr(self, "expert_stream", None)
+        from .runtime.demand_stream_memory import demand_stream_enabled, DemandStreamHeadroom
+        if demand_stream_enabled(stream):
+            # This route can stream on a small host and accepts paging. The
+            # Metal recommendation is a tuning hint, not an allocation limit.
+            from .memory import host_available_bytes
+            return DemandStreamHeadroom(
+                lambda: int(host_available_bytes(host_signals=True)), stream)
         if getattr(stream, "elastic", None) is None:
             return measure
         from .runtime.elastic_memory import ElasticHeadroom
@@ -8824,9 +8894,26 @@ class ServingEngine:
             count_add(self.counts, "apcv2_store_skipped_numerical_schedule", 1)
             return False
         try:
+            # Optional metadata and the numeric store must see the same token
+            # sequence even when a caller supplies a one-shot iterable.
+            if not isinstance(tokens, (list, tuple)):
+                tokens = list(tokens)
             # APCv2 charges what the arrays hold, so they must own their
             # bytes before it takes them (see ``detach_checkpoint_graph``).
             detach_checkpoint_graph(prompt_cache, kwargs.get("sidecar"))
+            if "expert_hints" not in kwargs:
+                from .runtime.checkpoint_resources import publication_hints
+                hints, hint_receipt = publication_hints(
+                    getattr(self, "adapter", None), prompt_cache, tokens
+                )
+                if hints is not None:
+                    kwargs["expert_hints"] = hints
+                elif hint_receipt["action"] == "declined":
+                    count_add(self.counts, "apc_expert_hints_publication_declined", 1)
+            if kwargs.get("expert_hints") is not None:
+                # APC may independently drop an optional hint under its
+                # metadata budget; an offer is not a publication receipt.
+                count_add(self.counts, "apc_expert_hints_offered", 1)
             capabilities = apc.store(key, tokens, prompt_cache, **kwargs)
             return getattr(capabilities, "stored", None) is not False
         except Exception:  # noqa: BLE001 - the worker must outlive one bad checkpoint
@@ -9910,6 +9997,12 @@ class ServingEngine:
                 }
             settings["execution_policy"] = dict(config)
             external_draft = config.get("backend") == "external_draft"
+            route_reuse_reason = config.get('apcv2_reuse_disabled_reason')
+            if route_reuse_reason is not None:
+                if not isinstance(route_reuse_reason,str) or not route_reuse_reason.strip():
+                    raise ValueError('adapter APCv2 reuse restriction must name its reason')
+                self.apc_reuse_disabled_reason = route_reuse_reason
+                settings['apcv2_reuse'] = {'enabled':False,'reason':route_reuse_reason}
             if config.get("external_varlen_prefill"):
                 # The current source-bound evidence compares serial B1 with
                 # packed B4 and is not full parity (8/12 greedy cases).  A
@@ -10487,6 +10580,15 @@ class ServingEngine:
                 route_receipt = route.receipt
                 route_capabilities = route.profile.capabilities
                 approximate_evidence = tuple(route.profile.evidence)
+            capability_hook = getattr(adapter, "effective_route_capabilities", None)
+            if callable(capability_hook):
+                route_capabilities = frozenset(capability_hook(
+                    route_capabilities,
+                    route=("external_draft" if external_draft else "prompt_lookup" if prompt_lookup else "native_mtp" if self.mtp else "ordinary"),
+                    max_lanes=self.max_lanes,
+                ))
+                if not route_capabilities <= implemented_capabilities:
+                    raise ValueError("adapter route capabilities exceed implemented capabilities")
             if self.adaptive_profile_receipt is not None:
                 from .adaptive_profile import (
                     bind_live_profile,
@@ -10718,6 +10820,8 @@ class ServingEngine:
 
             def lookup_apc(key, tokens, **kwargs):
                 """APCv2 lookup, or an explicit cold miss for unsafe routes."""
+                if not isinstance(tokens, (list, tuple)):
+                    tokens = list(tokens)
                 if self.apc_reuse_disabled_reason is not None:
                     count_add(self.counts, "apcv2_lookup_bypassed_route", 1)
                     return APCLookup(
@@ -10737,7 +10841,18 @@ class ServingEngine:
                 # Self-MTP decodes a target-only hit at ``len - 1`` plainly
                 # (route_usable_hit); external draft refuses every one.
                 kwargs.setdefault("allow_target_only_plain", not external_draft)
-                return apc.lookup(key, tokens, **kwargs)
+                from .runtime.checkpoint_resources import resource_binding, restore_resources
+                binding = resource_binding(adapter)
+                if binding is not None:
+                    kwargs.setdefault("expert_hint_binding", binding)
+                hit = apc.lookup(key, tokens, **kwargs)
+                resource_receipt = restore_resources(adapter, hit, tokens)
+                if resource_receipt["action"] == "adapter":
+                    count_add(self.counts, "apc_expert_hint_restore_calls", 1)
+                elif resource_receipt["action"] == "declined":
+                    count_add(self.counts, "apc_expert_hint_restore_declined", 1)
+                self._last_checkpoint_resource_receipt = resource_receipt
+                return hit
 
             def discard_lookup(hit, reason):
                 """Withdraw APCv2 credit for a lookup this request does not use.
@@ -10790,6 +10905,7 @@ class ServingEngine:
             # advisory has not already withheld, so it needs both; ``None``
             # for either keeps the 128 GiB calibration's 16+4 GiB.
             from .memory import host_memory_gib, metal_advisory_gib
+            from .runtime.demand_stream_memory import demand_stream_enabled
 
             controller = SelfMTPLaneAdmissionController(
                 host_memory_gib=host_memory_gib(),
@@ -10819,6 +10935,9 @@ class ServingEngine:
                     else 0.0
                 ),
                 workspace_reserve_gib=self.projection_workspace_reserve_gib,
+                memory_pressure_policy=(
+                    "attempt_after_reclaim" if demand_stream_enabled(
+                        getattr(self, "expert_stream", None)) else "bounded"),
             )
             # One line, once per server, naming every term of the admission
             # budget. The reserve is derived from two host readings now, and
@@ -10844,6 +10963,8 @@ class ServingEngine:
                 controller.service_reserve_gib,
                 controller.driver_allowance_gib,
             )
+            if controller.memory_pressure_policy == "attempt_after_reclaim":
+                mlx_limit = None
             if (
                 mlx_limit is not None
                 and mx.metal.is_available()
@@ -11228,7 +11349,8 @@ class ServingEngine:
             def replay_ready(job):
                 """Replay once pressure is below CRITICAL and every lane the
                 preemption was made for has progressed (or ended)."""
-                if self.memory_pressure_level() >= PressureLevel.CRITICAL:
+                if (self.memory_pressure_level() >= PressureLevel.CRITICAL
+                        and not demand_stream_enabled(getattr(self,'expert_stream',None))):
                     return False
                 if job.preempt_blockers:
                     by_id = {lane.id: lane for lane in active.values()}
@@ -11387,6 +11509,8 @@ class ServingEngine:
                     "runtime_source_scope": source_scope_status,
                     "dependency_builds": {"mlx_vlm": getattr(adapter, "mlx_vlm_build", None)},
                     "artifact": adapter.identity["fingerprint"],
+                    "base_artifact": adapter.identity.get("base_fingerprint", adapter.identity["fingerprint"]),
+                    "artifact_derivation": adapter.identity.get("derivation"),
                     "profile": profile_name,
                     "settings": settings,
                     "chat_template_options": (
@@ -13928,6 +14052,7 @@ class ServingEngine:
                             trigger = "stall"
                         elif (
                             self.memory_preemption_policy["on_pressure"]
+                            and not demand_stream_enabled(getattr(self,'expert_stream',None))
                             and self.memory_pressure_level()
                             >= PressureLevel.CRITICAL
                         ):
@@ -14472,6 +14597,9 @@ class ServingEngine:
                                 )
                                 (finalize or job.detokenizer.finalize)()
                             text = job.detokenizer.last_segment
+                            record_token = getattr(job.output_parser, "record_output_token", None)
+                            if callable(record_token):
+                                record_token(text, None if response.finish_reason == "stop" else int(response.token))
                             finish_output = getattr(job.output_parser, "finish", None)
                             if response.finish_reason and callable(finish_output):
                                 deltas = finish_output(text, response.finish_reason)
@@ -14849,6 +14977,7 @@ class ServingEngine:
                                         ),
                                         "session_id": job.request.get("session_id"),
                                         "reasoning_effort": job.request.get("reasoning_effort"),
+                                        "requested_reasoning_effort": job.request.get("_mlx2_reasoning_effort_requested", job.request.get("reasoning_effort")),
                                         "effort_semantics": getattr(adapter, "reasoning_effort_semantics", "thinking_toggle"),
                                         "context_limit": min(self.max_context, job.request.get("context_limit", self.max_context)),
                                         # A constraint is reported as enforced only

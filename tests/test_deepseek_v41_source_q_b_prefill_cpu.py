@@ -170,4 +170,5 @@ def test_dense_receipt_and_adapter_wiring(monkeypatch,w):
     receipt=w.dense_receipt();assert receipt['source_q_b_prefill']=='tile64x32_raw'
     text=inspect.getsource(DeepSeekV41SourceAdapter._load)
     assert "q_b_prefill_policy=self.kernel_policy.get('deepseek_source_q_b_prefill','reference')" in text
-    assert 'json.dumps(self.kernel_policy, sort_keys=True)'in text
+    # Target arithmetic identity excludes independently admitted auxiliary owners.
+    assert 'json.dumps(target_policy, sort_keys=True)'in text

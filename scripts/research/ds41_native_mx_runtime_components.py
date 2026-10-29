@@ -115,7 +115,7 @@ def run_components(mx,np,capture_dir,out,report,compare,atomic):
             key=(case['layer'],case['expert'])
             if key!=active:
                 if active is not None:
-                    mx.synchronize();del expert,host,views,bound;active=None;mx.clear_cache()
+                    mx.synchronize();expert=None;host=None;views=None;bound=None;active=None;mx.clear_cache()
                 if key not in hot_keys:raise ValueError('Runtime smoke original expert outside frozen precision map')
                 host=read_original_packed(artifact,*key);views=host.views()
                 files=sorted({artifact['tensors'][name]['file']for name in expert_names(*key)})
@@ -177,7 +177,7 @@ def run_components(mx,np,capture_dir,out,report,compare,atomic):
         write();return section
     finally:
         mx.synchronize()
-        if active is not None:del expert,host,views,bound
+        if active is not None:expert=None;host=None;views=None;bound=None
         mx.clear_cache()
 
 

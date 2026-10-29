@@ -193,7 +193,7 @@ def test_server_startup_exits_non_zero_with_the_refusal(monkeypatch, tmp_path, c
     monkeypatch.setattr(exit_trace.ExitTrace, "install", lambda self, fault_log=None: self)
     monkeypatch.setattr(
         registry, "inspect_model",
-        lambda path: types.SimpleNamespace(artifact_fingerprint="sha256:fake"),
+        lambda path: types.SimpleNamespace(artifact_fingerprint="sha256:fake", adapter_type=adapter_class),
     )
     monkeypatch.setattr(
         server, "resolve_route_selection",

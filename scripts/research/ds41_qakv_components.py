@@ -5,7 +5,6 @@ remain resident. Captured Q_b/Wo_b evidence supplies identity, not Qa/KV inputs.
 """
 import gc
 import hashlib
-import json
 from pathlib import Path
 
 LIMIT = 6 << 30

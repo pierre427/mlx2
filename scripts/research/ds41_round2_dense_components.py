@@ -201,9 +201,9 @@ def run(mx, np, artifact, out, report, compare, atomic):
                 ordinary_logical_cast_input_bytes=8192*4096*2,
                 ordinary_logical_cast_result_bytes=8192*4096*4,
                 cast_materialization='Allocator peak differences are evidence; logical expressions alone do not prove DRAM traffic')
-            del x
+            x=None
             clear()
-        del weight
+        weight=None
 
     def head():
         name = artifact['aliases']['output.weight']
@@ -245,9 +245,9 @@ def run(mx, np, artifact, out, report, compare, atomic):
                 reference_scope='Current ordinary Source head retains F32 coefficients prepared at startup',
                 cast_diagnostic_scope='Additional diagnostic BF16-to-F32 cast per call; not the current ordinary loader policy',
                 allocator_resident_setup='BF16 and prepared F32 coefficient tables held concurrently only for component parity/timing')
-            del x
+            x=None
             clear()
-        del reference_weight,weight
+        reference_weight=None;weight=None
 
     def dense_qat():
         gate_alias,up_alias = 'blk.0.ffn_gate_shexp.weight','blk.0.ffn_up_shexp.weight'
@@ -301,9 +301,9 @@ def run(mx, np, artifact, out, report, compare, atomic):
                 original_tensors=names,cropped_output_rows=256)
             row['scheduled_candidate_counters_cumulative'] = dict(candidate.scheduled_dense_calls)
             if reference is not None:row['scheduled_reference_counters_cumulative'] = dict(reference.scheduled_dense_calls)
-            del x
+            x=None
             clear();write()
-        del reference,candidate,packed
+        reference=None;candidate=None;packed=None
 
     write()
     # Each helper's local closures die on return. WoA is freed before loading

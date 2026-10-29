@@ -70,7 +70,7 @@ def test_shared_failure_cancels_owned_expert_reads(tmp_path):
     block.shared_expert = fail
     try:
         with pytest.raises(RuntimeError, match="shared projection"):
-            block(None, None, None, None, None)
+            block(None, None, None, None, {})
         assert stream._ticket is None and stream.live_bytes() == 0
         stream.gather("blk.0", mx.array([[1,3]], mx.uint32), row_buffers=True)
     finally:

@@ -9,7 +9,6 @@ import gc
 import hashlib
 import importlib.util
 import json
-import signal
 import statistics
 import subprocess
 import sys
@@ -22,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT/"src"), str(ROOT/"scripts/research")]
 from mlx2.desktop_campaign_worker import atomic, check_ownership
 
-MODEL = Path("~/mlx-models/DeepSeek-V4.1-Flash-1017-Maya-XS-Abliterated-MLX-IQ1S")
+MODEL = Path(str(Path.home() / 'mlx-models/DeepSeek-V4.1-Flash-1017-Maya-XS-Abliterated-MLX-IQ1S'))
 
 
 def sha(path):

@@ -95,7 +95,7 @@ def run_legacy_gu(mx,np,capture_path,load_expert,out,report,compare,atomic,*,can
         if row['exact']:
             row['timing']=compare(mx,np,{'reference':stock_boundary,'legacy_tiles':lambda:candidate(x,data,projection=projection)},repeats=3)
         else:row['timing']=None
-        mx.synchronize();del x,data,q,s,raw,rounded,candidate_boundary,candidate_raw,partials,a,b,c
+        mx.synchronize();x=None;data=None;q=None;s=None;del raw,rounded,candidate_boundary,candidate_raw,partials,a,b,c
         observe();write()
     section['all_raw_and_boundaries_exact']=len(section['cases'])==4 and all(c['exact']for c in section['cases'])
     section['complete']=True;write()

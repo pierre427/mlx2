@@ -212,6 +212,7 @@ def test_dense_and_adapter_receipts_bind_selected_tiny_contract_and_counters(mon
     assert dense['source_prefill_down_counters']=={helper.TINY_COUNTER+'jobs':12}
     monkeypatch.setattr(DeepSeekV41MLXAdapter,'diagnostics',lambda self:{})
     a=DeepSeekV41SourceAdapter.__new__(DeepSeekV41SourceAdapter);a.weights=w;a.kernel_policy={KEY:helper.TINY_POLICY}
+    a.identity={'fingerprint':'synthetic-source'};a.draft_model=None;a.native_admission={}
     a.model=NS(source_hc_boundary_policy='reference',index_policy='reference',selected_kv_policy='reference',
         source_attention_math_policy='reference',scheduled_hc_calls={},hc_coeff_policy='reference')
     receipt=a.diagnostics()

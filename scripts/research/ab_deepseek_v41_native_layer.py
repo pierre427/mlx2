@@ -5,7 +5,6 @@ layer is a derived artifact, not a serving route or numerical qualification.
 """
 from contextlib import contextmanager
 from copy import copy
-from dataclasses import asdict
 from pathlib import Path
 import gc
 import hashlib
@@ -35,7 +34,7 @@ def prepare(model_path, destination, *, phase=print):
     from safetensors.numpy import save_file
     from mlx2.adapters.deepseek_v41_artifact import FILENAME, inspect_artifact
     from mlx2.runtime.gguf.reader import GGUFFile, FORMATS
-    from deepseek_v41_native_layer import affine_spec, convert_affine, validate_affine
+    from deepseek_v41_native_layer import convert_affine, validate_affine
 
     artifact = inspect_artifact(model_path)
     source = Path(model_path) / FILENAME
@@ -286,6 +285,7 @@ def _run_impl(adapter,mx,out,phase,*,guard):
             phase('native_layer_pair',case=index,rows=rows,repeat=repeat,seconds={name:case['variants'][name]['samples_seconds'][-1] for name in views})
             atomic(out/'native-layer-ab.json',result)
         # Isolated MoE uses identical original expert IDs/scores in every arm.
+        expected = None
         for name in ['gguf','native_experts_f32','native_all_f16']:
             target=w if name=='gguf' else views[name].weights
             def moe():

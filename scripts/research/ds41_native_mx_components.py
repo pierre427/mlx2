@@ -206,7 +206,7 @@ def run_components(mx, np, capture_dir, out, report, compare, atomic):
             row['unsupported_reason'] = str(error)
             write()
             mx.synchronize()
-            del expert, x, q, s, raw, owner, stock, host, views
+            expert=None;x=None;q=None;s=None;stock=None;del raw,owner,host,views
             mx.clear_cache()
             continue
         start = time.perf_counter()
@@ -256,7 +256,7 @@ def run_components(mx, np, capture_dir, out, report, compare, atomic):
         row['timing_preparation_scope'] = 'Complete preparation API including diagnostic roundtrip checks; prepared variant excludes that API cost'
         write()
         mx.synchronize()
-        del expert, x, q, s, raw, owner, stock, host, views, prepared, native, native_owner, repeated
+        expert=None;x=None;q=None;s=None;stock=None;prepared=None;del raw,owner,host,views,native,native_owner,repeated
         del zero_prepared, zero, again, functions, native_complete
         mx.clear_cache()
     section['verdicts'] = verdicts(section['cases'])

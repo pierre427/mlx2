@@ -38,10 +38,12 @@ from .cache_capsule import CacheCapsuleGeneration, CacheCapsulePool
 from .cache_operations import cache_operations
 from .cache_planes import (
     CompiledScheduleMetadata,
+    ExpertResidencyHints,
     PLEResidencyHints,
     PromptHostPlane,
     TranscriptLedgerPlane,
 )
+from .expert_residency_hints import stored_expert_hints
 from .cow_cache import (
     COWCacheStale,
     COWCacheTelemetry,
@@ -167,6 +169,8 @@ class APCLookup:
     # counts, so a caller that does not consume it can withdraw it
     # (``APCv2.discard_lookup_credit``).  None once withdrawn.
     apc_credit: Any = None
+    expert_hints: Optional[ExpertResidencyHints] = None
+    expert_hints_miss_reason: Optional[str] = None
 
 
 @dataclass
@@ -1126,6 +1130,9 @@ class APCv2(PrefixIndex):
             "payload_refusals": 0,
         }
         self._cow_branching = True
+        # A separate finite allowance also bounds host-only hints retained by
+        # disk placeholders, whose tensor resident charge is intentionally0.
+        self._expert_hint_metadata_limit=max(0,int(min(16<<20,self.max_bytes)))
         self._cow_telemetry = COWCacheTelemetry()
         # Snapshot buffers several resident entries hold at once (COW-1):
         # buffer key -> [nbytes, holders]; the first holder is charged.
@@ -1545,7 +1552,7 @@ class APCv2(PrefixIndex):
         disk_pins = getattr(entry, "_apc_disk_pin_expiries", {})
         resident_pins = getattr(entry, "_apc_resident_pin_expiries", {})
         token_bytes = json.dumps(list(tokens), separators=(",", ":")).encode("utf-8")
-        return {
+        result = {
             "schema": self._PERSIST_SCHEMA,
             "suspension": getattr(entry, "_apc_suspension", None),
             "key": _key_manifest(key),
@@ -1579,6 +1586,9 @@ class APCv2(PrefixIndex):
             "last_access_at": float(getattr(entry, "_apc_last_access_wall", self._wall_time())),
             "hit_count": int(getattr(entry, "_apc_hit_count", 0)),
         }
+        hints=self._entry_expert_hints(entry)
+        if hints is not None:result['expert_hints']=hints.to_manifest()
+        return result
 
     def _run_metadata_mutation_locked(self, operation, function, *args, payload_bytes=0):
         self._ensure_metadata_available()
@@ -1816,7 +1826,12 @@ class APCv2(PrefixIndex):
                     physical_bytes=disk_bytes,
                     physical_paths=tuple(disk.values()),
                 )
+                hints=stored_expert_hints(ExpertResidencyHints.from_manifest(value.get('expert_hints')),tokens)
+                if (hints is not None and self._expert_hint_metadata_bytes_locked()+hints.nbytes
+                        >self._expert_hint_metadata_limit):hints=None
+                if hints is not None:disk['expert_hints']=hints
                 entry = PrefixIndex.CacheEntry([], 0, cache_type, None)
+                entry._apc_expert_hints=hints
                 entry._apc_disk = disk
                 entry._apc_retention_role = role
                 entry._apc_next_turn_boundary = (
@@ -2575,6 +2590,30 @@ class APCv2(PrefixIndex):
         """The entry's footprint with nothing shared (a restored copy's size)."""
         return int(entry.nbytes) + int(getattr(entry, "_apc_unpaid_nbytes", 0))
 
+    @staticmethod
+    def _entry_expert_hints(entry):
+        if entry is None:return None
+        owner=getattr(getattr(entry,'prompt_cache',None),'cow_owner',None)
+        if owner is not None:return owner.expert_hints()
+        return getattr(entry,'_apc_expert_hints',None)
+
+    @classmethod
+    def _lookup_expert_hints(cls,entry,covered):
+        hints=cls._entry_expert_hints(entry)
+        return None if hints is None else hints.for_restore(covered)
+
+    def _expert_hint_metadata_bytes_locked(self,exclude=None):
+        return sum(hints.nbytes for _key,_tokens,entry in self._entry_records_locked()
+            if entry is not exclude
+            and (hints:=getattr(entry,'_apc_expert_hints',None))is not None)
+
+    @property
+    def expert_hint_metadata_stats(self):
+        with self._apc_lock:
+            return dict(logical_bytes=self._expert_hint_metadata_bytes_locked(),
+                max_logical_bytes=self._expert_hint_metadata_limit,
+                advisory=True,owns_expert_weights=False)
+
     def _live_pin_sessions_locked(self, entry, *, now_wall=None) -> list:
         """Session ids whose disk pin on ``entry`` is still live: the parked
         sessions that lose their checkpoint if the entry goes."""
@@ -2856,6 +2895,8 @@ class APCv2(PrefixIndex):
             # restore must refuse anything else there.
             "block_encoded": not job.persist and job.block_bytes > 0,
         }
+        hints=self._entry_expert_hints(entry)
+        if hints is not None:disk['expert_hints']=hints
         entry._apc_disk = disk
         self._disk_bytes += int(job.written)
         if self._persist_dir is not None:
@@ -3161,10 +3202,13 @@ class APCv2(PrefixIndex):
         return False
 
     @staticmethod
-    def _restored_resident_nbytes(cache, sidecar) -> int:
+    def _restored_resident_nbytes(cache, sidecar, expert_hints=None) -> int:
+        if expert_hints is None:
+            owner=getattr(cache,'cow_owner',None)
+            expert_hints=None if owner is None else owner.expert_hints()
         return sum((int(getattr(item, "nbytes", 0)) for item in cache)) + int(
             getattr(sidecar, "nbytes", 0)
-        )
+        ) + (0 if expert_hints is None else expert_hints.nbytes)
 
     @property
     def _resident_entry_budget(self) -> int:
@@ -3350,10 +3394,11 @@ class APCv2(PrefixIndex):
             # Treat the recorded size as an estimate, never as authority.  A
             # serializer/runtime change can alter the restored footprint; use
             # the concrete arrays to reserve again before making them visible.
-            actual = self._restored_resident_nbytes(cache, sidecar)
+            metadata = disk.get("cow_metadata")
+            hints=stored_expert_hints(disk.get('expert_hints',getattr(metadata,'expert_hints',None)),tokens)
+            actual = self._restored_resident_nbytes(cache, sidecar,hints)
             if not self._reserve_restore_bytes_locked(actual, entry=entry):
                 raise _RestoreBudgetUnavailable("restored APCv2 snapshot exceeds resident byte cap")
-            metadata = disk.get("cow_metadata")
             if self._cow_branching:
                 (cache, sidecar) = freeze_prompt_cache(
                     cache,
@@ -3364,11 +3409,12 @@ class APCv2(PrefixIndex):
                     prompt_host=getattr(metadata, "prompt_host", None),
                     transcript_ledger=getattr(metadata, "transcript_ledger", None),
                     ple_hints=getattr(metadata, "ple_hints", None),
+                    expert_hints=hints,
                     compiled_schedule=getattr(metadata, "compiled_schedule", None),
                     telemetry=self._cow_telemetry,
                     layer_segments=True,
                 )
-            published_nbytes = self._restored_resident_nbytes(cache, sidecar)
+            published_nbytes = self._restored_resident_nbytes(cache, sidecar,hints)
             if not self._reserve_restore_bytes_locked(
                 published_nbytes, entry=entry
             ):
@@ -3381,6 +3427,7 @@ class APCv2(PrefixIndex):
                 # Never charge _n_bytes for an entry no lookup can reach.
                 raise FileNotFoundError("APCv2 placeholder left the trie during its restore")
             entry.prompt_cache = cache
+            entry._apc_expert_hints=hints
             entry.sidecar = sidecar
             entry.nbytes = published_nbytes
             self._n_bytes += int(entry.nbytes)
@@ -4663,6 +4710,7 @@ class APCv2(PrefixIndex):
         session_tag: Optional[tuple] = None,
         require_sidecar: bool = False,
         allow_target_only_plain: bool = True,
+        expert_hint_binding=None,
     ) -> APCLookup:
         """Find the deepest reusable prefix of ``tokens``.
 
@@ -4691,6 +4739,11 @@ class APCv2(PrefixIndex):
         )
         if result.cache is not None or result.sidecar is not None:
             materialize_restored_state(result.cache, result.sidecar)
+        if result.expert_hints is not None:
+            result.expert_hints=result.expert_hints.for_restore(result.cached_tokens,expert_hint_binding)
+            if result.expert_hints is None:result.expert_hints_miss_reason='binding_mismatch_or_stale'
+        elif result.hit:
+            result.expert_hints_miss_reason='absent_or_declined'
         return result
 
     def _lookup_accounted(
@@ -5168,6 +5221,7 @@ class APCv2(PrefixIndex):
                     branch_tokens=branch_beyond(covered),
                     codec_restored_leaves=restored_leaf_count(restored_cache),
                     deeper_disk_tokens=deeper_than(covered),
+                    expert_hints=self._lookup_expert_hints(entry,covered),
                 )
         if sidecar_candidates:
             served = serve_sidecar(max(sidecar_candidates, key=lambda item: item[0]))
@@ -5364,6 +5418,7 @@ class APCv2(PrefixIndex):
             branch_tokens=branch_beyond(cached_tokens),
             codec_restored_leaves=restored_leaf_count(cache) if hit else 0,
             deeper_disk_tokens=deeper_than(cached_tokens) if hit else 0,
+            expert_hints=self._lookup_expert_hints(selected_entry,cached_tokens) if hit else None,
         )
 
     def _drop_stale_entries_locked(self, key, paths) -> bool:
@@ -5546,6 +5601,7 @@ class APCv2(PrefixIndex):
         prompt_host: Optional[PromptHostPlane] = None,
         transcript_ledger: Optional[TranscriptLedgerPlane] = None,
         ple_hints: Optional[PLEResidencyHints] = None,
+        expert_hints: Optional[ExpertResidencyHints] = None,
         compiled_schedule: Optional[CompiledScheduleMetadata] = None,
         retention_role: str = _RETENTION_DEFAULT,
         session_tag: Optional[tuple] = None,
@@ -5565,6 +5621,7 @@ class APCv2(PrefixIndex):
                 prompt_host=prompt_host,
                 transcript_ledger=transcript_ledger,
                 ple_hints=ple_hints,
+                expert_hints=expert_hints,
                 compiled_schedule=compiled_schedule,
                 retention_role=retention_role,
                 session_tag=session_tag,
@@ -5582,6 +5639,7 @@ class APCv2(PrefixIndex):
         prompt_host: Optional[PromptHostPlane] = None,
         transcript_ledger: Optional[TranscriptLedgerPlane] = None,
         ple_hints: Optional[PLEResidencyHints] = None,
+        expert_hints: Optional[ExpertResidencyHints] = None,
         compiled_schedule: Optional[CompiledScheduleMetadata] = None,
         retention_role: str = _RETENTION_DEFAULT,
         session_tag: Optional[tuple] = None,
@@ -5591,6 +5649,17 @@ class APCv2(PrefixIndex):
         if self._closed:
             raise RuntimeError("APCv2 is closed")
         tokens = [int(token) for token in tokens]
+        expert_hints=stored_expert_hints(expert_hints,tokens)
+        if (expert_hints is not None and self._restored_resident_nbytes(prompt_cache,sidecar)
+                +expert_hints.nbytes>self._resident_entry_budget):
+            # Optional metadata may be dropped; it must not make an otherwise
+            # storable exact checkpoint too large by itself.
+            expert_hints=None
+        if expert_hints is not None:
+            try:prior=self._trie.get(key,tokens)
+            except (KeyError,TypeError):prior=None
+            if (self._expert_hint_metadata_bytes_locked(exclude=prior)+expert_hints.nbytes
+                    >self._expert_hint_metadata_limit):expert_hints=None
         capabilities = inspect_apc_capabilities(prompt_cache)
         if not capabilities.exact_prefix:
             return replace(capabilities, stored=False)
@@ -5636,6 +5705,7 @@ class APCv2(PrefixIndex):
                     prompt_host=prompt_host,
                     transcript_ledger=transcript_ledger,
                     ple_hints=ple_hints,
+                    expert_hints=expert_hints,
                     compiled_schedule=compiled_schedule,
                     telemetry=self._cow_telemetry,
                     layer_segments=True,
@@ -5754,7 +5824,10 @@ class APCv2(PrefixIndex):
             return replace(capabilities, stored=False)
         self._capsule_generation.advance()
         try:
-            self._ledger_attach_locked(self._trie.get(key, tokens))
+            published=self._trie.get(key,tokens)
+            published._apc_expert_hints=expert_hints
+            if expert_hints is not None:self._adjust_entry_charge_locked(published,expert_hints.nbytes)
+            self._ledger_attach_locked(published)
         except KeyError:
             pass
         superseded_parks = []

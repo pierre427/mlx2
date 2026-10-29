@@ -91,7 +91,7 @@ def run_components(mx,np,captureDir,out,report,compare,atomic):
             BF16=raw_details(np,arrays['reference_bf16'],np.array(boundary))),variants={})
         section['cases'].append(row);write()
         if not all(v['exact']for v in row['reference_controls'].values()):raise ValueError('Head-group stockcapture replay must beexact')
-        mx.synchronize();del raw,boundary,args;observe();mx.clear_cache()
+        mx.synchronize();args=None;del raw,boundary;observe();mx.clear_cache()
     section['required_reference_controls_exact']=True;write()
     # Independent stability cases gate operator validity, not model quality.
     stable={f'h{h}_s{s}':True for h,s in candidate.VARIANTS}
@@ -136,7 +136,7 @@ def run_components(mx,np,captureDir,out,report,compare,atomic):
         row['split4_raw_consistency']=raw_details(np,host_outputs['h4_s1'],host_outputs['h4_s4'])
         del host_outputs
         row['timings']=timed_interleaved(mx,np,functions,repeats=repeats);observe();write()
-        mx.synchronize();del args,functions;mx.clear_cache()
+        mx.synchronize();args=None;del functions;mx.clear_cache()
     section['required_reference_controls_exact']=all(all(v['exact']for v in row['reference_controls'].values())for row in section['cases'])
     section['verdicts']={name+'_all6_operator_valid':all(row['variants'][name]['timing_admitted']for row in section['cases'])for name in stable}
     section['complete']=section['harness_completed']=True;write();return section

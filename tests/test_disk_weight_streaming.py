@@ -1438,6 +1438,33 @@ def test_engine_refuses_unevidenced_combinations_before_loading(kwargs, match):
             )
 
 
+
+def test_validate_only_checks_the_own_declared_external_stream_contract():
+    from mlx2.serving import ServingEngine
+
+    class DeclaredExternal(_DeclaredMoE):
+        @staticmethod
+        def weight_streaming_external_draft(policy):
+            return policy.get("draft_model") == "owned_draft"
+
+    class InheritedExternal(DeclaredExternal):
+        pass
+
+    ServingEngine.validate_arguments(
+        "unused", adapter_factory=DeclaredExternal, max_lanes=1, max_inflight=1,
+        execution_policy={**MOE_POLICY, "draft_model": "owned_draft"},
+    )
+    for factory, draft in (
+        (DeclaredExternal, "foreign_draft"),
+        (InheritedExternal, "owned_draft"),
+    ):
+        with pytest.raises(ValueError, match="external draft"):
+            ServingEngine.validate_arguments(
+                "unused", adapter_factory=factory, max_lanes=1, max_inflight=1,
+                execution_policy={**MOE_POLICY, "draft_model": draft},
+            )
+
+
 def test_engine_refuses_dense_on_undeclared_and_mixed_or_multilane():
     from mlx2.serving import ServingEngine
 

@@ -170,7 +170,7 @@ def run_components(mx,np,capture_dir,out,report,compare,atomic):
             admitted_cast_project_owner='Fresh contiguous half cast from immutable admitted raw+native QMM+owner; no diagnostic eval/item/roundtrip readbacks inside graph',
             diagnostic_complete='Excluded from geometry timing; unchanged old mode retains diagnostic complete API evidence')
         write();mx.synchronize()
-        del expert,x,q,s,raw,owner,host,views,admission,zero_admission,functions,stock
+        expert=None;x=None;q=None;s=None;admission=None;stock=None;del raw,owner,host,views,zero_admission,functions
         mx.clear_cache()
     section['verdicts']=engineering_verdicts(section['cases'])
     section['required_reference_controls_exact']=section['verdicts']['actual_reference_replay']

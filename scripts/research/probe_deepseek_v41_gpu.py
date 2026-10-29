@@ -454,7 +454,7 @@ def main():
     from mlx2.desktop_campaign_process import spawn
     from mlx2.desktop_runner import digest, source_manifest
 
-    model = str(args.native_mlx_path.resolve()) if args.native_mlx_path else "~/mlx-models/DeepSeek-V4.1-Flash-1017-Maya-XS-Abliterated-GGUF"
+    model = str(args.native_mlx_path.resolve()) if args.native_mlx_path else str(Path.home() / 'mlx-models/DeepSeek-V4.1-Flash-1017-Maya-XS-Abliterated-GGUF')
     artifact = inspect_artifact(model)
     if args.optimized:
         if args.native_mlx_path:

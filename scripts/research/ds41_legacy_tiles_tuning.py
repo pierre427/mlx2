@@ -131,7 +131,7 @@ def run_tuning(mx,np,capture_path,load_expert,out,report,compare,atomic,*,single
         timings,reference_timing=admitted_timings(mx,np,reference,functions,row['variants'],compare)
         row['reference_timing']=reference_timing
         for name in functions:row['variants'][name]['timing']=timings[name]
-        mx.synchronize();del x,slices,values,functions,reference
+        mx.synchronize();x=None;slices=None;del values,functions,reference
         if job['kind']=='derived_middle':del scores,slots,scores_np,slots_np
         observe();write()
     section['verdicts']={f'{name}_{kind}_exact':all(c['variants'][name]['exact']for c in section['cases']if(c['kind']=='derived_middle')==(kind=='middle'))for name in TILES for kind in ('projection','middle')}

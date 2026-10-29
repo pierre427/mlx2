@@ -79,7 +79,7 @@ def preparation_timing(mx,prepare_fn,observe,*,repeats=3):
     for _ in range(repeats):
         mx.synchronize();start=time.perf_counter();prepared=prepare_fn();submitted=time.perf_counter()
         mx.eval(*prepared.inputs);end=time.perf_counter();observe()
-        samples.append(dict(wall_ms=(end-start)*1000,host_ms=(submitted-start)*1000,completion_ms=(end-submitted)*1000));del prepared
+        samples.append(dict(wall_ms=(end-start)*1000,host_ms=(submitted-start)*1000,completion_ms=(end-submitted)*1000));prepared=None
     return dict(samples=samples,median={k:statistics.median(r[k]for r in samples)for k in samples[0]},scope='BF16 operand and mask/index contiguous staging',repeats=repeats)
 
 
@@ -139,7 +139,7 @@ def run_components(mx,np,capture_dir,out,report,compare,atomic,*,candidate=None,
                 'prepared_nax_core':lambda:candidate.prepared_attention(prepared,numerical_profile=PROFILE),
                 'prepare_plus_nax_core':lambda:candidate.attention(*args,numerical_profile=PROFILE)},repeats=repeats)
         else:row['timing']=None
-        write();del args,gathered,ref,rb,prepared,actual,rounded,ar,ab,truth;observe()
+        write();args=None;gathered=None;prepared=None;del ref,rb,actual,rounded,ar,ab,truth;observe()
     selected=[r for r in section['cases']if r['candidate_dispatched']]
     section.update(complete=len(section['cases'])==6 and len(selected)==3,harness_completed=True,
                    required_reference_controls_exact=True,all_candidate_finite=all(r['finite']for r in selected),

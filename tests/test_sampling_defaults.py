@@ -51,6 +51,10 @@ def _adapter_classes():
     from mlx2.adapters.flint import FlintAdapter
     from mlx2.adapters.deepseek_v4_gguf import DeepSeekV4GGUFAdapter
     from mlx2.adapters.deepseek_v4_mlx import DeepSeekV4MLXAdapter
+    from mlx2.adapters.deepseek_v41 import DeepSeekV41Adapter
+    from mlx2.adapters.deepseek_v41_iq1 import DeepSeekV41IQ1Adapter
+    from mlx2.adapters.deepseek_v41_mlx import DeepSeekV41MLXAdapter
+    from mlx2.adapters.deepseek_v41_source import DeepSeekV41SourceAdapter
     from mlx2.adapters.xing import XingAdapter
 
     return {
@@ -75,6 +79,10 @@ def _adapter_classes():
         "bailing_hybrid": Ling3FlashAdapter,
         "deepseek4_gguf": DeepSeekV4GGUFAdapter,
         "deepseek4_mlx": DeepSeekV4MLXAdapter,
+        "deepseek41_gguf": DeepSeekV41Adapter,
+        "deepseek41_mlx": DeepSeekV41MLXAdapter,
+        "deepseek41_iq1": DeepSeekV41IQ1Adapter,
+        "deepseek_v41": DeepSeekV41SourceAdapter,
     }
 
 
@@ -204,6 +212,12 @@ def test_sampling_profile_is_generation_only_for_prompt_caching():
 # --- per-adapter declarations ------------------------------------------------
 
 EXPECTED = {
+    # All four V4.1 target providers retain the cited ordinary temperature1
+    # profile and neutral filters. Greedy draft routes override instances only.
+    "deepseek41_gguf": {"general": dict(temperature=1.0, top_p=1.0, top_k=0)},
+    "deepseek41_mlx": {"general": dict(temperature=1.0, top_p=1.0, top_k=0)},
+    "deepseek41_iq1": {"general": dict(temperature=1.0, top_p=1.0, top_k=0)},
+    "deepseek_v41": {"general": dict(temperature=1.0, top_p=1.0, top_k=0)},
     "deepseek4_mlx": {"general": dict(temperature=1.0,top_p=1.0,top_k=0)},
     # Exact pinned GGUF metadata general.sampling.temp/top_p; top_k0 is the
     # adapter's explicitly cited neutral policy, not a fabricated card value.

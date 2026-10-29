@@ -56,7 +56,7 @@ def run_down(mx,np,bank,artifact,out,report,compare,atomic):
                 'reused_actual_objects':len(set(ids))<len(ids),'stock_down_launches':len(counts),
                 'batch_down_launches':1,'variants':variants})
             atomic(out/'results.json',report)
-        del experts,middle
+        experts=None;middle=None
         mx.synchronize();mx.clear_cache();observe()
     # These assembly buffers intentionally scramble nonconsecutive expert IDs.
     # Per-expert additions, not group subtotals, are the exact reference.
@@ -88,7 +88,7 @@ def run_down(mx,np,bank,artifact,out,report,compare,atomic):
                 'input_profile':'synthetic F32 including cancellation and signed-zero; no early expert/group subtotal',
                 'variants':variants})
             atomic(out/'results.json',report)
-        del parts,ordinary_parts
+        parts=None;ordinary_parts=None
         mx.synchronize();mx.clear_cache();observe()
     meta['required_raw_exact']=all(v['exact']for key in ('prefill_down','prefill_combine')for r in report[key]for v in r['variants'].values())
     meta['down_cases']=len(report['prefill_down']);meta['combine_cases']=len(report['prefill_combine'])

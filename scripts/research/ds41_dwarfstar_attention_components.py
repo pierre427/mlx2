@@ -176,7 +176,7 @@ def run_components(mx,np,capture_dir,out,report,compare,atomic):
         section['cases'].append(dict(capture=case,input_layout=layout,reference_controls=controls,
             production_broadcast_control_selected='production_broadcast'in references))
         if not all(v['exact']for v in controls.values()):write();raise ValueError('DwarfStar stockcapture controls must beexact')
-        mx.synchronize();del raw,owner,args;observe();write();mx.clear_cache()
+        mx.synchronize();args=None;del raw,owner;observe();write();mx.clear_cache()
     section['required_reference_controls_exact']=True;write()
     # Establish all six exact preparation controls before any attention timing.
     for index,(case,arrays)in enumerate(cases):
@@ -193,7 +193,7 @@ def run_components(mx,np,capture_dir,out,report,compare,atomic):
             if not(exact and identity and same_plan):write();raise ValueError('DwarfStar fusedpreparation bytes/ownership/plan differ fromreference')
             observe();write()
         finally:fence_prepared(mx,owned)
-        del old,new,args;mx.clear_cache()
+        args=None;del old,new;mx.clear_cache()
     section['required_prepared_buffers_exact']=True;write();stability=True
     for name,values in synthetic_stability(np):
         host=dict(zip(('q','local','local_mask','pooled','indices','valid','sinks'),values));expected=numpy_reference(np,host,staged=True)
@@ -206,7 +206,7 @@ def run_components(mx,np,capture_dir,out,report,compare,atomic):
                 operator_stability_passed=passed,tolerance='rtol1e-4/atol1e-5 stagedF64equations'))
             stability&=passed;observe();write()
         finally:fence_prepared(mx,owned)
-        del prepared,value,inputs;mx.clear_cache()
+        prepared=None;del value,inputs;mx.clear_cache()
     for index,(case,arrays)in enumerate(cases):
         args,gathered,layout=restored_inputs(mx,np,case,arrays);row=section['cases'][index];owned=[]
         row['stage_F16_roundtrips']={key:roundtrip_half(np,arrays[key])for key in ('q','local','pooled')}
@@ -244,7 +244,7 @@ def run_components(mx,np,capture_dir,out,report,compare,atomic):
             else:row['timings']={}
             observe();write()
         finally:fence_prepared(mx,owned)
-        del prepared,old_prepared,old_value,value,second,owner,args;mx.clear_cache()
+        prepared=None;args=None;del old_prepared,old_value,value,second,owner;mx.clear_cache()
     section['verdicts']=dict(all6_operator_valid=all(c['timing_admitted']for c in section['cases']),all6_prepared_buffers_exact=section['required_prepared_buffers_exact'],synthetic_operator_stability=stability,
         all6_stage_F16_exact=all(all(v['exact']for v in c['stage_F16_roundtrips'].values())for c in section['cases']))
     section['complete']=section['harness_completed']=True;write();return section

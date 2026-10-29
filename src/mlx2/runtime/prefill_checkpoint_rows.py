@@ -109,8 +109,26 @@ def select_checkpoint_rows_with_indices(hidden):
     return narrowed, _REQUEST.get().rows
 
 
+def select_checkpoint_rows_from_final_suffix(hidden, *, full_width):
+    """A dependency-pruned prefill retains only its valid final output row.
+
+Bind the ordinary checkpoint guard to the original prompt width without
+fabricating absent hidden rows. Padded/mid-prefix requests fail closed because
+their desired row may have been pruned. Outside a request, return the final row.
+"""
+    request = _REQUEST.get()
+    if request is not None and not request.applied:
+        if (hidden.ndim != 3 or hidden.shape[0] != len(request.rows)
+                or request.width != full_width
+                or any(row != full_width - 1 for row in request.rows)):
+            raise ValueError("dependency prefill requires an exact final-row checkpoint")
+        request.applied += 1
+    return hidden[:, -1:]
+
+
 __all__ = [
     "prefill_checkpoint_rows",
     "select_checkpoint_rows",
+    "select_checkpoint_rows_from_final_suffix",
     "select_checkpoint_rows_with_indices",
 ]

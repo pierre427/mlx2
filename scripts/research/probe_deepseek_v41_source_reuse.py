@@ -110,7 +110,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("run", "unit"))
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--model", type=Path, default=Path("~/mlx-models/DeepSeek-V4.1-Flash-1017-Source"))
+    parser.add_argument("--model", type=Path, default=Path(str(Path.home() / 'mlx-models/DeepSeek-V4.1-Flash-1017-Source')))
     args = parser.parse_args()
     out = args.output.resolve()
     if args.mode == "unit":

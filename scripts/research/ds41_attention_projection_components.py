@@ -200,7 +200,7 @@ def run_components(mx,np,captureDir,out,report,compare,atomic):
             q,s,load=coefficient_payload(np,artifact,alias,read_tensors);verify_coefficients(load,case)
             q_gpu,s_gpu=upload_coefficients(mx,q,s)
             if distinct:host_bank[alias]=(q,s)
-            bank[alias]=(q_gpu,s_gpu,load);section['loaded_coefficients'].append(load);del q,s,q_gpu,s_gpu
+            bank[alias]=(q_gpu,s_gpu,load);section['loaded_coefficients'].append(load);q=None;s=None;del q_gpu,s_gpu
         q,s,load=bank[alias];verify_coefficients(load,case);observe()
         x=mx.array(arrays['prepared_input'],mx.float32);mx.eval(x)
         def stock_raw():return mx.quantized_matmul(x,q,scales=s,mode='mxfp8')
@@ -245,7 +245,7 @@ def run_components(mx,np,captureDir,out,report,compare,atomic):
             row['timings']=profile_timings(mx,np,functions,repeats=repeats)
             row['timing_output_self_stability_verified']=True
         else:row['timings']=compare(mx,np,functions,repeats=repeats)
-        observe();write();mx.synchronize();del x,functions,q,s;mx.clear_cache()
+        observe();write();mx.synchronize();x=None;q=None;s=None;del functions;mx.clear_cache()
     section['required_reference_controls_exact']=all(all(c['exact']for c in r['reference_controls'].values())for r in section['cases'])
     section['verdicts']={
         'native_bf16_all12_boundary_exact':all(r['variants']['native_bf16']['boundary_exact']for r in section['cases']),

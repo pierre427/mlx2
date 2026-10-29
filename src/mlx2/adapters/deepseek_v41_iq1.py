@@ -77,6 +77,14 @@ class DeepSeekV41IQ1Adapter(DeepSeekV41MLXAdapter):
     numerics_revision = NUMERICS_REVISION
     policy_parser = staticmethod(execution_policy)
     weight_streaming_modes = frozenset({"moe_experts"})
+
+    @staticmethod
+    def weight_streaming_external_draft(policy):
+        if 'draft_models' in policy or policy.get('draft_model') != 'prompt_lookup':
+            return False
+        execution_policy(policy)
+        return True
+
     adapter_owned_default_policy_keys = (
         DeepSeekV41MLXAdapter.adapter_owned_default_policy_keys
         | {

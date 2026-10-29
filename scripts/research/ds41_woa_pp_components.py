@@ -60,7 +60,7 @@ def fp64_reference(np,x,q,scales,*,groups=8,block_rows=128,resident_rows=None):
             or x.shape[-1]!=q.shape[1]*4):raise ValueError('WoA FP64 input/group/coefficient geometry')
     codes=np.ascontiguousarray(q).view(np.uint8)
     if scales.dtype!=np.uint8 or scales.shape!=(q.shape[0],codes.shape[1]//32):raise ValueError('WoA FP64 scale geometry')
-    rows,width=x.shape[1],x.shape[-1];outputs=q.shape[0]//groups
+    rows=x.shape[1];outputs=q.shape[0]//groups
     truth=np.empty((1,rows,groups,outputs),np.float64);changed=0;total=0;verified_blocks=0
     with single_thread_blas(np):
         for group in range(groups):

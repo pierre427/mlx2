@@ -25,7 +25,8 @@ def cpu_only(monkeypatch):
 
 def test_source_policy_default_optin_prerequisite_and_native_refusal():
     assert KEY not in source_policy()
-    assert SOURCE_POLICY_CHOICES[KEY]==('reference','all_retained_broadcast','omlx_nax_bf16_online_v1')
+    assert SOURCE_POLICY_CHOICES[KEY]==('reference','all_retained_broadcast','omlx_nax_bf16_online_v1',
+        'source_short_decode_joint_f32_v1','source_short_decode_grouped_f32_v1')
     assert KEY in DeepSeekV41SourceAdapter.adapter_owned_default_policy_keys
     assert source_policy({KEY:'reference'})[KEY]=='reference'
     for value in (None,True,1,[],{},'bad'):

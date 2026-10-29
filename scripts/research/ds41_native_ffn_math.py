@@ -170,7 +170,8 @@ def admit(mx, np, frame, expert, *, tile=(16, 32)):
     case, cpu = frame['case'], frame['arrays']
     validate_arrays(case, cpu)
     rows = case['rows']
-    plans = tuple(native.plan(p, rows, tile=tile) for p in ('gate', 'up', 'down'))
+    for projection in ('gate', 'up', 'down'):
+        native.plan(projection, rows, tile=tile)
     start = time.perf_counter()
     payload = np.array(expert.backing)
     coefficients = {}

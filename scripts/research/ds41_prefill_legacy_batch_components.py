@@ -121,7 +121,7 @@ def run_legacy_batch(mx,np,capture_path,load_expert,out,report,compare,atomic,*,
             row['mismatch_arrays']={'path':path.name,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
         row['timing']=compare(mx,np,{'reference':stock_boundary,'single_tiles':singles_boundary,'batch_tiles':lambda:batch(x,experts,counts,projection=projection)},repeats=3)if row['exact']else None
         mx.synchronize()
-        del x,slices,rows,values,outputs,singles,expected_raw,expected_boundary,single_boundary,single_raw,single_parts,batched_boundary,batched_raw,batched_parts,er,eb,sb,sr,sp,bb,br,bp
+        x=None;slices=None;del rows,values,outputs,singles,expected_raw,expected_boundary,single_boundary,single_raw,single_parts,batched_boundary,batched_raw,batched_parts,er,eb,sb,sr,sp,bb,br,bp
         observe();write()
     section['all_raw_boundary_partial_exact']=len(section['cases'])==28 and all(c['exact']for c in section['cases'])
     section['complete']=True;write()

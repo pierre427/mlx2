@@ -132,7 +132,7 @@ def _kernel(key, exp_spelling, return_projections):
 
 
 def pp_middle(x, experts, rows, scores, row_counts, *, exp_spelling="metal::exp",
-              return_projections=False):
+              return_projections=False, row_packet=None, batch_index=None):
     """Return flat expert-major middle rows, with no raw GU global buffer.
 
     ``row_counts`` is CPU routing metadata. ``rows`` and ``scores`` contain
@@ -146,7 +146,19 @@ def pp_middle(x, experts, rows, scores, row_counts, *, exp_spelling="metal::exp"
     # Validate flags before creating metadata or a Metal kernel.
     if exp_spelling not in gu.EXP_SPELLINGS or type(return_projections) is not bool:
         raise ValueError("Source prefill GU invalid epilogue/diagnostic option")
-    inputs = [x, rows, scores, mx.array(plan['offsets'], mx.uint32),
+    if row_packet is None:
+        if batch_index is not None:
+            raise ValueError('Source prefill GU batch index requires its row packet')
+        offsets=mx.array(plan['offsets'],mx.uint32)
+    else:
+        from ...adapters.deepseek_v41_source_row_packet import DeviceRowPacket
+        if (not isinstance(row_packet,DeviceRowPacket) or type(batch_index) is not int
+                or not 0 <= batch_index < len(row_packet.packet.plan.batches)
+                or row_packet.packet.plan.batches[batch_index].row_counts != tuple(row_counts)
+                or rows is not row_packet.view(f'batch{batch_index}.rows')):
+            raise ValueError('Source prefill GU row packet batch mismatch')
+        offsets=row_packet.view(f'batch{batch_index}.offsets')
+    inputs = [x, rows, scores, offsets,
               mx.array([1/448], mx.float32)]+[e.backing for e in experts]
     count = 3 if return_projections else 1
     result = _kernel(key, exp_spelling, return_projections)(inputs=inputs,

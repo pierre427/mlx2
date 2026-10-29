@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: MIT
 """Native packed V4.1 ordinary serving, APCv2 and opt-in adaptive copy draft."""
 
-import copy
 import hashlib
 import json
 from dataclasses import replace
@@ -19,6 +18,13 @@ from .deepseek_v41_artifact import (
     inspect_artifact,
     tokenizer_metadata,
 )
+from .deepseek_v41_execution import POLICY_CHOICES as CSA_POLICY_CHOICES
+from .deepseek_v41_execution import (
+    bind_cache_layout,
+    execution_receipt,
+    model_options,
+    validate_csa_policy,
+)
 
 DESCRIPTOR = replace(
     V4_DESCRIPTOR,
@@ -26,6 +32,7 @@ DESCRIPTOR = replace(
     family="deepseek_v41",
     variant="flash-1017-maya-xs-native-packed-text",
     cache_layout=CACHE_LAYOUT,
+    capabilities=V4_DESCRIPTOR.capabilities | {Capability.TOOLS, Capability.GRAMMAR},
     state_planes=V4_DESCRIPTOR.state_planes | {StatePlane.RECURRENT},
     metadata={
         "execution": "mlx2.adapters.deepseek_v41.DeepSeekV41Adapter",
@@ -43,6 +50,7 @@ SAMPLING = VendorSampling.single(
     model="deepseek-ai/DeepSeek-V4.1-Flash-1017",
 )
 POLICY_CHOICES = {
+    **CSA_POLICY_CHOICES,
     "deepseek_hc": ("reference", "fused_fp32"),
     "deepseek_qat": ("reference", "fused_fp32"),
     "deepseek_packed": ("reference", "cooperative"),
@@ -78,12 +86,14 @@ POLICY_CHOICES = {
 def execution_policy(value):
     value = {} if value is None else value
     if not isinstance(value, dict) or set(value) - (
-        POLICY_CHOICES.keys() | {"ast_prompt_lookup", "num_draft", "draft_model", "deepseek_dense_cache_mib"}
+        POLICY_CHOICES.keys() | {"ast_prompt_lookup", "num_draft", "draft_model", "deepseek_dense_cache_mib", "deepseek_context_limit"}
     ):
         raise ValueError(
             "unsupported V4.1 execution policy; foreign V4 DSpark/KV/attention policies are not compatible"
         )
     result = {k: value.get(k, v[0]) for k, v in POLICY_CHOICES.items()}
+    if "deepseek_context_limit" in value:
+        result["deepseek_context_limit"] = value["deepseek_context_limit"]
     if any(
         type(result[k]) is not str or result[k] not in v
         for k, v in POLICY_CHOICES.items()
@@ -117,6 +127,7 @@ def execution_policy(value):
         raise ValueError("adaptive copy-chain requires draft_model=prompt_lookup")
     if "num_draft" in value and not result["ast_prompt_lookup"]:
         raise ValueError("num_draft requires ast_prompt_lookup")
+    validate_csa_policy(result)
     return result
 
 
@@ -163,7 +174,74 @@ class DeepSeekV41Adapter(DeepSeekV4GGUFAdapter):
     sampling_defaults = SAMPLING
     profile = "deepseek-v41-1017-maya-xs-native-gguf-ordinary-b1"
     ast_prompt_lookup_tiles = False
+    reasoning_effort_semantics = "numeric_strength_1_100"
+    anthropic_tool_schema_history = True
+    tool_call_open_marker = "<｜DSML｜ calls>"
+
+    @staticmethod
+    def lower_ast_chain(drafter, artifact):
+        if drafter == "pld":
+            return "external_draft", {"draft_model": "prompt_lookup", "ast_prompt_lookup": True}
+        if drafter == "embedded_dspark":
+            return "external_draft", {"draft_model": "embedded_dspark"}
+        return None
+
+    @staticmethod
+    def effective_route_capabilities(capabilities, *, route, max_lanes):
+        selected = set(capabilities)
+        if route != "ordinary" or max_lanes != 1:
+            selected -= {Capability.TOOLS, Capability.GRAMMAR}
+        return frozenset(selected)
+
+    def normalize_request(self, request):
+        from .deepseek_v41_protocol import normalize_request
+
+        result = normalize_request(request)
+        if getattr(self, "draft_model", None) is not None and (
+            (result.get("tools") and result.get("tool_choice", "auto") != "none")
+            or result.get("grammar") is not None
+            or result.get("response_format") not in (None, {"type": "text"})
+        ):
+            raise ValueError("V4.1 tools and structured output require the ordinary B1 route")
+        return result
+
+    @staticmethod
+    def thinking_enabled(request):
+        from .deepseek_v41_protocol import normalize_request
+
+        return normalize_request(request).get("enable_thinking", False)
+
+    def thinking_close_token_ids(self):
+        ids = self.tokenizer.encode("</think>", add_special_tokens=False)
+        return tuple(ids) or None
+
+    def tool_constraint(self, request):
+        from ..output import callable_tools
+        from .deepseek_v41_protocol import constrained_tool_grammar
+
+        request = self.normalize_request(request)
+        tools = callable_tools(request)
+        return constrained_tool_grammar(
+            tools, request.get("tool_choice", "auto"),
+            parallel_tool_calls=request.get("parallel_tool_calls", True),
+        ) if tools else None
+
+    def output_parser(self, request):
+        from ..output import callable_tools, constrained_tool_choice
+        from .deepseek_v41_protocol import DeepSeekV41OutputParser
+
+        request = self.normalize_request(request)
+        self._validate_external_request(request)
+        return DeepSeekV41OutputParser(
+            chat="messages" in request, thinking=self.thinking_enabled(request),
+            tools=callable_tools(request), tokenizer=self.tokenizer,
+            stops=request.get("stop", ()),
+            constrained_tools=constrained_tool_choice(request),
+            parallel_tool_calls=request.get("parallel_tool_calls", True),
+        )
+
     adapter_owned_default_policy_keys = frozenset(POLICY_CHOICES) | {
+        "deepseek_context_limit",
         "ast_prompt_lookup",
         "num_draft",
         "draft_model",
@@ -366,6 +444,7 @@ class DeepSeekV41Adapter(DeepSeekV4GGUFAdapter):
             engram_tables=self.engram_tables,
             hc_policy=self.kernel_policy["deepseek_hc"],
             qat_policy=self.kernel_policy["deepseek_qat"],
+            **model_options(self.kernel_policy),
         )
         self.model.preload().eval()
         self.model.verification_commit_policy = self.kernel_policy["deepseek_verify_commit"]
@@ -383,8 +462,9 @@ class DeepSeekV41Adapter(DeepSeekV4GGUFAdapter):
             if limit is not None and mx.get_active_memory()+self.weight_stream.unfilled_reserve_bytes()+max(5 << 30, self.weight_streaming_request.headroom_bytes) > limit:
                 raise ValueError("V4.1 retained weights plus expert reserve do not fit admission")
         self.layout = CACHE_LAYOUT
-        self.max_context = min(args.max_position_embeddings, 65536)
+        self.max_context = self.model.context_limit
         self.descriptor = DESCRIPTOR
+        bind_cache_layout(self)
         if self.kernel_policy["ast_prompt_lookup"]:
             from ..runtime.drafters.prompt_lookup_draft import PromptLookupDraftModel
 
@@ -398,8 +478,8 @@ class DeepSeekV41Adapter(DeepSeekV4GGUFAdapter):
 
             self.default_route = "external_draft"
             self.descriptor = replace(
-                DESCRIPTOR,
-                capabilities=DESCRIPTOR.capabilities | {Capability.EXTERNAL_DRAFT},
+                self.descriptor,
+                capabilities=self.descriptor.capabilities | {Capability.EXTERNAL_DRAFT},
                 metadata={
                     **DESCRIPTOR.metadata,
                     "speculation": "adaptive copy chain, ordinary width-one; commit="+self.kernel_policy["deepseek_verify_commit"]+"; unqualified",
@@ -429,8 +509,9 @@ class DeepSeekV41Adapter(DeepSeekV4GGUFAdapter):
             )
 
     def execution_config(self, *, max_lanes, prefill_step):
-        if max_lanes != 1 or not 1 <= prefill_step <= 1024:
-            raise ValueError("V4.1 requires B1 and prefill chunks1..1024")
+        width = getattr(self, "physical_batch_width", 1)
+        if type(max_lanes) is not int or not 1 <= max_lanes <= width or not 1 <= prefill_step <= 1024:
+            raise ValueError(f"V4.1 requires physical width1..{width} and prefill chunks1..1024")
         from .ordinary_text import OrdinaryTextAdapter
 
         result = OrdinaryTextAdapter.execution_config(
@@ -443,6 +524,12 @@ class DeepSeekV41Adapter(DeepSeekV4GGUFAdapter):
         return result
 
     def create_external_batch(self, **kwargs):
+        if getattr(self.draft_model, "kind", None) == "deepseek_v41_dspark":
+            from .deepseek_v41_dspark_external import create_dspark_batch
+
+            kwargs.setdefault("num_draft", self.external_policy["num_draft"])
+            kwargs.setdefault("cost_per_commit_handoff", False)
+            return create_dspark_batch(self.model, self.draft_model, **kwargs)
         if self.draft_model is None:
             raise ValueError("V4.1 copy-chain route is not selected")
         from .deepseek_v41_external import create_batch
@@ -460,38 +547,31 @@ class DeepSeekV41Adapter(DeepSeekV4GGUFAdapter):
 
     def cache_budget(self, *, mtp):
         if mtp:
-            raise ValueError("V4.1 native DSpark artifact is not present/bound")
+            raise ValueError("V4.1 DSpark uses the explicit Source external-draft route, not native MTP")
         from .deepseek_v41_memory import DeepSeekV41CacheBudget
 
-        return DeepSeekV41CacheBudget.from_config(self.model.args)
+        return DeepSeekV41CacheBudget.from_config(self.model.args, kv_storage_policy=getattr(self.model, "kv_storage_policy", "reference"))
 
     def _template(self, request, *, tokenize):
+        request = self.normalize_request(request)
         self._validate_external_request(request)
-        if request.get("tools") and request.get("tool_choice") != "none":
-            raise ValueError("V4.1 DSML tool execution is unavailable")
         if "messages" in request:
             from ..runtime.models.deepseek_v41_encoding import encode_messages
+            from .deepseek_v41_protocol import messages_for_encoding
 
-            messages = copy.deepcopy(request["messages"])
-            if any(
-                m.get("role") not in ("system", "user", "assistant")
-                or not isinstance(m.get("content"), str)
-                or m.get("tool_calls")
-                for m in messages
-            ):
-                raise ValueError(
-                    "V4.1 route requires text-only system/user/assistant history"
-                )
             text = encode_messages(
-                messages,
+                messages_for_encoding(request),
                 thinking_mode="thinking" if self.thinking_enabled(request) else "chat",
                 reasoning_effort=request.get("reasoning_effort"),
+                drop_thinking=not request.get("preserve_thinking", False),
             )
         else:
             text = request["prompt"]
-        return (
-            self.tokenizer.encode(text, add_special_tokens=False) if tokenize else text
-        )
+        return self.tokenizer.encode(text, add_special_tokens=False) if tokenize else text
+
+    @staticmethod
+    def chat_template_options():
+        return {"preserve_thinking": {"implemented": True, "default": False}}
 
     def diagnostics(self):
         from ..runtime.models.deepseek_v41_quant import fused_status
@@ -529,6 +609,7 @@ class DeepSeekV41Adapter(DeepSeekV4GGUFAdapter):
             else "unavailable",
             "vision": "unavailable",
             "scheduled_call_observation": "Python scheduling only; not GPU completion evidence",
+            **execution_receipt(self.model),
         }
 
     def close(self):

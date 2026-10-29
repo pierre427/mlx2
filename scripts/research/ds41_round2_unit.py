@@ -1,6 +1,5 @@
 """Owned operator-only DS4.1 dense/KV diagnostic; no serving qualification."""
-from pathlib import Path
-import gc,json,os,time,traceback
+import gc,json,os,traceback
 
 
 def run(out,root):

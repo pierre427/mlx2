@@ -121,7 +121,7 @@ def run_nax_batch(mx,np,capture_path,load_expert,out,report,compare,atomic,*,sin
                 'boundary':details(np,arrays['reference_boundary'],np.asarray(boundary))}
         section['reference_controls'].append(dict(layer=c['layer'],expert=c['expert'],projection=c['projection'],rows=c['rows'],checks=checks))
         if not all(v['exact']for v in checks.values()):write();raise ValueError('Mandatory captured stock replay changed')
-        del x,raw,boundary;observe()
+        x=None;del raw,boundary;observe()
     for eid,e in bank.items():
         if 'gate.biases'in e:raise ValueError('Native batch admits original experts only')
         record={}
@@ -182,7 +182,7 @@ def run_nax_batch(mx,np,capture_path,load_expert,out,report,compare,atomic,*,sin
             if fused:functions['fused_middle']=lambda:fused_fn(x,experts,counts,scores,slots,exp_spelling=spelling,numerical_profile=PROFILE)
             row['timing']=timing(mx,np,functions,repeats=3)
         else:row['timing']=None
-        del x,slices,rows,values,singles,batched,stock,one,reference_middle,single_middle,batch_middle,scores,slots
+        x=None;slices=None;scores=None;slots=None;del rows,values,singles,batched,stock,one,reference_middle,single_middle,batch_middle
         observe();write()
     section.update(status='completed',harness_completed=True,complete=(len(section['cases'])==len(plans)==9),required_reference_controls_exact=True,
                    all_batch_addressing_exact=all(r['batch_addressing_exact']for r in section['cases']),

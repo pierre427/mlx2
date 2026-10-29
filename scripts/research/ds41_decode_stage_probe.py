@@ -8,8 +8,6 @@ counterfactual caches through APCv2. No tensor math changes or GPU work on impor
 Provenance: deepseek-v41-decode-stage-probe.json.
 """
 from contextlib import contextmanager
-import json
-from pathlib import Path
 import threading
 import time
 import weakref

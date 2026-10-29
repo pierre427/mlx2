@@ -33,8 +33,8 @@ def parse_policy(value):
         raise ValueError('preheat requires a persistent atlas')
     if result.get('mode') not in ('original_lfu','hot_original_q1'):
         raise ValueError('Source expert mode must be original_lfu or hot_original_q1')
-    if type(result.get('budget_bytes')) is not int or not ORIGINAL_BYTES*384 <= result['budget_bytes'] <= 90_000_000_000:
-        raise ValueError('explicit Source expert total budget must fit one layer and be at most90GB')
+    if type(result.get('budget_bytes')) is not int or not ORIGINAL_BYTES*2 <= result['budget_bytes'] <= 90_000_000_000:
+        raise ValueError('Source expert maximum must fit one expert plus staging and be at most90GB')
     if result['mode']=='hot_original_q1':
         if type(result.get('hot_bytes')) is not int or not ORIGINAL_BYTES<=result['hot_bytes']<result['budget_bytes']-ORIGINAL_BYTES:
             raise ValueError('invalid original-hot/Q1 budget split')
@@ -45,27 +45,41 @@ def parse_policy(value):
         raise ValueError('original-only LFU cannot accept Q1 options')
     return result
 
-def admission(artifact,request,policy):
-    from .deepseek_v41_mlx import admission_plan
-    from dataclasses import replace
-    # Preserve the existing request-contract validation at a smaller bound, then
-    # size the explicitly requested Source-only profile without a legacy70GiB cap.
-    admission_plan(artifact,replace(request,budget_bytes=32<<30,budget_mode='explicit'),planner=weight_plan)
-    if request.budget_mode!='explicit' or request.budget_bytes!=policy['budget_bytes']:
-        raise ValueError('LFU execution policy and requested expert budget disagree')
-    result=weight_plan(artifact,policy['budget_bytes'])
-    # Leased experts remain inside the same hard ceiling; eviction skips leases.
-    # One original host read is reserved inside the total expert budget too.
-    result.update(expert_active_bound_bytes=policy['budget_bytes'],expert_staging_bound_bytes=0,
-                  expert_cache_bytes=policy['budget_bytes'])
-    result['total_reservation_bytes']=sum(result[k] for k in ('dense_payload_bytes','dense_prepared_bound_bytes','dense_staging_bound_bytes','expert_cache_bytes'))
-    result.update(headroom_bytes=max(5<<30,request.headroom_bytes),metadata_reserve_bytes=256<<20,
-                  ple_cache_bytes=16<<20,admission_limit_bytes=request.admission_limit_bytes,
-                  ceiling_source='explicit',phase='pre_materialization')
-    result['required_bytes']=result['total_reservation_bytes']+result['headroom_bytes']+result['metadata_reserve_bytes']+result['ple_cache_bytes']
-    if result['required_bytes']>request.admission_limit_bytes:
-        raise MemoryError('explicit Source LFU profile exceeds measured process admission')
+def source_admission(artifact,request,policy=None):
+    """Source demand loading validates contracts, not a fictitious full cache.
+
+    Dense/cache estimates remain advisory. A low-memory host may attempt its
+    imminent expert/staging allocation and swap; actual allocation/I/O failures
+    remain visible. Other model adapters retain their original admission path.
+    """
+    from ..runtime.streamed_load import WeightStreamRequest
+    if not isinstance(request,WeightStreamRequest):raise ValueError('Source requires a validated WeightStreamRequest')
+    if (request.mode!='moe_experts' or request.mtp_resident or request.collector is not None
+            or request.prefill_admission!='lru' or request.router_hint!='off' or request.expert_overlap):
+        raise ValueError('Source demand experts require synchronous ordinary streaming')
+    if policy is not None:
+        policy=parse_policy(policy);budget=policy['budget_bytes']
+        if request.budget_mode=='explicit' and request.budget_bytes!=budget:
+            raise ValueError('LFU execution policy and requested expert maximum disagree')
+    else:budget=75_000_000_000 if request.budget_mode=='auto' else request.budget_bytes
+    if type(budget)is not int or not 2*ORIGINAL_BYTES<=budget<=90_000_000_000:
+        raise ValueError('Source expert maximum must fit one expert plus staging and be at most90GB')
+    result=weight_plan(artifact,budget)
+    result['estimated_full_reservation_bytes']=result['total_reservation_bytes']
+    progress=result['minimum_expert_cache_bytes']+ORIGINAL_BYTES
+    result.update(expert_active_bound_bytes=budget,expert_staging_bound_bytes=ORIGINAL_BYTES,
+        expert_cache_bytes=budget,configured_expert_cache_ceiling_bytes=budget,
+        total_reservation_bytes=progress,imminent_working_reserve_bytes=progress,
+        headroom_bytes=0,metadata_reserve_bytes=0,ple_cache_bytes=16<<20,
+        admission_limit_bytes=request.admission_limit_bytes,required_bytes=progress,
+        ceiling_source=request.budget_mode,phase='pre_materialization',
+        memory_admission_policy='attempt_after_reclaim',adaptive_residency=True,
+        estimates_are_advisory=True,full_cache_preallocation=False)
     return result
+
+
+def admission(artifact,request,policy):
+    return source_admission(artifact,request,policy)
 
 class LFUIndex:
     """Token-selection frequency; LRU ties; stale heap entries cannot evict leases."""
@@ -167,11 +181,27 @@ class LFUSourceExpertStore(SourceExpertStore):
             self.preheat_receipt={'requested':bool(policy.get('preheat',self.atlas_path is not None)),'performed':False}
             self.plan.transient_bound_bytes=0
             self.plan.allocation='global_byte_lfu'
+            self.configure_adaptive_residency()
         except BaseException:
             self.pool.close()
             raise
     def kind(self,key):
         return 'q1' if self.q1_root is not None and key not in self.hot else 'original'
+    def configure_adaptive_residency(self,enabled=True,**options):
+        options.setdefault('staging_bytes',ORIGINAL_BYTES)
+        options.setdefault('staging_within_cache',True)
+        return super().configure_adaptive_residency(enabled,**options)
+    def _adaptive_victim(self):
+        protected={**self._leased,**self._pending_uploads}
+        pinned=getattr(self,'_resident_bank_pinned_keys',frozenset())
+        try:return self.index.victim(self._cache,protected,lambda key:key not in pinned)
+        except MemoryError:return None
+    def _adaptive_evict_key(self,key):
+        if key in getattr(self,'_resident_bank_pinned_keys',frozenset()):
+            raise ValueError('Cannot individually evict an attached resident bank allocation')
+        kind=self.kind(key);amount=super()._adaptive_evict_key(key)
+        self.pool_bytes[kind]-=amount
+        return amount
     def observe_routes(self,prefix,ids,*,histogram=None):
         layer=int(prefix.split('.')[1])
         if histogram is None:
@@ -193,9 +223,24 @@ class LFUSourceExpertStore(SourceExpertStore):
             self.stats[self.kind((layer,expert))+'_token_selections']+=count
     def _evict_for(self,key,size):
         kind=self.kind(key)
+        if getattr(self,'adaptive_residency_enabled',False):
+            self.adaptive_residency_update(incoming_bytes=size)
+            self.payload_ceiling=self._adaptive_payload_ceiling
+            maximum=self.maximum_cache_bytes-ORIGINAL_BYTES
+            # The hot map fixes expert precision, not a prepaid cache pool.
+            # Adaptive original/Q1 payloads share the measured total capacity.
+            # A soft live-memory target can be exceeded by immutable active
+            # leases, but the operator's configured maximum remains bounded.
+            for _ in range(len(self._cache)+1):
+                if self._cache_bytes+size<=maximum:return
+                try:victim=self.index.victim(self._cache,{**self._leased,**self._pending_uploads},
+                    (lambda k:k not in getattr(self,'_resident_bank_pinned_keys',frozenset())))
+                except MemoryError:raise MemoryError('Configured expert maximum exhausted by protected/active objects; use a sequential completed-expert window')from None
+                self._adaptive_evict_key(victim)
+            raise RuntimeError('Adaptive expert eviction made no progress')
         limit=self.payload_ceiling if self.q1_root is None else (self.policy['hot_bytes'] if kind=='original' else self.policy['budget_bytes']-self.policy['hot_bytes']-ORIGINAL_BYTES)
         while self.pool_bytes[kind]+size>limit or self._cache_bytes+size>self.payload_ceiling:
-            victim=self.index.victim(self._cache,self._leased,lambda k:self.kind(k)==kind and (self.q1_root is None or kind=='q1'))
+            victim=self.index.victim(self._cache,self._leased,lambda k:k not in getattr(self,'_resident_bank_pinned_keys',frozenset()) and self.kind(k)==kind and (self.q1_root is None or kind=='q1'))
             arrays=self._cache.pop(victim);amount=sum(v.nbytes for v in arrays.values());self._cache_bytes-=amount;self.pool_bytes[kind]-=amount;self.stats['evictions']+=1
     def acquire(self,prefix,expert):
         import mlx.core as mx
@@ -290,6 +335,8 @@ class LFUSourceExpertStore(SourceExpertStore):
     def receipt(self):
         result=super().receipt()
         result.update(allocation='LFU by token-expert selections, LRU ties',policy=self.policy,quantization=Q1_REVISION if self.q1_root else 'original',q1_bank_binding=self.q1_binding,hot_map_binding=self.hot_binding,hot_expert_objects=len(self.hot),pool_payload_bytes=self.pool_bytes.copy(),peak_expert_payload_bytes=self.peak_payload_bytes,expert_total_payload_and_host_staging_ceiling=self.cache_budget_bytes,host_staging_reserve_bytes=ORIGINAL_BYTES,precision_selection='fixed per expert for profile lifetime',expert_requantization=self.q1_root is not None)
+        result['pool_capacity_policy']='shared_total_adaptive'if self.adaptive_residency_enabled else'legacy_fixed_kind_pools'
+        result['hot_budget_role']='immutable_precision_selection_only'if self.adaptive_residency_enabled else'precision_selection_and_kind_pool_limit'
         result['plan']['allocation']='global_byte_lfu'
         result['numeric_profile']='source_hot_original_cold_q1_g64' if self.q1_root else 'official_mxfp4_fp8'
         result.update(atlas_path=str(self.atlas_path) if self.atlas_path else None,atlas_known_experts=len(self.index.counts),preheat=self.preheat_receipt)
@@ -332,6 +379,9 @@ class LFUSourceExpertStore(SourceExpertStore):
         return selected
     def preheat(self):
         if not self.preheat_receipt['requested']:return self.preheat_receipt
+        if self.adaptive_residency_enabled:
+            self.preheat_receipt.update(performed=False,reason='adaptive demand residency; configured maximum is not a preheat target')
+            return self.preheat_receipt
         start=time.perf_counter();before=self.counters();selected=self.preheat_selection()
         from ..runtime.os_memory import host_memory_snapshot
         host=host_memory_snapshot()
@@ -346,6 +396,7 @@ class LFUSourceExpertStore(SourceExpertStore):
     def park(self):
         super().park();self.pool_bytes={'original':0,'q1':0};return self.receipt()
     def resize_cache_budget(self,budget):
+        if self.adaptive_residency_enabled:return self.set_adaptive_cache_target(budget)['effective_cache_target_bytes']
         raise ValueError('LFU experimental profile uses fixed precision-bound budgets')
     def close(self):
         try:self.persist_atlas()

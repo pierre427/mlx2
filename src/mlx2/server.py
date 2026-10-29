@@ -800,6 +800,7 @@ def validate_request(
     constrained_tool_grammar=False,
     max_tools=64,
     max_stops=4,
+    adapter=None,
 ):
     """Validate one request body.
 
@@ -878,6 +879,14 @@ def validate_request(
     unknown = set(body) - supported
     if unknown:
         raise ValueError(f"unsupported request fields: {', '.join(sorted(unknown))}")
+    if adapter is not None:
+        from .serving import normalize_adapter_request
+
+        # Public aliases must become the same identities admission, grammar
+        # and terminal validation use before generic tool/choice checks run.
+        # Check the original public fields above before an adapter adds any
+        # trusted internal provenance to its normalized copy.
+        body = normalize_adapter_request(adapter, body)
     # Each route owns one input field.  Every adapter decides between the chat
     # template and the raw prompt by ``"messages" in request``, so the other
     # route's field must not survive validation: a Completions body carrying
@@ -1403,28 +1412,14 @@ def normalize_client_options(body):
         result["verification"] = template["verification"]
     if "verification" in result and type(result["verification"]) is not bool:
         raise ValueError("verification must be boolean")
-    toggles = []
-    for name, value in (
-        ("enable_thinking", result.get("enable_thinking")),
-        ("think", result.pop("think", None)),
-        ("chat_template_kwargs.enable_thinking", template.get("enable_thinking")),
-    ):
-        if value is not None:
-            if not isinstance(value, bool):
-                raise ValueError(f"{name} must be boolean")
-            toggles.append(value)
+    from .reasoning_options import normalize_reasoning_options
+
+    reasoning_input = dict(result)
+    if "enable_thinking" in template:
+        reasoning_input["chat_template_kwargs"] = {"enable_thinking": template["enable_thinking"]}
+    result = normalize_reasoning_options(reasoning_input)
+    result.pop("chat_template_kwargs", None)
     effort = result.get("reasoning_effort")
-    if effort is not None:
-        if not isinstance(effort, str) or effort not in {
-            "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
-        }:
-            raise ValueError("invalid reasoning_effort")
-    if toggles:
-        if any(value != toggles[0] for value in toggles):
-            raise ValueError("thinking toggles disagree")
-        result["enable_thinking"] = toggles[0]
-    elif effort is not None:
-        result["enable_thinking"] = effort != "none"
     if result.get("verification"):
         if result.get("enable_thinking") is False or effort == "none":
             raise ValueError("verification requires thinking enabled")
@@ -1792,6 +1787,7 @@ def prompt_render_payload(engine, body, path):
             constrained_tool_grammar=bool(
                 (status.get("settings") or {}).get("constrained_tool_grammar")
             ),
+            adapter=getattr(engine, 'adapter', None),
         )
     # After validation, as the generation routes do: an invalid body is a 400
     # before an unknown model is a 404.
@@ -1883,7 +1879,8 @@ def tensorfold_owned_completion_payload(engine, router, body, path, *, route="au
     model = _generation_model(status, body)
     if model != status.get("model"):
         raise ValueError("TensorFold-owned completion requires the base model")
-    request = validate_request({**body, "enable_thinking": False} if chat else body, chat)
+    request = validate_request({**body, "enable_thinking": False} if chat else body, chat,
+                               adapter=getattr(engine, 'adapter', None))
     budget = request.get("max_tokens", 64)
     if not 1 <= budget <= 192:
         raise ValueError("TensorFold-owned completion supports max_tokens 1..192")
@@ -1963,6 +1960,18 @@ def lora_control_payload(engine, body, *, load):
     return {"id": name, "object": "lora.adapter", **result}
 
 
+def enforce_job_tool_contract(job, body, calls, **kwargs):
+    """Judge output against the exact request admitted by the worker.
+
+    An adapter may canonicalize public function identities during admission.
+    The original HTTP body then describes their aliases, while the parser and
+    grammar use ``job.request``. Lightweight external engines without a stored
+    request retain the HTTP contract as their compatibility boundary.
+    """
+    request = getattr(job, 'request', None)
+    enforce_tool_contract(request if isinstance(request, dict) else body, calls, **kwargs)
+
+
 def collect_nonstream_job(
     job, body, *, chat, responses=False,
     generation_event_timeout_seconds=DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS,
@@ -2010,8 +2019,8 @@ def collect_nonstream_job(
                 {key: value for key, value in call.items() if key != "index"}
                 for call in calls
             ]
-        enforce_tool_contract(
-            body,
+        enforce_job_tool_contract(
+            job, body,
             message.get("tool_calls", []),
             finish_reason=event["finish_reason"],
             stop_truncated_tool_call=(event.get("receipt") or {}).get(
@@ -2480,6 +2489,7 @@ def handler_for(
                 (status.get("settings") or {}).get("constrained_tool_grammar")
             ),
             max_tools=128 if responses_api and batch_compat.enabled else 64,
+            adapter=getattr(engine, 'adapter', None),
         )
         model = _generation_model(status, body)
         if body.get("n", 1) != 1:
@@ -3714,7 +3724,8 @@ def handler_for(
                             and not isinstance(producer_runtime_digest, str)
                         ):
                             raise PrefillHandoffError("malformed")
-                        body = validate_request(raw, chat="messages" in raw)
+                        body = validate_request(raw, chat="messages" in raw,
+                                                adapter=getattr(engine, 'adapter', None))
                         if body.get("prefill_handoff") is not None:
                             raise PrefillHandoffError("malformed")
                         planned = engine.prefill_handoff_plan(body)
@@ -4200,6 +4211,7 @@ def handler_for(
                             translation_metadata=translation_metadata,
                             agent_compat=agent_compat,
                             counts=getattr(engine, "counts", None),
+                            preserve_tool_schema_history=bool(getattr(getattr(engine, "adapter", None), "anthropic_tool_schema_history", False)),
                         )
                     rejections = translation_metadata.get(
                         "reasoning_signature_rejections", 0
@@ -4235,6 +4247,7 @@ def handler_for(
                         if responses_api and agent_compat.enabled
                         else 64,
                         max_stops=ANTHROPIC_MAX_STOP_SEQUENCES if anthropic else 4,
+                        adapter=getattr(engine, 'adapter', None),
                     )
                 if anthropic_count_tokens:
                     # Count the request /v1/messages would serve: validation
@@ -4879,7 +4892,7 @@ def handler_for(
                                     for call in calls
                                 ],
                             }
-                            enforce_tool_contract(body, message["tool_calls"])
+                            enforce_job_tool_contract(job, body, message["tool_calls"])
                             outputs = []
                             for call in message["tool_calls"]:
                                 function = call["function"]
@@ -4977,8 +4990,8 @@ def handler_for(
                             # terminal contract before sending any call (and
                             # before committing HTTP bytes, unless a keepalive
                             # already opened the stream).
-                            enforce_tool_contract(
-                                body,
+                            enforce_job_tool_contract(
+                                job, body,
                                 message.get("tool_calls", []),
                                 finish_reason=event["finish_reason"],
                                 stop_truncated_tool_call=(event.get("receipt") or {}).get(
@@ -5057,8 +5070,8 @@ def handler_for(
                                         {key: value for key, value in call.items() if key != "index"}
                                         for call in calls
                                     ]
-                                enforce_tool_contract(
-                                    body,
+                                enforce_job_tool_contract(
+                                    job, body,
                                     message.get("tool_calls", []),
                                     finish_reason=event["finish_reason"],
                                     stop_truncated_tool_call=(event.get("receipt") or {}).get(
@@ -5084,8 +5097,8 @@ def handler_for(
                                         {key: value for key, value in call.items() if key != "index"}
                                         for call in calls
                                     ]
-                                enforce_tool_contract(
-                                    body,
+                                enforce_job_tool_contract(
+                                    job, body,
                                     message.get("tool_calls", []),
                                     finish_reason=event["finish_reason"],
                                     stop_truncated_tool_call=(event.get("receipt") or {}).get(
@@ -5366,8 +5379,8 @@ def handler_for(
                                     # one whose name the grammar could not
                                     # read, fails here as the completed call
                                     # would have.
-                                    enforce_tool_contract(
-                                        body,
+                                    enforce_job_tool_contract(
+                                        job, body,
                                         [
                                             {k: v for k, v in c.items() if k != "index"}
                                             for c in calls
@@ -5414,8 +5427,8 @@ def handler_for(
                                     {k: v for k, v in c.items() if k != "index"}
                                     for c in calls
                                 ]
-                            enforce_tool_contract(
-                                body,
+                            enforce_job_tool_contract(
+                                job, body,
                                 message.get("tool_calls", []),
                                 finish_reason=event["finish_reason"],
                                 stop_truncated_tool_call=(event.get("receipt") or {}).get(
@@ -7086,13 +7099,22 @@ def apply_ast_invocation(args, policy, adapter_resolution):
             applied.update(defaults)
             resolved.update(defaults)
         args.external_draft = True
-    elif drafter == "mtp":
-        args.native_mtp = True
-    elif drafter == "pld":
-        args.prompt_lookup = True
     else:
-        resolved["draft_model"] = drafter
-        args.external_draft = True
+        chain_hook = getattr(adapter_type, "lower_ast_chain", None)
+        lowered = chain_hook(drafter, artifact) if callable(chain_hook) else None
+        if lowered is not None:
+            route, additions = lowered
+            if route not in ("native_mtp", "prompt_lookup", "external_draft"):
+                raise ValueError("adapter AST chain hook returned an unsupported route")
+            resolved.update(additions)
+            setattr(args, route, True)
+        elif drafter == "mtp":
+            args.native_mtp = True
+        elif drafter == "pld":
+            args.prompt_lookup = True
+        else:
+            resolved["draft_model"] = drafter
+            args.external_draft = True
     if ast_options[6] and ast_options[5] is None and not resolved.get("ast_tree_calibration"):
         raise ValueError("--ast-batch-row-sharing needs --ast-tree-calibration")
     if (ast_options[5] is not None or ast_options[6]) and (
@@ -7795,7 +7817,9 @@ def main():
     # is taken and before any weight is read, so they end in one line.  The
     # validate-only prefix reports a wrongly shaped value as TypeError.
     try:
-        ServingEngine.validate_arguments(args.model, **engine_kwargs)
+        ServingEngine.validate_arguments(
+            args.model, adapter_factory=adapter_resolution.adapter_type, **engine_kwargs
+        )
     except (ValueError, TypeError, OSError) as error:
         parser.error(str(error))
     # The same for the operator's JSON files: read them before the bind.

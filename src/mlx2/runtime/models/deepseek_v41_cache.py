@@ -54,6 +54,19 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
             CheckpointPublicationCondition(
                 "pending", "truthy", "V4.1 forward or source pool is incomplete"
             ),
+            CheckpointPublicationCondition(
+                "ast_private_profile", "truthy",
+                "V4.1 AST numerical profile is private and lacks exact publication admission",
+            ),
+        ),
+        segmented_publication_conditions=(
+            CheckpointPublicationCondition(
+                "pending", "truthy", "V4.1 forward or source pool is incomplete"
+            ),
+            CheckpointPublicationCondition(
+                "ast_private_profile", "truthy",
+                "V4.1 AST numerical profile is private and lacks exact publication admission",
+            ),
         ),
     )
 
@@ -86,6 +99,10 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
         self._pool_count = self._capacity = 0
         self.hash_tail = xp.full((3,), -1, dtype=xp.int32) if history else None
         self._in_forward = False
+        # A different native-M arithmetic profile may be executed privately
+        # while its numerical gate is unresolved. This mark survives ordinary
+        # continuation and descriptor cloning; it cannot donate an APC prefix.
+        self.ast_private_profile = None
 
     @property
     def pooled(self):
@@ -140,6 +157,20 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
     def state(self, value):
         if len(value) != 6:
             raise ValueError("invalid V4.1 cache array inventory")
+        values = _copy(self.xp, value)
+        pooled, index_keys = values[3:5]
+        # Capacity slack is internal only. Restored arrays must agree on
+        # their live extent before the accessors slice at _pool_count.
+        if (pooled is None) != (index_keys is None):
+            raise ValueError("incomplete V4.1 source plane inventory")
+        count = 0
+        if pooled is not None:
+            if len(pooled.shape) != 3:
+                raise ValueError("invalid V4.1 source plane geometry")
+            count = pooled.shape[1]
+            if (pooled.shape != (1, count, self.head_dim)
+                    or index_keys.shape != (1, count, self.index_head_dim)):
+                raise ValueError("V4.1 source plane extent mismatch")
         (
             self.keys,
             self.buf_kv,
@@ -147,14 +178,14 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
             self._pooled,
             self._index_keys,
             self.hash_tail,
-        ) = _copy(self.xp, value)
-        self._pool_count = 0 if self._pooled is None else self._pooled.shape[1]
-        self._capacity = self._pool_count
+        ) = values
+        self._pool_count = self._capacity = count
 
     @property
     def meta_state(self):
         return (
-            STATE_REVISION,
+            STATE_REVISION if self.ast_private_profile is None else
+            STATE_REVISION + ":private:" + self.ast_private_profile,
             self.identity,
             str(self.ratio),
             str(self.window_size),
@@ -222,6 +253,10 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
             raise ValueError("V4.1 n-gram state requires int32")
 
     def validate_state(self):
+        if self.ast_private_profile is not None and (
+            type(self.ast_private_profile) is not str or not self.ast_private_profile
+        ):
+            raise ValueError("invalid V4.1 private AST numerical profile")
         self.validate_storage()
         expected = min(self.offset, self.window_size)
         if self.keys is None:
@@ -275,6 +310,14 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
         self.validate_state()
         self.cache_operations_contract.validate_publication(self)
         return DeepSeekV4Snapshot(self.meta_state, _copy(self.xp, self.state))
+
+    def checkpoint_publication_refusal(self):
+        """Host-only exact-state guard for APCv2 and generic checkpoints."""
+        if self.pending:
+            return "V4.1 forward or source pool is incomplete"
+        if self.ast_private_profile is not None:
+            return "V4.1 AST numerical profile is private and lacks exact publication admission"
+        return None
 
     @property
     def nbytes(self):

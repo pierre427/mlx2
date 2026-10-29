@@ -302,9 +302,12 @@ def test_execution_scope_cleans_up_and_preserves_forward_counter(failure):
         events.append("body")
         if failure == "body": raise RuntimeError("body failed")
         return "result"
-    model = SimpleNamespace(_weight_executions=0,
-                            weights=SimpleNamespace(execution_scope=scope),
-                            _forward_impl=body)
+    # Use the actual descriptor so the ordinary implementation helper remains
+    # present after splitting public transaction entry from private execution.
+    model = object.__new__(v41.DeepSeekV41Model)
+    model._weight_executions=0
+    model.weights=SimpleNamespace(execution_scope=scope)
+    model._forward_impl=body
     if failure:
         with pytest.raises(RuntimeError, match=failure):
             v41.DeepSeekV41Model._forward(model, None)
@@ -315,7 +318,9 @@ def test_execution_scope_cleans_up_and_preserves_forward_counter(failure):
 
 
 def test_no_execution_hook_preserves_native_weight_behavior():
-    model = SimpleNamespace(_weight_executions=0, weights=SimpleNamespace(),
-                            _forward_impl=lambda *args, **kwargs: "native")
+    model = object.__new__(v41.DeepSeekV41Model)
+    model._weight_executions=0
+    model.weights=SimpleNamespace()
+    model._forward_impl=lambda *args, **kwargs: "native"
     assert v41.DeepSeekV41Model._forward(model, None) == "native"
     assert model._weight_executions == 0

@@ -118,7 +118,7 @@ def run_nax_profile(mx,np,capture_path,load_expert,out,report,compare,atomic,*,c
         with path.open('xb')as f:np.savez(f,candidate_boundary=a,candidate_raw=b,candidate_partials=c)
         row['candidate_arrays']=dict(path=name,sha256=hashlib.sha256(path.read_bytes()).hexdigest());observe();write()
         row['timing']=timing(mx,np,{'reference':stock_boundary,PROFILE:lambda:native()},repeats=3) if row['candidate_finite'] and row['ordered_partial_reduction']['exact'] else None
-        mx.synchronize();del x,data,q,s,raw,rounded,cb,cr,parts,a,b,c;observe();write()
+        mx.synchronize();x=None;data=None;q=None;s=None;del raw,rounded,cb,cr,parts,a,b,c;observe();write()
     section['required_reference_controls_exact']=all(all(v['exact']and v['finite']for v in row['replayed_stock'].values())for row in section['cases'])
     section['candidate_finite']=all(row['candidate_finite']for row in section['cases'])
     section['ordered_reduction_exact']=all(row['ordered_partial_reduction']['exact']for row in section['cases'])

@@ -7,9 +7,11 @@ must compare raw products against the actual ordinary dispatch before use.
 Provenance: provenance/deepseek-v41-source-dense.json.
 """
 from functools import lru_cache
+from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 import re
+import weakref
 
 
 SHAPES = {"wo_a": (8, 1024, 4096), "head": (1, 129280, 5120)}
@@ -23,6 +25,72 @@ HASHES = {
 }
 LIBRARY_SHA256 = "d8c9393d584e781393c3effccfccd8ba85ad0c70264edaf9f897dca9875375c6"
 DEFAULT_TILE = (64, 64, 128, 2, 2)
+OPERAND_POLICIES = ("full_operands_v1", "coefficient_views_v1")
+_COEFFICIENT_VIEW_ISSUER = object()
+
+
+@dataclass(frozen=True)
+class PreparedCoefficientView:
+    """Owner-bound alias proof, prepared once outside the forward hot path.
+
+    The owning SourceWeights cache retains this object through evaluation and
+    retires it only after its ordinary park/close completion fence. No global
+    array cache or per-call CPU buffer/address lookup is introduced.
+    """
+    full: object = field(repr=False)
+    view: object = field(repr=False)
+    kind: str
+    shape: tuple
+    dtype: object = field(repr=False)
+    _issuer: object = field(repr=False)
+    _identity: object = field(default=None, repr=False, compare=False)
+
+    def operand(self, weight, kind):
+        if (self._issuer is not _COEFFICIENT_VIEW_ISSUER
+                or not isinstance(self._identity, weakref.ReferenceType) or self._identity() is not self
+                or self.full is not weight
+                or self.kind != kind or tuple(weight.shape) != self.shape
+                or weight.dtype != self.dtype or tuple(self.view.shape) != (1, self.shape[1])
+                or self.view.dtype != self.dtype):
+            raise ValueError("Source dense coefficient alias owner/geometry changed")
+        return self.view
+
+
+def prepare_coefficient_view(weight, kind, *, ownercheck=None, _mx=None):
+    """Evaluate and prove a first-row alias during caller-owned idle preparation.
+
+    Geometry comes from the FULL original BF16 coefficient. The device kernels
+    use static G/N/K and do not infer their read span from the alias shape.
+    Provenance: deepseek-v41-source-dense-coefficient-views.json.
+    """
+    if _mx is None:
+        import mlx.core as _mx
+    if kind not in SHAPES:
+        raise ValueError("Source dense alias unknown projection kind")
+    groups, n, k = SHAPES[kind]
+    if tuple(weight.shape) != (groups*n, k) or weight.dtype != _mx.bfloat16:
+        raise ValueError("Source dense alias requires full original BF16 geometry")
+    if ownercheck is not None and (not callable(ownercheck) or ownercheck() is False):
+        raise ValueError("Source dense alias caller ownership is not live")
+    alias = weight[:1]
+    if tuple(alias.shape) != (1, k) or alias.dtype != weight.dtype:
+        raise ValueError("Source dense first-row alias geometry mismatch")
+    _mx.eval(weight, alias)
+    import numpy as np
+    full_buffer, alias_buffer = memoryview(weight), memoryview(alias)
+    if not full_buffer.c_contiguous or not alias_buffer.c_contiguous:
+        raise ValueError("Source dense coefficient alias must be C contiguous")
+    full_bytes = np.frombuffer(full_buffer, dtype=np.uint8)
+    alias_bytes = np.frombuffer(alias_buffer, dtype=np.uint8)
+    if (full_bytes.nbytes != groups*n*k*2 or alias_bytes.nbytes != k*2
+            or full_bytes.ctypes.data != alias_bytes.ctypes.data):
+        raise ValueError("Source dense coefficient alias does not share the full allocation base")
+    if ownercheck is not None and ownercheck() is False:
+        raise ValueError("Source dense alias caller ownership expired during preparation")
+    prepared = PreparedCoefficientView(weight, alias, kind, tuple(weight.shape), weight.dtype,
+                                       _COEFFICIENT_VIEW_ISSUER)
+    object.__setattr__(prepared, "_identity", weakref.ref(prepared))
+    return prepared
 
 
 def plan(kind, rows, *, algorithm="auto", tile=DEFAULT_TILE):
@@ -233,7 +301,8 @@ def _kernel(kind, rows, algorithm, tile):
         header=spec['header'], source=spec['source'], ensure_row_contiguous=True)
 
 
-def project(x, weight, kind, *, algorithm="auto", tile=DEFAULT_TILE):
+def project(x, weight, kind, *, algorithm="auto", tile=DEFAULT_TILE,
+            operand_policy="full_operands_v1", coefficient_view=None):
     """Schedule an explicit candidate; unsupported inputs raise before dispatch.
 
     WoA: x[1,T,8,4096], BF16 weight[8192,4096] -> F32[1,T,8,1024].
@@ -241,19 +310,28 @@ def project(x, weight, kind, *, algorithm="auto", tile=DEFAULT_TILE):
     No activation quantization or BF16 output rounding is inserted.
     """
     import mlx.core as mx
+    if operand_policy not in OPERAND_POLICIES:
+        raise ValueError("Source dense unknown coefficient operand policy")
     p = _geometry(x, weight, kind, algorithm, tile)
     if not device_supported():
         raise ValueError("Source dense candidate requires owned M5 Max Metal device")
-    return _kernel(kind, p['rows'], p['algorithm'], tile)(inputs=[x, weight],
+    operand = weight
+    if operand_policy == "coefficient_views_v1":
+        if not isinstance(coefficient_view, PreparedCoefficientView):
+            raise ValueError("Source dense coefficient view requires idle prepared ownership")
+        operand = coefficient_view.operand(weight, kind)
+    return _kernel(kind, p['rows'], p['algorithm'], tile)(inputs=[x, operand],
         grid=p['grid'], threadgroup=p['threadgroup'], output_shapes=[p['output_shape']],
         output_dtypes=[mx.float32])[0]
 
 
-def maybe_project(x, weight, kind, *, algorithm="auto", tile=DEFAULT_TILE):
+def maybe_project(x, weight, kind, *, algorithm="auto", tile=DEFAULT_TILE,
+                  operand_policy="full_operands_v1", coefficient_view=None):
     """Return None on a structural/device refusal; ordinary fallback is caller-owned."""
     if not supports(x, weight, kind, algorithm=algorithm, tile=tile):
         return None
-    return project(x, weight, kind, algorithm=algorithm, tile=tile)
+    return project(x, weight, kind, algorithm=algorithm, tile=tile,
+                   operand_policy=operand_policy, coefficient_view=coefficient_view)
 
 
 def compilation_source(kind, rows, *, algorithm="auto", tile=DEFAULT_TILE):

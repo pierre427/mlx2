@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import signal
 import socket
 import subprocess
@@ -23,6 +24,12 @@ from probe_uzu_kernels import atomic, swapouts
 from run_single_model_smoke_ladder import stop_server, thermal_sample, wait_health
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def server_env():
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "src")
+    return env
 
 
 def policy_for(model, candidate=True):
@@ -293,7 +300,7 @@ def main():
     try:
         command = [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:], "--worker"]
         with (args.out / "direct.log").open("w") as log:
-            worker = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            worker = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=server_env(), start_new_session=True)
             if worker.wait() != 0:
                 raise RuntimeError("direct worker failed; see direct.json/direct.log")
         result["direct"] = json.loads((args.out / "direct.json").read_text())
@@ -309,7 +316,7 @@ def main():
                    "--cache-bytes", str(1 << 30)]
         command.append("--external-draft" if "draft_model" in policy else "--native-mtp")
         with (args.out / "server.log").open("w") as log:
-            server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=server_env(), start_new_session=True)
             result["server_startup_status"] = wait_health(base, server, 300)
             with urllib.request.urlopen(base + "/v1/models", timeout=20) as response:
                 served = json.load(response)["data"][0]["id"]

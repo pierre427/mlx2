@@ -4,12 +4,12 @@
     "mlx2.adapters.registry": {
       "sha256": "edd51d56c4ac346ac9d5dd0fb998e46079c30e01f128190406cf00f88e9f652f",
       "targets": [],
-      "reason": "Selected-adapter dispatch reviewed through native DeepSeek V4 MLX registration and Nanbeige Llama topology refinement. New targets are literal internal adapter modules; the constructed adapter/model roots still define the dynamic closure. Unrelated unknown loaders remain unresolved."
+      "reason": "Selected-adapter dispatch reviewed through DeepSeek V4.1 GGUF, MLX, IQ1 and Source registration. New targets are literal internal adapter modules; the constructed adapter/model roots still define the dynamic closure. Unrelated unknown loaders remain unresolved."
     },
     "mlx2.runtime.models.cache": {
       "sha256": "a0a8b2929e90d396f509fa4a1aad44d4a9939f0fe4bc58b86c9f5a78f3d8b27c",
       "targets": [],
-      "reason": "Revision-bound cache classes supplied by the selected adapter. Reviewed bounded KV reservation, capacity-plan propagation and independent committed-descriptor cloning; no new dynamic loader or cache-class target. Default unreserved cache behavior is unchanged."
+      "reason": "Revision-bound cache classes supplied by the selected adapter. Reviewed bounded KV reservation, capacity-plan propagation, independent committed-descriptor cloning and validated empty-cache serialization for model-free drafters; no new dynamic loader or cache-class target. Default nonempty cache behavior is unchanged."
     },
     "mlx2.runtime.qwen38_tensorfold": {
       "sha256": "4344a13dbbde65343d42561998b2ef7fdf84720c723a150e8e7252e1483716d3",

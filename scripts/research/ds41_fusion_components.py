@@ -1,5 +1,4 @@
 """Owned-probe components for Source fusion; called only after lease validation."""
-import hashlib
 
 
 def run(mx,np,bank,artifact,out,report,compare,atomic):

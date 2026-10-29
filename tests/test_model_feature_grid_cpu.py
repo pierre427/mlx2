@@ -75,6 +75,15 @@ def test_the_committed_decisions_carry_the_checkpoint_dimension():
     _builder().validate_decisions(rows)
 
 
+def test_source_reviewed_features_have_explicit_inventory_slots():
+    builder = _builder()
+    with (ROOT / 'docs/research/model-feature-decisions.tsv').open(newline='') as handle:
+        source = {row['feature_or_flag'] for row in csv.DictReader(handle, delimiter='\t')
+                  if row['model'] == 'deepseek_v41:base' and row['scope'] == 'feature'}
+    assert source <= set(builder.FEATURES)
+    assert len(builder.FEATURES) == len(set(builder.FEATURES))
+
+
 def test_invalid_inventory_preserves_existing_grid(tmp_path, monkeypatch):
     module = _builder()
     path = tmp_path / 'grid.tsv'; path.write_text('retained evidence\n')

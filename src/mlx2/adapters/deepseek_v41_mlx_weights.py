@@ -224,6 +224,11 @@ class NativeExpertPlan(ExpertStreamPlan):
                       capacity_experts_global=self.ceiling_bytes//max(1, self.expert_bytes),
                       per_layer_equivalent_capacity=self.capacity_experts,
                       resident_ceiling_bytes=self.ceiling_bytes)
+        if getattr(self,'reservation_policy',None)=='adaptive_working_set':
+            result.update(configured_capacity_bytes=self.ceiling_bytes,
+                          reserved_bytes=getattr(self,'working_reservation_bytes',0),
+                          reservation_policy='adaptive_working_set',
+                          reservation_observation='last live provider reading; capacity is a maximum')
         return result
 
 
@@ -296,6 +301,7 @@ class NativeExpertStore:
             self._ready()
             if self._active:
                 raise ValueError("native expert execution window already active")
+            if getattr(self,'adaptive_residency_enabled',False):self.adaptive_residency_update()
             self._active = True
             self.stats["windows"] += 1
         try:
@@ -316,6 +322,7 @@ class NativeExpertStore:
                 self._pending_uploads.clear()
                 self._pending_host.clear()
                 self._active = False
+                if getattr(self,'adaptive_residency_enabled',False):self.adaptive_residency_update()
 
     def acquire(self, prefix, expert):
         import mlx.core as mx
@@ -383,10 +390,179 @@ class NativeExpertStore:
 
     resident_bytes = live_bytes
 
+    @property
+    def adaptive_residency_enabled(self):
+        return getattr(self,'_adaptive_residency_enabled',False)
+
+    @property
+    def memory_admission_policy(self):
+        return 'attempt_after_reclaim' if self.adaptive_residency_enabled else 'bounded_reservation'
+
+    @property
+    def adaptive_state(self):
+        return dict(getattr(self,'_adaptive_last',{}),enabled=self.adaptive_residency_enabled,
+            target_cache_bytes=getattr(self,'_adaptive_target',self.cache_budget_bytes),
+            target_payload_bytes=getattr(self,'_adaptive_payload_ceiling',self.cache_budget_bytes),
+            working_set_experts=getattr(self,'_adaptive_working_set',None))
+
+    def configure_adaptive_residency(self,enabled=True,*,available_bytes=None,headroom_bytes=0,
+                                     working_set_experts=6,staging_bytes=None,staging_within_cache=False):
+        """Adapter opt-in: a configured cache is a maximum, never prepaid RAM.
+
+        Other adapters remain on their existing reservation contract. Source
+        may supply a measured availability callback or a planner-owned target.
+        Pressure is advisory: immutable active leases survive a smaller target.
+        """
+        staging=max(self.minimum_cache_bytes,self.bounds.get('expert_staging_bound_bytes',self.minimum_cache_bytes))if staging_bytes is None else staging_bytes
+        if (type(enabled)is not bool or available_bytes is not None and not callable(available_bytes)
+                or type(headroom_bytes)is not int or headroom_bytes<0
+                or type(working_set_experts)is not int or not 1<=working_set_experts<=384
+                or type(staging)is not int or staging<self.minimum_cache_bytes
+                or type(staging_within_cache)is not bool):
+            raise ValueError('Invalid adaptive expert residency contract')
+        self._adaptive_residency_enabled=enabled
+        self._adaptive_available=available_bytes;self._adaptive_headroom=headroom_bytes
+        self._adaptive_working_set=working_set_experts;self._adaptive_staging=staging
+        self._adaptive_staging_within_cache=staging_within_cache
+        self._adaptive_override=None;self._adaptive_target=self.maximum_cache_bytes
+        self._adaptive_protected_bytes=0
+        self._adaptive_last={}
+        self.plan.reservation_policy='adaptive_working_set' if enabled else None
+        if enabled:self.plan.working_reservation_bytes=self._adaptive_reservation_bytes()
+        return self.adaptive_residency_update()if enabled else {'enabled':False}
+
+    def _adaptive_victim(self):
+        protected=set(self._leased)|set(self._pending_uploads)
+        return next((key for key in self._cache if key not in protected),None)
+
+    def _adaptive_evict_key(self,key):
+        arrays=self._cache.pop(key)
+        amount=getattr(arrays,'allocation_nbytes',None)
+        if amount is None:amount=sum(v.nbytes for v in arrays.values())
+        self._cache_bytes-=amount;self.stats['evictions']+=1
+        return amount
+
+    def adaptive_residency_update(self,*,incoming_bytes=0,measured_available_bytes=None,protected_bytes=None):
+        if not self.adaptive_residency_enabled:return {'enabled':False}
+        if type(incoming_bytes)is not int or incoming_bytes<0:raise ValueError('Invalid imminent expert bytes')
+        with self._lock:
+            available=measured_available_bytes
+            try:
+                if available is not None:pass
+                elif self._adaptive_available is None:
+                    from ..runtime.os_memory import host_memory_snapshot
+                    host=host_memory_snapshot();available=None if host is None else host.available_bytes
+                else:available=self._adaptive_available()
+            except Exception:
+                available=None
+            known=type(available)is int and available>=0
+            available=available if known else 0
+            if protected_bytes is not None:
+                if type(protected_bytes)is not int or protected_bytes<0:raise ValueError('Invalid protected working bytes')
+                self._adaptive_protected_bytes=protected_bytes
+            staging=self._adaptive_staging if self._adaptive_staging_within_cache else 0
+            floor=min(self.maximum_cache_bytes,self.minimum_cache_bytes*self._adaptive_working_set+staging)
+            live_target=min(self.maximum_cache_bytes,max(floor,self._cache_bytes+available
+                -max(self._adaptive_headroom,self._adaptive_protected_bytes)))
+            target=(live_target if self._adaptive_override is None else min(live_target,max(floor,self._adaptive_override)))
+            self._adaptive_target=target
+            payload=max(self.minimum_cache_bytes,target-staging)
+            self._adaptive_payload_ceiling=payload
+            evicted=0
+            # Each iteration removes one unleased object. Exhausted pins defer
+            # shrinking instead of spinning or recycling an encoded resource.
+            for _ in range(len(self._cache)):
+                if self._cache_bytes+incoming_bytes<=payload:break
+                victim=self._adaptive_victim()
+                if victim is None:break
+                evicted+=self._adaptive_evict_key(victim)
+            self._adaptive_last=dict(enabled=True,configured_maximum_bytes=self.maximum_cache_bytes,
+                effective_cache_target_bytes=target,effective_payload_target_bytes=payload,
+                measured_available_bytes=available,availability_known=known,evicted_bytes=evicted,
+                deferred_for_pins=self._cache_bytes+incoming_bytes>payload,
+                imminent_expert_window_bytes=self.minimum_cache_bytes*self._adaptive_working_set,
+                staging_bytes=self._adaptive_staging,precision_selection='unchanged')
+            return dict(self._adaptive_last)
+
+    def rebalance_headroom(self,*,available_bytes,protected_bytes):
+        if not self.adaptive_residency_enabled:raise ValueError('Adaptive expert residency is not enabled')
+        if any(type(v)is not int or v<0 for v in (available_bytes,protected_bytes)):
+            raise ValueError('Headroom rebalance requires measured nonnegative bytes')
+        result=self.adaptive_residency_update(measured_available_bytes=available_bytes,protected_bytes=protected_bytes)
+        # Dropping a tensor is not physical free-memory credit. Release only
+        # allocator-owned unused blocks; the caller MUST remeasure afterward.
+        if result['evicted_bytes']:
+            self._adaptive_reclaim_allocator()
+        result['free_memory_credit_bytes']=0
+        return result
+
+    def _adaptive_reclaim_allocator(self):
+        import mlx.core as mx
+        mx.clear_cache()
+
+    def release_completed_experts(self,keys,*,roots,wait=None):
+        """Release a sequential expert after all its output consumers complete.
+
+        Bounded completion uses key-based epoch counters and cannot safely mix
+        early release/reacquisition generations. Its caller must choose an
+        ordinary provider window for this sequential route.
+        """
+        if not self.adaptive_residency_enabled:raise ValueError('Adaptive expert residency is not enabled')
+        keys=tuple(keys);roots=tuple(roots)
+        if not keys or len(set(keys))!=len(keys)or not roots or any(v is None for v in roots):
+            raise ValueError('Completed expert release requires distinct keys and every output root')
+        with self._lock:
+            if not self._active or getattr(self,'_completion_collector',None)is not None:
+                raise ValueError('Sequential expert release requires an ordinary active provider window')
+            if any(key not in self._leased or key in self._pending_uploads or key in self._pending_host for key in keys):
+                raise ValueError('Cannot release an absent or pending expert upload')
+            owners=tuple(self._leased[key]for key in keys)
+            if wait is None:
+                import mlx.core as mx
+                mx.eval(*roots)
+            else:wait(roots)
+            if any(self._leased.get(key)is not owner for key,owner in zip(keys,owners)):
+                raise RuntimeError('Completed expert ownership generation changed during wait')
+            for key in keys:del self._leased[key]
+            self.stats['adaptive_completed_expert_releases']=self.stats.get('adaptive_completed_expert_releases',0)+len(keys)
+            return dict(released=len(keys),rebalanced=self.adaptive_residency_update(),free_memory_credit_bytes=0)
+
+    def set_adaptive_cache_target(self,cache_bytes,*,working_set_experts=None):
+        if not self.adaptive_residency_enabled:raise ValueError('Adaptive expert residency is not enabled')
+        if cache_bytes is not None and(type(cache_bytes)is not int or cache_bytes<self.minimum_cache_bytes):
+            raise ValueError('Adaptive target must admit one expert')
+        if working_set_experts is not None:
+            if type(working_set_experts)is not int or not 1<=working_set_experts<=384:raise ValueError('Invalid imminent expert count')
+            self._adaptive_working_set=working_set_experts
+        self._adaptive_override=cache_bytes
+        return self.adaptive_residency_update()
+
+    def record_pressure_attempt(self,required_bytes,available_bytes):
+        if any(type(v)is not int or v<0 for v in (required_bytes,available_bytes)):
+            raise ValueError('Pressure accounting requires actual nonnegative byte counts')
+        self.last_pressure_admission=dict(required_bytes=required_bytes,available_bytes=available_bytes,
+            shortfall_bytes=max(0,required_bytes-available_bytes),policy=self.memory_admission_policy,
+            free_memory_credit_bytes=0)
+        return dict(self.last_pressure_admission)
+
+    def _adaptive_reservation_bytes(self):
+        live=self.live_bytes()
+        ple_live=sum(len(t._cache)*t.row_bytes for t in self.ple_tables.values())
+        host=sum(getattr(value,'host_allocation_nbytes',self.files.get(key,{}).get('size',0))
+                 for key,value in self._pending_host.items())
+        return (max(0,live-ple_live,self.minimum_cache_bytes*self._adaptive_working_set)
+                +max(host,self._adaptive_staging)
+                +sum(getattr(t,'resume_reservation_bytes',t.reserved_bytes)()for t in self.ple_tables.values()))
+
     def resume_reservation_bytes(self):
+        if self.adaptive_residency_enabled:return self._adaptive_reservation_bytes()
         return self.cache_budget_bytes+self.plan.transient_bound_bytes+sum(t.resume_reservation_bytes() for t in self.ple_tables.values())
 
     def reserved_bytes(self):
+        if self.adaptive_residency_enabled:
+            value=(sum(t.reserved_bytes()for t in self.ple_tables.values())if self._parked else self._adaptive_reservation_bytes())
+            self.plan.working_reservation_bytes=value
+            return value
         return ((0 if self._parked else self.cache_budget_bytes+self.plan.transient_bound_bytes)
                 +sum(t.reserved_bytes() for t in self.ple_tables.values()))
 
@@ -417,10 +593,11 @@ class NativeExpertStore:
         return REVISION
 
     def receipt(self):
-        return dict(mode=self.mode, mechanism_revision=REVISION, allocation="global_byte_lru",
+        reservation=self.reserved_bytes()
+        result=dict(mode=self.mode, mechanism_revision=REVISION, allocation="global_byte_lru",
                     numeric_profile="native_f32_qmm", source_binding=self.binding,
                     source_read_byte_scope="whole expert safetensors files including headers",
-                    plan=self.plan.as_dict(), live_bytes=self.live_bytes(), reserved_bytes=self.reserved_bytes(),
+                    plan=self.plan.as_dict(), live_bytes=self.live_bytes(), reserved_bytes=reservation,
                     cache_payload_bytes=self._cache_bytes, cache_budget_bytes=self.cache_budget_bytes,
                     leased_items=len(self._leased), active_window=self._active,
                     pending_upload_items=len(self._pending_uploads),
@@ -428,8 +605,13 @@ class NativeExpertStore:
                     required_read_inflight=self.pool.counters()["weight_read_inflight"],
                     read_failure=self.pool.failure, parked=self._parked,
                     counters=self.counters(), qualification="unqualified")
+        if self.adaptive_residency_enabled:
+            result.update(adaptive_residency=dict(self._adaptive_last),memory_admission_policy=self.memory_admission_policy,
+                          last_pressure_admission=getattr(self,'last_pressure_admission',None))
+        return result
 
     def resize_cache_budget(self, budget):
+        if self.adaptive_residency_enabled:return self.set_adaptive_cache_target(budget)['effective_cache_target_bytes']
         self._ready()
         if self._active or type(budget) is not int or not self.minimum_cache_bytes <= budget <= self.maximum_cache_bytes:
             raise ValueError("native expert resize requires an idle admitted budget")

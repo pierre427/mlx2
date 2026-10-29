@@ -136,7 +136,8 @@ def test_profile_and_model_APC_binding_precedes_construction(monkeypatch):
 def test_diagnostics_explicit_distinct_law(monkeypatch):
     monkeypatch.setattr(DeepSeekV41MLXAdapter,'diagnostics',lambda self:{})
     monkeypatch.setattr(native,'implementation_identity',lambda:'implementation-A')
-    a=DeepSeekV41SourceAdapter.__new__(DeepSeekV41SourceAdapter);a.kernel_policy={}
+    a=DeepSeekV41SourceAdapter.__new__(DeepSeekV41SourceAdapter);a.kernel_policy={};a.native_admission={}
+    a.identity={'fingerprint':'synthetic-source'};a.draft_model=None
     a.weights=SimpleNamespace(expert_math_policy='reference',dense_receipt=lambda:{},source_qakv_policy='reference',source_q_b_prefill_policy='reference',source_fp8_pp_policy=native.POLICY)
     a.model=SimpleNamespace(source_attention_math_policy='all_retained_broadcast',source_hc_boundary_policy='reference',index_policy='finite_all_retained',selected_kv_policy='decode_reuse',scheduled_hc_calls={},hc_coeff_policy='reference')
     d=a.diagnostics()

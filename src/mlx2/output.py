@@ -270,6 +270,7 @@ class OutputParser:
             think_close_separator and chat and self.channel == "content"
         )
         self.buffer = ""
+        self._buffer_origin = 0
         self.stop_matcher = StopSequenceMatcher(stops)
         self.stopped = False
         self.tool_count = 0
@@ -304,9 +305,24 @@ class OutputParser:
         self.tool_marker_scan_chars = 0
         self.max_tool_parse_chars = max_tool_parse_chars
 
+    def _consume_buffer(self, count):
+        self._buffer_origin += count
+        self.buffer = self.buffer[count:]
+
+    def _marker_allowed(self, marker, absolute_offset):
+        """Adapters may bind structural markers to decoded special tokens."""
+        return True
+
+    def _find_marker(self, marker, start=0):
+        position = self.buffer.find(marker, start)
+        while position >= 0 and not self._marker_allowed(marker, self._buffer_origin + position):
+            position = self.buffer.find(marker, position + 1)
+        return position
+
     def _join_tool_buffer(self):
         prefix = self._tool_buffered_chars
         if self._tool_chunks:
+            self._buffer_origin -= prefix
             self.buffer = "".join((*self._tool_chunks, self.buffer))
             self._tool_chunks = []
             self._tool_buffered_chars = 0
@@ -318,7 +334,7 @@ class OutputParser:
         if end:
             self._tool_chunks.append(self.buffer[:end])
             self._tool_buffered_chars += end
-            self.buffer = self.buffer[end:]
+            self._consume_buffer(end)
 
     def _emit(self, events, text):
         if self.channel == "content":
@@ -405,7 +421,8 @@ class OutputParser:
         events = []
         while self.buffer:
             if self._drop_separator:
-                self.buffer = self.buffer.lstrip(self.think_close_separator)
+                stripped = self.buffer.lstrip(self.think_close_separator)
+                self._consume_buffer(len(self.buffer) - len(stripped))
                 if not self.buffer:
                     break  # the answer may still start with a separator
                 self._drop_separator = False
@@ -419,7 +436,7 @@ class OutputParser:
                     break
             if not self.chat:
                 events.append({"content": self.buffer})
-                self.buffer = ""
+                self._consume_buffer(len(self.buffer))
                 break
             if self._leading:
                 if (
@@ -429,14 +446,14 @@ class OutputParser:
                 ):
                     break  # may still become the leading open marker
                 self._leading = False
-                if self.buffer.startswith(THINKING_OPEN_MARKER):
-                    self.buffer = self.buffer[len(THINKING_OPEN_MARKER) :]
+                if self.buffer.startswith(THINKING_OPEN_MARKER) and self._marker_allowed(THINKING_OPEN_MARKER, self._buffer_origin):
+                    self._consume_buffer(len(THINKING_OPEN_MARKER))
                     self.channel = "reasoning_content"
                     self._reasoning_open = True
                 continue  # the answer may start here: recheck the stop gate
             if self.channel == "tool":
                 self.tool_marker_scan_chars += len(self.buffer)
-                end = self.buffer.find(self.tool_close)
+                end = self._find_marker(self.tool_close)
                 if end >= 0 or final:
                     prefix = self._join_tool_buffer()
                     if end >= 0:
@@ -467,7 +484,7 @@ class OutputParser:
                     # writes JSON arguments with a raw ``<``): the call runs
                     # on to a later closer, and fails at the first one unless
                     # a later one parses.
-                    end = self.buffer.find(self.tool_close, end + 1)
+                    end = self._find_marker(self.tool_close, end + 1)
                 truncated = final and (stop_hit or self._length_finish)
                 if end < 0 and first >= 0 and final and not truncated:
                     # No later closer: the call is malformed.  (Under a stop
@@ -480,7 +497,7 @@ class OutputParser:
                         # model output: drop the partial call (it is neither
                         # a call nor answer text) rather than fail the request.
                         self._record_cut_call(self.buffer, stop_hit=stop_hit)
-                        self.buffer = ""
+                        self._consume_buffer(len(self.buffer))
                         self.channel = "content"
                         break
                     if final:
@@ -488,7 +505,7 @@ class OutputParser:
                             raise ValueError("model produced an incomplete tool call")
                         self._content(events, self.tool_open + self.buffer)
                         self.tool_call_parse_fallbacks += 1
-                        self.buffer = ""
+                        self._consume_buffer(len(self.buffer))
                         self.channel = "content"
                     else:
                         self._hold_tool_buffer()
@@ -539,7 +556,7 @@ class OutputParser:
                         raise ValueError(str(exc)) from exc
                     self._content(events, raw)
                     self.tool_call_parse_fallbacks += 1
-                    self.buffer = self.buffer[end + len(self.tool_close) :]
+                    self._consume_buffer(end + len(self.tool_close))
                     self.channel = "content"
                     continue
                 # A parsed call confirms that pending whitespace separated two
@@ -548,7 +565,7 @@ class OutputParser:
                 self._pending_space = ""
                 events.extend(parsed_events)
                 self.tool_count += len(parsed_events)
-                self.buffer = self.buffer[end + len(self.tool_close) :]
+                self._consume_buffer(end + len(self.tool_close))
                 self.channel = "content"
                 self._after_call = True
                 continue
@@ -560,7 +577,7 @@ class OutputParser:
             # marker policy.  A call after ``</think>`` still parses.
             if self.tools and self.channel != "reasoning_content":
                 markers[self.tool_open] = "tool"
-            matches = [(self.buffer.find(m), m) for m in markers if m in self.buffer]
+            matches = [(position, marker) for marker in markers if (position := self._find_marker(marker)) >= 0]
             if matches:
                 end, marker = min(matches)
                 if end:
@@ -583,12 +600,12 @@ class OutputParser:
                     if marker == THINKING_CLOSE_MARKER:
                         self._reasoning_open = False
                         self._drop_separator = bool(self.think_close_separator)
-                self.buffer = self.buffer[end + len(marker) :]
+                self._consume_buffer(end + len(marker))
             else:
                 end = len(self.buffer) if final else _safe_prefix(self.buffer, markers)
                 if end:
                     self._emit(events, self.buffer[:end])
-                self.buffer = self.buffer[end:]
+                self._consume_buffer(end)
                 break
         if final and (stop_hit or self._length_finish) and self.channel == "tool":
             # The stop landed right after the opener: a call was in progress

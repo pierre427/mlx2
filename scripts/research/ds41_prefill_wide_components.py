@@ -117,7 +117,7 @@ def run_wide(mx,np,bank,artifact,out,report,compare,atomic):
                          'raw_boundary':raw_results,'variants':variants,
                          'boundary_exact':all(v['exact']for v in raw_results.values())}
                     section['cases'].append(row);observe();write()
-            del functions,reference,prepared,inclusive,x,xb,xr,values
+            x=None;xb=None;del functions,reference,prepared,inclusive,xr,values
             mx.synchronize()
     section['all_optional_boundaries_exact']=all(c['boundary_exact']for c in section['cases'])
     section['cases_count']=len(section['cases'])

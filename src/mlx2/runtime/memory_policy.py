@@ -357,29 +357,34 @@ class SelfMTPLaneAdmissionController:
         saturation_lane_cap: Optional[int] = SATURATION_LANE_CAP,
         verification_row_cap: Optional[int] = None,
         cache_estimator: Optional[Callable[[int], int]] = None,
+        memory_pressure_policy: str = "bounded",
     ):
+        if memory_pressure_policy not in ("bounded", "attempt_after_reclaim"):
+            raise ValueError("unknown admission memory pressure policy")
+        self.memory_pressure_policy = memory_pressure_policy
+        demand = memory_pressure_policy == "attempt_after_reclaim"
         (service_floor, driver_floor) = self.host_scaled_reserves(
             host_memory_gib, advisory_gib
         )
         if service_reserve_gib is None:
-            service_reserve_gib = service_floor
+            service_reserve_gib = 0.0 if demand else service_floor
         if driver_allowance_gib is None:
-            driver_allowance_gib = driver_floor
+            driver_allowance_gib = 0.0 if demand else driver_floor
         service_reserve_gib = float(service_reserve_gib)
         driver_allowance_gib = float(driver_allowance_gib)
         # An explicit override may raise the reserve but never lower it below
         # what this host needs; the floor is host-scaled instead of a flat
         # 16 GiB so a small Mac is configurable at all.
-        if not math.isfinite(service_reserve_gib) or service_reserve_gib <= 0:
+        if not math.isfinite(service_reserve_gib) or service_reserve_gib < 0 or (not demand and service_reserve_gib == 0):
             raise ValueError("self-MTP service reserve must be finite and positive")
-        if service_reserve_gib < service_floor:
+        if not demand and service_reserve_gib < service_floor:
             raise ValueError(
                 "self-MTP service reserve must be at least the host-scaled "
                 f"floor of {service_floor:.4g} GiB"
             )
         if not math.isfinite(driver_allowance_gib) or driver_allowance_gib < 0:
             raise ValueError("self-MTP driver allowance must be non-negative")
-        if driver_allowance_gib < driver_floor:
+        if not demand and driver_allowance_gib < driver_floor:
             raise ValueError(
                 "self-MTP driver allowance must be at least the host-scaled "
                 f"floor of {driver_floor:.4g} GiB"

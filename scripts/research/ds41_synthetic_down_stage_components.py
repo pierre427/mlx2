@@ -222,7 +222,7 @@ def run(mx,check_live=None):
     cases=[];controls=[]
     for name,kinds,counts in PROFILES:
         _live(check_live);values,ids=_routes(np,rng,counts)
-        profile_metadata=next(v for v in p['profiles']if v['name']==name)
+        next(v for v in p['profiles']if v['name']==name)
         mapping=dict(zip(ids,kinds));bank={e:banks[k][i]for i,(e,k)in enumerate(zip(ids,kinds))}
         # Dyadic finite inputs stand in for already-produced Source middle.
         # GU/QAT and coefficient construction are intentionally outside stage.

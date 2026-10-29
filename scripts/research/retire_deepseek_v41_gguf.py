@@ -5,7 +5,7 @@ rename. Finalize refuses deletion without completed source/output hashes,
 standalone ordinary/APCv2 evidence and released GPU ownership receipts.
 """
 from pathlib import Path
-import argparse,json,os,subprocess,time
+import argparse,json,subprocess,time
 
 FILENAME='DeepSeek-V4.1-Flash-1017-Maya-XS-Abliterated.gguf'
 SOURCE_SHA='f414995b3797f77009634fac995f50834e70393771f9423fca984c892503b42a'

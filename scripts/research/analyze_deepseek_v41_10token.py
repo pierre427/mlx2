@@ -7,10 +7,8 @@ are kept separate from the intrusive boundary instrumentation.
 
 from contextlib import contextmanager
 from concurrent.futures import Future
-import json
 import threading
 import time
-import urllib.request
 
 import numpy as np
 

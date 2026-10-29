@@ -232,7 +232,7 @@ def _resolve_tools(tools, tool_changes, *, compat, counts=None):
 
 def _anthropic_message(
     message, *, signer=None, model=None, tenant_id="default", compat=False,
-    counts=None, resolved=None, tool_changes=None,
+    counts=None, resolved=None, tool_changes=None, inline_tool_references=False,
 ):
     message = _object(message, "message")
     _only(message, {"role", "content"}, "message")
@@ -401,6 +401,11 @@ def _anthropic_message(
                 pieces = []
                 for part in result:
                     part = _object(part, "tool_result content block")
+                    if compat and inline_tool_references and tool_changes is not None and part.get("type") == "tool_reference":
+                        _only(part, {"type", "tool_name"}, "tool_reference")
+                        name = _text(part.get("tool_name"), "tool_reference tool_name", empty=False)
+                        tool_changes.append(("tool_addition", name, None))
+                        continue
                     _only(
                         part,
                         {"type", "text", "cache_control"},
@@ -469,8 +474,13 @@ def anthropic_request_to_chat(
     translation_metadata=None,
     agent_compat=None,
     counts=None,
+    preserve_tool_schema_history=False,
 ):
-    """Translate Anthropic Messages/count_tokens input to a chat request."""
+    """Translate Anthropic Messages/count_tokens input to a chat request.
+
+    Adapters with native mid-turn tool schemas can retain the exact activation
+    timeline. Other adapters keep the existing final-inventory projection.
+    """
     body = _object(body, "request")
     request_model = anthropic_request_model(body, agent_compat=agent_compat)
     compat = agent_compat is not None and agent_compat.enabled
@@ -498,7 +508,14 @@ def anthropic_request_to_chat(
         raise ValueError("assistant prefill is unsupported")
     rejections = 0
     tool_changes = []
+    preserve_tool_schema_history = bool(preserve_tool_schema_history and compat)
+    if preserve_tool_schema_history:
+        offered, _ = _resolve_tools(body.get("tools", []), [], compat=True)
+        if not messages or messages[0]["role"] != "system":
+            messages.insert(0, {"role": "system", "content": ""})
+        messages[0]["tool_schema_state"] = offered
     for message in raw_messages:
+        previous_changes = len(tool_changes)
         translated, dropped = _anthropic_message(
             message,
             signer=signer,
@@ -508,13 +525,27 @@ def anthropic_request_to_chat(
             counts=counts,
             resolved=agent_compat,
             tool_changes=tool_changes,
+            inline_tool_references=preserve_tool_schema_history,
         )
+        if preserve_tool_schema_history:
+            if len(tool_changes) != previous_changes:
+                offered, _ = _resolve_tools(body.get("tools", []), tool_changes, compat=True)
+                if not translated or translated[0]["role"] != "system":
+                    translated.append({"role": "system", "content": "", "tool_schema_state": offered})
+                else:
+                    translated[0]["tool_schema_state"] = offered
+            active_names = {tool["function"]["name"] for tool in offered}
+            for item in translated:
+                for call in item.get("tool_calls", ()):
+                    if call["function"]["name"] not in active_names:
+                        raise ValueError("tool history calls a function before activation or after removal")
         messages.extend(translated)
         rejections += dropped
     if compat:
         if "context_management" in body:
             messages = _context_management(body["context_management"], messages, counts)
-        messages = _agent.fold_system_messages(messages, counts)
+        if not preserve_tool_schema_history:
+            messages = _agent.fold_system_messages(messages, counts)
     # Anthropic extended thinking is opt-in.  Keep this explicit so adapters
     # whose native default is thinking-on do not override Messages semantics.
     result = {"messages": messages, "enable_thinking": False}

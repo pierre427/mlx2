@@ -39,7 +39,7 @@ def run_main_until_engine(monkeypatch, argv, *, route="ordinary"):
             super().__init__(*args, **kwargs)
             built["server"] = self
 
-    monkeypatch.setattr(registry, "inspect_model", lambda path: types.SimpleNamespace())
+    monkeypatch.setattr(registry, "inspect_model", lambda path: types.SimpleNamespace(adapter_type=None))
     monkeypatch.setattr(
         server,
         "resolve_route_selection",

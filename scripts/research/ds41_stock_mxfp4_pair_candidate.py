@@ -10,7 +10,7 @@ from functools import lru_cache
 import hashlib
 from pathlib import Path
 
-INSTALLED = Path('~/Desktop/mlx2/.venv/lib/python3.12/site-packages/mlx')
+INSTALLED = Path(str(Path.home() / 'Desktop/mlx2/.venv/lib/python3.12/site-packages/mlx'))
 HASHES = {
     'fp_quantized.h': 'fb4bf0919642717c5e36cfa7be0628e651844586cae1b405c27b2057a17dd1c8',
     'fp4.h': 'e3159945d7e5ae24f7a1ca9c4875b2a5d15cfb6952405df24a0df1bb2622a93a',

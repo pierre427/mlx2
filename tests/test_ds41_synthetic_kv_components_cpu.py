@@ -61,5 +61,5 @@ def test_resets_fresh_and_full_run_interleaves(monkeypatch):
 def test_no_mlx_import_at_module_load():
     # pytest's repository conftest imports MLX CPU; use a fresh interpreter.
     subprocess.run([sys.executable, "-c",
-                    "import ds41_synthetic_kv_components, sys; "
-                    "assert 'mlx.core' not in sys.modules"], check=True)
+                    "import runpy, sys; runpy.run_path(sys.argv[1]); "
+                    "assert 'mlx.core' not in sys.modules", str(P)], check=True)

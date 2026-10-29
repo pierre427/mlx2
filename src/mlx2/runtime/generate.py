@@ -7663,23 +7663,27 @@ class BatchGenerator:
         return rows
 
     def _prompt_prefill_step(self, total_tokens: int) -> int:
-        planner = _declared_model_callback(
-            getattr(self, "model", None), "_mlx2_prefill_plan"
-        )
+        model = getattr(self, "model", None)
+        planner = _declared_model_callback(model, "_mlx2_prefill_plan")
         if planner is not None:
-            planned = planner(
+            step = planner(
                 total_tokens=int(total_tokens),
                 active_decode_lanes=len(self._generation_batch),
                 maximum=self.prefill_step_size,
             )
-            if type(planned) is not int or not 1 <= planned <= self.prefill_step_size:
+            if type(step) is not int or not 1 <= step <= self.prefill_step_size:
                 raise ValueError("adapter prefill plan must fit the configured positive maximum")
-            return planned
-        if not self.prefill_step_autoscale:
-            return self.prefill_step_size
-        return prompt_length_prefill_step(
-            int(total_tokens), maximum=self.prefill_step_size
-        )
+        else:
+            step = (
+                prompt_length_prefill_step(int(total_tokens), maximum=self.prefill_step_size)
+                if self.prefill_step_autoscale else self.prefill_step_size
+            )
+        # A live memory cap may shrink the validated plan, never widen it.
+        # As with the planner, dynamic proxies cannot invent this capability.
+        if _declared_model_callback(model, "recommended_prefill_rows") is None:
+            return step
+        from .demand_stream_memory import recommended_prefill_rows
+        return recommended_prefill_rows(model, step, context_tokens=int(total_tokens))
 
     def _prefill_chunk_length(self, segments, total_tokens=None):
         if len(segments) == 1 and len(segments[0]) == 1:

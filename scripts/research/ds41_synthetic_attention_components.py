@@ -99,7 +99,7 @@ def run(mx,check_live=None):
                 KV_data_frozen_scope='Same immutable synthetic KV/pools as full baseline; no KV writes exist inside either measured attention function',
                 local_update_scope='Actual update_local plus attention; retained owned KV copy also evaluated; prebuilt post-update band in no-update arm; cache reset outside timers; excludes pool publication/compression',
                 pre_gathered_bytes=int(gathered.nbytes)))
-            del q,local,pool,indices,valid,mask,sinks,source,gathered,functions,state,old_local,new_token
+            q=None;local=None;pool=None;indices=None;valid=None;mask=None;sinks=None;source=None;gathered=None;state=None;old_local=None;new_token=None;del functions
             mx.synchronize();mx.clear_cache()
     report.update(complete=True,cases_completed=len(report['cases']),timed_function_calls=len(report['cases'])*7*REPEATS,
         maximum_logical_inputs_bytes=max(c['geometry']['logical_input_bytes']for c in report['cases']))

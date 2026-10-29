@@ -135,6 +135,26 @@ def aliases(config):
     return result
 
 
+def validate_router_precision(tensors, args, *, prefix="layers", layers=None, experts=None):
+    """Router precision is checkpoint math, independent of expert storage."""
+    layers = args.num_hidden_layers if layers is None else layers
+    experts = args.n_routed_experts if experts is None else experts
+    for layer in range(layers):
+        root = f"{prefix}.{layer}.ffn.gate."
+        for field, dtype, shape in (
+            ("weight", "BF16", (experts, args.hidden_size)),
+            ("bias", "F32", (experts,)),
+            ("bias_vl", "F32", (experts,)),
+        ):
+            value = tensors.get(root + field)
+            if value is None or value["dtype"] != dtype or tuple(value["shape"]) != shape:
+                raise ValueError("official router precision/shape mismatch: " + root + field)
+        if root + "scale" in tensors or root + "weight_scale_inv" in tensors:
+            raise ValueError("official BF16 router must not have quantization scales")
+    return {"weight": "BF16", "correction_bias": "F32", "image_bias": "F32",
+            "layers": layers, "experts": experts, "requantized": False}
+
+
 def inspect_artifact(model_path):
     root = Path(model_path).expanduser().resolve()
     seal = json.loads(checked_file(root, SEAL).read_text())
@@ -153,6 +173,7 @@ def inspect_artifact(model_path):
     index = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
     if set(index) != set(tensors) or any(tensors[k]["file"] != v for k, v in index.items()):
         raise ValueError("source tensor index and shards disagree")
+    router_precision = validate_router_precision(tensors, args)
     mapping = aliases(args)
     if set(mapping.values()) - tensors.keys():
         raise ValueError("official source lacks required backbone tensors")
@@ -164,7 +185,8 @@ def inspect_artifact(model_path):
             "seals": seal["files"], "identity": {"path": str(root), "fingerprint": fingerprint,
             "weight_sha256": fingerprint, "files": [(n, v["size"], v["mtime_ns"]) for n, v in seal["files"].items()]},
             "inventory": {"storage_bytes": {"dense": dense, "expert": expert, "engram": engram}},
-            "qualification": "unqualified", "weight_format": "official-mxfp4-fp8-bf16"}
+            "qualification": "unqualified", "weight_format": "official-mxfp4-fp8-bf16",
+            "router_precision": router_precision}
 
 
 def read_tensors(artifact, names):

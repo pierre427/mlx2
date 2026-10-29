@@ -39,7 +39,7 @@ def _run_main(monkeypatch, capsys, argv, *, fake_model=False, fake_engine=False)
         monkeypatch.setattr(
             registry,
             "inspect_model",
-            lambda path: types.SimpleNamespace(artifact_fingerprint="sha256:fake"),
+            lambda path: types.SimpleNamespace(artifact_fingerprint="sha256:fake", adapter_type=None),
         )
         monkeypatch.setattr(
             server,
@@ -300,7 +300,7 @@ def test_post_bind_abort_closes_the_socket_even_when_the_engine_close_raises(
     monkeypatch.setattr(exit_trace.ExitTrace, "install", lambda self, fault_log=None: self)
     monkeypatch.setattr(
         registry, "inspect_model",
-        lambda path: types.SimpleNamespace(artifact_fingerprint="sha256:fake"),
+        lambda path: types.SimpleNamespace(artifact_fingerprint="sha256:fake", adapter_type=None),
     )
     monkeypatch.setattr(
         server, "resolve_route_selection",

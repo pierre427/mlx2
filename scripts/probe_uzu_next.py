@@ -8,6 +8,7 @@ baseline route and APCv2, not the experimental arithmetic.
 import argparse
 import hashlib
 import json
+import os
 import signal
 import socket
 import subprocess
@@ -21,6 +22,12 @@ from probe_uzu_next_worker import direct
 from run_single_model_smoke_ladder import stop_server, thermal_sample, wait_health
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def server_env():
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "src")
+    return env
 
 
 def main():
@@ -117,7 +124,7 @@ def main():
         ]
         with (args.out / "direct.log").open("w") as log:
             worker = subprocess.Popen(
-                command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+                command, stdout=log, stderr=subprocess.STDOUT, env=server_env(), start_new_session=True
             )
             if worker.wait() != 0:
                 raise RuntimeError("direct worker failed; see direct.json/direct.log")
@@ -155,7 +162,7 @@ def main():
         )
         with (args.out / "server.log").open("w") as log:
             server = subprocess.Popen(
-                command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+                command, stdout=log, stderr=subprocess.STDOUT, env=server_env(), start_new_session=True
             )
             result["server_startup_status"] = wait_health(base, server, 300)
             with urllib.request.urlopen(base + "/v1/models", timeout=20) as response:

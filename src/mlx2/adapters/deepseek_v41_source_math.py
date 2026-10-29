@@ -51,13 +51,22 @@ def _combine_kernel(direct_count):
     )
 
 
-def ordered_combine(parts, values, order, *, offsets=None):
+def ordered_combine(parts, values, order, *, offsets=None, row_packet=None):
     """Ordered Source sum, optionally borrowing a validated frame-plan map.
 
     ``offsets`` is authoritative metadata from the same frame's route planner;
     the caller retains its immutable owner. No route contents are cached here.
     """
     import mlx.core as mx
+    device_offsets=None
+    if row_packet is not None:
+        from .deepseek_v41_source_row_packet import DeviceRowPacket
+        if (not isinstance(row_packet,DeviceRowPacket)
+                or row_packet.packet.plan.values is not values
+                or row_packet.packet.plan.order is not order
+                or row_packet.packet.plan.combine_offsets is not offsets):
+            raise ValueError('Source combine row packet belongs to another route frame')
+        device_offsets=row_packet.view('combine_offsets')
     if offsets is None:
         offsets = ordered_offsets(values, order)
     elif (not isinstance(values,np.ndarray) or values.dtype!=np.uint32 or values.ndim!=2
@@ -82,7 +91,7 @@ def ordered_combine(parts, values, order, *, offsets=None):
         inputs = parts
     else:
         packed = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=0)
-        inputs = [packed, mx.array(offsets, mx.uint32)]
+        inputs = [packed, mx.array(offsets, mx.uint32) if device_offsets is None else device_offsets]
     return _combine_kernel(topk if direct else 0)(
         inputs=inputs, template=[("ROWS", rows), ("WIDTH", width), ("TOPK", topk)],
         grid=(rows*width, 1, 1), threadgroup=(256, 1, 1),

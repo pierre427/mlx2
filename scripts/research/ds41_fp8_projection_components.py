@@ -112,7 +112,7 @@ def run_components(mx,np,captureDir,out,report,compare,atomic):
             del candidate_raw,raw_plus_owner,fused;observe();write()
         del raw,rounded
         row['timings']=compare(mx,np,functions,repeats=repeats)
-        observe();write();mx.synchronize();del x,functions;mx.clear_cache()
+        observe();write();mx.synchronize();x=None;del functions;mx.clear_cache()
     section['required_reference_controls_exact']=all(all(v['exact']for v in row['stock_controls'].values())for row in section['cases'])
     names={name for row in section['cases']for name in row['variants']}
     section['verdicts']={name+'_all_applicable_raw_and_fused_exact':all(row['variants'][name]['fused_pipeline_admitted']for row in section['cases']if name in row['variants'])for name in sorted(names)}

@@ -100,6 +100,8 @@ def test_diagnostics_describe_native_numerical_law_for_both_storage_profiles(mon
  from mlx2.adapters.deepseek_v41_source import DeepSeekV41SourceAdapter,DeepSeekV41MLXAdapter
  monkeypatch.setattr(DeepSeekV41MLXAdapter,'diagnostics',lambda self:{})
  a=DeepSeekV41SourceAdapter.__new__(DeepSeekV41SourceAdapter)
+ a.identity={'fingerprint':'synthetic@source-attention-diagnostics'};a.native_admission={}
+ a.draft_model=None
  a.kernel_policy={'deepseek_source_experts':{'mode':'hot_original_q1'}}if mixed else{}
  a.weights=SimpleNamespace(expert_math_policy='reference',dense_receipt=lambda:{},source_qakv_policy='reference',source_q_b_prefill_policy='reference')
  a.model=SimpleNamespace(source_attention_math_policy=route.POLICY,source_hc_boundary_policy='reference',index_policy='finite_all_retained',selected_kv_policy='decode_reuse',scheduled_hc_calls={},hc_coeff_policy='reference')

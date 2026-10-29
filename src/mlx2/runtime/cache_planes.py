@@ -7,6 +7,7 @@ import weakref
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable
+from .expert_residency_hints import ExpertResidencyHints
 
 
 class CachePlaneKind(str, Enum):
@@ -19,6 +20,7 @@ class CachePlaneKind(str, Enum):
     MAMBA_RECURRENT = "mamba_recurrent"
     MTP_DRAFT = "mtp_draft"
     PLE_HINTS = "ple_hints"
+    EXPERT_HINTS = "expert_hints"
     COMPILED_SCHEDULE = "compiled_schedule"
 
 

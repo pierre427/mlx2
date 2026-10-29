@@ -15,6 +15,13 @@ from ..sampling_defaults import SamplingDefaults, VendorSampling
 from .deepseek_v41 import DESCRIPTOR as V41_DESCRIPTOR
 from .deepseek_v41 import SAMPLING, DeepSeekV41Adapter
 from .deepseek_v41_artifact import REFERENCE_FILE, tokenizer_metadata
+from .deepseek_v41_execution import POLICY_CHOICES as CSA_POLICY_CHOICES
+from .deepseek_v41_execution import (
+    bind_cache_layout,
+    execution_receipt,
+    model_options,
+    validate_csa_policy,
+)
 from .deepseek_v41_mlx_artifact import (
     FORMAT,
     MODEL_TYPE,
@@ -40,6 +47,7 @@ DESCRIPTOR = replace(
     },
 )
 POLICY_CHOICES = {
+    **CSA_POLICY_CHOICES,
     "deepseek_hc": ("reference", "fused_fp32"),
     "deepseek_qat": ("reference", "fused_fp32"),
     "deepseek_engram_cache": ("fp32", "bf16_lut"),
@@ -49,20 +57,22 @@ POLICY_CHOICES = {
     # Wider native QMM has its own reduction geometry. Verify one row at a
     # time against this artifact's ordinary decode instead of assuming parity.
     "deepseek_verify_rows": ("serial",),
-    "deepseek_verify_commit": ("replay",),
+    "deepseek_verify_commit": ("replay", "local_frontier"),
 }
 
 
 def execution_policy(value=None):
     value = {} if value is None else value
-    allowed = set(POLICY_CHOICES) | {"draft_model", "ast_prompt_lookup", "num_draft"}
+    allowed = set(POLICY_CHOICES) | {"draft_model", "ast_prompt_lookup", "num_draft", "deepseek_context_limit"}
     if not isinstance(value, dict) or set(value) - allowed:
         raise ValueError(
-            "unsupported native V4.1 execution policy; GGUF kernels and CED are separate profiles"
+            "unsupported native V4.1 execution policy; GGUF-only kernels are unavailable"
         )
     result = {
         key: value.get(key, choices[0]) for key, choices in POLICY_CHOICES.items()
     }
+    if "deepseek_context_limit" in value:
+        result["deepseek_context_limit"] = value["deepseek_context_limit"]
     if any(
         type(result[key]) is not str or result[key] not in choices
         for key, choices in POLICY_CHOICES.items()
@@ -85,7 +95,9 @@ def execution_policy(value=None):
         raise ValueError(
             "native V4.1 copy-chain requires draft_model=prompt_lookup and num_draft1..5"
         )
-    return {**result, "ast_prompt_lookup": enabled, "num_draft": count}
+    result.update(ast_prompt_lookup=enabled, num_draft=count)
+    validate_csa_policy(result)
+    return result
 
 
 def optimized_policy(*, copy_chain=False):
@@ -103,12 +115,8 @@ def optimized_policy(*, copy_chain=False):
     return value
 
 
-def admission_plan(artifact, request, *, planner=None):
-    """Resolve the bounded expert cache before any native weight allocation."""
-    from .deepseek_v41_mlx_weights import native_weight_plan
-
-    planner = native_weight_plan if planner is None else planner
-
+def validate_streaming_request(request):
+    """Validate shared provider ownership without sizing a different profile."""
     if (
         request.mode != "moe_experts"
         or request.mtp_resident
@@ -119,14 +127,7 @@ def admission_plan(artifact, request, *, planner=None):
         or request.elastic
         or request.expert_overlap
     ):
-        raise ValueError("native V4.1 requires synchronous global-LRU expert streaming")
-    ceiling = (
-        DEFAULT_EXPERT_CACHE_BYTES
-        if request.budget_mode == "auto"
-        else request.budget_bytes
-    )
-    if not 0 < ceiling <= MAX_EXPERT_CACHE_BYTES:
-        raise ValueError("native V4.1 expert cache must be positive and at most 70 GiB")
+        raise ValueError("native V4.1 requires synchronous bounded expert streaming")
     if (
         type(request.admission_limit_bytes) is not int
         or request.admission_limit_bytes <= 0
@@ -134,6 +135,21 @@ def admission_plan(artifact, request, *, planner=None):
         raise MemoryError(
             "native V4.1 requires a positive measured early admission limit"
         )
+
+
+def admission_plan(artifact, request, *, planner=None):
+    """Resolve the bounded expert cache before any native weight allocation."""
+    from .deepseek_v41_mlx_weights import native_weight_plan
+
+    planner = native_weight_plan if planner is None else planner
+    ceiling = (
+        DEFAULT_EXPERT_CACHE_BYTES
+        if request.budget_mode == "auto"
+        else request.budget_bytes
+    )
+    if not 0 < ceiling <= MAX_EXPERT_CACHE_BYTES:
+        raise ValueError("native V4.1 expert cache must be positive and at most 70 GiB")
+    validate_streaming_request(request)
     headroom = max(5 << 30, request.headroom_bytes)
     ple_cache = (8 << 20) * len(getattr(artifact["args"], "engram_layer_ids", ()))
     plan = planner(artifact, ceiling)
@@ -183,7 +199,16 @@ class DeepSeekV41MLXAdapter(DeepSeekV41Adapter):
     weight_format = FORMAT
     policy_parser = staticmethod(execution_policy)
     weight_streaming_modes = frozenset({"moe_experts"})
+
+    @staticmethod
+    def weight_streaming_external_draft(policy):
+        if 'draft_models' in policy or policy.get('draft_model') != 'prompt_lookup':
+            return False
+        execution_policy(policy)
+        return True
+
     adapter_owned_default_policy_keys = frozenset(POLICY_CHOICES) | {
+        "deepseek_context_limit",
         "draft_model",
         "ast_prompt_lookup",
         "num_draft",
@@ -356,6 +381,7 @@ class DeepSeekV41MLXAdapter(DeepSeekV41Adapter):
             engram_tables=self.engram_tables,
             hc_policy=self.kernel_policy["deepseek_hc"],
             qat_policy=self.kernel_policy["deepseek_qat"],
+            **model_options(self.kernel_policy),
         )
         self.model.verification_commit_policy = self.kernel_policy[
             "deepseek_verify_commit"
@@ -384,8 +410,9 @@ class DeepSeekV41MLXAdapter(DeepSeekV41Adapter):
                 "native V4.1 retained tensors plus expert reserve exceed admission"
             )
         self.layout = type(self).descriptor.cache_layout
-        self.max_context = min(args.max_position_embeddings, 65536)
+        self.max_context = self.model.context_limit
         self.descriptor = type(self).descriptor
+        bind_cache_layout(self)
         self._configure_copy_chain()
 
     def _configure_copy_chain(self):
@@ -394,13 +421,17 @@ class DeepSeekV41MLXAdapter(DeepSeekV41Adapter):
         from ..runtime.drafters.prompt_lookup_draft import PromptLookupDraftModel
         from ..sampling_contract import GREEDY_REFUSAL_SAMPLING_CONTRACT
 
-        self.draft_model = PromptLookupDraftModel(
-            self.model, num_draft=self.kernel_policy["num_draft"]
-        )
+        if self.kernel_policy["deepseek_verify_commit"] == "local_frontier":
+            from .deepseek_v41_external import local_frontier_drafter
+            self.draft_model = local_frontier_drafter(self.model, num_draft=self.kernel_policy["num_draft"])
+        else:
+            self.draft_model = PromptLookupDraftModel(
+                self.model, num_draft=self.kernel_policy["num_draft"]
+            )
         self.default_route = "external_draft"
         self.descriptor = replace(
-            type(self).descriptor,
-            capabilities=type(self).descriptor.capabilities
+            self.descriptor,
+            capabilities=self.descriptor.capabilities
             | {Capability.EXTERNAL_DRAFT},
             metadata={
                 **type(self).descriptor.metadata,
@@ -445,7 +476,7 @@ class DeepSeekV41MLXAdapter(DeepSeekV41Adapter):
             "kv_storage": "physical FP32; existing BF16/FP8/FP4-rounded activation law",
             "speculation": {
                 "kind": "adaptive_copy_chain",
-                "verification": "ordinary_width_one_snapshot_replay",
+                "verification": "ordinary_width_one_" + self.kernel_policy["deepseek_verify_commit"],
                 "qualified": False,
                 "native_dspark": False,
                 "packed_tree_ast": False,
@@ -454,6 +485,7 @@ class DeepSeekV41MLXAdapter(DeepSeekV41Adapter):
             else "unavailable",
             "vision": "unavailable",
             "scheduled_call_observation": "Python scheduling only; not GPU completion evidence",
+            **execution_receipt(self.model),
         }
 
     def close(self):
