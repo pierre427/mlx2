@@ -14,7 +14,8 @@ def test_completed_source_empty_partial_plane_has_zero_error():
     left = np.empty((1, 0, 512), np.float32)
     result = probe.compare_arrays(left, left.copy(), atol=3e-3, rtol=3e-3)
     assert result == dict(shape=[1, 0, 512], finite=True, raw_bits_equal=True,
-                          tolerance_valid=True, maximum_absolute_error=0.0)
+                          first_raw_mismatch=None, tolerance_valid=True,
+                          maximum_absolute_error=0.0)
 
 
 @pytest.mark.parametrize("right,reason", [

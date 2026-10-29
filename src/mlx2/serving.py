@@ -201,6 +201,25 @@ def adapter_media_checkpoint_position(adapter, request, tokens, *, cached_tokens
     return position
 
 
+def adapter_partition_checkpoint_position(adapter, tokens, *, cuts=()):
+    """Validate an adapter-declared partition-exact APCv2 boundary.
+
+    A route whose prefill numerics are exact only on a fixed absolute grid
+    names the deepest boundary a cold prefill of ``tokens`` can publish, given
+    the cold plan's ``cuts``.  It is planned as a cold cut too, so a warm
+    continuation slices there exactly as the cold prefill does.
+    """
+    hook = getattr(adapter, "apc_partition_checkpoint_position", None)
+    if not callable(hook):
+        return None
+    position = hook(tokens, cached_tokens=0, cuts=tuple(cuts))
+    if position is not None and (
+        type(position) is not int or not 0 < position < len(tokens) - 1
+    ):
+        raise ValueError("adapter APC partition checkpoint boundary is invalid")
+    return position
+
+
 def _preemption_receipt(job):
     """The ``preemption`` receipt field, or None when nothing happened.
 
@@ -8915,6 +8934,17 @@ class ServingEngine:
         if numerical_schedule_changed:
             count_add(self.counts, "apcv2_store_skipped_numerical_schedule", 1)
             return False
+        partition_refusal = getattr(
+            getattr(self, "adapter", None), "apc_publication_refusal", None
+        )
+        if callable(partition_refusal):
+            if not isinstance(tokens, (list, tuple)):
+                tokens = list(tokens)
+            # A route-declared partition law decides exactness on host
+            # bookkeeping; a declined boundary is not a publish failure.
+            if partition_refusal(prompt_cache, tokens) is not None:
+                count_add(self.counts, "apcv2_store_skipped_partition", 1)
+                return False
         try:
             # Optional metadata and the numeric store must see the same token
             # sequence even when a caller supplies a one-shot iterable.
@@ -12876,6 +12906,24 @@ class ServingEngine:
                                     )
                                 ),
                             )
+                        partition_checkpoint_position = None
+                        if self.apc_interior_route_supported:
+                            partition_checkpoint_position = (
+                                adapter_partition_checkpoint_position(
+                                    adapter, tokens, cuts=job.prefill_cold_cuts
+                                )
+                            )
+                            if partition_checkpoint_position is not None:
+                                job.prefill_cold_cuts = tuple(sorted({
+                                    *job.prefill_cold_cuts,
+                                    partition_checkpoint_position,
+                                }))
+                            if (
+                                partition_checkpoint_position is not None
+                                and partition_checkpoint_position
+                                <= int(hit.cached_tokens)
+                            ):
+                                partition_checkpoint_position = None
                         if job.prefill_cold_cuts and not (
                             hit.cache is None
                             or inspect_apc_capabilities(
@@ -12895,6 +12943,7 @@ class ServingEngine:
                                 or self.apc_junction_checkpoints
                                 or turn_end_boundary is not None
                                 or media_checkpoint_position is not None
+                                or partition_checkpoint_position is not None
                             )
                             and not job.request.get("skip_writing_prefix_cache", False)
                             and (
@@ -12967,6 +13016,15 @@ class ServingEngine:
                                 *checkpoint_candidates, media_checkpoint_position
                             )))
                             count_add(self.counts, "apc_interior_positions_planned_media_boundary", 1)
+                        if (
+                            planning_target
+                            and partition_checkpoint_position is not None
+                            and partition_checkpoint_position not in checkpoint_candidates
+                        ):
+                            checkpoint_candidates = tuple(sorted((
+                                *checkpoint_candidates, partition_checkpoint_position
+                            )))
+                            count_add(self.counts, "apc_interior_positions_planned_partition_boundary", 1)
                         if int(hit.cached_tokens) and job.prefill_cold_cuts:
                             # A warm plan respaces its tail above the cached
                             # offset; capturing there would cut where a cold

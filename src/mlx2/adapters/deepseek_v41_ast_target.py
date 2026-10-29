@@ -332,7 +332,7 @@ def execute_tree(model, cache, anchor, paths3x5, capture_layers=(37, 38, 39), *,
                             hidden[node] = model.engram(hidden[node], layer, None,
                                                        rows=engram_rows[node:node+1])
                         if layer in layers:
-                            taps[node].append(mx.mean(hidden[node], axis=-2))
+                            taps[node].append(model.round(mx.mean(hidden[node], axis=-2)))
                         h, x, pre[node], post, comb = block.attention_half(
                             hidden[node], pre[node], local, frontiers[node], shared[node])
                         if layer == 0 and tails:

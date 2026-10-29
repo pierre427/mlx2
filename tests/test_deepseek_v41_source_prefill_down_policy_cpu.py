@@ -8,7 +8,8 @@ from mlx2.adapters import deepseek_v41_source_prefill_down as helper
 from mlx2.adapters.deepseek_v41_source import source_policy, DeepSeekV41SourceAdapter
 from mlx2.adapters.deepseek_v41_source_weights import SourceV41Weights
 from mlx2.adapters.deepseek_v41_mlx import execution_policy
-from mlx2.adapters.deepseek_v41_source_buffers import HostExpert, canonical_layout, materialize
+from mlx2.adapters.deepseek_v41_source_buffers import (HostExpert, canonical_layout, materialize,
+    ExpertLayout, TensorSlice)
 from mlx2.adapters import deepseek_v41_source_math as assembly
 from mlx2.runtime.gguf import source_q1_down_owner, source_mxfp4_pair
 from test_deepseek_v41_source_prefill_integration_cpu import case, run, expected
@@ -39,6 +40,33 @@ def packed(kind='q1'):
 def options():
     return {KEY:helper.POLICY,'deepseek_source_prefill_batch':'gate_up',
             'deepseek_source_expert_math':'routed_fused_fp32'}
+
+
+def test_native_file_tensor_order_uses_exact_named_views(monkeypatch):
+    # Actual sealed Q1 safetensors order (header only, l00-e000). The loader
+    # preserves this order without repacking the 6,635,520-byte payload.
+    canonical=canonical_layout('q1');offset=0;rows=[]
+    for name in ('down.qweight','gate.qweight','up.qweight','down.biases',
+                 'down.scales','gate.biases','gate.scales','up.biases','up.scales'):
+        old=canonical.tensor(name)
+        rows.append(TensorSlice(name,offset,old.dtype,old.shape));offset+=old.nbytes
+    native=ExpertLayout('q1',tuple(rows))
+    assert native != canonical
+    data=materialize(HostExpert(np.zeros(native.nbytes,np.uint8),native))
+    x=mx.zeros((1,2304),mx.float32)
+    assert helper.eligible(x,data,prefill_rows=99,check_device=False)
+    monkeypatch.setattr(mx,'default_device',lambda:mx.gpu)
+    monkeypatch.setattr(source_mxfp4_pair,'_device_supported',lambda:True)
+    calls=[];sentinel=object();counts={}
+    def project(*args):calls.append(args);return sentinel
+    monkeypatch.setattr(source_q1_down_owner,'project',project)
+    assert helper.maybe_project(x,data,policy=helper.POLICY,expert_math='routed_fused_fp32',
+        prefill_batch='gate_up',prefill_rows=99,counters=counts) is sentinel
+    assert calls==[(x,data['down.qweight'],data['down.scales'],data['down.biases'])]
+    assert counts=={helper.COUNTER:1}
+    # A fabricated descriptor cannot bypass ExpertLayout's schema validator.
+    data._layout=SimpleNamespace(kind='q1',nbytes=native.nbytes)
+    assert not helper.eligible(x,data,prefill_rows=99,check_device=False)
 
 
 def test_default_reference_adapter_only_and_required_profiles():
@@ -127,10 +155,9 @@ def test_identity_binds_policy_and_implementation_without_default_drift(monkeypa
     assert ids[0]==('source-reference','profile-reference') and len(set(ids))==3
 
 
-def test_reviewed_kernel_pin_and_metadata_only_layout_cache(monkeypatch):
+def test_reviewed_kernel_pin(monkeypatch):
     helper.implementation_identity.cache_clear()
     assert len(helper.implementation_identity())==64
-    assert helper._q1_layout() is helper._q1_layout()
     monkeypatch.setattr(helper,'SOURCE_PINS',{'source_q1_down_owner.py':'bad'})
     helper.implementation_identity.cache_clear()
     with pytest.raises(RuntimeError,match='re-audit'):helper.implementation_identity()

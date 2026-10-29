@@ -81,3 +81,5 @@ def test_replay_requires_explicit_adaptive_refusal_or_real_canonical_hit(probe):
     assert probe.validate_replay_receipts(policy, {}, result(0), result(4)) == 'apcv2_cold_warm'
     with pytest.raises(RuntimeError, match='receipt'):
         probe.validate_replay_receipts(policy, {}, result(0), result(0))
+    grid = {'deepseek_source_prefill_partition': 'position_grid_v1'}
+    assert probe.validate_replay_receipts(grid, {}, result(0), result(1024)) == 'apcv2_cold_warm'

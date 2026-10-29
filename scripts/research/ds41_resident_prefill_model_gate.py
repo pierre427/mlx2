@@ -31,12 +31,19 @@ def _delta(after,before):
 
 
 def _checkpoint(adapter):
-    store=adapter.weights.expert_stream
-    if adapter.identity.get('fingerprint')!=store.binding:
-        raise ValueError('PP gate adapter original-source identity differs from expert store')
-    binding=dict(source=store.binding,q1=store.q1_binding,hotmap=store.hot_binding)
-    fingerprint=hashlib.sha256(json.dumps(binding,sort_keys=True).encode()).hexdigest()
-    observed=CHECKPOINT.split('@')[0]+'@'+fingerprint
+    """Compare base/provider and effective derivative identities in their roles."""
+    from mlx2.adapters.deepseek_v41_identity import effective_source_identity
+    weights=adapter.weights;store=weights.expert_stream
+    base=weights.artifact['identity']
+    if store.binding!=base['fingerprint']:
+        raise ValueError('PP gate source provider differs from actual base artifact')
+    if weights.verify_source()is not True:
+        raise ValueError('PP gate actual source/stat verification did not pass')
+    expected=effective_source_identity(base,q1_bank=store.q1_binding,hot_map=store.hot_binding)
+    for name in ('fingerprint','base_fingerprint','derivation'):
+        if adapter.identity.get(name)!=expected.get(name):
+            raise ValueError('PP gate effective derivative identity differs: '+name)
+    observed=CHECKPOINT.split('@')[0]+'@'+expected['fingerprint']
     if observed!=CHECKPOINT:raise ValueError('PP gate exact hybrid checkpoint differs')
     return observed
 

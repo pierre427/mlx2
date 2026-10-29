@@ -186,7 +186,7 @@ def validate_proof(proof_unit,model,provider):
                 raw_sha256=_sha(raw),source_identity=dict(identities))
 
 
-def run(adapter,unit,guard,*,proof_unit,prompt_ids=None,max_tokens=8,forward_law='reference',expert_law=LAW):
+def run(adapter,unit,guard,*,proof_unit,prompt_ids=None,max_tokens=8,forward_law='reference',expert_law=LAW,resident_provider_scope=None):
     """Run one real generic AST tile, then ordinary continuation to completion.
 
     Returns evidence, writes ast-serving-oracle.json for same-profile loopback
@@ -206,7 +206,7 @@ def run(adapter,unit,guard,*,proof_unit,prompt_ids=None,max_tokens=8,forward_law
     if forward_law not in('reference','fully_batched_m1_v1'):
         raise ValueError('Source AST serving proof supports reference or explicit exact batched target')
     ids=list(prompt_ids)if prompt_ids is not None else list(adapter.tokenizer.encode('Reply with exactly the word Hello.',add_special_tokens=False))
-    if not ids or len(ids)>128:raise ValueError('Bounded AST serving prompt must contain1..128 tokens')
+    if not ids or len(ids)>384:raise ValueError('Bounded AST serving prompt must contain1..384 tokens; reference index scoring needs an admitted long prefix')
     record=dict(schema='mlx2.ds41-dspark-ast-generic-serving.v1',stage='ordinary-reference',passed=False,
                 qualified=False,performance_claim=False,prompt_tokens=len(ids),max_tokens=max_tokens,
                 forward_law=forward_law,expert_law=expert_law)
@@ -248,6 +248,11 @@ def run(adapter,unit,guard,*,proof_unit,prompt_ids=None,max_tokens=8,forward_law
                       whole_prompt_control_scope='partition_drift_attribution_only; AST oracle uses matched serving prefill')
         _atomic(output,record)
         binding=SourceDSparkASTBinding(adapter,check_live=guard,expert_law=expert_law,forward_law=forward_law)
+        if resident_provider_scope is not None:
+            if expert_law!=RESIDENT_LAW or not callable(resident_provider_scope):
+                raise ValueError('Explicit resident provider scope requires the resident exact target law')
+            record['resident_resource_preparations']=resident_provider_scope(binding.provider)
+            record['resident_resource_scope']='Prepared real bank selected only during target provider execution; ordinary prefix/controls remain reference'
         proof=validate_proof(proof_unit,adapter.model,binding.provider)
         if proof['record']['head']['head_fingerprint']!=binding.backbone.record['fingerprint']:
             raise ValueError('Actual Source DSpark head fingerprint differs')

@@ -106,6 +106,11 @@ class LagunaS21Adapter(LagunaXS21Adapter):
     sampling_defaults = LAGUNA_S21_SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
 
+    def cache_budget(self, *, mtp):
+        from .laguna_memory import LagunaCacheBudget
+
+        return LagunaCacheBudget.from_config(self.config, mtp=mtp)
+
     @staticmethod
     def profile_name(mtp):
         if mtp:

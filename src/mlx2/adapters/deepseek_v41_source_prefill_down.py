@@ -130,12 +130,15 @@ def maybe_tiny_project(x,experts,row_counts,*,policy,expert_math,prefill_batch,p
 
 
 def eligible(x, data, *, prefill_rows, check_device=True):
+    # ExpertLayout validates the complete contiguous Q1 schema. Native sealed
+    # files may arrange those tensors differently from canonical_layout; the
+    # kernel consumes separate named DOWN views, never whole-slab offsets.
     import mlx.core as mx
-    from .deepseek_v41_source_buffers import PackedExpert
+    from .deepseek_v41_source_buffers import ExpertLayout, PackedExpert
     if (type(prefill_rows) is not int or not 2 <= prefill_rows <= 1024
             or not isinstance(x, mx.array) or x.dtype != mx.float32 or x.shape != (1, 2304)
-            or not isinstance(data, PackedExpert) or data.layout.kind != 'q1'
-            or data.layout != _q1_layout()
+            or not isinstance(data, PackedExpert) or not isinstance(data.layout, ExpertLayout)
+            or data.layout.kind != 'q1'
             or not isinstance(data.backing, mx.array) or data.backing.dtype != mx.uint8
             or data.backing.shape != (data.layout.nbytes,)):
         return False
@@ -149,12 +152,6 @@ def eligible(x, data, *, prefill_rows, check_device=True):
         return False
     from ..runtime.gguf.source_mxfp4_pair import _device_supported
     return bool(_device_supported())
-
-
-@lru_cache(maxsize=1)
-def _q1_layout():
-    from .deepseek_v41_source_buffers import canonical_layout
-    return canonical_layout('q1')
 
 
 def maybe_project(x, data, *, policy, expert_math, prefill_batch, prefill_rows, counters):

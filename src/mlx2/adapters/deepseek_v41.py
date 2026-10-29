@@ -527,6 +527,8 @@ class DeepSeekV41Adapter(DeepSeekV4GGUFAdapter):
         if getattr(self.draft_model, "kind", None) == "deepseek_v41_dspark":
             from .deepseek_v41_dspark_external import create_dspark_batch
 
+            if kwargs.get("num_draft", self.external_policy["num_draft"]) != self.external_policy["num_draft"]:
+                raise ValueError("embedded DSpark draft depth differs from bound V4.1 profile")
             kwargs.setdefault("num_draft", self.external_policy["num_draft"])
             kwargs.setdefault("cost_per_commit_handoff", False)
             return create_dspark_batch(self.model, self.draft_model, **kwargs)

@@ -21,8 +21,9 @@ class DeclaredSource:
     )
     calls: ClassVar[list] = []
 
-    def __init__(self, path, **options):
-        type(self).calls.append(options)
+    # Early-loader contract: accept the typed request by name (c797f1ed1).
+    def __init__(self, path, *, weight_streaming=None, **options):
+        type(self).calls.append({**options, "weight_streaming": weight_streaming})
         raise RuntimeError("synthetic stop after pre-materialization delivery")
 
 

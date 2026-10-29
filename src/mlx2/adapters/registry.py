@@ -145,6 +145,30 @@ class AdapterResolution:
             raise ValueError(
                 f"{name} declares non-default-able policy keys: {sorted(unknown)}"
             )
+        # Optional adapter-owned profile scope. As with the defaults, never
+        # inherit a guard measured for another adapter. A guard only declines
+        # defaults; it cannot change operator-owned choices or artifact pins.
+        if "default_route_policy_applies" in vars(self.adapter_type):
+            guard = getattr(self.adapter_type, "default_route_policy_applies")
+            if not callable(guard):
+                raise ValueError(f"{name} default_route_policy_applies must be callable")
+            applies = guard(route, copy.deepcopy(operator_policy or {}))
+            if type(applies) is not bool:
+                raise ValueError(f"{name} default_route_policy_applies must return a boolean")
+            if not applies:
+                return {}
+        # Optional adapter-owned narrowing: it may only drop default keys
+        # (e.g. a kernel whose prerequisite the operator overrode), never add
+        # or change one, so operator choices and pins stay authoritative.
+        if "default_route_policy_filter" in vars(self.adapter_type):
+            narrow = getattr(self.adapter_type, "default_route_policy_filter")
+            if not callable(narrow):
+                raise ValueError(f"{name} default_route_policy_filter must be callable")
+            narrowed = narrow(route, copy.deepcopy(policy), copy.deepcopy(operator_policy or {}))
+            if (not isinstance(narrowed, dict)
+                    or any(key not in policy or policy[key] != value for key, value in narrowed.items())):
+                raise ValueError(f"{name} default_route_policy_filter may only drop default keys")
+            policy = narrowed
         return copy.deepcopy(policy)
 
 

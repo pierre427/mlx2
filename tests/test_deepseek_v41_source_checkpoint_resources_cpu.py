@@ -200,3 +200,15 @@ def test_manager_binding_closure_contains_helper_and_hint_abi_and_separates_live
     adapter.model._source_ast_bank_manager=manager
     first=helper.binding(adapter);adapter.model.identity='another-profile'
     assert helper.binding(adapter)!=first
+
+
+def test_restore_prefetch_respects_adaptive_headroom_before_acquire():
+    # Below headroom the acquire's live target would evict resident experts.
+    adapter,store,cache,tokens,hint=published();store.drop((0,1))
+    store._adaptive_headroom=64<<20
+    band=ORIGINAL_BYTES+store._adaptive_staging+(32<<20)
+    report=helper.restore(adapter,hint,cache,available_bytes=lambda:band)
+    assert report['prefetched']==0 and store.loads==[]
+    assert report['reason']=='actual_availability_or_operator_working_headroom'
+    report=helper.restore(adapter,hint,cache,available_bytes=lambda:band+(64<<20))
+    assert report['prefetched']==1 and store.loads==[(0,1)]

@@ -5,7 +5,9 @@ See provenance/deepseek-v41-source.json. Arithmetic is an unqualified MLX
 reference profile; byte preservation does not imply CUDA reduction parity.
 """
 from collections import OrderedDict
+from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from functools import lru_cache
 import hashlib
 from pathlib import Path
@@ -21,8 +23,38 @@ from .deepseek_v41_mlx_weights import NativeExpertPlan, NativeExpertStore, Nativ
 from .deepseek_v41_source_artifact import checked_file, read_tensors
 from .deepseek_v41_source_math import POLICIES
 from ..runtime.io_ownership import ReadPool, storage_owner
+from ..runtime.io_ownership import ReadPool as OverlapReadPool
 
 REVISION = "mlx2.v41-official-mxfp4-fp8-act32-bf16.v1"
+# Opt-in expert I/O overlap. Bounds are fixed by the policy revision.
+OVERLAP_POLICY = "overlap_v1"
+# Demand-only variant: same early exact-route reads and off-queue uploads,
+# no next-layer router prediction or hint reads.
+OVERLAP_DEMAND_POLICY = "overlap_demand_v1"
+OVERLAP_POLICIES = (OVERLAP_POLICY, OVERLAP_DEMAND_POLICY)
+OVERLAP_WORKERS = 4
+OVERLAP_PENDING = 12   # host-holding reads (demand plus hints); 12 x 18.8 MB
+OVERLAP_HINTS = 6      # one predicted next-layer route
+OVERLAP_COUNTERS = (
+    'overlap_route_readbacks', 'overlap_demand_issued', 'overlap_demand_unconsumed',
+    'overlap_demand_failed_unconsumed', 'overlap_sync_reads', 'overlap_consumed_bytes',
+    'overlap_ready_bytes', 'overlap_consumer_wait_ns', 'overlap_queue_full',
+    'overlap_hint_predictions', 'overlap_hint_issued', 'overlap_hint_used', 'overlap_hint_wasted',
+    'overlap_hint_wasted_bytes', 'overlap_hint_failed', 'overlap_hint_skip_resident',
+    'overlap_hint_skip_budget', 'upload_gpu_queue_evals', 'upload_offqueue_evals',
+)
+
+
+@dataclass(eq=False)
+class SourceExpertTicket:
+    owner: object
+    thread_id: int
+    prefix: str
+    values: object
+    demand: dict = field(default_factory=dict)
+    queued: list = field(default_factory=list)
+    hinted: set = field(default_factory=set)
+    closed: bool = False
 PROJECTIONS = {"gate": "w1", "up": "w3", "down": "w2"}
 
 # Only these reviewed implementations can back the opt-in raw PP Q_b path.
@@ -108,6 +140,8 @@ def weight_plan(artifact, budget):
 
 
 class SourceExpertStore(NativeExpertStore):
+    accepts_route_hidden = False
+
     def __init__(self, artifact, bounds, *, read_workers=2):
         _refuse_quarantined_uploads()
         self.artifact, self.root, self.bounds = artifact, artifact["root"], bounds
@@ -170,11 +204,7 @@ class SourceExpertStore(NativeExpertStore):
                 self._cache.move_to_end(key)
                 self.stats["cache_hits"] += 1
             else:
-                started = time.perf_counter_ns()
-                try:
-                    raw = self.pool.call(read_tensors, self.artifact, names)
-                finally:
-                    self.stats["demand_wait_ns"] += time.perf_counter_ns()-started
+                raw = self._read_expert(key, read_tensors, self.artifact, names)
                 self._pending_host[key] = raw
                 arrays = self._pending_uploads[key] = {}
                 for kind, part in PROJECTIONS.items():
@@ -207,11 +237,333 @@ class SourceExpertStore(NativeExpertStore):
     def apc_revision(self):
         return REVISION
 
+    # ---- Opt-in overlap_v1 expert I/O (provenance/deepseek-v41-source-expert-io-overlap.json).
+    # Reads move earlier and run concurrently; which bytes are uploaded, the
+    # upload contract, every kernel and the LFU accounting stay unchanged.
+
+    def _expert_read_job(self, key):
+        return (read_tensors, self.artifact, expert_names(*key))
+
+    def expert_overlap_enabled(self):
+        return getattr(self, '_overlap', None) is not None
+
+    def overlap_host_reserve_bytes(self):
+        return OVERLAP_PENDING*self.minimum_cache_bytes if self.expert_overlap_enabled() else 0
+
+    def enable_expert_overlap(self, predictor=None):
+        """Install the bounded overlap reader before any execution window."""
+        with self._lock:
+            self._ready()
+            if self._active or self.expert_overlap_enabled():
+                raise ValueError('Source expert overlap must be enabled once on an idle provider')
+            if predictor is not None and not callable(predictor):
+                raise ValueError('Source expert route predictor must be callable')
+            pool = OverlapReadPool(OVERLAP_WORKERS, 'v41-source-expert-overlap', timeout=60,
+                                   max_pending=OVERLAP_PENDING,
+                                   owner=storage_owner('v41-source-expert-overlap', self.root))
+            self._overlap = dict(pool=pool, predictor=predictor, ticket=None, hints=OrderedDict(),
+                                 retired=[], hints_disabled=False)
+            self.accepts_route_hidden = True
+            for name in OVERLAP_COUNTERS:
+                self.stats.setdefault(name, 0)
+            if getattr(self, '_adaptive_residency_enabled', False):
+                self._adaptive_staging = max(self._adaptive_staging,
+                                             self.minimum_cache_bytes+self.overlap_host_reserve_bytes())
+            return self.overlap_receipt()
+
+    def _ready(self):
+        super()._ready()
+        overlap = getattr(self, '_overlap', None)
+        if overlap is not None and overlap['pool'].failure is not None:
+            from ..runtime.io_ownership import ReadTimeout
+            raise ReadTimeout('Source overlap expert reader failed; reload required: '+overlap['pool'].failure)
+
+    def _overlap_inflight(self):
+        overlap = self._overlap
+        overlap['retired'][:] = [f for f in overlap['retired'] if not f.done()]
+        ticket = overlap['ticket']
+        return (len(overlap['hints'])+len(overlap['retired'])
+                + (len(ticket.demand) if ticket is not None else 0))
+
+    def _overlap_submit(self, key):
+        from ..runtime.io_ownership import ReadQueueFull
+        function, *args = self._expert_read_job(key)
+        try:
+            return self._overlap['pool'].submit(function, *args)
+        except ReadQueueFull:
+            self.stats['overlap_queue_full'] += 1
+            return None
+
+    def _retire_future(self, future, *, hint):
+        """Drop an unconsumed read. A running syscall stays owned until it returns."""
+        if future.cancel():
+            return
+        if future.done():
+            try:
+                future.result()
+                if hint:
+                    self.stats['overlap_hint_wasted_bytes'] += self.minimum_cache_bytes
+            except Exception:
+                self.stats['overlap_hint_failed' if hint else 'overlap_demand_failed_unconsumed'] += 1
+            return
+        self._overlap['retired'].append(future)
+        if hint:
+            self.stats['overlap_hint_wasted_bytes'] += self.minimum_cache_bytes
+
+    def _discard_hints(self, keep_layer=None):
+        hints = self._overlap['hints']
+        for key in [k for k in hints if k[0] != keep_layer]:
+            self.stats['overlap_hint_wasted'] += 1
+            self._retire_future(hints.pop(key), hint=True)
+
+    def _top_up(self, ticket):
+        while ticket.queued and self._overlap_inflight() < OVERLAP_PENDING:
+            key = ticket.queued[0]
+            if key in self._cache or key in self._leased:
+                ticket.queued.pop(0)
+                continue
+            future = self._overlap_submit(key)
+            if future is None:
+                return
+            ticket.queued.pop(0)
+            ticket.demand[key] = future
+            self.stats['overlap_demand_issued'] += 1
+
+    def prepare(self, prefix, ids, *, route_hidden=None):
+        """Read back exact routes once and start their miss reads early.
+
+        With a predictor and one decode row, the same evaluation also yields a
+        predicted next-layer route used only to start optional host reads.
+        Nothing is uploaded, cached or counted by LFU here.
+        """
+        import mlx.core as mx
+        with self._lock:
+            self._ready()
+            overlap = getattr(self, '_overlap', None)
+            if overlap is None:
+                raise ValueError('Source expert tickets require the overlap_v1 provider')
+            if overlap['ticket'] is not None:
+                raise ValueError('Source expert ticket already owned')
+            if prefix not in self.tables:
+                raise ValueError('Source expert ticket outside admitted layers')
+            layer = int(prefix.split('.')[1])
+            predicted = None
+            rows = ids.shape[0] if len(ids.shape) == 2 else 0
+            if (route_hidden is not None and overlap['predictor'] is not None and rows == 1
+                    and not overlap['hints_disabled'] and f'blk.{layer+1}' in self.tables):
+                predicted = overlap['predictor'](route_hidden, layer+1)
+            if predicted is None:
+                values = np.asarray(ids)
+            else:
+                mx.eval(ids, predicted)
+                values = np.asarray(ids)
+            self.stats['overlap_route_readbacks'] += 1
+            if (values.dtype != np.uint32 or values.ndim != 2 or not 0 < values.shape[0] <= 1024
+                    or not 1 <= values.shape[1] <= 384):
+                raise ValueError('Source expert ticket route geometry mismatch')
+            unique = np.unique(values)
+            if int(unique[-1]) >= len(self.tables[prefix]):
+                raise ValueError('Source expert ticket ID outside admitted layer')
+            ticket = SourceExpertTicket(self, threading.get_ident(), prefix, values.copy())
+            overlap['ticket'] = ticket
+            try:
+                self._discard_hints(keep_layer=layer)
+                hints = overlap['hints']
+                for expert in map(int, unique):
+                    key = (layer, expert)
+                    if key in self._leased or key in self._cache:
+                        hint = hints.pop(key, None)
+                        if hint is not None:
+                            self.stats['overlap_hint_wasted'] += 1
+                            self._retire_future(hint, hint=True)
+                        continue
+                    hint = hints.pop(key, None)
+                    if hint is not None:
+                        ticket.demand[key] = hint
+                        ticket.hinted.add(key)
+                    else:
+                        ticket.queued.append(key)
+                self._discard_hints(keep_layer=None)
+                self._top_up(ticket)
+                if predicted is not None:
+                    self._issue_hints(layer+1, np.asarray(predicted))
+            except BaseException:
+                self.cancel(ticket)
+                raise
+            return ticket
+
+    def _issue_hints(self, layer, predicted):
+        if predicted.ndim != 2 or predicted.shape[0] != 1 or predicted.dtype.kind not in 'iu':
+            raise ValueError('Source predicted route geometry mismatch')
+        self.stats['overlap_hint_predictions'] += 1
+        hints = self._overlap['hints']
+        for expert in dict.fromkeys(map(int, predicted.reshape(-1))):
+            key = (layer, expert)
+            if not 0 <= expert < len(self.tables[f'blk.{layer}']):
+                raise ValueError('Source predicted expert outside admitted layer')
+            if key in self._cache or key in self._leased or key in hints:
+                self.stats['overlap_hint_skip_resident'] += 1
+                continue
+            if len(hints) >= OVERLAP_HINTS or self._overlap_inflight() >= OVERLAP_PENDING:
+                self.stats['overlap_hint_skip_budget'] += 1
+                continue
+            future = self._overlap_submit(key)
+            if future is None:
+                break
+            hints[key] = future
+            self.stats['overlap_hint_issued'] += 1
+
+    def _read_expert(self, key, function, *args):
+        """Consume this key's early read when one exists; otherwise read now."""
+        overlap = getattr(self, '_overlap', None)
+        ticket = None if overlap is None else overlap['ticket']
+        future = None
+        if ticket is not None and ticket.prefix == f'blk.{key[0]}':
+            future = ticket.demand.pop(key, None)
+            if key in ticket.queued:
+                ticket.queued.remove(key)
+        started = time.perf_counter_ns()
+        try:
+            if future is not None:
+                hinted = key in ticket.hinted
+                ready = future.done()
+                try:
+                    raw = future.result(timeout=60)
+                except FutureTimeout as error:
+                    from ..runtime.io_ownership import ReadTimeout
+                    failure = ReadTimeout('Source overlap expert read exceeded its deadline')
+                    overlap['pool'].fail(failure)
+                    raise failure from error
+                except Exception:
+                    if not hinted:
+                        raise
+                    # An optional early read cannot supply bytes; the ordinary
+                    # synchronous demand read below remains authoritative.
+                    self.stats['overlap_hint_failed'] += 1
+                    overlap['hints_disabled'] = True
+                    raw = None
+                if raw is not None:
+                    self.stats['overlap_consumed_bytes'] += self.minimum_cache_bytes
+                    if ready:
+                        self.stats['overlap_ready_bytes'] += self.minimum_cache_bytes
+                    if hinted:
+                        self.stats['overlap_hint_used'] += 1
+                    return raw
+            if overlap is not None:
+                self.stats['overlap_sync_reads'] += 1
+            return self.pool.call(function, *args)
+        finally:
+            elapsed = time.perf_counter_ns()-started
+            self.stats['demand_wait_ns'] += elapsed
+            if overlap is not None:
+                self.stats['overlap_consumer_wait_ns'] += elapsed
+                if ticket is not None:
+                    self._top_up(ticket)
+
+    def _upload_stream(self):
+        """overlap_v1 builds packed views off the GPU queue; bytes are identical."""
+        if not self.expert_overlap_enabled():
+            return None
+        import mlx.core as mx
+        return mx.cpu
+
+    def finish_ticket(self, ticket):
+        self.cancel(ticket)
+
+    def cancel(self, ticket):
+        """Close a ticket; never uploads, publishes or poisons a healthy store."""
+        with self._lock:
+            overlap = getattr(self, '_overlap', None)
+            if overlap is None or not isinstance(ticket, SourceExpertTicket) or ticket.owner is not self:
+                raise ValueError('foreign Source expert ticket')
+            if ticket.thread_id != threading.get_ident():
+                raise ValueError('Source expert ticket belongs to another evaluation thread')
+            if ticket.closed:
+                return
+            if overlap['ticket'] is not ticket:
+                raise ValueError('stale Source expert ticket')
+            try:
+                for key, future in ticket.demand.items():
+                    self.stats['overlap_demand_unconsumed'] += 1
+                    self._retire_future(future, hint=key in ticket.hinted)
+            finally:
+                ticket.demand, ticket.queued, ticket.closed = {}, [], True
+                overlap['ticket'] = None
+
+    def end_context(self):
+        overlap = getattr(self, '_overlap', None)
+        if overlap is not None and overlap['ticket'] is None:
+            with self._lock:
+                self._discard_hints()
+
+    def _drain_overlap(self, *, timeout=60.0):
+        overlap = getattr(self, '_overlap', None)
+        if overlap is None:
+            return
+        with self._lock:
+            if overlap['ticket'] is not None:
+                raise ValueError('Source expert ticket still owns overlap reads')
+            self._discard_hints()
+            deadline = time.monotonic()+timeout
+            for future in tuple(overlap['retired']):
+                try:
+                    future.result(timeout=max(0.0, deadline-time.monotonic()))
+                except FutureTimeout as error:
+                    from ..runtime.io_ownership import ReadTimeout
+                    failure = ReadTimeout('abandoned Source overlap read still owns its buffer')
+                    overlap['pool'].fail(failure)
+                    raise failure from error
+                except Exception:
+                    pass
+            overlap['retired'].clear()
+
+    def park(self):
+        self._drain_overlap()
+        return super().park()
+
+    def close(self):
+        overlap = getattr(self, '_overlap', None)
+        try:
+            if overlap is not None:
+                try:
+                    with self._lock:
+                        ticket = overlap['ticket']
+                        if ticket is not None:
+                            for key, future in ticket.demand.items():
+                                self._retire_future(future, hint=key in ticket.hinted)
+                            ticket.demand, ticket.queued, ticket.closed = {}, [], True
+                            overlap['ticket'] = None
+                    # Let completed or short in-flight reads return before the
+                    # pool closes; a hung read still quarantines its owner.
+                    self._drain_overlap(timeout=5.0)
+                except Exception:
+                    pass
+                finally:
+                    overlap['pool'].close()
+        finally:
+            super().close()
+
+    def overlap_receipt(self):
+        overlap = getattr(self, '_overlap', None)
+        if overlap is None:
+            return dict(policy='reference')
+        counters = {name: self.stats.get(name, 0) for name in OVERLAP_COUNTERS}
+        return dict(policy=OVERLAP_POLICY, workers=OVERLAP_WORKERS, max_pending_reads=OVERLAP_PENDING,
+                    max_hint_reads=OVERLAP_HINTS, host_reserve_bytes=self.overlap_host_reserve_bytes(),
+                    hints_disabled=overlap['hints_disabled'], predictor=overlap['predictor'] is not None,
+                    pending_hints=len(overlap['hints']), retired_inflight=len([f for f in overlap['retired'] if not f.done()]),
+                    open_ticket=overlap['ticket'] is not None, read_failure=overlap['pool'].failure,
+                    upload_view_stream='cpu', counters=counters,
+                    contract='exact routes read back once per MoE call; early host reads only; uploads, kernels and LFU unchanged',
+                    qualification='unqualified')
+
     def receipt(self):
         value = super().receipt()
         value.update(mechanism_revision=REVISION, numeric_profile="official_mxfp4_fp8",
                      source_read_byte_scope="six exact tensor extents per expert; original packed payload and scales",
                      host_dequantization=False, expert_requantization=False)
+        if self.expert_overlap_enabled():
+            value['expert_io_overlap'] = self.overlap_receipt()
         return value
 
 
@@ -227,9 +579,17 @@ class SourceV41Weights(NativeV41Weights):
                  qakv_policy="reference", q_b_prefill_policy="reference", fp8_pp_policy="reference", woa_pp_policy="reference",
                  ffn_input_policy="reference", prefill_down_policy="reference", native_mx_policy="reference",
                  source_frame_reuse_policy="reference", submission_policy="reference",
-                 source_row_packet_policy="reference", resident_gather_policy="reference", resident_prefill_policy="reference"):
+                 source_row_packet_policy="reference", resident_gather_policy="reference", resident_prefill_policy="reference",
+                 woa_storage_policy="reference", source_expert_io_policy="reference"):
         if expert_math_policy not in POLICIES:
             raise ValueError("invalid Source expert math policy")
+        if type(source_expert_io_policy) is not str or source_expert_io_policy not in ('reference',)+OVERLAP_POLICIES:
+            raise ValueError('invalid Source expert I/O policy')
+        if source_expert_io_policy!='reference' and (expert_policy is None or resident_gather_policy!='reference'
+                or resident_prefill_policy!='reference' or submission_policy!='reference' or ffn_input_policy!='reference'):
+            raise ValueError('Source expert overlap_v1 requires bounded LFU experts, no resident bank, '
+                             'reference submission and reference FFN input')
+        self.source_expert_io_policy=source_expert_io_policy
         self.expert_math_policy = expert_math_policy
         if resident_gather_policy not in ('reference','resident_bank_v1'):
             raise ValueError('Invalid Source resident gather policy')
@@ -276,6 +636,7 @@ class SourceV41Weights(NativeV41Weights):
                     or not configuration_supported(artifact.get('args'))):
                 raise ValueError('Source Q1 prefill DOWN requires canonical BF16 Source hot-original/Q1 profile')
         for label, value, choices in (
+            ('WoA storage', woa_storage_policy, ('reference','mxfp8_gemv_v1')),
             ('FFN input', ffn_input_policy, ('reference','shared_routed_qat_reuse')),
             ('WoA PP', woa_pp_policy, ('reference','native_bf16_grouped_pp_v1')),
             ('FP8 PP', fp8_pp_policy, ('reference','native_bf16_qb_wob_v1')),
@@ -294,6 +655,17 @@ class SourceV41Weights(NativeV41Weights):
                 raise ValueError('invalid Source '+label+' policy')
         if qakv_policy != 'reference' and dense_qat_policy != 'fused_fp32':
             raise ValueError('Source Qa/KV reuse requires fused_fp32 Source dense QAT')
+        if woa_storage_policy!='reference':
+            # Original MXFP8 WoA codes stay resident; there is no full BF16
+            # coefficient for the bank's alias views or the M1 AST tiles.
+            if bf16_loads_policy not in ('woa_f32','direct_f32'):
+                raise ValueError('Source MXFP8 WoA storage requires a direct WoA consumer (woa_f32 or direct_f32)')
+            if resident_gather_policy!='reference' or resident_prefill_policy!='reference':
+                raise ValueError('Source MXFP8 WoA storage cannot combine with resident bank coefficient views')
+            from .deepseek_v41_source_woa_pp import configuration_supported as woa_geometry
+            if not woa_geometry(artifact.get('args')):
+                raise ValueError('Source MXFP8 WoA storage requires canonical Source WoA geometry')
+        self.source_woa_storage_policy = woa_storage_policy
         if fp8_pp_policy!='reference' and q_b_prefill_policy!='reference':
             raise ValueError('Source native FP8 PP cannot combine with Q_b prefill tile')
         if ffn_input_policy!='reference':
@@ -345,6 +717,9 @@ class SourceV41Weights(NativeV41Weights):
         if source_row_packet_policy != 'reference':
             from .deepseek_v41_source_row_packet import implementation_identity
             self.compute_policy=self.compute_policy+':source_row_packet='+source_row_packet_policy+':'+implementation_identity()
+        if woa_storage_policy != 'reference':
+            from ..runtime.gguf.source_dense_mxfp8 import implementation_identity
+            self.compute_policy=self.compute_policy+':source_woa_storage='+woa_storage_policy+':'+implementation_identity()
         self.dense_pair_policy = 'fused' if qakv_policy == 'qat_reuse' else 'reference'
         self.source_attention_math_policy = attention_math_policy
         self.source_bf16_loads_policy = bf16_loads_policy
@@ -381,6 +756,12 @@ class SourceV41Weights(NativeV41Weights):
                     packed_buffers=expert_math_policy in ('epilogue_fused_fp32','routed_fused_fp32'))
             if native_mx_policy!='reference':
                 self.enable_source_native_mx_attestation()
+            if source_expert_io_policy in OVERLAP_POLICIES:
+                self.expert_stream.enable_expert_overlap(
+                    self._predict_next_routes if source_expert_io_policy==OVERLAP_POLICY else None)
+                # The generic early-load hook in the V4.1 block now issues
+                # prepare(); moe() consumes the matching ticket.
+                self.expert_io_policy='overlap'
         except BaseException as error:
             if self.expert_stream is not None:
                 try:self.expert_stream.close()
@@ -428,7 +809,13 @@ class SourceV41Weights(NativeV41Weights):
                     q = mx.array(raw[name].view("<u4"))
                     scales = mx.repeat(mx.array(raw[scale]), 32, axis=0)[:row["shape"][0]]
                     self._pending_dense.update({alias+".q": q, alias+".s": scales})
-                    if alias.endswith("attn_output_a.weight"):
+                    if (alias.endswith("attn_output_a.weight")
+                            and getattr(self,'source_woa_storage_policy','reference') == 'mxfp8_gemv_v1'):
+                        # Keep the original codes; decode-time GEMV reproduces the
+                        # BF16 expansion exactly inside the admitted scale range.
+                        from ..runtime.gguf.source_dense_mxfp8 import validate_scale_bytes
+                        validate_scale_bytes(raw[scale])
+                    elif alias.endswith("attn_output_a.weight"):
                         # Official convert.py expands this grouped projection to BF16.
                         value = mx.dequantize(q, scales=scales, mode="mxfp8", dtype=mx.bfloat16)
                         self._pending_dense[alias] = value
@@ -464,7 +851,24 @@ class SourceV41Weights(NativeV41Weights):
 
     def array(self, name):
         self._ensure_dense()
+        if (name not in self._dense and name.endswith('attn_output_a.weight')
+                and getattr(self,'source_woa_storage_policy','reference') != 'reference'):
+            raise ValueError('Source MXFP8 WoA storage has no resident BF16 coefficient; consumer unsupported')
         return self._dense[name]
+
+    def _grouped_mxfp8(self, x, name):
+        """Decode M1 from original codes, else the exact official BF16 expansion."""
+        import mlx.core as mx
+        from ..runtime.gguf import source_dense_mxfp8
+        q, scales = self._dense[name+'.q'], self._dense[name+'.s']
+        counts = self.scheduled_grouped_calls
+        if x.ndim == 4 and x.shape[:2] == (1, 1):
+            value = source_dense_mxfp8.maybe_project(x.astype(mx.float32), q, scales)
+            if value is not None:
+                counts['source_mxfp8_grouped_gemv_f32'] = counts.get('source_mxfp8_grouped_gemv_f32', 0)+1
+                return value, None
+        counts['source_mxfp8_grouped_bf16_expansion'] = counts.get('source_mxfp8_grouped_bf16_expansion', 0)+1
+        return None, source_dense_mxfp8.expand_bf16(q, scales)
 
     def linear(self, name):
         self._ensure_dense()
@@ -529,6 +933,24 @@ class SourceV41Weights(NativeV41Weights):
         key='source_dense_qat_fused' if fused else 'source_dense_qat_reference'
         self.scheduled_dense_calls[key]=self.scheduled_dense_calls.get(key,0)+1
         return (fused_quantize(x.astype(mx.float32),'fp8') if fused else quantize(x,'fp8')).astype(mx.float32)
+
+    def _predict_next_routes(self, hidden, layer):
+        """Lazy hint only: layer's router applied to the previous FFN input.
+
+        Joins the exact route readback in one evaluation. Its IDs choose
+        optional early host reads and never reach routing or numerics.
+        """
+        import mlx.core as mx
+        weight=f'blk.{layer}.ffn_gate_inp.weight';bias=f'blk.{layer}.exp_probs_b.bias'
+        if weight not in self.tensors or bias not in self.tensors:
+            return None
+        c=self.artifact['args']
+        rows=hidden.reshape(-1,hidden.shape[-1])
+        if rows.shape!=(1,c.hidden_size):
+            return None
+        logits=(rows.astype(mx.bfloat16)@self.array(weight).astype(mx.bfloat16).T).astype(mx.float32)
+        scores=mx.sqrt(mx.logaddexp(logits,0.0))+self.array(bias).astype(mx.float32)
+        return mx.argpartition(-scores,kth=c.num_experts_per_tok-1,axis=-1)[...,:c.num_experts_per_tok].astype(mx.uint32)
 
     def ffn_input_token(self,x,prefix):
         if getattr(self,'source_ffn_input_policy','reference')=='reference':return None
@@ -606,10 +1028,39 @@ class SourceV41Weights(NativeV41Weights):
         return tuple(outputs)
 
     def recommended_prefill_rows(self, maximum, *, context_tokens=0):
-        """Live-memory chunk advice; cache maxima are never RAM reservations."""
+        """Live-memory chunk advice; cache maxima are never RAM reservations.
+
+        Under the explicit layer_major_v1 prefill order, a caller maximum above
+        one chunk may return a memory-bounded wave of whole chunks; the model
+        then executes those chunks layer-major. The reference order is unchanged.
+        """
         if type(maximum) is not int or maximum < 1 or type(context_tokens) is not int or context_tokens < 0:
             raise ValueError('Source prefill advice requires positive rows and nonnegative context')
-        maximum=min(maximum,1024)
+        chunk=self._source_chunk_rows(min(maximum,1024),context_tokens)
+        if maximum<=1024 or getattr(self,'source_prefill_order_policy','reference')!='layer_major_v1':
+            return chunk
+        from .deepseek_v41_source_layer_major import wave_rows
+        try:
+            return wave_rows(self,maximum,chunk,self._source_available_bytes())
+        except Exception:
+            return chunk
+
+    def source_layer_major_chunk_rows(self, *, context_tokens=0):
+        """Live sub-chunk size used inside a layer-major wave (1..1024)."""
+        return self._source_chunk_rows(1024,context_tokens)
+
+    def _source_available_bytes(self):
+        stream=getattr(self,'expert_stream',None)
+        callback=getattr(stream,'_adaptive_available',None)
+        if callback is not None:
+            available=callback()
+        else:
+            from ..runtime.os_memory import host_memory_snapshot
+            host=host_memory_snapshot()
+            available=None if host is None else host.available_bytes
+        return available if type(available) is int and available>=0 else None
+
+    def _source_chunk_rows(self, maximum, context_tokens):
         stream=getattr(self,'expert_stream',None)
         if stream is None or not getattr(stream,'adaptive_residency_enabled',False):
             return maximum
@@ -795,7 +1246,10 @@ class SourceV41Weights(NativeV41Weights):
     def grouped(self, x, name, *, groups=8):
         import mlx.core as mx
         self._ensure_dense()
-        weight = self.array(name)
+        if getattr(self,'source_woa_storage_policy','reference')=='mxfp8_gemv_v1' and name+'.q' in self._dense:
+            value, weight = self._grouped_mxfp8(x, name)
+            if value is not None:return value
+        else:weight = self.array(name)
         if getattr(self,'source_woa_pp_policy','reference')=='native_bf16_grouped_pp_v1':
             from .deepseek_v41_source_woa_pp import maybe_project
             value=maybe_project(name,x,weight,groups=groups,counters=self.scheduled_grouped_calls)
@@ -806,6 +1260,8 @@ class SourceV41Weights(NativeV41Weights):
             view_selected=(session is not None and session.active
                 and getattr(session,'operand_policy','full_operands_v1')=='coefficient_views_v1')
             if x.ndim==4 and x.shape[1]==1 and view_selected:
+                if getattr(self,'source_woa_storage_policy','reference')!='reference':
+                    raise ValueError('Source MXFP8 WoA storage has no coefficient view')
                 cap=getattr(self,'_resident_dense_coefficient_views',{}).get(name)
                 if cap is None:raise ValueError('Source WoA coefficient alias was not prepared before decode')
                 value=maybe_project(x.astype(mx.float32),weight,'wo_a',operand_policy='coefficient_views_v1',coefficient_view=cap)
@@ -892,8 +1348,6 @@ class SourceV41Weights(NativeV41Weights):
 
     def moe(self, x, ids, scores, prefix, *, ticket=None,ffn_input_token=None):
         import mlx.core as mx
-        from ..runtime.models.deepseek_v4 import limited_swiglu
-        from ..runtime.models.deepseek_v41_quant import quantize
         self._ready()
         if getattr(getattr(self,'expert_stream',None),'_resident_bank_preparing',None):
             raise ValueError('Source MoE cannot enter during resident bank preparation')
@@ -910,13 +1364,29 @@ class SourceV41Weights(NativeV41Weights):
             self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
             return session.moe(prepared,ids.reshape(-1),scores.reshape(-1).astype(mx.float32),prefix)
         if ticket is not None:
-            raise ValueError("official source profile has synchronous expert reads")
+            # overlap_v1: prepare() already read these exact routes back and
+            # started their miss reads; the ticket closes with this call.
+            stream=self.expert_stream
+            if (getattr(self,'source_expert_io_policy','reference') not in OVERLAP_POLICIES
+                    or not isinstance(ticket,SourceExpertTicket) or ticket.owner is not stream
+                    or ticket.closed or ticket.prefix!=prefix or ffn_input_token is not None
+                    or tuple(ids.shape)!=ticket.values.shape):
+                raise ValueError("Source expert ticket does not match this overlap_v1 route")
+            try:
+                return self._moe_routes(x,ids,scores,prefix,ticket.values,ffn_input_token=None)
+            finally:
+                stream.finish_ticket(ticket)
         if ffn_input_token is not None:
             from .deepseek_v41_source_ffn_input import FfnInputToken
             if not isinstance(ffn_input_token,FfnInputToken):
                 raise ValueError('Source FFN input requires an explicit frame token')
             ffn_input_token.validate_routed_request(self,x,prefix)
-        values = np.asarray(ids)
+        return self._moe_routes(x,ids,scores,prefix,np.asarray(ids),ffn_input_token=ffn_input_token)
+
+    def _moe_routes(self, x, ids, scores, prefix, values, *, ffn_input_token=None):
+        import mlx.core as mx
+        from ..runtime.models.deepseek_v4 import limited_swiglu
+        from ..runtime.models.deepseek_v41_quant import quantize
         self.source_route_host_materializations=getattr(self,'source_route_host_materializations',0)+1
         if (values.dtype != np.uint32 or values.ndim != 2 or not 0 < values.shape[0] <= 1024
                 or values.shape != scores.shape or x.shape != (values.shape[0], self.artifact["args"].hidden_size)
@@ -1356,6 +1826,7 @@ class SourceV41Weights(NativeV41Weights):
                      source_q_b_prefill=getattr(self,'source_q_b_prefill_policy','reference'),
                      source_fp8_pp=getattr(self,'source_fp8_pp_policy','reference'),
                      source_woa_pp=getattr(self,'source_woa_pp_policy','reference'),
+                     source_woa_storage=getattr(self,'source_woa_storage_policy','reference'),
                      source_ffn_input=getattr(self,'source_ffn_input_policy','reference'),
                      source_prefill_down=getattr(self,'source_prefill_down_policy','reference'),
                      source_q_b_prefill_contract='raw F32 PP99 Q_b64x32; existing model owns BF16 boundary',
@@ -1383,6 +1854,13 @@ class SourceV41Weights(NativeV41Weights):
             from .deepseek_v41_source_woa_pp import implementation_identity
             value['source_woa_pp_implementation_sha256']=implementation_identity()
             value['source_woa_pp_numerical_contract']='B1 M99 G8 K4096 N1024 original resident BF16 coefficients; Source BF16-owned input cast BF16; stock grouped BF16 result cast F32 then existing owner/QAT/WoB. Distinct unqualified profile; raw F32 accumulator unexposed.'
+        if getattr(self,'source_woa_storage_policy','reference')=='mxfp8_gemv_v1':
+            from ..runtime.gguf.source_dense_mxfp8 import implementation_identity
+            value['grouped_wo_a']='original source MXFP8 codes resident; no BF16 expansion stored'
+            value['source_woa_storage_implementation_sha256']=implementation_identity()
+            value['source_woa_storage_numerical_contract']=('B1 M1 WoA GEMV decodes E4M3*E8M0 to F32 in registers with the pinned '
+                'source_dense BF16 GEMV lane/loop/shuffle law; scale bytes 10..246 admitted at load so values equal the official '
+                'BF16 expansion; every other row count expands to BF16 per call and keeps the existing grouped consumers. Unqualified.')
         if getattr(self,'source_ffn_input_policy','reference')=='shared_routed_qat_reuse':
             from .deepseek_v41_source_ffn_input import implementation_identity
             value['source_ffn_input_implementation_sha256']=implementation_identity()
@@ -1404,4 +1882,8 @@ class SourceV41Weights(NativeV41Weights):
             value['source_native_mx_attestations']=registry.receipt()
         if getattr(self,'_source_completion',None) is not None:
             value['source_completion_receipt']=self._source_completion.receipt()
+        value['source_expert_io']=getattr(self,'source_expert_io_policy','reference')
+        overlap=getattr(getattr(self,'expert_stream',None),'overlap_receipt',None)
+        if value['source_expert_io']!='reference' and overlap is not None:
+            value['source_expert_io_receipt']=overlap()
         return value

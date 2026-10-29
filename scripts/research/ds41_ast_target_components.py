@@ -41,9 +41,26 @@ def _private_proof_diagnostic(path,model,result,controls):
     nodes=[]
     for value in controls:
         failed=_first_failed_proof_check(value)
+        layer_failures=[]
+        for layer,state in enumerate(value.get('state',())):
+            state_failure=_first_failed_proof_check(state)
+            if state_failure is None:continue
+            planes=[]
+            for index,plane in enumerate(state.get('planes',())):
+                plane_failure=_first_failed_proof_check(plane)
+                if plane_failure is not None:
+                    planes.append(dict(index=index,name=('keys','buf_kv','buf_gate','pooled','index_keys','hash_tail')[index],
+                        first_failed_check=plane_failure,comparison=plane))
+            layer_failures.append(dict(layer=layer,first_failed_check=state_failure,
+                capacity_equal=state.get('capacity_equal'),candidate_capacity=state.get('candidate_capacity'),
+                ordinary_capacity=state.get('ordinary_capacity'),topology_equal=state.get('topology_equal'),
+                metadata_equal=state.get('metadata_equal'),private_schema_expected=state.get('private_schema_expected'),
+                failed_planes=planes))
         nodes.append(dict(node=value['node'],passed=failed is None,
             logits_raw_equal=value['logits']['raw_bits_equal'],features_raw_equal=value['features']['raw_bits_equal'],
-            first_failed_check=failed))
+            logits_comparison=value['logits'],features_comparison=value['features'],
+            first_failed_check=failed,first_failed_state_layer=layer_failures[0]if layer_failures else None,
+            failed_state_layers=layer_failures))
     report=dict(schema='mlx2.ds41-prepared-private-gate.v1',target_model_identity=model.identity,
         source_revision_token=result.transaction.provider_revision_token,
         forward_law=result.receipt.get('forward_law'),numerical_profile=result.transaction.profile,
@@ -51,6 +68,27 @@ def _private_proof_diagnostic(path,model,result,controls):
         first_failed_node=next((row for row in nodes if not row['passed']),None),
         proof_local_admission_granted=False,APCv2_insertions=0,qualified=False,performance_claim=False,
         snapshot_contract='Capacity-preserving independent descriptors; visible arrays and topology/capacity gates remain exact')
+    with temporary.open('x')as stream:
+        json.dump(report,stream,indent=2,allow_nan=False);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+    os.replace(temporary,path)
+
+
+def _publication_proof_diagnostic(path,model,result,gates,*,partial_state,continuation,continuation_state,isolated):
+    """Retain the final proof stage before refusing commit/continuation/abort."""
+    if path is None:return
+    from pathlib import Path
+    import json,os
+    base=Path(path);path=base.with_name(base.stem+'-publication'+base.suffix)
+    temporary=path.with_name(path.name+'.tmp')
+    if path.exists()or temporary.exists():raise FileExistsError('Publication proof diagnostic already exists')
+    report=dict(schema='mlx2.ds41-publication-proof-gate.v1',target_model_identity=model.identity,
+        source_revision_token=result.transaction.provider_revision_token,
+        forward_law=result.receipt.get('forward_law'),numerical_profile=result.transaction.profile,
+        passed=all(gates.values()),gates=gates,failed_gates=[key for key,value in gates.items()if value is not True],
+        partial_commit_state=partial_state,continuation_logits=continuation,continuation_state=continuation_state,
+        live_cache_unchanged=isolated,first_failed_state_check=_first_failed_proof_check(dict(
+            partial_commit_state=partial_state,continuation_state=continuation_state,live_cache_unchanged=isolated)),
+        proof_local_admission_granted=True,generic_oracle_admitted=False,APCv2_insertions=0,qualified=False)
     with temporary.open('x')as stream:
         json.dump(report,stream,indent=2,allow_nan=False);stream.write('\n');stream.flush();os.fsync(stream.fileno())
     os.replace(temporary,path)
@@ -65,9 +103,19 @@ def compare_arrays(a, b, *, atol, rtol):
         raise ValueError(f"Source AST comparison dtype mismatch: {a.dtype} versus {b.dtype}")
     finite = bool(np.isfinite(a).all() and np.isfinite(b).all())
     maximum = (float(np.max(np.abs(a.astype(np.float64)-b.astype(np.float64))))
-               if a.size else 0.0)
+               if a.size and finite else 0.0 if finite else None)
+    left_bytes,right_bytes=a.tobytes(),b.tobytes()
+    equal=left_bytes==right_bytes
+    first=None
+    if not equal:
+        byte=next(i for i,(x,y)in enumerate(zip(left_bytes,right_bytes))if x!=y)
+        element=byte//a.dtype.itemsize
+        first=dict(flat_element=element,index=[int(v)for v in np.unravel_index(element,a.shape)],byte_offset=byte,
+            candidate_bytes=left_bytes[element*a.dtype.itemsize:(element+1)*a.dtype.itemsize].hex(),
+            ordinary_bytes=right_bytes[element*a.dtype.itemsize:(element+1)*a.dtype.itemsize].hex(),
+            candidate_value=repr(a.reshape(-1)[element].item()),ordinary_value=repr(b.reshape(-1)[element].item()))
     return dict(shape=list(a.shape), finite=finite,
-                raw_bits_equal=bool(a.tobytes() == b.tobytes()),
+                raw_bits_equal=equal,first_raw_mismatch=first,
                 tolerance_valid=bool(finite and np.allclose(a, b, atol=atol, rtol=rtol)),
                 maximum_absolute_error=maximum)
 
@@ -283,6 +331,8 @@ def _run_batched_exact(model, cache, check_live, *, anchor, paths, atol, rtol, e
         gates=dict(private_all16_raw_exact=exact(private_controls),prepared_all16_raw_exact=exact(controls),
             committed_state_exact=exact(partial_state),continuation_exact=exact(continuation)and exact(continuation_state),
             isolated=exact(isolated),abort_closed=abort_result.transaction.closed,commit_after_abort_refused=closed_refused)
+        _publication_proof_diagnostic(diagnostic_path,model,result,gates,partial_state=partial_state,
+            continuation=continuation,continuation_state=continuation_state,isolated=isolated)
         if not all(gates.values()):raise ValueError('Batched AST commit/abort/continuation/isolation gate failed')
         return dict(receipt=result.receipt,comparisons=controls,private_pre_admission=private_controls,
             partial_commit_state=partial_state,continuation=continuation,continuation_state=continuation_state,

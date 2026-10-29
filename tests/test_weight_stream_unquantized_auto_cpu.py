@@ -535,7 +535,10 @@ def test_auto_decision_rule(tmp_path):
         False, "explicit_policy", False)
     assert decide(adapter=_Undeclared, limit=1)["selected"]
     assert decide(limit=None)["reason"] == "admission_limit_unmeasured"
-    assert decide(path=tmp_path / "absent", limit=1)["reason"] == "expert_geometry_unavailable"
+    # A class moe_experts declaration is candidate evidence; bytes still prove it.
+    absent = decide(path=tmp_path / "absent", limit=1)
+    assert (absent["selected"], absent["reason"]) == (False, "artifact_unmeasured")
+    assert decide(adapter=_Undeclared, path=tmp_path / "absent", limit=1)["reason"] == "expert_geometry_unavailable"
 
 
 def _engine(tmp_path, monkeypatch, factory, policy, *, limit, max_lanes=1, **kwargs):

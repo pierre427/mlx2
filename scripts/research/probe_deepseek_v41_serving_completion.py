@@ -47,7 +47,9 @@ def baseline_policy(policy):
 
 def validate_replay_receipts(policy, status, cold, warm):
     """Distinguish repeated ordinary execution from an actual APCv2 hit."""
-    reusable = policy.get('deepseek_source_prefill_partition', 'adaptive_v1') == 'canonical_m1_v1'
+    # position_grid_v1 hits only at grid boundaries: its probe prompt must
+    # exceed one grid cell (default 1024 rows) for a nonzero warm hit.
+    reusable = policy.get('deepseek_source_prefill_partition', 'adaptive_v1') in ('canonical_m1_v1', 'position_grid_v1')
     reuse = status.get('settings', {}).get('apcv2_reuse', {})
     if not reusable and reuse != {'enabled': False, 'reason': 'adaptive_prefill_partitions_not_qualified'}:
         raise RuntimeError('adaptive Source must explicitly disable APCv2 reuse')

@@ -18,3 +18,12 @@ qualification/runs/**/*.safetensors
 qualification/mtp-handoff-*.json
 qualification/mtp-handoff-*.txt
 qualification/mtp-handoff-*-artifacts/
+
+# DS4.1 campaign sources are preserved as verified, deduplicated overlays in
+# ds41-options-source-snapshots-20261027, rather than hundreds of full copies.
+# Keep raw receipts and tensor evidence, but never publish transient API tokens
+# or runtime prefix-cache payloads.
+qualification/runs/ds41-options-*/source/
+qualification/runs/ds41-options-*/rejected-source-attempt-*/
+qualification/runs/ds41-options-*/admin-token
+qualification/runs/ds41-options-*/apcv2/

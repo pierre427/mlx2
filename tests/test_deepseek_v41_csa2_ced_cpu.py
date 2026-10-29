@@ -564,10 +564,11 @@ def test_full_source_indexer_tiles_native_index_decode(monkeypatch):
 
 def test_packed_storage_refuses_unimplemented_source_attention_math():
     c = _packed_config()
-    for policy in ("all_retained_broadcast", "omlx_nax_bf16_online_v1"):
-        with pytest.raises(ValueError, match="reference selected attention"):
+    for policy in ("source_short_decode_joint_f32_v1", "source_short_decode_grouped_f32_v1"):
+        with pytest.raises(ValueError, match="broadcast or oMLX selected attention"):
             DeepSeekV41Model(c, Weights(c), identity="synthetic@packed-incompatible",
-                             kv_storage_policy="native_packed", source_attention_math_policy=policy)
+                             kv_storage_policy="native_packed", index_policy="finite_all_retained",
+                             source_attention_math_policy=policy)
 
 
 @pytest.mark.parametrize("count", [511, 512, 513, 16383, 16384, 16385])

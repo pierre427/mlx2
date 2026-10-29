@@ -294,6 +294,8 @@ class BoundedCedExecutor:
                 final_cache_complete=True, source_numerical_equivalence_claimed=False)
             return CedResult(logits, tuple(work), receipt, model)
         except BaseException as error:
+            if model is not None:
+                model.discard_engram_prefetch(error)
             self._poisoned = True
             self._retained_failure = tuple(work or ())
             failure_error = CedExecutionError('Bounded CED failed before publishing private next-state: '+str(error),

@@ -185,6 +185,9 @@ def restore(adapter,hints,prompt_cache,*,available_bytes=None,cancelled=None):
         if getattr(store,'_resident_bank',None)is not None:return decline('existing_pinned_bank_preserved')
         staging=getattr(store,'_adaptive_staging',store.minimum_cache_bytes)
         working=store.minimum_cache_bytes*max(1,getattr(store,'_adaptive_working_set',1))
+        # Match adaptive_residency_update's live target (available minus
+        # headroom); otherwise an advisory prefetch evicts resident experts.
+        headroom=max(getattr(store,'_adaptive_headroom',0)or 0,getattr(store,'_adaptive_protected_bytes',0)or 0)
         for key in restored.experts:
             if key in store._cache:continue
             if _cancelled(adapter,manager,cancelled):report['reason']='cancelled_resource_prepare';break
@@ -195,7 +198,7 @@ def restore(adapter,hints,prompt_cache,*,available_bytes=None,cancelled=None):
             if kind not in ('original','q1'):report['reason']='unsupported_current_expert_format';break
             size=Q1_BYTES if kind=='q1'else ORIGINAL_BYTES
             hard_room=store.cache_budget_bytes-store._cache_bytes-staging-working
-            if available is None or available<size+staging or hard_room<size:
+            if available is None or available<size+staging+headroom or hard_room<size:
                 report['reason']='actual_availability_or_operator_working_headroom';break
             prior_error=getattr(store,'_error',None)
             try:

@@ -22,10 +22,14 @@ def test_csa_profiles_are_explicit_and_incompatible_producers_refused(parse):
                       'deepseek_context_limit': 1048576})
     assert model_options(selected) == {'kv_storage_policy': 'native_packed',
         'candidate_score_policy': 'candidate_only', 'ced_policy': 'reference', 'context_limit': 1048576}
-    for change in ({'deepseek_qat': 'fused_fp32'}, {'deepseek_attention_epilogue': 'fused'},
-                   {'deepseek_verify_commit': 'local_frontier'}):
-        with pytest.raises(ValueError):
-            parse({**selected, **change})
+    request = {'deepseek_kv_storage': 'native_packed', 'deepseek_candidate_score': 'candidate_only',
+               'deepseek_context_limit': 1048576}
+    # Fused QAT/attention-epilogue producers have an exact packed producer.
+    fused = parse({**request, 'deepseek_qat': 'fused_fp32', 'deepseek_attention_epilogue': 'fused'})
+    assert model_options(fused)['kv_storage_policy'] == 'native_packed'
+    assert fused['deepseek_qat'] == 'fused_fp32'
+    with pytest.raises(ValueError, match='snapshot/replay'):
+        parse({**request, 'deepseek_verify_commit': 'local_frontier', 'draft_model': 'prompt_lookup'})
     for value in (True, 0, -1, 1048577, 2.5, '1048576'):
         with pytest.raises(ValueError):
             parse({'deepseek_context_limit': value})

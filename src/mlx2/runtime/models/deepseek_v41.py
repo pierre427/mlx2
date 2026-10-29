@@ -33,6 +33,9 @@ SELECTED_KV_POLICIES = ("reference", "decode_reuse")
 KV_STORAGE_POLICIES = ("reference", "native_packed")
 CANDIDATE_SCORE_POLICIES = ("reference", "candidate_only")
 CED_POLICIES = ("reference", "dependency_exact")
+# Selected-attention laws with a compatible packed consumer: the reference
+# bounded packed gather, or exact bounded retained-pool decode staging.
+PACKED_ATTENTION_MATH_POLICIES = ("reference", "all_retained_broadcast", "omlx_nax_bf16_online_v1")
 
 
 def candidate_blocks(scores, lens, count, block, *, finite_all_retained=False):
@@ -228,7 +231,8 @@ class Attention:
     def rotate_packed(self, x, kind, offset=0, *, positions=None, shared=None):
         from .deepseek_v41_packed_qat import produce
 
-        return produce(self.rotate(x, offset, positions=positions, shared=shared), kind)
+        return produce(self.rotate(x, offset, positions=positions, shared=shared), kind,
+                       codec=getattr(self.model, "packed_codec_policy", "reference"))
 
     def publish(self, x, state, start, shared=None):
         c, m, ratio = self.c, self.model, self.ratio
@@ -423,8 +427,8 @@ class Attention:
     def __call__(self, x, state, cache, shared):
         c, m, length, start = self.c, self.model, x.shape[1], state.offset
         if (getattr(m, "kv_storage_policy", "reference") == "native_packed"
-                and getattr(m, "source_attention_math_policy", "reference") != "reference"):
-            raise ValueError("native packed KV requires reference selected attention math")
+                and getattr(m, "source_attention_math_policy", "reference") not in PACKED_ATTENTION_MATH_POLICIES):
+            raise ValueError("native packed KV requires reference, broadcast or oMLX selected attention math")
         if m.can_pair(x, self.prefix+"attn_q_a.weight", self.prefix+"attn_kv.weight"):
             qa, kva = self.w.paired_project(x,self.prefix+"attn_q_a.weight",self.prefix+"attn_kv.weight")
         else:
@@ -474,6 +478,9 @@ class Attention:
                     raise ValueError("V4.1 index source failed to publish")
             else:
                 pooled = packed_pooled = None
+            if packed_pooled is not None and getattr(m, "source_attention_math_policy", "reference") != "reference":
+                from .deepseek_v41_packed_cache import stage_retained_pool
+                pooled, packed_pooled = stage_retained_pool(m, packed_pooled, indices, length, start, shared)
         trusted_retained = (m.index_policy == "finite_all_retained" and length > 1 and pooled is not None
                      and pooled.shape[1] <= 512
                      and shared.get("_all_retained_chronological") ==
@@ -586,13 +593,54 @@ class Block:
             mixes, scale, base, c.hc_mult, c.hc_sinkhorn_iters, c.hc_eps
         )
 
+    def _mega(self, kind, h, pre):
+        """Opt-in single-pass Source mHC for one decode row, else None."""
+        m, c = self.model, self.c
+        if getattr(m, "source_hc_mega_policy", "reference") != "mega_v1":
+            return None
+        from .deepseek_v41_source_hc_mega import can_pre, pre as mega_pre, self_check
+        fn, scale, base = self.hc[kind]
+        weight = self.attn_norm if kind == "attn" else self.ffn_norm
+        counts = m.scheduled_hc_calls
+        if not can_pre(h, pre, fn, scale, base, weight):
+            counts["source_hc_mega_pre_reference"] = counts.get("source_hc_mega_pre_reference", 0) + 1
+            return None
+        options = dict(iterations=c.hc_sinkhorn_iters, hc_eps=c.hc_eps, rms_eps=c.rms_norm_eps)
+        self_check(**options)
+        counts["source_hc_mega_pre"] = counts.get("source_hc_mega_pre", 0) + 1
+        return mega_pre(h, pre, self.hc[kind], weight, **options)
+
+    def _mega_store(self, branch, h, post, comb, shared_out=None):
+        m = self.model
+        if getattr(m, "source_hc_mega_policy", "reference") != "mega_v1":
+            return None
+        from .deepseek_v41_source_hc_mega import can_store, store
+        counts = m.scheduled_hc_calls
+        key = "source_hc_mega_store" + ("_shared" if shared_out is not None else "")
+        if not can_store(branch, h, post, comb, shared_out):
+            counts[key + "_reference"] = counts.get(key + "_reference", 0) + 1
+            return None
+        counts[key] = counts.get(key, 0) + 1
+        return store(branch, h, post, comb, shared_out)
+
     def attention_half(self, h, pre, state, cache, shared):
         m = self.model
-        attn_pre, post, comb = self.mixes(h, "attn")
-        x = m.norm(m.collapse(h, pre), self.attn_norm)
+        mega = getattr(m, "source_hc_mega_policy", "reference") == "mega_v1"
+        fused = self._mega("attn", h, pre) if mega else None
+        if fused is None:
+            attn_pre, post, comb = self.mixes(h, "attn")
+            x = m.norm(m.collapse(h, pre), self.attn_norm)
+        else:
+            attn_pre, post, comb, x = fused
         x = self.attn(x, state, cache, shared)
         collapsed = None
-        if getattr(m,"source_hc_boundary_policy","reference") == "expand_collapse_seq":
+        stored = self._mega_store(x, h, post, comb) if mega else None
+        if stored is not None:
+            h = stored
+            fused = self._mega("ffn", h, attn_pre)
+            if fused is not None:
+                return (h, fused[3], *fused[:3])
+        elif getattr(m,"source_hc_boundary_policy","reference") == "expand_collapse_seq":
             from .deepseek_v41_source_hc_boundary import (
                 can_expand_collapse,
                 expand_collapse,
@@ -657,6 +705,10 @@ class Block:
 
     def finish(self, h, routed, shared_out, post, comb):
         m = self.model
+        if getattr(m, "source_hc_mega_policy", "reference") == "mega_v1":
+            stored = self._mega_store(routed, h, post, comb, shared_out)
+            if stored is not None:
+                return stored
         if getattr(m,"hc_epilogue_policy","reference") == "fused" and m.hc_policy == "fused_fp32":
             from .deepseek_v41_fused import epilogue_check, expand
             epilogue_check()
@@ -686,7 +738,9 @@ class Block:
             ).reshape(x.shape)
         try:
             if overlap:
-                ticket=self.w.expert_stream.prepare(self.prefix[:-1], indices.reshape(-1,c.num_experts_per_tok))
+                # A provider may use the exact router input only for early-read hints.
+                hint={'route_hidden':x}if getattr(self.w.expert_stream,'accepts_route_hidden',False)else{}
+                ticket=self.w.expert_stream.prepare(self.prefix[:-1], indices.reshape(-1,c.num_experts_per_tok),**hint)
             if getattr(self.w,'source_submission_policy','reference') == 'shared_first_v1':
                 if overlap:
                     raise ValueError('Source shared-first does not admit asynchronous expert tickets')
@@ -727,6 +781,7 @@ class DeepSeekV41Model:
         selected_kv_policy="reference",
         source_attention_math_policy="reference",
         source_hc_boundary_policy="reference",
+        source_hc_mega_policy="reference",
         kv_storage_policy="reference",
         candidate_score_policy="reference",
         ced_policy="reference",
@@ -742,10 +797,13 @@ class DeepSeekV41Model:
             raise ValueError("unknown V4.1 QAT policy")
         if kv_storage_policy not in KV_STORAGE_POLICIES or candidate_score_policy not in CANDIDATE_SCORE_POLICIES or ced_policy not in CED_POLICIES:
             raise ValueError("unknown V4.1 CSA2/CED policy")
-        if kv_storage_policy == "native_packed" and (not config.simulate_quantization or config.activation_dtype != "bfloat16" or qat_policy != "reference"):
-            raise ValueError("native packed QAT requires reference QAT and BF16 activation boundaries")
-        if kv_storage_policy == "native_packed" and source_attention_math_policy != "reference":
-            raise ValueError("native packed KV requires reference selected attention math")
+        if kv_storage_policy == "native_packed" and (not config.simulate_quantization or config.activation_dtype != "bfloat16"):
+            raise ValueError("native packed QAT requires simulated QAT and BF16 activation boundaries")
+        if kv_storage_policy == "native_packed" and source_attention_math_policy not in PACKED_ATTENTION_MATH_POLICIES:
+            raise ValueError("native packed KV requires reference, broadcast or oMLX selected attention math")
+        # Fused QAT producers emit original codes through the exact fused codec.
+        self.packed_codec_policy = ("fused_metal_v1" if kv_storage_policy == "native_packed"
+                                    and qat_policy == "fused_fp32" else "reference")
         self.kv_storage_policy = kv_storage_policy
         self.candidate_score_policy = candidate_score_policy
         self.ced_policy = ced_policy
@@ -759,6 +817,14 @@ class DeepSeekV41Model:
             raise ValueError("unknown Source HC boundary policy")
         if source_hc_boundary_policy != "reference" and (hc_policy!="reference"or config.activation_dtype!="bfloat16"):
             raise ValueError("Source HC boundary requires reference HC and BF16 boundaries")
+        if source_hc_mega_policy not in ("reference", "mega_v1"):
+            raise ValueError("unknown Source HC mega policy")
+        if source_hc_mega_policy != "reference" and (
+                hc_policy != "reference" or hc_coeff_policy != "source_fused_fp32"
+                or source_hc_boundary_policy != "reference"
+                or config.activation_dtype != "bfloat16" or config.hc_mult != 4):
+            raise ValueError("Source HC mega requires Source fused coefficients, reference HC/boundary and BF16 HC4")
+        self.source_hc_mega_policy = source_hc_mega_policy
         self.index_policy, self.selected_kv_policy = index_policy, selected_kv_policy
         self.source_attention_math_policy = source_attention_math_policy
         self.source_hc_boundary_policy = source_hc_boundary_policy
@@ -795,9 +861,16 @@ class DeepSeekV41Model:
             self.identity += ':source_attention_implementation='+implementation_identity()
         if source_hc_boundary_policy != "reference":
             self.identity += ":source_hc_boundary=" + source_hc_boundary_policy
+        if source_hc_mega_policy != "reference":
+            from .deepseek_v41_source_hc_mega import implementation_identity
+            self.identity += ":source_hc_mega=" + source_hc_mega_policy + ":" + implementation_identity()
         for name, value in (("kv_storage", kv_storage_policy), ("candidate_score", candidate_score_policy), ("ced", ced_policy)):
             if value != "reference":
                 self.identity += ":" + name + "=" + value
+        if self.packed_codec_policy != "reference":
+            from .deepseek_v41_packed_fused import implementation_identity as packed_codec_identity
+            self.identity += (":packed_codec=" + self.packed_codec_policy
+                              + ":packed_codec_implementation=" + packed_codec_identity())
         if context_limit != min(config.max_position_embeddings, 65536):
             self.identity += ":context_limit=" + str(context_limit)
         execution_geometry = {
@@ -1190,11 +1263,30 @@ class DeepSeekV41Model:
                                           dependency_prefill=dependency_prefill, image_inputs=image_inputs,
                                           embedding_override=embedding_override, image_mask=image_mask,
                                           head_hidden_only=head_hidden_only)
+        except BaseException as error:
+            discard = getattr(self, "discard_engram_prefetch", None)
+            if discard is not None:
+                discard(error)
+            raise
         finally:
             end_frame=getattr(self.weights,'end_source_frame',None)
             if end_frame is not None:
                 end_frame()
             self._weight_executions -= 1
+
+    def discard_engram_prefetch(self, error=None):
+        """A forward that raised before its Engram reads must not leave a
+        prefetch window owned; later forwards and park() would refuse."""
+        for table in (getattr(self, "engram_tables", None) or {}).values():
+            discard = getattr(table, "discard_prefetch", None)
+            if discard is None:
+                continue
+            try:
+                discard()
+            except BaseException as cleanup:  # noqa: BLE001 - keep the forward's failure
+                if error is None:
+                    raise
+                error.add_note("Engram prefetch discard also failed: " + repr(cleanup))
 
     def __call__(self, inputs, cache=None, *, logits_to_keep=None, image_inputs=None):
         return self._forward(inputs, cache, logits_to_keep=logits_to_keep,
@@ -1302,6 +1394,11 @@ class DeepSeekV41Model:
         self._weight_executions += 1
         try:
             return self._verify_layerwise_impl(inputs, cache, retain_frontiers=retain_frontiers)
+        except BaseException as error:
+            discard = getattr(self, "discard_engram_prefetch", None)
+            if discard is not None:
+                discard(error)
+            raise
         finally:
             self._weight_executions -= 1
 

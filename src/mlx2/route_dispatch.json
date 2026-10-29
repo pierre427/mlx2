@@ -2,7 +2,7 @@
   "schema": 1,
   "dispatchers": {
     "mlx2.adapters.registry": {
-      "sha256": "edd51d56c4ac346ac9d5dd0fb998e46079c30e01f128190406cf00f88e9f652f",
+      "sha256": "aa330f1a4cf8cc613adffd02ba1311c39c82191d1d201c2fc95a7f90f92a9cb0",
       "targets": [],
       "reason": "Selected-adapter dispatch reviewed through DeepSeek V4.1 GGUF, MLX, IQ1 and Source registration. New targets are literal internal adapter modules; the constructed adapter/model roots still define the dynamic closure. Unrelated unknown loaders remain unresolved."
     },

@@ -307,7 +307,11 @@ def auto_expert_streaming_decision(
         "fits": None,
     }
     early_loader = accepts_streaming_request(adapter_class)
-    candidate = artifact_has_experts(model_path)
+    # Packed/manifest artifacts (e.g. V4.1 IQ1S) carry a pointer config.json
+    # with no expert geometry; the class's own moe_experts declaration is
+    # still candidate evidence. Byte measurement below remains the proof.
+    candidate = (artifact_has_experts(model_path)
+                 or "moe_experts" in declared_stream_modes(adapter_class))
     if early_loader and candidate:
         try:
             # Native packed adapters exclude disk-only tables and file padding.

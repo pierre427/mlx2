@@ -43,9 +43,15 @@ class DeepSeekV41VerifyTransaction(DeepSeekV4VerifyTransaction):
         import mlx.core as mx
         from ..runtime.models.deepseek_v4_cache import _copy
 
-        if not taps and getattr(self.owner.model, "verify_rows_policy", "serial") == "layerwise":
+        policy = getattr(self.owner.model, "verify_rows_policy", "serial")
+        if not taps and policy == "layerwise":
             logits, self._locals = self.owner.model.verify_layerwise(inputs, self.caches, retain_frontiers=True)
             return logits, None
+        if policy == "lockstep_multirow_v1":
+            from .deepseek_v41_dspark_chain import verify
+            logits, features, self._locals = verify(self.owner.model, inputs, self.caches,
+                                                    self.owner.layers if taps else (), retain_frontiers=True)
+            return logits, features
 
         logits, features = [], []
         for i in range(inputs.shape[1]):

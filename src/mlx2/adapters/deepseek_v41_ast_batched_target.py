@@ -281,7 +281,7 @@ def _execute_batched_tree_once(model, cache, anchor, paths3x5, capture_layers=(3
                             rows = mx.array(model.engram_tables[layer].read(grouped))
                             h = engram_tile(model, h, layer, rows)
                         if layer in layers:
-                            taps.append(mx.mean(h, axis=-2))
+                            taps.append(model.round(mx.mean(h, axis=-2)))
                         h, x, pre, post, comb, descriptor = attention_half_tile(
                             block, h, pre, base, segments, shared)
                         segments[layer] = descriptor

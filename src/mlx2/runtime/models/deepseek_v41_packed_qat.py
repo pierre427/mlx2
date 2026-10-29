@@ -5,7 +5,7 @@ This is a producer, never a packer for previously decoded QAT values. See
 provenance/deepseek-v41-csa2-ced.json. Decode scratch is not persistent state.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import mlx.core as mx
 
@@ -17,6 +17,8 @@ class PackedQAT:
     codes: object
     scales: object
     kind: str
+    # Implementation of the same exact codec law; never part of state bytes.
+    codec: str = "reference"
 
     @property
     def shape(self):
@@ -27,11 +29,15 @@ class PackedQAT:
         return self.codes.nbytes + self.scales.nbytes
 
     def sliced(self, index):
-        return PackedQAT(self.codes[index], self.scales[index], self.kind)
+        return PackedQAT(self.codes[index], self.scales[index], self.kind, self.codec)
 
 
-def produce(x, kind):
+def produce(x, kind, *, codec="reference"):
     """Apply the reference QAT law once and retain its original quantizer output."""
+    if codec != "reference":
+        from .deepseek_v41_packed_fused import produce as fused
+
+        return fused(x, kind, codec=codec)
     if kind not in ("fp8", "index_fp4", "compressed_fp4"):
         raise ValueError("unknown V4.1 packed QAT format")
     block = 16 if kind == "compressed_fp4" else 32
@@ -62,6 +68,14 @@ def produce(x, kind):
 
 def decode(packed):
     """Reconstruct the model's BF16-rounded FP32 values, including zero signs."""
+    if packed.codec != "reference":
+        from .deepseek_v41_packed_fused import decode as fused
+
+        return fused(packed)
+    return reference_decode(packed)
+
+
+def reference_decode(packed):
     if packed.kind == "fp8":
         values = mx.from_fp8(packed.codes, mx.float32)
     else:
@@ -80,6 +94,10 @@ def gather_decode(packed, indices):
     if (len(packed.shape) != 3 or packed.shape[0] != 1 or indices.ndim != 3
             or indices.shape[0] != 1 or indices.dtype not in (mx.int32, mx.uint32)):
         raise ValueError("native QAT gather requires B1 query/selection IDs")
+    if packed.codec != "reference":
+        from .deepseek_v41_packed_fused import gather_decode as fused
+
+        return fused(packed, indices)
     return decode(PackedQAT(packed.codes[0, indices[0]][None],
                             packed.scales[0, indices[0]][None], packed.kind))
 
@@ -96,4 +114,10 @@ def concatenate(a, b, axis):
     if a.kind != b.kind:
         raise ValueError("mixed packed QAT formats")
     return PackedQAT(mx.concatenate((a.codes, b.codes), axis),
-                     mx.concatenate((a.scales, b.scales), axis), a.kind)
+                     mx.concatenate((a.scales, b.scales), axis), a.kind, a.codec)
+
+
+def with_codec(packed, codec):
+    if packed is None or packed.codec == codec:
+        return packed
+    return replace(packed, codec=codec)

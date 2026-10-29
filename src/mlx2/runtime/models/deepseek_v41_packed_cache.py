@@ -12,10 +12,15 @@ from .deepseek_v41_packed_qat import (
     decode,
     gather_decode,
     validate,
+    with_codec,
 )
 
 STATE_REVISION = "mlx2.deepseek-v41-native-qat-cache.v1"
 CACHE_LAYOUT = "deepseek-v41-shared-csa2-engram-b1-native-qat-v1"
+# Model identities carry this salt when the exact fused Metal codec decodes
+# the same code/scale bytes; the state layout and revision are unchanged.
+CODEC_SALT = ":packed_codec="
+RETAINED_STAGING_ROWS = 512
 
 
 def _planes(value):
@@ -43,8 +48,16 @@ class DeepSeekV41PackedLayerCache(DeepSeekV41LayerCache):
             raise ValueError("native QAT cache requires group32 aligned widths")
 
     @property
+    def codec(self):
+        identity = self.identity if type(self.identity) is str else ""
+        marker = identity.find(CODEC_SALT)
+        if marker < 0:
+            return "reference"
+        return identity[marker + len(CODEC_SALT):].split(":", 1)[0]
+
+    @property
     def keys(self):
-        return None if self._packed_local is None else decode(self._packed_local)
+        return None if self._packed_local is None else decode(with_codec(self._packed_local, self.codec))
 
     @keys.setter
     def keys(self, value):
@@ -54,11 +67,11 @@ class DeepSeekV41PackedLayerCache(DeepSeekV41LayerCache):
 
     @property
     def packed_pooled(self):
-        return None if self._pooled is None else self._pooled.sliced((slice(None), slice(self._pool_count)))
+        return None if self._pooled is None else with_codec(self._pooled.sliced((slice(None), slice(self._pool_count))), self.codec)
 
     @property
     def packed_index_keys(self):
-        return None if self._index_keys is None else self._index_keys.sliced((slice(None), slice(self._pool_count)))
+        return None if self._index_keys is None else with_codec(self._index_keys.sliced((slice(None), slice(self._pool_count))), self.codec)
 
     @property
     def pooled(self):
@@ -93,7 +106,7 @@ class DeepSeekV41PackedLayerCache(DeepSeekV41LayerCache):
         retained = band.sliced((slice(None), slice(None), slice(-self.window_size, None)))
         self._packed_local = PackedQAT(*_copy(self.xp, _planes(retained)), "fp8")
         self.offset += shape[2]
-        return decode(band)
+        return decode(with_codec(band, self.codec))
 
     def append_pools(self, pooled, index_keys):
         raise ValueError("native QAT cache requires original producer codes")
@@ -229,3 +242,24 @@ class DeepSeekV41PackedLayerCache(DeepSeekV41LayerCache):
     def nbytes(self):
         return sum(0 if value is None else value.nbytes for value in
                    (self._packed_local, self.buf_kv, self.buf_gate, self._pooled, self._index_keys, self.hash_tail))
+
+
+def stage_retained_pool(model, packed_pooled, indices, length, start, shared):
+    """Compatible packed consumer for Source all-retained attention profiles.
+
+    Under the trusted finite all-retained chronological selection, a prefill
+    chunk visits every pooled row. Decode those at most 512 original code rows
+    once into forward-local FP32 scratch, bitwise equal to the reference cache's
+    floating plane, so the broadcast/oMLX laws see identical operands. Any other
+    call keeps the bounded packed gather path. Nothing is retained on the cache.
+    """
+    count = packed_pooled.shape[1]
+    if (length <= 1 or count > RETAINED_STAGING_ROWS or not count
+            or getattr(model, "index_policy", "reference") != "finite_all_retained"
+            or shared.get("_all_retained_chronological")
+            != (id(indices), count, length, start, shared.get("_index_generation"))):
+        return None, packed_pooled
+    counters = model.scheduled_kv_calls
+    counters["packed_retained_staged_rows"] = counters.get("packed_retained_staged_rows", 0) + count
+    counters["packed_retained_staging_max_rows"] = max(counters.get("packed_retained_staging_max_rows", 0), count)
+    return decode(packed_pooled), None

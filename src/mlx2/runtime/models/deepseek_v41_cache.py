@@ -103,6 +103,10 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
         # while its numerical gate is unresolved. This mark survives ordinary
         # continuation and descriptor cloning; it cannot donate an APC prefix.
         self.ast_private_profile = None
+        # Source position-grid provenance (host-only, not serialized): the
+        # grid route stamps these; tainted or off-grid state cannot donate.
+        self.source_partition_grid = None
+        self.source_partition_tainted = False
 
     @property
     def pooled(self):
@@ -305,11 +309,17 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
         self.offset = restored.offset
         self.state = restored.state
         self._in_forward = False
+        # A snapshot taken from tainted grid state stays tainted on rollback.
+        self.source_partition_tainted = bool(
+            getattr(snapshot, "source_partition_tainted", False))
 
     def snapshot(self):
         self.validate_state()
         self.cache_operations_contract.validate_publication(self)
-        return DeepSeekV4Snapshot(self.meta_state, _copy(self.xp, self.state))
+        result = DeepSeekV4Snapshot(self.meta_state, _copy(self.xp, self.state))
+        if self.source_partition_tainted:
+            object.__setattr__(result, "source_partition_tainted", True)
+        return result
 
     def checkpoint_publication_refusal(self):
         """Host-only exact-state guard for APCv2 and generic checkpoints."""
@@ -317,6 +327,11 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
             return "V4.1 forward or source pool is incomplete"
         if self.ast_private_profile is not None:
             return "V4.1 AST numerical profile is private and lacks exact publication admission"
+        if self.source_partition_grid is not None:
+            if self.source_partition_tainted:
+                return "V4.1 Source grid state followed an off-grid forward"
+            if self.offset % self.source_partition_grid:
+                return "V4.1 Source grid state is not on a grid boundary"
         return None
 
     @property

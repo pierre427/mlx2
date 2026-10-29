@@ -330,6 +330,27 @@ class EngramRows:
                 raise
             self._pending = values, unique, hits, missing, futures
 
+    def discard_prefetch(self):
+        """Release a window a failed forward opened but never read.
+
+        In-flight chunks still occupy the bounded queue, so wait for them and
+        drop their rows. A failed or late read still poisons the pool exactly
+        as read() would; the caller's original error is never replaced.
+        """
+        with self._lock:
+            pending, self._pending = self._pending, None
+            if pending is None:
+                return False
+            try:
+                for _, future in pending[4]:
+                    future.result(timeout=self.timeout)
+            except FutureTimeout:
+                self.pool.fail(ReadTimeout("Engram prefetch exceeded its deadline"))
+            except BaseException as error:  # noqa: BLE001 - cleanup on an error path
+                self.pool.fail(error)
+            self.stats["discarded_prefetches"] = self.stats.get("discarded_prefetches", 0) + 1
+            return True
+
     def read(self, ids):
         with self._lock:
             self.prefetch(ids)

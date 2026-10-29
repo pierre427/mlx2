@@ -52,6 +52,7 @@ DESCRIPTOR = ModelDescriptor(
         {
             Capability.TEXT,
             Capability.STREAMING,
+            Capability.REASONING,
             Capability.CONTINUOUS_BATCH,
             Capability.PREFIX_REUSE,
             Capability.APC_V2,
@@ -448,6 +449,57 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "law_id": receipt.get("law_id"),
             "format_completion": receipt.get("format_completion"),
         }
+
+    # Ling's checkpoint template explicitly opens/closes <think> based on
+    # enable_thinking. Reuse the shared parser, not the content-only base.
+    # Provenance: provenance/ling-reasoning-controls-20261024.json.
+    reasoning_effort_semantics = "thinking_toggle"
+
+    @staticmethod
+    def thinking_enabled(request):
+        return "messages" in request and request.get("enable_thinking", True) is not False
+
+    def prompt_tokens(self, request):
+        from .ordinary_text import _template_history
+
+        if "messages" not in request:
+            return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
+        return self.tokenizer.apply_chat_template(
+            _template_history(request["messages"]), add_generation_prompt=True,
+            tokenize=True, enable_thinking=self.thinking_enabled(request),
+        )
+
+    def render_prompt(self, request):
+        from .ordinary_text import _template_history
+
+        if "messages" not in request:
+            return request["prompt"]
+        return self.tokenizer.apply_chat_template(
+            _template_history(request["messages"]), add_generation_prompt=True,
+            tokenize=False, enable_thinking=self.thinking_enabled(request),
+        )
+
+    def thinking_close_token_ids(self):
+        ids = self.tokenizer.encode("</think>", add_special_tokens=False)
+        return (int(ids[0]),) if len(ids) == 1 else None
+
+    def output_parser(self, request):
+        from ..output import OutputParser, callable_tools
+
+        if callable_tools(request):
+            raise ValueError("tools are not declared for the Ling adapter")
+        return OutputParser(chat="messages" in request,
+                            thinking=self.thinking_enabled(request), tools=None,
+                            stops=request.get("stop", ()))
+
+    def cache_budget(self, *, mtp):
+        # External trees own additional draft/verification state; preserve
+        # their existing admission path until separately bounded.
+        if getattr(self, "draft_model", None) is not None:
+            return None
+        from .ling_memory import LingCacheBudget
+
+        return LingCacheBudget.from_config(self.config, mtp=mtp)
 
     def lane_policy_defaults(self):
         if self.draft_model is not None and self.external_policy.get("ast_target_executor", "packed") == "packed":

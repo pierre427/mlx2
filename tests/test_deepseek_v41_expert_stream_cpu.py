@@ -142,6 +142,9 @@ def test_auto_admission_uses_adapter_measurement_for_native_payload(tmp_path):
         weight_streaming_modes = frozenset({"moe_experts"})
         resident_weight_bytes = staticmethod(lambda path: 100)
 
+        def __init__(self, path, *, weight_streaming=None):
+            pass
+
     result = auto_expert_streaming_decision(Native, tmp_path, admission_limit_bytes=50, explicit=False, headroom_bytes=1)
     assert result["selected"] and result["weight_bytes"] == 100 and result["fits"] is False
     Native.resident_weight_bytes = staticmethod(lambda path: True)

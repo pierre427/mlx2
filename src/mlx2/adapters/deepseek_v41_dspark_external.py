@@ -84,8 +84,10 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
     kind = "deepseek_v41_dspark"
     receipt_kind = "external_deepseek_v41_embedded_dspark_chain"
 
-    def __init__(self, backbone, *, confidence_threshold=0.0):
+    def __init__(self, backbone, *, confidence_threshold=0.0, verify_schedule="fixed",
+                 verify_costs=None, draft_cost=None):
         from ..runtime.drafters.deepseek_v41_dspark import DeepSeekV41DSparkBackbone
+        from .deepseek_v41_dspark_schedule import validate
 
         if not isinstance(backbone, DeepSeekV41DSparkBackbone):
             raise TypeError("bound embedded V4.1 draft required")
@@ -94,8 +96,13 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
             or not 0 <= confidence_threshold <= 1
         ):
             raise ValueError("draft confidence threshold must be in[0,1]")
+        validate(verify_schedule, verify_costs, draft_cost)
         self.backbone = backbone
         self.confidence_threshold = float(confidence_threshold)
+        self.verify_schedule = verify_schedule
+        self._verify_costs = None if verify_costs is None else tuple(float(v) for v in verify_costs)
+        self._draft_cost = draft_cost
+        self.schedule_stats = {}
         c, t = backbone.config, backbone.target.args
         self.config = SimpleNamespace(
             target_layer_ids=c.target_layers,
@@ -131,10 +138,43 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
                     self.backbone.identity,
                     identity,
                     self.confidence_threshold,
+                    *([] if self.verify_schedule == "fixed" else [
+                        self.verify_schedule, self.schedule_costs, self.schedule_draft_cost]),
                 ]
             ).encode()
         ).hexdigest()
         return self
+
+    @property
+    def schedule_costs(self):
+        from .deepseek_v41_dspark_schedule import DEFAULT_COSTS
+        if self._verify_costs is not None:
+            return list(self._verify_costs)
+        rows = getattr(self.backbone.target, "verify_rows_policy", "serial")
+        return list(DEFAULT_COSTS.get(rows, DEFAULT_COSTS["serial"]))
+
+    @property
+    def schedule_draft_cost(self):
+        from .deepseek_v41_dspark_schedule import DEFAULT_DRAFT_COST
+        return float(DEFAULT_DRAFT_COST if self._draft_cost is None else self._draft_cost)
+
+    def draft_distributions(self, anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs):
+        tokens, laws = super().draft_distributions(anchors, hidden, cache, proposal_length, rngs,
+                                                   temperatures, **kwargs)
+        if self.verify_schedule == "fixed" or not tokens[0]:
+            return tokens, laws
+        from .deepseek_v41_dspark_schedule import choose
+        confidence = self.adaptive_confidence_features[0][:len(tokens[0])]
+        k, receipt = choose(confidence, maximum=len(tokens[0]), costs=self.schedule_costs,
+                            draft_cost=self.schedule_draft_cost)
+        stats = self.schedule_stats
+        stats["rounds"] = stats.get("rounds", 0) + 1
+        stats["proposed"] = stats.get("proposed", 0) + len(tokens[0])
+        stats["scheduled"] = stats.get("scheduled", 0) + k
+        stats["expected_tokens"] = stats.get("expected_tokens", 0.0) + receipt["expected_tokens"]
+        key = f"verify_drafts_{k}"
+        stats[key] = stats.get(key, 0) + 1
+        return [tokens[0][:k]], [laws[0][:k]]
 
     def make_cache(self):
         if self.target_identity is None:
@@ -144,6 +184,14 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
     def extra_memory_reservation(self, cache, *, append, pending_tokens, prefill):
         from .deepseek_v41_dspark_artifact import dspark_workspace_bound
         return dspark_workspace_bound(self.backbone.target.args)
+
+    @property
+    def verification_receipt(self):
+        target = self.backbone.target
+        rows = getattr(target, "verify_rows_policy", "serial")
+        commit = getattr(target, "verification_commit_policy", "replay")
+        return ("lockstep_multirow_v1_" if rows == "lockstep_multirow_v1" else "ordinary_width_one_") + (
+            "local_frontier" if commit == "local_frontier" else "snapshot_replay")
 
     @property
     def receipt_settings(self):
@@ -158,7 +206,12 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
             "confidence_law": "sigmoid_prenorm_markov_strict_less_retained_prefix",
             "proposal_attention": "noncausal_committed_main_and_draft",
             "target_feature_law": "pre_attention_uniform_hc_mean_layers37_38_39",
-            "verification": "ordinary_width_one_snapshot_replay",
+            "verification": self.verification_receipt,
+            "verify_schedule": self.verify_schedule,
+            **({} if self.verify_schedule == "fixed" else {
+                "verify_schedule_law": "argmax_k (1+sum_j<=k prod_i<=j sigmoid(c_i))/(draft_cost+cost[k+1])",
+                "verify_costs": self.schedule_costs, "draft_cost": self.schedule_draft_cost,
+                "schedule_observations": dict(self.schedule_stats)}),
             "arithmetic_rows": 1,
             "packed_ast": False,
             "sampling": "greedy_only",
@@ -200,6 +253,11 @@ def create_dspark_batch(
             return super().insert(prompts, sampling_configs=sampling_configs, **options)
 
         def _target_owner(self, rows):
+            if getattr(self.model, "verification_commit_policy", "replay") == "local_frontier":
+                from .deepseek_v41_external import DeepSeekV41VerifyRows
+                return DeepSeekV41VerifyRows(self.model, rows, self.layers)
+            if getattr(self.model, "verify_rows_policy", "serial") != "serial":
+                raise ValueError("V4.1 multirow verification requires local_frontier commits")
             return DeepSeekV4VerifyRows(self.model, rows, self.layers)
 
         def _cohort_target_forward(

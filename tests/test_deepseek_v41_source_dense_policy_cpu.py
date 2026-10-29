@@ -30,10 +30,14 @@ def test_source_policy_choices_are_explicit_and_reference_default(key,tmp_path):
                 policy['deepseek_source_prefill_partition']='canonical_m1_v1'
             if key=='deepseek_source_dspark_target_expert_law'and value=='source_ast_resident_rows_v1':
                 policy['deepseek_source_dspark_target_forward']='fully_batched_v1'
+        if key=='deepseek_source_woa_storage' and value!='reference':
+            policy['deepseek_source_bf16_loads']='woa_f32'
         if key=='deepseek_source_qakv' and value!='reference':
             policy['deepseek_source_dense_qat']='fused_fp32'
         if key=='deepseek_source_ffn_input' and value!='reference':
             policy.update(deepseek_source_dense_qat='fused_fp32',deepseek_source_expert_math='routed_fused_fp32')
+        if key=='deepseek_source_hc_mega' and value!='reference':
+            policy['deepseek_source_hc_coefficients']='fused_fp32'
         if key=='deepseek_source_attention_math' and value!='reference':
             policy['deepseek_index_policy']='finite_all_retained'
         if key=='deepseek_source_prefill_batch' and value!='reference':
@@ -48,6 +52,8 @@ def test_source_policy_choices_are_explicit_and_reference_default(key,tmp_path):
                    'deepseek_source_native_mx','deepseek_source_prefill_down') and value!='reference':
             policy.update(deepseek_source_expert_math='routed_fused_fp32',deepseek_source_prefill_batch='gate_up')
         if key=='deepseek_source_native_mx' and value!='reference':
+            policy['deepseek_source_experts']={'mode':'original_lfu','budget_bytes':75_000_000_000}
+        if key=='deepseek_source_expert_io' and value!='reference':
             policy['deepseek_source_experts']={'mode':'original_lfu','budget_bytes':75_000_000_000}
         if key=='deepseek_source_row_packet' and value!='reference':
             policy['deepseek_source_frame_reuse']='prefill_v1'
