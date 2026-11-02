@@ -126,7 +126,31 @@ their desired row may have been pruned. Outside a request, return the final row.
     return hidden[:, -1:]
 
 
+def claim_final_row_checkpoint(batch: int, width: int) -> bool:
+    """Claim the open request when every lane's checkpoint row is the last.
+
+    For a model that drops non-output rows before the vocabulary head (and
+    before the layers that only feed it).  Returns True, and marks the
+    request applied, only when a request is open and unapplied, covers
+    ``batch`` lanes of ``width`` rows, and every lane's checkpoint row is
+    ``width - 1``; the forward must then return one row per lane.  Otherwise
+    returns False and the caller keeps its full-width path.
+    """
+    request = _REQUEST.get()
+    if (
+        request is None
+        or request.applied
+        or len(request.rows) != int(batch)
+        or request.width != int(width)
+        or any(row != request.width - 1 for row in request.rows)
+    ):
+        return False
+    request.applied += 1
+    return True
+
+
 __all__ = [
+    "claim_final_row_checkpoint",
     "prefill_checkpoint_rows",
     "select_checkpoint_rows",
     "select_checkpoint_rows_from_final_suffix",

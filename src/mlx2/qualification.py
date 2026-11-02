@@ -420,8 +420,10 @@ APPROVED_MEDIA_PRODUCERS = {
             "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-14: debd7c639 made the mlx-vlm chat render
             # fail closed without a chat template (adapters/mlx_vlm.py).
-            # Companions from ba3ebfdb... must be regenerated.
-            "adapter_contract_sha256": "19a21c414b0d9602dade38f20c113bab03691a90af8cc2428f175888cc6a7d32",
+            # Re-pinned 2026-10-31: Gemma 3n KV-shared row pruning, made the
+            # default the same day (adapters/mlx_vlm.py). Companions from
+            # 19a21c41... must be regenerated.
+            "adapter_contract_sha256": "a2ac39fba2de7e2cc389562db1d28188131838b3ac8e5c9a872e01e4b1043543",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma3n"],
@@ -491,7 +493,8 @@ APPROVED_MEDIA_PRODUCERS = {
             "ownership_sha256": "7d4bd7819aa9b4369247af80b8cdd7a77bc226711382c16eb2cad097570b481f",
             "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-14 with gemma3n (debd7c639, adapters/mlx_vlm.py).
-            "adapter_contract_sha256": "19a21c414b0d9602dade38f20c113bab03691a90af8cc2428f175888cc6a7d32",
+            # Re-pinned 2026-10-31 with gemma3n (KV-shared row pruning option).
+            "adapter_contract_sha256": "a2ac39fba2de7e2cc389562db1d28188131838b3ac8e5c9a872e01e4b1043543",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["minicpmo"],

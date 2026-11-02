@@ -6398,6 +6398,16 @@ def build_parser():
         help="concurrent multi-LoRA: padded slot rank (adapters above it are refused)",
     )
     parser.add_argument(
+        "--multi-lora-delta-precision",
+        choices=("adapter", "fp32"),
+        default=None,
+        help=(
+            "concurrent multi-LoRA: 'fp32' (the default with --max-loras) keeps "
+            "the rank intermediate and the delta in float32 and rounds the "
+            "output once (vllm#64747); 'adapter' keeps bf16/adapter-dtype slots"
+        ),
+    )
+    parser.add_argument(
         "--tool-backend-config",
         type=Path,
         help="JSON allowlist for Responses MCP Streamable HTTP execution",
@@ -7519,6 +7529,7 @@ def serving_engine_kwargs(
         "lora_root": args.lora_dir,
         "max_loras": args.max_loras,
         "max_lora_rank": args.max_lora_rank,
+        "multi_lora_delta_precision": args.multi_lora_delta_precision,
         "reasoning_signing_key_file": args.reasoning_signing_key_file,
         "reasoning_signing_key_env": args.reasoning_signing_key_env,
         "apc_persist_dir": args.apc_persist_dir,

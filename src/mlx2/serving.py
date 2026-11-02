@@ -2145,6 +2145,7 @@ def multi_lora_policy(
     approximate_kv,
     cache_capsules,
     varlen_mlp,
+    delta_precision=None,
 ):
     """Validate concurrent multi-LoRA settings; None when the lever is off.
 
@@ -2158,8 +2159,16 @@ def multi_lora_policy(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             raise ValueError(f"{label} must be an integer from {low} to {high}")
+    from .runtime.multi_lora import DELTA_PRECISIONS, SERVING_DELTA_PRECISION
+
+    if delta_precision is not None and delta_precision not in DELTA_PRECISIONS:
+        raise ValueError(f"multi_lora_delta_precision must be one of {DELTA_PRECISIONS}")
     if not max_loras:
+        if delta_precision is not None:
+            raise ValueError("multi_lora_delta_precision needs concurrent multi-LoRA (max_loras > 0)")
         return None
+    if delta_precision is None:
+        delta_precision = SERVING_DELTA_PRECISION
     if lora_root is None:
         raise ValueError("concurrent multi-LoRA (max_loras > 0) requires --lora-dir")
     for enabled, name in (
@@ -2176,7 +2185,7 @@ def multi_lora_policy(
                 f"concurrent multi-LoRA requires the ordinary route; it is "
                 f"incompatible with {name}"
             )
-    return {"max_loras": max_loras, "max_lora_rank": max_lora_rank}
+    return {"max_loras": max_loras, "max_lora_rank": max_lora_rank, "delta_precision": delta_precision}
 
 
 def optional_policy_enabled(value) -> bool:
@@ -4147,6 +4156,7 @@ class ServingEngine:
         lora_root=None,
         max_loras=0,
         max_lora_rank=16,
+        multi_lora_delta_precision=None,
         reasoning_signing_key_file=None,
         reasoning_signing_key_env=None,
         apc_persist_dir=None,
@@ -4706,6 +4716,7 @@ class ServingEngine:
                 optional_policy_enabled((execution_policy or {}).get(name))
                 for name in ("varlen_dense_mlp", "varlen_sparse_moe")
             ),
+            delta_precision=multi_lora_delta_precision,
         )
         self.multi_lora = None
         if self.weight_streaming_enabled():
@@ -10406,6 +10417,7 @@ class ServingEngine:
                     adapter.model,
                     max_loras=self.multi_lora_policy["max_loras"],
                     max_lora_rank=self.multi_lora_policy["max_lora_rank"],
+                    delta_precision=self.multi_lora_policy["delta_precision"],
                 )
                 # Present only when enabled, so default-off qualification
                 # settings are byte-identical.

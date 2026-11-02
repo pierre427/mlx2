@@ -12,7 +12,7 @@ import hashlib
 import json
 import math
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -274,6 +274,11 @@ class _Gemma3nLogitsModel(_LogitsModel):
     model's decode scaling, which changes even greedy factual output.
     """
 
+    def __init__(self, model, *, kv_shared_prune=None):
+        super().__init__(model)
+        # PruneCounters (gemma3n_prune, default on); None runs the ordinary forward.
+        object.__setattr__(self, "_kv_shared_prune", kv_shared_prune)
+
     def prefill_forward(self, input_ids, *, cache=None, **kwargs):
         inputs_embeds = kwargs.pop("inputs_embeds", None)
         per_layer_inputs = kwargs.pop("per_layer_inputs", None)
@@ -281,6 +286,22 @@ class _Gemma3nLogitsModel(_LogitsModel):
             features = self._model.get_input_embeddings(input_ids, **kwargs)
             inputs_embeds = features.inputs_embeds
             per_layer_inputs = features.per_layer_inputs
+        counters = self._kv_shared_prune
+        if counters is not None:
+            from .gemma3n_prune import pruned_language_forward
+
+            pruned = pruned_language_forward(
+                self._model.language_model,
+                input_ids,
+                inputs_embeds=inputs_embeds,
+                per_layer_inputs=per_layer_inputs,
+                cache=_gemma3n_cache_views(cache),
+                counters=counters,
+                **kwargs,
+            )
+            if pruned is not None:
+                return pruned
+            counters.ordinary_forwards += 1
         output = self._model.language_model(
             input_ids,
             inputs_embeds=inputs_embeds,
@@ -635,6 +656,43 @@ GEMMA3N = ModelDescriptor(
 )
 
 
+@dataclass(frozen=True)
+class Gemma3nAdapterPolicy:
+    """Route identity of the KV-shared row pruning route.
+
+    Drops dead prompt-chunk rows before the KV-shared layers (gemma3n_prune).
+    Default on (Pierre, 2026-10-31): exact for every cache byte and generated
+    token by construction, 1.57x cold prefill at 8K-31K on the M5
+    (docs/research/2026-10-31-gemma3n-kv-shared-prune). The opt-out route
+    (``kv_shared_row_pruning: false``) is the ordinary reference and keeps
+    the pre-2026-10-31 identity: the bare video policy.
+    """
+
+    video: Gemma3nVideoPolicy
+
+    def as_dict(self) -> dict:
+        return {**self.video.as_dict(), "kv_shared_row_pruning": True}
+
+
+def _gemma3n_policy_options(execution_policy):
+    if execution_policy is None:
+        return True
+    if not isinstance(execution_policy, dict):
+        raise ValueError("Gemma 3n execution policy must be an object")
+    unknown = set(execution_policy) - {"gemma3n_prefill"}
+    if unknown:
+        raise ValueError(
+            "unsupported Gemma 3n execution policy controls: " + ", ".join(sorted(unknown))
+        )
+    options = execution_policy.get("gemma3n_prefill", {})
+    if not isinstance(options, dict) or set(options) - {"kv_shared_row_pruning"}:
+        raise ValueError("gemma3n_prefill accepts only kv_shared_row_pruning")
+    value = options.get("kv_shared_row_pruning", True)
+    if not isinstance(value, bool):
+        raise ValueError("gemma3n_prefill.kv_shared_row_pruning must be a boolean")
+    return value
+
+
 class Gemma3nAdapter(_MLXVLMAdapter):
     descriptor = GEMMA3N
     sampling_defaults = GEMMA3N_SAMPLING
@@ -667,15 +725,34 @@ class Gemma3nAdapter(_MLXVLMAdapter):
         )
 
     def __init__(self, model_path, *, execution_policy=None):
-        super().__init__(model_path, execution_policy=execution_policy)
+        # Validate the operator's controls before any artifact load.
+        prune = _gemma3n_policy_options(execution_policy)
+        super().__init__(model_path, execution_policy=None)
         self.video_policy = Gemma3nVideoPolicy()
         # serving.py records adapter.policy.as_dict() in route settings; the
         # descriptor's conditional encoder check resolves against it.
-        self.policy = self.video_policy
+        # The opt-out (ordinary reference) route keeps the bare video policy.
+        self.policy = (
+            Gemma3nAdapterPolicy(self.video_policy) if prune else self.video_policy
+        )
+        if prune:
+            from .gemma3n_prune import PruneCounters, check_mirrored_source
+
+            check_mirrored_source(self.model.language_model)
+            self.kv_shared_prune = PruneCounters()
+            self.model = _Gemma3nLogitsModel(self.model._model, kv_shared_prune=self.kv_shared_prune)
+        else:
+            self.kv_shared_prune = None
         install_gemma3n_vision_batching(self.model, self.video_policy)
         install_media_feature_cache(
             self.model, self.media_feature_cache, family="gemma3n"
         )
+
+    def diagnostics(self):
+        diagnostics = super().diagnostics()
+        if self.kv_shared_prune is not None:
+            diagnostics["kv_shared_row_pruning"] = self.kv_shared_prune.as_dict()
+        return diagnostics
 
     def prepare_multimodal_request(self, request, *, file_loader=None):
         media, replacements, images, audios = [], [], [], []

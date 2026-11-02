@@ -279,17 +279,29 @@ def test_gemma3n_encoder_check_follows_the_resolved_video_policy():
 def test_gemma3n_adapter_binds_its_video_policy_into_route_identity(monkeypatch):
     from mlx2.adapters import mlx_vlm
 
+    import types
+
+    from mlx2.adapters import gemma3n_prune
+
     def fake_base_init(self, model_path, *, execution_policy=None):
-        self.model = object()
+        self.model = types.SimpleNamespace(_model=object(), language_model=None)
         self.media_feature_cache = None
 
     monkeypatch.setattr(mlx_vlm._MLXVLMAdapter, "__init__", fake_base_init)
     monkeypatch.setattr(mlx_vlm, "install_gemma3n_vision_batching", lambda *a: None)
     monkeypatch.setattr(mlx_vlm, "install_media_feature_cache", lambda *a, **k: None)
-    adapter = mlx_vlm.Gemma3nAdapter("unused")
+    monkeypatch.setattr(gemma3n_prune, "check_mirrored_source", lambda model: None)
     # serving.py records adapter.policy.as_dict() as settings["adapter_policy"].
-    assert adapter.policy is adapter.video_policy
-    assert adapter.policy.as_dict() == UNSPLIT
+    # Default route: KV-shared row pruning on (Pierre, 2026-10-31).
+    adapter = mlx_vlm.Gemma3nAdapter("unused")
+    assert adapter.policy.video is adapter.video_policy
+    assert adapter.policy.as_dict() == {**UNSPLIT, "kv_shared_row_pruning": True}
+    # The ordinary-reference opt-out keeps the bare video policy identity.
+    reference = mlx_vlm.Gemma3nAdapter(
+        "unused", execution_policy={"gemma3n_prefill": {"kv_shared_row_pruning": False}}
+    )
+    assert reference.policy is reference.video_policy
+    assert reference.policy.as_dict() == UNSPLIT
 
 
 def _gemma3n_report(policy, observation, *, feature_parity=True):

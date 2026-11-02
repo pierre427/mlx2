@@ -128,7 +128,79 @@ def test_concurrent_multi_lora_allows_explicitly_disabled_varlen(tmp_path):
         approximate_kv=False,
         cache_capsules=False,
         varlen_mlp=optional_policy_enabled({"enabled": False}),
-    ) == {"max_loras": 2, "max_lora_rank": 8}
+    ) == {"max_loras": 2, "max_lora_rank": 8, "delta_precision": "fp32"}
+
+
+def _policy(max_loras, root, **kwargs):
+    return multi_lora_policy(
+        max_loras, 8, lora_root=root, mtp=False, prompt_lookup=False, spomin=False,
+        int8_prefill=False, approximate_kv=False, cache_capsules=False, varlen_mlp=False,
+        **kwargs,
+    )
+
+
+def test_delta_precision_policy_is_validated(tmp_path):
+    # Serving default (Pierre, 2026-10-31): fp32; "adapter" stays selectable.
+    assert _policy(2, tmp_path)["delta_precision"] == "fp32"
+    assert _policy(2, tmp_path, delta_precision="adapter")["delta_precision"] == "adapter"
+    assert _policy(2, tmp_path, delta_precision="fp32")["delta_precision"] == "fp32"
+    with pytest.raises(ValueError, match="delta_precision"):
+        _policy(2, tmp_path, delta_precision="fp16")
+    with pytest.raises(ValueError, match="needs concurrent multi-LoRA"):
+        _policy(0, tmp_path, delta_precision="fp32")
+    assert _policy(0, tmp_path) is None
+
+
+def test_fp32_delta_precision_rounds_the_output_once():
+    """vllm#64747: fp32 slots keep the rank intermediate and delta in fp32
+    and round the output once, so the error sits at the bf16 rounding floor.
+    (CPU gather_mm is float32-only; the bf16-slot comparison is a GPU probe,
+    docs/research/2026-10-31-lora-fp32-delta.md.)"""
+    import numpy as np
+
+    from mlx2.runtime.multi_lora import _RowState, multi_lora_linear_class
+
+    rng = np.random.default_rng(0)
+    d_in, d_out, rank, m = 256, 384, 64, 16
+    base = nn.Linear(d_in, d_out, bias=False)
+    weight = (rng.standard_normal((d_out, d_in)) * 0.05).astype(np.float32)
+    base.weight = mx.array(weight).astype(mx.bfloat16)
+    a = rng.standard_normal((d_in, rank)) * 0.05
+    b_scaled = rng.standard_normal((rank, d_out)) * 0.5
+    x = mx.array(rng.standard_normal((m, 1, d_in)).astype(np.float32)).astype(mx.bfloat16)
+    x64 = np.array(x.astype(mx.float32), dtype=np.float64)[:, 0]
+    w64 = np.array(base.weight.astype(mx.float32), dtype=np.float64)
+    errors = {}
+    for precision, dtype in (("fp32", mx.float32),):
+        rows = _RowState()
+        rows.ids = mx.ones((m,), dtype=mx.uint32)
+        module = multi_lora_linear_class()(
+            base, slots=2, rank=rank, dtype=dtype, rows=rows, round_once=precision == "fp32"
+        )
+        module.lora_a = mx.stack([mx.zeros((d_in, rank)), mx.array(a.astype(np.float32))]).astype(dtype)
+        module.lora_b = mx.stack([mx.zeros((rank, d_out)), mx.array(b_scaled.astype(np.float32))]).astype(dtype)
+        a64 = np.array(module.lora_a[1].astype(mx.float32), dtype=np.float64)
+        b64 = np.array(module.lora_b[1].astype(mx.float32), dtype=np.float64)
+        # Reference: the bf16 base output plus the exact delta of the stored weights.
+        base64 = np.array(base(x).astype(mx.float32), dtype=np.float64)[:, 0]
+        reference = base64 + (x64 @ a64) @ b64
+        out = np.array(module(x).astype(mx.float32), dtype=np.float64)[:, 0]
+        floor = np.abs(np.array(mx.array(reference.astype(np.float32)).astype(mx.bfloat16).astype(mx.float32)) - reference).mean()
+        errors[precision] = np.abs(out - reference).mean() / floor
+        assert rows.delta_applications == 1
+    assert errors["fp32"] < 1.02
+
+
+def test_fp32_delta_precision_manager_settings_and_slots():
+    model = tiny_model()
+    manager = MultiLoRAManager(model, max_loras=1, max_lora_rank=4, delta_precision="fp32")
+    assert manager.dtype == mx.float32
+    assert manager.settings()["delta_precision"] == "fp32"
+    assert "delta_precision" not in MultiLoRAManager(tiny_model(), max_loras=1, max_lora_rank=4).settings()
+    with pytest.raises(ValueError, match="float32 slots"):
+        MultiLoRAManager(tiny_model(), max_loras=1, max_lora_rank=4, dtype=mx.bfloat16, delta_precision="fp32")
+    with pytest.raises(ValueError, match="delta_precision"):
+        MultiLoRAManager(tiny_model(), max_loras=1, max_lora_rank=4, delta_precision="bf16")
 
 
 def test_mixed_batch_matches_per_request_single_adapter(adapters):

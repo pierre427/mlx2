@@ -30,6 +30,12 @@ from io import BytesIO
 from pathlib import Path
 
 MULTI_LORA_RECEIPT_SCHEMA = "mlx2.multi-lora.v1"
+DELTA_PRECISIONS = ("adapter", "fp32")
+# Serving default (Pierre, 2026-10-31): round the output once. It sat at the
+# single-rounding floor (bf16 slots 1.03-1.38x) and was 13-36% faster from
+# four rows up on the M5 (docs/research/2026-10-31-lora-fp32-delta).
+# "adapter" keeps the earlier bf16-slot arithmetic.
+SERVING_DELTA_PRECISION = "fp32"
 _MANAGER_ATTRIBUTE = "_mlx2_multi_lora"
 
 
@@ -98,13 +104,16 @@ def _make_wrapper_class():
     from mlx import nn
 
     class MultiLoRALinear(nn.Module):
-        def __init__(self, base, *, slots, rank, dtype, rows):
+        def __init__(self, base, *, slots, rank, dtype, rows, round_once=False):
             super().__init__()
             input_dims, output_dims = _linear_dims(base)
             self.base = base
             self.lora_a = mx.zeros((slots, input_dims, rank), dtype=dtype)
             self.lora_b = mx.zeros((slots, rank, output_dims), dtype=dtype)
             self._rows = rows
+            # delta_precision "fp32": add the fp32 delta to the base output
+            # and round once, instead of rounding the delta and then the sum.
+            self._round_once = round_once
 
         @property
         def input_dims(self):
@@ -145,6 +154,8 @@ def _make_wrapper_class():
             if squeeze:
                 delta = delta[:, 0, :]
             rows.delta_applications += 1
+            if self._round_once:
+                return (y.astype(mx.float32) + delta).astype(y.dtype)
             return y + delta.astype(y.dtype)
 
     return MultiLoRALinear
@@ -188,7 +199,7 @@ def _adapter_fingerprint(payload, rank, scale, keys):
 class MultiLoRAManager:
     """Registry, slot residency (pin + LRU), row binding and counters."""
 
-    def __init__(self, model, *, max_loras, max_lora_rank, dtype=None):
+    def __init__(self, model, *, max_loras, max_lora_rank, dtype=None, delta_precision="adapter"):
         if isinstance(max_loras, bool) or not isinstance(max_loras, int) or not 1 <= max_loras <= 64:
             raise ValueError("max_loras must be an integer from 1 to 64")
         if (
@@ -204,6 +215,18 @@ class MultiLoRAManager:
 
             if not mx.issubdtype(dtype, mx.floating):
                 raise ValueError("multi-LoRA slot dtype must be floating point")
+        if delta_precision not in DELTA_PRECISIONS:
+            raise ValueError(f"multi-LoRA delta_precision must be one of {DELTA_PRECISIONS}")
+        if delta_precision == "fp32":
+            # vllm-project/vllm#64747: keep the rank intermediate and the
+            # delta in fp32 and round the output once (the serving default,
+            # SERVING_DELTA_PRECISION).
+            import mlx.core as mx
+
+            if dtype is not None and dtype != mx.float32:
+                raise ValueError("multi-LoRA delta_precision fp32 needs float32 slots")
+            dtype = mx.float32
+        self.delta_precision = delta_precision
         self.model = model
         self.max_loras = max_loras
         self.max_lora_rank = max_lora_rank
@@ -229,11 +252,15 @@ class MultiLoRAManager:
         return self.max_loras + 1
 
     def settings(self):
-        return {
+        settings = {
             "max_loras": self.max_loras,
             "max_lora_rank": self.max_lora_rank,
             "schema": MULTI_LORA_RECEIPT_SCHEMA,
         }
+        # Present only when not the default, so default receipts are unchanged.
+        if self.delta_precision != "adapter":
+            settings["delta_precision"] = self.delta_precision
+        return settings
 
     def detach(self):
         """Restore the original modules and detach from the model."""
@@ -383,6 +410,7 @@ class MultiLoRAManager:
                     rank=self.max_lora_rank,
                     dtype=self.dtype or _default_lora_dtype(base),
                     rows=self.rows,
+                    round_once=self.delta_precision == "fp32",
                 )
                 replacements.append((key, module))
                 self.wrapped[key] = module
