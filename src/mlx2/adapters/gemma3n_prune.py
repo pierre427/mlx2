@@ -34,8 +34,8 @@ decline it; mlx2 serves neither for Gemma 3n.
 from __future__ import annotations
 
 import hashlib
-import importlib
 import inspect
+import sys
 
 import mlx.core as mx
 
@@ -51,8 +51,14 @@ MIRRORED_SOURCES = {
 }
 
 
+def _defining_module(language_model):
+    # Already imported (the instance exists); a sys.modules lookup keeps the
+    # route-source closure resolvable, unlike importlib.import_module.
+    return sys.modules[type(language_model).__module__]
+
+
 def check_mirrored_source(language_model) -> None:
-    module = importlib.import_module(type(language_model).__module__)
+    module = _defining_module(language_model)
     for name, expected in MIRRORED_SOURCES.items():
         owner, method = name.split(".")
         source = inspect.getsource(getattr(getattr(module, owner), method))
@@ -119,7 +125,7 @@ def pruned_language_forward(language_model, inputs, *, inputs_embeds, cache, cou
     if not claim_final_row_checkpoint(batch, width):
         return None
     kwargs.pop("mask", None)
-    module = importlib.import_module(type(language_model).__module__)
+    module = _defining_module(language_model)
     model = language_model.model
     config = model.config
 

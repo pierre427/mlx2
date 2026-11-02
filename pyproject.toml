@@ -50,6 +50,7 @@ radio = ["mlx>=0.32", "numpy>=2", "pillow>=10"]
 fabric = ["zeroconf==0.151.5"]
 image-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
 gguf-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
+media = ["fastmcp>=2.2,<3", "pillow>=10.4,<13"]
 flux3-image = [
     "mlx>=0.32,<0.33", "numpy>=2", "pillow>=10.4,<13", "torch>=2.4",
     "huggingface-hub>=0.35", "transformers>=5.12,<6",
@@ -65,6 +66,7 @@ mlx2-decisions = "mlx2.decisions.server:main"
 mlx2-diarize = "mlx2.diarize_cli:main"
 mlx2-radio = "mlx2.radio_cli:main"
 mlx2-top = "mlx2.top:main"
+mlx2-media = "mlx2.media.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
