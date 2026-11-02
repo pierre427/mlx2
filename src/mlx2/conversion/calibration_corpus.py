@@ -18,6 +18,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from ..image_decoding import UNTRUSTED_IMAGE_FORMATS
 from .nvfp4 import sha256
 
 SCHEMA = "mlx2.image-text-calibration-corpus.v1"
@@ -46,15 +47,15 @@ def canonical(value):
 def image_geometry(data):
     if not isinstance(data, bytes) or not 0 < len(data) <= MAX_IMAGE_BYTES:
         raise ValueError("Calibration image bytes exceed the bound")
-    with Image.open(io.BytesIO(data)) as image:
-        if (image.format not in {"PNG", "JPEG", "WEBP"} or min(image.size) < 16
+    with Image.open(io.BytesIO(data), formats=UNTRUSTED_IMAGE_FORMATS) as image:
+        if (min(image.size) < 16
                 or image.width * image.height > MAX_IMAGE_PIXELS
                 or getattr(image, "n_frames", 1) != 1):
             raise ValueError("Unsupported calibration image geometry")
         geometry = {"width": image.width, "height": image.height, "format": image.format}
         image.verify()
     # Some decoders validate their compressed stream only when pixels load.
-    with Image.open(io.BytesIO(data)) as image:
+    with Image.open(io.BytesIO(data), formats=UNTRUSTED_IMAGE_FORMATS) as image:
         image.convert("RGB").load()
     return geometry
 

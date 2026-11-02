@@ -26,9 +26,9 @@ hysparse2-data = ["numpy>=2", "tokenizers>=0.22", "pyarrow>=25"]
 # runtime/tokenizer_integrity.py instead of changing token ids silently.
 serve = ["mlx>=0.32.4,<0.32.5", "transformers>=5.12,<6", "numpy>=2", "psutil>=7", "jinja2>=3.1", "regex>=2024.11", "greenlet>=3"]
 observability = [
-    "opentelemetry-api>=1.29",
-    "opentelemetry-sdk>=1.29",
-    "opentelemetry-exporter-otlp-proto-http>=1.29",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
     "prometheus-client>=0.21",
 ]
 # mlx-vlm is pinned to one revision: main after the 0.7.3 release, which adds

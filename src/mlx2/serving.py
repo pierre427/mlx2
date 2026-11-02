@@ -1403,6 +1403,7 @@ def minimum_tokens_processor(array_module, eos_token_ids, prompt_tokens, minimum
 def runtime_identity() -> dict:
     root = Path(__file__).parent
     digest = hashlib.sha256()
+    from .image_decoding import pillow_version
     from .source_dependencies import add_resources
     sources = sorted(root.rglob("*.py"))
     for path in sources:
@@ -1439,6 +1440,8 @@ def runtime_identity() -> dict:
                 "safetensors",
             )
         },
+        # Optional (multimodal extra); its resampling changes between releases.
+        "pillow": pillow_version(),
     }
 
 

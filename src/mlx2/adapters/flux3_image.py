@@ -217,12 +217,16 @@ class Flux3ImageKleinAdapter:
                 self._verify_inputs()
                 from PIL import Image
 
+                from ..image_decoding import UNTRUSTED_IMAGE_FORMATS
+
                 references, hashes = [], []
                 for name in image_paths:
                     # Load exactly the bytes that the receipt hashes.
                     raw = Path(name).expanduser().read_bytes()
                     hashes.append(hashlib.sha256(raw).hexdigest())
-                    with Image.open(io.BytesIO(raw)) as image:
+                    with Image.open(
+                        io.BytesIO(raw), formats=UNTRUSTED_IMAGE_FORMATS
+                    ) as image:
                         image.load()
                         references.append(image.copy())
                 if self._backend is None:

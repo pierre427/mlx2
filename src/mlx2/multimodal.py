@@ -50,8 +50,10 @@ def decode_data_url(value, *, max_bytes):
 def decode_image(payload, mime_type, *, max_pixels=16_000_000):
     from PIL import Image, ImageOps
 
+    from .image_decoding import UNTRUSTED_IMAGE_FORMATS
+
     try:
-        with Image.open(BytesIO(payload)) as source:
+        with Image.open(BytesIO(payload), formats=UNTRUSTED_IMAGE_FORMATS) as source:
             width, height = source.size
             if min(width, height) < 3:
                 raise ValueError("image minimum dimension is 3 pixels")

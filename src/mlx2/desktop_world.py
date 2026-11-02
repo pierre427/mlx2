@@ -215,11 +215,13 @@ class Worlds:
 
     def store_image(self, data):
         from PIL import Image
+
+        from .image_decoding import UNTRUSTED_IMAGE_FORMATS
         if len(data) > 8 * 1024 * 1024:
             raise ValueError("World textures must fit within eight MiB")
         try:
-            with Image.open(io.BytesIO(data)) as image:
-                if image.width * image.height > 16_000_000 or image.format not in {"PNG", "JPEG", "WEBP"}:
+            with Image.open(io.BytesIO(data), formats=UNTRUSTED_IMAGE_FORMATS) as image:
+                if image.width * image.height > 16_000_000:
                     raise ValueError("World textures must be bounded PNG, JPEG or WebP images")
                 image.verify()
         except (OSError, Image.DecompressionBombError) as error:
