@@ -14,31 +14,50 @@ SPARSE_WIDTH = 2051
 GATHERED_PREFILL_BLOCK_BYTES = 32 * (SPARSE_WIDTH * 512 + 2 * 64 * SPARSE_WIDTH) * 4
 # One decode row group (<= 8 query rows) of gathered latent rows.
 GATHERED_DECODE_GROUP_BYTES = 8 * SPARSE_WIDTH * 512 * 4
+# fused_v2 (docs/design/glm53-speed-round2.md 1.1, 2.1): no gathered rows are
+# materialized; one launch's partials are rows x ceil(2051 / 64) splits x 64
+# heads x (512 + 2) fp32. Prompt blocks are 64 rows (PREFILL_BLOCK_V2, one live
+# at a time); decode and verify rows go in one launch of at most
+# max(8, tree rows + 1) rows.
+FUSED_V2_ROW_BYTES = -(-SPARSE_WIDTH // 64) * 64 * (512 + 2) * 4
+FUSED_V2_PREFILL_BLOCK_ROWS = 64
+V2_PREFILL = tuple(f"gathered_v2_from_{n}" for n in (2049, 3072, 4096, 5120, 6144, 7168, 8192, 12288, 16384))
 # Bytes per capacity token per indexed layer: latent 512 + raw indexer 256,
 # plus the derived pooled keys (128 per 4 tokens) under incremental pools.
 COMMITTED_FLOATS, POOLED_FLOATS = 768, 32
 
 
 def _sparse_policy(kernel_policy):
-    """(gathered prefill, gathered decode, pooled plane) for a kernel policy."""
+    """(prefill law, decode law, pooled plane) for a kernel policy; a law is
+    None (dense), "v1" (gathered ops / fused_decode_v1) or "v2" (fused_v2)."""
     if kernel_policy is None:
-        return False, False, False
+        return None, None, False
     if not isinstance(kernel_policy, dict):
         raise TypeError("GLM-5.3 cache budget kernel policy must be a mapping")
     prefill = kernel_policy.get("glm53_sparse_prefill", "dense_reference")
     decode = kernel_policy.get("glm53_sparse_attention", "mask_reference")
     pools = kernel_policy.get("glm53_indexer_pools", "recompute")
     if (
-        prefill not in ("dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all")
-        or decode not in ("mask_reference", "gathered_v1", "fused_decode_v1")
+        prefill not in ("dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all", *V2_PREFILL)
+        or decode not in ("mask_reference", "gathered_v1", "fused_decode_v1", "fused_v2")
         or pools not in ("recompute", "recompute_fixed_order", "incremental_v1", "incremental_v1_audit")
     ):
         raise ValueError("GLM-5.3 cache budget cannot price an unknown sparse policy")
+    law = lambda value, dense, v2: None if value == dense else ("v2" if v2 else "v1")
     return (
-        prefill != "dense_reference",
-        decode != "mask_reference",
+        law(prefill, "dense_reference", prefill in V2_PREFILL),
+        law(decode, "mask_reference", decode == "fused_v2"),
         pools in ("incremental_v1", "incremental_v1_audit"),
     )
+
+
+def sparse_workspace_bytes(prefill, decode, tree_rows=0):
+    """One live consumer workspace per phase, booked together (as before)."""
+    prefill_bytes = {None: 0, "v1": GATHERED_PREFILL_BLOCK_BYTES,
+                     "v2": FUSED_V2_PREFILL_BLOCK_ROWS * FUSED_V2_ROW_BYTES}[prefill]
+    decode_bytes = {None: 0, "v1": GATHERED_DECODE_GROUP_BYTES,
+                    "v2": max(8, tree_rows + 1) * FUSED_V2_ROW_BYTES}[decode]
+    return prefill_bytes + decode_bytes
 
 
 @dataclass(frozen=True)
@@ -75,7 +94,11 @@ class Glm53CacheBudget:
             )
         if type(tree_rows) is not int or not 0 <= tree_rows <= 32:
             raise ValueError("GLM-5.3 private tree row envelope outside 0..32")
-        prefill, decode, pools = (True, True, True) if maximum else _sparse_policy(kernel_policy)
+        if maximum:
+            # The larger of each phase's laws (v2 prefill > v1; v2 decode > v1).
+            prefill, decode, pools = "v2", "v2", True
+        else:
+            prefill, decode, pools = _sparse_policy(kernel_policy)
         kv_append = "reference" if kernel_policy is None else kernel_policy.get("glm53_kv_append", "reference")
         if kv_append not in ("reference", "rotate_v1"):
             raise ValueError("GLM-5.3 cache budget cannot price an unknown KV append policy")
@@ -83,8 +106,7 @@ class Glm53CacheBudget:
 
         return cls(
             snapshot_copies=tree_rows + 2,
-            sparse_workspace_bytes=GATHERED_PREFILL_BLOCK_BYTES * prefill
-            + GATHERED_DECODE_GROUP_BYTES * decode,
+            sparse_workspace_bytes=sparse_workspace_bytes(prefill, decode, tree_rows),
             indexed_floats_per_token=COMMITTED_FLOATS + POOLED_FLOATS * pools,
             capacity_block=256 if kv_append == "reference" else BASE_BLOCK,
             indexed_plane_copies=RING_BUFFERS if kv_append == "rotate_v1" else 1,

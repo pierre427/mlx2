@@ -415,7 +415,7 @@ def ablation(model, weights, ids, chunk, mx, steps=6, mode="decode"):
                 setattr(weights, k, v)
             for k, v in mod_saved.items():
                 setattr(module, k, v)
-            token, times = ids[chunk - 1], []
+            token, times = ids[:chunk][-1], []
             for step in range(steps + 1):
                 logits = model(mx.array([[token]]), cache, logits_to_keep=1)
                 t0 = time.perf_counter()

@@ -36,8 +36,12 @@ from .precise_ops import gate_sigmoid
 SPARSE_POLICIES = {
     "indexer_pools": ("recompute", "recompute_fixed_order", "incremental_v1", "incremental_v1_audit"),
     "indexer_select": ("argsort", "topk_v1", "topk_v1_kernel"),
-    "sparse_attention": ("mask_reference", "gathered_v1", "fused_decode_v1"),
-    "sparse_prefill": ("dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all"),
+    # fused_v2 and gathered_v2_from_<n> (docs/design/glm53-speed-round2.md
+    # 1.1, 2.1): the v2 kernel law for decode rows and for prompt rows from
+    # position n (dense causal rows below 2049 included); opt-in, unqualified.
+    "sparse_attention": sparse_attention.POLICIES_ATTENTION[:1] + sparse_attention.DECODE_POLICIES,
+    "sparse_prefill": ("dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all",
+                       *(f"gathered_v2_from_{n}" for n in sparse_attention.PREFILL_POSITIONS_V2)),
     "tree_rows_attention": ("per_row", "batched_v1"),
     "tree_frontier": ("clone", "tails_v1"),
 }
@@ -99,6 +103,11 @@ SPARSE_COUNTERS = (
     "sparse_gathered_rows",
     "sparse_prefill_gathered_blocks",
     "sparse_prefill_dense_pieces",
+    "sparse_attention_fused_v2",
+    "sparse_attention_fused_v2_rows",
+    "sparse_attention_fused_v2_per_row_fallback",
+    "sparse_attention_fused_v2_dense_rows",
+    "sparse_prefill_fused_v2_blocks",
     "tree_rows_attention_batched",
     "tree_rows_attention_per_row_fallback",
     "tree_frontier_materialized",
@@ -273,6 +282,13 @@ class Glm53LatentQ8Cache:
     ``quantized_matmul`` (scores and values both come from the latent).  Not
     an APCv2/approximate-operation citizen: no state/from_state, ordinary
     route only (the layered tree clones exact planes).
+
+    Left off: not helpful (GLM-5.3-Flash-REAP50-Q3_K_M.gguf@5a865918, mlx2
+    ed4a08fd, 2026-10-31). The 11 latents are ~0.4 GB at 16K of an ~87 GB
+    peak, so q8 saves nothing visible; prefill is 5-11% slower (1K/8K/16K
+    544/410/315 -> 510/393/281 tok/s) and decode is no faster. Greedy output
+    diverges at 1K/8K/16K tokens 34/48/4, each a near tie (same top two,
+    margins <= 0.15 nat). Superseded by the sparse DSA design.
     """
 
     step = 256
@@ -294,7 +310,12 @@ class Glm53LatentQ8Cache:
         for buffer, part in zip(self.parts, new):
             buffer[:, :, prev:prev + length] = part
         self.offset = prev + length
-        return tuple(part[:, :, :self.offset] for part in self.parts), None
+        return self.state, None
+
+    @property
+    def state(self):
+        # Read-only (for mx.eval of the cache); there is no restore path.
+        return tuple(part[:, :, :self.offset] for part in self.parts) if self.parts else ()
 
 
 def _latent_q8_attention(q, keys, scale, mask):
@@ -963,16 +984,20 @@ class Glm53GGUFModel:
             self.calls["indexer_pool_recompute_full" if pools.last_from == 0 else "indexer_pool_extend"] += 1
             self.calls["indexer_pools_computed"] += pools.last_computed
 
-    def _mla_masked(self, q, latent, selected, stop_query, total):
-        """Today's consumer for queries [0, stop_query): 128-query pieces, key
-        trim, boolean put_along_axis mask (or the causal mask when ``selected``
-        is None) and dense SDPA. A query with no valid id gets a finite row
-        here (MLX's SDPA maps a boolean mask's false entries to finfo.min), not
-        NaN; it is the reference law and stays as it is."""
+    def _mla_masked(self, q, latent, selected, stop_query, total, start_query=0):
+        """Today's consumer for queries [start_query, stop_query): 128-query
+        pieces, key trim, boolean put_along_axis mask (or the causal mask when
+        ``selected`` is None) and dense SDPA. A query with no valid id gets a
+        finite row here (MLX's SDPA maps a boolean mask's false entries to
+        finfo.min), not NaN; it is the reference law and stays as it is.
+        ``start_query`` (a multiple of 128, so the pieces keep their places)
+        skips leading rows another consumer computes."""
+        if start_query % 128:
+            raise ValueError("GLM-5.3 masked pieces start on a 128-query boundary")
         b, length = q.shape[0], q.shape[2]
         q8 = isinstance(latent, tuple)
         pieces = []
-        for start in range(0, stop_query, 128):
+        for start in range(start_query, stop_query, 128):
             stop = min(start + 128, stop_query)
             # A piece reads only the keys its last query can see: the later
             # keys were fully masked, and scoring them made prefill attention
@@ -1020,9 +1045,11 @@ class Glm53GGUFModel:
             return self._sparse_decode(q, source, selected)
         q8 = isinstance(source, tuple)
         total = source[0].shape[2] if q8 else source.shape[2]
-        if selected is None:
-            return self._mla_masked(q, source, None, length, total)
         if sparse_phase() == "prompt":
+            if sparse_attention.prefill_law(self.sparse_prefill) == "fused_v2":
+                return self._mla_prefill_v2(q, selected, source, total)
+            if selected is None:
+                return self._mla_masked(q, source, None, length, total)
             start = sparse_attention.prefill_gathered_start(
                 total, length, sparse_attention.PREFILL_THRESHOLDS[self.sparse_prefill]
             )
@@ -1037,11 +1064,59 @@ class Glm53GGUFModel:
                 return gathered
             dense = self._mla_masked(q, source, selected, start, total)
             return mx.concatenate([dense, gathered], axis=2)
+        if selected is None:
+            if self.sparse_attention == "fused_v2":
+                # Dense rows (T <= 2048) under the v2 decode law: causal ids
+                # through the same kernel, as the prompt rows below 2049.
+                if q8:
+                    raise ValueError(Q8_REFUSAL)
+                self.calls["sparse_attention_fused_v2_dense_rows"] += length
+                return self._sparse_decode(q, source, None)
+            return self._mla_masked(q, source, None, length, total)
         if self.sparse_attention == "mask_reference":
             return self._mla_masked(q, source, selected, length, total)
         if q8:
             raise ValueError(Q8_REFUSAL)
         return self._sparse_decode(q, source, selected)
+
+    def _mla_prefill_v2(self, q, selected, source, total):
+        """Prompt rows under ``gathered_v2_from_<n>``, by query position alone:
+
+        * ``pos < 2048`` (``pos + 1 < 2049``; every visible key fits): the
+          fused_v2 kernel with dense causal ids (``dense_row_ids``), whether or
+          not this chunk selects - a chunk that crosses 2048 keys has ids for
+          these rows, a chunk below it has none, and both must give the same
+          bits, so cold and warm chunkings agree;
+        * ``2048 <= pos < n - 1``: the dense ``_mla_masked`` pieces (round 1,
+          5.1), as under the v1 thresholds;
+        * ``pos >= n - 1``: fused_v2 blocks of PREFILL_BLOCK_V2 on the selected ids.
+        """
+        q8 = isinstance(source, tuple)
+        if q8:  # the gathered sparse paths require the fp32 latent plane
+            raise ValueError(Q8_REFUSAL)
+        length = q.shape[2]
+        first = total - length
+        dense_stop = min(length, max(0, TOPK - first))
+        start = (length if selected is None else sparse_attention.prefill_gathered_start(
+            total, length, sparse_attention.PREFILL_THRESHOLDS[self.sparse_prefill]))
+        start = max(start, dense_stop)
+        pieces = []
+        if dense_stop:
+            # The source's first ``first + dense_stop <= 2048`` rows: the
+            # query rows are its last rows, as the dense-ids path requires.
+            self.calls["sparse_attention_fused_v2_dense_rows"] += dense_stop
+            pieces.append(sparse_attention.sparse_prefill(
+                q[:, :, :dense_stop], source[:, :, : first + dense_stop], None,
+                block=sparse_attention.PREFILL_BLOCK_V2, counters=self.calls, policy="fused_v2"))
+        if start > dense_stop:
+            aligned = dense_stop - dense_stop % 128
+            masked = self._mla_masked(q, source, selected, start, total, start_query=aligned)
+            pieces.append(masked[:, :, dense_stop - aligned :])
+        if start < length:
+            pieces.append(sparse_attention.sparse_prefill(
+                q[:, :, start:], source, selected[:, start:],
+                block=sparse_attention.PREFILL_BLOCK_V2, counters=self.calls, policy="fused_v2"))
+        return pieces[0] if len(pieces) == 1 else mx.concatenate(pieces, axis=2)
 
     def _sparse_decode(self, q, source, selected):
         """Decode-phase gathered consumer in groups of at most 8 query rows.
@@ -1096,7 +1171,7 @@ class Glm53GGUFModel:
             and sparse_phase() != "prompt"
             and self.indexer_pools == "incremental_v1"
             and self.indexer_select == "topk_v1_kernel"
-            and self.sparse_attention in ("gathered_v1", "fused_decode_v1")
+            and self.sparse_attention in ("gathered_v1", "fused_decode_v1", "fused_v2")
             and fused.ready(self.args.rms_norm_eps)
             and indexer.select_kernel_ready()
         )
@@ -1111,8 +1186,9 @@ class Glm53GGUFModel:
         kernels, each gated bitwise against that glue. Admitted only under the
         arm4 sparse laws (incremental_v1, topk_v1_kernel, gathered_v1) on the
         Metal GPU; everything else declines (counted) and runs the reference.
-        Under glm53_sparse_attention=fused_decode_v1 the selected ids feed that
-        consumer's own kernel instead of gather + SDPA (its law, not gathered_v1's).
+        Under glm53_sparse_attention=fused_decode_v1 or fused_v2 the selected ids
+        feed that consumer's own kernel instead of gather + SDPA (its law, not
+        gathered_v1's); a dense step (T <= 2048) takes _mla_attend's dense rows.
         """
         from . import glm53_mla_fused as fused
 
@@ -1198,7 +1274,8 @@ class Glm53GGUFModel:
         # Tie the raw append into this step (a later pool read would otherwise
         # pull several steps' deferred appends into one step); no value changes.
         ids = mx.depends(ids, full)
-        if self.sparse_attention == "fused_decode_v1":
+        if self.sparse_attention in ("fused_decode_v1", "fused_v2"):
+            # The consumer's own kernel on the selected ids (its law).
             self.calls["mla_fused"] += 1
             return self._sparse_decode(q, latent, ids[None])
         rows, mask = fused.gather(latent, ids)

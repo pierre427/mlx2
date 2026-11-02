@@ -18,6 +18,13 @@ work is independent of the context length. Laws:
                  ascending-split combine. Not bitwise to ``gathered_v1``; a
                  first-use gate bounds it (1e-5 absolute) or the policy
                  raises. Exposed only if the profile shows it pays (R4).
+``fused_v2``     glm53_sparse_attention_v2 (design glm53-speed-round2.md
+                 1.1): each gathered tile staged once for all 64 heads, MMA
+                 scores and values, rows on grid z. A new law (near-tie
+                 acceptance cross-policy); any grouping of rows is bitwise
+                 equal to one row per launch, so decode, prompt blocks and
+                 verify rows agree bitwise within it. Prompt rows take it
+                 under ``gathered_v2_from_<n>``.
 
 Failure contract (design 4.1): a query with no valid id yields a NaN output
 row in every law and nothing raises on the device; the final-logit guard
@@ -31,7 +38,7 @@ committed base rows plus a short private tail without copying the base.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 import mlx.core as mx
@@ -47,7 +54,38 @@ PREFILL_THRESHOLDS = {
     "gathered_v1_16k": 16384,
     "gathered_v1_all": TOPK + 1,
 }
-DECODE_POLICIES = ("gathered_v1", "fused_decode_v1")
+# Round 2 (WP1 -> WP5 interface): the v2 prompt law carries its threshold
+# position; these nine values are the only v2 prefill policies.
+PREFILL_POSITIONS_V2 = (2049, 3072, 4096, 5120, 6144, 7168, 8192, 12288, 16384)
+PREFILL_THRESHOLDS.update({f"gathered_v2_from_{n}": n for n in PREFILL_POSITIONS_V2})
+POLICIES_ATTENTION = ("mask_reference", "gathered_v1", "fused_decode_v1", "fused_v2")
+DECODE_POLICIES = ("gathered_v1", "fused_decode_v1", "fused_v2")
+WIDTH = TOPK + 3  # 2051: 512 pools x 4 rows + the 3-row tail
+
+
+def prefill_law(sparse_prefill):
+    """The ``sparse_prefill`` consumer policy a prompt threshold value selects."""
+    if sparse_prefill not in PREFILL_THRESHOLDS:
+        raise ValueError(f"unknown GLM-5.3 sparse prefill policy {sparse_prefill!r}")
+    return "fused_v2" if sparse_prefill.startswith("gathered_v2_from_") else "gathered_v1"
+
+
+def dense_row_ids(positions, width=WIDTH):
+    """(L, W) int32 causal ids ``where(arange(W) <= pos, arange(W), -1)``.
+
+    Dense rows (no selection yet, ``T <= 2048``) through the fused_v2 kernel:
+    every row keeps its own causal visibility; ``W = 2051 >= 2048`` fits.
+    """
+    if not isinstance(positions, mx.array):
+        positions = mx.array(list(positions), dtype=mx.int32)
+    positions = positions.astype(mx.int32).reshape(-1)
+    arange = mx.arange(width, dtype=mx.int32)
+    return mx.where(arange[None] <= positions[:, None], arange[None], mx.array(-1, mx.int32))
+
+
+def fused_v2_workspace_bytes(rows, *, split=64):
+    """Partials of one fused_v2 launch: rows * ceil(W / split) * 64 * (512 + 2) * 4."""
+    return rows * (-(-WIDTH // split)) * 64 * (LATENT + 2) * 4
 # Batched SDPA over R verify rows is row-exact on the builds checked so far;
 # a GPU check that finds otherwise sets this False (R7) and rows_attention
 # runs one SDPA per row until the fused rows kernel lands.
@@ -73,11 +111,15 @@ class TreeLatentView:
 
     Ids below ``split`` read ``base``, the others ``tail[id - split]``; the
     gathered values equal a gather from the concatenation, without building it.
+    ``origin`` names the committed cache ``base`` was sliced from (a frontier
+    sets it): fused_v2 batches rows into one launch only when every row has
+    the same origin and split, i.e. the same committed base rows.
     """
 
     base: mx.array
     tail: mx.array
     split: int
+    origin: object = field(default=None, compare=False)
 
     def __post_init__(self):
         if self.base.ndim != 2 or self.tail.ndim != 2 or self.base.shape[1] != self.tail.shape[1]:
@@ -162,7 +204,13 @@ def _check_ids(q, ids):
 
 
 def sparse_decode(q, latent, ids, *, policy, counters=None):
-    """Decode-phase consumer (decode, verify rows, MTP head, draft steps); any L."""
+    """Decode-phase consumer (decode, verify rows, MTP head, draft steps); any L.
+
+    Under ``fused_v2`` ``ids`` may be None for dense rows (``T <= 2048``): the
+    L query rows are the source's last L positions and get causal ids.
+    """
+    if policy == "fused_v2":
+        return fused_v2_attention(q, latent, ids, counters=counters)
     _check_ids(q, ids)
     if policy == "gathered_v1":
         _count(counters, "sparse_attention_gathered")
@@ -182,8 +230,13 @@ def sparse_decode(q, latent, ids, *, policy, counters=None):
     raise ValueError(f"GLM-5.3 sparse decode policy {policy!r} is not a gathered law")
 
 
-def sparse_prefill(q, latent, ids, *, block=PREFILL_BLOCK, counters=None):
+def sparse_prefill(q, latent, ids, *, block=PREFILL_BLOCK, counters=None, policy="gathered_v1"):
     """Prompt-phase gathered consumer in blocks of ``block`` queries.
+
+    ``policy="fused_v2"`` (a ``gathered_v2_from_<n>`` value, see
+    ``prefill_law``): one fused_v2 launch per block; rows share nothing, so
+    no single-row pad is needed and any block size gives the same bits.
+    ``ids`` may then be None for dense causal rows (``T <= 2048``).
 
     Each block is evaluated before the next is built, so one block's gather
     and scores are live at a time (the bound Glm53CacheBudget books; an
@@ -196,9 +249,13 @@ def sparse_prefill(q, latent, ids, *, block=PREFILL_BLOCK, counters=None):
     dense mask path already does. The per-block eval makes this eager-only:
     do not wrap a multi-block call in mx.compile.
     """
-    _check_ids(q, ids)
     if type(block) is not int or block < 1:
         raise ValueError("GLM-5.3 sparse prefill block must be a positive integer")
+    if policy == "fused_v2":
+        return _fused_v2_prefill(q, latent, ids, block, counters)
+    if policy != "gathered_v1":
+        raise ValueError(f"GLM-5.3 sparse prefill policy {policy!r} is not a gathered law")
+    _check_ids(q, ids)
     length = q.shape[2]
     pieces = []
     for start in range(0, length, block):
@@ -249,6 +306,8 @@ def rows_attention(q_rows, sources, *, policy, counters=None):
             raise ValueError("GLM-5.3 rows attention needs ids (1, 1, W) per row")
     if len({ids.shape[2] for _, ids in sources}) != 1:
         raise ValueError("GLM-5.3 rows attention needs one selection width")
+    if policy == "fused_v2":
+        return _fused_v2_rows(q_rows, sources, counters)
     if policy == "fused_decode_v1":
         # One launch per row: one latent source each (4.3). A (1, H, 1, D)
         # row is its own one-query decode layout.
@@ -271,6 +330,113 @@ def rows_attention(q_rows, sources, *, policy, counters=None):
     rows = mx.concatenate([g[0] for g in gathered], axis=0)
     valid = mx.concatenate([g[1] for g in gathered], axis=0)
     return _attend(q_rows, rows, valid)
+
+
+# fused_v2 orchestration (glm53_sparse_attention_v2 holds the kernels).
+PREFILL_BLOCK_V2 = 64  # 278 MB of partials per block (fused_v2_workspace_bytes)
+
+
+def _v2():
+    from . import glm53_sparse_attention_v2
+
+    return glm53_sparse_attention_v2
+
+
+def _v2_source(latent):
+    """(base (T0, 512), tail (d, 512) or None) of one latent source."""
+    if isinstance(latent, TreeLatentView):
+        return latent.base, (latent.tail if latent.tail.shape[0] else None)
+    _latent_total(latent)
+    return latent[0, 0], None
+
+
+def _v2_buffers(base, tail):
+    # No zero-size buffers: T0 = 0 never reads base, d = 0 never reads tails.
+    if base.shape[0] == 0:
+        base = mx.zeros((1, LATENT), mx.float32)
+    return base, (mx.zeros((1, LATENT), mx.float32) if tail is None else tail)
+
+
+def _v2_rows_ids(q, latent, ids):
+    """(flat ids (L, W), total) for q (1, 64, L, 512); dense causal ids when ids is None."""
+    if q.ndim != 4 or q.shape[0] != 1 or q.shape[1] != 64 or q.shape[3] != LATENT:
+        raise ValueError("GLM-5.3 fused_v2 is built for q (1, 64, L, 512)")
+    total = _latent_total(latent)
+    length = q.shape[2]
+    if ids is None:
+        if total > TOPK or length > total:
+            raise ValueError("GLM-5.3 fused_v2 dense rows need T <= 2048 and L <= T")
+        return dense_row_ids(range(total - length, total)), total
+    _check_ids(q, ids)
+    return ids[0], total
+
+
+def _fused_v2_launch(q, latent, flat_ids, positions, counters):
+    v2 = _v2()
+    v2.require_metal()
+    base, tail = _v2_source(latent)
+    split, depth = base.shape[0], (0 if tail is None else tail.shape[0])
+    base, tails = _v2_buffers(base, tail)
+    meta = mx.array([[split, depth, 0, p] for p in positions], dtype=mx.int32)
+    out = v2.checked_launch(q[0].transpose(1, 0, 2), base, tails, flat_ids, meta)
+    _count(counters, "sparse_attention_fused_v2")
+    _count(counters, "sparse_attention_fused_v2_rows", len(positions))
+    return out.transpose(1, 0, 2)[None]
+
+
+def fused_v2_attention(q, latent, ids, *, counters=None):
+    """fused_v2 over one latent source, all L rows in one launch: (1, 64, L, 512)."""
+    flat, total = _v2_rows_ids(q, latent, ids)
+    length = q.shape[2]
+    return _fused_v2_launch(q, latent, flat, list(range(total - length, total)), counters)
+
+
+def _fused_v2_prefill(q, latent, ids, block, counters):
+    flat, total = _v2_rows_ids(q, latent, ids)
+    length = q.shape[2]
+    positions = list(range(total - length, total))
+    pieces = []
+    for start in range(0, length, block):
+        stop = min(start + block, length)
+        piece = _fused_v2_launch(q[:, :, start:stop], latent, flat[start:stop], positions[start:stop], counters)
+        if length > block:
+            mx.eval(piece)  # one block's partials live at a time
+        pieces.append(piece)
+    _count(counters, "sparse_prefill_fused_v2_blocks", len(pieces))
+    _SCHEDULED["prefill_blocks"] += len(pieces)
+    return pieces[0] if len(pieces) == 1 else mx.concatenate(pieces, axis=2)
+
+
+def _fused_v2_rows(q_rows, sources, counters):
+    """One launch when every source is a TreeLatentView over the same committed
+    base (same origin and split, tails_v1); otherwise one launch per row with
+    the row's own source (the clone frontier), counted."""
+    views = [latent for latent, _ in sources]
+    first = views[0]
+    shared = all(
+        isinstance(v, TreeLatentView) and v.origin is not None and v.origin is first.origin and v.split == first.split
+        for v in views
+    )
+    if not shared:
+        _count(counters, "sparse_attention_fused_v2_per_row_fallback")
+        return mx.concatenate(
+            [fused_v2_attention(q_rows[r : r + 1], latent, ids, counters=counters)
+             for r, (latent, ids) in enumerate(sources)], axis=0)
+    v2 = _v2()
+    v2.require_metal()
+    tails, meta, offset = [], [], 0
+    for view in views:
+        depth = view.tail.shape[0]
+        if depth:
+            tails.append(view.tail)
+        meta.append([view.split, depth, offset, view.split + depth - 1])
+        offset += depth
+    base, tail = _v2_buffers(first.base, mx.concatenate(tails, axis=0) if tails else None)
+    flat = mx.concatenate([ids[0] for _, ids in sources], axis=0)
+    out = v2.checked_launch(q_rows[:, :, 0], base, tail, flat, mx.array(meta, dtype=mx.int32))
+    _count(counters, "sparse_attention_fused_v2")
+    _count(counters, "sparse_attention_fused_v2_rows", len(sources))
+    return out[:, :, None]
 
 
 # Optional fused decode kernel mlx2_glm53_sparse_decode_v1 (design 4.3).
@@ -567,7 +733,8 @@ class Glm53MLAFrontier:
         self.tail_raw = mx.concatenate([self.tail_raw, raw_row.astype(mx.float32)], axis=0)
 
     def latent_source(self):
-        return TreeLatentView(self._base_rows(0, LATENT, self.base_tokens), self.tail_latent, self.base_tokens)
+        return TreeLatentView(self._base_rows(0, LATENT, self.base_tokens), self.tail_latent, self.base_tokens,
+                              origin=self.base)
 
     def raw_rows(self, start, stop):
         """Raw indexer rows [start, stop) as (stop - start, 256): base then tail."""
@@ -623,6 +790,13 @@ class Glm53MLAFrontier:
         return result
 
 
+def _v2_status():
+    import sys
+
+    module = sys.modules.get(__name__.rsplit(".", 1)[0] + ".glm53_sparse_attention_v2")
+    return {"first_use_gate": "not_run"} if module is None else module.route_status()
+
+
 def route_status():
     gate = _FUSED_GATE["passed"]
     return {
@@ -630,6 +804,8 @@ def route_status():
             "gathered_v1": {"implemented": True, "qualified": False, "selected_by_default": True},
             "fused_decode_v1": {"implemented": True, "qualified": False, "selected_by_default": False,
                                 "first_use_gate": "not_run" if gate is None else ("passed" if gate else "failed")},
+            "fused_v2": {"implemented": True, "qualified": False, "selected_by_default": False,
+                         **_v2_status()},
         },
         "batched_rows_exact": BATCHED_ROWS_EXACT,
         "scheduled_calls": dict(_SCHEDULED),

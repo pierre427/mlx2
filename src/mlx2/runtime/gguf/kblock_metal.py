@@ -536,8 +536,230 @@ inline float kblock_dot32_v4(device const uchar *row, uint chunk, thread const f
     return sum;
 }
 #define KDOT(row, chunk, a, format) (VEC == 3 ? kblock_dot32_v4(row, chunk, a, format) : VEC == 2 ? kblock_dot32_v3(row, chunk, a, format) : VEC ? kblock_dot32_v2(row, chunk, a, format) : kblock_dot32(row, chunk, a, format))
+
+// Load-ahead (AHEAD=2, glm53_row_kernel=kblock_rows_ahead2): kblock_dot32_v2
+// split into a load phase and an arithmetic phase. ka_load issues every device
+// read one chunk needs into registers and does no arithmetic on them, so the
+// loads of the next chunk can be in flight while ka_dot runs the current one.
+// ka_dot is kblock_dot32_v2's element and accumulation expressions applied to
+// the same bytes (the scale and fp16 bits are the bytes gguf_k_half reads;
+// little-endian ushort/uint words of the same addresses), so its result is the
+// same float.
+// One struct per format holding exactly the raw words one chunk reads, so the
+// two in-flight sets stay in registers (a union of every format's fields was
+// spilled to thread memory: 452 -> 72 GB/s on the routed MoE, 1ee18335e).
+template<int F> struct KA { };
+template<> struct KA<2> { ushort q[8]; ushort d; };
+template<> struct KA<11> { ushort qs[16]; ushort hm[16]; ushort lo, hi, d; };
+template<> struct KA<12> { uint qs[8]; uchar sc, mn, aux; ushort d, dm; };
+template<> struct KA<13> { uint qs[8]; uint qh[8]; uchar sc, mn, aux; ushort d, dm; };
+template<> struct KA<14> { ushort ql[16]; ushort qh[16]; ushort sc; ushort d; };
+inline float ka_half(ushort bits) { return float(as_type<half>(bits)); }
+// Formats without a load-ahead body (e.g. the Q3N research container) never
+// take the AHEAD branch (the host keeps AHEAD=1); these keep it compilable.
+template<int F> inline KA<F> ka_load(device const uchar *row, uint chunk) { return KA<F>(); }
+template<int F> inline float ka_dot(thread const KA<F> &r, uint chunk, thread const float *a) { return 0.0f; }
+template<> inline KA<2> ka_load<2>(device const uchar *row, uint chunk) {
+    KA<2> r;
+    device const uchar *p=row+chunk*18;
+    device const ushort *q=(device const ushort*)(p+2);
+    #pragma unroll
+    for(uint w=0;w<8;w++) r.q[w]=q[w];
+    r.d=((device const ushort*)p)[0];
+    return r;
+}
+template<> inline float ka_dot<2>(thread const KA<2> &r, uint chunk, thread const float *a) {
+    float sum=0.0f;
+    const float d=ka_half(r.d);
+    #pragma unroll
+    for(uint w=0;w<8;w++) {
+        const uint b=r.q[w];
+        #pragma unroll
+        for(uint e=0;e<2;e++) {
+            const uint byte=(b>>(8*e))&255, i=2*w+e;
+            sum+=a[i]*(d*float(int(byte&15)-8));
+            sum+=a[i+16]*(d*float(int(byte>>4)-8));
+        }
+    }
+    return sum;
+}
+template<> inline KA<11> ka_load<11>(device const uchar *row, uint chunk) {
+    KA<11> r;
+    const uint c=chunk%8;
+    device const uchar *p=row+(chunk/8)*110;
+    device const ushort *qs=(device const ushort*)(p+32+(c/4)*32);
+    device const ushort *hm=(device const ushort*)p;
+    #pragma unroll
+    for(uint w=0;w<16;w++) { r.qs[w]=qs[w]; r.hm[w]=hm[w]; }
+    r.lo=*(device const ushort*)(p+96+(2*c)%8);
+    r.hi=*(device const ushort*)(p+104+(2*c)%4);
+    r.d=*(device const ushort*)(p+108);
+    return r;
+}
+template<> inline float ka_dot<11>(thread const KA<11> &r, uint chunk, thread const float *a) {
+    float sum=0.0f;
+    const uint c=chunk%8;
+    const float d=ka_half(r.d);
+    float ds[2];
+    #pragma unroll
+    for(uint h=0;h<2;h++) {
+        const uint g=2*c+h;
+        const uint lo=((uint(r.lo)>>(8*h))>>(4*(g/8)))&15;
+        const uint hi=((uint(r.hi)>>(8*h))>>(2*(g/4)))&3;
+        ds[h]=d*float(int(lo|(hi<<4))-32);
+    }
+    const uint shift=2*(c%4);
+    #pragma unroll
+    for(uint w=0;w<16;w++) {
+        const uint qw=r.qs[w], hw=r.hm[w];
+        #pragma unroll
+        for(uint e=0;e<2;e++) {
+            const uint j=2*w+e;
+            const float q=float((qw>>(8*e+shift))&3)+(((hw>>(8*e+c))&1) ? 0.0f : -4.0f);
+            sum+=a[j]*(ds[j/16]*q);
+        }
+    }
+    return sum;
+}
+template<int F> inline KA<F> ka_load_k45(device const uchar *row, uint chunk) {
+    KA<F> r;
+    const uint c=chunk%8;
+    device const uchar *p=row+(chunk/8)*(F==12 ? 144 : 176);
+    r.sc=p[4+c%4]; r.mn=p[8+c%4]; r.aux=p[12+c%4];
+    r.d=((device const ushort*)p)[0]; r.dm=((device const ushort*)p)[1];
+    device const uint *qs=(device const uint*)(p+(F==12 ? 16 : 48)+(c/2)*32);
+    #pragma unroll
+    for(uint w=0;w<8;w++) r.qs[w]=qs[w];
+    return r;
+}
+template<> inline KA<12> ka_load<12>(device const uchar *row, uint chunk) { return ka_load_k45<12>(row, chunk); }
+template<> inline KA<13> ka_load<13>(device const uchar *row, uint chunk) {
+    KA<13> r=ka_load_k45<13>(row, chunk);
+    device const uint *qh=(device const uint*)(row+(chunk/8)*176+16);
+    #pragma unroll
+    for(uint w=0;w<8;w++) r.qh[w]=qh[w];
+    return r;
+}
+template<int F> inline float ka_dot_k45(thread const KA<F> &r, uint chunk, thread const float *a, thread const uint *qh) {
+    float sum=0.0f;
+    const uint c=chunk%8;
+    const uint sc=r.sc, mn=r.mn, aux=r.aux;
+    const uint scale=c<4 ? sc&63 : (aux&15)|((sc>>2)&48);
+    const uint minimum=c<4 ? mn&63 : (aux>>4)|((mn>>2)&48);
+    const float ds=ka_half(r.d)*float(scale), dm=ka_half(r.dm)*float(minimum);
+    const uint shift=4*(c%2);
+    #pragma unroll
+    for(uint w=0;w<8;w++) {
+        const uint qw=r.qs[w], hw=F==13 ? qh[w] : 0u;
+        #pragma unroll
+        for(uint e=0;e<4;e++) {
+            uint q=(qw>>(8*e+shift))&15;
+            if(F==13) q|=((hw>>(8*e+c))&1)<<4;
+            sum+=a[4*w+e]*(ds*float(q)-dm);
+        }
+    }
+    return sum;
+}
+template<> inline float ka_dot<12>(thread const KA<12> &r, uint chunk, thread const float *a) {
+    return ka_dot_k45<12>(r, chunk, a, r.qs);  // qh unused for Q4_K
+}
+template<> inline float ka_dot<13>(thread const KA<13> &r, uint chunk, thread const float *a) {
+    return ka_dot_k45<13>(r, chunk, a, r.qh);
+}
+template<> inline KA<14> ka_load<14>(device const uchar *row, uint chunk) {
+    KA<14> r;
+    const uint c=chunk%8;
+    device const uchar *p=row+(chunk/8)*210;
+    device const ushort *ql=(device const ushort*)(p+(c/4)*64+(c%2)*32);
+    device const ushort *qh=(device const ushort*)(p+128+(c/4)*32);
+    #pragma unroll
+    for(uint w=0;w<16;w++) { r.ql[w]=ql[w]; r.qh[w]=qh[w]; }
+    r.sc=*(device const ushort*)(p+192+2*c);
+    r.d=*(device const ushort*)(p+208);
+    return r;
+}
+template<> inline float ka_dot<14>(thread const KA<14> &r, uint chunk, thread const float *a) {
+    float sum=0.0f;
+    const uint c=chunk%8;
+    const float d=ka_half(r.d);
+    const float ds[2]={d*float(int(as_type<char>(uchar(r.sc&255)))), d*float(int(as_type<char>(uchar(r.sc>>8))))};
+    const uint lshift=4*((c/2)%2), hshift=2*(c%4);
+    #pragma unroll
+    for(uint w=0;w<16;w++) {
+        const uint lw=r.ql[w], hw=r.qh[w];
+        #pragma unroll
+        for(uint e=0;e<2;e++) {
+            const uint j=2*w+e;
+            const uint lo=(lw>>(8*e+lshift))&15, hi=(hw>>(8*e+hshift))&3;
+            sum+=a[j]*(ds[j/16]*float(int(lo|(hi<<4))-32));
+        }
+    }
+    return sum;
+}
 """
 )
+
+
+def _ahead_loop(units, nch, src, xoff, guard, fmt="FORMAT"):
+    """AHEAD=2 chunk loop over ``units`` = [(tag, sums, row pointer expr)].
+
+    Lane ``lane`` owns chunks lane, lane+32, ... in ascending order (the
+    kblock_dot32 law). The (chunk, row, unit) work items of a lane are walked
+    in that order with a two-slot register ring: the raw words of item i+1 are
+    loaded (ka_load) before item i's arithmetic (ka_dot), so one item's loads
+    are always in flight while the previous item computes, at the cost of one
+    extra raw set of registers. (A whole chunk step ahead held ROWS x units
+    raw sets and was 4x slower from register pressure, 4ede902f7.) The body
+    covers two chunks so the item count per step is even and every ring slot
+    index is static after unrolling. Each ``sums[r]`` still adds its chunk
+    partials in ascending chunk order, so the result equals the AHEAD=1 loop's
+    bit for bit. Row pointers clamp to the last valid row and chunk indices to
+    the last chunk, so a padded row or the final look-ahead re-reads in range.
+    """
+    count = len(units)
+    decl = "".join(f"    device const uchar *wp_{t}[ROWS];\n" for t, _, _ in units)
+    ptrs = "".join(f"wp_{t}[r]={ptr};" for t, _, ptr in units)
+
+    def step(s):
+        cs = "chunk" if s == 0 else "c1"
+        body = []
+        for m, (t, sums, _) in enumerate(units):
+            item = f"({s}*ROWS*{count}+r*{count}+{m})"
+            if m + 1 < count:
+                nxt_ptr, nxt_chunk = f"wp_{units[m + 1][0]}[r]", cs
+            else:
+                nxt_ptr = f"wp_{units[0][0]}[r+1<ROWS ? r+1 : 0]"
+                nxt_chunk = f"(r+1<ROWS ? {cs} : {cs}+32)"
+            body.append(
+                f"                ring[({item}+1)%2]=ka_load<{fmt}>({nxt_ptr},min({nxt_chunk},NCH-1));\n"
+                f"                if({guard}) {sums}[r]+=ka_dot<{fmt}>(ring[{item}%2],{cs},a);\n")
+        return (
+            "        {\n"
+            "            float a[32];\n"
+            "            #pragma unroll\n"
+            f"            for(uint i=0;i<32;i++) a[i]={src}[{xoff}+{cs}*32+i];\n"
+            "            #pragma unroll\n"
+            "            for(uint r=0;r<ROWS;r++) {\n"
+            + "".join(body)
+            + "            }\n"
+            "        }\n")
+
+    return (
+        "{\n"
+        f"    const uint NCH=uint({nch});\n"
+        + decl
+        + "    #pragma unroll\n"
+        f"    for(uint r=0;r<ROWS;r++) {{ {ptrs} }}\n"
+        f"    KA<{fmt}> ring[2];\n"
+        f"    ring[0]=ka_load<{fmt}>(wp_{units[0][0]}[0],min(lane,NCH-1));\n"
+        "    for(uint chunk=lane;chunk<NCH;chunk+=64) {\n"
+        "        const uint c1=chunk+32;\n"
+        + step(0)
+        + "        if(c1>=NCH) break;\n"
+        + step(1)
+        + "    }\n"
+        "}\n")
+
 
 _LOAD = r"""
 float a[32];
@@ -641,7 +863,10 @@ if(EXACT) {
         for(uint r=0;r<ROWS;r++)
             if(row0+r<N) sums[r]+=xv*gguf_k_value(w+(WBASE+row0+r)*ROW_BYTES,k,FORMAT);
     }
-} else
+} else if(AHEAD>1)
+"""
+    + _ahead_loop([("w", "sums", "w+(WBASE+min(row0+r,uint(N-1)))*ROW_BYTES")], "K/32", "x", "size_t(token)*K", "row0+r<N")
+    + r"""else
 for(uint chunk=lane;chunk<K/32;chunk+=32) {
 """
     + _LOAD.replace("SRC", "x").replace("XOFF", "size_t(token)*K")
@@ -681,7 +906,12 @@ if(EXACT) {
             }
         }
     }
-} else
+} else if(AHEAD>1)
+"""
+    + _ahead_loop([("g", "sums_g", "gate+(size_t(expert)*M+min(row0+r,uint(M-1)))*ROW_BYTES"),
+                   ("u", "sums_u", "up+(size_t(expert)*M+min(row0+r,uint(M-1)))*ROW_BYTES")],
+                  "K/32", "x", "size_t(token)*K", "row0+r<M")
+    + r"""else
 for(uint chunk=lane;chunk<K/32;chunk+=32) {
 """
     + _LOAD.replace("SRC", "x").replace("XOFF", "size_t(token)*K")
@@ -725,7 +955,11 @@ if(EXACT) {
         for(uint r=0;r<ROWS;r++)
             if(row0+r<N) sums[r]+=xv*gguf_k_value(w+(size_t(expert)*N+row0+r)*ROW_BYTES,k,FORMAT);
     }
-} else
+} else if(AHEAD>1)
+"""
+    + _ahead_loop([("d", "sums", "w+(size_t(expert)*N+min(row0+r,uint(N-1)))*ROW_BYTES")],
+                  "M/32", "mid", "size_t(slot)*M", "row0+r<N")
+    + r"""else
 for(uint chunk=lane;chunk<M/32;chunk+=32) {
 """
     + _LOAD.replace("SRC", "mid").replace("XOFF", "size_t(slot)*M")
@@ -878,10 +1112,13 @@ GATE_UP_SHARED = GATE_UP.replace(
     "KDOT(gate+offset", "KDOT((is_shared ? gate_sh : gate)+offset"
 ).replace("KDOT(up+offset", "KDOT((is_shared ? up_sh : up)+offset").replace(
     "gguf_k_value(gate+offset", "gguf_k_value((is_shared ? gate_sh : gate)+offset"
-).replace("gguf_k_value(up+offset", "gguf_k_value((is_shared ? up_sh : up)+offset")
+).replace("gguf_k_value(up+offset", "gguf_k_value((is_shared ? up_sh : up)+offset").replace(
+    "wp_g[r]=gate+", "wp_g[r]=(is_shared ? gate_sh : gate)+").replace(
+    "wp_u[r]=up+", "wp_u[r]=(is_shared ? up_sh : up)+")
 DOWN_SHARED = DOWN.replace("const uint expert=ids[slot];", _FOLD_IDS).replace(
     "KDOT(w+(size_t(expert)", "KDOT((is_shared ? w_sh : w)+(size_t(expert)"
-).replace("gguf_k_value(w+(size_t(expert)", "gguf_k_value((is_shared ? w_sh : w)+(size_t(expert)")
+).replace("gguf_k_value(w+(size_t(expert)", "gguf_k_value((is_shared ? w_sh : w)+(size_t(expert)").replace(
+    "wp_d[r]=w+", "wp_d[r]=(is_shared ? w_sh : w)+")
 COMBINE_SHARED = r"""
 const uint row=thread_position_in_grid.x,token=thread_position_in_grid.y;
 if(row>=N) return;
@@ -892,7 +1129,7 @@ y[size_t(token)*N+row]=total+expert_out[size_t(token*(TOPK+1)+TOPK)*N+row];
 """
 
 
-@lru_cache(maxsize=9)
+@lru_cache(maxsize=16)
 def _kernel(kind):
     import mlx.core as mx
 
@@ -944,12 +1181,36 @@ def kblock_admits(ggml_type, k):
     return block > 0 and k % max(block, 32) == 0
 
 
+AHEAD_VALUES = (1, 2)
+_AHEAD_FORMATS = (2, 11, 12, 13, 14)
+
+
+def _ahead(ahead, vec, exact, ggml_type=None):
+    """Effective AHEAD template value of one chunk-law launch.
+
+    ``ahead=2`` is the load-ahead form of the VEC=1 chunk law (ka_load/ka_dot),
+    bitwise equal to ahead=1 and slower on the M5 Max in every form measured
+    (see GGUFWeights ``kblock_rows_ahead2``); it stays a default-off research
+    value;
+    the exact per-element law and the research containers have no load-ahead
+    body and keep AHEAD=1 (their own law, unchanged). Any other VEC with
+    ``ahead=2`` is refused rather than silently run under another decoder.
+    """
+    if ahead not in AHEAD_VALUES:
+        raise GGUFError(f"K-block ahead must be one of {AHEAD_VALUES}")
+    if ahead == 1 or exact or (ggml_type is not None and ggml_type not in _AHEAD_FORMATS):
+        return 1
+    if vec != 1:
+        raise GGUFError("K-block load-ahead is the VEC=1 chunk law only")
+    return ahead
+
+
 def _grid(n, rows):
     return ((n + 4 * rows - 1) // (4 * rows)) * 128
 
 
 @lru_cache(maxsize=1024)
-def _dense_launch(shape, ggml_type, row_bytes, rows, vec, exact, tok, b):
+def _dense_launch(shape, ggml_type, row_bytes, rows, vec, exact, tok, b, ahead=1):
     """(template, grid, output_shapes) of one kblock_dense launch; pure in its
     integer arguments, so the per-step host cost is one cache lookup."""
     n, k = shape
@@ -960,16 +1221,18 @@ def _dense_launch(shape, ggml_type, row_bytes, rows, vec, exact, tok, b):
     tok = (8 if b >= 8 else 1) if tok is None and is_exact else (tok or 1)
     if tok > 1 and not is_exact and (vec != 1 or ggml_type not in (11, 12, 13, 14)):
         raise GGUFError("K-block chunk-law token sharing needs VEC=1 and a K-quant format")
+    # The token-shared chunk body (TOK>1) has no load-ahead form: AHEAD=1.
+    ahead = _ahead(ahead, vec, is_exact, ggml_type) if tok == 1 else _ahead(ahead, vec, 1)
     return (
         [("K", k), ("N", n), ("ROW_BYTES", row_bytes),
          ("FORMAT", ggml_type), ("ROWS", rows), ("VEC", vec),
-         ("EXACT", is_exact), ("TOK", tok), ("TOKENS", b)],
+         ("EXACT", is_exact), ("TOK", tok), ("TOKENS", b), ("AHEAD", ahead)],
         (_grid(n, rows), 1, (b + tok - 1) // tok),
         [(b, n)],
     )
 
 
-def kblock_dense(x, weight: PackedMatrix, *, rows=4, vec=1, exact=0, tok=None):
+def kblock_dense(x, weight: PackedMatrix, *, rows=4, vec=1, exact=0, tok=None, ahead=1):
     import mlx.core as mx
 
     shape = weight.shape
@@ -979,7 +1242,7 @@ def kblock_dense(x, weight: PackedMatrix, *, rows=4, vec=1, exact=0, tok=None):
     if len(xs) != 2 or xs[-1] != shape[1] or rows not in (1, 2, 4, 8):
         raise GGUFError("K-block dense needs matching rank2 input and rows 1/2/4/8")
     template, grid, output_shapes = _dense_launch(
-        shape, weight.ggml_type, weight.row_bytes, rows, vec, exact, tok, xs[0])
+        shape, weight.ggml_type, weight.row_bytes, rows, vec, exact, tok, xs[0], ahead)
     return _kernel("dense")(
         inputs=[x.astype(mx.float32), weight.data],
         template=template, grid=grid, threadgroup=(128, 1, 1),
@@ -987,12 +1250,16 @@ def kblock_dense(x, weight: PackedMatrix, *, rows=4, vec=1, exact=0, tok=None):
     )[0]
 
 
-def kblock_moe_union(x, ids, scores, gate: PackedMatrix, up: PackedMatrix, down: PackedMatrix, *, rows=4, group=2):
+def kblock_moe_union(x, ids, scores, gate: PackedMatrix, up: PackedMatrix, down: PackedMatrix, *, rows=4, group=2,
+                     ahead=1):
     """kblock_moe for several rows with each routed expert decoded once per run
     of sorted slots (chunk law; K-quant experts). Every slot's mid/out row and
-    the slot-ordered combine equal kblock_moe's."""
+    the slot-ordered combine equal kblock_moe's. ``ahead`` is validated and
+    accepted for policy symmetry; the union body has no load-ahead form, so it
+    always runs AHEAD=1 (the same law either way)."""
     import mlx.core as mx
 
+    _ahead(ahead, 1, 1)
     if (len(gate.shape) != 3 or gate.shape != up.shape or gate.ggml_type != up.ggml_type
             or gate.ggml_type not in (11, 12, 13, 14) or down.ggml_type not in (11, 12, 13, 14)):
         raise GGUFError("expert union needs matching K-quant gate/up and a K-quant down")
@@ -1029,7 +1296,7 @@ def kblock_moe_union(x, ids, scores, gate: PackedMatrix, up: PackedMatrix, down:
     )[0]
 
 
-def kblock_grouped(x, weight: PackedMatrix, *, rows=4, vec=1, exact=0):
+def kblock_grouped(x, weight: PackedMatrix, *, rows=4, vec=1, exact=0, ahead=1):
     import mlx.core as mx
 
     if len(weight.shape) != 3 or not kblock_admits(weight.ggml_type, weight.shape[2]):
@@ -1044,14 +1311,16 @@ def kblock_grouped(x, weight: PackedMatrix, *, rows=4, vec=1, exact=0):
         template=[("K", k), ("N", n), ("GROUPS", groups), ("ROW_BYTES", weight.row_bytes),
                   ("FORMAT", weight.ggml_type), ("ROWS", rows), ("VEC", vec),
                   ("EXACT", int(bool(exact) or exact_law(weight.ggml_type))), ("TOK", 1),
-                  ("TOKENS", b * groups)],
+                  ("TOKENS", b * groups),
+                  ("AHEAD", _ahead(ahead, vec, bool(exact) or exact_law(weight.ggml_type), weight.ggml_type))],
         grid=(_grid(n, rows), 1, b * groups), threadgroup=(128, 1, 1),
         output_shapes=[(b * groups, n)], output_dtypes=[mx.float32],
     )[0]
     return y.reshape(*leading, groups, n)
 
 
-def kblock_moe(x, ids, scores, gate: PackedMatrix, up: PackedMatrix, down: PackedMatrix, *, rows=4, vec=1, exact=0):
+def kblock_moe(x, ids, scores, gate: PackedMatrix, up: PackedMatrix, down: PackedMatrix, *, rows=4, vec=1, exact=0,
+               ahead=1):
     """Routed experts with the reference activation and slot-ordered combine."""
     import mlx.core as mx
 
@@ -1065,15 +1334,17 @@ def kblock_moe(x, ids, scores, gate: PackedMatrix, up: PackedMatrix, down: Packe
         raise GGUFError("matching [tokens,topk] uint32 IDs and scores required")
     b, topk = ids.shape
     common = [("K", k), ("M", m), ("N", k), ("TOPK", topk), ("EXPERTS", experts), ("ROWS", rows), ("VEC", vec), ("EXACT", exact)]
+    gate_ahead = _ahead(ahead, vec, exact, gate.ggml_type)
+    down_ahead = _ahead(ahead, vec, exact, down.ggml_type)
     mid = _kernel("gate_up")(
         inputs=[x.astype(mx.float32), ids, gate.data, up.data],
-        template=common + [("ROW_BYTES", gate.row_bytes), ("FORMAT", gate.ggml_type)],
+        template=common + [("ROW_BYTES", gate.row_bytes), ("FORMAT", gate.ggml_type), ("AHEAD", gate_ahead)],
         grid=(_grid(m, rows), 1, b * topk), threadgroup=(128, 1, 1),
         output_shapes=[(b * topk, m)], output_dtypes=[mx.float32],
     )[0]
     expert_out = _kernel("down")(
         inputs=[mid, ids, down.data],
-        template=common + [("ROW_BYTES", down.row_bytes), ("FORMAT", down.ggml_type)],
+        template=common + [("ROW_BYTES", down.row_bytes), ("FORMAT", down.ggml_type), ("AHEAD", down_ahead)],
         grid=(_grid(k, rows), 1, b * topk), threadgroup=(128, 1, 1),
         output_shapes=[(b * topk, k)], output_dtypes=[mx.float32],
     )[0]
@@ -1092,7 +1363,7 @@ def _moe_shared_static(gate, up, down, gate_sh, up_sh, down_sh):
 
 
 @lru_cache(maxsize=256)
-def _moe_shared_launch(static, x_shape, ids_shape, scores_shape, ids_u32, rows, vec, exact):
+def _moe_shared_launch(static, x_shape, ids_shape, scores_shape, ids_u32, rows, vec, exact, ahead=1):
     """Validated (templates, grids, output shapes) of kblock_moe_shared's three
     launches; pure in the static weight geometry and the input shapes."""
     (gate_shape, up_shape, down_shape, gate_sh_shape, up_sh_shape, down_sh_shape,
@@ -1115,19 +1386,21 @@ def _moe_shared_launch(static, x_shape, ids_shape, scores_shape, ids_u32, rows, 
     slots = b * (topk + 1)
     common = [("K", k), ("M", m), ("N", k), ("TOPK", topk), ("EXPERTS", experts), ("ROWS", rows), ("VEC", vec), ("EXACT", exact)]
     return (
-        (common + [("ROW_BYTES", gate_rb), ("FORMAT", gate_t)], (_grid(m, rows), 1, slots), [(slots, m)]),
-        (common + [("ROW_BYTES", down_rb), ("FORMAT", down_t)], (_grid(k, rows), 1, slots), [(slots, k)]),
+        (common + [("ROW_BYTES", gate_rb), ("FORMAT", gate_t), ("AHEAD", _ahead(ahead, vec, exact, gate_t))],
+         (_grid(m, rows), 1, slots), [(slots, m)]),
+        (common + [("ROW_BYTES", down_rb), ("FORMAT", down_t), ("AHEAD", _ahead(ahead, vec, exact, down_t))],
+         (_grid(k, rows), 1, slots), [(slots, k)]),
         (common, (k, b, 1), (min(k, 256), 1, 1), [(b, k)]),
     )
 
 
-def kblock_moe_shared(x, ids, scores, gate, up, down, gate_sh, up_sh, down_sh, *, rows=4, vec=1, exact=0):
+def kblock_moe_shared(x, ids, scores, gate, up, down, gate_sh, up_sh, down_sh, *, rows=4, vec=1, exact=0, ahead=1):
     """Routed experts plus a format-identical shared expert in the same launches."""
     import mlx.core as mx
 
     first, second, third = _moe_shared_launch(
         _moe_shared_static(gate, up, down, gate_sh, up_sh, down_sh),
-        x.shape, ids.shape, scores.shape, ids.dtype == mx.uint32, rows, vec, exact)
+        x.shape, ids.shape, scores.shape, ids.dtype == mx.uint32, rows, vec, exact, ahead)
     mid = _kernel("gate_up_shared")(
         inputs=[x.astype(mx.float32), ids, gate.data, up.data, gate_sh.data, up_sh.data],
         template=first[0], grid=first[1], threadgroup=(128, 1, 1),
@@ -1169,7 +1442,9 @@ const uint row0=(threadgroup_position_in_grid.x*4+sg)*ROWS;
                 for(uint r=0;r<ROWS;r++)
                     if(local+r<N@) sums[r]+=xv*gguf_k_value(w@+size_t(local+r)*RB@,k,F@);
             }
-        } else
+        } else if(AHEAD>1)
+""" + _ahead_loop([("m", "sums", "w@+size_t(min(local+r,uint(N@-1)))*RB@")], "K@/32", "x@",
+                  "size_t(token)*K@", "local+r<N@", fmt="F@") + r"""        else
         for(uint chunk=lane;chunk<K@/32;chunk+=32) {
             float a[32];
             #pragma unroll
@@ -1207,13 +1482,17 @@ def _multi_kernel(count):
 
 
 @lru_cache(maxsize=512)
-def _multi_launch(static, x_shapes, rows, vec, exact):
+def _multi_launch(static, x_shapes, rows, vec, exact, ahead=1):
     """Validated (template, grid, output_shapes) of one kblock_multi launch;
     ``static`` is each weight's (shape, ggml_type, row_bytes)."""
     if not 1 <= len(static) <= 6 or len(x_shapes) != len(static):
         raise GGUFError("K-block multi projection takes 1-6 matching inputs and weights")
     b = x_shapes[0][0]
-    template, start = [("ROWS", rows), ("VEC", vec), ("EXACT", exact)], 0
+    # One AHEAD per launch; exact-law tensors (E@) take their own branch first,
+    # and a launch holding a format without a load-ahead body keeps AHEAD=1.
+    formats = {t for _, t, _ in static if not (exact or exact_law(t))}
+    template, start = [("ROWS", rows), ("VEC", vec), ("EXACT", exact),
+                       ("AHEAD", _ahead(ahead, vec, exact) if formats <= set(_AHEAD_FORMATS) else _ahead(ahead, vec, 1))], 0
     for t, (xs, (shape, ggml_type, row_bytes)) in enumerate(zip(x_shapes, static)):
         n, k = shape if len(shape) == 2 else (0, 0)
         if (len(shape) != 2 or not kblock_admits(ggml_type, k) or n % rows
@@ -1226,13 +1505,13 @@ def _multi_launch(static, x_shapes, rows, vec, exact):
     return template, (_grid(start, rows), 1, b), [(b, start)]
 
 
-def kblock_multi(inputs, weights, *, rows=4, vec=1, exact=0):
+def kblock_multi(inputs, weights, *, rows=4, vec=1, exact=0, ahead=1):
     """Concatenated [b, sum(N)] output of several rank2 K-block projections."""
     import mlx.core as mx
 
     template, grid, output_shapes = _multi_launch(
         tuple((w.shape, w.ggml_type, w.row_bytes) for w in weights),
-        tuple(x.shape for x in inputs), rows, vec, exact)
+        tuple(x.shape for x in inputs), rows, vec, exact, ahead)
     return _multi_kernel(len(weights))(
         inputs=[x.astype(mx.float32) for x in inputs] + [w.data for w in weights],
         template=template, grid=grid, threadgroup=(128, 1, 1),

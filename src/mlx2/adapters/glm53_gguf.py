@@ -67,8 +67,13 @@ SAMPLING = VendorSampling.single(
 SPARSE_KEYS = {
     "glm53_indexer_pools": ("recompute", "recompute_fixed_order", "incremental_v1", "incremental_v1_audit"),
     "glm53_indexer_select": ("argsort", "topk_v1", "topk_v1_kernel"),
-    "glm53_sparse_attention": ("mask_reference", "gathered_v1", "fused_decode_v1"),
-    "glm53_sparse_prefill": ("dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all"),
+    "glm53_sparse_attention": ("mask_reference", "gathered_v1", "fused_decode_v1", "fused_v2"),
+    # gathered_v2_from_<n>: the fused_v2 prompt law from position n, for n in
+    # exactly the nine enumerated thresholds (docs/design/glm53-speed-round2.md 2.1).
+    "glm53_sparse_prefill": (
+        "dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all",
+        *(f"gathered_v2_from_{n}" for n in (2049, 3072, 4096, 5120, 6144, 7168, 8192, 12288, 16384)),
+    ),
     "glm53_tree_rows_attention": ("per_row", "batched_v1"),
     "glm53_tree_frontier": ("clone", "tails_v1"),
 }
@@ -128,11 +133,13 @@ def _check_sparse_combination(policy):
         # does not declare would silently run the default, so it is refused.
         if policy[key] not in getattr(glm53_layer_tree, supported, SPARSE_KEYS[key][:1]):
             raise ValueError(f"{key}={policy[key]} is not implemented by the layered tree")
-    if policy["glm53_sparse_attention"] == "fused_decode_v1":
-        import mlx.core as mx
+    for key, value in (("glm53_sparse_attention", policy["glm53_sparse_attention"]),
+                       ("glm53_sparse_prefill", policy["glm53_sparse_prefill"])):
+        if value in ("fused_decode_v1", "fused_v2") or value.startswith("gathered_v2_from_"):
+            import mlx.core as mx
 
-        if not mx.metal.is_available():
-            raise ValueError("glm53_sparse_attention=fused_decode_v1 requires Metal; there is no fallback law")
+            if not mx.metal.is_available():
+                raise ValueError(f"{key}={value} requires Metal; there is no fallback law")
 
 
 def _check_mla_fused(policy):
@@ -146,7 +153,7 @@ def _check_mla_fused(policy):
     if (
         policy["glm53_indexer_pools"] != "incremental_v1"
         or policy["glm53_indexer_select"] != "topk_v1_kernel"
-        or policy["glm53_sparse_attention"] not in ("gathered_v1", "fused_decode_v1")
+        or policy["glm53_sparse_attention"] not in ("gathered_v1", "fused_decode_v1", "fused_v2")
     ):
         raise ValueError(
             "glm53_mla_fused=decode_v1 requires glm53_indexer_pools=incremental_v1, "
@@ -164,7 +171,7 @@ def _mla_fused_default(policy):
     if (
         resolved["glm53_indexer_pools"] != "incremental_v1"
         or resolved["glm53_indexer_select"] != "topk_v1_kernel"
-        or resolved["glm53_sparse_attention"] not in ("gathered_v1", "fused_decode_v1")
+        or resolved["glm53_sparse_attention"] not in ("gathered_v1", "fused_decode_v1", "fused_v2")
     ):
         return "reference"
     import mlx.core as mx
@@ -198,7 +205,11 @@ def _hc_fused_status(kernel_policy):
 
 
 def _sparse_route_status():
-    from ..runtime.models import glm53_gguf_indexer, glm53_kv_append, glm53_sparse_attention
+    from ..runtime.models import (
+        glm53_gguf_indexer,
+        glm53_kv_append,
+        glm53_sparse_attention,
+    )
 
     return {
         "indexer": glm53_gguf_indexer.route_status(),
@@ -515,6 +526,12 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "src/mlx2/runtime/models/glm53_gguf_mtp.py",
             "src/mlx2/runtime/models/glm53_gguf_indexer.py",
             "src/mlx2/runtime/models/glm53_sparse_attention.py",
+            # Kernel files bound unconditionally (round 2, WP5): they define
+            # the served arithmetic, so a kernel-only edit must move the
+            # numerics revision and the APCv2 identity.
+            "src/mlx2/runtime/models/glm53_sparse_attention_v2.py",
+            "src/mlx2/runtime/gguf/kblock_metal.py",
+            "src/mlx2/runtime/gguf/kblock_prefill_metal.py",
             "src/mlx2/runtime/models/glm53_kv_append.py",
             "src/mlx2/runtime/models/glm53_kv_append_geometry.py",
             "src/mlx2/runtime/models/glm53_glue_metal.py",

@@ -408,3 +408,217 @@ def test_frontier_siblings_complete_a_boundary_pool_privately():
         assert np.array_equal(bits(child.materialize().pools.pooled[:, :3]), bits(got))
     assert not np.array_equal(bits(left.pools.pooled[:, 2]), bits(right.pools.pooled[:, 2]))
     assert parent.pools.complete == base.pools.complete == 2
+
+
+# ---------------------------------------------------------------------------
+# fused_v2 (docs/design/glm53-speed-round2.md 1.1, 2.1): tables, spec, wiring.
+from mlx2.runtime.models import glm53_sparse_attention_v2 as v2
+
+
+def test_fused_v2_policy_tables_and_prefill_law():
+    assert sa.POLICIES_ATTENTION == ("mask_reference", "gathered_v1", "fused_decode_v1", "fused_v2")
+    assert "fused_v2" in sa.DECODE_POLICIES
+    assert sa.PREFILL_POSITIONS_V2 == (2049, 3072, 4096, 5120, 6144, 7168, 8192, 12288, 16384)
+    v2_values = [k for k in sa.PREFILL_THRESHOLDS if k.startswith("gathered_v2_from_")]
+    assert v2_values == [f"gathered_v2_from_{n}" for n in sa.PREFILL_POSITIONS_V2]
+    for value in v2_values:
+        assert sa.prefill_law(value) == "fused_v2"
+        assert sa.PREFILL_THRESHOLDS[value] == int(value.rsplit("_", 1)[1])
+    for value in ("dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all"):
+        assert sa.prefill_law(value) == "gathered_v1"
+    with pytest.raises(ValueError, match="unknown"):
+        sa.prefill_law("gathered_v2_from_9000")
+    # Per-position rule is unchanged: the threshold value carries the position.
+    assert sa.prefill_gathered_start(4096, 2048, sa.PREFILL_THRESHOLDS["gathered_v2_from_3072"]) == 1023
+
+
+@pytest.mark.parametrize("pos", [0, 3, 2047])
+def test_dense_row_ids_keep_each_rows_causal_visibility(pos):
+    ids = np.array(sa.dense_row_ids([pos]))
+    assert ids.shape == (1, sa.WIDTH) and ids.dtype == np.int32 and sa.WIDTH == 2051
+    assert (ids[0, : pos + 1] == np.arange(pos + 1)).all() and (ids[0, pos + 1 :] == -1).all()
+
+
+def test_fused_v2_spec_launch_plan_and_workspace():
+    spec = v2.kernel_spec()
+    assert spec["partial"]["name"] == "mlx2_glm53_gathered_attention_v2"
+    assert spec["partial"]["input_names"] == ["q", "base", "tails", "ids", "row_meta"]
+    assert spec["combine"]["name"] == "mlx2_glm53_gathered_attention_v2_combine"
+    source = spec["partial"]["source"]
+    for needle in ("simdgroup_multiply_accumulate", "ulong2(0, 0), true", "float4(0.0f)", "min(id, LAST)",
+                   "if (bad) m = NAN", "partial_m[slot] = empty ? -INFINITY : m", "TOFF + id - T0"):
+        assert needle in source
+    assert "acc / l" in spec["combine"]["source"] and "0.0625f" in spec["partial"]["header"]
+    plan = v2.launch_plan(1, 2051)
+    assert plan["splits"] == 33 and plan["threads"] == 1024 and plan["threadgroup_bytes"] == 32768
+    assert plan["partial"]["grid"] == (1024 * 33, 1, 1) and plan["partial"]["output_shapes"][2] == (1, 64, 33, 512)
+    assert plan["combine"]["grid"] == (512, 64, 1)
+    plan = v2.launch_plan(128, 2051, split=32, dim_split=4)
+    assert plan["splits"] == 65 and plan["threads"] == 1024 and plan["threadgroup_bytes"] == 24576
+    assert plan["partial"]["grid"] == (1024 * 65, 1, 128)
+    for split, dim_split in ((128, 2), (64, 8), (64, 1)):
+        with pytest.raises(ValueError, match="supports"):
+            v2.launch_plan(1, 2051, split=split, dim_split=dim_split)
+    with pytest.raises(ValueError, match="at least one row"):
+        v2.launch_plan(0, 2051)
+    assert sa.fused_v2_workspace_bytes(1) == 33 * 64 * 514 * 4 == v2.workspace_bytes(1)
+    assert sa.fused_v2_workspace_bytes(64) == 64 * 4342272 and sa.fused_v2_workspace_bytes(1, split=32) == 65 * 64 * 514 * 4
+
+
+def test_fused_v2_refuses_cpu_on_every_entry():
+    q = mx.zeros((1, 64, 1, 512))
+    latent = mx.zeros((1, 1, 2100, 512))
+    ids = mx.zeros((1, 1, 2051), dtype=mx.int32)
+    with pytest.raises(RuntimeError, match="requires Metal"):
+        sa.sparse_decode(q, latent, ids, policy="fused_v2")
+    with pytest.raises(RuntimeError, match="requires Metal"):
+        sa.sparse_prefill(q, latent, ids, policy="fused_v2")
+    with pytest.raises(RuntimeError, match="requires Metal"):
+        sa.rows_attention(q, [(latent, ids)], policy="fused_v2")
+    with pytest.raises(RuntimeError, match="requires Metal"):
+        v2.self_check()
+    with pytest.raises(ValueError, match="not a gathered law"):
+        sa.sparse_prefill(q, latent, ids, policy="fused_decode_v1")
+    assert sa.route_status()["policies"]["fused_v2"]["selected_by_default"] is False
+
+
+def spec_launch(calls):
+    """Stand-in for the two kernels with the same ABI: the float64 oracle per row,
+    rounded to fp32 (rows share nothing, as on the device)."""
+
+    def launch(q_rows, base, tails, ids, row_meta, split, dim_split):
+        meta = np.array(row_meta)
+        calls.append({"rows": q_rows.shape[0], "base": base.shape[0], "tails": tails.shape[0],
+                      "meta": meta.tolist(), "ids": np.array(ids)})
+        return mx.array(v2.oracle(q_rows, base, tails, ids, meta).astype(np.float32))
+
+    return launch
+
+
+@pytest.fixture
+def fake_metal(monkeypatch):
+    calls = []
+    monkeypatch.setattr(v2, "require_metal", lambda: None)
+    monkeypatch.setattr(v2, "_launch", spec_launch(calls))
+    monkeypatch.setattr(v2, "_GATE", {(v2.DEFAULT_SPLIT, v2.DEFAULT_DIM_SPLIT): True})
+    return calls
+
+
+def big(rng, total, length):
+    latent = mx.array(rng.normal(size=(1, 1, total, 512)).astype(np.float32))
+    q = mx.array(rng.normal(size=(1, 64, length, 512)).astype(np.float32))
+    return q, latent
+
+
+def test_fused_v2_decode_is_one_launch_for_all_rows_and_matches_the_oracle(fake_metal):
+    rng = np.random.default_rng(21)
+    q, latent = big(rng, 60, 11)
+    ids = selection(rng, 60, 11, width=20, count=3, empty_row=9)
+    counters = {}
+    out = sa.sparse_decode(q, latent, ids, policy="fused_v2", counters=counters)
+    assert len(fake_metal) == 1 and fake_metal[0]["rows"] == 11 and fake_metal[0]["base"] == 60
+    assert fake_metal[0]["meta"] == [[60, 0, 0, 49 + r] for r in range(11)]
+    assert counters == {"sparse_attention_fused_v2": 1, "sparse_attention_fused_v2_rows": 11}
+    assert np.isnan(np.array(out)[0, :, 9]).all()
+    within_oracle(np.delete(np.array(out), 9, axis=2), np.delete(oracle(q, latent, ids), 9, axis=2))
+
+
+@pytest.mark.parametrize("rows", [1, 2, 4, 8, 16, 64, 128])
+def test_fused_v2_row_invariance_on_the_spec(fake_metal, rows):
+    rng = np.random.default_rng(rows)
+    q, latent = big(rng, 200, rows)
+    ids = selection(rng, 200, rows, width=24, count=4)
+    together = sa.sparse_decode(q, latent, ids, policy="fused_v2")
+    alone = mx.concatenate([sa.sparse_decode(q[:, :, r : r + 1], latent, ids[:, r : r + 1], policy="fused_v2")
+                            for r in range(rows)], axis=2)
+    assert np.array_equal(bits(together), bits(alone), equal_nan=True)
+
+
+def test_fused_v2_prefill_blocks_equal_one_block_and_decode_rows(fake_metal):
+    rng = np.random.default_rng(22)
+    q, latent = big(rng, 90, 13)
+    ids = selection(rng, 90, 13, width=20, count=3)
+    counters = {}
+    small = sa.sparse_prefill(q, latent, ids, block=4, policy="fused_v2", counters=counters)
+    assert [c["rows"] for c in fake_metal] == [4, 4, 4, 1]
+    assert counters["sparse_prefill_fused_v2_blocks"] == 4 and counters["sparse_attention_fused_v2_rows"] == 13
+    whole = sa.sparse_prefill(q, latent, ids, block=13, policy="fused_v2")
+    rows = sa.sparse_decode(q, latent, ids, policy="fused_v2")
+    assert np.array_equal(bits(small), bits(whole)) and np.array_equal(bits(small), bits(rows))
+    # Row positions follow the chunk: the last row is the source's last position.
+    assert [m[3] for c in fake_metal[:4] for m in c["meta"]] == list(range(77, 90))
+
+
+@pytest.mark.parametrize("total", [4, 2048])
+def test_fused_v2_dense_rows_get_causal_ids(fake_metal, total):
+    rng = np.random.default_rng(total)
+    length = min(total, 5)
+    q, latent = big(rng, total, length)
+    out = sa.sparse_prefill(q, latent, None, block=2, policy="fused_v2")
+    ids = np.concatenate([c["ids"] for c in fake_metal])
+    want_ids = np.array(sa.dense_row_ids(list(range(total - length, total))))
+    assert np.array_equal(ids, want_ids)
+    within_oracle(out, oracle(q, latent, mx.array(want_ids[None])))
+    with pytest.raises(ValueError, match="T <= 2048"):
+        big_q, big_latent = big(rng, 2049, 1)
+        sa.sparse_decode(big_q, big_latent, None, policy="fused_v2")
+
+
+class Origin:
+    pass
+
+
+def test_fused_v2_rows_one_launch_over_a_shared_base_else_per_row(fake_metal):
+    rng = np.random.default_rng(23)
+    q, latent = big(rng, 50, 4)
+    base = latent[0, 0, :44]
+    origin = Origin()
+    tails = [latent[0, 0, 44 : 44 + d] for d in (0, 2, 6, 3)]
+    views = [sa.TreeLatentView(base, t, 44, origin=origin) for t in tails]
+    ids = mx.concatenate([selection(rng, 44 + max(d, 1), 1, width=16, count=2) for d in (0, 2, 6, 3)], axis=1)
+    sources = [(view, ids[:, r : r + 1]) for r, view in enumerate(views)]
+    q_rows = q.transpose(2, 1, 0, 3)
+    counters = {}
+    out = sa.rows_attention(q_rows, sources, policy="fused_v2", counters=counters)
+    assert len(fake_metal) == 1 and fake_metal[0]["tails"] == 11
+    assert fake_metal[0]["meta"] == [[44, 0, 0, 43], [44, 2, 0, 45], [44, 6, 2, 49], [44, 3, 8, 46]]
+    assert counters == {"sparse_attention_fused_v2": 1, "sparse_attention_fused_v2_rows": 4}
+    fake_metal.clear()
+    # The same rows without a shared origin (clone frontiers): one launch per row.
+    loose = [(sa.TreeLatentView(base, t, 44), i) for (_, i), t in zip(sources, tails, strict=True)]
+    counters = {}
+    per_row = sa.rows_attention(q_rows, loose, policy="fused_v2", counters=counters)
+    assert len(fake_metal) == 4 and counters["sparse_attention_fused_v2_per_row_fallback"] == 1
+    assert [c["meta"][0][:3] for c in fake_metal] == [[44, 0, 0], [44, 2, 0], [44, 6, 0], [44, 3, 0]]
+    assert np.array_equal(bits(out), bits(per_row))
+    for r, (view, row_ids) in enumerate(sources):
+        want = sa.gathered_attention(q[:, :, r : r + 1], *sa.gather_latent(view, row_ids))
+        within_oracle(out[r : r + 1].transpose(2, 1, 0, 3), np.array(want, np.float64))
+
+
+def test_frontier_views_carry_their_base_as_origin():
+    rng = np.random.default_rng(24)
+    base = committed_base(rng, 12)
+    a = sa.Glm53MLAFrontier(base, 12)
+    b = a.fork()
+    assert a.latent_source().origin is base and b.latent_source().origin is base
+
+
+@pytest.mark.parametrize("error", [0.0, 1e-3])
+def test_fused_v2_first_use_gate_bounds_against_float64_and_fails_closed(monkeypatch, error):
+    calls = []
+    exact = spec_launch(calls)
+    monkeypatch.setattr(v2, "require_metal", lambda: None)
+    monkeypatch.setattr(v2, "_launch", lambda *a: exact(*a) + error)
+    monkeypatch.setattr(v2, "_GATE", {})
+    if not error:
+        assert v2.self_check() is True
+        assert {c["rows"] for c in calls} == {2, 3}
+        assert any(c["tails"] == 7 for c in calls)  # the tree case was gated
+        assert v2.route_status()["first_use_gate"] == {"split64_dsplit4": "passed"}
+        return
+    for _ in range(2):  # sticky: no retry, no fallback law
+        with pytest.raises(RuntimeError, match="first-use gate"):
+            v2.checked_launch(mx.zeros((1, 64, 512)), mx.zeros((4, 512)), mx.zeros((1, 512)),
+                              mx.zeros((1, 2051), mx.int32), mx.array([[4, 0, 0, 3]], mx.int32))
+    assert v2.route_status()["first_use_gate"] == {"split64_dsplit4": "failed"}

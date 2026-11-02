@@ -124,7 +124,7 @@ def test_kblock_metal_sources_compile_on_the_cpu_compiler(tmp_path):
         ["xcrun", "--find", "metal"], capture_output=True, check=False
     ).returncode:
         pytest.skip("CPU Metal compiler unavailable")
-    constants = ("constant uint K=4096,M=2048,N=4096,TOPK=8,EXPERTS=144,ROWS=4,"
+    constants = ("constant uint AHEAD=1,K=4096,M=2048,N=4096,TOPK=8,EXPERTS=144,ROWS=4,"
                  "ROW_BYTES=1760,FORMAT=11,GROUPS=64,VEC=3,EXACT=1,TOK=8,TOKENS=512;\n")
     attrs = ("uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],"
              "uint3 thread_position_in_grid [[thread_position_in_grid]],"
@@ -170,7 +170,7 @@ def test_kblock_multi_source_selects_each_tensor_by_row_range(tmp_path):
         ["xcrun", "--find", "metal"], capture_output=True, check=False
     ).returncode:
         pytest.skip("CPU Metal compiler unavailable")
-    constants = ("constant uint ROWS=4,VEC=1,EXACT=1,E0=0,E1=0,E2=1,R0=0,R1=8192,R2=8320,R3=8384,RTOTAL=8384,"
+    constants = ("constant uint AHEAD=1,ROWS=4,VEC=1,EXACT=1,E0=0,E1=0,E2=1,R0=0,R1=8192,R2=8320,R3=8384,RTOTAL=8384,"
                  "N0=8192,N1=128,N2=64,K0=4096,K1=4096,K2=128,F0=11,F1=13,F2=2,"
                  "RB0=1760,RB1=2816,RB2=72;\n")
     bindings = "".join(f"device const float* x{t} [[buffer({t})]]," for t in range(3)) + "".join(

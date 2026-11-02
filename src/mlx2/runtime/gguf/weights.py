@@ -24,7 +24,7 @@ from .reader import GGUFError, GGUFFile
 from .segmented_prefill import segmented_prefill_active
 
 _NAX_DENSE_POLICIES = ("nax_fp16", "nax_fp16_v2", "nax_fp16_v2d")
-_KBLOCK_ROW_POLICIES = ("kblock_rows", "kblock_exact")
+_KBLOCK_ROW_POLICIES = ("kblock_rows", "kblock_exact", "kblock_rows_ahead2")
 _SEGMENTED_EXPERT_POLICIES = ("segmented_nax_fp16", "segmented_nax_fp16_v2")
 
 
@@ -94,7 +94,7 @@ class GGUFWeights:
             raise GGUFError("unsupported packed expert prefill policy")
         if dense_prefill_policy not in ("reference", "nax_fp16", "nax_fp16_v2", "nax_fp16_v2d"):
             raise GGUFError("unsupported packed dense prefill policy")
-        if row_policy not in ("reference", "kblock_rows", "kblock_exact"):
+        if row_policy not in ("reference",) + _KBLOCK_ROW_POLICIES:
             raise GGUFError("unsupported packed row policy")
         from pathlib import Path
         if native_read_view is not None:
@@ -119,8 +119,20 @@ class GGUFWeights:
         self.dense_prefill_policy = dense_prefill_policy
         self.row_policy = row_policy
         # Exact K-block rows keep packed_metal's per-row law (k order,
-        # gguf_k_value, simd_sum) bit for bit; kblock_rows reorders sums.
-        self._kblock_exact = int(row_policy == "kblock_exact")
+        # gguf_k_value, simd_sum) bit for bit; kblock_rows reorders sums
+        # (_kblock_exact, read from row_policy per call).
+        # kblock_rows_ahead2 is kblock_rows' chunk law with the next work
+        # item's block bytes loaded before the current item's FMAs
+        # (kblock_metal AHEAD=2); same sums bit for bit, only the load issue
+        # order moves. OFF, and not proposed as a default: on
+        # GLM-5.3-Flash-REAP50-Q3_K_M.gguf@5a865918 it is bitwise (every real
+        # tensor, 139 Metal cases, tokens equal in replay) but slower in every
+        # form tried. Cold routed MoE 455 -> 327 GB/s, Q3_K attn_q 399 -> 345
+        # (wp2-kbench-t4-a1, ea3267eca); interleaved replay 25.08 -> 27.06 ms
+        # per step at 2K and 33.98 -> 38.15 at 32K (wp2-ilv2-*, 67b78cd28).
+        # Apple GPUs hide this load latency through occupancy; the extra live
+        # raw words cost more occupancy than the overlap returns (a whole chunk
+        # step ahead: 443 -> 105 GB/s, 4ede902f7).
         self._embedding_rows = {}
         self._expected_stat = expected_stat
         self.scheduled_expert_calls = {}
@@ -285,6 +297,24 @@ class GGUFWeights:
             return project
         return weight
 
+    @property
+    def _kblock_exact(self):
+        """1 under kblock_exact, read per call so a runtime row_policy switch
+        (bench arms, replay variants) never keeps a stale law."""
+        return int(getattr(self, "row_policy", None) == "kblock_exact")
+
+    @property
+    def _kblock_ahead(self):
+        """K-block ``ahead=`` of every row call site, read per call from the
+        policy (memo keys carry ``row_policy``, so a switch rebuilds them)."""
+        return 2 if getattr(self, "row_policy", None) == "kblock_rows_ahead2" else 1
+
+    # Research only (glm53_decode_kernel_bench ROWS sweep): output rows per
+    # simdgroup of the one-token K-block row launches. Every row keeps its own
+    # chunk sums, so any value gives the same bits; serving keeps 4. Not part
+    # of a memo or compile-region key: set it before building closures.
+    kblock_row_block = 4
+
     def _kblock_rows(self, weight):
         return self.row_policy in _KBLOCK_ROW_POLICIES and kblock_admits(
             weight.ggml_type, weight.shape[-1]
@@ -304,9 +334,11 @@ class GGUFWeights:
                 # to 4 tokens (2 at K>=8192); every row equals its 1-row call.
                 tok = 2 if weight.shape[1] >= 8192 else 4
             if tok:
-                return (kblock_dense(flat, weight, rows=4, tok=tok),
+                return (kblock_dense(flat, weight, rows=4, tok=tok, ahead=self._kblock_ahead),
                         "kblock_rows_dense_tok")
-            return kblock_dense(flat, weight, rows=4, exact=self._kblock_exact), "kblock_rows_dense"
+            return (kblock_dense(flat, weight, rows=self.kblock_row_block, exact=self._kblock_exact,
+                                 ahead=self._kblock_ahead),
+                    "kblock_rows_dense")
         return weight(flat), "packed_reference_dense"
 
     def prepare_embedding(self, name="token_embd.weight"):
@@ -410,7 +442,8 @@ class GGUFWeights:
             self.scheduled_grouped_calls["kblock_rows_grouped"] = (
                 self.scheduled_grouped_calls.get("kblock_rows_grouped", 0) + 1
             )
-            return kblock_grouped(x, self._grouped[key], exact=self._kblock_exact)
+            return kblock_grouped(x, self._grouped[key], rows=self.kblock_row_block, exact=self._kblock_exact,
+                                  ahead=self._kblock_ahead)
         self.scheduled_grouped_calls["grouped_linear"] = (
             self.scheduled_grouped_calls.get("grouped_linear", 0) + 1
         )
@@ -453,7 +486,8 @@ class GGUFWeights:
 
             from .kblock_metal import kblock_moe
 
-            function = partial(kblock_moe, exact=self._kblock_exact)
+            function = partial(kblock_moe, rows=self.kblock_row_block, exact=self._kblock_exact,
+                               ahead=self._kblock_ahead)
             function.__name__ = "kblock_moe"
             if (getattr(self, "expert_union", False) and x.shape[0] > 1 and not self._kblock_exact
                     and all(self.packed(prefix + f".ffn_{p}_exps.weight").ggml_type in (11, 12, 13, 14)
@@ -462,7 +496,8 @@ class GGUFWeights:
                 # run of sorted slots; every slot equals kblock_moe's.
                 from .kblock_metal import kblock_moe_union
 
-                function = kblock_moe_union
+                function = partial(kblock_moe_union, ahead=self._kblock_ahead)
+                function.__name__ = "kblock_moe_union"
         name = function.__name__
         self.scheduled_expert_calls[name] = self.scheduled_expert_calls.get(name, 0) + 1
         window = getattr(self, "expert_prefill_window", None)
@@ -500,7 +535,8 @@ class GGUFWeights:
         if dense_prefill_active(flats[0].shape[0]):
             return None
         try:
-            y = kblock_multi(flats, packed, exact=self._kblock_exact)
+            y = kblock_multi(flats, packed, rows=self.kblock_row_block, exact=self._kblock_exact,
+                             ahead=self._kblock_ahead)
         except GGUFError:
             return None
         self.scheduled_dense_calls["kblock_rows_multi"] = (
@@ -550,7 +586,8 @@ class GGUFWeights:
         if packed is None:
             return None
         try:
-            result = kblock_moe_shared(x, ids, scores, *packed, exact=self._kblock_exact)
+            result = kblock_moe_shared(x, ids, scores, *packed, rows=self.kblock_row_block,
+                                       exact=self._kblock_exact, ahead=self._kblock_ahead)
         except GGUFError:
             return None
         self.scheduled_expert_calls["kblock_moe_shared"] = (
