@@ -4,10 +4,38 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from itertools import pairwise
 
+# Hot-path modules are imported once here, not inside the per-step methods
+# (each in-function import costs an importlib lookup on every projection).
+# None of them imports mlx at module scope.
 from .blocks import decode_blocks
+from .kblock_metal import (
+    kblock_admits,
+    kblock_dense,
+    kblock_grouped,
+    kblock_moe_shared,
+    kblock_multi,
+)
+from .nax_metal import LEGACY_FORMATS, nax_admits
 from .packed_metal import PackedMatrix, embedding, grouped_linear, packed_moe
+from .prefill_scope import dense_prefill_active
 from .reader import GGUFError, GGUFFile
+from .segmented_prefill import segmented_prefill_active
+
+_NAX_DENSE_POLICIES = ("nax_fp16", "nax_fp16_v2", "nax_fp16_v2d")
+_KBLOCK_ROW_POLICIES = ("kblock_rows", "kblock_exact")
+_SEGMENTED_EXPERT_POLICIES = ("segmented_nax_fp16", "segmented_nax_fp16_v2")
+
+
+def _nax_candidate(ggml_type, n, k):
+    """NAX prefill eligibility at load-time geometry, never runtime fallback.
+
+    The original Q8_0/Q2_K/IQ2_XXS candidates stay fail-closed in the kernel
+    on bad geometry; K-block tensors whose rows do not fit the tile (GLM's
+    128-wide Q4_0 KDA low-rank inputs) keep the packed reference kernel.
+    """
+    return ggml_type in LEGACY_FORMATS or nax_admits(ggml_type, n, k)
 
 
 class GGUFWeights:
@@ -16,7 +44,32 @@ class GGUFWeights:
     Native F16/F32/BF16 tensors retain their dtype. Quantized tensors cannot be
     silently expanded: array() has a bounded reference limit, linear() uses a
     packed kernel. No arbitrary whole-model floating conversion occurs.
+
+    Host dispatch memo: ``linear`` closures and ``multi_linear`` /
+    ``moe_with_shared`` admission plans are pure functions of the tensor
+    names and the policy attributes, so they are built once per
+    (name(s), policy) key instead of every decode step. The key carries every
+    policy attribute the decision reads, so reassigning a policy picks a fresh
+    entry; ``close`` drops them. The arrays and kernels are the ones the
+    unmemoized path builds. Subclasses that evict or replace ``_packed``
+    entries (DeepSeekV41Weights pages them) keep the unmemoized path unless
+    they set ``_dispatch_memo = True`` themselves.
     """
+
+    _dispatch_memo = True
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if "_dispatch_memo" not in cls.__dict__:
+            cls._dispatch_memo = False
+
+    def _memo(self):
+        if not self._dispatch_memo:
+            return None
+        memo = self.__dict__.get("_dispatch_cache")
+        if memo is None:
+            memo = self.__dict__["_dispatch_cache"] = {}
+        return memo
 
     def __init__(
         self,
@@ -28,6 +81,7 @@ class GGUFWeights:
         compute_policy="reference",
         expert_prefill_policy="reference",
         dense_prefill_policy="reference",
+        row_policy="reference",
         native_read_view=None,
         source_sha256=None,
     ):
@@ -36,10 +90,12 @@ class GGUFWeights:
             "cooperative",
         ):
             raise GGUFError("unsupported packed GGUF storage/compute policy")
-        if expert_prefill_policy not in ("reference", "segmented_nax_fp16"):
+        if expert_prefill_policy not in ("reference", "segmented_nax_fp16", "segmented_nax_fp16_v2"):
             raise GGUFError("unsupported packed expert prefill policy")
-        if dense_prefill_policy not in ("reference", "nax_fp16"):
+        if dense_prefill_policy not in ("reference", "nax_fp16", "nax_fp16_v2", "nax_fp16_v2d"):
             raise GGUFError("unsupported packed dense prefill policy")
+        if row_policy not in ("reference", "kblock_rows", "kblock_exact"):
+            raise GGUFError("unsupported packed row policy")
         from pathlib import Path
         if native_read_view is not None:
             from .native_read_view import NativeReadViewFile
@@ -61,6 +117,10 @@ class GGUFWeights:
         self.compute_policy = compute_policy
         self.expert_prefill_policy = expert_prefill_policy
         self.dense_prefill_policy = dense_prefill_policy
+        self.row_policy = row_policy
+        # Exact K-block rows keep packed_metal's per-row law (k order,
+        # gguf_k_value, simd_sum) bit for bit; kblock_rows reorders sums.
+        self._kblock_exact = int(row_policy == "kblock_exact")
         self._embedding_rows = {}
         self._expected_stat = expected_stat
         self.scheduled_expert_calls = {}
@@ -130,6 +190,18 @@ class GGUFWeights:
         return self._dense[name]
 
     def linear(self, name):
+        memo = self._memo()
+        if memo is None:
+            return self._build_linear(name)
+        # getattr: providers built with __new__ (tests, probes) may omit policies.
+        key = ("linear", name, getattr(self, "dense_prefill_policy", None),
+               getattr(self, "compute_policy", None), getattr(self, "row_policy", None))
+        project = memo.get(key)
+        if project is None:
+            project = memo[key] = self._build_linear(name)
+        return project
+
+    def _build_linear(self, name):
         tensor = self.tensors[name]
         if len(tensor.shape) != 2:
             raise GGUFError("linear requires rank2 weights")
@@ -150,28 +222,43 @@ class GGUFWeights:
             fp32_operand = cache[name]
             return lambda x: x @ (fp32_operand if x.dtype == mx.float32 else weight.T)
         weight = self.packed(name)
-        if self.dense_prefill_policy == "nax_fp16" and tensor.ggml_type in (8, 10, 16):
+        if self.dense_prefill_policy in _NAX_DENSE_POLICIES and _nax_candidate(
+            tensor.ggml_type, *weight.shape
+        ):
 
             def project(x):
-                from .prefill_scope import dense_prefill_active
-
                 flat = x.reshape(-1, x.shape[-1])
-                if dense_prefill_active(flat.shape[0]):
+                if (dense_prefill_active(flat.shape[0]) and weight.ggml_type in (11, 12, 13, 14)
+                        and self.dense_prefill_policy == "nax_fp16_v2d"):
+                    # Decode-once v2: every weight value decoded once to a device
+                    # fp16 scratch, then the v2 op reads it in place (64x128 tile).
+                    # Bit-identical to kblock_nax_prefill_v2 (s1-scratch).
+                    from .kblock_prefill_metal import kblock_nax_prefill_v2d
+
+                    result = kblock_nax_prefill_v2d(flat, weight, tn=128)
+                    route = "kblock_nax_prefill_v2d"
+                elif (dense_prefill_active(flat.shape[0]) and weight.ggml_type in (11, 12, 13, 14)
+                        and self.dense_prefill_policy == "nax_fp16_v2"):
+                    # Guide-shaped 64x64 tile, multiply_accumulate: fp64-equidistant
+                    # to nax_fp16 (ratio 1.0000, p9-v2), not bit-identical.
+                    from .kblock_prefill_metal import kblock_nax_prefill_v2
+
+                    result = kblock_nax_prefill_v2(flat, weight)
+                    route = "kblock_nax_prefill_v2"
+                elif dense_prefill_active(flat.shape[0]) and weight.ggml_type in (11, 12, 13, 14):
+                    # Same FP16-operand law as nax_prefill, bit for bit
+                    # (chunk-decoded weight tiles, two 16-row tiles per decode).
+                    from .kblock_prefill_metal import kblock_nax_prefill
+
+                    result = kblock_nax_prefill(flat, weight, mt=2)
+                    route = "kblock_nax_prefill"
+                elif dense_prefill_active(flat.shape[0]):
                     from .nax_metal import nax_prefill
 
                     result = nax_prefill(flat, weight)
                     route = "nax_prefill"
-                elif self.compute_policy == "cooperative" and tensor.ggml_type in (
-                    8,
-                    16,
-                ):
-                    from .cooperative_metal import cooperative_dense
-
-                    result = cooperative_dense(flat, weight, rows=4)
-                    route = "cooperative_dense"
                 else:
-                    result = weight(flat)
-                    route = "packed_reference_dense"
+                    result, route = self._dense_rows(flat, weight)
                 self.scheduled_dense_calls[route] = (
                     self.scheduled_dense_calls.get(route, 0) + 1
                 )
@@ -186,7 +273,41 @@ class GGUFWeights:
                 return result.reshape(*x.shape[:-1], tensor.shape[1])
 
             return project
+        if self._kblock_rows(weight):
+
+            def project(x):
+                result, route = self._dense_rows(x.reshape(-1, x.shape[-1]), weight)
+                self.scheduled_dense_calls[route] = (
+                    self.scheduled_dense_calls.get(route, 0) + 1
+                )
+                return result.reshape(*x.shape[:-1], tensor.shape[1])
+
+            return project
         return weight
+
+    def _kblock_rows(self, weight):
+        return self.row_policy in _KBLOCK_ROW_POLICIES and kblock_admits(
+            weight.ggml_type, weight.shape[-1]
+        )
+
+    def _dense_rows(self, flat, weight):
+        """Row (non-prefill-tile) execution of one rank2 packed projection."""
+        if self.compute_policy == "cooperative" and weight.ggml_type in (8, 16):
+            from .cooperative_metal import cooperative_dense
+
+            return cooperative_dense(flat, weight, rows=4), "cooperative_dense"
+        if self._kblock_rows(weight):
+            tok = None
+            if (getattr(self, "row_token_share", False) and flat.shape[0] > 1 and not self._kblock_exact
+                    and weight.ggml_type in (11, 12, 13, 14)):
+                # Multi-row decode/verify: decode each weight chunk once for up
+                # to 4 tokens (2 at K>=8192); every row equals its 1-row call.
+                tok = 2 if weight.shape[1] >= 8192 else 4
+            if tok:
+                return (kblock_dense(flat, weight, rows=4, tok=tok),
+                        "kblock_rows_dense_tok")
+            return kblock_dense(flat, weight, rows=4, exact=self._kblock_exact), "kblock_rows_dense"
+        return weight(flat), "packed_reference_dense"
 
     def prepare_embedding(self, name="token_embd.weight"):
         """Upload a resident table or bind exact file rows, never both."""
@@ -213,8 +334,6 @@ class GGUFWeights:
 
     def gate_up(self, x, gate_name, up_name):
         """Pair compatible Q8 projections within the selected compute profile."""
-        from .prefill_scope import dense_prefill_active
-
         gate, up = self.tensors[gate_name], self.tensors[up_name]
         if (
             self.compute_policy == "cooperative"
@@ -222,7 +341,7 @@ class GGUFWeights:
             and gate.shape == up.shape
             and len(gate.shape) == 2
             and not (
-                self.dense_prefill_policy == "nax_fp16"
+                self.dense_prefill_policy in ("nax_fp16", "nax_fp16_v2", "nax_fp16_v2d")
                 and dense_prefill_active(math.prod(x.shape[:-1]))
             )
         ):
@@ -270,17 +389,16 @@ class GGUFWeights:
             weight = self.packed(name)
             grouped_tensor = replace(tensor, shape=shape[::-1])
             self._grouped[key] = PackedMatrix(weight.data, grouped_tensor)
-        if self.dense_prefill_policy == "nax_fp16" and tensor.ggml_type in (8, 10, 16):
-            from .prefill_scope import dense_prefill_active
+        if (self.dense_prefill_policy in _NAX_DENSE_POLICIES
+                and _nax_candidate(tensor.ggml_type, *shape[1:])
+                and dense_prefill_active(math.prod(x.shape[:-2]))):
+            from .nax_metal import nax_grouped_prefill
 
-            if dense_prefill_active(math.prod(x.shape[:-2])):
-                from .nax_metal import nax_grouped_prefill
-
-                result = nax_grouped_prefill(x, self._grouped[key])
-                self.scheduled_grouped_calls["nax_grouped_prefill"] = (
-                    self.scheduled_grouped_calls.get("nax_grouped_prefill", 0) + 1
-                )
-                return result
+            result = nax_grouped_prefill(x, self._grouped[key])
+            self.scheduled_grouped_calls["nax_grouped_prefill"] = (
+                self.scheduled_grouped_calls.get("nax_grouped_prefill", 0) + 1
+            )
+            return result
         if self.compute_policy == "cooperative" and tensor.ggml_type in (8, 16):
             from .cooperative_metal import cooperative_grouped
 
@@ -288,6 +406,11 @@ class GGUFWeights:
                 self.scheduled_grouped_calls.get("cooperative_grouped", 0) + 1
             )
             return cooperative_grouped(x, self._grouped[key])
+        if self._kblock_rows(self._grouped[key]):
+            self.scheduled_grouped_calls["kblock_rows_grouped"] = (
+                self.scheduled_grouped_calls.get("kblock_rows_grouped", 0) + 1
+            )
+            return kblock_grouped(x, self._grouped[key], exact=self._kblock_exact)
         self.scheduled_grouped_calls["grouped_linear"] = (
             self.scheduled_grouped_calls.get("grouped_linear", 0) + 1
         )
@@ -295,7 +418,7 @@ class GGUFWeights:
 
     def moe(self, x, ids, scores, prefix):
         function = packed_moe
-        if self.expert_prefill_policy == "segmented_nax_fp16":
+        if self.expert_prefill_policy in ("segmented_nax_fp16", "segmented_nax_fp16_v2"):
             from .segmented_prefill import (
                 segmented_moe_prefill,
                 segmented_prefill_active,
@@ -303,12 +426,56 @@ class GGUFWeights:
 
             if segmented_prefill_active(x.shape[0]):
                 function = segmented_moe_prefill
+                kblock_experts = all(
+                    self.packed(prefix + f".ffn_{p}_exps.weight").ggml_type in (11, 12, 13, 14)
+                    for p in ("gate", "up", "down"))
+                if kblock_experts and self.expert_prefill_policy == "segmented_nax_fp16_v2":
+                    # Guide-shaped tiles, pre-gathered activations: fp64-equidistant
+                    # to segmented_nax_fp16 (p14-moe-v3), not bit-identical.
+                    from .kblock_prefill_metal import kblock_segmented_moe_prefill_v3
+
+                    function = kblock_segmented_moe_prefill_v3
+                elif self.packed(prefix + ".ffn_gate_exps.weight").ggml_type in (11, 12, 13, 14):
+                    # K-block experts: 32-row tiles (MT=2) halve weight-tile
+                    # decodes; per-output arithmetic is unchanged.
+                    from functools import partial
+
+                    function = partial(segmented_moe_prefill, mt=2, half_x=True)
+                    function.__name__ = "segmented_moe_prefill"
         if function is packed_moe and self.compute_policy == "cooperative":
             from .cooperative_metal import cooperative_moe
 
             function = cooperative_moe
+        if function is packed_moe and self._kblock_rows(
+            self.packed(prefix + ".ffn_gate_exps.weight")
+        ) and self._kblock_rows(self.packed(prefix + ".ffn_down_exps.weight")):
+            from functools import partial
+
+            from .kblock_metal import kblock_moe
+
+            function = partial(kblock_moe, exact=self._kblock_exact)
+            function.__name__ = "kblock_moe"
+            if (getattr(self, "expert_union", False) and x.shape[0] > 1 and not self._kblock_exact
+                    and all(self.packed(prefix + f".ffn_{p}_exps.weight").ggml_type in (11, 12, 13, 14)
+                            for p in ("gate", "up", "down"))):
+                # Multi-row decode/verify: each routed expert decoded once per
+                # run of sorted slots; every slot equals kblock_moe's.
+                from .kblock_metal import kblock_moe_union
+
+                function = kblock_moe_union
         name = function.__name__
         self.scheduled_expert_calls[name] = self.scheduled_expert_calls.get(name, 0) + 1
+        window = getattr(self, "expert_prefill_window", None)
+        if window and name.startswith(("kblock_segmented", "segmented")) and x.shape[0] > window:
+            # Research: bound the segmented scratch by running row windows of
+            # one prompt chunk; each row's output depends on that row only.
+            import mlx.core as mx
+
+            parts = [prefix + f".ffn_{p}_exps.weight" for p in ("gate", "up", "down")]
+            return mx.concatenate([
+                function(x[s:s + window], ids[s:s + window], scores[s:s + window],
+                         *(self.packed(n) for n in parts))
+                for s in range(0, x.shape[0], window)], axis=0)
         return function(
             x,
             ids,
@@ -317,6 +484,79 @@ class GGUFWeights:
             self.packed(prefix + ".ffn_up_exps.weight"),
             self.packed(prefix + ".ffn_down_exps.weight"),
         )
+
+    def multi_linear(self, inputs, names, *, joined=1):
+        """One K-block launch for several projections, or None if not admitted.
+
+        Row-path only: a NAX prefill-tile width keeps the separate projections.
+        Each output equals its kblock_dense call exactly. The first ``joined``
+        outputs come back as one slice, already concatenated in name order.
+        """
+        flats = [x.reshape(-1, x.shape[-1]) for x in inputs]
+        plan = self._multi_plan(names, joined)
+        if plan is None:
+            return None
+        packed, spans = plan
+        if dense_prefill_active(flats[0].shape[0]):
+            return None
+        try:
+            y = kblock_multi(flats, packed, exact=self._kblock_exact)
+        except GGUFError:
+            return None
+        self.scheduled_dense_calls["kblock_rows_multi"] = (
+            self.scheduled_dense_calls.get("kblock_rows_multi", 0) + 1
+        )
+        lead = inputs[0].shape[:-1]
+        return [y[:, a:b].reshape(*lead, b - a) for a, b in spans]
+
+    def _multi_plan(self, names, joined):
+        """(packed weights, output column spans) or None when not admitted."""
+        memo = self._memo()
+        key = ("multi", tuple(names), joined, getattr(self, "row_policy", None))
+        if memo is not None and key in memo:
+            return memo[key]
+        packed = [self.packed(n) for n in names]
+        plan = None
+        if all(self._kblock_rows(w) for w in packed):
+            bounds = [0]
+            for w in packed:
+                bounds.append(bounds[-1] + w.shape[0])
+            plan = packed, tuple(pairwise([0] + bounds[joined:]))
+        if memo is not None:
+            memo[key] = plan
+        return plan
+
+    def moe_with_shared(self, x, ids, scores, prefix, shared_prefix):
+        """Routed experts plus their shared expert in one set of K-block launches.
+
+        Returns None when the row policy or the formats do not admit the fold,
+        so the caller keeps its separate routed + shared computation.
+        """
+        if (self.expert_prefill_policy in _SEGMENTED_EXPERT_POLICIES
+                and segmented_prefill_active(x.shape[0])):
+            return None
+        memo = self._memo()
+        key = ("moe_shared", prefix, shared_prefix, getattr(self, "row_policy", None))
+        if memo is not None and key in memo:
+            packed = memo[key]
+        else:
+            names = [prefix + f".ffn_{p}_exps.weight" for p in ("gate", "up", "down")]
+            shared = [shared_prefix.format(p) for p in ("gate", "up", "down")]
+            packed = [self.packed(n) for n in names + shared]
+            if not all(self._kblock_rows(w) for w in packed):
+                packed = None
+            if memo is not None:
+                memo[key] = packed
+        if packed is None:
+            return None
+        try:
+            result = kblock_moe_shared(x, ids, scores, *packed, exact=self._kblock_exact)
+        except GGUFError:
+            return None
+        self.scheduled_expert_calls["kblock_moe_shared"] = (
+            self.scheduled_expert_calls.get("kblock_moe_shared", 0) + 1
+        )
+        return result
 
     def native_fp32_parameters(self):
         """Only registered native rank2 linears; raw weights stay authoritative."""
@@ -353,6 +593,7 @@ class GGUFWeights:
             self._dense.clear()
             self._grouped.clear()
             getattr(self, "_native_linear_fp32", {}).clear()
+            self.__dict__.pop("_dispatch_cache", None)
             self.file.close()
 
     def verify_storage(self):

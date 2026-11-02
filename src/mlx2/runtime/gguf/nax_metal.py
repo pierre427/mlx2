@@ -9,8 +9,20 @@ This candidate never registers itself as a selected serving route.
 from functools import lru_cache
 from math import prod
 
+from .k_blocks import SIZES as K_FORMATS
 from .packed_metal import HEADER, PackedMatrix
 from .reader import GGUFError
+
+# Q8_0/Q2_K/IQ2_XXS were the original DeepSeek candidates. The K-block types
+# (Q4_0, Q3_K..Q6_K) reuse the same tile through gguf_value's block decode;
+# GLM-5.3 REAP50 is their first consumer (still an explicit FP16-operand law).
+LEGACY_FORMATS = (8, 10, 16)
+NAX_FORMATS = LEGACY_FORMATS + tuple(sorted(K_FORMATS))
+
+
+def nax_admits(ggml_type, n, k):
+    """Whether a packed [n, k] matrix (or each group of one) fits the NAX tile."""
+    return ggml_type in NAX_FORMATS and n % 32 == 0 and k % 256 == 0
 
 NAX_HEADER = (
     HEADER
@@ -108,9 +120,9 @@ def nax_prefill(x, weight: PackedMatrix):
         or x.shape[0] < 1
         or weight.shape[0] % 32
         or x.shape[-1] % 256
-        or weight.ggml_type not in (8, 10, 16)
+        or weight.ggml_type not in NAX_FORMATS
     ):
-        raise GGUFError("GGUF NAX requires block-aligned rank2 Q8_0/Q2_K/IQ2_XXS")
+        raise GGUFError("GGUF NAX requires block-aligned rank2 Q8_0/Q2_K/IQ2_XXS/K-block")
     m, k = x.shape
     n = weight.shape[0]
     return _kernel()(
@@ -140,7 +152,7 @@ def nax_grouped_prefill(x, weight: PackedMatrix):
     if (len(weight.shape) != 3 or x.ndim < 2
             or x.shape[-2:] != (weight.shape[0], weight.shape[2])
             or weight.shape[1] % 32 or weight.shape[2] % 256
-            or weight.ggml_type not in (8, 10, 16)):
+            or weight.ggml_type not in NAX_FORMATS):
         raise GGUFError("GGUF grouped NAX requires block-aligned [...,groups,in] input")
     groups, n, k = weight.shape
     leading = x.shape[:-2]

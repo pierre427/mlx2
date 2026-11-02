@@ -8,7 +8,7 @@ _DENSE_PREFILL=ContextVar('mlx2_deepseek_dense_prefill',default=None)
 
 @contextmanager
 def dense_prefill_context(policy,*,tokens):
-    if policy not in ('reference','nax_fp16'):
+    if policy not in ('reference','nax_fp16','nax_fp16_v2','nax_fp16_v2d'):
         raise GGUFError('unknown dense prefill arithmetic policy')
     if type(tokens) is not int or tokens<=0:
         raise GGUFError('dense prefill context requires positive token count')
@@ -19,4 +19,5 @@ def dense_prefill_context(policy,*,tokens):
 
 def dense_prefill_active(rows):
     """Ordinary decode and slab verification never infer scope from width."""
-    return type(rows) is int and rows>=16 and _DENSE_PREFILL.get()==('nax_fp16',rows)
+    active=_DENSE_PREFILL.get()
+    return type(rows) is int and rows>=16 and active in (('nax_fp16',rows),('nax_fp16_v2',rows),('nax_fp16_v2d',rows))

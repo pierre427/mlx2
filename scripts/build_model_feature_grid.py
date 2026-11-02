@@ -49,7 +49,14 @@ VARIANTS = {
 # not a statement that every registered model implements each feature.
 FEATURES = (
     "gguf_native_packed_read_view", "gguf_native_k_blocks",
-    "glm53_shared_layer_ast", "draft_bf16_activation_boundary",
+    "glm53_shared_layer_ast", "draft_bf16_activation_boundary", "mla_prefill_causal_key_trim",
+    "glm53_indexer_pools_incremental_v1", "glm53_indexer_select_topk_v1",
+    "glm53_indexer_select_topk_v1_kernel", "glm53_sparse_attention_gathered_v1",
+    "glm53_sparse_attention_fused_decode_v1", "glm53_sparse_prefill_gathered_v1",
+    "glm53_tree_rows_attention_batched_v1", "glm53_tree_frontier_tails_v1",
+    "glm53_router_fused_v1", "glm53_kda_small_fused_v1",
+    "glm53_compile_regions_v1", "glm53_kda_fused_decode_v1", "glm53_kv_append_rotate_v1",
+    "glm53_mla_fused_decode_v1", "glm53_hc_fused_v1", "glm53_router_fused_v2",
     "ordinary_prefill_plan_exact", "lane_dense", "native_mtp_num_draft", "mtp_batched_prefill",
     "qsa_batch_decode_sparse", "varlen_sparse_moe", "fp32_head_logits", "gdn_state_dtype_float16", "qsa_lazy_causal_mask", "qsa_stage1_direct_selector", "ple_read_policy_adaptive", "mtp_draft_vocab", "compact_moe_prefill", "qsa_prefetch_partials", "tensorfold_qmv_rows", "tensorfold_prefill", "gdn_core",
     "prefill_plan_exact_slices", "async_qsa_promotion", "apc_eviction_queued_protection",

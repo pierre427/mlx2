@@ -37,8 +37,15 @@ class Glm53MTPHead(nn.Module):
             eps,
         )
         h = rms(hidden, w.array(p + ".nextn.hnorm.weight"), eps)
+        # The head owns its cache, whose positions differ from the trunk's:
+        # its own integer offset is the MLA frontier, never the trunk's.
+        frontier = cache[0].offset
+        if type(frontier) is not int:
+            raise ValueError("GLM-5.3 MTP head requires an integer MLA frontier")
         x = w.linear(p + ".nextn.eh_proj.weight")(mx.concatenate((e, h), axis=-1))
-        x = x + m._mla(rms(x, w.array(p + ".attn_norm.weight"), eps), cache[0], p)
+        x = x + m._mla(
+            rms(x, w.array(p + ".attn_norm.weight"), eps), cache[0], p, frontier=frontier
+        )
         x = x + m._mlp(rms(x, w.array(p + ".ffn_norm.weight"), eps), p, 45)
         seed = rms(x, w.array(p + ".nextn.shared_head_norm.weight"), eps)
         return w.linear("output.weight")(seed), seed

@@ -14,6 +14,7 @@ from pathlib import Path
 import mlx.core as mx
 
 from ..runtime.cow_cache import snapshot_prompt_cache_descriptors
+from ..runtime.models.glm53_sparse_attention import Glm53MLAFrontier
 from ..runtime.target_tree_executor import TargetTreeDispatchMetrics
 
 PROTOCOL = "glm53-ordinary-row-tree-v1"
@@ -23,6 +24,7 @@ SOURCE_PATHS = (
     "src/mlx2/adapters/glm53_layer_tree.py",
     "src/mlx2/runtime/models/glm53_gguf.py",
     "src/mlx2/runtime/models/glm53_gguf_indexer.py",
+    "src/mlx2/runtime/models/glm53_sparse_attention.py",
     "src/mlx2/runtime/gguf/packed_metal.py",
     "src/mlx2/runtime/gguf/k_metal.py",
     "src/mlx2/runtime/cow_cache.py",
@@ -85,7 +87,30 @@ class Glm53TreeTransaction:
             or any(self.parents[i] != p for p, i in zip((-1, *path[:-1]), path))
         ):
             raise ValueError("GLM-5.3 AST commit requires a root-connected path")
-        return clone(self.base if not path else self.frontiers[path[-1]])
+        return self.materialize(self.base if not path else self.frontiers[path[-1]])
+
+    def materialize(self, states):
+        """Real caches for one path: clones, and Glm53MLACache for MLA frontiers.
+
+        A frontier (glm53_tree_frontier=tails_v1) becomes clone(base) plus
+        its tail rows appended one at a time, equal to the clone-and-append
+        path's state bit for bit; KDA layers are descriptor clones as before.
+        """
+        frontier = [isinstance(s, Glm53MLAFrontier) for s in states]
+        if not any(frontier):
+            return clone(states)
+        plain = [s for s, f in zip(states, frontier) if not f]
+        plain = iter(clone(plain) if plain else ())
+        calls = getattr(self.provider.model, "calls", None)
+        result = []
+        for state, is_frontier in zip(states, frontier):
+            if not is_frontier:
+                result.append(next(plain))
+                continue
+            result.append(state.materialize(clone=clone))
+            if calls is not None:
+                calls["tree_frontier_materialized"] = calls.get("tree_frontier_materialized", 0) + 1
+        return result
 
     def commit_paths(self, paths):
         if len(paths) != 1:
@@ -224,4 +249,7 @@ class Glm53TargetTreeExecutor:
             "batched_attention_output_projection": self.implementation == "layered",
             "tree_transactions": self.invocations,
             "numerics": "ordinary B1 per node; private exact parent checkpoints",
+            # Layered-tree MLA policies (glm53_layer_tree); defaults = today.
+            "tree_rows_attention": getattr(self.model, "tree_rows_attention", "per_row"),
+            "tree_frontier": getattr(self.model, "tree_frontier", "clone"),
         }

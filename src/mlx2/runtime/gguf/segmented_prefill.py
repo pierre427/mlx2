@@ -15,7 +15,7 @@ from contextvars import ContextVar
 import math
 
 from .reader import GGUFError
-from .nax_metal import NAX_HEADER
+from .nax_metal import NAX_FORMATS
 
 POLICY='gguf-segmented-nax-fp16-v1'
 TILE_ROWS=16
@@ -30,7 +30,7 @@ def expert_prefill_context(policy, *, tokens):
     merely because their sequence contains multiple rows. Width binding also
     prevents a nested operation from treating another row geometry as prefill.
     """
-    if policy not in ('reference','segmented_nax_fp16'):
+    if policy not in ('reference','segmented_nax_fp16','segmented_nax_fp16_v2'):
         raise GGUFError('unknown expert prefill arithmetic policy')
     if type(tokens) is not int or tokens<=0:
         raise GGUFError('expert prefill context requires positive token count')
@@ -44,7 +44,7 @@ def expert_prefill_context(policy, *, tokens):
 def segmented_prefill_active(tokens):
     """Factory gate: exact scoped prompt width and at least one full tile."""
     return (type(tokens) is int and tokens>=TILE_ROWS
-            and _PREFILL_REQUEST.get()==('segmented_nax_fp16',tokens))
+            and _PREFILL_REQUEST.get() in (('segmented_nax_fp16',tokens),('segmented_nax_fp16_v2',tokens)))
 
 SCAN_SOURCE=r'''
 const uint tid=thread_index_in_threadgroup;
@@ -69,7 +69,7 @@ if(tid<EXPERTS) {
     while(lo<hi) { uint mid=(lo+hi)/2; if(sorted_ids[mid]<=tid) lo=mid+1; else hi=mid; }
     last=lo;
 }
-const uint count=(last-first+15)/16;
+const uint count=(last-first+TILE-1)/TILE;
 scan[tid]=count;
 threadgroup_barrier(mem_flags::mem_threadgroup);
 for(uint stride=1;stride<256;stride*=2) {
@@ -85,8 +85,8 @@ if(total>MAX_TILES) {
 }
 const uint start=scan[tid]-count;
 for(uint tile=0;tile<count;tile++) {
-    const uint row=first+tile*16;
-    *((device uint4*)tiles+start+tile)=uint4(row,tid,min(16u,last-row),0);
+    const uint row=first+tile*TILE;
+    *((device uint4*)tiles+start+tile)=uint4(row,tid,min(uint(TILE),last-row),0);
 }
 if(tid==0) { tile_count[0]=total; status[0]=0; }
 '''
@@ -103,7 +103,7 @@ const int colbase=(threadgroup_position_in_grid.x*4+sg)*32;
 const short qid=lane>>2;
 const short fm=(qid&4)|((lane>>1)&3);
 const short fn=((qid&2)|(lane&1))*4;
-threadgroup half xa[16*64];
+threadgroup half xa[MT*16*64];
 threadgroup half weights[4*32*64];
 threadgroup half* wb=weights+sg*32*64;
 constexpr auto desc_mma=matmul2d_descriptor(16,32,64,false,true,false,
@@ -113,18 +113,22 @@ matmul2d<desc_mma,execution_simdgroup> op;
 
 
 def _project_source(*,gate_up):
-    accumulator='''float sums[16];
+    accumulator='''float sums[MT][16];
 #pragma clang loop unroll(full)
-for(int j=0;j<16;j++) sums[j]=0.0f;
+for(int m=0;m<MT;m++)
+#pragma clang loop unroll(full)
+    for(int j=0;j<16;j++) sums[m][j]=0.0f;
 '''
     if gate_up:
-        accumulator+='''float up_sums[16];
+        accumulator+='''float up_sums[MT][16];
 #pragma clang loop unroll(full)
-for(int j=0;j<16;j++) up_sums[j]=0.0f;
+for(int m=0;m<MT;m++)
+#pragma clang loop unroll(full)
+    for(int j=0;j<16;j++) up_sums[m][j]=0.0f;
 '''
     source=COMMON_PREFIX+accumulator+r'''
 for(int kb=0;kb<K;kb+=64) {
-    for(int i=tid;i<16*64;i+=128) {
+    for(int i=tid;i<MT*16*64;i+=128) {
         const uint row=i/64; const int k=kb+i%64;
 '''
     source+=('''        const uint token=row<valid_rows ? order[rowbase+row]/TOPK : 0;
@@ -133,48 +137,83 @@ for(int kb=0;kb<K;kb+=64) {
 ''')
     source+=r'''
     }
+    if(FORMAT==2 || (FORMAT>=11 && FORMAT<=14)) {
+        // K-block chunk fill: same half(value) as gguf_value, scales once per chunk.
+        for(int t=0;t<2;t++) {
+            const int item=lane+32*t, r=item/2, part=item%2;
+            const int row=colbase+r;
+            threadgroup half *dst=wb+r*64+part*32;
+            if(row<N) kblock_values32(w+(ulong(expert)*N+row)*ROW_BYTES,uint(kb/32+part),dst,FORMAT);
+            else for(int j=0;j<32;j++) dst[j]=half(0.0f);
+        }
+    } else
     for(int i=lane;i<32*64;i+=32) {
         const int row=colbase+i/64,k=kb+i%64;
         wb[i]=row<N ? half(gguf_value(w+(ulong(expert)*N+row)*ROW_BYTES,k,FORMAT)) : half(0.0f);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    tensor<threadgroup half,dextents<int32_t,2>,tensor_inline> a(xa,dextents<int32_t,2>(64,16));
+    {
     tensor<threadgroup half,dextents<int32_t,2>,tensor_inline> b(wb,dextents<int32_t,2>(64,32));
-    auto product=op.template get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
-    op.run(a,b,product);
 #pragma clang loop unroll(full)
-    for(int j=0;j<16;j++) sums[j]+=product[j];
+    for(int m=0;m<MT;m++) {
+        tensor<threadgroup half,dextents<int32_t,2>,tensor_inline> a(xa+m*16*64,dextents<int32_t,2>(64,16));
+        auto product=op.template get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
+        op.run(a,b,product);
+#pragma clang loop unroll(full)
+        for(int j=0;j<16;j++) sums[m][j]+=product[j];
+    }
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 '''
     if gate_up:
         source+=r'''
     // Reuse the18KiB staging allocation, retaining FP32 gate accumulators.
+    if(FORMAT==2 || (FORMAT>=11 && FORMAT<=14)) {
+        // K-block chunk fill: same half(value) as gguf_value, scales once per chunk.
+        for(int t=0;t<2;t++) {
+            const int item=lane+32*t, r=item/2, part=item%2;
+            const int row=colbase+r;
+            threadgroup half *dst=wb+r*64+part*32;
+            if(row<N) kblock_values32(up+(ulong(expert)*N+row)*ROW_BYTES,uint(kb/32+part),dst,FORMAT);
+            else for(int j=0;j<32;j++) dst[j]=half(0.0f);
+        }
+    } else
     for(int i=lane;i<32*64;i+=32) {
         const int row=colbase+i/64,k=kb+i%64;
         wb[i]=row<N ? half(gguf_value(up+(ulong(expert)*N+row)*ROW_BYTES,k,FORMAT)) : half(0.0f);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    op.run(a,b,product);
+    {
+    tensor<threadgroup half,dextents<int32_t,2>,tensor_inline> b(wb,dextents<int32_t,2>(64,32));
 #pragma clang loop unroll(full)
-    for(int j=0;j<16;j++) up_sums[j]+=product[j];
+    for(int m=0;m<MT;m++) {
+        tensor<threadgroup half,dextents<int32_t,2>,tensor_inline> a(xa+m*16*64,dextents<int32_t,2>(64,16));
+        auto product=op.template get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
+        op.run(a,b,product);
+#pragma clang loop unroll(full)
+        for(int j=0;j<16;j++) up_sums[m][j]+=product[j];
+    }
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 '''
     source+=r'''
 }
 #pragma clang loop unroll(full)
+for(int m=0;m<MT;m++)
+#pragma clang loop unroll(full)
 for(int f=0;f<2;f++) {
 #pragma clang loop unroll(full)
     for(int r=0;r<2;r++) {
-        const uint row=fm+r*8; const int col=colbase+f*16+fn;
+        const uint row=m*16+fm+r*8; const int col=colbase+f*16+fn;
         if(row<valid_rows && col<N) {
 #pragma clang loop unroll(full)
             for(int j=0;j<4;j++) {
 '''
     source+=('''                const int index=f*8+r*4+j;
-                const float gate=min(sums[index],10.0f);
-                const float u=clamp(up_sums[index],-10.0f,10.0f);
+                const float gate=min(sums[m][index],10.0f);
+                const float u=clamp(up_sums[m][index],-10.0f,10.0f);
                 y[ulong(rowbase+row)*N+col+j]=(gate/(1.0f+metal::precise::exp(-gate)))*u;
-''' if gate_up else '''                y[ulong(rowbase+row)*N+col+j]=sums[f*8+r*4+j];
+''' if gate_up else '''                y[ulong(rowbase+row)*N+col+j]=sums[m][f*8+r*4+j];
 ''')
     return source+'            }\n        }\n    }\n}\n'
 
@@ -205,8 +244,12 @@ def _kernel(kind):
         'combine':(['rows','inverse','scores','status'],['out'],COMBINE_SOURCE),
     }
     ins,outs,source=sources[kind]
-    return mx.fast.metal_kernel(name='mlx2_gguf_segmented_nax_'+kind+'_v1',
-        input_names=ins,output_names=outs,header=NAX_HEADER,source=source,
+    from .kblock_prefill_metal import HEADER as KBLOCK_NAX_HEADER
+
+    # v2: K-block formats fill tiles by chunk decode (same half values);
+    # IQ2_XXS/Q2_K/Q8_0 keep v1's per-element fill unchanged.
+    return mx.fast.metal_kernel(name='mlx2_gguf_segmented_nax_'+kind+'_v2',
+        input_names=ins,output_names=outs,header=KBLOCK_NAX_HEADER,source=source,
         ensure_row_contiguous=True)
 
 
@@ -224,20 +267,20 @@ class SegmentedPlan:
     max_tiles:int
 
 
-def plan_capacity(rows,experts):
+def plan_capacity(rows,experts,tile=TILE_ROWS):
     if type(rows) is not int or type(experts) is not int or not 1<=experts<=256 or rows<1 or rows*experts>=2**32:
         raise GGUFError('segmented plan requires positive rows,<=256experts and unique32bit composite keys')
-    return min(rows,(rows+15)//16+experts-1)
+    return min(rows,(rows+tile-1)//tile+experts-1)
 
 
-def reference_plan(ids,experts):
+def reference_plan(ids,experts,tile=TILE_ROWS):
     """Independent CPU descriptor oracle, not a model execution backend."""
     import numpy as np
     if ids.ndim!=2 or not np.issubdtype(ids.dtype,np.integer) or ids.size<1:
         raise GGUFError('CPU plan requires nonempty integer[T,topk]IDs')
     if np.any(ids<0) or np.any(ids>=experts):
         raise GGUFError('CPU plan IDs outside expert table')
-    capacity=plan_capacity(ids.size,experts)
+    capacity=plan_capacity(ids.size,experts,tile)
     flat=ids.reshape(-1)
     order=np.argsort(flat,kind='stable').astype(np.uint32)
     inverse=np.argsort(order).astype(np.uint32)
@@ -246,20 +289,20 @@ def reference_plan(ids,experts):
     for expert in range(experts):
         assigned=np.flatnonzero(sorted_ids==expert)
         if not assigned.size: continue
-        for start in range(0,len(assigned),16):
-            tiles.append((int(assigned[start]),expert,min(16,len(assigned)-start),0))
+        for start in range(0,len(assigned),tile):
+            tiles.append((int(assigned[start]),expert,min(tile,len(assigned)-start),0))
     if len(tiles)>capacity: raise GGUFError('CPU tile bound violated')
     return {'order':order,'inverse':inverse,'sorted_ids':sorted_ids,
             'tiles':np.array(tiles,np.uint32).reshape(-1,4),'max_tiles':capacity}
 
 
-def build_plan(ids,experts):
+def build_plan(ids,experts,tile=TILE_ROWS):
     import mlx.core as mx
     if mx.default_device()!=mx.gpu or not mx.metal.is_available():
         raise GGUFError('segmented GPU plan requires an owned Metal execution window')
     if ids.ndim!=2 or ids.dtype!=mx.uint32:
         raise GGUFError('segmented GPU plan requires uint32[T,topk]IDs')
-    rows=ids.size; capacity=plan_capacity(rows,experts)
+    rows=ids.size; capacity=plan_capacity(rows,experts,tile)
     flat=ids.reshape(-1)
     # Unique composite keys provide stable expert order even when argsort's
     # equal-key stability is unspecified. No device-to-host count transfer.
@@ -268,7 +311,7 @@ def build_plan(ids,experts):
     inverse=mx.argsort(order).astype(mx.uint32)
     sorted_ids=flat[order]
     tiles,count,status=_kernel('scan')(inputs=[sorted_ids,flat],
-        template=[('ROWS',rows),('EXPERTS',experts),('MAX_TILES',capacity)],
+        template=[('ROWS',rows),('EXPERTS',experts),('MAX_TILES',capacity),('TILE',tile)],
         grid=(256,1,1),threadgroup=(256,1,1),
         output_shapes=[(capacity,4),(1,),(1,)],output_dtypes=[mx.uint32]*3)
     return SegmentedPlan(order,inverse,sorted_ids,tiles,count,status,rows,experts,ids.shape[1],capacity)
@@ -288,7 +331,7 @@ def _validate(x,ids,scores,gate,up,down,max_scratch_bytes):
     experts,hidden,k=gate.shape
     if down.shape!=(experts,k,hidden) or x.shape[1]!=k or ids.shape[1]>experts:
         raise GGUFError('segmented down/input/expert geometry mismatch')
-    if gate.ggml_type!=up.ggml_type or any(w.ggml_type not in (8,10,16) for w in (gate,up,down)):
+    if gate.ggml_type!=up.ggml_type or any(w.ggml_type not in NAX_FORMATS for w in (gate,up,down)):
         raise GGUFError('segmented native GGUF formats unsupported')
     if k%256 or hidden%256:
         raise GGUFError('segmented GGUF rows must align256coordinates')
@@ -298,7 +341,7 @@ def _validate(x,ids,scores,gate,up,down,max_scratch_bytes):
     return experts,hidden,k
 
 
-def segmented_moe_prefill(x,ids,scores,gate,up,down,*,max_scratch_bytes=512<<20):
+def segmented_moe_prefill(x,ids,scores,gate,up,down,*,max_scratch_bytes=512<<20,mt=1,half_x=False):
     """Explicit M5 NAX candidate; no automatic fallback or serving selection."""
     import mlx.core as mx
     if mx.default_device()!=mx.gpu or not mx.metal.is_available() or 'Apple M5' not in mx.device_info().get('device_name',''):
@@ -306,13 +349,19 @@ def segmented_moe_prefill(x,ids,scores,gate,up,down,*,max_scratch_bytes=512<<20)
     experts,hidden,k=_validate(x,ids,scores,gate,up,down,max_scratch_bytes)
     if ids.dtype!=mx.uint32:
         raise GGUFError('segmented expert IDs must beuint32')
-    plan=build_plan(ids,experts)
-    common=[('TOPK',ids.shape[1]),('K',k),('N',hidden),('ROW_BYTES',gate.row_bytes),('FORMAT',gate.ggml_type)]
-    mid=_kernel('gate_up')(inputs=[x.astype(mx.float32),plan.order,plan.tiles,plan.tile_count,gate.data,up.data],
+    if mt not in (1,2):
+        raise GGUFError('segmented prefill row tiles MT must be 1 or 2')
+    # MT row tiles of one expert share a decoded weight tile; each output keeps
+    # the same per-64-K MMA chain, so MT changes no output bits.
+    plan=build_plan(ids,experts,16*mt)
+    common=[('TOPK',ids.shape[1]),('K',k),('N',hidden),('ROW_BYTES',gate.row_bytes),('FORMAT',gate.ggml_type),('MT',mt)]
+    # half_x: cast activations once (same RTNE rounding the tile applies) so
+    # every expert tile reads half the bytes; mid stays FP32 for down's input.
+    mid=_kernel('gate_up')(inputs=[x.astype(mx.float16 if half_x else mx.float32),plan.order,plan.tiles,plan.tile_count,gate.data,up.data],
         template=common,grid=(((hidden+127)//128)*128,plan.max_tiles,1),threadgroup=(128,1,1),
         output_shapes=[(plan.assignment_rows,hidden)],output_dtypes=[mx.float32])[0]
     projected=_kernel('down')(inputs=[mid,plan.tiles,plan.tile_count,down.data],
-        template=[('K',hidden),('N',k),('ROW_BYTES',down.row_bytes),('FORMAT',down.ggml_type)],
+        template=[('K',hidden),('N',k),('ROW_BYTES',down.row_bytes),('FORMAT',down.ggml_type),('MT',mt)],
         grid=(((k+127)//128)*128,plan.max_tiles,1),threadgroup=(128,1,1),
         output_shapes=[(plan.assignment_rows,k)],output_dtypes=[mx.float32])[0]
     return _kernel('combine')(inputs=[projected,plan.inverse,scores.astype(mx.float32).reshape(-1),plan.status],
@@ -323,7 +372,7 @@ def segmented_moe_prefill(x,ids,scores,gate,up,down,*,max_scratch_bytes=512<<20)
 
 def metal_compile_source(kind):
     """Standalone Metal4 CPU compiler source; never dispatches a GPU."""
-    constants='\nconstant uint ROWS=192,EXPERTS=6,MAX_TILES=17,TOPK=6,K=256,N=256,FORMAT=16,ROW_BYTES=66,TOKENS=32;\n'
+    constants='\nconstant uint ROWS=192,EXPERTS=6,MAX_TILES=17,TOPK=6,K=256,N=256,FORMAT=16,ROW_BYTES=66,TOKENS=32,TILE=32,MT=2;\n'
     bindings={
         'scan':'device const uint* sorted_ids [[buffer(0)]],device const uint* original_ids [[buffer(1)]],device uint* tiles [[buffer(2)]],device uint* tile_count [[buffer(3)]],device uint* status [[buffer(4)]],',
         'gate_up':'device const float* x [[buffer(0)]],device const uint* order [[buffer(1)]],device const uint* tiles [[buffer(2)]],device const uint* tile_count [[buffer(3)]],device const uchar* w [[buffer(4)]],device const uchar* up [[buffer(5)]],device float* y [[buffer(6)]],',
@@ -332,4 +381,6 @@ def metal_compile_source(kind):
     }
     attrs='uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],uint3 thread_position_in_grid [[thread_position_in_grid]],uint thread_index_in_threadgroup [[thread_index_in_threadgroup]],uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]'
     source={'scan':SCAN_SOURCE,'gate_up':GATE_UP_SOURCE,'down':DOWN_SOURCE,'combine':COMBINE_SOURCE}[kind]
-    return '#include <metal_stdlib>\nusing namespace metal;\n'+NAX_HEADER+constants+'kernel void compile_'+kind+'('+bindings[kind]+attrs+') {\n'+source+'\n}\n'
+    from .kblock_prefill_metal import HEADER as KBLOCK_NAX_HEADER
+
+    return '#include <metal_stdlib>\nusing namespace metal;\n'+KBLOCK_NAX_HEADER+constants+'kernel void compile_'+kind+'('+bindings[kind]+attrs+') {\n'+source+'\n}\n'
