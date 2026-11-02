@@ -1123,6 +1123,8 @@ def _add_apcv2(
     for key in (
         "idle_spills",
         "pressure_spills",
+        "pressure_superseded_drops",
+        "superseded_drop_regrets",
         "restores",
         "restore_failures",
         "restore_budget_deferrals",

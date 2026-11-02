@@ -195,6 +195,9 @@ ADAPTER_DEFAULT_POLICY_KEYS = frozenset(
         "self_mtp_copy_draft",
         "prefill_scheduling",
         "host_memory_signals",
+        # Which disk-tier writes a pressure eviction makes; served state and
+        # token math are unchanged.
+        "apc_pressure_drop_superseded",
         # Publication order only (decode tokens before the round's prefill
         # phase); device work and token math are unchanged.
         "decode_first",

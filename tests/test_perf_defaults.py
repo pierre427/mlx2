@@ -274,6 +274,32 @@ def test_flash_next_native_mtp_defaults_match_gated_copy_drafts():
     assert off["self_mtp_copy_draft"] == {"enabled": False}
 
 
+def test_superseded_pressure_drops_default_on_flash_next_native_mtp_only():
+    from mlx2.serving import ServingEngine
+
+    resolution = _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
+    policy = resolve_execution_policy_defaults(None, MTP, resolution)
+    assert policy["apc_pressure_drop_superseded"] is True
+    ServingEngine.validate_arguments("unused", execution_policy=policy)
+    assert "apc_pressure_drop_superseded" not in (
+        resolve_execution_policy_defaults(None, ORDINARY, resolution) or {}
+    )
+    # Measured on Flash-Next only: neither its subclasses nor other hybrids.
+    for adapter_type, descriptor in (
+        (Nemotron3SuperAdapter, NEMOTRON),
+        (Qwen3827BAdapter, QWEN38_27B),
+        (Qwen3635BA3BAdapter, qwen36(has_mtp=True)),
+    ):
+        assert "apc_pressure_drop_superseded" not in (
+            resolve_execution_policy_defaults(
+                None, MTP, _resolution(adapter_type, descriptor)
+            ) or {}
+        )
+    assert resolve_execution_policy_defaults(
+        {"apc_pressure_drop_superseded": False}, MTP, resolution
+    )["apc_pressure_drop_superseded"] is False
+
+
 @pytest.mark.parametrize(
     ("adapter_type", "descriptor"),
     [

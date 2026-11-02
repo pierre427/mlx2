@@ -76,6 +76,7 @@ SERVER_OWNED_EXECUTION_POLICY_KEYS = frozenset(
         "apc_inflight_prefix_wait",
         "apc_retention_policy",
         "apc_rolling_checkpoints",
+        "apc_pressure_drop_superseded",
         "host_memory_signals",
         "moe_expert_streaming",
         "dense_weight_streaming",
@@ -736,6 +737,22 @@ def apc_interior_checkpoint_policy(value) -> dict:
     if float(uncached) != 0.0:
         result["min_uncached_fraction"] = float(uncached)
     return result
+
+
+def apc_pressure_drop_superseded_selection(value, environment=None) -> dict:
+    """``apc_pressure_drop_superseded`` from its policy value and env override.
+
+    The policy value is a boolean (an adapter route default or an operator's
+    choice); a set ``MLX2_APC_PRESSURE_DROP_SUPERSEDED`` must be "0" or "1"
+    and wins over it.
+    """
+    if not isinstance(value, bool):
+        raise ValueError("apc_pressure_drop_superseded must be a boolean")
+    if environment is None:
+        return {"enabled": value, "source": "policy"}
+    if environment not in {"0", "1"}:
+        raise ValueError("MLX2_APC_PRESSURE_DROP_SUPERSEDED must be 0 or 1")
+    return {"enabled": environment == "1", "source": "environment"}
 
 
 def host_memory_signals_policy(value) -> dict:
@@ -4309,6 +4326,14 @@ class ServingEngine:
 
         self.apc_retention_policy = apc_retention_policy(
             (execution_policy or {}).get("apc_retention_policy")
+        )
+        # Drop a pressure victim that a stored later turn covers instead of
+        # writing it to the disk tier (runtime/apc_v2.py).  The policy key is
+        # an adapter route default where measured;
+        # MLX2_APC_PRESSURE_DROP_SUPERSEDED=0|1 overrides it either way.
+        self.apc_pressure_drop_superseded = apc_pressure_drop_superseded_selection(
+            (execution_policy or {}).get("apc_pressure_drop_superseded", False),
+            os.environ.get("MLX2_APC_PRESSURE_DROP_SUPERSEDED"),
         )
         # Default-off: route small-M 4/5-bit verify matmuls through the mlx2
         # simdgroup kernel (runtime/models/sp_qmm.py) where it measured faster.
@@ -10202,6 +10227,11 @@ class ServingEngine:
             if self.apc_retention_policy is not None:
                 # Present only when selected so default receipts stay identical.
                 settings["apc_retention_policy"] = dict(self.apc_retention_policy)
+            if self.apc_pressure_drop_superseded["enabled"]:
+                # Present only when selected so default receipts stay identical.
+                settings["apc_pressure_drop_superseded"] = dict(
+                    self.apc_pressure_drop_superseded
+                )
             if (
                 self.apc_rolling_checkpoint_policy["interval_tokens"]
                 and not self.apc_rolling_checkpoint_default
@@ -11167,6 +11197,7 @@ class ServingEngine:
                 # TTFT (~1 s per 27B 4K-token request, intake-probes-20261007).
                 # MLX2_APC_BACKGROUND_SPILL=0 restores synchronous writes.
                 background_spill=os.environ.get("MLX2_APC_BACKGROUND_SPILL", "1") != "0",
+                pressure_drop_superseded=self.apc_pressure_drop_superseded["enabled"],
                 # AST metadata is an APCv2 child and remains opt-in. Debug is
                 # independently opt-in and can never authorize execution.
                 ast_memo_enabled=os.environ.get("MLX2_AST_MEMO", "0") == "1",

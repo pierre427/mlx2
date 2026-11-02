@@ -159,6 +159,7 @@ FEATURES = (
     "qsa_nax_prefill", "qsa_nax_batched", "qsa_nax_decode", "qsa_b1_selected",
     "invariant_prefill", "quantized_kv", "approximate_kv",
     "host_memory_signals", "host_available_floor", "weight_streaming",
+    "apc_pressure_drop_superseded",
     "constrained_tool_grammar", "strict_json_schema", "thinking_guard",
     "exact_prefill_projection_law", "native_mtp_packed_paths",
     "shared_root_tensorfold_tree_target", "ast_native_mtp_packed_3x5",

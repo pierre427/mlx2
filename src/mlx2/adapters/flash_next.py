@@ -446,6 +446,14 @@ class FlashNextAdapter:
         },
         "native_mtp": {
             "host_memory_signals": {"enabled": True},
+            # Default since 2026-11-01 (Pierre): a pressure eviction drops a
+            # checkpoint a stored later turn covers instead of writing it to
+            # disk.  Service A/B on 25c2da42 @ 1e0396613: two long agent
+            # sessions wrote 10.8 GB vs 64.6 GB with identical cached tokens
+            # and loop time -10%; six rotating sessions -7%; a retry branching
+            # off an old turn re-prefilled 6-42K tokens
+            # (qualification/runs/fn-pressure-drop-ab-20261101).  Unqualified.
+            "apc_pressure_drop_superseded": True,
             "apc_interior_checkpoints": "auto",
             "self_mtp_copy_draft": {
                 "enabled": True, "max_span": 7, "min_match": 8,

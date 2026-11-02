@@ -2,6 +2,7 @@
 # Standalone APCv2; provenance and retained notices in provenance/.
 from __future__ import annotations
 import ast
+import collections
 import copy
 from bisect import bisect_left
 import fcntl
@@ -809,6 +810,10 @@ _SPILL_QUARANTINE_LOCK = threading.Lock()
 # Truthy result of a spill call that only published an earlier background
 # write; that write's window event was recorded when it was handed off.
 _SPILL_SETTLED = "settled"
+# Truthy result of a pressure spill that dropped a superseded entry instead of
+# writing it (``pressure_drop_superseded``): its resident bytes are free and
+# nothing was written.
+_SPILL_DROPPED_SUPERSEDED = "dropped_superseded"
 # Writer -> its timed-out jobs that have not returned yet.
 _SPILL_QUARANTINES = {}
 
@@ -930,6 +935,8 @@ class APCv2(PrefixIndex):
     _metadata_operation = None
     _metadata_completion = "ready"
     _turn_supersessions = {}
+    _pressure_drop_superseded = False
+    _superseded_drop_ghosts = ()
     _ast_memo = None
     # Windowed spill/restore activity (rolling_counter); created on first use
     # so instances built with object.__new__ still report it.
@@ -978,6 +985,13 @@ class APCv2(PrefixIndex):
         "quarantine_evictions",
         "restore_digest_failures",
         "restore_nonfinite_state",
+        # pressure_drop_superseded: pressure victims dropped unwritten because
+        # a stored descendant covers them, their resident bytes, and lookups
+        # that one of those drops left shallower than it would have served.
+        "pressure_superseded_drops",
+        "pressure_superseded_drop_bytes",
+        "superseded_drop_regrets",
+        "superseded_drop_regret_tokens",
     )
     _PERSIST_SCHEMA = "mlx2.apcv2.persisted-entry.v1"
     _SESSION_TAG_LIMIT = 16
@@ -1015,6 +1029,15 @@ class APCv2(PrefixIndex):
     # Ancestors walked from a finished turn to find its prompt boundary
     # (interior and junction checkpoints may lie between them).
     _SUPERSESSION_WALK_LIMIT = 8
+    # Roles pressure_drop_superseded may drop.  Interior and junction
+    # checkpoints exist to serve prompts that diverge below a deeper entry,
+    # which is exactly what a descendant cannot do.
+    _SUPERSEDED_DROP_ROLES = frozenset(
+        {_RETENTION_DEFAULT, _RETENTION_PROMPT_BOUNDARY, _RETENTION_ROLLING}
+    )
+    # Recent superseded drops kept as token paths so a lookup can tell whether
+    # one of them would have served it deeper (bounded memory: <= 32 paths).
+    _SUPERSEDED_DROP_GHOSTS = 32
     # Served depths kept per entry so a withdrawn hit can restore the depth
     # it replaced; older hits fold into a base nothing withdraws.
     _SERVED_DEPTH_HISTORY = 16
@@ -1058,6 +1081,7 @@ class APCv2(PrefixIndex):
         retention_policy: Any = None,
         background_spill: bool = False,
         background_spill_max_bytes: Optional[int] = None,
+        pressure_drop_superseded: bool = False,
         ast_memo_enabled: bool = False,
         ast_memo_debug: bool = False,
     ):
@@ -1069,6 +1093,17 @@ class APCv2(PrefixIndex):
         # a quarter of the resident budget (at least 1 GiB) before spills
         # fall back to writing synchronously.
         self._background_spill = bool(background_spill)
+        # Opt-in: a pressure victim with a stored descendant on its path (the
+        # same conversation's later turn) is dropped instead of written to the
+        # disk tier.  An agent loop writes every turn as a whole new snapshot,
+        # almost all of it the previous turn's, and its next request resumes
+        # from the newest turn, so most such writes were never read back
+        # (flash-next service 2026-11-01: 1.33 TB written, 182 GB read in
+        # 5.6 h).  The ghosts let lookups count what a drop cost.
+        self._pressure_drop_superseded = bool(pressure_drop_superseded)
+        self._superseded_drop_ghosts = collections.deque(
+            maxlen=self._SUPERSEDED_DROP_GHOSTS
+        )
         if background_spill_max_bytes is None:
             background_spill_max_bytes = max(1 << 30, int(max_bytes) // 4)
         self._background_spill_max_bytes = int(background_spill_max_bytes)
@@ -2358,6 +2393,88 @@ class APCv2(PrefixIndex):
             covered |= set(getattr(turn, "_apc_session_tags", ()))
         return set(getattr(entry, "_apc_session_tags", ())) <= covered
 
+    def _superseding_descendant_locked(self, key, tokens, entry):
+        """A stored entry below ``entry`` that can resume everything it can
+        except a prompt diverging between the two, or None.
+
+        It must still hold state (resident or on disk), share the cache type,
+        carry draft state if ``entry`` does, and cover its sessions.  A
+        rolling checkpoint does not qualify: its publisher retires it.
+        """
+        role = getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT)
+        if role not in self._SUPERSEDED_DROP_ROLES or getattr(
+            entry, "_apc_next_turn_boundary", False
+        ):
+            # A next-turn boundary is the next request's only exact reuse
+            # point: the finished turn above it holds the generation prompt
+            # the template drops from history.
+            return None
+        sessions = set(getattr(entry, "_apc_session_tags", ()))
+        needs_sidecar = getattr(entry, "sidecar", None) is not None
+        tokens = list(tokens)
+        depth = len(tokens)
+        if not depth:
+            return None
+        # Scan the stored-entry registry rather than the trie below
+        # ``tokens``: its cost is bounded by the entry count, not by every
+        # token stored under a short shared prefix.
+        for other_key, path, other in self._trie.entries():
+            if (
+                len(path) <= depth
+                or path[depth - 1] != tokens[-1]
+                or other_key != key
+                or path[:depth] != tokens
+            ):
+                continue
+            disk = getattr(other, "_apc_disk", None)
+            if other is entry or not (other.prompt_cache or disk):
+                continue
+            if (
+                getattr(other, "_apc_retention_role", self._RETENTION_DEFAULT)
+                == self._RETENTION_ROLLING
+                or other.cache_type != entry.cache_type
+            ):
+                continue
+            if needs_sidecar and getattr(other, "sidecar", None) is None and not (
+                disk and disk.get("sidecar")
+            ):
+                continue
+            if not sessions <= set(getattr(other, "_apc_session_tags", ())):
+                continue
+            return other
+        return None
+
+    def _drop_superseded_locked(self, key, tokens, entry) -> bool:
+        """Drop pressure victim ``entry`` unwritten if a descendant covers it."""
+        if self._entry_disk_pinned_locked(key, tokens, entry):
+            return False
+        if self._superseding_descendant_locked(key, tokens, entry) is None:
+            return False
+        nbytes = int(entry.nbytes)
+        self._note_retention_eviction_locked(entry)
+        self._drop_entry_locked(key, tokens, entry, reason="superseded pressure drop")
+        self._superseded_drop_ghosts.append((key, tuple(tokens)))
+        self._disk_stats["pressure_superseded_drops"] += 1
+        self._disk_stats["pressure_superseded_drop_bytes"] += nbytes
+        return True
+
+    def _note_superseded_drop_regret_locked(self, key, tokens, served: int) -> None:
+        """Count a lookup a superseded drop left shallower than it could be."""
+        lost = 0
+        for ghost_key, ghost in self._superseded_drop_ghosts:
+            depth = len(ghost)
+            if (
+                served < depth <= len(tokens)
+                and depth - served > lost
+                and tokens[depth - 1] == ghost[-1]
+                and ghost_key == key
+                and tuple(tokens[:depth]) == ghost
+            ):
+                lost = depth - served
+        if lost:
+            self._disk_stats["superseded_drop_regrets"] += 1
+            self._disk_stats["superseded_drop_regret_tokens"] += lost
+
     def _resident_pin_live(self, entry, now_wall: float) -> bool:
         """A session prefetch pinned this entry resident until a later time.
 
@@ -2699,7 +2816,7 @@ class APCv2(PrefixIndex):
         # whole write: on the idle path that is the model thread).
         blocked = time.perf_counter() - began
         queued = self._spill_job_of(entry) is not None
-        settled = spilled is _SPILL_SETTLED
+        settled = spilled is _SPILL_SETTLED or spilled is _SPILL_DROPPED_SUPERSEDED
         spilled = bool(spilled)
         if spilled and not settled:
             self._disk_window("spills").add(
@@ -2749,6 +2866,14 @@ class APCv2(PrefixIndex):
                 len(tokens), int(entry.nbytes), resident_cap,
             )
         disk = getattr(entry, "_apc_disk", None)
+        if (
+            reason == "pressure"
+            and self._pressure_drop_superseded
+            and not disk
+            and not keep_resident
+            and self._drop_superseded_locked(key, tokens, entry)
+        ):
+            return _SPILL_DROPPED_SUPERSEDED
         if (
             not disk
             and self._disk_bytes >= self._idle_disk_max_bytes
@@ -4755,6 +4880,7 @@ class APCv2(PrefixIndex):
         restored layer a cross-stream fence inside that graph, which hung the
         GPU on Laguna-S-2.1 (model-matrix-t7-20261021).
         """
+        tokens = list(tokens)
         result = self._lookup_accounted(
             key,
             tokens,
@@ -4763,6 +4889,13 @@ class APCv2(PrefixIndex):
             require_sidecar=require_sidecar,
             allow_target_only_plain=allow_target_only_plain,
         )
+        if allow_disk_restore and self._superseded_drop_ghosts:
+            # Only a restoring lookup could have used a dropped entry's disk
+            # copy; an admission probe would double count the request.
+            with self._apc_lock:
+                self._note_superseded_drop_regret_locked(
+                    key, tokens, int(result.cached_tokens or 0) if result.hit else 0
+                )
         if result.cache is not None or result.sidecar is not None:
             materialize_restored_state(result.cache, result.sidecar)
         if result.expert_hints is not None:
@@ -6331,6 +6464,7 @@ class APCv2(PrefixIndex):
                 "disk_bytes": int(self._disk_bytes),
                 "disk_max_bytes": int(self._idle_disk_max_bytes),
                 "background_spill": self._background_spill,
+                "pressure_drop_superseded": self._pressure_drop_superseded,
                 "background_spill_inflight": len(self._spill_jobs),
                 "background_spill_inflight_bytes": self._inflight_spill_nbytes_locked(),
                 "background_spill_retained_bytes": self._queued_spill_nbytes_locked(),
