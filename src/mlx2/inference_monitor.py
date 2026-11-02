@@ -951,7 +951,13 @@ def build_reading(
     """Derive one server reading from current and earlier exports."""
     status = status if isinstance(status, dict) else None
     settings = (status or {}).get("settings") or {}
-    model_info = metrics.labels("model_info")
+    # The exporter writes "unavailable" for identity it does not know yet
+    # (a loading engine); read it as absent so fallbacks still apply.
+    model_info = {
+        key: value
+        for key, value in metrics.labels("model_info").items()
+        if value != "unavailable"
+    }
     build = metrics.labels("build_info")
     state = next(
         (labels.get("state") for labels, value in metrics.series("server_state") if value == 1),

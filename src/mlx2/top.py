@@ -154,9 +154,13 @@ def render_server(server: ServerReading, *, width: int = 100) -> list[str]:
         lines.append(f"  unreachable — {server.error or 'no response'}")
         return lines
 
-    readiness = (
-        server.state or ("ready" if server.ready else "not ready" if server.ready is not None else None)
-    )
+    if server.ready is False and server.state in {None, "serving"}:
+        # The lifecycle state reads "serving" before the engine is ready.
+        readiness = "loading"
+    else:
+        readiness = (
+            server.state or ("ready" if server.ready else "not ready" if server.ready is not None else None)
+        )
     lines.append(
         "Route     "
         + _join_present(

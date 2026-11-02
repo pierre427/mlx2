@@ -539,3 +539,33 @@ def test_powermetrics_gpu_clock_does_not_replace_ioreport_with_a_scaled_value():
     # mlx2-top renders this as f"{frequency_mhz:.0f} MHz"; a 1e6-scaled value
     # printed as "0 MHz" and hid IOReport's correct clock.
     assert reading.gpus[0].frequency_mhz == 1398.0
+
+
+def test_loading_engine_names_its_model_in_top():
+    import threading
+    from types import SimpleNamespace
+
+    from mlx2.prometheus import render_engine_metrics
+
+    # The constructor's loading snapshot: identity only, no profile yet.
+    engine = SimpleNamespace(
+        lock=threading.Lock(),
+        snapshot={"state": "loading", "model": "Demo-4bit", "max_lanes": 4},
+        counts={},
+        queued_jobs=0,
+        model_path="/models/Demo-4bit",
+    )
+    metrics = Metrics.parse(render_engine_metrics(engine))
+    reading = build_reading(
+        ServerEndpoint(url="http://127.0.0.1:8297"),
+        metrics,
+        now=100.0,
+        status=dict(engine.snapshot),
+    )
+    assert reading.model == "Demo-4bit"
+    assert reading.profile is None and reading.qualification is None
+    assert reading.ready is False and reading.max_lanes == 4
+    output = render(_host_reading(), servers=(reading,))
+    assert "LLM  Demo-4bit" in output
+    route = next(line for line in output.splitlines() if line.startswith("Route"))
+    assert "loading" in route and "unavailable" not in route

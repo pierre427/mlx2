@@ -4968,7 +4968,13 @@ class ServingEngine:
                         )
                 self.power_telemetry.add_listener(self.power_governor.observe)
             self.power_telemetry.start()
-        self.snapshot = {"state": "loading"}
+        # Identity settled before the adapter loads, so /metrics and
+        # /v1/status name the model while it loads.  Profile, qualification
+        # and context stay unpublished: the adapter decides them.
+        self.snapshot = {
+            "state": "loading", "model": Path(self.model_path).name,
+            "max_lanes": self.max_lanes,
+        }
         self.adapter = None
         self.apc = None
         self.model_revision = 0
