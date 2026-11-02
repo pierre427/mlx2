@@ -15,7 +15,12 @@ re-verified by a requalification campaign:
 
 Upstream changes known to move these references: mlx #4596 (unrolled
 ``sdpa_vector_2pass_1``), #4516 (``qmv_fast_rows``, which changes the kernel
-stock MLX selects for some shapes) and #4633 (residency refresh).  Before
+stock MLX selects for some shapes) and #4633 (residency refresh).  #4780
+(``expm1f`` argument reduction) moves fp32 ``erf``/``expm1``/exact-GELU
+outputs in the last bits (not bf16/fp16), so rerun the F32 Nemotron3
+diarization receipt; #4568 (custom-kernel source cache) renames templated
+kernels and must stay bit-identical (it was on Flash-Next decode,
+docs/experiments/MLX-PR4568-PR4780-INTAKE-2026-10-31.md).  Before
 admitting a new build here, rerun the header-digest test, the
 ``*_is_bit_exact_on_metal`` fixtures and the row-exact references, and check
 the custom-kernel ABI (oMLX #4311: nanobind 2.15 builds reject ``mx.array``).
