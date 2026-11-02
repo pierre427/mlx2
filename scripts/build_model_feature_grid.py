@@ -33,6 +33,7 @@ SERVER = ROOT / "src" / "mlx2" / "server.py"
 
 # Registry model_type values with distinct adapter or topology decisions.
 VARIANTS = {
+    "glm53_gguf": ("reap50-q3-k-m-packed-ordinary",),
     "qwen3_5": ("4b", "9b", "27b"),
     "qwen3_5_moe": ("35b_a3b", "122b_a10b"),
     "gemma4": ("a4b", "31b"),
@@ -47,6 +48,8 @@ VARIANTS = {
 # rather than a dedicated command-line switch. This is a review vocabulary,
 # not a statement that every registered model implements each feature.
 FEATURES = (
+    "gguf_native_packed_read_view", "gguf_native_k_blocks",
+    "glm53_shared_layer_ast", "draft_bf16_activation_boundary",
     "ordinary_prefill_plan_exact", "lane_dense", "native_mtp_num_draft", "mtp_batched_prefill",
     "qsa_batch_decode_sparse", "varlen_sparse_moe", "fp32_head_logits", "gdn_state_dtype_float16", "qsa_lazy_causal_mask", "qsa_stage1_direct_selector", "ple_read_policy_adaptive", "mtp_draft_vocab", "compact_moe_prefill", "qsa_prefetch_partials", "tensorfold_qmv_rows", "tensorfold_prefill", "gdn_core",
     "prefill_plan_exact_slices", "async_qsa_promotion", "apc_eviction_queued_protection",

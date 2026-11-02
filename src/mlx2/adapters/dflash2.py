@@ -201,13 +201,13 @@ def _validate_weight_headers(files, mapping, args, configured_dtype):
     return header_digests
 
 
-def inspect_drafter(path, target):
+def inspect_drafter(path, target, *, config_type=DFlash2Config):
     path = Path(path).expanduser().resolve()
     config_raw, config_binding = _read_bytes_with_binding(path/'config.json')
     config = _decode_unique_json(config_raw, 'draft config.json')
     if config.get('architectures') != ['DFlash2DraftModel']:
         raise ValueError('Expected DFlash2DraftModel artifact')
-    args = DFlash2Config.from_dict(config)
+    args = config_type.from_dict(config)
     target_config = _decode_unique_json((Path(target)/'config.json').read_bytes(), 'target config.json')
     text = target_config.get('text_config', target_config)
     for name in ('hidden_size','vocab_size'):

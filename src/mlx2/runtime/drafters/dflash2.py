@@ -197,6 +197,9 @@ class DFlash2DraftModel(DFlashDraftModel):
         }
         # Drafter arithmetic (mlx2), present only when not the artifact's
         # own bf16 weights on stock kernels, so default receipts are unchanged.
+        activation = self.__dict__.get("target_activation_dtype")
+        if activation is not None:
+            settings["target_activation_dtype"] = str(activation)
         quantization = self.__dict__.get("runtime_quantization")
         if quantization is not None:
             settings["runtime_quantization"] = dict(quantization)
@@ -467,7 +470,7 @@ def _draft_distributions(
 
 def _append_context(self, hidden, cache):
     """Project only committed target context; no draft block or vocabulary head."""
-    projected = self.fc(hidden)
+    projected = self.fc(self.target_activation(hidden))
     context = (
         _fold_rms_norm(self.hidden_norm, projected)
         if getattr(self, "fold_policy", None) is not None

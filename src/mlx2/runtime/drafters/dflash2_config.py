@@ -41,6 +41,7 @@ class DFlash2Config(DFlashConfig):
     # artifact's training metadata; the length-generic runtime supports this
     # separately bounded proposal domain without adding a new tensor law.
     maximum_proposal_length: ClassVar[int] = 15
+    supports_causal_blocks: ClassVar[bool] = False
     model_type: str = "dflash2"
     backbone_model_type: str = "qwen3"
     architectures: list[str] = field(default_factory=list)
@@ -127,7 +128,7 @@ class DFlash2Config(DFlashConfig):
             raise ValueError(
                 "DFlash2 runtime_block_size must be between 2 and block_size."
             )
-        if self.is_causal:
+        if self.is_causal and not self.supports_causal_blocks:
             raise ValueError("DFlash2 causal draft blocks are not currently supported.")
 
     @classmethod

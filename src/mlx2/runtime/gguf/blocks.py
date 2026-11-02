@@ -13,13 +13,14 @@ import numpy as np
 
 from .iq1_codebook import IQ1_GRID
 from .iq2_codebook import IQ2_GRID
+from .k_blocks import SIZES, decode_k_blocks
 from .reader import FORMATS, GGUFError
 
 
 def decode_blocks(
     data: bytes | memoryview, ggml_type: int, *, max_elements: int = 262144
 ) -> np.ndarray:
-    if ggml_type not in (0, 1, 8, 10, 16, 19, 30):
+    if ggml_type not in (0, 1, 8, 10, 16, 19, 30) and ggml_type not in SIZES:
         raise GGUFError(f"no reference decoder for GGML type {ggml_type}")
     _, count, size = FORMATS[ggml_type]
     if len(data) % size:
@@ -27,6 +28,8 @@ def decode_blocks(
     elements = len(data) // size * count
     if elements > max_elements:
         raise GGUFError("reference decoding exceeds explicit element budget")
+    if ggml_type in SIZES:
+        return decode_k_blocks(data, ggml_type)
     if ggml_type in (0, 1):
         return np.frombuffer(data, dtype="<f4" if ggml_type == 0 else "<f2").astype(
             np.float32

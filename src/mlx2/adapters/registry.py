@@ -489,6 +489,12 @@ def _flint(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.FlintAdapter, module.DESCRIPTOR, artifact)
 
 
+def _glm53_gguf(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".glm53_gguf", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.Glm53GGUFAdapter, module.DESCRIPTOR, artifact)
+
+
 def _deepseek_v41(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".deepseek_v41", __package__)
     artifact = module.inspect_artifact(path)
@@ -582,6 +588,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "gpt_oss_puzzle": _gpt_oss,
     "granitemoe_swa": _granite_swa,
     "flint": _flint,
+    "glm53_gguf": _glm53_gguf,
     "deepseek4_gguf": _deepseek_v4_gguf,
     "deepseek4_mlx": _deepseek_v4_mlx,
     "deepseek41_gguf": _deepseek_v41,

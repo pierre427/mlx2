@@ -13,12 +13,14 @@ from functools import lru_cache
 
 from .iq1_codebook import IQ1_GRID
 from .iq2_codebook import IQ2_GRID
+from .k_blocks import SIZES as K_FORMATS
+from .k_metal import HEADER as K_HEADER
 from .reader import FORMATS, GGUFError, GGUFTensor
 
 # Original Metal transcription of the documented block semantics. Codebook is
 # mined under MIT; provenance/deepseek-v4-gguf-packed.json and provenance/deepseek-v4-gguf-packed.NOTICE.
 HEADER = (
-    "constant ulong iq2_grid[256] = {"
+    K_HEADER + "constant ulong iq2_grid[256] = {"
     + ",".join(f"0x{x:016x}ul" for x in IQ2_GRID)
     + "};\n"
     + "constant ulong iq1_grid[2048] = {" + ",".join(f"0x{x:016x}ul" for x in IQ1_GRID) + "};\n"
@@ -31,6 +33,7 @@ inline uint gguf_u32(device const uchar *p) {
     return uint(p[0]) | (uint(p[1]) << 8) | (uint(p[2]) << 16) | (uint(p[3]) << 24);
 }
 inline float gguf_value(device const uchar *row, uint k, uint format) {
+    if(format==2 || (format>=11 && format<=14)) return gguf_k_value(row,k,format);
     if (format == 8) {
         device const uchar *p = row + (k / 32) * 34;
         return gguf_half(p) * float(as_type<char>(p[2 + k % 32]));
@@ -137,8 +140,8 @@ def _kernel(kind):
 
 
 def row_bytes(ggml_type: int, width: int) -> int:
-    if ggml_type not in (8, 10, 16, 19):
-        raise GGUFError("packed Metal only implements Q8_0/Q2_K/IQ2_XXS/IQ1_S")
+    if ggml_type not in (8, 10, 16, 19) and ggml_type not in K_FORMATS:
+        raise GGUFError("unsupported packed Metal quantization format")
     _, block, size = FORMATS[ggml_type]
     if width < 1 or width % block:
         raise GGUFError("packed matrix row is not block-aligned")

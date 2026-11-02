@@ -14,6 +14,7 @@ import struct
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from .k_blocks import SIZES as K_FORMATS
 from .reader import FORMATS, GGUFError, GGUFFile, GGUFTensor
 
 SCHEMA = "mlx2.packed-safetensors.v1"
@@ -154,7 +155,7 @@ def convert_gguf(source, destination, *, source_sha256, linear_names=(), shard_b
         manifest["metadata"] = file.metadata
         groups, pending, total = [], [], 0
         for name, t in file.tensors.items():
-            if t.ggml_type not in NATIVE and t.ggml_type not in (8,10,16):
+            if t.ggml_type not in NATIVE and t.ggml_type not in (8,10,16) and t.ggml_type not in K_FORMATS:
                 raise GGUFError("unsupported packed MLX tensor format")
             # Embeddings stay in an independent shard for bounded file-row reads.
             if pending and (total + t.nbytes > shard_bytes or name == "token_embd.weight"):

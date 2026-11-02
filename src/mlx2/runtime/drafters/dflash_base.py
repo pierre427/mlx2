@@ -61,6 +61,7 @@ class DFlashAttention(nn.Module):
         self.n_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
         self.scale = self.head_dim**-0.5
+        self.is_causal = bool(getattr(config, "is_causal", False))
         layer_types = (
             config.layer_types or ["full_attention"] * config.num_hidden_layers
         )
@@ -76,6 +77,16 @@ class DFlashAttention(nn.Module):
             # One learned logit per query head joins each softmax denominator
             # (the gpt-oss sink law MLX's fused attention implements).
             self.attention_sink_bias = mx.zeros((self.n_heads,))
+
+    def _proposal_mask(self, prefix, rows):
+        if not self.is_causal:
+            return None
+        query = prefix + mx.arange(rows)
+        key = mx.arange(prefix + rows)
+        mask = key[None, :] <= query[:, None]
+        if self.is_sliding:
+            mask = mask & (key[None, :] > query[:, None] - self.sliding_window)
+        return mask[None, None]
 
     def _sinks(self, queries):
         sinks = getattr(self, "attention_sink_bias", None)
@@ -102,6 +113,8 @@ class DFlashAttention(nn.Module):
     def __call__(self, x: mx.array, x_ctx: mx.array, rope, cache: KVCache):
         fused = self.__dict__.get("_fused_forward")
         if fused is not None:
+            if self.is_causal:
+                raise ValueError("causal draft blocks require the mask-aware stock kernel")
             return fused(self, x, x_ctx, rope, cache)
         B, L, _ = x.shape
         S = x_ctx.shape[1]
@@ -109,6 +122,8 @@ class DFlashAttention(nn.Module):
             x, x_ctx
         )
         fold = getattr(self, "fold_policy", None) is not None
+        if fold and self.is_causal:
+            raise ValueError("FOLD attention does not implement causal draft blocks")
         if fold and getattr(self, "attention_sink_bias", None) is not None:
             raise ValueError("FOLD attention does not implement attention sinks")
         query_rows = queries.reshape(B, L, self.n_heads, -1)
@@ -162,7 +177,7 @@ class DFlashAttention(nn.Module):
                 if self.is_sliding and keys.shape[2] > self.sliding_window-1:
                     keys, values = keys[:, :, -(self.sliding_window-1):], values[:, :, -(self.sliding_window-1):]
                     entry.keys, entry.values, entry._idx = keys, values, keys.shape[2]
-                outputs.append(mx.fast.scaled_dot_product_attention(q, mx.concatenate([keys,pk],axis=2), mx.concatenate([values,prop_values[row:row+1]],axis=2), scale=self.scale,mask=None, sinks=self._sinks(q)))
+                outputs.append(mx.fast.scaled_dot_product_attention(q, mx.concatenate([keys,pk],axis=2), mx.concatenate([values,prop_values[row:row+1]],axis=2), scale=self.scale,mask=self._proposal_mask(keys.shape[2], L), sinks=self._sinks(q)))
             o = mx.concatenate(outputs,axis=0)
             return self.o_proj(o.transpose(0,2,1,3).reshape(B,L,-1))
         if getattr(self, "fold_policy", None) is not None:
@@ -192,10 +207,10 @@ class DFlashAttention(nn.Module):
 
         keys = mx.concatenate([keys, prop_keys], axis=2)
         values = mx.concatenate([values, prop_values], axis=2)
-        # DFlash denoises the whole proposed block at once, so draft-block
-        # self-attention is intentionally non-causal. Sliding layers already
-        # limit resident prefix context through the rotating cache above.
-        mask = None
+        # Preserve the trained draft-block law. The default denoising block
+        # is bidirectional; an explicitly admitted causal variant also masks
+        # future proposals and slides visibility per query position.
+        mask = self._proposal_mask(keys.shape[2] - L, L)
         o = mx.fast.scaled_dot_product_attention(
             queries, keys, values, scale=self.scale, mask=mask,
             sinks=self._sinks(queries),
@@ -252,6 +267,11 @@ class DFlashDraftModel(nn.Module):
         self.lm_head = None
         self.accept_lens: List[int] = []
         self.draft_lens: List[int] = []
+
+    def target_activation(self, value):
+        """Optional adapter-owned draft input dtype; target arrays stay exact."""
+        dtype = getattr(self, "target_activation_dtype", None)
+        return value if dtype is None else value.astype(dtype)
 
     def bind(self, target_model) -> "DFlashDraftModel":
         if hasattr(target_model, "embed_tokens"):
@@ -349,9 +369,9 @@ class DFlashDraftModel(nn.Module):
         the first layer while the host still builds the rest.  It changes
         when work is submitted, never what is computed.
         """
-        h = self._embed_input_tokens(inputs)
+        h = self.target_activation(self._embed_input_tokens(inputs))
         fold = getattr(self, "fold_policy", None) is not None
-        projected_context = self.fc(target_hidden)
+        projected_context = self.fc(self.target_activation(target_hidden))
         h_ctx = (
             _fold_rms_norm(self.hidden_norm, projected_context)
             if fold

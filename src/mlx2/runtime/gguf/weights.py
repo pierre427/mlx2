@@ -28,6 +28,8 @@ class GGUFWeights:
         compute_policy="reference",
         expert_prefill_policy="reference",
         dense_prefill_policy="reference",
+        native_read_view=None,
+        source_sha256=None,
     ):
         if embedding_policy not in ("resident", "file_rows") or compute_policy not in (
             "reference",
@@ -39,7 +41,10 @@ class GGUFWeights:
         if dense_prefill_policy not in ("reference", "nax_fp16"):
             raise GGUFError("unsupported packed dense prefill policy")
         from pathlib import Path
-        if Path(path).is_dir():
+        if native_read_view is not None:
+            from .native_read_view import NativeReadViewFile
+            self.file = NativeReadViewFile(path, native_read_view, source_sha256=source_sha256)
+        elif Path(path).is_dir():
             from .mlx_storage import MLXPackedFile
 
             self.file = MLXPackedFile(path)

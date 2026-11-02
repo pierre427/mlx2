@@ -339,7 +339,13 @@ def encode_prompt_cache(prompt_cache, policy):
 
     def convert(item):
         if isinstance(item, CacheList):
-            return CacheList(*[convert(child) for child in item.caches])
+            # Preserve the adapter's composite operations ABI and class token.
+            # A plain CacheList erases revision/layout contracts on exact KV
+            # siblings even when the recurrent codec changes no child.
+            import copy
+            result = copy.copy(item)
+            result.caches = tuple(convert(child) for child in item.caches)
+            return result
         if isinstance(item, ArraysCache):
             if getattr(item, "speculating", False) or getattr(item, "_rollbacks", None):
                 # A live speculation transaction is never a store source;
