@@ -14,6 +14,7 @@ stopped in ``finally``. Run under the GPU lock recipe (bench.sh).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -46,7 +47,7 @@ def call(url, path, body=None, headers=None, timeout=1800):
 def stream(url, body):
     req = urllib.request.Request(url + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
-    stamps, final = [], None
+    stamps, final, text = [], None, []
     t0 = time.monotonic()
     with urllib.request.urlopen(req, timeout=3600) as response:
         for raw in response:
@@ -57,8 +58,10 @@ def stream(url, body):
             choices = event.get("choices") or []
             if choices and (choices[0].get("delta") or {}).get("content"):
                 stamps.append(time.monotonic() - t0)
+                text.append(choices[0]["delta"]["content"])
             if event.get("mlx2"):
                 final = event["mlx2"]
+    stream.text = "".join(text)
     return stamps, final
 
 
@@ -86,6 +89,8 @@ def main():
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--tokens", type=int, default=32768)
     parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--streams", default="write,skip_write,write",
+                        help="comma list of streamed requests (write | skip_write | skip = no request, keeps prompt slots)")
     parser.add_argument("--source-revision", default="unrecorded")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
@@ -128,7 +133,11 @@ def main():
         warm = {"model": model, "messages": [{"role": "user", "content": text[-4000:] + question}],
                 "max_tokens": 16, "temperature": 0, "enable_thinking": False}
         call(url, "/v1/chat/completions", warm)
-        for i, arm in enumerate(("write", "skip_write", "write")):
+        # Prompt i is the i-th slice of the haystack, so a given position in
+        # --streams always decodes the same prompt across arms and rounds.
+        for i, arm in enumerate(args.streams.split(",")):
+            if arm == "skip":
+                continue
             try:
                 call(url, "/v1/admin/apc/clear", {}, headers=admin)
             except Exception as error:  # noqa: BLE001
@@ -141,7 +150,9 @@ def main():
             stamps, final = stream(url, body)
             row = {"arm": arm, "rep": i, "deltas": len(stamps), "ttft_s": stamps[0] if stamps else None,
                    "decode_tok_s": (len(stamps) - 1) / (stamps[-1] - stamps[0]) if len(stamps) > 1 else None,
-                   "windows": windows(stamps), "receipt": final}
+                   "windows": windows(stamps), "receipt": final,
+                   # Output identity across arms/rounds (greedy): same prompt, same text.
+                   "text_sha256": hashlib.sha256(stream.text.encode()).hexdigest(), "text": stream.text}
             record["arms"].append(row)
             print(json.dumps({k: row[k] for k in ("arm", "deltas", "ttft_s", "decode_tok_s")}),
                   json.dumps({k: v for k, v in row["windows"].items() if k != "largest_gaps"}), flush=True)

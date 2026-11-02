@@ -184,8 +184,6 @@ class CompiledLayers:
         return body
 
     def _mla_ffn_body(self, index):
-        model = self.model
-
         def body(branch, h, post, comb):
             return self._ffn_half(index, branch, h, post, comb)
 

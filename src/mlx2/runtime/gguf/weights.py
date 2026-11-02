@@ -133,12 +133,6 @@ class GGUFWeights:
         # Apple GPUs hide this load latency through occupancy; the extra live
         # raw words cost more occupancy than the overlap returns (a whole chunk
         # step ahead: 443 -> 105 GB/s, 4ede902f7).
-        # K-block chunk decoder (the kernels' VEC): 1 = kblock_dot32_v2; 4 =
-        # glm53_kblock_element=fma_v1 (Q3_K/Q6_K element values by one exact
-        # fused multiply-add; same values and sums, see kblock_dot32_v5).
-        # Applies to one-row chunk-law launches; exact-law and token-shared
-        # launches keep their own decoders.
-        self._kblock_vec = 1
         self._embedding_rows = {}
         self._expected_stat = expected_stat
         self.scheduled_expert_calls = {}
@@ -320,6 +314,13 @@ class GGUFWeights:
     # chunk sums, so any value gives the same bits; serving keeps 4. Not part
     # of a memo or compile-region key: set it before building closures.
     kblock_row_block = 4
+
+    # K-block chunk decoder (the kernels' VEC): 1 = kblock_dot32_v2; 4 =
+    # glm53_kblock_element=fma_v1 (Q3_K/Q6_K element values by one exact
+    # fused multiply-add; same values and sums, see kblock_dot32_v5).
+    # Applies to one-row chunk-law launches; exact-law and token-shared
+    # launches keep their own decoders. The adapter sets it per instance.
+    _kblock_vec = 1
 
     def _kblock_rows(self, weight):
         return self.row_policy in _KBLOCK_ROW_POLICIES and kblock_admits(
@@ -592,8 +593,8 @@ class GGUFWeights:
         if packed is None:
             return None
         try:
-            result = kblock_moe_shared(x, ids, scores, *packed, rows=self.kblock_row_block,
-                                       exact=self._kblock_exact, vec=self._kblock_vec, ahead=self._kblock_ahead)
+            result = kblock_moe_shared(x, ids, scores, *packed, exact=self._kblock_exact, vec=self._kblock_vec,
+                                       rows=self.kblock_row_block, ahead=self._kblock_ahead)
         except GGUFError:
             return None
         self.scheduled_expert_calls["kblock_moe_shared"] = (

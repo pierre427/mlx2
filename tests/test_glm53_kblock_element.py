@@ -98,11 +98,11 @@ def test_every_one_row_chunk_law_launch_forwards_the_decoder_choice():
     from mlx2.runtime.gguf import weights
 
     source = inspect.getsource(weights)
-    for call in ("kblock_dense(flat, weight, rows=4, exact", "kblock_grouped(", "partial(kblock_moe,",
+    for call in ("kblock_dense(flat, weight, rows=self.kblock_row_block, exact", "kblock_grouped(", "partial(kblock_moe,",
                  "kblock_multi(flats", "kblock_moe_shared(x"):
         line = next(line for line in source.splitlines() if call in line)
         assert "vec=self._kblock_vec" in line, line
-    assert re.search(r"kblock_dense\(flat, weight, rows=4, tok=tok\)", source)
+    assert re.search(r"kblock_dense\(flat, weight, rows=4, tok=tok, ahead=self\._kblock_ahead\)", source)
 
 
 def test_v5_decoder_is_selected_only_by_vec_4():

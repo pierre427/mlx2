@@ -48,7 +48,14 @@ def record(args):
 
     adapter, policy = load(args.policy)
     model = adapter.model
-    ids = prompt_ids(adapter, args.tokens)
+    if args.serve_prompt:
+        # Exactly the chat request glm53_serve_profile sends, so the served
+        # stream and this recording decode the same tokens.
+        from glm53_serve_profile import serve_messages
+
+        ids = adapter.prompt_tokens({"messages": serve_messages(args.tokens), "enable_thinking": False})
+    else:
+        ids = prompt_ids(adapter, args.tokens)
     cache = model.make_cache()
     for begin in range(0, len(ids), 2048):
         piece = mx.array([ids[begin:begin + 2048]])
@@ -96,7 +103,12 @@ def record(args):
             gaps.append(time.perf_counter() - t0)
     (args.out / "trace.json").write_text(json.dumps({
         "schema": "mlx2.glm53-decode-trace.v1", "checkpoint": CHECKPOINT, "source_revision": args.source_revision,
-        "policy": policy, "prompt_tokens": len(ids), "tokens": tokens}) + "\n")
+        "policy": policy, "prompt_tokens": len(ids), "tokens": tokens,
+        "serve_prompt": bool(args.serve_prompt),
+        # Decoded text of the first --steps generated tokens, compared with a
+        # served stream of the same prompt (the server emits the same count).
+        "text_sha256": __import__("hashlib").sha256(adapter.tokenizer.decode(tokens[:args.steps]).encode()).hexdigest(),
+        "text": adapter.tokenizer.decode(tokens[:args.steps])}) + "\n")
     ordered = sorted(gaps)
     print(json.dumps({"recorded": len(tokens) - 1, "prompt_tokens": len(ids),
                       "mode": "pipelined" if args.pipelined_record else "serial",
@@ -301,6 +313,8 @@ def main():
             p.add_argument("--tokens", type=int, default=32768)
             p.add_argument("--pipelined-record", action="store_true")
             p.add_argument("--after-prefill", choices=("none", "clear_cache", "reload"), default="none")
+            p.add_argument("--serve-prompt", action="store_true",
+                           help="record glm53_serve_profile's chat prompt instead of the truncated haystack")
         else:
             p.add_argument("--trace", type=Path, required=True)
             p.add_argument("--rebind-identity", action="store_true",

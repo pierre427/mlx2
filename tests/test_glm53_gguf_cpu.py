@@ -1154,22 +1154,19 @@ def test_adapter_identity_binds_the_kernel_files_unconditionally(monkeypatch):
     from mlx2 import adapters, process_env
     from mlx2.adapters import glm53_gguf as adapter_module
 
-    class Stop(Exception):
-        pass
-
     monkeypatch.setattr(adapter_module, "inspect_artifact", lambda path: {
         "identity": {"fingerprint": "synthetic"}, "config": {"max_position_embeddings": 1}, "metadata": {}})
 
-    def stop(*args, **kwargs):
-        raise Stop
-
-    monkeypatch.setattr(process_env, "require_process_numerics", stop)
+    # The numerics check runs before artifact inspection (e038ba715), so let
+    # it pass; the synthetic identity has no path, so loading stops at the
+    # tokenizer root, just after the source identity is bound.
+    monkeypatch.setattr(process_env, "require_process_numerics", lambda *a, **k: None)
     assert adapters  # package import for the patched module
     identities = []
     for policy in ({"glm53_mla_fused": "reference", "glm53_router": "reference"},
                    {**{k: v[0] for k, v in adapter_module.SPARSE_KEYS.items()}, "glm53_mla_fused": "reference"}):
         adapter = object.__new__(adapter_module.Glm53GGUFAdapter)
-        with pytest.raises(Stop):
+        with pytest.raises(KeyError, match="path"):
             adapter._load("/nonexistent", policy)
         identities.append(adapter.source_identity)
     for identity in identities:  # the reference law and a default profile alike

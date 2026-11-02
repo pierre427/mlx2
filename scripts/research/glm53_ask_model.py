@@ -42,6 +42,32 @@ def call(url, path, body=None, timeout=3600):
         raise RuntimeError(f"HTTP {error.code}: {error.read().decode(errors='replace')[:2000]}") from None
 
 
+def degeneration(text):
+    """Where a text collapses into a loop: the first word from which the rest
+    is one short unit (1-8 words) repeated, and how long that tail is. A
+    generation cut by max_tokens may end mid-word, so the last word is also
+    tried dropped (codex review)."""
+    words = text.split()
+    first, rest = _loop(words), _loop(words[:-1])
+    loop = min((x for x in (first, rest) if x), key=lambda x: x["loop_start_word"], default=None)
+    return {"words": len(words), "loop": loop, "distinct_words_last_200": len(set(words[-200:]))}
+
+
+def _loop(words):
+    best = None
+    for unit in range(1, 9):
+        run_start = len(words)
+        i = len(words) - unit
+        while i - unit >= 0 and words[i - unit:i] == words[i:i + unit]:
+            i -= unit
+        run_start = i
+        tail = len(words) - run_start
+        if tail >= 8 * unit and (best is None or run_start < best["loop_start_word"]):
+            best = {"unit": " ".join(words[run_start:run_start + unit]), "loop_start_word": run_start,
+                    "loop_words": tail}
+    return best
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
@@ -50,6 +76,9 @@ def main():
     parser.add_argument("--thinking-budget", type=int, default=6144)
     parser.add_argument("--max-tokens", type=int, default=10240)
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--seed", type=int, default=None, help="request seed (sampled lanes draw from it)")
+    parser.add_argument("--repetition-penalty", type=float, default=None)
+    parser.add_argument("--server-env", default="{}", help="JSON env overrides for the server process")
     parser.add_argument("--source-revision", default="unrecorded")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
@@ -64,7 +93,7 @@ def main():
             "--reasoning-signing-key-file", str(args.out / "reasoning-key"), "--ordinary"]
     log = (args.out / "server.log").open("w")
     proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                            env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
+                            env={**os.environ, "PYTHONPATH": str(ROOT / "src"), **json.loads(args.server_env)})
     url = f"http://127.0.0.1:{port}"
     try:
         deadline = time.time() + 900
@@ -74,13 +103,17 @@ def main():
             try:
                 model = call(url, "/v1/status", timeout=5)["model"]
                 break
-            except Exception:  # noqa: BLE001 -- not ready yet
+            except Exception:  # not ready yet
                 if time.time() > deadline:
                     raise
                 time.sleep(3)
         body = {"model": model, "messages": [{"role": "user", "content": args.brief.read_text()}],
                 "temperature": args.temperature, "max_tokens": args.max_tokens,
                 "enable_thinking": True, "reasoning_effort": "high", "thinking_budget": args.thinking_budget}
+        if args.seed is not None:
+            body["seed"] = args.seed
+        if args.repetition_penalty is not None:
+            body["repetition_penalty"] = args.repetition_penalty
         t0 = time.time()
         refused = []
         # The route refuses controls it cannot honour (HTTP 400, fail closed):
@@ -97,7 +130,11 @@ def main():
         else:
             raise RuntimeError(f"every request variant refused: {refused}")
         message = response["choices"][0]["message"]
-        record = {"source_revision": args.source_revision, "request": {k: v for k, v in body.items() if k != "messages"},
+        record = {"source_revision": args.source_revision, "policy": json.loads(args.policy.read_text()),
+                  "server_env": json.loads(args.server_env),
+                  "degeneration": {"answer": degeneration(message.get("content") or ""),
+                                   "reasoning": degeneration(message.get("reasoning_content")
+                                                             or message.get("reasoning") or "")}, "request": {k: v for k, v in body.items() if k != "messages"},
                   "seconds": time.time() - t0, "refused": refused, "usage": response.get("usage"), "mlx2": response.get("mlx2"),
                   "reasoning": message.get("reasoning_content") or message.get("reasoning"),
                   "answer": message.get("content")}
@@ -105,7 +142,8 @@ def main():
         (args.out / "answer.md").write_text(record["answer"] or "")
         print(json.dumps({"seconds": round(record["seconds"], 1), "usage": record["usage"],
                           "answer_chars": len(record["answer"] or ""),
-                          "reasoning_chars": len(record["reasoning"] or "")}), flush=True)
+                          "reasoning_chars": len(record["reasoning"] or ""),
+                          "degeneration": record["degeneration"]}), flush=True)
     finally:
         if proc.poll() is None:
             try:
