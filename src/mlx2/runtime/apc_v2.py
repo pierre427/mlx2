@@ -1567,6 +1567,7 @@ class APCv2(PrefixIndex):
             "next_turn_boundary": bool(
                 getattr(entry, "_apc_next_turn_boundary", False)
             ),
+            "delete_pending": bool(getattr(entry, "_apc_delete_pending", False)),
             "session_tags": [[tag[0], tag[1]] for tag in tags],
             "disk_pins": [
                 {"tenant": tag[0], "session_id": tag[1], "expires_at": expiry}
@@ -1709,7 +1710,7 @@ class APCv2(PrefixIndex):
     def _discard_manifest(self, manifest: Path, value: Optional[dict], reason: str) -> None:
         discarded = self._rescan["discarded"]
         discarded[reason] = int(discarded.get(reason, 0)) + 1
-        corrupt = reason not in {"identity_mismatch", "unknown_schema"}
+        corrupt = reason not in {"identity_mismatch", "unknown_schema", "session_deleted"}
         if corrupt and self._persist_corruption_action == "quarantine":
             quarantine = self._persist_dir / "quarantine"
             quarantine.mkdir(mode=0o700, exist_ok=True)
@@ -1765,6 +1766,12 @@ class APCv2(PrefixIndex):
                 value = json.loads(manifest.read_text(encoding="utf-8"))
                 if value.get("schema") != self._PERSIST_SCHEMA:
                     self._discard_manifest(manifest, value, "unknown_schema")
+                    continue
+                if value.get("delete_pending") is True:
+                    # A live lease can outlast DELETE, but its durable state
+                    # must not resurrect the session after a process loss.
+                    # Older manifests omit this optional lifecycle marker.
+                    self._discard_manifest(manifest, value, "session_deleted")
                     continue
                 key = _key_from_manifest(value.get("key"))
                 if value.get("layout_name") != self.layout_name or not self._identity_matches(key):
@@ -4235,6 +4242,23 @@ class APCv2(PrefixIndex):
                 raise APCSessionNotFound(session_id)
             removed_entries = removed_files = removed_bytes = shared = deferred = 0
             for key, tokens, entry in tuple(records):
+                old_tags = set(getattr(entry, "_apc_session_tags", set()))
+                old_disk_pins = dict(getattr(entry, "_apc_disk_pin_expiries", {}))
+                old_resident_pins = dict(getattr(entry, "_apc_resident_pin_expiries", {}))
+                old_expected = set(getattr(entry, "_apc_prefetch_expected", set()))
+                old_delete_pending = getattr(entry, "_apc_delete_pending", False)
+
+                def persist_deletion():
+                    if not self._write_manifest_locked(key, tokens, entry):
+                        # Do not acknowledge a deletion whose durable tag
+                        # removal failed, or make it impossible to retry.
+                        entry._apc_session_tags = old_tags
+                        entry._apc_disk_pin_expiries = old_disk_pins
+                        entry._apc_resident_pin_expiries = old_resident_pins
+                        entry._apc_prefetch_expected = old_expected
+                        entry._apc_delete_pending = old_delete_pending
+                        raise APCSessionUnavailable("APCv2 session deletion could not be persisted")
+
                 getattr(entry, "_apc_session_tags", set()).discard(tag)
                 getattr(entry, "_apc_disk_pin_expiries", {}).pop(tag, None)
                 getattr(entry, "_apc_resident_pin_expiries", {}).pop(tag, None)
@@ -4242,10 +4266,12 @@ class APCv2(PrefixIndex):
                 if getattr(entry, "_apc_session_tags", set()):
                     shared += 1
                     if getattr(entry, "_apc_disk", None):
-                        self._write_manifest_locked(key, tokens, entry)
+                        persist_deletion()
                     continue
                 if self._entry_pinned(entry):
                     entry._apc_delete_pending = True
+                    if getattr(entry, "_apc_disk", None):
+                        persist_deletion()
                     deferred += 1
                     continue
                 before = self._entry_disk_bytes(entry)

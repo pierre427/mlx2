@@ -2775,8 +2775,17 @@ class ExternalDraftBatchGenerator:
             for lane in lanes
         ]
         for lane, length in zip(lanes, lengths):
+            # Which prompts share a slab is arrival dependent, and a row of a
+            # right-padded multi-lane forward is not bit-identical to the
+            # idle plan's single-prompt forward (same law as the native
+            # route's batched_lanes reason), so state captured at a boundary
+            # inside this slab is not plan-exact and APCv2 must not publish
+            # it as such.
             self._record_prefill_slice(
-                lane, length, min(self._prefill_limit(lane), len(lane.remaining) - 1)
+                lane,
+                length,
+                min(self._prefill_limit(lane), len(lane.remaining) - 1),
+                reason="batched_lanes",
             )
         width = max(lengths)
         depth = max(len(lane.history) for lane in lanes)
@@ -14305,19 +14314,23 @@ class ExternalDraftBatchGenerator:
 
     def pop_prompt_boundary(self, uid): return self.boundaries.pop(uid, None)
 
-    def _record_prefill_slice(self, lane, executed, planned):
+    def _record_prefill_slice(self, lane, executed, planned, reason=None):
         """Note one executed target prefill slice against the idle plan.
 
         The idle plan is ``_prefill_limit`` (configured or prompt-length
         autoscaled step, cut at planned boundaries); fairness caps, the
         decode-first width and admission halving are load dependent.
+        ``reason`` names a load-dependent mechanism that changed the forward
+        even at the planned width (a right-padded multi-lane slab).
         """
         from .prefill_slice_schedule import record_slice
 
         schedules = getattr(self, "_prefill_slice_schedules", None)
         if schedules is None:
             schedules = self._prefill_slice_schedules = {}
-        record_slice(schedules, lane.uid, len(lane.history), executed, planned)
+        record_slice(
+            schedules, lane.uid, len(lane.history), executed, planned, reason
+        )
 
     def prefill_slice_schedule(self, uid):
         from .prefill_slice_schedule import schedule_receipt

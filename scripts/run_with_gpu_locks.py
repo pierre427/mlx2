@@ -112,7 +112,13 @@ def earlier_waiter(mine: Path, mine_time: int) -> str | None:
         # stale mtime already marks an abandoned file.  No age cap: one made
         # a waiter that had queued for 90 minutes invisible, and every newer
         # waiter then went ahead of it forever.
-        if now - path.stat().st_mtime > 300:
+        try:
+            modified = path.stat().st_mtime
+        except FileNotFoundError:
+            # A predecessor unlinks its waiter as soon as it acquires the
+            # locks. Its normal departure must not fail another queued job.
+            continue
+        if now - modified > 300:
             continue
         if created < mine_time:
             return path.name
@@ -181,7 +187,7 @@ def acquire(owner: dict) -> tuple[list[dict], list[tuple[Path, Path | None]]]:
                 path.rename(backup)
             try:
                 path.mkdir()
-            except Exception:
+            except BaseException:
                 if backup is not None and backup.exists() and not path.exists():
                     backup.rename(path)
                 raise
@@ -194,6 +200,13 @@ def acquire(owner: dict) -> tuple[list[dict], list[tuple[Path, Path | None]]]:
         if owners[0] != owners[1]:
             raise RuntimeError("GPU owner receipts differ after acquisition")
         return before, backups
+    except BaseException:
+        # The caller receives backups only after a complete acquisition.
+        # Roll back partial ownership here, including signal interruption,
+        # while the original sentinel file descriptors are still flock-held.
+        if backups:
+            release(backups)
+        raise
     finally:
         for descriptor in held_files:
             try:
@@ -247,19 +260,31 @@ def descendant_pids(root: int) -> list[int]:
     return found
 
 
-def _signal_tree(child: subprocess.Popen, tree: list[int], sig: int) -> None:
+def _signal_tree(child: subprocess.Popen, tree: list[int], sig: int) -> list[int]:
+    """Signal the child's process group and ``tree``; return the pids we may not signal.
+
+    A descendant of another uid (a ``sudo powermetrics`` helper, or a pid
+    another user's process reused after the snapshot) raises PermissionError;
+    it is not ours to stop and must not abort the stop, which runs first in
+    the ``finally`` that restores the GPU locks.
+    """
+    unsignallable = []
     try:
         os.killpg(child.pid, sig)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     for pid in tree:
         try:
             os.kill(pid, sig)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            unsignallable.append(pid)
+    return unsignallable
 
 
 def _alive(pids: list[int]) -> list[int]:
+    """Pids in ``pids`` that still exist and that this uid may signal."""
     alive = []
     for pid in pids:
         try:
@@ -268,7 +293,9 @@ def _alive(pids: list[int]) -> list[int]:
         except ProcessLookupError:
             pass
         except PermissionError:
-            alive.append(pid)
+            # Exists, but belongs to another uid: nothing we send will stop
+            # it, so waiting on it would only run out the deadline.
+            pass
     return alive
 
 
@@ -279,12 +306,15 @@ def stop_child(child: subprocess.Popen | None, receipt: dict) -> None:
     receipt["child_terminated_by_wrapper"] = True
     tree = descendant_pids(child.pid)
     receipt["child_descendants_signalled"] = tree
-    _signal_tree(child, tree, signal.SIGTERM)
+    unsignallable = set(_signal_tree(child, tree, signal.SIGTERM))
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline and (child.poll() is None or _alive(tree)):
         time.sleep(0.5)
     if child.poll() is None or _alive(tree):
-        _signal_tree(child, _alive(tree), signal.SIGKILL)
+        # Re-snapshot: a pid from the first snapshot may have exited and been
+        # reused by an unrelated process of our own uid since then.
+        tree = sorted(set(tree) & set(descendant_pids(child.pid)) | set(_alive(tree)))
+        unsignallable |= set(_signal_tree(child, _alive(tree), signal.SIGKILL))
         receipt["child_killed_by_wrapper"] = True
         try:
             child.wait(timeout=30)
@@ -293,6 +323,8 @@ def stop_child(child: subprocess.Popen | None, receipt: dict) -> None:
     survivors = _alive(tree)
     if survivors:
         receipt["child_descendants_surviving"] = survivors
+    if unsignallable:
+        receipt["child_descendants_unsignallable"] = sorted(unsignallable)
     receipt["command_returncode"] = child.returncode
 
 
@@ -483,7 +515,12 @@ def main(argv: list[str] | None = None) -> int:
         stop_child(child, receipt)
     finally:
         # Ownership must never be released while a child can resume GPU work.
-        stop_child(child, receipt)
+        try:
+            stop_child(child, receipt)
+        except Exception as exc:  # noqa: BLE001 - the lock release below must run
+            receipt["stop_child_error"] = f"{type(exc).__name__}: {exc}"
+            receipt["status"] = "stop_child_failed"
+            rc = 1
         waiter.unlink(missing_ok=True)
         try:
             receipt["lock_state_after"] = (

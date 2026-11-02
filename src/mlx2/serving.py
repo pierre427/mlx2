@@ -5186,6 +5186,8 @@ class ServingEngine:
         if prefetch_sessions:
             self._ensure_apc_prefetch_available()
         with self.lock:
+            if self._worker_stopped:
+                raise RuntimeError(getattr(self, "error", None) or "server stopped")
             parked = self._service_state in {"parked", "activating", "park_failed"}
         if parked:
             return self.activate_model(prefetch_sessions=prefetch_sessions)
@@ -5201,6 +5203,8 @@ class ServingEngine:
             activate_parked = False
             with self._admission_section():
                 with self.lock:
+                    if self._worker_stopped:
+                        raise RuntimeError(getattr(self, "error", None) or "server stopped")
                     if (
                         len(self._admin_prefetch_queue) + len(prefetch_sessions)
                         > self._admin_prefetch_limit
@@ -5241,7 +5245,10 @@ class ServingEngine:
             if activate_parked:
                 return self.activate_model(prefetch_sessions=prefetch_sessions)
             if wait_for_worker:
-                self._quiesce_complete.wait()
+                # A worker failure during its owned drain never completes
+                # quiesce. Recheck the terminal flag so this HTTP caller does
+                # not wait forever or reopen admission over a closed adapter.
+                self._quiesce_complete.wait(timeout=0.1)
 
     def wait_for_quiesce(self, timeout=None):
         return self._quiesce_complete.wait(timeout)
@@ -5255,6 +5262,8 @@ class ServingEngine:
         prefetch_sessions = tuple(prefetch_sessions)
         with self._admission_section():
             with self.lock:
+                if self._worker_stopped:
+                    raise RuntimeError(getattr(self, "error", None) or "server stopped")
                 if self._service_state == "park_failed":
                     raise RuntimeError("model parking failed; reload the model before serving")
                 if self._service_state == "activating":
@@ -6692,7 +6701,8 @@ class ServingEngine:
         refused = weight_streaming_refusals(
             lane_matmul=self.lane_matmul,
             sp_qmm=self.sp_qmm_enabled,
-            qmm_row_pad=self.qmm_row_pad_enabled,
+            # Default-off; engines built outside __init__ (fixtures) lack it.
+            qmm_row_pad=getattr(self, "qmm_row_pad_enabled", False),
             int8_prefill=self.int8_prefill_policy.enabled,
             verify_bitexact=self.verify_bitexact_policy.enabled,
             multi_lora=self.multi_lora_policy is not None,
@@ -8723,8 +8733,14 @@ class ServingEngine:
                 if prompt_lookup
                 else "approximate KV"
             )
+            detail = (
+                f" ({type(adapter).__name__} does not declare "
+                "external_apc_state_checkpoints in its own namespace)"
+                if external_draft
+                else ""
+            )
             raise ValueError(
-                f"APCv2 {feature} checkpoints cannot capture on the selected {route} route"
+                f"APCv2 {feature} checkpoints cannot capture on the selected {route} route{detail}"
             )
         from .runtime.models.cache import make_prompt_cache
 
@@ -11403,7 +11419,12 @@ class ServingEngine:
                     if now - preparing_hold["since"] < self.PREPARING_EVICTION_HOLD_SECONDS:
                         count_add(self.counts, "memory_pressure_evictions_deferred_preparing", 1)
                         return False
-                preparing_hold["since"] = None
+                    # Past the bound the hold stays spent while a submission
+                    # keeps preparing: resetting it here re-armed a fresh
+                    # 0.25 s hold after every eviction, so an admission that
+                    # needed N evictions took N retries instead of one loop.
+                else:
+                    preparing_hold["since"] = None
                 protect = queued_prefix_protector(
                     waiting_jobs(),
                     lambda job: cache_key_for(

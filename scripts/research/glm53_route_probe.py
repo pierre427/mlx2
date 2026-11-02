@@ -261,8 +261,8 @@ def driver(args):
             draft = {
                 "pld": "pld",
                 "mtp": "mtp",
-                "modal": "~/mlx-models/GLM-5.3-Flash-DFlash",
-                "inco": "~/mlx-models/GLM-5.3-Flash-DFlash2",
+                "modal": str(Path.home() / "mlx-models" / "GLM-5.3-Flash-DFlash"),
+                "inco": str(Path.home() / "mlx-models" / "GLM-5.3-Flash-DFlash2"),
             }[args.route]
             command += ["--ast", "--ast-drafter", draft]
             if not args.ast_defaults:

@@ -6,7 +6,14 @@ restore cannot retain a stale pool. See provenance/glm53-gguf-forward.json.
 
 from __future__ import annotations
 
+
 import mlx.core as mx
+
+# The indexer key norm is nn.LayerNorm(head_dim, eps=1e-6) in the official
+# modeling_glm5_next.py (GLM-5.3 DSA indexer); every other norm in the graph
+# uses the GGUF's rms_norm_eps (1e-5).  This GGUF carries no
+# attention.layer_norm_epsilon key, so the constant comes from the reference.
+INDEXER_K_NORM_EPS = 1e-6
 
 
 def pooled_selection(x, qr, cache, weights, prefix, *, topk=2048, pool=4):
@@ -21,7 +28,9 @@ def pooled_selection(x, qr, cache, weights, prefix, *, topk=2048, pool=4):
     hd, heads = 128, 32
     key = weights.linear(prefix + ".indexer.attn_k.weight")(x)
     mean = key.mean(-1, keepdims=True)
-    key = (key - mean) * mx.rsqrt(((key - mean) ** 2).mean(-1, keepdims=True) + 1e-5)
+    key = (key - mean) * mx.rsqrt(
+        ((key - mean) ** 2).mean(-1, keepdims=True) + INDEXER_K_NORM_EPS
+    )
     key = key * weights.array(prefix + ".indexer.k_norm.weight") + weights.array(
         prefix + ".indexer.k_norm.bias"
     )

@@ -44,6 +44,12 @@ def enabled_from_env() -> bool:
 
 
 _ENABLED = enabled_from_env()
+# Record the environment this module read its switch from, so a profile pinned
+# after a stale import fails closed in import_env.assert_profile_applied
+# instead of serving the other decode law while the receipt says selected.
+from .import_env import snapshot as _import_env_snapshot  # noqa: E402
+
+_import_env_snapshot(__name__)
 
 
 def enabled() -> bool:

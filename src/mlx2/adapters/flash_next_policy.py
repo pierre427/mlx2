@@ -37,6 +37,19 @@ _OPTIONAL_KERNEL_ENV = {
 }
 
 
+# Policy fields that own the projections lane_dense would cover, or replace
+# lm_head's arithmetic with their own law: lane_dense cannot be combined with
+# any of them (_validate_lane_dense), and a *defaulted* lane_dense steps aside
+# when the operator selects one (FlashNextAdapter.default_route_policy_filter).
+LANE_DENSE_CLASHING_KEYS = (
+    "row_exact_verify",
+    "invariant_prefill",
+    "tensorfold_qmv_rows",
+    "tensorfold_prefill",
+    "fp32_head_logits",
+)
+
+
 @dataclass(frozen=True)
 class FlashNextPolicy:
     num_draft: int = 2
@@ -713,14 +726,8 @@ class FlashNextPolicy:
             # replaces lm_head's arithmetic with its own law.
             clashing = [
                 name
-                for name, on in (
-                    ("row_exact_verify", self.row_exact_verify),
-                    ("invariant_prefill", self.invariant_prefill),
-                    ("tensorfold_qmv_rows", self.tensorfold_qmv_rows),
-                    ("tensorfold_prefill", self.tensorfold_prefill),
-                    ("fp32_head_logits", self.fp32_head_logits),
-                )
-                if on
+                for name in LANE_DENSE_CLASHING_KEYS
+                if getattr(self, name)
             ]
             if clashing:
                 raise ValueError("lane_dense cannot be combined with " + ", ".join(clashing))

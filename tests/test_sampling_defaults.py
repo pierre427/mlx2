@@ -55,6 +55,7 @@ def _adapter_classes():
     from mlx2.adapters.deepseek_v41_iq1 import DeepSeekV41IQ1Adapter
     from mlx2.adapters.deepseek_v41_mlx import DeepSeekV41MLXAdapter
     from mlx2.adapters.deepseek_v41_source import DeepSeekV41SourceAdapter
+    from mlx2.adapters.glm53_gguf import Glm53GGUFAdapter
     from mlx2.adapters.xing import XingAdapter
 
     return {
@@ -78,6 +79,7 @@ def _adapter_classes():
         "flint": FlintAdapter,
         "bailing_hybrid": Ling3FlashAdapter,
         "deepseek4_gguf": DeepSeekV4GGUFAdapter,
+        "glm53_gguf": Glm53GGUFAdapter,
         "deepseek4_mlx": DeepSeekV4MLXAdapter,
         "deepseek41_gguf": DeepSeekV41Adapter,
         "deepseek41_mlx": DeepSeekV41MLXAdapter,
@@ -222,6 +224,9 @@ EXPECTED = {
     # Exact pinned GGUF metadata general.sampling.temp/top_p; top_k0 is the
     # adapter's explicitly cited neutral policy, not a fabricated card value.
     "deepseek4_gguf": {"general": dict(temperature=1.0, top_p=1.0, top_k=0)},
+    # Pinned GLM-5.3-Flash-REAP50-Q3_K_M GGUF general.sampling.temp/top_p
+    # (re-read 2026-10-31: 1.0 / 0.95); top_k0 is the adapter's neutral policy.
+    "glm53_gguf": {"general": dict(temperature=1.0, top_p=0.95, top_k=0)},
     # model_type: {profile: values}
     "qwen4_exp": {
         "thinking": dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, repetition_penalty=1.0, presence_penalty=0.0),

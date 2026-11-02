@@ -7390,6 +7390,10 @@ def resolve_cache_dir(args):
     if getattr(args, "no_cache_dir", False):
         if args.cache_dir:
             raise ValueError("--no-cache-dir conflicts with --cache-dir")
+        if getattr(args, "apc_persist_dir", None):
+            # The persistent tier is a disk tier too (serving uses it as the
+            # spill directory); "off" would be a false label.
+            raise ValueError("--no-cache-dir conflicts with --apc-persist-dir")
         return None, "disabled"
     if args.cache_dir or getattr(args, "apc_persist_dir", None):
         return args.cache_dir, "explicit"
@@ -7400,7 +7404,37 @@ def resolve_cache_dir(args):
         char if char.isalnum() or char in "-." else "_"
         for char in str(getattr(args, "host", "") or "local")
     )
-    return str(DEFAULT_CACHE_DIR_ROOT / f"{host}-{port}"), "default_per_port"
+    path = DEFAULT_CACHE_DIR_ROOT / f"{host}-{port}"
+    # An operator-named directory fails closed in APCv2 (foreign owner,
+    # symlink, unwritable).  The implicit default is an optimisation tier,
+    # not a request: a daemon HOME, a sandboxed launch or a root-owned leaf
+    # from a sudo run must not keep the model from loading, so an unusable
+    # default serves in-memory only, labelled.
+    reason = _default_cache_dir_unusable(path)
+    if reason is not None:
+        return None, f"default_unavailable:{reason}"
+    return str(path), "default_per_port"
+
+
+def _default_cache_dir_unusable(path):
+    """``None`` when ``path`` is (or can become) a writable 0700 directory we own."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if path.is_symlink():
+        return "symlink"
+    if not path.is_dir():
+        return "not a directory"
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if info.st_uid != os.getuid():
+        return "not owned by the process uid"
+    if not os.access(path, os.W_OK | os.X_OK):
+        return "not writable"
+    return None
 
 
 def serving_engine_kwargs(
@@ -7827,7 +7861,9 @@ def main():
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     logging.getLogger("mlx2.server").info(
-        "APCv2 disk tier: %s (%s)", args.cache_dir or "off", args.cache_dir_source
+        "APCv2 disk tier: %s (%s)",
+        args.cache_dir or getattr(args, "apc_persist_dir", None) or "off",
+        args.cache_dir_source,
     )
     from .exit_trace import ExitTrace
 

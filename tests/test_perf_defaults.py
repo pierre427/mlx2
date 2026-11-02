@@ -1018,3 +1018,28 @@ def test_flash_next_native_mtp_defaults_lane_dense_with_num_draft_three():
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
     FlashNextPolicy.from_mapping({"num_draft": 2, "lane_dense": True})
+
+
+def test_flash_next_defaulted_lane_dense_steps_aside_for_clashing_opt_ins():
+    """A default fills a key the operator did not name, but lane_dense cannot
+    be combined with the opt-ins that own its projections or replace lm_head's
+    law.  Filling it beside them refused ``{"row_exact_verify": true}`` (a
+    policy that loaded before eb82fc32d) naming a field the operator never
+    wrote; the adapter's filter drops the default instead."""
+    from mlx2.adapters.flash_next_policy import LANE_DENSE_CLASHING_KEYS, FlashNextPolicy
+
+    resolution = _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
+    for name in LANE_DENSE_CLASHING_KEYS:
+        resolved = resolve_execution_policy_defaults({name: True}, MTP, resolution)
+        assert "lane_dense" not in resolved, name
+        assert resolved["num_draft"] == 3
+        assert resolved[name] is True
+    for name in ("row_exact_verify", "fp32_head_logits", "invariant_prefill"):
+        resolved = resolve_execution_policy_defaults({name: True}, MTP, resolution)
+        FlashNextPolicy.from_mapping({"num_draft": resolved["num_draft"], name: True})
+    # A disabled opt-in does not displace the default.
+    resolved = resolve_execution_policy_defaults({"row_exact_verify": False}, MTP, resolution)
+    assert resolved["lane_dense"] is True
+    # An operator who names both still gets the policy's own refusal.
+    with pytest.raises(ValueError, match="lane_dense cannot be combined"):
+        FlashNextPolicy.from_mapping({"lane_dense": True, "row_exact_verify": True})

@@ -1695,6 +1695,47 @@ def test_external_varlen_prefill_composes_uneven_dflash_lanes_exactly():
         assert receipt["coalescing"]["selected"] is False
 
 
+def test_external_varlen_slab_boundary_checkpoint_is_not_plan_exact():
+    """A boundary captured inside a right-padded multi-lane slab is tainted.
+
+    Which prompts share a slab is arrival dependent and a slab row differs in
+    bits from the idle plan's single-prompt forward, so the checkpoint must
+    carry ``prefill_slice_schedule_changed`` and a ``batched_lanes`` reason
+    (the native route's law for multi-lane prefill forwards); APCv2 then
+    refuses to publish it as exact.
+    """
+    from contextlib import nullcontext
+
+    model, draft = tiny()
+    model.prefill_row_context = lambda lengths, *, width: nullcontext()
+    batch = generator(model, draft, external_varlen_prefill=True)
+    uids = batch.insert(
+        [[1, 2, 3, 4, 5, 6, 7, 8, 9], [9, 10, 11, 12, 13]],
+        max_tokens=[2, 2],
+        apc_interior_positions=[(3,), ()],
+    )
+    batch._prefill_many([batch.lanes[uid] for uid in uids])
+    assert batch.scheduler_stats["external_batched_prefill_rounds"] == 1
+    (checkpoint,) = batch.pop_interior_checkpoints(uids[0])
+    assert checkpoint["prefill_slice_schedule_changed"] is True
+    for uid in uids:
+        receipt = batch.prefill_slice_schedule(uid)
+        assert receipt["planned"] is False
+        assert receipt["deviation_reason"] == "batched_lanes"
+
+    # A single lane never forms a slab: its slices stay on the idle plan.
+    model2, draft2 = tiny()
+    model2.prefill_row_context = lambda lengths, *, width: nullcontext()
+    solo = generator(model2, draft2, external_varlen_prefill=True)
+    (uid,) = solo.insert(
+        [[1, 2, 3, 4, 5, 6, 7, 8, 9]], max_tokens=[2], apc_interior_positions=[(3,)]
+    )
+    solo._prefill_many([solo.lanes[uid]])
+    (checkpoint,) = solo.pop_interior_checkpoints(uid)
+    assert checkpoint["prefill_slice_schedule_changed"] is False
+    assert solo.prefill_slice_schedule(uid)["planned"] is True
+
+
 def test_external_atomic_cohort_holds_short_prefill_until_all_rows_reach_decode():
     from contextlib import nullcontext
 

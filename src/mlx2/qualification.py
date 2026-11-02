@@ -86,6 +86,8 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-10-30: qmm_row_pad routed-call observation and evidence
+    # (0d3d97610 changed the producer without re-pinning).
     # Re-pinned 2026-10-29: run-local qsa_b1_selected observation (the
     # one-token selected-block QSA candidate).
     # Re-pinned 2026-10-29: adaptive benchmark settings binding ignores
@@ -1311,6 +1313,19 @@ def _default_on_mechanisms(settings):
         # near-limit decode once it passes the indexer budget.
         if indexer["probe_blocks"] > (indexer["topk_blocks"] if indexer["fused_shortcircuit"] else 0):
             required.add("qsa_b1_selected")
+            # The selected-block kernel serves every one-row explicit-selection
+            # call, and the fused QSA mask is no longer built for a call it
+            # serves (it was built and discarded before, and its counter then
+            # certified work that never ran).  Batched decode keeps the masked
+            # path (the kernel declines width > 1), so at width >= 2 the mask
+            # stays required; a one-lane shape has no call left for it.
+            if width < 2 and "attn_fused_rows_qsa_mask" in required:
+                required.discard("attn_fused_rows_qsa_mask")
+                not_observed["attn_fused_rows_qsa_mask"] = (
+                    f"max_lanes {settings.get('max_lanes')} with qsa_b1_selected: "
+                    "the selected-block kernel serves every one-row explicit-"
+                    "selection decode call and width > 1 never occurs"
+                )
         else:
             not_observed["qsa_b1_selected"] = (
                 f"near-limit probe context {indexer['probe_context']} stays within "

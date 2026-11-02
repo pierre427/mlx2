@@ -230,6 +230,7 @@ def _merged(base, extra):
 ENGAGED = _merged(HISTORY, {
     "settings": {
         "sp_qmm": "measured",
+        "qmm_row_pad": {"modules": 4, "policy": "measured"},
         "qsdpa_verify_kernel": {"enabled": True, "min_context": 1024},
         "cache_capsules": {"enabled": True},
         "persistent_block_bytes": 4 << 20,
@@ -267,6 +268,7 @@ ENGAGED = _merged(HISTORY, {
     },
     "recent_receipts": [{"mtp": {"verification": "fly", "relaxed_accepts": 2}}],
     "sp_qmm": {"enabled": True, "modules": 4, "routed_calls": 10},
+    "qmm_row_pad": {"enabled": True, "modules": 4, "routed_calls": 10, "stock_calls": 3},
     "qsdpa_verify": {"counts": {"verify_kernel_calls": 5}},
     "lane_matmul": {"counts": {"lane_calls": 40}},
     "apcv2": {
@@ -422,6 +424,8 @@ GROWTH = {
         "decode_first": _S + ("decode_first_published_rounds",),
         "decode_fairness_slice_floor": _S + ("decode_fairness_slice_floor_lifts",),
         "sp_qmm": ("sp_qmm", "routed_calls"),
+        # 0d3d97610: split-K row padding reports the same status shape.
+        "qmm_row_pad": ("qmm_row_pad", "routed_calls"),
         "qsdpa_verify_kernel": ("qsdpa_verify", "counts", "verify_kernel_calls"),
         "lane_matmul": ("lane_matmul", "counts", "lane_calls"),
         "shared_qsa": _X + ("segmented_mtp", "shared_qsa_batched_selections"),

@@ -169,3 +169,72 @@ def test_own_position_of_a_plain_cache():
         offset = 41
 
     assert B1.own_position(Plain()) == 40
+
+
+def test_module_snapshots_its_import_environment():
+    """import_env.assert_profile_applied only sees modules that snapshot; a
+    module that reads its switch at import without one could serve the other
+    decode law while the receipt says selected."""
+    from mlx2.runtime.models import import_env
+
+    assert B1.__name__ in import_env._SNAPSHOTS
+
+
+def test_mask_builders_do_not_run_on_a_call_the_b1_kernel_serves(monkeypatch):
+    """The fused-rows / lazy-mask / scatter counters are the qualifier's
+    observed-used evidence; a mask built before the B1 decision and then
+    discarded advanced them for work that never ran."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from qsa_oracle import tiny_args
+
+    from mlx2.runtime import round_levers as levers
+    from mlx2.runtime.models import qwen4_attn_rows as rows
+
+    mx.random.seed(3)
+    attn = Q.Attention(tiny_args(indexer_budget=8))  # explicit selection past 2 blocks
+    attn.eval()
+    mx.eval(attn.parameters())
+    cache = Q.QSAKVCache(attn.indexer.summary_identity)
+    hidden = mx.random.normal((1, 40, 16))
+    out = attn(hidden, Q.qsa_attention_mask(hidden, cache), cache)
+    mx.eval(out, cache.state)
+
+    calls = []
+
+    def fake_attention(q, keys, values, block_ids, *, q_pos, scale, gate=None, left_pad=0, **kw):
+        calls.append(int(q.shape[1]))
+        return mx.zeros((1, 1, q.shape[1] * q.shape[-1]), dtype=q.dtype)
+
+    # The kernel is Metal-only and refuses the tiny fp32 geometry; only the
+    # order of the decision and the mask build is under test.
+    monkeypatch.setattr(B1, "attention", fake_attention)
+    monkeypatch.setattr(B1, "refusal", lambda *a, **k: None)
+    previous = B1.set_enabled(True)
+    try:
+        monkeypatch.setattr(Q.Attention, "_attn_rows_admit", lambda self, x, cache, length: True)
+        monkeypatch.setattr(Q.Attention, "_attn_rows_prep", lambda self, qg, k_flat, offset: None)
+        monkeypatch.setattr(rows, "qsa_mask_supported", lambda selection: None)
+        monkeypatch.setattr(rows, "qsa_mask", lambda selection: selection.dense_mask())
+        rows_was = rows.enabled()
+        rows.set_enabled(True)
+        try:
+            before = (
+                rows.status()["counts"].get("mask_rows", 0),
+                levers.counters().get("qsa_scatter_chosen_calls", 0),
+            )
+            step = mx.random.normal((1, 1, 16))
+            out = attn(step, Q.qsa_attention_mask(step, cache), cache)
+            mx.eval(out, cache.state)
+            after = (
+                rows.status()["counts"].get("mask_rows", 0),
+                levers.counters().get("qsa_scatter_chosen_calls", 0),
+            )
+        finally:
+            rows.set_enabled(rows_was)
+    finally:
+        B1.set_enabled(previous)
+    assert len(calls) == 1, "the B1 kernel path was not taken"
+    assert after == before

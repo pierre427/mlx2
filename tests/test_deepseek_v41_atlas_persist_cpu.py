@@ -64,3 +64,31 @@ def test_atlas_failure_at_close_does_not_quarantine_weights(tmp_path):
     assert id(weights) not in W._UPLOAD_QUARANTINE
     W._refuse_quarantined_uploads()
     assert store.atlas_persist_error["type"] == "OSError"
+
+
+@pytest.mark.parametrize("malformed", [
+    [],
+    {"schema": "mlx2.expert-frequency-atlas.v1", "source": "B", "clock": 0},
+    {"schema": "mlx2.expert-frequency-atlas.v1", "source": "B", "clock": 0,
+     "counts": None},
+    {"schema": "mlx2.expert-frequency-atlas.v1", "source": "B", "clock": 0,
+     "counts": [{}]},
+    {"schema": "mlx2.expert-frequency-atlas.v1", "source": "B", "clock": 0,
+     "counts": [None]},
+    {"schema": "mlx2.expert-frequency-atlas.v1", "source": "B", "clock": 0,
+     "counts": [{"layer": [], "expert": 1, "token_selections": 3, "last_access": 0}]},
+])
+def test_malformed_atlas_is_a_schema_error_and_remains_advisory(tmp_path, malformed):
+    store = _store(tmp_path)
+    store.atlas_path.write_text(L.json.dumps(malformed))
+    with pytest.raises(ValueError):
+        L.read_atlas(store.atlas_path, "B")
+    store.end_context()
+    assert store.stats["atlas_persist_failures"] == 1
+    assert store.atlas_persist_error["type"] == "ValueError"
+    assert not store._atlas_saved
+    # A later repair can persist all observations: a failed advisory write
+    # must not mark the delta as saved.
+    store.atlas_path.unlink()
+    store.persist_atlas()
+    assert L.read_atlas(store.atlas_path, "B")["counts"][0]["token_selections"] == 3

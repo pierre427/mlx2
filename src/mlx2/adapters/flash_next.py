@@ -461,6 +461,27 @@ class FlashNextAdapter:
     from .qwen import QWEN38_FLASH_NEXT_SAMPLING as sampling_defaults
 
     @staticmethod
+    def default_route_policy_filter(route, policy, operator_policy):
+        """Drop defaults an operator's explicit choices make unusable.
+
+        ``lane_dense`` (the native-MTP decode default) cannot be combined
+        with row_exact_verify, invariant_prefill, the TensorFold rows or
+        fp32_head_logits: they own the projections the lane would cover or
+        replace lm_head's law.  An operator who selects one of those has
+        chosen the other arithmetic; filling the default beside it would make
+        ``FlashNextPolicy`` refuse a policy that loaded before eb82fc32d,
+        naming a field the operator never wrote.  Only default keys are
+        dropped; operator values and pins stay authoritative.
+        """
+        from .flash_next_policy import LANE_DENSE_CLASHING_KEYS
+
+        if policy.get("lane_dense") and any(
+            operator_policy.get(name) for name in LANE_DENSE_CLASHING_KEYS
+        ):
+            policy = {key: value for key, value in policy.items() if key != "lane_dense"}
+        return policy
+
+    @staticmethod
     def spomin_backend(model, prompt_cache):
         """Adapter-owned approximate KV surgery; refuses hybrid/quantized state."""
         from ..runtime.spomin_qwen4_surgery import Qwen4SpominSurgeryBackend

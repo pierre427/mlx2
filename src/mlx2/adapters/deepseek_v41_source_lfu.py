@@ -140,12 +140,21 @@ class LFUIndex:
 def read_atlas(path,source):
     if not path.exists():return {'schema':'mlx2.expert-frequency-atlas.v1','source':source,'clock':0,'counts':[]}
     value=json.loads(path.read_text())
-    if value.get('schema')!='mlx2.expert-frequency-atlas.v1' or value.get('source')!=source or type(value.get('clock')) is not int or value['clock']<0:
+    # Keep malformed advisory metadata on the ValueError path understood by
+    # _persist_atlas_advisory. Missing fields must not raise KeyError after a
+    # forward has already advanced its state or while closing its weights.
+    if (not isinstance(value,dict) or value.get('schema')!='mlx2.expert-frequency-atlas.v1'
+            or value.get('source')!=source or type(value.get('clock')) is not int
+            or value['clock']<0 or not isinstance(value.get('counts'),list)):
         raise ValueError('expert atlas source/schema mismatch')
     seen=set()
     for row in value['counts']:
+        if (not isinstance(row,dict)
+                or any(type(row.get(name)) is not int
+                       for name in ('layer','expert','token_selections','last_access'))):
+            raise ValueError('invalid per-expert frequency atlas record')
         key=(row['layer'],row['expert'])
-        if key in seen or any(type(x) is not int for x in (*key,row['token_selections'],row['last_access'])) or not 0<=key[0]<40 or not 0<=key[1]<384 or row['token_selections']<0 or row['last_access']<0:
+        if key in seen or not 0<=key[0]<40 or not 0<=key[1]<384 or row['token_selections']<0 or row['last_access']<0:
             raise ValueError('invalid per-expert frequency atlas record')
         seen.add(key)
     return value

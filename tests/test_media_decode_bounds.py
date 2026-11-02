@@ -32,14 +32,14 @@ def test_image_pixel_limit_precedes_decoding(monkeypatch):
         def load(self):
             pytest.fail("oversized image was decoded before enforcing max_pixels")
 
-    monkeypatch.setattr(Image, "open", lambda *_: OversizedImage())
+    monkeypatch.setattr(Image, "open", lambda *_args, **_kwargs: OversizedImage())
     with pytest.raises(ValueError, match="pixel bound"):
         decode_image(b"compressed image", "image/png", max_pixels=1_000_000)
 
 
 @pytest.mark.parametrize("error", [Image.DecompressionBombError, Image.DecompressionBombWarning])
 def test_pillow_bomb_errors_remain_invalid_media(monkeypatch, error):
-    def open_image(*_args):
+    def open_image(*_args, **_kwargs):
         raise error("unsafe dimensions")
 
     monkeypatch.setattr(Image, "open", open_image)

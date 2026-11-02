@@ -90,6 +90,24 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise
 
     def _load(self, model_path, policy):
+        from ..process_env import (
+            PROCESS_NUMERICS,
+            assert_process_profile_applied,
+            clear_inherited_profile,
+            require_process_numerics,
+        )
+
+        # Refuse conflicting process numerics before any drafter or artifact
+        # inspection, as the DeepSeek V4 profile does.
+        require_process_numerics("the GLM-5.3 native GGUF profile")
+        clear_inherited_profile(())
+        self.environment = {
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            **PROCESS_NUMERICS,
+        }
+        os.environ.update(self.environment)
+        assert_process_profile_applied("the GLM-5.3 native GGUF profile")
         policy = policy or {}
         if not isinstance(policy, dict):
             raise TypeError("GLM-5.3 execution policy must be an object")
@@ -218,20 +236,6 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         ).hexdigest()
         self.layout = CACHE_LAYOUT + ":" + self.numerics_revision
         self.max_context = self.config["max_position_embeddings"]
-        from ..process_env import (
-            PROCESS_NUMERICS,
-            clear_inherited_profile,
-            require_process_numerics,
-        )
-
-        require_process_numerics("the GLM-5.3 native GGUF profile")
-        clear_inherited_profile(())
-        self.environment = {
-            "HF_HUB_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1",
-            **PROCESS_NUMERICS,
-        }
-        os.environ.update(self.environment)
         from tokenizers import Tokenizer
         from transformers import PreTrainedTokenizerFast
 

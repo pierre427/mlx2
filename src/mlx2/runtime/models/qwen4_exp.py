@@ -7094,12 +7094,6 @@ class Attention(nn.Module):
             and (length <= _QSA_GATHER_MAX_QUERY)
             and gather_context_ok
         ) or (batch_arm == "gather")
-        if use_nax or use_indexed or use_gather:
-            sparse_mask = None
-        elif fused_rows and selection.kind == "explicit":
-            sparse_mask = self._attn_rows_mask(selection)
-        else:
-            sparse_mask = selection.dense_mask()
         if qg is None:
             qg = self.q_proj(x)
             k_flat = self.k_proj(x)
@@ -7155,6 +7149,17 @@ class Attention(nn.Module):
                 )
                 return self.o_proj(out)
             _qsa_b1.decline(reason)
+        # Built after the B1 decision: the mask builders bump the fused-rows,
+        # lazy-mask and scatter-chosen counters at graph-build time, and the
+        # qualifier reads those as observed-used evidence; a mask the B1
+        # kernel then discards would certify work that never ran (and cost a
+        # graph node per QSA layer per decode step).
+        if use_nax or use_indexed or use_gather:
+            sparse_mask = None
+        elif fused_rows and selection.kind == "explicit":
+            sparse_mask = self._attn_rows_mask(selection)
+        else:
+            sparse_mask = selection.dense_mask()
         if use_nax:
             (ids, counts, n_sel, u_width, q_pos, left_pad, total) = (
                 compact_blocks_to_kernel_inputs(selection.compact_blocks())

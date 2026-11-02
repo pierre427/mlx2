@@ -44,6 +44,12 @@ CANDIDATE_ENV = {
     "MLX_QWEN4_MOE_ROUTER_KERNEL": "flag",
     "MLX_QWEN4_PLE_WINDOWED_GATHER": "flag",
     "MLX_QWEN4_QSA_NAX_DECODE": "flag",
+    # One-token selected-block QSA decode attention (flash_next_policy
+    # qsa_b1_selected, the Flash-Next ordinary-route default since
+    # e5b8d532d): a different arithmetic order from the masked SDPA, not
+    # bit-exact, and its output feeds the K/V the same step writes for the
+    # following layers, so state made under it is another decode law.
+    "MLX_QWEN4_QSA_B1_SELECTED": "flag",
     # NAX block-sparse QSA prefill on B > 1 slices (flash_next_policy
     # qsa_nax_batched): those slices leave the masked SDPA's rounding.
     "MLX_QWEN4_QSA_NAX_BATCHED": "flag",

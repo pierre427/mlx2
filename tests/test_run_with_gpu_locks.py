@@ -422,3 +422,93 @@ def test_transport_failure_past_the_grace_window_stops_the_unit(monkeypatch, tmp
         monkeypatch, tmp_path, [None, TimeoutError("radio")], grace=-1)
     assert rc != 0
     assert recorded["error"] == "TimeoutError: radio" and stopped
+
+
+def test_stop_child_tolerates_descendants_it_cannot_signal(monkeypatch):
+    """A descendant of another uid (a sudo powermetrics helper, or a pid
+    another user's process reused after the snapshot) raised PermissionError
+    out of stop_child, the first statement of main()'s finally, so the lock
+    sentinels were never restored and no terminal receipt was written."""
+    import subprocess
+    import sys
+
+    module = _load_module()
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    receipt = {}
+    try:
+        # launchd exists and is never ours to signal.
+        monkeypatch.setattr(module, "descendant_pids", lambda pid: [1])
+        module.stop_child(child, receipt)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    assert receipt["child_terminated_by_wrapper"] is True
+    assert receipt["child_descendants_unsignallable"] == [1]
+    assert "child_descendants_surviving" not in receipt
+    assert receipt["command_returncode"] is not None
+    assert child.poll() is not None
+
+
+@pytest.mark.parametrize("failure", ["second_mkdir", "owner_write", "interrupt"])
+@pytest.mark.parametrize("sentinels", [False, True])
+def test_partial_acquisition_restores_all_owned_locks(tmp_path, monkeypatch, failure, sentinels):
+    module = _load_module()
+    locks = (tmp_path / "shared.lock", tmp_path / "tmp.lock")
+    if sentinels:
+        for lock in locks:
+            lock.touch()
+    monkeypatch.setattr(module, "LOCKS", locks)
+    original_mkdir = Path.mkdir
+    original_write = Path.write_text
+
+    def mkdir(path, *args, **kwargs):
+        if path == locks[1] and failure in {"second_mkdir", "interrupt"}:
+            if failure == "interrupt":
+                raise KeyboardInterrupt("acquisition interrupted")
+            raise OSError("second lock mkdir failed")
+        return original_mkdir(path, *args, **kwargs)
+
+    def write(path, *args, **kwargs):
+        if path == locks[1] / "owner.json" and failure == "owner_write":
+            raise OSError("owner receipt write failed")
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    monkeypatch.setattr(Path, "write_text", write)
+    expected = KeyboardInterrupt if failure == "interrupt" else OSError
+    with pytest.raises(expected):
+        module.acquire({"pid": 123, "lease_id": "test"})
+
+    for lock in locks:
+        if sentinels:
+            assert lock.is_file() and lock.stat().st_size == 0
+        else:
+            assert not lock.exists()
+    assert not list(tmp_path.glob("*.sentinel.*"))
+
+
+def test_departing_waiter_does_not_abort_queue_scan(tmp_path, monkeypatch):
+    import os
+    import time
+
+    module = _load_module()
+    monkeypatch.setattr(module, "WAITERS", tmp_path)
+    now = int(time.time())
+    departing = tmp_path / f"a.label.{os.getpid()}.{now - 2}"
+    queued = tmp_path / f"b.label.{os.getpid()}.{now - 1}"
+    mine = tmp_path / f"c.label.{os.getpid()}.{now}"
+    for path in (departing, queued, mine):
+        path.touch()
+    original_kill = module.os.kill
+
+    def kill(pid, sig):
+        departing.unlink(missing_ok=True)
+        return original_kill(pid, sig)
+
+    # The predecessor starts its command and removes its waiter between
+    # this scanner's is_file() and mtime read.
+    monkeypatch.setattr(module.os, "kill", kill)
+    assert module.earlier_waiter(mine, now) == queued.name

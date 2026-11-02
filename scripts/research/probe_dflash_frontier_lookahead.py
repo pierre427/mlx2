@@ -175,7 +175,7 @@ def audit_exact_frontier_capability() -> dict[str, Any]:
     observed_exact_apis = sorted(exact_api_names & generator_methods)
     append_uses_target_hidden = (
         "def _append_context(self, hidden, cache):" in dflash_text
-        and "self.fc(hidden)" in dflash_text
+        and "self.fc(self.target_activation(hidden))" in dflash_text
     )
     commit_call = "self._commit(\n                cohort,"
     commit_precedes_prelaunch = (
