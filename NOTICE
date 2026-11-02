@@ -1063,3 +1063,34 @@ Copyright © 2023 Apple Inc.
 
 The MIT permission notice and warranty disclaimer are as in the DwarfStar /
 ds4 section above.
+
+------------------------------------------------------------------------------
+GLM-5.3-Flash (src/mlx2/adapters/glm53_*.py, src/mlx2/adapters/
+glm52_dsa_candidate.py, src/mlx2/runtime/models/glm53_*.py,
+scripts/prepare_glm53_gguf.py, scripts/gpu_check_glm53_sparse_dsa.py,
+scripts/research/glm53_*.py)
+
+The GLM-5.3-Flash GGUF forward, NextN head, sparse DSA attention, fused
+MLA/KDA/HC kernels and AST draft routes are original mlx2 code. No source
+file was copied. The model's computation graph and tensor layout were read
+from the following sources, which are attributed here:
+- llama.cpp (https://github.com/ggml-org/llama.cpp, revision aa588a346335,
+  src/models/glm5-next.cpp) — MIT License, Copyright (c) 2023-2026 The ggml
+  authors. Its MIT permission notice is reproduced earlier in this file.
+- mlx-vlm (https://github.com/Blaizzy/mlx-vlm, revision 64ff26c53433,
+  mlx_vlm/models/glm5_next/language.py) — MIT License, Copyright (c) 2025
+  Prince Canuma. Its MIT permission notice is reproduced in the mlx-vlm
+  section earlier in this file.
+- GLM-5.3-Flash-REAP50-GGUF (https://huggingface.co/patrickbdevaney/
+  GLM-5.3-Flash-REAP50-GGUF, revision 086b915c9490, glm5-next-llama.cpp.patch)
+  — MIT License: the checkpoint-specific A_log conversion.
+- SGLang (https://github.com/sgl-project/sglang, revision 2d4b6acea720,
+  python/sglang/srt/models/glm5_next.py) — Apache License 2.0.
+Mechanism sources read for the sparse DSA and fused-decode rebuild, with no
+code copied: oMLX (https://github.com/jundot/omlx, PRs #4843 and #3987,
+Apache License 2.0), mlx-lm (https://github.com/ml-explore/mlx-lm, PR #1997,
+MIT License), TensorRT-LLM (https://github.com/NVIDIA/TensorRT-LLM, PRs
+#20454, #20251 and #16309, Apache License 2.0), vLLM (Apache License 2.0)
+and the installed MLX 0.32.4 Metal kernels (MIT License). The Apache License
+2.0 text is this repository's LICENSE. No Apple copyright header is added to
+mlx2 source files.

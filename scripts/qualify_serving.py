@@ -2627,15 +2627,16 @@ def run_rolling_checkpoint_probe(
     return True, evidence
 
 
-def sp_qmm_routed_observation(initial, final):
-    """Count only routed calls made during this qualification run."""
+def sp_qmm_routed_observation(initial, final, key="sp_qmm"):
+    """Count only routed calls made during this qualification run (``key``:
+    ``sp_qmm`` or ``qmm_row_pad``, which report the same status shape)."""
     if initial is None:
         return 0
-    selected = (initial.get("settings") or {}).get("sp_qmm")
-    if not selected or selected != (final.get("settings") or {}).get("sp_qmm"):
+    selected = (initial.get("settings") or {}).get(key)
+    if not selected or selected != (final.get("settings") or {}).get(key):
         return 0
-    before = initial.get("sp_qmm") or {}
-    after = final.get("sp_qmm") or {}
+    before = initial.get(key) or {}
+    after = final.get(key) or {}
     if before.get("enabled") is not True or after.get("enabled") is not True:
         return 0
     modules = before.get("modules")
@@ -3501,6 +3502,7 @@ def feature_observations(
             "counts", "ingress_cohort_target_reached"
         ),
         "sp_qmm": sp_qmm_routed_observation(initial, final),
+        "qmm_row_pad": sp_qmm_routed_observation(initial, final, "qmm_row_pad"),
         "qsdpa_verify_kernel": qsdpa_verify_observation(initial, final),
         "verify_bitexact": (
             count_delta("verify_bitexact", "dispatches")
@@ -5144,11 +5146,11 @@ def main():
                     "after": (final.get("scheduler") or {}).get(key),
                     "delta": observed.get(feature, 0),
                 }
-            elif feature == "sp_qmm":
+            elif feature in ("sp_qmm", "qmm_row_pad"):
                 evidence = {
-                    "before": initial.get("sp_qmm"),
-                    "after": final.get("sp_qmm"),
-                    "routed_delta": observed["sp_qmm"],
+                    "before": initial.get(feature),
+                    "after": final.get(feature),
+                    "routed_delta": observed[feature],
                 }
             elif feature == "qsdpa_verify_kernel":
                 evidence = {

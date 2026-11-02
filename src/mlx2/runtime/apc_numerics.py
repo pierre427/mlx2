@@ -190,13 +190,15 @@ def _bound_value(kind: str, raw: str):
         return value
 
 
-def execution_numerics_identity(environ=None, *, sp_qmm=False, verify_bitexact=False):
+def execution_numerics_identity(environ=None, *, sp_qmm=False, verify_bitexact=False,
+                                qmm_row_pad=False):
     """The non-default process numerics, or None when everything is default.
 
     ``sp_qmm``: the small-M quantized matmul (not bitwise identical, M=2..16
     rows, which includes short prefill tails).  ``verify_bitexact``: the
     process-global mode that gives every matmul of <= max_m rows the
-    single-row arithmetic (prefill tails included).
+    single-row arithmetic (prefill tails included).  ``qmm_row_pad``: mid-row
+    calls that MLX 0.32.4 sends to legacy split-K run its NAX qmm instead.
     """
     env = os.environ if environ is None else environ
     bound = {}
@@ -219,6 +221,8 @@ def execution_numerics_identity(environ=None, *, sp_qmm=False, verify_bitexact=F
         bound["sp_qmm"] = True
     if verify_bitexact:
         bound["verify_bitexact"] = True
+    if qmm_row_pad:
+        bound["qmm_row_pad"] = True
     return {"version": 1, **bound} if bound else None
 
 

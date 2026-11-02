@@ -88,6 +88,7 @@ SERVER_OWNED_EXECUTION_POLICY_KEYS = frozenset(
         "constrained_tool_grammar_auto",
         "tool_grammar_streaming",
         "sp_qmm",
+        "qmm_row_pad",
     }
 )
 
@@ -918,13 +919,15 @@ def validate_weight_streaming_lanes(adapter_factory, execution_policy, *, mode, 
 
 def weight_streaming_refusals(
     *, lane_matmul, sp_qmm, int8_prefill, verify_bitexact, multi_lora, lora_root,
-    execution_policy,
+    execution_policy, qmm_row_pad=False,
 ) -> list:
     reasons = []
     if lane_matmul in ("crossover", "exact", "tensorfold"):
         reasons.append(f"lane_matmul={lane_matmul}")
     if sp_qmm:
         reasons.append("sp_qmm")
+    if qmm_row_pad:
+        reasons.append("qmm_row_pad")
     if int8_prefill:
         reasons.append("int8_prefill")
     if verify_bitexact:
@@ -2133,6 +2136,31 @@ def sp_qmm_status(engine):
         "modules": len(engine.sp_qmm_handle or ()),
         "routed_calls": sp_qmm.STATS["routed"],
         "stock_calls": sp_qmm.STATS["stock"],
+    }
+
+
+def qmm_row_pad_selected(execution_policy) -> bool:
+    """Execution-policy ``qmm_row_pad`` (boolean); MLX2_QMM_ROW_PAD=1 selects
+    it when the policy does not say. An explicit policy value always wins."""
+    value = (execution_policy or {}).get(
+        "qmm_row_pad", os.environ.get("MLX2_QMM_ROW_PAD", "0") == "1"
+    )
+    if type(value) is not bool:
+        raise ValueError("qmm_row_pad must be boolean")
+    return value
+
+
+def qmm_row_pad_status(engine):
+    """Selected and observed-used state of the split-K row padding."""
+    if not getattr(engine, "qmm_row_pad_enabled", False):
+        return {"enabled": False}
+    from .runtime.models import qmm_row_pad
+
+    return {
+        "enabled": True,
+        "modules": len(engine.qmm_row_pad_handle or ()),
+        "routed_calls": qmm_row_pad.STATS["routed"],
+        "stock_calls": qmm_row_pad.STATS["stock"],
     }
 
 
@@ -4187,6 +4215,12 @@ class ServingEngine:
         # simdgroup kernel (runtime/models/sp_qmm.py) where it measured faster.
         self.sp_qmm_enabled = sp_qmm_selected(execution_policy)
         self.sp_qmm_handle = None
+        # Default-off: pad mid-row quantized matmuls past MLX 0.32.4's legacy
+        # split-K kernel to its NAX qmm (runtime/models/qmm_row_pad.py).
+        self.qmm_row_pad_enabled = qmm_row_pad_selected(execution_policy)
+        self.qmm_row_pad_handle = None
+        if self.qmm_row_pad_enabled and self.sp_qmm_enabled:
+            raise ValueError("qmm_row_pad and sp_qmm both own plain quantized projections; select one")
         # An operator's key (including null or 0) wins; otherwise the default.
         self.apc_rolling_checkpoint_default = (
             "apc_rolling_checkpoints" not in (execution_policy or {})
@@ -5443,6 +5477,8 @@ class ServingEngine:
         ]
         if self.sp_qmm_enabled:
             conflicts.append("sp_qmm")
+        if self.qmm_row_pad_enabled:
+            conflicts.append("qmm_row_pad")
         if self.multi_lora_policy is not None:
             conflicts.append("concurrent multi-LoRA")
         if self.weight_streaming_enabled():
@@ -6643,6 +6679,7 @@ class ServingEngine:
         refused = weight_streaming_refusals(
             lane_matmul=self.lane_matmul,
             sp_qmm=self.sp_qmm_enabled,
+            qmm_row_pad=self.qmm_row_pad_enabled,
             int8_prefill=self.int8_prefill_policy.enabled,
             verify_bitexact=self.verify_bitexact_policy.enabled,
             multi_lora=self.multi_lora_policy is not None,
@@ -7032,6 +7069,7 @@ class ServingEngine:
                     else {}
                 ),
                 "sp_qmm": sp_qmm_status(self),
+                "qmm_row_pad": qmm_row_pad_status(self),
                 "qsdpa_verify": {
                     "counts": dict(qvm.STATS),
                     "by_rows": dict(qvm.STATS_BY_ROWS),
@@ -9458,6 +9496,7 @@ class ServingEngine:
             or self.weight_streaming_enabled()
             or self.lane_matmul not in ("auto", "off")
             or self.int8_prefill_policy.enabled or self.sp_qmm_enabled
+            or self.qmm_row_pad_enabled
             or self.verify_bitexact_policy.enabled
             or self.recurrent_state_codec_policy.enabled
             or self.cache_capsule_policy["enabled"] or self.persistent_block_bytes
@@ -10559,6 +10598,22 @@ class ServingEngine:
                     "modules": len(self.sp_qmm_handle),
                     "policy": "measured-m5max-20260925",
                 }
+            if self.qmm_row_pad_enabled:
+                # Recorded in settings only when enabled so default-off
+                # records match.  Installed after the lane matmul, whose
+                # instances it leaves alone.
+                from .runtime.models import qmm_row_pad
+
+                reason = qmm_row_pad.refusal()
+                if reason:
+                    raise ValueError(reason)
+                self.qmm_row_pad_handle = qmm_row_pad.apply(adapter.model)
+                if not self.qmm_row_pad_handle:
+                    raise ValueError("qmm_row_pad selected but no eligible 4-bit gs64 projections")
+                settings["qmm_row_pad"] = {
+                    "modules": len(self.qmm_row_pad_handle),
+                    "policy": qmm_row_pad.POLICY_ID,
+                }
             if self.int8_prefill_auto is not None:
                 self._resolve_int8_prefill_auto(adapter)
             if self.int8_prefill_policy.enabled:
@@ -10618,6 +10673,7 @@ class ServingEngine:
                 execution_numerics=execution_numerics_identity(
                     sp_qmm=self.sp_qmm_enabled,
                     verify_bitexact=self.verify_bitexact_policy.enabled,
+                    qmm_row_pad=self.qmm_row_pad_enabled,
                 ),
                 prefill_execution=prefill_execution_identity,
                 lane_matmul_receipt=self.lane_matmul_receipt,

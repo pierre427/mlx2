@@ -323,7 +323,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-24: explicit source-owned greedy/refusal sampling
     # scope requires named controls/repeat/refusal evidence and cannot claim
     # stochastic coverage; absence preserves the historical sampling suite.
-    "sha256": "060f083608355976b8f94deff6679fba3be04167a83d91bc8f90eb97a9eb742e",
+    "sha256": "57912d389c23a09efc5361204e2781c4e54cda5b6163ef89b288612c308ca0bb",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -742,6 +742,8 @@ def required_feature_checks(settings):
         # Patching eligible projections does not prove that the measured
         # shape policy actually routed any model calls through the kernel.
         features.add("feature_sp_qmm")
+    if settings.get("qmm_row_pad"):
+        features.add("feature_qmm_row_pad")
     verify = settings.get("qsdpa_verify_kernel") or {}
     if (
         (settings.get("approximate_kv") or {}).get("enabled") is True

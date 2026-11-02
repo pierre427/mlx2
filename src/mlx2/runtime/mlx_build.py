@@ -27,6 +27,10 @@ were made source-spelling aware and passed their Metal exactness gates.  The
 release adds thin-M/thin-N GEMM and wider qmv routes, changes split-K partials
 to fp32, and fixes a batched qvm leading-dimension corruption.
 
+``models/qmm_row_pad.py`` models 0.32.4's quantized-matmul dispatch and is
+admitted on 0.32.4 only; a new build must re-measure it (or drop it if
+mlx #4793 / #4720 has landed) before its admission list grows.
+
 "Verified" here is a kernel-exactness statement about the installed MLX; it is
 not route qualification (docs/QUALIFICATION.md).
 """
