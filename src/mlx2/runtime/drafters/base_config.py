@@ -2,9 +2,31 @@
 # Mined closure; provenance/muse-dflash2.json.
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, List, Mapping, Optional
 
 
+def check_dflash_window_contract(flat: Mapping, dflash: Mapping) -> None:
+    """Refuse a sliding window that ``layer_types`` does not carry.
+
+    The drafters window exactly the layers typed ``sliding_attention``.  Some
+    DFlash2 checkpoints declare the window only as ``dflash_config.use_swa``
+    with every layer ``full_attention`` (TensorRT-LLM #21367 windows every
+    layer for them); serving one here would silently drop the window, so it
+    is refused, as is a ``use_swa`` or window size the layer types contradict.
+    """
+    sliding = "sliding_attention" in (flat.get("layer_types") or ())
+    use_swa = dflash.get("use_swa")
+    if use_swa is not None and bool(use_swa) != sliding:
+        raise ValueError(
+            f"DFlash dflash_config.use_swa={use_swa!r} contradicts layer_types "
+            f"({'some' if sliding else 'no'} sliding_attention layers); refusing to guess the window."
+        )
+    window = dflash.get("swa_window_size")
+    if window is not None and sliding and window != flat.get("sliding_window"):
+        raise ValueError(
+            f"DFlash dflash_config.swa_window_size={window!r} differs from sliding_window="
+            f"{flat.get('sliding_window')!r}."
+        )
 
 
 @dataclass
@@ -36,6 +58,11 @@ class DFlashConfig:
     def from_dict(cls, params: dict) -> "DFlashConfig":
         flat = dict(params)
         dflash_cfg = flat.pop("dflash_config", None) or {}
+        check_dflash_window_contract(flat, dflash_cfg)
+        # This parser applies no logit transform; the DFlash2 parser does.
+        for key, identity in (("output_multiplier", 1.0), ("final_logit_softcapping", None)):
+            if dflash_cfg.get(key, identity) != identity:
+                raise ValueError(f"DFlash dflash_config.{key}={dflash_cfg[key]!r} is not applied by this drafter.")
         if "mask_token_id" in dflash_cfg:
             flat["mask_token_id"] = dflash_cfg["mask_token_id"]
         if "target_layer_ids" in dflash_cfg:

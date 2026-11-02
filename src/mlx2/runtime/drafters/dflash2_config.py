@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from .base_config import DFlashConfig
+from .base_config import DFlashConfig, check_dflash_window_contract
 
 
 def _is_strictly_increasing_ints(values: list[int]) -> bool:
@@ -139,6 +139,7 @@ class DFlash2Config(DFlashConfig):
             raise TypeError("DFlash2 requires a dflash_config object.")
 
         _refuse_other_draft_contracts(flat, dflash)
+        check_dflash_window_contract(flat, dflash)
         # Every spelling of block causality the DFlash family uses selects
         # ``is_causal``, which ``validate`` refuses: the drafter implements
         # only the bidirectional block, and serving a causally trained
