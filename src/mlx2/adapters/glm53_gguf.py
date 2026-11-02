@@ -95,6 +95,24 @@ SPARSE_DEFAULTS = {
 }
 
 
+def _check_tree_levers(policy):
+    """Refuse AST-verify levers whose policy could never engage them."""
+    layered = policy["glm53_ast_target"] == "layered"
+    if policy["glm53_tree_moe"] == "union_fold_v1" and not (
+        layered and policy["glm53_shared_fold"] == "kblock" and policy["glm53_row_kernel"] == "kblock_rows"
+        and policy["glm53_tree_batch"] == "kblock_v1"
+    ):
+        raise ValueError(
+            "glm53_tree_moe=union_fold_v1 requires glm53_ast_target=layered, glm53_shared_fold=kblock, "
+            "glm53_row_kernel=kblock_rows and glm53_tree_batch=kblock_v1"
+        )
+    fused_hc = policy["glm53_hc"] in ("fused_fp32", "mega_v1")
+    if policy["glm53_tree_compile"] != "off" and not (layered and fused_hc):
+        raise ValueError("glm53_tree_compile requires glm53_ast_target=layered and a fused glm53_hc")
+    if policy["glm53_tree_router"] != "reference" and not layered:
+        raise ValueError("glm53_tree_router requires glm53_ast_target=layered")
+
+
 def _check_sparse_combination(policy):
     """Refuse sparse DSA combinations whose law is undefined or not built.
 
@@ -291,6 +309,10 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "glm53_kda_group",
             "glm53_mla_group",
             "glm53_tree_batch",
+            "glm53_tree_compile",
+            "glm53_tree_router",
+            "glm53_tree_barrier",
+            "glm53_tree_moe",
             "glm53_compile_regions",
             "glm53_router",
             "glm53_kda_small",
@@ -369,7 +391,11 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             or policy.get("glm53_kda_group", "off") not in ("off", "kblock")
             or policy.get("glm53_mla_group", "off") not in ("off", "kblock")
             or policy.get("glm53_tree_batch", "off") not in ("off", "kblock_v1")
-            or policy.get("glm53_compile_regions", "v1") not in ("off", "v1")
+            or policy.get("glm53_tree_compile", "off") not in ("off", "v1")
+            or policy.get("glm53_tree_router", "reference") not in ("reference", "fused_v1")
+            or policy.get("glm53_tree_barrier", "every5") not in ("every5", "every15", "end")
+            or policy.get("glm53_tree_moe", "fold") not in ("fold", "union_fold_v1")
+            or policy.get("glm53_compile_regions", "v1") not in ("off", "v1", "v1_taps")
             or policy.get("glm53_router", "fused_v1") not in ("reference", "fused_v1", "fused_v2")
             or policy.get("glm53_kda_small", "fused_v1") not in ("reference", "fused_v1")
             or policy.get("glm53_kda_fused", "decode_v1") not in ("reference", "decode_v1")
@@ -415,6 +441,25 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # expert-union MoE and a 5-layer barrier; every row equals its
             # one-row computation bit for bit.
             "glm53_tree_batch": policy.get("glm53_tree_batch", "off"),
+            # Layered tree (AST verify) layer bodies traced per parent
+            # topology under mx.compile and replayed (glm53_layer_tree
+            # TreeRegions): host graph build only, same values. Fused HC only.
+            # Default-off, unqualified.
+            "glm53_tree_compile": policy.get("glm53_tree_compile", "off"),
+            # Layered tree MoE routing: all rows' sigmoid/bias/top-8/normalize
+            # in one fused router launch (glm53_glue_metal.fused_router, one
+            # threadgroup per row, bit for bit the op chain) instead of ~8
+            # launches per row. Default-off, unqualified.
+            "glm53_tree_router": policy.get("glm53_tree_router", "reference"),
+            # Layered tree layer barrier (mx.eval of rows and states): every
+            # 5 layers (kblock_v1's bound, today), every 15, or once at the
+            # end. Scheduling only, same values. Default every5.
+            "glm53_tree_barrier": policy.get("glm53_tree_barrier", "every5"),
+            # Layered tree MoE under glm53_shared_fold=kblock: "fold" runs the
+            # serial row's fold per row (routed experts read per slot);
+            # "union_fold_v1" gives the same values with routed experts read
+            # once per run of sorted slots (kblock_union_shared). Default-off.
+            "glm53_tree_moe": policy.get("glm53_tree_moe", "fold"),
             # B1 decode layer bodies (KDA layers whole, MLA FFN halves) traced
             # once under mx.compile and replayed: host graph build only; the
             # replay gate requires bitwise logits and state (glm53_compile_regions).
@@ -541,6 +586,7 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # External/AST routes prefill through body-only tap forwards,
             # which this evaluation does not cover.
             raise ValueError("glm53_prompt_eval=layer_v1 does not cover external-draft prompt prefill")
+        _check_tree_levers(self.kernel_policy)
         _check_mla_fused(self.kernel_policy)
         if (
             self.kernel_policy["glm53_draft_activation"] != "target"
@@ -566,6 +612,8 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                           ("glm53_kda_group", "kda_group"),
                           ("glm53_mla_group", "mla_group"),
                           ("glm53_tree_batch", "tree_batch"),
+                          ("glm53_tree_compile", "tree_compile"),
+                          ("glm53_tree_router", "tree_router"),
                           ("glm53_router", "router"),
                           ("glm53_kda_small", "kda_small"),
                           ("glm53_kda_fused", "kda_fused"),
@@ -579,6 +627,10 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         for key, values in SPARSE_KEYS.items():
             if self.kernel_policy[key] != values[0]:
                 self.profile += ":" + key.removeprefix("glm53_") + "=" + self.kernel_policy[key]
+        if self.kernel_policy["glm53_tree_moe"] != "fold":
+            self.profile += ":tree_moe=" + self.kernel_policy["glm53_tree_moe"]
+        if self.kernel_policy["glm53_tree_barrier"] != "every5":
+            self.profile += ":tree_barrier=" + self.kernel_policy["glm53_tree_barrier"]
         if self.kernel_policy["glm53_compile_regions"] != "off":
             self.profile += ":compile_regions=" + self.kernel_policy["glm53_compile_regions"]
         artifact = inspect_artifact(model_path)
@@ -713,7 +765,13 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             self.weights.row_token_share = True
             self.weights.expert_union = True
             self.model.tree_eval_every = 5
+        if self.kernel_policy["glm53_tree_barrier"] != "every5":
+            self.model.tree_eval_every = {"every15": 15, "end": len(self.config["layer_types"])}[
+                self.kernel_policy["glm53_tree_barrier"]]
         self.model.compile_regions = self.kernel_policy["glm53_compile_regions"]
+        self.model.tree_compile = self.kernel_policy["glm53_tree_compile"]
+        self.model.tree_router = self.kernel_policy["glm53_tree_router"]
+        self.model.tree_moe = self.kernel_policy["glm53_tree_moe"]
         if drafter_kind == "mtp":
             self.model.enable_mtp()
         self.model.preload().eval()

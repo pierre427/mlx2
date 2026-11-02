@@ -93,6 +93,9 @@ def run_config(name, policy, flags, args, out):
         for i, text in enumerate(texts):
             body = {"model": model, "messages": [{"role": "user", "content": text}], "max_tokens": args.max_tokens,
                     "temperature": 0, "enable_thinking": False}
+            if args.logprobs:
+                # Near-tie classification evidence (AGENTS.md): bounded top-k window.
+                body.update(logprobs=True, top_logprobs=args.logprobs)
             if args.clear_apc:
                 # Every request starts without retained prefix state (AGENTS.md ladder rule).
                 cleared = call(url, "/v1/admin/apc/clear", {"reason": f"{name}-{i}"}, timeout=120,
@@ -152,6 +155,7 @@ def main():
     parser.add_argument("--prefill-step", type=int, default=2048)
     parser.add_argument("--sample", action="store_true", help="macOS sample(1) of the server during request 1")
     parser.add_argument("--keep-receipts", action="store_true")
+    parser.add_argument("--logprobs", type=int, default=0, help="request top-N logprobs per token")
     parser.add_argument("--clear-apc", action="store_true",
                         help="POST /v1/admin/apc/clear (admin token) before every request")
     parser.add_argument("--bool-trace", action="store_true", help="count mx.array truth tests by call site")

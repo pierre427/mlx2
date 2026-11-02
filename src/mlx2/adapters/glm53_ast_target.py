@@ -27,6 +27,8 @@ SOURCE_PATHS = (
     "src/mlx2/runtime/models/glm53_sparse_attention.py",
     "src/mlx2/runtime/gguf/packed_metal.py",
     "src/mlx2/runtime/gguf/k_metal.py",
+    "src/mlx2/runtime/gguf/kblock_metal.py",
+    "src/mlx2/runtime/gguf/kblock_union_shared.py",
     "src/mlx2/runtime/cow_cache.py",
     "src/mlx2/runtime/models/gated_delta.py",
     "src/mlx2/adapters/glm53_gguf.py",
@@ -252,4 +254,9 @@ class Glm53TargetTreeExecutor:
             # Layered-tree MLA policies (glm53_layer_tree); defaults = today.
             "tree_rows_attention": getattr(self.model, "tree_rows_attention", "per_row"),
             "tree_frontier": getattr(self.model, "tree_frontier", "clone"),
+            "tree_compile": getattr(self.model, "tree_compile", "off"),
+            "tree_router": getattr(self.model, "tree_router", "reference"),
+            "tree_moe": getattr(self.model, "tree_moe", "fold"),
+            "tree_compile_counters": dict(getattr(
+                self.model.__dict__.get("_tree_regions"), "counters", {})),
         }

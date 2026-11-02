@@ -44,7 +44,10 @@ import numpy as np
 
 from . import deepseek_v4_hc, glm53_hc_fused, glm53_hc_mega, precise_ops
 
-POLICIES = ("off", "v1")
+# "v1_taps": v1 plus one-token decodes that capture layer taps (the AST route's
+# plain/parked target step, forward_with_taps). Taps are read from the replayed
+# layer outputs exactly as eager reads them. Default-off, unqualified.
+POLICIES = ("off", "v1", "v1_taps")
 _COUNTERS = {"kda_layers": 0, "mla_ffn_halves": 0, "traces": 0, "declined_steps": 0, "warmup_steps": 0}
 # Serializes tracing and the counter replay: a trace records its counter delta
 # from the shared ledgers, and the trace flag is per region. (A model forward
@@ -124,6 +127,23 @@ class _Region:
             return result
 
 
+def policy_key(model):
+    """Every model/weights attribute a traced body reads (a change keys a fresh trace)."""
+    weights = model.weights
+    return (
+        id(weights), model.math_policy, model.hc_mega, model.hc_fused,
+        getattr(model, "kda_group", False), getattr(model, "shared_fold", False),
+        getattr(model, "kda_small", "reference"), getattr(model, "router", "reference"),
+        getattr(model, "kda_fused", "reference"), getattr(model, "hc_fused_policy", "reference"),
+        getattr(model, "f32_weights", "reference"),
+        getattr(weights, "row_policy", None), getattr(weights, "dense_prefill_policy", None),
+        getattr(weights, "expert_prefill_policy", None), getattr(weights, "compute_policy", None),
+        getattr(weights, "row_token_share", False), getattr(weights, "expert_union", False),
+        getattr(weights, "_kblock_exact", None), getattr(weights, "_kblock_vec", 1),
+        model.args.rms_norm_eps, str(mx.default_device()),
+    )
+
+
 class CompiledLayers:
     """Per-model cache of compiled layer bodies, keyed by the traced policy."""
 
@@ -134,19 +154,7 @@ class CompiledLayers:
         self.regions = {}
 
     def _policy_key(self):
-        model, weights = self.model, self.model.weights
-        return (
-            id(weights), model.math_policy, model.hc_mega, model.hc_fused,
-            getattr(model, "kda_group", False), getattr(model, "shared_fold", False),
-            getattr(model, "kda_small", "reference"), getattr(model, "router", "reference"),
-            getattr(model, "kda_fused", "reference"), getattr(model, "hc_fused_policy", "reference"),
-            getattr(model, "f32_weights", "reference"),
-            getattr(weights, "row_policy", None), getattr(weights, "dense_prefill_policy", None),
-            getattr(weights, "expert_prefill_policy", None), getattr(weights, "compute_policy", None),
-            getattr(weights, "row_token_share", False), getattr(weights, "expert_union", False),
-            getattr(weights, "_kblock_exact", None), getattr(weights, "_kblock_vec", 1),
-            model.args.rms_norm_eps, str(mx.default_device()),
-        )
+        return policy_key(self.model)
 
     def _region(self, kind, index):
         key = self._policy_key()
@@ -236,18 +244,20 @@ def _mid(model, branch, h, post, comb, half, norm):
     return (h, *model._hc_in(h, half, norm))
 
 
-def active(model, inputs, cache, *, plain=True):
+def active(model, inputs, cache, *, plain=True, taps=False):
     """The layer runner of an admitted decode step, or None (eager).
 
     ``plain`` is False for tap/body-only forwards (AST rows, feature capture):
-    those stay eager.
+    those stay eager under ``v1``. ``taps`` marks a one-token tap forward
+    (not body-only), admitted under ``v1_taps``.
     """
-    if getattr(model, "compile_regions", "off") != "v1":
+    policy = getattr(model, "compile_regions", "off")
+    if policy not in ("v1", "v1_taps"):
         return None
     from .glm53_gguf import sparse_phase
 
     admitted = (
-        plain
+        (plain or (taps and policy == "v1_taps"))
         and inputs.shape == (1, 1)
         and sparse_phase() != "prompt"
         and mx.default_device() == mx.gpu
@@ -279,7 +289,7 @@ def active(model, inputs, cache, *, plain=True):
 def release(model):
     """Drop compiled bodies and host memos (they capture weight arrays)."""
     with _LOCK:
-        for name in ("_compiled_layers", "_kda_static_memo", "_hc_in_memo", "_mlp_names",
+        for name in ("_compiled_layers", "_tree_regions", "_kda_static_memo", "_hc_in_memo", "_mlp_names",
                      "_hc_fused_memo", "_f32_rows_memo", "_f32_bf16_memo"):
             model.__dict__.pop(name, None)
 

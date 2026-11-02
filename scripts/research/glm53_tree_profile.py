@@ -118,6 +118,18 @@ def tree_ablation(model, adapter, executor, cache, layers, inputs, parents, mx, 
     return rows
 
 
+def _path(parents, row):
+    path = []
+    while row >= 0:
+        path.append(row)
+        row = parents[row]
+    return path[::-1]
+
+
+def _depth(parents, row):
+    return len(_path(parents, row))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
@@ -212,15 +224,23 @@ def main():
                 before = {k: dict(getattr(weights, k)) for k in
                           ("scheduled_dense_calls", "scheduled_grouped_calls", "scheduled_expert_calls")
                           if hasattr(weights, k)}
-                times = []
+                times, commits = [], []
                 for rep in range(args.reps + 1):
                     t0 = time.perf_counter()
                     out, features, transaction = executor.forward(model, inputs, parents, cache, layers)
                     mx.eval(out, features)
                     elapsed = time.perf_counter() - t0
-                    transaction.abort()
+                    # c_commit: materialize the deepest path (as a full accept
+                    # commits) and evaluate it; the live cache is untouched.
+                    deepest = max(range(width), key=lambda r: (_depth(parents, r), r))
+                    t1 = time.perf_counter()
+                    committed = transaction.commit_paths([_path(parents, deepest)])[0]
+                    mx.eval([c.state for c in committed])
+                    commit = time.perf_counter() - t1
+                    del committed
                     if rep:
                         times.append(elapsed)
+                        commits.append(commit)
                 import hashlib
 
                 import numpy as np
@@ -232,12 +252,15 @@ def main():
                     after = getattr(weights, k)
                     calls[k] = {r: (after[r] - b.get(r, 0)) // (args.reps + 1) for r in after if after[r] != b.get(r, 0)}
                 t = sorted(times)[len(times) // 2]
+                c_commit = sorted(commits)[len(commits) // 2]
                 row = {"implementation": implementation, "tree": kind, "width": width, "seconds": t,
+                       "commit_seconds": c_commit,
                        "per_row_ms": t * 1e3 / width, "vs_w_decode_steps": t / (width * one),
                        "vs_one_decode_step": t / one, "calls_per_forward": calls}
                 record["rows"].append(row)
                 print(f"{implementation:8s} {kind:5s} W{width:<3d} {t*1e3:8.2f} ms  {t*1e3/width:7.2f} ms/row  "
-                      f"= {t/one:5.2f} decode steps ({t/(width*one):.2f} of W steps)", flush=True)
+                      f"= {t/one:5.2f} decode steps ({t/(width*one):.2f} of W steps)  commit {c_commit*1e3:6.2f} ms",
+                      flush=True)
     record["logits_sha256"] = digests
     if args.ablate:
         executor = Glm53TargetTreeExecutor(model, implementation="layered")

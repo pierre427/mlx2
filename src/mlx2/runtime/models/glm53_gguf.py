@@ -1452,7 +1452,8 @@ class Glm53GGUFModel:
             from . import glm53_compile_regions
 
             regions = glm53_compile_regions.active(
-                self, inputs, cache, plain=_taps is None and not _body_only
+                self, inputs, cache, plain=_taps is None and not _body_only,
+                taps=_taps is not None and not _body_only,
             )
         prompt_eval_every = (getattr(self, "prompt_eval_every", 0)
                              if sparse_phase() == "prompt" and _taps is None and not _body_only else 0)

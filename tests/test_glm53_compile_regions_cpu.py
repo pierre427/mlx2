@@ -133,6 +133,13 @@ def test_first_admitted_step_per_policy_runs_a_complete_eager_warmup():
         assert np.array_equal(np.array(out), np.array(eager))
         assert isinstance(regions.active(model, mx.zeros((1, 1)), caches), regions.CompiledLayers)
         assert regions.active(model, mx.zeros((1, 1)), caches, plain=False) is None
+        # Tap decodes stay eager under v1 and are admitted under v1_taps.
+        assert regions.active(model, mx.zeros((1, 1)), caches, plain=False, taps=True) is None
+        model.compile_regions = "v1_taps"
+        assert isinstance(regions.active(model, mx.zeros((1, 1)), caches, plain=False, taps=True),
+                          regions.CompiledLayers)
+        assert regions.active(model, mx.zeros((1, 1)), caches, plain=False) is None
+        model.compile_regions = "v1"
         model.router = "fused_v1"
         assert isinstance(regions.active(model, mx.zeros((1, 1)), caches), regions._Warmup)
         regions.release(model)

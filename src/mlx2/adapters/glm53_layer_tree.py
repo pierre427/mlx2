@@ -18,6 +18,13 @@ defaults (per_row, clone) are the pre-policy loop bit for bit:
     parent's cache, so no row copies the whole latent; the transaction
     materializes the accepted path at commit. KDA rows keep private
     Glm53KDACache clones (they refuse trims and carry inherent state).
+``glm53_tree_compile=v1``  (fused HC only) each layer's stateless row work is
+    traced once per (layer, parent topology) under ``mx.compile`` and replayed
+    (glm53_compile_regions' _Region, counters included): a KDA layer whole
+    (rows' projections, per-row recurrences from their parents' states, FFN),
+    an MLA layer's attention HC-in and its FFN tail; the MLA appends,
+    selection and attention stay eager. Host graph build only; a key's first
+    call runs the same body eagerly so host memos hold real arrays.
 """
 
 from __future__ import annotations
@@ -29,6 +36,10 @@ from ..runtime.models import glm53_sparse_attention as sparse_attention
 from ..runtime.models.glm53_gguf import INCREMENTAL_POOLS, Q8_REFUSAL, hc_collapse, hc_expand, rms
 from ..runtime.models.glm53_gguf_indexer import Glm53PoolCache
 from ..runtime.models.precise_ops import gate_sigmoid
+
+SUPPORTED_TREE_COMPILE = ("off", "v1")
+SUPPORTED_TREE_ROUTER = ("reference", "fused_v1")
+SUPPORTED_TREE_MOE = ("fold", "union_fold_v1")
 
 # Tree policy values this module implements; the adapter refuses any other
 # (glm53_gguf._check_sparse_combination). First value = today's loop.
@@ -166,6 +177,47 @@ def kda_projection_rows(model, x, prefix):
     }
 
 
+def _fused_rows_routing(model, x, prefix):
+    """glm53_tree_router=fused_v1: every row's router logits by its own M1
+    gemv, then all rows' sigmoid/bias/top-8/normalize in ONE fused router
+    launch (one threadgroup per row, each equal to the op chain bit for bit:
+    glm53_glue_metal.fused_router). None when the kernel declines."""
+    from ..runtime.models.glm53_glue_metal import fused_router, router_admits
+
+    logits = project_rows(model, x, prefix + ".ffn_gate_inp.weight")
+    bias = model.weights.array(prefix + ".exp_probs_b.bias")
+    if not router_admits(logits, bias, 8):
+        model.calls["tree_router_fused_declined"] = model.calls.get("tree_router_fused_declined", 0) + 1
+        return None
+    model.calls["tree_router_fused"] = model.calls.get("tree_router_fused", 0) + 1
+    return fused_router(logits, bias, topk=8, scale=2.5)
+
+
+def _union_fold(model, flat, ids, scores, prefix):
+    """glm53_tree_moe=union_fold_v1: the serial fold's values with routed
+    experts read once per run of sorted slots (kblock_union_shared), or None."""
+    weights = model.weights
+    if flat.shape[0] < 2 or getattr(weights, "_kblock_exact", False):
+        return None
+    from ..runtime.gguf.kblock_union_shared import kblock_moe_union_shared
+    from ..runtime.gguf.reader import GGUFError
+
+    names = [prefix + f".ffn_{p}_exps.weight" for p in ("gate", "up", "down")]
+    names += [prefix + f".ffn_{p}_shexp.weight" for p in ("gate", "up", "down")]
+    packed = [weights.packed(n) for n in names]
+    if not all(weights._kblock_rows(w) for w in packed):
+        return None
+    try:
+        out = kblock_moe_union_shared(flat, ids, scores, *packed)
+    except GGUFError:
+        model.calls["tree_moe_union_fold_declined"] = model.calls.get("tree_moe_union_fold_declined", 0) + 1
+        return None
+    model.calls["tree_moe_union_fold"] = model.calls.get("tree_moe_union_fold", 0) + 1
+    weights.scheduled_expert_calls["kblock_moe_union_shared"] = (
+        weights.scheduled_expert_calls.get("kblock_moe_union_shared", 0) + 1)
+    return out
+
+
 def mlp_rows(model, x, prefix, index):
     def shared(suffix):
         gate = mx.minimum(
@@ -180,23 +232,41 @@ def mlp_rows(model, x, prefix, index):
 
     if index < 3:
         return shared("")
-    ids = []
-    scores = []
-    for row in range(x.shape[1]):
-        probability = gate_sigmoid(
-            model.weights.linear(prefix + ".ffn_gate_inp.weight")(x[:, row : row + 1])
-        )
-        biased = probability + model.weights.array(prefix + ".exp_probs_b.bias")
-        chosen = mx.argsort(-biased, axis=-1)[..., :8].astype(mx.uint32)
-        weight = mx.take_along_axis(probability, chosen, axis=-1)
-        weight = weight / weight.sum(-1, keepdims=True) * 2.5
-        ids.append(chosen)
-        scores.append(weight)
-    ids = mx.concatenate(ids, axis=1)
-    scores = mx.concatenate(scores, axis=1)
-    routed = model.weights.moe(
-        x.reshape(-1, x.shape[-1]), ids.reshape(-1, 8), scores.reshape(-1, 8), prefix
-    ).reshape(x.shape)
+    routed = None
+    if getattr(model, "tree_router", "reference") == "fused_v1":
+        routed = _fused_rows_routing(model, x, prefix)
+    if routed is not None:
+        ids, scores = routed
+    else:
+        ids = []
+        scores = []
+        for row in range(x.shape[1]):
+            probability = gate_sigmoid(
+                model.weights.linear(prefix + ".ffn_gate_inp.weight")(x[:, row : row + 1])
+            )
+            biased = probability + model.weights.array(prefix + ".exp_probs_b.bias")
+            chosen = mx.argsort(-biased, axis=-1)[..., :8].astype(mx.uint32)
+            weight = mx.take_along_axis(probability, chosen, axis=-1)
+            weight = weight / weight.sum(-1, keepdims=True) * 2.5
+            ids.append(chosen)
+            scores.append(weight)
+        ids = mx.concatenate(ids, axis=1)
+        scores = mx.concatenate(scores, axis=1)
+    flat = x.reshape(-1, x.shape[-1])
+    if getattr(model, "shared_fold", False) and getattr(model, "tree_moe", "fold") == "union_fold_v1":
+        folded = _union_fold(model, flat, ids.reshape(-1, 8), scores.reshape(-1, 8), prefix)
+        if folded is not None:
+            return folded.reshape(x.shape)
+    if getattr(model, "shared_fold", False):
+        # The serial row (Glm53GGUFModel._mlp) folds the shared expert into
+        # the routed K-block launches (its activation and slot-ordered
+        # combine differ in the last bits from routed + separate shared), so
+        # the tree takes the same fold for every row (one slot set per row).
+        folded = model.weights.moe_with_shared(
+            flat, ids.reshape(-1, 8), scores.reshape(-1, 8), prefix, prefix + ".ffn_{}_shexp.weight")
+        if folded is not None:
+            return folded.reshape(x.shape)
+    routed = model.weights.moe(flat, ids.reshape(-1, 8), scores.reshape(-1, 8), prefix).reshape(x.shape)
     return routed + shared("_shexp")
 
 
@@ -206,6 +276,8 @@ def collapse_rows(model, h, prefix, eps):
     The fused Sinkhorn, weighted-sum and expand kernels compute each row
     independently, and rms_norm reduces within a row, so batching rows keeps
     every row's values. The native F32 mixing projection keeps its M1 law.
+    This is the fused_fp32 composition; under glm53_hc=mega_v1 the serial
+    row runs glm53_hc_mega instead, see hc_in_rows.
     """
     from ..runtime.models.deepseek_v4_hc import split_sinkhorn, weighted_sum
 
@@ -216,6 +288,36 @@ def collapse_rows(model, h, prefix, eps):
     return weighted_sum(h, pre), post, comb
 
 
+def hc_in_rows(model, h, prefix, norm, eps):
+    """Every row's HC-in and half norm: (normalized x, post, comb), (1, W, ...).
+
+    Each row gets its serial one-token law (Glm53GGUFModel._hc_in): under
+    glm53_hc=mega_v1 the flat norm, its own M1 mixing gemv and ONE
+    glm53_hc_mega.post launch for all rows (one threadgroup per row, so
+    each row equals its one-row launch); otherwise the fused_fp32 split
+    Sinkhorn + weighted sum, then the norm. (Before this, mega_v1 trees ran
+    the fused_fp32 composition, which differs from the mega kernel in the
+    last bits once HC streams differ: the pre-existing tree-vs-serial
+    oracle failure.)
+    """
+    weights = model.weights
+    if getattr(model, "hc_mega", False):
+        from ..runtime.models import glm53_hc_mega as mega
+
+        mega.self_check()
+        rows = h.shape[1]
+        # Per-row flat norm: the serial row normalizes one (1, 1, 4D) row.
+        z = mx.concatenate(
+            [rms(h[:, row : row + 1].reshape(1, 1, -1), None, eps) for row in range(rows)], axis=1)
+        mixes = project_rows(model, z, prefix + "_fn")
+        x, _, post, comb = mega.post(
+            h, mixes, weights.array(prefix + "_scale"), weights.array(prefix + "_base"),
+            weights.array(norm), rms_eps=eps)
+        return x, post, comb
+    x, post, comb = collapse_rows(model, h, prefix, eps)
+    return rms(x, weights.array(norm), eps), post, comb
+
+
 def _batched_layer(model, layer, index, prefix, hidden, parents, base, successors, eps, clone,
                    offset, depth, policy):
     """One layer with HC/norm work over all rows at once (fused HC only)."""
@@ -223,8 +325,8 @@ def _batched_layer(model, layer, index, prefix, hidden, parents, base, successor
 
     rows = len(hidden)
     h = mx.concatenate(hidden, axis=1)
-    x, post, comb = collapse_rows(model, h, prefix + ".hc_attn", eps)
-    attention_inputs = rms(x, model.weights.array(prefix + ".attn_norm.weight"), eps)
+    attention_inputs, post, comb = hc_in_rows(
+        model, h, prefix + ".hc_attn", prefix + ".attn_norm.weight", eps)
     projected = kda_projection_rows(model, attention_inputs, prefix) if layer.is_linear else None
     cores = _attention_cores(
         model, layer, index, prefix,
@@ -233,9 +335,148 @@ def _batched_layer(model, layer, index, prefix, hidden, parents, base, successor
     )
     branches = project_rows(model, mx.concatenate(cores, axis=1), prefix + ".attn_output.weight")
     h = expand(branches, h, post, comb)
-    x, post, comb = collapse_rows(model, h, prefix + ".hc_ffn", eps)
-    mixed = rms(x, model.weights.array(prefix + ".ffn_norm.weight"), eps)
+    mixed, post, comb = hc_in_rows(model, h, prefix + ".hc_ffn", prefix + ".ffn_norm.weight", eps)
     h = expand(mlp_rows(model, mixed, prefix, index), h, post, comb)
+    return [h[:, row : row + 1] for row in range(rows)]
+
+
+class TreeRegions:
+    """Per-model compiled tree bodies keyed by (kind, layer, parents).
+
+    Each body's arrays are explicit inputs and outputs; weights and policy
+    memos are captured. A policy change (glm53_compile_regions.policy_key)
+    drops every region. A key's first use runs its body eagerly.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self.key = None
+        self.regions = {}
+        self.warm = set()
+        self.counters = {"tree_compiled_layers": 0, "tree_compile_traces": 0,
+                         "tree_compile_warmups": 0}
+
+    def call(self, kind, index, parents, build, *arrays):
+        from ..runtime.models import glm53_compile_regions as regions
+
+        # The tree bodies also read the tree's own policy attributes.
+        key = (regions.policy_key(self.model), getattr(self.model, "tree_router", "reference"),
+               getattr(self.model, "tree_moe", "fold"), getattr(self.model, "hc_fused_policy", "reference"))
+        if key != self.key:
+            self.key, self.regions, self.warm = key, {}, set()
+        name = (kind, index, tuple(parents))
+        if name not in self.warm:
+            # Eager first use: every lazily built host memo then holds real
+            # arrays before anything is traced (as compile regions' warm-up).
+            # Marked warm only once the eager body has completed.
+            result = build()(*arrays)
+            self.warm.add(name)
+            self.counters["tree_compile_warmups"] += 1
+            return result
+        region = self.regions.get(name)
+        if region is None:
+            region = self.regions[name] = regions._Region(build(), self.model)
+            self.counters["tree_compile_traces"] += 1
+        self.counters["tree_compiled_layers"] += 1
+        return region(self.model, *arrays)
+
+
+def tree_regions(model, base):
+    """The model's TreeRegions when glm53_tree_compile=v1 admits this tree, else None."""
+    if getattr(model, "tree_compile", "off") != "v1" or not getattr(model, "hc_fused", False):
+        return None
+    from ..runtime.models.glm53_gguf import sparse_phase
+
+    on_gpu = mx.default_device() == mx.gpu and mx.metal.is_available()
+    if (
+        not (on_gpu or getattr(model, "_tree_compile_any_device", False))
+        or sparse_phase() == "prompt"
+        or any(layer.is_linear and (state.conv is None or state.recurrent is None)
+               for state, layer in zip(base, model.layers))
+    ):
+        model.calls["tree_compile_declined"] = model.calls.get("tree_compile_declined", 0) + 1
+        return None
+    regions = model.__dict__.get("_tree_regions")
+    if regions is None:
+        regions = model.__dict__["_tree_regions"] = TreeRegions(model)
+    return regions
+
+
+def _ffn_tail(model, index, prefix, cores, h, post, comb, eps):
+    """Attention output projection, HC expand, FFN HC-in, MLP/MoE, HC expand."""
+    from ..runtime.models.deepseek_v4_hc import expand
+
+    branches = project_rows(model, cores, prefix + ".attn_output.weight")
+    h = expand(branches, h, post, comb)
+    mixed, post, comb = hc_in_rows(model, h, prefix + ".hc_ffn", prefix + ".ffn_norm.weight", eps)
+    return expand(mlp_rows(model, mixed, prefix, index), h, post, comb)
+
+
+def _attention_in(model, prefix, h, eps):
+    return hc_in_rows(model, h, prefix + ".hc_attn", prefix + ".attn_norm.weight", eps)
+
+
+def _compiled_layer(model, regions, layer, index, prefix, hidden, parents, base, successors,
+                    eps, clone, offset, depth, policy):
+    """_batched_layer with its stateless row work replayed from compiled bodies.
+
+    Same values and state as _batched_layer: the bodies are its own op
+    sequences, and KDA rows start from their parents' (conv, recurrent).
+    """
+    from ..runtime.models.glm53_gguf import Glm53KDACache
+
+    rows = len(hidden)
+    parents = tuple(parents)
+    h = mx.concatenate(hidden, axis=1)
+    if layer.is_linear:
+        def build():
+            def body(h, conv, recurrent):
+                from types import SimpleNamespace
+
+                x, post, comb = _attention_in(model, prefix, h, eps)
+                projected = kda_projection_rows(model, x, prefix)
+                convs, recurrents, cores = [], [], []
+                for row, parent in enumerate(parents):
+                    state = SimpleNamespace(
+                        conv=conv if parent < 0 else convs[parent],
+                        recurrent=recurrent if parent < 0 else recurrents[parent],
+                        offset=0,
+                    )
+                    local = {name: value[:, row : row + 1] for name, value in projected.items()}
+                    cores.append(model._kda(x[:, row : row + 1], state, prefix, _projected=local,
+                                            _return_pre_output=True))
+                    convs.append(state.conv)
+                    recurrents.append(state.recurrent)
+                out = _ffn_tail(model, index, prefix, mx.concatenate(cores, axis=1), h, post, comb, eps)
+                return (out, *convs, *recurrents)
+
+            return body
+
+        source = base[index]
+        result = regions.call("kda", index, parents, build, h, source.conv, source.recurrent)
+        h = result[0]
+        for row, parent in enumerate(parents):
+            prior = source if parent < 0 else successors[parent][index]
+            state = Glm53KDACache(prior.identity)
+            state.offset = prior.offset + 1
+            state.conv, state.recurrent = result[1 + row], result[1 + rows + row]
+            successors[row].append(state)
+        return [h[:, row : row + 1] for row in range(rows)]
+
+    def build_in():
+        return lambda h: _attention_in(model, prefix, h, eps)
+
+    x, post, comb = regions.call("mla_in", index, parents, build_in, h)
+    cores = _attention_cores(
+        model, layer, index, prefix, [x[:, row : row + 1] for row in range(rows)],
+        None, parents, base, successors, clone, offset, depth, policy,
+    )
+
+    def build_tail():
+        return lambda cores, h, post, comb: _ffn_tail(model, index, prefix, cores, h, post, comb, eps)
+
+    h = regions.call("mla_tail", index, parents, build_tail,
+                     mx.concatenate(cores, axis=1), h, post, comb)
     return [h[:, row : row + 1] for row in range(rows)]
 
 
@@ -277,13 +518,20 @@ def forward(model, inputs, parents, base, capture_layers, clone):
     taps = {}
     eps = model.args.rms_norm_eps
     batched_hc = bool(getattr(model, "hc_fused", False))
+    regions = tree_regions(model, base) if batched_hc else None
     for index, layer in enumerate(model.layers):
         prefix = f"blk.{index}"
         if batched_hc:
-            hidden = _batched_layer(
-                model, layer, index, prefix, hidden, parents, base, successors, eps, clone,
-                offset, depth, policy,
-            )
+            if regions is not None:
+                hidden = _compiled_layer(
+                    model, regions, layer, index, prefix, hidden, parents, base, successors,
+                    eps, clone, offset, depth, policy,
+                )
+            else:
+                hidden = _batched_layer(
+                    model, layer, index, prefix, hidden, parents, base, successors, eps, clone,
+                    offset, depth, policy,
+                )
             # Research knob: barrier every N layers (1 = every layer, as before).
             every = getattr(model, "tree_eval_every", 1)
             if (index + 1) % every == 0 or index + 1 == len(model.layers):
