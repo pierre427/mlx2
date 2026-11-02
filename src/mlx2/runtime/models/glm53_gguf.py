@@ -73,6 +73,13 @@ GLUE_COUNTERS = (
 # glm53_hc=mega_v1. "tail_v1" also runs the mega post step in that launch.
 HC_FUSED_POLICIES = ("reference", "v1", "tail_v1")
 HC_FUSED_COUNTERS = ("hc_fused_boundary", "hc_fused_tail", "hc_fused_declined")
+# glm53_f32_weights: the F32 gemv operands read by the fused HC and router
+# kernels (hc_*_fn, ffn_gate_inp) hold BF16-representable values in this
+# checkpoint; "bf16_v1" hands those kernels an exact BF16 copy (half the bytes,
+# the same float operand per element, so the same bits). A tensor whose copy
+# is not exact keeps its F32 operand and counts as declined.
+F32_WEIGHT_POLICIES = ("reference", "bf16_v1")
+F32_WEIGHT_COUNTERS = ("f32_bf16_operand", "f32_bf16_declined")
 # Prompt-phase selection scores pools in blocks of this many (design 5.2).
 SELECT_BLOCK = 4096
 # Decode-phase gathered query rows live at once (Glm53CacheBudget books 8).
@@ -516,7 +523,7 @@ class Glm53GGUFModel:
         indexer_select="argsort", sparse_attention="mask_reference", sparse_prefill="dense_reference",
         tree_rows_attention="per_row", tree_frontier="clone", router="reference",
         kda_small="reference", kv_append="reference", kda_fused="reference", hc_fused_policy="reference",
-        mla_fused="reference",
+        mla_fused="reference", f32_weights="reference",
     ):
         if math_policy not in ("ordinary", "reference"):
             raise ValueError("unknown GLM-5.3 math policy")
@@ -532,6 +539,8 @@ class Glm53GGUFModel:
             raise ValueError("glm53_hc_fused requires glm53_hc=mega_v1")
         if mla_fused not in MLA_FUSED_POLICIES:
             raise ValueError(f"unsupported GLM-5.3 MLA fused policy {mla_fused!r}")
+        if f32_weights not in F32_WEIGHT_POLICIES:
+            raise ValueError(f"unsupported GLM-5.3 F32 weight policy {f32_weights!r}")
         sparse = {
             "indexer_pools": indexer_pools,
             "indexer_select": indexer_select,
@@ -556,6 +565,7 @@ class Glm53GGUFModel:
         self.kda_fused = kda_fused
         self.hc_fused_policy = hc_fused_policy
         self.mla_fused = mla_fused
+        self.f32_weights = f32_weights
         # Storage law of the MLA latent/raw planes: "reference" appends in
         # place, which under pipelined decode copies the whole plane every
         # token (the step in flight still holds it); "rotate_v1" rotates
@@ -586,6 +596,8 @@ class Glm53GGUFModel:
             **{name: 0 for name in SPARSE_COUNTERS},
             **{name: 0 for name in GLUE_COUNTERS},
             **{name: 0 for name in HC_FUSED_COUNTERS},
+            **{name: 0 for name in F32_WEIGHT_COUNTERS},
+            "prompt_layer_evals": 0,
             **{name: 0 for name in KV_APPEND_COUNTERS},
             **{name: 0 for name in MLA_FUSED_COUNTERS},
         }
@@ -1348,13 +1360,37 @@ class Glm53GGUFModel:
             memo[name] = rows
         return memo[name]
 
+    def _f32_operand(self, name):
+        """``_f32_rows(name)``, or under glm53_f32_weights=bf16_v1 its exact
+        BF16 copy (built and bit-checked once, eagerly; compile regions warm
+        every policy with one eager step before tracing). A copy that is not
+        exact is refused and the F32 rows are returned."""
+        rows = self._f32_rows(name)
+        if rows is None or getattr(self, "f32_weights", "reference") != "bf16_v1":
+            return rows
+        memo = self.__dict__.get("_f32_bf16_memo")
+        if memo is None:
+            memo = self.__dict__["_f32_bf16_memo"] = {}
+        if name not in memo:
+            half = mx.contiguous(rows.astype(mx.bfloat16))
+            back = mx.view(half.astype(mx.float32), mx.uint32)
+            exact = mx.array_equal(back, mx.view(mx.contiguous(rows), mx.uint32))
+            mx.eval(half, exact)
+            memo[name] = half if bool(exact.item()) else None
+        half = memo[name]
+        if half is None:
+            self.calls["f32_bf16_declined"] += 1
+            return rows
+        self.calls["f32_bf16_operand"] += 1
+        return half
+
     def _route_gemv(self, x, prefix, router_name):
         """glm53_router=fused_v2: (ids, weights) from x in one launch, or None."""
         if getattr(self, "router", "reference") != "fused_v2":
             return None
         from . import glm53_glue_metal as glue
 
-        weight = self._f32_rows(router_name)
+        weight = self._f32_operand(router_name)
         bias = self.weights.array(prefix + ".exp_probs_b.bias")
         if x.shape[:-1] == (1, 1) and glue.router_gemv_admits(x, weight, bias, 8):
             self.calls["router_fused_v2"] += 1
@@ -1418,6 +1454,8 @@ class Glm53GGUFModel:
             regions = glm53_compile_regions.active(
                 self, inputs, cache, plain=_taps is None and not _body_only
             )
+        prompt_eval_every = (getattr(self, "prompt_eval_every", 0)
+                             if sparse_phase() == "prompt" and _taps is None and not _body_only else 0)
         for index, (layer, c) in enumerate(zip(self.layers, cache)):
             if regions is not None:
                 h = regions.layer(index, layer, c, h, offset)
@@ -1438,6 +1476,18 @@ class Glm53GGUFModel:
             )
             if _taps is not None and index in _taps:
                 _taps[index] = h.mean(-2)
+            if prompt_eval_every and (index + 1) % prompt_eval_every == 0:
+                # glm53_prompt_eval: evaluate each layer of a prompt chunk on
+                # its own (same kernels, same bits). With a large command-
+                # buffer op cap and no byte trigger (MLX2_COMMAND_BUFFERS=
+                # ops100_v1) a chunk's buffers otherwise hold ~100 kernels'
+                # prefill temporaries alive at once (+24 GB peak at 2048-row
+                # chunks); a per-layer evaluation commits and retires them.
+                # A cache without serializable state (research q8 latent)
+                # contributes only h; its writes stay lazy.
+                mx.eval(h, getattr(c, "state", []) if not isinstance(c, Glm53MLACache) or not getattr(
+                    self, "mla_kv_q8", False) else [])
+                self.calls["prompt_layer_evals"] += 1
         h = rms(
             h.mean(-2), self.weights.array("output_norm.weight"), self.args.rms_norm_eps
         )
@@ -1516,8 +1566,9 @@ class Glm53GGUFModel:
             memo = self.__dict__["_hc_fused_memo"] = {}
         entry = memo.get(half)
         if entry is None:
-            entry = memo[half] = (self._f32_rows(half + "_fn"), (half + "_scale", half + "_base"))
-        fn, (scale_name, base_name) = entry
+            entry = memo[half] = (half + "_fn", (half + "_scale", half + "_base"))
+        fn_name, (scale_name, base_name) = entry
+        fn = self._f32_operand(fn_name)
         stream = h if expand is None else expand[1]
         if not (
             self.hc_mega

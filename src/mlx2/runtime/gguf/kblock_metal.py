@@ -535,7 +535,72 @@ inline float kblock_dot32_v4(device const uchar *row, uint chunk, thread const f
     }
     return sum;
 }
-#define KDOT(row, chunk, a, format) (VEC == 3 ? kblock_dot32_v4(row, chunk, a, format) : VEC == 2 ? kblock_dot32_v3(row, chunk, a, format) : VEC ? kblock_dot32_v2(row, chunk, a, format) : kblock_dot32(row, chunk, a, format))
+// VEC=4 (glm53_kblock_element=fma_v1): kblock_dot32_v2 with the Q3_K and
+// Q6_K element values formed by one fused multiply-add instead of an integer
+// or float offset followed by a multiply. For a finite fp16 d = H*2^e
+// (|H| <= 2047), ds = d*scale and the codes give integer products below 2^24
+// (Q3_K: scale in [-32,31], code < 4; Q6_K: int8 scale, code < 64:
+// 2047*128*63 < 2^24), so ds*code, the offset -4*ds / -32*ds and their sum are
+// all exactly representable: fma(code, ds, offset) rounds nothing and equals
+// v2's ds*q. A chunk whose d is not finite takes v2 itself (Inf*code-Inf would
+// be NaN where v2 gives +-Inf).
+// The one difference is the sign of a zero element (v2: ds*(+0) = -0 when
+// ds < 0; here +0); it only reaches a sum through sum + a*(+-0), and the
+// running sum starts at +0 and is never -0 (x + -x rounds to +0), so every
+// partial is the same bits. Products and accumulation order are v2's.
+inline float kblock_dot32_v5(device const uchar *row, uint chunk, thread const float *a, uint format) {
+    if(format!=11 && format!=14) return kblock_dot32_v2(row, chunk, a, format);
+    float sum=0.0f;
+    const uint c=chunk%8;
+    if(format==11) {
+        device const uchar *p=row+(chunk/8)*110;
+        const float d=gguf_k_half(p+108);
+        if(!isfinite(d)) return kblock_dot32_v2(row, chunk, a, format);
+        float ds[2], off[2];
+        #pragma unroll
+        for(uint h=0;h<2;h++) {
+            const uint g=2*c+h;
+            const uint lo=(p[96+g%8]>>(4*(g/8)))&15;
+            const uint hi=(p[104+g%4]>>(2*(g/4)))&3;
+            ds[h]=d*float(int(lo|(hi<<4))-32);
+            off[h]=-4.0f*ds[h];
+        }
+        device const ushort *qs=(device const ushort*)(p+32+(c/4)*32);
+        device const ushort *hm=(device const ushort*)p;
+        const uint shift=2*(c%4);
+        #pragma unroll
+        for(uint w=0;w<16;w++) {
+            const uint qw=qs[w], hw=hm[w];
+            #pragma unroll
+            for(uint e=0;e<2;e++) {
+                const uint j=2*w+e;
+                const float v=fma(float((qw>>(8*e+shift))&3), ds[j/16], ((hw>>(8*e+c))&1) ? 0.0f : off[j/16]);
+                sum+=a[j]*v;
+            }
+        }
+        return sum;
+    }
+    device const uchar *p=row+(chunk/8)*210;
+    const float d=gguf_k_half(p+208);
+    if(!isfinite(d)) return kblock_dot32_v2(row, chunk, a, format);
+    const float ds[2]={d*float(int(as_type<char>(p[192+2*c]))), d*float(int(as_type<char>(p[193+2*c])))};
+    const float off[2]={-32.0f*ds[0], -32.0f*ds[1]};
+    device const ushort *ql=(device const ushort*)(p+(c/4)*64+(c%2)*32);
+    device const ushort *qh=(device const ushort*)(p+128+(c/4)*32);
+    const uint lshift=4*((c/2)%2), hshift=2*(c%4);
+    #pragma unroll
+    for(uint w=0;w<16;w++) {
+        const uint lw=ql[w], hw=qh[w];
+        #pragma unroll
+        for(uint e=0;e<2;e++) {
+            const uint j=2*w+e;
+            const uint lo=(lw>>(8*e+lshift))&15, hi=(hw>>(8*e+hshift))&3;
+            sum+=a[j]*fma(float(lo|(hi<<4)), ds[j/16], off[j/16]);
+        }
+    }
+    return sum;
+}
+#define KDOT(row, chunk, a, format) (VEC == 4 ? kblock_dot32_v5(row, chunk, a, format) : VEC == 3 ? kblock_dot32_v4(row, chunk, a, format) : VEC == 2 ? kblock_dot32_v3(row, chunk, a, format) : VEC ? kblock_dot32_v2(row, chunk, a, format) : kblock_dot32(row, chunk, a, format))
 
 // Load-ahead (AHEAD=2, glm53_row_kernel=kblock_rows_ahead2): kblock_dot32_v2
 // split into a load phase and an arithmetic phase. ka_load issues every device

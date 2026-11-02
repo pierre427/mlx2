@@ -57,6 +57,7 @@ FEATURES = (
     "glm53_router_fused_v1", "glm53_kda_small_fused_v1",
     "glm53_compile_regions_v1", "glm53_kda_fused_decode_v1", "glm53_kv_append_rotate_v1",
     "glm53_mla_fused_decode_v1", "glm53_hc_fused_v1", "glm53_router_fused_v2",
+    "glm53_f32_weights_bf16_v1", "glm53_kblock_element_fma_v1", "glm53_command_buffers_ops100_v1_prompt_eval_layer_v1",
     "ordinary_prefill_plan_exact", "lane_dense", "native_mtp_num_draft", "mtp_batched_prefill",
     "qsa_batch_decode_sparse", "varlen_sparse_moe", "fp32_head_logits", "gdn_state_dtype_float16", "qsa_lazy_causal_mask", "qsa_stage1_direct_selector", "ple_read_policy_adaptive", "mtp_draft_vocab", "compact_moe_prefill", "qsa_prefetch_partials", "tensorfold_qmv_rows", "tensorfold_prefill", "gdn_core",
     "prefill_plan_exact_slices", "async_qsa_promotion", "apc_eviction_queued_protection",

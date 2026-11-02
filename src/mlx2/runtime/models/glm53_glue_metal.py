@@ -253,7 +253,8 @@ threadgroup float lg[E];
 // chain for each of their rows).
 {
     const uint gr = sg / BN, gs = sg % BN;
-    const device float *mat = w + size_t(tile * RPT + gr) * K;
+    // F32 or exact-BF16 weights (glm53_f32_weights): same float operand values.
+    const device auto *mat = w + size_t(tile * RPT + gr) * K;
     float result = 0.0f;
     int bn = int(gs * 32 + lane) * TN;
     for (int it = 0; it < K / BLOCKN; ++it) {
@@ -318,13 +319,14 @@ def _router_v2_source():
     return _GEMV_TILE + "const uint i = lid;\nconst uint row = 0;\n" + body
 
 
-@lru_cache(maxsize=4)
-def _router_v2_kernel(scale):
+@lru_cache(maxsize=8)
+def _router_v2_kernel(scale, bf16_weight=False):
     source = _router_v2_source().replace("SIGMOID_P", _sigmoid("x", "p")).replace(
         "SCALE", repr(float(scale)) + "f"
     )
     return mx.fast.metal_kernel(
-        name="mlx2_glm53_router_gemv_v2_" + repr(float(scale)).replace(".", "_"),
+        name="mlx2_glm53_router_gemv_v2_" + repr(float(scale)).replace(".", "_")
+        + ("_bf16w" if bf16_weight else ""),
         input_names=["xin", "w", "bias", "counter"],
         output_names=["ids", "weights", "logits"],
         header=_GEMV_ACC_HEADER,
@@ -383,7 +385,7 @@ def router_gemv_admits(x, weight, bias, topk):
     experts, k = weight.shape
     return (
         x.dtype == mx.float32
-        and weight.dtype == mx.float32
+        and weight.dtype in (mx.float32, mx.bfloat16)
         and bias.dtype == mx.float32
         and bias.shape == (experts,)
         and x.size == k
@@ -401,7 +403,10 @@ def fused_router_gemv(x, weight, bias, counter=None, *, topk=8, scale=2.5, with_
     """(ids uint32, weights float32), each [..., topk], for one row in one launch.
 
     Equal bit for bit to ``fused_router(x @ weight.T, bias)`` for x [..., K]
-    holding one row, weight F32 [E, K] row-major (router_gemv_admits).
+    holding one row, weight F32 [E, K] row-major (router_gemv_admits). A
+    BF16 ``weight`` must hold the F32 matrix's values exactly (glm53_f32_weights
+    makes it so): each element widens to the same float operand, so the
+    outputs equal the F32 launch bit for bit with half the weight bytes.
     ``with_logits`` also returns the gathered logits [E] (tests). Each launch
     gets a fresh arrival counter by default: a counter shared by two launches
     that no data dependency orders could mix their arrivals.
@@ -410,7 +415,7 @@ def fused_router_gemv(x, weight, bias, counter=None, *, topk=8, scale=2.5, with_
         counter = router_counter()
     experts, k = weight.shape
     lead = x.shape[:-1]
-    ids, weights, logits = _router_v2_kernel(scale)(
+    ids, weights, logits = _router_v2_kernel(scale, weight.dtype == mx.bfloat16)(
         inputs=[x.reshape(k), weight, bias, counter],
         template=[("E", experts), ("TOPK", topk), ("K", k), ("BN", GEMV_BN), ("RPT", GEMV_RPT),
                   ("TN", GEMV_TN), ("BLOCKN", GEMV_BN * 32 * GEMV_TN)],

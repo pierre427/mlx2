@@ -30,6 +30,11 @@ SERVING_ENV_SWITCHES = {
     "MLX2_LFM25_FUSED_SHORTCONV": "LFM2.5-VL fused one-token ShortConv candidate",
     "MLX2_FUSED_SDPA_MIN_L": "fused d256 prefill SDPA crossover (APCv2 exemption)",
     "MLX2_DECODE_FIRST": "decode-first publication kill switch",
+    "MLX2_COMMAND_BUFFERS": "Metal command-buffer commit cadence (process_env; no computed bit changes)",
+    # MLX's own commit caps, latched at Metal start (set by MLX2_COMMAND_BUFFERS
+    # or by the operator): schedule and transient memory, never values.
+    "MLX_MAX_OPS_PER_BUFFER": "MLX command-buffer kernel cap",
+    "MLX_MAX_MB_PER_BUFFER": "MLX command-buffer input-size cap",
 }
 
 

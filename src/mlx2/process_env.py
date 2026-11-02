@@ -84,14 +84,91 @@ def apply_process_numerics(environ=None) -> dict:
 PROCESS_RUNTIME_DEFAULTS = {"MLX_METAL_FAST_SYNCH": "1"}
 
 
+# Metal command-buffer commit cadence, latched by MLX when Metal starts. It
+# never changes a computed bit: it decides only where MLX ends one command
+# buffer and starts the next. MLX commits after max_ops_per_buffer kernels or
+# once the *input* bytes bound in the buffer pass max_mb_per_buffer (M5 Max
+# defaults 50 ops / 50 MB, mlx/backend/metal/device.cpp). An input is billed
+# at its whole buffer size, so a decode step of a large model whose kernels
+# bind whole packed weight banks (GLM-5.3: a 520 MB expert bank per routed
+# launch) commits after nearly every weight kernel, and each commit leaves the
+# GPU waiting on the next buffer's scheduling. MLX2_COMMAND_BUFFERS selects:
+#
+#   "mlx_default" (default)  MLX's own values.
+#   "ops100_v1"              commit every 100 kernels; no byte trigger
+#                            (MLX_MAX_OPS_PER_BUFFER=100,
+#                            MLX_MAX_MB_PER_BUFFER=1000000).
+#
+# Evidence for ops100_v1 (GLM-5.3-Flash-REAP50-Q3_K_M.gguf@5a865918, mlx2
+# 1892dab2a, process-level ABBA of recorded 2K/32K decode replays,
+# qualification/runs/glm53-ordinary-roofline-20261030/scout-envsweep-*):
+# pipelined decode 24.7-25.3 -> 20.2-20.5 ms per step (-19%), every greedy
+# token identical. No byte trigger with the default 50 ops: -14%; neither
+# trigger (one buffer per step): -2% (the GPU then waits for the whole step to
+# be encoded). Opt-in, unqualified; explicit MLX_MAX_* values win.
+COMMAND_BUFFER_POLICY_ENV = "MLX2_COMMAND_BUFFERS"
+COMMAND_BUFFER_POLICIES = {
+    "mlx_default": {},
+    "ops100_v1": {"MLX_MAX_OPS_PER_BUFFER": "100", "MLX_MAX_MB_PER_BUFFER": "1000000"},
+}
+
+
+# The command-buffer values present when the package defaults were first
+# applied (before any mlx2 entrypoint can start Metal). A value written after
+# that may never have reached MLX, so status reports this snapshot.
+_COMMAND_BUFFERS_AT_IMPORT: dict | None = None
+
+
+def command_buffers_at_import() -> dict | None:
+    return None if _COMMAND_BUFFERS_AT_IMPORT is None else dict(_COMMAND_BUFFERS_AT_IMPORT)
+
+
+# A byte cap at or above this many MB no longer bounds a prefill chunk's
+# command buffers (MLX's own M5 Max default is 50).
+RAISED_BYTE_CAP_MB = 512
+
+
+def raised_command_buffer_byte_cap(environ=None) -> bool:
+    """True when the byte cap MLX latched (the import snapshot) or the one now
+    in the environment is raised to RAISED_BYTE_CAP_MB or more, whichever way
+    it was set (MLX2_COMMAND_BUFFERS or an explicit MLX_MAX_MB_PER_BUFFER)."""
+    target = os.environ if environ is None else environ
+    values = [target.get("MLX_MAX_MB_PER_BUFFER")]
+    if environ is None and _COMMAND_BUFFERS_AT_IMPORT is not None:
+        values.append(_COMMAND_BUFFERS_AT_IMPORT.get("MLX_MAX_MB_PER_BUFFER"))
+    for value in values:
+        try:
+            if value is not None and int(value) >= RAISED_BYTE_CAP_MB:
+                return True
+        except ValueError:
+            return True  # unparseable: assume the worst
+    return False
+
+
+def command_buffer_policy(environ=None) -> str:
+    target = os.environ if environ is None else environ
+    value = target.get(COMMAND_BUFFER_POLICY_ENV, "mlx_default")
+    if value not in COMMAND_BUFFER_POLICIES:
+        raise ValueError(f"unsupported {COMMAND_BUFFER_POLICY_ENV}={value!r}; "
+                         f"expected one of {sorted(COMMAND_BUFFER_POLICIES)}")
+    return value
+
+
 def apply_process_runtime_defaults(environ=None) -> dict:
     """Set each runtime default that is not already present; return what was set."""
     target = os.environ if environ is None else environ
     applied = {}
-    for name, value in PROCESS_RUNTIME_DEFAULTS.items():
+    global _COMMAND_BUFFERS_AT_IMPORT
+    defaults = {**PROCESS_RUNTIME_DEFAULTS, **COMMAND_BUFFER_POLICIES[command_buffer_policy(target)]}
+    for name, value in defaults.items():
         if name not in target:
             target[name] = value
             applied[name] = value
+    if environ is None and _COMMAND_BUFFERS_AT_IMPORT is None:
+        _COMMAND_BUFFERS_AT_IMPORT = {
+            "policy": command_buffer_policy(target),
+            **{name: target.get(name) for name in ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER")},
+        }
     return applied
 
 

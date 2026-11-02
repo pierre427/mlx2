@@ -46,7 +46,7 @@ def error(a, b, mx):
             "rel_l2": float((mx.linalg.norm(a - b) / mx.linalg.norm(a)).item())}
 
 
-VARIANTS = {"v0": {"vec": 0}, "v1": {"vec": 1}, "v2": {"vec": 2}, "v4": {"vec": 3},
+VARIANTS = {"v0": {"vec": 0}, "v1": {"vec": 1}, "v2": {"vec": 2}, "v4": {"vec": 3}, "v5": {"vec": 4},
             "exact": {"vec": 1, "exact": 1},
             "r1": {"vec": 1, "rows": 1}, "r2": {"vec": 1, "rows": 2}, "r8": {"vec": 1, "rows": 8}}
 
@@ -760,6 +760,8 @@ def classify(args, weights, kblock_metal, packed_moe, mx, rows):
 
 def cold(args, weights, kblock_metal, packed_moe, mx, rows):
     """Per-call time over every layer's tensor of a kind (several hundred MB per pass)."""
+    import numpy as np
+
     linear = [i for i in range(45) if f"blk.{i}.ssm_beta.weight" in weights.tensors]
     kinds = {
         "cold attn_q Q3_K (KDA)": [f"blk.{i}.attn_q.weight" for i in linear],
@@ -771,12 +773,15 @@ def cold(args, weights, kblock_metal, packed_moe, mx, rows):
         ws = [weights.packed(n) for n in names]
         x = mx.random.normal((1, ws[0].shape[1])).astype(mx.float32)
         nbytes = sum(w.tensor.nbytes for w in ws)
+        base = [np.array(kblock_metal.kblock_dense(x, w, vec=1)).view(np.uint32) for w in ws]
         for v in args.variants.split(","):
             fn = lambda v=v, x=x, ws=ws: [kblock_metal.kblock_dense(x, w, **VARIANTS[v]) for w in ws]
-            mx.eval(fn())
+            outs = fn()
+            mx.eval(outs)
+            same = all(np.array_equal(np.array(o).view(np.uint32), b) for o, b in zip(outs, base))
             t = min(_timed_once(fn, mx) for _ in range(5))
             rows.append({"label": f"{label} {v}", "bytes": nbytes, "kblock_ms": t * 1e3 / len(ws),
-                         "kblock_gb_s": nbytes / t / 1e9, "calls": len(ws)})
+                         "kblock_gb_s": nbytes / t / 1e9, "calls": len(ws), "bitwise_vs_v1": same})
             print(f"{label + ' ' + v:36s} {t*1e3/len(ws):7.3f} ms/call {nbytes/t/1e9:6.1f} GB/s", flush=True)
     layers = range(3, 45)
     banks = [[weights.packed(f"blk.{i}.ffn_{p}_exps.weight") for p in ("gate", "up", "down")] for i in layers]
@@ -785,13 +790,17 @@ def cold(args, weights, kblock_metal, packed_moe, mx, rows):
     x = mx.random.normal((1, k)).astype(mx.float32)
     ids = [mx.random.permutation(experts)[:8].reshape(1, 8).astype(mx.uint32) for _ in layers]
     scores = mx.random.uniform(shape=(1, 8))
+    base = [np.array(y).view(np.uint32) for y in
+            [kblock_metal.kblock_moe(x, i, scores, *b, vec=1) for i, b in zip(ids, banks)]]
     for v in args.variants.split(","):
         fn = lambda v=v: [kblock_metal.kblock_moe(x, i, scores, *b, **VARIANTS[v]) for i, b in zip(ids, banks)]
-        mx.eval(fn())
+        outs = fn()
+        mx.eval(outs)
+        same = all(np.array_equal(np.array(o).view(np.uint32), b) for o, b in zip(outs, base))
         t = min(_timed_once(fn, mx) for _ in range(5))
         nbytes = 8 * per_expert * len(banks)
         rows.append({"label": f"cold routed_moe {v}", "bytes": nbytes, "kblock_ms": t * 1e3 / len(banks),
-                     "kblock_gb_s": nbytes / t / 1e9, "calls": len(banks)})
+                     "kblock_gb_s": nbytes / t / 1e9, "calls": len(banks), "bitwise_vs_v1": same})
         print(f"{'cold routed_moe ' + v:36s} {t*1e3/len(banks):7.3f} ms/call {nbytes/t/1e9:6.1f} GB/s", flush=True)
 
 

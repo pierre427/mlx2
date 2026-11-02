@@ -47,8 +47,12 @@ def mlx_gemv_geometry(n, k):
 class SyntheticWeights:
     """Just enough of GGUFWeights for Glm53GGUFModel's HC, router, MLP and head."""
 
-    def __init__(self, layers, seed=5310):
+    def __init__(self, layers, seed=5310, bf16_values=False):
         rng = np.random.default_rng(seed)
+        # bf16_values: hc_*_fn and ffn_gate_inp hold BF16-representable F32
+        # values, as the GLM-5.3 checkpoint does (glm53_f32_weights).
+        exact = (lambda v: np.array(mx.array(v.astype(np.float32)).astype(mx.bfloat16).astype(mx.float32))) \
+            if bf16_values else (lambda v: v)
         self.rng = rng
         self.values, self.tensors, self._native_linear_fp32 = {}, {}, {}
         self.scheduled_dense_calls, self.scheduled_grouped_calls, self.scheduled_expert_calls = {}, {}, {}
@@ -63,7 +67,7 @@ class SyntheticWeights:
         put("output.weight", rng.normal(0, 0.02, (VOCAB, HIDDEN)), linear=True)
         for i in range(layers):
             for half, norm in (("hc_attn", "attn_norm"), ("hc_ffn", "ffn_norm")):
-                put(f"blk.{i}.{half}_fn", rng.normal(0, 0.01, (24, 4 * HIDDEN)), linear=True)
+                put(f"blk.{i}.{half}_fn", exact(rng.normal(0, 0.01, (24, 4 * HIDDEN))), linear=True)
                 put(f"blk.{i}.{half}_scale", rng.uniform(0.1, 1.5, 3))
                 put(f"blk.{i}.{half}_base", rng.normal(0, 0.5, 24))
                 put(f"blk.{i}.{norm}.weight", rng.normal(1, 0.1, HIDDEN))
@@ -71,7 +75,7 @@ class SyntheticWeights:
                 put(f"blk.{i}.ffn_gate{suffix}.weight", rng.normal(0, 0.02, (INNER, HIDDEN)), linear=True)
                 put(f"blk.{i}.ffn_up{suffix}.weight", rng.normal(0, 0.02, (INNER, HIDDEN)), linear=True)
                 put(f"blk.{i}.ffn_down{suffix}.weight", rng.normal(0, 0.1, (HIDDEN, INNER)), linear=True)
-            put(f"blk.{i}.ffn_gate_inp.weight", rng.normal(0, 0.05, (EXPERTS, HIDDEN)), linear=True)
+            put(f"blk.{i}.ffn_gate_inp.weight", exact(rng.normal(0, 0.05, (EXPERTS, HIDDEN))), linear=True)
             put(f"blk.{i}.exp_probs_b.bias", rng.normal(0, 0.05, EXPERTS))
             put(f"blk.{i}.expert_scale", rng.normal(0, 1, (EXPERTS, HIDDEN)))
 
@@ -398,3 +402,160 @@ def test_gpu_independent_forwards_evaluated_together_stay_bitwise(gpu, regions):
     for step, (got, want) in enumerate(zip(out["tail_v1"], out["reference"])):
         for a, b in zip(got, want):
             assert np.array_equal(a, b), step
+
+
+# ---- glm53_f32_weights=bf16_v1 (exact BF16 copies of the F32 gemv operands) ----
+
+
+def _bf16_exact(a):
+    return mx.array(a).astype(mx.bfloat16).astype(mx.float32)
+
+
+def test_f32_weight_policy_is_validated_and_off_by_default(cpu):
+    weights = SyntheticWeights(0)
+    assert synthetic_model(weights, 0).f32_weights == "reference"
+    with pytest.raises(ValueError, match="F32 weight policy"):
+        synthetic_model(weights, 0, f32_weights="fp16_v1")
+    assert synthetic_model(weights, 0, f32_weights="bf16_v1").f32_weights == "bf16_v1"
+
+
+def test_f32_operand_copies_exact_tensors_and_declines_inexact_ones(cpu):
+    from mlx2.runtime.models.glm53_gguf import F32_WEIGHT_COUNTERS
+
+    exact = SyntheticWeights(1, bf16_values=True)
+    model = synthetic_model(exact, 1, f32_weights="bf16_v1")
+    assert all(model.calls[name] == 0 for name in F32_WEIGHT_COUNTERS)
+    half = model._f32_operand("blk.0.hc_attn_fn")
+    rows = model._f32_rows("blk.0.hc_attn_fn")
+    assert half.dtype == mx.bfloat16 and half.shape == rows.shape
+    assert np.array_equal(bits(half.astype(mx.float32)), bits(rows))
+    assert model._f32_operand("blk.0.hc_attn_fn") is half  # built once
+    assert model.calls["f32_bf16_operand"] == 2 and model.calls["f32_bf16_declined"] == 0
+    # The reference policy and inexact values keep the F32 rows.
+    off = synthetic_model(exact, 1)
+    assert off._f32_operand("blk.0.hc_attn_fn").dtype == mx.float32
+    inexact = synthetic_model(SyntheticWeights(1), 1, f32_weights="bf16_v1")
+    got = inexact._f32_operand("blk.0.ffn_gate_inp.weight")
+    assert got.dtype == mx.float32 and inexact.calls["f32_bf16_declined"] == 1
+    # Other storage stays None.
+    exact.tensors["blk.0.hc_ffn_fn"] = SimpleNamespace(ggml_type=1, shape=(4 * HIDDEN, 24))
+    assert synthetic_model(exact, 1, f32_weights="bf16_v1")._f32_operand("blk.0.hc_ffn_fn") is None
+
+
+def test_adapter_f32_weights_needs_a_consuming_kernel_and_marks_the_profile():
+    from mlx2.adapters.glm53_gguf import Glm53GGUFAdapter
+
+    base = {"glm53_hc": "mega_v1", "glm53_hc_fused": "v1", "glm53_router": "fused_v2"}
+    on = _adapter({**base, "glm53_f32_weights": "bf16_v1"})
+    off = _adapter(base)
+    assert on.kernel_policy["glm53_f32_weights"] == "bf16_v1" and ":f32_weights=bf16_v1" in on.profile
+    assert off.kernel_policy["glm53_f32_weights"] == "reference" and "f32_weights" not in off.profile
+    assert ":f32_weights=bf16_v1" in _adapter({"glm53_hc": "mega_v1", "glm53_router": "fused_v2",
+                                               "glm53_f32_weights": "bf16_v1"}).profile
+    for bad in ({"glm53_hc": "mega_v1", "glm53_f32_weights": "bf16_v1"},  # no consumer: fail closed
+                {**base, "glm53_f32_weights": "fp16"}):
+        with pytest.raises(ValueError, match="unsupported GLM-5.3 packed execution policy"):
+            object.__new__(Glm53GGUFAdapter)._load("/nonexistent", bad)
+
+
+@metal
+def test_gpu_hc_kernels_read_exact_bf16_fn_bitwise(gpu):
+    rng = np.random.default_rng(5320)
+    for trial, magnitude in enumerate((1e-3, 0.05, 1.0, 30.0, 3e4)):
+        h, branch, post, comb, fn, scale, base, weight = _hc_case(rng, magnitude)
+        fn = _bf16_exact(fn)
+        fn16 = fn.astype(mx.bfloat16)
+        assert fused.admits(h, fn16)
+        for expand in (None, (branch, h, post, comb)):
+            want = fused.reference(h, fn, scale, base, weight, rms_eps=1e-5, expand=expand)
+            got_h, got_mixes = fused.project(h, fn16, rms_eps=1e-5, expand=expand)
+            tail = fused.boundary(h, fn16, scale, base, weight, rms_eps=1e-5, expand=expand)
+            mx.eval(want, got_h, got_mixes, tail)
+            label = (trial, expand is not None)
+            assert np.array_equal(bits(got_h), bits(want[0])), label
+            assert np.array_equal(bits(got_mixes), bits(want[5])), label
+            for index, (a, b) in enumerate(zip(tail, want[:5])):
+                assert np.array_equal(bits(a), bits(b)), (label, index)
+
+
+@metal
+def test_gpu_router_gemv_reads_exact_bf16_weights_bitwise(gpu):
+    rng = np.random.default_rng(5321)
+    for trial in range(12):
+        x = mx.array((rng.normal(size=(1, 1, HIDDEN)) * 10 ** rng.uniform(-2, 2)).astype(np.float32))
+        w = _bf16_exact(rng.normal(0, 0.05, (EXPERTS, HIDDEN)).astype(np.float32))
+        b = mx.array(rng.normal(0, 0.05, EXPERTS).astype(np.float32))
+        w16 = w.astype(mx.bfloat16)
+        assert glue.router_gemv_admits(x, w16, b, 8)
+        logits = x @ w.T
+        want = glue.fused_router(logits, b)
+        ids, weights_, scratch = glue.fused_router_gemv(x, w16, b, with_logits=True)
+        mx.eval(want, logits, ids, weights_, scratch)
+        assert np.array_equal(bits(scratch), bits(logits.reshape(-1))), trial
+        np.testing.assert_array_equal(np.array(ids), np.array(want[0]), err_msg=str(trial))
+        assert np.array_equal(bits(weights_), bits(want[1])), trial
+
+
+@metal
+@pytest.mark.parametrize("regions", [False, True], ids=["eager", "compile_regions"])
+def test_gpu_model_chained_decode_with_bf16_operands_is_bitwise(gpu, regions):
+    layers, steps = 5, 6
+    weights = SyntheticWeights(layers, bf16_values=True)
+    runs = {}
+    for name, policy in (("reference", POLICIES["reference"]),
+                         ("v1_bf16", {**POLICIES["v1"], "f32_weights": "bf16_v1"}),
+                         ("tail_bf16", {**POLICIES["tail_v1"], "f32_weights": "bf16_v1"})):
+        model = synthetic_model(weights, layers, **policy)
+        runs[name] = (_decode_chain(model, steps, regions), dict(model.calls))
+    (want_logits, want_state), _ = runs["reference"]
+    for name in ("v1_bf16", "tail_bf16"):
+        (logits, state), calls = runs[name]
+        for step, (a, b) in enumerate(zip(logits, want_logits)):
+            assert np.array_equal(a, b), (name, step)
+        for a, b in zip(state, want_state):
+            assert np.array_equal(a, b), name
+        assert calls["f32_bf16_operand"] > 0 and calls["f32_bf16_declined"] == 0, calls
+
+
+@metal
+def test_gpu_policy_flips_on_one_model_with_mixed_exact_and_inexact_operands(gpu):
+    """reference -> bf16_v1 -> reference on one compiled model; one layer's fn is
+    not BF16-representable (declines to F32) while the others take BF16."""
+    layers, steps = 4, 4
+    weights = SyntheticWeights(layers, bf16_values=True)
+    bad = np.array(weights.values["blk.1.hc_ffn_fn"])
+    bad[0, :8] = np.float32(1.0 + 2.0 ** -20)  # low mantissa bits set
+    bad[1, :4] = np.array([0.0, -0.0, 1e-40, -1e-39], np.float32)
+    weights.values["blk.1.hc_ffn_fn"] = mx.array(bad)
+    reference = synthetic_model(weights, layers, **POLICIES["reference"])
+    (want_logits, want_state), _ = (_decode_chain(reference, steps, True), None)
+    model = synthetic_model(weights, layers, **POLICIES["v1"])
+    for value in ("reference", "bf16_v1", "reference", "bf16_v1"):
+        model.f32_weights = value
+        logits, state = _decode_chain(model, steps, True)
+        for step, (a, b) in enumerate(zip(logits, want_logits)):
+            assert np.array_equal(a, b), (value, step)
+        for a, b in zip(state, want_state):
+            assert np.array_equal(a, b), value
+    assert model.calls["f32_bf16_operand"] > 0 and model.calls["f32_bf16_declined"] > 0, model.calls
+    assert model._f32_operand("blk.1.hc_ffn_fn").dtype == mx.float32
+    assert model._f32_operand("blk.0.hc_ffn_fn").dtype == mx.bfloat16
+
+
+def test_prompt_layer_evaluation_is_bitwise_and_prompt_only(cpu):
+    from mlx2.runtime.models.glm53_gguf import sparse_attention_phase
+
+    layers = 3
+    weights = SyntheticWeights(layers, seed=5330)
+    outs = {}
+    for every in (0, 1):
+        model = synthetic_model(weights, layers)
+        model.prompt_eval_every = every
+        cache = model.make_cache()
+        with sparse_attention_phase("prompt"):
+            logits = model(mx.array([[3]], dtype=mx.int32), cache)  # the stand-in KDA takes one row
+        decode = model(mx.array([[2]], dtype=mx.int32), cache)  # not a prompt: never evaluated per layer
+        mx.eval(logits, decode)
+        outs[every] = (bits(logits).copy(), bits(decode).copy(), model.calls["prompt_layer_evals"])
+    assert np.array_equal(outs[0][0], outs[1][0]) and np.array_equal(outs[0][1], outs[1][1])
+    assert outs[0][2] == 0 and outs[1][2] == layers

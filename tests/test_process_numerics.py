@@ -59,3 +59,32 @@ def test_runtime_sync_default_applied_at_import_and_explicit_value_wins():
                          env={"PYTHONPATH": str(SRC.parent), "PATH": "/usr/bin:/bin"})
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "1"
+
+
+def test_command_buffer_policy_is_opt_in_and_explicit_values_win():
+    import pytest
+
+    from mlx2.process_env import COMMAND_BUFFER_POLICIES, apply_process_runtime_defaults
+
+    env = {}
+    applied = apply_process_runtime_defaults(env)
+    assert "MLX_MAX_OPS_PER_BUFFER" not in env and "MLX_MAX_MB_PER_BUFFER" not in env
+    assert "MLX_MAX_OPS_PER_BUFFER" not in applied
+    env = {"MLX2_COMMAND_BUFFERS": "ops100_v1"}
+    applied = apply_process_runtime_defaults(env)
+    assert env["MLX_MAX_OPS_PER_BUFFER"] == "100" and env["MLX_MAX_MB_PER_BUFFER"] == "1000000"
+    assert COMMAND_BUFFER_POLICIES["ops100_v1"].items() <= applied.items()
+    env = {"MLX2_COMMAND_BUFFERS": "ops100_v1", "MLX_MAX_OPS_PER_BUFFER": "40"}
+    apply_process_runtime_defaults(env)
+    assert env["MLX_MAX_OPS_PER_BUFFER"] == "40" and env["MLX_MAX_MB_PER_BUFFER"] == "1000000"
+    with pytest.raises(ValueError, match="MLX2_COMMAND_BUFFERS"):
+        apply_process_runtime_defaults({"MLX2_COMMAND_BUFFERS": "one_buffer"})
+
+
+def test_raised_byte_cap_is_detected_however_it_was_set():
+    from mlx2.process_env import raised_command_buffer_byte_cap
+
+    assert not raised_command_buffer_byte_cap({})
+    assert not raised_command_buffer_byte_cap({"MLX_MAX_MB_PER_BUFFER": "50"})
+    assert raised_command_buffer_byte_cap({"MLX_MAX_MB_PER_BUFFER": "1000000"})
+    assert raised_command_buffer_byte_cap({"MLX_MAX_MB_PER_BUFFER": "lots"})

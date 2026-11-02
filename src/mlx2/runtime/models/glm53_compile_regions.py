@@ -140,10 +140,11 @@ class CompiledLayers:
             getattr(model, "kda_group", False), getattr(model, "shared_fold", False),
             getattr(model, "kda_small", "reference"), getattr(model, "router", "reference"),
             getattr(model, "kda_fused", "reference"), getattr(model, "hc_fused_policy", "reference"),
+            getattr(model, "f32_weights", "reference"),
             getattr(weights, "row_policy", None), getattr(weights, "dense_prefill_policy", None),
             getattr(weights, "expert_prefill_policy", None), getattr(weights, "compute_policy", None),
             getattr(weights, "row_token_share", False), getattr(weights, "expert_union", False),
-            getattr(weights, "_kblock_exact", None),
+            getattr(weights, "_kblock_exact", None), getattr(weights, "_kblock_vec", 1),
             model.args.rms_norm_eps, str(mx.default_device()),
         )
 
@@ -279,7 +280,7 @@ def release(model):
     """Drop compiled bodies and host memos (they capture weight arrays)."""
     with _LOCK:
         for name in ("_compiled_layers", "_kda_static_memo", "_hc_in_memo", "_mlp_names",
-                     "_hc_fused_memo", "_f32_rows_memo"):
+                     "_hc_fused_memo", "_f32_rows_memo", "_f32_bf16_memo"):
             model.__dict__.pop(name, None)
 
 

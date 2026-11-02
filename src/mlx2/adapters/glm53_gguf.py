@@ -195,6 +195,18 @@ def _compile_regions_status(kernel_policy):
     return glm53_compile_regions.route_status()
 
 
+def _command_buffer_status():
+    import os
+
+    from ..process_env import command_buffers_at_import
+
+    return {"at_package_import": command_buffers_at_import(),
+            "now": {name: os.environ.get(name) for name in
+                    ("MLX2_COMMAND_BUFFERS", "MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER")},
+            "effective": "the at_package_import values when nothing started Metal before mlx2 was imported "
+                         "(MLX latches them at Metal start); not observable from Python"}
+
+
 def _hc_fused_status(kernel_policy):
     policy = kernel_policy.get("glm53_hc_fused", "reference")
     if policy == "reference":
@@ -286,6 +298,9 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "glm53_kv_append",
             "glm53_hc_fused",
             "glm53_mla_fused",
+            "glm53_f32_weights",
+            "glm53_kblock_element",
+            "glm53_prompt_eval",
             *SPARSE_KEYS,
         }
         external = {k: v for k, v in policy.items() if k not in kernel_keys}
@@ -363,6 +378,14 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             or (policy.get("glm53_hc_fused", "reference") != "reference"
                 and policy.get("glm53_hc", "reference") != "mega_v1")
             or policy.get("glm53_mla_fused", "decode_v1") not in ("reference", "decode_v1")
+            or policy.get("glm53_f32_weights", "reference") not in ("reference", "bf16_v1")
+            or policy.get("glm53_kblock_element", "reference") not in ("reference", "fma_v1")
+            or policy.get("glm53_prompt_eval", "off") not in ("off", "layer_v1")
+            or (policy.get("glm53_kblock_element", "reference") != "reference"
+                and policy.get("glm53_row_kernel", "reference") != "kblock_rows")
+            or (policy.get("glm53_f32_weights", "reference") != "reference"
+                and policy.get("glm53_hc_fused", "reference") == "reference"
+                and policy.get("glm53_router", "fused_v1") != "fused_v2")
             or any(policy.get(key, SPARSE_DEFAULTS[key]) not in values
                    for key, values in SPARSE_KEYS.items())
         ):
@@ -469,8 +492,55 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # 25.85 ms, 2K 27.20 -> 26.52 ms per step, tokens identical, and the
             # ~2.2 ms every-4th-token pool-completion step gone.
             "glm53_mla_fused": policy.get("glm53_mla_fused", _mla_fused_default(policy)),
+            # F32 gemv operands of the fused HC (glm53_hc_fused) and router
+            # (glm53_router=fused_v2) kernels: "bf16_v1" reads an exact BF16
+            # copy of hc_*_fn / ffn_gate_inp (this checkpoint stores BF16
+            # values widened to F32; the copy is bit-checked per tensor and a
+            # tensor that is not exact keeps F32). Same operand values, so
+            # the same bits; half the bytes. Port of omlx#4843 commits 6 and
+            # 14 (exact BF16 copies of the HC mix and router weights).
+            # Requires one of those kernels; opt-in, unqualified. Helpful with
+            # glm53_hc_fused=v1 + glm53_router=fused_v2 (GLM-5.3-Flash-REAP50-
+            # Q3_K_M.gguf@5a865918, interleaved replays at mlx2 bd49b0f5b and
+            # 11a51eaad, tokens identical in all four): 2K 28.19 -> 27.50 and
+            # 24.96 -> 24.21 ms per step, 32K 28.05 -> 27.46 and 25.22 -> 24.43
+            # (-2.1 to -3.1%), where the two kernels alone at F32 were
+            # neutral (28.05 / 28.14). Proposed as a default bundle; not
+            # flipped without Pierre's approval.
+            "glm53_f32_weights": policy.get("glm53_f32_weights", "reference"),
+            # K-block chunk decoder of the one-row chunk-law launches
+            # (glm53_row_kernel=kblock_rows: dense, grouped, multi, routed and
+            # shared-fold MoE): "fma_v1" forms each Q3_K / Q6_K element value
+            # with one exact fused multiply-add (kblock_dot32_v5) instead of
+            # an offset then a multiply; the values, products and sum order
+            # are the same, so the same bits. Opt-in, unqualified. Left off:
+            # not helpful (GLM-5.3-Flash-REAP50-Q3_K_M.gguf@5a865918, mlx2
+            # 65ad9013e, 2026-11-01): bitwise equal on every real tensor, but
+            # cold Q3_K 373-379 -> 380-382 GB/s and routed MoE 436-441 ->
+            # 437-445 GB/s (noise), and interleaved replay 2K 25.04 -> 25.50,
+            # 32K 25.18 -> 25.60 ms per step; the compiler already schedules
+            # v2's offset+multiply as cheaply.
+            "glm53_kblock_element": policy.get("glm53_kblock_element", "reference"),
+            # Prompt chunks evaluated one layer at a time ("layer_v1"): same
+            # kernels and bits; bounds the prefill transient that a large
+            # command-buffer op cap with no byte trigger (MLX2_COMMAND_BUFFERS=
+            # ops100_v1, a process setting) would otherwise hold. Opt-in,
+            # unqualified; meant to ship together with ops100_v1.
+            "glm53_prompt_eval": policy.get("glm53_prompt_eval", "off"),
         }
         _check_sparse_combination(self.kernel_policy)
+        from ..process_env import raised_command_buffer_byte_cap
+
+        if raised_command_buffer_byte_cap() and self.kernel_policy["glm53_prompt_eval"] != "layer_v1":
+            # Without a byte trigger a 2048-row prompt chunk's command buffers
+            # hold ~100 kernels' temporaries (+24 GB peak, unpriced by the
+            # prefill budget); layer_v1 bounds them below the default's peak.
+            raise ValueError("a raised Metal command-buffer byte cap (MLX2_COMMAND_BUFFERS=ops100_v1 or "
+                             "MLX_MAX_MB_PER_BUFFER) requires glm53_prompt_eval=layer_v1 on GLM-5.3")
+        if self.kernel_policy["glm53_prompt_eval"] != "off" and external:
+            # External/AST routes prefill through body-only tap forwards,
+            # which this evaluation does not cover.
+            raise ValueError("glm53_prompt_eval=layer_v1 does not cover external-draft prompt prefill")
         _check_mla_fused(self.kernel_policy)
         if (
             self.kernel_policy["glm53_draft_activation"] != "target"
@@ -501,7 +571,9 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                           ("glm53_kda_fused", "kda_fused"),
                           ("glm53_kv_append", "kv_append"),
                           ("glm53_hc_fused", "hc_fused"),
-                          ("glm53_mla_fused", "mla_fused")):
+                          ("glm53_mla_fused", "mla_fused"),
+                          ("glm53_f32_weights", "f32_weights"),
+                          ("glm53_kblock_element", "kblock_element")):
             if self.kernel_policy[key] not in ("reference", "off"):
                 self.profile += ":" + name + "=" + self.kernel_policy[key]
         for key, values in SPARSE_KEYS.items():
@@ -629,9 +701,14 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             kda_fused=self.kernel_policy["glm53_kda_fused"],
             hc_fused_policy=self.kernel_policy["glm53_hc_fused"],
             mla_fused=self.kernel_policy["glm53_mla_fused"],
+            f32_weights=self.kernel_policy["glm53_f32_weights"],
             kv_append=self.kernel_policy["glm53_kv_append"],
             **{key.removeprefix("glm53_"): self.kernel_policy[key] for key in SPARSE_KEYS},
         )
+        if self.kernel_policy["glm53_prompt_eval"] == "layer_v1":
+            self.model.prompt_eval_every = 1
+        if self.kernel_policy["glm53_kblock_element"] == "fma_v1":
+            self.weights._kblock_vec = 4
         if self.kernel_policy["glm53_tree_batch"] == "kblock_v1":
             self.weights.row_token_share = True
             self.weights.expert_union = True
@@ -831,6 +908,15 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "compile_regions": _compile_regions_status(self.kernel_policy),
             "hc_fused": _hc_fused_status(self.kernel_policy),
             "mla_fused": _mla_fused_status(self.kernel_policy),
+            "f32_weights": "not selected"
+            if self.kernel_policy["glm53_f32_weights"] == "reference"
+            else {"policy": self.kernel_policy["glm53_f32_weights"], "implemented": True,
+                  "qualified": False, "selected_by_default": False,
+                  "counters": {name: self.model.calls.get(name, 0)
+                               for name in ("f32_bf16_operand", "f32_bf16_declined")}},
+            "prompt_eval": {"policy": self.kernel_policy["glm53_prompt_eval"],
+                            "layer_evals": self.model.calls.get("prompt_layer_evals", 0)},
+            "command_buffers": _command_buffer_status(),
             "embedded_mtp": "selected"
             if self.model.mtp is not None
             else "not selected",

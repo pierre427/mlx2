@@ -134,7 +134,8 @@ const uint gr = sg / BN, gs = sg % BN;
 const bool gemv_lane = gr < RPT;
 const uint row = tile * RPT + gr;
 const uint v = gs * 32 + lane;
-const device float *mat = w + size_t(gemv_lane ? row : 0) * FLAT;
+// F32 or exact-BF16 fn (glm53_f32_weights): same float operand values.
+const device auto *mat = w + size_t(gemv_lane ? row : 0) * FLAT;
 float result = 0.0f;
 for (uint c = 0; c < 4; c++) {
     for (uint i = 0; i < 4; i++) stage[lid * 4 + i] = glm_hc_scale(1.0f, vals[c * 4 + i], inv);
@@ -235,8 +236,8 @@ def _source(expand, tail):
             .replace("TAIL", _TAIL if tail else _STORE_MIXES))
 
 
-@lru_cache(maxsize=4)
-def _kernel(expand, tail):
+@lru_cache(maxsize=8)
+def _kernel(expand, tail, bf16_weight=False):
     import mlx.core as mx
 
     names = ["branch", "residual", "post", "comb"] if expand else ["h"]
@@ -247,7 +248,8 @@ def _kernel(expand, tail):
         outs += ["mixes", "out_coeff", "x"]
     else:
         outs += ["mixes"]
-    name = "mlx2_glm53_hc_fused_" + ("expand_" if expand else "") + ("tail_" if tail else "") + "v1"
+    name = ("mlx2_glm53_hc_fused_" + ("expand_" if expand else "") + ("tail_" if tail else "") + "v1"
+            + ("_bf16w" if bf16_weight else ""))
     return mx.fast.metal_kernel(name=name, input_names=names, output_names=outs, header=_HEADER,
                                 source=_source(expand, tail), ensure_row_contiguous=True)
 
@@ -263,7 +265,8 @@ def _template(expand, tail, iterations):
 
 
 def admits(h, fn):
-    """True for one B1 row with the HC4x4096 stream and an F32 [24, 16384] fn."""
+    """True for one B1 row with the HC4x4096 stream and an F32 [24, 16384] fn
+    (or its exact BF16 copy, glm53_f32_weights=bf16_v1: same operand values)."""
     import mlx.core as mx
 
     return (
@@ -273,7 +276,7 @@ def admits(h, fn):
         and h.dtype == mx.float32
         and fn is not None
         and tuple(fn.shape) == (MIXES, FLAT)
-        and fn.dtype == mx.float32
+        and fn.dtype in (mx.float32, mx.bfloat16)
     )
 
 
@@ -291,14 +294,14 @@ def project(h, fn, *, rms_eps, expand=None):
 
     constants = mega._constants(1e-6, rms_eps)
     if expand is None:
-        (mixes,) = _kernel(False, False)(
+        (mixes,) = _kernel(False, False, fn.dtype == mx.bfloat16)(
             inputs=[h.astype(mx.float32), fn, constants], template=_template(False, False, 0),
             grid=(TILES * THREADS, 1, 1), threadgroup=(THREADS, 1, 1),
             output_shapes=[(1, 1, MIXES)], output_dtypes=[mx.float32])
         _SCHEDULED["project"] += 1
         return h, mixes
     branch, residual, post_, comb = expand
-    h_out, mixes = _kernel(True, False)(
+    h_out, mixes = _kernel(True, False, fn.dtype == mx.bfloat16)(
         inputs=[branch.astype(mx.float32), residual.astype(mx.float32), post_.astype(mx.float32),
                 comb.astype(mx.float32), fn, constants], template=_template(True, False, 0),
         grid=(TILES * THREADS, 1, 1), threadgroup=(THREADS, 1, 1),
@@ -324,14 +327,14 @@ def boundary(h, fn, scale, base, weight, counter_=None, *, rms_eps, hc_eps=1e-6,
     tail = [scale.astype(mx.float32), base.astype(mx.float32), weight.astype(mx.float32), counter_]
     shapes = [(1, 1, MIXES), (1, 1, MIXES), (1, 1, DIM)]
     if expand is None:
-        mixes, coeff, x = _kernel(False, True)(
+        mixes, coeff, x = _kernel(False, True, fn.dtype == mx.bfloat16)(
             inputs=[h.astype(mx.float32), fn, constants, *tail], template=_template(False, True, iterations),
             grid=(TILES * THREADS, 1, 1), threadgroup=(THREADS, 1, 1),
             output_shapes=shapes, output_dtypes=[mx.float32] * 3)
         _SCHEDULED["tail"] += 1
     else:
         branch, residual, post_, comb = expand
-        h, mixes, coeff, x = _kernel(True, True)(
+        h, mixes, coeff, x = _kernel(True, True, fn.dtype == mx.bfloat16)(
             inputs=[branch.astype(mx.float32), residual.astype(mx.float32), post_.astype(mx.float32),
                     comb.astype(mx.float32), fn, constants, *tail],
             template=_template(True, True, iterations),

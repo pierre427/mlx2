@@ -133,6 +133,12 @@ class GGUFWeights:
         # Apple GPUs hide this load latency through occupancy; the extra live
         # raw words cost more occupancy than the overlap returns (a whole chunk
         # step ahead: 443 -> 105 GB/s, 4ede902f7).
+        # K-block chunk decoder (the kernels' VEC): 1 = kblock_dot32_v2; 4 =
+        # glm53_kblock_element=fma_v1 (Q3_K/Q6_K element values by one exact
+        # fused multiply-add; same values and sums, see kblock_dot32_v5).
+        # Applies to one-row chunk-law launches; exact-law and token-shared
+        # launches keep their own decoders.
+        self._kblock_vec = 1
         self._embedding_rows = {}
         self._expected_stat = expected_stat
         self.scheduled_expert_calls = {}
@@ -336,7 +342,7 @@ class GGUFWeights:
             if tok:
                 return (kblock_dense(flat, weight, rows=4, tok=tok, ahead=self._kblock_ahead),
                         "kblock_rows_dense_tok")
-            return (kblock_dense(flat, weight, rows=self.kblock_row_block, exact=self._kblock_exact,
+            return (kblock_dense(flat, weight, rows=self.kblock_row_block, exact=self._kblock_exact, vec=self._kblock_vec,
                                  ahead=self._kblock_ahead),
                     "kblock_rows_dense")
         return weight(flat), "packed_reference_dense"
@@ -442,7 +448,7 @@ class GGUFWeights:
             self.scheduled_grouped_calls["kblock_rows_grouped"] = (
                 self.scheduled_grouped_calls.get("kblock_rows_grouped", 0) + 1
             )
-            return kblock_grouped(x, self._grouped[key], rows=self.kblock_row_block, exact=self._kblock_exact,
+            return kblock_grouped(x, self._grouped[key], rows=self.kblock_row_block, exact=self._kblock_exact, vec=self._kblock_vec,
                                   ahead=self._kblock_ahead)
         self.scheduled_grouped_calls["grouped_linear"] = (
             self.scheduled_grouped_calls.get("grouped_linear", 0) + 1
@@ -486,7 +492,7 @@ class GGUFWeights:
 
             from .kblock_metal import kblock_moe
 
-            function = partial(kblock_moe, rows=self.kblock_row_block, exact=self._kblock_exact,
+            function = partial(kblock_moe, rows=self.kblock_row_block, exact=self._kblock_exact, vec=self._kblock_vec,
                                ahead=self._kblock_ahead)
             function.__name__ = "kblock_moe"
             if (getattr(self, "expert_union", False) and x.shape[0] > 1 and not self._kblock_exact
@@ -535,7 +541,7 @@ class GGUFWeights:
         if dense_prefill_active(flats[0].shape[0]):
             return None
         try:
-            y = kblock_multi(flats, packed, rows=self.kblock_row_block, exact=self._kblock_exact,
+            y = kblock_multi(flats, packed, rows=self.kblock_row_block, exact=self._kblock_exact, vec=self._kblock_vec,
                              ahead=self._kblock_ahead)
         except GGUFError:
             return None
@@ -587,7 +593,7 @@ class GGUFWeights:
             return None
         try:
             result = kblock_moe_shared(x, ids, scores, *packed, rows=self.kblock_row_block,
-                                       exact=self._kblock_exact, ahead=self._kblock_ahead)
+                                       exact=self._kblock_exact, vec=self._kblock_vec, ahead=self._kblock_ahead)
         except GGUFError:
             return None
         self.scheduled_expert_calls["kblock_moe_shared"] = (

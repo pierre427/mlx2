@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from glm53_ordinary_profile import CHECKPOINT, MODEL, prompt_ids  # noqa: E402
+from glm53_ordinary_profile import CHECKPOINT, MODEL, prompt_ids
 
 
 def load(policy_path):
@@ -175,7 +175,12 @@ def replay(args):
                 block = (i - 1) // args.block
                 variant = variants[block % len(variants)]
                 for attr, value in variant["attrs"].items():
-                    setattr(model, attr, value)
+                    # "weights.<attr>" sets an attribute of the weight provider
+                    # (e.g. weights._kblock_vec); anything else is a model attribute.
+                    if attr.startswith("weights."):
+                        setattr(model.weights, attr.removeprefix("weights."), value)
+                    else:
+                        setattr(model, attr, value)
                 nxt = mx.argmax(model(mx.array([[tokens[i]]]), cache)[0, -1])
                 mx.async_eval(nxt)
                 outs.append(int(pending.item()))
