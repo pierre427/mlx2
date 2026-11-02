@@ -56,7 +56,7 @@ FEATURES = (
     "ordinary_reference", "apc_v2", "apc_interior_checkpoints", "apc_junction_checkpoints",
     "apc_rolling_checkpoints", "apc_session_persistence", "tools",
     "vision_input", "video_input", "audio_input", "native_mtp",
-    "mtp_ordinary_handoff", "adaptive_mtp_depth", "self_mtp_copy_draft",
+    "mtp_ordinary_handoff", "adaptive_mtp_depth", "self_mtp_copy_draft", "speculation_request_opt_out",
     "external_draft", "external_draft_dspark", "flat_segmented_ast", "ast_speculative_batching",
     "packed_prefill_serial_equivalence", "prompt_lookup", "prompt_lookup_target_s1",
     "decode_first", "prefill_scheduling", "mixed_prefill_decode",

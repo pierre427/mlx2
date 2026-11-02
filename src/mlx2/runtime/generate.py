@@ -2963,6 +2963,7 @@ class MTPGenerationBatch:
             "width_lock_deferral_limit": "width_lock_deferral_limit",
             "starvation_boundary_limit": "starvation_boundary_limit",
             "admission_plain": "admission_plain",
+            "request_opt_out": "request_opt_out",
         }.get(str(reason), "other")
         _bump_bounded_counter(
             self.scheduler_stats, f"mtp_plain_fallback_{reason_key}"
@@ -3718,6 +3719,23 @@ class MTPGenerationBatch:
         packages = batch._detach_packages(range(len(batch)))
         packages.extend(batch._paused.values())
         batch._paused.clear()
+        opted_out = [
+            package
+            for package in packages
+            if getattr(package.detached.lane, "_plain_decode_reason", None)
+        ]
+        if opted_out:
+            # Request-owned: the lane never joins the cohort, so it neither
+            # counts toward the cohort's width nor sees a speculative round.
+            plain_ids = {id(package) for package in opted_out}
+            packages = [package for package in packages if id(package) not in plain_ids]
+            self._plain_ready.extend(opted_out)
+            for package in opted_out:
+                self._mark_plain_fallback(
+                    [package], reason=package.detached.lane._plain_decode_reason
+                )
+            if not packages:
+                return
         if self.mtp_admission is None:
             self._attach_packages(packages)
             return
@@ -6352,6 +6370,9 @@ class BatchGenerator:
             )
             lane.lane._requested_num_draft = config.get("requested_num_draft")
             lane.lane._batch_cohort = config.get("batch_cohort")
+            # A request that opted out of speculation is prepared like any
+            # lane, then handed to the ordinary decoder before its first round.
+            lane.lane._plain_decode_reason = config.get("plain_decode_reason")
             lane.lane._batched_prefill = getattr(
                 self, "_mtp_batched_prefill_by_uid", {}
             ).pop(uid, None)

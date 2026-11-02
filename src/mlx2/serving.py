@@ -153,6 +153,79 @@ def media_route_policy(adapter, route):
     }
 
 
+REQUEST_PLAIN_DECODE_REASON = "request_opt_out"
+
+
+def speculation_request_policy(route):
+    """How the selected ``route`` serves a request's ``"speculation": "off"``.
+
+    Native MTP prepares the lane as usual, then hands it to the ordinary
+    decoder before its first speculative round (a one-way plain fallback, so
+    the rest of the cohort keeps speculating).  Prompt lookup runs the lane's
+    plain-only mode.  The ordinary route never speculates.  Any other route
+    has no per-request opt-out and refuses the request.
+    """
+    if route in ("native_mtp", "prompt_lookup"):
+        return {
+            "route": route,
+            "requested": "off",
+            "status": "plain_decode",
+            "reason": REQUEST_PLAIN_DECODE_REASON,
+        }
+    if route == "ordinary":
+        return {
+            "route": route,
+            "requested": "off",
+            "status": "not_applicable",
+            "reason": "the ordinary route does not speculate",
+        }
+    return {
+        "route": route,
+        "requested": "off",
+        "status": "refused",
+        "reason": f"the {route} route has no per-request speculation opt-out",
+    }
+
+
+def speculation_request_receipt(policy, mtp_receipt, speculation):
+    """The terminal ``speculation_request`` receipt of an opted-out request.
+
+    ``decode`` is what the lane reports it ran, not the declaration:
+    ``ordinary`` only when the native-MTP lane carries this request's plain
+    fallback, or the prompt-lookup lane reports speculation disabled.
+    """
+    receipt = {"schema": "mlx2.speculation-request.v1", **policy}
+    if policy["status"] != "plain_decode":
+        receipt["decode"] = (
+            "ordinary" if policy["status"] == "not_applicable" else "unobserved"
+        )
+        return receipt
+    if policy["route"] == "native_mtp":
+        mtp = mtp_receipt if isinstance(mtp_receipt, Mapping) else {}
+        fallback = mtp.get("mtp_plain_fallback")
+        if not mtp:
+            decode = "unobserved"
+        elif (
+            mtp.get("route") == "ordinary_after_mtp_fallback"
+            and isinstance(fallback, Mapping)
+            and fallback.get("reason") == REQUEST_PLAIN_DECODE_REASON
+        ):
+            stats = fallback.get("stats_before_fallback") or {}
+            decode = (
+                "ordinary" if not int(stats.get("draft_proposed", 0) or 0)
+                else "speculative"
+            )
+        else:
+            decode = "speculative"
+        receipt["decode"] = decode
+        receipt["observed_route"] = mtp.get("route", "unobserved")
+        return receipt
+    lane = speculation if isinstance(speculation, Mapping) else {}
+    receipt["decode"] = lane.get("decode", "unobserved")
+    receipt["speculation"] = lane.get("speculation", "unobserved")
+    return receipt
+
+
 def media_decode_receipt(job, speculation):
     """The terminal ``media_decode`` receipt of a plain-decode media request.
 
@@ -3968,6 +4041,9 @@ class Job:
     # A media request on a route that serves media with plain decode
     # (``media_route_policy``): the declared policy, receipt at finish.
     media_decode: dict | None = None
+    # ``"speculation": "off"`` on a speculative route
+    # (``speculation_request_policy``): the declared policy, receipt at finish.
+    speculation_request: dict | None = None
     # The bounded event queue overflowed: None, "pending" (decided at finish,
     # the 429 not yet queued) or "delivered".  The 429 is the only terminal.
     output_overflow: str | None = None
@@ -5908,6 +5984,15 @@ class ServingEngine:
             ):
                 raise ValueError("prefill handoff v1 accepts text-only base-model requests")
             public_request["skip_writing_prefix_cache"] = True
+        speculation_policy = None
+        if public_request.get("speculation", "auto") == "off":
+            speculation_policy = speculation_request_policy(
+                (self.snapshot.get("settings") or {}).get("route")
+            )
+            if speculation_policy["status"] == "refused":
+                from .api_resources import CapabilityUnavailable
+
+                raise CapabilityUnavailable(speculation_policy["reason"])
         media_policy = None
         if has_media:
             media_policy = media_route_policy(
@@ -6000,6 +6085,9 @@ class ServingEngine:
         if media_policy is not None and media_policy["media"] == "plain_decode":
             job.media_decode = media_policy
             count_add(self.counts, "media_plain_decode_requests", 1)
+        if speculation_policy is not None:
+            job.speculation_request = speculation_policy
+            count_add(self.counts, "speculation_opt_out_requests", 1)
         if lora is not None:
             job.lora_name, job.lora_fingerprint = lora
         if handle is not None:
@@ -13940,6 +14028,15 @@ class ServingEngine:
                             # Cold or warm (media restored from APCv2), the
                             # lane never speculates: plain decode for media.
                             sampling_config["plain_decode_reason"] = job.media_decode["reason"]
+                        if (
+                            job.speculation_request is not None
+                            and job.speculation_request["status"] == "plain_decode"
+                            and not external_draft
+                        ):
+                            # Request opt-out: a prompt-lookup lane runs
+                            # plain-only; a native-MTP lane hands itself to
+                            # the ordinary decoder once prepared.
+                            sampling_config["plain_decode_reason"] = job.speculation_request["reason"]
                         if job.request.get("batch_cohort") is not None:
                             sampling_config["batch_cohort"] = {
                                 "tenant_id": job.tenant_id,
@@ -15453,6 +15550,17 @@ class ServingEngine:
                                             )
                                         }
                                         if job.media_decode is not None
+                                        else {}
+                                    ),
+                                    **(
+                                        {
+                                            "speculation_request": speculation_request_receipt(
+                                                job.speculation_request,
+                                                response.mtp_receipt,
+                                                getattr(response, "speculative_receipt", None),
+                                            )
+                                        }
+                                        if job.speculation_request is not None
                                         else {}
                                     ),
                                     "spomin_live_surgery": job.spomin_receipt,

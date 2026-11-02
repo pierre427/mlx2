@@ -457,6 +457,8 @@ _ENGINE_EVENTS = {
     "multimodal_apcv2_boundary_misses": ("multimodal", "apcv2_boundary_miss"),
     # Media requests a speculative route served with plain decode.
     "media_plain_decode_requests": ("multimodal", "plain_decode_request"),
+    # Requests that asked for ``"speculation": "off"`` on a route that honours it.
+    "speculation_opt_out_requests": ("speculation", "opt_out_request"),
     "output_audio_completed": ("output_audio", "completed"),
     "output_audio_failed": ("output_audio", "failed"),
     "output_audio_requests": ("output_audio", "request"),
@@ -603,6 +605,7 @@ _SCHEDULER_EVENTS = frozenset(
         "mtp_plain_fallback_width_lock_deferral_limit",
         "mtp_plain_fallback_starvation_boundary_limit",
         "mtp_plain_fallback_admission_plain",
+        "mtp_plain_fallback_request_opt_out",
         "mtp_plain_fallback_other",
         "external_rounds",
         "accepted_proposals",

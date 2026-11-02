@@ -851,6 +851,7 @@ def validate_request(
         "response_format",
         "grammar",
         "batch_cohort",
+        "speculation",
         "mlx_fault",
         "skip_writing_prefix_cache",
         "paged_native_qwen3",
@@ -1224,6 +1225,8 @@ def validate_request(
             )
         if samples != 1:
             raise ValueError("batch_cohort cannot be combined with n greater than 1")
+    if body.get("speculation", "auto") not in ("auto", "off"):
+        raise ValueError('speculation must be "auto" or "off"')
     for key, lower, upper in (
         ("max_tokens", 1, MAX_OUTPUT_TOKENS),
         ("min_tokens", 0, MAX_OUTPUT_TOKENS),
