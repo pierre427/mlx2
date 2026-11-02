@@ -1353,11 +1353,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # cohort runs ordinary and copies are inert.  Not declared on Qwen3.6:
     # its prose dispersion did not clear.
     #
-    # Decode-first publication in "order" mode on both routes since
-    # 2026-10-02 (Pierre): decode-to-client lag max 670-765 -> 57-101 ms,
-    # TTFT, gaps and lane tok/s unchanged (options-sweep-27b-20261002, item
-    # 3).  MLX2_DECODE_FIRST=0 is the kill switch; an explicit "decode_first"
-    # in the execution policy (false included) wins.
+    # Decode-first publication in "order" mode on ordinary and native MTP
+    # since 2026-10-02 (Pierre): decode-to-client lag max 670-765 -> 57-101
+    # ms, TTFT, gaps and lane tok/s unchanged (options-sweep-27b-20261002,
+    # item 3); on the external (--ast) route since 2026-10-30, after that
+    # route became the best-route default.  MLX2_DECODE_FIRST=0 is the kill
+    # switch; an explicit "decode_first" in the execution policy (false
+    # included) wins.
     default_route_execution_policy = {
         "ordinary": {
             "decode_first": {"enabled": True, "shared_prefill_budget": False},
@@ -1370,8 +1372,17 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         # Artifact-bound external defaults for the exact target/DFlash2 pair
         # declared below.  A different pair receives no tree defaults.  This
         # selects the measured topology while keeping the route candidate and
-        # explicitly selected by --external-draft.
+        # explicitly selected by --external-draft.  decode_first, the
+        # interior checkpoints and SRPT prefill order are pair-independent
+        # (registry.PAIR_INDEPENDENT_EXTERNAL_DEFAULT_KEYS), so the
+        # auto-paired best-route --ast default receives them too.  The
+        # external generator has no one-slice contention clamp.
         "external_draft": {
+            "decode_first": {"enabled": True, "shared_prefill_budget": False},
+            "apc_interior_checkpoints": "auto",
+            "prefill_scheduling": {
+                "order": "srpt", "max_bypass": 3, "one_slice_contention": False,
+            },
             "pairwise_selection": "host",
             "batch_size_route": "tree15_b1_b4_chain_b5plus_v1",
             "tree_node_budget_by_lanes": {"1": 15, "2": 7, "3": 4, "4": 3},
@@ -1380,6 +1391,15 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             "draft_quantization": {"bits": 4, "group_size": 64},
         },
     }
+    # The external generator's prefill captures planned APCv2 boundaries
+    # (interior, rolling, junction) with their DFlash2 draft-state sidecar
+    # (ExternalDraftBatchGenerator._capture_state_boundary), so the --ast
+    # default keeps the native-MTP route's prompt checkpoints.  Own
+    # __dict__ only (serving.external_state_checkpoints).
+    external_apc_state_checkpoints = True
+    # The external generator orders its serial prefill slice by
+    # ``prefill_scheduling`` (ExternalDraftBatchGenerator._order_serial_prefill).
+    external_prefill_scheduling = True
     default_external_route_binding = {
         "target_revision": "e59471c5c6fa8c6819b81cb5957bcab10736020db8bacb47fbb9089813fa93f8",
         "draft_revision": "34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90",

@@ -110,6 +110,7 @@ class AdapterResolution:
             return {}
         if route == "native_mtp" and Capability.MTP not in self.descriptor.capabilities:
             return {}
+        binding = None
         if route == "external_draft":
             binding = vars(self.adapter_type).get("default_external_route_binding")
             if binding is not None:
@@ -126,11 +127,22 @@ class AdapterResolution:
                         "64-character target_revision and draft_revision pins"
                     )
                 supplied = operator_policy or {}
-                if any(supplied.get(key) != value for key, value in binding.items()):
-                    return {}
+                pair_bound = all(
+                    supplied.get(key) == value for key, value in binding.items()
+                )
         policy = declared.get(route) or {}
         if not isinstance(policy, dict):
             raise TypeError(f"{name} {route} default policy must be an object")
+        if route == "external_draft" and binding is not None and not pair_bound:
+            # Another target/drafter pair (an auto-paired best-route default
+            # pins only the drafter): the measured tree geometry stays with
+            # its exact pair, but target-side server scheduling keys apply to
+            # any external route on this adapter.
+            policy = {
+                key: value
+                for key, value in policy.items()
+                if key in PAIR_INDEPENDENT_EXTERNAL_DEFAULT_KEYS
+            }
         # An adapter may also default keys it owns and declares in its own
         # class namespace (exact kernel and depth choices it parses itself),
         # never inherited, for the same evidence reason as the policy above.
@@ -195,6 +207,13 @@ ADAPTER_DEFAULT_POLICY_KEYS = frozenset(
         "varlen_dense_mlp",
         "draft_quantization",
     }
+)
+# External-route defaults that do not depend on the drafter: publication
+# order, prefill service order and APCv2 state capture of the target prompt.  They apply to every
+# external pair on the adapter; the rest of an ``external_draft`` default
+# stays bound to ``default_external_route_binding``.
+PAIR_INDEPENDENT_EXTERNAL_DEFAULT_KEYS = frozenset(
+    {"decode_first", "apc_interior_checkpoints", "prefill_scheduling"}
 )
 # The subset that snapshots hybrid state; the engine refuses these on
 # approximate-KV routes, so a default must not select them there.

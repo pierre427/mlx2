@@ -864,6 +864,38 @@ class PrefillOrder:
             ),
         )
 
+    def rank(self, candidates: Sequence[PrefillCandidate]) -> list[int]:
+        """Every candidate index in repeated ``select`` order, counting nothing.
+
+        For a caller that serves only the first admissible pick: it reports
+        the pick it served with ``note_served``.
+        """
+        overdue = sorted(
+            (
+                index
+                for index, candidate in enumerate(candidates)
+                if self.enabled and candidate.bypassed >= self.max_bypass
+            ),
+            key=lambda index: (candidates[index].uid, index),
+        )
+        rest = sorted(
+            (index for index in range(len(candidates)) if index not in overdue),
+            key=lambda index: (
+                candidates[index].remaining,
+                -candidates[index].cached,
+                index,
+            ),
+        )
+        return overdue + rest
+
+    def note_served(self, uid: int, candidates: Sequence[PrefillCandidate]) -> None:
+        """Count a ``rank`` pick that was served because it was overdue."""
+        if self.enabled and any(
+            candidate.uid == int(uid) and candidate.bypassed >= self.max_bypass
+            for candidate in candidates
+        ):
+            _bump(self.counters, "bypass_forced")
+
     def commit(
         self,
         served: Sequence[int],

@@ -679,6 +679,35 @@ class ExternalDraftState:
             raise ValueError("External draft context is not paired to target boundary")
 
 
+def _planned_state_boundaries(requested, interior_positions, passed, total):
+    """``(position, purpose)`` boundaries strictly inside the uncached prompt.
+
+    ``requested`` (``StateBoundary`` rows) wins; otherwise interior-only
+    positions.  Same validation as the ordinary generator.
+    """
+    from .state_boundaries import BoundaryPurpose, StateBoundary
+
+    if requested is None:
+        requested = tuple(
+            StateBoundary(position, BoundaryPurpose.INTERIOR)
+            for position in (interior_positions or ())
+        )
+    planned = []
+    for bound in requested:
+        if not isinstance(bound, StateBoundary) or isinstance(
+            bound.position, bool
+        ) or not isinstance(bound.position, int):
+            raise ValueError("invalid APC state boundary positions")
+        if bound.position >= total - 1:
+            raise ValueError("invalid APC state boundary positions")
+        if bound.position > passed:
+            planned.append((bound.position, BoundaryPurpose(bound.purpose)))
+    positions = [position for position, _purpose in planned]
+    if positions != sorted(set(positions)):
+        raise ValueError("invalid APC state boundary positions")
+    return planned
+
+
 @dataclass
 class Lane:
     uid: int
@@ -692,9 +721,12 @@ class Lane:
     processors: list
     sampling: dict
     # Absolute prompt positions where prefill must end a slice.  These match
-    # ordinary serving's numerical geometry but never request or publish an
-    # APCv2 checkpoint on the external route.
+    # ordinary serving's numerical geometry and publish no checkpoint.
     prefill_cuts: deque = field(default_factory=deque)
+    # Planned APCv2 state boundaries ``(position, BoundaryPurpose)``: prefill
+    # ends a slice there and captures the target cache with its draft-state
+    # sidecar (``_capture_state_boundary``).
+    state_boundaries: deque = field(default_factory=deque)
     prefill_inserted_at: float = field(default_factory=time.monotonic)
     prefill_coalesce_expired_recorded: bool = False
     generated: int = 0
@@ -1028,6 +1060,7 @@ class ExternalDraftBatchGenerator:
                  ast_physical_target=False,
                  ast_memo=None,
                  decode_time_fairness=None, decode_first=None,
+                 prefill_scheduling=None,
                  cost_per_commit_handoff=None,
                  draft_tail_equalize=None,
                  ast_topology=None,
@@ -1051,6 +1084,16 @@ class ExternalDraftBatchGenerator:
 
         self._ast_tree_calibration_mode = _calibration_mode(ast_tree_calibration)
         round_phases.initialize(self, decode_first)
+        from .adaptive_policy import PrefillOrder
+
+        # Which waiting prompt gets the serial prefill slice (absent: queue
+        # order).  The one-slice contention clamp is ordinary-route only.
+        self.prefill_order = PrefillOrder.from_value(prefill_scheduling)
+        if self.prefill_order.one_slice_contention:
+            raise ValueError(
+                "prefill_scheduling one_slice_contention is unavailable on the "
+                "external draft route"
+            )
         self.memory_headroom = memory_headroom
         self.reclaim_memory = reclaim_memory; self.evict_checkpoint = evict_checkpoint
         self._schedule_cursor = 0; self._reclaims_left = 0; self._allocator_reclaimed = False
@@ -1834,6 +1877,9 @@ class ExternalDraftBatchGenerator:
         self.stops = {int(t[0]) for t in stop_tokens}
         self.layers = tuple(draft_model.config.target_layer_ids)
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
+        # Captured interior snapshots wait for their prompt end; rolling and
+        # junction snapshots are drained by serving every poll.
+        self._interior_checkpoints = {}; self._state_checkpoints = []
         self._prefill_slice_schedules = {}
         # A parked cohort's dispatched, unread round (pipelined parked decode).
         self._parked_inflight = None
@@ -2313,7 +2359,7 @@ class ExternalDraftBatchGenerator:
                logits_processors=None, samplers=None, resume_rng=False,
                apc_interior_positions=None, prefill_inputs=None,
                prefill_cuts=None, session_keys=None,
-               ast_memo_layout_revisions=None):
+               ast_memo_layout_revisions=None, state_boundaries=None):
         if self._open:
             raise RuntimeError("Membership change during external transaction")
         if session_keys is not None and (len(session_keys) != len(prompts) or any(
@@ -2351,10 +2397,11 @@ class ExternalDraftBatchGenerator:
             raise ValueError("prefill_inputs must have one entry per external request")
         if len(prefill_cuts) != len(prompts):
             raise ValueError("prefill_cuts must have one entry per external request")
-        if any(positions for positions in apc_interior_positions):
-            raise ValueError(
-                "APCv2 interior checkpoints are unavailable on external draft routes"
-            )
+        state_boundaries = (
+            [None] * len(prompts) if state_boundaries is None else state_boundaries
+        )
+        if len(state_boundaries) != len(prompts):
+            raise ValueError("state_boundaries must have one entry per external request")
         if any(value is not None for value in prefill_inputs):
             raise ValueError("multimodal prefill is unavailable on external draft routes")
         for name, rows in (
@@ -2421,9 +2468,13 @@ class ExternalDraftBatchGenerator:
                 raise ValueError("invalid prefill cut positions")
             passed = len(prefix)
             total = passed + len(todo)
+            planned = _planned_state_boundaries(
+                state_boundaries[i], apc_interior_positions[i], passed, total
+            )
+            positions = {position for position, _purpose in planned}
             cuts = tuple(
                 position for position in cuts
-                if passed < position < total - 1
+                if passed < position < total - 1 and position not in positions
             )
             lane = Lane(
                 uid,
@@ -2437,6 +2488,7 @@ class ExternalDraftBatchGenerator:
                 (logits_processors or [[]] * len(prompts))[i] or [],
                 dict((sampling_configs or [{}] * len(prompts))[i]),
                 prefill_cuts=deque(cuts),
+                state_boundaries=deque(planned),
             )
             if self.round_timing:
                 lane.external_timing_start = {
@@ -2545,7 +2597,60 @@ class ExternalDraftBatchGenerator:
             _bump(self.scheduler_stats, "external_prefill_cuts_reached")
         if lane.prefill_cuts:
             step = min(step, lane.prefill_cuts[0] - len(lane.history))
+        if lane.state_boundaries:
+            step = min(step, lane.state_boundaries[0][0] - len(lane.history))
         return step
+
+    def _capture_state_boundary(self, lane):
+        """Snapshot the lane if this prefill slice ended on a planned boundary.
+
+        Mid-prefill the draft plane holds context through the previous slice
+        and ``lane.tail`` the taps of the last one, exactly what a resumed
+        lane consumes before its next slice, so the pair is an exact
+        external-route APCv2 checkpoint.  A boundary a slice passed without
+        ending on it (an operator cut cannot cause this) is dropped.
+        """
+        from .prefill_slice_schedule import changed_at
+        from .state_boundaries import BoundaryPurpose
+
+        covered = len(lane.history)
+        while lane.state_boundaries and lane.state_boundaries[0][0] < covered:
+            lane.state_boundaries.popleft()
+            _bump(self.scheduler_stats, "external_state_checkpoints_skipped_passed")
+        if not lane.state_boundaries or lane.state_boundaries[0][0] != covered:
+            return
+        _position, purpose = lane.state_boundaries.popleft()
+        purpose = BoundaryPurpose(purpose)
+        checkpoint = {
+            "tokens": list(lane.history),
+            "target_cache": self._freeze_cache(lane.cache),
+            "covered_tokens": covered,
+            "cache_sidecar": self._sidecar(lane),
+            "purpose": purpose,
+            "prefill_slice_schedule_changed": changed_at(
+                self.prefill_slice_schedule(lane.uid), covered
+            ),
+        }
+        if purpose == BoundaryPurpose.INTERIOR:
+            self._interior_checkpoints.setdefault(lane.uid, []).append(checkpoint)
+        else:
+            self._state_checkpoints.append((lane.uid, checkpoint))
+        _bump(
+            self.scheduler_stats,
+            f"external_apc_{purpose.name.lower()}_checkpoints_captured",
+        )
+
+    def pop_interior_checkpoints(self, uid):
+        """Interior snapshots for ``uid``, published with its prompt boundary."""
+        return self._interior_checkpoints.pop(int(uid), [])
+
+    def drain_state_checkpoints(self):
+        """Transfer rolling/junction snapshots for immediate publication."""
+        drained, self._state_checkpoints = self._state_checkpoints, []
+        return drained
+
+    def drain_state_checkpoint_declines(self):
+        return []
 
     def _sync_decode_fairness_stats(self):
         fairness = self.decode_time_fairness
@@ -2622,10 +2727,10 @@ class ExternalDraftBatchGenerator:
     def _prefill(self, lane, *, step=None, contended=False):
         if len(lane.remaining) > 1:
             planned = min(self._prefill_limit(lane), len(lane.remaining) - 1)
-            n = min(
-                self._prefill_limit(lane) if step is None else step,
-                len(lane.remaining) - 1,
-            )
+            # A supplied step (fairness floor, decode-first width, admission
+            # halving) may shorten the slice but never carry it past the next
+            # planned cut or state boundary, as _prefill_many also clamps.
+            n = planned if step is None else min(step, planned)
             self._record_prefill_slice(lane, n, planned)
             depth = len(lane.history)
             tic = time.perf_counter()
@@ -2639,6 +2744,7 @@ class ExternalDraftBatchGenerator:
                 n, time.perf_counter() - tic, contended=contended, rows=1,
                 depth=depth,
             )
+            self._capture_state_boundary(lane)
             self.scheduler_stats["prefill_rounds"] += 1
             if self.prefill_allocator_reclaim:
                 # After the materialization above; lane.tail stays referenced.
@@ -2706,6 +2812,8 @@ class ExternalDraftBatchGenerator:
             width, time.perf_counter() - tic, contended=contended,
             rows=len(lanes), depth=depth,
         )
+        for lane in lanes:
+            self._capture_state_boundary(lane)
         self.scheduler_stats["prefill_rounds"] += 1
         _bump(self.scheduler_stats, "external_batched_prefill_rounds")
         _bump(self.scheduler_stats, "external_batched_prefill_lanes", len(lanes))
@@ -13789,7 +13897,11 @@ class ExternalDraftBatchGenerator:
                 )
         # A multirow slab is this poll's one bounded physical prefill slice.
         # If it could not form, retain the unchanged serial admission path.
-        for lane in (() if prompts or defer_serial_prefill else ordered):
+        serial = () if prompts or defer_serial_prefill else ordered
+        order_candidates = None
+        if serial and self.prefill_order.enabled:
+            serial, order_candidates = self._order_serial_prefill(serial)
+        for lane in serial:
             if lane.anchor is not None or active_count >= self.capacity:
                 continue
             limit = self._prefill_limit(lane)
@@ -13812,9 +13924,40 @@ class ExternalDraftBatchGenerator:
                 prompts.append(
                     self._prefill(lane, step=append, contended=contended)
                 )
+                if order_candidates is not None:
+                    self._commit_prefill_order(lane.uid, order_candidates)
                 break
             self._memory_waiting_uids.add(lane.uid)
         return prompts
+
+    def _order_serial_prefill(self, lanes):
+        """``PrefillOrder`` picks first; decoding lanes keep their place after.
+
+        Returns the reordered lanes and the candidates (the waiting prompts
+        before the move) the served pick is committed against.
+        """
+        waiting = [lane for lane in lanes if lane.anchor is None]
+        candidates = [
+            self.prefill_order.candidate(
+                lane.uid, len(lane.remaining), queued_at=lane.prefill_inserted_at
+            )
+            for lane in waiting
+        ]
+        # Ranking is side-effect free: only the lane actually served counts.
+        picks = [waiting[index] for index in self.prefill_order.rank(candidates)]
+        return picks + [lane for lane in lanes if lane.anchor is not None], candidates
+
+    def _commit_prefill_order(self, uid, candidates):
+        self.prefill_order.note_served(uid, candidates)
+        self.prefill_order.commit(
+            [uid],
+            candidates,
+            pending=[
+                lane.uid for lane in self.lanes.values() if lane.anchor is None
+            ],
+        )
+        for key, value in self.prefill_order.counters.items():
+            self.scheduler_stats[f"prefill_scheduling_{key}"] = int(value)
 
     def _drain_ready(self, prompts):
         responses = []
@@ -14243,11 +14386,22 @@ class ExternalDraftBatchGenerator:
         result = {}
         removed = False
         self._discard_prelaunched(uids)
+        if self._state_checkpoints:
+            # An undrained snapshot has lost its owner (and the tenant
+            # namespace it publishes under); drop it with the lane, as the
+            # ordinary generator does.
+            self._state_checkpoints = [
+                item for item in self._state_checkpoints if item[0] not in uids
+            ]
         for uid in uids:
             lane = self.lanes.pop(uid,None)
             if not keep_boundary:
                 self.boundaries.pop(uid,None)
                 getattr(self, "_prefill_slice_schedules", {}).pop(uid, None)
+                # An unfinished prompt publishes no interior snapshots; a
+                # kept boundary (the lane finished in its prompt-end poll)
+                # keeps them for serving to pop with it.
+                self._interior_checkpoints.pop(uid, None)
             if lane is not None:
                 removed = True
                 if (
@@ -14297,5 +14451,6 @@ class ExternalDraftBatchGenerator:
             round_phases.close_pending(self)
             self.remove(list(self.lanes)); self.boundaries.clear()
             getattr(self, "_prefill_slice_schedules", {}).clear()
+            self._interior_checkpoints.clear(); self._state_checkpoints.clear()
         finally:
             _remove_gc_timing(self)

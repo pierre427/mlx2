@@ -268,7 +268,8 @@ def test_external_insert_accepts_shared_serving_seam_and_rejects_unsupported_inp
     finally:
         compatible.close()
 
-    with pytest.raises(ValueError, match="interior checkpoints"):
+    # A boundary must lie strictly before the prompt's last token.
+    with pytest.raises(ValueError, match="state boundary positions"):
         generator(m, d).insert(
             [[1, 2]], max_tokens=[1], apc_interior_positions=[(1,)]
         )
@@ -300,7 +301,9 @@ def test_external_prefill_cuts_match_absolute_ordinary_geometry_without_checkpoi
         assert batch.scheduler_stats["external_prefill_cuts_planned"] == 2
         assert batch.scheduler_stats["external_prefill_cuts_reached"] == 2
         assert not hasattr(batch, "_interior_checkpoint_positions")
-        assert not hasattr(batch, "_interior_checkpoints")
+        # Cuts end slices only; they capture no APCv2 snapshot.
+        assert batch.pop_interior_checkpoints(uid) == []
+        assert batch.drain_state_checkpoints() == []
     finally:
         batch.close()
 
@@ -3722,3 +3725,216 @@ def test_ast_batching_defaults_preserve_explicit_and_non_ast_choices():
     paired = generator(model, draft, progressive_verification_tile=1)
     assert paired.ready_drain == "all"
     assert paired.draft_tail_equalize is False
+
+
+def _prefill_to_anchor(batch, lane):
+    covered = []
+    while lane.anchor is None:
+        batch._prefill(lane)
+        covered.append(len(lane.history))
+    return covered
+
+
+def test_external_interior_checkpoint_resumes_like_the_cold_prompt():
+    from mlx2.runtime.state_boundaries import BoundaryPurpose
+
+    model, draft = tiny()
+    prompt = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    cold = generator(model, draft)
+    resumed = generator(model, draft)
+    try:
+        uid = cold.insert(
+            [prompt], max_tokens=[4], apc_interior_positions=[(4,)]
+        )[0]
+        lane = cold.lanes[uid]
+        # The slice ends exactly on the planned boundary (prefill step 3).
+        assert _prefill_to_anchor(cold, lane) == [3, 4, 7, 8]
+        assert cold.scheduler_stats["external_apc_interior_checkpoints_captured"] == 1
+        assert cold.drain_state_checkpoints() == []
+        (checkpoint,) = cold.pop_interior_checkpoints(uid)
+        assert cold.pop_interior_checkpoints(uid) == []
+        assert checkpoint["purpose"] == BoundaryPurpose.INTERIOR
+        assert checkpoint["tokens"] == prompt[:4]
+        assert checkpoint["covered_tokens"] == 4
+        assert checkpoint["prefill_slice_schedule_changed"] is False
+        sidecar = checkpoint["cache_sidecar"]
+        assert isinstance(sidecar, ExternalDraftState)
+        sidecar.validate("test", 4)
+        cold_output, _ = drain(cold)
+
+        resumed_uid = resumed.insert(
+            [prompt[4:]],
+            max_tokens=[4],
+            caches=[checkpoint["target_cache"]],
+            cache_states=[sidecar],
+            all_tokens=[checkpoint["tokens"]],
+        )[0]
+        assert resumed.scheduler_stats["paired_cache_resumes"] == 1
+        resumed_lane = resumed.lanes[resumed_uid]
+        assert _prefill_to_anchor(resumed, resumed_lane) == [7, 8]
+        resumed_output, _ = drain(resumed)
+        assert resumed_output[resumed_uid] == cold_output[uid]
+    finally:
+        resumed.close()
+        cold.close()
+
+
+def test_external_rolling_boundary_drains_and_removal_discards_interiors():
+    from mlx2.runtime.state_boundaries import BoundaryPurpose, StateBoundary
+
+    model, draft = tiny()
+    batch = generator(model, draft)
+    try:
+        uid = batch.insert(
+            [[1, 2, 3, 4, 5, 6, 7, 8, 9]],
+            max_tokens=[2],
+            state_boundaries=[(
+                StateBoundary(2, BoundaryPurpose.ROLLING),
+                StateBoundary(5, BoundaryPurpose.INTERIOR),
+            )],
+        )[0]
+        lane = batch.lanes[uid]
+        batch._prefill(lane)
+        assert len(lane.history) == 2
+        ((drained_uid, rolling),) = batch.drain_state_checkpoints()
+        assert drained_uid == uid
+        assert rolling["purpose"] == BoundaryPurpose.ROLLING
+        rolling["cache_sidecar"].validate("test", 2)
+        batch._prefill(lane)
+        assert len(lane.history) == 5
+        assert batch.scheduler_stats["external_apc_interior_checkpoints_captured"] == 1
+        # An unfinished prompt publishes none of its interior snapshots.
+        batch.remove([uid])
+        assert batch.pop_interior_checkpoints(uid) == []
+    finally:
+        batch.close()
+
+
+@pytest.mark.parametrize(
+    "boundaries",
+    [((8,),), ((3, 2),), ((2, 2),), ((True,),)],
+)
+def test_external_state_boundaries_fail_closed(boundaries):
+    model, draft = tiny()
+    batch = generator(model, draft)
+    try:
+        with pytest.raises(ValueError, match="state boundary positions"):
+            batch.insert(
+                [[1, 2, 3, 4, 5, 6, 7, 8, 9]],
+                max_tokens=[1],
+                apc_interior_positions=list(boundaries),
+            )
+    finally:
+        batch.close()
+
+
+def test_external_srpt_serves_the_shorter_prompt_and_bounds_bypass():
+    model, draft = tiny()
+    batch = generator(
+        model, draft,
+        prefill_scheduling={"order": "srpt", "max_bypass": 1,
+                            "one_slice_contention": False},
+    )
+    try:
+        long_uid, short_uid = batch.insert(
+            [list(range(1, 13)), [1, 2, 3]], max_tokens=[1, 1]
+        )
+        order = [
+            lane.uid
+            for lane in batch._order_serial_prefill(list(batch.lanes.values()))[0]
+        ]
+        assert order == [short_uid, long_uid]
+        served = []
+        for _ in range(3):
+            (prompt,) = batch._prefill_phase(list(batch.lanes))
+            served.append(prompt.uid)
+        # The overtaken older prompt is served once max_bypass is reached.
+        assert served[0] == short_uid
+        assert long_uid in served
+        assert batch.scheduler_stats["prefill_scheduling_bypasses"] >= 1
+    finally:
+        batch.close()
+
+    with pytest.raises(ValueError, match="one_slice_contention"):
+        generator(model, draft, prefill_scheduling={"order": "srpt"})
+
+
+def test_external_interiors_survive_a_finish_in_the_prompt_end_poll():
+    model, draft = tiny()
+    batch = generator(model, draft)
+    try:
+        uid = batch.insert(
+            [[1, 2, 3, 4, 5, 6, 7, 8, 9]], max_tokens=[1],
+            apc_interior_positions=[(4,)],
+        )[0]
+        _prefill_to_anchor(batch, batch.lanes[uid])
+        batch.remove([uid], cancelled=False, keep_boundary=True)
+        assert batch.pop_prompt_boundary(uid) is not None
+        assert [c["covered_tokens"] for c in batch.pop_interior_checkpoints(uid)] == [4]
+    finally:
+        batch.close()
+
+
+def test_prefill_order_rank_counts_only_the_served_forced_pick():
+    from mlx2.runtime.adaptive_policy import PrefillCandidate, PrefillOrder
+
+    order = PrefillOrder.from_value(
+        {"order": "srpt", "max_bypass": 1, "one_slice_contention": False}
+    )
+    candidates = [
+        PrefillCandidate(uid=0, remaining=9, cached=0, queued_at=0.0, bypassed=1),
+        PrefillCandidate(uid=1, remaining=8, cached=0, queued_at=0.0, bypassed=1),
+        PrefillCandidate(uid=2, remaining=1, cached=0, queued_at=0.0, bypassed=0),
+    ]
+    assert order.rank(candidates) == [0, 1, 2]
+    assert order.counters["bypass_forced"] == 0
+    picks = list(range(3))
+    selected = []
+    while picks:
+        pick = picks[order.select([candidates[i] for i in picks])]
+        picks.remove(pick)
+        selected.append(pick)
+    assert selected == order.rank(candidates)
+    order.counters["bypass_forced"] = 0
+    order.note_served(0, candidates)
+    order.note_served(2, candidates)
+    assert order.counters["bypass_forced"] == 1
+
+
+def test_external_supplied_prefill_step_never_passes_a_planned_boundary():
+    model, draft = tiny()
+    batch = generator(model, draft)
+    try:
+        uid = batch.insert(
+            [list(range(1, 13))], max_tokens=[1], apc_interior_positions=[(2,)]
+        )[0]
+        lane = batch.lanes[uid]
+        # A fairness floor wider than the boundary distance.
+        batch._prefill(lane, step=8)
+        assert len(lane.history) == 2
+        assert [c["covered_tokens"] for c in batch.pop_interior_checkpoints(uid)] == [2]
+        assert "external_state_checkpoints_skipped_passed" not in batch.scheduler_stats
+    finally:
+        batch.close()
+
+
+def test_external_removal_drops_undrained_rolling_snapshots():
+    from mlx2.runtime.state_boundaries import BoundaryPurpose, StateBoundary
+
+    model, draft = tiny()
+    batch = generator(model, draft)
+    try:
+        kept, cancelled = batch.insert(
+            [[1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6]],
+            max_tokens=[1, 1],
+            state_boundaries=[
+                (StateBoundary(2, BoundaryPurpose.ROLLING),),
+                (StateBoundary(2, BoundaryPurpose.ROLLING),),
+            ],
+        )
+        batch._prefill(batch.lanes[kept])
+        batch._prefill(batch.lanes[cancelled])
+        batch.remove([cancelled])
+        assert [uid for uid, _ in batch.drain_state_checkpoints()] == [kept]
+    finally:
+        batch.close()

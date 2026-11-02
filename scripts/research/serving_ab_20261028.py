@@ -370,6 +370,83 @@ class Unit:
                               "probe_cached": c["probe"]["cached_tokens"]}), flush=True)
         return cells
 
+    def scenario_interior_parity(self, corpus, params, session_index):
+        """Warm continuation from an interior checkpoint against a cold prefill.
+
+        Per rep: prime a shared system prompt (its interior checkpoints
+        publish), then a different question with greedy ``max_tokens``
+        (warm); clear APCv2 and send that request cold twice (cold, plus a
+        cold-versus-cold control).  When warm and cold token ids differ, the
+        same session replays both arms with one bounded logprob window at the
+        first divergent position only (AGENTS.md cold/warm drift rule).
+        """
+        reps, size = params.get("reps", 3), params.get("prefix_tokens", 8192)
+        max_tokens, top = params.get("max_tokens", 128), params.get("top_logprobs", 20)
+        trace = {"return_token_trace": True}
+        cells = []
+
+        def ids(result):
+            return list(((result.get("token_trace") or {}).get("token_ids")) or [])
+
+        def first_divergence(a, b):
+            for index, (x, y) in enumerate(zip(a, b)):
+                if x != y:
+                    return index
+            return None if len(a) == len(b) else min(len(a), len(b))
+
+        for rep in range(reps):
+            system = corpus.prompt(params.get("slot_base", 0) + 300 + rep, size,
+                                   question="Use these notes for the conversation.")
+            question = params.get("question", "Explain in detail what the notes say about "
+                                  "qualification and route receipts.")
+
+            def run():
+                prime = self.chat("Summarise the notes in one sentence.", system=system,
+                                  max_tokens=1)
+                warm = self.chat(question, system=system, max_tokens=max_tokens, extra=trace)
+                self.clear(f"parity-r{rep}-cold")
+                cold = self.chat(question, system=system, max_tokens=max_tokens, extra=trace)
+                self.clear(f"parity-r{rep}-cold2")
+                cold2 = self.chat(question, system=system, max_tokens=max_tokens, extra=trace)
+                result = {"rep": rep, "prime": prime, "warm": warm, "cold": cold,
+                          "cold2": cold2,
+                          "warm_vs_cold_first_divergence": first_divergence(ids(warm), ids(cold)),
+                          "cold_vs_cold_first_divergence": first_divergence(ids(cold), ids(cold2))}
+                index = result["warm_vs_cold_first_divergence"]
+                if index is not None and index < min(len(ids(warm)), len(ids(cold))):
+                    position = index + 1
+                    window = {"logprobs": True, "top_logprobs": top,
+                              "logprobs_start": position, "logprobs_end": position, **trace}
+
+                    def windowed():
+                        body = {"model": self.model_name, "temperature": 0,
+                                "max_tokens": position, "messages": [
+                                    {"role": "system", "content": system},
+                                    {"role": "user", "content": question}], **window}
+                        code, response = http(self.base + "/v1/chat/completions", body)
+                        choice = (response.get("choices") or [{}])[0] if code == 200 else {}
+                        receipt = (response.get("mlx2") or {}) if code == 200 else {}
+                        return {"http_status": code, "logprobs": choice.get("logprobs"),
+                                "token_trace": receipt.get("token_trace"),
+                                "cached_tokens": ((response.get("usage") or {}).get(
+                                    "prompt_tokens_details") or {}).get("cached_tokens")
+                                if code == 200 else None}
+                    self.clear(f"parity-r{rep}-window-warm")
+                    self.chat("Summarise the notes in one sentence.", system=system, max_tokens=1)
+                    warm_window = windowed()
+                    self.clear(f"parity-r{rep}-window-cold")
+                    cold_window = windowed()
+                    result["divergence_window"] = {"position": position,
+                                                   "warm": warm_window, "cold": cold_window}
+                return result
+            c = self.cell(f"parity-r{rep}", run)
+            cells.append(c)
+            print(json.dumps({"label": c["label"], "warm_cached": c["warm"]["cached_tokens"],
+                              "warm_tokens": len(ids(c["warm"])),
+                              "warm_vs_cold": c["warm_vs_cold_first_divergence"],
+                              "cold_vs_cold": c["cold_vs_cold_first_divergence"]}), flush=True)
+        return cells
+
     def scenario_logprob_window(self, corpus, params, session_index):
         """Localize a known first divergence: replay the greedy prompt and read
         one bounded logprob window at that already-selected position only."""

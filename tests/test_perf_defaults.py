@@ -118,7 +118,12 @@ def test_qwen38_external_defaults_do_not_leak_to_another_payload_pair():
         EXTERNAL,
         resolution,
     )
-    assert set(policy) == {"draft_model", "target_revision", "draft_revision"}
+    # The measured tree geometry stays with its exact pair; only the
+    # pair-independent target-side scheduling keys reach another pair.
+    assert set(policy) == {
+        "draft_model", "target_revision", "draft_revision",
+        "decode_first", "apc_interior_checkpoints", "prefill_scheduling",
+    }
 
 
 def test_qwen38_external_draft_explicit_tensorfold_geometry_survives_defaults():

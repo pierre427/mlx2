@@ -1147,6 +1147,16 @@ def adapter_prefill_row_tile(adapter):
     return None if tile == 64 else int(tile)
 
 
+def external_state_checkpoints(adapter) -> bool:
+    """Whether the adapter's external generator captures APCv2 state boundaries.
+
+    Read from the adapter class's own namespace: a subclass or an adapter
+    with its own generator subclass must declare it after checking that its
+    prefill path reaches ``ExternalDraftBatchGenerator._capture_state_boundary``.
+    """
+    return vars(type(adapter)).get("external_apc_state_checkpoints", False) is True
+
+
 def decode_time_fairness_policy(
     *, external_draft: bool, prompt_lookup: bool, overrides=None
 ) -> dict:
@@ -8701,7 +8711,11 @@ class ServingEngine:
         self, adapter, *, external_draft, prompt_lookup, inspect, feature="rolling"
     ):
         """Choose how rolling prefill checkpoints work on this route, or fail closed."""
-        if external_draft or prompt_lookup or self.approximate_kv_policy.enabled:
+        if (
+            (external_draft and not external_state_checkpoints(adapter))
+            or prompt_lookup
+            or self.approximate_kv_policy.enabled
+        ):
             route = (
                 "external draft"
                 if external_draft
@@ -8847,6 +8861,13 @@ class ServingEngine:
         return None
 
     def _select_inflight_route(self, adapter, *, external_draft, prompt_lookup, inspect):
+        if external_draft:
+            # The external generator captures planned boundaries only; it has
+            # no add_state_boundary for a follower's mid-prefill request.
+            raise ValueError(
+                "APCv2 in-flight prefix checkpoints cannot capture on the "
+                "selected external draft route"
+            )
         route = self._select_rolling_route(
             adapter,
             external_draft=external_draft,
@@ -8882,7 +8903,7 @@ class ServingEngine:
             if owner is None or owner.request.get("skip_writing_prefix_cache", False):
                 count_add(self.counts, f"apc_{name}_checkpoints_skipped_write_suppressed", 1)
                 continue
-            sidecar = (
+            sidecar = checkpoint.get("cache_sidecar") or (
                 sidecar_type(
                     checkpoint["mtp_state"],
                     checkpoint["covered_tokens"],
@@ -10303,7 +10324,9 @@ class ServingEngine:
                     # a bound changes chunk geometry and so output bits.
                     settings["prefill_depth_budget"] = self.prefill_depth_budget
             self.apc_interior_route_supported = not (
-                external_draft or prompt_lookup or self.approximate_kv_policy.enabled
+                (external_draft and not external_state_checkpoints(adapter))
+                or prompt_lookup
+                or self.approximate_kv_policy.enabled
             )
             state_checkpoints_selected = bool(
                 self.apc_interior_checkpoint_policy["count"]
@@ -10476,10 +10499,15 @@ class ServingEngine:
                     "self_mtp_copy_draft requires the native self-MTP route"
                 )
             if self.prefill_scheduling_policy is not None:
-                if external_draft or prompt_lookup:
+                if prompt_lookup or (
+                    external_draft
+                    and vars(type(adapter)).get("external_prefill_scheduling")
+                    is not True
+                ):
                     raise ValueError(
                         "prefill_scheduling requires the ordinary or native "
-                        "self-MTP route"
+                        "self-MTP route, or an adapter whose external route "
+                        "declares it"
                     )
                 settings["prefill_scheduling"] = dict(self.prefill_scheduling_policy)
             if self.decode_first_policy is not None:
@@ -11635,6 +11663,11 @@ class ServingEngine:
                         decode_time_fairness=settings["decode_time_fairness"],
                         decode_first=self.decode_first_policy,
                         ast_memo=ast_memo_handle,
+                        **(
+                            {"prefill_scheduling": self.prefill_scheduling_policy}
+                            if self.prefill_scheduling_policy is not None
+                            else {}
+                        ),
                     )
                 elif prompt_lookup:
                     from .runtime.pld import PromptLookupBatchGenerator
@@ -11920,7 +11953,8 @@ class ServingEngine:
                 ):
                     count_add(self.counts, counter + "_skipped_approximate", 1)
                     return
-                checkpoint_sidecar = (
+                # An external-route snapshot carries its draft-state sidecar.
+                checkpoint_sidecar = checkpoint.get("cache_sidecar") or (
                     MTPAPCSidecar(
                         checkpoint["mtp_state"],
                         checkpoint["covered_tokens"],
@@ -12274,6 +12308,9 @@ class ServingEngine:
             # drain waits only for ``self.jobs``), or make entries resident
             # again on a suspended server.
             pending_interiors = deque()
+            # Serving polls that reached interior publication; a queued
+            # snapshot records the one it was queued in (``queued_poll``).
+            interior_poll = 0
 
             def drop_queued_interiors(*, live_owners=True):
                 """Drop queued snapshots of ended owners (all: ``live_owners=False``)."""
@@ -14773,6 +14810,7 @@ class ServingEngine:
                                     publish_interior(
                                         response, owner, surgery_receipt, checkpoint
                                     )
+                                checkpoint = None
                                 publish_prompt_boundary(
                                     response, owner, surgery_receipt
                                 )
@@ -15587,6 +15625,7 @@ class ServingEngine:
                     # active lanes have taken ownership, before next admission.
                     if _loop_trace.enabled():
                         trace_iteration["responses1"] = _loop_trace.now()
+                    interior_poll += 1
                     for (prompt_end, owner, surgery_receipt, interiors) in (
                         deferred_prompt_ends
                     ):
@@ -15597,17 +15636,45 @@ class ServingEngine:
                             count_add(self.counts, "apc_prompt_end_publications_dropped", 1)
                             continue
                         publish_prompt_boundary(prompt_end, owner, surgery_receipt)
-                        pending_interiors.extend(
-                            (prompt_end, owner, surgery_receipt, checkpoint)
-                            for checkpoint in interiors
-                        )
+                        for checkpoint in interiors:
+                            checkpoint["queued_poll"] = interior_poll
+                            pending_interiors.append(
+                                (prompt_end, owner, surgery_receipt, checkpoint)
+                            )
+                        # The loop local must not keep a snapshot alive into
+                        # a later device-fault rebuild's release check.
+                        checkpoint = None
                     deferred_prompt_ends = ()
                     # Interior checkpoints are snapshots: beside other
                     # decoding lanes publish one per round so their stores'
-                    # disk spills do not stack into one neighbour gap.
+                    # disk spills do not stack into one neighbour gap.  A
+                    # lane whose prompt end carried no token (the external
+                    # route samples its first token in the next round) keeps
+                    # its snapshots queued for one poll, so the stores do not
+                    # land inside its TTFT.  Only one: until published they
+                    # are not evictable APCv2 state, and holding them longer
+                    # could starve the very first-decode admission they wait
+                    # for.
                     drop_queued_interiors()
                     while pending_interiors:
-                        publish_interior(*pending_interiors.popleft())
+                        ready = next(
+                            (
+                                index
+                                for index, item in enumerate(pending_interiors)
+                                if int(getattr(item[1], "completion_tokens", 0) or 0)
+                                or item[3].get("queued_poll", 0) < interior_poll
+                            ),
+                            None,
+                        )
+                        if ready is None:
+                            count_add(self.counts, "apc_interior_publications_held_for_first_token", 1)
+                            break
+                        item = pending_interiors[ready]
+                        del pending_interiors[ready]
+                        publish_interior(*item)
+                        # No loop local may keep a snapshot alive into a
+                        # later device-fault rebuild's release check.
+                        item = None
                         if len(active) >= 2:
                             count_add(self.counts, "apc_interior_publications_paced", 1)
                             break
