@@ -41,6 +41,32 @@ def test_anthropic_omitted_disabled_and_enabled_thinking_translation():
     assert enabled["thinking_budget_mode"] == "history"
 
 
+def test_anthropic_always_thinking_adapter_leaves_the_off_default_unset():
+    base = {
+        "model": "fixture",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 64,
+    }
+    counts = Counter()
+    omitted = anthropic_request_to_chat(base, thinking_off_supported=False, counts=counts)
+    assert "enable_thinking" not in omitted
+    assert counts["anthropic_thinking_default_omitted"] == 1
+    # An explicit disable is still forwarded so the adapter can refuse it.
+    disabled = anthropic_request_to_chat(
+        {**base, "thinking": {"type": "disabled"}}, thinking_off_supported=False
+    )
+    assert disabled["enable_thinking"] is False
+    enabled = anthropic_request_to_chat(
+        {**base, "thinking": {"type": "enabled", "budget_tokens": 16}},
+        thinking_off_supported=False,
+    )
+    assert enabled["enable_thinking"] is True and enabled["thinking_budget"] == 16
+    anthropic_request_to_chat(
+        base, thinking_off_supported=False, count_tokens=True, counts=counts
+    )
+    assert counts["anthropic_thinking_default_omitted"] == 1
+
+
 def test_anthropic_translation_maps_thinking_tools_and_signed_history():
     signer = ReasoningSigner(b"shared-secret")
     signature = signer.sign_anthropic(
@@ -418,6 +444,28 @@ def test_anthropic_http_nonstream_count_stream_errors_and_invalid_tool(anthropic
     assert '"type": "error"' in wire
     assert '"type": "api_error"' in wire
     assert 'chat.completion.chunk' not in wire
+
+
+def test_anthropic_http_always_thinking_adapter_gets_no_off_flag(
+    anthropic_endpoint,
+):
+    engine, base = anthropic_endpoint
+    engine.adapter = type("AlwaysThinks", (), {"thinking_off_supported": False})()
+    with _post(
+        base,
+        "/v1/messages",
+        {
+            "model": "fixture",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 64,
+        },
+    ) as response:
+        assert response.status == 200
+        content = json.loads(response.read())["content"]
+    assert "enable_thinking" not in engine.last_request
+    assert engine.thinking_enabled is True
+    assert [block["type"] for block in content] == ["thinking", "text"]
+    assert engine.counts["anthropic_thinking_default_omitted"] == 1
 
 
 def test_anthropic_http_omitted_thinking_disables_thinking_default(

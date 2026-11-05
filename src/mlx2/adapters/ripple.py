@@ -405,6 +405,11 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # Apple silicon; 7 is a starting point for the A/B, not a tuned default.
     EXTERNAL_DEFAULT_NUM_DRAFT = 7
     EXTERNAL_ROUTE_TAG = "external-ripple-dflash2-v1"
+    # The model always thinks (it writes <think> itself; the template has no off control)
+    # (``_check_request`` refuses enable_thinking=false). /v1/messages then
+    # leaves its thinking-off default unset rather than sending a flag this
+    # adapter must refuse (Pierre, 2026-11-05, option 3).
+    thinking_off_supported = False
     EXTERNAL_PROFILE = "ripple-apcv2-dflash2"
     # Identity pin an auto-paired default writes (best_route_defaults); the
     # adapter re-checks it below so a drafter changed after pairing fails.

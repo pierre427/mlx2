@@ -147,6 +147,18 @@ def test_thinking_off_is_still_refused_with_tools(adapter):
         adapter.render_prompt(_request(enable_thinking=False))
 
 
+def test_messages_translation_omits_the_off_flag_ripple_would_refuse(adapter):
+    from mlx2.anthropic_compat import anthropic_request_to_chat
+
+    assert RippleAdapter.thinking_off_supported is False
+    chat = anthropic_request_to_chat(
+        {"model": "ripple", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
+        thinking_off_supported=RippleAdapter.thinking_off_supported,
+    )
+    assert "enable_thinking" not in chat
+    assert adapter.render_prompt(chat) == adapter.render_prompt({"messages": chat["messages"]})
+
+
 # -- calls -------------------------------------------------------------------
 
 def test_single_call_without_content(adapter, tokenizer):

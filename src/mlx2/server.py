@@ -4387,6 +4387,7 @@ def handler_for(
                             agent_compat=agent_compat,
                             counts=getattr(engine, "counts", None),
                             preserve_tool_schema_history=bool(getattr(getattr(engine, "adapter", None), "anthropic_tool_schema_history", False)),
+                            thinking_off_supported=bool(getattr(getattr(engine, "adapter", None), "thinking_off_supported", True)),
                         )
                     rejections = translation_metadata.get(
                         "reasoning_signature_rejections", 0

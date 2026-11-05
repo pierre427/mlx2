@@ -475,11 +475,19 @@ def anthropic_request_to_chat(
     agent_compat=None,
     counts=None,
     preserve_tool_schema_history=False,
+    thinking_off_supported=True,
 ):
     """Translate Anthropic Messages/count_tokens input to a chat request.
 
     Adapters with native mid-turn tool schemas can retain the exact activation
     timeline. Other adapters keep the existing final-inventory projection.
+
+    ``thinking_off_supported=False`` is for adapters whose template always
+    thinks (no off switch): the Messages default of thinking-off is then left
+    unset instead of asserted, so the adapter's native behaviour applies and
+    its reasoning comes back as ``thinking`` blocks. An explicit
+    ``thinking: {"type": "disabled"}`` is still forwarded, and such an adapter
+    refuses it.
     """
     body = _object(body, "request")
     request_model = anthropic_request_model(body, agent_compat=agent_compat)
@@ -548,7 +556,11 @@ def anthropic_request_to_chat(
             messages = _agent.fold_system_messages(messages, counts)
     # Anthropic extended thinking is opt-in.  Keep this explicit so adapters
     # whose native default is thinking-on do not override Messages semantics.
-    result = {"messages": messages, "enable_thinking": False}
+    result = {"messages": messages}
+    if thinking_off_supported:
+        result["enable_thinking"] = False
+    elif not count_tokens:
+        _agent.count(counts, "anthropic_thinking_default_omitted")
     if translation_metadata is not None:
         translation_metadata["reasoning_signature_rejections"] = rejections
     if "session_id" in body:
