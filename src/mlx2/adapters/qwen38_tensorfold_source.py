@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from ..runtime.arithmetic_class import tensorfold_family_identity
+from ..runtime.mlx_build import installed_mlx_build
+
 EXPECTED_REVISION = "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170"
 EXPECTED_TREE = "d9d141b99525a8866f48475858d7011fb192c11b"
 VENDORED_SOURCE = "src/mlx2/runtime/tensorfold_qwen38"
@@ -59,4 +62,8 @@ def qualification_source_identity(root: str | Path | None = None) -> dict:
     """Return the revision, tree and module hashes bound by qualification."""
 
     identity = validate_source(root)
-    return {**identity, "module_sha256": dict(QUALIFICATION_MODULE_SHA256)}
+    return {
+        **identity,
+        "module_sha256": dict(QUALIFICATION_MODULE_SHA256),
+        "arithmetic_class": tensorfold_family_identity(runtime_revision=installed_mlx_build()),
+    }

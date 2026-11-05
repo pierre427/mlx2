@@ -28,6 +28,12 @@ from dataclasses import dataclass, field
 import mlx.core as mx
 from mlx import nn
 
+from ..arithmetic_class import (
+    lane_cache_fingerprint,
+    lane_family_identity,
+    lane_implementation_digest,
+)
+from ..mlx_build import installed_mlx_build
 from . import simd
 from .matmul import (
     MAX_ROWS,
@@ -39,8 +45,8 @@ from .matmul import (
     backend,
     lane_matmul,
     prepare,
-    weight_passes,
     split_k,
+    weight_passes,
 )
 
 LAW_ID = "lane-matmul-v1"
@@ -527,6 +533,21 @@ def _group_siblings(model, groups) -> Counter:
 DEFAULT_MAX_ROWS = 32
 
 
+def _lane_arithmetic_identity(backend_name):
+    """Bind this installed recipe to the actual device/build without a launch."""
+    info = mx.device_info()
+    architecture = info.get("architecture") or info.get("device_name")
+    if not isinstance(architecture, str) or not architecture:
+        raise RuntimeError("installed lane arithmetic requires an explicit device identity")
+    revision = installed_mlx_build()
+    if revision == "unknown":
+        raise RuntimeError("installed lane arithmetic requires an explicit MLX build identity")
+    return lane_family_identity(
+        backend_name, architecture=architecture, runtime_revision=revision,
+        implementation_sha256=lane_implementation_digest(),
+    )
+
+
 def apc_lane_fingerprint(base, receipt):
     """APCv2 namespace for prefix state computed under an installed lane law.
 
@@ -534,9 +555,7 @@ def apc_lane_fingerprint(base, receipt):
     recurrent state produced under it (in memory, idle disk and a persist
     dir) must not be served to a route running stock kernels or another law.
     """
-    if not receipt or not receipt.get("covered"):
-        return base
-    return (base, "lane-matmul", receipt["law_id"])
+    return lane_cache_fingerprint(base, receipt)
 
 
 def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
@@ -568,6 +587,10 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
         raise ValueError("declared projection group names must be unique")
     if declared and not groups:
         raise ValueError("declared projection groups require grouping")
+    # A receipt/namespace refusal must precede preparation, class swaps and
+    # backend-mismatch uninstall, so a failed identity leaves the model intact.
+    current = backend() or "mpp"
+    arithmetic_identity = _lane_arithmetic_identity(current)
     from .policy import format_class
 
     _refuse_int8_wrapped(model)
@@ -592,7 +615,6 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
         except LaneUnsupported:
             return False
         return True
-    current = backend() or "mpp"
     prepared = [lw for lw in (_prepared(m) for _n, m in model.named_modules()) if lw is not None]
     if any(lw.backend != current for lw in prepared):
         # Installed under the other backend: its prepared weights and groups
@@ -692,7 +714,9 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS,
                "max_rows": max_rows, "chunk_above_max": chunk_above_max,
                "covered": dict(covered),
                "groups": dict(formed), "refused": dict(refused), "available": available(),
-               "backend": backend()}
+               "backend": current}
+    if covered:
+        receipt["arithmetic_class"] = arithmetic_identity
     if twins:
         # simd only: per-shape scalar/matrix twin checks on this GPU.
         receipt["simd_twins"] = twins

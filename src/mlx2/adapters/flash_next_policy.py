@@ -171,7 +171,12 @@ class FlashNextPolicy:
     qsa_stage1_gvr_count_paths: bool = False
     # Exact QSA stage-one selector (runtime/models/qwen4_qsa_stage1.py):
     # "off" keeps the default radix selector; direct8/direct4 are qualified
-    # default-off, gvr is an unqualified research candidate.  configure_
+    # default-off, gvr is an unqualified research candidate. "selective"
+    # explicitly selects the separate scalar-F32 score arithmetic candidate
+    # and producer-side bounded candidates; it has no stock-GEMM parity or
+    # performance qualification. The first native backend is serial per row
+    # and retires 32-row windows synchronously to bound workspace; it is a
+    # correctness/reference candidate and may be slower. configure_
     # environment() clears inherited MLX_QWEN* variables, so this key is the
     # only way to select one on the served route.  Enters the environment
     # and receipts only when not "off".
@@ -488,9 +493,9 @@ class FlashNextPolicy:
                 raise ValueError(
                     "fused_expert_kernel stock requires every moe_window consumer off"
                 )
-        if self.qsa_stage1_direct_selector not in {"off", "direct8", "direct4", "gvr"}:
+        if self.qsa_stage1_direct_selector not in {"off", "direct8", "direct4", "gvr", "selective"}:
             raise ValueError(
-                "qsa_stage1_direct_selector must be off, direct8, direct4, or gvr"
+                "qsa_stage1_direct_selector must be off, direct8, direct4, gvr, or selective"
             )
         if self.moe_topk_fold not in {"off", "launch", "fold"}:
             raise ValueError("moe_topk_fold must be off, launch, or fold")

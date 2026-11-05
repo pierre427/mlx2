@@ -41,7 +41,7 @@ _ONEPASS_TOPK_MIN_BLOCKS = max(
 _ONEPASS_TOPK_MAX = 1024
 # Every accepted MLX_QWEN4_QSA_STAGE1_DIRECT_SELECTOR value; "gvr" is the
 # unqualified self-sampling research candidate.
-_DIRECT_SELECTOR_MODES = ("off", "direct8", "direct4", "gvr")
+_DIRECT_SELECTOR_MODES = ("off", "direct8", "direct4", "gvr", "selective")
 
 
 def _direct_selector_mode(raw: str) -> str:
@@ -111,6 +111,8 @@ def qsa_stage1_candidate_status(*, reset: bool = False) -> dict:
             "direct8_qualification": "qualified_default_off",
             "direct4_qualification": "qualified_default_off",
             "gvr_qualification": "unqualified_research_candidate",
+            "selective_qualification": "unqualified_scalar_f32_candidate",
+            "selective_selected": _DIRECT_SELECTOR == "selective",
             "gvr_count_paths": bool(_GVR_COUNT_PATHS),
             # Selected: the route takes it for every geometry it admits.
             # Observed-used: it dispatched since the last reset.
@@ -134,6 +136,15 @@ def qsa_stage1_candidate_status(*, reset: bool = False) -> dict:
             "default_selector": "radix_exact",
             "runtime_counts": dict(_CANDIDATE_STATS),
         }
+        if _DIRECT_SELECTOR == "selective":
+            from .qwen4_qsa_selective import status as selective_status
+
+            report["selective"] = selective_status(reset=reset)
+            report["direct_selector_observed_used"] = (
+                report["selective"]["native_execution_observed"]
+            )
+            report["direct_selector_qualification_receipt"] = None
+            report["direct_selector_model_receipt"] = None
         if _SELECT_TIMING or _SELECT_TIMING_STATS:
             report["select_timing"] = {
                 "enabled": bool(_SELECT_TIMING),
@@ -192,6 +203,15 @@ def qsa_stage1_supported(
     compress_ratio: int,
 ) -> bool:
     """Check static geometry without evaluating device arrays."""
+    if _DIRECT_SELECTOR == "selective":
+        from .qwen4_qsa_selective import SelectiveConfig, native_supported_metadata
+
+        native_supported_metadata(q.shape, pooled.shape, q_positions.shape,
+                                  SelectiveConfig(topk=block_topk, ratio=compress_ratio))
+        if (q.dtype != pooled.dtype or q.dtype not in _SUPPORTED_DTYPES
+                or q_positions.dtype != mx.int32 or not qsa_stage1_kernel_available()):
+            raise ValueError("explicit selective QSA dtype/device capability unavailable")
+        return True
     if not qsa_stage1_kernel_available():
         return False
     if q.ndim != 4 or pooled.ndim != 3 or q_positions.ndim != 2:
@@ -249,6 +269,9 @@ def qsa_stage1_route(
     q: mx.array, pooled: mx.array, *, block_topk: int = 512
 ) -> dict[str, str | None]:
     """Describe the scorer and every selector used by a stage-one call."""
+    if _DIRECT_SELECTOR == "selective":
+        return {"score_producer": "selective_scalar_f32_v1",
+                "selector": "composite_exact_recovery", "refine_selector": None}
     score_producer = qsa_stage1_score_producer(q, pooled, block_topk=block_topk)
     uses_exact_band = score_producer.endswith("_exact_band")
     primary_topk = (
@@ -821,6 +844,8 @@ def _select_scores(
 def _select_scores_untimed(
     scores: mx.array, q_positions: mx.array, *, topk: int, compress_ratio: int
 ) -> mx.array:
+    if _DIRECT_SELECTOR == "selective":
+        raise ValueError("selective QSA requires immutable query/key producer inputs")
     (rows, blocks) = map(int, scores.shape)
     producer = qsa_stage1_selector_producer(blocks=blocks, block_topk=topk)
     if producer == "direct8_exact":
@@ -899,6 +924,13 @@ def qsa_stage1_select(
         q, pooled, q_positions, block_topk=block_topk, compress_ratio=compress_ratio
     ):
         raise ValueError("unsupported QSA stage-one kernel geometry")
+    if _DIRECT_SELECTOR == "selective":
+        from .qwen4_qsa_selective import select_metal
+
+        result = select_metal(q, pooled, q_positions, block_topk=block_topk,
+                              compress_ratio=compress_ratio)
+        _record_candidate_dispatch("selective_scheduled_dispatches")
+        return result
     (batch, length, _, _) = map(int, q.shape)
     blocks = int(pooled.shape[1])
     topk = int(block_topk)

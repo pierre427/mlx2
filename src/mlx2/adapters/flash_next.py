@@ -1501,7 +1501,13 @@ class FlashNextAdapter:
         # A diagnostic snapshot may stand in for the model; the tree law is
         # bound on the live model only, so read it without assuming one.
         tree_law = getattr(getattr(self, "model", None), "_mlx2_flash_tree_law", None)
+        selective_law = None
+        if self.policy.qsa_stage1_direct_selector == "selective":
+            from ..runtime.models.qwen4_qsa_selective import arithmetic_contract
+
+            selective_law = arithmetic_contract()
         return {
+            **({"qsa_selective_score_law": selective_law} if selective_law else {}),
             **({"q4_gate_three_rows": self.q4_gate_three_rows.identity()}
                if getattr(self, "q4_gate_three_rows", None) is not None else {}),
             **({"flash_tensorfold_tree_projection_law": dict(tree_law)} if tree_law else {}),
