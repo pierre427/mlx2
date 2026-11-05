@@ -17,6 +17,7 @@ microbench), while the decode work per output falls by MT and per element.
 Same FP16-operand law as nax_fp16; explicit, unqualified.
 """
 
+import math
 from functools import lru_cache
 
 from .kblock_metal import KBLOCK_HEADER
@@ -407,6 +408,26 @@ if (row < N) {
 }
 """
 
+# Every element value of a K-block weight, exactly as the reference per-row
+# kernel reads it (gguf_value), to float32: one thread per four consecutive
+# values of a row. A one-off per prompt chunk for the projections that have no
+# fast tile (grouped MLA k_b/v_b, KDA f_b/g_b at K = 128), whose matmul then
+# runs on MLX's dense GEMM over the same element values.
+DECODE_F32 = r"""
+const uint gid = thread_position_in_grid.x;
+const uint per_row = K / 4;
+const uint row = gid / per_row, col = (gid % per_row) * 4;
+if (row < N) {
+    device const uchar *w_row = w + ulong(row) * ROW_BYTES;
+    float4 v;
+    v.x = gguf_value(w_row, col, FORMAT);
+    v.y = gguf_value(w_row, col + 1, FORMAT);
+    v.z = gguf_value(w_row, col + 2, FORMAT);
+    v.w = gguf_value(w_row, col + 3, FORMAT);
+    *((device float4 *)(out + ulong(row) * K + col)) = v;
+}
+"""
+
 SOURCE_V2D = r"""
 const int row0 = int(threadgroup_position_in_grid.y) * TM;
 const int col0 = int(threadgroup_position_in_grid.x) * TN;
@@ -455,19 +476,55 @@ def _kernel_v2d():
         header=HEADER, source=SOURCE_V2D, ensure_row_contiguous=True)
 
 
-def kblock_decode_fp16(weight: PackedMatrix):
-    """Every value of a rank2 K-block weight as kblock_values32 computes it, (N, K) half."""
+@lru_cache(maxsize=1)
+def _kernel_decode_f32():
     import mlx.core as mx
 
-    if len(weight.shape) != 2 or weight.shape[1] % 64 or weight.ggml_type not in (2, 11, 12, 13, 14):
-        raise GGUFError("K-block fp16 decode needs rank2 K-block weights with K % 64 == 0")
-    n, k = weight.shape
+    return mx.fast.metal_kernel(
+        name="mlx2_gguf_kblock_decode_f32", input_names=["w"], output_names=["out"],
+        header=HEADER, source=DECODE_F32, ensure_row_contiguous=True)
+
+
+DECODED_F32_FORMATS = (2, 11, 12, 13, 14)
+
+
+def kblock_decode_f32(weight: PackedMatrix):
+    """Every value of a K-block weight as gguf_value computes it, float32, in
+    the weight's own shape: rank2 (N, K) or grouped (G, N, K)."""
+    import mlx.core as mx
+
+    shape = tuple(weight.shape)
+    k = shape[-1]
+    n = math.prod(shape[:-1])
+    block = 32 if weight.ggml_type == 2 else 256
+    if len(shape) not in (2, 3) or weight.ggml_type not in DECODED_F32_FORMATS or k % block:
+        raise GGUFError("K-block f32 decode needs rank2/3 K-block weights of whole blocks")
+    threads = n * (k // 4)
+    out = _kernel_decode_f32()(
+        inputs=[weight.data],
+        template=[("K", k), ("N", n), ("ROW_BYTES", weight.row_bytes), ("FORMAT", weight.ggml_type)],
+        grid=(((threads + 255) // 256) * 256, 1, 1), threadgroup=(256, 1, 1),
+        output_shapes=[(n, k)], output_dtypes=[mx.float32])[0]
+    return out.reshape(*shape)
+
+
+def kblock_decode_fp16(weight: PackedMatrix):
+    """Every value of a K-block weight as kblock_values32 computes it, half, in
+    the weight's own shape: rank2 (N, K) or grouped (G, N, K)."""
+    import mlx.core as mx
+
+    shape = tuple(weight.shape)
+    if len(shape) not in (2, 3) or shape[-1] % 64 or weight.ggml_type not in (2, 11, 12, 13, 14):
+        raise GGUFError("K-block fp16 decode needs rank2/3 K-block weights with K % 64 == 0")
+    k = shape[-1]
+    n = math.prod(shape[:-1])
     threads = n * (k // 32)
-    return _kernel_decode_fp16()(
+    out = _kernel_decode_fp16()(
         inputs=[weight.data],
         template=[("K", k), ("N", n), ("ROW_BYTES", weight.row_bytes), ("FORMAT", weight.ggml_type)],
         grid=(((threads + 127) // 128) * 128, 1, 1), threadgroup=(128, 1, 1),
         output_shapes=[(n, k)], output_dtypes=[mx.float16])[0]
+    return out.reshape(*shape)
 
 
 def kblock_nax_prefill_v2d(x, weight: PackedMatrix, *, decoded=None, tm=64, tn=64, sg=4):

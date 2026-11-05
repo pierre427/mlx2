@@ -83,6 +83,7 @@ SOURCE = r"""
     const int q_pos = meta[0];                         // logical position
     const int cap = meta[1];
     const int pad = meta[2];                           // left padding: physical = logical + pad
+    const int NSEL = meta[3];                          // selected slots (runtime: one pipeline)
     const uint qh = kvh * GQA + sg;
     constexpr int VPL = D / 32;                        // values per lane
 
@@ -159,6 +160,7 @@ SOURCE_V2 = r"""
     const int q_pos = meta[0];                         // logical position
     const int cap = meta[1];
     const int pad = meta[2];                           // left padding: physical = logical + pad
+    const int NSEL = meta[3];                          // selected slots (runtime: one pipeline)
     const uint qh = kvh * GQA + sg;
 
     threadgroup int toks[SPC * BS + BS];
@@ -261,6 +263,7 @@ TILE_TOKENS = 16
 COMBINE_SOURCE = r"""
     const uint h = threadgroup_position_in_grid.x;
     const uint d = thread_position_in_threadgroup.x;
+    const int NCH = nch[0];
     float top = -INFINITY;
     for (int c = 0; c < NCH; c++) {
       top = max(top, out_m[h * NCH + c]);
@@ -338,15 +341,18 @@ def own_position(cache, left_pad=0):
     return written - 1 - int(left_pad)
 
 
-def _meta(q_pos, left_pad, capacity: int):
-    """[q_pos, capacity, left_pad] as int32 without reading device values:
-    a batch cache's offset and left padding stay on the GPU."""
+def _meta(q_pos, left_pad, capacity: int, nsel: int):
+    """[q_pos, capacity, left_pad, nsel] as int32 without reading device
+    values: a batch cache's offset and left padding stay on the GPU.  The
+    selected-slot count is a runtime value, not a template constant: it grows
+    every BLOCK_SIZE tokens below the indexer budget, and each template value
+    compiled its own Metal library (omlx#5025's hazard)."""
     def one(value):
         if isinstance(value, mx.array):
             return value.reshape(-1)[:1].astype(mx.int32)
         return mx.array([int(value)], dtype=mx.int32)
 
-    return mx.concatenate([one(q_pos), one(capacity), one(left_pad)])
+    return mx.concatenate([one(q_pos), one(capacity), one(left_pad), one(nsel)])
 
 
 def partials(q, keys, values, block_ids, *, q_pos, scale: float, left_pad=0,
@@ -358,9 +364,8 @@ def partials(q, keys, values, block_ids, *, q_pos, scale: float, left_pad=0,
     gqa = nqh // nkv
     nsel = int(block_ids.shape[-1])
     nchunks = (nsel + 1 + spc - 1) // spc
-    meta = _meta(q_pos, left_pad, int(keys.shape[2]))
-    template = [("T", q.dtype), ("D", HEAD_DIM), ("GQA", gqa), ("NSEL", nsel),
-                ("SPC", spc), ("BS", BLOCK_SIZE)]
+    meta = _meta(q_pos, left_pad, int(keys.shape[2]), nsel)
+    template = [("T", q.dtype), ("D", HEAD_DIM), ("GQA", gqa), ("SPC", spc), ("BS", BLOCK_SIZE)]
     if variant != "v1":
         template.append(("TT", TILE_TOKENS))
     out_m, out_l, out_o = _kernel(variant)(
@@ -381,7 +386,7 @@ def _combine_kernel():
     if kernel is None:
         kernel = mx.fast.metal_kernel(
             name="mlx2_qwen4_qsa_b1_selected_combine",
-            input_names=["out_m", "out_l", "out_o", "gate"],
+            input_names=["out_m", "out_l", "out_o", "gate", "nch"],
             output_names=["out"],
             source=COMBINE_SOURCE,
             ensure_row_contiguous=True,
@@ -401,9 +406,9 @@ def combine(m, l, o, *, dtype, gate=None, fused: bool | None = None):
         gate_flat = (gate.reshape(-1).astype(dtype) if gate is not None
                      else mx.zeros((1,), dtype=dtype))
         out = _combine_kernel()(
-            inputs=[m.reshape(-1), l.reshape(-1), o.reshape(-1), gate_flat],
-            template=[("T", dtype), ("D", HEAD_DIM), ("NCH", nchunks),
-                      ("GATED", int(gate is not None))],
+            inputs=[m.reshape(-1), l.reshape(-1), o.reshape(-1), gate_flat,
+                    mx.array([nchunks], dtype=mx.int32)],
+            template=[("T", dtype), ("D", HEAD_DIM), ("GATED", int(gate is not None))],
             grid=(HEAD_DIM * nqh, 1, 1),
             threadgroup=(HEAD_DIM, 1, 1),
             output_shapes=[(nqh * HEAD_DIM,)],

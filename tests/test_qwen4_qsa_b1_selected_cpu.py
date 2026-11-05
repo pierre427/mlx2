@@ -140,9 +140,33 @@ def test_kernel_visible_set_with_left_padding(seed):
 
 
 def test_meta_keeps_device_offsets_on_the_device():
-    meta = B1._meta(mx.array([123]), mx.array([5]), 4096)
-    assert meta.dtype == mx.int32 and meta.tolist() == [123, 4096, 5]
-    assert B1._meta(7, 0, 64).tolist() == [7, 64, 0]
+    meta = B1._meta(mx.array([123]), mx.array([5]), 4096, 31)
+    assert meta.dtype == mx.int32 and meta.tolist() == [123, 4096, 5, 31]
+    assert B1._meta(7, 0, 64, 1).tolist() == [7, 64, 0, 1]
+
+
+def test_selected_count_and_chunks_are_runtime_values_not_templates(monkeypatch):
+    """Below the indexer budget the selected count grows every block; a
+    template value per count compiled a Metal library per count (omlx#5025).
+    Every count must share one partials and one combine instantiation."""
+    seen = {"partials": set(), "combine": set()}
+
+    def recorder(kind):
+        def call(**kw):
+            seen[kind].add(tuple(kw["template"]))
+            return [mx.zeros(shape, dtype) for shape, dtype in zip(kw["output_shapes"], kw["output_dtypes"])]
+        return call
+
+    monkeypatch.setattr(B1, "_kernel", lambda variant: recorder("partials"))
+    monkeypatch.setattr(B1, "_combine_kernel", lambda: recorder("combine"))
+    q, keys, values = _arrays(cap=2112)[:3]
+    for nsel in (1, 2, 7, 8, 9, 63, 64, 511, 512):
+        ids = mx.arange(nsel, dtype=mx.uint32).reshape(1, 1, nsel)
+        m, l, o = B1.partials(q, keys, values, ids, q_pos=4 * nsel + 2, scale=1 / 16)
+        B1.combine(m, l, o, dtype=q.dtype)
+    assert len(seen["partials"]) == 1 and len(seen["combine"]) == 1
+    names = {name for template in seen["partials"] | seen["combine"] for name, _ in template}
+    assert not names & {"NSEL", "NCH"}
 
 
 @pytest.mark.parametrize("pad", [0, 3])

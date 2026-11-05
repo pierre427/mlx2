@@ -70,9 +70,12 @@ SPARSE_KEYS = {
     "glm53_sparse_attention": ("mask_reference", "gathered_v1", "fused_decode_v1", "fused_v2"),
     # gathered_v2_from_<n>: the fused_v2 prompt law from position n, for n in
     # exactly the nine enumerated thresholds (docs/design/glm53-speed-round2.md 2.1).
+    # gathered_f16_from_<n> (2026-11-02): the fp16-operand fused kernel on the
+    # gathered prompt rows from the same nine positions; prompt-only.
     "glm53_sparse_prefill": (
         "dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all",
         *(f"gathered_v2_from_{n}" for n in (2049, 3072, 4096, 5120, 6144, 7168, 8192, 12288, 16384)),
+        *(f"gathered_f16_from_{n}" for n in (2049, 3072, 4096, 5120, 6144, 7168, 8192, 12288, 16384)),
     ),
     "glm53_tree_rows_attention": ("per_row", "batched_v1"),
     "glm53_tree_frontier": ("clone", "tails_v1"),
@@ -85,14 +88,34 @@ SPARSE_KEYS = {
 # first value of each SPARSE_KEYS entry stays today's law, selectable by
 # naming it. Fused decode stays off (slower than gathered at 16K); batched
 # verify rows cannot be exact on Metal (one-query SDPA is another kernel).
+# glm53_sparse_prefill=gathered_f16_from_8192 (Pierre, 2026-11-02): the fp16
+# flash gathered kernel on the prompt rows past 8192, the gathered_v1_8k
+# threshold kept. Breadth 16K+32K vs gathered_v1_8k 9 exact / 3 near-tie / 0
+# failed of 12, TTFT -17% at 16K and -22% at 32K (qualification/runs/
+# glm53-gathered-f16-20261102). Metal-only: without Metal the default falls
+# back to gathered_v1_8k (sparse_default).
 SPARSE_DEFAULTS = {
     "glm53_indexer_pools": "incremental_v1",
     "glm53_indexer_select": "topk_v1_kernel",
     "glm53_sparse_attention": "gathered_v1",
-    "glm53_sparse_prefill": "gathered_v1_8k",
+    "glm53_sparse_prefill": "gathered_f16_from_8192",
     "glm53_tree_rows_attention": "per_row",
     "glm53_tree_frontier": "clone",
 }
+
+
+SPARSE_DEFAULTS_WITHOUT_METAL = {"glm53_sparse_prefill": "gathered_v1_8k"}
+
+
+def sparse_default(key):
+    """The unqualified default of one sparse key on this host: SPARSE_DEFAULTS,
+    or its fp32 fallback where the default's kernel needs Metal and there is none."""
+    if key in SPARSE_DEFAULTS_WITHOUT_METAL:
+        import mlx.core as mx
+
+        if not mx.metal.is_available():
+            return SPARSE_DEFAULTS_WITHOUT_METAL[key]
+    return SPARSE_DEFAULTS[key]
 
 
 def _check_tree_levers(policy):
@@ -111,6 +134,27 @@ def _check_tree_levers(policy):
         raise ValueError("glm53_tree_compile requires glm53_ast_target=layered and a fused glm53_hc")
     if policy["glm53_tree_router"] != "reference" and not layered:
         raise ValueError("glm53_tree_router requires glm53_ast_target=layered")
+
+
+# Levers that run only through the K-block row kernels (GGUFWeights._kblock_rows):
+# under glm53_row_kernel=reference their call sites fall back silently, while
+# the profile (and the APCv2 namespace) would still name them.
+_KBLOCK_LEVERS = {
+    "glm53_shared_fold": "kblock",
+    "glm53_kda_group": "kblock",
+    "glm53_mla_group": "kblock",
+    "glm53_tree_batch": "kblock_v1",
+}
+
+
+def _check_kblock_levers(policy):
+    """Refuse K-block levers whose row policy could never engage them."""
+    if policy["glm53_row_kernel"] == "reference":
+        named = [key for key, value in _KBLOCK_LEVERS.items() if policy[key] == value]
+        if named:
+            raise ValueError(
+                f"{', '.join(named)} require glm53_row_kernel=kblock_rows or kblock_exact"
+            )
 
 
 def _check_sparse_combination(policy):
@@ -153,7 +197,8 @@ def _check_sparse_combination(policy):
             raise ValueError(f"{key}={policy[key]} is not implemented by the layered tree")
     for key, value in (("glm53_sparse_attention", policy["glm53_sparse_attention"]),
                        ("glm53_sparse_prefill", policy["glm53_sparse_prefill"])):
-        if value in ("fused_decode_v1", "fused_v2") or value.startswith("gathered_v2_from_"):
+        if (value in ("fused_decode_v1", "fused_v2") or value.startswith("gathered_v2_from_")
+                or value.startswith("gathered_f16_from_")):
             import mlx.core as mx
 
             if not mx.metal.is_available():
@@ -185,7 +230,7 @@ def _check_mla_fused(policy):
 
 def _mla_fused_default(policy):
     """decode_v1 when the resolved sparse laws and device let it engage."""
-    resolved = {key: policy.get(key, SPARSE_DEFAULTS[key]) for key in SPARSE_KEYS}
+    resolved = {key: policy.get(key, sparse_default(key)) for key in SPARSE_KEYS}
     if (
         resolved["glm53_indexer_pools"] != "incremental_v1"
         or resolved["glm53_indexer_select"] != "topk_v1_kernel"
@@ -262,6 +307,57 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     EXTERNAL_ROUTE_TAG = "glm53-exact-row-tree-v1"
     EXTERNAL_DEFAULT_NUM_DRAFT = 15
     apc_cache_headroom_guard = True
+    # The served default is the measured-best kernel set ("kblock-v6", the
+    # policy every 2026-10-30/31 GLM ladder and A/B ran under), unqualified.
+    # Until 2026-11-01 nothing declared it, so a plain ``--model`` launch ran
+    # the reference law: per-element K-block decode on every weight read and
+    # the op-chain HC, 6.6 tok/s decode / ~80-111 tok/s prefill at 1K against
+    # 33-37 / 475-530 under this set (tuning library
+    # glm53-ordinary-roofline-campaign; qualification/runs/glm53-ladder-final-
+    # 20261031, f1504817c, 1K-16K every cell passed, 6/6 needles; qualification/
+    # runs/glm53-bugsweep-20261101/p0-1k-v6, 15ae65bdd: 530 tok/s prefill,
+    # 37.2 decode).  Checkpoint GLM-5.3-Flash-REAP50-Q3_K_M.gguf@5a865918.
+    # Exactness: kblock_rows keeps every element value and changes the FP32
+    # sum order (near-tie classified, r12-cand vs r12-ref); the NAX prefill
+    # tiles are an explicit FP16-operand law; shared_fold uses the routed
+    # kernel's sigmoid expression for the shared expert.  An operator policy
+    # naming any key wins (``resolve_execution_policy_defaults``); naming the
+    # first value of a key selects the reference law.  mla_group stays off
+    # (neutral end to end, 389687d8f); the decode glue and sparse DSA keys
+    # default inside ``_load`` and are not route defaults.
+    # prompt_decoded=decoded_f16_v1 (Pierre, 2026-11-02): the prompt-width
+    # grouped k_b/v_b and KDA f_b/g_b projections decoded to half on the NAX
+    # fp16 GEMM; the same fp16-operand class as the prompt tiles.  Breadth
+    # 2K/8K 12 of 12 exact against the reference (decoded-f16-breadth-2k-8k),
+    # 1K prefill 530 -> ~600 tok/s, decode untouched.  The f32 sibling
+    # (decoded_f32_v1) stays opt-in: 8/2/2 on the same prompts.
+    ROUTE_DEFAULTS = {
+        "glm53_dense_prefill": "nax_fp16_v2d",
+        "glm53_expert_prefill": "segmented_nax_fp16_v2",
+        "glm53_prompt_decoded": "decoded_f16_v1",
+        "glm53_row_kernel": "kblock_rows",
+        "glm53_hc": "mega_v1",
+        "glm53_shared_fold": "kblock",
+        "glm53_kda_group": "kblock",
+        "glm53_tree_batch": "kblock_v1",
+        "glm53_ast_target": "layered",
+    }
+    default_route_execution_policy = {
+        "ordinary": ROUTE_DEFAULTS,
+        # The same kernels serve the target under an external drafter; the
+        # drafter binding and tree geometry stay operator-owned.
+        "external_draft": ROUTE_DEFAULTS,
+    }
+    adapter_owned_default_policy_keys = frozenset(ROUTE_DEFAULTS)
+
+    @staticmethod
+    def default_route_policy_filter(route, policy, operator_policy):
+        """Drop the K-block levers when the operator keeps the reference row
+        kernel: they could never engage, and _check_kblock_levers would refuse
+        the merged policy instead of serving the operator's choice."""
+        if operator_policy.get("glm53_row_kernel", "kblock_rows") == "reference":
+            return {key: value for key, value in policy.items() if key not in _KBLOCK_LEVERS}
+        return policy
 
     def __init__(self, model_path, *, execution_policy=None):
         from .process_globals import guarded_construction
@@ -304,6 +400,8 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "glm53_draft_activation",
             "glm53_dense_prefill",
             "glm53_expert_prefill",
+            "glm53_prompt_decoded",
+            "glm53_mla_prompt",
             "glm53_row_kernel",
             "glm53_shared_fold",
             "glm53_kda_group",
@@ -385,6 +483,9 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             not in ("reference", "nax_fp16", "nax_fp16_v2", "nax_fp16_v2d")
             or policy.get("glm53_expert_prefill", "reference")
             not in ("reference", "segmented_nax_fp16", "segmented_nax_fp16_v2")
+            or policy.get("glm53_prompt_decoded", "reference")
+            not in ("reference", "decoded_f32_v1", "decoded_f16_v1")
+            or policy.get("glm53_mla_prompt", "reference") not in ("reference", "expanded_f16_v1")
             or policy.get("glm53_row_kernel", "reference")
             not in ("reference", "kblock_rows", "kblock_exact")
             or policy.get("glm53_shared_fold", "off") not in ("off", "kblock")
@@ -412,7 +513,7 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             or (policy.get("glm53_f32_weights", "reference") != "reference"
                 and policy.get("glm53_hc_fused", "reference") == "reference"
                 and policy.get("glm53_router", "fused_v1") != "fused_v2")
-            or any(policy.get(key, SPARSE_DEFAULTS[key]) not in values
+            or any(policy.get(key, sparse_default(key)) not in values
                    for key, values in SPARSE_KEYS.items())
         ):
             raise ValueError("unsupported GLM-5.3 packed execution policy")
@@ -425,6 +526,19 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # numerical law from the packed FP32 reference; explicit, default-off.
             "glm53_dense_prefill": policy.get("glm53_dense_prefill", "reference"),
             "glm53_expert_prefill": policy.get("glm53_expert_prefill", "reference"),
+            # Prompt-width K-block projections without a fast tile (grouped
+            # MLA k_b/v_b; KDA ssm_f_b/g_b at K = 128): decode every element
+            # once per chunk to FP32 (the reference's per-element value) and
+            # multiply on MLX's GEMM. Same element values, a different FP32
+            # sum order; prompt rows only, decode untouched.
+            "glm53_prompt_decoded": policy.get("glm53_prompt_decoded", "reference"),
+            # Prompt-phase dense MLA attention in the un-absorbed form every
+            # other GLM-5.3 stack prefills with: per-head K and V expanded from
+            # the latent through fp16-decoded k_b/v_b, MLX's fused D=256 fp16
+            # attention (NAX), output widened to fp32. FP16 operands: the
+            # class of the nax_fp16 prompt tiles; selected (gathered) rows and
+            # every decode row keep the absorbed fp32 law. Opt-in, unqualified.
+            "glm53_mla_prompt": policy.get("glm53_mla_prompt", "reference"),
             # K-block row kernels (decode, verification, untiled rows): same
             # element values as the reference, FP32, a different sum order.
             "glm53_row_kernel": policy.get("glm53_row_kernel", "reference"),
@@ -495,13 +609,17 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # window, depthwise conv, SiLU, q/k L2 norms, gates, delta rule,
             # norm x gate) in one Metal launch per layer, bit for bit
             # (glm53_kda_fused); prefill and other shapes keep the op chain.
-            # Default with glm53_compile_regions (same evidence above).
-            "glm53_kda_fused": policy.get("glm53_kda_fused", "decode_v1"),
+            # Default with glm53_compile_regions (same evidence above); the
+            # kernel admits ordinary math only, so the reference math policy
+            # defaults it off instead of declining it 34 times per token.
+            "glm53_kda_fused": policy.get(
+                "glm53_kda_fused",
+                "reference" if policy.get("glm53_math", "ordinary") == "reference" else "decode_v1"),
             # Sparse DSA (docs/design/glm53-sparse-dsa.md): pooled-key plane,
             # selection law, decode/verify consumer, prompt consumer and the
             # layered tree's rows and frontier. The first value of each is
             # today's law; SPARSE_DEFAULTS is the unqualified default.
-            **{key: policy.get(key, SPARSE_DEFAULTS[key]) for key in SPARSE_KEYS},
+            **{key: policy.get(key, sparse_default(key)) for key in SPARSE_KEYS},
             # Storage of the MLA latent/raw planes (glm53_kv_append).
             # "rotate_v1" rotates RING_BUFFERS full buffers so a pipelined
             # append never copies the plane (synthetic bench: 4.4 -> 0.5 ms per
@@ -587,6 +705,7 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # which this evaluation does not cover.
             raise ValueError("glm53_prompt_eval=layer_v1 does not cover external-draft prompt prefill")
         _check_tree_levers(self.kernel_policy)
+        _check_kblock_levers(self.kernel_policy)
         _check_mla_fused(self.kernel_policy)
         if (
             self.kernel_policy["glm53_draft_activation"] != "target"
@@ -607,6 +726,8 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         # APCv2 namespaces derived from them) keep their identity.
         for key, name in (("glm53_dense_prefill", "dense_prefill"),
                           ("glm53_expert_prefill", "expert_prefill"),
+                          ("glm53_prompt_decoded", "prompt_decoded"),
+                          ("glm53_mla_prompt", "mla_prompt"),
                           ("glm53_row_kernel", "row_kernel"),
                           ("glm53_shared_fold", "shared_fold"),
                           ("glm53_kda_group", "kda_group"),
@@ -732,6 +853,7 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             source_sha256=artifact["identity"]["weight_sha256"],
             dense_prefill_policy=self.kernel_policy["glm53_dense_prefill"],
             expert_prefill_policy=self.kernel_policy["glm53_expert_prefill"],
+            prompt_decoded_policy=self.kernel_policy["glm53_prompt_decoded"],
             row_policy=self.kernel_policy["glm53_row_kernel"],
         )
         self.model = Glm53GGUFModel(
@@ -755,6 +877,7 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             mla_fused=self.kernel_policy["glm53_mla_fused"],
             f32_weights=self.kernel_policy["glm53_f32_weights"],
             kv_append=self.kernel_policy["glm53_kv_append"],
+            mla_prompt=self.kernel_policy["glm53_mla_prompt"],
             **{key.removeprefix("glm53_"): self.kernel_policy[key] for key in SPARSE_KEYS},
         )
         if self.kernel_policy["glm53_prompt_eval"] == "layer_v1":

@@ -279,15 +279,15 @@ def _prefill(x, ids, scores, planes, slot_map, capacity, hidden, intermediate):
     order = mx.argsort(flat*mx.array(rows, mx.uint32)+mx.arange(rows, dtype=mx.uint32)).astype(mx.uint32)
     inverse = mx.argsort(order).astype(mx.uint32)
     tiles, count, status = kernel("prefill_scan")(inputs=[flat[order], flat, slot_map, mx.array([capacity], mx.uint32)],
-        template=[("ROWS", rows), ("EXPERTS", slot_map.size), ("MAX_TILES", tiles_bound)],
+        template=[("ROWS", rows), ("EXPERTS", slot_map.size), ("MAX_TILES", tiles_bound), ("TILE", prefill_base.TILE_ROWS)],
         grid=(512, 1, 1), threadgroup=(512, 1, 1),
         output_shapes=[(tiles_bound, 4), (1,), (1,)], output_dtypes=[mx.uint32]*3)
     mid = kernel("prefill_gate")(inputs=[x.astype(mx.float32), order, tiles, count, slot_map, *planes[:6], scores.reshape(-1).astype(mx.float32)],
-        template=[("TOPK", ids.shape[1]), ("K", hidden), ("N", intermediate), ("EXPERTS", slot_map.size)],
+        template=[("TOPK", ids.shape[1]), ("K", hidden), ("N", intermediate), ("EXPERTS", slot_map.size), ("MT", prefill_base.MT)],
         grid=(((intermediate+127)//128)*128, tiles_bound, 1), threadgroup=(128, 1, 1),
         output_shapes=[(rows, intermediate)], output_dtypes=[mx.float32])[0]
     projected = kernel("prefill_down")(inputs=[mid, tiles, count, slot_map, *planes[6:]],
-        template=[("K", intermediate), ("N", hidden), ("EXPERTS", slot_map.size)],
+        template=[("K", intermediate), ("N", hidden), ("EXPERTS", slot_map.size), ("MT", prefill_base.MT)],
         grid=(((hidden+127)//128)*128, tiles_bound, 1), threadgroup=(128, 1, 1),
         output_shapes=[(rows, hidden)], output_dtypes=[mx.float32])[0]
     return kernel("prefill_combine")(inputs=[projected, inverse, scores.reshape(-1).astype(mx.float32), status],
@@ -321,5 +321,5 @@ def metal_compile_source(kind, *, constant_inputs=False):
     attrs = ["uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]", "uint3 thread_position_in_grid [[thread_position_in_grid]]",
              "uint thread_index_in_threadgroup [[thread_index_in_threadgroup]]", "uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]",
              "uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]"]
-    constants = "constant uint K=5120,N=2304,TOPK=6,ROWS=1,SIMDS=4,EXPERTS=384,ROUTES=6,TOKENS=1,MAX_TILES=6;\n"
+    constants = "constant uint K=5120,N=2304,TOPK=6,ROWS=1,SIMDS=4,EXPERTS=384,ROUTES=6,TOKENS=1,MAX_TILES=6,TILE=16,MT=1;\n"
     return "#include <metal_stdlib>\nusing namespace metal;\n"+(NAX_HEADER if kind.startswith("prefill_") else HEADER)+constants+"kernel void probe("+",".join(bindings+attrs)+") {\n"+source+"\n}\n"

@@ -21,3 +21,10 @@ def dense_prefill_active(rows):
     """Ordinary decode and slab verification never infer scope from width."""
     active=_DENSE_PREFILL.get()
     return type(rows) is int and rows>=16 and active in (('nax_fp16',rows),('nax_fp16_v2',rows),('nax_fp16_v2d',rows))
+
+
+def prompt_rows_active(rows):
+    """The scoped prompt width itself, under any dense policy (reference too):
+    prompt-only laws that do not depend on the NAX tile key off this."""
+    active=_DENSE_PREFILL.get()
+    return type(rows) is int and rows>=16 and active is not None and active[1]==rows

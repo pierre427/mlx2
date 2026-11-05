@@ -58,8 +58,15 @@ PREFILL_THRESHOLDS = {
 # position; these nine values are the only v2 prefill policies.
 PREFILL_POSITIONS_V2 = (2049, 3072, 4096, 5120, 6144, 7168, 8192, 12288, 16384)
 PREFILL_THRESHOLDS.update({f"gathered_v2_from_{n}": n for n in PREFILL_POSITIONS_V2})
+# gathered_f16_from_<n> (2026-11-02): the fp16-operand fused kernel on the
+# gathered prompt rows from position n (same positions as v2; rows below n
+# keep the reference dense pieces). Prompt-only: decode keeps the fp32 law
+# ``glm53_sparse_attention`` names.
+PREFILL_POSITIONS_F16 = PREFILL_POSITIONS_V2
+PREFILL_THRESHOLDS.update({f"gathered_f16_from_{n}": n for n in PREFILL_POSITIONS_F16})
 POLICIES_ATTENTION = ("mask_reference", "gathered_v1", "fused_decode_v1", "fused_v2")
 DECODE_POLICIES = ("gathered_v1", "fused_decode_v1", "fused_v2")
+PREFILL_LAWS = ("gathered_v1", "fused_v2", "fused_f16")
 WIDTH = TOPK + 3  # 2051: 512 pools x 4 rows + the 3-row tail
 
 
@@ -67,7 +74,11 @@ def prefill_law(sparse_prefill):
     """The ``sparse_prefill`` consumer policy a prompt threshold value selects."""
     if sparse_prefill not in PREFILL_THRESHOLDS:
         raise ValueError(f"unknown GLM-5.3 sparse prefill policy {sparse_prefill!r}")
-    return "fused_v2" if sparse_prefill.startswith("gathered_v2_from_") else "gathered_v1"
+    if sparse_prefill.startswith("gathered_v2_from_"):
+        return "fused_v2"
+    if sparse_prefill.startswith("gathered_f16_from_"):
+        return "fused_f16"
+    return "gathered_v1"
 
 
 def dense_row_ids(positions, width=WIDTH):
@@ -253,6 +264,10 @@ def sparse_prefill(q, latent, ids, *, block=PREFILL_BLOCK, counters=None, policy
         raise ValueError("GLM-5.3 sparse prefill block must be a positive integer")
     if policy == "fused_v2":
         return _fused_v2_prefill(q, latent, ids, block, counters)
+    if policy == "fused_f16":
+        # The fp16-operand kernel: half q rows and one half copy of the chunk's
+        # visible latent rows per call (the cached plane stays fp32).
+        return _fused_v2_prefill(q, latent, ids, block, counters, half=True)
     if policy != "gathered_v1":
         raise ValueError(f"GLM-5.3 sparse prefill policy {policy!r} is not a gathered law")
     _check_ids(q, ids)
@@ -371,17 +386,25 @@ def _v2_rows_ids(q, latent, ids):
     return ids[0], total
 
 
-def _fused_v2_launch(q, latent, flat_ids, positions, counters):
+def _fused_v2_launch_source(q, base, tail, flat_ids, positions, counters, half=False):
+    """One launch over prepared source buffers (``_v2_source`` output, cast by the caller)."""
     v2 = _v2()
     v2.require_metal()
-    base, tail = _v2_source(latent)
     split, depth = base.shape[0], (0 if tail is None else tail.shape[0])
     base, tails = _v2_buffers(base, tail)
+    if half:
+        base, tails = base.astype(mx.float16), tails.astype(mx.float16)
     meta = mx.array([[split, depth, 0, p] for p in positions], dtype=mx.int32)
-    out = v2.checked_launch(q[0].transpose(1, 0, 2), base, tails, flat_ids, meta)
-    _count(counters, "sparse_attention_fused_v2")
-    _count(counters, "sparse_attention_fused_v2_rows", len(positions))
+    out = v2.checked_launch(q[0].transpose(1, 0, 2), base, tails, flat_ids, meta, half=half)
+    law = "fused_f16" if half else "fused_v2"
+    _count(counters, f"sparse_attention_{law}")
+    _count(counters, f"sparse_attention_{law}_rows", len(positions))
     return out.transpose(1, 0, 2)[None]
+
+
+def _fused_v2_launch(q, latent, flat_ids, positions, counters):
+    base, tail = _v2_source(latent)
+    return _fused_v2_launch_source(q, base, tail, flat_ids, positions, counters)
 
 
 def fused_v2_attention(q, latent, ids, *, counters=None):
@@ -391,18 +414,26 @@ def fused_v2_attention(q, latent, ids, *, counters=None):
     return _fused_v2_launch(q, latent, flat, list(range(total - length, total)), counters)
 
 
-def _fused_v2_prefill(q, latent, ids, block, counters):
+def _fused_v2_prefill(q, latent, ids, block, counters, half=False):
     flat, total = _v2_rows_ids(q, latent, ids)
     length = q.shape[2]
     positions = list(range(total - length, total))
+    base, tail = _v2_source(latent)
+    if half:
+        # One half copy of the source per call: every block of this chunk
+        # reads it (the first block's eval materializes it once).
+        q = q.astype(mx.float16)
+        base = base.astype(mx.float16)
+        tail = None if tail is None else tail.astype(mx.float16)
     pieces = []
     for start in range(0, length, block):
         stop = min(start + block, length)
-        piece = _fused_v2_launch(q[:, :, start:stop], latent, flat[start:stop], positions[start:stop], counters)
+        piece = _fused_v2_launch_source(q[:, :, start:stop], base, tail, flat[start:stop], positions[start:stop],
+                                        counters, half)
         if length > block:
             mx.eval(piece)  # one block's partials live at a time
         pieces.append(piece)
-    _count(counters, "sparse_prefill_fused_v2_blocks", len(pieces))
+    _count(counters, "sparse_prefill_fused_f16_blocks" if half else "sparse_prefill_fused_v2_blocks", len(pieces))
     _SCHEDULED["prefill_blocks"] += len(pieces)
     return pieces[0] if len(pieces) == 1 else mx.concatenate(pieces, axis=2)
 
@@ -806,6 +837,9 @@ def route_status():
                                 "first_use_gate": "not_run" if gate is None else ("passed" if gate else "failed")},
             "fused_v2": {"implemented": True, "qualified": False, "selected_by_default": False,
                          **_v2_status()},
+            # Prompt-only (gathered_f16_from_<n>); its gate is keyed "_f16" in the v2 status.
+            "fused_f16": {"implemented": True, "qualified": False, "selected_by_default": False,
+                          "prompt_only": True},
         },
         "batched_rows_exact": BATCHED_ROWS_EXACT,
         "scheduled_calls": dict(_SCHEDULED),

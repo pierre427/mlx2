@@ -13,11 +13,12 @@ def weights(kind,*,compute='reference',native=False):
     block,size=FORMATS[kind][1:] if not native else (1,4 if kind==0 else 2)
     tensor=GGUFTensor('weight',(256,64),kind,0,64*256//block*size)
     result.tensors={'weight':tensor};result.compute_policy=compute
-    result.dense_prefill_policy='nax_fp16';result._grouped={}
+    result.dense_prefill_policy='nax_fp16';result.row_policy='reference';result._grouped={}
     result.scheduled_dense_calls={};result.scheduled_grouped_calls={}
     result._dense={'weight':mx.ones((64,256),dtype={0:mx.float32,1:mx.float16,30:mx.bfloat16}[kind])} if native else {}
     class Matrix:
         data=mx.zeros((tensor.nbytes,),dtype=mx.uint8)
+        shape=tensor.numpy_shape;ggml_type=tensor.ggml_type  # PackedMatrix's fields
         def __call__(self,x):return mx.ones((*x.shape[:-1],64),dtype=mx.float32)
     result._packed={'weight':Matrix()}
     return result

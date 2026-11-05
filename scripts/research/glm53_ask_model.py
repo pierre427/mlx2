@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-MODEL = "~/mlx-models/GLM-5.3-Flash-REAP50-Q3_K_M"
+MODEL = str(Path.home() / "mlx-models" / "GLM-5.3-Flash-REAP50-Q3_K_M")
 ROOT = Path(__file__).resolve().parents[2]
 
 

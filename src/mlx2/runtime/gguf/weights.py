@@ -19,12 +19,17 @@ from .kblock_metal import (
 )
 from .nax_metal import LEGACY_FORMATS, nax_admits
 from .packed_metal import PackedMatrix, embedding, grouped_linear, packed_moe
-from .prefill_scope import dense_prefill_active
+from .prefill_scope import dense_prefill_active, prompt_rows_active
 from .reader import GGUFError, GGUFFile
 from .segmented_prefill import segmented_prefill_active
 
 _NAX_DENSE_POLICIES = ("nax_fp16", "nax_fp16_v2", "nax_fp16_v2d")
 _KBLOCK_ROW_POLICIES = ("kblock_rows", "kblock_exact", "kblock_rows_ahead2")
+# decoded_f32_v1: fp32 element values on MLX's fp32 GEMM (class 2: same values,
+# another sum order); decoded_f16_v1: half element values and half activations
+# on the NAX fp16 GEMM, fp16 output widened to fp32 (class 3, the FP16-operand
+# law of the nax_fp16 prompt tiles plus an fp16 output rounding).
+_PROMPT_DECODED_POLICIES = ("decoded_f32_v1", "decoded_f16_v1")
 _SEGMENTED_EXPERT_POLICIES = ("segmented_nax_fp16", "segmented_nax_fp16_v2")
 
 
@@ -82,6 +87,7 @@ class GGUFWeights:
         expert_prefill_policy="reference",
         dense_prefill_policy="reference",
         row_policy="reference",
+        prompt_decoded_policy="reference",
         native_read_view=None,
         source_sha256=None,
     ):
@@ -96,6 +102,8 @@ class GGUFWeights:
             raise GGUFError("unsupported packed dense prefill policy")
         if row_policy not in ("reference",) + _KBLOCK_ROW_POLICIES:
             raise GGUFError("unsupported packed row policy")
+        if prompt_decoded_policy not in ("reference",) + _PROMPT_DECODED_POLICIES:
+            raise GGUFError("unsupported packed prompt decoded-weight policy")
         from pathlib import Path
         if native_read_view is not None:
             from .native_read_view import NativeReadViewFile
@@ -118,6 +126,12 @@ class GGUFWeights:
         self.expert_prefill_policy = expert_prefill_policy
         self.dense_prefill_policy = dense_prefill_policy
         self.row_policy = row_policy
+        # decoded_f32_v1: prompt-width K-block projections that have no fast
+        # tile (grouped weights; K < 256 rows) decode every element once per
+        # chunk to float32 (kblock_decode_f32: the reference's gguf_value per
+        # element) and multiply on MLX's dense GEMM. Same element values as
+        # the packed reference, a different FP32 sum order; prompt rows only.
+        self.prompt_decoded_policy = prompt_decoded_policy
         # Exact K-block rows keep packed_metal's per-row law (k order,
         # gguf_k_value, simd_sum) bit for bit; kblock_rows reorders sums
         # (_kblock_exact, read from row_policy per call).
@@ -207,7 +221,8 @@ class GGUFWeights:
             return self._build_linear(name)
         # getattr: providers built with __new__ (tests, probes) may omit policies.
         key = ("linear", name, getattr(self, "dense_prefill_policy", None),
-               getattr(self, "compute_policy", None), getattr(self, "row_policy", None))
+               getattr(self, "compute_policy", None), getattr(self, "row_policy", None),
+               getattr(self, "prompt_decoded_policy", None))
         project = memo.get(key)
         if project is None:
             project = memo[key] = self._build_linear(name)
@@ -285,6 +300,22 @@ class GGUFWeights:
                 return result.reshape(*x.shape[:-1], tensor.shape[1])
 
             return project
+        if self._prompt_decoded(weight):
+            # No NAX tile admits this weight (K % 256 != 0: the KDA ssm_f_b /
+            # ssm_g_b Q4_0 rows at K = 128); prompt rows decode it once and
+            # run MLX's GEMM instead of the one-token row kernel.
+            def project(x):
+                flat = x.reshape(-1, x.shape[-1])
+                if prompt_rows_active(flat.shape[0]):
+                    result, route = self._decoded_matmul(flat, weight)
+                else:
+                    result, route = self._dense_rows(flat, weight)
+                self.scheduled_dense_calls[route] = (
+                    self.scheduled_dense_calls.get(route, 0) + 1
+                )
+                return result.reshape(*x.shape[:-1], tensor.shape[1])
+
+            return project
         if self._kblock_rows(weight):
 
             def project(x):
@@ -326,6 +357,33 @@ class GGUFWeights:
         return self.row_policy in _KBLOCK_ROW_POLICIES and kblock_admits(
             weight.ggml_type, weight.shape[-1]
         )
+
+    def _prompt_decoded(self, weight):
+        """Whether prompt rows of this K-block weight take the decoded GEMM."""
+        from .kblock_prefill_metal import DECODED_F32_FORMATS
+
+        return (
+            getattr(self, "prompt_decoded_policy", None) in _PROMPT_DECODED_POLICIES
+            and weight.ggml_type in DECODED_F32_FORMATS
+            and weight.shape[-1] % (64 if self.prompt_decoded_policy == "decoded_f16_v1" else 32) == 0
+        )
+
+    def decoded(self, weight):
+        """The weight's element values in the decoded policy's dtype, its own shape."""
+        from .kblock_prefill_metal import kblock_decode_f32, kblock_decode_fp16
+
+        if self.prompt_decoded_policy == "decoded_f16_v1":
+            return kblock_decode_fp16(weight)
+        return kblock_decode_f32(weight)
+
+    def _decoded_matmul(self, flat, weight):
+        """``flat @ W.T`` under the decoded policy; fp32 out either way."""
+        import mlx.core as mx
+
+        decoded = self.decoded(weight)
+        if decoded.dtype == mx.float16:
+            return (flat.astype(mx.float16) @ decoded.T).astype(mx.float32), "decoded_f16_dense"
+        return flat @ decoded.T, "decoded_f32_dense"
 
     def _dense_rows(self, flat, weight):
         """Row (non-prefill-tile) execution of one rank2 packed projection."""
@@ -409,6 +467,25 @@ class GGUFWeights:
             return self.array(name)[ids]
         return embedding(ids, self.packed(name))
 
+    def grouped_decoded(self, name, *, groups=8, dtype=None):
+        """A grouped K-block weight's element values as (groups, out, in),
+        decoded once per call in ``dtype`` (float16 or float32)."""
+        import mlx.core as mx
+
+        from .kblock_prefill_metal import kblock_decode_f32, kblock_decode_fp16
+
+        tensor = self.tensors[name]
+        shape = tensor.numpy_shape
+        if len(shape) == 2:
+            shape = (groups, shape[0] // groups, shape[1])
+        if tensor.ggml_type in (0, 1, 30):
+            value = self.array(name).reshape(shape)
+            return value if dtype is None else value.astype(dtype)
+        key = (name, groups)
+        if key not in self._grouped:
+            self._grouped[key] = PackedMatrix(self.packed(name).data, replace(tensor, shape=shape[::-1]))
+        return (kblock_decode_fp16 if dtype == mx.float16 else kblock_decode_f32)(self._grouped[key])
+
     def grouped(self, x, name, *, groups=8):
         tensor = self.tensors[name]
         shape = tensor.numpy_shape
@@ -428,6 +505,23 @@ class GGUFWeights:
             weight = self.packed(name)
             grouped_tensor = replace(tensor, shape=shape[::-1])
             self._grouped[key] = PackedMatrix(weight.data, grouped_tensor)
+        if self._prompt_decoded(self._grouped[key]) and prompt_rows_active(math.prod(x.shape[:-2])):
+            # Decode the (groups, out, in) weight once for this chunk and run
+            # one batched GEMM over heads; nax_grouped_prefill's first-
+            # generation tile re-decodes every element per 16 rows (~4 TF/s).
+            import mlx.core as mx
+
+            decoded = self.decoded(self._grouped[key])
+            half = decoded.dtype == mx.float16
+            lead = x.shape[:-2]
+            rows = mx.moveaxis(x, -2, 0).reshape(groups, -1, x.shape[-1])
+            result = mx.matmul(rows.astype(mx.float16) if half else rows, mx.swapaxes(decoded, 1, 2))
+            result = mx.moveaxis(result.reshape(groups, *lead, shape[1]), 0, -2)
+            if half:
+                result = result.astype(mx.float32)
+            route = "decoded_f16_grouped" if half else "decoded_f32_grouped"
+            self.scheduled_grouped_calls[route] = self.scheduled_grouped_calls.get(route, 0) + 1
+            return result
         if (self.dense_prefill_policy in _NAX_DENSE_POLICIES
                 and _nax_candidate(tensor.ggml_type, *shape[1:])
                 and dense_prefill_active(math.prod(x.shape[:-2]))):
@@ -540,6 +634,10 @@ class GGUFWeights:
             return None
         packed, spans = plan
         if dense_prefill_active(flats[0].shape[0]):
+            return None
+        if prompt_rows_active(flats[0].shape[0]) and any(self._prompt_decoded(w) for w in packed):
+            # A joined row launch would consume the KDA low-rank rows before
+            # the decoded-f32 prompt law could; the separate projections take it.
             return None
         try:
             y = kblock_multi(flats, packed, rows=self.kblock_row_block, exact=self._kblock_exact, vec=self._kblock_vec,

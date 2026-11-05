@@ -32,7 +32,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-MODEL = "~/mlx-models/GLM-5.3-Flash-REAP50-Q3_K_M"
+MODEL = str(Path.home() / "mlx-models" / "GLM-5.3-Flash-REAP50-Q3_K_M")
 CHECKPOINT = ("GLM-5.3-Flash-REAP50-Q3_K_M.gguf@"
               "5a865918aea87a362ff8ae419581a0447929bfd68534a44d1125b394c272762d")
 ROOT = Path(__file__).resolve().parents[2]

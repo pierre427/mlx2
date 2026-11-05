@@ -412,3 +412,127 @@ def test_mla_group_policy_extends_the_profile(tmp_path):
     adapter, error = _parse({"glm53_row_kernel": "kblock_rows", "glm53_mla_group": "kblock"}, tmp_path)
     assert "unsupported GLM-5.3 packed execution policy" not in str(error)
     assert ":row_kernel=kblock_rows:mla_group=kblock:" in adapter.profile + ":"
+
+
+def test_glm_prompt_decoded_policy_is_explicit_and_changes_identity(tmp_path):
+    adapter, error = _parse({"glm53_prompt_decoded": "decoded_f32_v1"}, tmp_path)
+    assert "unsupported GLM-5.3 packed execution policy" not in str(error)
+    assert adapter.kernel_policy["glm53_prompt_decoded"] == "decoded_f32_v1"
+    assert ":prompt_decoded=decoded_f32_v1:" in adapter.profile + ":"
+    reference, _ = _parse({}, tmp_path)
+    assert reference.kernel_policy["glm53_prompt_decoded"] == "reference"
+    assert "prompt_decoded" not in reference.profile
+    _, bad = _parse({"glm53_prompt_decoded": "f16"}, tmp_path)
+    assert "unsupported GLM-5.3 packed execution policy" in str(bad)
+
+
+def test_prompt_decoded_admission_is_prompt_width_and_k_block_only():
+    from mlx2.runtime.gguf.prefill_scope import prompt_rows_active
+    from mlx2.runtime.gguf.weights import GGUFWeights
+
+    weights = SimpleNamespace(prompt_decoded_policy="decoded_f32_v1")
+    admits = GGUFWeights._prompt_decoded
+    assert admits(weights, _packed((8192, 128), Q4_0))  # KDA ssm_f_b / ssm_g_b
+    assert admits(weights, _packed((64, 512, 256), Q3_K))  # grouped attn_k_b
+    assert not admits(weights, _packed((8192, 40), Q4_0))
+    assert not admits(weights, _packed((8192, 128), 8))  # Q8_0 has no K-block decoder
+    assert not admits(SimpleNamespace(prompt_decoded_policy="reference"), _packed((8192, 128), Q4_0))
+    # The scope is the prompt width itself, under the reference dense policy too.
+    model = SimpleNamespace(
+        weights=SimpleNamespace(dense_prefill_policy="reference", expert_prefill_policy="reference")
+    )
+    with Glm53GGUFModel._prompt_scope(model, 512):
+        assert prompt_rows_active(512) and not prompt_rows_active(4) and not prompt_rows_active(511)
+        assert not dense_prefill_active(512)
+    assert not prompt_rows_active(512)
+
+
+def test_kblock_levers_are_refused_under_the_reference_row_kernel(tmp_path):
+    """shared_fold/kda_group/mla_group/tree_batch run only through the K-block
+    row kernels; under glm53_row_kernel=reference they would fall back
+    silently while the profile named them."""
+    for key, value in (("glm53_shared_fold", "kblock"), ("glm53_kda_group", "kblock"),
+                       ("glm53_mla_group", "kblock"), ("glm53_tree_batch", "kblock_v1")):
+        _, error = _parse({key: value, "glm53_row_kernel": "reference"}, tmp_path)
+        assert "require glm53_row_kernel" in str(error), key
+        ok, error = _parse({key: value, "glm53_row_kernel": "kblock_rows"}, tmp_path)
+        assert "require glm53_row_kernel" not in str(error) and ok.kernel_policy[key] == value
+
+
+def test_kda_fused_defaults_off_under_reference_math(tmp_path):
+    adapter, _ = _parse({"glm53_math": "reference"}, tmp_path)
+    assert adapter.kernel_policy["glm53_kda_fused"] == "reference"
+    adapter, _ = _parse({"glm53_math": "reference", "glm53_kda_fused": "decode_v1"}, tmp_path)
+    assert adapter.kernel_policy["glm53_kda_fused"] == "decode_v1"  # explicit stays explicit
+    adapter, _ = _parse({}, tmp_path)
+    assert adapter.kernel_policy["glm53_kda_fused"] == "decode_v1"
+
+
+def test_multi_linear_steps_aside_for_decoded_prompt_projections():
+    """glm53_kda_group's joined row launch must not consume the KDA low-rank
+    rows at prompt width when decoded_f32_v1 owns them (codex round 1)."""
+    from mlx2.runtime.gguf.weights import GGUFWeights
+
+    class Stub:
+        prompt_decoded_policy = "decoded_f32_v1"
+        _prompt_decoded = GGUFWeights._prompt_decoded
+        scheduled_dense_calls = {}
+
+        def _multi_plan(self, names, joined):
+            return [_packed((8192, 128), Q4_0), _packed((8192, 128), Q4_0)], ((0, 8192), (8192, 16384))
+
+    x = SimpleNamespace(shape=(512, 128), reshape=lambda *s: SimpleNamespace(shape=(512, 128)))
+    model = SimpleNamespace(
+        weights=SimpleNamespace(dense_prefill_policy="reference", expert_prefill_policy="reference")
+    )
+    with Glm53GGUFModel._prompt_scope(model, 512):
+        assert GGUFWeights.multi_linear(Stub(), [x, x], ["a", "b"]) is None
+
+
+def test_gathered_f16_prompt_law_parses_and_changes_identity(tmp_path, monkeypatch):
+    """glm53_sparse_prefill=gathered_f16_from_<n>: admitted at the nine
+    positions, Metal-only, carried in the profile like every sparse value;
+    the adapter's default prompt law on a Metal host, gathered_v1_8k without."""
+    import mlx.core as mx
+
+    from mlx2.adapters.glm53_gguf import SPARSE_DEFAULTS, sparse_default
+
+    assert SPARSE_DEFAULTS["glm53_sparse_prefill"] == "gathered_f16_from_8192"
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    adapter, error = _parse({"glm53_sparse_prefill": "gathered_f16_from_8192"}, tmp_path)
+    assert "unsupported" not in str(error) and "requires Metal" not in str(error)
+    assert adapter.kernel_policy["glm53_sparse_prefill"] == "gathered_f16_from_8192"
+    assert "gathered_f16_from_8192" in adapter.profile
+    default, _ = _parse({}, tmp_path)
+    assert default.kernel_policy["glm53_sparse_prefill"] == "gathered_f16_from_8192"
+    assert default.profile == adapter.profile
+    explicit_v1, _ = _parse({"glm53_sparse_prefill": "gathered_v1_8k"}, tmp_path)
+    assert explicit_v1.profile != adapter.profile
+    _, bad = _parse({"glm53_sparse_prefill": "gathered_f16_from_9000"}, tmp_path)
+    assert "glm53_sparse_prefill" in str(bad) or "unsupported" in str(bad)
+    # Without Metal the default is the fp32 gathered law; the explicit f16 value is refused.
+    monkeypatch.setattr(mx.metal, "is_available", lambda: False)
+    assert sparse_default("glm53_sparse_prefill") == "gathered_v1_8k"
+    fallback, _ = _parse({}, tmp_path)
+    assert fallback.kernel_policy["glm53_sparse_prefill"] == "gathered_v1_8k"
+    _, refused = _parse({"glm53_sparse_prefill": "gathered_f16_from_8192"}, tmp_path)
+    assert "requires Metal" in str(refused)
+
+
+def test_decoded_f16_and_mla_prompt_policies_parse_and_change_identity(tmp_path):
+    adapter, error = _parse({"glm53_prompt_decoded": "decoded_f16_v1", "glm53_mla_prompt": "expanded_f16_v1"}, tmp_path)
+    assert "unsupported GLM-5.3 packed execution policy" not in str(error)
+    assert adapter.kernel_policy["glm53_prompt_decoded"] == "decoded_f16_v1"
+    assert adapter.kernel_policy["glm53_mla_prompt"] == "expanded_f16_v1"
+    assert ":prompt_decoded=decoded_f16_v1:mla_prompt=expanded_f16_v1:" in adapter.profile + ":"
+    reference, _ = _parse({}, tmp_path)
+    assert reference.kernel_policy["glm53_mla_prompt"] == "reference" and "mla_prompt" not in reference.profile
+    _, bad = _parse({"glm53_mla_prompt": "expanded_f32_v1"}, tmp_path)
+    assert "unsupported GLM-5.3 packed execution policy" in str(bad)
+    # fp16 decode needs whole 64-value chunks; f32 needs 32.
+    from mlx2.runtime.gguf.weights import GGUFWeights
+
+    admits = GGUFWeights._prompt_decoded
+    assert admits(SimpleNamespace(prompt_decoded_policy="decoded_f16_v1"), _packed((8192, 128), Q4_0))
+    assert not admits(SimpleNamespace(prompt_decoded_policy="decoded_f16_v1"), _packed((8192, 96), Q4_0))
+    assert admits(SimpleNamespace(prompt_decoded_policy="decoded_f32_v1"), _packed((8192, 96), Q4_0))

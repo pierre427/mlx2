@@ -25,7 +25,10 @@ W = sa.WIDTH
 
 @pytest.fixture(autouse=True)
 def gpu():
+    previous = mx.default_device()
     mx.set_default_device(mx.gpu)
+    yield
+    mx.set_default_device(previous)
 
 
 def bits(a):

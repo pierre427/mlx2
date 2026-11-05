@@ -428,7 +428,8 @@ def main():
     p.add_argument("--arms-json", required=True, help='[{"name":..,"attrs":{model attr: value}}, ...]')
     p.add_argument("--cooldown-c", type=float, default=None)
     p.add_argument("--cooldown-script",
-                   default="~/Desktop/mlx2/qualification/runs/glm53-ordinary-roofline-20261030/cooldown.py")
+                   default=str(Path.home() / "Desktop" / "mlx2" / "qualification" / "runs"
+                               / "glm53-ordinary-roofline-20261030" / "cooldown.py"))
     p = sub.add_parser("captured")
     p.add_argument("--policy", type=Path, required=True)
     p.add_argument("--tokens", type=int, default=8400)

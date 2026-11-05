@@ -22,6 +22,11 @@ GATHERED_DECODE_GROUP_BYTES = 8 * SPARSE_WIDTH * 512 * 4
 FUSED_V2_ROW_BYTES = -(-SPARSE_WIDTH // 64) * 64 * (512 + 2) * 4
 FUSED_V2_PREFILL_BLOCK_ROWS = 64
 V2_PREFILL = tuple(f"gathered_v2_from_{n}" for n in (2049, 3072, 4096, 5120, 6144, 7168, 8192, 12288, 16384))
+# gathered_f16_from_<n>: the flash kernel's partials are 4 slots x 64 heads x 514
+# floats per row (33.7 MB per 64-row block) plus a half copy of the rows the
+# chunk can see (T x 512 x 2 bytes) and of its q rows; booked at the fused_v2
+# figure, which covers both up to ~230K visible rows.
+F16_PREFILL = tuple(f"gathered_f16_from_{n}" for n in (2049, 3072, 4096, 5120, 6144, 7168, 8192, 12288, 16384))
 # Bytes per capacity token per indexed layer: latent 512 + raw indexer 256,
 # plus the derived pooled keys (128 per 4 tokens) under incremental pools.
 COMMITTED_FLOATS, POOLED_FLOATS = 768, 32
@@ -29,7 +34,8 @@ COMMITTED_FLOATS, POOLED_FLOATS = 768, 32
 
 def _sparse_policy(kernel_policy):
     """(prefill law, decode law, pooled plane) for a kernel policy; a law is
-    None (dense), "v1" (gathered ops / fused_decode_v1) or "v2" (fused_v2)."""
+    None (dense), "v1" (gathered ops / fused_decode_v1), "v2" (fused_v2) or
+    "f16" (the flash kernel, prefill only)."""
     if kernel_policy is None:
         return None, None, False
     if not isinstance(kernel_policy, dict):
@@ -38,14 +44,15 @@ def _sparse_policy(kernel_policy):
     decode = kernel_policy.get("glm53_sparse_attention", "mask_reference")
     pools = kernel_policy.get("glm53_indexer_pools", "recompute")
     if (
-        prefill not in ("dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all", *V2_PREFILL)
+        prefill not in ("dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all", *V2_PREFILL,
+                        *F16_PREFILL)
         or decode not in ("mask_reference", "gathered_v1", "fused_decode_v1", "fused_v2")
         or pools not in ("recompute", "recompute_fixed_order", "incremental_v1", "incremental_v1_audit")
     ):
         raise ValueError("GLM-5.3 cache budget cannot price an unknown sparse policy")
     law = lambda value, dense, v2: None if value == dense else ("v2" if v2 else "v1")
     return (
-        law(prefill, "dense_reference", prefill in V2_PREFILL),
+        "f16" if prefill in F16_PREFILL else law(prefill, "dense_reference", prefill in V2_PREFILL),
         law(decode, "mask_reference", decode == "fused_v2"),
         pools in ("incremental_v1", "incremental_v1_audit"),
     )
@@ -54,7 +61,8 @@ def _sparse_policy(kernel_policy):
 def sparse_workspace_bytes(prefill, decode, tree_rows=0):
     """One live consumer workspace per phase, booked together (as before)."""
     prefill_bytes = {None: 0, "v1": GATHERED_PREFILL_BLOCK_BYTES,
-                     "v2": FUSED_V2_PREFILL_BLOCK_ROWS * FUSED_V2_ROW_BYTES}[prefill]
+                     "v2": FUSED_V2_PREFILL_BLOCK_ROWS * FUSED_V2_ROW_BYTES,
+                     "f16": FUSED_V2_PREFILL_BLOCK_ROWS * FUSED_V2_ROW_BYTES}[prefill]
     decode_bytes = {None: 0, "v1": GATHERED_DECODE_GROUP_BYTES,
                     "v2": max(8, tree_rows + 1) * FUSED_V2_ROW_BYTES}[decode]
     return prefill_bytes + decode_bytes

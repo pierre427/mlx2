@@ -46,7 +46,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL = "~/mlx-models/GLM-5.3-Flash-REAP50-Q3_K_M"
+MODEL = str(Path.home() / "mlx-models" / "GLM-5.3-Flash-REAP50-Q3_K_M")
 CHECKPOINT = (
     "GLM-5.3-Flash-REAP50-Q3_K_M.gguf@"
     "5a865918aea87a362ff8ae419581a0447929bfd68534a44d1125b394c272762d"
@@ -376,8 +376,30 @@ def source_record(source_revision, *, allow_mismatch=False, allow_dirty=False):
 
     evaluators = {rel: hashlib.sha256((ROOT / rel).read_bytes()).hexdigest() for rel in EVALUATORS
                   if (ROOT / rel).is_file()}
+    # A dirty src/ file, when allowed, is bound by content: the receipt names
+    # what ran, not only that something differed from HEAD.
+    dirty_sha256 = {}
+    # NUL-separated porcelain: paths arrive unescaped, a rename or copy record
+    # is "XY new\0old", untracked files are listed one by one.
+    raw = subprocess.run(["git", "status", "--porcelain", "-z", "--untracked-files=all", "--", "src"],
+                         cwd=ROOT, capture_output=True, check=True).stdout.decode()
+    entries = raw.split("\0")
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        if not entry:
+            continue
+        code, rel = entry[:2], entry[3:]
+        if "R" in code or "C" in code:
+            i += 1  # the old name follows; what ran is the new one
+        if "D" in code:
+            continue  # deleted in the worktree: nothing ran from it
+        if not (ROOT / rel).is_file():
+            raise SystemExit(f"cannot hash dirty source entry {entry!r}")
+        dirty_sha256[rel] = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
     return {"source_revision": source_revision, "head": head, "head_matches": matches,
-            "src_dirty": dirty, "scripts_dirty": [line for line in git(
+            "src_dirty": dirty, "src_dirty_sha256": dirty_sha256, "scripts_dirty": [line for line in git(
                 "status", "--porcelain", "--", "scripts").splitlines() if line.strip()],
             # The evaluator code that produced the verdict, even when uncommitted.
             "evaluator_sha256": evaluators}

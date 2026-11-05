@@ -1069,3 +1069,63 @@ def test_flash_next_defaulted_lane_dense_steps_aside_for_clashing_opt_ins():
     # An operator who names both still gets the policy's own refusal.
     with pytest.raises(ValueError, match="lane_dense cannot be combined"):
         FlashNextPolicy.from_mapping({"lane_dense": True, "row_exact_verify": True})
+
+
+def test_glm53_ordinary_route_defaults_to_the_measured_kblock_v6_kernels():
+    """GLM-5.3-Flash: a bare launch gets the kernel set every ladder and A/B
+    ran under (2026-11-01), not the reference law; an operator value wins."""
+    from mlx2.adapters.glm53_gguf import DESCRIPTOR as GLM53, Glm53GGUFAdapter
+
+    resolution = _resolution(Glm53GGUFAdapter, GLM53)
+    policy = resolve_execution_policy_defaults(None, ORDINARY, resolution)
+    assert policy == Glm53GGUFAdapter.ROUTE_DEFAULTS
+    assert policy["glm53_expert_prefill"] == "segmented_nax_fp16_v2"
+    assert policy["glm53_row_kernel"] == "kblock_rows"
+    assert policy["glm53_hc"] == "mega_v1"
+    # The half-decoded prompt projections (12/12 exact at 2K/8K) are the
+    # default since 2026-11-02; the f32 sibling stays opt-in.
+    assert policy["glm53_prompt_decoded"] == "decoded_f16_v1"
+    # The same kernels serve the target under an external drafter.
+    assert resolve_execution_policy_defaults(None, EXTERNAL, resolution) == policy
+    # Naming a key, including its reference value, is operator-owned.
+    explicit = resolve_execution_policy_defaults(
+        {"glm53_expert_prefill": "reference", "glm53_hc": "fused_fp32"}, ORDINARY, resolution
+    )
+    assert explicit["glm53_expert_prefill"] == "reference"
+    assert explicit["glm53_hc"] == "fused_fp32"
+    assert explicit["glm53_row_kernel"] == "kblock_rows"
+    # Every default is a value the adapter's own validation accepts.
+    assert set(policy) <= Glm53GGUFAdapter.adapter_owned_default_policy_keys
+    adapter = object.__new__(Glm53GGUFAdapter)
+    adapter.profile = "p"
+    adapter.external_policy = {}
+    with pytest.raises(Exception) as caught:
+        Glm53GGUFAdapter._load(adapter, "/nonexistent/glm53", dict(policy))
+    assert "unsupported GLM-5.3" not in str(caught.value)
+    assert adapter.kernel_policy["glm53_dense_prefill"] == "nax_fp16_v2d"
+    assert adapter.kernel_policy["glm53_prompt_decoded"] == "decoded_f16_v1"
+    # Naming the key's first value selects the packed reference projections.
+    explicit = resolve_execution_policy_defaults({"glm53_prompt_decoded": "reference"}, ORDINARY, resolution)
+    assert explicit["glm53_prompt_decoded"] == "reference"
+    assert explicit["glm53_dense_prefill"] == "nax_fp16_v2d"
+
+
+def test_glm53_route_defaults_drop_the_kblock_levers_when_the_operator_keeps_reference_rows():
+    from mlx2.adapters.glm53_gguf import DESCRIPTOR as GLM53, Glm53GGUFAdapter
+
+    resolution = _resolution(Glm53GGUFAdapter, GLM53)
+    policy = resolve_execution_policy_defaults({"glm53_row_kernel": "reference"}, ORDINARY, resolution)
+    assert policy["glm53_row_kernel"] == "reference"
+    for key in ("glm53_shared_fold", "glm53_kda_group", "glm53_tree_batch"):
+        assert key not in policy
+    # The prefill tiles, decoded prompt projections and HC do not depend on
+    # the row kernel and stay.
+    assert policy["glm53_expert_prefill"] == "segmented_nax_fp16_v2" and policy["glm53_hc"] == "mega_v1"
+    assert policy["glm53_prompt_decoded"] == "decoded_f16_v1"
+    # The adapter then accepts the merged policy.
+    adapter = object.__new__(Glm53GGUFAdapter)
+    adapter.profile = "p"
+    adapter.external_policy = {}
+    with pytest.raises(Exception) as caught:
+        Glm53GGUFAdapter._load(adapter, "/nonexistent/glm53", dict(policy))
+    assert "require glm53_row_kernel" not in str(caught.value)

@@ -15,7 +15,7 @@ import json
 import time
 from pathlib import Path
 
-MODEL = Path("~/mlx-models/GLM-5.3-Flash-REAP50-Q3_K_M")
+MODEL = Path.home() / "mlx-models" / "GLM-5.3-Flash-REAP50-Q3_K_M"
 DENSE = [
     "blk.0.attn_q.weight",  # Q3_K 8192x4096
     "blk.0.attn_v.weight",  # Q5_K

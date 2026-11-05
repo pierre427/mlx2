@@ -14,9 +14,43 @@ from .packed_metal import HEADER
 from .reader import GGUFError
 from .v41_metal import BF16_HEADER
 
+# The shared tiles are parameterized for GLM K-block experts (MT row tiles,
+# TILE-row plans, a kblock_values32 fill this header lacks). V4.1's IQ1_S
+# keeps the one-tile geometry: MT=1, TILE=16, no K-block branch.
+TILE_ROWS = 16
+MT = 1
+
+
+def _kblock_branch(pointer):
+    return (
+        "    if(FORMAT==2 || (FORMAT>=11 && FORMAT<=14)) {\n"
+        "        // K-block chunk fill: same half(value) as gguf_value, scales once per chunk.\n"
+        "        for(int t=0;t<2;t++) {\n"
+        "            const int item=lane+32*t, r=item/2, part=item%2;\n"
+        "            const int row=colbase+r;\n"
+        "            threadgroup half *dst=wb+r*64+part*32;\n"
+        f"            if(row<N) kblock_values32({pointer}+(ulong(expert)*N+row)*ROW_BYTES,"
+        "uint(kb/32+part),dst,FORMAT);\n"
+        "            else for(int j=0;j<32;j++) dst[j]=half(0.0f);\n"
+        "        }\n"
+        "    } else\n"
+    )
+
+
+def _without_kblock(source, pointers):
+    for pointer in pointers:
+        branch = _kblock_branch(pointer)
+        if source.count(branch) != 1:
+            raise GGUFError("V4.1 prefill: shared K-block anchor changed")
+        source = source.replace(branch, "", 1)
+    if "kblock_values32" in source:
+        raise GGUFError("V4.1 prefill: unstripped K-block fill")
+    return source
+
+
 SCAN_SOURCE = base.SCAN_SOURCE.replace("256", "512").replace("255", "511")
 GATE_SOURCE = (
-    base.GATE_UP_SOURCE.replace(
+    _without_kblock(base.GATE_UP_SOURCE, ("w", "up")).replace(
         "min(sums[index],10.0f)", "min(v41_bf16(sums[index]),10.0f)"
     )
     .replace(
@@ -28,7 +62,7 @@ GATE_SOURCE = (
         "v41_bf16((gate/(1.0f+metal::precise::exp(-gate)))*u*scores[order[rowbase+row]]);",
     )
 )
-DOWN_SOURCE = base.DOWN_SOURCE.replace(
+DOWN_SOURCE = _without_kblock(base.DOWN_SOURCE, ("w",)).replace(
     "=sums[f*8+r*4+j];", "=v41_bf16(sums[f*8+r*4+j]);"
 )
 COMBINE_SOURCE = base.COMBINE_SOURCE.replace("scores[original]*rows[", "rows[")
@@ -129,7 +163,12 @@ def moe(x, ids, scores, gate, up, down, *, max_scratch_bytes=512 << 20):
     inverse = mx.argsort(order).astype(mx.uint32)
     tiles, count, status = _kernel("scan")(
         inputs=[flat[order], flat],
-        template=[("ROWS", rows), ("EXPERTS", experts), ("MAX_TILES", capacity)],
+        template=[
+            ("ROWS", rows),
+            ("EXPERTS", experts),
+            ("MAX_TILES", capacity),
+            ("TILE", TILE_ROWS),
+        ],
         grid=(512, 1, 1),
         threadgroup=(512, 1, 1),
         output_shapes=[(capacity, 4), (1,), (1,)],
@@ -151,6 +190,7 @@ def moe(x, ids, scores, gate, up, down, *, max_scratch_bytes=512 << 20):
             ("N", hidden),
             ("ROW_BYTES", gate.row_bytes),
             ("FORMAT", 19),
+            ("MT", MT),
         ],
         grid=(((hidden + 127) // 128) * 128, capacity, 1),
         threadgroup=(128, 1, 1),
@@ -164,6 +204,7 @@ def moe(x, ids, scores, gate, up, down, *, max_scratch_bytes=512 << 20):
             ("N", width),
             ("ROW_BYTES", down.row_bytes),
             ("FORMAT", 19),
+            ("MT", MT),
         ],
         grid=(((width + 127) // 128) * 128, capacity, 1),
         threadgroup=(128, 1, 1),

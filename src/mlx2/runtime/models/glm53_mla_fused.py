@@ -66,7 +66,8 @@ COUNTERS = (
     "mla_fused",            # a selecting decode step ran the fused glue
     "mla_fused_dense",      # a decode step at T <= 2048 ran prep (no ids exist)
     "mla_fused_pool",       # pools computed by the one-pool kernel
-    "mla_fused_declined",   # decode_v1 selected but the reference chain ran
+    "mla_fused_declined",   # decode_v1 selected but the reference chain ran (gate, law or device)
+    "mla_fused_not_candidate",  # a prompt chunk or multi-row verify call: never the kernel's shape
 )
 Q_RANK, LATENT, RAW, IDX_DIM, IDX_HEADS, KPOOL = 1536, 512, 256, 128, 32, 4
 PREP_THREADS = 384

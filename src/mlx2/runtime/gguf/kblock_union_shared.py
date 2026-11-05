@@ -19,7 +19,8 @@ routed expert once per run of sorted slots instead:
   ``[token, TOPK + 1]`` slot rows (routed slots in order, shared last).
 
 Every output row therefore equals ``kblock_moe_shared``'s bit for bit
-(chunk law, EXACT = 0, VEC = 1). Original mlx2 code; it reuses
+(chunk law, EXACT = 0, VEC = 1, AHEAD = 1: the kernels' header carries the
+load-ahead branch, so every launch names its AHEAD). Original mlx2 code; it reuses
 kblock_metal's kernels and does not modify them.
 """
 
@@ -51,7 +52,7 @@ def kblock_moe_union_shared(x, ids, scores, gate, up, down, gate_sh, up_sh, down
     flat = ids.reshape(-1)
     order = mx.argsort(flat).astype(mx.uint32)
     common = [("K", k), ("M", m), ("N", k), ("TOPK", topk), ("EXPERTS", experts), ("ROWS", rows),
-              ("VEC", 1), ("EXACT", 0), ("G", group), ("SLOTS", slots)]
+              ("VEC", 1), ("EXACT", 0), ("G", group), ("SLOTS", slots), ("AHEAD", 1)]
     mid = _kernel("gate_up_union")(
         inputs=[x, flat, order, gate.data, up.data],
         template=common + [("ROW_BYTES", gate.row_bytes), ("FORMAT", gate.ggml_type)],
@@ -67,7 +68,7 @@ def kblock_moe_union_shared(x, ids, scores, gate, up, down, gate_sh, up_sh, down
     # The shared slot: one-expert routed kernels over the shared tensors.
     zero = mx.zeros((b,), dtype=mx.uint32)
     single = [("K", k), ("M", m), ("N", k), ("TOPK", 1), ("EXPERTS", 1), ("ROWS", rows),
-              ("VEC", 1), ("EXACT", 0)]
+              ("VEC", 1), ("EXACT", 0), ("AHEAD", 1)]
     mid_sh = _kernel("gate_up")(
         inputs=[x, zero, gate_sh.data, up_sh.data],
         template=single + [("ROW_BYTES", gate_sh.row_bytes), ("FORMAT", gate_sh.ggml_type)],
@@ -83,7 +84,7 @@ def kblock_moe_union_shared(x, ids, scores, gate, up, down, gate_sh, up_sh, down
     slots_out = mx.concatenate(
         [routed.reshape(b, topk, k), shared.reshape(b, 1, k)], axis=1).reshape(b * (topk + 1), k)
     fold = [("K", k), ("M", m), ("N", k), ("TOPK", topk), ("EXPERTS", experts), ("ROWS", rows),
-            ("VEC", 1), ("EXACT", 0)]
+            ("VEC", 1), ("EXACT", 0), ("AHEAD", 1)]
     return _kernel("combine_shared")(
         inputs=[slots_out, scores.astype(mx.float32)],
         template=fold,

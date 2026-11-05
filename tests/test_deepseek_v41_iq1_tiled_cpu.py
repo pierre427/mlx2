@@ -173,7 +173,8 @@ def test_prefill_device_sort_and_descriptor_bound_preserve_original_slots(monkey
     np.testing.assert_array_equal(order[inverse], np.arange(ids.size))
     scan = calls[0][1]
     assert dict(scan['template']) == dict(ROWS=ids.size, EXPERTS=experts,
-        MAX_TILES=v41_prefill.plan_capacity(ids.size, experts))
+        MAX_TILES=v41_prefill.plan_capacity(ids.size, experts), TILE=16)
+    assert dict(calls[1][1]['template'])['MT'] == dict(calls[2][1]['template'])['MT'] == 1
     assert scan['threadgroup'] == (512, 1, 1)
     assert scan['inputs'][2] is slots
     assert scan['inputs'][3].dtype == mx.uint32 and scan['inputs'][3].shape == (1,)
@@ -295,4 +296,35 @@ def test_offline_metal4_compiles_without_gpu_execution(tmp_path, kind, constant_
     source.write_text(tiled.metal_compile_source(kind, constant_inputs=constant_inputs))
     result = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-std=metal4.0', '-c', str(source),
                              '-o', str(source.with_suffix('.air'))], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout+result.stderr
+
+
+@pytest.mark.parametrize('kind', ['scan', 'gate', 'down'])
+def test_v41_segmented_prefill_compiles_offline_with_its_templates(tmp_path, kind):
+    # The shared segmented tiles gained GLM-only MT/TILE/K-block parameters;
+    # V4.1 must pass MT=1 and TILE=16 and carry no K-block fill.
+    if not shutil.which('xcrun') or subprocess.run(['xcrun', '--find', 'metal'], capture_output=True).returncode:
+        pytest.skip('offline Metal compiler unavailable')
+    names, outputs, source = {
+        'scan': (['sorted_ids', 'original_ids'], ['tiles', 'tile_count', 'status'], v41_prefill.SCAN_SOURCE),
+        'gate': (['x', 'order', 'tiles', 'tile_count', 'w', 'up', 'scores'], ['y'], v41_prefill.GATE_SOURCE),
+        'down': (['x', 'tiles', 'tile_count', 'w'], ['y'], v41_prefill.DOWN_SOURCE),
+    }[kind]
+    assert 'kblock_values32' not in source
+    dtype = {'x': 'float', 'scores': 'float', 'w': 'uchar', 'up': 'uchar'}
+    bindings = [f"device const {dtype.get(n, 'uint')}* {n} [[buffer({i})]]" for i, n in enumerate(names)]
+    bindings += [f"device {'uint' if kind == 'scan' else 'float'}* {n} [[buffer({i})]]"
+                 for i, n in enumerate(outputs, len(bindings))]
+    attrs = ["uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]",
+             "uint3 thread_position_in_grid [[thread_position_in_grid]]",
+             "uint thread_index_in_threadgroup [[thread_index_in_threadgroup]]",
+             "uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]",
+             "uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]"]
+    constants = (f"constant uint ROWS=192,EXPERTS=384,MAX_TILES=17,TOPK=6,K=4096,N=2048,FORMAT=19,"
+                 f"ROW_BYTES=1100,TILE={v41_prefill.TILE_ROWS},MT={v41_prefill.MT};\n")
+    path = tmp_path/(kind+'.metal')
+    path.write_text("#include <metal_stdlib>\nusing namespace metal;\n"+v41_prefill.HEAD+constants
+                    +"kernel void probe("+",".join(bindings+attrs)+") {\n"+source+"\n}\n")
+    result = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-std=metal4.0', '-c', str(path),
+                             '-o', str(path.with_suffix('.air'))], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout+result.stderr

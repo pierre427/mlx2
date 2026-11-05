@@ -1094,3 +1094,135 @@ MIT License), TensorRT-LLM (https://github.com/NVIDIA/TensorRT-LLM, PRs
 and the installed MLX 0.32.4 Metal kernels (MIT License). The Apache License
 2.0 text is this repository's LICENSE. No Apple copyright header is added to
 mlx2 source files.
+
+------------------------------------------------------------------------------
+mlx-vlm (https://github.com/Blaizzy/mlx-vlm) — MIT License, Copyright (c)
+2025 Prince Canuma. Additional adapted files (the MIT permission notice is
+reproduced in the mlx-vlm section earlier in this file):
+- Revision 67599f2e8ec31bf35cbb7b02794114f20844f0bb
+  (mlx_vlm/models/inkling/language.py, config.py and inkling.py): the
+  Inkling-Small tensor model and configuration, adapted in
+  src/mlx2/runtime/models/inkling/language.py and config.py; the short-
+  convolution weight transpose and interleaved gate/up split are restated in
+  src/mlx2/runtime/models/inkling/mtp.py. Caches, tree execution, kernels and
+  serving are mlx2's own. tests/fixtures/inkling-small-config.json is the
+  unmodified config.json of Sawfwair/Inkling-Small-MLX-Mixed-2bit (revision
+  22c95fc2e30400a893dc9ac9fe4df17f306362ae, Apache License 2.0).
+- Revision 8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5
+  (mlx_vlm/models/muse_glimmer/vision.py, config.py, muse_glimmer.py and
+  processing_muse_glimmer.py): the Muse Glimmer vision tower, projector and
+  CPU image preprocessing, adapted in src/mlx2/runtime/models/muse_vision.py,
+  src/mlx2/runtime/models/muse_multimodal.py,
+  src/mlx2/adapters/muse_vision_config.py and
+  src/mlx2/adapters/muse_glimmer_images.py. The text trunk, caches and server
+  are mlx2's own.
+
+------------------------------------------------------------------------------
+mxfp4-int8-m5 (https://github.com/shinyoungkang1/mxfp4-int8-m5, revision
+71ab38d3ad7e94279368accd0e880df90a63ae1c) — MIT License
+
+The SC-MXFP4 codec in src/mlx2/runtime/microscaling/format.py and the dense
+and grouped INT8 prefill Metal kernel bodies in
+src/mlx2/runtime/microscaling/kernels.py are derived from sim/mx_int8.py,
+sim/make_testcase.py, e2e/sc_format.py, e2e/sc_kernels.py and e2e/sc_moe.py.
+The immutable format contract, offline conversion
+(src/mlx2/runtime/microscaling/conversion.py, scripts/convert_sc_mxfp4.py),
+per-instance installer and adapter declarations are mlx2's own.
+
+Copyright (c) 2026 Shinyoung Kang
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+IronMLX (https://github.com/apepkuss/ironmlx, revision
+3f067efc1ed6a21dd278f3b6c9cbee83ab9d3a8a) — Apache License 2.0,
+Copyright 2026 Xin Liu.
+
+src/mlx2/experimental/ironmlx_tiled_prefill.py ports the 128x64 staged MPP
+GEMM and SwiGLU epilogue of ironmlx-lm/src/nn/dense_prefill_kernels.rs to a
+standalone MLX Metal kernel, with guarded partial stores and an FP32 sigmoid.
+Mechanisms from IronMLX (revisions 3f067efc1ed6a21dd278f3b6c9cbee83ab9d3a8a
+and 495c2ad8e1ed1f3ac443af391226b6db42ee3ed8) are also reimplemented, with no
+code copied, in src/mlx2/experimental/ironmlx_ane_prefill.py,
+src/mlx2/experimental/ironmlx_sparse_kv.py,
+src/mlx2/runtime/draft_exploration_credit.py and the scan-resistant expert
+eviction in src/mlx2/runtime/weight_stream.py. The full Apache-2.0 text is
+this repository's LICENSE.
+
+------------------------------------------------------------------------------
+Ripple 65B Preview (https://huggingface.co/ricursiveAI/Ripple-65B-Preview-NVFP4,
+revision 99eea4477a001a41b86914e41feb4b2ed86105e5, and
+https://huggingface.co/ricursiveAI/Ripple-65B-Preview, revision
+240d5966cbe00f0627c699e59ef58560b60303cf) — Apache License 2.0
+
+The Ricursive model law in src/mlx2/runtime/models/ricursive.py (PeriNorm,
+split-half local RoPE, per-head Q/K RMSNorm, per-element attention gates,
+scaled-embedding value residuals and clamped SwiGLU) is ported to MLX from
+modeling_ricursive.py and configuration_ricursive.py; the layer walk in
+src/mlx2/conversion/ripple_oq.py reuses it. tests/fixtures/ripple/config.json
+and tests/fixtures/ripple/chat_template.jinja are the publisher's unmodified
+files. The adapter, loader, caches, Metal glue kernels and tool/reasoning
+parsers (src/mlx2/adapters/ripple*.py, src/mlx2/runtime/models/ricursive_*.py,
+src/mlx2/runtime/tool_parsers/hermes_json.py) are mlx2's own. The upstream
+LICENSE names no copyright holder and the repositories ship no NOTICE file.
+The full Apache-2.0 text is this repository's LICENSE.
+
+------------------------------------------------------------------------------
+Kimi Linear tokenizer (tokenization_kimi.py from
+https://huggingface.co/KimiRio/Huihui-Kimi-Linear-REAP-35B-A3B-Instruct-abliterated,
+revision b42145adff0585a78379d1845b11d20431a40a86, a derivative of
+moonshotai/Kimi-Linear-48B-A3B-Instruct) — MIT License, as declared by the
+model card; the source file names no copyright holder.
+
+Adapted in src/mlx2/runtime/kimi_tokenizer.py: local import, a local GPT-2
+byte table for Transformers 5, exactly 256 reserved ids and named K2
+tool-call markers. The MIT permission notice and warranty disclaimer are as
+in the mxfp4-int8-m5 section above.
+
+------------------------------------------------------------------------------
+Rapid-MLX (https://github.com/raullenchai/Rapid-MLX) — Apache License 2.0.
+src/mlx2/runtime/tool_parsers/kimi.py takes the Kimi K2 tool-call wire
+markers and the functions.<name>:<index> name rule from
+vllm_mlx/tool_parsers/kimi_tool_parser.py (read at be5d8bd65 of a local
+fork); the parser body is rewritten for mlx2's OutputParser.
+
+------------------------------------------------------------------------------
+oMLX (https://github.com/jundot/omlx) PR #4808 and PR #3912 — Apache License
+2.0, additional files:
+- The 16x32x16 matmul2d fragment layout, xor-1/xor-8 row reductions, online
+  FP32 softmax and FP16 high/residual probability products of the PR #4808
+  attention kernel (see the scoped DeepSeek V4/V4.1 attention notice) are
+  reused in src/mlx2/runtime/models/kimi_linear_mla_flash.py (Kimi MLA
+  expanded and absorbed kernels) and src/mlx2/runtime/models/fp_verify_tensor.py
+  (native FP multi-row verification), with mlx2's own geometry, masks and
+  split/combine laws.
+- The PR #3912 QMV_HEADER is reused unchanged by
+  src/mlx2/runtime/models/deepseek_v41_routed_decode.py, which also carries
+  the 2-bit qmv branch and qmv_fast lane partition of the installed MLX 0.32.4
+  quantized.h (MIT License; see the MLX installed Metal kernel headers
+  section).
+
+------------------------------------------------------------------------------
+GSM8K (https://huggingface.co/datasets/openai/gsm8k, revision
+740312add88f) — MIT License, Copyright (c) 2021 OpenAI.
+
+benchmarks/gsm8k/test.jsonl and train_few_shot.jsonl are converted unchanged
+from the dataset's parquet files (see benchmarks/gsm8k/SOURCE.json). The MIT
+permission notice and warranty disclaimer are as in the mxfp4-int8-m5 section
+above.

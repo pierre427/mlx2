@@ -35,8 +35,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-COUNTERS = ("sparse_attention_fused_v2", "sparse_attention_fused_v2_rows", "sparse_attention_fused_v2_dense_rows",
+COUNTERS = ("mla_prompt_expanded_rows", "mla_prompt_expanded_calls",
+            "sparse_attention_fused_v2", "sparse_attention_fused_v2_rows", "sparse_attention_fused_v2_dense_rows",
             "sparse_prefill_fused_v2_blocks", "sparse_prefill_gathered_blocks", "sparse_prefill_dense_pieces",
+            "sparse_attention_fused_f16", "sparse_attention_fused_f16_rows", "sparse_prefill_fused_f16_blocks",
             "sparse_attention_gathered", "sparse_attention_mask", "mla_fused", "mla_fused_declined")
 
 # Six task templates; each buries facts in varied filler and asks a question
@@ -116,12 +118,39 @@ def render_prompt(adapter, template, tokens, offset):
     return best
 
 
+# Which policy the arms switch (--law-key): the prompt attention law, or the
+# prompt-phase decoded-weight GEMM law (glm53_prompt_decoded), whose engagement
+# is read from the weights' route counters instead of the model's.
+LAW_KEY = "sparse_prefill"
+WEIGHT_COUNTERS = ("decoded_f32_grouped", "decoded_f32_dense", "decoded_f16_grouped", "decoded_f16_dense")
+
+
 def set_law(adapter, value):
+    if LAW_KEY == "mla_prompt":
+        from mlx2.runtime.models.glm53_gguf import MLA_PROMPT_POLICIES
+
+        if value not in MLA_PROMPT_POLICIES:
+            raise ValueError(f"unknown glm53_mla_prompt value {value!r}")
+        adapter.model.mla_prompt = value
+        return
+    if LAW_KEY == "prompt_decoded":
+        from mlx2.runtime.gguf.weights import _PROMPT_DECODED_POLICIES
+
+        if value not in ("reference",) + _PROMPT_DECODED_POLICIES:
+            raise ValueError(f"unknown glm53_prompt_decoded value {value!r}")
+        # The linear memo keys carry the policy, so a switch rebuilds them.
+        adapter.weights.prompt_decoded_policy = value
+        return
     from mlx2.adapters.glm53_gguf import _check_sparse_combination
 
     policy = {**adapter.kernel_policy, "glm53_sparse_prefill": value}
     _check_sparse_combination(policy)
     adapter.model.sparse_prefill = value
+
+
+def weight_counters(adapter):
+    w = adapter.weights
+    return {k: w.scheduled_grouped_calls.get(k, 0) + w.scheduled_dense_calls.get(k, 0) for k in WEIGHT_COUNTERS}
 
 
 def run_one(adapter, ids, decode, window, mx):
@@ -130,6 +159,7 @@ def run_one(adapter, ids, decode, window, mx):
 
     model = adapter.model
     before = {k: model.calls.get(k, 0) for k in COUNTERS}
+    before_weights = weight_counters(adapter)
     mx.clear_cache()
     mx.reset_peak_memory()
     peak = {}
@@ -145,7 +175,9 @@ def run_one(adapter, ids, decode, window, mx):
             "prefill_peak_bytes": peak.get("prefill", mx.get_peak_memory()), "tokens": out, "eos_at": eos_at,
             "served": served(out, eos_at), "windows": run_pass.windows, "finite": run_pass.finite, "text": text,
             "prefill_logits_sha256": run_pass.prefill_logits_sha256,
-            "counters": {k: model.calls.get(k, 0) - before[k] for k in COUNTERS}}
+            "counters": {k: model.calls.get(k, 0) - before[k] for k in COUNTERS},
+            "weight_counters": {k: v - before_weights[k] for k, v in weight_counters(adapter).items()},
+            "sparse_prefill": model.sparse_prefill}
 
 
 MLA_LAYERS = 11
@@ -155,21 +187,51 @@ def engaged(row, law, tokens):
     """Each arm's prompt law engaged on exactly the rows its positions select."""
     from mlx2.runtime.models import glm53_sparse_attention as sa
 
+    if LAW_KEY == "mla_prompt":
+        # Every prompt row below the loaded gathered threshold, over the 11
+        # MLA layers; none on the reference.
+        threshold = sa.PREFILL_THRESHOLDS[row["sparse_prefill"]]
+        expanded = MLA_LAYERS * (tokens if threshold is None else min(tokens, threshold - 1))
+        want = 0 if law == "reference" else expanded
+        return row["counters"]["mla_prompt_expanded_rows"] == want
+    if LAW_KEY == "prompt_decoded":
+        # Per 2048-row chunk of at least 16 rows (prompt_rows_active): 11 MLA
+        # layers x (k_b, v_b) grouped calls and 34 KDA layers x (ssm_f_b,
+        # ssm_g_b) dense calls; none on the reference.
+        chunks = tokens // 2048 + (1 if tokens % 2048 >= 16 else 0)
+        w = row["weight_counters"]
+        grouped = w["decoded_f32_grouped"] + w.get("decoded_f16_grouped", 0)
+        dense = w["decoded_f32_dense"] + w.get("decoded_f16_dense", 0)
+        if law == "reference":
+            return grouped == 0 and dense == 0
+        # The arm's own dtype must be the one that ran.
+        own = "decoded_f16" if law == "decoded_f16_v1" else "decoded_f32"
+        return (w.get(own + "_grouped", 0) == MLA_LAYERS * 2 * chunks == grouped
+                and w.get(own + "_dense", 0) == 34 * 2 * chunks == dense)
     c = row["counters"]
     threshold = sa.PREFILL_THRESHOLDS[law]
     if threshold is None:  # dense_reference: masked pieces only
-        return bool(c["sparse_attention_fused_v2"] == 0 and c["sparse_prefill_gathered_blocks"] == 0
+        return bool(c["sparse_attention_fused_v2"] == 0 and c["sparse_attention_fused_f16"] == 0
+                    and c["sparse_prefill_gathered_blocks"] == 0
                     and (c["sparse_prefill_dense_pieces"] > 0) == (tokens > sa.TOPK))
     gathered_rows = MLA_LAYERS * max(0, tokens - (threshold - 1)) if tokens > sa.TOPK else 0
     masked = tokens > sa.TOPK and threshold - 1 > sa.TOPK
-    if not law.startswith("gathered_v2_from_"):
-        ok = c["sparse_attention_fused_v2"] == 0
+    fused_law = sa.prefill_law(law)
+    if fused_law == "gathered_v1":
+        ok = c["sparse_attention_fused_v2"] == 0 and c["sparse_attention_fused_f16"] == 0
         ok &= (c["sparse_prefill_gathered_blocks"] > 0) == (gathered_rows > 0)
         return bool(ok and (c["sparse_prefill_dense_pieces"] > 0) == masked)
-    dense = MLA_LAYERS * min(tokens, sa.TOPK)
-    ok = c["sparse_attention_fused_v2_dense_rows"] == dense
-    ok &= c["sparse_attention_fused_v2_rows"] - c["sparse_attention_fused_v2_dense_rows"] == gathered_rows
+    # Prompt rows below the threshold are the reference dense pieces (2026-11-01):
+    # no fused dense rows at prompt time; the fused rows are the selected ones,
+    # all of them under the arm's own kernel (fp32 v2 or fp16 operands).
+    own, other = ("fused_f16", "fused_v2") if fused_law == "fused_f16" else ("fused_v2", "fused_f16")
+    ok = c["sparse_attention_fused_v2_dense_rows"] == 0
+    ok &= c[f"sparse_attention_{own}_rows"] == gathered_rows
+    ok &= c[f"sparse_attention_{other}_rows"] == 0
     ok &= c["sparse_prefill_gathered_blocks"] == 0
+    # _mla_masked counts dense pieces only when the chunk selects (total >
+    # 2048): a prompt of <= 2048 tokens, or a threshold whose last dense row
+    # lies inside the first 2048-row chunk, counts none.
     return bool(ok and (c["sparse_prefill_dense_pieces"] > 0) == masked)
 
 
@@ -182,6 +244,8 @@ def main():
     parser.add_argument("--contexts", default="8192,16384,32768")
     parser.add_argument("--reference", default=None, help="reference prompt law (default: the loaded policy's)")
     parser.add_argument("--candidate", default="gathered_v2_from_5120")
+    parser.add_argument("--law-key", choices=("sparse_prefill", "prompt_decoded", "mla_prompt"), default="sparse_prefill",
+                        help="which policy the arms switch: glm53_sparse_prefill, glm53_prompt_decoded or glm53_mla_prompt values")
     parser.add_argument("--templates", default=",".join(t["name"] for t in TEMPLATES))
     parser.add_argument("--offset-base", type=int, default=0, help="filler offset seed (distinct per job)")
     parser.add_argument("--control", default=None,
@@ -190,6 +254,9 @@ def main():
     parser.add_argument("--decode", type=int, default=160)
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--reps", type=int, default=2, help="ttft: A/B pairs per context")
+    parser.add_argument("--allow-dirty-src", action="store_true",
+                        help="record uncommitted src/ paths in the receipt instead of refusing (a shared checkout "
+                             "with another session's unrelated edits); the receipt names them")
     args = parser.parse_args()
     if args.out.exists() and any(args.out.iterdir()):
         raise SystemExit("refusing to reuse a nonempty evidence directory")
@@ -200,9 +267,13 @@ def main():
     from glm53_ordinary_profile import CHECKPOINT
     from glm53_policy_ab import classify_divergence, host_record, source_record
 
-    source = source_record(args.source_revision)
+    source = source_record(args.source_revision, allow_dirty=args.allow_dirty_src)
+    global LAW_KEY
+    LAW_KEY = args.law_key
     adapter, policy = load(args.policy)
-    reference = args.reference or adapter.model.sparse_prefill
+    reference = args.reference or {"sparse_prefill": adapter.model.sparse_prefill,
+                                   "prompt_decoded": adapter.weights.prompt_decoded_policy,
+                                   "mla_prompt": adapter.model.mla_prompt}[LAW_KEY]
     arms = [("reference", reference), ("candidate", args.candidate)]
     if args.control and args.command == "breadth":
         arms.append(("control", args.control))
@@ -215,6 +286,7 @@ def main():
         raise SystemExit(f"--templates must name some of {sorted(known)}")
     templates = [t for t in TEMPLATES if t["name"] in names]
     record = {"schema": f"mlx2.glm53-v2-prefill-ab.{args.command}.v1", "checkpoint": CHECKPOINT, **source,
+              "law_key": LAW_KEY,
               "host": host_record(mx), "policy": policy, "kernel_policy": adapter.kernel_policy,
               "arms": dict(arms), "contexts": contexts, "decode": args.decode, "window": args.window,
               "thermal": "not gated: correctness / A-B signal, not publishable statistics",

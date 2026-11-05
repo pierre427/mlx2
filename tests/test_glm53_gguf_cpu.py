@@ -92,6 +92,16 @@ class Weights:
             self.arrays[name] = mx.array(value)
         return mx.einsum("...gi,goi->...go", x, self.arrays[name])
 
+    def grouped_decoded(self, name, *, groups, dtype=None):
+        # The element values behind ``grouped``, (groups, out, in), in ``dtype``.
+        if name not in self.arrays:
+            out = 512 if "attn_k_b" in name else 256
+            inp = 256 if "attn_k_b" in name else 512
+            value = self.rng.normal(0, 0.05, (groups, out, inp)).astype(np.float32)
+            self.arrays[name] = mx.array(value)
+        value = self.arrays[name]
+        return value if dtype is None else value.astype(dtype)
+
     def multi_linear(self, inputs, names, *, joined=1):
         # Equal to the separate projections (the K-block contract).
         self.multi_calls = getattr(self, "multi_calls", []) + [tuple(names)]
@@ -430,8 +440,12 @@ def test_adapter_profile_suffix_only_off_the_reference_law_and_refused_combinati
     assert all(default.kernel_policy[key] == value for key, value in SPARSE_DEFAULTS.items())
     assert default.profile == base + (
         ":indexer_pools=incremental_v1:indexer_select=topk_v1_kernel"
-        ":sparse_attention=gathered_v1:sparse_prefill=gathered_v1_8k"
+        ":sparse_attention=gathered_v1:sparse_prefill=gathered_f16_from_8192"
     )
+    # The default prompt law needs Metal; without it the fp32 gathered_v1_8k law.
+    from mlx2.adapters.glm53_gguf import sparse_default
+    assert sparse_default("glm53_sparse_prefill") == "gathered_f16_from_8192"
+    assert sparse_default("glm53_sparse_attention") == "gathered_v1"
     sparse_policy = adapter_policy({**glue,
         "glm53_indexer_pools": "incremental_v1", "glm53_indexer_select": "topk_v1",
         "glm53_sparse_attention": "gathered_v1", "glm53_sparse_prefill": "gathered_v1_all",
@@ -955,6 +969,7 @@ def test_adapter_declares_the_think_close_token_for_thinking_budgets():
 from mlx2.runtime.models import glm53_sparse_attention_v2 as sparse_v2
 
 V2_PREFILL = tuple(f"gathered_v2_from_{n}" for n in sparse.PREFILL_POSITIONS_V2)
+F16_PREFILL = tuple(f"gathered_f16_from_{n}" for n in sparse.PREFILL_POSITIONS_F16)
 
 
 def _v2_rows(base, tails, ids, row_meta):
@@ -971,9 +986,9 @@ def fake_v2(monkeypatch):
     calls = []
     state = {"mode": "oracle"}
 
-    def launch(q_rows, base, tails, ids, row_meta, split, dim_split):
+    def launch(q_rows, base, tails, ids, row_meta, split, dim_split, kind="partial", outer=None):
         calls.append({"rows": q_rows.shape[0], "base": base.shape[0], "meta": np.array(row_meta).tolist(),
-                      "ids": np.array(ids)})
+                      "ids": np.array(ids), "half": kind == "flash_f16", "dtype": base.dtype})
         if state["mode"] == "oracle":
             return mx.array(sparse_v2.oracle(q_rows, base, tails, ids, np.array(row_meta)).astype(np.float32))
         b, t, q = np.array(base), np.array(tails), np.array(q_rows)
@@ -986,7 +1001,8 @@ def fake_v2(monkeypatch):
 
     monkeypatch.setattr(sparse_v2, "require_metal", lambda: None)
     monkeypatch.setattr(sparse_v2, "_launch", launch)
-    monkeypatch.setattr(sparse_v2, "_GATE", {(sparse_v2.DEFAULT_SPLIT, sparse_v2.DEFAULT_DIM_SPLIT): True})
+    monkeypatch.setattr(sparse_v2, "_GATE", {(sparse_v2.DEFAULT_SPLIT, sparse_v2.DEFAULT_DIM_SPLIT, False): True,
+                                             (sparse_v2.DEFAULT_SPLIT, sparse_v2.DEFAULT_DIM_SPLIT, True): True})
     return calls, state
 
 
@@ -1001,64 +1017,61 @@ def test_v2_policy_values_are_exactly_the_nine_thresholds_and_need_chronological
     from mlx2.adapters.glm53_gguf import SPARSE_KEYS
 
     assert gguf.SPARSE_POLICIES["sparse_prefill"] == (
-        "dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all", *V2_PREFILL)
+        "dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all", *V2_PREFILL, *F16_PREFILL)
     assert gguf.SPARSE_POLICIES["sparse_attention"] == (
         "mask_reference", "gathered_v1", "fused_decode_v1", "fused_v2")
     # The adapter's table is the model's, under the glm53_ prefix.
     assert {k.removeprefix("glm53_"): v for k, v in SPARSE_KEYS.items()} == gguf.SPARSE_POLICIES
     weights = Weights()
-    for value in V2_PREFILL:
+    for value in V2_PREFILL + F16_PREFILL:
         mla_model(weights, **SPARSE, sparse_prefill=value)
     mla_model(weights, **dict(SPARSE, sparse_attention="fused_v2"))
     for bad in ({"sparse_prefill": "gathered_v2_from_9000"}, {"sparse_prefill": "gathered_v2_from_2048"},
+                {"sparse_prefill": "gathered_f16_from_9000"}, {"sparse_attention": "fused_f16"},
                 {"sparse_attention": "fused_v3"}):
         with pytest.raises(ValueError, match="unsupported"):
             mla_model(weights, **{**SPARSE, **bad})
-    # argsort ids are not chronological: no v2 law takes them.
-    for bad in ({"sparse_prefill": "gathered_v2_from_5120"}, {"sparse_attention": "fused_v2"}):
+    # argsort ids are not chronological: no v2 or f16 law takes them.
+    for bad in ({"sparse_prefill": "gathered_v2_from_5120"}, {"sparse_prefill": "gathered_f16_from_5120"},
+                {"sparse_attention": "fused_v2"}):
         with pytest.raises(ValueError, match="chronological"):
             mla_model(weights, indexer_pools="recompute_fixed_order", **bad)
 
 
-def test_v2_first_chunk_dense_rows_take_causal_ids_through_the_kernel(fake_v2):
+def test_v2_first_chunk_dense_rows_keep_the_reference_masked_law(fake_v2):
+    """Rows below 2048 never touch the v2 kernel at prompt time (WP5 flips at
+    8K, below the threshold, came from them): bit for bit the dense pieces."""
     calls, _ = fake_v2
     weights = Weights()
     model = mla_model(weights, **SPARSE, sparse_prefill="gathered_v2_from_5120")
     q, ids, source, out = v2_prompt(model, 10, 20)
-    assert ids is None and len(calls) == 1 and calls[0]["rows"] == 20 and calls[0]["base"] == 30
-    assert np.array_equal(calls[0]["ids"], np.array(sparse.dense_row_ids(range(10, 30))))
-    assert model.calls["sparse_attention_fused_v2_dense_rows"] == 20
-    assert model.calls["sparse_attention_fused_v2"] == 1 and model.calls["sparse_prefill_fused_v2_blocks"] == 1
-    assert model.calls["sparse_prefill_dense_pieces"] == model.calls["sparse_attention_mask"] == 0
-    # Against float64 on the causal keys of each row.
-    want = np.array(sparse_v2.oracle(np.array(q[0]).transpose(1, 0, 2), np.array(source[0, 0]),
-                                     np.zeros((1, 512), np.float32), np.array(sparse.dense_row_ids(range(10, 30))),
-                                     np.array([[30, 0, 0, p] for p in range(10, 30)])))
-    np.testing.assert_allclose(np.array(out)[0].transpose(1, 0, 2), want, atol=1e-6)
+    assert ids is None and calls == []
+    assert model.calls["sparse_attention_fused_v2_dense_rows"] == 0
+    assert model.calls["sparse_attention_fused_v2"] == 0 and model.calls["sparse_prefill_fused_v2_blocks"] == 0
+    assert np.array_equal(bits(out), bits(model._mla_masked(q, source, None, 20, 30)))
+    reference = mla_model(Weights(), **SPARSE, sparse_prefill="gathered_v1_8k")
+    assert np.array_equal(bits(out), bits(v2_prompt(reference, 10, 20)[3]))
 
 
-@pytest.mark.parametrize("threshold,starts", [("gathered_v2_from_2049", (8, 8)), ("gathered_v2_from_3072", (8, 20))])
-def test_v2_rows_below_2048_are_chunking_invariant_across_the_selection_boundary(fake_v2, threshold, starts):
-    """A chunk crossing 2048 keys has ids for its rows below 2048; they still
-    take dense causal ids, so their bits equal a chunk that ends at 2048."""
+@pytest.mark.parametrize("threshold,start", [("gathered_v2_from_2049", 8), ("gathered_v2_from_3072", 20)])
+def test_v2_rows_below_the_threshold_are_the_reference_dense_pieces(fake_v2, threshold, start):
+    """A chunk crossing 2048 keys: rows below the threshold (those below 2048
+    included) are the reference's masked pieces; only rows at or past it take
+    the fused kernel, on the selected ids."""
     calls, _ = fake_v2
     weights = Weights()
     model = mla_model(weights, **SPARSE, sparse_prefill=threshold)
     q, ids, source, out = v2_prompt(model, 2040, 20)
     assert ids is not None
-    dense_stop, start = starts
-    assert calls[0]["rows"] == dense_stop and calls[0]["base"] == 2048
-    assert np.array_equal(calls[0]["ids"], np.array(sparse.dense_row_ids(range(2040, 2048))))
-    with gguf.sparse_attention_phase("prompt"):
-        short = model._mla_attend(q[:, :, :dense_stop], None, source[:, :, :2048])
-    assert np.array_equal(bits(out[:, :, :dense_stop]), bits(short))
+    masked = model._mla_masked(q, source, ids, start, 2060)
+    assert np.array_equal(bits(out[:, :, :start]), bits(masked))
+    assert model.calls["sparse_prefill_dense_pieces"] == 1  # the model's (the test's call is not a prompt)
+    assert model.calls["sparse_attention_fused_v2_dense_rows"] == 0
     if start < 20:  # the gathered tail reads the selected ids
-        assert np.array_equal(calls[1]["ids"], np.array(ids[0, start:]))
-        assert model.calls["sparse_prefill_dense_pieces"] == 0
-    else:  # 2048 <= pos < 3071: the dense masked pieces, bit for bit
-        masked = model._mla_masked(q, source, ids, 20, 2060)
-        assert np.array_equal(bits(out[:, :, dense_stop:]), bits(masked[:, :, dense_stop:]))
-        assert model.calls["sparse_prefill_dense_pieces"] == 1  # the model's (the test's call is not a prompt)
+        assert len(calls) == 1 and calls[0]["rows"] == 20 - start and calls[0]["base"] == 2060
+        assert np.array_equal(calls[0]["ids"], np.array(ids[0, start:]))
+    else:  # 2048 <= pos < 3071: no row reaches the v2 law
+        assert calls == []
 
 
 def test_v2_threshold_splits_masked_and_fused_rows_by_position(fake_v2):
@@ -1075,19 +1088,18 @@ def test_v2_threshold_splits_masked_and_fused_rows_by_position(fake_v2):
     assert model.calls["sparse_attention_gathered"] == 0 and model.calls["sparse_prefill_gathered_blocks"] == 0
 
 
-def test_v2_masked_middle_keeps_its_128_query_piece_places(fake_v2):
+def test_v2_chunk_crossing_2048_below_the_threshold_is_one_reference_call(fake_v2):
     calls, state = fake_v2
     state["mode"] = "cheap"
     weights = Weights()
     model = mla_model(weights, **SPARSE, sparse_prefill="gathered_v2_from_5120")
     q, ids, source, out = v2_prompt(model, 1900, 300)
-    # dense_stop = 148 (blocks of 64: 64, 64, 20), masked [148, 300) from the aligned piece at 128.
-    assert [c["rows"] for c in calls] == [64, 64, 20]
-    assert model.calls["sparse_prefill_fused_v2_blocks"] == 3
+    # Every position is below 5120: the whole chunk is the reference's masked
+    # pieces (3 x 128-query pieces), no fused launch, whatever the 2048 crossing.
+    assert calls == [] and model.calls["sparse_prefill_fused_v2_blocks"] == 0
+    assert model.calls["sparse_prefill_dense_pieces"] == 3
     reference = model._mla_masked(q, source, ids, 300, 2200)
-    assert np.array_equal(bits(out[:, :, 148:]), bits(reference[:, :, 148:]))
-    with pytest.raises(ValueError, match="128-query boundary"):
-        model._mla_masked(q, source, ids, 300, 2200, start_query=20)
+    assert np.array_equal(bits(out), bits(reference))
 
 
 def test_v1_prompt_law_is_untouched_by_the_v2_wiring(fake_v2):
@@ -1143,7 +1155,7 @@ def test_adapter_v2_profiles_mla_glue_default_and_refusals():
     assert decode.kernel_policy["glm53_mla_fused"] == "decode_v1"
     assert decode.profile.endswith(":mla_fused=decode_v1:indexer_pools=incremental_v1"
                                    ":indexer_select=topk_v1_kernel:sparse_attention=fused_v2"
-                                   ":sparse_prefill=gathered_v1_8k")
+                                   ":sparse_prefill=gathered_f16_from_8192")
     _check_mla_fused({"glm53_mla_fused": "decode_v1", "glm53_indexer_pools": "incremental_v1",
                       "glm53_indexer_select": "topk_v1_kernel", "glm53_sparse_attention": "fused_v2"})
     with pytest.raises(ValueError, match="unsupported"):
@@ -1195,3 +1207,127 @@ def test_v2_workspace_budget_books_partials_not_gathered_rows():
     planning = Glm53GGUFAdapter.planning_cache_budget(config, mtp=False)
     assert planning.sparse_workspace_bytes == 64 * row + 8 * row
     assert planning.sparse_workspace_bytes >= v1_block + v1_group
+    # gathered_f16_from_<n> (the default prompt law since 2026-11-02) is priced
+    # at the fused_v2 figure: 33.7 MB of partials per block plus the chunk's
+    # half latent and q copies fit under it to ~230K visible rows.
+    f16 = Glm53CacheBudget.from_config(config, kernel_policy={
+        **pools, "glm53_sparse_prefill": "gathered_f16_from_8192", "glm53_sparse_attention": "gathered_v1"})
+    assert f16.sparse_workspace_bytes == 64 * row + v1_group
+    assert 64 * row >= 64 * 4 * 64 * 514 * 4 + 230_000 * 512 * 2
+
+
+# ---- glm53_mla_prompt=expanded_f16_v1 ------------------------------------------
+
+
+def test_mla_prompt_policy_is_validated_and_off_by_default():
+    weights = Weights()
+    assert mla_model(weights, **SPARSE).mla_prompt == "reference"
+    assert mla_model(weights, **SPARSE, mla_prompt="expanded_f16_v1").mla_prompt == "expanded_f16_v1"
+    with pytest.raises(ValueError, match="MLA prompt policy"):
+        mla_model(weights, **SPARSE, mla_prompt="expanded_f32_v1")
+    assert set(gguf.MLA_PROMPT_COUNTERS) <= set(mla_model(weights, **SPARSE).calls)
+
+
+def test_expanded_f16_prompt_law_matches_the_reference_within_fp16_and_only_at_prompt_time():
+    """A dense chunk (T <= 2048): every row un-absorbed in fp16, output the
+    per-head 256-wide rows; equal to the reference consumer through v_b to
+    fp16 tolerance; decode rows and the per-head q are untouched."""
+    weights = Weights()
+    reference = mla_model(weights, **SPARSE)
+    expanded = mla_model(weights, **SPARSE, mla_prompt="expanded_f16_v1")
+    with gguf.sparse_attention_phase("prompt"):
+        want = reference._mla(hidden(5, 20), committed(6, 10), PREFIX, frontier=10, _return_pre_output=True)
+        got = expanded._mla(hidden(5, 20), committed(6, 10), PREFIX, frontier=10, _return_pre_output=True)
+    assert got.shape == want.shape == (1, 20, 64 * 256)
+    np.testing.assert_allclose(np.array(got), np.array(want), rtol=5e-2, atol=5e-3)
+    assert expanded.calls["mla_prompt_expanded_rows"] == 20 and expanded.calls["mla_prompt_expanded_calls"] == 1
+    assert expanded.calls["sparse_attention_mask"] == 0 and not expanded._prompt_expanded
+    # Decode rows keep the absorbed law bit for bit.
+    d_want = reference._mla(hidden(7, 1), committed(8, 30), PREFIX, frontier=30, _return_pre_output=True)
+    d_got = expanded._mla(hidden(7, 1), committed(8, 30), PREFIX, frontier=30, _return_pre_output=True)
+    assert np.array_equal(bits(d_got), bits(d_want))
+    assert expanded.calls["mla_prompt_expanded_rows"] == 20
+
+
+def test_expanded_f16_prompt_law_hands_selected_rows_to_the_gathered_law():
+    """A chunk crossing the gathered threshold: rows below it expanded, rows
+    at or past it on the loaded gathered consumer (absorbed q, then v_b)."""
+    weights = Weights()
+    reference = mla_model(weights, **SPARSE, sparse_prefill="gathered_v1_all")
+    expanded = mla_model(weights, **SPARSE, sparse_prefill="gathered_v1_all", mla_prompt="expanded_f16_v1")
+    with gguf.sparse_attention_phase("prompt"):
+        want = reference._mla(hidden(9, 20), committed(10, 2040), PREFIX, frontier=2040, _return_pre_output=True)
+        got = expanded._mla(hidden(9, 20), committed(10, 2040), PREFIX, frontier=2040, _return_pre_output=True)
+    # gathered_v1_all: rows with pos + 1 >= 2049, i.e. the last 12 of the 20.
+    assert expanded.calls["mla_prompt_expanded_rows"] == 8
+    assert expanded.calls["sparse_prefill_gathered_blocks"] == reference.calls["sparse_prefill_gathered_blocks"] == 1
+    np.testing.assert_allclose(np.array(got[:, 8:]), np.array(want[:, 8:]), rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(np.array(got[:, :8]), np.array(want[:, :8]), rtol=5e-2, atol=5e-3)
+
+
+def test_expanded_flag_never_outlives_the_prepare_that_set_it():
+    """A standalone prompt-phase _mla_prepare (tree rows, tests) sets the
+    flag; the next _mla must prepare its own q, not inherit it."""
+    weights = Weights()
+    expanded = mla_model(weights, **SPARSE, mla_prompt="expanded_f16_v1")
+    with gguf.sparse_attention_phase("prompt"):
+        q, _, _ = expanded._mla_prepare(hidden(5, 20), committed(6, 10), PREFIX, frontier=10)
+    assert q.shape[-1] == 256 and expanded._prompt_expanded
+    reference = mla_model(weights, **SPARSE)
+    want = reference._mla(hidden(7, 1), committed(8, 30), PREFIX, frontier=30, _return_pre_output=True)
+    got = expanded._mla(hidden(7, 1), committed(8, 30), PREFIX, frontier=30, _return_pre_output=True)
+    assert np.array_equal(bits(got), bits(want)) and not expanded._prompt_expanded
+    assert expanded.calls["mla_prompt_expanded_rows"] == 0
+
+
+# ---------------------------------------------------------------------------
+# gathered_f16_from_<n> (2026-11-02): the fp16-operand gathered kernel on the
+# prompt rows at or past the threshold; rows below it keep the reference dense
+# pieces; decode keeps sparse_attention's fp32 law. Kernel stand-in: fake_v2.
+
+@pytest.mark.parametrize("threshold,start", [("gathered_f16_from_2049", 8), ("gathered_f16_from_3072", 20)])
+def test_f16_rows_below_the_threshold_are_the_reference_dense_pieces(fake_v2, threshold, start):
+    calls, _ = fake_v2
+    weights = Weights()
+    model = mla_model(weights, **SPARSE, sparse_prefill=threshold)
+    q, ids, source, out = v2_prompt(model, 2040, 20)
+    assert ids is not None
+    masked = model._mla_masked(q, source, ids, start, 2060)
+    assert np.array_equal(bits(out[:, :, :start]), bits(masked))
+    assert model.calls["sparse_prefill_dense_pieces"] == 1
+    assert model.calls["sparse_attention_fused_v2"] == 0 and model.calls["sparse_attention_fused_v2_rows"] == 0
+    if start < 20:
+        assert len(calls) == 1 and calls[0]["rows"] == 20 - start and calls[0]["base"] == 2060
+        assert calls[0]["half"] is True and calls[0]["dtype"] == mx.float16
+        assert np.array_equal(calls[0]["ids"], np.array(ids[0, start:]))
+        assert model.calls["sparse_attention_fused_f16"] == 1
+        assert model.calls["sparse_attention_fused_f16_rows"] == 20 - start
+        assert model.calls["sparse_prefill_fused_f16_blocks"] == 1
+    else:
+        assert calls == [] and model.calls["sparse_attention_fused_f16"] == 0
+
+
+def test_f16_prompt_law_leaves_decode_on_the_fp32_gathered_law(fake_v2):
+    calls, _ = fake_v2
+    weights = Weights()
+    model = mla_model(weights, **SPARSE, sparse_prefill="gathered_f16_from_2049")
+    reference = mla_model(weights, **SPARSE, sparse_prefill="gathered_v1_8k")
+    # A decode row past 2048 keys: gathered_v1 in both models, no kernel call.
+    got = model._mla(hidden(50, 1), committed(51, 2070), PREFIX, frontier=2070, _return_pre_output=True)
+    want = reference._mla(hidden(50, 1), committed(51, 2070), PREFIX, frontier=2070, _return_pre_output=True)
+    assert np.array_equal(bits(got), bits(want)) and calls == []
+    assert model.calls["sparse_attention_gathered"] == 1 and model.calls["sparse_attention_fused_f16"] == 0
+
+
+def test_f16_prompt_law_under_the_expanded_prompt_law_takes_the_selected_rows(fake_v2):
+    """glm53_mla_prompt=expanded_f16_v1 with gathered_f16_from_2049: rows below
+    the threshold expanded, rows at or past it through the fp16 kernel."""
+    calls, _ = fake_v2
+    weights = Weights()
+    model = mla_model(weights, **SPARSE, sparse_prefill="gathered_f16_from_2049", mla_prompt="expanded_f16_v1")
+    with gguf.sparse_attention_phase("prompt"):
+        out = model._mla(hidden(9, 20), committed(10, 2040), PREFIX, frontier=2040, _return_pre_output=True)
+    assert out.shape == (1, 20, 64 * 256)
+    assert model.calls["mla_prompt_expanded_rows"] == 8
+    assert len(calls) == 1 and calls[0]["rows"] == 12 and calls[0]["half"] is True
+    assert model.calls["sparse_attention_fused_f16_rows"] == 12 and model.calls["sparse_prefill_gathered_blocks"] == 0

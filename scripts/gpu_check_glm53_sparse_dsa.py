@@ -722,7 +722,8 @@ def mask_consumer(q, latent, ids, mx):
     """The model's mask_reference consumer (Glm53GGUFModel._mla_masked), decode phase."""
     from mlx2.runtime.models.glm53_gguf import Glm53GGUFModel
 
-    stub = SimpleNamespace(calls=defaultdict(int), mla_serial_pieces=False)
+    stub = SimpleNamespace(calls=defaultdict(int), mla_serial_pieces=False,
+                           _prompt_mask=Glm53GGUFModel._prompt_mask)
     return Glm53GGUFModel._mla_masked(stub, q, latent, ids, q.shape[2], latent.shape[2])
 
 

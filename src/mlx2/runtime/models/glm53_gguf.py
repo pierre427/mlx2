@@ -18,7 +18,7 @@ from ..prefill_checkpoint_rows import select_checkpoint_rows
 from . import glm53_gguf_indexer as indexer
 from . import glm53_kv_append as kv_store
 from . import glm53_sparse_attention as sparse_attention
-from .cache import CacheList, KVCache, _cache_class_token, register_cache_class
+from .cache import CacheList, KVCache, _BaseCache, _cache_class_token, register_cache_class
 from .gated_delta import gated_delta_kernel, gated_delta_ops
 from .glm53_gguf_indexer import (
     TOPK,
@@ -38,10 +38,14 @@ SPARSE_POLICIES = {
     "indexer_select": ("argsort", "topk_v1", "topk_v1_kernel"),
     # fused_v2 and gathered_v2_from_<n> (docs/design/glm53-speed-round2.md
     # 1.1, 2.1): the v2 kernel law for decode rows and for prompt rows from
-    # position n (dense causal rows below 2049 included); opt-in, unqualified.
+    # position n (rows below n keep the reference prompt law, see
+    # _mla_prefill_v2); opt-in, unqualified.
     "sparse_attention": sparse_attention.POLICIES_ATTENTION[:1] + sparse_attention.DECODE_POLICIES,
+    # gathered_f16_from_<n> (2026-11-02): the fp16-operand fused kernel on the
+    # same prompt rows; prompt-only, decode keeps sparse_attention's law.
     "sparse_prefill": ("dense_reference", "gathered_v1_8k", "gathered_v1_16k", "gathered_v1_all",
-                       *(f"gathered_v2_from_{n}" for n in sparse_attention.PREFILL_POSITIONS_V2)),
+                       *(f"gathered_v2_from_{n}" for n in sparse_attention.PREFILL_POSITIONS_V2),
+                       *(f"gathered_f16_from_{n}" for n in sparse_attention.PREFILL_POSITIONS_F16)),
     "tree_rows_attention": ("per_row", "batched_v1"),
     "tree_frontier": ("clone", "tails_v1"),
 }
@@ -115,6 +119,9 @@ SPARSE_COUNTERS = (
     "sparse_attention_fused_v2_per_row_fallback",
     "sparse_attention_fused_v2_dense_rows",
     "sparse_prefill_fused_v2_blocks",
+    "sparse_attention_fused_f16",
+    "sparse_attention_fused_f16_rows",
+    "sparse_prefill_fused_f16_blocks",
     "tree_rows_attention_batched",
     "tree_rows_attention_per_row_fallback",
     "tree_frontier_materialized",
@@ -125,7 +132,15 @@ KV_APPEND_COUNTERS = ("kv_append_ring",)
 # row, pool completion, pool scores, gather + mask) in four kernels around the
 # unchanged projections, select kernel, q x pooled matmul and SDPA; same bits.
 MLA_FUSED_POLICIES = ("reference", "decode_v1")
-MLA_FUSED_COUNTERS = ("mla_fused", "mla_fused_dense", "mla_fused_pool", "mla_fused_declined")
+# glm53_mla_prompt: the prompt-phase dense MLA consumer. "expanded_f16_v1"
+# attends in the un-absorbed form (per-head K/V expanded from the latent
+# through fp16-decoded k_b/v_b, MLX's fused D=256 fp16 attention) for the
+# rows below the gathered threshold; selected rows and decode keep the
+# absorbed fp32 law. FP16 operands: the nax_fp16 tiles' class.
+MLA_PROMPT_POLICIES = ("reference", "expanded_f16_v1")
+MLA_PROMPT_COUNTERS = ("mla_prompt_expanded_rows", "mla_prompt_expanded_calls")
+MLA_FUSED_COUNTERS = ("mla_fused", "mla_fused_dense", "mla_fused_pool", "mla_fused_declined",
+                      "mla_fused_not_candidate")
 
 
 def check_sparse_policy(policy):
@@ -175,8 +190,13 @@ def sparse_phase():
     return _SPARSE_PHASE.get()
 
 
-class Glm53KDACache:
-    """Exact conv + vector-decay recurrent state; restore only at checkpoints."""
+class Glm53KDACache(_BaseCache):
+    """Exact conv + vector-decay recurrent state; restore only at checkpoints.
+
+    A ``_BaseCache`` so the engine's optional lifecycle hooks (speculation
+    start/stop, state checkpoints, padded-row preparation) are the base
+    no-ops rather than AttributeErrors mid-request on a route that calls them.
+    """
 
     cache_operations_contract = CacheOperationsContract(
         family="glm53-kda",
@@ -278,7 +298,6 @@ class Glm53KDACache:
             raise ValueError("GLM-5.3 recurrent checkpoint identity changed")
 
 
-register_cache_class(Glm53KDACache)
 
 
 class Glm53LatentQ8Cache:
@@ -523,7 +542,7 @@ class Glm53GGUFModel:
         indexer_select="argsort", sparse_attention="mask_reference", sparse_prefill="dense_reference",
         tree_rows_attention="per_row", tree_frontier="clone", router="reference",
         kda_small="reference", kv_append="reference", kda_fused="reference", hc_fused_policy="reference",
-        mla_fused="reference", f32_weights="reference",
+        mla_fused="reference", f32_weights="reference", mla_prompt="reference",
     ):
         if math_policy not in ("ordinary", "reference"):
             raise ValueError("unknown GLM-5.3 math policy")
@@ -541,6 +560,8 @@ class Glm53GGUFModel:
             raise ValueError(f"unsupported GLM-5.3 MLA fused policy {mla_fused!r}")
         if f32_weights not in F32_WEIGHT_POLICIES:
             raise ValueError(f"unsupported GLM-5.3 F32 weight policy {f32_weights!r}")
+        if mla_prompt not in MLA_PROMPT_POLICIES:
+            raise ValueError(f"unsupported GLM-5.3 MLA prompt policy {mla_prompt!r}")
         sparse = {
             "indexer_pools": indexer_pools,
             "indexer_select": indexer_select,
@@ -561,11 +582,16 @@ class Glm53GGUFModel:
         self.kda_group = kda_group
         self.mla_group = mla_group
         self.router = router
+        # Research only: routed experts per token (the checkpoint's own is 8).
+        # A smaller value is an approximate route for speed probes, never served.
+        self.routed_topk = 8
         self.kda_small = kda_small
         self.kda_fused = kda_fused
         self.hc_fused_policy = hc_fused_policy
         self.mla_fused = mla_fused
         self.f32_weights = f32_weights
+        self.mla_prompt = mla_prompt
+        self._prompt_expanded = False
         # Storage law of the MLA latent/raw planes: "reference" appends in
         # place, which under pipelined decode copies the whole plane every
         # token (the step in flight still holds it); "rotate_v1" rotates
@@ -600,6 +626,7 @@ class Glm53GGUFModel:
             "prompt_layer_evals": 0,
             **{name: 0 for name in KV_APPEND_COUNTERS},
             **{name: 0 for name in MLA_FUSED_COUNTERS},
+            **{name: 0 for name in MLA_PROMPT_COUNTERS},
         }
 
     def _embed_tokens(self, inputs):
@@ -852,6 +879,9 @@ class Glm53GGUFModel:
         """
         b, length, _ = x.shape
         tree = hasattr(state, "latent_source")
+        # The flag describes this call's q only; a standalone prepare (tree
+        # rows, tests) must never hand a later _mla a stale representation.
+        self._prompt_expanded = False
         if frontier is None:
             frontier = state.offset if tree else state[1].offset
         project = lambda value, name: self._linear(value, prefix, name)
@@ -903,10 +933,69 @@ class Glm53GGUFModel:
         if type(frontier) is int and frontier + length != total:
             raise ValueError("GLM-5.3 MLA frontier differs from its latent plane")
         self.calls["pooled_indexer"] += int(selected is not None)
+        if (self.mla_prompt == "expanded_f16_v1" and sparse_phase() == "prompt" and not tree
+                and not isinstance(latent, tuple)):
+            # The expanded law consumes the per-head q; the absorbed q is
+            # built for the selected rows only, inside _mla_expanded_prompt.
+            self._prompt_expanded = True
+            return q.transpose(0, 2, 1, 3), selected, latent
         q = self.weights.grouped(q, prefix + ".attn_k_b.weight", groups=64).transpose(
             0, 2, 1, 3
         )
         return q, selected, latent
+
+    @staticmethod
+    def _prompt_mask(selected, start, stop, seen, total, length, b):
+        """The dense consumer's boolean mask for queries [start, stop) over
+        the first ``seen`` keys: causal when ``selected`` is None, otherwise
+        the put_along_axis mask of the rows' ids (-1 padding dumped past seen)."""
+        if selected is None:
+            pos = total - length + mx.arange(start, stop)
+            return (mx.arange(seen)[None, :] <= pos[:, None])[None, None]
+        ids = selected[:, start:stop]
+        safe = mx.where(ids >= 0, ids, seen)
+        mask = mx.zeros((b, stop - start, seen + 1), dtype=mx.bool_)
+        return mx.put_along_axis(mask, safe, mx.array(True), axis=-1)[..., :seen][:, None]
+
+    def _mla_expanded_prompt(self, q_heads, selected, source, prefix):
+        """glm53_mla_prompt=expanded_f16_v1 for one prompt chunk: rows below
+        the gathered threshold attend un-absorbed in fp16 - K = latent @ k_b,
+        V = latent @ v_b^T per head (64 x 256), MLX's fused D=256 attention
+        over the trimmed keys with the dense consumer's mask - and come out
+        as the per-head 256-wide output (no v_b pass); rows at or past the
+        threshold take the loaded gathered law on the absorbed q, then v_b.
+        Returns (b, L, 16384), the attn_output input."""
+        b, length = q_heads.shape[0], q_heads.shape[2]
+        total = source.shape[2]
+        start = (length if selected is None else sparse_attention.prefill_gathered_start(
+            total, length, sparse_attention.PREFILL_THRESHOLDS[self.sparse_prefill]))
+        pieces = []
+        if start:
+            k_b = self.weights.grouped_decoded(prefix + ".attn_k_b.weight", groups=64, dtype=mx.float16)
+            v_b = self.weights.grouped_decoded(prefix + ".attn_v_b.weight", groups=64, dtype=mx.float16)
+            seen = total - length + start  # the last expanded row's visible keys
+            latent16 = source[0, :, :seen].astype(mx.float16)  # (1, seen, 512)
+            keys = mx.matmul(latent16, k_b)[None]  # (1, 64, seen, 256): latent @ W_kb[h]
+            values = mx.matmul(latent16, mx.swapaxes(v_b, 1, 2))[None]  # latent @ W_vb[h]^T
+            mask = self._prompt_mask(selected, 0, start, seen, total, length, b)
+            out = mx.fast.scaled_dot_product_attention(
+                q_heads[:, :, :start].astype(mx.float16), keys, values, scale=256**-0.5, mask=mask)
+            pieces.append(out.astype(mx.float32).transpose(0, 2, 1, 3).reshape(b, start, -1))
+            self.calls["mla_prompt_expanded_rows"] += start
+            self.calls["mla_prompt_expanded_calls"] += 1
+        if start < length:
+            q_abs = self.weights.grouped(
+                q_heads[:, :, start:].transpose(0, 2, 1, 3), prefix + ".attn_k_b.weight", groups=64
+            ).transpose(0, 2, 1, 3)
+            law = sparse_attention.prefill_law(self.sparse_prefill)
+            gathered = sparse_attention.sparse_prefill(
+                q_abs, source, selected[:, start:], counters=self.calls,
+                **({"block": sparse_attention.PREFILL_BLOCK_V2, "policy": law}
+                   if law in ("fused_v2", "fused_f16") else {}))
+            gathered = self.weights.grouped(
+                gathered.transpose(0, 2, 1, 3), prefix + ".attn_v_b.weight", groups=64)
+            pieces.append(gathered.reshape(b, length - start, -1))
+        return pieces[0] if len(pieces) == 1 else mx.concatenate(pieces, axis=1)
 
     def _mla_select_cache(self, x, qr, cache, prefix, projected, total):
         """Append the raw indexer rows to ``cache[1]`` once and select."""
@@ -916,7 +1005,16 @@ class Glm53GGUFModel:
             if selected is not None:
                 self.calls["indexer_pool_recompute_full"] += 1
                 self.calls["indexer_select_argsort"] += 1
-            return selected
+        else:
+            selected = self._mla_select_cache_pools(x, qr, cache, prefix, projected, total)
+        # The two planes append separately; ids over a raw plane that is not
+        # at the latent frontier would gather shifted rows silently (the NextN
+        # head cache has no KDA offset guarding it).
+        if type(cache[1].offset) is int and cache[1].offset != total:
+            raise ValueError("GLM-5.3 raw indexer plane differs from its latent plane")
+        return selected
+
+    def _mla_select_cache_pools(self, x, qr, cache, prefix, projected, total):
         pools = None
         if self.indexer_pools in INCREMENTAL_POOLS:
             # Fresh and serialized-restored caches alike: the first extend
@@ -996,38 +1094,23 @@ class Glm53GGUFModel:
             self.calls["indexer_pool_recompute_full" if pools.last_from == 0 else "indexer_pool_extend"] += 1
             self.calls["indexer_pools_computed"] += pools.last_computed
 
-    def _mla_masked(self, q, latent, selected, stop_query, total, start_query=0):
-        """Today's consumer for queries [start_query, stop_query): 128-query
-        pieces, key trim, boolean put_along_axis mask (or the causal mask when
+    def _mla_masked(self, q, latent, selected, stop_query, total):
+        """Today's consumer for queries [0, stop_query): 128-query pieces, key
+        trim, boolean put_along_axis mask (or the causal mask when
         ``selected`` is None) and dense SDPA. A query with no valid id gets a
         finite row here (MLX's SDPA maps a boolean mask's false entries to
-        finfo.min), not NaN; it is the reference law and stays as it is.
-        ``start_query`` (a multiple of 128, so the pieces keep their places)
-        skips leading rows another consumer computes."""
-        if start_query % 128:
-            raise ValueError("GLM-5.3 masked pieces start on a 128-query boundary")
+        finfo.min), not NaN; it is the reference law and stays as it is."""
         b, length = q.shape[0], q.shape[2]
         q8 = isinstance(latent, tuple)
         pieces = []
-        for start in range(start_query, stop_query, 128):
+        for start in range(0, stop_query, 128):
             stop = min(start + 128, stop_query)
             # A piece reads only the keys its last query can see: the later
             # keys were fully masked, and scoring them made prefill attention
             # work grow with chunk x context. Bit-identical (w1-1k/w1-2048).
             seen = total - length + stop
             keys = tuple(p[:, :, :seen] for p in latent) if q8 else latent[:, :, :seen]
-            if selected is None:
-                pos = total - length + mx.arange(start, stop)
-                mask = mx.arange(seen)[None, :] <= pos[:, None]
-                mask = mask[None, None]
-            else:
-                ids = selected[:, start:stop]
-                # Extra dump column keeps -1 padding outside the visible keys.
-                safe = mx.where(ids >= 0, ids, seen)
-                mask = mx.zeros((b, stop - start, seen + 1), dtype=mx.bool_)
-                mask = mx.put_along_axis(mask, safe, mx.array(True), axis=-1)[
-                    ..., :seen
-                ][:, None]
+            mask = self._prompt_mask(selected, start, stop, seen, total, length, b)
             q_piece = q[:, :, start:stop]
             if pieces and getattr(self, "mla_serial_pieces", False):
                 # Research: order the pieces so one piece's unfused 512-wide
@@ -1058,8 +1141,9 @@ class Glm53GGUFModel:
         q8 = isinstance(source, tuple)
         total = source[0].shape[2] if q8 else source.shape[2]
         if sparse_phase() == "prompt":
-            if sparse_attention.prefill_law(self.sparse_prefill) == "fused_v2":
-                return self._mla_prefill_v2(q, selected, source, total)
+            law = sparse_attention.prefill_law(self.sparse_prefill)
+            if law in ("fused_v2", "fused_f16"):
+                return self._mla_prefill_v2(q, selected, source, total, law)
             if selected is None:
                 return self._mla_masked(q, source, None, length, total)
             start = sparse_attention.prefill_gathered_start(
@@ -1091,43 +1175,35 @@ class Glm53GGUFModel:
             raise ValueError(Q8_REFUSAL)
         return self._sparse_decode(q, source, selected)
 
-    def _mla_prefill_v2(self, q, selected, source, total):
-        """Prompt rows under ``gathered_v2_from_<n>``, by query position alone:
+    def _mla_prefill_v2(self, q, selected, source, total, law="fused_v2"):
+        """Prompt rows under ``gathered_v2_from_<n>`` (``law="fused_v2"``) or
+        ``gathered_f16_from_<n>`` (``law="fused_f16"``, the fp16-operand
+        kernel on the same rows), by query position alone:
 
-        * ``pos < 2048`` (``pos + 1 < 2049``; every visible key fits): the
-          fused_v2 kernel with dense causal ids (``dense_row_ids``), whether or
-          not this chunk selects - a chunk that crosses 2048 keys has ids for
-          these rows, a chunk below it has none, and both must give the same
-          bits, so cold and warm chunkings agree;
-        * ``2048 <= pos < n - 1``: the dense ``_mla_masked`` pieces (round 1,
-          5.1), as under the v1 thresholds;
-        * ``pos >= n - 1``: fused_v2 blocks of PREFILL_BLOCK_V2 on the selected ids.
+        * ``pos + 1 < n``: the reference prompt law, the dense ``_mla_masked``
+          pieces (round 1, 5.1), exactly as under the v1 thresholds - rows
+          below 2048 included. Round 2 (WP5) sent those rows through the
+          fused_v2 kernel with dense causal ids, which put every prompt's first
+          2048 rows x 11 layers under the new law below the threshold: at 8K,
+          where ``gathered_v2_from_12288`` selects nothing, the arm still
+          flipped 2 of 6 prompts against a 0-of-6 control
+          (wp5-t12kr-b8k-e71e4af46, e71e4af46). The v2 law now differs from
+          the reference only on the rows it is meant to speed up;
+        * ``pos + 1 >= n``: fused_v2 blocks of PREFILL_BLOCK_V2 on the selected ids.
         """
         q8 = isinstance(source, tuple)
         if q8:  # the gathered sparse paths require the fp32 latent plane
             raise ValueError(Q8_REFUSAL)
         length = q.shape[2]
-        first = total - length
-        dense_stop = min(length, max(0, TOPK - first))
         start = (length if selected is None else sparse_attention.prefill_gathered_start(
             total, length, sparse_attention.PREFILL_THRESHOLDS[self.sparse_prefill]))
-        start = max(start, dense_stop)
         pieces = []
-        if dense_stop:
-            # The source's first ``first + dense_stop <= 2048`` rows: the
-            # query rows are its last rows, as the dense-ids path requires.
-            self.calls["sparse_attention_fused_v2_dense_rows"] += dense_stop
-            pieces.append(sparse_attention.sparse_prefill(
-                q[:, :, :dense_stop], source[:, :, : first + dense_stop], None,
-                block=sparse_attention.PREFILL_BLOCK_V2, counters=self.calls, policy="fused_v2"))
-        if start > dense_stop:
-            aligned = dense_stop - dense_stop % 128
-            masked = self._mla_masked(q, source, selected, start, total, start_query=aligned)
-            pieces.append(masked[:, :, dense_stop - aligned :])
+        if start:
+            pieces.append(self._mla_masked(q, source, selected, start, total))
         if start < length:
             pieces.append(sparse_attention.sparse_prefill(
                 q[:, :, start:], source, selected[:, start:],
-                block=sparse_attention.PREFILL_BLOCK_V2, counters=self.calls, policy="fused_v2"))
+                block=sparse_attention.PREFILL_BLOCK_V2, counters=self.calls, policy=law))
         return pieces[0] if len(pieces) == 1 else mx.concatenate(pieces, axis=2)
 
     def _sparse_decode(self, q, source, selected):
@@ -1168,6 +1244,11 @@ class Glm53GGUFModel:
             if out is not None:
                 return self._mla_finish(out, prefix, _return_pre_output=_return_pre_output)
         q, selected, source = self._mla_prepare(x, state, prefix, frontier=frontier)
+        if self._prompt_expanded:
+            self._prompt_expanded = False
+            out = self._mla_expanded_prompt(q, selected, source, prefix)
+            self.calls["mla"] += 1
+            return out if _return_pre_output else self._linear(out, prefix, "attn_output.weight")
         out = self._mla_attend(q, selected, source)
         return self._mla_finish(out, prefix, _return_pre_output=_return_pre_output)
 
@@ -1204,6 +1285,12 @@ class Glm53GGUFModel:
         """
         from . import glm53_mla_fused as fused
 
+        if x.shape[:2] != (1, 1) or sparse_phase() == "prompt":
+            # Prompt chunks and multi-row verify are not what the kernel is
+            # for; counted apart so "declined" means a gate, law or device
+            # refusal on a one-token decode row.
+            self.calls["mla_fused_not_candidate"] += 1
+            return None
         if not self._mla_fused_admits(x, state, frontier):
             self.calls["mla_fused_declined"] += 1
             return None
@@ -1327,8 +1414,8 @@ class Glm53GGUFModel:
         if getattr(self, "shared_fold", False):
             folded = self.weights.moe_with_shared(
                 x.reshape(-1, x.shape[-1]),
-                ids.reshape(-1, 8),
-                selected.reshape(-1, 8),
+                ids.reshape(-1, self.routed_topk),
+                selected.reshape(-1, self.routed_topk),
                 prefix,
                 names["fold"],
             )
@@ -1336,8 +1423,8 @@ class Glm53GGUFModel:
                 return folded.reshape(x.shape)
         routed = self.weights.moe(
             x.reshape(-1, x.shape[-1]),
-            ids.reshape(-1, 8),
-            selected.reshape(-1, 8),
+            ids.reshape(-1, self.routed_topk),
+            selected.reshape(-1, self.routed_topk),
             prefix,
         ).reshape(x.shape)
         return routed + shared("_shexp")
@@ -1392,26 +1479,26 @@ class Glm53GGUFModel:
 
         weight = self._f32_operand(router_name)
         bias = self.weights.array(prefix + ".exp_probs_b.bias")
-        if x.shape[:-1] == (1, 1) and glue.router_gemv_admits(x, weight, bias, 8):
+        if x.shape[:-1] == (1, 1) and glue.router_gemv_admits(x, weight, bias, self.routed_topk):
             self.calls["router_fused_v2"] += 1
             # A fresh counter per launch (glue.fused_router_gemv default).
-            return glue.fused_router_gemv(x, weight, bias, topk=8, scale=2.5)
+            return glue.fused_router_gemv(x, weight, bias, topk=self.routed_topk, scale=2.5)
         self.calls["router_fused_v2_declined"] += 1
         return None
 
     def _route(self, logits, prefix):
-        """Top-8 expert ids and their normalized x2.5 unbiased scores per row."""
+        """Top-k (8) expert ids and their normalized x2.5 unbiased scores per row."""
         bias = self.weights.array(prefix + ".exp_probs_b.bias")
         if getattr(self, "router", "reference") in ("fused_v1", "fused_v2"):
             from .glm53_glue_metal import fused_router, router_admits
 
-            if router_admits(logits, bias, 8):
+            if router_admits(logits, bias, self.routed_topk):
                 self.calls["router_fused"] += 1
-                return fused_router(logits, bias, topk=8, scale=2.5)
+                return fused_router(logits, bias, topk=self.routed_topk, scale=2.5)
             self.calls["router_fused_declined"] += 1
         scores = gate_sigmoid(logits)
         choice = scores + bias
-        ids = mx.argsort(-choice, axis=-1)[..., :8].astype(mx.uint32)
+        ids = mx.argsort(-choice, axis=-1)[..., :self.routed_topk].astype(mx.uint32)
         selected = mx.take_along_axis(scores, ids, axis=-1)
         selected = selected / selected.sum(-1, keepdims=True) * 2.5
         return ids, selected

@@ -276,6 +276,10 @@ class FlashNextPolicy:
     # Candidate policies have a separate qualification/cache identity.
     tensorfold_prefill: bool = False
     tensorfold_prefill_backend: str = "native"
+    # Not adopted: chunk-sparse GDN prefill (SparseGDN, arXiv 2610.41420).
+    # It is approximate, and its sparse final state seeds decode. The
+    # recurrence is only 4.5-6.4% of 8K-64K TTFT on 25c2da42, so its 1.94x
+    # kernel gain would buy <= ~3% (qualification/runs/fn-gdn-share-20261102).
     gdn_prefill_chunk: int = 0
     gdn_prefill_segment_rows: int = 2048
     # omlx #4052 fused attention rows (MLX_QWEN4_ATTN_FUSED_ROWS): one-request

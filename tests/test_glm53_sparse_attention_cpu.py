@@ -432,6 +432,103 @@ def test_fused_v2_policy_tables_and_prefill_law():
     assert sa.prefill_gathered_start(4096, 2048, sa.PREFILL_THRESHOLDS["gathered_v2_from_3072"]) == 1023
 
 
+def test_fused_f16_prompt_law_tables():
+    """gathered_f16_from_<n>: the fp16-operand kernel on the gathered prompt rows
+    from the same nine positions as v2; prompt-only (no decode or rows law)."""
+    assert sa.PREFILL_POSITIONS_F16 == sa.PREFILL_POSITIONS_V2
+    f16_values = [k for k in sa.PREFILL_THRESHOLDS if k.startswith("gathered_f16_from_")]
+    assert f16_values == [f"gathered_f16_from_{n}" for n in sa.PREFILL_POSITIONS_F16]
+    for value in f16_values:
+        assert sa.prefill_law(value) == "fused_f16"
+        assert sa.PREFILL_THRESHOLDS[value] == int(value.rsplit("_", 1)[1])
+    assert sa.PREFILL_LAWS == ("gathered_v1", "fused_v2", "fused_f16")
+    assert "fused_f16" not in sa.DECODE_POLICIES and "fused_f16" not in sa.POLICIES_ATTENTION
+    with pytest.raises(ValueError, match="unknown"):
+        sa.prefill_law("gathered_f16_from_9000")
+    q = mx.zeros((1, 64, 1, 512))
+    latent = mx.zeros((1, 1, 2100, 512))
+    ids = mx.zeros((1, 1, 2051), dtype=mx.int32)
+    with pytest.raises(ValueError, match="not a gathered law"):
+        sa.sparse_decode(q, latent, ids, policy="fused_f16")
+    with pytest.raises(ValueError, match="not a gathered law"):
+        sa.rows_attention(q, [(latent, ids)], policy="fused_f16")
+    with pytest.raises(RuntimeError, match="requires Metal"):
+        sa.sparse_prefill(q, latent, ids, policy="fused_f16")
+    status = sa.route_status()["policies"]["fused_f16"]
+    assert status["selected_by_default"] is False and status["prompt_only"] is True
+
+
+def test_fused_f16_spec_and_launch_plan():
+    spec = v2.kernel_spec()
+    assert spec["partial_flash"]["name"] == "mlx2_glm53_gathered_attention_flash"
+    assert spec["partial_flash"]["input_names"] == spec["partial"]["input_names"]
+    assert spec["partial_flash"]["output_names"] == spec["partial"]["output_names"]
+    source = spec["partial_flash"]["source"]
+    for needle in ("threadgroup T tile[4096]", "threadgroup float S[64 * SPLIT]",
+                   "threadgroup T* P = (threadgroup T*)S", "threadgroup float D[8 * 64]", "threadgroup uint BAD[64]",
+                   "const device T* qrow",
+                   "simdgroup_matrix<T, 8, 8> qf", "simdgroup_matrix<T, 8, 8> kf", "simdgroup_matrix<T, 8, 8> pf",
+                   "simdgroup_matrix<T, 8, 8> vf", "simdgroup_float8x8 s = make_filled_simdgroup_matrix<float, 8, 8>(0.0f)",
+                   "vec<T, 4>(0)", "min(id, LAST)",
+                   "mo == -INFINITY ? 0.0f : metal::precise::exp(mo - mn)", "L[h] = L[h] * a + l", "const float mn = max(mo, ms)",
+                   "D[(h >> 3) * 64 + (h & 7) * 9] = a", "BAD[h] |= bad", "simdgroup_multiply(t, df, o[j])",
+                   "const bool poison = isnan(x) || x == INFINITY", "ms = max(ms, poison ? -INFINITY : x)",
+                   "(valid && !empty && !poison)",
+                   "partial_m[slot] = BAD[tid] ? NAN : (empty ? -INFINITY : M[tid])",
+                   "partial_l[slot] = BAD[tid] ? 1.0f : (empty ? 0.0f : L[tid])",
+                   "float pv[SPLIT / 8]", "P[h * SPLIT + lane8 + 8 * i] = T(pv[i])", "TOFF + id - T0",
+                   "if (first >= WIDTH) break"):
+        assert needle in source, needle
+    # The scores scratch is read as fp32 by every statistics lane before any
+    # lane writes P over it: one barrier between the two.
+    stats_read = source.index("const float x = valid ? srow[kk] * SCALE")
+    p_write = source.index("P[h * SPLIT + lane8 + 8 * i] = T(pv[i])")
+    assert "threadgroup_barrier(mem_flags::mem_threadgroup);" in source[stats_read:p_write]
+    assert v2.KINDS == ("partial", "flash_f16", "flash_f32") and v2.FLASH_OUTER == 4
+    plan = v2.launch_plan(1, 2051, kind="flash_f16")
+    assert plan["kernel"] == "partial_flash" and plan["dtype"] == mx.float16
+    assert plan["splits"] == 4 and plan["partial"]["grid"] == (1024 * 4, 1, 1)
+    assert plan["partial"]["output_shapes"][2] == (1, 64, 4, 512)
+    assert plan["threadgroup_bytes"] == 2 * 4096 + 4 * 64 * 64 + 4 * (8 * 64 + 3 * 64)
+    assert "thread_elements" not in source
+    assert dict(plan["template"])["INNER"] == 9 and dict(plan["template"])["T"] == mx.float16
+    assert v2.flash_plan(2051, 64, 4) == (4, 9) and v2.flash_plan(2051, 64, 64) == (33, 1)
+    assert v2.flash_plan(2051, 32, 8) == (8, 9)
+    # The fp32 twin at SPLIT 64 would need 35 KiB of threadgroup memory: refused, SPLIT 32 fits.
+    with pytest.raises(ValueError, match="threadgroup bytes"):
+        v2.launch_plan(3, 2051, kind="flash_f32", outer=2)
+    f32 = v2.launch_plan(3, 2051, kind="flash_f32", outer=2, split=32)
+    assert f32["dtype"] == mx.float32 and f32["splits"] == 2 and dict(f32["template"])["INNER"] == 33
+    assert f32["threadgroup_bytes"] == 4 * 4096 + 4 * 64 * 32 + 4 * (8 * 64 + 3 * 64)
+    legacy = v2.launch_plan(1, 2051)
+    assert legacy["kernel"] == "partial" and legacy["threadgroup_bytes"] == 32768 and legacy["splits"] == 33
+    with pytest.raises(ValueError, match="kind"):
+        v2.launch_plan(1, 2051, kind="flash_bf16")
+    assert v2.F16_ABS_BOUND == 1e-3 and v2.F16_REL_RMS_BOUND == 2e-3
+    rounded = v2.half_rounded(np.array([1.0, 1.0 + 2**-12, 3.14159], np.float32))[0]
+    assert rounded.dtype == np.float32 and rounded[0] == 1.0 and rounded[1] == 1.0 and rounded[2] != np.float32(3.14159)
+
+
+def test_fused_f16_prefill_casts_once_and_blocks_equal_one_block(fake_metal):
+    rng = np.random.default_rng(23)
+    q, latent = big(rng, 90, 13)
+    ids = selection(rng, 90, 13, width=20, count=3)
+    counters = {}
+    small = sa.sparse_prefill(q, latent, ids, block=4, policy="fused_f16", counters=counters)
+    assert [c["rows"] for c in fake_metal] == [4, 4, 4, 1]
+    assert all(c["half"] for c in fake_metal)
+    assert all(c["dtypes"] == (mx.float16, mx.float16, mx.float16) for c in fake_metal)
+    assert counters == {"sparse_attention_fused_f16": 4, "sparse_attention_fused_f16_rows": 13,
+                        "sparse_prefill_fused_f16_blocks": 4}
+    whole = sa.sparse_prefill(q, latent, ids, block=13, policy="fused_f16")
+    assert np.array_equal(bits(small), bits(whole))
+    # Not the fp32 law's bits: the operands were rounded to half first.
+    fp32 = sa.sparse_prefill(q, latent, ids, block=13, policy="fused_v2")
+    assert not np.array_equal(bits(whole), bits(fp32))
+    # The fp32 law's calls are not half.
+    assert fake_metal[-1]["half"] is False and fake_metal[-1]["dtypes"][0] == mx.float32
+
+
 @pytest.mark.parametrize("pos", [0, 3, 2047])
 def test_dense_row_ids_keep_each_rows_causal_visibility(pos):
     ids = np.array(sa.dense_row_ids([pos]))
@@ -486,10 +583,11 @@ def spec_launch(calls):
     """Stand-in for the two kernels with the same ABI: the float64 oracle per row,
     rounded to fp32 (rows share nothing, as on the device)."""
 
-    def launch(q_rows, base, tails, ids, row_meta, split, dim_split):
+    def launch(q_rows, base, tails, ids, row_meta, split, dim_split, kind="partial", outer=None):
         meta = np.array(row_meta)
         calls.append({"rows": q_rows.shape[0], "base": base.shape[0], "tails": tails.shape[0],
-                      "meta": meta.tolist(), "ids": np.array(ids)})
+                      "meta": meta.tolist(), "ids": np.array(ids), "half": kind == "flash_f16", "kind": kind,
+                      "dtypes": (q_rows.dtype, base.dtype, tails.dtype)})
         return mx.array(v2.oracle(q_rows, base, tails, ids, meta).astype(np.float32))
 
     return launch
@@ -500,7 +598,8 @@ def fake_metal(monkeypatch):
     calls = []
     monkeypatch.setattr(v2, "require_metal", lambda: None)
     monkeypatch.setattr(v2, "_launch", spec_launch(calls))
-    monkeypatch.setattr(v2, "_GATE", {(v2.DEFAULT_SPLIT, v2.DEFAULT_DIM_SPLIT): True})
+    monkeypatch.setattr(v2, "_GATE", {(v2.DEFAULT_SPLIT, v2.DEFAULT_DIM_SPLIT, False): True,
+                                      (v2.DEFAULT_SPLIT, v2.DEFAULT_DIM_SPLIT, True): True})
     return calls
 
 

@@ -273,7 +273,9 @@ def test_gpu_declines_prompt_rows_wider_rows_and_other_laws(gpu):
     mx.eval(model._mla(x, cache[1], "blk.1", frontier=2300))
     with sparse_attention_phase("prompt"):
         mx.eval(model._mla(x[:, :1], cache[1], "blk.1", frontier=2302))
-    assert model.calls["mla_fused_declined"] == 2 and model.calls["mla_fused"] == 0
+    # Prompt rows and multi-row verify are not candidates, not declines.
+    assert model.calls["mla_fused_not_candidate"] == 2 and model.calls["mla_fused_declined"] == 0
+    assert model.calls["mla_fused"] == 0
 
 
 @metal
