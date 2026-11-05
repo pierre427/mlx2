@@ -48,13 +48,14 @@ VARIANTS = {
 # rather than a dedicated command-line switch. This is a review vocabulary,
 # not a statement that every registered model implements each feature.
 FEATURES = (
+    "oq4e_conversion",
     "source_engram_carry_tuple", "source_expert_direct_final_reads",
     "source_expert_decayed_retention", "native_fp_tensor_verify", "apc_inpass_checkpoints",
     "ling_optimizations", "ast_apcv2_current_source",
     "ling_kda_fusion_components", "ling_split_mla_components",
     "inkling_fused_ops", "inkling_q2_down_combine", "inkling_inline_relative_attention",
     "mtp_tree_pipeline",
-    "integer_exact_microscaling",
+    "integer_exact_microscaling", "exl3_upstream_weight_format",
     "resident_kernel_reload", "kimi_linear_supervised_lora_research",
     "kimi_router_score_profile_one_domain_prompt",
     "kimi_moe_behavior_research", "kimi_moe_loop_research",
@@ -106,6 +107,7 @@ FEATURES = (
     # omlx-layout V4.1 route (2026-11-04).
     "source_hc_mega", "omlx_expert_bank_gather",
     "omlx_layer_eval_async", "source_woa_mxfp8_storage",
+    "omlx_expert_bank_routed_decode", "omlx_prefill_scan_resistant",
     "compact_iq1_experts",
     "splash_iq1_decoder",
     "tiled_iq1_expert_arena", "gpu_expert_slot_routing",

@@ -83,3 +83,21 @@ def test_literal_loader_alias_and_keyword_package_are_resolved(tmp_path):
         "from importlib import import_module as load; load('.cache', package='sample')"
     )
     assert "cache.py" in source_closure(root, ["sample.entry"])
+
+
+def test_shipped_dispatcher_reviews_match_their_files():
+    # A stale pin silently drops every route to full-source identity.
+    import json
+    from pathlib import Path
+
+    import mlx2
+
+    root = Path(mlx2.__file__).parent
+    reviews = json.loads((root / "route_dispatch.json").read_text())["dispatchers"]
+    stale = {
+        module
+        for module, review in reviews.items()
+        if file_digest(root / (module.removeprefix("mlx2.").replace(".", "/") + ".py"))
+        != review["sha256"]
+    }
+    assert not stale

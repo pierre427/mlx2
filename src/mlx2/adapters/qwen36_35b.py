@@ -15,6 +15,7 @@ from ..process_env import (
     clear_inherited_profile,
     require_process_numerics,
 )
+from ..runtime.trellis.upstream import is_exl3, plan_checkpoint, read_storage
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from .qwen38_27b import (
     EAGER_DISPATCH_POLICY_KEYS,
@@ -158,6 +159,16 @@ def inspect_artifact(model_path: str | Path) -> dict:
     has_mtp = bool(mtp_keys)
     if has_mtp and config.get("mlx2_exl3") is not None:
         raise ValueError("EXL3 adapter slice supports ordinary artifacts without embedded MTP")
+    exl3_upstream = None
+    if is_exl3(config):
+        # Upstream ExLlamaV3 layout: admitted from headers, executed nowhere yet.
+        if config.get("mlx2_exl3") is not None:
+            raise ValueError("an upstream EXL3 checkpoint cannot carry the mlx2_exl3 marker")
+        if has_mtp:
+            raise ValueError("upstream EXL3 MTP tensors are not read yet")
+        exl3_upstream = plan_checkpoint(
+            path, weight_map, num_experts=text["num_experts"], storage=read_storage(path)
+        )
     if has_mtp and text.get("mtp_num_hidden_layers") != 1:
         raise ValueError("MTP tensors and configured head count disagree")
     if has_mtp:
@@ -204,6 +215,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "tokenizer_config.json",
         "chat_template.jinja",
         "generation_config.json",
+        *(("quantization_config.json",) if exl3_upstream is not None else ()),
     ):
         item = path / name
         if item.is_file():
@@ -220,6 +232,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "weight_map": weight_map,
         "has_mtp": has_mtp,
         "mtp_tensor_count": len(mtp_keys),
+        "exl3_upstream": exl3_upstream,
         "identity": {
             "path": str(path),
             "fingerprint": digest.hexdigest(),
@@ -852,6 +865,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             )
         self.weight_stream = None
         artifact = inspect_artifact(model_path)
+        if artifact.get("exl3_upstream") is not None:
+            receipt = json.dumps(artifact["exl3_upstream"].receipt(), sort_keys=True)
+            raise ValueError(f"upstream EXL3 execution is not implemented: {receipt}")
         self.skipped_affine_moe_defaults = {}
         if artifact["config"].get("mlx2_exl3") is None and expert_tables_lack_affine_format(artifact["weight_map"]):
             reason = "expert projections have no affine quantized tables"

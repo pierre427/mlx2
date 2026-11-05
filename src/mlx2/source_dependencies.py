@@ -283,6 +283,9 @@ def add_resources(root, files):
         nested.append(root / "adapters/assets")
     if "adapters/vlm_runtime.py" in files:
         nested.append(root / "adapters/vlm_contracts")
+    if "runtime/models/exl3.py" in files:
+        # The EXL3 Metal bodies live in a non-package subdirectory.
+        nested.append(root / "runtime/models/exl3_kernels")
     paths = [path for directory in directories for path in directory.iterdir()]
     paths.extend(path for directory in nested for path in directory.rglob("*"))
     for path in paths:

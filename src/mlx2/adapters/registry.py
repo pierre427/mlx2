@@ -307,6 +307,8 @@ def _qwen3_5_dense(path: Path, config: dict) -> AdapterResolution:
 def _qwen36_35b(path: Path, config: dict) -> AdapterResolution:
     text = config.get("text_config", config)
     if (text.get("num_hidden_layers"), text.get("hidden_size")) == (48, 3072):
+        if (config.get("quantization_config") or {}).get("quant_method") == "exl3":
+            raise ValueError("Qwen3.5 122B does not admit EXL3 checkpoints yet")
         module = importlib.import_module(".qwen35_122b", __package__)
         artifact = module.inspect_artifact(path)
         return AdapterResolution(
@@ -584,7 +586,14 @@ def _kimi_linear(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.KimiLinearAdapter, module.DESCRIPTOR, artifact)
 
 
+def _ripple(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".ripple", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.RippleAdapter, module.artifact_descriptor(artifact), artifact)
+
+
 _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
+    "ricursive": _ripple,
     "kimi_linear": _kimi_linear,
     "bert": _minilm,
     "qwen4_exp": _flash_next,
@@ -631,6 +640,11 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
 
 
 
+# Upstream ExLlamaV3 checkpoints keep their family's model_type; only these
+# resolvers read runtime/trellis/upstream.py, others refuse before loading.
+_EXL3_UPSTREAM_MODEL_TYPES = frozenset({"qwen3_5_moe"})
+
+
 def inspect_model(model_path: str | Path) -> AdapterResolution:
     path = Path(model_path).expanduser().resolve()
     config = json.loads((path / "config.json").read_text())
@@ -646,6 +660,13 @@ def inspect_model(model_path: str | Path) -> AdapterResolution:
     resolver = _RESOLVERS.get(model_type) if isinstance(model_type, str) else None
     if resolver is None:
         raise ValueError(f"No mlx2 adapter for model_type {model_type!r}")
+    quant = config.get("quantization_config")
+    if (
+        isinstance(quant, dict)
+        and quant.get("quant_method") == "exl3"
+        and model_type not in _EXL3_UPSTREAM_MODEL_TYPES
+    ):
+        raise ValueError(f"No mlx2 adapter admits EXL3 checkpoints of {model_type!r}")
     return resolver(path, config)
 
 

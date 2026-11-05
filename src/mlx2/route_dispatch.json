@@ -2,9 +2,9 @@
   "schema": 1,
   "dispatchers": {
     "mlx2.adapters.registry": {
-      "sha256": "07903bc2f12f475bfe0e66999fb1cf35997c8b8df42b16d2ffef2a72bf11b6c5",
+      "sha256": "3dba40f1820c1a72e1f9ee1f64d72fea81bcb0b2225547e4138abe3fe10430e9",
       "targets": [],
-      "reason": "Reviewed Inkling native adapter registration. The new dynamic target is the literal internal mlx2.adapters.inkling module; selected adapter/model roots define its math closure. Preserved current-main Muse descriptor selection during integration. Reviewed omlx-layout DeepSeek V4.1 branch (2026-11-04): configs carrying omlx_deepseek_v41 version 1 resolve to the literal internal mlx2.adapters.deepseek_v41_omlx module with its own pinned admission; every other deepseek_v41 config keeps the Source route."
+      "reason": "Reviewed Inkling native adapter registration. The new dynamic target is the literal internal mlx2.adapters.inkling module; selected adapter/model roots define its math closure. Preserved current-main Muse descriptor selection during integration. Reviewed omlx-layout DeepSeek V4.1 branch (2026-11-04): configs carrying omlx_deepseek_v41 version 1 resolve to the literal internal mlx2.adapters.deepseek_v41_omlx module with its own pinned admission; every other deepseek_v41 config keeps the Source route. Reviewed upstream EXL3 admission guard (2026-11-04): quantization_config quant_method exl3 refuses before resolution unless the model_type is in _EXL3_UPSTREAM_MODEL_TYPES, and the 122B branch refuses EXL3; no new dynamic import target. Reviewed Ripple resolver (2026-11-04, landed on main without a pin renewal): model_type ricursive resolves the literal internal mlx2.adapters.ripple module."
     },
     "mlx2.runtime.models.cache": {
       "sha256": "dd69c2a30559650fe1775cab5fdaa8f399fa11b09ba7837e04b90f542bb57c54",

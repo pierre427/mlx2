@@ -19,6 +19,10 @@ from typing import (
 
 from ..memory import bounded_settle
 
+# Operator override of the host service reserve (GiB), for a host dedicated to
+# one large model. Unset keeps the measured host-scaled rule.
+SERVICE_RESERVE_ENV = "MLX2_SERVICE_RESERVE_GIB"
+
 
 @dataclass(frozen=True)
 class PagedMemoryEstimate:
@@ -335,6 +339,18 @@ class SelfMTPLaneAdmissionController:
             cls.MIN_SERVICE_RESERVE_GIB,
             min(cls.SERVICE_RESERVE_GIB, shortfall),
         )
+        override = os.environ.get(SERVICE_RESERVE_ENV)
+        if override is not None:
+            # Explicit operator choice (e.g. one large model on a host with
+            # nothing else resident). Bounded so the host keeps a floor.
+            try:
+                value = float(override)
+            except ValueError:
+                raise ValueError(f"{SERVICE_RESERVE_ENV} must be a number of GiB") from None
+            if not math.isfinite(value) or not cls.MIN_SERVICE_RESERVE_GIB <= value <= 64:
+                raise ValueError(f"{SERVICE_RESERVE_ENV} must be within "
+                                 f"{cls.MIN_SERVICE_RESERVE_GIB}..64 GiB")
+            service = value
         driver = max(
             cls.MIN_DRIVER_ALLOWANCE_GIB,
             min(

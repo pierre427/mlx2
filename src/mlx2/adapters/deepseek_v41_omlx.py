@@ -52,7 +52,18 @@ DESCRIPTOR = replace(
 # hoisted_v1: same per-expert QMM, with the FP8 input, SwiGLU and middle FP8
 # each run once over the layer's expert-sorted rows; bit-exact by construction.
 # First choice is the default.
-EXPERT_POLICIES = ("hoisted_v1", "reference", "bank_gather_v1")
+# bank_routed_v1: resident banks like bank_gather_v1, but one-row decode runs
+# the device-routed qmv kernels (no route-ID readback) and every other width
+# the hoisted per-expert path on bank slices, so it stays bit-exact (opt-in).
+# Default (Pierre, 2026-11-04): bank_routed_v1 with 32 bank layers and
+# scan_resistant_v1 prefill admission; token-identical to the hoisted_v1
+# defaults over a 1300-char greedy replay; warm decode 14.62 -> 22.13 tok/s,
+# cold 8.14 -> 17.07, 3.3K prefill 95.2 -> 102.3, warm-cache 2.9K prefill
+# 102.7 -> 92.8 (exploratory; ds41-omlx-ab-20261104/evidence-r10).
+EXPERT_POLICIES = ("bank_routed_v1", "hoisted_v1", "reference", "bank_gather_v1")
+# 32 rather than "auto": auto fills admission (37 layers here) and loading that
+# many up front pushed other processes past 8 GiB of swap on a 128 GB host.
+DEFAULT_BANK_LAYERS = 32
 
 
 # Format-agnostic model options the Source route already exposes; the model
@@ -74,6 +85,10 @@ MODEL_POLICY_CHOICES = {
     # prefill 93.8 -> 99.2 (exploratory; ds41-omlx-ab-20261104/evidence-r4).
     "deepseek_omlx_layer_eval": ("async_v1", "sync"),
     "deepseek_source_woa_storage": ("mxfp8_gemv_v1", "reference"),
+    # scan_resistant_v1: prefill misses never evict from a full expert cache,
+    # so a sweep over more experts than fit keeps the resident set (default
+    # with bank_routed_v1, see EXPERT_POLICIES).
+    "deepseek_omlx_prefill_admission": ("scan_resistant_v1", "lru"),
     "deepseek_source_hc_coefficients": ("fused_fp32", "reference"),
     "deepseek_source_hc_mega": ("mega_v1", "reference"),
     "deepseek_source_hc_boundary": ("reference", "expand_collapse_seq"),
@@ -90,10 +105,16 @@ def execution_policy(value=None):
     experts = value.pop("deepseek_omlx_experts", EXPERT_POLICIES[0])
     if experts not in EXPERT_POLICIES:
         raise ValueError("unsupported omlx V4.1 expert path")
+    # Most bank layers to make resident ("auto": as many as admission allows).
+    # Banks load up front, so a cap leaves host headroom for other processes.
+    bank_layers = value.pop("deepseek_omlx_bank_layers", DEFAULT_BANK_LAYERS)
+    if bank_layers != "auto" and (type(bank_layers) is not int or not 0 <= bank_layers <= 64):
+        raise ValueError("deepseek_omlx_bank_layers must be 'auto' or an integer 0..64")
     model = {key: value.pop(key, choices[0]) for key, choices in MODEL_POLICY_CHOICES.items()}
     if any(type(model[key]) is not str or model[key] not in choices for key, choices in MODEL_POLICY_CHOICES.items()):
         raise ValueError("unsupported omlx V4.1 model policy")
-    return {**mlx_execution_policy(value), "deepseek_omlx_experts": experts, **model}
+    return {**mlx_execution_policy(value), "deepseek_omlx_experts": experts,
+            "deepseek_omlx_bank_layers": bank_layers, **model}
 
 
 def model_policy_options(policy):
@@ -108,7 +129,7 @@ def model_policy_options(policy):
             "source_attention_math_policy": policy["deepseek_source_attention_math"]}
 
 
-def admission_plan(artifact, request, *, experts="reference", planner=omlx_weight_plan):
+def admission_plan(artifact, request, *, experts="reference", bank_cap="auto", planner=omlx_weight_plan):
     """Size the expert LRU (and resident banks) from measured early admission.
 
     bank_gather_v1 keeps whole layers' stacked experts resident for device-side
@@ -122,11 +143,12 @@ def admission_plan(artifact, request, *, experts="reference", planner=omlx_weigh
     headroom = max(5 << 30, request.headroom_bytes)
     ple_cache = (8 << 20) * len(args.engram_layer_ids)
     bank_layers = ()
-    if experts == "bank_gather_v1":
+    if experts in ("bank_gather_v1", "bank_routed_v1"):
         if request.budget_mode != "auto":
             raise ValueError("omlx V4.1 expert banks are sized from automatic admission only")
         layer = layer_bank_bytes(artifact)
-        for count in range(args.num_hidden_layers, -1, -1):
+        most = args.num_hidden_layers if bank_cap == "auto" else min(bank_cap, args.num_hidden_layers)
+        for count in range(most, -1, -1):
             trial = tuple(range(count))
             plan = planner(artifact, item, trial)
             reserve = max(256 << 20, plan["metadata_bound_bytes"])
@@ -170,7 +192,7 @@ class DeepSeekV41OmlxAdapter(DeepSeekV41MLXAdapter):
     weight_format = FORMAT
     policy_parser = staticmethod(execution_policy)
     adapter_owned_default_policy_keys = DeepSeekV41MLXAdapter.adapter_owned_default_policy_keys | {
-        "deepseek_omlx_experts", *MODEL_POLICY_CHOICES}
+        "deepseek_omlx_experts", "deepseek_omlx_bank_layers", *MODEL_POLICY_CHOICES}
 
     @staticmethod
     def weight_streaming_external_draft(policy):
@@ -180,17 +202,22 @@ class DeepSeekV41OmlxAdapter(DeepSeekV41MLXAdapter):
         return True
 
     def _weight_admission_plan(self, artifact, request):
-        return admission_plan(artifact, request, experts=self.kernel_policy["deepseek_omlx_experts"])
+        return admission_plan(artifact, request, experts=self.kernel_policy["deepseek_omlx_experts"],
+                              bank_cap=self.kernel_policy["deepseek_omlx_bank_layers"])
 
     def _construct_weights(self, artifact, request):
         from .deepseek_v41_omlx_weights import OmlxV41Weights
         return OmlxV41Weights(artifact, expert_cache_bytes=self.native_admission["expert_cache_bytes"],
                               expert_read_workers=request.read_workers, bounds=self.native_admission,
                               bank_layers=self.native_admission["expert_bank_layers"],
-                              expert_math="hoisted_v1" if self.kernel_policy["deepseek_omlx_experts"] == "hoisted_v1"
-                              else "reference", dense_qat=self.kernel_policy["deepseek_source_dense_qat"],
+                              expert_math="hoisted_v1" if self.kernel_policy["deepseek_omlx_experts"] in (
+                                  "hoisted_v1", "bank_routed_v1") else "reference",
+                              dense_qat=self.kernel_policy["deepseek_source_dense_qat"],
                               layer_eval=self.kernel_policy["deepseek_omlx_layer_eval"],
-                              woa_storage=self.kernel_policy["deepseek_source_woa_storage"])
+                              woa_storage=self.kernel_policy["deepseek_source_woa_storage"],
+                              bank_decode="routed_v1" if self.kernel_policy["deepseek_omlx_experts"] == "bank_routed_v1"
+                              else "gather_qmm",
+                              prefill_admission=self.kernel_policy["deepseek_omlx_prefill_admission"])
 
     def _load(self, model_path):
         from ..process_env import (

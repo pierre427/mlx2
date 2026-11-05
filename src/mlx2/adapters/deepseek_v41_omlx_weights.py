@@ -77,6 +77,28 @@ def omlx_weight_plan(artifact, expert_cache_bytes, bank_layers=()):
             "total_reservation_bytes": dense_bytes+2*CHUNK_BYTES+expert_cache_bytes+active+item+bank+bank_staging}
 
 
+def bank_expert_views(bank, experts):
+    """Per-expert arrays as as_strided views of a resident stacked bank.
+
+    Unlike slices, evaluated as_strided views share the bank's buffer (0 bytes
+    added, checked on GPU 2026-11-04) and quantized_matmul on them is
+    bit-equal to the slice result, so the exact per-expert law reads the bank
+    in place.
+    """
+    import mlx.core as mx
+    names = ("qweight", "scales", "biases")
+    views = []
+    for expert in range(experts):
+        item = {}
+        for kind, arrays in bank.items():
+            for name, array in zip(names, arrays):
+                rows, cols = array.shape[1:]
+                item[kind+"."+name] = mx.as_strided(array, (rows, cols), (cols, 1), expert*rows*cols)
+        views.append(item)
+    mx.eval(views)
+    return views
+
+
 def expert_extents(artifact, layer, expert):
     """(shard, offset, size, dtype, shape, key) for one expert's nine arrays."""
     result = []
@@ -163,7 +185,13 @@ class OmlxExpertStore(NativeExpertStore):
         self.pool = ReadPool(min(8, read_workers), "v41-omlx-experts", timeout=timeout, max_pending=1,
                              owner=storage_owner("v41-omlx-experts", self.root))
 
-    def acquire(self, prefix, expert):
+    def acquire(self, prefix, expert, *, admit=True):
+        """Lease one expert; ``admit=False`` never evicts a cached expert for it.
+
+        A full cache then serves the miss for this window only, so a prefill
+        sweep over more experts than fit cannot churn the resident set (LRU's
+        worst case on a cyclic scan).
+        """
         import mlx.core as mx
         with self._lock:
             self._ready()
@@ -202,6 +230,11 @@ class OmlxExpertStore(NativeExpertStore):
                 size = sum(value.nbytes for value in arrays.values())
                 if size != self.minimum_cache_bytes or size > self.cache_budget_bytes:
                     raise ValueError("omlx expert payload differs from its admitted size")
+                if not admit and self._cache_bytes + size > self.cache_budget_bytes:
+                    self.stats["scan_bypass"] = self.stats.get("scan_bypass", 0) + 1
+                    self._leased[key] = arrays
+                    self._pending_uploads.pop(key, None)
+                    return arrays
                 self._cache[key] = arrays
                 self._cache_bytes += size
                 while self._cache_bytes > self.cache_budget_bytes:
@@ -267,16 +300,26 @@ class OmlxV41Weights:
 
     def __init__(self, artifact, *, expert_cache_bytes, expert_read_workers=2, bounds=None,
                  bf16_loads_policy="direct_f32", bank_layers=(), expert_math="reference",
-                 dense_qat="reference", layer_eval="sync", woa_storage="reference"):
+                 dense_qat="reference", layer_eval="sync", woa_storage="reference", bank_decode="gather_qmm",
+                 prefill_admission="lru"):
         _refuse_quarantined_uploads()
         if (bf16_loads_policy not in ("reference", "direct_f32") or expert_math not in ("reference", "hoisted_v1")
                 or dense_qat not in ("reference", "fused_fp32") or layer_eval not in ("sync", "async_v1")
-                or woa_storage not in ("reference", "mxfp8_gemv_v1")):
+                or woa_storage not in ("reference", "mxfp8_gemv_v1")
+                or bank_decode not in ("gather_qmm", "routed_v1")
+                or prefill_admission not in ("lru", "scan_resistant_v1")):
             raise ValueError("unsupported omlx weights policy")
         # hoisted_v1: one FP8 input quantize per layer and one SwiGLU/middle
         # quantize over all selected experts' rows; per-row arithmetic is
         # unchanged, so it is bit-exact with the reference loop.
         self.expert_math, self.dense_qat, self.layer_eval = expert_math, dense_qat, layer_eval
+        # Resident bank layers: "routed_v1" runs one-row decode through the
+        # device-routed kernels and every other width through the per-expert
+        # path on bank slices; "gather_qmm" is the stock gather (opt-in, slower).
+        self.bank_decode = bank_decode
+        # scan_resistant_v1: multi-row (prefill) misses never evict from a full
+        # expert cache; one-row decode admits as before.
+        self.prefill_admission = prefill_admission
         # mxfp8_gemv_v1: the checkpoint's BF16 wo_a lies on the MXFP8 grid
         # (verify_report wo_a_mxfp8_grid); keep exact MXFP8 codes instead,
         # proven by a bitwise round trip at load, and read them in registers.
@@ -289,7 +332,7 @@ class OmlxV41Weights:
                        if bounds is None else dict(bounds))
         if list(self.bank_layers) != list(self.bounds.get("expert_bank_layers", [])):
             raise ValueError("omlx expert bank layers differ from admission")
-        self._banks = {}
+        self._banks, self._bank_views = {}, {}
         self.bf16_loads_policy = bf16_loads_policy
         self.tensors = {}
         for alias, name in artifact["aliases"].items():
@@ -362,6 +405,7 @@ class OmlxV41Weights:
                     self._pending_dense_host = None
                     del raw
                 self._banks[layer] = bank
+                self._bank_views[layer] = bank_expert_views(bank, self.artifact["args"].n_routed_experts)
             self._loaded = True
         except BaseException as error:
             self._error = str(error)
@@ -373,6 +417,7 @@ class OmlxV41Weights:
             self._dense.clear()
             self._quant.clear()
             self._banks.clear()
+            self._bank_views.clear()
             self._pending_dense.clear()
             self._pending_dense_host = None
             raise
@@ -501,6 +546,55 @@ class OmlxV41Weights:
         import mlx.core as mx
         return self.array(name)[ids].astype(mx.float32)
 
+    def _bank_slice(self, prefix, expert):
+        """One expert's arrays: load-time as_strided views of its resident bank."""
+        layer = int(prefix.split(".")[1])
+        views = self._bank_views.get(layer)
+        if views is not None:
+            return views[expert]
+        bank = self._banks[layer]
+        names = ("qweight", "scales", "biases")
+        return {kind+"."+name: bank[kind][i][expert] for kind in bank for i, name in enumerate(names)}
+
+    def _routed_supported(self, layer):
+        from ..runtime.models import deepseek_v41_routed_decode as routed
+        args = self.artifact["args"]
+        return routed.supports(args.hidden_size, args.moe_intermediate_size, args.num_experts_per_tok,
+                               self.artifact["experts"][layer])
+
+    def _routed_moe(self, x, ids, scores, layer):
+        """One decode row over a resident bank; route IDs stay on the GPU.
+
+        Per-row arithmetic of the per-expert path (MLX qmv_fast / qmv in the
+        routed kernels, then the same BF16 rounds, clamped SwiGLU, FP8 middle
+        and expert-ID-ordered F32 sum).
+        """
+        import mlx.core as mx
+
+        from ..runtime.models import deepseek_v41_routed_decode as routed
+        from ..runtime.models.deepseek_v4 import limited_swiglu
+        args = self.artifact["args"]
+        top = args.num_experts_per_tok
+        if tuple(ids.shape) != (1, top) or tuple(scores.shape) != (1, top) or tuple(x.shape) != (1, args.hidden_size):
+            raise ValueError("omlx routed decode requires one admitted route row")
+        specs, bank = self.artifact["experts"][layer], self._banks[layer]
+        rounded = lambda v: v.astype(mx.bfloat16).astype(mx.float32)
+
+        def prepared(value, kind):
+            if not specs[kind]["quantize_input"]:
+                return value.astype(mx.float32)
+            return self._fp8(value, self.scheduled_expert_calls, "omlx_expert")
+        index = ids.reshape(top).astype(mx.uint32)
+        gate, up = routed.gate_up(prepared(x, "gate"), index, bank["gate"], bank["up"], specs["gate"])
+        middle = rounded(limited_swiglu(rounded(gate), rounded(up))*scores.astype(mx.float32).reshape(top, 1))
+        down = rounded(routed.down(prepared(middle, "down"), index, bank["down"], specs["down"]))
+        ordered = down[mx.argsort(index)]
+        output = mx.zeros((1, args.hidden_size), mx.float32)
+        for slot in range(top):
+            output = output + ordered[slot:slot+1]
+        self._count(self.scheduled_expert_calls, "omlx_affine_experts_bank_routed_decode")
+        return output
+
     def _bank_moe(self, x, ids, scores, layer):
         """Device-side routed experts over one resident stacked bank.
 
@@ -548,8 +642,16 @@ class OmlxV41Weights:
         if ticket is not None:
             raise ValueError("omlx expert provider does not accept early-load tickets")
         bank_layer = int(prefix.split(".")[1]) if prefix.startswith("blk.") else None
+        acquire = self.expert_stream.acquire
+        if self.prefill_admission == "scan_resistant_v1" and len(ids.shape) == 2 and ids.shape[0] > 1:
+            stream = self.expert_stream
+            acquire = lambda prefix, expert: stream.acquire(prefix, expert, admit=False)
         if bank_layer in self._banks:
-            return self._bank_moe(x, ids, scores, bank_layer)
+            if self.bank_decode == "gather_qmm":
+                return self._bank_moe(x, ids, scores, bank_layer)
+            if len(ids.shape) == 2 and ids.shape[0] == 1 and self._routed_supported(bank_layer):
+                return self._routed_moe(x, ids, scores, bank_layer)
+            acquire = self._bank_slice
         args = self.artifact["args"]
         values = np.asarray(ids)
         if (values.dtype != np.uint32 or values.ndim != 2 or not 0 < values.shape[0] <= 1024
@@ -582,11 +684,11 @@ class OmlxV41Weights:
                 return quantize(value, "fp8").astype(mx.float32)
             if self.expert_math == "hoisted_v1":
                 return self._hoisted_moe(x, scores, values, order, sorted_ids, prefix, specs, owned,
-                                         project, prepared, rounded, limited_swiglu)
+                                         project, prepared, rounded, limited_swiglu, acquire)
             for expert in np.unique(sorted_ids):
                 slots = order[sorted_ids == expert]
                 rows = mx.array(slots//values.shape[1], mx.uint32)
-                data = self.expert_stream.acquire(prefix, int(expert))
+                data = acquire(prefix, int(expert))
                 selected = prepared(x[rows], "gate")
                 gate, up = rounded(project(selected, data, "gate")), rounded(project(selected, data, "up"))
                 middle = rounded(limited_swiglu(gate, up)*scores.reshape(-1)[mx.array(slots, mx.uint32), None])
@@ -605,7 +707,7 @@ class OmlxV41Weights:
             return output
 
     def _hoisted_moe(self, x, scores, values, order, sorted_ids, prefix, specs, owned,
-                     project, prepared, rounded, limited_swiglu):
+                     project, prepared, rounded, limited_swiglu, acquire):
         """Reference law with whole-layer pointwise stages (one launch each)."""
         import mlx.core as mx
         experts, counts = np.unique(sorted_ids, return_counts=True)
@@ -613,7 +715,7 @@ class OmlxV41Weights:
         selected = prepared(x, "gate")[rows]
         data, gates, ups, start = [], [], [], 0
         for expert, count in zip(experts, counts):
-            data.append(self.expert_stream.acquire(prefix, int(expert)))
+            data.append(acquire(prefix, int(expert)))
             part = selected[start:start+count]
             gates.append(project(part, data[-1], "gate"))
             ups.append(project(part, data[-1], "up"))
@@ -694,6 +796,7 @@ class OmlxV41Weights:
         self._dense.clear()
         self._quant.clear()
         self._banks.clear()
+        self._bank_views.clear()
         self._pending_dense.clear()
         self._pending_dense_host = None
         self._loaded = False

@@ -188,11 +188,12 @@ def _synthetic_weights(rows=5, hidden=128, middle=64, experts=8, top=3, seed=0):
     weights = object.__new__(OmlxV41Weights)
     weights.artifact = {"args": SimpleNamespace(num_experts_per_tok=top, hidden_size=hidden, n_routed_experts=experts),
                         "experts": {0: specs}}
-    weights._banks = {0: bank}
+    weights._banks, weights._bank_views = {0: bank}, {}
     weights._parked = weights._closed = False
     weights._error = None
     weights.scheduled_expert_calls = {}
     weights.expert_math, weights.dense_qat, weights._last_input = "reference", "reference", None
+    weights.bank_decode, weights.prefill_admission = "gather_qmm", "lru"
 
     class Stream:
         _active = False
@@ -279,3 +280,78 @@ def test_woa_mxfp8_encoding_is_bitwise_or_refused():
         weights._dense = {"blk.1.attn_output_a.weight": off_grid}
         with pytest.raises(ValueError, match="MXFP8 grid"):
             weights._encode_woa("blk.1.attn_output_a.weight")
+
+
+@pytest.mark.parametrize("rows", [2, 5])
+def test_bank_routed_prefill_uses_exact_bank_slices(rows):
+    mx = pytest.importorskip("mlx.core")
+    with mx.stream(mx.cpu):
+        weights, x, ids, scores = _synthetic_weights(rows=rows, seed=9)
+        weights.expert_math, weights.bank_decode = "hoisted_v1", "routed_v1"
+        sliced = weights.moe(x, ids, scores, "blk.0")
+        bank = weights._banks.pop(0)
+        weights.expert_math = "reference"
+        reference = weights.moe(x, ids, scores, "blk.0")
+        weights._banks[0] = bank
+        assert mx.array_equal(sliced, reference).item()
+        assert "omlx_affine_experts_bank_gather_qmm" not in weights.scheduled_expert_calls
+
+
+def test_routed_decode_headers_carry_two_bit_and_refuse_other_shapes():
+    from mlx2.runtime.models import deepseek_v41_routed_decode as routed
+    for fast in (True, False):
+        assert "x_thread[i + 3] = x[i + 3] / 64.0f;" in routed.header(2, 64, fast)
+    spec = {"bits": 2, "group_size": 64}
+    specs = {"gate": spec, "up": spec, "down": spec}
+    assert routed.supports(5120, 2304, 6, specs)
+    assert not routed.supports(5120, 2048, 6, specs)  # MLX would pick qmv_fast for down
+    assert not routed.supports(5000, 2304, 6, specs)
+
+
+def test_bank_expert_views_share_memory_and_match_slices():
+    from mlx2.adapters.deepseek_v41_omlx_weights import bank_expert_views
+    mx = pytest.importorskip("mlx.core")
+    with mx.stream(mx.cpu):
+        weights, _, _, _ = _synthetic_weights(seed=11)
+        bank = weights._banks[0]
+        views = bank_expert_views(bank, 8)
+        for expert in (0, 3, 7):
+            for kind, arrays in bank.items():
+                for name, array in zip(("qweight", "scales", "biases"), arrays):
+                    assert mx.array_equal(views[expert][kind+"."+name], array[expert]).item()
+
+
+@pytest.mark.parametrize(("rows", "expected_admit"), [(1, True), (5, False)])
+def test_scan_resistant_admission_only_bypasses_multi_row_misses(rows, expected_admit):
+    mx = pytest.importorskip("mlx.core")
+    with mx.stream(mx.cpu):
+        weights, x, ids, scores = _synthetic_weights(rows=rows, seed=4)
+        bank = weights._banks.pop(0)
+        stream, seen = weights.expert_stream, []
+        plain = type(stream).acquire
+
+        def recording(prefix, expert, *, admit=True):
+            seen.append(admit)
+            return plain(stream, prefix, expert)
+        stream.acquire = recording
+        weights.prefill_admission, weights.expert_math = "scan_resistant_v1", "hoisted_v1"
+        bypassed = weights.moe(x, ids, scores, "blk.0")
+        weights.prefill_admission = "lru"
+        seen_before = list(seen)
+        reference = weights.moe(x, ids, scores, "blk.0")
+        weights._banks[0] = bank
+        assert mx.array_equal(bypassed, reference).item()
+        assert set(seen_before) == {expected_admit}
+
+
+def test_service_reserve_override_is_explicit_and_bounded(monkeypatch):
+    from mlx2.runtime.memory_policy import SERVICE_RESERVE_ENV
+    from mlx2.runtime.memory_policy import SelfMTPLaneAdmissionController as C
+    monkeypatch.delenv(SERVICE_RESERVE_ENV, raising=False)
+    assert C.host_scaled_reserves(128.0, 112.0) == (16.0, 4.0)
+    monkeypatch.setenv(SERVICE_RESERVE_ENV, "8")
+    assert C.host_scaled_reserves(128.0, 112.0) == (8.0, 4.0)
+    for bad in ("1", "nan", "65", "x"):
+        monkeypatch.setenv(SERVICE_RESERVE_ENV, bad)
+        with pytest.raises(ValueError):
+            C.host_scaled_reserves(128.0, 112.0)

@@ -15,6 +15,8 @@ def codebook(cb, window=16):
         lo = (r & 65535).astype(np.uint16).view(np.float16).astype(np.float32)
         hi = (r >> 16).astype(np.uint16).view(np.float16).astype(np.float32)
         return (lo + hi).astype(np.float16)
+    if cb != "mul1":
+        raise ValueError(f"EXL3 codebook {cb!r} is not implemented")
     mixed = cw * np.uint32(0x83DCD12D)
     total = sum((mixed >> shift) & 255 for shift in (0, 8, 16, 24))
     h = (0x6400 + total).astype(np.uint16).view(np.float16).astype(np.float64)
@@ -53,3 +55,24 @@ def decode_inner(trellis, cb="mcg", window=16):
     return grid.transpose(axes).reshape(
         *t.shape[:-3], t.shape[-3] * 16, t.shape[-2] * 16
     )
+
+
+def hadamard128(a):
+    """Orthonormal H128 over the last axis in 128-wide blocks, float64."""
+    a = np.array(a, dtype=np.float64)
+    shape = a.shape
+    a = a.reshape(-1, 128)
+    for bit in (1, 2, 4, 8, 16, 32, 64):
+        block = a.reshape(-1, 128 // (2 * bit), 2, bit)
+        lo, hi = block[:, :, 0, :].copy(), block[:, :, 1, :].copy()
+        block[:, :, 0, :], block[:, :, 1, :] = lo + hi, lo - hi
+    return (a / np.sqrt(128)).reshape(shape)
+
+
+def effective_weight(trellis, suh, svh, cb="mcg", window=16):
+    """Dense [I, O] float64 W with ``x @ W == svh * H(H(suh * x) @ inner)``."""
+    suh = np.asarray(suh, dtype=np.float64)
+    svh = np.asarray(svh, dtype=np.float64)
+    inner = decode_inner(np.asarray(trellis).view(np.uint16), cb, window)
+    rows = hadamard128(np.diag(suh)) @ inner.astype(np.float64)
+    return hadamard128(rows) * svh
