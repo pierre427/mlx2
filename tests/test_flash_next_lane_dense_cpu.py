@@ -191,7 +191,11 @@ def test_numerics_law_is_recorded_and_namespaced(gpu_free_lane):
     assert report["law_id"] == receipt["law_id"]
     assert "+skip[" in receipt["law_id"] and receipt["law_id"].endswith("+grouped")
     assert report["state"] == "implemented-unqualified"
-    assert apc_lane_fingerprint("base", receipt) == ("base", "lane-matmul", receipt["law_id"])
+    # The namespace also carries the installed arithmetic-class fingerprint
+    # (device, MLX build, kernel digest) since 7af38665c.
+    assert apc_lane_fingerprint("base", receipt) == (
+        "base", "lane-matmul", receipt["law_id"], receipt["arithmetic_class"]["fingerprint"]
+    )
     # An operator crossover over the whole model (no exclusions) is another law.
     whole = tiny_flash_next()
     other = lane.apply_policy(whole, lane_policy.resolve(

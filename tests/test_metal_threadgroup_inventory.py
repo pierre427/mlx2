@@ -51,6 +51,12 @@ ABOVE_M1_FLOOR = {
     "runtime/models/glm53_hc_fused.py": 4,
     "runtime/models/glm53_hc_mega.py": 2,
     "runtime/models/glm53_kda_fused.py": 2,
+    # EXL3 trellis kernels: fused_rows and its residual twin launch 256 * KS
+    # threads (fused_ksplit caps KS at 4, i.e. 1024; the default FUSED_KS = 2
+    # launches 512), and fused_gate_up launches a fixed 1024. On a register-
+    # heavy M1 pipeline MLX raises rather than returning zeros; the M1-M4
+    # runtime check is GPU-deferred like the rest of this list.
+    "runtime/models/exl3.py": 3,
 }
 
 

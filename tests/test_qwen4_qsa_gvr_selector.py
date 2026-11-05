@@ -253,7 +253,9 @@ def test_gvr_selector_is_default_off_and_opt_in(monkeypatch):
 
 
 def test_gvr_env_value_is_accepted_at_import():
-    assert stage1._DIRECT_SELECTOR_MODES == ("off", "direct8", "direct4", "gvr")
+    assert stage1._DIRECT_SELECTOR_MODES == (
+        "off", "direct8", "direct4", "gvr", "selective"
+    )
     source = inspect.getsource(stage1)
     assert "MLX_QWEN4_QSA_STAGE1_GVR_COUNT_PATHS" in source
 

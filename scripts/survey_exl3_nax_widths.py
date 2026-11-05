@@ -133,7 +133,8 @@ def main():
                     row[f"{name}_err"] = _err(fn(), ref)
             print("dense", json.dumps(row), flush=True)
             dense.append(row)
-        del fused, rows_law, resident, bank
+        # Rebind instead of del: the per-width closures above reference these names.
+        fused = rows_law = resident = bank = None
         gc.collect()
         mx.clear_cache()
     receipt["dense"] = dense

@@ -279,6 +279,8 @@ def test_stage1_status_reports_and_resets_bounded_receipts(monkeypatch):
         "direct8_qualification": "qualified_default_off",
         "direct4_qualification": "qualified_default_off",
         "gvr_qualification": "unqualified_research_candidate",
+        "selective_qualification": "unqualified_scalar_f32_candidate",
+        "selective_selected": stage1._DIRECT_SELECTOR == "selective",
         "gvr_count_paths": stage1._GVR_COUNT_PATHS,
         "direct_selector_selected": stage1._DIRECT_SELECTOR != "off",
         "direct_selector_observed_used": False,

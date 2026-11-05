@@ -331,6 +331,7 @@ INLINE_PROFILE_MODULES = [
     ("deepseek_v41", "DeepSeekV41Adapter"),
     ("deepseek_v41_mlx", "DeepSeekV41MLXAdapter"),
     ("deepseek_v41_source", "DeepSeekV41SourceAdapter"),
+    ("deepseek_v41_omlx", "DeepSeekV41OmlxAdapter"),
     ("glm53_gguf", "Glm53GGUFAdapter"),
     ("inkling", "InklingAdapter"),
 ]

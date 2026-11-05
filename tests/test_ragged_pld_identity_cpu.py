@@ -261,11 +261,22 @@ def _function_named(tree, name):
     return next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
 
 
+# Qwen3.6 adds quantization_config.json to its identity only for upstream
+# EXL3 checkpoints (9cc8dd4ce).  This recipe reproduces the ordinary layout;
+# an upstream-EXL3 artifact recomputes to a different fingerprint, so the
+# qualifier fails closed on it rather than adopting a partial identity.
+_EXL3_ONLY_METADATA = "*(('quantization_config.json',) if exl3_upstream is not None else ())"
+
+
 def _metadata_tuple(fn):
     for node in ast.walk(fn):
-        if (isinstance(node, ast.For) and isinstance(node.iter, ast.Tuple)
-                and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.iter.elts)):
-            return tuple(e.value for e in node.iter.elts)
+        if not (isinstance(node, ast.For) and isinstance(node.iter, ast.Tuple)):
+            continue
+        names = [e for e in node.iter.elts if not isinstance(e, ast.Starred)]
+        starred = [ast.unparse(e) for e in node.iter.elts if isinstance(e, ast.Starred)]
+        if (names and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in names)
+                and all(text == _EXL3_ONLY_METADATA for text in starred)):
+            return tuple(e.value for e in names)
     return None
 
 

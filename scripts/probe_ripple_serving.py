@@ -26,6 +26,24 @@ MESSAGES = [
 ]
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def checkout_env() -> dict:
+    """Child environment with THIS checkout's ``src`` first on PYTHONPATH.
+
+    An inherited environment lets ``python -m mlx2.server`` (and the reference
+    child) import mlx2 from whichever checkout is ambient, so a probe run from
+    a worktree would silently measure another tree.
+    """
+    environment = dict(os.environ)
+    existing = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(ROOT / "src"), existing) if part
+    )
+    return environment
+
+
 def atomic_json(path, value):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n")
@@ -129,7 +147,8 @@ def main():
     receipt["swap_before"] = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)
     try:
         subprocess.run([sys.executable, __file__, "--model", str(args.model), "--output", str(args.output),
-                        "--cpg-lock", str(args.cpg_lock), "--reference-only"], check=True, timeout=900)
+                        "--cpg-lock", str(args.cpg_lock), "--reference-only"], check=True, timeout=900,
+                       env=checkout_env())
         ordinary = json.loads((args.output / "ordinary-reference.json").read_text())
     except BaseException as exc:
         # A failed or timed-out reference still leaves a failing receipt.
@@ -154,7 +173,8 @@ def main():
         atomic_json(policy_path, args.policy)
         command.extend(["--execution-policy", str(policy_path)])
     log = (args.output / "server.log").open("w")
-    server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                              env=checkout_env())
     receipt["server_pid"] = server.pid
     try:
         deadline = time.monotonic() + 600

@@ -275,7 +275,8 @@ def test_policy_opt_in_and_cache_arithmetic_contract_are_distinct():
 
 
 def test_import_and_cpu_execution_never_import_accelerator_libraries():
-    assert not any(name == "mlx" or name.startswith("mlx.") for name in sys.modules)
+    # Checked in a fresh interpreter: tests/conftest.py imports mlx.core into
+    # the pytest process itself, so an in-process sys.modules check can never hold.
     env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
     result = subprocess.run([sys.executable, "-c",
         ("import sys; from mlx2.runtime.models.qwen4_qsa_selective import status; status(); "

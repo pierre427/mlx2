@@ -292,6 +292,10 @@ def test_every_target_adapter_declares_cited_vendor_defaults():
         # token ids and the Inkling-Small artifacts ship none (checked
         # 2026-11-04); neither adapter declares sampling_defaults.
         "kimi_linear", "inkling",
+        # Ripple-65B-Preview-NVFP4's generation_config.json carries only token
+        # ids and the oQ4e conversion ships none (checked 2026-11-05); the
+        # ricursive adapter declares no sampling_defaults.
+        "ricursive",
     }
     assert set(_RESOLVERS) == set(EXPECTED) | no_vendor_profile
     for model_type, profiles in EXPECTED.items():

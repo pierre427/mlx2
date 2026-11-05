@@ -20,7 +20,6 @@ Anything else is ``unclassified`` (missing evidence) or ``failed``.
 """
 import argparse
 import json
-import re
 from pathlib import Path
 
 CEILING = 0.5
@@ -59,7 +58,6 @@ def lookup(window, token):
 
 
 def contract(control, arm):
-    c_sel, a_sel = control["selected"], arm["selected"]
     c_margin, a_margin = margin(control), margin(arm)
     if c_margin is None or a_margin is None:
         return "unclassified", "window shorter than two entries"

@@ -59,7 +59,7 @@ INTER = 40960
 CLAMP = 20.0
 GROUP = 64
 REPO = Path(__file__).resolve().parents[2]
-COREML_PY = "~/Desktop/mlx-uag/.venv/bin/python"
+COREML_PY = str(Path.home() / "Desktop" / "mlx-uag" / ".venv" / "bin" / "python")
 DEFAULT_SCRATCH = "/private/tmp/claude-501/ripple-ane"
 TAG = "@@"  # worker protocol lines; anything else on stdout is library noise
 

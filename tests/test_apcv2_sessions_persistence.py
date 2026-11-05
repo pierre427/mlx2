@@ -1166,6 +1166,36 @@ def test_restart_under_another_lane_law_discards_the_state(tmp_path):
         restarted.close()
 
 
+
+def test_restart_matches_the_lane_arithmetic_class_layer_for_layer(tmp_path):
+    """The lane namespace is ``(inner, "lane-matmul", law, class)`` since the
+    arithmetic-class fingerprint joined it; rescan unwrapped only three-field
+    wrappers, so every lane-law parked session was deleted on restart.  The
+    class field must still separate state: same law, other class discards."""
+    from mlx2.serving import cache_semantic_fingerprint
+
+    base = cache_semantic_fingerprint(None)
+
+    def server(token):
+        template = (base, "lane-matmul", LANE, token)
+        return APCv2(
+            max_size=16, max_bytes=1 << 20, layout_name="layout-a",
+            idle_disk_seconds=180, idle_disk_dir=str(tmp_path), persist_dir=str(tmp_path),
+            persist_identity=replace(_identity(), semantic_fingerprint=template),
+            persist_semantic_namespace="shared",
+        )
+
+    apc = server("class-a")
+    key = replace(_identity(), semantic_fingerprint=(base, "lane-matmul", LANE, "class-a"))
+    tag = ("tenant-a", "parked")
+    apc.store(key, list(range(8)), [_state(8)], session_tag=tag)
+    assert apc.park_session(*tag, ttl_seconds=600)["state"] == "disk"
+    apc.close()
+    other = server("class-b")
+    assert other.apc_stats["persistence"]["rescan"]["registered"] == 0
+    other.close()
+
+
 def test_republish_at_the_same_tokens_keeps_a_deferred_park_pending(tmp_path):
     """apc-sessions#1: a park deferred behind a lease survives a republish.
 

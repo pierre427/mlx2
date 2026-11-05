@@ -340,12 +340,15 @@ _NUMERICS_WRAPPER_TAGS = frozenset(
 def _numerics_layers(semantic):
     """``(base, layers)``: ``semantic`` with its numerical-law wrappers removed.
 
-    ``layers`` lists each wrapper's ``(tag, revision)`` from the outside in.
+    ``layers`` lists each wrapper's ``(tag, revision, *extra)`` from the outside in.
     """
     layers = []
+    # Wrappers are ``(inner, tag, revision, *extra)``: the lane law appends its
+    # arithmetic-class fingerprint (arithmetic_class.lane_cache_fingerprint),
+    # and every extra field is part of the layer compared at rescan.
     while (
         isinstance(semantic, tuple)
-        and len(semantic) == 3
+        and len(semantic) >= 3
         and semantic[1] in _NUMERICS_WRAPPER_TAGS
     ):
         layers.append(tuple(semantic[1:]))

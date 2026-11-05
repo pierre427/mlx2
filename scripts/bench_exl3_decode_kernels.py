@@ -92,7 +92,7 @@ def _modules(path, artifact, rng):
                 "bitwise_vs_one_row": bool(mx.array_equal(got.view(mx.uint16), alone.view(mx.uint16)).item()),
             })
             print("module", json.dumps(rows[-1]), flush=True)
-        del bank
+        bank = None  # rebind, not del: the timing lambda above references it
         gc.collect()
     # MoE tail at B1: routed down per slot, and shared slots vs separate.
     root = next(k for k in sorted(plan.banks) if ".layers.10." in k).rsplit(".", 1)[0]
@@ -100,7 +100,7 @@ def _modules(path, artifact, rng):
                                 if k in ("trellis", "suh", "svh")}) for p in ("gate_proj", "up_proj", "down_proj")]
     chain = exl3.Exl3SwitchGLU(*projs, execution="fused_chain_nax", trusted_router=True)
     chain.eval()
-    shared = f"model.language_model.layers.10.mlp.shared_expert"
+    shared = "model.language_model.layers.10.mlp.shared_expert"
     parts = {p: exl3.Exl3DenseLinear(**load_linear(read, plan.linears[f"{shared}.{p}"]), law="fused_nax")
              for p in ("gate_proj", "up_proj", "down_proj")}
     for part in parts.values():

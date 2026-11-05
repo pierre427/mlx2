@@ -1502,7 +1502,8 @@ class FlashNextAdapter:
         # bound on the live model only, so read it without assuming one.
         tree_law = getattr(getattr(self, "model", None), "_mlx2_flash_tree_law", None)
         selective_law = None
-        if self.policy.qsa_stage1_direct_selector == "selective":
+        # Like the tree law, a diagnostic snapshot policy may omit the field.
+        if getattr(self.policy, "qsa_stage1_direct_selector", "off") == "selective":
             from ..runtime.models.qwen4_qsa_selective import arithmetic_contract
 
             selective_law = arithmetic_contract()
