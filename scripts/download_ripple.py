@@ -31,7 +31,10 @@ def resume_file(entry, output, *, url, headers=None):
     cache = output / ".cache/mlx2-ripple-download"
     cache.mkdir(parents=True, exist_ok=True)
     partial = cache / (digest + ".incomplete")
-    old = list((output / ".cache/huggingface/download").glob(f"*.{digest}.*.incomplete"))
+    hub = output / ".cache/huggingface/download"
+    # huggingface_hub >= 1.x writes <name>.<etag>.<uuid>.incomplete; older
+    # releases wrote <name>.<etag>.incomplete. Either is a prefix of this hash.
+    old = sorted({*hub.rglob(f"*.{digest}.*.incomplete"), *hub.rglob(f"*.{digest}.incomplete")})
     candidates = [p for p in [partial, *old] if p.is_file()]
     if any(p.stat().st_size > entry["size"] for p in candidates):
         raise ValueError(f"oversized download partial: {entry['path']}")
@@ -48,6 +51,30 @@ def resume_file(entry, output, *, url, headers=None):
     # preceding Hub transfer. The completed target is still hash-checked below.
     for path in old:
         path.unlink(missing_ok=True)
+
+
+def content_hash(path, entry):
+    digest = hashlib.sha256() if entry["sha256"] else hashlib.sha1()
+    if not entry["sha256"]:
+        digest.update(f"blob {entry['size']}\0".encode())
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def quarantine(output, entry):
+    """Move a full-size file with the wrong content out of the snapshot.
+
+    Transfers skip any target whose size already matches, so a corrupt
+    full-size file would otherwise fail verification on every rerun without
+    ever being fetched again. It is kept, not deleted, for inspection.
+    """
+    target = output / entry["path"]
+    rejected = output / ".cache/mlx2-ripple-download/rejected" / entry["path"]
+    rejected.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(target, rejected)
+    return rejected
 
 
 def download(output, *, token_file=None, workers=5, variant="nvfp4"):
@@ -88,15 +115,12 @@ def download(output, *, token_file=None, workers=5, variant="nvfp4"):
             path = output/entry["path"]
             if not path.is_file() or path.stat().st_size != entry["size"]:
                 raise ValueError(f"missing/incomplete snapshot file: {entry['path']}")
-            digest = hashlib.sha256() if entry["sha256"] else hashlib.sha1()
-            if not entry["sha256"]:
-                digest.update(f"blob {entry['size']}\0".encode())
-            with path.open("rb") as stream:
-                for block in iter(lambda:stream.read(8<<20),b""):
-                    digest.update(block)
-            if digest.hexdigest() != (entry["sha256"] or entry["git_blob"]):
-                raise ValueError(f"snapshot content hash differs: {entry['path']}")
-            return {"path":entry["path"],"bytes":entry["size"],"content_hash":digest.hexdigest()}
+            actual = content_hash(path, entry)
+            if actual != (entry["sha256"] or entry["git_blob"]):
+                rejected = quarantine(output, entry)
+                raise ValueError(f"snapshot content hash differs: {entry['path']}; moved to "
+                                 f"{rejected}, rerun to fetch it again")
+            return {"path":entry["path"],"bytes":entry["size"],"content_hash":actual}
 
         with ThreadPoolExecutor(max_workers=5) as pool:
             verified = list(pool.map(verify,manifest["files"]))

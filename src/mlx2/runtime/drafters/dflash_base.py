@@ -53,6 +53,16 @@ def append_context_kv(cache, keys, values):
     return cache.update_and_fetch(keys, values)
 
 
+class _NoRope:
+    """Identity rotation for draft layers declared in ``no_rope_layers``."""
+
+    def __call__(self, x, offset=0):
+        return x
+
+
+NO_ROPE = _NoRope()
+
+
 class DFlashAttention(nn.Module):
     def __init__(self, config: DFlashConfig, layer_idx: int):
         super().__init__()
@@ -66,6 +76,7 @@ class DFlashAttention(nn.Module):
             config.layer_types or ["full_attention"] * config.num_hidden_layers
         )
         self.is_sliding = layer_types[layer_idx] == "sliding_attention"
+        self.use_rope = layer_idx not in set(getattr(config, "no_rope_layers", None) or ())
         self.sliding_window = config.sliding_window if self.is_sliding else None
         self.q_proj = nn.Linear(dim, self.n_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -111,6 +122,11 @@ class DFlashAttention(nn.Module):
         )
 
     def __call__(self, x: mx.array, x_ctx: mx.array, rope, cache: KVCache):
+        if not self.use_rope:
+            # Fused installers skip NoPE layers (their kernels bake RoPE in).
+            if self.__dict__.get("_fused_forward") is not None:
+                raise ValueError("a fused draft attention kernel cannot serve a NoPE layer")
+            rope = NO_ROPE
         fused = self.__dict__.get("_fused_forward")
         if fused is not None:
             if self.is_causal:

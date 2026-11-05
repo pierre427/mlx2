@@ -54,6 +54,11 @@ class DFlash2Config(DFlashConfig):
     selector_rank: int = 0
     selector_top_k: int = 0
     is_causal: bool = False
+    # Draft layers without positional encoding (Ripple's DFlash2 global
+    # layer; SGLang's DFlash path needed the same patch). Unknown config keys
+    # are dropped by ``from_dict``, so this must be a declared field: a silent
+    # drop would rotate a NoPE layer and cut acceptance without any error.
+    no_rope_layers: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.layer_types:
@@ -121,6 +126,12 @@ class DFlash2Config(DFlashConfig):
                 "DFlash2 target_layer_ids must be unique, increasing indices "
                 "inside the target layer range."
             )
+        if (
+            not isinstance(self.no_rope_layers, (list, tuple))
+            or any(type(i) is not int or not 0 <= i < self.num_hidden_layers for i in self.no_rope_layers)
+            or len(set(self.no_rope_layers)) != len(self.no_rope_layers)
+        ):
+            raise ValueError("DFlash2 no_rope_layers must be unique draft layer indices.")
         if self.runtime_block_size is not None and (
             not isinstance(self.runtime_block_size, int)
             or not 2 <= self.runtime_block_size <= self.block_size

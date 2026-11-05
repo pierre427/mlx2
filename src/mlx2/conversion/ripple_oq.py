@@ -15,7 +15,7 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 
-from ..runtime.models.ricursive import DecoderLayer, ModelArgs, RMSNorm
+from ..runtime.models.ricursive import DecoderLayer, ModelArgs, RMSNorm, scale_embeddings
 from ..runtime.ubc_evict import ubc_evict
 from .nvfp4 import read_header
 
@@ -105,7 +105,7 @@ def stream_calibrate(reader, config, tokenizer, oq, *, evidence, micro_batch_siz
     embedding = reader.read("model.embed_tokens.weight")
 
     def embed(weight, tokens):
-        x = weight[tokens] * args.embed_scale
+        x = scale_embeddings(weight[tokens], args.embed_scale)
         mx.eval(x)
         return x
 

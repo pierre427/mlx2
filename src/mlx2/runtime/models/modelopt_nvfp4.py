@@ -174,6 +174,25 @@ class ModelOptNVFP4Linear(nn.Module):
         return self._native(x)
 
 
+def shared_fp32_input(modules, x):
+    """One FP32 copy of ``x`` for sibling native projections, else ``None``.
+
+    ``_native`` casts its input to FP32 and rounds its FP32 result to the
+    input dtype.  Given an already-FP32 input both casts are identities, so
+    sibling projections (Ripple's gate and up) can share one cast and round
+    the FP32 result to ``x.dtype`` themselves: the same products and the same
+    single rounding, minus the duplicate input copy.  Only the native policy
+    is shared; the decoded and fused paths consume the input dtype directly.
+    """
+
+    if x.dtype == mx.float32 or not all(
+        isinstance(module, ModelOptNVFP4Linear) and module._dispatch_policy == "native"
+        for module in modules
+    ):
+        return None
+    return x.astype(mx.float32)
+
+
 def install_nvfp4_modules(model, module_paths, *, policy="native"):
     """Replace only declared Linear leaves, before loading strict artifact data."""
     from mlx.utils import tree_unflatten

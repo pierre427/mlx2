@@ -312,3 +312,122 @@ def load_bank(read, spec):
 
     parts = [load_linear(read, spec.expert_spec(e)) for e in range(spec.experts)]
     return {name: mx.stack([p[name] for p in parts]) for name in _PARTS}
+
+
+def load_stored(read, plan):
+    """Every non-trellis tensor, as stored (embeddings, norms, routers, ...)."""
+    return {name: read(name) for name in sorted(plan.stored)}
+
+
+def install_upstream(model, read, plan, module_path, *, execution="reference"):
+    """Swap every planned trellis module into ``model``; return the receipt.
+
+    ``module_path`` maps a checkpoint module name to the model's module path
+    (adapter-owned naming). A dense module must replace a plain ``nn.Linear``
+    of the same geometry; a bank replaces the routed switch at
+    ``<root>.switch_mlp``. Everything is admitted before anything is swapped.
+    ``execution`` is ``reference`` (per-row Sushi kernels), ``rows`` (the
+    row-blocked law) or ``fused`` (one-launch dense linears, expert banks on
+    the row-blocked law; Sushi's fused pair is validated at 40-word tiles
+    only). One law per module kind at every width keeps rows invariant. It is
+    a numerics law and part of the receipt.
+    """
+    if execution not in ("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax"):
+        raise ValueError(
+            "upstream EXL3 execution must be reference, rows, fused, fused_nax, fused_w8a8 or nax"
+        )
+    if execution == "fused_w8a8":
+        from ..int8_prefill import require_supported_device
+
+        require_supported_device()  # Metal 4 tensor ops, or refuse
+    import mlx.nn as nn
+
+    from ..models.exl3 import (
+        NAX_BANK_MIN_ROWS, NAX_MIN_ROWS, ROWS_LAW_REVISION, Exl3DenseLinear, install_banks,
+    )
+    from ..weight_stream import _swap_module
+
+    modules = dict(model.named_modules())
+    dense = []
+    for key, spec in sorted(plan.linears.items()):
+        path = module_path(key)
+        old = modules.get(path)
+        if type(old) is not nn.Linear:
+            raise ValueError(f"EXL3 linear {key} has no plain Linear at {path}")
+        out_dims, in_dims = old.weight.shape
+        if (in_dims, out_dims) != (spec.input_dims, spec.output_dims):
+            raise ValueError(f"EXL3 linear {key} disagrees with model geometry at {path}")
+        if ("bias" in old) != spec.bias:
+            raise ValueError(f"EXL3 linear {key} bias disagrees with {path}")
+        tensors = load_linear(read, spec)
+        dense.append((path, Exl3DenseLinear(**tensors, law="fused_nax" if execution == "nax" else execution)))
+    banks = {}
+    for spec in plan.banks.values():
+        root = module_path(spec.root) + ".switch_mlp"
+        for part, value in load_bank(read, spec).items():
+            banks[f"{root}.{spec.projection}.{part}"] = value
+    bank_execution = {"fused": "rows", "fused_nax": "rows", "fused_w8a8": "rows",
+                      "nax": "rows_nax"}.get(execution, execution)
+    switches = install_banks(model, banks, execution=bank_execution) if banks else []
+    for path, module in dense:
+        _swap_module(model, path, module)
+    packed = sum(m.bank.packed_nbytes for _, m in dense) + sum(
+        s.receipt()["packed_weight_bytes"] for s in switches
+    )
+    return {
+        **plan.receipt(),
+        "execution": execution,
+        "bank_execution": bank_execution,
+        **({"rows_law_revision": ROWS_LAW_REVISION} if bank_execution in ("rows", "rows_nax") else {}),
+        **({"nax_min_rows": NAX_MIN_ROWS} if execution in ("fused_nax", "fused_w8a8", "nax") else {}),
+        **({"nax_bank_min_rows": NAX_BANK_MIN_ROWS} if bank_execution == "rows_nax" else {}),
+        "fidelity": "approximate" if execution == "fused_w8a8" else "exact_trellis",
+        "installed_linears": len(dense),
+        "installed_switches": len(switches),
+        "packed_weight_bytes": packed,
+        "module_paths": sorted(
+            [path for path, _ in dense]
+            + [module_path(spec.root) + ".switch_mlp" for spec in plan.banks.values()]
+        ),
+    }
+
+
+def load_beside(model, receipt, weights):
+    """Load sanitized stored tensors around installed trellis modules.
+
+    Coverage is exact: every parameter is either trellis-owned or stored,
+    never both, and no stored tensor is left without a parameter.
+    """
+    from mlx.utils import tree_flatten
+
+    roots = tuple(path + "." for path in receipt["module_paths"])
+    params = {name for name, _ in tree_flatten(model.parameters())}
+    trellis = {name for name in params if name.startswith(roots)}
+    missing = sorted(params - trellis - set(weights))
+    extra = sorted(set(weights) - params)
+    doubled = sorted(trellis & set(weights))
+    if missing or extra or doubled:
+        raise ValueError(
+            f"EXL3 checkpoint does not cover the model: missing {missing[:4]}, "
+            f"unexpected {extra[:4]}, stored over trellis {doubled[:4]}"
+        )
+    model.load_weights(list(weights.items()), strict=False)
+
+
+def cast_half_compute(weights, suffixes, target):
+    """Cast the named F16 stored weights to the compute dtype.
+
+    Upstream EXL3 keeps small gate projections in F16; against BF16
+    activations MLX promotes their products to F32 and widens the residual
+    stream. The cast rounds F16 to the compute dtype and is recorded.
+    """
+    import mlx.core as mx
+
+    suffixes = tuple(suffixes)
+    if target is None or target == mx.float16:
+        return {"cast": 0}
+    keys = sorted(k for k, v in weights.items() if v.dtype == mx.float16 and k.endswith(suffixes))
+    for key in keys:
+        weights[key] = weights[key].astype(target)
+    return {"cast": len(keys), "from": "float16", "to": str(target).rsplit(".", 1)[-1],
+            "suffixes": list(suffixes)}

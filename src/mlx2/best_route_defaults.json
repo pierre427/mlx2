@@ -994,6 +994,40 @@
     ],
     "source_revision": "67dbd6fc6e140917273deba4a792c2e0780c164d"
    }
+  },
+  {
+   "checkpoint": "Ripple-65B-Preview-oQ4e@sha256:8ddd93fab94b25551a5a9533efdcb0f9edfbb198bfcde2888e0515933208f7da",
+   "fingerprint": "8ddd93fab94b25551a5a9533efdcb0f9edfbb198bfcde2888e0515933208f7da",
+   "adapter": "RippleAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ast_Ripple-65B-Preview-DFlash2",
+    "kind": "ast",
+    "execution_policy": {
+     "num_draft": 7
+    },
+    "drafter": {
+     "name": "Ripple-65B-Preview-DFlash2",
+     "architectures": [
+      "DFlash2DraftModel"
+     ],
+     "identities": [
+      "423dc0fb0e863f043a306af53ef6c241ebedd5099b48ced8ee9dcbf072e110c2"
+     ],
+     "config_sha256": [
+      "868841f16379f34f97e8a17575c6a9f1f4cab4eae214e6d947e2641c38962171"
+     ]
+    }
+   },
+   "reason": "decision row from another lane: Operator decision: Pierre 2026-11-04 made the vendor DFlash2 drafter (num_draft 7) the no-flag route for this checkpoint; selected unqualified. Route: ast drafter=Ripple-65B-Preview-DFlash2@sha256:423dc0fb0e863f043a306af53ef6c241ebedd5099b48ced8ee9dcbf072e110c2 adapter=RippleAdapter. Measured vs eager control (B1): prose 15.7 vs 11.0 t/s, copy 45.6 vs 10.9, 4-request aggregate 15.2 vs 10.4; the 8-cell rule campaign was not run. Near-tie classification: 5 near_tie_equivalent, 0 failed, 9 unclassified (route not run-to-run deterministic; copy oracle invalid). Execution-policy: {\"num_draft\": 7}",
+   "evidence": {
+    "files": [
+     "qualification/runs/ripple-perf-ab-20261104/run5/evidence/receipt.json",
+     "qualification/runs/ripple-perf-ab-20261104/classify/classification.json"
+    ],
+    "source_revision": "708b49722",
+    "decision_row": true
+   }
   }
  ]
 }

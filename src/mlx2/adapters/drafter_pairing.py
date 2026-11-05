@@ -221,6 +221,16 @@ def pair_drafter(
 
         record = dflash2.inspect_drafter(dpath, tpath)
         policy["num_draft"] = 4
+    elif adapter == "RippleAdapter":
+        if archs != ["DFlash2DraftModel"]:
+            raise ValueError(f"Ripple external route accepts DFlash2DraftModel only (artifact declares {archs})")
+        from . import dflash2
+
+        record = dflash2.inspect_drafter(dpath, tpath)
+        pins["draft_revision"] = dflash2.content_revision(record)
+        # num_draft 7: best prose and aggregate rate of 3/7/15 on oQ4e
+        # (qualification/runs/ripple-perf-ab-20261104/run5).
+        policy.update(pins, num_draft=7)
     elif adapter == "NorthMiniCodeAdapter":
         from . import cohere_eagle
 

@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from .external_draft_policy import ExternalDraftAdapterMixin
 from .ordinary_artifact import inspect_indexed_artifact
 from .ordinary_text import OrdinaryTextAdapter, _template_history
 
@@ -24,14 +25,23 @@ DESCRIPTOR = ModelDescriptor(
     model_type="ricursive", family="ripple", variant="65b-preview-nvfp4-w4a16",
     state_planes=frozenset({StatePlane.ATTENTION_KV, StatePlane.RNG, StatePlane.TRANSCRIPT}),
     capabilities=frozenset({Capability.TEXT, Capability.STREAMING, Capability.PREFIX_REUSE,
-                            Capability.APC_V2, Capability.LAYERED_CACHE, Capability.REASONING}),
+                            # Batched rotating/full KV with per-lane RoPE
+                            # offsets; greedy-exact against per-request
+                            # decode on CPU (tests/test_ripple_batch_cpu.py).
+                            Capability.CONTINUOUS_BATCH,
+                            Capability.APC_V2, Capability.LAYERED_CACHE, Capability.REASONING,
+                            # Attention-only (rotating + full KV with exact
+                            # speculative rollback): the generic PLD verify
+                            # path (tests/test_ripple_pld_cpu.py). Explicit
+                            # --prompt-lookup only; see prompt_lookup_default.
+                            Capability.PROMPT_LOOKUP}),
     cache_layout=CACHE_LAYOUT,
     metadata={"execution": "mlx2.adapters.ripple.RippleAdapter", "implemented": True,
               "qualification": "unqualified", "qualified": False, "selected": False,
               "observed_used": False, "ordinary_reference": True,
               "source_activation_precision": "nvfp4", "activation_precision": "bf16",
               "explicit_execution_policy_required": {"activation_precision": "bf16"},
-              "scope": "ordinary W4A16; source W4A4, tools, batching and long context unqualified"},
+              "scope": "ordinary W4A16; source W4A4, tools, batching, prompt lookup and long context unqualified"},
 )
 
 
@@ -265,6 +275,44 @@ def source_weights(artifact):
             ubc_evict(str(path / shard))
 
 
+# Adapter-owned execution options (default off; see docs/ripple-65b.md):
+#   fused_elementwise  per-layer elementwise chains in compiled regions.
+#                      Kept OFF: bit-identical to eager on CPU and Metal
+#                      (real widths, 1 and 512 rows) and in serving, but no
+#                      measurable gain: decode 10.72 vs 10.67 t/s eager on
+#                      oQ4e (qualification/runs/ripple-perf-ab-20261104/run3).
+OPTIONS = {"fused_elementwise": bool}
+
+
+NUMERICS_KEYS = ("activation_precision",)
+
+
+def split_policy(policy):
+    """``(numerics, adapter options, external-draft policy)``.
+
+    Every key that is neither numerics nor a Ripple option goes to the
+    external-draft parser, which refuses unknown keys and any external key
+    without a ``draft_model``.
+    """
+    numerics, options = split_options(policy)
+    external = {k: v for k, v in numerics.items() if k not in NUMERICS_KEYS}
+    numerics = {k: v for k, v in numerics.items() if k in NUMERICS_KEYS}
+    return numerics, options, external
+
+
+def split_options(policy):
+    """``(numerics policy, adapter options)``; unknown keys fail closed."""
+    policy = dict(policy or {})
+    options = {}
+    for key, kind in OPTIONS.items():
+        if key in policy:
+            value = policy.pop(key)
+            if type(value) is not kind:
+                raise ValueError(f"Ripple option {key} must be a {kind.__name__}")
+            options[key] = value
+    return policy, options
+
+
 def parse_policy(policy):
     if policy != {"activation_precision": "bf16"}:
         raise ValueError(
@@ -274,14 +322,29 @@ def parse_policy(policy):
     return dict(policy)
 
 
-class RippleAdapter(OrdinaryTextAdapter):
+class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     descriptor = DESCRIPTOR
+    # Vendor DFlash2 drafter (ricursiveAI/Ripple-65B-Preview-DFlash2): taps
+    # target blocks 1/20/39/58/77 before the final norm. Depth unmeasured on
+    # Apple silicon; 7 is a starting point for the A/B, not a tuned default.
+    EXTERNAL_DEFAULT_NUM_DRAFT = 7
+    EXTERNAL_ROUTE_TAG = "external-ripple-dflash2-v1"
+    EXTERNAL_PROFILE = "ripple-apcv2-dflash2"
+    # Identity pin an auto-paired default writes (best_route_defaults); the
+    # adapter re-checks it below so a drafter changed after pairing fails.
+    EXTERNAL_POLICY_EXTENSIONS = frozenset({"draft_revision"})
     profile = "ripple-nvfp4-w4a16-apcv2-ordinary"
+    # Wider lanes are admitted (--max-lanes); the no-flag width stays one
+    # until a GPU A/B selects a default.
     default_max_lanes = 1
+    # PLD is CPU-exact across window wraps but has no GPU A/B on a Ripple
+    # artifact yet, so it is not the no-flag route. Flip after an owned A/B
+    # and the user's approval (AGENTS.md default-change rule).
+    prompt_lookup_default = False
 
     def execution_config(self, *, max_lanes, prefill_step):
-        if max_lanes != 1:
-            raise ValueError("the initial Ripple adapter supports one ordinary lane")
+        if getattr(self, "draft_model", None) is not None:
+            return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
         return super().execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
 
     def __init__(self, model_path, *, execution_policy=None):
@@ -295,9 +358,23 @@ class RippleAdapter(OrdinaryTextAdapter):
         artifact = inspect_artifact(model_path)
         self.config, self.identity = artifact["config"], artifact["identity"]
         self.kind = artifact["storage_format"]
+        numerics, self.options, external = split_policy(self.policy)
+        draft_record = None
+        if self._parse_external_policy(external, family="Ripple"):
+            # Header-only drafter inspection before any target tensor loads.
+            from .dflash2 import inspect_drafter
+
+            draft_record = inspect_drafter(self.external_policy["draft_model"], artifact["identity"]["path"])
+            pin = self.external_policy.pop("draft_revision", None)
+            if pin is not None:
+                from .dflash2 import content_revision
+
+                if content_revision(draft_record) != pin:
+                    raise ValueError("Ripple drafter content differs from its pinned draft_revision")
+            self._check_num_draft(draft_record)
         if self.kind == "nvfp4":
-            self.policy = parse_policy(self.policy)
-        elif self.policy not in (None, {}, {"activation_precision": "bf16"}):
+            self.policy = parse_policy(numerics)
+        elif numerics not in ({}, {"activation_precision": "bf16"}):
             raise ValueError("Ripple BF16/affine accepts only BF16 activations")
         else:
             self.policy = {"activation_precision": "bf16"}
@@ -321,6 +398,7 @@ class RippleAdapter(OrdinaryTextAdapter):
 
             specs = affine_specs(self.config)
             nn.quantize(self.model, class_predicate=lambda name, module: specs.get(name, False))
+        self.model.set_fused_elementwise(self.options.get("fused_elementwise", False))
         weights = list(source_weights(artifact))
         self.model.load_weights(weights, strict=True)
         self.model.eval()
@@ -334,6 +412,10 @@ class RippleAdapter(OrdinaryTextAdapter):
         self.tokenizer = TokenizerWrapper(tokenizer, detokenizer_class=BPEStreamingDetokenizer,
                                           eos_token_ids=self.config["eos_token_id"])
         self.max_context = self.config["max_position_embeddings"]
+        if draft_record is not None:
+            from .dflash2 import load_drafter
+
+            self._bind_external_drafter(draft_record, load_drafter, self.descriptor)
 
     @staticmethod
     def _check_request(request):
@@ -341,7 +423,9 @@ class RippleAdapter(OrdinaryTextAdapter):
 
         if callable_tools(request):
             raise ValueError("Ripple tool calling is not implemented in this initial adapter")
-        if request.get("enable_thinking") is False:
+        # The flag only has template meaning for chat requests; raw prompts
+        # (e.g. classifier scoring) set it without asking for a control.
+        if "messages" in request and request.get("enable_thinking") is False:
             raise ValueError("Ripple's source template does not implement a thinking-off control")
 
     def render_prompt(self, request):
@@ -368,7 +452,11 @@ class RippleAdapter(OrdinaryTextAdapter):
 
         status = nvfp4_model_status(self.model)
         return {"route": "ordinary", "qualification": "unqualified", "policy": self.policy,
+                "options": dict(self.options),
+                "fused_elementwise": bool(getattr(self.model, "fused_elementwise", False)),
                 "implemented": True, "qualified": False, "selected": True,
+                "speculation": ("external-ripple-dflash2-implemented-unqualified"
+                                if getattr(self, "draft_model", None) is not None else "none"),
                 "observed_used": getattr(self.model, "forward_calls", 0) > 0,
                 "forward_calls": getattr(self.model, "forward_calls", 0),
                 "storage_format": self.kind,

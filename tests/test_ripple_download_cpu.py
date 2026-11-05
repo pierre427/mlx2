@@ -77,3 +77,65 @@ def test_oversized_partial_refused_before_network(tmp_path):
     entry = {"path": "weight", "sha256": "hash", "git_blob": None, "size": 2}
     with pytest.raises(ValueError, match="oversized"):
         download.resume_file(entry, tmp_path, url="https://example.invalid/weight")
+
+
+def test_full_size_corrupt_file_is_quarantined_then_refetched(tmp_path, monkeypatch):
+    """A right-size, wrong-hash file used to fail every rerun with no refetch."""
+    import huggingface_hub
+    from huggingface_hub import file_download
+
+    payload = b"A" * 100
+    entry = {"path": "weight", "sha256": hashlib.sha256(payload).hexdigest(),
+             "git_blob": None, "size": len(payload)}
+    manifest = {"repo": "r/m", "revision": "rev", "files": [entry]}
+    real_loads = download.json.loads
+    monkeypatch.setattr(download.json, "loads",
+                        lambda text: manifest if "ricursiveAI" in text else real_loads(text))
+    token = tmp_path / "token"
+    token.write_text("secret\n")
+    output = tmp_path / "out"
+    output.mkdir()
+    (output / "weight").write_bytes(b"B" * 100)
+
+    class Metadata:
+        commit_hash, size, etag = "rev", len(payload), entry["sha256"]
+        location = "https://cdn.example.invalid/weight"
+
+    calls = []
+    monkeypatch.setattr(huggingface_hub, "get_hf_file_metadata",
+                        lambda url, token: calls.append(url) or Metadata)
+
+    def fetch(_url, stream, **kwargs):
+        assert kwargs["headers"] is None  # PAT never sent to a foreign origin
+        stream.write(payload[kwargs["resume_size"]:])
+
+    monkeypatch.setattr(file_download, "http_get", fetch)
+    with pytest.raises(ValueError, match="content hash differs"):
+        download.download(output, token_file=token)
+    assert not (output / "weight").exists()
+    assert (output / ".cache/mlx2-ripple-download/rejected/weight").read_bytes() == b"B" * 100
+    assert not calls
+    receipt = download.download(output, token_file=token)
+    assert len(calls) == 1
+    assert (output / "weight").read_bytes() == payload
+    assert receipt["verified"] == [{"path": "weight", "bytes": 100, "content_hash": entry["sha256"]}]
+
+
+def test_legacy_hub_partial_name_is_adopted(tmp_path, monkeypatch):
+    from huggingface_hub import file_download
+
+    payload = b"0123456789" * 10
+    digest = hashlib.sha256(payload).hexdigest()
+    entry = {"path": "weight", "sha256": digest, "git_blob": None, "size": len(payload)}
+    legacy = tmp_path / ".cache/huggingface/download/sub"
+    legacy.mkdir(parents=True)
+    (legacy / f"weight.{digest}.incomplete").write_bytes(payload[:40])
+
+    def fetch(_url, stream, **kwargs):
+        assert kwargs["resume_size"] == 40
+        stream.write(payload[40:])
+
+    monkeypatch.setattr(file_download, "http_get", fetch)
+    download.resume_file(entry, tmp_path, url="https://example.invalid/weight")
+    assert (tmp_path / "weight").read_bytes() == payload
+    assert not list(legacy.glob("*.incomplete"))

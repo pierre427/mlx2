@@ -158,6 +158,59 @@ def test_rotary_lane_offsets_and_source_bf16_rounding():
     np.testing.assert_array_equal(np.asarray(batched.astype(mx.float32)), np.asarray(separate.astype(mx.float32)))
 
 
+SOURCE_EMBED_SCALE = 71.55417527999327
+
+
+def test_bf16_embedding_scale_rounds_once_like_source():
+    torch = pytest.importorskip("torch")
+    from mlx2.runtime.models.ricursive import scale_embeddings
+
+    rng = np.random.default_rng(5)
+    h = mx.array(rng.normal(size=(4, 512)).astype(np.float32)).astype(mx.bfloat16)
+    expected = torch.tensor(np.asarray(h.astype(mx.float32))).bfloat16() * SOURCE_EMBED_SCALE
+    actual = scale_embeddings(h, SOURCE_EMBED_SCALE)
+    assert actual.dtype == mx.bfloat16
+    np.testing.assert_array_equal(np.asarray(actual.astype(mx.float32)), expected.float().numpy())
+    # The pre-repair law rounded the scalar to BF16 (71.5) first.
+    assert (np.asarray((h * SOURCE_EMBED_SCALE).astype(mx.float32)) != expected.float().numpy()).any()
+
+
+def test_bf16_one_token_model_oracle_uses_published_embed_scale():
+    torch = pytest.importorskip("torch")
+    torch.set_num_threads(1)
+    mx.random.seed(72)
+    args = tiny_args()
+    args.embed_scale = SOURCE_EMBED_SCALE
+    model = Model(args, nvfp4=False)
+    for layer, value in zip(model.layers, [-2.75, -.3, .25, 1.1, 4.0], strict=True):
+        layer.self_attn.value_res_lambda = mx.array([value])
+    model.set_dtype(mx.bfloat16)
+    weights = dict(tree_flatten(model.parameters()))
+    actual = np.asarray(model(mx.array([[1]])).astype(mx.float32))
+    np.testing.assert_array_equal(actual, torch_reference([[1]], weights, args, torch))
+
+
+@pytest.mark.parametrize("offset", [1000, 5000, 131071])
+def test_rotary_matches_source_at_deep_positions(offset):
+    torch = pytest.importorskip("torch")
+    from mlx2.runtime.models.ricursive import inverse_frequencies
+
+    dims, theta = 128, 10000.0
+    source_inv = 1.0 / (theta ** (torch.arange(0, dims, 2).float() / dims))
+    np.testing.assert_array_equal(np.asarray(inverse_frequencies(dims, theta)), source_inv.numpy())
+    rng = np.random.default_rng(offset)
+    x = mx.array(rng.normal(size=(1, 2, 3, dims)).astype(np.float32)).astype(mx.bfloat16)
+    positions = torch.arange(offset, offset + 3).float()
+    phase = positions[:, None] * source_inv[None, :]
+    emb = torch.cat((phase, phase), dim=-1)
+    cos, sin = emb.cos().bfloat16().float(), emb.sin().bfloat16().float()
+    y = torch.tensor(np.asarray(x.astype(mx.float32)))
+    first, second = y.chunk(2, dim=-1)
+    expected = (y * cos + torch.cat((-second, first), dim=-1) * sin).bfloat16()
+    actual = rotary(x, offset, theta)
+    np.testing.assert_array_equal(np.asarray(actual.astype(mx.float32)), expected.float().numpy())
+
+
 def test_rmsnorm_rounds_before_scale():
     norm = RMSNorm(16, 1e-6)
     x = mx.array(np.random.default_rng(7).normal(size=(3, 16))).astype(mx.bfloat16)
@@ -270,8 +323,7 @@ def test_exact_published_config_and_policy_fail_closed():
     assert not DESCRIPTOR.metadata["qualified"]
     adapter = object.__new__(RippleAdapter)
     assert adapter.execution_config(max_lanes=1, prefill_step=256)["num_draft"] == 0
-    with pytest.raises(ValueError, match="one ordinary lane"):
-        adapter.execution_config(max_lanes=2, prefill_step=256)
+    assert adapter.execution_config(max_lanes=4, prefill_step=256)["segment_aware_cohort_size"] == 4
     budget = RippleAdapter.planning_cache_budget(config, mtp=False)
     assert budget.global_layers == 16 and budget.sliding_layers == 64
     assert budget.project(16384) > budget.project(8192)
@@ -292,5 +344,21 @@ def test_template_and_reasoning_contract():
     assert parser.channel == "content"
     with pytest.raises(ValueError, match="thinking-off"):
         adapter.output_parser({"messages": messages, "enable_thinking": False})
+    # Raw prompts have no template control; classifier scoring sets the flag.
+    assert adapter.output_parser({"prompt": "x", "enable_thinking": False}).channel == "content"
+    assert adapter.render_prompt({"prompt": "x", "enable_thinking": False}) == "x"
     with pytest.raises(ValueError, match="tool calling"):
         adapter.output_parser({"messages": messages, "tools": [{"type": "function", "function": {"name": "f"}}]})
+
+
+def test_fused_elementwise_option_is_explicit_and_typed():
+    from mlx2.adapters.ripple import split_options
+
+    assert split_options(None) == ({}, {})
+    assert split_options({"activation_precision": "bf16", "fused_elementwise": True}) == (
+        {"activation_precision": "bf16"}, {"fused_elementwise": True})
+    with pytest.raises(ValueError, match="must be a bool"):
+        split_options({"fused_elementwise": "yes"})
+    # Unknown keys are left in the numerics policy, which then fails closed.
+    with pytest.raises(ValueError, match="W4A16"):
+        parse_policy(split_options({"activation_precision": "bf16", "speed": 1})[0])

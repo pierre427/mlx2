@@ -127,9 +127,17 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     receipt["thermal_before"] = subprocess.check_output(["pmset", "-g", "therm"], text=True)
     receipt["swap_before"] = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)
-    subprocess.run([sys.executable, __file__, "--model", str(args.model), "--output", str(args.output),
-                    "--cpg-lock", str(args.cpg_lock), "--reference-only"], check=True, timeout=900)
-    ordinary = json.loads((args.output / "ordinary-reference.json").read_text())
+    try:
+        subprocess.run([sys.executable, __file__, "--model", str(args.model), "--output", str(args.output),
+                        "--cpg-lock", str(args.cpg_lock), "--reference-only"], check=True, timeout=900)
+        ordinary = json.loads((args.output / "ordinary-reference.json").read_text())
+    except BaseException as exc:
+        # A failed or timed-out reference still leaves a failing receipt.
+        receipt.update(passed=False, error=repr(exc), phase="ordinary_reference",
+                       thermal_after=subprocess.check_output(["pmset", "-g", "therm"], text=True),
+                       swap_after=subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True))
+        atomic_json(args.output / "receipt.json", receipt)
+        raise
     receipt["ordinary_reference"] = ordinary
     root = f"http://127.0.0.1:{args.port}"
 

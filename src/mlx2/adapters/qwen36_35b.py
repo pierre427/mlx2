@@ -347,6 +347,26 @@ MOE_NAX_GATHER_MODES = ("off", "gather", "fused")
 DEFAULT_MOE_NAX_GATHER = "fused"
 
 
+# Stored F16 gates of upstream EXL3 checkpoints. Against BF16 activations
+# they promote to F32 (in_proj_a/b feed the GDN; shared_expert_gate scales
+# the residual), seen as a widened load dtype check on the first GPU run.
+EXL3_HALF_COMPUTE_WEIGHTS = (
+    ".linear_attn.in_proj_a.weight",
+    ".linear_attn.in_proj_b.weight",
+    ".mlp.gate.weight",
+    ".mlp.shared_expert_gate.weight",
+)
+
+
+def exl3_module_path(key):
+    """Upstream EXL3 checkpoint module name -> this model's module path."""
+    if key.startswith("model.language_model."):
+        return "language_model.model." + key[len("model.language_model."):]
+    if key == "lm_head":
+        return "language_model.lm_head"
+    raise ValueError(f"no Qwen3.6 module for EXL3 tensor {key}")
+
+
 def expert_tables_lack_affine_format(weight_map):
     """Prove the known expert projections have no affine table consumer.
 
@@ -404,9 +424,36 @@ EXTERNAL_TARGET_KERNEL_KEYS = frozenset(
 
 TARGET_EXECUTION_POLICY_KEYS = frozenset({
     "tensorfold_prefill", "tensorfold_prefill_backend", "gdn_prefill_chunk",
-    "gdn_prefill_segment_rows", "gdn_state_dtype", "moe_nax_gather",
+    "gdn_prefill_segment_rows", "gdn_state_dtype", "moe_nax_gather", "exl3_execution",
     *KERNEL_POLICY_ENV, *EAGER_DISPATCH_POLICY_KEYS,
 })
+# Upstream EXL3 execution laws, one per module kind at every width, so rows
+# stay invariant (qualification/runs/exl3-phase3-metal-20261104, M5 Max,
+# 4.00bpw, sanity timings):
+#   reference  per-row Sushi kernels; 277 tok/s prefill, 71.8 tok/s decode.
+#   rows       four-row blocks of one expert (ROWS_GEMV); 434 / 64.4.
+#   fused      one-launch dense linears (FUSED_LINEAR) and row-law banks;
+#              450 / 84.2, correct, bitwise row-invariant, APCv2 cold/warm
+#              exact on the server. Candidate default, awaiting approval;
+#              one B4/reference divergence is not yet classified.
+#   fused_nax  fused below 64 rows; wider dense calls reconstruct fp16
+#              weights and run mx.matmul on the M5 tensor units (two dense
+#              laws split by width, like affine qmv/qmm). 963 / 87.2: the
+#              best measured; APCv2 cold/warm exact on the server.
+#   fused_w8a8 fused below 64 rows; wider dense calls run approximate W8A8
+#              (int8 rows x int8 output channels, int8_prefill GEMM on the
+#              tensor units). Approximate: its own identity and APCv2 space.
+#              952 / 87.6: no gain over exact fp16 NAX (per-call weight
+#              quantization cancels the int8 GEMM gain), so leave it off.
+#   nax        fused_nax plus expert banks on the tensor units at 1024+
+#              routed slots (chunked fp16 expert reconstruction, sorted
+#              gather_mm). 1125 / 87.8: the fastest measured; APCv2
+#              cold/warm exact on the server; its one serving divergence is
+#              near_tie_equivalent. The default (Pierre, 2026-11-05).
+EXL3_EXECUTIONS = ("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax")
+# Upstream EXL3 checkpoints only; every other artifact keeps no EXL3 law.
+# Correct on any Metal host: off M5 mx.matmul runs the ordinary GEMM.
+DEFAULT_EXL3_EXECUTION = "nax"
 
 
 def partition_native_tree_policy(policy, *, numerical_defaults=None):
@@ -800,7 +847,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if set(policy) - {"num_draft", *TARGET_EXECUTION_POLICY_KEYS}:
             raise ValueError(
                 "Qwen3.6 execution policy supports only num_draft, gdn_state_dtype, "
-                "moe_nax_gather, tensorfold_prefill, tensorfold_prefill_backend, "
+                "moe_nax_gather, exl3_execution, tensorfold_prefill, tensorfold_prefill_backend, "
                 "gdn_prefill_chunk, gdn_prefill_segment_rows, "
                 "the eager-dispatch keys and the kernel switches "
                 + ", ".join(sorted(KERNEL_POLICY_ENV))
@@ -865,12 +912,24 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             )
         self.weight_stream = None
         artifact = inspect_artifact(model_path)
-        if artifact.get("exl3_upstream") is not None:
-            receipt = json.dumps(artifact["exl3_upstream"].receipt(), sort_keys=True)
-            raise ValueError(f"upstream EXL3 execution is not implemented: {receipt}")
         self.skipped_affine_moe_defaults = {}
-        if artifact["config"].get("mlx2_exl3") is None and expert_tables_lack_affine_format(artifact["weight_map"]):
-            reason = "expert projections have no affine quantized tables"
+        upstream_exl3 = artifact.get("exl3_upstream") is not None
+        explicit_exl3 = "exl3_execution" in policy
+        self.exl3_execution = policy.pop(
+            "exl3_execution", DEFAULT_EXL3_EXECUTION if upstream_exl3 else "reference"
+        )
+        if self.exl3_execution not in EXL3_EXECUTIONS:
+            raise ValueError(f"Qwen3.6 exl3_execution must be one of {EXL3_EXECUTIONS}")
+        if explicit_exl3 and not upstream_exl3:
+            raise ValueError("exl3_execution requires an upstream EXL3 checkpoint")
+        if artifact["config"].get("mlx2_exl3") is None and (
+            upstream_exl3 or expert_tables_lack_affine_format(artifact["weight_map"])
+        ):
+            reason = (
+                "expert projections are upstream EXL3 trellis banks"
+                if upstream_exl3
+                else "expert projections have no affine quantized tables"
+            )
             if moe_nax_explicit and self.moe_nax_gather != "off":
                 raise ValueError(f"moe_nax_gather requires affine expert tables: {reason}")
             if self.moe_nax_gather != "off":
@@ -1171,6 +1230,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
 
         self.model = Model(ModelArgs.from_dict(config))
         exl3 = config.get("mlx2_exl3")
+        upstream = artifact.get("exl3_upstream")
+        if upstream is not None and stream_request is not None:
+            raise ValueError("EXL3 disk streaming is not implemented; select resident EXL3")
         if exl3 is not None and artifact["has_mtp"]:
             raise ValueError("EXL3 adapter slice supports ordinary artifacts without embedded MTP")
         if exl3 is not None and stream_request is not None:
@@ -1204,7 +1266,22 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 class_predicate=predicate,
             )
 
-        if stream_request is None:
+        if upstream is not None:
+            from ..runtime.trellis.upstream import (
+                ShardReader, cast_half_compute, install_upstream, load_stored,
+            )
+
+            # Trellis modules swap in first; stored tensors then load through
+            # the ordinary sanitize (renames, norm convention, dtypes).
+            read = ShardReader(path, artifact["weight_map"])
+            self.exl3 = install_upstream(
+                self.model, read, upstream, exl3_module_path, execution=self.exl3_execution
+            )
+            weights = self.model.sanitize(self.model.shard_prune(load_stored(read, upstream)))
+            self.exl3["stored_half_cast"] = cast_half_compute(
+                weights, EXL3_HALF_COMPUTE_WEIGHTS, self.model.language_model.compute_dtype
+            )
+        elif stream_request is None:
             weights = self.model.sanitize(
                 load_shards_evicting(files, sanitize=self.model.shard_prune)
             )
@@ -1221,7 +1298,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         self.norm_convention = report
         self.mtp_norm_repairs = [] if report is None else report.repaired_head_keys
         self.mtp_norm_means = norm_means(weights, "mtp.")
-        if stream_request is None:
+        if upstream is not None:
+            self._load_upstream_exl3_stored(weights)
+        elif stream_request is None:
             packed = any(key.endswith(".trellis") for key in weights)
             if packed and exl3 is None:
                 raise ValueError("EXL3 tensors require explicit mlx2_exl3 format metadata")
@@ -1245,6 +1324,32 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             self.model.model.set_eager_dispatch(*eager_dispatch)
         weights.clear()
         mx.clear_cache()
+
+    def _load_upstream_exl3_stored(self, weights):
+        """Load stored tensors beside installed trellis modules, coverage exact."""
+        import hashlib as _hashlib
+        from dataclasses import replace
+
+        from ..runtime.trellis.upstream import load_beside
+
+        load_beside(self.model, self.exl3, weights)
+        # The installed format is a numerics law: its own APCv2 namespace
+        # and qualification identity, as for the Sushi pack marker.
+        self.identity = {
+            **self.identity,
+            "exl3": self.exl3,
+            "fingerprint": _hashlib.sha256(
+                (self.identity["fingerprint"] + json.dumps(self.exl3, sort_keys=True)).encode()
+            ).hexdigest(),
+        }
+        self.descriptor = replace(
+            self.descriptor,
+            metadata={
+                **self.descriptor.metadata,
+                "weight_format": "exl3-upstream",
+                "weight_format_qualification": "unqualified",
+            },
+        )
 
     def _load_streamed(self, path, names, artifact, config, stream_request, quantize):
         """Early-load expert streaming; the manager joins ``self._tables``."""
@@ -1465,10 +1570,19 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             result["moe_pad"] = pad_status
 
         if getattr(self,"exl3",None) is not None:
-            from ..runtime.models.exl3 import Exl3SwitchGLU
+            from ..runtime.models.exl3 import Exl3DenseLinear, Exl3SwitchGLU
             result["exl3"] = {**self.exl3,"observed_blocks":[
                 {"path":path,**module.receipt()} for path,module in self.model.named_modules()
                 if isinstance(module,Exl3SwitchGLU)]}
+            dense = [m for _, m in self.model.named_modules() if isinstance(m, Exl3DenseLinear)]
+            if dense:
+                result["exl3"]["observed_linears"] = {
+                    "modules": len(dense),
+                    "called": sum(1 for m in dense if m.calls),
+                    "calls": sum(m.calls for m in dense),
+                    "rows": sum(m.rows for m in dense),
+                    "laws_called": sorted({m.law for m in dense if m.calls}),
+                }
         result["architecture"] = "sparse-moe-hybrid-gdn-gqa"
         result["layout"] = self.layout
         result["optimized_moe_selected"] = any(

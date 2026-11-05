@@ -248,7 +248,7 @@ def test_registry_refuses_exl3_for_families_without_a_reader(tmp_path):
         inspect_model(tmp_path)
 
 
-def test_qwen36_inspector_plans_and_adapter_refuses_execution(tmp_path):
+def test_qwen36_inspector_plans_and_names_modules(tmp_path):
     from mlx2.adapters import qwen36_35b
     from mlx2.adapters.registry import inspect_model
 
@@ -287,8 +287,12 @@ def test_qwen36_inspector_plans_and_adapter_refuses_execution(tmp_path):
         (tmp_path / "quantization_config.json").read_text().replace("0.0.29", "0.0.30")
     )
     assert inspect_model(tmp_path).artifact["identity"]["fingerprint"] != fingerprint
-    with pytest.raises(ValueError, match="upstream EXL3 execution is not implemented"):
-        qwen36_35b.Qwen3635BA3BAdapter(tmp_path)
+    assert qwen36_35b.exl3_module_path(
+        "model.language_model.layers.3.self_attn.q_proj"
+    ) == "language_model.model.layers.3.self_attn.q_proj"
+    assert qwen36_35b.exl3_module_path("lm_head") == "language_model.lm_head"
+    with pytest.raises(ValueError, match="no Qwen3.6 module"):
+        qwen36_35b.exl3_module_path("model.visual.blocks.0.attn.qkv")
 
 
 def test_exl3_kernel_assets_bind_into_source_identity():
@@ -304,3 +308,140 @@ def test_exl3_kernel_assets_bind_into_source_identity():
         if p.is_file()
     }
     assert kernels == on_disk and any(k.endswith(".metal") for k in kernels)
+
+
+def test_named_half_gates_cast_to_compute_dtype_and_nothing_else():
+    from mlx2.adapters.qwen36_35b import EXL3_HALF_COMPUTE_WEIGHTS
+    from mlx2.runtime.trellis.upstream import cast_half_compute
+
+    gate = "language_model.model.layers.0.linear_attn.in_proj_a.weight"
+    router = "language_model.model.layers.0.mlp.gate.weight"
+    norm = "language_model.model.layers.0.input_layernorm.weight"
+    a_log = "language_model.model.layers.0.linear_attn.A_log"
+    weights = {
+        gate: mx.ones((4, 8), mx.float16),
+        router: mx.ones((4, 8), mx.float16),
+        norm: mx.ones((8,), mx.float16),
+        a_log: mx.ones((4,), mx.float32),
+    }
+    receipt = cast_half_compute(weights, EXL3_HALF_COMPUTE_WEIGHTS, mx.bfloat16)
+    assert receipt["cast"] == 2 and receipt["to"] == "bfloat16"
+    assert weights[gate].dtype == weights[router].dtype == mx.bfloat16
+    assert weights[norm].dtype == mx.float16 and weights[a_log].dtype == mx.float32
+    assert cast_half_compute(weights, EXL3_HALF_COMPUTE_WEIGHTS, mx.float16) == {"cast": 0}
+
+
+@pytest.mark.parametrize("rows,experts", [(1, 1), (37, 1), (5, 8), (31, 8), (32, 8), (200, 8)])
+def test_row_plan_orders_every_row_once_sorted_by_expert(rows, experts):
+    from mlx2.runtime.models.exl3 import GROUP_MIN_ROWS, ROWS_PER_BLOCK, row_plan
+
+    rng = np.random.default_rng(rows)
+    ids = mx.array(rng.integers(0, experts, rows).astype(np.int32))
+    plan = row_plan(ids, experts)
+    order = np.asarray(plan.order)
+    assert plan.order.dtype == plan.eids.dtype == mx.uint32
+    assert sorted(order.tolist()) == list(range(rows))
+    np.testing.assert_array_equal(np.asarray(plan.eids), np.asarray(ids))
+    wide = experts == 1 and rows > 1 or experts > 1 and rows >= GROUP_MIN_ROWS
+    assert plan.rows == (ROWS_PER_BLOCK if wide else 1)
+    if plan.rows > 1:
+        assert (np.diff(np.asarray(ids)[order]) >= 0).all()
+
+
+@pytest.mark.parametrize("rows", [1, 5, 40])
+def test_rows_law_matches_the_reference_law(rows):
+    from mlx2.runtime.models.exl3 import Exl3Linear
+
+    rng = np.random.default_rng(11)
+    e, i, o, words = 4, 256, 128, 48
+    trellis = mx.array(rng.integers(0, 65536, (e, i // 16, o // 16, words), np.uint16))
+    suh = mx.array((rng.normal(0, 1, (e, i)) * 0.03).astype(np.float16))
+    svh = mx.array(np.sign(rng.normal(size=(e, o))).astype(np.float16))
+    ids = mx.array(rng.integers(0, e, rows).astype(np.uint32))
+    x = mx.array(rng.normal(0, 1, (rows, i)).astype(np.float32))
+    ref = Exl3Linear(trellis, suh, svh)(x, ids)
+    got = Exl3Linear(trellis, suh, svh, law="rows")(x, ids)
+    scale = float(mx.max(mx.abs(ref)).item())
+    assert float(mx.max(mx.abs(got.astype(mx.float32) - ref.astype(mx.float32))).item()) <= 2e-3 * scale
+
+
+def test_unknown_law_and_mixed_switch_laws_refuse():
+    from mlx2.runtime.models.exl3 import Exl3Linear, Exl3SwitchGLU
+
+    rng = np.random.default_rng(2)
+    t = lambda i, o: mx.array(rng.integers(0, 65536, (2, i // 16, o // 16, 32), np.uint16))
+    v = lambda n: mx.ones((2, n), mx.float16)
+    with pytest.raises(ValueError, match="law"):
+        Exl3Linear(t(128, 128), v(128), v(128), law="auto")
+    gate = Exl3Linear(t(128, 128), v(128), v(128), law="rows")
+    up = Exl3Linear(t(128, 128), v(128), v(128))
+    down = Exl3Linear(t(128, 128), v(128), v(128), law="rows")
+    with pytest.raises(ValueError, match="row-law"):
+        Exl3SwitchGLU(gate, up, down, execution="rows")
+
+
+def test_nax_dense_law_matches_reference_above_the_row_threshold():
+    from mlx2.runtime.models.exl3 import NAX_MIN_ROWS, Exl3DenseLinear
+    from mlx2.runtime.models.exl3_reference import decode_inner
+
+    rng = np.random.default_rng(5)
+    i, o, words = 256, 384, 64
+    t = {
+        "trellis": mx.array(rng.integers(0, 65536, (i // 16, o // 16, words), np.uint16)),
+        "suh": mx.array((rng.normal(0, 1, i) * 0.03).astype(np.float16)),
+        "svh": mx.array(np.sign(rng.normal(size=o)).astype(np.float16)),
+    }
+    ref, nax = Exl3DenseLinear(**t), Exl3DenseLinear(**t, law="fused_nax")
+    ref.eval()
+    nax.eval()
+    whole = nax.bank.reconstruct(mx.array([0], mx.uint32))
+    np.testing.assert_array_equal(np.asarray(whole[0]), decode_inner(np.asarray(t["trellis"])))
+    part = nax.bank.reconstruct(mx.array([0], mx.uint32), 8, 128)
+    np.testing.assert_array_equal(np.asarray(part[0]), np.asarray(whole[0][:, 128:256]))
+    with pytest.raises(ValueError, match="128-column"):
+        nax.bank.reconstruct(mx.array([0], mx.uint32), 0, 100)
+    x = mx.array(rng.normal(0, 1, (NAX_MIN_ROWS + 3, i)).astype(np.float32))
+    got = nax(x)
+    assert nax.nax_calls == 1
+    scale = float(mx.max(mx.abs(ref(x))).item())
+    assert float(mx.max(mx.abs(got - ref(x))).item()) <= 5e-3 * scale
+
+
+def test_nax_bank_switch_matches_the_reference_switch(monkeypatch):
+    from mlx2.runtime.models import exl3
+
+    monkeypatch.setattr(exl3, "NAX_BANK_MIN_ROWS", 16)
+    monkeypatch.setattr(exl3, "NAX_BANK_CHUNK", 3)  # several chunks, some empty
+    rng = np.random.default_rng(9)
+    e, h, i = 8, 256, 128
+
+    def bank(i_dim, o_dim, law):
+        t = mx.array(rng.integers(0, 65536, (e, i_dim // 16, o_dim // 16, 32), np.uint16))
+        return t, mx.array((rng.normal(0, 1, (e, i_dim)) * 0.03).astype(np.float16)), \
+            mx.array(np.sign(rng.normal(size=(e, o_dim))).astype(np.float16))
+
+    tensors = [bank(h, i, None), bank(h, i, None), bank(i, h, None)]
+    ref = exl3.Exl3SwitchGLU(*(exl3.Exl3Linear(*t) for t in tensors), execution="reference")
+    nax = exl3.Exl3SwitchGLU(*(exl3.Exl3Linear(*t, law="rows") for t in tensors), execution="rows_nax")
+    ref.eval()
+    nax.eval()
+    x = mx.array(rng.normal(0, 1, (6, h)).astype(np.float32))
+    ids = mx.array(np.stack([rng.choice([0, 1, 5, 7], 4, replace=False) for _ in range(6)]).astype(np.uint32))
+    want, got = ref(x, ids), nax(x, ids)
+    assert nax.nax_calls == 1
+    scale = float(mx.max(mx.abs(want)).item())
+    assert float(mx.max(mx.abs(got - want)).item()) <= 5e-3 * scale
+    small = mx.array(np.stack([rng.choice(e, 2, replace=False) for _ in range(3)]).astype(np.uint32))
+    nax(x[:3], small)
+    assert nax.nax_calls == 1 and nax.rows_calls == 1  # below the threshold: row law
+
+
+def test_nax_is_the_upstream_exl3_default_and_refuses_elsewhere():
+    from mlx2.adapters import qwen36_35b
+
+    assert qwen36_35b.DEFAULT_EXL3_EXECUTION == "nax"
+    assert qwen36_35b.DEFAULT_EXL3_EXECUTION in qwen36_35b.EXL3_EXECUTIONS
+    source = Path(qwen36_35b.__file__).read_text()
+    # Non-EXL3 artifacts get no EXL3 law, and only an explicit choice refuses.
+    assert 'DEFAULT_EXL3_EXECUTION if upstream_exl3 else "reference"' in source
+    assert "if explicit_exl3 and not upstream_exl3:" in source

@@ -7,6 +7,7 @@ import mlx.nn as nn
 
 
 from .dflash_base import (
+    NO_ROPE,
     DFlashDecoderLayer,
     DFlashDraftModel,
     _fold_rms_norm,
@@ -492,7 +493,8 @@ def _append_context(self, hidden, cache):
             if not isinstance(entry, FOLDKVCache):
                 raise TypeError("FOLD context append requires FOLDKVCache")
             entry.append_raw_keys(keys)
-        keys = self.rope(keys, offset=entry.offset)
+        rope = self.rope if getattr(attn, "use_rope", True) else NO_ROPE
+        keys = rope(keys, offset=entry.offset)
         append_context_kv(entry, keys, values)
         if hasattr(entry, "max_size") and entry.keys.shape[2] > entry.max_size:
             entry.keys = entry.keys[:, :, -entry.max_size:]

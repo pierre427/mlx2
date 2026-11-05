@@ -446,4 +446,7 @@ def layer_forward(layer, x, x_ctx, rope, cache):
 def install(model):
     for layer in model.layers:
         object.__setattr__(layer, "_fused_layer", layer_forward)
-        object.__setattr__(layer.self_attn, "_fused_forward", attention)
+        if getattr(layer.self_attn, "use_rope", True):
+            # The fused attention kernel applies RoPE; NoPE layers keep the
+            # stock attention (inside the fused layer body).
+            object.__setattr__(layer.self_attn, "_fused_forward", attention)
