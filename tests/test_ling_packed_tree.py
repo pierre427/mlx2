@@ -58,7 +58,8 @@ def assert_close(left, right):
 
 @pytest.mark.parametrize("moe,lora", [(False, False), (True, True)])
 @pytest.mark.parametrize("prefill", [[], [9, 8, 7]])
-def test_packed_tree_matches_serial_nodes_commit_and_continuation(moe, lora, prefill):
+@pytest.mark.parametrize("merged_conv", [False, True])
+def test_packed_tree_matches_serial_nodes_commit_and_continuation(moe, lora, prefill, merged_conv):
     mx.random.seed(71)
     model = tiny_model(moe=moe, lora=lora)
     model.eval()
@@ -70,7 +71,10 @@ def test_packed_tree_matches_serial_nodes_commit_and_continuation(moe, lora, pre
     expected, expected_taps, reference = tree_forward(
         model, tokens, parents, serial_cache, [0, 1, 2], "oracle",
     )
-    provider = LingTreeExecutor.create()
+    for layer in model.layers:
+        if not layer.is_global:
+            layer.attention.ling_merged_conv = merged_conv
+    provider = LingTreeExecutor(optimizations={"merged_conv": merged_conv})
     actual, actual_taps, transaction = provider.forward(
         model, tokens, parents, packed_cache, [0, 1, 2], cached=False,
     )
@@ -169,3 +173,124 @@ def test_cohort_commit_prepares_every_lane_before_publication(monkeypatch):
         transaction.commit_paths([[0, 1], [0, 1]])
     assert [cache[1].offset for cache in caches] == [0, 0]
     assert all(value is None for cache in caches for value in cache[0].cache)
+
+
+@pytest.mark.parametrize('mask_kind', ['none', 'mask', 'lengths'])
+@pytest.mark.parametrize('warm', [False, True])
+@pytest.mark.parametrize('rows', [1, 5])
+def test_merged_convolution_matches_reference_histories_and_masked_fallback(mask_kind, warm, rows):
+    model = tiny_model()
+    model.eval()
+    module = model.layers[0].attention
+    raw = tuple(mx.random.normal((2, rows, module.projection_dim)) for _ in range(3))
+    states = tuple(mx.random.normal((2, 3, module.projection_dim)) if warm else None for _ in range(3))
+    mask = mx.array([[i < 2 for i in range(rows)], [True]*rows]) if mask_kind == 'mask' else None
+    lengths = mx.array([min(2, rows), rows]) if mask_kind == 'lengths' else None
+    reference = module.convolve_qkv(raw, states, mask, lengths)
+    module.ling_merged_conv = True
+    actual = module.convolve_qkv(raw, states, mask, lengths)
+    for lefts, rights in zip(reference, actual, strict=True):
+        for left, right in zip(lefts, rights, strict=True):
+            assert_close(left, right)
+    assert module.ling_calls['merged_conv'] == (1 if mask_kind == 'none' and rows == 1 else 0)
+    # A changed weight invalidates the cached concatenation.
+    if mask_kind == 'none':
+        module.q_conv1d.conv.weight = module.q_conv1d.conv.weight * 2
+        changed = module.convolve_qkv(raw, states)
+        module.ling_merged_conv = False
+        expected = module.convolve_qkv(raw, states)
+        for left, right in zip(changed[0], expected[0], strict=True):
+            assert_close(left, right)
+
+
+@pytest.mark.parametrize('mixed', ['raw', 'history', 'weight'])
+def test_merged_convolution_preserves_independent_mixed_dtype_branches(mixed):
+    model = tiny_model()
+    module = model.layers[0].attention
+    module.set_dtype(mx.bfloat16)
+    module.eval()
+    raw = [mx.random.normal((1, 1, module.projection_dim)).astype(mx.bfloat16) for _ in range(3)]
+    states = [mx.zeros((1, 3, module.projection_dim), dtype=mx.bfloat16) for _ in range(3)]
+    if mixed == 'raw':
+        raw[1] = raw[1].astype(mx.float32)
+    elif mixed == 'history':
+        states[1] = states[1].astype(mx.float32)
+    else:
+        module.k_conv1d.conv.weight = module.k_conv1d.conv.weight.astype(mx.float32)
+    expected = module.convolve_qkv(raw, states)
+    module.ling_merged_conv = True
+    actual = module.convolve_qkv(raw, states)
+    for lefts, rights in zip(actual, expected, strict=True):
+        for left, right in zip(lefts, rights, strict=True):
+            assert left.dtype == right.dtype
+            assert bool(mx.array_equal(left, right))
+    assert module.ling_calls['merged_conv'] == 0
+
+
+@pytest.mark.parametrize('policy,helpers', [
+    ({}, set()),
+    ({'merged_conv': True}, set()),
+    ({'fused_norm': True}, {'ling_fused.py', 'qwen4_fused_gdn_prefill.py', 'served_exp.py'}),
+    ({'fused_mla_decode': True}, {'kimi_linear_mla_fused.py', 'glm53_sparse_attention.py'}),
+])
+def test_tree_hashes_only_bound_helpers_and_detects_exact_byte_changes(policy, helpers, tmp_path):
+    import os
+
+    provider = LingTreeExecutor(optimizations=policy)
+    core = {'ling_tree_executor.py', 'ling_tree.py', 'bailing_hybrid.py', 'hybrid_tree_executor.py'}
+    assert {p.name for p in provider._sources} == core | helpers
+    copies = []
+    for source in provider._sources:
+        copied = tmp_path / source.name
+        copied.write_bytes(source.read_bytes())
+        copies.append(copied)
+    provider._sources = tuple(copies)
+    provider.validate_revision()
+    disabled = tmp_path / 'disabled_helper.py'
+    disabled.write_text('unselected helper changes do not alter this execution law')
+    provider.validate_revision()
+    # Preserve size and mtime to ensure revision admission still hashes bytes.
+    changed = copies[-1]
+    before = changed.stat()
+    raw = changed.read_bytes()
+    changed.write_bytes(bytes([raw[0] ^ 1]) + raw[1:])
+    os.utime(changed, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with pytest.raises(RuntimeError, match='source changed'):
+        provider.validate_revision()
+
+
+@pytest.mark.parametrize('flag', ['ling_merged_conv', 'ling_fused_norm', 'ling_fused_mla'])
+def test_tree_refuses_optimization_drift_before_state_or_projection_work(flag):
+    model = tiny_model()
+    cache = model.make_cache()
+    provider = LingTreeExecutor.create()
+    layer = next(layer for layer in model.layers if hasattr(layer.attention, flag))
+    setattr(layer.attention, flag, True)
+    with pytest.raises(RuntimeError, match='optimization binding changed'):
+        provider.forward(model, [1, 2], [-1, 0], cache, [0], cached=False)
+    assert provider.dispatches == provider.projection_rows == 0
+    assert all(item is None for item in cache[0])
+
+
+def test_tree_reuses_ancestor_index_array_across_channels_and_layers(monkeypatch):
+    from mlx2.runtime.models.ling_tree import LingTree
+
+    model = tiny_model()
+    tree = LingTree([-1, 0, 0, 2], model.make_cache())
+    made = []
+    array = mx.array
+
+    def tracked(value, *args, **kwargs):
+        made.append(value)
+        return array(value, *args, **kwargs)
+
+    monkeypatch.setattr(mx, 'array', tracked)
+    for channels in (3, 5, 3, 5):
+        raw = mx.arange(4*channels, dtype=mx.float32).reshape(1, 4, channels)
+        windows = tree.convolution_windows(4, raw, None)
+        source = np.concatenate([np.zeros((3, channels), np.float32), np.asarray(raw)[0]])
+        expected = np.stack([source[[0, 1, 2, 3]], source[[1, 2, 3, 4]],
+                             source[[1, 2, 3, 5]], source[[2, 3, 5, 6]]])
+        np.testing.assert_array_equal(np.asarray(windows), expected)
+    assert len(made) == 1
+    assert tree._convolution_indices[4].shape == (4, 4)

@@ -42,7 +42,7 @@ def test_profile_is_typed(value):
         validate_profile(value)
 
 
-def test_full_preflight_requires_explicit_approval(tmp_path):
+def test_full_preflight_selection_requires_a_boolean(tmp_path):
     control = SimpleNamespace(home=tmp_path, store=RecordStore(tmp_path), engines={})
     queue = CampaignQueue(control)
     with pytest.raises(ValueError, match="explicit"):
@@ -102,9 +102,13 @@ def test_badge_never_combines_source_or_profile_and_newest_failure_wins(tmp_path
     for level in (1, 2):
         store.evidence({"binding": binding(), "level": level, "passed": True})
     store.evidence(measured(source_revision="other commit"))
-    assert not store.summary("small@abc")["qualified"]
+    assert store.summary("small@abc")["qualified"]
+    assert not store.summary("small@abc")["performance_measured"]
     store.evidence(measured())
     assert store.summary("small@abc")["qualified"]
+    store.evidence({"binding": binding(), "level": 3, "passed": False})
+    assert store.summary("small@abc")["qualified"]
+    assert not store.summary("small@abc")["performance_measured"]
     store.evidence({"binding": binding(), "level": 2, "passed": False})
     assert not store.summary("small@abc")["qualified"]
     store.close()
@@ -235,6 +239,47 @@ def test_badges_reject_historical_source_host_artifact_runtime_and_shape(tmp_pat
     assert resolver.summarize(row, records, profiles)["qualified"]
 
 
+@pytest.mark.parametrize("option", [
+    {"lora_root": "/adapters", "max_loras": 4, "max_lora_rank": 32},
+    {"max_loras": 1},
+    {"multi_lora_delta_precision": "fp32"},
+    {"kernel_dev_root": "/kernels"},
+    {"weight_space_config": "/private/config.json"},
+    {"microscaling_prefill": "experts"},
+    {"microscaling_prefill": "mlp"},
+    {"microscaling_prefill": "all"},
+])
+def test_badge_preserves_historical_evidence_without_qualifying_runtime_opt_ins(tmp_path, option):
+    from mlx2.desktop_badges import BadgeResolver
+    host = {"hostname": "host", "platform": "test"}
+    build = {"source_sha256": "current", "mlx_native_sha256": "native"}
+    source = {"source_revision": "commit", "source_sha256": "snapshot"}
+    resolver = BadgeResolver(tmp_path, source_identity=source, build_identity=build,
+                             runtime_resolver=lambda old: build, host=host)
+    row = {"path": "/model", "checkpoint": "small@abc", "default_route": "ordinary"}
+    bound = binding(host=host, runtime=build, model_path="/model",
+                    profile={"route": "ordinary", "settings": {"max_context": 1024, "max_lanes": 1}})
+    records = [{"binding": bound, "level": level, "passed": True} for level in (1, 2)]
+    plain = {"path": "/model", "route": "ordinary", "context": 1024, "lanes": 1}
+    assert resolver.summarize(row, records, [plain])["qualified"]
+    # A later plain sibling does not qualify the first profile Library Start uses.
+    summary = resolver.summarize(row, records, [{**plain, **option}, plain])
+    assert summary["qualified"] is False
+    assert summary["applicability_status"] == "profile_mismatch"
+    assert summary["historical_qualified"] is True
+    assert summary["historical_label"] == "Qualified"
+    assert summary["historical_scope"]["route"] == "ordinary"
+    assert "profile mismatch" in summary["label"]
+    assert resolver.summarize(row, records, [plain, {**plain, **option}])["qualified"]
+    lora_binding = {**bound, "profile": {**bound["profile"], "settings": {
+        **bound["profile"]["settings"], "multi_lora": {"max_loras": 4, "max_lora_rank": 32}}}}
+    assert not resolver.profile_matches(lora_binding, [plain], row)
+    microscaling_binding = {**bound, "profile": {**bound["profile"], "settings": {
+        **bound["profile"]["settings"], "microscaling_prefill": {"enabled": True, "scope": "mlp"}}}}
+    assert not resolver.profile_matches(microscaling_binding, [plain], row)
+    assert resolver.summarize(row, records, [{**plain, "microscaling_prefill": "off"}])["qualified"]
+
+
 def test_build_identity_can_be_read_without_importing_mlx():
     import os
     import subprocess
@@ -297,4 +342,21 @@ def test_invalid_cpg_settings_never_persist_or_launch(tmp_path, url):
         queue.dispatch({"command": "campaign_configure", "settings": {"mcp_url": url}})
     assert not queue.settings_path.exists()
     assert queue.thread is None
+    store.close()
+
+
+def test_correctness_queue_never_requires_full_preflight_or_performance(tmp_path, monkeypatch):
+    model = tmp_path / 'synthetic'
+    model.mkdir()
+    library = SimpleNamespace(rows=[{'path': str(model), 'identity': 'synthetic'}],
+                              checked_path=lambda raw, identity: Path(raw))
+    store = RecordStore(tmp_path)
+    control = SimpleNamespace(home=tmp_path, store=store, engines={}, primary=SimpleNamespace(library=library))
+    queue = CampaignQueue(control)
+    monkeypatch.setattr(queue, '_unit', lambda identity: None)
+    queue.enqueue({'paths': [str(model)]})
+    queue.thread.join(2)
+    spec = store.jobs()[0]['spec']
+    assert spec['levels'] == [1, 2]
+    assert spec['approve_preflight'] is False and spec['preflight_receipt'] is None
     store.close()

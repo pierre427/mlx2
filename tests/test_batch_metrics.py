@@ -4,6 +4,47 @@ from mlx2.batch_metrics import BatchFaultSpec, BatchRuntimeMetrics, HttpRuntimeM
 from mlx2.tracing import OptionalRequestTracer
 
 
+def test_live_request_progress_survives_event_eviction_and_stays_tenant_scoped():
+    now = [10.0]
+    metrics = BatchRuntimeMetrics(history_size=1, clock=lambda: now[0])
+    metrics.admitted("live", "alice", 0)
+    queued = metrics.snapshot()["active_request_details"][0]
+    assert queued["phase"] == "queued"
+    assert queued["context_tokens"] is None
+    assert queued["prefill_tokens_per_second"] is None
+    now[0] = 11.0
+    metrics.dequeued("live", 0)
+    metrics.prompt("live", 100, 40)
+    metrics.lane_attached("live", 1, "external_draft")
+    prefill = metrics.snapshot()["active_request_details"][0]
+    assert prefill["phase"] == "prefill" and prefill["context_tokens"] == 100
+    assert prefill["prefill_tokens_per_second"] is None
+    now[0] = 13.0
+    metrics.token("live")
+    first = metrics.snapshot()["active_request_details"][0]
+    assert first["prefill_tokens_per_second"] == 30.0  # 60 uncached / 2 s
+    assert first["decode_tokens_per_second"] is None
+    now[0] = 14.0
+    metrics.token("live")
+    now[0] = 15.0
+    metrics.token("live")
+    # This admission evicts the last lifecycle event for the live request.
+    metrics.admitted("other", "bob", 0)
+    now[0] = 17.0
+    view = metrics.snapshot(tenant_id="alice")
+    row = view["active_request_details"][0]
+    assert view["active_requests"] == ["live"] and view["events"] == []
+    assert row["phase"] == "decode" and row["age_seconds"] == 7.0
+    assert row["context_tokens"] == 103 and row["completion_tokens"] == 3
+    assert row["cached_tokens"] == 40 and row["prompt_tokens"] == 100
+    assert row["decode_tokens_per_second"] == 0.5  # 2 gaps / 4 s, including stall
+    assert row["queue_ms"] == 1000.0 and row["ttft_ms"] == 3000.0
+    assert row["mechanism"] == "external_draft" and row["tenant_id"] == "alice"
+    metrics.token("live")
+    assert row["completion_tokens"] == 3  # returned rows are stable copies
+    assert metrics.snapshot(tenant_id="bob")["active_request_details"][0]["request_id"] == "other"
+
+
 def test_bounded_metrics_report_latency_fairness_and_mechanism():
     ticks = iter([0.0, 0.1, 0.2, 0.4, 0.5, 0.7, 0.8, 1.0, 1.1, 1.2])
     metrics = BatchRuntimeMetrics(history_size=4, clock=lambda: next(ticks))
@@ -220,3 +261,20 @@ def test_batching_status_computes_distributions_outside_engine_lock():
     # Sorting the ITL history under engine.lock blocks dequeue, submit and the
     # worker's 1 Hz snapshot publish for the whole computation.
     assert seen["engine_lock_held"] is False
+
+
+def test_published_request_passes_session_identity_to_live_and_final_metrics():
+    import queue
+    import threading
+    from types import SimpleNamespace as NS
+
+    from mlx2.serving import ServingEngine
+
+    metrics = BatchRuntimeMetrics(clock=lambda: 1.0)
+    engine = NS(lock=threading.Lock(), jobs={}, queued_jobs=0,
+                batch_metrics=metrics, incoming=queue.Queue())
+    job = NS(id="request", tenant_id="alice", request={"session_id": "chat"})
+    ServingEngine._publish_jobs(engine, [job])
+    assert metrics.snapshot()["active_request_details"][0]["session_id"] == "chat"
+    metrics.terminal("request", "completed")
+    assert metrics.snapshot()["completed_requests"][0]["session_id"] == "chat"

@@ -32,9 +32,13 @@ def oracle(name, text):
         try:
             module = ast.parse(text)
             function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
-            result = next(node.value for node in function.body if isinstance(node, ast.Return))
+            body = function.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                body = body[1:]  # docstring
+            # Only a lone return: earlier statements could rebind a or b.
             return (function.name == 'add' and [a.arg for a in function.args.args] == ['a', 'b']
-                    and ast.dump(result) == ast.dump(ast.parse('a + b', mode='eval').body))
+                    and len(body) == 1 and isinstance(body[0], ast.Return) and body[0].value is not None
+                    and ast.dump(body[0].value) == ast.dump(ast.parse('a + b', mode='eval').body))
         except (SyntaxError, StopIteration):
             return False
     if name == 'sequence':
@@ -163,6 +167,10 @@ def unit(spec):
             else:
                 raise TimeoutError('AST startup')
             report['status_before'] = status
+            # Bind the drafter the server loaded to the one this receipt names.
+            loaded = (status.get('ast_route') or {}).get('drafter_fingerprint') or ''
+            assert loaded and spec['drafter_checkpoint'].rsplit('@', 1)[-1].startswith(loaded), (
+                'loaded drafter differs from drafter_checkpoint', loaded)
             model_id = http_json(base, '/v1/models')['data'][0]['id']
             def stream(name, **extra):
                 result = helper.stream(port, model_id, prompts[name], limits[name],

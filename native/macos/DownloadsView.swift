@@ -9,6 +9,7 @@ struct DownloadsView: View {
     @State private var throttle = "0"
     @State private var token = ""
     @State private var tokenFile = ""
+    @State private var savingToken = false
     private var jobs: [JSON] { model.jobs.filter { $0["kind"].text == "download" } }
 
     var body: some View {
@@ -35,9 +36,8 @@ struct DownloadsView: View {
                         TextField("Protected HF token file (optional)", text: $tokenFile)
                         HStack {
                             SecureField("HF personal access token", text: $token)
-                            Button("Save Token") {
-                                model.perform("hf_save_token", ["token": token]); token = ""
-                            }.disabled(token.isEmpty)
+                            Button(savingToken ? "Saving…" : "Save Token") { Task { await saveToken() } }
+                                .disabled(token.isEmpty || savingToken || model.busy)
                         }
                         Text("Saved tokens stay in an owner-only file in Application Support; they are excluded from model requests, telemetry and job logs.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -84,6 +84,17 @@ struct DownloadsView: View {
             throttle = String((model.preferences["download_bytes_per_second"].double ?? 0) / 1048576)
             tokenFile = model.preferences["hf_token_file"].string ?? ""
         }
+    }
+    @MainActor private func saveToken() async {
+        guard !savingToken else { return }
+        let submitted = token
+        savingToken = true; defer { savingToken = false }
+        do {
+            let result = try await model.request("hf_save_token", ["token": submitted])
+            if token == submitted { token = "" }
+            tokenFile = result["token_file"].string ?? tokenFile
+            await model.refresh()
+        } catch { model.error = error.localizedDescription }
     }
 }
 

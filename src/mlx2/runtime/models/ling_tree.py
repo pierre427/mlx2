@@ -48,6 +48,7 @@ class LingTree:
         # per node. MLX arrays preserve COW isolation on subsequent updates.
         self.private = copy.deepcopy(cache)
         self.recurrent = {}
+        self._convolution_indices = {}
 
     def rope(self, rope, values, offset):
         rows_first = values.transpose(2, 1, 0, 3)
@@ -55,27 +56,39 @@ class LingTree:
         return rope(rows_first, offset=positions).transpose(2, 1, 0, 3)
 
     def convolution(self, module, raw, state):
-        count = module.kernel_size - 1
+        windows = self.convolution_windows(module.kernel_size, raw, state)
+        return module(windows[:, -1:], windows[:, :-1], None, None)
+
+    def convolution_windows(self, kernel_size, raw, state):
+        count = kernel_size - 1
         if state is None:
             state = mx.zeros((1, count, raw.shape[-1]), dtype=raw.dtype)
         # Each window is the last K-1 inputs on this node's true ancestry,
         # followed by this node's input, never an adjacent sibling's input.
-        indices = []
-        for path in self.paths:
-            history = [*range(count), *(count + row for row in path)]
-            indices.append(history[-module.kernel_size:])
+        indices = self._convolution_indices.get(kernel_size)
+        if indices is None:
+            windows = []
+            for path in self.paths:
+                history = [*range(count), *(count + row for row in path)]
+                windows.append(history[-kernel_size:])
+            indices = mx.array(windows, dtype=mx.int32)
+            self._convolution_indices[kernel_size] = indices
         source = mx.concatenate([state, raw], axis=1)
-        windows = mx.take(source, mx.array(indices, dtype=mx.int32), axis=1)[0]
-        values, tails = module(windows[:, -1:], windows[:, :-1], None, None)
-        return values, tails
+        return mx.take(source, indices, axis=1)[0]
 
     def kda(self, module, x, cache):
-        from mlx import nn
-
         width = len(self.parents)
-        q, qs = self.convolution(module.q_conv1d, module.q_proj(x), cache[0])
-        k, ks = self.convolution(module.k_conv1d, module.k_proj(x), cache[1])
-        v, vs = self.convolution(module.v_conv1d, module.v_proj(x), cache[2])
+        raw = (module.q_proj(x), module.k_proj(x), module.v_proj(x))
+        if module.ling_merged_conv:
+            windows = [self.convolution_windows(module.conv_kernel, value, state)
+                       for value, state in zip(raw, (cache[0], cache[1], cache[2]), strict=True)]
+            (q, k, v), (qs, ks, vs) = module.convolve_qkv(
+                [item[:, -1:] for item in windows], [item[:, :-1] for item in windows],
+            )
+        else:
+            (q, qs), (k, ks), (v, vs) = [self.convolution(conv, value, state) for conv, value, state in
+                zip((module.q_conv1d, module.k_conv1d, module.v_conv1d), raw,
+                    (cache[0], cache[1], cache[2]), strict=True)]
         shape = (width, 1, module.num_heads, module.head_dim)
         q, k, v = (value.reshape(shape) for value in (q, k, v))
         q = (module.scale**2) * mx.fast.rms_norm(q, None, 1e-6)
@@ -113,7 +126,7 @@ class LingTree:
         output = mx.concatenate(outputs, axis=1)
         gate = module.g_proj(x) if module.no_kda_lora else module.g_b_proj(module.g_a_proj(x))
         gate = gate.reshape(1, width, module.num_heads, module.head_dim)
-        output = module.o_norm(output) * nn.sigmoid(gate)
+        output = module.output_norm_gate(output, gate)
         return module.o_proj(output.reshape(1, width, -1))
 
     def mla(self, module, q_nope, q_pe, kv, pe, cache, start):
@@ -124,6 +137,11 @@ class LingTree:
             indices = mx.array(path, dtype=mx.int32)
             keys = mx.concatenate([kv[..., :start, :], mx.take(kv[..., start:, :], indices, axis=2)], axis=2)
             positional = mx.concatenate([pe[..., :start, :], mx.take(pe[..., start:, :], indices, axis=2)], axis=2)
+            fused = module.fused_latent_output(q_nope[:, :, row:row + 1], q_pe[:, :, row:row + 1],
+                                                keys, positional)
+            if fused is not None:
+                outputs.append(fused)
+                continue
             query = module.embed_q(q_nope[:, :, row:row + 1])
             scores = (q_pe[:, :, row:row + 1] * module.scale) @ positional.swapaxes(-1, -2)
             output = scaled_dot_product_attention(

@@ -233,11 +233,22 @@ class KimiDeltaAttention(ling.KimiDeltaAttention):
             cache.advance(t)
         return self.o_proj(self.norm_gate(out, gate, x.dtype).reshape(b, t, p))
 
+    _PROJECTIONS = ("q_proj", "k_proj", "v_proj", "b_proj",
+                    "f_a_proj", "f_b_proj", "g_a_proj", "g_b_proj")
+
+    def _projections_unwrapped(self):
+        # The joined views hold the loaded weights only; a served LoRA wraps
+        # the modules, so its delta exists only on the per-module path.
+        if all(type(self[n]) is nn.Linear for n in self._PROJECTIONS):
+            return True
+        self.calls["fused_projections_declined_wrapped"] += 1
+        return False
+
     def project(self, x):
         """Row-wise q/k/v/beta/decay-logit/gate projections (pre-convolution)."""
         h, d = self.num_heads, self.head_dim
         p = h * d
-        if self.fused_projections:
+        if self.fused_projections and self._projections_unwrapped():
             q, k, v, beta, fa, ga = mx.split(x @ self._joined.T,
                                             [p, 2*p, 3*p, 3*p+h, 3*p+h+d], -1)
             fg = mx.stack([fa, ga], axis=0) @ self._second[:, None].swapaxes(-1, -2)

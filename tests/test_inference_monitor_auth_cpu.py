@@ -108,3 +108,50 @@ def test_collector_authenticates_all_telemetry_without_exporting_key(monkeypatch
         collector.close()
         server.shutdown()
         server.server_close()
+
+
+def test_sticky_sessions_are_scoped_to_server_and_credentials(monkeypatch):
+    import json
+
+    endpoint = monitor.ServerEndpoint("http://127.0.0.1:18285")
+    uptime = [10]
+    revision = ["fixture-a"]
+    batching = {"active_requests": [], "completed_requests": [{
+        "request_id": "done", "tenant_id": "alice", "session_id": "chat",
+        "status": "completed", "prompt_tokens": 100, "completion_tokens": 10,
+        "context_tokens": 110, "prefill_tokens_per_second": 20.0,
+        "decode_tokens_per_second": 5.0,
+    }]}
+
+    def get(_url, path, _key, _timeout):
+        if path == "/metrics":
+            return (f'mlx2_build_info{{revision="{revision[0]}"}} 1\n'
+                    f'mlx2_process_uptime_seconds {uptime[0]}\n').encode()
+        return json.dumps(batching if path.endswith("batching") else {}).encode()
+
+    monkeypatch.setattr(monitor, "_get", get)
+    collector = monitor.InferenceCollector(discover=False, urls=(endpoint.url,))
+    try:
+        first, = collector.sample()
+        assert first.observed_sessions[0].context_tokens == 110
+        batching.clear()
+        idle, = collector.sample()
+        assert idle.observed_sessions == first.observed_sessions
+        # A changed credential must never inherit another tenant's idle rows.
+        collector.api_key = "synthetic-other-tenant"
+        other, = collector.sample()
+        assert other.observed_sessions == ()
+        batching.update({"completed_requests": [{"request_id": "bob-done", "tenant_id": "bob"}]})
+        assert collector.sample()[0].observed_sessions
+        batching.clear()
+        uptime[0] = 1
+        restarted, = collector.sample()
+        assert restarted.observed_sessions == ()
+        batching.update({"completed_requests": [{"request_id": "again", "tenant_id": "bob"}]})
+        assert collector.sample()[0].observed_sessions
+        batching.clear()
+        revision[0] = "fixture-b"
+        reloaded, = collector.sample()
+        assert reloaded.observed_sessions == ()
+    finally:
+        collector.close()

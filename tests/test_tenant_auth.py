@@ -747,6 +747,7 @@ def test_batching_status_is_scoped_to_the_authenticated_tenant(served, tmp_path)
     view, raw = batching(app, b)
     assert [row["request_id"] for row in view["completed_requests"]] == [bob_done]
     assert view["active_requests"] == []
+    assert view["active_request_details"] == []
     assert view["events"] and {e["request_id"] for e in view["events"]} == {bob_done}
     assert list(view["fairness"]["tenant_token_rates"]) == ["tenant-b"]
     for private in ("tenant-a", alice_done, "alice-inflight"):
@@ -759,6 +760,7 @@ def test_batching_status_is_scoped_to_the_authenticated_tenant(served, tmp_path)
     view, _ = batching(app, a)
     assert [row["request_id"] for row in view["completed_requests"]] == [alice_done]
     assert view["active_requests"] == ["alice-inflight"]
+    assert [row["request_id"] for row in view["active_request_details"]] == ["alice-inflight"]
     assert list(view["fairness"]["tenant_token_rates"]) == ["tenant-a"]
 
     # An engine that cannot scope its snapshot shows no per-request rows.
@@ -766,6 +768,7 @@ def test_batching_status_is_scoped_to_the_authenticated_tenant(served, tmp_path)
         def batching_status(self):
             return {
                 "active_requests": ["x"],
+                "active_request_details": [{"request_id": "x", "tenant_id": "tenant-a"}],
                 "completed_requests": [{"request_id": "x", "tenant_id": "tenant-a"}],
                 "events": [{"kind": "admitted", "request_id": "x"}],
                 "fairness": {"jain_tenant_token_rate": 1.0, "tenant_token_rates": {"tenant-a": 1.0}},
@@ -775,6 +778,7 @@ def test_batching_status_is_scoped_to_the_authenticated_tenant(served, tmp_path)
     app = served(_auth(tmp_path, header_policy="ignore"), engine=LeakyEngine())
     view, _ = batching(app, b)
     assert view["active_requests"] == view["completed_requests"] == view["events"] == []
+    assert view["active_request_details"] == []
     assert view["fairness"] == {"jain_tenant_token_rate": 1.0, "tenant_token_rates": {}}
     assert view["counters"] == {"admitted": 1}
     # Without tenant auth there is no tenant boundary: the view is unchanged.

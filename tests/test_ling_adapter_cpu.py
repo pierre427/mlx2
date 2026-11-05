@@ -306,3 +306,39 @@ def test_checkpoint_bounded_kda_matches_independent_recurrence(tiny_ling, monkey
     mx.eval(layer(mx.ones((1, 3, 128)), cache=cache))
     assert checked == [True]
     assert ling3_flash.CACHE_LAYOUT == "ling3-flash-hybrid-kda-bounded-mla-v3"
+
+
+@pytest.mark.parametrize('policy', [
+    {'unexpected': True}, {'merged_conv': 1}, {'fused_norm': 'yes'}, [],
+])
+def test_ling_optimization_policy_refuses_unknown_or_untyped_values(policy):
+    with pytest.raises(ValueError, match='Ling optimization'):
+        ling3_flash.optimization_policy(policy)
+
+
+def test_ordinary_optimization_policy_loads_and_revisions_cache(tiny_ling):
+    ordinary = ling3_flash.Ling3FlashAdapter(tiny_ling)
+    candidate = None
+    try:
+        candidate = ling3_flash.Ling3FlashAdapter(tiny_ling, execution_policy={
+            'ling_optimizations': {'merged_conv': True, 'fused_norm': True},
+        })
+        assert candidate.draft_model is None
+        assert candidate.layout != ordinary.layout
+        assert candidate.identity['fingerprint'] != ordinary.identity['fingerprint']
+        assert candidate.descriptor.cache_layout == candidate.layout
+        prompt = mx.array([[1]])
+        expected = ordinary.model(prompt, ordinary.model.make_cache())
+        actual = candidate.model(prompt, candidate.model.make_cache())
+        np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=3e-5, atol=3e-5)
+        diagnostics = candidate.diagnostics()['optimizations']
+        assert diagnostics['graph_build_calls']['merged_conv'] > 0
+        assert diagnostics['graph_build_calls']['fused_norm_declined'] > 0  # CPU retains eager math.
+        assert diagnostics['policy']['fused_mla_decode'] is False
+        assert ordinary.diagnostics()['optimizations']['policy'] == {
+            'merged_conv': False, 'fused_norm': False, 'fused_mla_decode': False,
+        }
+    finally:
+        ordinary.close()
+        if candidate is not None:
+            candidate.close()

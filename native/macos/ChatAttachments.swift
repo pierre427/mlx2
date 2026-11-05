@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import PDFKit
 import UniformTypeIdentifiers
 
@@ -14,6 +15,38 @@ struct ChatAttachment: Identifiable {
     let name: String
     let modality: String
     let part: [String: Any]
+
+    private static func imageContent(_ data: Data) throws -> (Data, String) {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let identifier = CGImageSourceGetType(source), let type = UTType(identifier as String),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber,
+              width.doubleValue > 0, height.doubleValue > 0,
+              width.doubleValue * height.doubleValue <= 40_000_000 else {
+            throw DesktopError.message("Use a valid image with at most 40 million pixels.")
+        }
+        // The serving image decoder accepts PNG, JPEG and WebP. Native photos
+        // such as HEIC/TIFF need conversion before they reach that contract.
+        if [UTType.png.identifier, UTType.jpeg.identifier, "org.webmproject.webp"].contains(type.identifier) {
+            return (data, type.preferredMIMEType ?? "image/webp")
+        }
+        guard CGImageSourceGetCount(source) == 1 else {
+            throw DesktopError.message("Attach one image frame or a supported video. Multi-frame images cannot be converted without discarding frames.")
+        }
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+            throw DesktopError.message("This image could not be converted to PNG.")
+        }
+        let converted = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(converted, UTType.png.identifier as CFString, 1, nil) else {
+            throw DesktopError.message("This image could not be converted to PNG.")
+        }
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination), converted.length <= 32 * 1024 * 1024 else {
+            throw DesktopError.message("The converted PNG exceeds 32 MiB. Resize or export this image as JPEG before attaching it.")
+        }
+        return (converted as Data, "image/png")
+    }
 
     static func read(_ url: URL) throws -> ChatAttachment {
         let size = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
@@ -32,8 +65,8 @@ struct ChatAttachment: Identifiable {
             return .init(name: name, modality: "text", part: ["type": "text", "text": "Attached document: \(name)\n\(text)"])
         }
         if type?.conforms(to: .image) == true {
-            let mime = type?.preferredMIMEType ?? "image/png"
-            return .init(name: name, modality: "image", part: ["type": "image_url", "image_url": ["url": "data:\(mime);base64," + data.base64EncodedString()]])
+            let (payload, mime) = try imageContent(data)
+            return .init(name: name, modality: "image", part: ["type": "image_url", "image_url": ["url": "data:\(mime);base64," + payload.base64EncodedString()]])
         }
         if type?.conforms(to: .audio) == true {
             guard ["wav", "mp3", "flac", "m4a", "ogg", "aiff", "aac"].contains(ext) else { throw DesktopError.message("Unsupported audio container.") }

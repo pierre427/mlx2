@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -20,6 +21,21 @@ from .ordinary_artifact import inspect_indexed_artifact
 from .ordinary_text import OrdinaryTextAdapter
 
 CACHE_LAYOUT = "ling3-flash-hybrid-kda-bounded-mla-v3"
+
+
+def optimization_policy(value):
+    # The shared Kimi split MLA is a different reduction law. Synthetic M5
+    # checks at 257/4097 keys were slower than the existing Ling attention;
+    # retain it as an explicit experiment, never an automatic selection.
+    # All candidates await checkpoint A/B evidence and explicit default approval.
+    defaults = {"merged_conv": False, "fused_norm": False, "fused_mla_decode": False}
+    if value is None:
+        return defaults
+    if not isinstance(value, dict) or set(value) - defaults.keys():
+        raise ValueError("unknown Ling optimization policy")
+    if any(type(item) is not bool for item in value.values()):
+        raise ValueError("Ling optimization selections must be boolean")
+    return {**defaults, **value}
 
 
 def _tree_controls(policy):
@@ -250,7 +266,9 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         from ..runtime.streamed_load import require_declared
 
         stream_request = require_declared(type(self), weight_streaming)
-        external = self._parse_external_policy(execution_policy, family="Ling 3 Flash")
+        policy = dict(execution_policy or {})
+        self.optimizations = optimization_policy(policy.pop("ling_optimizations", None))
+        external = self._parse_external_policy(policy, family="Ling 3 Flash")
         _tree_controls(self.external_policy)
         if type(self.external_policy.get("ast_graft_prompt_lookup", False)) is not bool:
             raise ValueError("Ling AST prompt-lookup graft must be boolean")
@@ -339,6 +357,7 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         mx.eval(self.model.parameters())
         weights.clear()
         mx.clear_cache()
+        self._bind_optimizations()
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -383,6 +402,48 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 self.weight_stream = None
         finally:
             super().close()
+
+    def _bind_optimizations(self):
+        for layer in self.model.layers:
+            attention = layer.attention
+            if layer.is_global:
+                attention.ling_fused_mla = self.optimizations["fused_mla_decode"]
+            else:
+                attention.ling_merged_conv = self.optimizations["merged_conv"]
+                attention.ling_fused_norm = self.optimizations["fused_norm"]
+        if any(self.optimizations.values()):
+            root = Path(__file__).parents[1] / "runtime" / "models"
+            sources = ["bailing_hybrid.py", "ling_tree.py"]
+            if self.optimizations["fused_norm"]:
+                sources += ["ling_fused.py", "qwen4_fused_gdn_prefill.py", "served_exp.py"]
+            if self.optimizations["fused_mla_decode"]:
+                sources += ["kimi_linear_mla_fused.py", "glm53_sparse_attention.py"]
+            self.optimization_sources = {name: hashlib.sha256((root/name).read_bytes()).hexdigest()
+                                         for name in sources}
+            digest = hashlib.sha256((self.identity["fingerprint"] + ":ling-kimi-ops-v1:"
+                                     + json.dumps({"policy": self.optimizations,
+                                                   "sources": self.optimization_sources},
+                                                  sort_keys=True)).encode()).hexdigest()
+            self.identity = {**self.identity, "fingerprint": digest}
+            self.layout += ":ling-kimi-ops-v1:" + digest
+            self.descriptor = replace(self.descriptor, cache_layout=self.layout)
+
+    @staticmethod
+    def lane_projection_groups():
+        from ..runtime.lane.installer import ProjectionGroup
+        from ..runtime.models.bailing_hybrid import (
+            KimiDeltaAttention,
+            MultiLatentAttention,
+        )
+
+        return (
+            ProjectionGroup("ling_kda_qkvfgb", KimiDeltaAttention,
+                            ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj", "b_proj")),
+            ProjectionGroup("ling_kda_lora_inputs", KimiDeltaAttention,
+                            ("q_proj", "k_proj", "v_proj", "f_a_proj", "g_a_proj", "b_proj")),
+            ProjectionGroup("ling_mla_inputs", MultiLatentAttention,
+                            ("q_proj", "kv_a_proj_with_mqa", "g_proj")),
+        )
 
     def execution_config(self, *, max_lanes, prefill_step):
         if self.draft_model is not None:
@@ -556,7 +617,11 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         )
         if provider is HybridTreeExecutor and rows > 16:
             raise ValueError("Ling serial reference supports at most 16 tile rows")
-        kwargs.setdefault("target_tree_executor_provider", provider.create())
+        if "target_tree_executor_provider" not in kwargs:
+            kwargs["target_tree_executor_provider"] = (
+                provider.create() if provider is HybridTreeExecutor
+                else provider(optimizations=getattr(self, "optimizations", None))
+            )
         return super().create_external_batch(**kwargs)
 
     def _bind_tree_controls(self):
@@ -583,8 +648,17 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         )
 
     def diagnostics(self):
+        from collections import Counter
+
+        calls = Counter()
+        for layer in getattr(getattr(self, "model", None), "layers", ()):
+            calls.update(getattr(getattr(layer, "attention", None), "ling_calls", {}))
+        optimizations = {"policy": getattr(self, "optimizations", optimization_policy(None)),
+                         "source_hashes": getattr(self, "optimization_sources", {}),
+                         "graph_build_calls": dict(calls)}
         if self.draft_model is None:
-            return {"route": "ordinary", "qualification": "pending"}
+            return {"route": "ordinary", "qualification": "unqualified",
+                    "optimizations": optimizations}
         return {
             "route": "external_ubtree_ast",
             "qualification": "unqualified",
@@ -594,6 +668,7 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "draft": self.draft_model.receipt_settings,
             "tree_controls": dict(zip(("tile_rows", "adaptive_rows"), _tree_controls(self.external_policy))),
             "projection_law": getattr(self, "packed_projection_law", None),
+            "optimizations": optimizations,
             **({"prompt_lookup_graft": dict(self.draft_model.stats)}
                if self.external_policy.get("ast_graft_prompt_lookup", False) else {}),
         }

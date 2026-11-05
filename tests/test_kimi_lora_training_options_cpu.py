@@ -69,6 +69,16 @@ def test_resume_cannot_change_loss_or_attention_profile(tmp_path, parent_options
         runner.resume_training_binding(child)
 
 
+@pytest.mark.parametrize('child_options', [{'max_grad_norm': 0.5},
+                                           {'execution_policy': {'router_combine': 'fp32'}}])
+def test_resume_cannot_change_the_rest_of_the_training_law(tmp_path, child_options):
+    p, digest = parent_spec(tmp_path)
+    child = spec(tmp_path, resume_checkpoint='checkpoint', resume_from_spec=str(p),
+                 resume_from_spec_sha256=digest, **child_options)
+    with pytest.raises(ValueError, match='changed'):
+        runner.resume_training_binding(child)
+
+
 @pytest.mark.parametrize('options', [{}, {'projection_chunk_size':128},
                                      {'training_mla':'padded_sdpa', 'projection_chunk_size':128}])
 def test_consumed_parent_spec_snapshot_is_bound(tmp_path, monkeypatch, options):

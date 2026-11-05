@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .desktop import artifact_row, atomic_json, source_identity
+from .desktop import artifact_row, atomic_json, child_exited, source_identity
 
 
 def checkpoint(path):
@@ -52,7 +52,7 @@ class Lifecycle:
         if len(matches) != 1:
             raise ValueError("This engine is not owned by this UI; self lifecycle is unavailable")
         identity, engine = matches[0]
-        if engine.child.poll() is not None:
+        if child_exited(engine.child):
             raise ValueError("This engine has already stopped")
         return identity, engine
 
@@ -141,7 +141,7 @@ class Lifecycle:
             if self.closed or self.pending:
                 raise ValueError("Finish the pending lifecycle action first")
             specs = [self._spec(identity, engine) for identity, engine in self.controller.engines.items()
-                     if engine.child is not None and engine.child.poll() is None]
+                     if engine.child is not None and not child_exited(engine.child)]
             plan = {"id": uuid.uuid4().hex, "created": time.time(), "source": source_identity(), "engines": specs,
                     "scope": "managed engines only; external services and jobs are not restarted"}
             atomic_json(self.resume_path, plan)

@@ -2,6 +2,8 @@ import Foundation
 
 @main enum BridgeChecks {
     static func main() async throws {
+        precondition(bytes(.nan) == "—" && bytes(.infinity) == "—" && bytes(Double(Int64.max)) == "—")
+        precondition(number(.infinity) == "—" && timestamp(.nan) == "Never")
         let script = CommandLine.arguments[1]
         let executable = CommandLine.arguments[2]
         func bridge(_ mode: String, timeout: Double = 2) -> Bridge {

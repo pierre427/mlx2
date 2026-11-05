@@ -41,7 +41,9 @@ def test_hybrid_adapter_declarations_and_inheritance(module_name,class_name,scop
     import importlib
     cls=getattr(importlib.import_module('mlx2.adapters.'+module_name),class_name)
     adapter=object.__new__(cls)
-    adapter.config={'text_config':{'num_experts':512,'num_experts_per_tok':10}}
+    # What the constructors set (none assigns ``adapter.config``).
+    adapter._attention_topology_config={'num_experts':512,'num_experts_per_tok':10}
+    assert not hasattr(adapter,'config')
     assert adapter_scopes(adapter) == scopes
     assert adapter.microscaling_decode_row_multiplier() == 10
     adapter.policy=SimpleNamespace(lane_dense=True)

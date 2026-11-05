@@ -238,7 +238,10 @@ def plan_tensors(source: Source, scope="mlp", *, normalize_only=False, protected
         if name in consumed:
             continue
         grouped = len(tensor.shape) == 3 and ".switch_mlp." in name
-        convert = (not normalize_only and name not in protected_tensors and name.endswith(".weight") and len(tensor.shape) in (2, 3)
+        # A 3-D tensor outside switch_mlp is not a projection (GDN conv1d
+        # [C, 1, K]); the installer skips it, so "all" must not select it.
+        convert = (not normalize_only and name not in protected_tensors and name.endswith(".weight")
+                   and (len(tensor.shape) == 2 or grouped)
                    and selected(name.removesuffix(".weight"), scope, grouped=grouped))
         if convert:
             quant_metadata.update(name.removesuffix("weight") + suffix for suffix in ("scales", "biases"))
@@ -546,6 +549,11 @@ def convert_artifact(source, output, *, scope="mlp", rows_per_chunk=128, workers
         return receipt
     except BaseException as error:
         receipt.update(status="failed", finished_at=time.time(), error=repr(error))
+        # The late gates run after config and index exist; nothing reads
+        # ``.incomplete``, so remove what makes the output loadable (the
+        # directory was empty when this conversion started).
+        for name in ("config.json", "model.safetensors.index.json"):
+            (output / name).unlink(missing_ok=True)
         _atomic(output / "mlx2-sc-mxfp4-conversion.json", receipt)
         raise
     finally:

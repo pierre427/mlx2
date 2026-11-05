@@ -11,7 +11,7 @@ from mlx2 import desktop_lifecycle as lifecycle
 
 class Engine:
     def __init__(self, path, identity):
-        self.child = SimpleNamespace(poll=lambda: None)
+        self.child = SimpleNamespace(poll=lambda: pytest.fail("liveness must not reap the process-group leader"))
         self.worker = {"path": str(path), "url": "http://127.0.0.1:9999", "checkpoint": "synthetic@fingerprint", "state": "Ready"}
         self.settings = {"port": 9999}
         self.calls = []
@@ -26,6 +26,7 @@ class Engine:
 
 
 def setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(lifecycle, "child_exited", lambda child: False)
     path = tmp_path / "synthetic"
     path.mkdir()
     monkeypatch.setattr(lifecycle, "source_identity", lambda: {"source_revision": "synthetic-source"})
@@ -130,3 +131,16 @@ def test_replaced_owned_child_is_never_stopped(tmp_path, monkeypatch):
     assert engine.calls == []
     receipt = json.loads((manager.home / (result["operation_id"] + ".json")).read_text())
     assert receipt["state"] == "failed"
+
+
+def test_exited_owned_leader_is_refused_without_reaping(tmp_path, monkeypatch):
+    import psutil
+    from mlx2.desktop import child_exited
+    manager, engine = setup(tmp_path, monkeypatch)
+    engine.child.pid = 98765
+    monkeypatch.setattr(lifecycle, "child_exited", child_exited)
+    monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(status=lambda: psutil.STATUS_ZOMBIE))
+    with pytest.raises(ValueError, match="already stopped"):
+        manager._managed({"url": engine.worker["url"]})
+    assert engine.child is not None
+    manager.close()

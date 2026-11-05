@@ -162,6 +162,31 @@ def execution_headroom(host_signals=False, minimum_host_available_bytes=0):
     return headroom
 
 
+def execution_headroom_terms(host_signals=False):
+    """The readings behind ``execution_headroom``, for refusal diagnostics.
+
+    Host-side reads only (no device sync); never used to decide admission.
+    """
+    import mlx.core as mx
+    from .runtime.os_memory import physical_footprint_bytes
+
+    info = mx.device_info()
+    recommended = int(info.get("max_recommended_working_set_size", 0))
+    available = host_available_bytes(host_signals)
+    active, cached = int(mx.get_active_memory()), int(mx.get_cache_memory())
+    footprint = physical_footprint_bytes()
+    credit = host_term_reserve_credit_bytes(info.get("memory_size", 0), recommended)
+    return {
+        "host_available": None if available is None else int(available),
+        "host_term": None if available is None else int(available) + max(0, int(credit)),
+        "advisory_term": recommended - max(active + cached, int(footprint or 0)),
+        "recommended": recommended,
+        "active": active,
+        "cached": cached,
+        "footprint": None if footprint is None else int(footprint),
+    }
+
+
 def mlx_footprint_reading():
     """``(active, cached, footprint)`` bytes, or ``None`` when unmeasurable."""
     try:

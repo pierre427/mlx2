@@ -165,8 +165,8 @@ def main():
     server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                               env=env, cwd=ROOT)
     receipt["server_pid"] = server.pid
-    swap0 = swapouts_mb()
     try:
+        swap0 = swapouts_mb()  # inside try: a failed sample still stops the server
         deadline = time.monotonic() + 900
         while True:
             if server.poll() is not None:
@@ -242,8 +242,15 @@ def main():
         receipt["swapouts_mb"] = swapouts_mb() - swap0
         (args.output / "status-final.json").write_text(json.dumps(call("/v1/status"), indent=2, default=str))
         (args.output / "metrics.prom").write_text(call("/metrics"))
-        receipt["passed"] = all(c["oracle"] and c["reference_oracle"] for c in receipt["cases"]) and all(
-            c["vs_b1"]["verdict"] in ("exact", "near_tie_equivalent") for c in receipt["cases"])
+        # The timed and streamed passes are measured outputs too, and the
+        # feature under test must have engaged in both concurrent passes.
+        padded = [receipt[k].get("latent_flash_padded", 0) > 0 for k in (
+            "mla_counters_concurrent_logprob_pass", "mla_counters_concurrent_timed_pass")]
+        receipt["padded_flash_engaged"] = padded
+        receipt["passed"] = all(c["oracle"] and c["reference_oracle"] and c["timed_oracle"]
+                                for c in receipt["cases"]) and all(
+            c["vs_b1"]["verdict"] in ("exact", "near_tie_equivalent") for c in receipt["cases"]) and all(
+            receipt.get("overlap_window", {}).get("oracles", [True])) and all(padded)
     except BaseException as error:
         receipt["passed"] = False
         receipt["error"] = repr(error)

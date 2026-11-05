@@ -10,6 +10,26 @@ def validate_source_profiles(policy):
     """
     if type(policy) is not dict:
         raise ValueError('Source V4.1 execution policy must be a dictionary')
+    experts=policy.get('deepseek_source_experts')
+    if isinstance(experts,dict) and experts.get('direct_reads',False):
+        for name,reference in (
+            ('deepseek_source_expert_io','reference'),
+            ('deepseek_source_prefill_readahead','reference'),
+            ('deepseek_source_native_mx','reference'),
+        ):
+            if policy.get(name,reference)!=reference:
+                raise ValueError('direct Source reads cannot combine '+name)
+        if experts.get('residency')=='dynamic_precision_v1':
+            raise ValueError('direct Source reads require immutable precision selection')
+    if policy.get('deepseek_source_engram','reference')!='reference':
+        for name,reference in (
+            ('deepseek_ced','reference'),('deepseek_vision','reference'),
+            ('deepseek_physical_batch','b1'),
+            ('deepseek_source_prefill_order','reference'),
+            ('deepseek_source_prefill_partition','adaptive_v1'),
+        ):
+            if policy.get(name,reference)!=reference:
+                raise ValueError('Engram carry/tuple profile cannot combine '+name)
     extensions = []
     for name, reference in (
         ('deepseek_kv_storage', 'reference'),

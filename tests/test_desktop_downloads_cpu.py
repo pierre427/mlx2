@@ -202,8 +202,9 @@ def test_crosshost_redirect_strips_authorization_and_refuses_http():
 
 def test_secret_file_mode_and_no_token_in_job(environment):
     env = environment
-    env.manager.dispatch({"command": "hf_save_token", "token": "hf_synthetic_secret"})
+    result = env.manager.dispatch({"command": "hf_save_token", "token": "hf_synthetic_secret"})
     token = Path(env.controller.preferences["hf_token_file"])
+    assert result == {"saved": True, "token_file": str(token)}
     assert token.stat().st_mode & 0o777 == 0o600
     identity = env.manager.start("owner/model")["job_id"]
     job = finish(env, identity)

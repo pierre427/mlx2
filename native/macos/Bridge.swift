@@ -53,7 +53,8 @@ final class Bridge: @unchecked Sendable {
         guard let python = config["python"].string, let source = config["source"].string else {
             throw DesktopError.message("Rebuild MLX2.app: runtime.json is incomplete")
         }
-        let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MLX2")
+        let home = config["desktop_home"].string.map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MLX2")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let log = home.appendingPathComponent("desktop.log")
         if !FileManager.default.fileExists(atPath: log.path) { FileManager.default.createFile(atPath: log.path, contents: nil) }
@@ -62,6 +63,7 @@ final class Bridge: @unchecked Sendable {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: python)
         task.arguments = ["-u", "-m", "mlx2.desktop", "--trash-helper", Bundle.main.executableURL!.path]
+        if config["desktop_home"].string != nil { task.arguments! += ["--home", home.path] }
         task.currentDirectoryURL = URL(fileURLWithPath: source)
         var environment = ProcessInfo.processInfo.environment
         environment["PYTHONPATH"] = URL(fileURLWithPath: source).appendingPathComponent("src").path
@@ -156,16 +158,16 @@ final class Bridge: @unchecked Sendable {
 }
 
 func bytes(_ value: Double?) -> String {
-    guard let value else { return "—" }
+    guard let value, value.isFinite, value >= Double(Int64.min), value < Double(Int64.max) else { return "—" }
     return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .binary)
 }
 
 func number(_ value: Double?, suffix: String = "", digits: Int = 1) -> String {
-    guard let value else { return "—" }
+    guard let value, value.isFinite else { return "—" }
     return String(format: "%.*f", digits, value) + suffix
 }
 
 func timestamp(_ value: Double?) -> String {
-    guard let value else { return "Never" }
+    guard let value, value.isFinite, abs(value) < 253402300800 else { return "Never" }
     return Date(timeIntervalSince1970: value).formatted(date: .abbreviated, time: .shortened)
 }

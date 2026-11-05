@@ -27,16 +27,19 @@ struct HistoryPoint: Identifiable {
     @Published var logProfileID = "default"
     @Published var checkedModels: Set<String> = []
     @Published var points: [HistoryPoint] = []
+    var runtimeOperations: [String: String] = [:]
     let chat = ChatModel()
     let codeCoordinator = CodeCoordinator()
     let choices = AgentChoices()
     private let profileChats = ProfileChatPersistence()
     private let wakeupCoordinator = WakeupCoordinator()
-    private let bridge = Bridge()
+    private let bridge: Bridge
     private var timer: Task<Void, Never>?
     private var historyIdentity: String?
     private var previousUptime: Double?
     private var lastWorkerError: String?
+
+    init(bridge: Bridge = Bridge()) { self.bridge = bridge }
 
     // A snapshot repeats persistent worker failures. Present each transition
     // once so dismissing an old failure survives the next status poll.
@@ -187,7 +190,10 @@ struct HistoryPoint: Identifiable {
     }
 
     func perform(_ command: String, _ arguments: [String: Any] = [:]) {
-        guard !busy else { return }
+        guard !busy else {
+            error = "Another operation is in progress. Wait for it to finish, then try again."
+            return
+        }
         if ["user_profile_create", "user_profile_switch"].contains(command) && chat.generating {
             error = "Stop the current reply before switching user profiles."
             return
@@ -221,8 +227,15 @@ struct HistoryPoint: Identifiable {
     }
 
     func refreshLogs() async {
-        do { logs = try await bridge.request("logs", ["source": logSource, "profile_id": logProfileID])["text"].text }
-        catch { logs = "Unable to read logs: \(error.localizedDescription)" }
+        let source = logSource, profile = logProfileID
+        do {
+            let result = try await bridge.request("logs", ["source": source, "profile_id": profile])["text"].text
+            guard source == logSource, profile == logProfileID else { return }
+            logs = result
+        } catch {
+            guard source == logSource, profile == logProfileID else { return }
+            logs = "Unable to read logs: \(error.localizedDescription)"
+        }
     }
 
     func start(_ row: JSON) {
@@ -267,19 +280,21 @@ struct HistoryPoint: Identifiable {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
-    func chatTarget(_ server: JSON) async throws -> JSON {
+    func chatTarget(_ server: JSON, requestedModel: String = "") async throws -> JSON {
         if server["endpoint"]["remote"].bool {
             return try await bridge.request("chat_target", ["remote": true, "nid": server["endpoint"]["nid"].text,
                                                            "model": server["endpoint"]["remote_model"].text])
         }
-        return try await bridge.request("chat_target", ["url": server["endpoint"]["url"].text, "pid": server["endpoint"]["pid"].raw])
+        var target: [String: Any] = ["url": server["endpoint"]["url"].text, "pid": server["endpoint"]["pid"].raw]
+        if !requestedModel.isEmpty { target["model"] = requestedModel }
+        return try await bridge.request("chat_target", target)
     }
 
-    func chatTools(_ server: JSON) async throws -> JSON {
+    func chatTools(_ server: JSON, requestedModel: String = "") async throws -> JSON {
         var target: [String: Any] = ["url": server["endpoint"]["url"].text, "pid": server["endpoint"]["pid"].raw]
         if server["endpoint"]["remote"].bool {
             target = ["remote": true, "nid": server["endpoint"]["nid"].text, "model": server["endpoint"]["remote_model"].text]
-        }
+        } else if !requestedModel.isEmpty { target["model"] = requestedModel }
         let goal = chat.conversations[chat.selected]?.last(where: { $0.role == "user" && $0.origin.isEmpty })?.text ?? ""
         return try await bridge.request("chat_tools", ["target": target, "chat_session_id": chat.selected, "task_goal": String(goal.prefix(2000))])
     }

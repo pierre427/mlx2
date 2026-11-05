@@ -412,6 +412,9 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
         for layer_index, (layer, c) in enumerate(zip(self.pipeline_layers, cache)):
             mask = ssm_mask if layer.is_linear else fa_mask
             hidden_states = layer(hidden_states, mask=mask, cache=c)
+            if not layer.is_linear:
+                from ..inpass_checkpoints import record_kv
+                record_kv(c)
             if stride and (layer_index == last or (layer_index + 1) % stride == 0):
                 mx.async_eval(hidden_states)
                 _lv.bump("eager_async_evals")
@@ -516,6 +519,28 @@ def _trunk_mixed(trunk, segments):
 
 
 class TextModel(nn.Module):
+    def prefill_checkpoint_capacity(self, cache, width):
+        from ..inpass_checkpoints import CaptureTape,CaptureRefused,MAX_CAPTURES,MAX_RETAINED_BYTES
+        if width<2: return 0
+        try:
+            tape=CaptureTape(self.model,self.make_cache() if cache is None else cache,width,(1,))
+        except CaptureRefused:
+            return 0
+        return min(MAX_CAPTURES,MAX_RETAINED_BYTES//max(1,tape.estimated_retained_bytes))
+
+    def prefill_checkpoint_forward(self, inputs, cache, positions, *, body_only=False):
+        from ..inpass_checkpoints import CaptureTape, CaptureRefused
+        if inputs.ndim != 2 or inputs.shape[0] != 1:
+            raise CaptureRefused("in-pass checkpoint capture requires B1 text tokens")
+        tape = CaptureTape(self.model,cache,inputs.shape[1],positions)
+        with tape.scope():
+            hidden = self.model(inputs,cache)
+        snapshots=tape.finish()
+        output=hidden if body_only else self.logits(select_checkpoint_rows(hidden))
+        return output,snapshots,{'snapshot_mode':'inpass_descriptor_cow',
+            'estimated_retained_bytes':tape.estimated_retained_bytes,
+            'captures':len(snapshots),'projection_passes':1}
+
     @property
     def state_plane_operations(self):
         # Serving adapters expose TextModel directly as well as through the
@@ -744,6 +769,12 @@ class ModelArgs(BaseModelArgs):
 
 
 class Model(nn.Module):
+    def prefill_checkpoint_capacity(self, cache, width):
+        return self.language_model.prefill_checkpoint_capacity(cache,width)
+
+    def prefill_checkpoint_forward(self, inputs, cache, positions, *, body_only=False):
+        return self.language_model.prefill_checkpoint_forward(inputs,cache,positions,body_only=body_only)
+
     apc_v2_layout = "qwen38-27b-hybrid-layer-segments-v1"
     supports_speculative_rollback = True
     supports_trusted_pld = True

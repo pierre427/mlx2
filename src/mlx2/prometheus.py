@@ -682,6 +682,8 @@ _SCHEDULER_EVENTS = frozenset(
         "external_cost_cohort_reengage_decisions",
         "external_cost_cohort_reprobe_events",
         "memory_deferred",
+        "prefill_admission_refusals_total",
+        "external_admission_footprint_settles",
         "memory_pressure_evictions",
         "stream_page_ins_total",
         "stream_page_in_bytes_total",
@@ -1764,7 +1766,7 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
     # Host graph-dispatch counters, like GDN: no device reads on scrape and
     # bounded labels only. Present when the adapter declares these mechanisms.
     mechanism_events = {
-        "kda": ("reference", "vector_kernel", "chunk32", "chunk_wy", "fused_projections", "merged_conv",
+        "kda": ("reference", "vector_kernel", "chunk32", "chunk_wy", "fused_projections", "fused_projections_declined_wrapped", "merged_conv",
                 "fused_norm", "norm_fla_fp32", "norm_qwen_bf16", "multirow_calls", "single_row_calls",
                 "multirow_tokens", "single_row_tokens",
                 # Speculative rollback and packed-tree verify (Kimi KDA).

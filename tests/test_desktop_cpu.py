@@ -743,3 +743,97 @@ def test_poll_timeout_requires_sustained_evidence_and_recovers(supervisor, monke
         assert supervisor.worker["state"] == "Unreachable"
     finally:
         supervisor.child = None
+
+
+def test_runtime_launch_options_validate_private_configuration(supervisor, tmp_path):
+    private = tmp_path / 'private-runtime'
+    private.mkdir(mode=0o700)
+    config = private / 'weight-space.json'
+    config.write_text('{}')
+    config.chmod(0o600)
+    settings = {**supervisor.settings, 'kernel_dev_root': str(tmp_path), 'weight_space_config': str(config)}
+    checked = desktop.Supervisor.valid_settings(settings)
+    assert checked['kernel_dev_root'] == str(tmp_path.resolve())
+    assert checked['weight_space_config'] == str(config.resolve())
+    for changes in ({'kernel_dev_root': ''}, {'kernel_dev_root': str(config)},
+                    {'weight_space_config': str(private)}, {'multi_lora_delta_precision': 'fp32'},
+                    {'multi_lora_delta_precision': 'invalid'}):
+        with pytest.raises(ValueError):
+            desktop.Supervisor.valid_settings({**settings, **changes})
+    config.chmod(0o644)
+    with pytest.raises(ValueError, match='owner-private'):
+        desktop.Supervisor.valid_settings(settings)
+
+
+def test_runtime_options_reach_owned_launch_without_changing_defaults(supervisor, monkeypatch, tmp_path):
+    row = supervisor.library.snapshot()['rows'][0]
+    synthetic_resolution(monkeypatch)
+    adapter = tmp_path / 'runtime-adapter'
+    adapter.mkdir(mode=0o700)
+    config = adapter / 'weight-space.json'
+    config.write_text('{}')
+    config.chmod(0o600)
+    supervisor.settings = desktop.Supervisor.valid_settings({**supervisor.settings, 'route': 'ordinary',
+        'lora_root': str(adapter), 'max_loras': 1, 'max_lora_rank': 32,
+        'multi_lora_delta_precision': 'adapter', 'kernel_dev_root': str(tmp_path), 'weight_space_config': str(config),
+        'microscaling_prefill': 'mlp'})
+    lease = reservation(tmp_path)
+    monkeypatch.setattr(desktop, 'GPUReservation', lambda: lease)
+    monkeypatch.setattr(desktop, 'source_identity', dict)
+    arguments = []
+    def no_spawn(args, **kwargs):
+        arguments.extend(args)
+        raise OSError('synthetic no-spawn')
+    monkeypatch.setattr(desktop.subprocess, 'Popen', no_spawn)
+    with pytest.raises(OSError, match='no-spawn'):
+        supervisor.start(row['path'], row['identity'])
+    for flag, value in (('--multi-lora-delta-precision', 'adapter'), ('--kernel-dev-root', str(tmp_path)),
+                        ('--weight-space-config', str(config)), ('--microscaling-prefill', 'mlp')):
+        assert arguments[arguments.index(flag) + 1] == value
+    token = Path(arguments[arguments.index('--admin-token-file') + 1])
+    assert token.stat().st_mode & 0o777 == 0o600
+    assert supervisor.reservation is None
+
+
+@pytest.mark.parametrize('scope', [None, 'off', 'experts', 'mlp', 'all'])
+def test_microscaling_prefill_has_explicit_scope_and_no_enabled_default(supervisor, scope):
+    assert supervisor.settings.get('microscaling_prefill') in {None, 'off'}
+    checked = desktop.Supervisor.valid_settings({**supervisor.settings, 'microscaling_prefill': scope})
+    assert checked['microscaling_prefill'] == scope
+
+
+@pytest.mark.parametrize('scope', [True, 'auto', 'fp32', [], {}])
+def test_microscaling_prefill_refuses_invalid_ui_scopes(supervisor, scope):
+    with pytest.raises(ValueError, match='Microscaling prefill'):
+        desktop.Supervisor.valid_settings({**supervisor.settings, 'microscaling_prefill': scope})
+
+
+def test_microscaling_prefill_refuses_non_autoregressive_launch_before_preparation(supervisor):
+    supervisor.settings['microscaling_prefill'] = 'all'
+    with pytest.raises(ValueError, match='autoregressive'):
+        supervisor.launch(None, None, 'embedding', None)
+    assert supervisor.child is None and supervisor.reservation is None
+
+
+def test_missing_launch_resources_leave_settings_recoverable_but_refuse_start(supervisor, monkeypatch, tmp_path):
+    root = supervisor.library.root
+    missing = tmp_path / 'moved-adapters'
+    saved = {**supervisor.settings, 'route': 'ordinary', 'lora_root': str(missing),
+             'max_loras': 1, 'kernel_dev_root': str(tmp_path / 'moved-source'),
+             'weight_space_config': str(tmp_path / 'moved-config.json')}
+    home = tmp_path / 'recoverable-app'
+    home.mkdir()
+    desktop.atomic_json(home / 'desktop-settings.json', saved)
+    reopened = desktop.Supervisor(home, tmp_path / 'never-executed')
+    try:
+        assert reopened.settings['lora_root'] == str(missing)
+        assert reopened.settings['root'] == str(root)
+        wait_scan(reopened.library)
+        row = reopened.library.snapshot()['rows'][0]
+        monkeypatch.setattr(reopened.runner_manager, 'ensure', lambda *a, **k: pytest.fail('Invalid launch must not prepare a runner'))
+        with pytest.raises(ValueError, match='kernel_dev_root'):
+            reopened.start(row['path'], row['identity'])
+        recovered = {k: v for k, v in saved.items() if k not in desktop.RUNTIME_SETTINGS}
+        assert reopened.configure(recovered) == recovered
+    finally:
+        reopened.close()

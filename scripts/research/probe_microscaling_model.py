@@ -67,7 +67,10 @@ def oracle(text,kind,expected):
         try:
             tree=ast.parse(text)
             f=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='add')
-            ret=next(n.value for n in f.body if isinstance(n,ast.Return))
+            body=f.body[1:] if f.body and isinstance(f.body[0],ast.Expr) and isinstance(f.body[0].value,ast.Constant) else f.body
+            # Only a lone return: earlier statements could rebind a or b.
+            if len(body)!=1 or not isinstance(body[0],ast.Return): return False
+            ret=body[0].value
             return ([a.arg for a in f.args.args]==['a','b'] and isinstance(ret,ast.BinOp)
                 and isinstance(ret.op,ast.Add) and isinstance(ret.left,ast.Name) and ret.left.id=='a'
                 and isinstance(ret.right,ast.Name) and ret.right.id=='b')
@@ -318,7 +321,7 @@ def unit(spec):
         if report['before']['foreign_model_processes']: raise RuntimeError('foreign model process; yield')
         from mlx2.adapters.registry import inspect_model
         resolution=inspect_model(Path(spec['model']))
-        if resolution.artifact['identity']['fingerprint']!=spec['artifact_fingerprint']: raise RuntimeError('model identity changed')
+        if resolution.artifact_fingerprint!=spec['artifact_fingerprint']: raise RuntimeError('model identity changed')
         from transformers import AutoTokenizer
         tokenizer=AutoTokenizer.from_pretrained(spec['model'],local_files_only=True)
         prompts=[make_prompt(tokenizer,n) for n in spec['contexts']]
@@ -377,6 +380,7 @@ def unit(spec):
         report['passed']=not method_failures and not numerical_failures and report['ordinary_functional_passed'] and report['candidate_functional_passed'] is not False
         verify_sources(spec)
     except BaseException as e:
+        report['passed']=False
         report['error']={'type':type(e).__name__,'message':str(e),'traceback':traceback.format_exc()}
         print(report['error']['traceback'],flush=True)
     finally:
@@ -389,7 +393,8 @@ def owned(args):
     from mlx2.desktop_campaign_lease import DesktopCPGLease
     from mlx2.desktop_campaign_process import spawn
     out=args.output.resolve(); out.mkdir(exist_ok=False)
-    model=args.model.expanduser().resolve(); identity=inspect_model(model).artifact['identity']
+    # Either resolver shape (Flash-Next returns the identity itself).
+    model=args.model.expanduser().resolve(); identity={'fingerprint':inspect_model(model).artifact_fingerprint}
     manifest=source_manifest(); revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
     spec={'out':str(out),'job_id':out.name,'model':str(model),'scope':args.scope,'contexts':args.contexts,
         'artifact_fingerprint':identity['fingerprint'],'checkpoint':model.name+'@sha256:'+identity['fingerprint'],

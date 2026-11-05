@@ -22,7 +22,7 @@ struct ChatHistorySidebar: View {
             HStack {
                 Text("Chats").font(.headline)
                 Spacer()
-                Button(action: newChat) { Image(systemName: "square.and.pencil") }.disabled(chat.generating)
+                Button(action: newChat) { Image(systemName: "square.and.pencil") }.disabled(chat.generating || chat.branching)
                     .help("New chat").accessibilityLabel("New chat in history")
                 Button(action: collapse) { Image(systemName: "sidebar.left") }.help("Collapse chat history").accessibilityLabel("Collapse chat history")
             }
@@ -37,13 +37,17 @@ struct ChatHistorySidebar: View {
                         Button { chat.selected = identity } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(chat.historyTitle(identity)).font(.callout).lineLimit(2)
+                                if chat.hasUnsentInput(in: identity) {
+                                    Text("Draft" + (chat.draftText(for: identity).isEmpty ? " · attachment" : ": " + chat.draftText(for: identity)))
+                                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                }
                                 if let date = chat.conversations[identity]?.last?.createdAt {
                                     Text(date, format: .dateTime.month().day().hour().minute()).font(.caption2).foregroundStyle(.secondary)
                                 }
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(9)
                                 .background(chat.selected == identity ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 8))
                                 .contentShape(Rectangle())
-                        }.buttonStyle(.plain).disabled(chat.generating)
+                        }.buttonStyle(.plain).disabled(chat.generating || chat.branching)
                         .contextMenu {
                             Button("Rename…") { renameID = identity; title = chat.historyTitle(identity) }
                             if category != "active" { Button("Restore to Recent") { chat.setHistoryState("active", for: identity) } }

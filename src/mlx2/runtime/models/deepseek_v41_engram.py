@@ -200,9 +200,11 @@ class EngramRows:
         timeout=60.0,
         cache_format="fp32",
         scale_offset=None,
+        carry_window=False,
     ):
         if (
             type(offset) is not int or offset < 0
+            or type(carry_window) is not bool
             or (scale_offset is not None and (type(scale_offset) is not int or scale_offset < 0))
             or type(rows) is not int or rows < 1
             or type(cache_bytes) is not int or cache_bytes < 0
@@ -217,13 +219,15 @@ class EngramRows:
         self.expected_stat = dict(expected_stat)
         self.compact = cache_format == "bf16_lut"
         self.row_bytes = 512 if self.compact else 1024
+        self.carry_enabled = carry_window
+        self.carry_staging_bound_bytes = max_rows*(self.row_bytes+24) if carry_window else 0
         self.cache_rows, self.max_rows = cache_bytes // self.row_bytes, max_rows
         self.maximum_cache_bytes = self.cache_rows*self.row_bytes
         if self.compact:
             engram_bf16_lut()
         self.workers, self.timeout = workers, timeout
         self._lock = threading.RLock()
-        self._cache, self._pending = OrderedDict(), None
+        self._cache, self._pending, self._carry = OrderedDict(), None, None
         self._closed = False
         self._parked = False
         self.stats = {
@@ -259,7 +263,7 @@ class EngramRows:
                 workers,
                 "v41-engram",
                 timeout=timeout,
-                max_pending=workers,
+                max_pending=(2 if carry_window else 1) * workers,
                 owner=storage_owner("v41-engram", self.path),
             )
         except BaseException:
@@ -297,6 +301,15 @@ class EngramRows:
                 if not np.array_equal(values, self._pending[0]):
                     raise ValueError("Engram prefetch window is already owned")
                 return
+            if self._carry is not None:
+                carry, self._carry = self._carry, None
+                if np.array_equal(values, carry[0]):
+                    self.verify()
+                    self._pending = carry
+                    self.stats["carry_hits"] = self.stats.get("carry_hits", 0) + 1
+                    return
+                self._drain_window(carry)
+                self.stats["carry_discards"] = self.stats.get("carry_discards", 0) + 1
             self.verify()
             unique = np.unique(values)
             hits = {
@@ -330,6 +343,34 @@ class EngramRows:
                 raise
             self._pending = values, unique, hits, missing, futures
 
+    def prefetch_next(self, ids):
+        """Own one copied next-chunk window, independently of the active read.
+
+        Never steal a current window or publish next rows in its place. The
+        queue admits at most two worker sets; stale carries drain before reuse.
+        """
+        with self._lock:
+            if not self.carry_enabled:
+                raise ValueError("Engram carry window was not admitted")
+            active, self._pending = self._pending, None
+            try:
+                self.prefetch(ids)
+                self._carry, self._pending = self._pending, None
+                self.stats["carry_windows"] = self.stats.get("carry_windows", 0) + 1
+            finally:
+                self._pending = active
+
+    def _drain_window(self, pending):
+        if pending is None:
+            return
+        for _, future in pending[4]:
+            try:
+                future.result(timeout=self.timeout)
+            except FutureTimeout:
+                self.pool.fail(ReadTimeout("Engram prefetch exceeded its deadline"))
+            except BaseException as error:
+                self.pool.fail(error)
+
     def discard_prefetch(self):
         """Release a window a failed forward opened but never read.
 
@@ -338,16 +379,12 @@ class EngramRows:
         as read() would; the caller's original error is never replaced.
         """
         with self._lock:
-            pending, self._pending = self._pending, None
-            if pending is None:
+            pending, carry = self._pending, self._carry
+            self._pending = self._carry = None
+            if pending is None and carry is None:
                 return False
-            try:
-                for _, future in pending[4]:
-                    future.result(timeout=self.timeout)
-            except FutureTimeout:
-                self.pool.fail(ReadTimeout("Engram prefetch exceeded its deadline"))
-            except BaseException as error:  # noqa: BLE001 - cleanup on an error path
-                self.pool.fail(error)
+            self._drain_window(pending)
+            self._drain_window(carry)
             self.stats["discarded_prefetches"] = self.stats.get("discarded_prefetches", 0) + 1
             return True
 
@@ -407,6 +444,9 @@ class EngramRows:
                 "format_lut_bytes": 131072 if self.compact else 0,
                 "max_lookup_rows": self.max_rows,
                 "prefetch_pending": self._pending is not None,
+                "carry_pending": self._carry is not None,
+                "prefetch_window_limit": 2 if self.carry_enabled else 1,
+                "carry_staging_bound_bytes": self.carry_staging_bound_bytes,
                 "parked": self._parked,
                 "reserved_bytes": self.reserved_bytes(),
                 "resume_reservation_bytes": self.resume_reservation_bytes(),
@@ -415,7 +455,7 @@ class EngramRows:
             }
 
     def resume_reservation_bytes(self):
-        return self.cache_rows*self.row_bytes
+        return self.cache_rows*self.row_bytes + self.carry_staging_bound_bytes
 
     def reserved_bytes(self):
         return 0 if self._parked else self.resume_reservation_bytes()
@@ -424,6 +464,10 @@ class EngramRows:
         with self._lock:
             if self._closed or self._pending is not None:
                 raise ValueError("cannot park a closed/owned Engram read window")
+            # A cancelled request may never consume its known-tail carry.
+            # Parking an otherwise idle provider drains and retires it.
+            carry,self._carry=self._carry,None
+            self._drain_window(carry)
             if self.pool.counters()["weight_read_inflight"]:
                 raise ValueError("cannot park while Engram reads remain owned")
             if not self._parked:
@@ -434,7 +478,7 @@ class EngramRows:
 
     def activate(self):
         with self._lock:
-            if self._closed or self._pending is not None:
+            if self._closed or self._pending is not None or self._carry is not None:
                 raise ValueError("cannot activate a closed/owned Engram read window")
             if self.pool.failure is not None:
                 raise ReadTimeout("Engram reader failed; reload required: "+self.pool.failure)
@@ -446,7 +490,7 @@ class EngramRows:
 
     def resize_cache_budget(self, budget):
         with self._lock:
-            if self._closed or self._pending is not None:
+            if self._closed or self._pending is not None or self._carry is not None:
                 raise ValueError("cannot resize an owned/closed Engram read window")
             if type(budget) is not int or not 0 <= budget <= self.maximum_cache_bytes:
                 raise ValueError("Engram cache budget outside admitted bounds")
@@ -463,5 +507,6 @@ class EngramRows:
             self._closed = True
             self._cache.clear()
             self._pending = None
+            self._carry = None
             fd = self.fd
             self.pool.close(CloseAction(lambda: os.close(fd)))

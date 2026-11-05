@@ -18,6 +18,7 @@ import mlx.core as mx
 import pytest
 from mlx import nn
 
+from mlx2.adapters.ling3_flash import Ling3FlashAdapter
 from mlx2.runtime import lane
 from mlx2.runtime.lane import installer, policy
 from mlx2.runtime.lane.installer import ProjectionGroup
@@ -63,7 +64,8 @@ def _self_path(node):
 
 
 def _declared():
-    return [spec for module in MODULES for spec in module.lane_projection_groups()]
+    return ([spec for module in MODULES for spec in module.lane_projection_groups()]
+            + list(Ling3FlashAdapter.lane_projection_groups()))
 
 
 def _check_call_site(spec):
@@ -430,3 +432,47 @@ def test_status_and_metrics_expose_declared_groups():
             '{event="launches",group="test-qkv-gate"} 1') in text
     assert ('mlx2_lane_matmul_declared_group_events_total'
             '{event="reuses",group="test-qkv-gate"} 3') in text
+
+
+@pytest.mark.parametrize('lora', [False, True])
+def test_ling_kda_declared_group_launches_once_and_preserves_state(lora, request):
+    import hashlib
+    import subprocess
+    from dataclasses import replace
+
+    import numpy as np
+    from mlx.utils import tree_flatten
+    from test_kimi_linear import args
+
+    from mlx2.runtime.models.bailing_hybrid import KimiDeltaAttention
+    from mlx2.runtime.models.cache import ArraysCache
+
+    attn = KimiDeltaAttention(replace(args(), hidden_size=128, head_dim=128, num_attention_heads=32,
+                                      no_kda_lora=not lora, kda_lower_bound=-5.0))
+    attn.set_dtype(mx.bfloat16)
+    attn.eval()
+    mx.eval(attn.parameters())
+    digest = hashlib.sha256()
+    for name, value in tree_flatten(attn.parameters()):
+        digest.update((name + str(value.shape) + str(value.dtype)).encode())
+        digest.update(np.asarray(value.astype(mx.float32)).tobytes())
+    request.node.user_properties.extend([
+        ('checkpoint', 'synthetic-ling-declared-groups@sha256:' + digest.hexdigest()),
+        ('source_revision', subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()),
+        ('device', 'cpu'),
+    ])
+    x = mx.random.normal((1, 3, 128)).astype(mx.bfloat16)
+    baseline_cache = ArraysCache(4)
+    baseline = attn(x, cache=baseline_cache)
+    mx.eval(baseline, baseline_cache.state)
+    receipt = lane.install(nn.Sequential(attn), min_rows=1, declared=Ling3FlashAdapter.lane_projection_groups())
+    installer.STATS.clear()
+    cache = ArraysCache(4)
+    actual = attn(x, cache=cache)
+    mx.eval(actual, cache.state)
+    group = 'ling_kda_lora_inputs' if lora else 'ling_kda_qkvfgb'
+    assert receipt['declared_groups'][group]['formed'] == {'unquantized': 1}
+    assert _events(dict(installer.STATS), group) == (1, 5, 0)
+    assert _close(actual, baseline)
+    for left, right in zip(cache, baseline_cache, strict=True):
+        assert _close(left, right)

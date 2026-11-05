@@ -6,6 +6,7 @@ struct APCBranchesView: View {
     @State private var state = JSON()
     @State private var error: String?
     @State private var loading = false
+    @State private var refreshID = UUID()
     private var workers: [JSON] { model.workers.filter { ["Ready", "Busy", "Suspended"].contains($0["state"].text) } }
     var body: some View {
         GroupBox("APCv2 branches") {
@@ -46,16 +47,21 @@ struct APCBranchesView: View {
                 }
                 if state["truncated"].bool { Text("Showing the first 200 retained entries.").font(.caption).foregroundStyle(.secondary) }
             }.padding(8)
-        }.onChange(of: profile) { _, _ in state = JSON(); Task { await refresh() } }
+        }.onChange(of: profile) { _, _ in state = JSON(); error = nil; Task { await refresh() } }
+        .onChange(of: workers.map { $0["profile_id"].string ?? "default" }) { _, ids in
+            if !profile.isEmpty && !ids.contains(profile) { profile = "" }
+        }
     }
     @MainActor private func refresh() async {
-        guard !profile.isEmpty, !loading else { return }
+        let requestID = UUID()
+        refreshID = requestID
+        guard !profile.isEmpty else { loading = false; return }
         let selected = profile
         loading = true
-        defer { loading = false }
+        defer { if refreshID == requestID { loading = false } }
         do {
             let result = try await model.request("engine_cache_branches", ["profile_id": selected])
-            if profile == selected { state = result; error = nil }
-        } catch { if profile == selected { state = JSON(); self.error = error.localizedDescription } }
+            if refreshID == requestID && profile == selected { state = result; error = nil }
+        } catch { if refreshID == requestID && profile == selected { state = JSON(); self.error = error.localizedDescription } }
     }
 }

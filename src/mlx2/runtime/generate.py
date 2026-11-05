@@ -1181,6 +1181,9 @@ class PromptProcessingBatch:
                             for length in lengths
                         ],
                         step=self.prefill_step_size,
+                        next_tokens=(np.asarray(tokens[:, n_to_process:n_to_process + self.prefill_step_size])
+                                     if getattr(self.model, "engram_carry_enabled", False)
+                                     and len(lengths) == 1 and not kwargs else None),
                     )
                     with context, stream_context, lookahead, prefill_checkpoint_rows(
                         chunk_lengths, width=n_to_process
@@ -6504,14 +6507,25 @@ class BatchGenerator:
                 (uid, segments, history) = (sequence[0], sequence[1], sequence[4])
                 covered = len(history)
                 residual = sum(len(segment) for segment in segments)
-                boundary = self._next_interior_checkpoint(uid, covered)
+                # Preparation still visits captures even when they no longer
+                # stop an ordinary wide in-pass prefill slice.
+                if self._inpass_checkpoint_enabled():
+                    boundary=min((p for p in (self._peek_capture_checkpoint(uid,covered),
+                        next_prefill_checkpoint(getattr(self,'_prefill_cut_positions',{}).get(int(uid),()),covered))
+                        if p is not None),default=None)
+                else:
+                    boundary = self._next_interior_checkpoint(uid, covered)
                 # Boundaries sit strictly below the final prompt token, so a
                 # bounded advance never reaches lane preparation here.
                 if boundary is None or not 0 < boundary - covered < residual - 1:
                     break
-                (released, chunk) = self._advance_mtp_prefill(
-                    index, boundary - covered
-                )
+                if self._inpass_checkpoint_enabled():
+                    candidates=[p for p in self._interior_checkpoint_positions.get(int(uid),())
+                                if covered<p<=min(covered+self.prefill_step_size,covered+residual-2)]
+                    end=max(candidates,default=boundary)
+                    (released,chunk)=self._advance_mtp_prefill(index,end-covered,capture_end=end)
+                else:
+                    (released,chunk)=self._advance_mtp_prefill(index,boundary-covered)
                 if released is not None:
                     raise RuntimeError(
                         "boundary capture prepared a lane before its cohort"
@@ -6560,6 +6574,11 @@ class BatchGenerator:
             getattr(self, "_prefill_cut_positions", {}).get(int(uid)) or (),
             covered,
         )
+        if self._inpass_checkpoint_enabled():
+            # CaptureTape owns interior states; only cut-only boundaries end
+            # an outer slice. The model's retained-byte/capture limit is
+            # applied in _mtp_prefill_slice_setup before execution.
+            return cut
         return min((p for p in (capture, cut) if p is not None), default=None)
 
     def _next_interior_checkpoint(self, uid: int, covered: int):
@@ -6747,7 +6766,21 @@ class BatchGenerator:
             )
             covered += executed
 
-    def _mtp_prefill_slice_setup(self, index: int, max_tokens: int):
+    def _inpass_checkpoint_enabled(self):
+        return (bool(getattr(self,'self_mtp',None)) and os.environ.get('MLX2_INPASS_CHECKPOINTS') == '1'
+                and callable(getattr(self.model,'prefill_checkpoint_forward',None)))
+
+    def _inpass_checkpoint_plan(self, uid, covered, rows, cache):
+        from .inpass_checkpoints import MAX_CAPTURES
+        capacity=getattr(self.model,'prefill_checkpoint_capacity',None)
+        limit=MAX_CAPTURES if capacity is None else min(MAX_CAPTURES,capacity(cache,rows))
+        captures=[p for p in self._interior_checkpoint_positions.get(int(uid),()) if covered<p<covered+rows]
+        cut=next_prefill_checkpoint(getattr(self,'_prefill_cut_positions',{}).get(int(uid),()),covered)
+        end=min((p for p in (cut,captures[limit] if len(captures)>limit else None)
+                 if p is not None),default=None)
+        return end,tuple(p-covered for p in captures[:limit] if end is None or p<end)
+
+    def _mtp_prefill_slice_setup(self, index: int, max_tokens: int, *, capture_end=None):
         """Plan one queued self-MTP lane's next slice (no forward yet).
 
         Returns ``None`` when the residual is the final prompt token only;
@@ -6763,6 +6796,12 @@ class BatchGenerator:
         config.update(self._mtp_configs.get(uid, {}))
         self._validate_mtp_config(config)
         next_checkpoint = self._next_interior_checkpoint(uid, len(history))
+        capture_positions=()
+        if self._inpass_checkpoint_enabled():
+            next_checkpoint,capture_positions=self._inpass_checkpoint_plan(
+                uid,len(history),min(max_tokens,len(prompt)-1),prompt_cache)
+        if capture_end is not None:
+            next_checkpoint=min(p for p in (next_checkpoint,capture_end) if p is not None)
         if next_checkpoint is not None:
             max_tokens = min(max_tokens, next_checkpoint - len(history))
         slice_start = len(history)
@@ -6787,6 +6826,13 @@ class BatchGenerator:
             # refused, not risked).
             reshaped = True
             max_tokens = planned_rows
+        if self._inpass_checkpoint_enabled():
+            # Exact-plan reshaping can widen the proposed slice. Re-plan the
+            # complete capture set after that decision; never step over an
+            # unrecorded boundary or a cut-only numerical boundary.
+            end,capture_positions=self._inpass_checkpoint_plan(
+                uid,len(history),min(int(max_tokens),len(prompt)-1),prompt_cache)
+            if end is not None: max_tokens=min(int(max_tokens),end-len(history))
         return {
             "index": index,
             "uid": uid,
@@ -6800,6 +6846,7 @@ class BatchGenerator:
             # Rows the slice actually runs (the final token stays queued).
             "rows": min(int(max_tokens), len(prompt) - 1),
             "reshaped": reshaped,
+            "capture_positions": tuple(p for p in capture_positions if p < min(int(max_tokens),len(prompt)-1)),
         }
 
     def _mtp_prefill_slice_stage(self, context) -> None:
@@ -6956,15 +7003,22 @@ class BatchGenerator:
             return (None, progress)
         return self._release_prefilled_mtp_lane(index, progress)
 
-    def _advance_mtp_prefill(self, index: int, max_tokens: int):
+    def _advance_mtp_prefill(self, index: int, max_tokens: int, *, capture_end=None):
         """Advance one queued self-MTP lane without blocking live decode."""
         from .hybrid_speculative import advance_self_mtp_prefill
 
-        context = self._mtp_prefill_slice_setup(index, max_tokens)
+        context = (self._mtp_prefill_slice_setup(index,max_tokens,capture_end=capture_end)
+                   if capture_end is not None else self._mtp_prefill_slice_setup(index,max_tokens))
         if context is None:
             return self._release_prefilled_mtp_lane(index, [])
         self._mtp_prefill_slice_stage(context)
         tic = time.perf_counter()
+        inpass=[]
+        lane_rng=getattr(self,'_mtp_lane_rngs',{}).get(context['uid'])
+        capture_args=({'capture_positions':context['capture_positions'],'checkpoint_out':inpass,
+                      'checkpoint_rng_key':None if lane_rng is None else lane_rng.key,
+                      'checkpoint_rng_draws':0 if lane_rng is None else int(lane_rng.draws)}
+                     if context.get('capture_positions') else {})
         (remaining, prompt_cache, mtp_state, processed) = advance_self_mtp_prefill(
             mx.array(context["prompt"], dtype=mx.uint32),
             self.model,
@@ -6976,8 +7030,16 @@ class BatchGenerator:
                 context["config"].get("fused_gdn_catchup", False)
             ),
             clear_cache=prefill_clear_cache(self._has_active_decode()),
+            **capture_args,
         )
         toc = time.perf_counter()
+        for relative,checkpoint in inpass:
+            position=len(context['history'])+relative
+            if self._skip_state_boundary_for_pressure(context['uid'],position): continue
+            checkpoint['tokens']=list(context['history'])+context['prompt'][:relative]
+            checkpoint['interior']=True
+            self._record_state_checkpoint(context['uid'],position,checkpoint)
+            _bump_bounded_counter(self.scheduler_stats,'mtp_inpass_checkpoints_captured')
         (progress, residual) = self._mtp_prefill_slice_commit(
             context, remaining, prompt_cache, mtp_state, processed, toc
         )

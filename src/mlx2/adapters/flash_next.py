@@ -288,7 +288,9 @@ class FlashNextAdapter:
 
     def microscaling_decode_row_multiplier(self):
         from .microscaling_support import decode_row_multiplier
-        return decode_row_multiplier(self.config)
+        # Every hybrid constructor keeps the text config here; none sets
+        # ``self.config``.
+        return decode_row_multiplier(self._attention_topology_config)
 
     def chat_template_options(self):
         from ..agentic_chat import template_options

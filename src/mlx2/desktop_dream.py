@@ -275,10 +275,10 @@ class Dream:
     def _admission(self, selection, current):
         import psutil
 
-        from .desktop import WAITERS, model_processes
+        from .desktop import WAITERS, child_exited, model_processes
         managed = [engine for engine in self.controller.engines.values() if engine.child is not None and engine.worker
                    and engine.worker.get("url") == selection["url"] and engine.child.pid == selection["pid"]]
-        if len(managed) != 1 or managed[0].child.poll() is not None:
+        if len(managed) != 1 or child_exited(managed[0].child):
             return False, "Selected model is no longer app-managed and running; no model will be loaded", {}
         if self.controller.campaign.running:
             return False, "Qualification has priority", {}

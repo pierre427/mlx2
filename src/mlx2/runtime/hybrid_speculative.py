@@ -21,6 +21,7 @@ import numpy as np
 from .speculative_sampling import count_delivered_relaxed_accepts
 from .generate import PromptChunkCorruption, generation_stream
 from .models.cache import (
+    KVCache,
     can_trim_prompt_cache,
     make_prompt_cache,
     trim_ragged_prompt_cache,
@@ -1262,6 +1263,10 @@ def advance_self_mtp_prefill(
     fused_gdn_catchup: bool = False,
     clear_cache: bool = True,
     uid: int | None = None,
+    capture_positions=(),
+    checkpoint_out=None,
+    checkpoint_rng_key=None,
+    checkpoint_rng_draws=0,
 ) -> Tuple[mx.array, List[Any], Tuple[List[Any], mx.array], int]:
     """Advance one exact teacher-forced self-MTP prefill slice.
 
@@ -1285,6 +1290,9 @@ def advance_self_mtp_prefill(
     else:
         (draft_cache, prev_h) = _restore_mtp_state(target_cache, mtp_state, uid=uid)
     _reject_unsupported_self_mtp_caches(draft_cache)
+    if capture_positions and any(type(c) is not KVCache for c in draft_cache):
+        from .inpass_checkpoints import CaptureRefused
+        raise CaptureRefused('in-pass MTP capture requires ordinary predictor KV')
     n = min(int(max_tokens), int(prompt.size) - 1)
     if n <= 0:
         return (prompt, target_cache, (draft_cache, prev_h), 0)
@@ -1292,7 +1300,13 @@ def advance_self_mtp_prefill(
         scope = getattr(model, "gdn_catchup_scope", None)
         context = scope(fused_gdn_catchup) if callable(scope) else nullcontext()
         with context:
-            (_, h_chunk) = _mtp_backbone(model, prompt[:n][None], target_cache)
+            if capture_positions:
+                if checkpoint_out is None:
+                    raise ValueError('in-pass checkpoints require an owned output collection')
+                (h_chunk, target_snapshots, capture_receipt) = model.prefill_checkpoint_forward(
+                    prompt[:n][None],target_cache,capture_positions,body_only=True)
+            else:
+                (_, h_chunk) = _mtp_backbone(model, prompt[:n][None], target_cache)
         _validate_mtp_checkpoint_hidden(h_chunk, rows=n, uid=uid)
         if prev_h is None:
             (hs, ts) = (h_chunk[:, :-1], prompt[1:n][None])
@@ -1303,6 +1317,29 @@ def advance_self_mtp_prefill(
             model.mtp_step(hs, ts, draft_cache)
         prev_h = h_chunk[:, -1:, :]
         mx.eval([c.state for c in target_cache], [c.state for c in draft_cache])
+        if capture_positions:
+            staged=[]
+            for position in capture_positions:
+                # The MTP predictor is full-attention only. Its teacher-forced
+                # history at p has p-1 pairs; trim the shared wide catch-up by
+                # exactly n-p, preserving the hidden seed at p-1.
+                if any(type(c) is not KVCache for c in draft_cache):
+                    raise ValueError('in-pass MTP capture requires ordinary predictor KV')
+                saved_draft=[]
+                for c in draft_cache:
+                    saved=c.committed_descriptor_clone()
+                    if saved is None or saved.trim(n-position) != n-position:
+                        raise RuntimeError('in-pass predictor prefix capture failed')
+                    saved.keys=mx.contiguous(saved.keys[...,:saved.offset,:])
+                    saved.values=mx.contiguous(saved.values[...,:saved.offset,:])
+                    saved_draft.append(saved)
+                checkpoint=capture_self_mtp_checkpoint(target_snapshots[position],
+                    (saved_draft,h_chunk[:,position-1:position]),uid=uid,
+                    rng_key=checkpoint_rng_key,rng_draws=checkpoint_rng_draws)
+                if checkpoint is None: raise RuntimeError('in-pass MTP boundary is not exact')
+                checkpoint.update(capture_receipt)
+                staged.append((position,checkpoint))
+            checkpoint_out.extend(staged)
         if clear_cache:
             mx.clear_cache()
     mtp_state_trace.state(

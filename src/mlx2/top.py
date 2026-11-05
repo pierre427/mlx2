@@ -18,7 +18,6 @@ from .clients import DEFAULT_URL
 from .inference_monitor import (
     CompletedRequest,
     InferenceCollector,
-    LatencyStat,
     ServerReading,
 )
 from .system_monitor import HostCollector, HostReading
@@ -111,17 +110,8 @@ def _short_id(request_id: str) -> str:
     return request_id.rpartition("-")[2][:8] or request_id[:8]
 
 
-def _latency_row(name: str, stat: LatencyStat) -> str:
-    marker = " " if stat.exact else "~"
-    window = (
-        f"{_seconds(stat.window_p50):>8} {_seconds(stat.window_p95):>8} {stat.window_count:>6}"
-        if stat.window_count
-        else f"{'—':>8} {'—':>8} {0:>6}"
-    )
-    return (
-        f"  {name:<8}{marker}{_seconds(stat.p50):>8} {_seconds(stat.p95):>8} "
-        f"{_seconds(stat.p99):>8} {_seconds(stat.average):>8} {stat.count:>7}  │ {window}"
-    )
+def _tokens(value: int | None) -> str:
+    return "—" if value is None else _count(value)
 
 
 def _request_row(request: CompletedRequest) -> str:
@@ -261,16 +251,54 @@ def render_server(server: ServerReading, *, width: int = 100) -> list[str]:
         jain = f"  Jain {server.jain_fairness:.2f}" if server.jain_fairness is not None else ""
         lines.append(f"Tenants   {tenants}{jain}")
 
-    lines.append(
-        f"Latency   {'':<1}{'p50':>8} {'p95':>8} {'p99':>8} {'avg':>8} {'n':>7}  │ "
-        f"{'30s p50':>8} {'p95':>8} {'n':>6}"
-    )
-    for name, stat in server.latency:
-        if stat.count or stat.window_count:
-            lines.append(_latency_row(name, stat))
-    itl = dict(server.latency).get("ITL")
-    if itl is not None and itl.p50:
-        lines.append(f"          per-stream decode ≈ {1.0 / itl.p50:.1f} tok/s at ITL p50  (~ = bucket estimate)")
+    sessions = server.observed_sessions or server.active_requests
+    active = [request for request in sessions if request.active]
+    idle = [request for request in sessions if not request.active]
+    if sessions:
+        lines.append(
+            f"Sessions  {len(active)} active · {len(idle)} retained · ctx = prompt + out · rates in tok/s"
+        )
+        lines.append(
+            f"  {'id':<9}{'phase':<9}{'age':>8}{'ctx':>8}{'prompt':>8}"
+            f"{'cached':>8}{'out':>7}{'avg pp':>9}{'avg dec':>9}  route"
+        )
+        for request in (*active, *idle[:8]):
+            context = "—" if request.context_tokens is None else f"{request.context_tokens:,}"
+            lines.append(
+                f"  {_short_id(request.request_id):<9}{request.phase:<9}"
+                f"{_seconds(request.age_seconds):>8}{context:>8}"
+                f"{_tokens(request.prompt_tokens):>8}{_tokens(request.cached_tokens):>8}"
+                f"{_tokens(request.completion_tokens):>7}"
+                f"{_tps(request.prefill_tokens_per_second):>9}"
+                f"{_tps(request.decode_tokens_per_second):>9}  {request.mechanism or '—'}"
+            )
+            metadata = _join_present(
+                [
+                    "last observed" if not request.active else None,
+                    f"tenant {request.tenant_id}" if request.tenant_id else None,
+                    f"session {request.session_id}" if request.session_id else None,
+                    f"queue {_seconds(request.queue_ms / 1000)}" if request.queue_ms is not None else None,
+                    f"TTFT {_seconds(request.ttft_ms / 1000)}" if request.ttft_ms is not None else None,
+                ],
+                " · ",
+            )
+            if metadata:
+                lines.append("           " + metadata)
+            if request.active and request.last_observed_fields:
+                names = {
+                    "prefill_tokens_per_second": "avg pp",
+                    "decode_tokens_per_second": "avg dec",
+                    "context_tokens": "ctx",
+                }
+                fields = ", ".join(
+                    names.get(name, name.removesuffix("_tokens").removesuffix("_ms"))
+                    for name in request.last_observed_fields
+                )
+                lines.append("           last observed: " + fields)
+        if len(idle) > 8:
+            lines.append(f"           showing 8 of {len(idle)} retained idle sessions")
+    else:
+        lines.append("Sessions  none observed")
 
     spec = server.speculation
     if spec.cycles or spec.receipt_requests or spec.mode:
@@ -427,19 +455,6 @@ def render_server(server: ServerReading, *, width: int = 100) -> list[str]:
                 f"  {item.name[:52]:<52} {_count(item.per_second) if item.per_second else '·':>9} "
                 f"{_count(item.total):>9}"
             )
-
-    if server.active_requests:
-        lines.append("In flight  id       phase    age      queue     TTFT     mechanism")
-        for request in server.active_requests[:8]:
-            lines.append(
-                f"  {_short_id(request.request_id):<9}{request.phase:<9}"
-                f"{_seconds(request.age_seconds):>7}"
-                f"{'—' if request.queue_ms is None else _seconds(request.queue_ms / 1000):>9}"
-                f"{'—' if request.ttft_ms is None else _seconds(request.ttft_ms / 1000):>9}"
-                f"  {request.mechanism or ''}"
-            )
-    else:
-        lines.append("In flight  none")
 
     if server.recent_requests:
         age = (

@@ -12,6 +12,7 @@ zero rather than a stale lifetime average.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -23,7 +24,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +179,16 @@ class ActiveRequest:
     queue_ms: float | None = None
     ttft_ms: float | None = None
     mechanism: str | None = None
+    tenant_id: str | None = None
+    prompt_tokens: int | None = None
+    cached_tokens: int | None = None
+    completion_tokens: int | None = None
+    context_tokens: int | None = None
+    prefill_tokens_per_second: float | None = None
+    decode_tokens_per_second: float | None = None
+    session_id: str | None = None
+    active: bool = True
+    last_observed_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -316,6 +327,7 @@ class ServerReading:
     # mechanisms and requests
     mechanisms: tuple[MechanismRate, ...] = ()
     active_requests: tuple[ActiveRequest, ...] = ()
+    observed_sessions: tuple[ActiveRequest, ...] = ()
     recent_requests: tuple[CompletedRequest, ...] = ()
 
 
@@ -497,6 +509,8 @@ class _ServerState:
     status_at: float | None = None
     status_error: str | None = None
     uptime: float | None = None
+    sessions: tuple[ActiveRequest, ...] = ()
+    scope: tuple | None = None
 
 
 class InferenceCollector:
@@ -585,6 +599,22 @@ class InferenceCollector:
             return ServerReading(
                 endpoint=endpoint, reachable=False, error="not an mlx2 /metrics endpoint"
             )
+        # Retained observations must not cross a process, model or credential
+        # boundary. Keep only a digest, never the credential itself.
+        scope = (
+            endpoint.pid,
+            tuple(sorted(metrics.labels("model_info").items())),
+            tuple(sorted(metrics.labels("build_info").items())),
+            hashlib.sha256((api_key or "").encode()).digest(),
+        )
+        uptime = metrics.value("process_uptime_seconds")
+        restarted = uptime is not None and state.uptime is not None and uptime < state.uptime
+        if state.scope != scope or restarted:
+            state.history.clear()
+            state.sessions = ()
+            state.status = None
+            state.status_at = None
+        state.scope = scope
         batching = None
         try:
             batching = json.loads(
@@ -602,16 +632,13 @@ class InferenceCollector:
             except (OSError, ValueError) as error:
                 state.status_error = _error_text(error)
             state.status_at = now
-        uptime = metrics.value("process_uptime_seconds")
-        if uptime is not None and state.uptime is not None and uptime < state.uptime:
-            state.history.clear()  # the server restarted; counters reset
         state.uptime = uptime
         state.history.append((now, metrics))
         while len(state.history) > 2 and now - state.history[1][0] > self.window_seconds:
             state.history.popleft()
         previous = state.history[-2] if len(state.history) > 1 else None
         window = state.history[0] if len(state.history) > 1 else None
-        return build_reading(
+        reading = build_reading(
             endpoint,
             metrics,
             now=now,
@@ -623,7 +650,10 @@ class InferenceCollector:
             status_age_seconds=None if state.status_at is None else now - state.status_at,
             recent_requests=self.recent_requests,
             clock_comparable=_is_loopback(endpoint.url),
+            retained_sessions=state.sessions,
         )
+        state.sessions = reading.observed_sessions
+        return reading
 
 
 def _rate(
@@ -738,7 +768,33 @@ def _active_requests(
             if event.get("mechanism"):
                 mechanisms[request_id] = str(event["mechanism"])
     result = []
+    details = {
+        str(row.get("request_id")): row
+        for row in batching.get("active_request_details") or ()
+        if isinstance(row, dict)
+    }
     for request_id in active:
+        if request_id in details:
+            # Durations are computed by the server, so remote monotonic clocks
+            # and bounded event-history eviction cannot corrupt live progress.
+            row = details[request_id]
+            result.append(ActiveRequest(
+                request_id=request_id,
+                phase=str(row.get("phase") or "unknown"),
+                age_seconds=_float(row.get("age_seconds")),
+                queue_ms=_float(row.get("queue_ms")),
+                ttft_ms=_float(row.get("ttft_ms")),
+                mechanism=row.get("mechanism"),
+                tenant_id=row.get("tenant_id"),
+                prompt_tokens=_int(row.get("prompt_tokens")),
+                cached_tokens=_int(row.get("cached_tokens")),
+                completion_tokens=_int(row.get("completion_tokens")),
+                context_tokens=_int(row.get("context_tokens")),
+                prefill_tokens_per_second=_float(row.get("prefill_tokens_per_second")),
+                decode_tokens_per_second=_float(row.get("decode_tokens_per_second")),
+                session_id=row.get("session_id"),
+            ))
+            continue
         seen = events[request_id]
         admitted = seen.get("admitted")
         dequeued = seen.get("dequeued")
@@ -827,6 +883,99 @@ def _recent_requests(
             )
         )
     return tuple(result)
+
+
+_STICKY_FIELDS = (
+    "context_tokens", "prompt_tokens", "cached_tokens", "completion_tokens",
+    "prefill_tokens_per_second", "decode_tokens_per_second", "ttft_ms", "queue_ms",
+)
+
+
+def _observed_sessions(
+    active: tuple[ActiveRequest, ...], batching: dict | None, status: dict | None,
+    retained: tuple[ActiveRequest, ...],
+) -> tuple[ActiveRequest, ...]:
+    """Keep bounded, session-scoped observations, including between turns.
+
+    A request id is the fallback identity when no explicit session id exists.
+    Missing measurements retain prior observations and label their provenance;
+    observed zeroes replace old values. No rates are invented from histograms.
+    """
+    def key(row):
+        return (row.tenant_id, "session", row.session_id) if row.session_id else (
+            row.tenant_id, "request", row.request_id
+        )
+
+    rows = {
+        key(row): replace(row, active=False, phase=(
+            "stale" if batching is None else "idle"
+        )) if row.active else row
+        for row in reversed(retained)
+    }
+
+    def observe(row):
+        identity = key(row)
+        previous = rows.pop(identity, None)
+        if previous is not None:
+            last = set(row.last_observed_fields)
+            values = {}
+            for name in _STICKY_FIELDS:
+                if getattr(row, name) is None and getattr(previous, name) is not None:
+                    values[name] = getattr(previous, name)
+                    last.add(name)
+            row = replace(row, **values, last_observed_fields=tuple(sorted(last)))
+        rows[identity] = row
+
+    # Completed metrics provide final observations even for requests which
+    # started and finished between polls. Receipts seed older servers too.
+    receipts = {row.request_id: row for row in _recent_requests(status, batching, 512)}
+    raw_receipts = {
+        str(row.get("request_id")): row
+        for row in (status or {}).get("recent_receipts") or ()
+        if isinstance(row, dict)
+    }
+    completed = {
+        str(row.get("request_id")): row
+        for row in (batching or {}).get("completed_requests") or ()
+        if isinstance(row, dict)
+    }
+    order = dict.fromkeys(reversed(receipts))
+    for request_id in completed:
+        order.pop(request_id, None)
+        order[request_id] = None
+    for request_id in order:
+        raw = completed.get(request_id, {})
+        receipt = receipts.get(request_id)
+
+        def value(name, fallback=None, *, row=raw):
+            return row[name] if row.get(name) is not None else fallback
+
+        prompt = _int(value("prompt_tokens", receipt.prompt_tokens if receipt else None))
+        output = _int(value("completion_tokens", value("tokens", receipt.completion_tokens if receipt else None)))
+        controls = _dig(raw_receipts.get(request_id), "request_controls", "session_id")
+        observe(ActiveRequest(
+            request_id=request_id,
+            phase=str(raw.get("status") or (receipt.status if receipt else None) or "idle"),
+            active=False,
+            age_seconds=_float(value("age_seconds", receipt.elapsed_seconds if receipt else None)),
+            queue_ms=_float(raw.get("queue_ms")),
+            ttft_ms=_float(value("ttft_ms", 1000 * receipt.ttft_seconds
+                                if receipt and receipt.ttft_seconds is not None else None)),
+            mechanism=value("mechanism", receipt.route if receipt else None),
+            tenant_id=raw.get("tenant_id"),
+            session_id=raw.get("session_id") or controls,
+            prompt_tokens=prompt,
+            cached_tokens=_int(value("cached_tokens", receipt.cached_tokens if receipt else None)),
+            completion_tokens=output,
+            context_tokens=_int(value("context_tokens", prompt + output
+                                      if prompt is not None and output is not None else None)),
+            prefill_tokens_per_second=_float(raw.get("prefill_tokens_per_second")),
+            decode_tokens_per_second=_float(value("decode_tokens_per_second", receipt.decode_tokens_per_second if receipt else None)),
+        ))
+    for row in active:
+        observe(row)
+    # Active observations are inserted last and remain ahead of idle history.
+    return tuple(reversed(tuple(rows.values())[-512:]))
 
 
 def _speculation(
@@ -952,6 +1101,7 @@ def build_reading(
     status_age_seconds: float | None = None,
     recent_requests: int = 8,
     clock_comparable: bool = True,
+    retained_sessions: tuple[ActiveRequest, ...] = (),
 ) -> ServerReading:
     """Derive one server reading from current and earlier exports."""
     status = status if isinstance(status, dict) else None
@@ -1018,6 +1168,7 @@ def build_reading(
     evictions = None
     if window is not None:
         evictions = _delta("prefix_cache_eviction_age_seconds_count", metrics, window)
+    active_requests = _active_requests(batching, now, clock_comparable)
     return ServerReading(
         endpoint=endpoint,
         reachable=True,
@@ -1100,7 +1251,8 @@ def build_reading(
         http_errors=tuple(sorted(http_errors.items(), key=lambda item: -item[1])),
         failures=tuple(sorted(failures.items(), key=lambda item: -item[1])),
         mechanisms=_mechanisms(metrics, previous, now),
-        active_requests=_active_requests(batching, now, clock_comparable),
+        active_requests=active_requests,
+        observed_sessions=_observed_sessions(active_requests, batching, status, retained_sessions),
         recent_requests=_recent_requests(status, batching, recent_requests),
     )
 

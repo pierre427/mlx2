@@ -70,10 +70,14 @@ class InklingCacheBudget:
 
     def prefill_transient_bytes(self, context_tokens, chunk_rows):
         n, rows = self._count(context_tokens), self._count(chunk_rows)
+        # Match attention's 64 MiB query-mask tiling, conservatively using
+        # two-byte inputs and four-byte workspace. A fixed 128-row cap
+        # understated short-context, wide-prefill masks.
+        mask_rows = min(rows, max(1, (64 << 20) // (32 * max(n, 1) * 2)))
         # One layer's relative-bias mask + SDPA workspace, projected activations,
         # routed intermediates and cache growth. This is a shape bound, not measured.
         return (
-            3 * 32 * min(rows, 128) * max(n, 1) * 4
+            3 * 32 * mask_rows * max(n, 1) * 4
             + rows * (16 * self.hidden_size + 6 * 2048 * 3) * 4
         )
 

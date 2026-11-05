@@ -16,6 +16,11 @@ from .models.ling_tree import LingTree
 from .target_tree_executor import TargetTreeDispatchMetrics
 
 PROTOCOL = "ling_layerwise_packed_tree_v1"
+_OPTIMIZATION_FLAGS = {
+    "merged_conv": "ling_merged_conv",
+    "fused_norm": "ling_fused_norm",
+    "fused_mla_decode": "ling_fused_mla",
+}
 
 
 class LingTreeTransaction:
@@ -52,14 +57,27 @@ class LingTreeTransaction:
 class LingTreeExecutor(HybridTreeExecutor):
     protocol = PROTOCOL
 
-    def __init__(self):
+    def __init__(self, *, optimizations=None):
+        selected = dict(optimizations or {})
+        if set(selected) - _OPTIMIZATION_FLAGS.keys() or any(type(value) is not bool for value in selected.values()):
+            raise ValueError("invalid Ling tree optimization binding")
+        self._optimization_binding = tuple(
+            (key, selected.get(key, False)) for key in _OPTIMIZATION_FLAGS
+        )
         root = Path(__file__).parent
         self._sources = (Path(__file__), root / "models/ling_tree.py",
                          root / "models/bailing_hybrid.py", root / "hybrid_tree_executor.py")
+        if selected.get("fused_norm", False):
+            self._sources += (root / "models/ling_fused.py",
+                              root / "models/qwen4_fused_gdn_prefill.py", root / "models/served_exp.py")
+        if selected.get("fused_mla_decode", False):
+            self._sources += (root / "models/kimi_linear_mla_fused.py", root / "models/glm53_sparse_attention.py")
         self.source_identity = tuple(
             (path.name, hashlib.sha256(path.read_bytes()).hexdigest()) for path in self._sources
         )
-        self.source_revision_token = hashlib.sha256(repr(self.source_identity).encode()).hexdigest()
+        self.source_revision_token = hashlib.sha256(
+            repr((self.source_identity, self._optimization_binding)).encode()
+        ).hexdigest()
         self.dispatches = 0
         self.projection_rows = 0
 
@@ -75,6 +93,13 @@ class LingTreeExecutor(HybridTreeExecutor):
         return logits, features, transaction
 
     def forward_many(self, model, inputs, parents, caches, layers, *, cached, configured_limit):
+        # Source selection is immutable for this executor. A later option flip
+        # must never activate a helper outside its exact revision-bound set.
+        for layer in model.layers:
+            for key, selected in self._optimization_binding:
+                flag = _OPTIMIZATION_FLAGS[key]
+                if hasattr(layer.attention, flag) and getattr(layer.attention, flag) is not selected:
+                    raise RuntimeError("Ling packed tree optimization binding changed")
         self.validate_revision()
         self.validate_cohort(len(caches), configured_limit)
         if not len(inputs) == len(parents) == len(caches):

@@ -4,10 +4,10 @@ from dataclasses import replace
 import mlx.core as mx
 import numpy as np
 import pytest
+from test_kimi_linear import args
 
 from mlx2.runtime.models.bailing_hybrid import KimiDeltaAttention
 from mlx2.runtime.models.cache import ArraysCache
-from test_kimi_linear import args
 
 
 def _layer():
@@ -28,8 +28,10 @@ def _cache_close(actual, expected):
 
 
 @pytest.mark.parametrize("bounded", [True, False])
-def test_short_verify_after_wide_verify_restores_all_kda_planes(bounded):
+@pytest.mark.parametrize("merged_conv", [False, True])
+def test_short_verify_after_wide_verify_restores_all_kda_planes(bounded, merged_conv):
     layer = _layer()
+    layer.ling_merged_conv = merged_conv
     if not bounded:
         layer.lower_bound = None
     prefix = mx.random.normal((2, 4, 32))

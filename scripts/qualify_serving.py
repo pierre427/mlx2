@@ -4075,6 +4075,18 @@ def validate_adaptive_benchmark(path, initial):
     }
 
 
+def check_preflight(report, *, trusted_receipt, skip, check):
+    """Separate live functionality from optional full-suite evidence."""
+    if trusted_receipt:
+        check("unit_tests", True, trusted_receipt)
+    elif skip:
+        # Outside checks: not running a suite must never manufacture a pass.
+        report["preflight"] = {"status": "not_requested", "unit_tests_observed": False}
+    else:
+        tests = subprocess.run([sys.executable, "-m", "pytest"], capture_output=True, text=True)
+        check("unit_tests", tests.returncode == 0, tests.stdout + tests.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8285")
@@ -4083,6 +4095,8 @@ def main():
     parser.add_argument("--quiescence-timeout", type=float, default=5.0)
     parser.add_argument("--preflight-only", action="store_true",
                         help="Run the full unit suite, write a bound receipt to --output, and exit")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="Run live feature checks without a full unit preflight; record it as not requested")
     parser.add_argument(
         "--preflight-pytest-arg",
         action="append",
@@ -4124,6 +4138,8 @@ def main():
     )
     parser.add_argument("--require-feature", action="append", default=[], choices=["qsa_lazy_causal_mask", "shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "ple_early_dispatch", "qsa_stage1_direct_selector", "ple_read_policy", "tensorfold_qmv_rows", "row_exact_verify", "row_exact_attn_window", "row_exact_low_bit_lane", "moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify", "qsa_batch_decode_sparse", "qsa_b1_selected", "qsa_nax_batched", "mtp_draft_vocab", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "mtp_ordinary_handoff", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions", "cache_capsules", "persistent_blocks"], help="Fail this candidate unless its mechanism actually executed")
     args = parser.parse_args()
+    if args.skip_preflight and (args.preflight_only or args.preflight_receipt or args.preflight_delta or args.preflight_source_delta):
+        parser.error("--skip-preflight cannot be combined with preflight execution or receipts")
     if args.output.exists():
         parser.error(f"refusing to overwrite existing qualification receipt: {args.output}")
 
@@ -4313,13 +4329,7 @@ def main():
             {"selected": sorted(selected_capabilities),
              "implemented": initial.get("implemented_capabilities")},
         )
-        if trusted_preflight:
-            check("unit_tests", True, trusted_preflight)
-        else:
-            tests = subprocess.run(
-                [sys.executable, "-m", "pytest"], capture_output=True, text=True
-            )
-            check("unit_tests", tests.returncode == 0, tests.stdout + tests.stderr)
+        check_preflight(report, trusted_receipt=trusted_preflight, skip=args.skip_preflight, check=check)
         hermes_text = "Reply with exactly HERMES_READY"
         hermes_request = prompt(hermes_text, options={"num_ctx": 262144},
                                 reasoning_effort="none", think=False)

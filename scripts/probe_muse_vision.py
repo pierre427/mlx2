@@ -139,6 +139,10 @@ def unit(spec):
             else:
                 raise TimeoutError('vision AST startup')
             report['status_before'] = status
+            # Bind the drafter the server loaded to the one this receipt names.
+            loaded = (status.get('ast_route') or {}).get('drafter_fingerprint') or ''
+            assert loaded and spec['drafter_checkpoint'].rsplit('@', 1)[-1].startswith(loaded), (
+                'loaded drafter differs from drafter_checkpoint', loaded)
             model_id = http_json(base, '/v1/models')['data'][0]['id']
             def stream(name):
                 case = cases[name]

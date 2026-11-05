@@ -1,11 +1,15 @@
 """Revision-bound, persistable Inkling four-shortconv cache identity."""
 
+from collections import deque
+
+import mlx.core as mx
+
 from ...cache_operations import (
     ROLLBACK_PUBLICATION_CONDITIONS,
     CacheOperationsContract,
     CachePlaneDeclaration,
 )
-from ..cache import ArraysCache
+from ..cache import ArraysCache, _committed_descriptor_fields
 
 OPERATIONS = CacheOperationsContract(
     family="recurrent",
@@ -35,6 +39,61 @@ class InklingConvolutionCache(ArraysCache):
 
     def cache_operations_contract(self):
         return OPERATIONS
+
+    def committed_descriptor_clone(self):
+        """Cache-owned committed capture, mined from ArraysCache's contract."""
+        if (
+            type(self) is not InklingConvolutionCache
+            or len(self.cache) != 4
+            or self.apcv2_recurrent_kind != "inkling_shortconv"
+            or self.speculating
+            or self._rollbacks
+            or self._rollback_position
+            or self._rollback_positions is not None
+        ):
+            return None
+        allowed = {
+            "cache",
+            "left_padding",
+            "lengths",
+            "speculating",
+            "_rollbacks",
+            "_rollback_window",
+            "_rollback_epoch",
+            "_rollback_position",
+            "_rollback_positions",
+            "_rollback_invalid_reason",
+            "_host_lengths",
+            "_host_left_padding",
+            "_checkpoints",
+            "apcv2_recurrent_kind",
+            "apcv2_layer_index",
+            "_recurrent_codec_restored_leaves",
+        }
+        fields = _committed_descriptor_fields(self, allowed)
+        if fields is None or any(
+            value is not None and not isinstance(value, mx.array)
+            for value in self.cache
+        ):
+            return None
+        if (
+            "_recurrent_codec_restored_leaves" in fields
+            and type(fields["_recurrent_codec_restored_leaves"]) is not int
+        ):
+            return None
+        clone = object.__new__(InklingConvolutionCache)
+        clone.__dict__.update(fields)
+        clone.cache = [None if x is None else mx.stop_gradient(x) for x in self.cache]
+        clone._rollbacks = deque()
+        clone._checkpoints = [
+            [(position, list(snapshot)) for position, snapshot in lane]
+            for lane in self._checkpoints
+        ]
+        for name in ("left_padding", "lengths"):
+            value = fields[name]
+            setattr(clone, name, None if value is None else mx.stop_gradient(value))
+        clone._host_lengths = clone._host_left_padding = None
+        return clone
 
     @property
     def meta_state(self):

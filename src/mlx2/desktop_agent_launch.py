@@ -13,7 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .desktop import atomic_json, source_identity
+from .desktop import atomic_json, child_exited, source_identity
 
 ACTIVE = {"queued", "loading", "dispatching", "running"}
 PRIVATE = {"cancel", "thread", "history", "child", "engine", "preparation", "created_profile", "principal"}
@@ -181,7 +181,7 @@ class AgentLaunch:
                     continue
                 worker = engine.worker or {}
                 if (worker.get("checkpoint") == job["checkpoint"] and worker.get("state") in {"Ready", "Busy"}
-                        and engine.child is not None and engine.child.poll() is None):
+                        and engine.child is not None and not child_exited(engine.child)):
                     if any(key in spec and engine.settings.get(key) != spec[key] for key in ("lanes", "context")):
                         continue
                     matches.append((identity, engine))
@@ -247,7 +247,7 @@ class AgentLaunch:
                 if job["child"] is not None and engine.child is not job["child"]:
                     raise ValueError("Managed model instance changed during launch")
                 if worker.get("state") in {"Ready", "Busy"} and engine.child is not None:
-                    if engine.child.poll() is not None or worker.get("checkpoint") != job["checkpoint"]:
+                    if child_exited(engine.child) or worker.get("checkpoint") != job["checkpoint"]:
                         raise ValueError("Ready worker does not match the selected checkpoint")
                     break
                 if worker.get("state") in {"Error", "Stopped", "Suspended", "Suspending", "Resuming"}:

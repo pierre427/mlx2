@@ -74,6 +74,9 @@ def main():
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
+            if prompt == "empty reply":
+                self.wfile.write(b"data: [DONE]\n\n")
+                return
             try:
                 for delta in [
                     {"reasoning_content": "Considering"},
@@ -127,6 +130,9 @@ def main():
         finally:
             server.shutdown()
             server.server_close()
+        assert requests[0]["speculation"] == "off"
+        assert requests[0]["model"] == "public-adapter"
+        assert "speculation" not in requests[1]
         assert len(requests[1]["messages"]) == 3
         assert requests[1]["messages"][1] == {
             "role": "assistant",

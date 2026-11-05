@@ -171,6 +171,37 @@ def test_failure_retains_incomplete_receipt_and_never_marks_ready(tmp_path):
         convert_artifact(src, out)
 
 
+def test_late_gate_failure_leaves_no_loadable_artifact(tmp_path):
+    rng = np.random.default_rng(1)
+    src = write_source(tmp_path / "source", {
+        "model.layers.0.mlp.gate_proj.weight": ("BF16", bf16(rng.normal(0, .02, (64, 256))))})
+    out = tmp_path / "out"
+    def mutate(_):
+        (src / "generation_config.json").write_text("{}")
+    with pytest.raises(ConversionError, match="source identity changed"):
+        convert_artifact(src, out, progress=mutate)
+    assert json.loads((out / "mlx2-sc-mxfp4-conversion.json").read_text())["status"] == "failed"
+    assert (out / ".incomplete").exists()
+    assert not (out / "config.json").exists()
+    assert not (out / "model.safetensors.index.json").exists()
+    with pytest.raises(Exception):
+        Source(out)
+
+
+def test_scope_all_skips_non_projection_convolution_weights(tmp_path):
+    from mlx2.runtime.microscaling.conversion import plan_tensors
+    rng = np.random.default_rng(2)
+    src = write_source(tmp_path / "source", {
+        "model.layers.0.mlp.gate_proj.weight": ("BF16", bf16(rng.normal(0, .02, (64, 256)))),
+        "model.layers.0.linear_attn.in_proj_qkvz.weight": ("BF16", bf16(rng.normal(0, .02, (128, 256)))),
+        "model.layers.0.linear_attn.conv1d.weight": ("BF16", bf16(rng.normal(0, .02, (128, 1, 4)))),
+    })
+    plans = {p.name: p.convert for p in plan_tensors(Source(src), "all")}
+    assert plans["model.layers.0.linear_attn.conv1d.weight"] is False
+    assert plans["model.layers.0.linear_attn.in_proj_qkvz.weight"] is True
+    convert_artifact(src, tmp_path / "out", scope="all")
+
+
 def test_missing_expert_and_unsupported_geometry_fail_before_output(tmp_path):
     src = write_source(tmp_path / "source", {
         "model.layers.0.mlp.experts.1.up_proj.weight": ("F32", np.zeros((64, 128), np.float32))})

@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", type=Path, default=root / ".venv/bin/python")
     parser.add_argument("--output", type=Path, default=root / "build/macos/MLX2.app")
+    parser.add_argument("--desktop-home", type=Path, help="isolated development settings and data directory; cannot be installed")
     parser.add_argument(
         "--install-dir", type=Path, default=Path.home() / "Applications"
     )
@@ -33,6 +34,8 @@ def main():
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("Building this app requires macOS and Xcode command line tools")
+    if args.desktop_home and args.install:
+        parser.error("An isolated development app cannot replace the installed app")
     python = args.python.expanduser().absolute()  # Preserve virtualenv identity.
     subprocess.run(
         [str(python), "-c", "import psutil; import mlx2.desktop"],
@@ -40,6 +43,8 @@ def main():
         check=True,
     )
     runtime = {"python": str(python), "source": str(root)}
+    if args.desktop_home:
+        runtime["desktop_home"] = str(args.desktop_home.expanduser().resolve())
     if args.install:
         # A login-launched app must not execute its interpreter or source from
         # Desktop (TCC). Prepare the complete substrate in Application Support.
@@ -72,6 +77,7 @@ print(json.dumps({'python': record['python'], 'source': record['source']}))
     resources = contents / "Resources"
     binary.parent.mkdir(parents=True, exist_ok=True)
     resources.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(root / "docs/MICROSCALING.md", resources / "MICROSCALING.md")
     iconset = root / "build/macos/MLX2.iconset"
     subprocess.run(
         ["xcrun", "swift", str(root / "scripts/macos_app_icon.swift"), str(iconset)],
@@ -114,6 +120,7 @@ print(json.dumps({'python': record['python'], 'source': record['source']}))
                     for path in [
                         *sorted((root / "src/mlx2").glob("desktop*.py")),
                         *sorted((root / "native/macos").glob("*.swift")),
+                        root / "docs/MICROSCALING.md",
                     ]
                 },
             },

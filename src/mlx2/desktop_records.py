@@ -94,23 +94,10 @@ class RecordStore:
         rows = [r for r in self.records() if r["binding"]["checkpoint"] == checkpoint]
         if source_sha256:
             rows = [r for r in rows if r["binding"]["source_sha256"] == source_sha256]
-        groups = {}
-        for row in rows:
-            group = groups.setdefault(digest(row["binding"]), {})
-            group.setdefault(row["level"], row)  # newest result wins, including failures
-        def route_coverage_complete(group):
-            coverage = group.get(2, {}).get("coverage", {})
-            required = set(coverage.get("required_routes", []))
-            tested = set(coverage.get("tested_routes", []))
-            return not required or required <= tested
-        complete = [g for g in groups.values() if all(g.get(i, {}).get("passed") for i in (1, 2, 3))
-                    and route_coverage_complete(g)]
-        passing = max((sum(bool(g.get(i, {}).get("passed")) for i in (1, 2, 3)) for g in groups.values()), default=0)
-        label = "Qualified" if complete else f"{passing}/3 levels" if rows else "Untested"
-        if passing == 3 and not complete:
-            label += " · route coverage pending"
-        return {"label": label,
-                "qualified": bool(complete), "records": len(rows)}
+        # Share the exact profile grouping and verdict policy with the model
+        # library. Performance remains a separate observation, never a gate.
+        from .desktop_badges import aggregate
+        return aggregate(rows)
 
     def close(self):
         with self.lock:

@@ -569,3 +569,115 @@ def test_loading_engine_names_its_model_in_top():
     assert "LLM  Demo-4bit" in output
     route = next(line for line in output.splitlines() if line.startswith("Route"))
     assert "loading" in route and "unavailable" not in route
+
+
+def test_top_live_sessions_use_request_metrics_even_with_remote_clocks():
+    from mlx2.batch_metrics import BatchRuntimeMetrics
+
+    now = [100.0]
+    metrics = BatchRuntimeMetrics(history_size=1, clock=lambda: now[0])
+    metrics.admitted("chatcmpl-live", "alice", 0)
+    metrics.dequeued("chatcmpl-live", 0)
+    metrics.prompt("chatcmpl-live", 32768, 16384)
+    metrics.lane_attached("chatcmpl-live", 1, "ordinary")
+    now[0] = 102.0
+    metrics.token("chatcmpl-live")
+    now[0] = 103.0
+    metrics.token("chatcmpl-live")
+    now[0] = 104.0
+    # Erase live's events without altering its authoritative state.
+    metrics.admitted("chatcmpl-wait", "alice", 1)
+    reading = build_reading(
+        ServerEndpoint(url="http://remote:8297"),
+        Metrics.parse(_EXPOSITION_BEFORE),
+        now=9000.0,
+        batching=metrics.snapshot(),
+        clock_comparable=False,
+    )
+    live, waiting = reading.active_requests
+    assert live.phase == "decode" and live.age_seconds == 4.0
+    assert live.context_tokens == 32770 and live.prompt_tokens == 32768
+    assert live.cached_tokens == 16384 and live.completion_tokens == 2
+    assert live.prefill_tokens_per_second == 8192.0
+    assert live.decode_tokens_per_second == 0.5
+    assert waiting.context_tokens is None and waiting.decode_tokens_per_second is None
+    output = render(_host_reading(), servers=(reading,), width=103)
+    assert "Sessions  2 active" in output
+    assert "32,770" in output and "avg pp" in output and "avg dec" in output
+    assert "tenant alice" in output and "TTFT 2.00s" in output
+    assert "Latency " not in output and "per-stream decode" not in output
+    assert "In flight" not in output
+    idle = render(_host_reading(), servers=(ServerReading(reading.endpoint, True),))
+    assert "Sessions  none observed" in idle
+
+
+def test_session_observations_stay_visible_idle_and_across_turns():
+    from mlx2.batch_metrics import BatchRuntimeMetrics
+
+    now = [100.0]
+    metrics = BatchRuntimeMetrics(history_size=2, clock=lambda: now[0])
+    endpoint = ServerEndpoint("http://127.0.0.1:8297")
+    exposition = Metrics.parse(_EXPOSITION_BEFORE)
+    metrics.admitted("turn1", "alice", 0, session_id="chat")
+    metrics.dequeued("turn1", 0)
+    metrics.prompt("turn1", 100, 40)
+    metrics.lane_attached("turn1", 1, "ordinary")
+    now[0] = 102.0
+    metrics.token("turn1")
+    now[0] = 103.0
+    metrics.token("turn1")
+    now[0] = 104.0
+    metrics.terminal("turn1", "completed")
+    finished = build_reading(endpoint, exposition, now=104.0, batching=metrics.snapshot())
+    row, = finished.observed_sessions
+    assert not row.active and row.phase == "completed" and row.session_id == "chat"
+    assert row.context_tokens == 102 and row.prefill_tokens_per_second == 30.0
+    assert row.decode_tokens_per_second == 0.5
+    output = render(_host_reading(), servers=(finished,))
+    assert "Sessions  0 active · 1 retained" in output and "last observed" in output
+
+    # Poll gaps and history eviction retain the observed numbers, not zeroes.
+    idle = build_reading(endpoint, exposition, now=500.0, batching={},
+                         retained_sessions=finished.observed_sessions)
+    assert idle.observed_sessions == finished.observed_sessions
+    metrics.admitted("turn2", "alice", 0, session_id="chat")
+    queued = build_reading(endpoint, exposition, now=500.0, batching=metrics.snapshot(),
+                           retained_sessions=idle.observed_sessions)
+    row, = queued.observed_sessions
+    assert row.active and row.request_id == "turn2" and row.context_tokens == 102
+    assert row.completion_tokens == 0  # an observed zero replaces the old count
+    assert row.prefill_tokens_per_second == 30.0 and row.decode_tokens_per_second == 0.5
+    assert "context_tokens" in row.last_observed_fields
+    assert "last observed:" in render(_host_reading(), servers=(queued,))
+    # A new prompt replaces context; throughput remains until newly measured.
+    metrics.prompt("turn2", 120, 0)
+    resumed = build_reading(endpoint, exposition, now=500.0, batching=metrics.snapshot(),
+                            retained_sessions=queued.observed_sessions)
+    row, = resumed.observed_sessions
+    assert row.context_tokens == 120 and "context_tokens" not in row.last_observed_fields
+    assert row.decode_tokens_per_second == 0.5
+    # Same session string under another tenant is a distinct observation.
+    metrics.admitted("foreign", "bob", 0, session_id="chat")
+    scoped = build_reading(endpoint, exposition, now=500.0, batching=metrics.snapshot(),
+                           retained_sessions=resumed.observed_sessions)
+    assert len(scoped.observed_sessions) == 2
+    assert next(r for r in scoped.observed_sessions if r.tenant_id == "bob").context_tokens is None
+
+
+def test_retained_sessions_are_bounded_and_newest_turn_wins():
+    completed = [{
+        "request_id": f"turn-{i}", "tenant_id": "alice", "session_id": f"chat-{i}",
+        "status": "completed", "context_tokens": i,
+    } for i in range(520)]
+    completed.extend([
+        {"request_id": "old", "tenant_id": "alice", "session_id": "shared", "context_tokens": 10},
+        {"request_id": "new", "tenant_id": "alice", "session_id": "shared", "context_tokens": 20},
+    ])
+    reading = build_reading(
+        ServerEndpoint("http://127.0.0.1:8297"), Metrics.parse(_EXPOSITION_BEFORE), now=1.0,
+        batching={"completed_requests": completed},
+        status={"recent_receipts": [{"request_id": "new", "prompt_tokens": 20, "completion_tokens": 0}]},
+    )
+    assert len(reading.observed_sessions) == 512
+    shared = [row for row in reading.observed_sessions if row.session_id == "shared"]
+    assert len(shared) == 1 and shared[0].request_id == "new" and shared[0].context_tokens == 20

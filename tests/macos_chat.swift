@@ -27,6 +27,14 @@ import SwiftUI
         precondition(!ChatModel.isReadyForChat(JSON(["reachable": false, "ready": true])))
         precondition(!ChatModel.isReadyForChat(JSON(["ready": false])))
         precondition(!ChatModel.isReadyForChat(JSON(["status_error": "timed out"])))
+        precondition(ChatModel.isReadyForChat(JSON(["ready": true, "selected_capabilities": []])))
+        precondition(ChatModel.isReadyForChat(JSON(["ready": true, "selected_capabilities": ["text", "vision", "tools"]])))
+        precondition(ChatModel.isReadyForChat(JSON(["ready": true, "execution_kind": "autoregressive", "capabilities": ["text"]])))
+        precondition(!ChatModel.isReadyForChat(JSON(["ready": true, "selected_capabilities": ["embeddings"], "capabilities": ["text", "embeddings"]])))
+        precondition(!ChatModel.isReadyForChat(JSON(["ready": true, "selected_capabilities": ["rerank"]])))
+        precondition(!ChatModel.isReadyForChat(JSON(["ready": true, "capabilities": ["embeddings"]])))
+        precondition(!ChatModel.isReadyForChat(JSON(["ready": true, "execution_kind": "image", "selected_capabilities": ["text"]])))
+        precondition(!ChatModel.isReadyForChat(JSON(["ready": true, "endpoint": ["execution_kind": "rerank"]])))
         var attachment = ChatScrollAttachment()
         attachment.observe(height: 1000, viewport: 400, distance: 0)
         precondition(attachment.followsBottom)
@@ -63,10 +71,40 @@ import SwiftUI
         precondition(historyRestored.historyState(historyID) == "active")
         let firstModel = JSON(["endpoint": ["url": "http://127.0.0.1:8991", "pid": 11, "model_path": "/models/first"], "model": "First"])
         let secondModel = JSON(["endpoint": ["url": "http://127.0.0.1:8992", "pid": 12, "model_path": "/models/second"], "model": "Second"])
+        let embeddingModel = JSON(["endpoint": ["url": "http://127.0.0.1:8993", "pid": 13, "model_path": "/models/embedding"], "ready": true, "selected_capabilities": ["embeddings"]])
+        let modalityChat = ChatModel()
+        modalityChat.startFreshChat(servers: [embeddingModel, firstModel])
+        precondition(modalityChat.serverIdentity(for: modalityChat.selected) == ChatModel.identity(firstModel))
+        precondition(modalityChat.newConversation(servers: [embeddingModel]) == nil)
         let lockedChat = ChatModel()
         lockedChat.startFreshChat(servers: [firstModel])
         precondition(lockedChat.bindEmptyConversation(to: secondModel))
         precondition(lockedChat.conversationModel(lockedChat.selected) == "second")
+        let drafts = ChatModel()
+        drafts.startFreshChat(servers: [firstModel])
+        let firstDraftID = drafts.selected
+        drafts.draft = "Private draft for first conversation"
+        drafts.attachments = [.init(name: "first.txt", modality: "text", part: ["type": "text", "text": "First document"])]
+        let secondDraftID = drafts.newConversation(servers: [secondModel])!
+        precondition(drafts.draft.isEmpty && drafts.attachments.isEmpty)
+        precondition(drafts.hasUnsentInput(in: firstDraftID))
+        drafts.draft = "Second conversation draft"
+        drafts.setSpeculation("off", for: secondDraftID)
+        drafts.setRequestedModel("public-adapter", for: secondDraftID)
+        drafts.selected = firstDraftID
+        precondition(drafts.draft == "Private draft for first conversation" && drafts.attachments.first?.name == "first.txt")
+        precondition(drafts.speculation(for: firstDraftID) == "auto")
+        let savedDrafts = ChatModel()
+        savedDrafts.restoreProfileArchive(JSON(drafts.profileArchive()))
+        precondition(savedDrafts.draft == "Private draft for first conversation")
+        savedDrafts.selected = secondDraftID
+        precondition(savedDrafts.draft == "Second conversation draft" && savedDrafts.speculation(for: secondDraftID) == "off")
+        precondition(savedDrafts.requestedModel(for: secondDraftID) == "public-adapter")
+        savedDrafts.conversations[secondDraftID] = [ChatMessage(role: "user", text: "Started")]
+        savedDrafts.setRequestedModel("different-adapter", for: secondDraftID)
+        precondition(savedDrafts.requestedModel(for: secondDraftID) == "public-adapter")
+        let scopedArchive = JSON(drafts.sessionArchiveDocument(for: firstDraftID))
+        precondition((scopedArchive["conversation_drafts"].raw as? [String: String])?.isEmpty == true)
         lockedChat.conversations[lockedChat.selected] = [ChatMessage(role: "user", text: "Started")]
         precondition(!lockedChat.bindEmptyConversation(to: firstModel))
         precondition(lockedChat.conversationModel(lockedChat.selected) == "second")
@@ -212,13 +250,22 @@ import SwiftUI
         defer { try? FileManager.default.removeItem(at: localMedia) }
         let localResource = try await ChatMediaLoader.resource(from: localMedia, maximumBytes: 1024)
         precondition(localResource.data == fixtureData && localResource.filename.hasSuffix(".png"))
+        let attachedPNG = try ChatAttachment.read(localMedia)
+        precondition(JSON(attachedPNG.part)["image_url"]["url"].text.hasPrefix("data:image/png;base64,"))
+        let tiffMedia = localMedia.deletingPathExtension().appendingPathExtension("tiff")
+        try NSImage(data: fixtureData)!.tiffRepresentation!.write(to: tiffMedia)
+        defer { try? FileManager.default.removeItem(at: tiffMedia) }
+        let convertedImage = try ChatAttachment.read(tiffMedia)
+        precondition(JSON(convertedImage.part)["image_url"]["url"].text.hasPrefix("data:image/png;base64,"))
         let chat = ChatModel()
         func server(_ name: String, _ pid: Int = 123) -> JSON {
             JSON(["endpoint": ["url": base, "pid": pid, "model_path": name], "model": name])
         }
         let first = server("synthetic-a")
-        let target = JSON(["url": base, "api_key": "synthetic-secret"])
+        let target = JSON(["url": base, "api_key": "synthetic-secret", "model": "public-adapter", "lora_fingerprint": "lora-v1"])
         chat.selected = ChatModel.identity(first)
+        chat.setRequestedModel("public-adapter", for: chat.selected)
+        chat.setSpeculation("off", for: chat.selected)
         chat.draft = "hello"
         chat.send(server: first) { target }
         try await wait(chat)
@@ -226,10 +273,18 @@ import SwiftUI
         precondition(chat.conversations[chat.selected]?.last?.text == "Hello 🌍")
         precondition(chat.conversations[chat.selected]?.last?.reasoning == "Considering")
         chat.draft = "follow up"
+        chat.setSpeculation("auto", for: chat.selected)
         chat.send(server: first) { target }
         try await wait(chat)
         precondition(chat.error == nil)
         precondition(chat.conversations[chat.selected]?.count == 4)
+        let pinnedHistory = try JSONSerialization.data(withJSONObject: chat.profileArchive()["wire_history"]!, options: [.sortedKeys])
+        chat.draft = "changed adapter"
+        chat.send(server: first) { JSON(["url": base, "api_key": "synthetic-secret", "model": "public-adapter", "lora_fingerprint": "lora-v2"]) }
+        try await wait(chat)
+        precondition(chat.error?.contains("adapter revision changed") == true)
+        let unchangedHistory = try JSONSerialization.data(withJSONObject: chat.profileArchive()["wire_history"]!, options: [.sortedKeys])
+        precondition(unchangedHistory == pinnedHistory)
         let other = server("synthetic-b")
         chat.selected = ChatModel.identity(other)
         precondition(chat.conversations[chat.selected] == nil)
@@ -263,6 +318,11 @@ import SwiftUI
         chat.send(server: other) { target }
         try await wait(chat)
         precondition(chat.error?.contains("tools must contain 1 to 64") == true)
+        chat.draft = "empty reply"
+        chat.send(server: other) { target }
+        try await wait(chat)
+        precondition(chat.error?.contains("without a reply") == true && chat.canRetryFailedPrompt)
+        precondition(chat.conversations[chat.selected]?.suffix(2).allSatisfy { !$0.committed } == true)
         precondition(ChatModel.effectiveToolName("mlx2_tool_call", arguments: ["name": "mlx2__session_compact"]) == "mlx2__session_compact")
         precondition(ChatModel.effectiveToolName("mlx2__snapshot", arguments: ["name": "mlx2__stop"]) == "mlx2__snapshot")
         print("Native chat, server error detail, discovery routing, composer key and Dock lifecycle checks passed")

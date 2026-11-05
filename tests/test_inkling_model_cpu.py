@@ -355,3 +355,18 @@ def test_apcv2_warm_tree_forks_descriptors_and_commits_selected_path(packed):
         live.close()
     finally:
         apc.close()
+
+
+def test_equal_length_merged_batch_keeps_mask_free_conv_and_exact_rollback():
+    from mlx2.runtime.models.inkling.language import _cache_padding_mask
+    m = model()
+    rows = [m.make_cache() for _ in range(2)]
+    merged = [type(rows[0][i]).merge([r[i] for r in rows]) for i in range(4)]
+    m(mx.array([[1, 2, 3], [4, 5, 6]]), cache=merged)
+    assert merged[1].make_mask(1) is None
+    assert _cache_padding_mask(merged[1], 1) is None
+    for c in merged:
+        c.start_speculation(16)
+    m(mx.array([[7, 8, 9], [7, 8, 9]]), cache=merged)
+    for c in merged:
+        c.trim(2)

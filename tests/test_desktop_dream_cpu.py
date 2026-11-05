@@ -182,8 +182,9 @@ def test_real_admission_missing_thermal_waiters_foreign_and_own_busy_attribution
     import os
 
     from mlx2 import desktop, inference_monitor
+    monkeypatch.setattr(desktop, "child_exited", lambda child: False)
     host = {"cpu_busy_percent": [5, 10], "thermal_state": "unavailable", "swap": {"swapouts_bytes": 0, "swapouts_per_second": 0}}
-    engine = SimpleNamespace(child=SimpleNamespace(pid=123, poll=lambda: None), worker={"url": "http://127.0.0.1:18285", "state": "Busy"}, preparing=lambda: False)
+    engine = SimpleNamespace(child=SimpleNamespace(pid=123, poll=lambda: pytest.fail("liveness must not reap the process-group leader")), worker={"url": "http://127.0.0.1:18285", "state": "Busy"}, preparing=lambda: False)
     dream.controller.engines = {"default": engine}
     dream.controller.owned_pids = lambda: {123}
     dream.controller.campaign = SimpleNamespace(running=False)

@@ -160,7 +160,7 @@ def window_supported(queries, keys, values, n_first: int) -> str | None:
         return "mlx_sdpa_blocks"
     # The ordinary Muse call can opt into a different experimental decoder.
     # Do not compare or replace that arithmetic through this capability.
-    if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1":
+    if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1" or os.environ.get("MLX2_FP_VERIFY_KERNEL") == "1":
         return "fp_decode_override"
     if queries.ndim != 4 or keys.ndim != 4 or values.ndim != 4:
         return "rank"

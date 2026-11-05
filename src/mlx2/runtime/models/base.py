@@ -375,6 +375,10 @@ def scaled_dot_product_attention(
             out = out * _expand_kv_scale(value_scale, out.shape[1])
         return out
     else:
+        if 2 <= queries.shape[2] <= 16:
+            from .fp_verify_tensor import attention as fp_verify, use_kernel as use_fp_verify
+            if use_fp_verify(queries, keys, values, mask, sinks):
+                return fp_verify(queries, keys, values, scale=scale, mask=mask, sinks=sinks)
         if queries.shape[2] == 1 and sinks is None:
             from .qsdpa_decode_metal import gqa_decode_attention_fp, use_fp_decode_kernel
 

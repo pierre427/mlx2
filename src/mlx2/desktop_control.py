@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from .desktop import GPUReservation, Supervisor, atomic_json, json_safe, read_config
+from .desktop import GPUReservation, RUNTIME_SETTINGS, Supervisor, atomic_json, child_exited, json_safe, read_config
 from .desktop_records import RecordStore
 
 ACTIVE = {"Preparing", "Loading", "Ready", "Busy", "Stopping", "Unreachable"}
@@ -55,6 +55,8 @@ class DesktopController:
         self.primary = Supervisor(home, trash_helper,
             reservation_factory=self.pool.ticket, owned_pids=self.owned_pids, context_resolver=self.context_limit)
         self.engines = {"default": self.primary}
+        from .desktop_runtime import DesktopRuntime
+        self.runtime = DesktopRuntime(self)
         self.store = RecordStore(home)
         from .desktop_badges import BadgeResolver
         self.badges = BadgeResolver(self.primary.runner_manager.source)
@@ -235,9 +237,9 @@ class DesktopController:
                     reservation_factory=self.pool.ticket, owned_pids=self.owned_pids, context_resolver=self.context_limit)
                 self.engines[identity] = engine
             engine.settings = self.primary.valid_settings({
-                **{k: v for k, v in self.primary.settings.items() if k not in {"lora_root", "max_loras", "max_lora_rank"}},
+                **{k: v for k, v in self.primary.settings.items() if k not in RUNTIME_SETTINGS},
                 **{k: profile[k] for k in ("port", "context", "lanes", "route")},
-                **{k: profile[k] for k in ("lora_root", "max_loras", "max_lora_rank") if k in profile},
+                **{k: profile[k] for k in RUNTIME_SETTINGS if k in profile},
                 "sticky_port": profile.get("sticky_port", True),
             })
             engine.library = self.primary.library
@@ -261,7 +263,7 @@ class DesktopController:
         ids, ports = set(), set()
         for profile in profiles:
             required = {"id", "path", "port", "context", "lanes", "route", "autostart", "share"}
-            if not isinstance(profile, dict) or not required <= set(profile) or set(profile) - (required | {"sticky_port", "lora_root", "max_loras", "max_lora_rank"}):
+            if not isinstance(profile, dict) or not required <= set(profile) or set(profile) - (required | {"sticky_port"} | RUNTIME_SETTINGS):
                 raise ValueError("Invalid serving profile fields")
             if type(profile.get("sticky_port", True)) is not bool or type(profile["lanes"]) is not int or not 1 <= profile["lanes"] <= 4:
                 raise ValueError("Choose 1–4 serving lanes and a boolean sticky-port setting")
@@ -278,9 +280,9 @@ class DesktopController:
                 if path.parent != self.primary.library.root.resolve() or not path.is_dir():
                     raise ValueError("Choose a model in the current library")
                 self.primary.valid_settings({"root": str(path.parent), **{k: profile[k] for k in ("port", "context", "lanes", "route")},
-                    **{k: profile[k] for k in ("lora_root", "max_loras", "max_lora_rank") if k in profile}})
+                    **{k: profile[k] for k in RUNTIME_SETTINGS if k in profile}})
             engine = self.engines.get(identity)
-            launch_keys = ("path", "port", "context", "lanes", "route", "sticky_port", "lora_root", "max_loras", "max_lora_rank")
+            launch_keys = ("path", "port", "context", "lanes", "route", "sticky_port", *RUNTIME_SETTINGS)
             changed_launch = old is None or any(old.get(k, True if k == "sticky_port" else None) != profile.get(k, True if k == "sticky_port" else None) for k in launch_keys)
             if changed_launch and engine and (engine.child is not None or engine.preparing() or self.retained(engine)):
                 raise ValueError("Stop this profile before editing its launch settings")
@@ -449,7 +451,9 @@ class DesktopController:
         # Badge aggregation is performed on exactly bound records, never from chat success.
         records = value["qualification_records"]
         for row in value["library"]["rows"]:
-            row["qualification"] = self.badges.summarize(row, records, self.preferences["profiles"])
+            profiles = [profile for profile in self.preferences["profiles"] if profile.get("path") == row["path"]]
+            requested = profiles or [{**self.primary.settings, "path": row["path"]}]
+            row["qualification"] = self.badges.summarize(row, records, requested)
         return value
 
     def logs(self, source="application", profile_id="default"):
@@ -481,7 +485,7 @@ class DesktopController:
         if worker.get("state") == "Suspended":
             return {**worker.get("apc_branches", {}), "clock_frozen": True, "state": "Suspended"}
         child = engine.child
-        if child is None or child.poll() is not None:
+        if child is None or child_exited(child):
             raise ValueError("This model is not running")
         # Resolve this exact listener again before sending its private admin key.
         engine.chat_target(worker["url"], child.pid)
@@ -492,6 +496,8 @@ class DesktopController:
 
     def dispatch(self, request):
         command = request.get("command")
+        if command in {"runtime_status", "runtime_action", "runtime_operation"}:
+            return self.runtime.dispatch(request)
         if command and command.startswith("code_"):
             return self.code.dispatch(request)
         if command and (command.startswith("skill_") or command == "skills_list"):
@@ -654,7 +660,7 @@ class DesktopController:
                           self.dream, self.lifecycle):
             close_one(component)
         self.startup_thread.join(timeout=10)
-        for component in (self.downloads, self.agents, self.research_plans, self.skills,
+        for component in (self.runtime, self.downloads, self.agents, self.research_plans, self.skills,
                           self.sessions, self.planning, self.capsules, self.memory,
                           self.code, self.helpers, self.campaign, self.media, self.node,
                           *reversed(list(self.engines.values())), self.store):
@@ -692,6 +698,9 @@ class DesktopController:
             if not isinstance(lora_fingerprint, str) or not lora_fingerprint:
                 raise ValueError("The requested LoRA has no verified runtime fingerprint")
         capabilities = set(status.get("selected_capabilities") or status.get("capabilities") or [])
+        execution = status.get("execution_kind")
+        if (execution is not None and execution != "autoregressive") or (capabilities and "text" not in capabilities):
+            raise ValueError("The selected route does not support autoregressive text chat")
         modalities = ["text"]
         if (status.get("media_route") or {}).get("media") != "refused":
             modalities.extend(name for name, cap in (("image", "vision"), ("audio", "audio"), ("video", "video")) if cap in capabilities)
@@ -716,5 +725,6 @@ class DesktopController:
                 "artifact_fingerprint": fingerprint, "source_revision": (status.get("runtime") or {}).get("source_revision"),
                 "runtime": status.get("runtime"), "lora_fingerprint": lora_fingerprint, "context_limit": context_limit,
                 "chat_options": chat_options,
+                "available_models": [status.get("model"), *registered] if (status.get("multi_lora") or {}).get("enabled") else [status.get("model")],
                 "chat_template_options": status.get("chat_template_options") or {},
                 "output_tokens": output_tokens}

@@ -160,6 +160,46 @@ class _RequestState:
     finish_reason: str | None = None
     inter_token_ms: _GapSample = field(default_factory=_GapSample)
     mechanism: str = "pending"
+    session_id: str | None = None
+
+    def live_snapshot(self, now: float) -> dict[str, Any]:
+        """Host-only progress, copied while the metrics lock is held.
+
+        Context is logical prompt plus delivered output, not KV residency.
+        Prefill includes first-token work and excludes APCv2-reused tokens;
+        it is available only once the first token has arrived. Decode uses
+        elapsed wall time since that token, including any current stall.
+        """
+        prefill = (
+            self.first_token_at - self.attached_at
+            if self.first_token_at is not None and self.attached_at is not None
+            else None
+        )
+        decode = now - self.first_token_at if self.first_token_at is not None else None
+        return {
+            "request_id": self.request_id,
+            "tenant_id": self.tenant_id,
+            "session_id": self.session_id,
+            "phase": (
+                "decode" if self.first_token_at is not None else
+                "prefill" if self.attached_at is not None else
+                "attach" if self.dequeued_at is not None else "queued"
+            ),
+            "age_seconds": max(0.0, now - self.enqueued_at),
+            "queue_ms": 1000.0 * (self.dequeued_at - self.enqueued_at)
+            if self.dequeued_at is not None else None,
+            "ttft_ms": 1000.0 * (self.first_token_at - self.enqueued_at)
+            if self.first_token_at is not None else None,
+            "mechanism": self.mechanism,
+            "prompt_tokens": self.prompt_tokens if self.prompt_recorded else None,
+            "cached_tokens": self.cached_tokens if self.prompt_recorded else None,
+            "completion_tokens": self.tokens,
+            "context_tokens": self.prompt_tokens + self.tokens if self.prompt_recorded else None,
+            "prefill_tokens_per_second": (self.prompt_tokens - self.cached_tokens) / prefill
+            if self.prompt_recorded and prefill is not None and prefill > 0 else None,
+            "decode_tokens_per_second": (self.tokens - 1) / decode
+            if self.tokens >= 2 and decode is not None and decode > 0 else None,
+        }
 
 
 class BatchRuntimeMetrics:
@@ -224,10 +264,13 @@ class BatchRuntimeMetrics:
         )
         return timestamp
 
-    def admitted(self, request_id: str, tenant_id: str, queue_depth: int) -> None:
+    def admitted(
+        self, request_id: str, tenant_id: str, queue_depth: int,
+        *, session_id: str | None = None,
+    ) -> None:
         with self._lock:
             self._active[request_id] = _RequestState(
-                request_id, tenant_id or "default", self._clock()
+                request_id, tenant_id or "default", self._clock(), session_id=session_id
             )
             self._counters["admitted"] += 1
             self._event("admitted", request_id, queue_depth=max(0, queue_depth))
@@ -398,6 +441,7 @@ class BatchRuntimeMetrics:
                 ].observe(service_seconds / state.tokens)
             self._completed.append(
                 {
+                    **state.live_snapshot(now),
                     "request_id": state.request_id,
                     "tenant_id": state.tenant_id,
                     "status": status,
@@ -560,7 +604,8 @@ class BatchRuntimeMetrics:
         """
         with self._lock:
             completed = list(self._completed)
-            active = list(self._active.values())
+            now = self._clock() if self._active else 0.0
+            active = [state.live_snapshot(now) for state in self._active.values()]
             counters = dict(self._counters)
             admission = dict(self._admission)
             batch_sizes = {str(key): value for key, value in sorted(self._batch_sizes.items())}
@@ -585,9 +630,9 @@ class BatchRuntimeMetrics:
         inflight = len(active)
         if tenant_id is not None:
             owner = str(tenant_id or "default")
-            active = [state for state in active if state.tenant_id == owner]
+            active = [row for row in active if row["tenant_id"] == owner]
             completed = [row for row in completed if row["tenant_id"] == owner]
-            owned = {state.request_id for state in active} | {
+            owned = {row["request_id"] for row in active} | {
                 row["request_id"] for row in completed
             }
             # Events without a request of this tenant (rejections carry no
@@ -618,7 +663,8 @@ class BatchRuntimeMetrics:
             "batch_composition": batch_sizes,
             "mechanism_receipts": mechanisms,
             "memory": dict(memory or {}),
-            "active_requests": [state.request_id for state in active],
+            "active_requests": [row["request_id"] for row in active],
+            "active_request_details": active,
             "completed_requests": [
                 {key: value for key, value in row.items() if key != "itl_ms"}
                 for row in completed

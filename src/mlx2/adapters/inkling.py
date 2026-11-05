@@ -295,15 +295,34 @@ def validate_policy(value):
         raise ValueError("Inkling tree executor must be serial or packed")
     kernels = {
         name: value.pop(name, False)
-        for name in ("inkling_fused", "inkling_q2_down_combine")
+        for name in (
+            "inkling_fused",
+            "inkling_q2_down_combine",
+            "inkling_grouped_q2",
+            "inkling_tree_kernels",
+            "inkling_tree_cohort",
+            "inkling_shortconv_prefill",
+        )
     }
     if any(type(v) is not bool for v in kernels.values()):
         raise TypeError("Inkling kernel options must be booleans")
+    if executor != "packed" and (
+        kernels["inkling_tree_kernels"] or kernels["inkling_tree_cohort"]
+    ):
+        raise ValueError(
+            "Inkling tree kernels and cohort packing require the packed executor"
+        )
     mode = value.pop("inkling_moe_nax", None)
     if mode not in (None, "off", "gather", "fused"):
         raise ValueError("Inkling MoE NAX mode must be off, gather or fused")
     kernels["inkling_moe_nax"] = mode
     kernels["inkling_tree_executor"] = executor
+    attention = value.pop("inkling_attention", "reference")
+    if attention not in ("reference", "decode", "all", "nax", "mapped"):
+        raise ValueError(
+            "Inkling attention must be reference, decode, all, nax or mapped"
+        )
+    kernels["inkling_attention"] = attention
     if not value:
         if executor != "serial":
             raise ValueError(
@@ -395,6 +414,11 @@ class InklingAdapter(ExternalDraftAdapterMixin):
         from ..runtime.models import moe_nax_gather, switch_layers
         from .process_globals import MOE_NAX_GATHER, MOE_RHS_PAD_POLICY, claim
 
+        if (
+            self.kernel_policy["inkling_attention"] == "nax"
+            and not moe_nax_gather.nax_host()
+        ):
+            raise ValueError("Inkling NAX attention requires an M5 NAX-capable device")
         mode = self.kernel_policy.get("inkling_moe_nax")
         mode = os.environ.get("MLX2_MOE_NAX_GATHER", "off") if mode is None else mode
         bits = moe_nax_gather.affine_bits_from_env()
@@ -443,6 +467,11 @@ class InklingAdapter(ExternalDraftAdapterMixin):
         self.model.configure_kernels(
             fused=self.kernel_policy.get("inkling_fused", False),
             down_combine=self.kernel_policy.get("inkling_q2_down_combine", False),
+            attention=self.kernel_policy["inkling_attention"],
+            grouped=self.kernel_policy["inkling_grouped_q2"],
+            tree_kernels=self.kernel_policy["inkling_tree_kernels"],
+            tree_cohort=self.kernel_policy["inkling_tree_cohort"],
+            shortconv_prefill=self.kernel_policy["inkling_shortconv_prefill"],
         )
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
@@ -486,11 +515,26 @@ class InklingAdapter(ExternalDraftAdapterMixin):
         return {
             "operation": "inkling-native-v1",
             "kernel_policy": self.kernel_policy,
-            "source_sha256": hashlib.sha256(
-                (
-                    Path(__file__).parents[1] / "runtime/models/inkling/language.py"
-                ).read_bytes()
-            ).hexdigest(),
+            "source_sha256": {
+                name: hashlib.sha256(
+                    (
+                        Path(__file__).parents[1] / "runtime/models/inkling" / name
+                    ).read_bytes()
+                ).hexdigest()
+                for name in (
+                    "language.py",
+                    "attention.py",
+                    "attention_nax.py",
+                    "cache.py",
+                    "config.py",
+                    "tree.py",
+                    "experts.py",
+                    "ancestry.py",
+                    "tree_attention.py",
+                    "../qwen36_moe_grouped.py",
+                    "../qwen4_routed_decode.py",
+                )
+            },
             "qualification": "unqualified",
         }
 
@@ -584,7 +628,7 @@ class InklingAdapter(ExternalDraftAdapterMixin):
             self._messages(request),
             tokenize=True,
             add_generation_prompt=True,
-            reasoning_effort=request.get("reasoning_effort", "high"),
+            reasoning_effort=self._reasoning_effort(request),
         )
 
     def render_prompt(self, request):
@@ -594,13 +638,29 @@ class InklingAdapter(ExternalDraftAdapterMixin):
             self._messages(request),
             tokenize=False,
             add_generation_prompt=True,
-            reasoning_effort=request.get("reasoning_effort", "high"),
+            reasoning_effort=self._reasoning_effort(request),
         )
 
     @staticmethod
+    def _reasoning_effort(request):
+        # The request normalizer keeps ``enable_thinking=False`` without
+        # adding an effort; the template's lowest level is "none".
+        effort = request.get("reasoning_effort")
+        if effort is None:
+            return "none" if request.get("enable_thinking") is False else "high"
+        return effort
+
+    @staticmethod
     def _messages(request):
-        if request.get("tools"):
+        # tool_choice "none" asks for ordinary text: render without the tools.
+        if request.get("tools") and request.get("tool_choice", "auto") != "none":
             raise ValueError("Inkling tool routing is not implemented")
+        # ``thinking_enabled`` is False (content markers select the channel),
+        # so serving would silently skip an explicit budget: refuse it.
+        if request.get("thinking_budget"):
+            raise ValueError("Inkling thinking budgets are not implemented")
+        if request.get("thinking_steer_alpha"):
+            raise ValueError("Inkling thinking steering is not implemented")
         messages = copy.deepcopy(request["messages"])
         for message in messages:
             content = message.get("content")

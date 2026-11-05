@@ -103,7 +103,7 @@ def validate_chat_options(options):
     for key in ("verification", "enable_thinking"):
         if key in options and type(options[key]) is not bool:
             raise ValueError(f"{key} must be boolean")
-    for key, low, high in (("context_limit", 1024, 262144),
+    for key, low, high in (("context_limit", 1024, 1048576),
                            ("output_tokens", 128, 65536), ("thinking_budget", 0, 64512)):
         if key in options and (type(options[key]) is not int or not low <= options[key] <= high):
             raise ValueError(f"Invalid {key}")

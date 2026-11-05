@@ -18,7 +18,7 @@ import numpy as np
 from .deepseek_v41_source_artifact import checked_file, read_tensors
 from .deepseek_v41_source_weights import SourceExpertStore, weight_plan, expert_names, PROJECTIONS
 from .deepseek_v41_mlx_weights import _stamp, _verify_file, read_native_file
-from .deepseek_v41_source_buffers import read_original_packed, borrow_q1_packed, materialize
+from .deepseek_v41_source_buffers import read_original_packed, read_original_device, borrow_q1_packed, materialize
 from . import deepseek_v41_source_residency as residency
 from . import deepseek_v41_source_prefill_residency as prefill_residency
 
@@ -26,13 +26,22 @@ REVISION = 'source-expert-lfu-token-frequency-v1'
 Q1_REVISION = 'source-q1-affine-g64-lloyd4-f16-v1'
 ORIGINAL_BYTES = 18800640
 Q1_BYTES = 6635520
+RETENTION_KEYS = {'retention', 'retention_half_life', 'direct_reads'}
 
 def parse_policy(value, *, adaptive=True):
     """Validate the default adaptive profile or an explicit fixed-pool transition."""
     if type(adaptive)is not bool:raise ValueError('Source expert residency mode must be boolean')
-    if not isinstance(value,dict) or set(value)-{'mode','budget_bytes','hot_bytes','q1_root','hotset_path','atlas_path','preheat'}-residency.RESIDENCY_KEYS:
+    if not isinstance(value,dict) or set(value)-{'mode','budget_bytes','hot_bytes','q1_root','hotset_path','atlas_path','preheat'}-residency.RESIDENCY_KEYS-RETENTION_KEYS:
         raise ValueError('invalid Source expert LFU policy')
     result=dict(value)
+    if result.get('retention', 'lifetime_lfu') not in ('lifetime_lfu', 'decayed_lfu_v1'):
+        raise ValueError('invalid Source expert retention policy')
+    if ('retention_half_life' in result and result.get('retention') != 'decayed_lfu_v1'
+            or type(result.get('retention_half_life',64)) is not int
+            or not 1 <= result.get('retention_half_life',64) <= 65536):
+        raise ValueError('invalid Source expert retention half life')
+    if type(result.get('direct_reads', False)) is not bool:
+        raise ValueError('direct_reads must be boolean')
     if 'atlas_path' in result and (not isinstance(result['atlas_path'],str) or not Path(result['atlas_path']).is_absolute()):
         raise ValueError('expert atlas path must be absolute')
     if 'preheat' in result and (type(result['preheat']) is not bool or 'atlas_path' not in result):
@@ -58,7 +67,7 @@ def parse_policy(value, *, adaptive=True):
         for key in ('q1_root','hotset_path'):
             if not isinstance(result.get(key),str) or not Path(result[key]).is_absolute():
                 raise ValueError('hybrid expert policy requires absolute Q1 and hotset paths')
-    elif set(result)-{'mode','budget_bytes','atlas_path','preheat','cache_maximum','live_reserve_bytes'}:
+    elif set(result)-{'mode','budget_bytes','atlas_path','preheat','cache_maximum','live_reserve_bytes'}-RETENTION_KEYS:
         raise ValueError('original-only LFU cannot accept Q1 options')
     return result
 
@@ -118,7 +127,9 @@ class LFUIndex:
     def __init__(self):
         self.counts=Counter();self.last={};self.clock=0;self.heap=[]
     def observe(self,layer,ids):
-        for expert,count in Counter(int(v) for v in np.asarray(ids).ravel()).items():
+        self.observe_counts(layer, Counter(int(v) for v in np.asarray(ids).ravel()).items())
+    def observe_counts(self,layer,counts):
+        for expert,count in counts:
             self.counts[(layer,expert)]+=count
     def touch(self,key):
         self.clock+=1;self.last[key]=self.clock
@@ -136,6 +147,38 @@ class LFUIndex:
             raise MemoryError('expert budget exhausted by protected/active objects')
         finally:
             for item in held:heapq.heappush(self.heap,item)
+
+
+class DecayedLFUIndex(LFUIndex):
+    """Per-layer observation epochs; lifetime counts remain an honest atlas.
+
+    Resident scans avoid stale heap priorities after exponential decay. Only
+    route observations age frequency; disk hits and eviction scans do not.
+    """
+    def __init__(self, half_life=64):
+        if type(half_life) is not int or not 1 <= half_life <= 65536:
+            raise ValueError('invalid Source expert retention half life')
+        super().__init__()
+        self.half_life = half_life
+        self.epochs, self.frequency = Counter(), {}
+
+    def score(self, key):
+        value, stamp = self.frequency.get(key, (0.0, self.epochs[key[0]]))
+        return value * math.exp2(-(self.epochs[key[0]] - stamp) / self.half_life)
+
+    def observe_counts(self, layer, counts):
+        self.epochs[layer] += 1
+        for expert, count in counts:
+            key = (layer, expert)
+            self.frequency[key] = (self.score(key) + count, self.epochs[layer])
+            self.counts[key] += count
+
+    def victim(self, resident, leased, eligible):
+        keys = (k for k in resident if k not in leased and eligible(k))
+        try:
+            return min(keys, key=lambda k: (self.score(k), self.last.get(k, 0), k))
+        except ValueError:
+            raise MemoryError('expert budget exhausted by protected/active objects') from None
 
 def read_atlas(path,source):
     if not path.exists():return {'schema':'mlx2.expert-frequency-atlas.v1','source':source,'clock':0,'counts':[]}
@@ -198,6 +241,10 @@ class LFUSourceExpertStore(SourceExpertStore):
         try:
             self.packed_buffers=packed_buffers
             self.policy=policy;self.index=LFUIndex();self.hot=frozenset();self.q1_root=None;self.q1_records={};self.q1_binding=None
+            if policy.get('retention') == 'decayed_lfu_v1':
+                self.index = DecayedLFUIndex(policy.get('retention_half_life',64))
+            if policy.get('direct_reads',False) and (not packed_buffers or self.expert_overlap_enabled()):
+                raise ValueError('direct expert reads require packed buffers and synchronous I/O')
             self.payload_ceiling=self.cache_budget_bytes-ORIGINAL_BYTES
             self.pool_bytes={'original':0,'q1':0};self.peak_payload_bytes=0
             self.stats.update(original_hits=0,original_misses=0,q1_hits=0,q1_misses=0,original_bytes_read=0,q1_bytes_read=0,q1_token_selections=0,original_token_selections=0)
@@ -365,10 +412,11 @@ class LFUSourceExpertStore(SourceExpertStore):
                     or int(amounts.sum())!=np.asarray(ids).size):
                 raise ValueError('Source frame route histogram geometry mismatch')
             counts=zip(map(int,experts),map(int,amounts))
+        counts=list(counts)
+        self.index.observe_counts(layer, counts)
         dynamic=self._dynamic()
         for expert,count in counts:
             key=(layer,expert);kind=self.kind(key)
-            self.index.counts[key]+=count
             self.stats[kind+'_token_selections']+=count
             if dynamic:
                 self._cycle_counts[key]+=count;self._cycle_mix[kind]+=count
@@ -504,8 +552,24 @@ class LFUSourceExpertStore(SourceExpertStore):
                 size=Q1_BYTES if kind=='q1' else ORIGINAL_BYTES;insert=self._admit_miss(key,size)
                 # _read_expert owns demand_wait_ns; overlap_v1 may consume an
                 # early read of these exact bytes instead of reading now.
-                raw=self._read_expert(key,*self._expert_read_job(key))
-                arrays=self._upload_expert(key,kind,size,raw);del raw
+                if self.policy.get('direct_reads',False) and kind=='original':
+                    if self.expert_overlap_enabled():
+                        raise ValueError('direct expert reads cannot consume overlapped host staging')
+                    if getattr(self,'_packed_original_loaded',None) is not None:
+                        raise ValueError('direct expert reads cannot bypass a host-source attestation observer')
+                    started=time.monotonic_ns()
+                    try:
+                        arrays=read_original_device(self.artifact,*key,stream=self._upload_stream(),
+                            read_call=self.pool.call,
+                            on_allocated=lambda packed:self._pending_uploads.__setitem__(key,packed))
+                    finally:
+                        self.stats['demand_wait_ns']=self.stats.get('demand_wait_ns',0)+time.monotonic_ns()-started
+                    self.stats['direct_read_bytes']=self.stats.get('direct_read_bytes',0)+size
+                    self.stats['packed_backing_allocations']+=1
+                    self.stats['packed_typed_views']+=len(arrays)
+                else:
+                    raw=self._read_expert(key,*self._expert_read_job(key))
+                    arrays=self._upload_expert(key,kind,size,raw);del raw
                 if insert:self._insert_resident(key,kind,size,arrays)
                 else:self._hold_prefill_transient(key,size,arrays)
                 self.stats['cache_misses']+=1;self.stats[kind+'_misses']+=1;self.stats['uploaded_experts']+=1;self.stats['upload_batches']+=1
@@ -843,6 +907,10 @@ class LFUSourceExpertStore(SourceExpertStore):
         readahead=getattr(self,'_prefill_readahead',None)
         if readahead is not None:result['prefill_readahead']=readahead.receipt()
         result['hot_map_provenance']=getattr(self,'hot_map_provenance',None)
+        result['retention']={'policy':self.policy.get('retention','lifetime_lfu'),
+            'half_life_observations':self.policy.get('retention_half_life',64),
+            'atlas_counts':'lifetime', 'decay_state':'process-local'}
+        result['direct_reads_original']=self.policy.get('direct_reads',False)
         if self._split_active():result['pool_capacity_policy']='split_kind_pools_adaptive'
         if self._dynamic():
             result.update(hot_budget_role='dynamic_precision_seed_only',

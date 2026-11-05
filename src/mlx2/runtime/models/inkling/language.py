@@ -195,6 +195,12 @@ def banded_additive_mask(
 def _cache_padding_mask(cache, length):
     if cache is None:
         return None
+    # All rows valid (a merged equal-length batch keeps left_padding <= 0):
+    # None, as ArraysCache.make_mask, so the fused shortconv decode and the
+    # exact rollback spans still engage.  Host mirrors only, never a sync.
+    all_valid = getattr(cache, "_host_all_valid", None)
+    if callable(all_valid) and all_valid(length):
+        return None
     positions = mx.arange(length)[None, :]
     mask = None
     left_padding = getattr(cache, "left_padding", None)
@@ -234,7 +240,9 @@ _SCONV_SRC = r"""
     float w2 = (float)w[c * K + 2];
     float w3 = (float)w[c * K + 3];
     // Virtual padded input xp = [state (K-1 rows, fp32); x (L rows, T)].
-    for (uint i = 0; i < L; ++i) {
+    const uint begin = PARALLEL ? thread_position_in_grid.z : 0;
+    const uint end = PARALLEL ? min(begin + 1, uint(L)) : uint(L);
+    for (uint i = begin; i < end; ++i) {
         float acc = 0.0f;
         for (uint k = 0; k < K; ++k) {
             int r = (int)(i + k) - (int)(K - 1);  // row into x; negative -> state
@@ -256,7 +264,7 @@ _SCONV_SRC = r"""
             out[(b * L + i) * C + c] = inner;
         }
     }
-    for (uint s = 0; s < K - 1; ++s) {
+    if (!PARALLEL || begin == 0) for (uint s = 0; s < K - 1; ++s) {
         int r = (int)(L + s) - (int)(K - 1);
         nstate[(b * (K - 1) + s) * C + c] = (r < 0)
             ? state[(b * (K - 1) + (uint)(r + (int)(K - 1))) * C + c]
@@ -282,6 +290,10 @@ class InklingShortConvolution(nn.Module):
         self.conv_idx = conv_idx
         self.fused = False
         self.fused_calls = 0
+        self.prefill_calls = 0
+        self.tree_calls = 0
+        self.tree_fused = False
+        self.prefill_fused = False
         self.conv = nn.Conv1d(
             channels, channels, kernel_size, groups=channels, bias=False
         )
@@ -307,7 +319,7 @@ class InklingShortConvolution(nn.Module):
             and mask is None
             and K == 4
             and self.conv.weight.dtype == x.dtype
-            and x.shape[1] <= 8
+            and (x.shape[1] <= 8 or self.prefill_fused)
             and mx.default_device() == mx.gpu
         ):
             B, L, C = x.shape
@@ -315,6 +327,7 @@ class InklingShortConvolution(nn.Module):
             if state is None:
                 state = mx.zeros((B, K - 1, C), dtype=mx.float32)
             self.fused_calls += 1
+            self.prefill_calls += int(x.shape[1] > 8)
             out, nstate = _sconv_kernel(
                 inputs=[
                     mx.contiguous(x),
@@ -329,8 +342,9 @@ class InklingShortConvolution(nn.Module):
                     ("C", C),
                     ("K", K),
                     ("HAS_RES", residual is not None),
+                    ("PARALLEL", L > 8),
                 ],
-                grid=(_rup(C, 32), B, 1),
+                grid=(_rup(C, 32), B, L if L > 8 else 1),
                 threadgroup=(32, 1, 1),
                 output_shapes=[(B, L, C), (B, K - 1, C)],
                 output_dtypes=[dt, mx.float32],
@@ -367,6 +381,13 @@ class InklingAttention(nn.Module):
         self.fused_projection_calls = 0
         self.mask_tiles = 0
         self.fused_mask_calls = 0
+        self.attention_policy = "reference"
+        self.fused_attention_calls = 0
+        self.fused_attention_rows = 0
+        self.fused_attention_prefill_calls = 0
+        self.attention_reference_calls = 0
+        self.fused_attention_nax_calls = 0
+        self.mapped_attention_calls = 0
         self.is_sliding = config.layer_is_sliding(layer_idx)
         self.head_dim = config.swa_head_dim if self.is_sliding else config.head_dim
         self.n_heads = (
@@ -426,6 +447,131 @@ class InklingAttention(nn.Module):
             )
         return qkvr
 
+    def attend(self, q, k, v, r, offset, *, left_padding=None, query_position=None):
+        B, _, L, _ = q.shape
+        S = k.shape[2]
+        from .attention import relative_attention, supported
+
+        # The scalar all-row candidate was correct but slower at 16K on M5 Max
+        # (68.7s cold TTFT vs41.3s composed, one directional run, not statistics).
+        # NAX128-row prefill also lost the isolated M5 A/B: 11.37 vs6.41ms
+        # at16K KV;20.91 vs19.14ms at32K. Eight-query SIMD lost3.14 vs1.89ms.
+        # Keep both prefill/wider-verify candidates explicit/default-off.
+        # Only global singleton decode at32K won this bounded operator A/B
+        # (0.92-0.98 vs1.13ms); this is not generated-token throughput.
+        selected = (
+            self.attention_policy in ("all", "nax")
+            or (
+                self.attention_policy == "decode"
+                and L == 1
+                and S >= 16384
+                and not self.sliding
+            )
+            or (
+                self.attention_policy == "mapped"
+                and B == 1
+                and L == 1
+                and left_padding is None
+            )
+        )
+        if selected and supported(q, k, v, r, self.rel_proj.astype(q.dtype)):
+            tau = None
+            if self.log_floor is not None:
+                positions = mx.arange(L)[None, :] + offset + 1
+                if query_position is not None:
+                    positions = mx.array([[query_position]], mx.float32)
+                elif left_padding is not None:
+                    positions = positions - left_padding[:, None]
+                tau = (
+                    1
+                    + self.log_alpha
+                    * mx.log(
+                        mx.maximum(positions.astype(mx.float32) / self.log_floor, 1)
+                    )
+                ).astype(q.dtype)
+                q = q * tau[:, None, :, None]
+            self.fused_attention_calls += 1
+            self.fused_attention_rows += B * L
+            self.fused_attention_prefill_calls += int(L > 16)
+            operation = relative_attention
+            if self.attention_policy == "mapped":
+                from .tree_attention import attend
+
+                self.mapped_attention_calls += 1
+                return attend(
+                    q,
+                    k,
+                    v,
+                    r,
+                    self.rel_proj.astype(q.dtype),
+                    scale=self.scale,
+                    window=self.sliding,
+                    tau=tau,
+                )
+            if self.attention_policy == "nax" and L > 16:
+                from .attention_nax import relative_attention_nax
+
+                if (
+                    q.dtype in (mx.bfloat16, mx.float16)
+                    and q.shape[1] // k.shape[1] == 4
+                ):
+                    operation = relative_attention_nax
+                    self.fused_attention_nax_calls += 1
+            return operation(
+                q,
+                k,
+                v,
+                r,
+                self.rel_proj.astype(q.dtype),
+                offset=offset,
+                scale=self.scale,
+                window=self.sliding,
+                left_padding=left_padding,
+                tau=tau,
+            )
+        self.attention_reference_calls += 1
+        # Relative position bias is dense over visible keys. Tile query
+        # rows to bound each temporary mask at long context; no full LxS
+        # mask is staged for every query in a large prefill chunk.
+        rows = max(1, _MASK_BUDGET_BYTES // max(1, B * self.n_heads * S * q.itemsize))
+        outputs = []
+        for begin in range(0, L, rows):
+            end = min(L, begin + rows)
+            qr = q[:, :, begin:end]
+            mask = banded_additive_mask(
+                r[:, begin:end],
+                self.rel_proj.astype(q.dtype),
+                offset + begin,
+                S,
+                self.sliding,
+                self.rel_extent,
+                left_padding=left_padding,
+                shape_ref=k if self.fused else None,
+                fused=self.fused,
+            )
+            self.mask_tiles += 1
+            self.fused_mask_calls += int(self.fused and mx.default_device() == mx.gpu)
+            if self.log_floor is not None:
+                qpos = (mx.arange(begin, end) + offset + 1).astype(mx.float32)[None, :]
+                if query_position is not None:
+                    qpos = mx.array([[query_position]], mx.float32)
+                elif left_padding is not None:
+                    qpos = qpos - left_padding[:, None]
+                tau = 1.0 + self.log_alpha * mx.log(
+                    mx.maximum(qpos / self.log_floor, 1.0)
+                )
+                tau = tau.reshape(
+                    B if left_padding is not None else 1, 1, end - begin, 1
+                ).astype(q.dtype)
+                qr = qr * tau
+                mask = mx.where(mask > -1e29, mask * tau, mask)
+            outputs.append(
+                scaled_dot_product_attention(
+                    qr, k, v, cache=None, scale=self.scale, mask=mask
+                )
+            )
+        return mx.concatenate(outputs, axis=2)
+
     def __call__(self, x, cache=None, conv_mask=None):
         B, L, _ = x.shape
         kv = cache[0] if cache is not None else None
@@ -469,45 +615,7 @@ class InklingAttention(nn.Module):
                 left_padding = mx.maximum(left_padding - j0, 0)
         offset = S - L
 
-        # Relative position bias is dense over visible keys. Tile query
-        # rows to bound each temporary mask at long context; no full LxS
-        # mask is staged for every query in a large prefill chunk.
-        rows = max(1, _MASK_BUDGET_BYTES // max(1, B * self.n_heads * S * x.itemsize))
-        outputs = []
-        for begin in range(0, L, rows):
-            end = min(L, begin + rows)
-            qr = q[:, :, begin:end]
-            mask = banded_additive_mask(
-                r[:, begin:end],
-                self.rel_proj.astype(x.dtype),
-                offset + begin,
-                S,
-                self.sliding,
-                self.rel_extent,
-                left_padding=left_padding,
-                shape_ref=k if self.fused else None,
-                fused=self.fused,
-            )
-            self.mask_tiles += 1
-            self.fused_mask_calls += int(self.fused and mx.default_device() == mx.gpu)
-            if self.log_floor is not None:
-                qpos = (mx.arange(begin, end) + offset + 1).astype(mx.float32)[None, :]
-                if left_padding is not None:
-                    qpos = qpos - left_padding[:, None]
-                tau = 1.0 + self.log_alpha * mx.log(
-                    mx.maximum(qpos / self.log_floor, 1.0)
-                )
-                tau = tau.reshape(
-                    B if left_padding is not None else 1, 1, end - begin, 1
-                ).astype(x.dtype)
-                qr = qr * tau
-                mask = mx.where(mask > -1e29, mask * tau, mask)
-            outputs.append(
-                scaled_dot_product_attention(
-                    qr, k, v, cache=None, scale=self.scale, mask=mask
-                )
-            )
-        out = mx.concatenate(outputs, axis=2)
+        out = self.attend(q, k, v, r, offset, left_padding=left_padding)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return self.o_proj(out)
 
@@ -809,6 +917,11 @@ class InklingSparseMoE(nn.Module):
         )
         self.fused = False
         self.down_combine = False
+        # Private-row grouped q2 remains an explicit experiment: component
+        # wins over per-node trees did not establish a model-throughput win.
+        # The optimized serving profiles keep it off.
+        self.grouped = False
+        self.grouped_calls = 0
         self.route_calls = 0
         self.down_combine_calls = 0
         self._wscale = None
@@ -880,19 +993,14 @@ class InklingSparseMoE(nn.Module):
 
     def _routed(self, xf, idx, topk_w):
         sm = self.switch_mlp
+        if self.grouped:
+            from .experts import routed, supported
+
+            if supported(xf, idx, sm):
+                self.grouped_calls += 1
+                return (routed(xf, idx, sm) * topk_w[..., None]).sum(axis=-2)
         dp = sm.down_proj
-        if (
-            self.down_combine
-            and xf.shape[0] <= 8
-            and mx.default_device() == mx.gpu
-            and getattr(dp, "bits", None) == 2
-            and getattr(dp, "group_size", None) == 128
-            and getattr(dp, "mode", "affine") == "affine"
-            and getattr(dp, "biases", None) is not None
-            and dp.input_dims == 2048  # kernel maps one 128-wide group per lane
-            and dp.scales.dtype == xf.dtype
-            and sm.scales_trivial()
-        ):
+        if xf.shape[0] <= 8 and self._can_down_combine(xf):
             # decode: gather_qmm's vector-per-expert mode is ~3.5x off peak on
             # the down shape; dequantize rows directly and fold the weighted
             # expert sum in.
@@ -917,14 +1025,49 @@ class InklingSparseMoE(nn.Module):
             yr = (sm(xf, idx) * topk_w[..., None]).sum(axis=-2)
         return yr
 
+    def _can_down_combine(self, xf):
+        sm = self.switch_mlp
+        dp = sm.down_proj
+        return (
+            self.down_combine
+            and self.top_k <= 8
+            and mx.default_device() == mx.gpu
+            and getattr(dp, "bits", None) == 2
+            and getattr(dp, "group_size", None) == 128
+            and getattr(dp, "mode", "affine") == "affine"
+            and getattr(dp, "biases", None) is not None
+            and dp.input_dims == 2048  # kernel maps one 128-wide group per lane
+            and dp.scales.dtype == xf.dtype
+            and sm.scales_trivial()
+        )
+
     def tree(self, x):
+        from .experts import supported
+
         B, L, D = x.shape
         xf = x.reshape(-1, D)
         idx, weights, gamma = self._route(self.router_logits(xf))
+        if self.grouped and supported(xf, idx, self.switch_mlp):
+            routed = self._routed(xf, idx, weights)
+            shared = self.shared_experts(xf, gamma)
+            return (routed + shared).reshape(B, L, D).astype(x.dtype)
+        # The q2/g128 gate/up gathers keep M=1 and unsorted expert indices;
+        # down-combine assigns each token its own grid-z plane. Packing up to
+        # eight rows therefore keeps the singleton reduction without invoking
+        # SwitchGLU's row-count-dependent sorting. Actual-weight B2/4/8 probes
+        # were bit-exact on all 40 routed layers. Preserve the per-row path for
+        # other formats, dtypes and down-projection geometries.
+        chunk = (
+            8
+            if supported(xf, idx, self.switch_mlp) and self._can_down_combine(xf)
+            else 1
+        )
         routed = mx.concatenate(
             [
-                self._routed(xf[i : i + 1], idx[i : i + 1], weights[i : i + 1])
-                for i in range(xf.shape[0])
+                self._routed(
+                    xf[i : i + chunk], idx[i : i + chunk], weights[i : i + chunk]
+                )
+                for i in range(0, xf.shape[0], chunk)
             ],
             axis=0,
         )
@@ -1173,9 +1316,21 @@ class Model(LanguageModel):
                 out.setdefault(base + "out_scale", mx.ones((count,)))
         return fuse_qkvr(shared_experts_to_dense(out))
 
-    def configure_kernels(self, *, fused=False, down_combine=False):
+    def configure_kernels(
+        self,
+        *,
+        fused=False,
+        down_combine=False,
+        attention="reference",
+        grouped=False,
+        tree_kernels=False,
+        tree_cohort=False,
+        shortconv_prefill=False,
+    ):
+        self.tree_cohort = tree_cohort
         for layer in self.layers:
             layer.self_attn.fused = fused
+            layer.self_attn.attention_policy = attention
             for conv in (
                 layer.self_attn.k_sconv,
                 layer.self_attn.v_sconv,
@@ -1183,12 +1338,46 @@ class Model(LanguageModel):
                 layer.mlp_sconv,
             ):
                 conv.fused = fused
+                conv.tree_fused = tree_kernels
+                conv.prefill_fused = shortconv_prefill
             if isinstance(layer.mlp, InklingSparseMoE):
                 layer.mlp.fused = fused
                 layer.mlp.down_combine = down_combine
+                layer.mlp.grouped = grouped
 
     def kernel_receipt(self):
         return {
+            "mapped_attention_calls": sum(
+                layer.self_attn.mapped_attention_calls for layer in self.layers
+            ),
+            "grouped_q2_calls": sum(
+                getattr(layer.mlp, "grouped_calls", 0) for layer in self.layers
+            ),
+            "tree_shortconv_calls": sum(
+                conv.tree_calls
+                for layer in self.layers
+                for conv in (
+                    layer.self_attn.k_sconv,
+                    layer.self_attn.v_sconv,
+                    layer.attn_sconv,
+                    layer.mlp_sconv,
+                )
+            ),
+            "fused_attention_nax_calls": sum(
+                layer.self_attn.fused_attention_nax_calls for layer in self.layers
+            ),
+            "fused_attention_calls": sum(
+                layer.self_attn.fused_attention_calls for layer in self.layers
+            ),
+            "fused_attention_rows": sum(
+                layer.self_attn.fused_attention_rows for layer in self.layers
+            ),
+            "fused_attention_prefill_calls": sum(
+                layer.self_attn.fused_attention_prefill_calls for layer in self.layers
+            ),
+            "attention_reference_calls": sum(
+                layer.self_attn.attention_reference_calls for layer in self.layers
+            ),
             "qkvr_projection_calls": sum(
                 layer.self_attn.projection_calls for layer in self.layers
             ),
@@ -1203,6 +1392,16 @@ class Model(LanguageModel):
             ),
             "fused_shortconv_calls": sum(
                 conv.fused_calls
+                for layer in self.layers
+                for conv in (
+                    layer.self_attn.k_sconv,
+                    layer.self_attn.v_sconv,
+                    layer.attn_sconv,
+                    layer.mlp_sconv,
+                )
+            ),
+            "fused_prefill_shortconv_calls": sum(
+                conv.prefill_calls
                 for layer in self.layers
                 for conv in (
                     layer.self_attn.k_sconv,

@@ -197,7 +197,7 @@ class DenseQwen3FlatSegmentTarget:
             or args.rope_scaling is not None
         ):
             raise ValueError("real flat executor requires dense full-attention Qwen3")
-        if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1":
+        if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1" or os.environ.get("MLX2_FP_VERIFY_KERNEL") == "1":
             raise ValueError("real flat executor excludes the FP decode kernel")
         if (
             not self.capture_layers

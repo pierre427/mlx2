@@ -10,6 +10,7 @@ from mlx2 import desktop_agent_launch as module
 
 @pytest.fixture
 def launch(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "child_exited", lambda child: False)
     root = tmp_path / "models"
     root.mkdir()
     path = root / "synthetic-q4"
@@ -39,7 +40,7 @@ def launch(tmp_path, monkeypatch):
     request_calls = []
     def start(identity):
         profile = controller.profile(identity)
-        child = SimpleNamespace(pid=111, poll=lambda: None)
+        child = SimpleNamespace(pid=111, poll=lambda: pytest.fail("liveness must not reap the process-group leader"))
         engine = SimpleNamespace(settings={**profile}, child=child, preparation_thread=object(), stopped=0)
         engine.worker = {"state": "Loading", "url": "http://127.0.0.1:19999", "checkpoint": path.name + "@" + fingerprint["value"]}
         engine.snapshot = lambda: engine.worker.update(state="Ready" if ready.is_set() else "Loading")

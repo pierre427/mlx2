@@ -8,6 +8,8 @@ struct ConversionView: View {
     @State private var tooling = ""
     @State private var reserve = "10"
     @State private var plan = JSON()
+    @State private var planRequestID = UUID()
+    @State private var checking = false
     private var state: JSON { model.snapshot["media"]["conversions"] }
     var body: some View {
         ScrollView {
@@ -27,16 +29,12 @@ struct ConversionView: View {
                         Text("oQ measures layer sensitivity and chooses a model-specific mixed precision plan. Its isolated pinned converter needs a compatible Python environment. Uniform Q uses a bounded CPU affine converter; adapter compatibility is verified by subsequent qualification.").font(.caption).foregroundStyle(.secondary)
                         Text("Free-space admission reserves temporary weights and the configured reserve. Existing destinations are refused; partial failures remain outside the model library.").font(.caption).foregroundStyle(.secondary)
                         HStack {
-                            Button("Check disk & source") {
-                                Task {
-                                    do { plan = try await model.request("conversion_plan", ["path": source, "recipe": recipe]) }
-                                    catch { plan = JSON(); model.error = error.localizedDescription }
-                                }
-                            }.disabled(source.isEmpty)
+                            Button(checking ? "Checking…" : "Check disk & source") { Task { await checkPlan() } }
+                                .disabled(source.isEmpty || checking || model.busy)
                             Spacer()
                             if state["running"].bool { Button("Cancel") { model.perform("conversion_cancel") } }
                             Button("Convert") { model.perform("conversion_start", ["path": source, "recipe": recipe]) }
-                                .buttonStyle(.borderedProminent).disabled(source.isEmpty || state["running"].bool)
+                                .buttonStyle(.borderedProminent).disabled(source.isEmpty || state["running"].bool || model.busy)
                         }
                         if plan["destination"].string != nil {
                             Text("Destination: \(plan["destination"].text)").font(.caption).textSelection(.enabled)
@@ -77,13 +75,25 @@ struct ConversionView: View {
                     }.padding(8)
                 }
             }.padding(24)
-        }.onChange(of: source) { _, _ in plan = JSON() }
-        .onChange(of: recipe) { _, _ in plan = JSON() }
+        }.onChange(of: source) { _, _ in invalidatePlan() }
+        .onChange(of: recipe) { _, _ in invalidatePlan() }
+        .onChange(of: model.snapshot["user_profiles"]["active_id"].string) { _, _ in invalidatePlan(); source = "" }
         .onAppear {
             python = state["python"].text
             tooling = state["omlx_source"].text
             reserve = String(format: "%.0f", (state["reserve_bytes"].double ?? 10_737_418_240) / 1_073_741_824)
         }
+    }
+    private func invalidatePlan() { planRequestID = UUID(); checking = false; plan = JSON() }
+    @MainActor private func checkPlan() async {
+        let requestID = UUID(), source = source, recipe = recipe
+        planRequestID = requestID; checking = true; plan = JSON()
+        defer { if planRequestID == requestID { checking = false } }
+        do {
+            let result = try await model.request("conversion_plan", ["path": source, "recipe": recipe])
+            guard planRequestID == requestID else { return }
+            plan = result
+        } catch { if planRequestID == requestID { model.error = error.localizedDescription } }
     }
 }
 private extension JSON {

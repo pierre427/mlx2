@@ -109,11 +109,14 @@ def validated_adapter_prefill_inputs(adapter, request, remaining_tokens, prefill
     The optional callback is model-specific; serving never interprets the
     model's media markers or emits a trust flag of its own.
     """
-    if prefill_input is None:
+    if prefill_input is None and not getattr(adapter, "validates_absent_prefill_inputs", False):
         return None
     validate = getattr(adapter, "validate_prefill_inputs", None)
     if not callable(validate):
         return prefill_input
+    if prefill_input is None:
+        # The adapter refuses media markers that arrive without a payload.
+        return validate(request, remaining_tokens, None)
     result = validate(request, remaining_tokens, dict(prefill_input))
     if not isinstance(result, dict):
         raise TypeError("adapter prefill validation must return a dict")
@@ -6900,7 +6903,8 @@ class ServingEngine(KernelReloadMixin):
         # and an admission recorded after that would stay running forever.
         for offset, job in enumerate(jobs, 1):
             self.batch_metrics.admitted(
-                job.id, job.tenant_id, initial_depth + offset
+                job.id, job.tenant_id, initial_depth + offset,
+                session_id=job.request.get("session_id"),
             )
             live_weight_space = getattr(self, "weight_space_live", None)
             if live_weight_space is not None:
@@ -7511,6 +7515,7 @@ class ServingEngine(KernelReloadMixin):
     def status(self):
         from .runtime.models import qsdpa_verify_metal as qvm
         from .runtime.models import qsdpa_decode_metal as qdm
+        from .runtime.models import fp_verify_tensor as fpv
 
         receipts = self.recent_receipts()
         with self.lock:
@@ -7606,6 +7611,7 @@ class ServingEngine(KernelReloadMixin):
                     "selected_host_branches": qvm.selected_host_branch_snapshot(),
                 },
                 "fp_decode_attention": qdm.fp_decode_status(),
+                "fp_verify_attention": fpv.status(),
                 "recent_receipts": receipts,
                 **({"checkpoint_resources": self._last_checkpoint_resource_receipt}
                    if hasattr(self, "_last_checkpoint_resource_receipt") else {}),
@@ -11161,6 +11167,11 @@ class ServingEngine(KernelReloadMixin):
                     "enabled": True, "version": qdm.FP_KERNEL_VERSION,
                     "min_context": qdm.FP_MIN_CONTEXT,
                 }
+            from .runtime.models import fp_verify_tensor as fpv
+            if fpv.status()['selected']:
+                settings['fp_verify_attention']={'enabled':True,'version':fpv.VERSION}
+            if os.environ.get('MLX2_INPASS_CHECKPOINTS')=='1':
+                settings['inpass_checkpoints']={'enabled':True,'version':'qwen38-gdn-projection-share-v1'}
             if self.approximate_kv_policy.enabled:
                 from .runtime.models import qsdpa_verify_metal as qvm
 
@@ -12693,7 +12704,7 @@ class ServingEngine(KernelReloadMixin):
             def build_batch():
                 """This route generator; rebuilt after a device out-of-memory."""
                 if external_draft:
-                    return adapter.create_external_batch(
+                    batch = adapter.create_external_batch(
                         completion_batch_size=self.max_lanes,
                         prefill_step_size=self.prefill_step,
                         prefill_step_autoscale=self.prefill_step_autoscale,
@@ -12711,6 +12722,10 @@ class ServingEngine(KernelReloadMixin):
                             else {}
                         ),
                     )
+                    # After construction: adapters forward their own kwargs.
+                    if hasattr(batch, "settle_memory"):
+                        batch.settle_memory = settle_footprint
+                    return batch
                 elif prompt_lookup:
                     from .runtime.pld import PromptLookupBatchGenerator
 

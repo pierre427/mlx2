@@ -1,23 +1,21 @@
 """Parent-indexed Inkling tiles with packed projections and private branch state.
 
 Original mlx2 glue. Four convolution histories follow true ancestry. Attention
-keeps one query and its exact ancestor key count; projections use the installed
-row-invariant lane law. Routed experts retain one-node gather arithmetic.
+keeps singleton arithmetic and its exact ancestor key count; projections use the
+installed row-invariant lane law. Grouped experts preserve private row reductions.
 """
 
 from __future__ import annotations
 
 import mlx.core as mx
 
-from ...cow_cache import snapshot_prompt_cache_descriptors
-from ..base import scaled_dot_product_attention
+from ...cow_cache import lend_append_only_kv, snapshot_prompt_cache_descriptors
 from ..cache import ArraysCache, CacheList, KVCache, RotatingKVCache
 from .cache import InklingConvolutionCache
-from .language import banded_additive_mask
 
 
 class InklingTree:
-    def __init__(self, parents, cache):
+    def __init__(self, parents, cache, *, descriptor_plan=None, descriptor_scope=None):
         self.parents = tuple(parents)
         if not 1 <= len(parents) <= 16:
             raise ValueError("Inkling trees require 1..16 rows")
@@ -49,14 +47,167 @@ class InklingTree:
                 )
         self.live = cache
         self.live_pairs = pairs
-        private = snapshot_prompt_cache_descriptors(cache)[0]
+        captured = (
+            None
+            if descriptor_plan is None
+            else descriptor_plan.capture(cache, descriptor_scope)
+        )
+        self.descriptor_plan_used = captured is not None
+        private = (
+            captured[0]
+            if captured is not None
+            else snapshot_prompt_cache_descriptors(cache)[0]
+        )
         self.private = [
             CacheList(private[i], private[i + 1]) for i in range(0, len(private), 2)
         ]
         self.histories = {}
         self.raw_kv = {}
+        self.anchor_bases = None
+
+    def forward_anchor(self, model, tokens, layers):
+        """One ordinary step on private KV rings and convolution histories.
+
+        A root-only tree has no branches to gather or ancestry to evaluate.
+        Keeping its private descriptor transaction lets parked AST use the
+        ordinary tensor path without treating wrapped rings as trimmable KV.
+        """
+        if self.parents != (-1,) or tokens.shape != (1, 1):
+            raise ValueError("Inkling ordinary anchor requires one root token")
+        bases = [int(pair[0].offset) for pair in self.live_pairs]
+        for live, private in zip(self.live_pairs, self.private, strict=True):
+            # The existing contract lends only append-only planes. It refuses
+            # local rings, which retain their private COW snapshots. Aborted
+            # global suffix writes are outside the live committed fill level.
+            lend_append_only_kv(live[0], private[0])
+        flat = [plane for pair in self.private for plane in pair.caches]
+        result = model.forward_with_taps(tokens, flat, layers)
+        self.anchor_bases = bases
+        return result
+
+    @staticmethod
+    def forward_anchor_cohort(model, trees, tokens, layers):
+        """Batch ordinary token math, retaining private per-request KV planes.
+
+        There is no ancestry to gather for a single root. Short convolutions
+        share one launch across rows (including the ordinary residual fusion),
+        while attention reads each request's KV without merging its prefix.
+        Expert reductions retain the tree's singleton arithmetic contract.
+        """
+        if tokens.shape != (len(trees), 1) or any(
+            tree.parents != (-1,) for tree in trees
+        ):
+            raise ValueError("Inkling ordinary cohort needs one root per lane")
+        bases = [[int(pair[0].offset) for pair in tree.live_pairs] for tree in trees]
+        for tree in trees:
+            for live, private in zip(tree.live_pairs, tree.private, strict=True):
+                lend_append_only_kv(live[0], private[0])
+        hidden = model.model.embed(tokens)
+        model.completed_forwards += 1
+        taps = {}
+        for index, layer in enumerate(model.layers):
+            items = [tree.private[index] for tree in trees]
+            convs = [item[1] for item in items]
+            attention = layer.self_attn
+            projected = attention.project_qkvr(layer.input_layernorm(hidden))
+            dq, dk, dv, _ = attention.qkvr_dims
+            k = InklingTree.anchor_convolution(
+                attention.k_sconv, projected[..., dq : dq + dk], convs
+            )
+            v = InklingTree.anchor_convolution(
+                attention.v_sconv, projected[..., dq + dk : dq + dk + dv], convs
+            )
+            shape = (len(trees), 1, attention.n_kv, attention.head_dim)
+            k = attention.k_norm(k.reshape(shape)).transpose(0, 2, 1, 3)
+            v = v.reshape(shape).transpose(0, 2, 1, 3)
+            q = attention.q_norm(
+                projected[..., :dq].reshape(
+                    len(trees), 1, attention.n_heads, attention.head_dim
+                )
+            ).transpose(0, 2, 1, 3)
+            r = projected[..., dq + dk + dv :].reshape(
+                len(trees), 1, attention.n_heads, attention.d_rel
+            )
+            outputs = []
+            for row, item in enumerate(items):
+                kv = item[0]
+                keys, values = kv.update_and_fetch(k[row : row + 1], v[row : row + 1])
+                if type(kv) is RotatingKVCache:
+                    keys = kv._temporal_order(kv.keys)
+                    values = kv._temporal_order(kv.values)
+                if attention.sliding and keys.shape[2] > attention.sliding:
+                    keys = keys[..., -attention.sliding :, :]
+                    values = values[..., -attention.sliding :, :]
+                outputs.append(
+                    attention.attend(
+                        q[row : row + 1],
+                        keys,
+                        values,
+                        r[row : row + 1],
+                        keys.shape[2] - 1,
+                    )
+                )
+            raw = attention.o_proj(
+                mx.concatenate(outputs, axis=0)
+                .transpose(0, 2, 1, 3)
+                .reshape(len(trees), 1, -1)
+            )
+            hidden = InklingTree.anchor_convolution(
+                layer.attn_sconv, raw, convs, residual=hidden
+            )
+            normalized = layer.post_attention_layernorm(hidden)
+            raw = (
+                layer.mlp.tree(normalized)
+                if hasattr(layer.mlp, "switch_mlp")
+                else layer.mlp(normalized)
+            )
+            hidden = InklingTree.anchor_convolution(
+                layer.mlp_sconv, raw, convs, residual=hidden
+            )
+            for conv in convs:
+                conv.advance(1)
+            if index in layers:
+                taps[index] = hidden
+        for tree, offsets in zip(trees, bases, strict=True):
+            tree.anchor_bases = offsets
+        return model._logits_from_norm(model.model.norm(hidden)), mx.concatenate(
+            [taps[i] for i in layers], axis=-1
+        )
+
+    @staticmethod
+    def anchor_convolution(module, raw, convs, *, residual=None):
+        """Pack only the tiny histories; publish tails to private descriptors."""
+        slot = module.conv_idx
+        count = module.kernel_size - 1
+        cache = ArraysCache(4)
+        cache[slot] = mx.concatenate(
+            [
+                conv[slot]
+                if conv[slot] is not None
+                else mx.zeros((1, count, raw.shape[-1]), dtype=mx.float32)
+                for conv in convs
+            ],
+            axis=0,
+        )
+        out = module(raw, cache=cache, residual=residual)
+        for row, conv in enumerate(convs):
+            conv[slot] = cache[slot][row : row + 1]
+        return out
 
     def convolution(self, module, raw, conv):
+        if (
+            module.tree_fused
+            and module.kernel_size == 4
+            and mx.default_device() == mx.gpu
+        ):
+            from .ancestry import convolution
+
+            out, tails = convolution(module, raw, conv[module.conv_idx], self.paths)
+            module.tree_calls += 1
+            self.histories.setdefault(id(conv), {})[module.conv_idx] = [
+                tails[row : row + 1] for row in range(len(self.paths))
+            ]
+            return out
         # Execute the ordinary one-row convolution for each node, staging only
         # tiny histories. Projection/MLP matrices are not replicated per node.
         count = module.kernel_size - 1
@@ -77,14 +228,15 @@ class InklingTree:
         self.histories.setdefault(id(conv), {})[module.conv_idx] = tails
         return mx.concatenate(outputs, axis=1)
 
-    def attention(self, module, x, item):
+    def attention(self, module, x, item, *, packed=None, project_output=True):
         batch, width, _ = x.shape
         if batch != 1:
             raise ValueError("Inkling packed tree is per-request")
         dq, dk, dv, _ = module.qkvr_dims
         # Always call the installed projection: ordinary decoding uses the
         # same QKVR module once lane arithmetic is selected.
-        packed = module.project_qkvr(x)
+        if packed is None:
+            packed = module.project_qkvr(x)
         k = self.convolution(module.k_sconv, packed[..., dq : dq + dk], item[1])
         v = self.convolution(
             module.v_sconv, packed[..., dq + dk : dq + dk + dv], item[1]
@@ -104,6 +256,48 @@ class InklingTree:
             keys = item[0]._temporal_order(item[0].keys)
             values = item[0]._temporal_order(item[0].values)
         prefix = keys.shape[2] - width
+        # Match the ordinary decode law before packing queries. With eight KV
+        # heads the ordinary singleton kernel uses the same sixteen splits as
+        # mapped attention. Every ancestor must meet its global 16K threshold;
+        # local/short queries retain ordinary SDPA instead of forcing the slower
+        # mapped law on all 42 layers (including parked AST decoding).
+        decode_mapped = (
+            module.attention_policy == "decode"
+            and not module.sliding
+            and module.n_kv == 8
+            and prefix + 1 >= 16384
+        )
+        if (
+            module.attention_policy == "mapped" or decode_mapped
+        ) and module.head_dim == 128:
+            from .tree_attention import attend
+
+            tau = None
+            if module.log_floor is not None:
+                positions = mx.array(
+                    [[start + len(path) for path in self.paths]], mx.float32
+                )
+                tau = (
+                    1
+                    + module.log_alpha
+                    * mx.log(mx.maximum(positions / module.log_floor, 1))
+                ).astype(q.dtype)
+                q = q * tau[:, None, :, None]
+            out = attend(
+                q,
+                keys,
+                values,
+                r,
+                module.rel_proj.astype(q.dtype),
+                scale=module.scale,
+                paths=self.paths,
+                prefix=prefix,
+                window=module.sliding,
+                tau=tau,
+            )
+            module.mapped_attention_calls += 1
+            out = out.transpose(0, 2, 1, 3).reshape(1, width, -1)
+            return module.o_proj(out) if project_output else out
         outputs = []
         for row, path in enumerate(self.paths):
             ids = mx.array(path, mx.int32)
@@ -125,33 +319,20 @@ class InklingTree:
             if module.sliding and size > module.sliding:
                 kr, vr = kr[..., -module.sliding :, :], vr[..., -module.sliding :, :]
                 size = kr.shape[2]
-            mask = banded_additive_mask(
-                r[:, row : row + 1],
-                module.rel_proj.astype(x.dtype),
-                size - 1,
-                size,
-                module.sliding,
-                module.rel_extent,
-                shape_ref=kr,
-                fused=module.fused,
-            )
-            qr = q[:, :, row : row + 1]
-            if module.log_floor is not None:
-                pos = mx.array(start + len(path), mx.float32)
-                tau = (
-                    1 + module.log_alpha * mx.log(mx.maximum(pos / module.log_floor, 1))
-                ).astype(x.dtype)
-                qr = qr * tau
-                mask = mx.where(mask > -1e29, mask * tau, mask)
             outputs.append(
-                scaled_dot_product_attention(
-                    qr, kr, vr, cache=None, scale=module.scale, mask=mask
+                module.attend(
+                    q[:, :, row : row + 1],
+                    kr,
+                    vr,
+                    r[:, row : row + 1],
+                    size - 1,
+                    query_position=start + len(path),
                 )
             )
         out = (
             mx.concatenate(outputs, axis=2).transpose(0, 2, 1, 3).reshape(1, width, -1)
         )
-        return module.o_proj(out)
+        return module.o_proj(out) if project_output else out
 
     def forward(self, model, tokens, layers):
         model.completed_forwards += 1
@@ -163,9 +344,8 @@ class InklingTree:
             raw = self.attention(layer.self_attn, layer.input_layernorm(hidden), item)
             hidden = hidden + self.convolution(layer.attn_sconv, raw, item[1])
             normalized = layer.post_attention_layernorm(hidden)
-            # Keep routed gather selection/reduction identical to singleton
-            # ordinary decode. Shared/dense projection tiling still engages
-            # through the lane installer; a future expert tile needs its own gate.
+            # Grouped expert tiles retain private singleton reductions; the
+            # ordinary gather path remains available when the tile is disabled.
             if hasattr(layer.mlp, "switch_mlp"):
                 raw = layer.mlp.tree(normalized)
             else:
@@ -186,9 +366,89 @@ class InklingTree:
         ):
             raise ValueError("Inkling commit must follow one complete root path")
 
+    @staticmethod
+    def forward_cohort(model, trees, tokens, layers):
+        """Share dense/expert work across requests; retain independent ancestry.
+
+        State operations stay in each private tree. A cohort has no cache writes
+        to another request, even when the requests share an APCv2 backing slab.
+        """
+        widths = [len(tree.paths) for tree in trees]
+        boundaries = []
+        position = 0
+        for width in widths:
+            boundaries.append((position, position + width))
+            position += width
+        packed_tokens = (
+            tokens.reshape(1, -1)
+            if isinstance(tokens, mx.array)
+            else mx.array([[t for row in tokens for t in row]], mx.uint32)
+        )
+        hidden = model.model.embed(packed_tokens)
+        model.completed_forwards += 1
+        taps = {}
+        for index, layer in enumerate(model.layers):
+            normalized = layer.input_layernorm(hidden)
+            projections = layer.self_attn.project_qkvr(normalized)
+            attention = []
+            for tree, (begin, end) in zip(trees, boundaries, strict=True):
+                attention.append(
+                    tree.attention(
+                        layer.self_attn,
+                        normalized[:, begin:end],
+                        tree.private[index],
+                        packed=projections[:, begin:end],
+                        project_output=False,
+                    )
+                )
+            raw = layer.self_attn.o_proj(mx.concatenate(attention, axis=1))
+            hidden = hidden + mx.concatenate(
+                [
+                    tree.convolution(
+                        layer.attn_sconv, raw[:, begin:end], tree.private[index][1]
+                    )
+                    for tree, (begin, end) in zip(trees, boundaries, strict=True)
+                ],
+                axis=1,
+            )
+            normalized = layer.post_attention_layernorm(hidden)
+            raw = (
+                layer.mlp.tree(normalized)
+                if hasattr(layer.mlp, "switch_mlp")
+                else layer.mlp(normalized)
+            )
+            hidden = hidden + mx.concatenate(
+                [
+                    tree.convolution(
+                        layer.mlp_sconv, raw[:, begin:end], tree.private[index][1]
+                    )
+                    for tree, (begin, end) in zip(trees, boundaries, strict=True)
+                ],
+                axis=1,
+            )
+            if index in layers:
+                taps[index] = hidden
+        logits = model._logits_from_norm(model.model.norm(hidden))
+        features = mx.concatenate([taps[i] for i in layers], axis=-1)
+        return (
+            mx.concatenate([logits[:, a:b] for a, b in boundaries], axis=0),
+            mx.concatenate([features[:, a:b] for a, b in boundaries], axis=0),
+        )
+
     def prepare_commit(self, path):
         self.validate_path(path)
         prepared = []
+        if self.anchor_bases is not None:
+            for live, private, base in zip(
+                self.live_pairs, self.private, self.anchor_bases, strict=True
+            ):
+                if int(live[0].offset) != base or int(private[0].offset) != base + 1:
+                    raise RuntimeError("Inkling ordinary anchor boundary changed")
+                prepared.extend(
+                    (dst, src.__dict__.copy())
+                    for dst, src in zip(live.caches, private.caches, strict=True)
+                )
+            return prepared
         ids = mx.array(path, mx.int32)
         for live, private in zip(self.live_pairs, self.private, strict=True):
             if type(live[0]) is RotatingKVCache:

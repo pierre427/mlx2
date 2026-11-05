@@ -23,7 +23,7 @@ def aggregate(records):
         levels = {str(level): bool(group.get(level, {}).get("passed")) for level in (1, 2, 3)}
         coverage = group.get(2, {}).get("coverage", {})
         complete = set(coverage.get("required_routes", [])) <= set(coverage.get("tested_routes", []))
-        candidates.append((all(levels.values()) and complete, sum(levels.values()), levels, group))
+        candidates.append((levels["1"] and levels["2"] and complete, sum(levels.values()), levels, group))
     if not candidates:
         return {"label": "Untested", "qualified": False, "levels": {"1": False, "2": False, "3": False}}
     qualified, count, levels, group = max(candidates, key=lambda row: (row[0], row[1]))
@@ -31,11 +31,12 @@ def aggregate(records):
     settings = binding["profile"].get("settings", {})
     scope = {"route": binding["profile"].get("route"), "context": settings.get("max_context"),
              "lanes": settings.get("max_lanes"), "profile": binding["profile"]}
-    label = "Qualified" if qualified else f"{count}/3 levels"
-    if count == 3 and not qualified:
+    functional_count = sum(levels[key] for key in ("1", "2"))
+    label = "Qualified" if qualified else f"{functional_count}/2 correctness checks"
+    if functional_count == 2 and not qualified:
         label += " · route coverage pending"
     return {"label": label, "qualified": qualified, "levels": levels, "scope": scope,
-            "binding": binding, "records": len(records)}
+            "binding": binding, "records": len(records), "performance_measured": levels["3"]}
 
 
 class BadgeResolver:
@@ -90,12 +91,29 @@ class BadgeResolver:
     def profile_matches(binding, profiles, row):
         if profiles is None:
             return True
-        profiles = [profile for profile in profiles if profile.get("path") == row.get("path")]
+        # Library Start uses the first saved profile for this path. Evidence for
+        # a different sibling profile must not qualify that default action.
+        profiles = [profile for profile in profiles if profile.get("path") == row.get("path")][:1]
         if not profiles:
             return True  # no configured profile; scope remains explicit in badge
         actual = binding["profile"]
         settings = actual.get("settings", {})
         for profile in profiles:
+            # These launch options admit different adapter artifacts or live
+            # computational changes. The desktop campaign does not bind their
+            # contents, so a base-model receipt cannot qualify the new profile.
+            # Matching only a directory/config path would not prove its bytes.
+            if any(profile.get(key) for key in (
+                "lora_root", "max_loras", "multi_lora_delta_precision",
+                "kernel_dev_root", "weight_space_config",
+            )):
+                continue
+            if settings.get("multi_lora"):
+                continue  # The reverse direction must not qualify a plain launch either.
+            if profile.get("microscaling_prefill") not in {None, "off"} or (settings.get("microscaling_prefill") or {}).get("enabled") is True:
+                # Approximate prefill needs its own scope-bound evidence; the
+                # desktop campaign currently has no microscaling profile knob.
+                continue
             route = profile.get("route", "auto")
             if route == "auto":
                 route = row.get("default_route")
@@ -110,6 +128,7 @@ class BadgeResolver:
     def summarize(self, row, records, configured_profiles=None):
         historical = [record for record in records if record.get("binding", {}).get("model_path") == row.get("path")]
         current = []
+        matching_identity = []
         if not self.error and row.get("checkpoint"):
             for record in historical:
                 bound = record["binding"]
@@ -118,11 +137,17 @@ class BadgeResolver:
                     and bound.get("source_revision") == self.source.get("source_revision")
                     and bound.get("host") == self.host
                     and isinstance(bound.get("runtime"), dict)
-                    and self.runtime_matches(bound["runtime"])
-                    and self.profile_matches(bound, configured_profiles, row)):
-                    current.append(record)
+                    and self.runtime_matches(bound["runtime"])):
+                    matching_identity.append(record)
+                    if self.profile_matches(bound, configured_profiles, row):
+                        current.append(record)
         summary = aggregate(current)
         summary.update(current=bool(current), historical_records=len(historical), applicability_error=self.error)
-        if historical and not current:
+        if matching_identity and not current:
+            prior = aggregate(matching_identity)
+            summary.update(label="Historical evidence · profile mismatch", applicability_status="profile_mismatch",
+                           historical_label=prior["label"], historical_qualified=prior["qualified"],
+                           historical_scope=prior.get("scope"))
+        elif historical and not current:
             summary["label"] = "Historical evidence · retest"
         return summary

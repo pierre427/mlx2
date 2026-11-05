@@ -122,7 +122,7 @@ class CampaignQueue:
         return {"running": self.running, "current_job": self.current,
                 "settings": self.settings, "comparisons": comparison_rows(self.control.store.records()),
                 "levels": {"1": "Load and ordinary output, with coherence review",
-                           "2": "Approved feature qualifier and replicated context/cache ladder",
+                           "2": "Feature correctness and context/cache checks (no thermal holds)",
                            "3": "Controlled prefill and decode measurements"}}
 
     def logs(self):
@@ -170,14 +170,14 @@ class CampaignQueue:
 
     def enqueue(self, request):
         paths = request.get("paths")
-        levels = request.get("levels", [1, 2, 3])
+        levels = request.get("levels", [1, 2])
         if not isinstance(paths, list) or not paths or len(paths) > 256 or any(not isinstance(p, str) for p in paths):
             raise ValueError("Select one or more model paths")
         if not isinstance(levels, list) or not levels or any(type(v) is not int or v not in (1, 2, 3) for v in levels):
             raise ValueError("Select qualification levels 1, 2 and/or 3")
         levels = sorted(set(levels))
-        if 2 in levels and request.get("approve_preflight") is not True and not request.get("preflight_receipt"):
-            raise ValueError("Level 2 requires explicit full preflight approval or a matching saved receipt")
+        if type(request.get("approve_preflight", False)) is not bool:
+            raise ValueError("Full preflight is optional; its selection must be an explicit boolean")
         profile = validate_profile(request.get("profile", self.settings["profile"]))
         with self.lock:
             if self.closed or self.running:
@@ -271,12 +271,10 @@ class CampaignQueue:
         environment.pop("GIT_WORK_TREE", None)
         # Full CPU preflight precedes any CPG claim/GPU ownership window.
         preflight_key = (runner["python"], spec["source_sha256"])
-        if 2 in spec["levels"] and not spec.get("preflight_receipt") and preflight_key in self.preflight_cache:
+        if spec.get("approve_preflight") and not spec.get("preflight_receipt") and preflight_key in self.preflight_cache:
             spec["preflight_receipt"] = self.preflight_cache[preflight_key]
             atomic_json(out / "spec.json", spec)
-        if 2 in spec["levels"] and not spec.get("preflight_receipt"):
-            if not spec.get("approve_preflight"):
-                raise ValueError("Full preflight requires explicit approval")
+        if spec.get("approve_preflight") and not spec.get("preflight_receipt"):
             preflight = out / "preflight.json"
             preflight_command = [runner["python"], str(source / "scripts/qualify_serving.py"),
                                  "--preflight-only", "--output", str(preflight)]

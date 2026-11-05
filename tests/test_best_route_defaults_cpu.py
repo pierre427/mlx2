@@ -243,6 +243,25 @@ def test_tiel_approved_no_flag_profile_is_exactly_the_gpu_tested_policy():
     assert all(resolved[key] == value for key, value in tested.items())
 
 
+@pytest.mark.parametrize("flags", [["--lane-matmul", "exact"], ["--int8-prefill", "mlp"],
+                                   ["--microscaling-prefill", "experts"]])
+def test_tiel_policy_defaults_yield_to_an_explicit_projection_owner(flags):
+    from mlx2.server import build_parser
+    from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter, descriptor_for
+
+    fingerprint = "e50c224a715030005f931df75c2c6d0b4ca183ca5c583b09c9c2d6e9dc6aae5f"
+    resolution = AdapterResolution(Qwen3635BA3BAdapter, descriptor_for(has_mtp=True),
+                                   {"identity": {"fingerprint": fingerprint}, "has_mtp": True})
+    args = build_parser().parse_args(["--model", "/m/AX-Tiel-Coder-35B-A3B-MLX-AXQ-MXFP8-MTP", *flags])
+    record = apply_best_route_default(args, resolution)
+    assert record["applied"]
+    assert brd.finish_best_route_default(args, None) is None
+    assert record["execution_policy_defaults_skipped"] == [flags[0][2:].replace("-", "_")]
+    view = brd.receipt_view(record)
+    assert "execution_policy" not in view
+    assert view["execution_policy_defaults_skipped"] == record["execution_policy_defaults_skipped"]
+
+
 @pytest.mark.parametrize("override", [
     {"ordinary": True}, {"native_mtp": True}, {"prompt_lookup": True}, {"ast": True},
     {"external_draft": True}, {"draft_model": ["/m/d"]}, {"execution_policy": Path("/p.json")},

@@ -210,6 +210,64 @@ class _ParkedInflight:
     timing_start_ns: int
     generated_before: list
 
+_PREFILL_KV_CACHE_NAMES = frozenset({
+    "KVCache", "QuantizedKVCache", "RotatingKVCache", "RotatingQuantizedKVCache",
+    "SinkWindowKVCache", "BatchKVCache", "BatchQuantizedKVCache",
+    "BatchRotatingKVCache", "BatchRotatingQuantizedKVCache",
+})
+
+
+def _prefill_target_reservation(caches):
+    """Target-cache bytes a prefill slice reserves beyond its appended span.
+
+    The cache is already resident, so measured headroom counts it. A prefill
+    slice appends KV in place (one copy while a buffer grows) and checkpoints
+    recurrent state planes, up to four copies.  Charging every plane 4x priced
+    a lone 32K Inkling prompt over the admission edge near 20K tokens, and the
+    halving loop then ran off-plan slices that APCv2 refuses to publish.
+    Planes this does not recognise keep the 4x charge.
+    """
+    from .models.cache import CacheList
+
+    total = 0
+    for cache in caches:
+        if isinstance(cache, CacheList):
+            total += _prefill_target_reservation(cache.caches)
+        elif any(cls.__name__ in _PREFILL_KV_CACHE_NAMES for cls in type(cache).__mro__):
+            total += int(getattr(cache, "nbytes", 0))
+        else:
+            total += 4 * int(getattr(cache, "nbytes", 0))
+    return total
+
+
+_PREFILL_REFUSAL_RECORDS = 16
+
+
+def _record_prefill_refusal(stats, lanes, append, required, headroom):
+    """Keep the last prefill admission refusals with the headroom terms.
+
+    Diagnostic only: which term (host-available or Metal advisory) bound a
+    refused slice, at what depth.  Host reads, no device sync, refusals only.
+    """
+    record = {
+        "depth": max((len(getattr(lane, "history", ())) for lane in lanes), default=0),
+        "append": int(append),
+        "lanes": len(lanes),
+        "required": int(required),
+        "headroom": int(headroom),
+    }
+    try:
+        from ..memory import execution_headroom_terms
+
+        record["terms"] = execution_headroom_terms()
+    except Exception as error:  # noqa: BLE001 - diagnostics never fail admission
+        record["terms_error"] = type(error).__name__
+    # A replaced tuple: round snapshots copy this mapping shallowly.
+    records = (*stats.get("prefill_admission_refusals", ()), record)
+    stats["prefill_admission_refusals"] = records[-_PREFILL_REFUSAL_RECORDS:]
+    stats["prefill_admission_refusals_total"] = stats.get("prefill_admission_refusals_total", 0) + 1
+
+
 def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
 
@@ -1100,6 +1158,8 @@ class ExternalDraftBatchGenerator:
             )
         self.memory_headroom = memory_headroom
         self.reclaim_memory = reclaim_memory; self.evict_checkpoint = evict_checkpoint
+        # Serving's FootprintSettler; set after construction (None: no wait).
+        self.settle_memory = None; self._settle_once = None; self._settle_pending = False
         self._schedule_cursor = 0; self._reclaims_left = 0; self._allocator_reclaimed = False
         # Responses returned by next(); drives the periodic allocator reclaim.
         self._emitted_responses = 0
@@ -10659,6 +10719,20 @@ class ExternalDraftBatchGenerator:
             self.draft_topology, self.target_execution = saved
             self._auto_active_width, self._auto_cohort_width = saved_widths
 
+    def _plain_anchor_provider(self, cohort):
+        """Adapter-owned exact ordinary transactions for non-hybrid layouts."""
+        provider = getattr(self, "target_tree_executor_provider", None)
+        if (
+            not getattr(self, "dynamic_singleton_tree", False)
+            or getattr(self, "target_execution", None) != "provider"
+            or getattr(provider, "plain_anchor_protocol", None)
+            != "private-ordinary-anchor-v1"
+            or not 1 <= len(cohort) <= getattr(provider, "plain_anchor_max_width", 0)
+            or not callable(getattr(provider, "forward_plain_anchors", None))
+        ):
+            return None
+        return provider
+
     def _parked_pipeline_eligible(self, cohort, *, following=False):
         """Whether a parked cohort's anchor-only round may run before its read.
 
@@ -10672,9 +10746,9 @@ class ExternalDraftBatchGenerator:
         on the lane's own cache (the provider never sees it), its draft
         append is deferred exactly as on the chain route, and the caller
         releases the cohort's prelaunched lattices before the first dispatch.
-        The hybrid-cache, residual-tap and fly-verification guards remain:
-        only the hybrid owner has a plain one-token transaction, and steering
-        or relaxed verification change the step itself.
+        A hybrid owner or an adapter-declared private ordinary provider must
+        own the plain one-token transaction. Residual-tap and fly-verification
+        guards remain because steering or relaxed verification change the step.
         """
         settings = self.cost_per_commit_handoff
         if (
@@ -10690,7 +10764,9 @@ class ExternalDraftBatchGenerator:
         live = [lane for lane in self.lanes.values() if not lane.cancelled]
         if {id(lane) for lane in live} != {id(lane) for lane in cohort}:
             return False
-        if not self._is_hybrid([lane.cache for lane in cohort]):
+        if self._plain_anchor_provider(cohort) is None and not self._is_hybrid(
+            [lane.cache for lane in cohort]
+        ):
             return False
         reserve = 2 if following else 1
         for lane in cohort:
@@ -10729,7 +10805,10 @@ class ExternalDraftBatchGenerator:
             or getattr(getattr(self.model, "model", None), "residual_taps", None)
             is not None
             or self._ast_anchor_cohort_eligible(cohort)
-            or not self._is_hybrid([lane.cache for lane in cohort])
+            or (
+                self._plain_anchor_provider(cohort) is None
+                and not self._is_hybrid([lane.cache for lane in cohort])
+            )
         ):
             return False
         for lane in cohort:
@@ -10748,6 +10827,28 @@ class ExternalDraftBatchGenerator:
             ):
                 return False
         return True
+
+    def _plain_probe_admission_eligible(self, cohort):
+        """Price a guaranteed ordinary probe without advancing its policy.
+
+        If every reversible lane needs a baseline, any admitted subset still
+        runs a plain one-token step. Reserving a speculative tree here can
+        serialize that baseline and make the batched ordinary alternative
+        look artificially expensive. Mixed/established cohorts retain their
+        speculative reservation: the bounded probe policy may run them at
+        full depth. Only the execution path mutates that policy's counters.
+        """
+        return (
+            bool(cohort)
+            and getattr(self, "dynamic_singleton_tree", False)
+            and all(
+                (state := lane.cost_handoff_state) is not None
+                and getattr(state.settings, "reversible", False)
+                and state.needs_ordinary_probe(len(cohort))
+                for lane in cohort
+            )
+            and self._plain_target_step_eligible(cohort)
+        )
 
     def _plain_target_round(self, cohort, *, probe_uids, execution_width):
         """One synchronous plain target step for an anchor-only tree cohort.
@@ -10788,25 +10889,33 @@ class ExternalDraftBatchGenerator:
     def _dispatch_parked(self, cohort, anchors, *, timing_start_ns):
         """Begin and dispatch one anchor-only round; nothing is read."""
         phase = _PhaseClock(self) if self.round_timing else None
-        owner = self._parked_target_owner(cohort)
+        provider = self._plain_anchor_provider(cohort)
+        owner = None if provider is not None else self._parked_target_owner(cohort)
         recovery = self._parked_recovery(
-            cohort, recurrent_rows=getattr(owner, "_recurrent_rows", None)
+            cohort, recurrent_rows=getattr(owner, "_recurrent_rows", None),
+            private_forward=provider is not None,
         )
         if phase is not None:
             phase("parked_snapshot")
-        transaction = owner.begin(
+        transaction = None if owner is None else owner.begin(
             lengths=[1] * len(cohort), plain_single_token=True
         )
         try:
-            if not getattr(transaction, "plain", False):
-                raise RuntimeError("a pipelined parked round requires a plain transaction")
             if isinstance(anchors, self.mx.array):
                 inputs = anchors.astype(self.mx.int32)[:, None]
             else:
                 inputs = self.mx.array([[int(a)] for a in anchors], dtype=self.mx.int32)
-            logits, features = self._cohort_target_forward(
-                inputs, transaction, cohort, site="parked_plain"
-            )
+            if provider is not None:
+                logits, features, transaction = provider.forward_plain_anchors(
+                    self.model, inputs, [lane.cache for lane in cohort], self.layers
+                )
+                _bump(self.scheduler_stats, "external_plain_anchor_provider_rounds")
+            else:
+                logits, features = self._cohort_target_forward(
+                    inputs, transaction, cohort, site="parked_plain"
+                )
+            if not getattr(transaction, "plain", False):
+                raise RuntimeError("a pipelined parked round requires a plain transaction")
             # Everything the host read needs is built here, before the
             # following round launches: an op created on these logits after
             # that launch would queue behind the following forward and wait
@@ -10829,7 +10938,7 @@ class ExternalDraftBatchGenerator:
             if phase is not None:
                 phase("parked_launch")
         except BaseException:
-            if not transaction.closed:
+            if transaction is not None and not transaction.closed:
                 transaction.abort()
             raise
         return _ParkedInflight(
@@ -10872,18 +10981,34 @@ class ExternalDraftBatchGenerator:
         self._parked_owner = owner if isinstance(owner, HybridVerifyRows) else None
         return owner
 
-    def _parked_recovery(self, cohort, *, recurrent_rows=None):
+    def _parked_recovery(self, cohort, *, recurrent_rows=None, private_forward=False):
         """A one-token plain step's exact undo record, without a deep snapshot.
 
         The pipelined round advances each lane by exactly one anchor, so its
-        undo is the plain transaction's own: trim every KV plane back to its
-        offset and put each recurrent plane's state list back.  Host fields
+        undo is the plain transaction's own: trim append-only KV to its offset,
+        restore rotating KV descriptors and each recurrent plane's state list.
+        Host fields
         are restored from a shallow copy; the lists the round appends to
         (history, ready) are cut back to their lengths and the RNG position is
         recorded.  ``recurrent_rows`` is the owner's per-plane classification
         of exactly these lanes, when the caller holds one.
         """
+        from .cache_operations import cache_operations
         from .hybrid_verify_rows import _kv_offset, _recurrent
+
+        if private_forward:
+            # The declared provider preserves live committed state during
+            # forward and publishes by replacing descriptor fields. Retain
+            # those fields directly, including recurrent revision metadata.
+            # Borrowed append-only buffers may change only beyond their old
+            # committed offset; no MLX alias or per-plane graph walk is needed.
+            return [
+                [lane, *self._parked_host_record(lane), [
+                    ("descriptor", cache, cache.__dict__.copy())
+                    for cache in lane.cache
+                ]]
+                for lane in cohort
+            ]
 
         if recurrent_rows is None or len(recurrent_rows) != len(cohort):
             recurrent_rows = [
@@ -10897,6 +11022,14 @@ class ExternalDraftBatchGenerator:
                     planes.append(
                         ("recurrent", cache, list(cache.cache), cache.lengths, cache.left_padding)
                     )
+                elif cache_operations(
+                    cache, capability="parked KV recovery"
+                ).family == "rotating_kv":
+                    # A wrapped ring cannot recover evicted keys by reducing
+                    # its offset. In-place owners need independent COW aliases;
+                    # never widen the generic hybrid trim contract.
+                    frozen = snapshot_prompt_cache_descriptors([cache])[0][0]
+                    planes.append(("descriptor", cache, frozen.__dict__.copy()))
                 else:
                     planes.append(("kv", cache, _kv_offset(cache)))
             records.append([lane, *self._parked_host_record(lane), planes])
@@ -10925,6 +11058,10 @@ class ExternalDraftBatchGenerator:
                     _kind, cache, state, lengths, left_padding = plane
                     cache.cache = list(state)
                     cache.lengths, cache.left_padding = lengths, left_padding
+                elif plane[0] == "descriptor":
+                    _kind, cache, state = plane
+                    cache.__dict__.clear()
+                    cache.__dict__.update(state)
                 else:
                     _kind, cache, offset = plane
                     drop = _kv_offset(cache) - offset
@@ -11194,11 +11331,33 @@ class ExternalDraftBatchGenerator:
         ordinary_probe_uids=(),
         prior_execution_width=None,
         mixed_parked_uids=(),
+        _elapsed_ns=None,
+        _elapsed_by_uid=None,
     ):
         """Publish request-local timing only after a complete round commit."""
         if started_ns is None:
             return
-        elapsed_ns = max(time.perf_counter_ns() - started_ns, 1)
+        elapsed_ns = (
+            max(time.perf_counter_ns() - started_ns, 1)
+            if _elapsed_ns is None else _elapsed_ns
+        )
+        phase = getattr(self, "_cost_service_phase", None)
+        if phase is not None:
+            # A memory-limited cohort can run one ready lane per poll. Its
+            # own turn alone omits the peer turns that lane waits through.
+            # Book after the decode phase so separate cohorts in one poll
+            # and admission deferrals across polls use the same cost domain.
+            phase["records"].append((
+                list(cohort),
+                [lane.generated - before for lane, before in
+                 zip(cohort, generated_before, strict=True)],
+                elapsed_ns,
+                {"ordinary_probe": ordinary_probe,
+                 "ordinary_probe_uids": set(ordinary_probe_uids),
+                 "prior_execution_width": prior_execution_width,
+                 "mixed_parked_uids": set(mixed_parked_uids)},
+            ))
+            return
         width = len(cohort)
         reprobed = reengaged = False
         for lane, before in zip(cohort, generated_before, strict=True):
@@ -11220,7 +11379,8 @@ class ExternalDraftBatchGenerator:
             else:
                 decision = state.observe(
                     kind="ordinary" if ordinary_probe else "speculative",
-                    elapsed_ns=elapsed_ns,
+                    elapsed_ns=(elapsed_ns if _elapsed_by_uid is None
+                                else _elapsed_by_uid[lane.uid]),
                     committed_tokens=lane.generated - before,
                     execution_width=width,
                     lane_uid=lane.uid,
@@ -11267,8 +11427,12 @@ class ExternalDraftBatchGenerator:
                     self._cost_handoff_receipt(lane)
                 )
         if not ordinary_probe and width >= 2:
+            cohort_elapsed = (
+                elapsed_ns if _elapsed_by_uid is None
+                else sum(_elapsed_by_uid[lane.uid] for lane in cohort) // width
+            )
             reengaged = (
-                self._reconcile_cohort_costs(cohort, generated_before, elapsed_ns)
+                self._reconcile_cohort_costs(cohort, generated_before, cohort_elapsed)
                 or reengaged
             )
         if reprobed:
@@ -13585,6 +13749,18 @@ class ExternalDraftBatchGenerator:
         ast_private_required = 0
         ast_transient_per_lane = []
         reserve_draft = getattr(self.draft, "extra_memory_reservation", None)
+        reserve_plain_cache = None
+        if (
+            not prefill and append == 1
+            and callable(getattr(self, "_plain_target_step_eligible", None))
+            and (
+                all(_speculation_parked(lane) for lane in lanes)
+                or self._plain_probe_admission_eligible(lanes)
+            )
+            and self._plain_target_step_eligible(lanes)
+        ):
+            provider = self._plain_anchor_provider(lanes)
+            reserve_plain_cache = getattr(provider, "plain_anchor_cache_reservation", None)
         for lane in lanes:
             lane_append = (
                 min(append, max(0, len(lane.remaining) - 1))
@@ -13593,7 +13769,21 @@ class ExternalDraftBatchGenerator:
             )
             target_bytes = sum(int(getattr(c,"nbytes",0)) for c in lane.cache)
             draft_bytes = sum(int(getattr(c,"nbytes",0)) for c in lane.draft_cache)
-            required += 4*target_bytes + 3*draft_bytes
+            # A multi-lane slab merges (copies) every lane's cache into a
+            # padded batch, so only a serial slice gets the in-place charge.
+            cache_required = (
+                _prefill_target_reservation(lane.cache)
+                if prefill and len(lanes) == 1
+                else 4*target_bytes
+            )
+            if callable(reserve_plain_cache):
+                private_required = reserve_plain_cache(lane.cache)
+                if private_required is not None:
+                    if type(private_required) is not int or private_required < 0:
+                        raise ValueError("private ordinary cache reservation must be nonnegative bytes")
+                    cache_required = private_required
+                    _bump(self.scheduler_stats, "external_private_anchor_admission_lanes")
+            required += cache_required + 3*draft_bytes
             required += lane_append*(target.num_hidden_layers*target_per_token + int(getattr(draft, "num_hidden_layers", 0) or 0)*draft_per_token)
             feature_width = getattr(draft, "feature_width", None) or target.hidden_size*len(self.layers)
             required += lane_append*int(feature_width)*8
@@ -13646,8 +13836,11 @@ class ExternalDraftBatchGenerator:
             required *= self.continuation_policy.limit
         self.scheduler_stats["reservation_bytes"] = required
         self.scheduler_stats["draft_extra_reservation_bytes"] = extra_required
-        if required > self.memory_headroom():
+        headroom = self.memory_headroom()
+        if required > headroom:
             self.scheduler_stats["memory_deferred"] = self.scheduler_stats.get("memory_deferred",0)+1
+            if prefill:
+                _record_prefill_refusal(self.scheduler_stats, lanes, append, required, headroom)
             return False
         return True
 
@@ -13656,15 +13849,43 @@ class ExternalDraftBatchGenerator:
         if not self._allocator_reclaimed and self.reclaim_memory is not None:
             self._allocator_reclaimed = True
             self.reclaim_memory()
+            self._settle_pending = True
             return True
+        # Reached only when the re-check after a reclaim still fell short.
+        if self._settle_pending:
+            self._settle_pending = False
+            if self._settle_after_reclaim():
+                return True
         if self._reclaims_left and self.evict_checkpoint is not None:
             self._reclaims_left -= 1
             if self.evict_checkpoint():
                 self.scheduler_stats["memory_pressure_evictions"] = self.scheduler_stats.get("memory_pressure_evictions", 0) + 1
                 if self.reclaim_memory is not None:
                     self.reclaim_memory()
+                    self._settle_pending = True
                 return True
         return False
+
+    def _settle_after_reclaim(self):
+        """Wait (bounded per poll) for the cleared Metal pages to leave the footprint.
+
+        Headroom charges ``max(active + cached, footprint)``; right after a
+        clear the footprint still holds the freed pages, so the re-check
+        refused the planned slice again and halved it off the APCv2 plan
+        (Inkling 32K: cache 11.3 GiB cleared, footprint fell 1.3 GiB).
+        Only a re-check that still falls short waits; nothing is credited
+        and the caller re-measures.  True when a wait ran.
+        """
+        if self.settle_memory is None:
+            return False
+        if self._settle_once is None:
+            from ..memory import bounded_settle
+
+            self._settle_once = bounded_settle(self.settle_memory)
+        if self._settle_once() is None:
+            return False
+        _bump(self.scheduler_stats, "external_admission_footprint_settles")
+        return True
 
     def _fit_cohort(self, candidates, append, *, prefill=False, max_lanes=None):
         # A failed B4 reservation must not block B1/B2 work. Retain each lane's
@@ -14039,7 +14260,7 @@ class ExternalDraftBatchGenerator:
             self._memory_waiting_uids.intersection_update(self.lanes)
         self._decode_fit_waiting_uids.clear()
         self._atomic_prefill_waiting_uids.clear()
-        self._reclaims_left = 2; self._allocator_reclaimed = False
+        self._reclaims_left = 2; self._allocator_reclaimed = False; self._settle_once = None; self._settle_pending = False
         ordered = list(self.lanes.values())
         if ordered:
             start = self._schedule_cursor % len(ordered)
@@ -14094,6 +14315,81 @@ class ExternalDraftBatchGenerator:
             _bump(self.scheduler_stats, "external_ast_tree_completed_turns")
 
     def _decode_phase(self, ordered):
+        """Price reversible tree work in each ready lane's service domain.
+
+        Timing only a B1 speculative turn can falsely beat a B2 ordinary
+        step when memory admission serializes two competing lanes. Include
+        work in this decode phase and earlier phases where the lane was ready
+        but not served. Do not charge prefill, client delay, or time draining
+        already-produced tokens. B1, one-way control and planner-owned mixed
+        AST retain their existing timing contract.
+        """
+        live = (
+            self._live_reversible_lanes()
+            if getattr(self, "dynamic_singleton_tree", False) else None
+        )
+        if not live or len(live) < 2:
+            self._cost_service_wait_ns = {}
+            self._cost_service_scope = None
+            return self._decode_phase_work(ordered)
+        scope = frozenset((lane.uid, id(lane.cost_handoff_state)) for lane in live)
+        if getattr(self, "_cost_service_scope", None) != scope:
+            self._cost_service_wait_ns = {}
+            self._cost_service_scope = scope
+        phase = {"ready": [], "records": [], "start": time.perf_counter_ns()}
+        self._cost_service_phase = phase
+        try:
+            result = self._decode_phase_work(ordered)
+        except BaseException:
+            self._cost_service_wait_ns.clear()
+            raise
+        finally:
+            self._cost_service_phase = None
+        self._finish_cost_service_phase(phase)
+        return result
+
+    def _finish_cost_service_phase(self, phase):
+        records = phase["records"]
+        if not records:
+            # An initial asynchronous launch has no committed observation.
+            return
+        phase_ns = max(
+            time.perf_counter_ns() - phase["start"],
+            max(record[2] for record in records), 1,
+        )
+        ready = {lane.uid for lane in phase["ready"] if not lane.cancelled}
+        seen = [lane.uid for cohort, *_ in records for lane in cohort]
+        waiting = self._cost_service_wait_ns
+        if len(seen) != len(set(seen)):
+            # Unexpected multiple successful turns for one lane: retain the
+            # original observations rather than double-price the phase.
+            waiting.clear()
+            ready.clear()
+            _bump(self.scheduler_stats, "external_cost_service_phase_declines")
+        for uid in list(waiting):
+            if uid not in ready:
+                waiting.pop(uid)
+        for uid in ready - set(seen):
+            waiting[uid] = waiting.get(uid, 0) + phase_ns
+        for cohort, committed, elapsed, options in records:
+            prices = {}
+            for lane in cohort:
+                delay = waiting.pop(lane.uid, 0)
+                prices[lane.uid] = phase_ns + delay if lane.uid in ready else elapsed
+                if lane.uid in ready:
+                    self.scheduler_stats["external_cost_multilane_timing_scope"] = (
+                        "ready_lane_decode_service"
+                    )
+                    _bump(self.scheduler_stats, "external_cost_ready_service_observations")
+                    _bump(self.scheduler_stats, "external_cost_ready_wait_ns", delay)
+            self._observe_cost_handoff_round(
+                cohort,
+                [lane.generated - count for lane, count in
+                 zip(cohort, committed, strict=True)],
+                0, _elapsed_ns=phase_ns, _elapsed_by_uid=prices, **options,
+            )
+
+    def _decode_phase_work(self, ordered):
         self._memory_waiting_uids.difference_update(
             lane.uid for lane in ordered if lane.anchor is not None
         )
@@ -14106,6 +14402,9 @@ class ExternalDraftBatchGenerator:
             and not lane.cancelled
             and self._atomic_cohort_prefill_ready(lane)
         ][:self.capacity]
+        cost_phase = getattr(self, "_cost_service_phase", None)
+        if cost_phase is not None:
+            cost_phase["ready"] = list(ready)
         draining = sum(
             1
             for lane in ordered
@@ -14208,6 +14507,9 @@ class ExternalDraftBatchGenerator:
                 if self.dynamic_singleton_tree and not concurrent and count
                 else count + 1
             )
+            if not concurrent and self._plain_probe_admission_eligible(candidates):
+                append = 1
+                _bump(self.scheduler_stats, "external_plain_probe_admission_groups")
             # Limit admitted lanes, not candidates: an old unfit cohort must
             # not hide a newer lane whose smaller private state can progress.
             cohort = (

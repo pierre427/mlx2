@@ -255,3 +255,10 @@ def test_sampling_spec_rejected_before_model_load(tmp_path, extra):
     spec = {'model': str(tmp_path / 'copy'), 'original_model': str(tmp_path / 'original'),
             'out': str(tmp_path / 'out'), 'mode': 'baseline', **extra}
     with pytest.raises(ValueError):runner.validate_spec(spec)
+
+
+def test_minimum_row_length_is_enforced_when_requested():
+    row = {'id': 'source:1', 'split': 'train', 'input_ids': list(range(9)), 'loss_mask': [0] + [1] * 8}
+    runner.validate_training_rows([row])
+    with pytest.raises(ValueError):
+        runner.validate_training_rows([row], min_tokens=10)

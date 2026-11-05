@@ -7,6 +7,7 @@ self-contained runtime and target taps are added for the external drafter.
 """
 
 import math
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -108,6 +109,8 @@ class MultiLatentAttention(nn.Module):
         self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
         self.gate_type = args.gated_attention_proj_granularity_type
         self.scale = self.qk_head_dim**-0.5
+        self.ling_fused_mla = False
+        self.ling_calls = Counter()
 
         if self.q_lora_rank is None:
             self.q_proj = nn.Linear(
@@ -222,7 +225,13 @@ class MultiLatentAttention(nn.Module):
         if cache is not None:
             kv_latent, k_pe = cache.update_and_fetch(kv_latent, k_pe)
 
-        pe_scores = None if tree is not None else (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
+        # Kimi's split kernel consumes the shared channels after position
+        # encoding. Ling supplies rotated Q/K here, preserving its RoPE law.
+        fused_output = None
+        if tree is None and length == 1:
+            fused_output = self.fused_latent_output(q_nope, q_pe, kv_latent, k_pe, mask)
+        pe_scores = (None if tree is not None or fused_output is not None
+                     else (q_pe * self.scale) @ k_pe.swapaxes(-1, -2))
         if mask is not None and tree is None:
             pe_scores = mx.where(
                 mask,
@@ -230,7 +239,9 @@ class MultiLatentAttention(nn.Module):
                 mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype),
             )
 
-        if tree is not None:
+        if fused_output is not None:
+            output = fused_output
+        elif tree is not None:
             output = tree.mla(self, q_nope, q_pe, kv_latent, k_pe, cache, int(offset))
         elif length == 1:
             q_nope = self.embed_q(q_nope)
@@ -239,12 +250,13 @@ class MultiLatentAttention(nn.Module):
             keys = self.embed_q(kv_latent, transpose=False)
             values = self.unembed_out(kv_latent)
 
-        if tree is None:
+        if tree is None and fused_output is None:
             output = scaled_dot_product_attention(
                 q_nope, keys, values, cache=cache, scale=self.scale, mask=pe_scores,
             )
             if length == 1:
                 output = self.unembed_out(output)
+            self.ling_calls["mla_reference"] += 1
 
         output = output.transpose(0, 2, 1, 3)
         if self.g_proj is not None:
@@ -261,6 +273,19 @@ class MultiLatentAttention(nn.Module):
 
         output = output.reshape(batch, length, -1)
         return self.dense(output)
+
+    def fused_latent_output(self, q_nope, q_pe, latent, positional, mask=None):
+        if not self.ling_fused_mla or self.training or self.scale != 192**-0.5:
+            return None
+        from .kimi_linear_mla_fused import admits, attend
+
+        if q_nope.shape != (1, 32, 1, 128) or mask is not None:
+            return None
+        absorbed = self.embed_q(q_nope)
+        if not admits(absorbed, q_pe, latent, positional, mask):
+            return None
+        self.ling_calls["mla_fused_decode"] += 1
+        return self.unembed_out(attend(absorbed, q_pe, latent, positional).astype(q_nope.dtype))
 
 
 class ShortConv1d(nn.Module):
@@ -321,6 +346,9 @@ class KimiDeltaAttention(nn.Module):
         # Omitting it changes the recurrence even though every shape matches.
         self.lower_bound = args.kda_lower_bound
         self.scale = float(self.head_dim) ** -0.5
+        self.ling_merged_conv = False
+        self.ling_fused_norm = False
+        self.ling_calls = Counter()
 
         hidden = args.hidden_size
         self.q_proj = nn.Linear(hidden, self.projection_dim, bias=False)
@@ -387,9 +415,9 @@ class KimiDeltaAttention(nn.Module):
             spans = cache.rollback_spans(length, mask)
         snapshot = [q_state, k_state, v_state, recurrent_state]
         raw = (self.q_proj(x), self.k_proj(x), self.v_proj(x))
-        q, q_state = self.q_conv1d(raw[0], q_state, mask, lengths)
-        k, k_state = self.k_conv1d(raw[1], k_state, mask, lengths)
-        v, v_state = self.v_conv1d(raw[2], v_state, mask, lengths)
+        (q, k, v), (q_state, k_state, v_state) = self.convolve_qkv(
+            raw, (q_state, k_state, v_state), mask, lengths,
+        )
 
         if cache is not None:
             cache[0] = q_state
@@ -447,8 +475,54 @@ class KimiDeltaAttention(nn.Module):
         else:
             gate = self.g_b_proj(self.g_a_proj(x))
         gate = gate.reshape(batch, length, self.num_heads, self.head_dim)
-        output = self.o_norm(output) * mx.sigmoid(gate)
+        output = self.output_norm_gate(output, gate)
         return self.o_proj(output.reshape(batch, length, -1))
+
+    def convolve_qkv(self, raw, states, mask=None, lengths=None):
+        # The real layer0 A/B won at one row and lost at 32/128 prompt rows.
+        # Keep prompt convolutions on the ordinary path. Tree ancestry windows
+        # arrive as independent batch rows with sequence length one.
+        merge = (self.ling_merged_conv and raw[0].shape[1] == 1
+                 and mask is None and lengths is None and not self.training)
+        if merge:
+            weights = (self.q_conv1d.conv.weight, self.k_conv1d.conv.weight, self.v_conv1d.conv.weight)
+            # A channel stack must not promote otherwise independent branches.
+            # The loader preserves per-tensor dtypes, including mixed artifacts.
+            merge = all(value.dtype == raw[0].dtype for value in (*raw, *weights)) and all(
+                state is None or state.dtype == raw[0].dtype for state in states
+            )
+        if merge:
+            inputs = mx.concatenate(raw, axis=-1)
+            history = mx.concatenate([
+                mx.zeros((value.shape[0], self.conv_kernel-1, value.shape[-1]), dtype=value.dtype)
+                if state is None else state for value, state in zip(raw, states, strict=True)
+            ], axis=-1)
+            full = mx.concatenate([history, inputs], axis=1)
+            cached = getattr(self, "_ling_conv_weights", None)
+            if cached is None or any(a is not b for a, b in zip(cached[0], weights, strict=True)):
+                cached = (weights, mx.concatenate(weights, axis=0))
+                object.__setattr__(self, "_ling_conv_weights", cached)
+            weight = cached[1]
+            result = nn.silu(mx.conv1d(full, weight, groups=3*self.projection_dim))
+            tails = mx.contiguous(full[:, -(self.conv_kernel-1):])
+            self.ling_calls["merged_conv"] += 1
+            return mx.split(result, 3, axis=-1), mx.split(tails, 3, axis=-1)
+        self.ling_calls["separate_conv"] += 1
+        values = [module(value, state, mask, lengths) for module, value, state in
+                  zip((self.q_conv1d, self.k_conv1d, self.v_conv1d), raw, states, strict=True)]
+        return tuple(item[0] for item in values), tuple(item[1] for item in values)
+
+    def output_norm_gate(self, output, gate):
+        if self.ling_fused_norm and not self.training:
+            from .ling_fused import norm_gate
+
+            result = norm_gate(output, gate, self.o_norm.weight, self.o_norm.eps)
+            if result is not None:
+                self.ling_calls["fused_norm"] += 1
+                return result
+            self.ling_calls["fused_norm_declined"] += 1
+        self.ling_calls["eager_norm"] += 1
+        return self.o_norm(output) * mx.sigmoid(gate)
 
     def _gated_delta_update(self, *args, **kwargs):
         return gated_delta_update(*args, **kwargs)

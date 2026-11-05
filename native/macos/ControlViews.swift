@@ -11,6 +11,7 @@ struct EngineProfilesView: View {
     @State private var startup = false
     @State private var share = false
     @State private var route = "auto"
+    @State private var runtimeOptions = RuntimeLaunchOptions()
 
     private var profiles: [JSON] { model.preferences["profiles"].array }
     private func update(_ profile: JSON, _ key: String, _ value: Any) {
@@ -28,7 +29,7 @@ struct EngineProfilesView: View {
                 Text("Serving engines").font(.title2.weight(.semibold))
                 Text("Saved profiles retain each model's port, lane count, route, startup and community sharing choices. Multiple engines share the app's GPU reservation; memory capacity still applies.")
                     .foregroundStyle(.secondary)
-                ForEach(Array(profiles.enumerated()), id: \.offset) { _, profile in
+                ForEach(profiles, id: \.servingProfileID) { profile in
                     let engine = model.workers.first { $0["profile_id"].text == profile["id"].text }
                     let running = model.workers.first { $0["profile_id"].text == profile["id"].text && ["Preparing", "Loading", "Ready", "Busy", "Unreachable", "Stopping", "Suspended", "Suspending", "Resuming", "SuspendError", "ResumeError", "SuspensionRecoveryRequired"].contains($0["state"].text) }
                     GroupBox {
@@ -70,6 +71,11 @@ struct EngineProfilesView: View {
                                     }
                                 }
                             }
+                            EngineRuntimeOptionsEditor(profile: profile)
+                                .disabled(running != nil || model.busy)
+                            if running != nil {
+                                Text("Stop this engine to edit its launch options.").font(.caption).foregroundStyle(.secondary)
+                            }
                         }.padding(6)
                     }
                 }
@@ -88,6 +94,7 @@ struct EngineProfilesView: View {
                             TextField("Context (0 = automatic)", text: $context).frame(width: 190)
                         }
                         Picker("Route", selection: $route) { Text("Automatic").tag("auto"); Text("Ordinary reference").tag("ordinary") }
+                        RuntimeLaunchOptionsView(options: $runtimeOptions)
                         HStack {
                             Toggle("Start when MLX2 launches", isOn: $startup)
                             Toggle("Serve admitted community systems", isOn: $share)
@@ -95,10 +102,13 @@ struct EngineProfilesView: View {
                         Button("Save Profile") {
                             guard let portValue = Int(port), let contextValue = Int(context) else { model.error = "Port and context must be whole numbers."; return }
                             var rows = profiles.map { $0.raw as? [String: Any] ?? [:] }
-                            rows.append(["id": UUID().uuidString.lowercased(), "path": path, "port": portValue,
-                                         "context": contextValue, "lanes": lanes, "route": route,
-                                         "sticky_port": sticky, "autostart": startup, "share": share])
-                            model.savePreferences(["profiles": rows])
+                            do {
+                                let profile: [String: Any] = ["id": UUID().uuidString.lowercased(), "path": path, "port": portValue,
+                                             "context": contextValue, "lanes": lanes, "route": route,
+                                             "sticky_port": sticky, "autostart": startup, "share": share]
+                                rows.append(try runtimeOptions.applying(to: profile, route: route))
+                                model.savePreferences(["profiles": rows])
+                            } catch { model.error = error.localizedDescription }
                         }.disabled(path.isEmpty || model.busy)
                     }.padding(8)
                 }
@@ -109,6 +119,39 @@ struct EngineProfilesView: View {
     }
 }
 
+private struct EngineRuntimeOptionsEditor: View {
+    @EnvironmentObject var model: DesktopModel
+    let profile: JSON
+    @State private var options = RuntimeLaunchOptions()
+    @State private var route = "auto"
+    var body: some View {
+        DisclosureGroup("Edit route and runtime options") {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Route", selection: $route) {
+                    Text("Automatic").tag("auto")
+                    Text("Ordinary reference").tag("ordinary")
+                }
+                RuntimeLaunchOptionsView(options: $options)
+                Button("Save runtime options") {
+                    do {
+                        var saved = profile.raw as? [String: Any] ?? [:]
+                        saved["route"] = route
+                        saved = try options.applying(to: saved, route: route)
+                        let rows = model.preferences["profiles"].array.map { row in
+                            row["id"].text == profile["id"].text ? saved : row.raw as? [String: Any] ?? [:]
+                        }
+                        model.savePreferences(["profiles": rows])
+                    } catch { model.error = error.localizedDescription }
+                }
+            }.padding(.top, 8)
+        }.onAppear { options = RuntimeLaunchOptions(profile); route = profile["route"].string ?? "auto" }
+    }
+}
+
+private extension JSON {
+    var servingProfileID: String { self["id"].text }
+}
+
 struct CommunityView: View {
     @EnvironmentObject var model: DesktopModel
     @State private var home = ""
@@ -116,6 +159,7 @@ struct CommunityView: View {
     @State private var fabric = "8291"
     @State private var invite = ""
     @State private var membershipResult = ""
+    @State private var loadedSettings = false
     private var community: JSON { model.snapshot["community"] }
 
     private func membership(_ command: String, _ arguments: [String: Any] = [:]) {
@@ -197,11 +241,19 @@ struct CommunityView: View {
                     }.padding(8)
                 }
             }.padding(20)
-        }.onAppear {
-            home = model.preferences["community_home"].string ?? ""
-            front = number(model.preferences["community_front_port"].double, digits: 0)
-            fabric = number(model.preferences["community_fabric_port"].double, digits: 0)
+        }.disabled(!loadedSettings || model.busy)
+        .onAppear { loadSettings() }
+        .onChange(of: model.preferences["community_home"].string) { _, _ in if !loadedSettings { loadSettings() } }
+        .onChange(of: model.snapshot["user_profiles"]["active_id"].string) { _, _ in
+            loadedSettings = false; invite = ""; membershipResult = ""; loadSettings()
         }
+    }
+    private func loadSettings() {
+        guard model.preferences["community_home"].string != nil else { return }
+        home = model.preferences["community_home"].string ?? ""
+        front = String(Int(model.preferences["community_front_port"].double ?? 8290))
+        fabric = String(Int(model.preferences["community_fabric_port"].double ?? 8291))
+        loadedSettings = true
     }
 }
 
@@ -292,9 +344,10 @@ struct ModelLaunchOptionsView: View {
                 guard let port = Int(port), let context = Int(context) else { model.error = "Port and context must be whole numbers."; return }
                 var profiles = model.preferences["profiles"].array.map { $0.raw as? [String: Any] ?? [:] }
                 let identity = profile?["id"].string ?? UUID().uuidString.lowercased()
-                let saved: [String: Any] = ["id": identity, "path": row["path"].text, "port": port, "lanes": lanes,
+                var saved = profile?.raw as? [String: Any] ?? [:]
+                saved.merge(["id": identity, "path": row["path"].text, "port": port, "lanes": lanes,
                                             "context": context, "route": profile?["route"].string ?? "auto",
-                                            "sticky_port": sticky, "autostart": profile?["autostart"].bool ?? false, "share": profile?["share"].bool ?? false]
+                                            "sticky_port": sticky, "autostart": profile?["autostart"].bool ?? false, "share": profile?["share"].bool ?? false]) { _, updated in updated }
                 profiles.removeAll { ($0["id"] as? String) == identity }
                 profiles.append(saved)
                 model.savePreferences(["profiles": profiles])

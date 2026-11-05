@@ -169,7 +169,7 @@ def _read_into(fd, offset, destination):
         return stream.readinto(destination)
 
 
-def read_original_packed(artifact, layer, expert, *, read_into=None):
+def read_original_packed(artifact, layer, expert, *, read_into=None, destination=None):
     """Fill one expert slab directly from exact, sealed official source extents.
 
     Optional read_into(fd, offset, memoryview) returns the count actually filled;
@@ -200,7 +200,12 @@ def read_original_packed(artifact, layer, expert, *, read_into=None):
         ordered = sorted((r["offset"], r["offset"]+r["size"]) for r, _ in rows)
         if any(a[1] > b[0] for a, b in zip(ordered, ordered[1:])):
             raise ValueError("packed original source extents overlap")
-    slab = np.empty(layout.nbytes, np.uint8)
+    supplied_destination = destination is not None
+    slab = np.empty(layout.nbytes, np.uint8) if destination is None else destination
+    if (not isinstance(slab, np.ndarray) or slab.dtype != np.uint8
+            or slab.shape != (layout.nbytes,) or not slab.flags.c_contiguous
+            or not slab.flags.writeable):
+        raise ValueError("direct expert destination must be an exact writable byte slab")
     reader = _read_into if read_into is None else read_into
     for shard, rows in shards.items():
         seal = artifact["seals"][shard]
@@ -230,7 +235,45 @@ def read_original_packed(artifact, layer, expert, *, read_into=None):
             checked_file(artifact["root"], shard, seal)
         finally:
             os.close(fd)
-    return HostExpert(slab, layout)
+    return layout if supplied_destination else HostExpert(slab, layout)
+
+
+def _read_original_destination(artifact, layer, expert, destination, read_into):
+    return read_original_packed(artifact,layer,expert,destination=destination,read_into=read_into)
+
+
+def read_original_device(artifact, layer, expert, *, read_into=None, stream=None,
+                         read_call=None, on_allocated=None):
+    """Read into a fresh final MLX allocation; publish only after all seals pass.
+
+    A slot is never reused or overwritten while any consumer can retain it.
+    This removes the host slab/upload copy while preserving ordinary lease and
+    pending-upload lifetimes. No allocator cache manipulation is permitted.
+    """
+    import mlx.core as mx
+    layout = canonical_layout("original")
+    with mx.stream(stream) if stream is not None else nullcontext():
+        backing = mx.zeros((layout.nbytes,), dtype=mx.uint8)
+        mx.eval(backing)
+        view = np.asarray(memoryview(backing))
+        # MLX's export is the proof of shared storage; refuse a copy or an
+        # unavailable/moving pointer instead of silently writing staging.
+        pointer = np.frombuffer(memoryview(backing).cast("B"), dtype=np.uint8).ctypes.data
+        if view.ctypes.data != pointer or not view.flags.writeable:
+            raise ValueError("MLX does not expose writable final expert storage")
+        dtypes = {"<u4": mx.uint32, "|u1": mx.uint8}
+        tensors = {t.name: backing[t.offset:t.offset+t.nbytes].view(dtypes[t.dtype]).reshape(t.shape)
+                   for t in layout.tensors}
+        mx.eval(*tensors.values())
+        packed=PackedExpert(backing,layout,tensors,_compact_issuer=_COMPACT_UPLOAD_ISSUER)
+        if on_allocated is not None:on_allocated(packed)
+        # Production injects ReadPool.call. A late worker retains this exact
+        # view/backing; it never evaluates MLX or publishes a partial expert.
+        if read_call is None:
+            _read_original_destination(artifact,layer,expert,view,read_into)
+        else:
+            read_call(_read_original_destination,artifact,layer,expert,view,read_into)
+    return packed
 
 
 class PackedExpert(Mapping):

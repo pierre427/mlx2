@@ -684,7 +684,12 @@ class Model(nn.Module):
                 if not any(key in normalized for key in keys):
                     continue
                 target = f"{prefix}.switch_mlp.{projection}.weight"
-                if target in normalized or not all(key in normalized for key in keys):
+                # A packed experts.{gate_up,down}_proj table would be renamed
+                # over the stacked one below; refuse both representations.
+                kind = 'down_proj' if projection == 'down_proj' else 'gate_up_proj'
+                packed = (f"{prefix}.experts.{kind}", f"{prefix}.switch_mlp.{kind}.weight")
+                if (target in normalized or any(key in normalized for key in packed)
+                        or not all(key in normalized for key in keys)):
                     raise ValueError("incomplete or duplicate individual expert tables")
                 normalized[target] = mx.stack([normalized.pop(key) for key in keys])
         rename_packed_experts(

@@ -351,6 +351,18 @@ def test_individual_expert_missing_tensor_refuses_sanitize(monkeypatch):
         source.sanitize(weights)
 
 
+def test_individual_and_packed_expert_tables_together_refuse_sanitize(monkeypatch):
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    source = _tiny_mtp_model(monkeypatch, False)
+    weights = _released_layout(dict(tree_flatten(source.parameters())), False, "numbered")
+    first = weights["mtp.layers.0.mlp.experts.0.gate_proj.weight"]
+    for packed in ("mtp.layers.0.mlp.experts.gate_up_proj", "mtp.layers.0.mlp.switch_mlp.gate_up_proj.weight"):
+        with pytest.raises(ValueError, match="duplicate"):
+            source.sanitize({**weights, packed: mx.zeros((2, 2 * first.shape[0], first.shape[1]))})
+
+
 def test_adapter_artifact_loads_are_strict():
     """Every adapter's model load is strict, so a key a sanitize rule missed
     fails the load instead of leaving a randomly initialised tensor."""
@@ -673,8 +685,12 @@ def _flash_next_stub_load(tmp_path, monkeypatch):
 
     from mlx2.adapters import flash_next
     from mlx2.runtime import ubc_evict
-    from mlx2.runtime.models import import_env, qwen4_exp, qwen4_ple_nvme
+    from mlx2.runtime.models import import_env, moe_nax_gather, qwen4_exp, qwen4_ple_nvme, switch_layers
 
+    # The adapter's MoE claim sets process globals that release() leaves in
+    # place; restore them at teardown so later tests see the stock route.
+    monkeypatch.setattr(moe_nax_gather, "MODE", moe_nax_gather.MODE)
+    monkeypatch.setattr(switch_layers, "_RHS_PAD_POLICY", switch_layers._RHS_PAD_POLICY)
     endoftext, _ = _chat_tokenizer(tmp_path)
     (tmp_path / "config.json").write_text(json.dumps({
         "model_type": "qwen4_exp",

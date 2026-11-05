@@ -439,6 +439,14 @@ def resolve_best_route_default(
     return record
 
 
+def _explicit_projection_owners(args) -> list[str]:
+    owners = [name for name in ("lane_matmul", "int8_prefill")
+              if getattr(args, name, None) not in (None, "auto", "off")]
+    if getattr(args, "microscaling_prefill", None) not in (None, "off"):
+        owners.append("microscaling_prefill")
+    return owners
+
+
 def finish_best_route_default(args, policy):
     """Apply exact-artifact policy defaults and pin a verified drafter identity.
 
@@ -449,6 +457,12 @@ def finish_best_route_default(args, policy):
     if not record or not record.get("applied"):
         return policy
     defaults = record["route"].get("execution_policy")
+    owners = _explicit_projection_owners(args)
+    if defaults and owners:
+        # An operator-chosen projection owner cannot compose with a default
+        # TensorFold/fused projection policy; the engine would refuse to start.
+        record["execution_policy_defaults_skipped"] = owners
+        defaults = None
     if defaults:
         # Explicit values (including False and None) always win. The normal
         # adapter validation and cache-identity construction see this policy.
@@ -486,6 +500,10 @@ def receipt_view(record: dict | None) -> dict | None:
     if record.get("failover"):
         view["failover"] = [item["route"] for item in record["failover"]]
     policy = (record.get("route") or {}).get("execution_policy")
-    if policy is not None:
+    skipped = record.get("execution_policy_defaults_skipped")
+    if skipped:
+        # The table's policy was not merged; never advertise it as applied.
+        view["execution_policy_defaults_skipped"] = list(skipped)
+    elif policy is not None:
         view["execution_policy"] = dict(policy)
     return view

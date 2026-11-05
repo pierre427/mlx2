@@ -212,3 +212,12 @@ def test_extreme_aspect_ratio_refuses_reference_fallback_token_overflow():
         smart_resize(3, 1_000_000, 28, 4096)
     h, w = smart_resize(224, 560, 28, 4096)
     assert (h // 28) * (w // 28) <= 4096
+
+
+def test_serving_refuses_image_markers_without_their_payload():
+    from mlx2.serving import validated_adapter_prefill_inputs
+    adapter = object.__new__(MuseGlimmerAdapter)
+    adapter._config = {'image_token_id': 95}
+    assert validated_adapter_prefill_inputs(adapter, {}, [1, 2, 3], None) is None
+    with pytest.raises(ValueError, match='without their image payload'):
+        validated_adapter_prefill_inputs(adapter, {}, [1, 95, 3], None)

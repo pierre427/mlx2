@@ -9,14 +9,14 @@ private struct SidebarGroup: Identifiable {
 }
 private let sidebarGroups = [
     SidebarGroup(id: "workspace", title: "Workspace", sections: ["Chat", "Code", "World", "Memory", "Agents", "Skills", "Wakeups", "Dream"]),
-    SidebarGroup(id: "models", title: "Models", sections: ["Model Library", "Engines", "Qualification", "Media", "Downloads", "Conversions"]),
+    SidebarGroup(id: "models", title: "Models", sections: ["Model Library", "Engines", "Runtime", "Qualification", "Media", "Downloads", "Conversions"]),
     SidebarGroup(id: "monitor", title: "Monitor", sections: ["Overview", "Performance", "Requests", "Cache", "Routes", "Logs"]),
     SidebarGroup(id: "connections", title: "Connections & Settings", sections: ["Community", "Helpers", "User Profiles", "Settings"])
 ]
 private let symbols = ["Code": "chevron.left.forwardslash.chevron.right", "Chat": "bubble.left.and.bubble.right", "Overview": "chart.bar.xaxis", "Performance": "gauge.with.dots.needle.67percent", "Requests": "list.bullet", "Cache": "externaldrive",
                        "Routes": "point.3.connected.trianglepath.dotted", "Logs": "doc.text",
                        "Model Library": "shippingbox", "Settings": "gearshape", "Qualification": "checkmark.seal",
-                       "Skills": "books.vertical", "Wakeups": "alarm", "User Profiles": "person.crop.circle", "World": "cube.transparent", "Dream": "moon.stars", "Engines": "server.rack", "Community": "network", "Media": "photo.on.rectangle.angled",
+                       "Skills": "books.vertical", "Wakeups": "alarm", "User Profiles": "person.crop.circle", "World": "cube.transparent", "Dream": "moon.stars", "Engines": "server.rack", "Runtime": "slider.horizontal.3", "Community": "network", "Media": "photo.on.rectangle.angled",
                        "Downloads": "arrow.down.circle", "Conversions": "arrow.triangle.2.circlepath", "Helpers": "person.2.badge.gearshape", "Agents": "person.3.sequence", "Memory": "brain.head.profile"]
 
 struct StatusDot: View {
@@ -196,6 +196,7 @@ struct DetailsView: View {
                 case "Logs": LogsView()
                 case "Qualification": QualificationView(model: model)
                 case "Engines": EngineProfilesView()
+                case "Runtime": RuntimeView()
                 case "Community": CommunityView()
                 case "Media": MediaView()
                 case "Downloads": DownloadsView()
@@ -709,7 +710,9 @@ struct SettingsView: View {
     @State private var lanes = "0"
     @State private var stickyPort = true
     @State private var route = "auto"
+    @State private var runtimeOptions = RuntimeLaunchOptions()
     @State private var launchAtLogin = LoginItems.enabled
+    @State private var loadedSettings = false
     var body: some View {
         Form {
             Section {
@@ -745,12 +748,17 @@ struct SettingsView: View {
                 }
                 Text("Automatic uses the runtime's artifact-specific defaults. Starts remain unqualified unless the server supplies matching qualification evidence.")
                     .font(.caption).foregroundStyle(.secondary)
+                RuntimeLaunchOptionsView(options: $runtimeOptions)
                 Button("Save Settings") {
                     guard let port = Int(port), let context = Int(context), let lanes = Int(lanes) else {
                         model.error = "Port, context and lanes must be whole numbers."; return
                     }
-                    model.perform("configure", ["settings": ["root": model.library["root"].text,
-                                                              "port": port, "context": context, "lanes": lanes, "route": route, "sticky_port": stickyPort]])
+                    do {
+                        var settings = model.snapshot["settings"].raw as? [String: Any] ?? [:]
+                        settings.merge(["root": model.library["root"].text, "port": port, "context": context,
+                                        "lanes": lanes, "route": route, "sticky_port": stickyPort]) { _, updated in updated }
+                        model.perform("configure", ["settings": try runtimeOptions.applying(to: settings, route: route)])
+                    } catch { model.error = error.localizedDescription }
                 }
             }.disabled(model.servingSettingsLocked)
             Section("Application") {
@@ -771,14 +779,23 @@ struct SettingsView: View {
             SkillsPolicySettings()
             ChoiceSettingsView()
             ContextSettingsView()
-        }.formStyle(.grouped).disabled(model.busy)
-            .onAppear {
-                let settings = model.snapshot["settings"]
-                port = number(settings["port"].double, digits: 0)
-                context = number(settings["context"].double, digits: 0)
-                lanes = number(settings["lanes"].double, digits: 0)
-                stickyPort = settings["sticky_port"].raw is NSNull ? true : settings["sticky_port"].bool
-                route = settings["route"].string ?? "auto"
-            }
+        }.formStyle(.grouped).disabled(model.busy || !loadedSettings)
+            // Recreate nested settings editors once their first snapshot arrives,
+            // and when profiles change; polling must not overwrite unsaved edits.
+            .id((model.snapshot["user_profiles"]["active_id"].string ?? "") + (loadedSettings ? ":ready" : ":loading"))
+            .onAppear { loadSettings() }
+            .onChange(of: model.snapshot["settings"]["root"].string) { _, _ in if !loadedSettings { loadSettings() } }
+            .onChange(of: model.snapshot["user_profiles"]["active_id"].string) { _, _ in loadedSettings = false; loadSettings() }
+    }
+    private func loadSettings() {
+        let settings = model.snapshot["settings"]
+        guard settings["root"].string != nil else { return }
+        port = String(Int(settings["port"].double ?? 8285))
+        context = String(Int(settings["context"].double ?? 0))
+        lanes = String(Int(settings["lanes"].double ?? 1))
+        stickyPort = settings["sticky_port"].raw is NSNull ? true : settings["sticky_port"].bool
+        route = settings["route"].string ?? "auto"
+        runtimeOptions = RuntimeLaunchOptions(settings)
+        loadedSettings = true
     }
 }

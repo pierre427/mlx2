@@ -105,6 +105,18 @@ import SwiftUI
         precondition(event?.name == completed.name && event?.arguments == completed.arguments)
         precondition(ChatToolEvent.restore([running.archive, running.archive]).count == 1)
         precondition(ChatToolEvent.restore([running.archive]).first?.statusTitle == "Interrupted")
+        precondition(ChatToolEvent.outcome(JSON(["result": ["error": "Tool could not finish"]])) == "failed")
+        precondition(ChatToolEvent.outcome(JSON(["isError": true, "content": [["type": "text", "text": "Tool failed"]]])) == "failed")
+        precondition(ChatToolEvent.outcome(JSON(["result": ["isError": true, "content": []]])) == "failed")
+        precondition(ChatToolEvent.outcome(JSON(["error": ["code": "missing_tool", "message": "Unavailable"]])) == "failed")
+        precondition(ChatToolEvent.outcome(JSON(["result": ["error": ["message": "Unavailable"]]])) == "failed")
+        precondition(ChatToolEvent.outcome(JSON(["result": ["isError": false, "error": NSNull(), "content": []]])) == "completed")
+        precondition(ChatToolEvent.outcome(JSON(["result": ["status": "incomplete"]])) == "failed")
+        precondition(ChatToolEvent.outcome(JSON(["result": ["state": "cancelled"]])) == "cancelled")
+        precondition(ChatToolEvent.outcome(JSON(["result": ["status": "completed"]])) == "completed")
+        precondition(ChatToolEvent.summary([.init(name: "tool", status: "interrupted")]).contains("interrupted"))
+        precondition(!ChatToolEvent.summary([.init(name: "tool", status: "skipped")]).contains("completed"))
+        precondition(ChatToolEvent.summary([.init(name: "tool", status: "awaiting_approval")]).contains("in progress"))
         restored.restoreProfileArchive(JSON(["schema_version": 1, "conversations": ["legacy": [["role": "assistant", "text": "Older answer", "tool_activity": "Older tool activity"]]]]))
         precondition(restored.conversations["legacy"]?.first?.toolEvents.isEmpty == true)
         precondition(restored.conversations["legacy"]?.first?.toolActivity == "Older tool activity")
@@ -149,6 +161,21 @@ import SwiftUI
         var payloads: [String] = []
         for try await payload in ServerSentEvents(stream) { payloads.append(payload) }
         precondition(payloads == [unicode + "\nsecond", "[DONE]"])
+        let crStream = AsyncStream<UInt8> { continuation in
+            for byte in "data: first\r\rdata: second\r\n\r\ndata: incomplete".utf8 { continuation.yield(byte) }
+            continuation.finish()
+        }
+        var crPayloads: [String] = []
+        for try await payload in ServerSentEvents(crStream) { crPayloads.append(payload) }
+        precondition(crPayloads == ["first", "second"])
+        let oversizedStream = AsyncStream<UInt8> { continuation in
+            for _ in 0..<(2 * 1024 * 1024 + 1) { continuation.yield(65) }
+            continuation.finish()
+        }
+        do {
+            for try await _ in ServerSentEvents(oversizedStream) {}
+            fatalError("Unterminated oversized stream event was accepted")
+        } catch { precondition(error.localizedDescription.contains("2 MiB")) }
 
         let chat = ChatModel()
         let result = String(repeating: "R", count: 1024 * 1024)
@@ -186,10 +213,51 @@ import SwiftUI
         print("Bug-sweep SSE Unicode/multiline framing, bounded archive and context reset checks passed")
     }
 
+    @MainActor static func profileRecoveryChecks() async throws {
+        let model = DesktopModel()
+        let original = ChatModel()
+        original.selected = "saved-chat"
+        original.conversations[original.selected] = [ChatMessage(role: "user", text: "Keep this history")]
+        original.draft = "Keep this unsent draft"
+        var shouldFail = false
+        var wrongProfile = false
+        var writes = 0
+        let persistence = ProfileChatPersistence(request: { command, arguments in
+            if command == "user_profile_chat_set" { writes += 1; return JSON([:]) }
+            if shouldFail { throw DesktopError.message("Synthetic storage unavailable") }
+            return JSON(["profile_id": wrongProfile ? "wrong-profile" : arguments["profile_id"]!, "document": original.profileArchive()])
+        })
+        persistence.start(model)
+        persistence.pause()
+        let loaded = await persistence.select("profile-a")
+        precondition(loaded && !model.chat.mutationsPaused)
+        precondition(model.chat.selected != "saved-chat" && model.chat.draft.isEmpty)
+        model.chat.selected = "saved-chat"
+        precondition(model.chat.draft == "Keep this unsent draft")
+        shouldFail = true
+        let failed = await persistence.select("profile-b")
+        precondition(!failed && model.chat.mutationsPaused)
+        precondition(model.chat.draft == "Keep this unsent draft" && model.chat.conversations["saved-chat"]?.first?.text == "Keep this history")
+        precondition(model.chat.permissionProfile == "profile-a")
+        let savedDuringFailure = await persistence.flush()
+        precondition(!savedDuringFailure && writes == 0)
+        shouldFail = false
+        wrongProfile = true
+        let mismatched = await persistence.select("profile-b")
+        precondition(!mismatched && model.chat.permissionProfile == "profile-a")
+        wrongProfile = false
+        let recovered = await persistence.select("profile-b")
+        precondition(recovered && !model.chat.mutationsPaused && model.chat.permissionProfile == "profile-b")
+        precondition(model.chat.draft == "Keep this unsent draft")
+        await persistence.close()
+        print("Profile restore failure, cross-profile receipt, draft retention and recovery checks passed")
+    }
+
     @MainActor static func main() async throws {
         _ = NSApplication.shared
         precondition(NSApp.activationPolicy() != .regular)
         try await bugsweepChecks()
+        try await profileRecoveryChecks()
         try toolCardChecks()
         try await payloadLayoutChecks()
         try await choiceChecks()
@@ -238,6 +306,18 @@ import SwiftUI
         let restoredCallback = ChatModel()
         restoredCallback.restoreProfileArchive(JSON(retried.profileArchive()))
         precondition(restoredCallback.conversations[retried.selected]?.first?.origin == "Subagent result")
+        for failure in [JSON(["isError": true, "content": [["type": "text", "text": "synthetic missing capability"]]]), JSON(["result": ["error": ["message": "synthetic missing capability"]]])] {
+            let structuredFailure = ChatModel()
+            structuredFailure.selected = ChatModel.identity(server); structuredFailure.draft = "retry failed tool"
+            var executions = 0
+            structuredFailure.send(server: server, resolve: { target }, tools: { context }, execute: { _, _, _, _ in
+                executions += 1
+                return failure
+            })
+            try await wait(structuredFailure)
+            precondition(executions == 1 && structuredFailure.error == nil)
+            precondition(structuredFailure.conversations[structuredFailure.selected]?.last?.toolEvents.allSatisfy { $0.status == "failed" } == true)
+        }
         print("Repeated failed tool execution suppression and callback origin persistence checks passed")
         let lateSchema = JSON(["type": "function", "function": ["name": "mlx2__late_action", "description": "Synthetic allowed action", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]])
         let lateContext = JSON(["session_id": "synthetic-session", "tools": [["type": "function", "function": ["name": "mlx2_tool_search", "parameters": ["type": "object"]]], ["type": "function", "function": ["name": "mlx2_tool_call", "parameters": ["type": "object"]]]]])
@@ -585,6 +665,10 @@ import SwiftUI
         restoredFork.restoreProfileArchive(JSON(try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: forkArchive))))
         precondition(restoredFork.branches[branch]?["parent_id"] == parentConversation)
         precondition(restoredFork.canFork(at: restoredFork.conversations[branch]!.last!))
+        let invalidFork = try await restoredFork.forkConversation(at: restoredFork.conversations[branch]!.last!, archive: { id, _ in
+            JSON(["session_id": id, "revision": 7.5, "digest": "fractional-revision"])
+        })
+        precondition(invalidFork == nil && restoredFork.selected == branch && !restoredFork.branching)
         var archivedForkPoint: [String: Any] = [:]
         let childBranch = try await restoredFork.forkConversation(at: restoredFork.conversations[branch]!.last!, archive: { id, document in
             archivedForkPoint = document
@@ -593,6 +677,15 @@ import SwiftUI
         precondition(restoredFork.branches[childBranch]?["parent_revision"] == "7")
         precondition(restoredFork.branches[childBranch]?["parent_id"] == branch)
         precondition((archivedForkPoint["wire_history"] as? [String: [[String: Any]]])?[branch]?.last?["role"] as? String == "assistant")
+        let priorTools = ChatModel()
+        priorTools.restoreProfileArchive(JSON(forkArchive))
+        let priorToolHistory = try JSONSerialization.data(withJSONObject: priorTools.profileArchive()["wire_history"]!, options: [.sortedKeys])
+        priorTools.draft = "Never sent because resolution failed"
+        priorTools.send(server: server, resolve: { throw DesktopError.message("Synthetic resolve failed") })
+        try await wait(priorTools)
+        let afterResolveFailure = try JSONSerialization.data(withJSONObject: priorTools.profileArchive()["wire_history"]!, options: [.sortedKeys])
+        precondition(priorToolHistory == afterResolveFailure)
+        precondition(priorTools.conversations[priorTools.selected]?.suffix(2).allSatisfy { !$0.committed } == true)
 
         chat.draft = "follow up"
         chat.send(server: server, resolve: { target }, systemPrompt: "new base prompt", tools: { context }, execute: execute)

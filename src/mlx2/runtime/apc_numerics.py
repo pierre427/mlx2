@@ -238,6 +238,11 @@ def execution_numerics_identity(environ=None, *, sp_qmm=False, verify_bitexact=F
         bound["fp_decode_attention"] = {
             "version": FP_KERNEL_VERSION, "min_context": FP_MIN_CONTEXT,
         }
+    if env.get("MLX2_FP_VERIFY_KERNEL") == "1":
+        from .models.fp_verify_tensor import VERSION
+        bound["fp_verify_attention"] = {"version": VERSION}
+    if env.get("MLX2_INPASS_CHECKPOINTS") == "1":
+        bound["inpass_checkpoints"] = {"version": "qwen38-gdn-projection-share-v1"}
     return {"version": 1, **bound} if bound else None
 
 

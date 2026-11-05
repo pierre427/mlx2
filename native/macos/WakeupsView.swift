@@ -11,6 +11,9 @@ struct WakeupsView: View {
     @State private var offset = 0
     @State private var page = JSON()
     @State private var error: String?
+    @State private var refreshID = UUID()
+    @State private var changing = false
+    private var profileID: String { model.snapshot["user_profiles"]["active_id"].string ?? "" }
     private var schedules: [JSON] { page["schedules"].array }
     var body: some View {
         ScrollView {
@@ -26,7 +29,7 @@ struct WakeupsView: View {
                         Toggle("Suspend the model again when the turn finishes", isOn: $suspendAfter)
                         Button(creating ? "Scheduling…" : "Create Schedule") { Task { await create() } }
                             .disabled(creating || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.chat.selected.isEmpty)
-                    }.padding(8)
+                    }.padding(8).disabled(creating || model.busy)
                 }
                 Text("A model can use wakeup_schedule to schedule an interval or an exact date and time in its current branch. Wakeups resume the same suspended model and can suspend it again after the turn. The menu-bar app must remain running; quitting the app stops delivery until it is reopened.").foregroundStyle(.secondary)
                 HStack {
@@ -46,10 +49,10 @@ struct WakeupsView: View {
                                 Spacer()
                                 Text(timestamp(item["next_due"].double))
                                 if !["cancelled", "completed"].contains(item["state"].text) {
-                                    Button("Cancel") { model.perform("wakeup_cancel", ["wakeup_id": item["id"].text]); Task { await refresh() } }
+                                    Button("Cancel") { Task { await change("wakeup_cancel", id: item["id"].text) } }.disabled(changing || model.busy)
                                 }
                                 if ["blocked", "interrupted", "failed"].contains(item["state"].text) {
-                                    Button("Retry") { model.perform("wakeup_retry", ["wakeup_id": item["id"].text]); Task { await refresh() } }
+                                    Button("Retry") { Task { await change("wakeup_retry", id: item["id"].text) } }.disabled(changing || model.busy)
                                 }
                             }
                             Text(item["message"].text).textSelection(.enabled)
@@ -60,28 +63,52 @@ struct WakeupsView: View {
                     }
                 }
             }.padding(20)
-        }.task { await refresh() }
-        .onChange(of: model.snapshot["wakeups"]["total"].double) { _, _ in Task { await refresh() } }
+        }.task(id: profileID) {
+            offset = 0; page = JSON(); error = nil
+            while !Task.isCancelled {
+                await refresh()
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            }
+        }
     }
     @MainActor private func create() async {
         guard let server = model.servers.first(where: { ChatModel.identity($0) == model.chat.serverIdentity(for: model.chat.selected) }) else {
             error = "Select a running app-managed model in Chat first."; return
         }
+        let profile = profileID, sessionID = model.chat.selected, scheduledMessage = message
+        let scheduledMode = mode, scheduledSeconds = seconds, scheduledDate = date, suspend = suspendAfter
         creating = true; defer { creating = false }
         do {
             let target = try await model.chatTarget(server)
-            var arguments: [String: Any] = ["session_id": model.chat.selected, "_target": target.raw,
-                "message": message, "suspend_after": suspendAfter, "every_seconds": NSNull(), "at": NSNull()]
-            if mode == "interval" {
-                guard let interval = Double(seconds), interval.isFinite, interval >= 1 else { throw DesktopError.message("Choose an interval of at least one second.") }
+            guard profileID == profile, !Task.isCancelled else { return }
+            var arguments: [String: Any] = ["session_id": sessionID, "_target": target.raw,
+                "message": scheduledMessage, "suspend_after": suspend, "every_seconds": NSNull(), "at": NSNull()]
+            if scheduledMode == "interval" {
+                guard let interval = Double(scheduledSeconds), interval.isFinite, interval >= 1 else { throw DesktopError.message("Choose an interval of at least one second.") }
                 arguments["every_seconds"] = interval
-            } else { arguments["at"] = ISO8601DateFormatter().string(from: date) }
+            } else { arguments["at"] = ISO8601DateFormatter().string(from: scheduledDate) }
             _ = try await model.request("wakeup_schedule", arguments)
+            guard profileID == profile else { return }
             message = ""; error = nil; await refresh()
-        } catch { self.error = error.localizedDescription }
+        } catch { if profileID == profile { self.error = error.localizedDescription } }
+    }
+    @MainActor private func change(_ command: String, id: String) async {
+        guard !changing else { return }
+        let profile = profileID
+        changing = true; defer { changing = false }
+        do {
+            _ = try await model.request(command, ["wakeup_id": id])
+            guard profileID == profile else { return }
+            await refresh()
+        } catch { if profileID == profile { self.error = error.localizedDescription } }
     }
     @MainActor private func refresh() async {
-        do { page = try await model.request("wakeup_list", ["offset": offset, "limit": 100]); error = nil }
-        catch { self.error = error.localizedDescription }
+        let profile = profileID, requestedOffset = offset, requestID = UUID()
+        refreshID = requestID
+        do {
+            let result = try await model.request("wakeup_list", ["offset": requestedOffset, "limit": 100])
+            guard !Task.isCancelled, profileID == profile, refreshID == requestID, offset == requestedOffset else { return }
+            page = result; error = nil
+        } catch { if !Task.isCancelled, profileID == profile, refreshID == requestID { self.error = error.localizedDescription } }
     }
 }

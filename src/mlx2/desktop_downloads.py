@@ -442,7 +442,7 @@ class Downloads:
                 stream.write(token)
             path.chmod(0o600)
             self.controller.configure_preferences({"hf_token_file": str(path)})
-            return {"saved": True}
+            return {"saved": True, "token_file": str(path)}
         raise DownloadError("Unknown download operation")
 
     def close(self):

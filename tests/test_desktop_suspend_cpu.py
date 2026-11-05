@@ -17,7 +17,8 @@ from mlx2.desktop_suspend import Suspension
 
 
 @pytest.fixture
-def lifecycle(tmp_path):
+def lifecycle(tmp_path, monkeypatch):
+    monkeypatch.setattr("mlx2.desktop_suspend.child_exited", lambda child: False)
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text('{"model_type":"synthetic"}')
@@ -29,7 +30,7 @@ def lifecycle(tmp_path):
         "url": "http://127.0.0.1:12345", "api_key_file": str(tmp_path / "key"), "apc_persist_dir": str(tmp_path / "cache"),
         "effective_context": 8192, "resume_lineage_id": "stable-lineage", "runner": runner}
     owner = SimpleNamespace(home=tmp_path, lifecycle_lock=threading.RLock(), reap=Mock(), preparing=lambda: False,
-        child=SimpleNamespace(pid=12345), worker=worker, worker_error=None, settings={"context": 8192}, context_resolver=None,
+        child=SimpleNamespace(pid=12345, poll=lambda: pytest.fail("liveness must not reap the process-group leader")), worker=worker, worker_error=None, settings={"context": 8192}, context_resolver=None,
         preparation_cancel=threading.Event())
     def checked(path, identity):
         if artifact_row(Path(path))["identity"] != identity:
@@ -57,6 +58,20 @@ def lifecycle(tmp_path):
 def join(helper):
     helper.thread.join(2)
     assert not helper.busy()
+
+
+def test_exited_owned_leader_refuses_suspend_requests_without_reaping(lifecycle, monkeypatch):
+    import psutil
+    from mlx2.desktop import child_exited
+    helper, owner = lifecycle
+    monkeypatch.setattr("mlx2.desktop_suspend.child_exited", child_exited)
+    monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(status=lambda: psutil.STATUS_ZOMBIE))
+    helper._capture_operation()
+    with pytest.raises(ValueError, match="exited during suspension"):
+        helper._assert_operation()
+    with pytest.raises(ValueError, match="no longer has its owned process"):
+        Suspension.request(helper, "GET", "/v1/status")
+    assert owner.child is not None
 
 
 @pytest.mark.parametrize("live_state", ["suspended", "parked"])

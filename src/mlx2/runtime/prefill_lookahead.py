@@ -30,6 +30,7 @@ from typing import Any
 class PrefillLookahead:
     rows_after: tuple[int, ...]
     step: int
+    next_tokens: tuple[tuple[int, ...], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -46,8 +47,12 @@ _LOOKAHEAD: ContextVar[PrefillLookahead | None] = ContextVar(
 
 
 @contextlib.contextmanager
-def prefill_lookahead(rows_after: Sequence[int], *, step: int):
-    value = PrefillLookahead(tuple(max(0, int(r)) for r in rows_after), int(step))
+def prefill_lookahead(rows_after: Sequence[int], *, step: int, next_tokens=None):
+    rows = tuple(max(0, int(r)) for r in rows_after)
+    tokens = None if next_tokens is None else tuple(tuple(int(t) for t in lane) for lane in next_tokens)
+    if tokens is not None and (len(tokens) != len(rows) or any(len(t) > min(r, step) for t, r in zip(tokens, rows))):
+        raise ValueError("prefill token lookahead exceeds the guaranteed next chunk")
+    value = PrefillLookahead(rows, int(step), tokens)
     token = _LOOKAHEAD.set(value)
     try:
         yield value

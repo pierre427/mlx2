@@ -554,8 +554,9 @@ class PackedExpertStream:
                         raise ValueError("Engram provider has no "+name)
                 maximum = byte_count(table.maximum_cache_bytes,"Engram maximum cache")
                 current = byte_count(table.resume_reservation_bytes(),"Engram current cache")
+                current -= byte_count(getattr(table,'carry_staging_bound_bytes',0),'Engram carry staging')
                 row_bytes = byte_count(table.row_bytes,"Engram row bytes")
-                if not row_bytes or current > maximum or not isinstance(getattr(table,"_cache",None),dict):
+                if not row_bytes or not 0 <= current <= maximum or not isinstance(getattr(table,"_cache",None),dict):
                     raise ValueError("Engram provider cache geometry mismatch")
             self.ple_tables, self._ple_bound = tables, True
 
@@ -572,7 +573,7 @@ class PackedExpertStream:
         minimum = self.plan.top_k*len(self.tables)*self.row_bytes
         resources = {"experts": ReclaimableMemory(minimum,self.maximum_cache_bytes,self._resize_cache_budget,self.ceiling)}
         resources.update({f"ple.{key}": ReclaimableMemory(0,table.maximum_cache_bytes,table.resize_cache_budget,
-                                                        table.resume_reservation_bytes())
+                                                        table.resume_reservation_bytes()-getattr(table,'carry_staging_bound_bytes',0))
                           for key,table in tables.items()})
         if self.dense_provider is not None:
             dense=self.dense_provider
@@ -616,6 +617,7 @@ class PackedExpertStream:
         byte_count(available_bytes,"available_bytes");byte_count(protected_bytes,"protected_bytes")
         floor=sum(r.minimum_bytes for r in self.elastic.resources.values())
         fixed=self.plan.transient_bound_bytes
+        fixed+=sum(getattr(t,'carry_staging_bound_bytes',0) for t in self.ple_tables.values())
         if self.dense_provider is not None:
             fixed += self.dense_provider.resume_reservation_bytes()-self.dense_provider.cache_budget_bytes
         ceiling=available_bytes+self.live_bytes()-fixed-protected_bytes

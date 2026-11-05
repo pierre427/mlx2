@@ -4,12 +4,12 @@
     "mlx2.adapters.registry": {
       "sha256": "cef9ac51f3524d74bf0dab6e0a87993f0e2eb7c43a84437fd2eb8d1f4485f995",
       "targets": [],
-      "reason": "Reviewed Inkling native adapter registration. The new dynamic target is the literal internal mlx2.adapters.inkling module; selected adapter/model roots define its math closure."
+      "reason": "Reviewed Inkling native adapter registration. The new dynamic target is the literal internal mlx2.adapters.inkling module; selected adapter/model roots define its math closure. Preserved current-main Muse descriptor selection during integration."
     },
     "mlx2.runtime.models.cache": {
       "sha256": "dd69c2a30559650fe1775cab5fdaa8f399fa11b09ba7837e04b90f542bb57c54",
       "targets": [],
-      "reason": "Revision-bound cache classes supplied by the selected adapter. Reviewed bounded KV reservation, capacity-plan propagation, independent committed-descriptor cloning and validated empty-cache serialization for model-free drafters; no new dynamic loader or cache-class target. Default nonempty cache behavior is unchanged."
+      "reason": "Revision-bound cache classes supplied by the selected adapter. Reviewed bounded KV reservation, capacity-plan propagation, independent committed-descriptor cloning and validated empty-cache serialization for model-free drafters; no new dynamic loader or cache-class target. Default nonempty cache behavior is unchanged. Reviewed current-main rollback-record reconstruction and invalidation for unrecorded forwards; no dynamic loader target added."
     },
     "mlx2.runtime.qwen38_tensorfold": {
       "sha256": "4344a13dbbde65343d42561998b2ef7fdf84720c723a150e8e7252e1483716d3",

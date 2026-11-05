@@ -987,8 +987,24 @@ class DeepSeekV41Model:
 
     def engram(self, h, layer, hashes, *, rows=None):
         c, p = self.args, f"blk.{layer}."
+        inverse = None
+        if rows is None and getattr(self, "engram_carry_enabled", False) and h.shape[1] > 8:
+            # Deduplicate full tuples, not independent disk rows. Reconstruct
+            # projected rows before the query-dependent gate and residual.
+            flat = np.asarray(hashes).reshape(h.shape[1], -1)
+            unique, first, inverse = np.unique(flat, axis=0, return_index=True, return_inverse=True)
+            if len(unique) < len(flat):
+                rows = mx.array(self.engram_tables[layer].read(hashes)[first])
+                kv = self.linear(rows.reshape(1, len(unique), -1), p + "engram_kv.weight")
+                kv = mx.take(kv, mx.array(inverse), axis=1)
+                stats = self.engram_tables[layer].stats
+                stats["tuple_projected_rows"] = stats.get("tuple_projected_rows", 0) + len(unique)
+                stats["tuple_saved_rows"] = stats.get("tuple_saved_rows", 0) + len(flat) - len(unique)
+            else:
+                inverse = None
         rows = mx.array(self.engram_tables[layer].read(hashes)) if rows is None else rows
-        kv = self.linear(rows.reshape(*h.shape[:2], -1), p + "engram_kv.weight")
+        if inverse is None:
+            kv = self.linear(rows.reshape(*h.shape[:2], -1), p + "engram_kv.weight")
         key = kv[..., : c.hc_mult * c.hidden_size].reshape(h.shape)
         value = kv[..., c.hc_mult * c.hidden_size :]
         qweight = self.weights.array(p + "engram_q_norm.weight")
@@ -1132,6 +1148,13 @@ class DeepSeekV41Model:
                                        **({"mask": ~image_mask} if image_mask is not None else {}))
             for index, layer in enumerate(c.engram_layer_ids):
                 self.engram_tables[layer].prefetch(hashes[:, index])
+            if getattr(self, "engram_carry_enabled", False) and image_mask is None and not dependency_prefill:
+                from ..prefill_lookahead import current
+                lookahead = current()
+                if lookahead is not None and lookahead.next_tokens and lookahead.next_tokens[0]:
+                    next_hashes, _ = self.hasher(np.asarray(lookahead.next_tokens[0]), tail)
+                    for index, layer in enumerate(c.engram_layer_ids):
+                        self.engram_tables[layer].prefetch_next(next_hashes[:, index])
         for state in cache:
             state._in_forward = True
         with self._weight_scope():

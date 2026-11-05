@@ -26,6 +26,7 @@ DESCRIPTOR = replace(NATIVE_DESCRIPTOR, model_type=MODEL_TYPE, variant="flash-10
               "qualification": "unqualified", "scope": "official checkpoint; ordinary B1 text; streamed MXFP4 experts and split-plane Engram; exact APCv2 within this numerical profile"})
 
 SOURCE_POLICY_CHOICES = {
+    'deepseek_source_engram': ('reference', 'carry_tuple_v1'),
     'deepseek_source_prefill_partition': ('adaptive_v1', 'canonical_m1_v1', 'position_grid_v1'),
     'deepseek_source_prefill_order': ('reference', 'layer_major_v1'),
     'deepseek_source_prefill_readahead': ('reference', 'layer_ahead_v1'),
@@ -591,7 +592,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
                 raise ValueError("unsupported official Engram plane layout")
             path = root / weight["file"]
             self.engram_tables[layer] = EngramRows(path, offset=weight["offset"], scale_offset=scale["offset"], rows=rows,
-                expected_stat=file_stamp(path.stat()), workers=min(8, request.read_workers), cache_format=self.kernel_policy["deepseek_engram_cache"])
+                expected_stat=file_stamp(path.stat()), workers=min(8, request.read_workers), cache_format=self.kernel_policy["deepseek_engram_cache"],
+                carry_window=self.kernel_policy.get('deepseek_source_engram','reference')=='carry_tuple_v1')
         self.weight_stream.bind_ple_providers(self.engram_tables)
         self._bind_fp8_pp_identity()
         self._bind_woa_pp_identity()
@@ -623,6 +625,9 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             self.numeric_profile+=':'+self.kernel_policy['deepseek_source_resident_prefill']+'_unqualified'
         # Head selection, its storage maximum and oracle location belong to
         # the composed route. They do not alter target arithmetic or its oracle.
+        if self.kernel_policy.get('deepseek_source_engram','reference')=='carry_tuple_v1':
+            self.numerics_revision+=':engram_carry_tuple_v1'
+            self.numeric_profile+=':engram_carry_tuple_v1_unqualified'
         target_policy={k:v for k,v in self.kernel_policy.items()if not k.startswith('deepseek_source_dspark_')}
         binding = self.identity["fingerprint"]+":"+self.numerics_revision+":"+hashlib.sha256(json.dumps(target_policy, sort_keys=True).encode()).hexdigest()
         model_type=DeepSeekV41Model
@@ -647,6 +652,7 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             source_hc_mega_policy=self.kernel_policy.get('deepseek_source_hc_mega','reference'),
             **model_options(self.kernel_policy))
         self.model._mlx2_source_ast_target_laws=self._source_ast_target_laws
+        self.model.engram_carry_enabled = self.kernel_policy.get('deepseek_source_engram', 'reference') == 'carry_tuple_v1'
         self.model.source_ast_kv_preparation_policy=self.kernel_policy.get('deepseek_source_ast_kv_preparation','reference')
         self.model.recommended_prefill_rows = self.weights.recommended_prefill_rows
         if self.kernel_policy.get('deepseek_source_prefill_partition','adaptive_v1')=='position_grid_v1':

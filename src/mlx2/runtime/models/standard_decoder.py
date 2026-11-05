@@ -352,9 +352,9 @@ class Model(nn.Module):
                 raise ValueError(
                     "row-exact verification requires a known dense Qwen3 topology"
                 )
-            if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1":
+            if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1" or os.environ.get("MLX2_FP_VERIFY_KERNEL") == "1":
                 raise ValueError(
-                    "row-exact verification does not support MLX2_FP_DECODE_KERNEL"
+                    "row-exact verification does not support MLX2_FP_DECODE_KERNEL or MLX2_FP_VERIFY_KERNEL"
                 )
             for layer in self.layers:
                 if (
@@ -433,9 +433,9 @@ class Model(nn.Module):
         from ..segmented_rotating_kv import SegmentedKVView
         from .cache import KVCache
 
-        if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1":
+        if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1" or os.environ.get("MLX2_FP_VERIFY_KERNEL") == "1":
             raise ValueError(
-                "row-exact verification does not support MLX2_FP_DECODE_KERNEL"
+                "row-exact verification does not support MLX2_FP_DECODE_KERNEL or MLX2_FP_VERIFY_KERNEL"
             )
         if self._homogeneous_backbone_dtype() != self._row_exact_backbone_dtype:
             raise ValueError(

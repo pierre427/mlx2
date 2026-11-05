@@ -150,3 +150,10 @@ def test_unsupported_text_template_endpoint_cannot_ignore_verification():
 def test_reference_spawn_schema_accepts_self_contained_tasks_without_background():
     tasks = [{"task": "Summarize the supplied question.", "context": "", "expected_output": ""}]
     assert validate_spawn_tasks(tasks) == tasks
+
+
+def test_per_model_context_accepts_recent_one_million_token_routes_without_changing_defaults():
+    assert validate_chat_options({'context_limit': 1048576})['context_limit'] == 1048576
+    assert AGENTIC_DEFAULTS['context_limit'] == 262144
+    with pytest.raises(ValueError, match='context_limit'):
+        validate_chat_options({'context_limit': 1048577})

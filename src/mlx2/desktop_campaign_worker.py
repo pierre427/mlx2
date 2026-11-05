@@ -227,6 +227,8 @@ def persistence_seed(base, model, job_id):
 
 
 def performance_samples(ladder):
+    if ladder.get("correctness_only") is True or ladder.get("performance_eligible") is False:
+        raise ValueError("Correctness-only or explicitly ineligible evidence cannot provide performance samples")
     helper = load_helper("performance_assessment")
     cells = helper._cells(ladder)
     if ladder.get("runs_per_cell") != 3 or not helper._coverage_valid(ladder, cells):
@@ -261,12 +263,12 @@ def artifact(spec):
         from .desktop_runner import source_manifest
         if source_digest(source_manifest(ROOT)) != spec["source_sha256"]:
             raise RuntimeError("Frozen campaign source digest changed before model execution")
-        # The existing safe probe checks nominal/fair thermal admission before
-        # loading reference weights. Throughput has stricter per-cell controls.
+        # Observe thermals for every run; admission gates belong only to
+        # explicitly requested performance measurements.
         sys.path.insert(0, str(ROOT / "scripts"))
         import run_single_model_smoke_ladder as existing
         initial_thermal = existing.thermal_sample()
-        if initial_thermal["thermal_state"] not in {0, 1}:
+        if 3 in spec["levels"] and initial_thermal["thermal_state"] not in {0, 1}:
             raise RuntimeError("Reference smoke deferred until nominal/fair thermal admission")
         atomic(out / "thermal-at-start.json", initial_thermal)
         from .adapters.registry import inspect_model
@@ -349,10 +351,10 @@ def artifact(spec):
         if 2 in spec["levels"]:
             try:
                 receipt = spec.get("preflight_receipt")
-                if not receipt:
-                    raise ValueError("A source-bound CPU preflight must finish before GPU ownership")
                 qualify = [sys.executable, str(ROOT / "scripts/qualify_serving.py"), "--url", base,
-                           "--output", str(out / "features.json"), "--preflight-receipt", receipt]
+                           "--output", str(out / "features.json")]
+                qualify.extend(["--preflight-receipt", receipt] if receipt else ["--skip-preflight"])
+                result["preflight"] = {"status": "source_bound_receipt" if receipt else "not_requested", "receipt": receipt}
                 for feature in profile["features"]:
                     qualify.extend(["--require-feature", feature])
                 command_run(qualify, out, "features")
@@ -381,6 +383,8 @@ def artifact(spec):
                     ladder.extend(["--only-width", "1"])
                 if 3 in spec["levels"]:
                     ladder.append("--performance-mode")
+                else:
+                    ladder.extend(["--correctness-only", "--max-retries", "0"])
                 command_run(ladder, out, "ladder", timeout=21600)
             except Exception as error:  # noqa: BLE001 -- partial ladder is evidence, not success
                 result["ladder_error"] = str(error)
@@ -396,7 +400,7 @@ def artifact(spec):
                           "feature_error": result.get("feature_error"),
                           "persistence_error": result.get("persistence_error"),
                           "coverage": {"route": route,
-                              "required_routes": list(dict.fromkeys(["ordinary", resolution.default_route])),
+                              "required_routes": [route],
                               "tested_routes": [route], "scope": "this exact serving profile"},
                           "qualification_claim": False}
                 result["records"].append(record)

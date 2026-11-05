@@ -977,10 +977,12 @@ def test_child_tools_cannot_exceed_parent_inventory_or_other_branch_grants(contr
         tool(controller, other, 'agent_resume', {'job_id': 'child', 'message': 'Continue'}, approved=True)
 
 
-def test_plain_profile_never_inherits_primary_lora_settings(controller, tmp_path):
+def test_plain_profile_never_inherits_primary_runtime_settings(controller, tmp_path):
     adapter = tmp_path / "primary-lora"
     adapter.mkdir()
-    controller.primary.settings.update(route="ordinary", lora_root=str(adapter), max_loras=4, max_lora_rank=64)
+    controller.primary.settings.update(route="ordinary", lora_root=str(adapter), max_loras=4, max_lora_rank=64,
+        multi_lora_delta_precision="fp32", kernel_dev_root=str(tmp_path), weight_space_config=str(tmp_path / "private.json"),
+        microscaling_prefill="experts")
     saved = profile(controller, route="ordinary")
     controller.configure_preferences({"profiles": [saved]})
     engine = SimpleNamespace(child=None, worker=None, preparing=lambda: False,
@@ -988,7 +990,7 @@ def test_plain_profile_never_inherits_primary_lora_settings(controller, tmp_path
     controller.engines[saved["id"]] = engine
     try:
         controller.start_profile(saved["id"])
-        assert not {"lora_root", "max_loras", "max_lora_rank"} & engine.settings.keys()
+        assert not desktop.RUNTIME_SETTINGS & engine.settings.keys()
     finally:
         controller.engines.pop(saved["id"])
 
@@ -1327,6 +1329,42 @@ def test_chat_target_clamps_reasoning_after_context_reduces_output(controller, m
     assert target['chat_options']['thinking_budget'] <= max(0, target['output_tokens'] - 1024)
 
 
+@pytest.mark.parametrize("metadata", [
+    {"capabilities": ["embeddings"]},
+    {"selected_capabilities": ["rerank"], "capabilities": ["text", "rerank"]},
+    {"execution_kind": "embedding", "capabilities": ["text"]},
+])
+def test_chat_target_refuses_explicit_non_text_routes(controller, monkeypatch, metadata):
+    from mlx2 import inference_monitor
+    status = {"model": "synthetic", **metadata}
+    monkeypatch.setattr(inference_monitor, '_get', lambda *args: json.dumps(status))
+    with pytest.raises(ValueError, match="autoregressive text chat"):
+        controller.chat_target({'url': 'http://127.0.0.1:18285'})
+
+
+@pytest.mark.parametrize("metadata", [{}, {"capabilities": []},
+    {"execution_kind": "autoregressive", "selected_capabilities": ["text", "vision"]}])
+def test_chat_target_preserves_text_and_legacy_routes(controller, monkeypatch, metadata):
+    from mlx2 import inference_monitor
+    monkeypatch.setattr(inference_monitor, '_get', lambda *args: json.dumps({"model": "synthetic", **metadata}))
+    assert controller.chat_target({'url': 'http://127.0.0.1:18285'})['model'] == "synthetic"
+
+
+def test_cache_branches_refuses_exited_leader_without_reaping(controller, monkeypatch):
+    import psutil
+    child = SimpleNamespace(pid=98765, poll=lambda: pytest.fail("liveness must not reap the process-group leader"))
+    monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(status=lambda: psutil.STATUS_ZOMBIE))
+    controller.primary.child = child
+    controller.primary.worker = {"state": "Ready"}
+    try:
+        with pytest.raises(ValueError, match="not running"):
+            controller.cache_branches("default")
+        assert controller.primary.child is child
+    finally:
+        controller.primary.child = None
+        controller.primary.worker = None
+
+
 def test_shutdown_releases_all_owners_even_when_first_subsystem_raises():
     from mlx2.desktop_control import DesktopController
     calls = []
@@ -1337,7 +1375,7 @@ def test_shutdown_releases_all_owners_even_when_first_subsystem_raises():
                 raise RuntimeError('synthetic failure')
         return SimpleNamespace(close=close)
     fake = SimpleNamespace(stopping=threading.Event(), startup_thread=SimpleNamespace(join=lambda **kwargs: None))
-    names = ('wakeups web agent_launches user_profiles dream lifecycle downloads agents research_plans skills '
+    names = ('wakeups web agent_launches user_profiles dream lifecycle runtime downloads agents research_plans skills '
              'sessions planning capsules memory code helpers campaign media node store').split()
     for name in names:
         setattr(fake, name, component(name, name == 'wakeups'))

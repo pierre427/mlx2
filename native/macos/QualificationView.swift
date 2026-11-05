@@ -6,13 +6,13 @@ struct QualificationView: View {
     @State private var selected = Set<String>()
     @State private var level1 = true
     @State private var level2 = true
-    @State private var level3 = true
+    @State private var level3 = false
     @State private var route = "auto"
     @State private var context = "32768"
     @State private var lanes = "4"
     @State private var cache = "4"
     @State private var features = ""
-    @State private var showPreflight = false
+    @State private var runPreflight = false
     @State private var performanceSort = "decode_tps"
     @State private var comparisonGroup = ""
     @State private var details: String?
@@ -31,7 +31,7 @@ struct QualificationView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Qualification").font(.title2.bold())
-                Text("Records bind the exact model fingerprint, code checkpoint, runtime, host and serving profile. Qualified means all three levels passed together. The serving runtime retains its separate qualification receipt rules.")
+                Text("Records bind the exact model fingerprint, code checkpoint, runtime, host and serving profile. Loading and functional checks establish qualification. Controlled performance measurements are optional and recorded separately.")
                     .font(.callout).foregroundStyle(.secondary)
                 GroupBox("Select models • runs serially, smallest first") {
                     VStack(alignment: .leading, spacing: 6) {
@@ -60,7 +60,8 @@ struct QualificationView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Toggle("Level 1 — loads and generates coherent output", isOn: $level1)
                         Toggle("Level 2 — functionality, advanced features and replicated cache/context checks", isOn: $level2)
-                        Toggle("Level 3 — controlled prefill and decode measurements", isOn: $level3)
+                        Toggle("Optional performance — controlled prefill and decode measurements", isOn: $level3)
+                        Toggle("Also run a full CPU preflight", isOn: $runPreflight)
                         HStack {
                             Picker("Route", selection: $route) {
                                 Text("Adapter default").tag("auto")
@@ -68,24 +69,26 @@ struct QualificationView: View {
                                 Text("Native MTP").tag("native_mtp")
                                 Text("Prompt lookup").tag("prompt_lookup")
                             }.frame(maxWidth: 260)
-                            TextField("Context", text: $context).frame(width: 90)
-                            TextField("Lanes", text: $lanes).frame(width: 60)
-                            TextField("Cache GiB", text: $cache).frame(width: 85)
+                            LabeledContent("Context") { TextField("Tokens", text: $context).frame(width: 90).accessibilityLabel("Context tokens") }
+                            LabeledContent("Lanes") { TextField("Count", text: $lanes).frame(width: 60).accessibilityLabel("Serving lanes") }
+                            LabeledContent("Cache") { TextField("GiB", text: $cache).frame(width: 85).accessibilityLabel("Cache budget in GiB") }
                         }
                         TextField("Additional required feature IDs, separated by commas", text: $features)
-                        Text("Level 1 asks you to review the retained ordinary output. Level 2 uses the approved qualifier; missing companions or unsupported profiles remain unqualified. Level 3 requires three clean nominal-thermal measurements per cell. Existing model servers must be stopped before queuing.")
+                        Text("Level 1 retains ordinary output for review. Level 2 checks functionality without thermal holds. Optional performance measurements use controlled thermal conditions. Full preflight is optional. Stop existing model servers before queuing.")
                             .font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Button(campaign["running"].bool ? "Campaign running" : "Run selected models") {
-                                if level2 { showPreflight = true } else { enqueue(approved: false) }
-                            }.disabled(selected.isEmpty || levels.isEmpty || campaign["running"].bool || model.busy)
+                                enqueue(approved: runPreflight)
+                            }.disabled(selected.isEmpty || levels.isEmpty || campaign["running"].bool || model.busy || profileError != nil)
                             if campaign["running"].bool {
                                 ProgressView().controlSize(.small)
                                 Button("Cancel queue") { model.perform("campaign_cancel") }
                             }
                             Spacer()
                             Button("Save test profile") { model.perform("campaign_configure", ["settings": ["profile": profile]]) }
+                                .disabled(model.busy || profileError != nil)
                         }
+                        if let profileError { Label(profileError, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange) }
                     }.padding(5)
                 }
                 if !jobs.isEmpty {
@@ -154,12 +157,6 @@ struct QualificationView: View {
         .onChange(of: groups) { _, value in if !value.contains(comparisonGroup) { comparisonGroup = value.first ?? "" } }
         .onChange(of: selected) { _, value in model.checkedModels = value }
         .onChange(of: model.checkedModels) { _, value in if selected != value { selected = value } }
-        .alert("Approve full preflight for this frozen code snapshot?", isPresented: $showPreflight) {
-            Button("Cancel", role: .cancel) {}
-            Button("Approve preflight and run") { enqueue(approved: true) }
-        } message: {
-            Text("AGENTS.md requires your explicit approval before a full preflight. This runs the full CPU suite before GPU ownership, then the selected models serially. Existing services are never stopped automatically.")
-        }
         .sheet(isPresented: Binding(get: { details != nil }, set: { if !$0 { details = nil } })) {
             VStack(alignment: .leading) {
                 HStack { Text("Source-bound evidence").font(.headline); Spacer(); Button("Done") { details = nil } }
@@ -172,6 +169,12 @@ struct QualificationView: View {
         ["route": route, "context": Int(context) ?? 0, "lanes": Int(lanes) ?? 0,
          "inflight": Int(lanes) ?? 0, "cache_gib": Int(cache) ?? 0,
          "features": features.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }]
+    }
+    private var profileError: String? {
+        guard let context = Int(context), (1024...1_048_576).contains(context) else { return "Context must be a whole number from 1,024 to 1,048,576 tokens." }
+        guard let lanes = Int(lanes), (1...32).contains(lanes) else { return "Choose 1–32 serving lanes." }
+        guard let cache = Int(cache), (1...512).contains(cache) else { return "Cache must be a whole number from 1 to 512 GiB." }
+        return nil
     }
     private func enqueue(approved: Bool) {
         model.perform("campaign_enqueue", ["paths": Array(selected), "levels": levels, "profile": profile, "approve_preflight": approved])

@@ -162,19 +162,22 @@ def test_malformed_private_chat_is_an_explicit_restore_error(tmp_path):
     profiles.close()
 
 
-def test_portable_profile_with_local_lora_settings_roundtrips_without_adapter_paths(tmp_path):
+def test_portable_profile_cannot_inherit_local_runtime_paths_or_execution_options(tmp_path):
+    from mlx2.desktop import RUNTIME_SETTINGS
     c = controller(tmp_path)
     c.primary = SimpleNamespace(settings={'root': '/private/models', 'port': 8285, 'context': 8192, 'lanes': 1, 'route': 'ordinary',
-        'sticky_port': True, 'lora_root': '/private/adapters', 'max_loras': 1, 'max_lora_rank': 64})
+        'sticky_port': True, 'lora_root': '/private/adapters', 'max_loras': 1, 'max_lora_rank': 64,
+        'kernel_dev_root': '/private/source', 'weight_space_config': '/private/repair.json', 'multi_lora_delta_precision': 'fp32',
+        'microscaling_prefill': 'mlp'})
     profiles = UserProfiles(c)
     document = profiles.dispatch({'command': 'user_profile_export', 'profile_id': profiles.active})['document']
-    assert '/private/adapters' not in json.dumps(document)
-    assert 'lora_root' not in document['settings']
+    assert '/private/' not in json.dumps(document)
+    assert not RUNTIME_SETTINGS & document['settings'].keys()
     before = {row['id'] for row in profiles.snapshot()['profiles']}
     result = profiles.dispatch({'command': 'user_profile_import', 'document': document})
     imported = next(row['id'] for row in result['profiles'] if row['id'] not in before)
     settings = profiles._read(imported)['settings']
-    assert not {'lora_root', 'max_loras', 'max_lora_rank'} & settings.keys()
+    assert not RUNTIME_SETTINGS & settings.keys()
     assert settings['route'] == 'ordinary'
     profiles.close()
 

@@ -66,11 +66,17 @@ def text(response):
     return response["choices"][0]["message"].get("content") or ""
 
 
-def functional(response, lane=0):
+def has_identifier(value, code):
+    """``code`` as a whole token: TIEL-730 or XTIEL-73 do not answer TIEL-73."""
     # Only Unicode dash punctuation is normalized; identifier case stays exact.
+    import re
     import unicodedata
-    value = "".join("-" if unicodedata.category(c) == "Pd" else c for c in text(response))
-    return f"TIEL-{73 + lane}" in value
+    value = "".join("-" if unicodedata.category(c) == "Pd" else c for c in value)
+    return re.search(rf"(?<![A-Za-z0-9]){re.escape(code)}(?![A-Za-z0-9])", value) is not None
+
+
+def functional(response, lane=0):
+    return has_identifier(text(response), f"TIEL-{73 + lane}")
 
 
 def ordinary_reference(adapter, body, *, prefill_step=2048):
@@ -132,8 +138,9 @@ def cpu_unit(spec):
             "messages": [{"role": "user", "content": "Return exactly TIEL-73 with no explanation."}],
             "enable_thinking": False, "max_tokens": 16,
         })
-        report["passed"] = report["output"]["finite"] and "TIEL-73" in report["output"]["text"]
+        report["passed"] = report["output"]["finite"] and has_identifier(report["output"]["text"], "TIEL-73")
     except BaseException as error:
+        report["passed"] = False
         report.update(error=str(error), traceback=traceback.format_exc())
     finally:
         if adapter is not None:
@@ -175,7 +182,7 @@ def unit(spec):
             body = request_body(repetitions)
             result = ordinary_reference(adapter, body, prefill_step=prefill_step)
             report["reference"].append(result)
-            if not result["finite"] or "TIEL-73" not in result["text"]:
+            if not result["finite"] or not has_identifier(result["text"], "TIEL-73"):
                 raise AssertionError("ordinary reference failed functional oracle")
         report["reference_diagnostics"] = adapter.diagnostics()
         adapter.close()
@@ -267,12 +274,13 @@ def unit(spec):
             "return_token_trace": True,
         })
         report["coding"] = {"response": coding,
-            "passed": "a+b" in text(coding).replace(" ", "")}
+            "passed": text(coding).strip().strip("`").replace(" ", "") == "a+b"}
         report["passed"] = all(cell["passed"] for cell in report["cells"]) and all(
             arm["functional"] for arm in report["batch"]) and any(
                 width > 1 for width in report["batch_observed_widths"]) and report["coding"]["passed"]
         report["status_after"] = http_json(base, "/v1/status")
     except BaseException as error:
+        report["passed"] = False
         report.update(error=str(error), traceback=traceback.format_exc())
     finally:
         stop_server(server)

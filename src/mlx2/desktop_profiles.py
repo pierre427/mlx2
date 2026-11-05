@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 
-from .desktop import atomic_json
+from .desktop import RUNTIME_SETTINGS, atomic_json
 
 MAX_BYTES = 16 * 1024 * 1024
 PORTABLE = {
@@ -290,7 +290,7 @@ class UserProfiles:
                 row = self._capture(uuid.uuid4().hex, name_text(doc['name']))
                 if not isinstance(doc['settings'], dict) or set(doc['settings']) - PORTABLE_SETTINGS:
                     raise ValueError('Portable profiles cannot contain model directory paths')
-                for key in ('lora_root', 'max_loras', 'max_lora_rank'):
+                for key in RUNTIME_SETTINGS:
                     row['settings'].pop(key, None)
                 row['settings'].update(doc['settings'])
                 row['preferences'].update(doc['preferences'])

@@ -120,7 +120,8 @@ def inspect_artifact(model_path: str | Path) -> dict:
             vision = inspect_vision(path)
             from .muse_glimmer_images import policy
             vision['processor_policy'] = policy(path)
-        except (ValueError, OSError, KeyError):
+        except (ValueError, OSError, KeyError, ImportError):
+            # ImportError: the image processor needs the optional Pillow.
             vision = None
     return {
         "path": str(path),
@@ -859,8 +860,12 @@ class MuseGlimmerAdapter:
             self.identity = {**self.identity, 'artifact_fingerprint': self.identity['fingerprint'],
                              'fingerprint': revision, 'vision_revision': self.image_policy['revision']}
             self.model = VisionModel(ModelArgs.from_dict(config), config)
-            self.multimodal_routes = frozenset({'ordinary', 'prompt_lookup'} | (
+            # The prompt-lookup batch forces media lanes to plain decode, so it
+            # is a plain-decode route: declared native, warm hits speculated
+            # while cold runs did not, with no media receipt.
+            self.multimodal_routes = frozenset({'ordinary'} | (
                 {'external_draft'} if self.external_policy.get('batch_size_route') == MUSE_AST_ROUTE else set()))
+            self.multimodal_plain_decode_routes = frozenset({'prompt_lookup'})
         else:
             self.model = Model(ModelArgs.from_dict(config))
         files = [path / record[0] for record in self.identity["files"]]
@@ -1217,6 +1222,10 @@ class MuseGlimmerAdapter:
             raise ValueError('This Muse artifact has no complete supported image encoder')
         from .muse_glimmer_images import prepare
         return prepare(self, request, file_loader=file_loader)
+
+    # Serving calls validate_prefill_inputs with no payload too, so image
+    # markers in text (a raw completion prompt) are refused, not embedded.
+    validates_absent_prefill_inputs = True
 
     def validate_prefill_inputs(self, request, remaining_tokens, prefill_input):
         if prefill_input is None:

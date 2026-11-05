@@ -1994,3 +1994,14 @@ def test_receipt_writer_excludes_concurrent_overwrites(tmp_path):
     with pytest.raises(FileExistsError):
         qualify._write_receipt_exclusive(path, {"passed": False})
     assert json.loads(path.read_text())["passed"] is True
+
+
+def test_explicitly_skipped_preflight_cannot_run_tests_or_fabricate_a_pass(monkeypatch):
+    monkeypatch.setattr(qualify.subprocess, 'run', lambda *a, **k: pytest.fail('Full preflight was not requested'))
+    report, checks = {}, []
+    qualify.check_preflight(report, trusted_receipt=None, skip=True, check=lambda *a: checks.append(a))
+    assert checks == []
+    assert report == {'preflight': {'status': 'not_requested', 'unit_tests_observed': False}}
+    receipt = {'source_revision': 'synthetic', 'passed': True}
+    qualify.check_preflight({}, trusted_receipt=receipt, skip=False, check=lambda *a: checks.append(a))
+    assert checks == [('unit_tests', True, receipt)]

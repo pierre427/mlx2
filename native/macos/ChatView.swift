@@ -9,6 +9,29 @@ struct ChatToolEvent: Identifiable {
     var result = ""
     var status = "running"
 
+    static func outcome(_ result: JSON) -> String {
+        let returned = result["result"].raw is NSNull ? result : result["result"]
+        if result["error"].string == "User declined this tool call." { return "declined" }
+        if [result, returned].contains(where: { value in
+            value["isError"].bool || value["error"].string != nil || value["error"].raw is [String: Any]
+        }) { return "failed" }
+        for value in [result["status"].text, result["state"].text, returned["status"].text, returned["state"].text] {
+            if value == "cancelled" { return "cancelled" }
+            if ["failed", "error", "incomplete"].contains(value) { return "failed" }
+        }
+        return "completed"
+    }
+
+    static func summary(_ events: [ChatToolEvent]) -> String {
+        let prefix = "\(events.count) tool call\(events.count == 1 ? "" : "s")"
+        let failed = events.filter { ["failed", "error", "declined"].contains($0.status) }.count
+        if failed > 0 { return prefix + " · \(failed) failed" }
+        if events.contains(where: { ["running", "pending", "approval", "awaiting_approval"].contains($0.status) }) { return prefix + " · in progress" }
+        if events.contains(where: { ["cancelled", "interrupted"].contains($0.status) }) { return prefix + " · interrupted" }
+        if events.contains(where: { !["completed", "success"].contains($0.status) }) { return prefix + " · recorded" }
+        return prefix + " · completed"
+    }
+
     var archive: [String: Any] { ["id": id, "name": name, "arguments": arguments, "result": result, "status": status] }
     static func restore(_ raw: Any?) -> [ChatToolEvent] {
         guard let rows = raw as? [[String: Any]] else { return [] }
@@ -144,9 +167,7 @@ private struct ChatToolActivity: View {
     var reasoning = ""
     @State private var expanded = false
     private var summary: String {
-        let failed = events.filter { ["failed", "error", "declined"].contains($0.status) }.count
-        let running = events.contains { ["running", "pending", "approval"].contains($0.status) }
-        return "\(events.count) tool call\(events.count == 1 ? "" : "s")" + (failed > 0 ? " · \(failed) failed" : running ? " · in progress" : " · completed")
+        ChatToolEvent.summary(events)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -277,9 +298,19 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
 }
 
 @MainActor final class ChatModel: ObservableObject {
+    static func supportsChat(_ server: JSON) -> Bool {
+        let kind = server["execution_kind"].string ?? server["endpoint"]["execution_kind"].string
+        if let kind, !kind.isEmpty, kind != "autoregressive" { return false }
+        let selected = server["selected_capabilities"].array.compactMap(\.string)
+        let advertised = selected.isEmpty ? server["capabilities"].array.compactMap(\.string) : selected
+        // Older telemetry may omit capability metadata. Only an explicit
+        // non-text contract refuses chat, including representation-only routes.
+        return advertised.isEmpty || advertised.contains("text")
+    }
+
     static func isReadyForChat(_ server: JSON) -> Bool {
         // Detailed status may time out while fresh metrics still report ready.
-        (server["reachable"].raw as? Bool) != false &&
+        supportsChat(server) && (server["reachable"].raw as? Bool) != false &&
         (server["ready"].raw as? Bool) != false &&
         (server["ready"].bool || server["status_error"].string == nil)
     }
@@ -390,7 +421,22 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
     @Published var conversations: [String: [ChatMessage]] = [:]
     @Published var draft = "" { didSet { interactionRevision &+= 1 } }
-    @Published var selected = "" { didSet { if selected != oldValue { interactionRevision &+= 1 } } }
+    @Published var selected = "" {
+        didSet {
+            guard selected != oldValue else { return }
+            interactionRevision &+= 1
+            guard !restoringComposer else { return }
+            // Each conversation owns its unsent input. Selecting history must
+            // never send another conversation's draft or attachments by accident.
+            if !oldValue.isEmpty {
+                draftsByConversation[oldValue] = draft
+                attachmentsByConversation[oldValue] = attachments
+                draft = draftsByConversation[selected] ?? ""
+                attachments = attachmentsByConversation[selected] ?? []
+            }
+            error = nil; contextNotice = ""
+        }
+    }
     private(set) var interactionRevision: UInt64 = 0
     private(set) var latestGenerationID: UUID?
     @Published private(set) var generationID: UUID?
@@ -418,6 +464,41 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
     private var profileEpoch = UUID()
     private var generationOutcomes: [UUID: Bool] = [:]
     private var outcomeOrder: [UUID] = []
+    private var draftsByConversation: [String: String] = [:]
+    private var attachmentsByConversation: [String: [ChatAttachment]] = [:]
+    private var restoringComposer = false
+
+    func hasUnsentInput(in identity: String) -> Bool {
+        if identity == selected { return !draft.isEmpty || !attachments.isEmpty }
+        return !(draftsByConversation[identity] ?? "").isEmpty || !(attachmentsByConversation[identity] ?? []).isEmpty
+    }
+
+    func draftText(for identity: String) -> String { identity == selected ? draft : draftsByConversation[identity] ?? "" }
+
+    func speculation(for identity: String) -> String { branches[identity]?["speculation"] == "off" ? "off" : "auto" }
+    func setSpeculation(_ value: String, for identity: String) {
+        guard !mutationsPaused, !generating, !branching, !identity.isEmpty, ["auto", "off"].contains(value) else { return }
+        if branches[identity] == nil { branches[identity] = ["id": identity, "server_identity": identity] }
+        branches[identity]?["speculation"] = value
+    }
+
+    func requestedModel(for identity: String) -> String { branches[identity]?["requested_model"] ?? "" }
+    func setRequestedModel(_ value: String, for identity: String) {
+        guard !identity.isEmpty, canChangeModel(identity) else { return }
+        if branches[identity] == nil { branches[identity] = ["id": identity, "server_identity": identity] }
+        branches[identity]?["requested_model"] = value
+        endpointBindings[identity]?.removeValue(forKey: "lora_fingerprint")
+        contextUsageByConversation.removeValue(forKey: identity)
+    }
+
+    private func bindResolvedModel(_ target: JSON, to identity: String) throws {
+        let fingerprint = target["lora_fingerprint"].string ?? ""
+        if !(wireHistory[identity] ?? []).isEmpty,
+           let previous = endpointBindings[identity]?["lora_fingerprint"] as? String, previous != fingerprint {
+            throw DesktopError.message("This conversation's adapter revision changed. Start a new chat to use the current adapter; saved history was preserved.")
+        }
+        endpointBindings[identity, default: [:]]["lora_fingerprint"] = fingerprint
+    }
 
     func upsertToolEvent(_ event: ChatToolEvent, conversationID: String, messageIndex: Int) {
         guard let messages = conversations[conversationID], messages.indices.contains(messageIndex), messages[messageIndex].role == "assistant" else { return }
@@ -442,6 +523,8 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
     @Published var autosaveError: String?
 
     func profileArchive(compact: Bool = false) -> [String: Any] {
+        var drafts = draftsByConversation
+        if !selected.isEmpty { drafts[selected] = draft }
         let savedToolResults = Set(wireHistory.values.flatMap { history in
             history.filter { $0["role"] as? String == "tool" }.compactMap { $0["content"] as? String }
         })
@@ -452,15 +535,18 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
                 return archive
             }, "origin": $0.origin, "created_at": $0.createdAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull()] as [String: Any] }
         }
-        return ["schema_version": 1, "conversations": transcripts, "wire_history": wireHistory, "selected": selected, "draft": draft, "endpoint_bindings": endpointBindings, "branches": branches, "turn_cuts": turnCuts, "context_usage": contextUsageByConversation.mapValues(\.archive)]
+        return ["schema_version": 1, "conversations": transcripts, "wire_history": wireHistory, "selected": selected, "draft": draft, "conversation_drafts": drafts.filter { !$0.value.isEmpty }, "endpoint_bindings": endpointBindings, "branches": branches, "turn_cuts": turnCuts, "context_usage": contextUsageByConversation.mapValues(\.archive)]
     }
 
     func restoreProfileArchive(_ value: JSON) {
+        restoringComposer = true
+        defer { restoringComposer = false }
         profileEpoch = UUID()
         stop()
         generating = false; generationID = nil; latestGenerationID = nil; branching = false; task = nil; session = nil
         error = nil; failedPrompt = nil; failedPromptConversationID = ""; contextNotice = ""; toolStatus = ""
         contextUsageByConversation = [:]
+        draftsByConversation = [:]; attachmentsByConversation = [:]
         conversations = [:]; wireHistory = [:]; forkSeeds = [:]; endpointBindings = [:]; branches = [:]; turnCuts = [:]; workingTurnCuts = [:]; draft = ""; attachments = []; selected = ""
         guard value["schema_version"].double == 1 else { return }
         if let transcripts = value["conversations"].raw as? [String: [[String: Any]]] {
@@ -478,7 +564,8 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
             contextUsageByConversation = rows.compactMapValues { ChatContextUsage.restore(JSON($0)) }
         }
         selected = value["selected"].string ?? ""
-        draft = value["draft"].string ?? ""
+        draftsByConversation = value["conversation_drafts"].raw as? [String: String] ?? [:]
+        draft = draftsByConversation[selected] ?? value["draft"].string ?? ""
         error = nil; contextNotice = ""; toolStatus = ""
     }
 
@@ -525,6 +612,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
         document["context_usage"] = contextUsageByConversation[conversationID].map { [conversationID: $0.archive] } ?? [:]
         document["selected"] = conversationID
         document["draft"] = ""
+        document["conversation_drafts"] = [:] as [String: String]
         return document
     }
 
@@ -553,6 +641,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
     @discardableResult func bindEmptyConversation(to server: JSON) -> Bool {
         guard !selected.isEmpty, canChangeModel(selected) else { return false }
         if branches[selected] == nil { branches[selected] = ["id": selected, "kind": "root", "name": "New Chat"] }
+        if serverIdentity(for: selected) != Self.identity(server) { branches[selected]?.removeValue(forKey: "requested_model") }
         branches[selected]?["server_identity"] = Self.identity(server)
         bind(server, to: selected)
         contextUsageByConversation.removeValue(forKey: selected)
@@ -612,7 +701,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
 
     func canFork(at message: ChatMessage) -> Bool {
-        !generating && !branching && message.role == "assistant" && message.committed && turnCuts[selected]?[message.id.uuidString] != nil
+        !mutationsPaused && !generating && !branching && message.role == "assistant" && message.committed && turnCuts[selected]?[message.id.uuidString] != nil
     }
 
     @discardableResult func forkConversation(at message: ChatMessage) -> String? {
@@ -629,7 +718,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
         turnCuts[identity] = (turnCuts[parent] ?? [:]).filter { allowed.contains($0.key) }
         endpointBindings[identity] = endpointBindings[parent]
         branches[identity] = ["id": identity, "parent_id": parent, "server_identity": serverIdentity(for: parent),
-                              "fork_message_id": message.id.uuidString, "name": "Branch " + String(branches.count + 1)]
+                              "fork_message_id": message.id.uuidString, "name": "Branch " + String(branches.count + 1), "speculation": speculation(for: parent), "requested_model": requestedModel(for: parent)]
         selected = identity
         error = nil
         return identity
@@ -651,7 +740,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
         try Task.checkCancellation()
         guard profileEpoch == epoch, selected == parent, !generating,
               receipt["session_id"].string == parent, let revision = receipt["revision"].double,
-              revision.isFinite, revision >= 1, revision <= 9007199254740991,
+              revision.isFinite, revision >= 1, revision <= 9007199254740991, revision.rounded(.towardZero) == revision,
               receipt["digest"].string?.isEmpty == false else { return nil }
         branching = false
         guard let identity = forkConversation(at: message) else { return nil }
@@ -686,8 +775,10 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
 
     private func bind(_ server: JSON, to identity: String) {
         let endpoint = server["endpoint"]
+        let loraFingerprint = endpointBindings[identity]?["lora_fingerprint"]
         endpointBindings[identity] = ["url": endpoint["url"].text, "pid": endpoint["pid"].double ?? 0,
                                       "checkpoint": endpoint["checkpoint"].string ?? "", "model_name": Self.label(server)]
+        if let loraFingerprint { endpointBindings[identity]?["lora_fingerprint"] = loraFingerprint }
     }
 
     private func completeTurn(_ identity: String, at index: Int, history: [[String: Any]]) {
@@ -725,7 +816,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
 
     func selectFirstIfNeeded(_ servers: [JSON]) {
         reconcileManagedResumes(servers)
-        guard !generating, !branching, let first = servers.first else { return }
+        guard !generating, !branching, let first = servers.first(where: Self.supportsChat) else { return }
         if selected.isEmpty { selected = Self.identity(first); return }
         guard !servers.contains(where: { Self.identity($0) == serverIdentity(for: selected) }),
               branches[selected]?["kind"] == "root", (conversations[selected] ?? []).isEmpty,
@@ -772,7 +863,10 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
     @discardableResult func newConversation(servers: [JSON]? = nil) -> String? {
         guard !generating, !branching else { return nil }
         let previous = selected
-        let candidate = servers.flatMap { available in available.first(where: { Self.identity($0) == serverIdentity(for: previous) }) ?? available.first }
+        let candidate = servers.flatMap { available in
+            let supported = available.filter(Self.supportsChat)
+            return supported.first(where: { Self.identity($0) == serverIdentity(for: previous) }) ?? supported.first
+        }
         if servers != nil && candidate == nil { return nil }
         let engine = candidate.map(Self.identity) ?? serverIdentity(for: previous)
         guard !engine.isEmpty else { return nil }
@@ -877,7 +971,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
               autoTitle: Bool = false) {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !mutationsPaused, !generating, !branching, !prompt.isEmpty || !attachments.isEmpty else { return }
-        guard Self.identity(server) == serverIdentity(for: selected) else { return }
+        guard Self.supportsChat(server), Self.identity(server) == serverIdentity(for: selected) else { return }
         let identity = selected
         bind(server, to: identity)
         let clock = ISO8601DateFormatter()
@@ -886,6 +980,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
         let timestamp = clock.string(from: Date())
         let outboundPrompt = prompt + "\n\n[Message time: " + timestamp + ". Use this timestamp only when current date, time, or elapsed time matters to the request.]"
         let attached = attachments
+        let speculation = speculation(for: identity)
         var messages: [[String: Any]] = wireHistory[identity] ?? (conversations[identity] ?? []).filter(\.committed).map {
             ["role": $0.role, "content": $0.text]
         }
@@ -913,6 +1008,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
         task = Task {
             var toolSessionID: String?
             var turnFailed = false
+            var currentTurnHasTools = false
             defer {
                 if let toolSessionID, let finishTools {
                     let outcome = Task.isCancelled ? "cancelled" : epoch == profileEpoch && !turnFailed ? "completed" : "failed"
@@ -935,8 +1031,9 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
                 var archiveReceipt: JSON?
                 var pendingCompaction: JSON?
                 let target = try await resolve()
-                if autoTitle { requestTitle(identity, prompt: prompt, target: target) }
                 try Task.checkCancellation()
+                try bindResolvedModel(target, to: identity)
+                if autoTitle { requestTitle(identity, prompt: prompt, target: target) }
                 if target["chat_options"]["verification"].bool {
                     let fallback = "Solve the task carefully. Verify conclusions against available evidence and report uncertainty."
                     if messages.first?["role"] as? String != "system" {
@@ -998,6 +1095,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
                     let guidance = toolDefinitions.isEmpty ? "" : budget.guidance(calls: callCount, negotiating: negotiating, previousContext: previousContextCount, contextLimit: target["context_limit"].double.flatMap { $0.isFinite && $0 >= 1 && $0 <= 1048576 ? Int($0) : nil })
                     let roundGuidance = guidance + budgetBoundaryFeedback
                     var body: [String: Any] = ["messages": Self.withRoundGuidance(messages, roundGuidance), "stream": true, "stream_options": ["include_usage": true], "max_tokens": outputTokens]
+                    if speculation == "off" { body["speculation"] = "off" }
                     let chatOptions = target["chat_options"]
                     if let thinking = chatOptions["enable_thinking"].raw as? Bool {
                         body["enable_thinking"] = thinking
@@ -1143,6 +1241,9 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
                     try Task.checkCancellation()
                     guard completed else { throw DesktopError.message("Connection ended before the reply finished.") }
                     if calls.isEmpty {
+                        guard !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !reasoningReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                            throw DesktopError.message("The model finished without a reply. Your prompt is available to retry.")
+                        }
                         if Self.isRawToolRequest(reply) {
                             upsertToolEvent(ChatToolEvent(name: "Unexecuted tool request", arguments: reply, result: "The model emitted tool syntax as text. It was not executed.", status: "skipped"), conversationID: identity, messageIndex: assistantIndex)
                             if !answerRecovery && round < 135 {
@@ -1182,6 +1283,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
                     var assistant: [String: Any] = ["role": "assistant", "content": reply, "tool_calls": ordered.map(\.wire)]
                     if !reasoningReply.isEmpty { assistant["reasoning_content"] = reasoningReply }
                     messages.append(assistant)
+                    currentTurnHasTools = true
                     for call in ordered {
                         try Task.checkCancellation()
                         guard let data = call.arguments.data(using: .utf8), let arguments = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw DesktopError.message("Tool arguments must be a JSON object.") }
@@ -1252,13 +1354,17 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
                             toolDefinitions = discovered.map(\.raw)
                         }
                         let returned = result["result"].raw is NSNull ? result : result["result"]
-                        if didExecute && (result["error"].string != nil || returned["error"].string != nil || ["failed", "cancelled", "incomplete"].contains(returned["status"].text) || ["failed", "cancelled"].contains(returned["state"].text)) {
-                            failedToolCalls[failureSignature] = String((result["error"].string ?? returned["error"].string ?? returned["status"].string ?? returned["state"].text).prefix(1024))
+                        if didExecute && ["failed", "cancelled", "declined"].contains(ChatToolEvent.outcome(result)) {
+                            let mcpReason = returned["content"].array.first(where: { $0["type"].string == "text" })?["text"].string
+                            let reason = result["error"].string ?? result["error"]["message"].string
+                                ?? returned["error"].string ?? returned["error"]["message"].string
+                                ?? mcpReason ?? returned["status"].string ?? returned["state"].string ?? "The tool reported an error."
+                            failedToolCalls[failureSignature] = String(reason.prefix(1024))
                         }
                         let encoded = try JSONSerialization.data(withJSONObject: result.raw, options: [.sortedKeys])
                         guard encoded.count <= 2_000_000 else { throw DesktopError.message("Tool result exceeds the chat size limit.") }
                         event.result = String(decoding: encoded, as: UTF8.self)
-                        event.status = result["error"].string == nil ? "completed" : result["error"].string == "User declined this tool call." ? "declined" : "failed"
+                        event.status = ChatToolEvent.outcome(result)
                         upsertToolEvent(event, conversationID: identity, messageIndex: assistantIndex)
                         // Keep the template's front-loaded tool block stable. Discovery
                         // returns schemas as tail metadata for mlx2_tool_call; a direct
@@ -1332,7 +1438,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
                 guard epoch == profileEpoch else { return }
                 // Keep executed tool history even if a later call or reply was cancelled.
                 // Supply explicit cancellation results for pending calls so replay stays well-formed.
-                if messages.contains(where: { $0["tool_calls"] != nil }) {
+                if currentTurnHasTools {
                     let latestCalls = messages.lastIndex(where: { $0["tool_calls"] != nil }) ?? messages.startIndex
                     let answered = Set(messages.suffix(from: latestCalls + 1).compactMap { $0["tool_call_id"] as? String })
                     let pending = messages[latestCalls]["tool_calls"] as? [[String: Any]] ?? []
@@ -1586,6 +1692,7 @@ struct ChatView: View {
     @State private var composerFocusRequest: UUID?
     @State private var contextExpanded = false
     @State private var scrollRequest = UUID()
+    @State private var availableModels: [String] = []
     @AppStorage("mlx2.chat.historyExpanded") private var historyExpanded = true
 
     private static func suspendedServer(_ worker: JSON) -> JSON {
@@ -1642,8 +1749,9 @@ struct ChatView: View {
         guard let target, chat.historyState(chat.selected) != "deleted" else { return }
         let previousGeneration = chat.generationID
         if chat.historyState(chat.selected) == "archived" { chat.setHistoryState("active", for: chat.selected) }
-        chat.send(server: target, resolve: { try await model.chatTarget(target) },
-                  systemPrompt: effectiveSystemPrompt, archive: { try await model.archiveChatSession(conversationID: $0, document: $1) }, tools: { try await model.chatTools(target) },
+        let requestedModel = chat.requestedModel(for: chat.selected)
+        chat.send(server: target, resolve: { try await model.chatTarget(target, requestedModel: requestedModel) },
+                  systemPrompt: effectiveSystemPrompt, archive: { try await model.archiveChatSession(conversationID: $0, document: $1) }, tools: { try await model.chatTools(target, requestedModel: requestedModel) },
                   execute: { try await model.chatToolCall(sessionID: $0, name: $1, arguments: $2, approved: $3) },
                   finishTools: { await model.finishResearchPlan(sessionID: $0, outcome: $1, parentID: $2) }, autoTitle: true)
         if chat.generationID != previousGeneration { scrollRequest = UUID() }
@@ -1691,7 +1799,7 @@ HStack(spacing: 8) {
                     chat.newConversation(servers: model.servers)
                     composerFocusRequest = UUID()
                 }
-                    .disabled(chat.generating || chat.branching || model.servers.isEmpty)
+                    .disabled(chat.generating || chat.branching || !model.servers.contains(where: ChatModel.supportsChat))
             }.padding(16)
             ChatResearchPlanView(parentID: chat.selected)
             Divider()
@@ -1701,7 +1809,8 @@ HStack(spacing: 8) {
                             VStack(spacing: 12) {
                                 Image(systemName: "bubble.left.and.text.bubble.right").font(.system(size: 38)).foregroundStyle(.secondary)
                                 if let worker = pendingWorker { ChatModelLoadingView(worker: worker) }
-                                else { Text(model.servers.isEmpty ? "Start a model in Model Library to chat." : "Send a message to a running model.").foregroundStyle(.secondary) }
+                                else if let boundServer, !ChatModel.supportsChat(boundServer) { Text("This route does not generate chat replies. Choose an autoregressive text model in Model Library.").foregroundStyle(.secondary) }
+                                else { Text(!model.servers.contains(where: ChatModel.supportsChat) ? "Start an autoregressive text model in Model Library to chat." : "Send a message to a running model.").foregroundStyle(.secondary) }
                                 Text("Chats autosave privately in the active user profile, separately for each running model.")
                                     .font(.caption).foregroundStyle(.tertiary)
                             }.frame(maxWidth: .infinity).padding(.top, 60)
@@ -1773,6 +1882,9 @@ HStack(spacing: 8) {
                 else if !chat.generating && !chat.serverIdentity(for: chat.selected).isEmpty && target == nil && boundServer == nil && suspendedTarget == nil && pendingWorker == nil {
                     Text("This model is offline. Start or select a running model to continue.").font(.callout).foregroundStyle(.secondary)
                 }
+                if let boundServer, !ChatModel.supportsChat(boundServer), !transcript.isEmpty {
+                    Text("This route does not generate chat replies. Start a new chat with an autoregressive text model.").font(.callout).foregroundStyle(.secondary)
+                }
                 if let approval = chat.approval {
                     VStack(alignment: .leading) {
                         Text("Allow agent tool: " + approval.name).font(.headline)
@@ -1797,13 +1909,31 @@ HStack(spacing: 8) {
                             if let server = model.servers.first(where: { ChatModel.identity($0) == value }) { chat.bindEmptyConversation(to: server) }
                         })) {
                             if target == nil { Text(chat.conversationModel(chat.selected)).tag(chat.serverIdentity(for: chat.selected)) }
-                            ForEach(Array(model.servers.enumerated()), id: \.offset) { _, server in Text(ChatModel.label(server)).tag(ChatModel.identity(server)) }
+                            ForEach(Array(model.servers.filter(ChatModel.supportsChat).enumerated()), id: \.offset) { _, server in Text(ChatModel.label(server)).tag(ChatModel.identity(server)) }
                         }.labelsHidden().frame(maxWidth: 400)
                     } else {
                         Label(chat.conversationModel(chat.selected), systemImage: "lock.fill")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                             .help("This conversation uses " + chat.conversationModel(chat.selected) + ". Start a new chat to choose another model.")
                     }
+                    Spacer(minLength: 0)
+                }
+                HStack(spacing: 8) {
+                    if availableModels.count > 1 || !chat.requestedModel(for: chat.selected).isEmpty {
+                        Picker("Adapter", selection: Binding(get: { chat.requestedModel(for: chat.selected) }, set: { chat.setRequestedModel($0, for: chat.selected) })) {
+                            Text("Base model").tag("")
+                            ForEach(Array(availableModels.dropFirst()), id: \.self) { name in Text(name).tag(name) }
+                            if !chat.requestedModel(for: chat.selected).isEmpty && !availableModels.dropFirst().contains(chat.requestedModel(for: chat.selected)) {
+                                Text(chat.requestedModel(for: chat.selected) + " · unavailable").tag(chat.requestedModel(for: chat.selected))
+                            }
+                        }.disabled(!chat.canChangeModel(chat.selected)).frame(maxWidth: 400)
+                            .help("Select a publicly registered LoRA adapter before the first message. Start a new chat to change adapters.")
+                    }
+                    Picker("Speculative decoding", selection: Binding(get: { chat.speculation(for: chat.selected) }, set: { chat.setSpeculation($0, for: chat.selected) })) {
+                        Text("Automatic").tag("auto")
+                        Text("Off · ordinary decoding").tag("off")
+                    }.fixedSize().disabled(chat.generating || chat.branching || chat.historyState(chat.selected) == "deleted")
+                        .help("Automatic uses the server's selected route. Off requests ordinary decoding for this conversation. This does not change server defaults.")
                     Spacer(minLength: 0)
                 }
                 HStack {
@@ -1834,10 +1964,12 @@ HStack(spacing: 8) {
         .onChange(of: chat.generating) { _, _ in contextExpanded = false }
         .onDisappear { contextExpanded = false }
         .task(id: chat.selected + "|" + (target.map(ChatModel.identity) ?? "")) {
+            availableModels = []
             guard let target, !chat.selected.isEmpty else { return }
             let identity = chat.selected
-            guard let resolved = try? await model.chatTarget(target), !Task.isCancelled, chat.selected == identity,
-                  let usage = ChatContextUsage.restore(JSON(["capacity": resolved["context_limit"].raw, "reserved": resolved["output_tokens"].raw])) else { return }
+            guard let resolved = try? await model.chatTarget(target), !Task.isCancelled, chat.selected == identity else { return }
+            availableModels = resolved["available_models"].array.compactMap(\.string)
+            guard let usage = ChatContextUsage.restore(JSON(["capacity": resolved["context_limit"].raw, "reserved": resolved["output_tokens"].raw])) else { return }
             if chat.contextUsageByConversation[identity] == nil { chat.contextUsageByConversation[identity] = usage }
         }
         .onAppear { selectFirstIfNeeded() }

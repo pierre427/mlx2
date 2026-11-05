@@ -35,6 +35,8 @@ from .system_monitor import HostCollector
 APP_HOME = Path.home() / "Library/Application Support/MLX2"
 LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock"))
 WAITERS = Path("/Users/Shared/mlxuag/gpu.lock.waiters")
+RUNTIME_SETTINGS = {"lora_root", "max_loras", "max_lora_rank", "multi_lora_delta_precision",
+                    "kernel_dev_root", "weight_space_config", "microscaling_prefill"}
 
 
 def serving_port(settings):
@@ -505,7 +507,9 @@ class Supervisor:
             self.settings.update(read_config(settings_path))
         if self.settings["lanes"] == 0:
             self.settings["lanes"] = 1
-        self.settings = self.valid_settings(self.settings, allow_missing_root=True)
+        # Missing external resources must not prevent opening Settings to fix
+        # them. Validate their current existence and permissions before launch.
+        self.settings = self.valid_settings(self.settings, allow_missing_root=True, check_resources=False)
         self.history = {}
         history_path = home / "desktop-history.json"
         if history_path.exists():
@@ -534,9 +538,9 @@ class Supervisor:
         self.suspension = Suspension(self)
 
     @staticmethod
-    def valid_settings(settings, *, allow_missing_root=False):
+    def valid_settings(settings, *, allow_missing_root=False, check_resources=True):
         expected = {"root", "port", "context", "lanes", "route"}
-        if set(settings) - (expected | {"sticky_port", "lora_root", "max_loras", "max_lora_rank"}) or not expected <= set(settings):
+        if set(settings) - (expected | {"sticky_port"} | RUNTIME_SETTINGS) or not expected <= set(settings):
             raise ValueError("Unknown or missing desktop settings")
         settings = {"sticky_port": True, **settings}
         if type(settings["sticky_port"]) is not bool:
@@ -555,6 +559,28 @@ class Supervisor:
                 raise ValueError(f"Invalid {key}: expected {low}–{high}")
         if settings["route"] not in {"auto", "ordinary"}:
             raise ValueError("Choose automatic or ordinary decode")
+        settings = dict(settings)
+        for key, directory in (("kernel_dev_root", True), ("weight_space_config", False)):
+            supplied = settings.get(key)
+            if supplied is None:
+                continue
+            if not isinstance(supplied, str) or not supplied.strip():
+                raise ValueError(f"{key} must name an existing {'directory' if directory else 'file'}")
+            path = Path(supplied).expanduser()
+            if check_resources and (path.is_symlink() or not (path.is_dir() if directory else path.is_file())):
+                raise ValueError(f"{key} must name an existing real {'directory' if directory else 'file'}")
+            if check_resources and not directory:
+                for private in (path, path.parent):
+                    info = private.stat()
+                    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+                        raise ValueError("Weight-space config and its parent directory must be owner-private")
+            settings[key] = str(path.resolve(strict=True) if check_resources else path.absolute())
+        precision = settings.get("multi_lora_delta_precision")
+        if precision is not None and precision not in {"adapter", "fp32"}:
+            raise ValueError("LoRA delta precision must be adapter or fp32")
+        microscaling = settings.get("microscaling_prefill")
+        if microscaling is not None and (not isinstance(microscaling, str) or microscaling not in {"off", "experts", "mlp", "all"}):
+            raise ValueError("Microscaling prefill must be off, experts, mlp or all")
         if any(key in settings for key in ("lora_root", "max_loras", "max_lora_rank")):
             lora_root = settings.get("lora_root")
             slots, rank = settings.get("max_loras", 1 if lora_root else 0), settings.get("max_lora_rank", 16)
@@ -564,14 +590,16 @@ class Supervisor:
                 if not isinstance(lora_root, str) or not lora_root:
                     raise ValueError("LoRA root must be a real adapter directory")
                 adapter_root = Path(lora_root).expanduser()
-                if adapter_root.is_symlink() or not adapter_root.is_dir():
+                if check_resources and (adapter_root.is_symlink() or not adapter_root.is_dir()):
                     raise ValueError("LoRA root must be a real adapter directory")
-                lora_root = str(adapter_root.resolve(strict=True))
+                lora_root = str(adapter_root.resolve(strict=True) if check_resources else adapter_root.absolute())
                 if settings["route"] != "ordinary":
                     raise ValueError("Desktop LoRA requires the ordinary route")
             elif slots:
                 raise ValueError("LoRA slots require an explicit adapter directory")
             settings = {**settings, "lora_root": lora_root, "max_loras": slots, "max_lora_rank": rank}
+        if precision is not None and (not settings.get("lora_root") or not settings.get("max_loras")):
+            raise ValueError("LoRA delta precision requires an adapter directory and at least one slot")
         return {**settings, "root": str(root)}
 
     def configure(self, settings):
@@ -650,6 +678,7 @@ class Supervisor:
         self.reap()
         if self.child is not None or self.suspension.busy() or (self.worker or {}).get("state") in {"Suspended", "SuspensionRecoveryRequired"}:
             raise ValueError("Stop the current model or discard its suspension before starting another")
+        self.settings = self.valid_settings(self.settings)
         path = self.library.checked_path(raw, identity)
         from .adapters.registry import inspect_model
 
@@ -675,6 +704,9 @@ class Supervisor:
             str(getattr(capability, "value", capability))
             for capability in resolution.descriptor.capabilities
         }
+        extras = "serve,observability" + (",multimodal" if capabilities & {"vision", "video", "audio"} else "")
+        if self.settings.get("weight_space_config"):
+            extras += ",weight-space-research"
         runner = self.runner_manager.ensure(
             path,
             resolution.artifact_fingerprint,
@@ -682,6 +714,7 @@ class Supervisor:
             cancel=self.preparation_cancel,
             progress=progress,
             log_path=self.log_path,
+            extras_override=extras,
         )
         # Environment preparation is CPU-only and may run beside an existing
         # server. Only the actual worker launch needs exclusive GPU ownership.
@@ -693,6 +726,10 @@ class Supervisor:
     def launch(self, path, resolution, execution, runner, *, resume_worker=None):
         if self.settings.get("lora_root") and (execution != "autoregressive" or self.settings["route"] != "ordinary"):
             raise ValueError("Desktop LoRA requires an autoregressive ordinary route")
+        if execution != "autoregressive" and any(self.settings.get(key) for key in ("kernel_dev_root", "weight_space_config")):
+            raise ValueError("Kernel reload and weight-space tools require an autoregressive serving route")
+        if execution != "autoregressive" and self.settings.get("microscaling_prefill") not in {None, "off"}:
+            raise ValueError("Microscaling prefill requires an autoregressive serving route")
         if any(p["pid"] not in self.owned_pids() for p in model_processes()):
             raise RuntimeError(
                 "An external model process is running. Stop it through its owner before starting a managed model."
@@ -751,6 +788,12 @@ class Supervisor:
                 args.extend(["--lora-dir", self.settings["lora_root"],
                              "--max-loras", str(self.settings.get("max_loras", 1)),
                              "--max-lora-rank", str(self.settings.get("max_lora_rank", 16))])
+            for key, flag in (("multi_lora_delta_precision", "--multi-lora-delta-precision"),
+                              ("kernel_dev_root", "--kernel-dev-root"),
+                              ("weight_space_config", "--weight-space-config"),
+                              ("microscaling_prefill", "--microscaling-prefill")):
+                if self.settings.get(key) is not None:
+                    args.extend([flag, self.settings[key]])
             lineage = resume_worker["resume_lineage_id"] if resume_worker else uuid.uuid4().hex
             binding = hashlib.sha256(json.dumps({"checkpoint": resolution.artifact_fingerprint, "runner": runner.get("binding", {})}, sort_keys=True).encode()).hexdigest()
             persist_dir = Path(resume_worker["apc_persist_dir"]) if resume_worker else self.home / "apc-state" / binding / lineage

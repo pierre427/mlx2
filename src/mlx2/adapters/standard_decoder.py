@@ -850,9 +850,9 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                 raise ValueError(
                     "target_verify_row_exact requires an unquantized dense full-attention Qwen3 target"
                 )
-            if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1":
+            if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1" or os.environ.get("MLX2_FP_VERIFY_KERNEL") == "1":
                 raise ValueError(
-                    "target_verify_row_exact does not support MLX2_FP_DECODE_KERNEL"
+                    "target_verify_row_exact does not support MLX2_FP_DECODE_KERNEL or MLX2_FP_VERIFY_KERNEL"
                 )
         draft_record = None
         draft_entries = []

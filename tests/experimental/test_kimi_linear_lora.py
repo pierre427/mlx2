@@ -317,3 +317,30 @@ def test_wy_training_gradients_match_reference_and_restore(length, tmp_path):
 def test_invalid_training_kda_policy_refused(tmp_path):
     with pytest.raises(ValueError, match='Training KDA policy'):
         session_for(model_fixture(), tmp_path, kda_policy='vector_kernel')
+
+
+def test_served_kda_projection_adapter_applies_under_fused_projections(tmp_path):
+    mx.random.seed(3)
+    model = model_fixture(False)
+    model.configure(parse_policy({'mla': 'expanded', 'mla_flash': 'off', 'kda': 'reference',
+                                  'fused_projections': True}))
+    attention = model.layers[0].attention
+    assert attention.fused_projections
+    tokens = mx.array([[1, 2, 4, 5, 7, 9]])
+    keys = ('model.layers.0.attention.q_proj', 'model.layers.1.attention.o_proj')
+    with LoRATrainingSession(model, keys, base_checkpoint='synthetic@fixture',
+                             source_revision='a' * 40, base_paths=(tmp_path / 'base',)) as s:
+        s.restore_weights({k: v + (.05 if k.endswith('lora_b') else 0) for k, v in s.weights().items()})
+        trained = s.forward(tokens)
+        mx.eval(trained)
+        s.export_program(tmp_path / 'adapter', {})
+    assert attention.fused_projections
+    serving = install_lora(model, name='x', path=tmp_path / 'adapter', base_checkpoint='synthetic@fixture')
+    served = model(tokens)
+    mx.eval(served)
+    assert serving.program_application_count == 2
+    assert float(mx.abs(served - trained).max()) == 0
+    assert attention.calls['fused_projections_declined_wrapped'] > 0
+    serving.restore(model)
+    model(tokens)
+    assert attention.calls['fused_projections'] > 0

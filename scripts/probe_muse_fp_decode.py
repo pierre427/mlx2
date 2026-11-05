@@ -38,6 +38,16 @@ def environment():
                 'services': ['launchctl', 'list']}.items()}
 
 
+def _group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def stop(child):
     if child is None:
         return
@@ -45,10 +55,21 @@ def stop(child):
         os.killpg(child.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    deadline = time.monotonic() + 20
     try:
         child.wait(timeout=20)
     except subprocess.TimeoutExpired:
-        os.killpg(child.pid, signal.SIGKILL)
+        pass
+    # The leader can exit before a descendant that ignores SIGTERM; the
+    # group, not the leader, owns the GPU work.
+    while _group_alive(child.pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    if _group_alive(child.pid):
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if child.poll() is None:
         child.wait()
 
 

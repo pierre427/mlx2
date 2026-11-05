@@ -2215,7 +2215,7 @@ def tenant_batching_status(engine, tenant_id):
     if scoped:
         return method(tenant_id=tenant_id)
     status = dict(method())
-    for key in ("active_requests", "completed_requests", "events"):
+    for key in ("active_requests", "active_request_details", "completed_requests", "events"):
         if key in status:
             status[key] = []
     fairness = status.get("fairness")

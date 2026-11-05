@@ -238,6 +238,10 @@ class GatedDeltaNet(nn.Module):
             with observed_stage("gdn.input_projections", rows=rows) as materialize:
                 (qkv, z, b, a) = self._input_projections(inputs)
                 materialize(qkv, z, b, a)
+        from ..inpass_checkpoints import recurrent_capture
+        captured = recurrent_capture(self,qkv,z,b,a,mask,cache,dtype=inputs.dtype)
+        if captured is not None:
+            return self.out_proj(captured.reshape(B,S,-1))
         if observer is None:
             fused = self._try_fused_decode(qkv, z, b, a, mask, cache)
         else:

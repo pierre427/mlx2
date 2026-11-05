@@ -107,6 +107,8 @@ def test_kernel_and_ast_policy_validation_is_explicit():
         {"inkling_moe_nax": "bad"},
         {"draft_model": "arbitrary"},
         {"inkling_tree_executor": "packed"},
+        {"inkling_tree_kernels": True},
+        {"inkling_tree_cohort": True, "draft_model": "prompt_lookup"},
     ):
         with pytest.raises((ValueError, TypeError)):
             validate_policy(bad)
@@ -138,3 +140,28 @@ def test_ast_controls_reach_the_bound_provider(monkeypatch):
     ):
         with pytest.raises(ValueError):
             validate_policy({"draft_model": "prompt_lookup", **extra})
+
+
+def test_prompt_honours_thinking_toggle_and_refuses_unenforced_controls():
+    from mlx2.adapters.inkling import InklingAdapter
+
+    seen = []
+
+    class Tokenizer:
+        def apply_chat_template(self, messages, **kw):
+            seen.append(kw["reasoning_effort"])
+            return [1] if kw["tokenize"] else "x"
+
+    adapter = object.__new__(InklingAdapter)
+    adapter.tokenizer = Tokenizer()
+    messages = [{"role": "user", "content": "hi"}]
+    for render in (adapter.prompt_tokens, adapter.render_prompt):
+        render({"messages": messages})
+        render({"messages": messages, "enable_thinking": False})
+        render({"messages": messages, "enable_thinking": False, "reasoning_effort": "low"})
+    assert seen == ["high", "none", "low"] * 2
+    tool = {"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}
+    adapter.prompt_tokens({"messages": messages, "tools": [tool], "tool_choice": "none"})
+    for bad in ({"tools": [tool]}, {"thinking_budget": 8}, {"thinking_steer_alpha": 0.5}):
+        with pytest.raises(ValueError):
+            adapter.prompt_tokens({"messages": messages, **bad})

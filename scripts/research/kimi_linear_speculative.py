@@ -140,6 +140,10 @@ def classify(reference, candidate, ref_ok, cand_ok):
     """AGENTS.md first-divergence near-tie contract (width-one rows)."""
     a = [row["token"] for row in reference]
     b = [row["token"] for row in candidate]
+    if not a or not b:
+        # Missing logprobs are not token evidence: two empty rows are no parity.
+        return {"verdict": "missing_token_evidence",
+                "reference_tokens": len(a), "candidate_tokens": len(b)}
     if a == b:
         return {"verdict": "exact", "tokens": len(a)}
     index = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))

@@ -1,6 +1,6 @@
 import Foundation
 
-// SSE framing uses wire LF bytes, never Unicode paragraph separators in JSON.
+// SSE framing uses wire line endings, never Unicode paragraph separators in JSON.
 struct ServerSentEvents<Source: AsyncSequence>: AsyncSequence where Source.Element == UInt8 {
     typealias Element = String
     let source: Source
@@ -12,15 +12,17 @@ struct ServerSentEvents<Source: AsyncSequence>: AsyncSequence where Source.Eleme
         private var line: [UInt8] = []
         private var fields: [String] = []
         private var ended = false
+        private var skipLF = false
+        private var eventBytes = 0
         init(source: Source.AsyncIterator) { self.source = source }
 
         private mutating func finishLine() throws -> String? {
-            if line.last == 13 { line.removeLast() }
             defer { line.removeAll(keepingCapacity: true) }
             guard let text = String(bytes: line, encoding: .utf8) else {
                 throw DesktopError.message("Invalid UTF-8 in chat stream")
             }
             if text.isEmpty {
+                eventBytes = 0
                 guard !fields.isEmpty else { return nil }
                 defer { fields.removeAll(keepingCapacity: true) }
                 return fields.joined(separator: "\n")
@@ -38,7 +40,14 @@ struct ServerSentEvents<Source: AsyncSequence>: AsyncSequence where Source.Eleme
             guard !ended else { return nil }
             while let byte = try await source.next() {
                 try Task.checkCancellation()
-                if byte == 10 {
+                if skipLF {
+                    skipLF = false
+                    if byte == 10 { continue }
+                }
+                eventBytes += 1
+                guard eventBytes <= 2 * 1024 * 1024 else { throw DesktopError.message("Chat stream event exceeds the 2 MiB limit.") }
+                if byte == 10 || byte == 13 {
+                    skipLF = byte == 13
                     if let payload = try finishLine() { return payload }
                 } else { line.append(byte) }
             }

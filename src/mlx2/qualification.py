@@ -86,6 +86,8 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-11-03: explicit optional preflight records no unit_tests
+    # pass when skipped; the exact omission marker is validated below.
     # Re-pinned 2026-10-30: qmm_row_pad routed-call observation and evidence
     # (0d3d97610 changed the producer without re-pinning).
     # Re-pinned 2026-10-29: run-local qsa_b1_selected observation (the
@@ -325,8 +327,8 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-24: explicit source-owned greedy/refusal sampling
     # scope requires named controls/repeat/refusal evidence and cannot claim
     # stochastic coverage; absence preserves the historical sampling suite.
-    # Re-pinned 2026-11-03: source-bound SC-MXFP4 dispatch observation.
-    "sha256": "50d92f13e99e607c05705d22b9b898f1e449cabf2b89c4c7f732d5ac81088703",
+    # Re-pinned 2026-11-03: combined SC-MXFP4 observation and explicit optional preflight.
+    "sha256": "b99f2729b87e766dc64a7d1618ad6365b8b19d463e3363dc412f6b068507329a",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -2133,6 +2135,16 @@ def load_qualified_route(
     required = required_generic_checks(descriptor, capabilities=selected_for_checks) | (
         {"mtp_execution"} if settings["mtp"] else set()
     )
+    # Full CPU preflight is optional under the project qualification contract.
+    # Only the approved producer's explicit no-preflight receipt can omit this
+    # check; absence alone, contradictory passes, and foreign producers cannot.
+    preflight = record.get("preflight")
+    if isinstance(preflight, dict) and preflight.get("status") == "not_requested":
+        if (set(preflight) != {"status", "unit_tests_observed"}
+                or preflight.get("unit_tests_observed") is not False
+                or "unit_tests" in checks or "preflight_receipt" in record):
+            raise ValueError("qualification has contradictory skipped-preflight evidence")
+        required.discard("unit_tests")
     if Capability.GRAMMAR in descriptor.capabilities:
         required.add("structured_output")
     descriptor_checks = required_descriptor_checks(descriptor, settings)

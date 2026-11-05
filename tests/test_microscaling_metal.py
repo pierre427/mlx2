@@ -26,6 +26,13 @@ def test_dense_integer_and_scaled_reference(shape,dtype_name):
     # Transposed input exercises the public contiguous-input contract.
     x=mx.array(rng.standard_normal((k,m)).astype(np.float32)).astype(getattr(mx,dtype_name)).T
     aq,asc=K.quantize_activations(x)
+    # Independent per-row law (amax/127, rint, clamp); padding rows are zero.
+    # Metal fast-math division may differ from NumPy by one code at a tie.
+    xv=np.array(x.astype(mx.float32)); amax=np.abs(xv).max(axis=1)
+    np.testing.assert_allclose(np.array(asc)[:m],amax/np.float32(127),rtol=1e-6)
+    ref_q=np.clip(np.rint(xv/(amax/np.float32(127))[:,None]),-127,127)
+    assert np.abs(np.array(aq)[:m].astype(np.int32)-ref_q).max()<=1
+    assert not np.array(aq)[m:].any() and not np.array(asc)[m:].any()
     qw=K.unpack_i8(codes,bc)
     assert np.array_equal(np.array(qw),decode_numpy(packed))
     acc=K.int8_mm(aq,qw)

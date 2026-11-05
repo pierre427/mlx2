@@ -135,6 +135,11 @@ def resume_training_binding(spec):
         raise ValueError("checkpoint resume training loss profile changed")
     if training_attention_profile(parent) != training_attention_profile(spec):
         raise ValueError("checkpoint resume training attention profile changed")
+    # The checkpoint binding substitutes the parent spec hash, so every other
+    # input of the training law must be compared here.
+    for key, default in (("execution_policy", None), ("max_grad_norm", 1.0)):
+        if parent.get(key, default) != spec.get(key, default):
+            raise ValueError(f"checkpoint resume {key} changed")
     return {"path": str(Path(spec["resume_from_spec"]).resolve()), "sha256": fingerprint,
             "training_loss": training_loss_profile(parent),
             "training_attention": training_attention_profile(parent)}
@@ -230,14 +235,14 @@ def verify_selected_mount(selected, mounted):
         raise ValueError("mounted adapter changed after frozen final selection")
 
 
-def validate_training_rows(rows, *, vocab_size=163840, max_tokens=4096):
+def validate_training_rows(rows, *, vocab_size=163840, max_tokens=4096, min_tokens=2):
     if not rows:
         raise ValueError("training data is empty")
     for row in rows:
         if row.get("split") != "train" or row.get("evaluation_only"):
             raise ValueError("training row is not explicitly in the training split")
         ids, mask = row.get("input_ids"), row.get("loss_mask")
-        if not isinstance(ids, list) or not isinstance(mask, list) or len(ids) != len(mask) or not 2 <= len(ids) <= max_tokens:
+        if not isinstance(ids, list) or not isinstance(mask, list) or len(ids) != len(mask) or not min_tokens <= len(ids) <= max_tokens:
             raise ValueError("training row needs aligned, complete, bounded tokens and mask")
         if any(type(token) is not int or not 0 <= token < vocab_size for token in ids):
             raise ValueError("training token outside checkpoint vocabulary")
@@ -448,7 +453,10 @@ def run(spec_path):
         # does not consume training rows.
         read_bound_bytes(spec["data"], expected_sha256=spec["data_expected_sha256"])
     if training_rows:
-        validate_training_rows(training_rows, max_tokens=int(spec.get("max_sequence_length", 4096)))
+        # padded_sdpa training MLA needs T > 8 on the shifted input; refuse
+        # short rows here, before the model loads, not at their first step.
+        validate_training_rows(training_rows, max_tokens=int(spec.get("max_sequence_length", 4096)),
+                               min_tokens=10 if training_attention_profile(spec)["mla"] == "padded_sdpa" else 2)
     elif spec.get("mode") in {"probe", "train"}:
         raise ValueError("training data is empty")
     from kimi_lora_loss import validate_loss_rows, evaluate_loss

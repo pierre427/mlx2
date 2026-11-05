@@ -98,6 +98,41 @@ def test_qualification_binds_artifact_runtime_settings_and_checks(tmp_path):
             load_qualified_route(path, **args)
 
 
+def test_explicit_skipped_preflight_preserves_all_functional_gates(tmp_path):
+    path = tmp_path / "qualification.json"
+    settings = {"mtp": False, "max_context": 16384}
+    record = {
+        "passed": True, "runtime": {"source": "synthetic"}, "artifact": "synthetic-weights",
+        "settings": settings, "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "preflight": {"status": "not_requested", "unit_tests_observed": False},
+        "checks": {name: {"passed": True} for name in (REQUIRED_CHECKS | {"structured_output"}) - {"unit_tests"}},
+    }
+    args = dict(runtime=record["runtime"], artifact=record["artifact"], settings=settings,
+                descriptor=QWEN4_FLASH_NEXT, name="synthetic-optional-preflight")
+    path.write_text(json.dumps(record))
+    assert load_qualified_route(path, **args).profile
+    assert "unit_tests" not in json.loads(path.read_text())["checks"]
+    for missing in ("cold_text", "warm_prefix", "context", "structured_output"):
+        changed = {**record, "checks": {key: value for key, value in record["checks"].items() if key != missing}}
+        path.write_text(json.dumps(changed))
+        with pytest.raises(ValueError, match="missing or failed"):
+            load_qualified_route(path, **args)
+    variants = [
+        {key: value for key, value in record.items() if key != "preflight"},
+        {**record, "preflight": {"status": "not_requested"}},
+        {**record, "preflight": {"status": "not_requested", "unit_tests_observed": True}},
+        {**record, "preflight": {"status": "not_requested", "unit_tests_observed": 0}},
+        {**record, "preflight_receipt": {}},
+        {**record, "checks": {**record["checks"], "unit_tests": {"passed": True}}},
+        {**record, "checks": {**record["checks"], "unit_tests": {"passed": False}}},
+        {**record, "qualification_harness": {"name": "unreviewed-producer"}},
+    ]
+    for changed in variants:
+        path.write_text(json.dumps(changed))
+        with pytest.raises(ValueError):
+            load_qualified_route(path, **args)
+
+
 @pytest.mark.parametrize("qualified_fp32", [False, True])
 def test_fp32_head_receipt_cannot_select_opposite_head_mode(tmp_path, qualified_fp32):
     """The head precision is execution identity in both directions."""

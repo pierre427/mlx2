@@ -44,9 +44,12 @@ struct MediaView: View {
         return providerID == "mlx2-video" ? media["direct"]["video_models"].array : []
     }
     private var hasUsableModel: Bool {
-        if capability == "image" && providerID == "mlx2-image" { return images.contains { $0["available"].bool } }
+        guard selected["id"].string != nil else { return false }
+        if capability == "image" && providerID == "mlx2-image" {
+            return MediaRouteSelection.usable(images, selection: backendID, operation: imageOperation, exactDefault: true)
+        }
         if (selected["models_tool"].string ?? "").isEmpty { return true }
-        return remoteModels.contains { $0["available"].bool || ($0["available"].raw is NSNull && ($0["ready"].bool || $0["ready"].raw is NSNull)) }
+        return MediaRouteSelection.usable(remoteModels, selection: backendID, operation: capability == "image" ? imageOperation : nil)
     }
     var body: some View {
         ScrollView {
@@ -77,7 +80,7 @@ struct MediaView: View {
                 } else {
                     Picker("Model service", selection: $providerID) {
                         ForEach(services, id: \.rawID) { service in Text(service["label"].text).tag(service["id"].text) }
-                    }
+                    }.onChange(of: providerID) { _, _ in backendID = "selected"; validation = nil }
                     servicePanel
                     GroupBox("Generate") {
                         VStack(alignment: .leading, spacing: 12) {
@@ -91,8 +94,9 @@ struct MediaView: View {
                             if capability == "image" && providerID == "mlx2-image" {
                                 Picker("Model", selection: $backendID) {
                                     Text("Service default").tag("selected")
-                                    ForEach(images.filter { $0["available"].bool && (imageOperation == "generate" || $0["operations"].array.contains { $0.text == "edit" }) }, id: \.rawID) { item in
-                                        Text(item["label"].text).tag(item["id"].text)
+                                    ForEach(images, id: \.rawID) { item in
+                                        let usable = MediaRouteSelection.available(item) && MediaRouteSelection.supports(item, operation: imageOperation)
+                                        Text(item["label"].text + (usable ? "" : " · unavailable for this operation")).tag(item["id"].text)
                                     }
                                 }
                             }
@@ -100,12 +104,13 @@ struct MediaView: View {
                                 Picker("Model", selection: $backendID) {
                                     Text("Service default").tag("selected")
                                     ForEach(Array(remoteModels.enumerated()), id: \.offset) { _, item in
-                                        Text((item["label"].string ?? item["name"].string ?? item["id"].text) + (item["available"].bool ? "" : " · unavailable")).tag(item["id"].string ?? item["name"].text)
+                                        let usable = MediaRouteSelection.available(item) && MediaRouteSelection.supports(item, operation: capability == "image" ? imageOperation : nil)
+                                        Text((item["label"].string ?? item["name"].string ?? item["id"].text) + (usable ? "" : " · unavailable")).tag(MediaRouteSelection.id(item))
                                     }
                                 }
                             }
-                            if capability != "music" && remoteModels.isEmpty && !(capability == "image" && providerID == "mlx2-image" && !images.isEmpty) {
-                                Text("No model routes discovered for this service. Connect or start the service, then refresh. Generation stays disabled until a usable route is advertised.").font(.caption).foregroundStyle(.secondary)
+                            if !hasUsableModel {
+                                Text("The selected model cannot run this operation. Choose an available model, or start the service and refresh its routes.").font(.caption).foregroundStyle(.orange)
                             }
                             Text(capability == "music" ? "Caption" : capability == "voice" ? "Text to speak" : "Prompt").font(.headline)
                             if capability == "voice" {
@@ -144,7 +149,7 @@ struct MediaView: View {
                                 Text("Route remains unqualified until separately tested.").font(.caption).foregroundStyle(.secondary)
                                 Spacer()
                                 Button("Generate") { generate() }.buttonStyle(.borderedProminent)
-                                    .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !selected["configured"].bool || !selected["ready"].bool || !hasUsableModel)
+                                    .disabled(model.busy || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !selected["configured"].bool || !selected["ready"].bool || !hasUsableModel || (capability == "image" && imageOperation == "edit" && references.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
                             }
                         }.padding(8)
                     }
@@ -312,6 +317,7 @@ struct MediaView: View {
         return Array(Set(values.filter { $0.hasPrefix("/") })).sorted()
     }
     private func generate() {
+        guard hasUsableModel else { validation = "Choose an available model for this operation."; return }
         do {
             var params = try JSONSerialization.jsonObject(with: Data(options.utf8)) as? [String: Any]
             guard params != nil else { throw CocoaError(.propertyListReadCorrupt) }
@@ -323,10 +329,17 @@ struct MediaView: View {
             } else {
                 params!["prompt"] = prompt
                 if capability == "image" {
-                    guard let w = Int(width), let h = Int(height) else { validation = "Enter numeric image dimensions."; return }
+                    guard let w = Int(width), let h = Int(height), w > 0, h > 0 else { validation = "Enter positive whole-number image dimensions."; return }
+                    if providerID == "mlx2-image" && (!(256...2048).contains(w) || !(256...2048).contains(h) || w % 16 != 0 || h % 16 != 0) {
+                        validation = "This image service requires width and height from 256 to 2048, in multiples of 16."; return
+                    }
                     params!["width"] = w; params!["height"] = h
                     params!["operation"] = imageOperation
-                    if imageOperation == "edit" { params!["reference_images"] = references.split(separator: "\n").map(String.init) }
+                    if imageOperation == "edit" {
+                        let paths = references.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                        guard !paths.isEmpty else { validation = "Attach a reference image to edit."; return }
+                        params!["reference_images"] = paths
+                    }
                     if providerID == "mlx2-image" { params!["backend"] = backendID }
                 }
             }

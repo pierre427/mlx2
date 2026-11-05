@@ -11,6 +11,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from .desktop import child_exited
+
 
 class Suspension:
     def __init__(self, supervisor):
@@ -67,14 +69,13 @@ class Suspension:
         child = getattr(self, "operation_child", None)
         if child is None or self.owner.child is not child:
             raise ValueError("Managed worker ownership changed during suspension")
-        poll = getattr(child, "poll", None)
-        if callable(poll) and poll() is not None:
+        if child_exited(child):
             raise ValueError("Managed worker exited during suspension")
 
     def request(self, method, route, body=None):
         from .http_security import load_secret_file
         child = self.owner.child
-        if child is None or (callable(getattr(child, "poll", None)) and child.poll() is not None):
+        if child is None or child_exited(child):
             raise ValueError("Managed metadata endpoint no longer has its owned process")
         worker = dict(self.owner.worker)
         token = load_secret_file(worker["api_key_file"], flag="managed admin key")
@@ -94,7 +95,7 @@ class Suspension:
             raise ValueError("Managed suspension request refused (HTTP " + str(error.code) + "); the current worker may need restarting with suspension support") from None
         if self.owner.child is not child or any(self.owner.worker.get(key) != worker.get(key) for key in ("url", "api_key_file")):
             raise ValueError("Managed metadata endpoint changed while receiving its receipt")
-        if callable(getattr(child, "poll", None)) and child.poll() is not None:
+        if child_exited(child):
             raise ValueError("Managed metadata process exited before receipt validation")
         if not isinstance(value, dict):
             raise TypeError("Managed server returned an invalid suspension receipt")
