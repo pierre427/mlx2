@@ -319,7 +319,8 @@ def test_exact_published_config_and_policy_fail_closed():
             parse_policy(policy)
     assert parse_policy({"activation_precision": "bf16"}) == {"activation_precision": "bf16"}
     assert Capability.MTP not in DESCRIPTOR.capabilities
-    assert Capability.TOOLS not in DESCRIPTOR.capabilities
+    # Tools are implemented (tests/test_ripple_tools_cpu.py), not qualified.
+    assert Capability.TOOLS in DESCRIPTOR.capabilities
     assert not DESCRIPTOR.metadata["qualified"]
     adapter = object.__new__(RippleAdapter)
     assert adapter.execution_config(max_lanes=1, prefill_step=256)["num_draft"] == 0
@@ -347,8 +348,8 @@ def test_template_and_reasoning_contract():
     # Raw prompts have no template control; classifier scoring sets the flag.
     assert adapter.output_parser({"prompt": "x", "enable_thinking": False}).channel == "content"
     assert adapter.render_prompt({"prompt": "x", "enable_thinking": False}) == "x"
-    with pytest.raises(ValueError, match="tool calling"):
-        adapter.output_parser({"messages": messages, "tools": [{"type": "function", "function": {"name": "f"}}]})
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    assert adapter.output_parser({"messages": messages, "tools": tools}).tools == tools
 
 
 def test_fused_elementwise_option_is_explicit_and_typed():

@@ -1,0 +1,24 @@
+{
+  "dataset": "openai/gsm8k",
+  "config": "main",
+  "revision": "740312add88f781978c0658806c59bc2815b9866",
+  "license": "MIT",
+  "url": "https://huggingface.co/datasets/openai/gsm8k",
+  "splits": {
+    "test": {
+      "file": "main/test-00000-of-00001.parquet",
+      "sha256": "ee7b8da9e381df27b9e3f7758a159ab2bdaa4dbaa910546cbbc47e0cb44e4f59",
+      "rows_kept": 1319,
+      "output": "test.jsonl",
+      "output_sha256": "752adc99f23132275139f1f7be57126b08735a55daf0c56859ee6df70abafbac"
+    },
+    "train": {
+      "file": "main/train-00000-of-00001.parquet",
+      "sha256": "ea82612ea9582142387730c793eb67d3b12849002bc0b7fa6f8efafa7351419d",
+      "rows_kept": 8,
+      "output": "train_few_shot.jsonl",
+      "output_sha256": "3f7ee50a459a52ed756683a31829ee9feb74db2b71c5638a09bf31139b8fee14"
+    }
+  },
+  "conversion": "parquet rows -> JSONL {question, answer}, unmodified text; train keeps the first 8 rows (few-shot pool)"
+}

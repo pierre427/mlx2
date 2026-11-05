@@ -34,14 +34,19 @@ DESCRIPTOR = ModelDescriptor(
                             # speculative rollback): the generic PLD verify
                             # path (tests/test_ripple_pld_cpu.py). Explicit
                             # --prompt-lookup only; see prompt_lookup_default.
-                            Capability.PROMPT_LOOKUP}),
+                            Capability.PROMPT_LOOKUP,
+                            # Hermes JSON calls in <tool_call> blocks, parsed
+                            # from the detokenized text on every route
+                            # (adapters/ripple_output.py).  No GRAMMAR: forced
+                            # calls are checked by the terminal tool contract.
+                            Capability.TOOLS}),
     cache_layout=CACHE_LAYOUT,
     metadata={"execution": "mlx2.adapters.ripple.RippleAdapter", "implemented": True,
               "qualification": "unqualified", "qualified": False, "selected": False,
               "observed_used": False, "ordinary_reference": True,
               "source_activation_precision": "nvfp4", "activation_precision": "bf16",
               "explicit_execution_policy_required": {"activation_precision": "bf16"},
-              "scope": "ordinary W4A16; source W4A4, tools, batching, prompt lookup and long context unqualified"},
+              "scope": "ordinary W4A16; source W4A4, tools (implemented), batching, prompt lookup and long context unqualified"},
 )
 
 
@@ -529,10 +534,6 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
     @staticmethod
     def _check_request(request):
-        from ..output import callable_tools
-
-        if callable_tools(request):
-            raise ValueError("Ripple tool calling is not implemented in this initial adapter")
         # The flag only has template meaning for chat requests; raw prompts
         # (e.g. classifier scoring) set it without asking for a control.
         if "messages" in request and request.get("enable_thinking") is False:
@@ -542,20 +543,34 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self._check_request(request)
         if "messages" not in request:
             return request["prompt"]
+        from ..output import callable_tools
+
+        # tool_choice "none" renders no tools block, as for the other adapters.
         return self.tokenizer.apply_chat_template(_template_history(request["messages"]),
-                                                  add_generation_prompt=True, tokenize=False)
+                                                  add_generation_prompt=True, tokenize=False,
+                                                  tools=callable_tools(request))
 
     def prompt_tokens(self, request):
         return self.tokenizer.encode(self.render_prompt(request), add_special_tokens=False)
 
     def output_parser(self, request):
-        from ..output import OutputParser
+        from ..output import callable_tools, constrained_tool_choice
+        from ..runtime.tool_parsers.hermes_json import parse_tool_call
+        from .ripple_output import RippleOutputParser
 
         self._check_request(request)
-        # The source prompt does not pre-open <think>. The shared parser
-        # detects a leading generated marker and separates reasoning then.
-        return OutputParser(chat="messages" in request, thinking=False, tools=None,
-                            stops=request.get("stop", ()))
+        # The source prompt does not pre-open <think>. The parser detects a
+        # leading generated marker and separates reasoning then; template
+        # framing newlines go to neither channel (ripple_output.py).  The
+        # markers are multi-token pieces in this tokenizer, so they are
+        # text-matched (TokenBoundOutputParser would bind nothing).
+        return RippleOutputParser(
+            chat="messages" in request, thinking=False, tools=callable_tools(request),
+            parse_tool=parse_tool_call, stops=request.get("stop", ()),
+            constrained_tools=constrained_tool_choice(request),
+            parallel_tool_calls=request.get("parallel_tool_calls", True),
+            tolerant_tool_markers=request.get("_tolerant_tool_markers", False),
+        )
 
     def diagnostics(self):
         from ..runtime.models.modelopt_nvfp4 import nvfp4_model_status
