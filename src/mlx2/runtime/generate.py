@@ -43,6 +43,7 @@ from .models.cache import (
 )
 from .multi_lora import bind_lora_rows, clear_lora_rows
 from .prefill_checkpoint_rows import prefill_checkpoint_rows
+from .prefill_lookahead import StateOnlyPrefillOutput, prefill_lookahead
 from .prefill_plan import (
     checkpoint_bounded_prefill_rows,
     depth_bounded_prefill_rows,
@@ -230,7 +231,7 @@ def _narrowed_checkpoint_output(output, request):
 
 
 def _validate_prefill_checkpoint_output(
-    output, chunk_lengths, uids, *, allow_test_bypass: bool = False
+    output, chunk_lengths, uids, *, rows_after=None, allow_test_bypass: bool = False
 ) -> None:
     """Fail closed before a prompt chunk can become a restore checkpoint.
 
@@ -249,6 +250,28 @@ def _validate_prefill_checkpoint_output(
     test doubles and must never be inferred from an unfamiliar output shape.
     """
     if allow_test_bypass:
+        return
+    if isinstance(output, StateOnlyPrefillOutput):
+        # Incomplete state is legal only inside one call: a later chunk of it
+        # completes the cache before the call's boundary can be published.
+        live = [i for (i, length) in enumerate(chunk_lengths) if int(length) > 0]
+        if rows_after is None or any(int(rows_after[i]) <= 0 for i in live):
+            raise PromptChunkCorruption(
+                [uids[i] for i in live],
+                "a state-only prefill chunk must be followed by a chunk of the same call",
+            )
+        hidden = output.hidden
+        if len(hidden.shape) != 2 or int(hidden.shape[0]) != len(chunk_lengths):
+            raise RuntimeError("state-only prefill output has an unsupported geometry")
+        valid = mx.isfinite(hidden).all(axis=-1)
+        mx.eval(valid)
+        corrupt = [int(uids[i]) for (i, ok) in enumerate(valid.tolist()) if i in live and not ok]
+        if corrupt:
+            raise PromptChunkCorruption(
+                corrupt,
+                "state-only prefill chunk produced non-finite hidden state for uid(s) "
+                f"{corrupt}",
+            )
         return
     last_row_only = bool(getattr(output, "last_row_only", False))
     output = getattr(output, "logits", output)
@@ -1150,7 +1173,14 @@ class PromptProcessingBatch:
                         else "mixed"
                     )
                     stream_context = expert_prefill_admission(phase, self.uids)
-                    with context, stream_context, prefill_checkpoint_rows(
+                    lookahead = prefill_lookahead(
+                        [
+                            max(0, length - processed - n_to_process)
+                            for length in lengths
+                        ],
+                        step=self.prefill_step_size,
+                    )
+                    with context, stream_context, lookahead, prefill_checkpoint_rows(
                         chunk_lengths, width=n_to_process
                     ) as checkpoint_rows:
                         checkpoint_output = forward(
@@ -1184,6 +1214,10 @@ class PromptProcessingBatch:
                 checkpoint_output,
                 chunk_lengths,
                 self.uids,
+                rows_after=[
+                    max(0, length - processed - n_to_process)
+                    for length in lengths
+                ],
                 allow_test_bypass=bool(
                     getattr(
                         self.model,

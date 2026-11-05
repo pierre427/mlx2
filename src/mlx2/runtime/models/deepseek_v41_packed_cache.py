@@ -195,19 +195,21 @@ class DeepSeekV41PackedLayerCache(DeepSeekV41LayerCache):
 
     @property
     def pending(self):
-        if self._closed or self._in_forward:
+        if self._closed or self._in_forward or self.ced_local_deferred:
             return True
         return self.source and any((0 if p is None else min(p.shape[1], self._pool_count)) != self.offset // self.ratio
                                    for p in (self._pooled, self._index_keys))
 
     def validate_storage(self):
+        if self.ced_local_deferred and (self._packed_local is not None or self.source):
+            raise ValueError("native QAT deferred CED local state mismatch")
         for value, shape, kind in (
             (self._packed_local, (1, 1, min(self.offset, self.window_size), self.head_dim), "fp8"),
             (self.packed_pooled, (1, self.offset // self.ratio if self.source else 0, self.head_dim), "compressed_fp4"),
             (self.packed_index_keys, (1, self.offset // self.ratio if self.source else 0, self.index_head_dim), "index_fp4"),
         ):
             if value is None:
-                if shape[-2]:
+                if shape[-2] and not (kind == "fp8" and self.ced_local_deferred):
                     raise ValueError("native QAT cache plane missing")
             else:
                 validate(value, shape=shape, kind=kind, xp=self.xp)

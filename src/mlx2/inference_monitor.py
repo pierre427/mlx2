@@ -42,6 +42,8 @@ MECHANISM_FAMILIES = (
     ("advanced_path_events_total", "event"),
     ("capability_engagements_total", "capability"),
     ("fused_gdn_events_total", "event"),
+    ("kda_events_total", "event"),
+    ("mla_events_total", "event"),
     ("indexed_qsa_attestations_total", None),
     ("indexed_qsa_fallbacks_total", None),
     ("int8_prefill_calls_total", "outcome"),

@@ -1599,6 +1599,25 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
                     {"event": event},
                 )
 
+    # Host graph-dispatch counters, like GDN: no device reads on scrape and
+    # bounded labels only. Present when the adapter declares these mechanisms.
+    mechanism_events = {
+        "kda": ("reference", "vector_kernel", "chunk32", "chunk_wy", "fused_projections", "merged_conv",
+                "fused_norm", "norm_fla_fp32", "norm_qwen_bf16", "multirow_calls", "single_row_calls",
+                "multirow_tokens", "single_row_tokens"),
+        "mla": ("expanded_sdpa", "latent_tiled", "latent_single", "latent_single_tiled",
+                "auto_expanded", "auto_latent",
+                "fused_mla_decode", "fused_mla_declined",
+                "multirow_calls", "single_row_calls", "multirow_tokens", "single_row_tokens"),
+    }
+    for mechanism,events in mechanism_events.items():
+        counts = execution.get(mechanism)
+        if isinstance(counts,Mapping):
+            for event in events:
+                builder.counter(f"mlx2_{mechanism}_events_total",
+                    f"{mechanism.upper()} host graph dispatch events (not device completion).",
+                    int(counts.get(event,0)),{"event":event})
+
     gdn = execution.get("fused_gdn")
     if isinstance(gdn, Mapping):
         for event in (

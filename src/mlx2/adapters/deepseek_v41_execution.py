@@ -12,6 +12,11 @@ POLICY_CHOICES = {
     "deepseek_kv_storage": ("reference", "native_packed", "context_gated_v1"),
     "deepseek_candidate_score": ("reference", "candidate_only"),
     "deepseek_ced": ("reference", "dependency_exact"),
+    # Opt-in, unqualified and not GPU-tested (2026-11-02): a dependency CED
+    # prefill chunk with at least one first-decoder-layer cone of rows after
+    # it in the same prompt call skips every layer above the barrier
+    # (Sushi's state-only chunks). See deepseek_v41_ced.state_only_admitted.
+    "deepseek_ced_state_only": ("reference", "after_cone_v1"),
 }
 
 
@@ -52,12 +57,16 @@ def validate_csa_policy(policy):
         or policy.get("deepseek_vision", "reference") != "reference"
     ):
         raise ValueError("dependency CED is a separate ordinary text prefill profile")
+    if (policy.get("deepseek_ced_state_only", "reference") != "reference"
+            and policy.get("deepseek_ced", "reference") != "dependency_exact"):
+        raise ValueError("CED state-only chunks require deepseek_ced=dependency_exact")
 
 
 def model_options(policy):
     return {"kv_storage_policy": policy.get("deepseek_kv_storage", "reference"),
             "candidate_score_policy": policy.get("deepseek_candidate_score", "reference"),
             "ced_policy": policy.get("deepseek_ced", "reference"),
+            "ced_state_only": policy.get("deepseek_ced_state_only", "reference") == "after_cone_v1",
             "context_limit": policy.get("deepseek_context_limit")}
 
 
@@ -75,6 +84,7 @@ def execution_receipt(model):
             "kv_storage_policy": getattr(model, "kv_storage_policy", "reference"),
             "candidate_score_policy": getattr(model, "candidate_score_policy", "reference"),
             "ced": ced, "full_depth_prefill": ced == "reference",
+            "ced_state_only": "after_cone_v1" if getattr(model, "ced_state_only", False) else "reference",
             "supported_context": getattr(model, "context_limit", 65536),
             "long_context_evidence": "explicit unqualified profile" if getattr(model, "context_limit", 65536) > 65536 else "see exact checkpoint receipts",
             "approximate_replay": False,

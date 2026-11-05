@@ -21,7 +21,8 @@ def test_csa_profiles_are_explicit_and_incompatible_producers_refused(parse):
     selected = parse({'deepseek_kv_storage': 'native_packed', 'deepseek_candidate_score': 'candidate_only',
                       'deepseek_context_limit': 1048576})
     assert model_options(selected) == {'kv_storage_policy': 'native_packed',
-        'candidate_score_policy': 'candidate_only', 'ced_policy': 'reference', 'context_limit': 1048576}
+        'candidate_score_policy': 'candidate_only', 'ced_policy': 'reference', 'ced_state_only': False,
+        'context_limit': 1048576}
     request = {'deepseek_kv_storage': 'native_packed', 'deepseek_candidate_score': 'candidate_only',
                'deepseek_context_limit': 1048576}
     # Fused QAT/attention-epilogue producers have an exact packed producer.

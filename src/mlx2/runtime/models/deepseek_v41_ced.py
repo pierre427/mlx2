@@ -13,11 +13,37 @@ def dependency_starts(config, length):
         raise ValueError("invalid CED prefill geometry")
     last = config.num_hidden_layers - 1
     # Candidate source output is query-specific and shared with later layers.
-    barrier = max((*config.kv_source_layer_ids, config.candidate_source_layer_id), default=-1)
+    barrier = dependency_barrier(config)
     window = config.sliding_window
     return tuple(0 if layer <= barrier else
                  max(0, length - (window + (last - layer) * (window - 1)))
                  for layer in range(config.num_hidden_layers))
+
+
+def dependency_barrier(config):
+    """Last layer that must run every prompt row (sources and candidates)."""
+    return max((*config.kv_source_layer_ids, config.candidate_source_layer_id), default=-1)
+
+
+def state_only_admitted(config, rows_after, step):
+    """Whether a chunk may skip every layer above the barrier.
+
+    Ported from Sushi's state-only chunks (dsv41_model.extendState), adapted
+    to this dependency-complete profile. The final logits read the input of
+    decoder layer L only on the last ``window + (last - L)(window - 1)`` prompt
+    rows; the widest such cone is the first decoder layer's. When at least that
+    many rows of the same call follow, no row of this chunk is inside any
+    cone. A later chunk that starts a decoder layer at zero reads this chunk's
+    (now empty) local keys only for warmup outputs that nothing consumes, and
+    refills a full window only if it is at least ``window`` rows wide.
+    """
+    last = config.num_hidden_layers - 1
+    barrier = dependency_barrier(config)
+    window = config.sliding_window
+    if barrier >= last or window < 1 or any(layer > barrier for layer in config.engram_layer_ids):
+        return False
+    cone = window + (last - (barrier + 1)) * (window - 1)
+    return int(rows_after) >= cone and int(step) >= window
 
 
 def trim_shared(shared, delta):

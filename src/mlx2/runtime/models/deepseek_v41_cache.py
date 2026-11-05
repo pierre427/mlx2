@@ -99,6 +99,10 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
         self._pool_count = self._capacity = 0
         self.hash_tail = xp.full((3,), -1, dtype=xp.int32) if history else None
         self._in_forward = False
+        # A CED state-only chunk skipped this decoder layer: its local keys are
+        # absent until a later chunk of the same prompt call refills them, and
+        # until then the row is pending (no snapshot, publication or decode).
+        self.ced_local_deferred = False
         # A different native-M arithmetic profile may be executed privately
         # while its numerical gate is unresolved. This mark survives ordinary
         # continuation and descriptor cloning; it cannot donate an APC prefix.
@@ -239,7 +243,7 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
 
     @property
     def pending(self):
-        if self._closed or self._in_forward:
+        if self._closed or self._in_forward or self.ced_local_deferred:
             return True
         if self.source:
             count = self.offset // self.ratio
@@ -263,7 +267,10 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
             raise ValueError("invalid V4.1 private AST numerical profile")
         self.validate_storage()
         expected = min(self.offset, self.window_size)
-        if self.keys is None:
+        if self.ced_local_deferred:
+            if self.keys is not None or self.source:
+                raise ValueError("V4.1 deferred CED local state mismatch")
+        elif self.keys is None:
             if expected:
                 raise ValueError("V4.1 local KV missing")
         elif self.keys.shape != (1, 1, expected, self.head_dim):
@@ -309,11 +316,14 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
         self.offset = restored.offset
         self.state = restored.state
         self._in_forward = False
+        self.ced_local_deferred = False
         # A snapshot taken from tainted grid state stays tainted on rollback.
         self.source_partition_tainted = bool(
             getattr(snapshot, "source_partition_tainted", False))
 
     def snapshot(self):
+        if self.ced_local_deferred:
+            raise ValueError("V4.1 CED state-only local keys are not a snapshot frontier")
         self.validate_state()
         self.cache_operations_contract.validate_publication(self)
         result = DeepSeekV4Snapshot(self.meta_state, _copy(self.xp, self.state))

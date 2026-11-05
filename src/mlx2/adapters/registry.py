@@ -564,7 +564,14 @@ def _hysparse2(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.HySparse2Adapter, module.DESCRIPTOR, artifact)
 
 
+def _kimi_linear(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".kimi_linear", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.KimiLinearAdapter, module.DESCRIPTOR, artifact)
+
+
 _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
+    "kimi_linear": _kimi_linear,
     "bert": _minilm,
     "qwen4_exp": _flash_next,
     "qwen3_5": _qwen3_5_dense,

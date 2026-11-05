@@ -5913,6 +5913,23 @@ class _ExplicitMaxLanes(argparse.Action):
         namespace.max_lanes_explicit = True
 
 
+class _ExplicitMaxContext(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.max_context_explicit = True
+
+
+def apply_adapter_context_default(args, adapter_resolution):
+    """Adapter-owned capacity default; preserve explicit operator limits."""
+    if not getattr(args, "max_context_explicit", False):
+        declared = getattr(getattr(adapter_resolution, "adapter_type", None), "default_max_context", None)
+        if declared is not None:
+            if type(declared) is not int or declared < 1:
+                raise ValueError("adapter default_max_context must be a positive integer")
+            args.max_context = declared
+    return args.max_context
+
+
 def apply_adapter_lane_default(args, adapter_resolution):
     """Use an adapter-declared ``default_max_lanes`` when --max-lanes is unset.
 
@@ -6097,7 +6114,7 @@ def build_parser():
         help="append faulthandler stack dumps for fatal signals (SIGSEGV, "
         "SIGBUS, SIGABRT, ...) to PATH instead of stderr (env MLX2_FAULT_LOG)",
     )
-    parser.add_argument("--max-context", type=int, default=262144)
+    parser.add_argument("--max-context", type=int, default=262144, action=_ExplicitMaxContext)
     parser.add_argument(
         "--prefill-step", type=prefill_step_arg,
         help=(
@@ -7770,6 +7787,8 @@ def main():
             # any other flag (OSError and TypeError used to be tracebacks).
             parser.error(f"cannot inspect --model {args.model}: {error}")
         validate_invocation_draft_adapter(args, adapter_resolution)
+        apply_adapter_context_default(args, adapter_resolution)
+        max_request_bytes = request_body_limit(args.max_context, args.max_request_bytes)
         apply_adapter_lane_default(args, adapter_resolution)
         streaming = apply_auto_streaming_lane_default(args, adapter_resolution, policy)
         # After the streaming decision: a best-route entry only sets route

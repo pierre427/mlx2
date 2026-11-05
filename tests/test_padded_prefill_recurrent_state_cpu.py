@@ -78,7 +78,17 @@ def _agnes():
     return Model(ModelArgs(model_type="agnes", text_config=args.__dict__)), 64
 
 
+def _kimi_linear():
+    from test_kimi_linear import args
+
+    from mlx2.runtime.models.kimi_linear import Model
+
+    mx.random.seed(13)
+    return Model(args()), 64
+
+
 FAMILIES = {
+    "kimi_linear": _kimi_linear,
     "qwen38_27b": _qwen38,
     "qwen36_35b": _qwen36,
     "qwen4_exp": _qwen4,

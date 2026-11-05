@@ -48,6 +48,9 @@ VARIANTS = {
 # rather than a dedicated command-line switch. This is a review vocabulary,
 # not a statement that every registered model implements each feature.
 FEATURES = (
+    # Existing reviewed GLM rows also need inventory cells for regeneration.
+    'glm53_mla_prompt_expanded_f16_v1', 'glm53_prompt_decoded_decoded_f16_v1', 'glm53_prompt_decoded_decoded_f32_v1', 'glm53_route_defaults_kblock_v6', 'glm53_sparse_prefill_gathered_f16_from_n', 'glm53_sparse_prefill_gathered_v2_below_threshold_reference',
+    'kda_vector_kernel', 'kimi_mla_latent_tiled', 'kimi_mla_fused_decode', 'kimi_kda_norm_rounding_ab', 'kimi_session_memory_budget', 'kimi_kda_mla_prometheus', 'native_bf16_nax_prefill', 'context_default_1m', 'kimi_grouped_kda_projections', 'kimi_fused_kda_norm', 'kimi_chunk32_prefill',
     "gguf_native_packed_read_view", "gguf_native_k_blocks",
     "glm53_shared_layer_ast", "draft_bf16_activation_boundary", "mla_prefill_causal_key_trim",
     "glm53_indexer_pools_incremental_v1", "glm53_indexer_select_topk_v1",
@@ -152,7 +155,7 @@ FEATURES = (
     'source_head_bf16_direct_f32',
     'source_dense_nax_candidate',
     "ced_encoder_only_prefill", "csa2_packed_kv", "csa2_candidate_only_scoring",
-    "ced_dependency_complete_prefill", "ordinary_physical_batch", "numeric_reasoning_strength",
+    "ced_dependency_complete_prefill", "ced_state_only_chunks", "ordinary_physical_batch", "numeric_reasoning_strength",
     "effective_weight_identity", "explicit_long_context_admission", "router_precision_admission",
     "moe_window_row_exact", "attention_window_row_exact",
     "progressive_ast_rootless_fallback",

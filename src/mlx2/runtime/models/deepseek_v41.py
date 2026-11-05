@@ -785,6 +785,7 @@ class DeepSeekV41Model:
         kv_storage_policy="reference",
         candidate_score_policy="reference",
         ced_policy="reference",
+        ced_state_only=False,
         context_limit=None,
     ):
         if hc_policy not in ("reference", "fused_fp32"):
@@ -807,6 +808,9 @@ class DeepSeekV41Model:
         self.kv_storage_policy = kv_storage_policy
         self.candidate_score_policy = candidate_score_policy
         self.ced_policy = ced_policy
+        if type(ced_state_only) is not bool or ced_state_only and ced_policy != "dependency_exact":
+            raise ValueError("V4.1 CED state-only chunks require dependency_exact CED")
+        self.ced_state_only = ced_state_only
         if index_policy not in INDEX_POLICIES or selected_kv_policy not in SELECTED_KV_POLICIES:
             raise ValueError("unknown V4.1 index or selected-KV policy")
         if source_attention_math_policy not in ("reference", "all_retained_broadcast", "omlx_nax_bf16_online_v1", "source_short_decode_joint_f32_v1", "source_short_decode_grouped_f32_v1"):
@@ -1023,7 +1027,7 @@ class DeepSeekV41Model:
             return DeepSeekV41PackedLayerCache
         return DeepSeekV41LayerCache
 
-    def validate_forward(self, inputs, cache, logits_to_keep=None):
+    def validate_forward(self, inputs, cache, logits_to_keep=None, *, ced_deferred_admitted=False):
         if self._weights_parked:
             raise ValueError("V4.1 model weights are parked")
         c = self.args
@@ -1048,7 +1052,8 @@ class DeepSeekV41Model:
                 or state.ratio != c.compress_ratios[i]
                 or state.source != (i in c.kv_source_layer_ids)
                 or state.history != (i == 0 and bool(c.engram_layer_ids))
-                or state.pending
+                or (state.pending and not (ced_deferred_admitted and state.ced_local_deferred
+                                           and not state._closed and not state._in_forward))
                 or state.head_dim != c.head_dim
                 or state.index_head_dim != c.index_head_dim
                 or state.window_size != c.sliding_window
@@ -1081,9 +1086,13 @@ class DeepSeekV41Model:
         embedding_override=None,
         image_mask=None,
         head_hidden_only=False,
+        state_only=False,
     ):
         c = self.args
-        cache, ids = self.validate_forward(inputs, cache, logits_to_keep)
+        cache, ids = self.validate_forward(inputs, cache, logits_to_keep,
+                                           ced_deferred_admitted=dependency_prefill)
+        if state_only and not dependency_prefill:
+            raise ValueError("V4.1 CED state-only chunks run under dependency prefill")
         if image_inputs is not None:
             if embedding_override is not None or image_mask is not None:
                 raise ValueError("V4.1 duplicate visual embedding input")
@@ -1104,7 +1113,7 @@ class DeepSeekV41Model:
         starts = (0,) * len(self.layers)
         base_offset = 0
         if dependency_prefill:
-            from .deepseek_v41_ced import dependency_starts, trim_shared
+            from .deepseek_v41_ced import dependency_barrier, dependency_starts, trim_shared
 
             starts = dependency_starts(c, inputs.shape[1])
             base_offset = cache[0].offset
@@ -1142,7 +1151,16 @@ class DeepSeekV41Model:
             shared["_source_prefill_geometry"] = geometry
         taps = []
         active_start = 0
+        barrier = dependency_barrier(c) if state_only else None
         for i, (block, state) in enumerate(zip(self.layers, cache)):
+            if state_only and i > barrier:
+                # Nothing above the barrier is read before a later chunk of
+                # this call rebuilds it (state_only_admitted); park the row at
+                # the chunk's end with no local keys.
+                state.keys = None
+                state.offset = base_offset + inputs.shape[1]
+                state.ced_local_deferred = True
+                continue
             if starts[i] != active_start:
                 delta = starts[i] - active_start
                 h, pre = h[:, delta:], pre[:, delta:]
@@ -1184,6 +1202,25 @@ class DeepSeekV41Model:
                         if not deferred:
                             mx.async_eval(h, pre)
                     self._weight_eval(h, pre, [v.state for v in cache], shared, taps)
+            state.ced_local_deferred = False
+        if state_only:
+            from ..prefill_lookahead import StateOnlyPrefillOutput
+
+            skipped = (len(self.layers) - barrier - 1) * inputs.shape[1]
+            self.scheduled_kv_calls["ced_state_only_chunks"] = self.scheduled_kv_calls.get("ced_state_only_chunks", 0) + 1
+            self.scheduled_kv_calls["ced_skipped_layer_rows"] = self.scheduled_kv_calls.get("ced_skipped_layer_rows", 0) + skipped
+            if tail is not None:
+                cache[0].hash_tail = mx.array(tail, mx.int32)
+            with self._weight_scope():
+                check = h[:, -1].reshape(1, -1)
+                self._weight_eval(check, [v.state for v in cache], shared)
+            for state in cache:
+                state.validate_state()
+            for state in cache:
+                state._in_forward = False
+            if stream is not None:
+                stream.end_context()
+            return StateOnlyPrefillOutput(check), None
         if dependency_prefill:
             self.scheduled_kv_calls["ced_prefill_calls"] = self.scheduled_kv_calls.get("ced_prefill_calls", 0) + 1
             self.scheduled_kv_calls["ced_skipped_layer_rows"] = self.scheduled_kv_calls.get("ced_skipped_layer_rows", 0) + sum(starts)
@@ -1221,7 +1258,7 @@ class DeepSeekV41Model:
 
     def _forward(self, inputs, cache=None, *, logits_to_keep=None, capture_layers=(), body_only=False,
                  dependency_prefill=False, image_inputs=None, embedding_override=None, image_mask=None,
-                 head_hidden_only=False):
+                 head_hidden_only=False, state_only=False):
         if (getattr(self,'_mlx2_ds41_ast_active',None) is not None
                 or getattr(self,'_mlx2_ds41_ast_poisoned',False)):
             raise ValueError('Public Source forward cannot enter an active or poisoned AST transaction')
@@ -1235,7 +1272,7 @@ class DeepSeekV41Model:
         options = {"logits_to_keep": logits_to_keep, "capture_layers": capture_layers, "body_only": body_only,
                    "dependency_prefill": dependency_prefill, "image_inputs": image_inputs,
                    "embedding_override": embedding_override, "image_mask": image_mask,
-                   "head_hidden_only": head_hidden_only}
+                   "head_hidden_only": head_hidden_only, "state_only": state_only}
         if not body_only and bank_session is not None and bank_session.selected(inputs,cache):
             return bank_session.forward(self,inputs,cache,
                 lambda private:self._forward_ordinary(inputs,private,**options))
@@ -1243,7 +1280,7 @@ class DeepSeekV41Model:
 
     def _forward_ordinary(self, inputs, cache=None, *, logits_to_keep=None, capture_layers=(), body_only=False,
                           dependency_prefill=False, image_inputs=None, embedding_override=None, image_mask=None,
-                          head_hidden_only=False):
+                          head_hidden_only=False, state_only=False):
         if (getattr(self,'_mlx2_ds41_ast_active',None) is not None
                 or getattr(self,'_mlx2_ds41_ast_poisoned',False)):
             raise ValueError('Ordinary Source forward cannot enter an active or poisoned AST transaction')
@@ -1262,7 +1299,7 @@ class DeepSeekV41Model:
                                           capture_layers=capture_layers, body_only=body_only,
                                           dependency_prefill=dependency_prefill, image_inputs=image_inputs,
                                           embedding_override=embedding_override, image_mask=image_mask,
-                                          head_hidden_only=head_hidden_only)
+                                          head_hidden_only=head_hidden_only, state_only=state_only)
         except BaseException as error:
             discard = getattr(self, "discard_engram_prefetch", None)
             if discard is not None:
@@ -1368,8 +1405,22 @@ class DeepSeekV41Model:
             ),
         ):
             if self.ced_policy == "dependency_exact":
-                return self._forward(inputs, cache, logits_to_keep=1, dependency_prefill=True)[0]
+                return self._forward(inputs, cache, logits_to_keep=1, dependency_prefill=True,
+                                     state_only=self._ced_state_only_chunk(inputs))[0]
             return self(inputs, cache)
+
+    def _ced_state_only_chunk(self, inputs):
+        """True when the prompt loop guarantees enough rows after this chunk."""
+        from ..prefill_lookahead import current
+        from .deepseek_v41_ced import state_only_admitted
+
+        lookahead = current()
+        # A private resident-bank transaction replays whole forwards; it
+        # never sees a state-only chunk.
+        return (self.ced_state_only and lookahead is not None and inputs.shape[0] == 1
+                and getattr(self.weights, "source_resident_bank_session", None) is None
+                and len(lookahead.rows_after) == 1
+                and state_only_admitted(self.args, lookahead.rows_after[0], lookahead.step))
 
     def verify_rows(self, inputs, cache, capture_layers=()):
         if not 1 <= inputs.shape[1] <= 6:

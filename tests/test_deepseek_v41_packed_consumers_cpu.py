@@ -183,7 +183,8 @@ def test_selected_source_bundle_composes_with_packed_candidate_long_context():
         assert result["deepseek_qat"] == "fused_fp32"
         assert result["deepseek_source_attention_math"] == "all_retained_broadcast"
         assert model_options(result) == {"kv_storage_policy": "native_packed", "candidate_score_policy": "candidate_only",
-                                         "ced_policy": "reference", "context_limit": 262144}
+                                         "ced_policy": "reference", "ced_state_only": False,
+                                         "context_limit": 262144}
     for math in ("source_short_decode_joint_f32_v1", "source_short_decode_grouped_f32_v1"):
         with pytest.raises(ValueError, match="broadcast or oMLX"):
             source_policy({**selected, "deepseek_kv_storage": "native_packed", "deepseek_source_attention_math": math})
