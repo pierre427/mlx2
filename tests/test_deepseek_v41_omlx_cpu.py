@@ -17,7 +17,7 @@ from mlx2.runtime.models.deepseek_v41_engram import (
     file_stamp,
 )
 
-CHECKPOINT = Path("~/mlx-models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-MLX")
+CHECKPOINT = Path.home() / ("mlx-models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-MLX")
 
 
 def _bf16(value):

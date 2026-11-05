@@ -16060,6 +16060,17 @@ class ServingEngine(KernelReloadMixin):
                             or any(delta.get("reasoning_content") for delta in deltas)
                         ):
                             job.reasoning_tokens += 1
+                        # A parser that held text before classifying it as
+                        # reasoning (Ripple's implicit reasoning) hands back
+                        # the token pushes it held, so usage counts them.
+                        take_deferred = getattr(job.output_parser, "take_deferred_reasoning_tokens", None)
+                        if callable(take_deferred):
+                            # Not ``deferred``: that name is this loop's
+                            # admission queue.
+                            held_reasoning = int(take_deferred())
+                            if held_reasoning:
+                                job.reasoning_tokens += held_reasoning
+                                count_add(self.counts, "implicit_reasoning_blocks", 1)
                         for delta in deltas:
                             self._emit(job, {"delta": delta})
                         parse_fallbacks = int(

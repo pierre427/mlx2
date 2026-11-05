@@ -236,7 +236,10 @@ def test_tiel_approved_no_flag_profile_is_exactly_the_gpu_tested_policy():
     policy = brd.finish_best_route_default(args, None)
     route = resolve_route_selection(args, policy, resolution)
     resolved = resolve_execution_policy_defaults(policy, route, resolution, max_lanes=4)
-    tested = json.loads((ROOT / "qualification/policies/tiel-coder-optimized.json").read_text())
+    tested_path = ROOT / "qualification/policies/tiel-coder-optimized.json"
+    if not tested_path.is_file():
+        pytest.skip("private qualification policy not present (public mirror)")
+    tested = json.loads(tested_path.read_text())
     assert record["checkpoint"] == f"{checkpoint}@sha256:{fingerprint}"
     assert record["match"] == "checkpoint" and record["qualification"] == "unqualified"
     assert route.route == "ordinary" and policy == tested
@@ -463,7 +466,7 @@ def test_shipped_table_is_valid_and_cites_committed_evidence():
     cited = [path for entry in table["entries"] for path in entry["evidence"]["files"]]
     # The public code mirror ships no run evidence or research notes: when
     # none of the cited private evidence is present, check only the rest.
-    private = ("qualification/runs/", "docs/research/")
+    private = ("qualification/runs/", "qualification/policies/", "docs/research/")
     evidence_present = any((ROOT / path).exists() for path in cited if path.startswith(private))
     for path in cited:
         if evidence_present or not path.startswith(private):
@@ -522,6 +525,9 @@ def test_lane_decision_rows_import_by_convention(tmp_path, monkeypatch):
 
 def test_tiel_shipped_default_matches_the_durable_decision_row():
     import importlib.util
+
+    if not (ROOT / "docs/research/model-feature-decisions.tsv").is_file():
+        pytest.skip("private decision rows not present (public mirror)")
 
     spec = importlib.util.spec_from_file_location("build_brd", ROOT / "scripts/build_best_route_defaults.py")
     build = importlib.util.module_from_spec(spec)

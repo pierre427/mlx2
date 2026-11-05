@@ -138,7 +138,7 @@ def test_interactive_oracle_requires_actual_current_patch_checks_and_finish():
 
 
 def test_exact_staged_q8_tokenizer_serialization_cpu():
-    path = Path('~/Models/Kimi-Linear-48B-A3B-Instruct-8bit')
+    path = Path.home() / 'Models/Kimi-Linear-48B-A3B-Instruct-8bit'
     if not (path/'tiktoken.model').exists(): pytest.skip('exact local tokenizer artifact unavailable')
     tokenizer = data.load_tokenizer(path)
     r = record([{'role': 'user', 'content': 'Return the sum of 2 and 3.'},

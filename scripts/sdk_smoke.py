@@ -476,6 +476,9 @@ def run_client(base_url, *, scripted=True):
         print("SKIP openai.responses.function_roundtrip: adapter does not declare tools", flush=True)
     _case("openai.responses.store_retrieve_input_items_delete", responses_store, failures)
 
+    # anthropic-python 2.x dropped temperature/top_p/top_k from
+    # ``messages.create``; ``extra_body`` sends the same wire field from
+    # 0.111 through 2.x, and the server still accepts it.
     def anthropic_nonstream_tools():
         for choice in (
             {"type": "auto"},
@@ -483,7 +486,7 @@ def run_client(base_url, *, scripted=True):
             {"type": "tool", "name": "weather"},
         ):
             message = anthropic_client.messages.create(
-                temperature=0,
+                extra_body={"temperature": 0},
                 model=MODEL,
                 max_tokens=64,
                 system=[
@@ -505,7 +508,7 @@ def run_client(base_url, *, scripted=True):
 
     def anthropic_tool_roundtrip():
         first = anthropic_client.messages.create(
-            temperature=0,
+            extra_body={"temperature": 0},
             model=MODEL,
             max_tokens=64,
             messages=[{
@@ -520,7 +523,7 @@ def run_client(base_url, *, scripted=True):
         )
         call = next(block for block in first.content if block.type == "tool_use")
         second = anthropic_client.messages.create(
-            temperature=0,
+            extra_body={"temperature": 0},
             model=MODEL,
             max_tokens=64,
             messages=[
@@ -533,6 +536,10 @@ def run_client(base_url, *, scripted=True):
                             "type": "tool_result",
                             "tool_use_id": call.id,
                             "content": "21 C",
+                            # anthropic-python >= 0.125 types this echo
+                            # field; the assistant replay above carries the
+                            # tool_use side on SDKs that dump it.
+                            "toolset_name": None,
                         }
                     ],
                 },
@@ -542,7 +549,7 @@ def run_client(base_url, *, scripted=True):
 
     def anthropic_thinking_roundtrip():
         first = anthropic_client.messages.create(
-            temperature=0,
+            extra_body={"temperature": 0},
             model=MODEL,
             max_tokens=2048,
             messages=[{"role": "user", "content": "think"}],
@@ -551,7 +558,7 @@ def run_client(base_url, *, scripted=True):
         thinking = next(block for block in first.content if block.type == "thinking")
         assert thinking.signature
         second = anthropic_client.messages.create(
-            temperature=0,
+            extra_body={"temperature": 0},
             model=MODEL,
             max_tokens=2048,
             messages=[
@@ -565,7 +572,7 @@ def run_client(base_url, *, scripted=True):
 
     def anthropic_stops():
         stopped = anthropic_client.messages.create(
-            temperature=0,
+            extra_body={"temperature": 0},
             model=MODEL,
             max_tokens=64,
             stop_sequences=["END"],
@@ -574,7 +581,7 @@ def run_client(base_url, *, scripted=True):
         )
         assert stopped.stop_reason == "stop_sequence" and stopped.stop_sequence == "END"
         limited = anthropic_client.messages.create(
-            temperature=0,
+            extra_body={"temperature": 0},
             model=MODEL,
             max_tokens=1,
             messages=[{"role": "user", "content": "__length__"}],
@@ -611,7 +618,7 @@ def run_client(base_url, *, scripted=True):
     def anthropic_errors():
         try:
             anthropic_client.messages.create(
-                temperature=0,
+                extra_body={"temperature": 0},
                 model="not-loaded",
                 max_tokens=8,
                 messages=[{"role": "user", "content": "hello"}],
@@ -622,7 +629,7 @@ def run_client(base_url, *, scripted=True):
             raise AssertionError("unknown model did not raise NotFoundError")
         try:
             anthropic_client.messages.create(
-                temperature=0,
+                extra_body={"temperature": 0},
                 model=MODEL,
                 max_tokens=8,
                 messages=[],

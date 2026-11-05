@@ -227,8 +227,8 @@ def test_kimi_mla_policy_auto_keeps_verify_rows_latent():
 
 # -- policy, route selection, fail-closed refusals ---------------------------
 
-TARGET = Path("~/Models/Huihui-Kimi-Linear-REAP-35B-A3B-Instruct-abliterated")
-DRAFT = Path("~/Models/Kimi-Linear-48B-A3B-DFlash-240k")
+TARGET = Path.home() / ("Models/Huihui-Kimi-Linear-REAP-35B-A3B-Instruct-abliterated")
+DRAFT = Path.home() / "Models/Kimi-Linear-48B-A3B-DFlash-240k"
 
 
 def resolution():
@@ -650,7 +650,7 @@ def test_downloaded_head_pairs_with_the_target_tokenizer(request):
         tokenizer_pairing({**DRAFT_CONFIG, "eos_token_id": 1}, TARGET, target_config)
     # The drafter's own training target (unpruned 48B Instruct, MLX 8-bit)
     # carries the same pinned tiktoken vocabulary and special ids.
-    q8 = Path("~/Models/Kimi-Linear-48B-A3B-Instruct-8bit")
+    q8 = Path.home() / "Models/Kimi-Linear-48B-A3B-Instruct-8bit"
     if (q8 / "tiktoken.model").exists():
         q8_config = json.loads((q8 / "config.json").read_text())
         assert tokenizer_pairing(DRAFT_CONFIG, q8, q8_config) == pairing

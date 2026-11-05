@@ -92,7 +92,7 @@ def test_padded_batch_decode_runs_latent_flash_and_matches_the_latent_law():
         MultiLatentAttention,
     )
 
-    config = Path("~/Models/Kimi-Linear-48B-A3B-Instruct-8bit/config.json")
+    config = Path.home() / "Models/Kimi-Linear-48B-A3B-Instruct-8bit/config.json"
     if not config.is_file():
         pytest.skip("48B config not on disk")
     args = ModelArgs.from_dict(json.loads(config.read_text()))

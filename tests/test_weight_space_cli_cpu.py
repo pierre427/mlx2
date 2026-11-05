@@ -184,6 +184,8 @@ def test_projection_geometry_is_checked_before_arithmetic():
 
 
 def test_cli_abliteration_is_cpu_only_and_explicitly_gated(tmp_path):
+    if not (Path(__file__).resolve().parents[1] / "src/mlx2/experimental/weight_space/heretic.py").is_file():
+        pytest.skip("heretic module not present (withheld from the public mirror)")
     arrays = tmp_path / "direction.npz"
     np.savez(
         arrays, w=np.array([[1, 2], [3, 4]], dtype=np.float32),

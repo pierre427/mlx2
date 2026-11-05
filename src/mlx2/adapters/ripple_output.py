@@ -22,12 +22,29 @@ neither reasoning nor content:
 
 Each held newline is released unchanged when what follows shows it was
 text, so the joined channels do not depend on how the output was chunked:
-streaming and non-streaming deliver the same reasoning and content.  Output
-that starts without ``<think>`` is all content.  Behaviour reference only
-(no code): vLLM PR vllm-project/vllm#65745.
+streaming and non-streaming deliver the same reasoning and content.
+
+Implicit reasoning.  The model sometimes reasons without writing ``<think>``
+and then closes with a bare ``</think>`` (quality probe s_knaves,
+qualification/runs/ripple-quality-20261105).  Its reasoning always opens in
+one of a few house styles (``IMPLICIT_REASONING_OPENERS``; every reasoning
+block in that probe and the tools smoke starts with one), so a chat output
+that starts with an opener is held until a ``</think>``, tool-call opener
+or client stop string completes (the first to complete decides), or the
+output ends.  A ``</think>``
+first makes the held text reasoning; anything else releases it unchanged as
+content.  The decision reads only the text so far, so streaming and
+non-streaming agree; the cost is that an answer which happens to start with
+an opener streams only at the end.  Other output that starts without
+``<think>`` is all content.  Behaviour reference only (no code): vLLM PR
+vllm-project/vllm#65745 (which starts in content and has the same gap).
 """
 
 from ..output import OutputParser
+
+# How the model's reasoning begins when it skips ``<think>``.
+IMPLICIT_REASONING_OPENERS = ("We need ", "The user ")
+_THINK_OPEN, _THINK_CLOSE = "<think>", "</think>"
 
 
 class RippleOutputParser(OutputParser):
@@ -42,6 +59,13 @@ class RippleOutputParser(OutputParser):
         self._reasoning_held = ""
         self._content_held = False
         self._content_held_calls = 0
+        # "undecided" -> "held" (an implicit-reasoning opener) -> "passed".
+        self._implicit = "undecided" if self.chat else "passed"
+        self.implicit_reasoning = False
+        self._implicit_chunks = []
+        self._implicit_tail = ""  # held suffix a marker could still complete in
+        self._implicit_pushes = 0
+        self._deferred_reasoning_tokens = 0
 
     def _emit(self, events, text):
         if self.channel != "reasoning_content":
@@ -97,7 +121,59 @@ class RippleOutputParser(OutputParser):
         if text:
             super()._content(events, text)
 
+    def take_deferred_reasoning_tokens(self):
+        """Held pushes now known to be reasoning (read once by the serving loop)."""
+        count, self._deferred_reasoning_tokens = self._deferred_reasoning_tokens, 0
+        return count
+
+    def _release(self, text):
+        self._implicit = "passed"
+        self._implicit_chunks, self._implicit_tail = [], ""
+        return text
+
+    def _implicit_filter(self, text, final):
+        """Text to hand the shared parser now (``None``: keep holding).
+
+        Linear in the held text: each push searches only its own text plus
+        the held suffix a marker could still complete across.
+        """
+        if self._implicit == "passed":
+            return text
+        if self._implicit == "undecided":
+            held = "".join(self._implicit_chunks) + text
+            self._implicit_chunks = [held]
+            prefixes = (_THINK_OPEN, *IMPLICIT_REASONING_OPENERS)
+            if any(held.startswith(opener) for opener in IMPLICIT_REASONING_OPENERS):
+                self._implicit = "held"
+                text, self._implicit_chunks = held, []
+            elif not final and any(opener.startswith(held) for opener in prefixes):
+                self._implicit_pushes += 1
+                return None
+            else:
+                return self._release(held)
+        markers = [marker for marker in (_THINK_CLOSE, self.tool_open, *self.stop_matcher.stops) if marker]
+        window = self._implicit_tail + text
+        self._implicit_chunks.append(text)
+        # The marker that completes first decides; ties go to the one that
+        # started first.  Completion order is causal, so every chunking of
+        # the same text reaches the same decision.
+        found = [(at + len(marker), at, marker) for marker in markers if (at := window.find(marker)) >= 0]
+        if not found and not final:
+            longest = max((len(marker) for marker in markers), default=1)
+            self._implicit_tail = window[-(longest - 1):] if longest > 1 else ""
+            self._implicit_pushes += 1
+            return None
+        held = "".join(self._implicit_chunks)
+        if found and min(found)[2] == _THINK_CLOSE:
+            self.implicit_reasoning = True
+            self._deferred_reasoning_tokens = self._implicit_pushes
+            return self._release(_THINK_OPEN + held)
+        return self._release(held)
+
     def push(self, text, *, final=False):
+        text = self._implicit_filter(text, final)
+        if text is None:
+            return []
         was_stopped = self.stopped
         events = super().push(text, final=final)
         if (final or self.stopped) and not was_stopped:

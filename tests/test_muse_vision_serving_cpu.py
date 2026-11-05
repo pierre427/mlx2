@@ -175,7 +175,7 @@ def test_request_expansion_and_media_identity_use_ordered_image_content():
     from PIL import Image
     from transformers import AutoTokenizer
 
-    root = '~/mlx-models-m3-imports-20261021/Muse-Glimmer-30B-mlx-4bit'
+    root = str(Path.home() / 'mlx-models-m3-imports-20261021/Muse-Glimmer-30B-mlx-4bit')
     if not Path(root).exists():
         pytest.skip('optional local Muse target absent')
     adapter = object.__new__(MuseGlimmerAdapter)

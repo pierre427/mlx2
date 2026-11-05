@@ -29,6 +29,21 @@ def _only(value, allowed, name):
         raise ValueError(f"unsupported {name} fields: {', '.join(sorted(unknown))}")
 
 
+def _toolset_name(block, kind, counts):
+    """Validate the SDK's echoed ``toolset_name`` on tool_use/tool_result.
+
+    anthropic-python >= 0.125 dumps it (``None`` unless the call came from an
+    Anthropic-defined toolset such as ``computer_toolset_20260801``) whenever
+    a client replays ``response.content``.  It is history metadata: the call
+    and its result render by name either way, so it is validated and
+    ignored.  Toolset *declarations* stay refused by ``_chat_tool``.
+    """
+    if "toolset_name" not in block or block["toolset_name"] is None:
+        return
+    _text(block["toolset_name"], f"{kind} toolset_name", empty=False)
+    _agent.count(counts, "anthropic_toolset_name_ignored")
+
+
 def _text(value, name, *, empty=True):
     if not isinstance(value, str) or (not empty and not value):
         raise ValueError(f"{name} must be {'nonempty ' if not empty else ''}text")
@@ -61,6 +76,8 @@ def anthropic_request_model(body, *, agent_compat=None):
             "mcp_servers",
             "session_id",
             "return_progress",
+            "cache_control",
+            "speed",
         },
         "Anthropic request",
     )
@@ -284,9 +301,11 @@ def _anthropic_message(
                         "input",
                         "cache_control",
                         "caller",
+                        "toolset_name",
                     },
                     "tool_use block",
                 )
+                _toolset_name(block, "tool_use", counts)
                 caller = block.get("caller")
                 if caller is not None:
                     caller = _object(caller, "tool_use caller")
@@ -390,9 +409,17 @@ def _anthropic_message(
         elif kind == "tool_result":
             _only(
                 block,
-                {"type", "tool_use_id", "content", "is_error", "cache_control"},
+                {
+                    "type",
+                    "tool_use_id",
+                    "content",
+                    "is_error",
+                    "cache_control",
+                    "toolset_name",
+                },
                 "tool_result block",
             )
+            _toolset_name(block, "tool_result", counts)
             if "cache_control" in block:
                 _cache_control(block["cache_control"])
             flush_text()
@@ -502,6 +529,14 @@ def anthropic_request_to_chat(
         raise ValueError("mcp_servers is unsupported")
     if body.get("service_tier", "auto") not in ("auto", "standard_only"):
         raise ValueError("service_tier must be auto or standard_only")
+    if body.get("cache_control") is not None:
+        # Top-level automatic prompt caching; APCv2 already caches every
+        # exact prefix, as for block-level markers.
+        _cache_control(body["cache_control"])
+    if body.get("speed") not in (None, "standard"):
+        # anthropic-python 1.15+: ``fast`` asks for a faster serving tier
+        # this server does not have.
+        raise ValueError("speed must be standard: fast mode is unsupported")
     messages = []
     if "system" in body:
         messages.append(
@@ -614,7 +649,17 @@ def anthropic_request_to_chat(
             _only(thinking, {"type"}, "thinking")
             result["enable_thinking"] = False
         elif kind == "enabled":
-            _only(thinking, {"type", "budget_tokens"}, "thinking")
+            _only(thinking, {"type", "budget_tokens", "display"}, "thinking")
+            display = thinking.get("display")
+            if display == "omitted":
+                # Omitted display (signature-carried reasoning) is an
+                # agent-compat adaptive-thinking contract only.
+                raise ValueError(
+                    "thinking display omitted is supported only for adaptive "
+                    "thinking under agent compat"
+                )
+            if display not in (None, "summarized"):
+                raise ValueError("thinking display must be summarized or omitted")
             budget = thinking.get("budget_tokens")
             # Messages ``budget_tokens`` caps thinking; it cannot ask for none
             # (that is ``type: disabled``).  mlx2's own ``thinking_budget: 0``
@@ -636,13 +681,17 @@ def anthropic_request_to_chat(
                 raise ValueError("thinking budget_tokens must be less than max_tokens")
         elif compat and kind == "adaptive":
             _only(thinking, {"type", "display"}, "thinking")
-            if thinking.get("display", "summarized") not in ("summarized", "omitted"):
+            if thinking.get("display") not in (None, "summarized", "omitted"):
                 raise ValueError("thinking display must be summarized or omitted")
             # Effort-scaled default budget; never the history-pure close mode.
             result["enable_thinking"] = True
             _agent.count(counts, "agent_compat_adaptive_thinking")
             if thinking.get("display") == "omitted":
                 _agent.count(counts, "agent_compat_thinking_omitted")
+        elif kind == "between_tools":
+            # anthropic-python 1.9+: interleaved thinking only between tool
+            # calls needs a per-turn thinking switch no adapter exposes.
+            raise ValueError("thinking type between_tools is unsupported")
         else:
             raise ValueError("thinking type must be enabled or disabled")
     if compat and "output_config" in body:

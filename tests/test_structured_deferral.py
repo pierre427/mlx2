@@ -374,7 +374,8 @@ def scripted_engine(monkeypatch):
             from mlx2.output import OutputParser, constrained_tool_choice
             from mlx2.runtime.tool_parsers.qwen3_coder import parse_tool_call
 
-            return OutputParser(
+            parser_class = state.get("parser_class") or OutputParser
+            return parser_class(
                 chat="messages" in request,
                 thinking=(
                     _thinking_requested(request)
@@ -558,6 +559,31 @@ def test_reasoning_tokens_count_every_token_until_the_channel_closes(scripted_en
     job = engine.submit({**chat, "enable_thinking": False})
     _collect(job)
     assert job.completion_tokens == 2 and job.reasoning_tokens == 0
+
+
+def test_parser_held_reasoning_tokens_reach_usage(scripted_engine):
+    """A parser that classifies held text late (Ripple implicit reasoning)
+    hands its held pushes back; the real loop adds them to usage."""
+    from mlx2.output import OutputParser
+
+    class HoldingParser(OutputParser):
+        handed = False
+
+        def take_deferred_reasoning_tokens(self):
+            if HoldingParser.handed:
+                return 0
+            HoldingParser.handed = True
+            return 3
+
+    build, state = scripted_engine
+    state["parser_class"] = HoldingParser
+    engine = build(declare_marker=True)
+    state["script"] = [HELLO, EOS]
+    job = engine.submit({"messages": [{"role": "user", "content": "x"}], "temperature": 0, "max_tokens": 4})
+    _, content, final = _collect(job)
+    assert final["finish_reason"] == "stop" and content == "hello"
+    assert job.reasoning_tokens == 3
+    assert engine.counts["implicit_reasoning_blocks"] == 1
 
 
 def test_a_failing_terminal_receipt_fails_only_its_own_request(scripted_engine, monkeypatch):

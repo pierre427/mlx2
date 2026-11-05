@@ -18,6 +18,8 @@ from mlx2.runtime.trellis.upstream import (
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "scripts/sushi_probe/fixtures"
+# The tile fixtures live with the private Sushi probe; the public mirror omits it.
+needs_fixtures = pytest.mark.skipif(not FIXTURES.is_dir(), reason="Sushi probe fixtures not present")
 # Fixtures without codebook metadata are Sushi's MUL1 converter outputs.
 CASES = [
     ("exl3_k2_linear", "mul1", 16),
@@ -38,6 +40,7 @@ FORMAT = {
 }
 
 
+@needs_fixtures
 @pytest.mark.parametrize("name,cb,window", CASES)
 def test_host_decoder_matches_exllamav3_tiles(name, cb, window):
     f = mx.load(str(FIXTURES / f"{name}.safetensors"))
@@ -48,6 +51,7 @@ def test_host_decoder_matches_exllamav3_tiles(name, cb, window):
         np.testing.assert_allclose(w, np.asarray(f["public"]), atol=2e-3, rtol=1e-2)
 
 
+@needs_fixtures
 def test_signed_trellis_decodes_as_its_bit_pattern():
     f = mx.load(str(FIXTURES / "exl3_k3_mcg_linear.safetensors"))
     signed = np.asarray(f["trellis"]).view(np.int16)

@@ -376,3 +376,78 @@ def test_operator_sampling_defaults_and_no_thinking_override():
     # The model decides per turn whether to open <think>: the engine must not
     # arm thinking paths for every chat request.
     assert not hasattr(RippleAdapter, "thinking_enabled")
+
+
+# -- implicit reasoning (no <think>, bare </think>) --------------------------
+
+KNAVES = ("We need answer. Need solve.\n\nCase 1: B knight, so C knave.\nNeed final.\n</think>\n\n"
+          "C is a **knave**.")
+
+
+@pytest.mark.parametrize("tools", [True, False])
+def test_implicit_reasoning_closed_by_bare_think_close(adapter, tokenizer, tools):
+    request = _request() if tools else {"messages": USER}
+    assert _all_ways(adapter, tokenizer, request, KNAVES) == (
+        "We need answer. Need solve.\n\nCase 1: B knight, so C knave.\nNeed final.", "C is a **knave**.", [])
+    parser = adapter.output_parser(request)
+    parser.finish(KNAVES, "stop")
+    assert parser.implicit_reasoning is True
+
+
+def test_implicit_reasoning_then_tool_call(adapter, tokenizer):
+    text = ("The user wants weather in Paris. Call the tool.\n</think>\n\nChecking."
+            + call_block("get_weather", {"city": "Paris"}))
+    assert _all_ways(adapter, tokenizer, _request(), text) == (
+        "The user wants weather in Paris. Call the tool.", "Checking.", [("get_weather", {"city": "Paris"}, 0)])
+
+
+@pytest.mark.parametrize("text", [
+    "The user manual says to restart it.",  # opener, never closed: an answer
+    "We need more data before deciding.\n\nTwo reasons follow.",
+    "We",  # undecided prefix at the end of the output
+    "Answer first.\n</think>\nstill content",  # bare close without an opener stays literal
+])
+def test_held_or_unmatched_output_stays_content(adapter, tokenizer, text):
+    assert _all_ways(adapter, tokenizer, {"messages": USER}, text) == ("", text, [])
+
+
+def test_opener_then_tool_call_before_any_close_is_content(adapter, tokenizer):
+    text = "We need the weather." + call_block("get_weather", {"city": "Paris"})
+    assert _all_ways(adapter, tokenizer, _request(), text) == (
+        "", "We need the weather.", [("get_weather", {"city": "Paris"}, 0)])
+
+
+def test_stop_string_before_close_releases_held_text_as_content(adapter, tokenizer):
+    text = "We need X. STOP then more\n</think>\nanswer"
+    request = {"messages": USER, "stop": ["STOP"]}
+    assert _all_ways(adapter, tokenizer, request, text) == ("", "We need X. ", [])
+
+
+def test_implicit_reasoning_cut_by_max_tokens_is_content(adapter, tokenizer):
+    text = "We need answer. Let's search memory. Let's"
+    assert _all_ways(adapter, tokenizer, {"messages": USER}, text, "length") == ("", text, [])
+
+
+def test_explicit_think_block_unchanged(adapter, tokenizer):
+    text = "<think>\nWe need answer.\n</think>\n\nRome."
+    assert _all_ways(adapter, tokenizer, {"messages": USER}, text) == ("We need answer.", "Rome.", [])
+
+
+def test_held_pushes_are_handed_back_as_reasoning_tokens(adapter):
+    parser = adapter.output_parser({"messages": USER})
+    close_end = KNAVES.index("</think>") + len("</think>")
+    for char in KNAVES[:close_end - 1]:
+        assert parser.push(char) == []
+    assert parser.take_deferred_reasoning_tokens() == 0
+    parser.push(KNAVES[close_end - 1])
+    # Every held push was reasoning; the releasing push is counted by the loop.
+    assert parser.take_deferred_reasoning_tokens() == close_end - 1
+    assert parser.take_deferred_reasoning_tokens() == 0
+    held_content = adapter.output_parser({"messages": USER})
+    _run(held_content, list("The user manual says so.") + [""])
+    assert held_content.take_deferred_reasoning_tokens() == 0
+
+
+def test_opener_needs_a_word_boundary(adapter, tokenizer):
+    text = "The username field is required.\n</think>\nliteral"
+    assert _all_ways(adapter, tokenizer, {"messages": USER}, text) == ("", text, [])

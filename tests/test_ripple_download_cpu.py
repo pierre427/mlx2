@@ -81,6 +81,8 @@ def test_oversized_partial_refused_before_network(tmp_path):
 
 def test_full_size_corrupt_file_is_quarantined_then_refetched(tmp_path, monkeypatch):
     """A right-size, wrong-hash file used to fail every rerun with no refetch."""
+    if not (Path(__file__).resolve().parents[1] / "provenance/ripple-65b-snapshot.json").is_file():
+        pytest.skip("private snapshot manifest not present (public mirror)")
     import huggingface_hub
     from huggingface_hub import file_download
 

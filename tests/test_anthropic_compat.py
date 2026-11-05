@@ -672,3 +672,74 @@ def test_anthropic_accepts_legal_stop_sequence_and_custom_tool_shapes(
     assert engine.last_request["tools"][0]["function"]["name"] == "t"
     server_tool = {**custom, "type": "web_search_20250305"}
     assert status({**request, "tools": [server_tool]}) == 400
+
+
+def _toolset_history(tool_use_extra=None, tool_result_extra=None):
+    return {
+        "model": "fixture",
+        "max_tokens": 16,
+        "messages": [
+            {"role": "user", "content": "weather?"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "lookup",
+                        "input": {"city": "Toronto"},
+                        **(tool_use_extra or {}),
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": "sunny",
+                        **(tool_result_extra or {}),
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def test_anthropic_sdk_echoed_toolset_name_round_trips():
+    # anthropic-python >= 0.125 dumps ``toolset_name: None`` on every
+    # tool_use it replays; 2.x also types it on tool_result.  The M3 SDK
+    # smoke of 2026-11-05 got a 400 for it.
+    plain = anthropic_request_to_chat(_toolset_history())
+    counts = Counter()
+    echoed = anthropic_request_to_chat(
+        _toolset_history({"toolset_name": None}, {"toolset_name": None}),
+        counts=counts,
+    )
+    assert echoed["messages"] == plain["messages"]
+    assert counts["anthropic_toolset_name_ignored"] == 0
+    # A named toolset member renders as the same history and is counted.
+    named = anthropic_request_to_chat(
+        _toolset_history(
+            {"toolset_name": "computer"}, {"toolset_name": "computer"}
+        ),
+        counts=counts,
+    )
+    assert named["messages"] == plain["messages"]
+    assert counts["anthropic_toolset_name_ignored"] == 2
+    for bad in ("", 3, {"name": "computer"}):
+        with pytest.raises(ValueError, match="toolset_name"):
+            anthropic_request_to_chat(_toolset_history({"toolset_name": bad}))
+        with pytest.raises(ValueError, match="toolset_name"):
+            anthropic_request_to_chat(
+                _toolset_history(None, {"toolset_name": bad})
+            )
+
+
+def test_anthropic_http_accepts_echoed_toolset_name(anthropic_endpoint):
+    engine, base = anthropic_endpoint
+    body = _toolset_history({"toolset_name": None}, {"toolset_name": None})
+    with _post(base, "/v1/messages", body) as response:
+        assert response.status == 200
+    assert engine.last_request["messages"][1]["tool_calls"][0]["id"] == "call_1"

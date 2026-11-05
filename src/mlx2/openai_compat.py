@@ -40,6 +40,7 @@ RESPONSES_FIELDS = frozenset(
         "include",
         "user",
         "prompt_cache_key",
+        "prompt_cache_options",
         "truncation",
         "service_tier",
         "stream_options",
@@ -134,6 +135,69 @@ def refuse_video_sampling_options(part):
     }
 
 
+_PROMPT_CACHE_TTLS = ("30m", "12h")
+
+
+def _prompt_cache_hint(value, name, *, mode=None):
+    """Validate an OpenAI prompt-cache hint that APCv2 makes redundant.
+
+    openai-python 3.32+ types ``prompt_cache_options`` (a request field) and
+    ``prompt_cache_breakpoint`` (a content-part field).  APCv2 reuses every
+    exact prefix automatically and cannot promise a provider retention TTL,
+    so, like Anthropic ``cache_control``, a well-formed hint is accepted and
+    changes nothing.  Fields that ask for a capability (``prewarm``,
+    ``comparison_response_id``) fail closed through the unknown-field check.
+    """
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be an object")
+    # ``prewarm: false`` and ``comparison_response_id: null`` ask for nothing.
+    value = {
+        key: item
+        for key, item in value.items()
+        if not (key == "prewarm" and item is False)
+        and not (key == "comparison_response_id" and item is None)
+    }
+    unknown = set(value) - {"mode", "ttl"}
+    if unknown:
+        raise ValueError(f"unsupported {name} fields: {', '.join(sorted(unknown))}")
+    allowed = (mode,) if mode else ("implicit", "explicit")
+    # A breakpoint (``mode`` given) requires its mode; options default it.
+    if value.get("mode", None if mode else allowed[0]) not in allowed:
+        raise ValueError(f"{name} mode must be {' or '.join(allowed)}")
+    if value.get("ttl") is not None and value["ttl"] not in _PROMPT_CACHE_TTLS:
+        raise ValueError(f"{name} ttl must be 30m or 12h")
+
+
+def _strip_cache_breakpoint(part):
+    """``part`` without its validated ``prompt_cache_breakpoint``."""
+    if "prompt_cache_breakpoint" not in part:
+        return part
+    _prompt_cache_hint(
+        part["prompt_cache_breakpoint"], "prompt_cache_breakpoint", mode="explicit"
+    )
+    return {key: value for key, value in part.items() if key != "prompt_cache_breakpoint"}
+
+
+def _direct_caller(item, kind):
+    """Accept history metadata openai-python 3.x types on tool-call items.
+
+    ``caller: {"type": "direct"}`` and ``async: false`` describe an ordinary
+    call, which is the only kind this server renders.  A programmatic caller
+    or an async call needs execution machinery mlx2 does not have.
+    """
+    caller = item.get("caller")
+    if caller is not None and (
+        not isinstance(caller, Mapping)
+        or caller.get("type") != "direct"
+        or set(caller) != {"type"}
+    ):
+        raise ValueError(
+            f"{kind} caller must be direct: programmatic tool calling is unsupported"
+        )
+    if item.get("async") is not None and item["async"] is not False:
+        raise ValueError(f"{kind} async is unsupported")
+
+
 def _responses_content(content, *, file_resolver=None, allow_empty=False):
     # ``allow_empty`` admits an assistant replay of this server's own empty
     # answer (a turn that only reasoned, or stopped at once): the message item
@@ -149,6 +213,7 @@ def _responses_content(content, *, file_resolver=None, allow_empty=False):
     for part in content:
         if not isinstance(part, Mapping):
             raise ValueError("Responses content parts must be objects")
+        part = _strip_cache_breakpoint(part)
         if part.get("type") in ("input_text", "output_text") and isinstance(
             part.get("text"), str
         ):
@@ -263,8 +328,18 @@ def _responses_messages(
         if item_type == "function_call_output" or (
             compat_on and item_type == "custom_tool_call_output"
         ):
-            if set(item) - {"type", "call_id", "output", "id", "status"}:
+            if set(item) - {
+                "type", "call_id", "output", "id", "status", "caller", "name",
+                "namespace",
+            }:
                 raise ValueError(f"unsupported {item_type} fields")
+            _direct_caller(item, item_type)
+            # Echoed call identity: the output pairs by ``call_id`` alone.
+            for key in ("name", "namespace"):
+                if item.get(key) is not None and (
+                    not isinstance(item[key], str) or not item[key]
+                ):
+                    raise ValueError(f"{item_type} {key} must be nonempty text")
             call_id, output = item.get("call_id"), item.get("output")
             if not isinstance(call_id, str) or not call_id:
                 raise ValueError(f"{item_type} requires call_id")
@@ -277,8 +352,11 @@ def _responses_messages(
             )
             continue
         if compat_on and item_type == "custom_tool_call":
-            if set(item) - {"type", "call_id", "name", "input", "id", "status"}:
+            if set(item) - {
+                "type", "call_id", "name", "input", "id", "status", "caller", "async"
+            }:
                 raise ValueError("unsupported custom_tool_call fields")
+            _direct_caller(item, item_type)
             if not all(
                 isinstance(item.get(key), str) and item[key]
                 for key in ("call_id", "name")
@@ -293,11 +371,14 @@ def _responses_messages(
             _agent.count(counts, "agent_compat_custom_tool_replays")
             continue
         if item_type == "function_call":
-            allowed = {"type", "call_id", "name", "arguments", "id", "status"}
+            allowed = {
+                "type", "call_id", "name", "arguments", "id", "status", "caller", "async"
+            }
             if compat_on:
                 allowed = allowed | {"namespace"}
             if set(item) - allowed:
                 raise ValueError("unsupported function_call fields")
+            _direct_caller(item, item_type)
             if not all(
                 isinstance(item.get(key), str) and item[key]
                 for key in ("call_id", "name", "arguments")
@@ -498,6 +579,8 @@ def responses_to_chat_request(
         or not body["prompt_cache_key"]
     ):
         raise ValueError("prompt_cache_key must be nonempty text")
+    if "prompt_cache_options" in body:
+        _prompt_cache_hint(body["prompt_cache_options"], "prompt_cache_options")
     if body.get("truncation", "disabled") != "disabled":
         raise ValueError("truncation only supports disabled")
     service_tier = body.get("service_tier", "auto")
