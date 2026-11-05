@@ -103,6 +103,9 @@ FEATURES = (
     "dense_direct_positional_read", "dense_working_set_retention", "peer_omlx_exact_image",
     "single_1k_three_repeat_perf", "native_affine_layer_ab", "atlas_prefetch_miss_ranking",
     "standalone_native_affine",
+    # omlx-layout V4.1 route (2026-11-04).
+    "source_hc_mega", "omlx_expert_bank_gather",
+    "omlx_layer_eval_async", "source_woa_mxfp8_storage",
     "compact_iq1_experts",
     "splash_iq1_decoder",
     "tiled_iq1_expert_arena", "gpu_expert_slot_routing",

@@ -6,6 +6,7 @@ No full-table mmap, materialization, or device call occurs in this module.
 See provenance/deepseek-v41-adapter.json and retained notices.
 """
 
+import itertools
 import math
 import os
 import stat
@@ -160,6 +161,59 @@ def decode_engram_bf16(raw):
     return result
 
 
+AFFINE4_ROW_PLANES = (128, 16, 16)  # U32 codes, BF16 scales, BF16 biases
+
+
+def decode_affine4_rows(codes, scales, biases, compact=False):
+    """MLX affine 4-bit/group-32 rows -> BF16-rounded FP32 (or BF16 bits).
+
+    Codes are packed low nibble first in little-endian U32 words. Each value
+    is scale*q+bias in F32 (scale*q is exact: 4-bit by BF16), rounded once
+    to BF16 ties-to-even. This is the Metal mx.dequantize law that omlx
+    serves with (GPU oracle on real rows of both tables, 2026-11-04). MLX's
+    CPU kernel instead rounds after the product and after the sum; it
+    differs on about 45% of values and is not used.
+    """
+    codes, scales, biases = (np.asarray(v) for v in (codes, scales, biases))
+    if (codes.dtype != np.uint32 or codes.ndim != 2 or codes.shape[1] != 32
+            or scales.dtype != np.uint16 or biases.dtype != np.uint16
+            or scales.shape != (codes.shape[0], 8) or biases.shape != scales.shape):
+        raise ValueError("Engram affine rows require U32[32] codes and BF16[8] scales/biases")
+    shifts = np.arange(0, 32, 4, dtype=np.uint32)
+    q = ((codes[:, :, None] >> shifts) & np.uint32(15)).reshape(codes.shape[0], 256).astype(np.float32)
+    as_f32 = lambda v: (v.astype(np.uint32) << 16).view(np.float32)
+
+    def bf16(value):
+        bits = np.ascontiguousarray(value, np.float32).view(np.uint32)
+        return ((bits + np.uint32(0x7FFF) + ((bits >> 16) & 1)) & np.uint32(0xFFFF0000)).view(np.float32)
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        values = bf16(q.reshape(-1, 8, 32)*as_f32(scales)[:, :, None]
+                      + as_f32(biases)[:, :, None]).reshape(-1, 256)
+    if not np.isfinite(values).all():
+        raise ValueError("nonfinite decoded Engram row")
+    return (values.view(np.uint32) >> 16).astype(np.uint16) if compact else values
+
+
+def _read_affine_chunk(fd, bases, rows, compact=False):
+    planes = []
+    for base, size in zip(bases, AFFINE4_ROW_PLANES):
+        data = bytearray()
+        for row in rows:
+            offset, consumed = base + int(row)*size, 0
+            while consumed < size:
+                block = os.pread(fd, size-consumed, offset+consumed)
+                if not block:
+                    raise OSError("short Engram row read")
+                data.extend(block)
+                consumed += len(block)
+        planes.append(bytes(data))
+    count = len(rows)
+    return decode_affine4_rows(np.frombuffer(planes[0], "<u4").reshape(count, 32),
+                               np.frombuffer(planes[1], "<u2").reshape(count, 8),
+                               np.frombuffer(planes[2], "<u2").reshape(count, 8), compact)
+
+
 def _read_chunk(fd, base, rows, compact=False, scale_offset=None):
     result = []
     for row in rows:
@@ -201,11 +255,16 @@ class EngramRows:
         cache_format="fp32",
         scale_offset=None,
         carry_window=False,
+        bias_offset=None,
     ):
+        # bias_offset selects the MLX affine 4-bit/group-32 three-plane layout
+        # (weight at offset, scales at scale_offset, biases at bias_offset).
         if (
             type(offset) is not int or offset < 0
             or type(carry_window) is not bool
             or (scale_offset is not None and (type(scale_offset) is not int or scale_offset < 0))
+            or (bias_offset is not None and (type(bias_offset) is not int or bias_offset < 0
+                                             or scale_offset is None))
             or type(rows) is not int or rows < 1
             or type(cache_bytes) is not int or cache_bytes < 0
             or type(workers) is not int or not 1 <= workers <= 32
@@ -216,6 +275,9 @@ class EngramRows:
             raise ValueError("invalid Engram I/O bounds")
         self.path, self.offset, self.rows = os.fspath(path), offset, rows
         self.scale_offset = scale_offset
+        self.bias_offset = bias_offset
+        self.affine = bias_offset is not None
+        self.source_row_bytes = sum(AFFINE4_ROW_PLANES) if self.affine else 264
         self.expected_stat = dict(expected_stat)
         self.compact = cache_format == "bf16_lut"
         self.row_bytes = 512 if self.compact else 1024
@@ -247,11 +309,19 @@ class EngramRows:
         )
         try:
             self.verify()
-            end = offset+rows*264 if scale_offset is None else max(offset+rows*256, scale_offset+rows*8)
-            if end > os.fstat(self.fd).st_size:
-                raise ValueError("Engram table exceeds sealed file")
-            if scale_offset is not None and not (scale_offset >= offset+rows*256 or offset >= scale_offset+rows*8):
-                raise ValueError("Engram weight and scale extents overlap")
+            if self.affine:
+                spans = sorted((start, start+rows*size) for start, size in
+                               zip((offset, scale_offset, bias_offset), AFFINE4_ROW_PLANES))
+                if spans[-1][1] > os.fstat(self.fd).st_size:
+                    raise ValueError("Engram table exceeds sealed file")
+                if any(a[1] > b[0] for a, b in itertools.pairwise(spans)):
+                    raise ValueError("Engram affine planes overlap")
+            else:
+                end = offset+rows*264 if scale_offset is None else max(offset+rows*256, scale_offset+rows*8)
+                if end > os.fstat(self.fd).st_size:
+                    raise ValueError("Engram table exceeds sealed file")
+                if scale_offset is not None and not (scale_offset >= offset+rows*256 or offset >= scale_offset+rows*8):
+                    raise ValueError("Engram weight and scale extents overlap")
             if os.uname().sysname == "Darwin":
                 import fcntl
 
@@ -334,6 +404,9 @@ class EngramRows:
                             (
                                 group,
                                 self.pool.submit(
+                                    _read_affine_chunk, self.fd,
+                                    (self.offset, self.scale_offset, self.bias_offset), group, self.compact,
+                                ) if self.affine else self.pool.submit(
                                     _read_chunk, self.fd, self.offset, group, self.compact, self.scale_offset
                                 ),
                             )
@@ -428,15 +501,17 @@ class EngramRows:
             self.stats["unique_rows"] += len(unique)
             self.stats["cache_hits"] += len(unique) - len(missing)
             self.stats["cache_misses"] += len(missing)
-            self.stats["bytes_read"] += 264 * len(missing)
+            self.stats["bytes_read"] += self.source_row_bytes * len(missing)
             return output
 
     def diagnostics(self):
         with self._lock:
             return {
                 **self.stats,
-                "storage": "pread-e4m3-e8m0-row264" if self.scale_offset is None else "pread-e4m3-e8m0-split-planes",
-                "table_bytes": self.rows * 264,
+                "storage": ("pread-affine4-g32-bf16-three-planes" if self.affine
+                            else "pread-e4m3-e8m0-row264" if self.scale_offset is None
+                            else "pread-e4m3-e8m0-split-planes"),
+                "table_bytes": self.rows * self.source_row_bytes,
                 "resident_table_bytes": 0,
                 "cached_bytes": len(self._cache) * self.row_bytes,
                 "cache_budget_bytes": self.cache_rows * self.row_bytes,

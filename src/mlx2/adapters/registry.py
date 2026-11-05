@@ -524,6 +524,13 @@ def _deepseek_v41_iq1(path: Path, config: dict) -> AdapterResolution:
 
 
 def _deepseek_v41_source(path: Path, config: dict) -> AdapterResolution:
+    # The omlx layout shares model_type with the official release; its own
+    # admission pins it, and it never falls back to the Source route.
+    from .deepseek_v41_omlx_artifact import is_omlx_config
+    if is_omlx_config(config):
+        module = importlib.import_module(".deepseek_v41_omlx", __package__)
+        artifact = module.inspect_artifact(path)
+        return AdapterResolution(module.DeepSeekV41OmlxAdapter, module.DESCRIPTOR, artifact)
     module = importlib.import_module(".deepseek_v41_source", __package__)
     artifact = module.inspect_artifact(path)
     return AdapterResolution(module.DeepSeekV41SourceAdapter, module.DESCRIPTOR, artifact)

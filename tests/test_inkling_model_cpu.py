@@ -397,6 +397,9 @@ def test_tree_lends_global_kv_and_abort_keeps_the_committed_prefix():
 def test_chain_attention_slices_equal_the_gathered_ancestry(parents, monkeypatch):
     from mlx2.runtime.models.inkling.tree import InklingTree
 
+    # The per-node loop under test (a chain's full local windows otherwise
+    # take the batched path, covered below).
+    monkeypatch.setattr(InklingTree, "batch_chain_windows", False)
     m = model()
     cache = m.make_cache()
     for token in range(1, 10):  # wrap the local ring
@@ -523,3 +526,30 @@ def test_tree_mapping_is_built_once_per_prefix_and_window():
     assert windowed[1] == [4, 4, 4, 4]
     # A different tree's memo never leaks into this one.
     assert tree_mapping([[0]], 6, 0, memo={})[0].tolist() == [[0, 1, 2, 3, 4, 5, 6]]
+
+
+@pytest.mark.parametrize("parents", [[-1, 0, 1, 2], [-1, 0, 1], [-1, 0, 0, 2]])
+def test_chain_window_batch_equals_the_per_node_loop(parents, monkeypatch):
+    from mlx2.runtime.models.inkling.tree import InklingTree
+
+    m = model()
+    cache = m.make_cache()
+    for token in range(1, 10):  # wrap the local ring
+        m(mx.array([[token]]), cache=cache)
+    tokens = mx.array([[10 + i for i in range(len(parents))]])
+
+    def run(batched):
+        monkeypatch.setattr(InklingTree, "batch_chain_windows", batched)
+        tree = InklingTree(parents, cache)
+        logits, features = tree.forward(m, tokens, [1])
+        mx.eval(logits, features)
+        return tree, logits, features
+
+    tree, logits, features = run(True)
+    loop, ref_logits, ref_features = run(False)
+    chain = parents == [-1] + list(range(len(parents) - 1))
+    local_layers = sum(1 for layer in m.layers if layer.self_attn.sliding)
+    assert tree.chain_window_batches == (local_layers if chain else 0)
+    assert loop.chain_window_batches == 0
+    assert bool(mx.array_equal(logits, ref_logits).item())
+    assert bool(mx.array_equal(features, ref_features).item())

@@ -50,6 +50,10 @@ def main():
     ap.add_argument("--context", type=int, default=16384)
     ap.add_argument("--widths", type=int, nargs="+", default=[4, 8])
     ap.add_argument("--repeats", type=int, default=12)
+    ap.add_argument("--compare-batch", action="store_true",
+                    help="check batched chain windows equal the per-node loop, bit for bit")
+    ap.add_argument("--no-batch", action="store_true",
+                    help="time with batched chain windows off (the per-node loop)")
     ap.add_argument("--compare-gather", action="store_true",
                     help="also check chain-slice logits equal the per-node gather, bit for bit")
     args = ap.parse_args()
@@ -115,6 +119,25 @@ def main():
         model(mx.array([prompt[begin:begin + 2048]], mx.uint32), cache=cache)
         mx.eval([c.state for c in cache])
     vocab = len(adapter.tokenizer)
+    if args.compare_batch:
+        for w in args.widths:
+            proposed = [(prompt[-1] + 7 * i + 3) % vocab for i in range(w)]
+            parents = [-1] + list(range(w - 1))
+            outputs = {}
+            for batched in (True, False):
+                Tree.batch_chain_windows = batched
+                values, _, tx = executor.forward(model, proposed, parents, cache, [1], cached=False)
+                mx.eval(values)
+                outputs[batched] = values
+                del tx
+            Tree.batch_chain_windows = True
+            check = {"width": w, "batch_bit_equal": bool(mx.array_equal(outputs[True], outputs[False]).item()),
+                     "max_abs_diff": float(mx.max(mx.abs(outputs[True].astype(mx.float32)
+                                                         - outputs[False].astype(mx.float32))).item())}
+            report.setdefault("batch_checks", []).append(check)
+            print(json.dumps(check), flush=True)
+    Tree.batch_chain_windows = not args.no_batch
+    report["batch_chain_windows"] = Tree.batch_chain_windows
     if args.compare_gather:
         original_init = Tree.__init__
         for w in args.widths:

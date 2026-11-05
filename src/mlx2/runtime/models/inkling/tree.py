@@ -30,6 +30,7 @@ class InklingTree:
         # prefix slice of K/V in the local-attention loop.
         self._chain_paths = [list(range(depth + 1)) for depth in range(len(parents))]
         self.chain_slice_rows = 0
+        self.chain_window_batches = 0
         if len(cache) % 2:
             raise ValueError("Inkling cache must alternate KV and convolution planes")
         pairs = [CacheList(cache[i], cache[i + 1]) for i in range(0, len(cache), 2)]
@@ -304,6 +305,10 @@ class InklingTree:
             module.mapped_attention_calls += 1
             out = out.transpose(0, 2, 1, 3).reshape(1, width, -1)
             return module.o_proj(out) if project_output else out
+        batched = self._attend_chain_windows(module, q, keys, values, r, prefix, start)
+        if batched is not None:
+            out = batched.transpose(0, 2, 1, 3).reshape(1, width, -1)
+            return module.o_proj(out) if project_output else out
         outputs = []
         for row, path in enumerate(self.paths):
             if path == self._chain_paths[len(path) - 1]:
@@ -347,6 +352,84 @@ class InklingTree:
             mx.concatenate(outputs, axis=2).transpose(0, 2, 1, 3).reshape(1, width, -1)
         )
         return module.o_proj(out) if project_output else out
+
+    # Run a chain's full-window local attention as one batch of one-row
+    # problems (see ``_attend_chain_windows``); False keeps the per-node loop.
+    batch_chain_windows = True
+
+    def _attend_chain_windows(self, module, q, keys, values, r, prefix, start):
+        """A chain's local attention as one batch of the per-node one-row calls.
+
+        Every node of a chain whose window is full attends the same number of
+        keys at the same relative offset: node ``i`` reads the ``sliding``
+        keys ending at its own row, a fixed-stride window of one buffer.
+        Stacking those windows as batch items (an overlapping strided view)
+        gives the stock kernels the same per-item inputs and shape as the
+        per-node loop's one-row calls, so the mask, position scaling and SDPA
+        run once per layer instead of once per node. Returns ``None`` (use the
+        loop) for anything else: a branched tree, a window not yet full, or a
+        policy whose one-row call is not the reference SDPA.
+        """
+        width = len(self.paths)
+        window = int(module.sliding)
+        if (
+            not self.batch_chain_windows
+            or width < 2
+            or window <= 0
+            or module.attention_policy not in ("reference", "decode")
+            or self.paths[-1] != self._chain_paths[width - 1]
+            or prefix + 1 < window
+            or keys.shape[2] != prefix + width
+        ):
+            return None
+        from ..base import scaled_dot_product_attention
+        from .language import banded_additive_mask
+
+        _, n_kv, total, head_dim = keys.shape
+        value_dim = values.shape[3]
+        first = prefix + 1 - window
+        keys = mx.contiguous(keys)
+        values = mx.contiguous(values)
+        kb = mx.as_strided(
+            keys, (width, n_kv, window, head_dim),
+            (head_dim, total * head_dim, head_dim, 1), first * head_dim,
+        )
+        vb = mx.as_strided(
+            values, (width, n_kv, window, value_dim),
+            (value_dim, total * value_dim, value_dim, 1), first * value_dim,
+        )
+        qb = q.transpose(2, 1, 0, 3)  # [width, heads, 1, head_dim]
+        rb = r.transpose(1, 0, 2, 3)  # [width, 1, heads, d_rel]
+        mask = banded_additive_mask(
+            rb,
+            module.rel_proj.astype(q.dtype),
+            window - 1,
+            window,
+            module.sliding,
+            module.rel_extent,
+            shape_ref=kb if module.fused else None,
+            fused=module.fused,
+        )
+        # Receipts count launches: one mask and one SDPA per batched layer
+        # (``chain_window_batches`` on the tree counts the batches).
+        module.mask_tiles += 1
+        module.fused_mask_calls += int(module.fused and mx.default_device() == mx.gpu)
+        if module.log_floor is not None:
+            qpos = mx.array(
+                [[start + row + 1] for row in range(width)], mx.float32
+            )
+            tau = 1.0 + module.log_alpha * mx.log(
+                mx.maximum(qpos / module.log_floor, 1.0)
+            )
+            tau = tau.reshape(width, 1, 1, 1).astype(q.dtype)
+            qb = qb * tau
+            mask = mx.where(mask > -1e29, mask * tau, mask)
+        module.attention_reference_calls += 1
+        self.chain_window_batches += 1
+        out = scaled_dot_product_attention(
+            qb, kb, vb, cache=None, scale=module.scale, mask=mask
+        )
+        return out.transpose(2, 1, 0, 3)  # [1, heads, width, value_dim]
 
     def lend_global_kv(self):
         """Append tree rows into the live global KV buffers, as anchors do.
