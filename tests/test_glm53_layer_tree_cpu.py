@@ -57,6 +57,7 @@ def test_each_rows_own_routing_and_shared_order_are_preserved():
         weights = Weights()
         model = object.__new__(Glm53GGUFModel)
         model.weights = weights
+        model.routed_topk = 8
         x = mx.array(
             np.random.default_rng(77).normal(size=(1, 5, 4)).astype(np.float32)
         )

@@ -59,6 +59,7 @@ from .round_phases import publish_round
 from .sample_utils import LaneRNG, draw_key
 from .speculative_sampling import count_delivered_relaxed_accepts
 from .state_boundaries import BoundaryPurpose, StateBoundary
+from .weight_overlays import bind_weight_overlay_rows, clear_weight_overlay_rows
 from .weight_stream import expert_prefill_admission
 
 DEFAULT_MAX_TOKENS = 100
@@ -1144,6 +1145,7 @@ class PromptProcessingBatch:
                 )
             else:
                 lora_rows = bind_lora_rows(self.model, self.uids)
+                overlay_rows = bind_weight_overlay_rows(self.model, self.uids)
                 try:
                     forward = prefill_model_forward(self.model)
                     row_context = getattr(self.model, "prefill_row_context", None)
@@ -1190,6 +1192,7 @@ class PromptProcessingBatch:
                         )
                 finally:
                     clear_lora_rows(lora_rows)
+                    clear_weight_overlay_rows(overlay_rows)
                 checkpoint_output = _narrowed_checkpoint_output(
                     checkpoint_output, checkpoint_rows
                 )
@@ -1582,6 +1585,7 @@ class GenerationBatch:
         if steer is not None:
             taps.steer = steer
         lora_rows = bind_lora_rows(self.model, self.uids)
+        overlay_rows = bind_weight_overlay_rows(self.model, self.uids)
         mixed = getattr(self, "_mixed_segment", None)
         mixed_eval = None
         try:
@@ -1592,6 +1596,7 @@ class GenerationBatch:
                 and not kwargs
                 and steer is None
                 and lora_rows is None
+                and overlay_rows is None
             ):
                 # The prompt slice and these decode rows share one forward:
                 # every projection reads its weights once for both.
@@ -1622,6 +1627,7 @@ class GenerationBatch:
                     self._prompt_tail_inputs = {self.uids[0]: kwargs}
         finally:
             clear_lora_rows(lora_rows)
+            clear_weight_overlay_rows(overlay_rows)
             if steer is not None:
                 taps.steer = None
         trace_t1b = time.perf_counter() if STEP_TRACE is not None else None
@@ -9875,11 +9881,13 @@ class BatchGenerator:
                 # forward does, or a LoRA request prefills as base (sweep
                 # 2026-10-02 V2).
                 lora_rows = bind_lora_rows(self.model, self._prompt_batch.uids)
+                overlay_rows = bind_weight_overlay_rows(self.model, self._prompt_batch.uids)
                 try:
                     forward = getattr(self.model, "prefill_forward", self.model)
                     return forward(tokens, cache=cache)
                 finally:
                     clear_lora_rows(lora_rows)
+                    clear_weight_overlay_rows(overlay_rows)
             checkpoint_output = gen._mixed_prompt_checkpoint_output
             gen._mixed_prompt_checkpoint_output = None
             return checkpoint_output

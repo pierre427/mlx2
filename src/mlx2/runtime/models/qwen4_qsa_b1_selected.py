@@ -297,15 +297,36 @@ def _kernel(variant: str):
     return kernel
 
 
+def selection_refusal(selection) -> str | None:
+    """The kernel encodes plain causal visibility and four-token blocks.
+
+    A custom mask may exclude tokens inside a selected block. Its shape is
+    not a proof of plain causality, so leave it with the ordinary consumer.
+    """
+    from .qwen4_qsa_visibility import QSAVisibility
+    from .qsdpa_verify_metal import NOT_CAUSAL, causal_left_padding
+
+    if selection.block_size != BLOCK_SIZE:
+        return "block size"
+    mask = selection.causal_mask
+    if isinstance(mask, QSAVisibility):
+        return None
+    if causal_left_padding(
+        mask, selection.batch, selection.length, selection.physical_width
+    ) is NOT_CAUSAL:
+        return "custom attention mask"
+    return None
+
+
 def refusal(q, keys, values, block_ids, q_pos) -> str | None:
     """Why this call cannot be served, or None."""
     if q.ndim != 4 or q.shape[0] != 1 or q.shape[2] != 1:
         return "not one query row"
-    if q.shape[-1] != HEAD_DIM or keys.shape[-1] != HEAD_DIM:
-        return "head dim"
     if keys.ndim != 4 or keys.shape[0] != 1 or values.shape != keys.shape:
         return "cache layout"
-    if q.shape[1] % keys.shape[1]:
+    if q.shape[-1] != HEAD_DIM or keys.shape[-1] != HEAD_DIM:
+        return "head dim"
+    if keys.shape[1] < 1 or q.shape[1] < 1 or q.shape[1] % keys.shape[1]:
         return "query heads not a multiple of KV heads"
     gqa = q.shape[1] // keys.shape[1]
     if gqa * 32 > 1024:
@@ -314,6 +335,8 @@ def refusal(q, keys, values, block_ids, q_pos) -> str | None:
         return "dtype"
     if block_ids.ndim != 3 or block_ids.shape[:2] != (1, 1):
         return "block ids shape"
+    if block_ids.dtype != mx.uint32:
+        return "block ids dtype"
     if isinstance(q_pos, int):
         if q_pos < 0 or q_pos >= keys.shape[2]:
             return "query position"

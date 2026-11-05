@@ -71,7 +71,14 @@ def rule_cells() -> tuple[str, ...]:
 def route_score(baseline: dict, candidate: dict) -> dict:
     """Speedup ratios, geometric mean and minimum cell of one route."""
     cells = rule_cells()
-    missing = [cell for cell in cells if not baseline.get(cell) or not candidate.get(cell)]
+    missing = [cell for cell in cells if baseline.get(cell) is None or candidate.get(cell) is None]
+    for label, measurements in (("baseline", baseline), ("candidate", candidate)):
+        for cell in cells:
+            value = measurements.get(cell)
+            if value is not None and (
+                type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+            ):
+                raise ValueError(f"{label} {cell} throughput must be finite and positive")
     if missing:
         return {"qualifies": False, "missing": missing, "ratios": {}, "geomean": None, "min_cell": None}
     ratios = {cell: candidate[cell] / baseline[cell] for cell in cells}
@@ -100,7 +107,14 @@ def rule_verdict(baseline: dict, candidates: dict, current_default: str) -> dict
     scores = {name: route_score(baseline, cells) for name, cells in candidates.items()}
     qualifying = [name for name, score in scores.items() if score["qualifies"]]
     if qualifying:
-        winner = max(qualifying, key=lambda name: scores[name]["geomean"])
+        # The receipt rounds scores for display; select using the measurements
+        # so two distinct routes do not become an insertion-order tie.
+        winner = max(
+            qualifying,
+            key=lambda name: sum(
+                math.log(candidates[name][cell] / baseline[cell]) for cell in rule_cells()
+            ),
+        )
         decision = "selected"
     else:
         winner = current_default
@@ -155,6 +169,13 @@ def validate_entry(entry: dict) -> None:
     for spec in routes:
         if not isinstance(spec, dict) or spec.get("kind") not in ROUTE_KINDS:
             raise ValueError(f"best-route route kind must be one of {sorted(ROUTE_KINDS)}")
+        if "execution_policy" in spec:
+            if "fingerprint" not in entry:
+                raise ValueError("best-route execution policy needs an exact artifact fingerprint")
+            if not isinstance(spec["execution_policy"], dict) or any(
+                not isinstance(key, str) for key in spec["execution_policy"]
+            ):
+                raise ValueError("best-route execution policy must be an object with string keys")
         drafter = spec.get("drafter")
         if isinstance(drafter, dict):
             if spec["kind"] != "ast":
@@ -260,6 +281,8 @@ def _apply_spec(args, spec: dict, adapter_resolution, drafters_cache: dict, root
     kind = spec["kind"]
     capabilities = adapter_resolution.descriptor.capabilities
     applied: dict = {"name": spec.get("name", kind), "kind": kind}
+    if "execution_policy" in spec:
+        applied["execution_policy"] = dict(spec["execution_policy"])
     if kind == "adapter_default":
         return applied
     if kind == "native_mtp":
@@ -417,7 +440,7 @@ def resolve_best_route_default(
 
 
 def finish_best_route_default(args, policy):
-    """Pin the verified drafter identity into the resolved policy.
+    """Apply exact-artifact policy defaults and pin a verified drafter identity.
 
     Called after ``apply_ast_invocation``.  The adapter re-verifies the pin at
     load, so a drafter that changed after pairing fails closed.
@@ -425,6 +448,11 @@ def finish_best_route_default(args, policy):
     record = getattr(args, "route_default_selection", None)
     if not record or not record.get("applied"):
         return policy
+    defaults = record["route"].get("execution_policy")
+    if defaults:
+        # Explicit values (including False and None) always win. The normal
+        # adapter validation and cache-identity construction see this policy.
+        policy = {**defaults, **(policy or {})}
     if getattr(args, "ast_route", None) is not None:
         record["route"]["ast_route"] = dict(args.ast_route)
     drafter = record.get("drafter")
@@ -457,4 +485,7 @@ def receipt_view(record: dict | None) -> dict | None:
         view["drafter"] = {"identity": drafter.get("identity"), "path": drafter.get("path")}
     if record.get("failover"):
         view["failover"] = [item["route"] for item in record["failover"]]
+    policy = (record.get("route") or {}).get("execution_policy")
+    if policy is not None:
+        view["execution_policy"] = dict(policy)
     return view

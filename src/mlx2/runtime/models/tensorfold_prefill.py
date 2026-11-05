@@ -174,17 +174,18 @@ def eligible(module):
 
 
 def native_eligible(module):
-    """Native grouped QMM supports validated affine q4/q8 group-64 tables."""
+    """Native QMM packs affine q4/q8 or MXFP8 without changing their format."""
     if not isinstance(module, nn.QuantizedLinear):
         return False
     bits = getattr(module, "bits", None)
     group_size = getattr(module, "group_size", None)
-    if bits not in (4, 8) or group_size != 64:
+    mode = getattr(module, "mode", "affine")
+    affine = mode == "affine" and bits in (4, 8) and group_size == 64
+    mxfp8 = mode == "mxfp8" and bits == 8 and group_size == 32
+    if not (affine or mxfp8):
         return False
-    if getattr(module, "mode", "affine") != "affine":
-        return False
-    w, s, b = module.weight, module.scales, module.biases
-    if w.ndim != 2 or s.ndim != 2 or b.shape != s.shape:
+    w, s, b = module.weight, module.scales, module.get("biases")
+    if w.ndim != 2 or s.ndim != 2:
         return False
     n, packed_k = w.shape
     values_per_word = 32 // bits
@@ -195,7 +196,9 @@ def native_eligible(module):
         and k % group_size == 0
         and s.shape == (n, k // group_size)
         and w.dtype == mx.uint32
-        and s.dtype == b.dtype == mx.bfloat16
+        and ((affine and b is not None and b.shape == s.shape
+              and s.dtype == b.dtype == mx.bfloat16)
+             or (mxfp8 and b is None and s.dtype == mx.uint8))
         and (
             "bias" not in module
             or (module.bias.shape == (n,) and module.bias.dtype == mx.bfloat16)
@@ -262,7 +265,7 @@ class PackedProjectionGroup:
     def __init__(self, modules):
         modules = tuple(modules)
         if not modules or any(not native_eligible(module) for module in modules):
-            raise ValueError("native packed projections require affine q4/q8 group-64")
+            raise ValueError("native packed projections require affine q4/q8 g64 or MXFP8 g32")
         formats = {
             (module.bits, module.group_size, getattr(module, "mode", "affine"))
             for module in modules
@@ -271,25 +274,27 @@ class PackedProjectionGroup:
             raise ValueError("native packed projections require one quantization format")
         self.bits, self.group_size, self.mode = formats.pop()
         self.widths = tuple(int(m.weight.shape[0]) for m in modules)
-        self.weight, self.scales, self.biases = (
+        self.keys = ("weight", "scales", "biases") if self.mode == "affine" else ("weight", "scales")
+        arrays = [
             mx.concatenate([getattr(m, key) for m in modules], axis=0)
-            for key in ("weight", "scales", "biases")
-        )
-        mx.eval(self.weight, self.scales, self.biases)
+            for key in self.keys
+        ]
+        mx.eval(*arrays)
+        self.weight, self.scales = arrays[:2]
+        self.biases = arrays[2] if len(arrays) == 3 else None
         self.expected = []
         start = 0
         for m, n in zip(modules, self.widths):
-            m.weight = self.weight[start : start + n]
-            m.scales = self.scales[start : start + n]
-            m.biases = self.biases[start : start + n]
-            self.expected.append((m.weight, m.scales, m.biases))
+            for key, array in zip(self.keys, arrays):
+                setattr(m, key, array[start : start + n])
+            self.expected.append(tuple(getattr(m, key) for key in self.keys))
             start += n
 
     def matches(self, modules):
         return len(modules) == len(self.expected) and all(
             all(
                 getattr(m, key) is array
-                for key, array in zip(("weight", "scales", "biases"), expected)
+                for key, array in zip(self.keys, expected)
             )
             for m, expected in zip(modules, self.expected)
         )
@@ -551,9 +556,13 @@ def install(model, *, backend="native"):
                 )
             mlps += 1
     if not installed:
-        raise ValueError("prefill candidate found no eligible dense q4/g64 projections")
+        raise ValueError("prefill candidate found no eligible dense quantized projections")
     return {
-        "kernel": _KERNEL_IDENTITY[backend],
+        "kernel": (_KERNEL_IDENTITY[backend] + "_mxfp8_g32"
+                   if backend == "native" and any(
+                       getattr(module, "mode", None) == "mxfp8"
+                       and name in installed for name, module in model.named_modules()
+                   ) else _KERNEL_IDENTITY[backend]),
         "installed": len(installed),
         "grouped_layers": groups,
         "mlp_layers": mlps,

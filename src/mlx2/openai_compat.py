@@ -46,6 +46,9 @@ RESPONSES_FIELDS = frozenset(
         "top_logprobs",
         "return_progress",
         "client_metadata",
+        "weight_overlay",
+        "layer_excision",
+        "expert_mask",
     }
 )
 
@@ -561,6 +564,9 @@ def responses_to_chat_request(
         "top_p": "top_p",
         "top_logprobs": "top_logprobs",
         "return_progress": "return_progress",
+        "weight_overlay": "weight_overlay",
+        "layer_excision": "layer_excision",
+        "expert_mask": "expert_mask",
     }
     for source, target in aliases.items():
         if source in body:

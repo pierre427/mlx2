@@ -464,6 +464,12 @@ class _RollbackRecord(tuple):
         record.depths = depths
         return record
 
+    def __getnewargs__(self):
+        # tuple's default reconstruction passes one tuple to __new__, while
+        # this record needs the original forward width and its replay state.
+        # In a ragged record self[0] is only the minimum remaining depth.
+        return (self.num_tokens, self.fn, self.snapshot, self.per_row_fn, self.depths)
+
     @property
     def fn(self):
         return self[1]
@@ -2605,13 +2611,23 @@ class ArraysCache(_BaseCache):
         and a LEADING pad run: replay closures index a row's tokens from slab
         position 0, so a row whose tokens start later cannot be replayed by a
         scalar depth.
+
+        An unrecordable forward also breaks the existing exact suffix. Drop
+        its records and invalidate markers conservatively at this admission
+        boundary: otherwise a later trim can replay an older forward while
+        silently discarding the newer unrecorded state. Live tensors are not
+        changed, and the next describable forward may start a new suffix.
         """
         lengths = self._length_vector()
         padding = self._left_padding_vector()
         if padding is not None and max(padding) > 0:
+            self._invalidate_rollbacks("forward has leading padding with no exact rollback geometry")
             return None
         if lengths is None:
-            return None if mask is not None else ()
+            if mask is not None:
+                self._invalidate_rollbacks("forward mask has no exact rollback geometry")
+                return None
+            return ()
         return [min(max(v, 0), length) for v in lengths]
 
     def _record_depths(self, num_tokens, depths):
@@ -2762,9 +2778,10 @@ class ArraysCache(_BaseCache):
     def _invalidate_rollbacks(self, reason: str):
         """Drop rollback records that no longer describe the live rows.
 
-        ``fn``/``snapshot`` capture whole-batch tensors, so any change of
-        batch membership makes them un-replayable. Dropping them turns a
-        later trim into a loud failure instead of a wrong-shaped restore.
+        ``fn``/``snapshot`` capture whole-batch tensors, so a membership
+        change or an unrecorded forward breaks the exact chain. Dropping
+        them turns a later trim into a loud failure instead of a stale or
+        wrong-shaped restore.
         """
         self._clear_staged_rollback()
         if (

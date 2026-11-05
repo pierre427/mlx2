@@ -57,7 +57,7 @@ class D3GatedDeltaNet(GatedDeltaNet):
         return q * (q.shape[-1] ** -0.5), k
 
     def _gated_delta_update(
-        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False
+        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False, allow_core=True
     ):
         result, state = gated_delta_update(
             q,
@@ -72,6 +72,7 @@ class D3GatedDeltaNet(GatedDeltaNet):
             use_kernel=use_kernel,
             beta_input_dtype=True,
             decay_input_float32=True,
+            allow_core=allow_core,
         )
         return result.astype(v.dtype), state
 

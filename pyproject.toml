@@ -19,6 +19,7 @@ dev = ["pytest>=8", "ruff>=0.16"]
 mlx = ["mlx>=0.32"]
 hysparse2-research = ["mlx>=0.32", "numpy>=2", "tokenizers>=0.22"]
 hysparse2-data = ["numpy>=2", "tokenizers>=0.22", "pyarrow>=25"]
+weight-space-research = ["numpy>=2", "safetensors>=0.8", "jsonschema>=4.25"]
 # mlx is capped below the next release: the exact kernels are verified per
 # build (runtime/mlx_build.py) and a bump needs a requalification first.
 # transformers is not capped tighter: a tokenizer class that rebuilds a pack's
@@ -67,6 +68,7 @@ mlx2-diarize = "mlx2.diarize_cli:main"
 mlx2-radio = "mlx2.radio_cli:main"
 mlx2-top = "mlx2.top:main"
 mlx2-media = "mlx2.media.server:main"
+mlx2-weight-space = "mlx2.experimental.weight_space.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

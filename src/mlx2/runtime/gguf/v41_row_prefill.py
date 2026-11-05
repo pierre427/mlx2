@@ -48,24 +48,40 @@ def kernel_spec(kind, experts):
         return "("+"".join(f"expert=={i}?{name}{i}:" for i in range(experts-1))+f"{name}{experts-1})"
 
     source = base.GATE_SOURCE if kind == "gate" else base.DOWN_SOURCE
+
+    def once(source, before, after):
+        # Every edit must land exactly once on the shared template, or the
+        # kernel references unbound pointers (as after the MT/TILE rewrite).
+        if source.count(before) != 1:
+            raise GGUFError("V4.1 row-group prefill: shared template anchor changed")
+        return source.replace(before, after, 1)
+
     # CPU-uploaded small descriptors may bind in Metal's constant address
     # space. Scalar access works for both constant and device descriptors.
-    source = source.replace("const uint4 desc=*((device const uint4*)tiles+tile);",
-                            "const uint4 desc=uint4(tiles[4*tile],tiles[4*tile+1],tiles[4*tile+2],tiles[4*tile+3]);")
+    source = once(source, "const uint4 desc=*((device const uint4*)tiles+tile);",
+                  "const uint4 desc=uint4(tiles[4*tile],tiles[4*tile+1],tiles[4*tile+2],tiles[4*tile+3]);")
     # Choose each expert pointer once per tile, outside both dequantization
     # loops. The original MMA, BF16 stores and reduction order stay intact.
     declarations = "device const uchar *row_w="+choose("w")+";\n"
     if kind == "gate":
         declarations += "device const uchar *row_up="+choose("up")+";\n"
-    source = source.replace("float sums[16];", declarations+"float sums[16];")
-    source = source.replace("w+(ulong(expert)*N+row)*ROW_BYTES", "row_w+ulong(row)*ROW_BYTES")
-    source = source.replace("up+(ulong(expert)*N+row)*ROW_BYTES", "row_up+ulong(row)*ROW_BYTES")
+    source = once(source, "float sums[MT][16];", declarations+"float sums[MT][16];")
+    source = once(source, "w+(ulong(expert)*N+row)*ROW_BYTES", "row_w+ulong(row)*ROW_BYTES")
+    if kind == "gate":
+        source = once(source, "up+(ulong(expert)*N+row)*ROW_BYTES", "row_up+ulong(row)*ROW_BYTES")
     if kind == "gate":
         names = ["x", "order", "tiles", "tile_count", "scores"]
         names += [f"w{i}" for i in range(experts)]+[f"up{i}" for i in range(experts)]
     else:
         names = ["x", "tiles", "tile_count"]+[f"w{i}" for i in range(experts)]
     return names, source
+
+
+def launch_template(kind, k, n, row_bytes, topk=None):
+    """Template constants of one row-group launch: the shared V4.1 tile
+    geometry (MT one 16-row tile per expert tile) plus the projection's own."""
+    template = [("K", k), ("N", n), ("ROW_BYTES", row_bytes), ("FORMAT", 19), ("MT", base.MT)]
+    return ([("TOPK", topk)] if kind == "gate" else [])+template
 
 
 @lru_cache(maxsize=24)
@@ -105,12 +121,12 @@ def _moe(x, ids, scores, gate, up, down, *, counters=None, max_scratch_bytes=512
             inputs=[x.astype(mx.float32), mx.array(order), tile_array, tile_count,
                     scores.reshape(-1).astype(mx.float32)]
                    +[w.data for w in gate[begin:end]]+[w.data for w in up[begin:end]],
-            template=[("TOPK", topk), ("K", width), ("N", hidden), ("ROW_BYTES", gate[0].row_bytes), ("FORMAT", 19)],
+            template=launch_template("gate", width, hidden, gate[0].row_bytes, topk),
             grid=(((hidden+127)//128)*128, count, 1), threadgroup=(128, 1, 1),
             output_shapes=[(n, hidden)], output_dtypes=[mx.float32])[0]
         value = kernel("down", end-begin)(
             inputs=[mid, tile_array, tile_count]+[w.data for w in down[begin:end]],
-            template=[("K", hidden), ("N", width), ("ROW_BYTES", down[0].row_bytes), ("FORMAT", 19)],
+            template=launch_template("down", hidden, width, down[0].row_bytes),
             grid=(((width+127)//128)*128, count, 1), threadgroup=(128, 1, 1),
             output_shapes=[(n, width)], output_dtypes=[mx.float32])[0]
         projected.append(value)

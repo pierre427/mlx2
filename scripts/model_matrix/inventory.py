@@ -219,11 +219,12 @@ AST_ROUTE_KIND = {
     "Qwen3827BAdapter": "external_draft", "Qwen3627BAdapter": "external_draft",
     "Qwen3635BA3BAdapter": "external_draft", "GptOssAdapter": "external_draft",
     "Qwen359BAdapter": "prompt_lookup",
+    "MuseGlimmerAdapter": "prompt_lookup",
 }
-AST_TILE_ADAPTERS = frozenset(k for k, v in AST_ROUTE_KIND.items() if v == "external_draft")
+AST_TILE_ADAPTERS = frozenset(k for k, v in AST_ROUTE_KIND.items() if v == "external_draft") | {"MuseGlimmerAdapter"}
 
 
-AST_DRAFT_KINDS = frozenset({"DFlash2DraftModel", "Qwen3DSparkModel", "MTPHead"})
+AST_DRAFT_KINDS = frozenset({"DFlash2DraftModel", "Qwen3DSparkModel", "MuseGlimmerAssistantModel", "MTPHead"})
 
 
 def ast_drafter_route(target: dict, pairing: dict, slug: str) -> dict | None:
@@ -488,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 class _RevisionCache(dict):
-    """Payload-hash cache invalidated by shard size/mtime."""
+    """Payload-hash cache bound to the target revision's metadata and shards."""
 
     def __init__(self, rows: dict):
         super().__init__()
@@ -496,9 +497,21 @@ class _RevisionCache(dict):
 
     @staticmethod
     def _stamp(path: str) -> str:
-        names, _ = shard_names(Path(path))
-        stats = [(n, (Path(path) / n).stat().st_size, (Path(path) / n).stat().st_mtime_ns) for n in names]
-        return hashlib.sha256(json.dumps(stats).encode()).hexdigest()
+        root = Path(path)
+        names, _ = shard_names(root)
+        # qwen38_27b.content_revision hashes these bytes as well as the
+        # payloads. A config or tensor-to-shard remap must invalidate the
+        # cached pin even when the set of weight files did not change.
+        metadata = {
+            name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in ("config.json", "model.safetensors.index.json")
+        }
+        stats = []
+        for name in names:
+            stat = (root / name).stat()
+            stats.append((name, stat.st_dev, stat.st_ino, stat.st_size,
+                          stat.st_mtime_ns, stat.st_ctime_ns))
+        return hashlib.sha256(json.dumps((metadata, stats), sort_keys=True).encode()).hexdigest()
 
     def __contains__(self, key) -> bool:
         row = self.rows.get(json.dumps(key))

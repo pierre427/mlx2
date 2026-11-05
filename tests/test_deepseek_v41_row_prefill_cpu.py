@@ -53,3 +53,73 @@ def test_profile_byte_oracle_distinguishes_signed_zero_dtype_and_shape(monkeypat
     assert not equal(np.zeros((1,2),np.float32),np.zeros((2,1),np.float32))
     assert not equal(np.zeros(1,np.float32),np.zeros(1,np.uint32))
     assert equal((None,np.array([1],np.float32)),(None,np.array([1],np.float32)))
+
+
+@pytest.mark.parametrize("kind", ["gate", "down"])
+@pytest.mark.parametrize("experts", [1, 3, GROUP_EXPERTS])
+def test_row_group_sources_bind_every_pointer_and_template_constant(kind, experts):
+    """The row-group kernels rewrite the shared V4.1 sources; every edit must
+    land, every pointer it introduces be declared before use, and every
+    template constant the source names be passed by the launch."""
+    import re
+
+    from mlx2.runtime.gguf import v41_row_prefill as rp
+
+    names, source = rp.kernel_spec(kind, experts)
+    pointers = ("row_w", "row_up") if kind == "gate" else ("row_w",)
+    for pointer in pointers:
+        declaration = f"device const uchar *{pointer}="
+        assert source.count(declaration) == 1
+        assert source.index(declaration) < source.index(f"{pointer}+ulong(row)*ROW_BYTES")
+        assert source.index(declaration) < source.index("float sums[MT][16];")
+    assert "row_up" not in source if kind == "down" else True
+    # No unrebound expert-plane pointer: only w0..wN / up0..upN are inputs.
+    assert not re.search(r"(?<![A-Za-z0-9_])(w|up)\+\(ulong\(expert\)", source)
+    for token in re.findall(r"(?<![A-Za-z0-9_])(w|up)(\d+)(?![A-Za-z0-9_])", source):
+        assert "".join(token) in names
+    assert "*((device const uint4*)tiles+tile)" not in source
+    stores = 3 if kind == "gate" else 1
+    assert source.count("v41_bf16(") == stores
+    template = dict(rp.launch_template(kind, 256, 512, 50, 6 if kind == "gate" else None))
+    assert template["MT"] == 1
+    constants = set(re.findall(r"(?<![A-Za-z0-9_])[A-Z][A-Z_]*(?![A-Za-z0-9_])", source))
+    assert constants <= set(template), constants - set(template)
+
+
+def test_row_group_spec_refuses_a_changed_template(monkeypatch):
+    from mlx2.runtime.gguf import v41_prefill
+    from mlx2.runtime.gguf import v41_row_prefill as rp
+
+    monkeypatch.setattr(v41_prefill, "DOWN_SOURCE", v41_prefill.DOWN_SOURCE.replace("float sums[MT][16];",
+                                                                                     "float sums[16];"))
+    with pytest.raises(GGUFError, match="anchor changed"):
+        rp.kernel_spec("down", 2)
+
+
+@pytest.mark.parametrize("kind", ["gate", "down"])
+def test_row_group_kernels_compile_offline_with_their_launch_templates(tmp_path, kind):
+    """CPU-only compile with the launch's own template constants (no GPU run)."""
+    import shutil
+    import subprocess
+
+    from mlx2.runtime.gguf import v41_prefill
+    from mlx2.runtime.gguf import v41_row_prefill as rp
+
+    if not shutil.which("xcrun") or subprocess.run(["xcrun", "--find", "metal"], capture_output=True).returncode:
+        pytest.skip("offline Metal compiler unavailable")
+    names, source = rp.kernel_spec(kind, 3)
+    template = rp.launch_template(kind, 4096, 2048, 1100, 6 if kind == "gate" else None)
+    dtype = lambda n: "float" if n in ("x", "scores") else "uchar" if n[0] in "wu" else "uint"
+    bindings = [f"device const {dtype(n)}* {n} [[buffer({i})]]" for i, n in enumerate(names)]
+    bindings.append(f"device float* y [[buffer({len(names)})]]")
+    attrs = ["uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]",
+             "uint thread_index_in_threadgroup [[thread_index_in_threadgroup]]",
+             "uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]",
+             "uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]"]
+    constants = "constant uint "+",".join(f"{k}={v}" for k, v in template)+";\n"
+    path = tmp_path/(kind+".metal")
+    path.write_text("#include <metal_stdlib>\nusing namespace metal;\n"+v41_prefill.HEAD+constants
+                    +"kernel void probe("+",".join(bindings+attrs)+") {\n"+source+"\n}\n")
+    result = subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-std=metal4.0", "-c", str(path),
+                             "-o", str(path.with_suffix(".air"))], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout+result.stderr

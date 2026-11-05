@@ -6288,6 +6288,54 @@ class APCv2(PrefixIndex):
             },
         )
 
+    def rebind_empty_identity(self, identity: APCKey) -> dict:
+        """Bind a new execution revision after a drained, successful clear.
+
+        Kernel development retains model storage but changes the producer of
+        every prefix.  Both subsequent lookups and persisted manifests must
+        carry that new revision.  This operation never clears state implicitly
+        or changes the artifact/layout contract; the caller must own the idle
+        execution boundary and explicitly purge first.
+        """
+        if not isinstance(identity, APCKey):
+            raise TypeError("APCv2 identity must be an APCKey")
+        hash(identity)
+        with self._apc_lock:
+            self._ensure_metadata_available()
+            if self._closed:
+                raise RuntimeError("cannot rebind a closed APCv2 cache")
+            if not self._apc_clears:
+                raise RuntimeError("APCv2 identity rebind requires an explicit clear")
+            if (
+                any(_iter_trie_entries(self._trie))
+                or self._n_bytes
+                or self._disk_bytes
+                or self._spill_jobs
+                or self._pending_prefetch is not None
+                or self._pending_retirements
+                or self._restore_staging_bytes
+                or _spill_writes_blocked(self._disk_owner)
+                or (self._metadata_future is not None and not self._metadata_future.done())
+                or self._metadata_other_owner_pending
+            ):
+                raise RuntimeError("APCv2 identity rebind requires an empty, idle cache")
+            previous = self._persist_identity
+            if previous is not None and any(
+                getattr(previous, name) != getattr(identity, name)
+                for name in (
+                    "model", "adapter", "tokenizer_fingerprint",
+                    "cache_layout_fingerprint", "semantic_fingerprint",
+                )
+            ):
+                raise ValueError("APCv2 identity rebind may change only the execution revision")
+            self._persist_identity = identity
+            self._capsule_generation.advance()
+            return {
+                "status": "rebound", "persistent": self._persist_dir is not None,
+                "previous_revision": previous.revision if previous is not None else None,
+                "revision": identity.revision,
+            }
+
     def clear(self, *, release_memory: bool = True) -> dict:
         """Drop every stored prefix, its MTP sidecar, and its bytes.
 
@@ -6366,6 +6414,7 @@ class APCv2(PrefixIndex):
                 (1 for entry in entries if getattr(entry, "sidecar", None) is not None)
             ),
             "bytes": int(self._n_bytes),
+            "disk_bytes": int(self._disk_bytes),
             "pinned_parks_lost": pinned_lost,
             "lost_sessions": lost_sessions[: self._LOST_SESSIONS_REPORT_LIMIT],
         }

@@ -445,6 +445,29 @@ def test_v41_segmented_capacity_covers_all_384_experts():
         plan_capacity(1, 513)
 
 
+def test_v41_segmented_prefill_sources_keep_every_bf16_store():
+    # The V4.1 law rounds gate, up, the scaled SwiGLU middle and the down
+    # store to BF16. Assert the generated kernels, not the shared template.
+    from mlx2.runtime.gguf import v41_iq1_tiled, v41_prefill
+    from mlx2.runtime.gguf.reader import GGUFError
+
+    gate_stores = (
+        "min(v41_bf16(sums[m][index]),10.0f)",
+        "clamp(v41_bf16(up_sums[m][index]),-10.0f,10.0f)",
+        "v41_bf16((gate/(1.0f+metal::precise::exp(-gate)))*u*scores[order[rowbase+row]]);",
+    )
+    down_store = "=v41_bf16(sums[m][f*8+r*4+j]);"
+    tiled_gate = v41_iq1_tiled.prefill_spec("gate")[2]
+    tiled_down = v41_iq1_tiled.prefill_spec("down")[2]
+    for gate in (v41_prefill.GATE_SOURCE, tiled_gate):
+        assert gate.count("v41_bf16(") == 3
+        assert all(gate.count(store) == 1 for store in gate_stores)
+    for down in (v41_prefill.DOWN_SOURCE, tiled_down):
+        assert down.count("v41_bf16(") == 1 and down.count(down_store) == 1
+    with pytest.raises(GGUFError, match="BF16 store anchor"):
+        v41_prefill._bf16_store("sums[index]", "sums[m][index]", "x")
+
+
 def test_fused_qat_does_not_dispatch_on_cpu():
     from mlx2.runtime.models.deepseek_v41_quant import fused_quantize
 

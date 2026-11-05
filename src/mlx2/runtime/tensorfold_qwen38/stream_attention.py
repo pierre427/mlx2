@@ -331,6 +331,14 @@ class Plan:
     def __init__(self, parents: Sequence[Sequence[int]], starts: Sequence[int], heads: int, kv_heads: int) -> None:
         if not 1 <= len(parents) <= MAX_STREAMS or len(parents) != len(starts):
             raise ValueError(f"stream_attention: 1 to {MAX_STREAMS} streams, one start each")
+        if (type(heads) is not int or type(kv_heads) is not int
+                or heads < 1 or kv_heads < 1 or heads % kv_heads):
+            raise ValueError("stream_attention: query heads must be a positive multiple of key heads")
+        if any(type(start) is not int or start < 0 for start in starts):
+            raise ValueError("stream_attention: starts must be nonnegative exact positions")
+        if any(not row or any(type(parent) is not int or parent < -1 for parent in row)
+               for row in parents):
+            raise ValueError("stream_attention: each stream requires nonempty integer parents")
         G = heads // kv_heads
         self.G, self.heads, self.kv_heads, self.streams = G, heads, kv_heads, len(parents)
         self.parents = tuple(tuple(int(parent) for parent in row) for row in parents)
@@ -345,6 +353,8 @@ class Plan:
         for s, (rp, start) in enumerate(zip(parents, starts)):
             W, P = len(rp), int(start)
             depths, node_paths = tree_paths(rp)
+            if max(depths) >= MAX_DEPTH:
+                raise ValueError(f"stream_attention: ancestor paths exceed {MAX_DEPTH} rows")
             PT = (P // la.TILE) * la.TILE
             CA = -(-PT // la.CHUNK)
             NCB = (P + max(depths)) // la.CHUNK - PT // la.CHUNK + 1
@@ -506,10 +516,30 @@ def masked_tree_sdpa(
 def tree_sdpa(queries: mx.array, kv: Sequence[tuple[mx.array, mx.array]], scale: float, plan: Plan) -> mx.array:
     """Attend grouped queries [1, H, R, D] over each stream's whole KV buffers [1, HKV, capacity, D], with window rows last."""
 
-    _, H, R, D = (int(v) for v in queries.shape)
+    # Every stream named by the plan is a live kernel input. Spare buffers
+    # only fill unused binding slots; they cannot stand in for a missing lane.
+    # Validate here as well as through the named position-law entry point:
+    # research callers also invoke this raw dispatcher directly.
+    if not isinstance(queries, mx.array) or queries.ndim != 4:
+        raise ValueError("position tree attention: queries must be [1, H, R, 256]")
+    B, H, R, D = (int(v) for v in queries.shape)
     HKV = plan.kv_heads
-    if D != 256 or H != plan.heads or R != plan.rows or len(kv) > MAX_STREAMS:
+    if (B != 1 or D != 256 or H != plan.heads or R != plan.rows
+            or not 1 <= plan.G <= 16 or len(kv) != plan.streams):
         raise ValueError(f"stream_attention: unsupported shape q={queries.shape} for {len(kv)} streams")
+    if queries.dtype != mx.bfloat16:
+        raise ValueError(f"position tree attention: {queries.dtype} queries unsupported")
+    checked = []
+    for (keys, values), start, parents in zip(kv, plan.starts, plan.parents, strict=True):
+        for name, buf in (("keys", keys), ("values", values)):
+            if not isinstance(buf, mx.array) or buf.ndim != 4 or int(buf.shape[0]) != 1:
+                raise ValueError(f"position tree attention: {name} is not one [1, HKV, capacity, D] buffer")
+            if buf.dtype != mx.bfloat16 or int(buf.shape[3]) != 256 or int(buf.shape[1]) != HKV:
+                raise ValueError(f"position tree attention: {name} {buf.dtype} {tuple(buf.shape)} unsupported")
+            if int(buf.shape[2]) < start + len(parents):
+                raise ValueError(f"position tree attention: {name} buffer does not hold every window row")
+        checked.append((mx.contiguous(keys), mx.contiguous(values)))
+    kv = checked
     G, SGA, NT = plan.G, plan.tiles, plan.rows
     RP = 16 * SGA
     strides: list[int] = []
@@ -564,21 +594,7 @@ def position_tree_sdpa(queries: mx.array, buffers: Sequence[tuple[mx.array, mx.a
     else fails closed rather than reading a layout the kernel does not take.
     """
 
-    checked = []
-    for (keys, values), start, parents in zip(buffers, plan.starts, plan.parents):
-        for name, buf in (("keys", keys), ("values", values)):
-            if not isinstance(buf, mx.array) or buf.ndim != 4 or int(buf.shape[0]) != 1:
-                raise ValueError(f"position tree attention: {name} is not one [1, HKV, capacity, D] buffer")
-            if buf.dtype != mx.bfloat16 or int(buf.shape[3]) != 256 or int(buf.shape[1]) != plan.kv_heads:
-                raise ValueError(f"position tree attention: {name} {buf.dtype} {tuple(buf.shape)} unsupported")
-            if int(buf.shape[2]) < start + len(parents):
-                raise ValueError(f"position tree attention: {name} buffer does not hold every window row")
-        # The kernels read raw rows at the buffer's own head stride: a
-        # row-contiguous buffer passes through without a copy.
-        checked.append((mx.contiguous(keys), mx.contiguous(values)))
-    if queries.dtype != mx.bfloat16:
-        raise ValueError(f"position tree attention: {queries.dtype} queries unsupported")
-    return tree_sdpa(queries, checked, scale, plan)
+    return tree_sdpa(queries, buffers, scale, plan)
 
 
 __all__ = ["MAX_STREAMS", "Plan", "masked_tree_sdpa", "ordinary_tree_sdpa", "position_tree_sdpa", "sources",

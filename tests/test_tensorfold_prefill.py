@@ -187,6 +187,29 @@ def test_packed_native_group_preserves_q4_and_q8_outputs(bits):
         assert mx.array_equal(actual, expected).item()
 
 
+def test_mxfp8_native_packing_preserves_format_and_reload_guard():
+    modules = []
+    for width in (64, 32):
+        linear = nn.Linear(128, width, bias=False)
+        linear.weight = linear.weight.astype(mx.bfloat16)
+        modules.append(nn.QuantizedLinear.from_linear(linear, group_size=32, bits=8, mode="mxfp8"))
+    assert all(prefill.native_eligible(m) for m in modules)
+    x = mx.random.normal((1, 73, 128)).astype(mx.bfloat16)
+    reference = [module(x) for module in modules]
+    original = [(m.weight, m.scales) for m in modules]
+    group = prefill.PackedProjectionGroup(modules)
+    assert group.mode == "mxfp8" and group.biases is None
+    assert group.matches(modules)
+    for module, (weight, scales) in zip(modules, original):
+        assert module.scales.dtype == mx.uint8
+        assert mx.array_equal(module.weight, weight).item()
+        assert mx.array_equal(module.scales, scales).item()
+    for actual, expected in zip(group(x, modules), reference):
+        assert mx.array_equal(actual, expected).item()
+    modules[0].scales = mx.zeros_like(modules[0].scales)
+    assert not group.matches(modules)
+
+
 def test_gdn_candidate_policy_rejects_dead_and_invalid_knobs():
     for settings in (
         {"gdn_prefill_segment_rows": 256},

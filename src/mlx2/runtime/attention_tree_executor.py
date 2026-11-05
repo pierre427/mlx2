@@ -76,6 +76,14 @@ def _prefix_columns(cache):
 def attention_modules(model):
     """The decoder layers' RoPE-bearing attention modules."""
 
+    declared = getattr(model, "attention_tree_rope_modules", None)
+    if callable(declared):
+        modules = list(declared())
+        if len({id(module) for module in modules}) != len(modules) or any(
+            not callable(getattr(module, "rope", None)) for module in modules
+        ):
+            raise ValueError("invalid declared attention-tree RoPE modules")
+        return modules
     core = getattr(model, "model", model)
     modules = []
     for layer in core.layers:

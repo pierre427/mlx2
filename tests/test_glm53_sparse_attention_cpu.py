@@ -454,8 +454,29 @@ def test_fused_f16_prompt_law_tables():
         sa.rows_attention(q, [(latent, ids)], policy="fused_f16")
     with pytest.raises(RuntimeError, match="requires Metal"):
         sa.sparse_prefill(q, latent, ids, policy="fused_f16")
-    status = sa.route_status()["policies"]["fused_f16"]
+    status = sa.route_status({"glm53_sparse_attention": "gathered_v1",
+                              "glm53_sparse_prefill": "gathered_v1_8k"})["policies"]["fused_f16"]
     assert status["selected_by_default"] is False and status["prompt_only"] is True
+
+
+def test_route_status_selection_follows_the_sparse_defaults():
+    # gathered_f16_from_8192 (the Metal default) selects the fused_f16 prompt
+    # law; the receipt must say so rather than a hard-coded False.
+    from mlx2.adapters.glm53_gguf import sparse_default
+
+    def selected(attention, prompt):
+        policies = sa.route_status({"glm53_sparse_attention": attention,
+                                    "glm53_sparse_prefill": prompt})["policies"]
+        return {name for name, row in policies.items() if row["selected_by_default"]}
+
+    assert selected("gathered_v1", "gathered_f16_from_8192") == {"gathered_v1", "fused_f16"}
+    assert selected("gathered_v1", "gathered_v1_8k") == {"gathered_v1"}
+    assert selected("fused_decode_v1", "gathered_v2_from_4096") == {"fused_decode_v1", "fused_v2"}
+    assert selected("fused_v2", "dense_reference") == {"fused_v2"}
+    host = {key: sparse_default(key) for key in ("glm53_sparse_attention", "glm53_sparse_prefill")}
+    assert sa.route_status()["policies"] == sa.route_status(host)["policies"]
+    assert sa.route_status()["policies"]["fused_f16"]["selected_by_default"] is (
+        sa.prefill_law(host["glm53_sparse_prefill"]) == "fused_f16")
 
 
 def test_fused_f16_spec_and_launch_plan():

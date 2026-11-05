@@ -25,7 +25,7 @@ def is_assistant_artifact(path) -> bool:
     return config.get("architectures") == ["MuseGlimmerAssistantModel"]
 
 
-def inspect_drafter(path, target):
+def inspect_drafter(path, target, *, config_parser=None, weight_schema=None):
     from ..runtime.drafters.muse_dflash import MuseDFlashConfig, expected_weights
 
     path = Path(path).expanduser().resolve()
@@ -33,8 +33,9 @@ def inspect_drafter(path, target):
     config = _decode_unique_json(raw, "draft config.json")
     target_config = json.loads((Path(target) / "config.json").read_text())
     text = target_config.get("text_config", target_config)
-    args = MuseDFlashConfig.from_hf(config, target_text=text)
-    expected = expected_weights(args)
+    parser = MuseDFlashConfig.from_hf if config_parser is None else config_parser
+    args = parser(config, target_text=text)
+    expected = (expected_weights if weight_schema is None else weight_schema)(args)
     index = path / "model.safetensors.index.json"
     digest = hashlib.sha256(raw)
     if index.is_file():
@@ -96,13 +97,13 @@ def inspect_drafter(path, target):
     }
 
 
-def load_drafter(record, target_model):
+def load_drafter(record, target_model, *, model_class=None):
     import mlx.core as mx
     import mlx.nn as nn
 
     from ..runtime.drafters.muse_dflash import MuseDFlashDraftModel
 
-    model = MuseDFlashDraftModel(record["args"])
+    model = (MuseDFlashDraftModel if model_class is None else model_class)(record["args"])
     weights = {}
     for name, _, _ in record["files"]:
         weights.update(mx.load(str(Path(record["path"]) / name)))

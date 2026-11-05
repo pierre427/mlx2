@@ -49,12 +49,15 @@ MECHANISM_FAMILIES = (
     ("int8_prefill_calls_total", "outcome"),
     ("lane_matmul_calls_total", "path"),
     ("moe_dispatches_total", "mode"),
+    ("moe_nax_gather_calls_total", "route"),
+    ("moe_sort_decisions_total", "decision"),
     ("moe_router_calls_total", None),
     ("ple_compile_events_total", "event"),
     ("qsa_mtp_amendment_events_total", "event"),
     ("runtime_events_total", "component,event"),
     ("scheduler_events_total", "event"),
     ("segmented_mtp_events_total", "event"),
+    ("tensorfold_qmv_calls_total", "path"),
     ("verify_bitexact_dispatches_total", None),
 )
 

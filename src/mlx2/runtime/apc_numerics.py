@@ -229,6 +229,15 @@ def execution_numerics_identity(environ=None, *, sp_qmm=False, verify_bitexact=F
         bound["verify_bitexact"] = True
     if qmm_row_pad:
         bound["qmm_row_pad"] = True
+    # Only the exact spelling "1" selects this optional attention law.
+    # It changes downstream K/V even when prefill itself is stock, so both
+    # persistent and live APCv2 namespaces must distinguish it.
+    if env.get("MLX2_FP_DECODE_KERNEL") == "1":
+        from .models.qsdpa_decode_metal import FP_KERNEL_VERSION, FP_MIN_CONTEXT
+
+        bound["fp_decode_attention"] = {
+            "version": FP_KERNEL_VERSION, "min_context": FP_MIN_CONTEXT,
+        }
     return {"version": 1, **bound} if bound else None
 
 

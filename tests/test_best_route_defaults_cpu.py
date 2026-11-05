@@ -74,6 +74,34 @@ def test_rule_picks_highest_qualifying_geomean_else_keeps_current_default():
     assert verdict["scores"]["ast"]["missing"] == ["long/B4"]
 
 
+@pytest.mark.parametrize("value", [-100.0, 0, True, float("inf"), float("nan"), "100"])
+@pytest.mark.parametrize("arm", ["baseline", "candidate"])
+def test_rule_refuses_invalid_throughput_measurements(value, arm):
+    baseline = dict.fromkeys(brd.rule_cells(), 100.0)
+    candidate = dict.fromkeys(brd.rule_cells(), 200.0)
+    (baseline if arm == "baseline" else candidate)["code/B1"] = value
+    with pytest.raises(ValueError, match="throughput must be finite and positive"):
+        brd.route_score(baseline, candidate)
+
+
+def test_rule_cannot_qualify_two_negative_measurements():
+    baseline = dict.fromkeys(brd.rule_cells(), -100.0)
+    candidate = dict.fromkeys(brd.rule_cells(), -200.0)
+    with pytest.raises(ValueError, match="throughput must be finite and positive"):
+        brd.route_score(baseline, candidate)
+
+
+def test_rule_chooses_fastest_before_rounding_receipt_scores():
+    baseline = dict.fromkeys(brd.rule_cells(), 100.0)
+    candidates = {
+        "slower": dict.fromkeys(brd.rule_cells(), 110.001),
+        "faster": dict.fromkeys(brd.rule_cells(), 110.002),
+    }
+    verdict = brd.rule_verdict(baseline, candidates, "ordinary")
+    assert verdict["scores"]["slower"]["geomean"] == verdict["scores"]["faster"]["geomean"]
+    assert verdict["winner"] == "faster"
+
+
 # ---------------------------------------------------------------- fixtures --
 
 def _args(**overrides):
@@ -161,6 +189,58 @@ def test_unmatched_fingerprint_keeps_todays_default():
                                       table=_table(_entry({"kind": "native_mtp"})))
     assert record["status"] == "no_entry" and not record["applied"]
     assert not args.native_mtp and not args.ast
+
+
+def test_exact_artifact_policy_defaults_reach_resolution_and_receipts():
+    defaults = {"tensorfold_prefill": True, "tensorfold_prefill_backend": "native",
+                "moe_fused_gate_up": True}
+    args = _args()
+    table = _table(_entry({"kind": "ordinary", "execution_policy": defaults}))
+    record = apply_best_route_default(args, _resolution(), table=table)
+    policy = brd.finish_best_route_default(args, {"moe_fused_gate_up": False, "other": None})
+    assert policy == {**defaults, "moe_fused_gate_up": False, "other": None}
+    assert resolve_route_selection(args, policy, _resolution()).route == "ordinary"
+    assert brd.receipt_view(record)["execution_policy"] == defaults
+    assert record["qualification"] == "unqualified"
+    unmatched = _args()
+    apply_best_route_default(unmatched, _resolution(fingerprint=OTHER), table=table)
+    assert brd.finish_best_route_default(unmatched, None) is None
+    assert not unmatched.ordinary
+
+
+@pytest.mark.parametrize("policy", [None, [], "native"])
+def test_default_policy_requires_an_object(policy):
+    with pytest.raises(ValueError, match="execution policy must be an object"):
+        _table(_entry({"kind": "ordinary", "execution_policy": policy}))
+
+
+def test_default_policy_cannot_leak_into_a_family_entry():
+    entry = _entry({"kind": "ordinary", "execution_policy": {"tensorfold_prefill": True}})
+    del entry["fingerprint"]
+    entry["family"] = entry.pop("adapter")
+    with pytest.raises(ValueError, match="exact artifact fingerprint"):
+        brd.validate_entry(entry)
+
+
+def test_tiel_approved_no_flag_profile_is_exactly_the_gpu_tested_policy():
+    from mlx2.server import build_parser, resolve_execution_policy_defaults
+
+    checkpoint = "AX-Tiel-Coder-35B-A3B-MLX-AXQ-MXFP8-MTP"
+    fingerprint = "e50c224a715030005f931df75c2c6d0b4ca183ca5c583b09c9c2d6e9dc6aae5f"
+    from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter, descriptor_for
+
+    resolution = AdapterResolution(Qwen3635BA3BAdapter, descriptor_for(has_mtp=True),
+                                   {"identity": {"fingerprint": fingerprint}, "has_mtp": True})
+    args = build_parser().parse_args(["--model", f"/m/{checkpoint}"])
+    record = apply_best_route_default(args, resolution)
+    policy = brd.finish_best_route_default(args, None)
+    route = resolve_route_selection(args, policy, resolution)
+    resolved = resolve_execution_policy_defaults(policy, route, resolution, max_lanes=4)
+    tested = json.loads((ROOT / "qualification/policies/tiel-coder-optimized.json").read_text())
+    assert record["checkpoint"] == f"{checkpoint}@sha256:{fingerprint}"
+    assert record["match"] == "checkpoint" and record["qualification"] == "unqualified"
+    assert route.route == "ordinary" and policy == tested
+    assert all(resolved[key] == value for key, value in tested.items())
 
 
 @pytest.mark.parametrize("override", [
@@ -408,13 +488,29 @@ def test_lane_decision_rows_import_by_convention(tmp_path, monkeypatch):
         row(f"Own@sha256:{GOOD}", "Route: ast", evidence="src/mlx2/best_route_defaults.json"),
         row(f"Vague@sha256:{OTHER}", "EAGLE-4 wins"),
         row(f"NotSel@sha256:{OTHER}", "Route: ordinary adapter=X", selected="no"),
+        row(f"Packed@sha256:{GOOD}", 'Operator decision: Route: ordinary adapter=X '
+            'Execution-policy: {"tensorfold_prefill": true}'),
+        row(f"Broken@sha256:{OTHER}", "Route: ordinary adapter=X Execution-policy: {bad"),
     ]) + "\n")
     monkeypatch.setattr(build, "DECISIONS", tsv)
     entries, skipped = build.lane_rows()
-    assert [e["checkpoint"] for e in entries] == [f"Flint@sha256:{FP}"]
+    assert [e["checkpoint"] for e in entries] == [f"Flint@sha256:{FP}", f"Packed@sha256:{GOOD}"]
     assert entries[0]["default"] == {"name": "prompt_lookup", "kind": "prompt_lookup"}
     assert entries[0]["adapter"] == "FlintAdapter" and entries[0]["evidence"]["decision_row"]
-    assert [item["checkpoint"] for item in skipped] == [f"Vague@sha256:{OTHER}"]
+    assert entries[1]["default"]["execution_policy"] == {"tensorfold_prefill": True}
+    assert [item["checkpoint"] for item in skipped] == [f"Vague@sha256:{OTHER}", f"Broken@sha256:{OTHER}"]
+
+
+def test_tiel_shipped_default_matches_the_durable_decision_row():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("build_brd", ROOT / "scripts/build_best_route_defaults.py")
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    entries, _ = build.lane_rows()
+    fingerprint = "e50c224a715030005f931df75c2c6d0b4ca183ca5c583b09c9c2d6e9dc6aae5f"
+    imported = next(entry for entry in entries if entry["fingerprint"] == fingerprint)
+    assert brd.find_entry(brd.load_table(), "Qwen3635BA3BAdapter", fingerprint) == imported
 
 
 def test_operator_decision_row_overrides_a_measured_entry():

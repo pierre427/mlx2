@@ -139,6 +139,77 @@ def test_official_fused_mtp_experts_are_accepted_and_still_required():
             inspect_artifact(root)
 
 
+def test_separate_mtp_sidecar_is_indexed_and_revision_bound(tmp_path):
+    import numpy as np
+    from safetensors.numpy import save_file
+
+    root = make_artifact(tmp_path, mtp=True)
+    index_path = root / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    head = {name: np.ones((2,), np.float32) for name in list(index["weight_map"])
+            if ".mtp." in name}
+    for name in head:
+        del index["weight_map"][name]
+    index_path.write_text(json.dumps(index))
+    save_file(head, str(root / "mtp.safetensors"))
+    artifact = inspect_artifact(root)
+    assert artifact["has_mtp"]
+    assert artifact["weight_map"]["language_model.mtp.fc.weight"] == "mtp.safetensors"
+    assert Capability.MTP in inspect_model(root).descriptor.capabilities
+    first = artifact["identity"]["fingerprint"]
+    head["language_model.mtp.extra.weight"] = np.ones((3,), np.float32)
+    save_file(head, str(root / "mtp.safetensors"))
+    assert inspect_artifact(root)["identity"]["fingerprint"] != first
+    head["language_model.model.norm.weight"] = np.ones((2,), np.float32)
+    save_file(head, str(root / "mtp.safetensors"))
+    with pytest.raises(ValueError, match="only MTP"):
+        inspect_artifact(root)
+
+
+def test_sidecar_duplicate_and_incomplete_individual_experts_refuse(tmp_path):
+    import numpy as np
+    from safetensors.numpy import save_file
+
+    root = make_artifact(tmp_path, mtp=True)
+    save_file({"mtp.fc.weight": np.ones((2,), np.float32)}, str(root / "mtp.safetensors"))
+    with pytest.raises(ValueError, match="duplicates"):
+        inspect_artifact(root)
+    (root / "mtp.safetensors").unlink()
+    index_path = root / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    weights = index["weight_map"]
+    for name in list(weights):
+        if ".switch_mlp." in name:
+            del weights[name]
+    for expert in range(256):
+        for projection in ("gate_proj", "up_proj", "down_proj"):
+            weights[f"mtp.layers.0.mlp.experts.{expert}.{projection}.weight"] = "model.safetensors"
+    index_path.write_text(json.dumps(index))
+    assert inspect_artifact(root)["has_mtp"]
+    del weights["mtp.layers.0.mlp.experts.127.up_proj.weight"]
+    index_path.write_text(json.dumps(index))
+    with pytest.raises(ValueError, match="incomplete"):
+        inspect_artifact(root)
+
+
+def test_native_head_ast_keeps_target_packing_and_explicit_kernel_controls():
+    from mlx2.adapters.qwen36_35b import partition_native_tree_policy
+
+    tree, target = partition_native_tree_policy({
+        "draft_model": "/target", "ast_topology": "3x5", "num_draft": 5,
+        "tensorfold_prefill": True, "tensorfold_prefill_backend": "native",
+        "moe_fused_gate_up": True, "fused_gdn_decode": False,
+        "eager_dispatch_stride": 0,
+    }, numerical_defaults={"ast_adaptive_rows": False, "cost_per_commit_handoff": False})
+    assert tree["ast_topology"] == "3x5" and tree["num_draft"] == 5
+    assert tree["ast_adaptive_rows"] is False
+    assert target == {"tensorfold_prefill": True, "tensorfold_prefill_backend": "native",
+        "moe_fused_gate_up": True, "fused_gdn_decode": False, "eager_dispatch_stride": 0}
+    assert not set(target).intersection(tree)
+    with pytest.raises(ValueError, match="unknown keys"):
+        partition_native_tree_policy({"draft_model": "/target", "unknown_kernel": True})
+
+
 # H=32 and I=24: a layout that confuses H with I or 2I cannot load strictly.
 TINY_MTP_MOE = {
     "model_type": "qwen3_5_moe_text",
@@ -221,9 +292,10 @@ def _released_layout(stacked, fuse_gate_up, layout):
     return weights
 
 
+@pytest.mark.parametrize("layout", ["hub", "numbered"])
 @pytest.mark.parametrize("fuse_gate_up", [False, True])
 def test_official_fused_mtp_experts_load_strictly_into_the_stacked_tables(
-    monkeypatch, fuse_gate_up
+    monkeypatch, fuse_gate_up, layout
 ):
     """MTPLX#574: a lenient loader silently dropped fused MTP experts.  mlx2
     converts the hub layout for the body and the MTP head, then loads strictly;
@@ -244,8 +316,9 @@ def test_official_fused_mtp_experts_load_strictly_into_the_stacked_tables(
     reference = _tiny_mtp_model(monkeypatch, fuse_gate_up)
     reference.load_weights(list(reference.sanitize(dict(stacked)).items()), strict=True)
     released = _tiny_mtp_model(monkeypatch, fuse_gate_up)
-    hub = _released_layout(stacked, fuse_gate_up, "hub")
-    assert "mtp.layers.0.mlp.experts.gate_up_proj" in hub
+    hub = _released_layout(stacked, fuse_gate_up, layout)
+    assert ("mtp.layers.0.mlp.experts.gate_up_proj" if layout == "hub"
+            else "mtp.layers.0.mlp.experts.0.gate_proj.weight") in hub
     released.load_weights(list(released.sanitize(hub).items()), strict=True)
 
     loaded = dict(tree_flatten(released.parameters()))
@@ -256,18 +329,26 @@ def test_official_fused_mtp_experts_load_strictly_into_the_stacked_tables(
         assert mx.array_equal(loaded[key], value).item(), key
 
 
-@pytest.mark.parametrize("layout", ["bmm", "numbered"])
-def test_other_expert_layouts_fail_closed_at_the_strict_load(monkeypatch, layout):
-    """Only the hub layout is converted.  The transformers bmm orientation and
-    one-tensor-per-expert tables must refuse to load, never load partially."""
+def test_other_expert_layouts_fail_closed_at_the_strict_load(monkeypatch):
+    """The transformers bmm orientation must refuse to load."""
     from mlx.utils import tree_flatten
 
     source = _tiny_mtp_model(monkeypatch, False)
     stacked = dict(tree_flatten(source.parameters()))
     target = _tiny_mtp_model(monkeypatch, False)
-    weights = target.sanitize(_released_layout(stacked, False, layout))
+    weights = target.sanitize(_released_layout(stacked, False, "bmm"))
     with pytest.raises(ValueError):
         target.load_weights(list(weights.items()), strict=True)
+
+
+def test_individual_expert_missing_tensor_refuses_sanitize(monkeypatch):
+    from mlx.utils import tree_flatten
+
+    source = _tiny_mtp_model(monkeypatch, False)
+    weights = _released_layout(dict(tree_flatten(source.parameters())), False, "numbered")
+    del weights["mtp.layers.0.mlp.experts.2.up_proj.weight"]
+    with pytest.raises(ValueError, match="incomplete"):
+        source.sanitize(weights)
 
 
 def test_adapter_artifact_loads_are_strict():

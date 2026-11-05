@@ -542,6 +542,7 @@ class FlashNextPolicy:
             "indexed_output_gate",
             "allow_unverified_indexed",
             "eager_dispatch",
+            "prefill_plan_exact_slices",
             "fused_gdn_dynamic_accept",
             "fp32_head_logits",
             "mtp_draft_vocab",

@@ -5,6 +5,7 @@ lease); routine test runs are CPU-only and exercise the gating logic.
 """
 
 import os
+from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
@@ -155,8 +156,102 @@ def test_fp_kernel_is_opt_in(pretend_gpu, monkeypatch):
     assert qdm.use_fp_decode_kernel(q, k, k)
     short = mx.zeros((1, 2, qdm.FP_MIN_CONTEXT - 1, 256), dtype=mx.bfloat16)
     assert not qdm.use_fp_decode_kernel(q, short, short)
-    assert not qdm.use_fp_decode_kernel(q, k, k, mask=mx.ones((1, 1, 1, qdm.FP_MIN_CONTEXT), dtype=mx.bool_))
+    assert qdm.use_fp_decode_kernel(q, k, k, mask=mx.ones((1, 1, 1, qdm.FP_MIN_CONTEXT), dtype=mx.bool_))
+    assert not qdm.use_fp_decode_kernel(q, k, k, mask=mx.zeros((1, 1, 1, qdm.FP_MIN_CONTEXT), dtype=mx.float32))
     assert not qdm.use_fp_decode_kernel(mx.zeros((1, 16, 2, 256), dtype=mx.bfloat16), k, k)
+
+
+def _shape(shape, dtype=mx.bfloat16):
+    return SimpleNamespace(shape=shape, ndim=len(shape), dtype=dtype)
+
+
+def test_fp_muse_geometry_and_selection(pretend_gpu, monkeypatch):
+    q = _shape((1, 32, 1, 128))
+    k = _shape((1, 2, qdm.FP_MIN_CONTEXT, 128))
+    assert qdm.fp_decode_attention_supported(q, k, k)
+    monkeypatch.delenv("MLX2_FP_DECODE_KERNEL", raising=False)
+    assert not qdm.use_fp_decode_kernel(q, k, k)
+    monkeypatch.setenv("MLX2_FP_DECODE_KERNEL", "1")
+    assert qdm.use_fp_decode_kernel(q, k, k)
+    local = _shape((1, 2, 2048, 128))
+    assert qdm.fp_decode_attention_supported(q, local, local)
+    assert not qdm.use_fp_decode_kernel(q, local, local)
+    assert qdm.fp_decode_kernel_config(65536, 16) == (4, 2, 256)
+    assert qdm.fp_decode_kernel_config(2048, 16) == (4, 2, 128)
+    assert qdm.fp_decode_kernel_config(65536, 8) == qdm.decode_kernel_config(65536, 8)
+
+
+def test_fp_decode_law_binds_apcv2_namespace():
+    from mlx2.runtime.apc_numerics import execution_numerics_identity, apc_execution_fingerprint
+
+    ordinary = execution_numerics_identity({})
+    assert ordinary is None
+    assert execution_numerics_identity({"MLX2_FP_DECODE_KERNEL": "true"}) is None
+    selected = execution_numerics_identity({"MLX2_FP_DECODE_KERNEL": "1"})
+    assert selected["fp_decode_attention"]["version"] == qdm.FP_KERNEL_VERSION
+    assert apc_execution_fingerprint("prefix", selected) != apc_execution_fingerprint("prefix", ordinary)
+
+
+@pytest.mark.parametrize("q,k,v", [
+    ((1, 32, 128), (1, 2, 64, 128), (1, 2, 64, 128)),
+    ((1, 32, 1, 128), (1, 0, 64, 128), (1, 0, 64, 128)),
+    ((1, 32, 1, 128), (1, 2, 0, 128), (1, 2, 0, 128)),
+    ((2, 32, 1, 128), (1, 2, 64, 128), (1, 2, 64, 128)),
+    ((1, 32, 1, 128), (1, 2, 64, 256), (1, 2, 64, 256)),
+    ((1, 32, 1, 128), (1, 2, 64, 128), (1, 2, 63, 128)),
+    ((1, 24, 1, 128), (1, 2, 64, 128), (1, 2, 64, 128)),
+    ((1, 64, 1, 128), (1, 2, 64, 128), (1, 2, 64, 128)),
+])
+def test_fp_invalid_geometry_fails_closed(pretend_gpu, q, k, v):
+    arrays = tuple(_shape(s) for s in (q, k, v))
+    assert not qdm.fp_decode_attention_supported(*arrays)
+    with pytest.raises(ValueError, match="geometry"):
+        qdm.gqa_decode_attention_fp(*arrays, scale=0.1)
+
+
+@pytest.mark.parametrize("launch", [
+    {"blocks": 0}, {"blocks": -1}, {"simdgroups": True},
+    {"simdgroups": 33}, {"head_split": 3}, {"head_split": 0},
+    {"simdgroups": 32, "head_split": 1},
+])
+def test_fp_invalid_launch_refused_before_dispatch(pretend_gpu, launch):
+    with pytest.raises(ValueError):
+        qdm.gqa_decode_attention_fp(_shape((1, 32, 1, 128)),
+            _shape((1, 2, 64, 128)), _shape((1, 2, 64, 128)), scale=0.1, **launch)
+
+
+@metal
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+@pytest.mark.parametrize("D,B,T", [(128, 1, 1), (128, 2, 2049),
+                                  (128, 1, 65573), (256, 2, 65573)])
+def test_fp_gqa16_strided_matches_sdpa(dtype, D, B, T, monkeypatch):
+    from mlx2.runtime.models.base import scaled_dot_product_attention
+
+    mx.set_default_device(mx.gpu)
+    try:
+        mx.random.seed(19)
+        # Padding in batch/head/sequence/dimension axes exercises real cache
+        # views and the non-unit inner strides the old FP kernel ignored.
+        q = mx.random.normal((B + 1, 64, 1, D * 2)).astype(dtype)[1:, ::2, :, ::2]
+        k = mx.random.normal((B + 1, 4, T + 7, D * 2)).astype(dtype)[1:, ::2, :T, ::2]
+        v = mx.random.normal((B + 1, 4, T + 7, D * 2)).astype(dtype)[1:, ::2, :T, ::2]
+        scale = D ** -0.5
+        want = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale)
+        before = qdm.STATS["fp_decode_gqa16_calls"]
+        got = qdm.gqa_decode_attention_fp(q, k, v, scale=scale)
+        assert mx.all(mx.isfinite(got)).item()
+        assert mx.abs(got.astype(mx.float32) - want.astype(mx.float32)).max().item() < 5e-3
+        assert qdm.STATS["fp_decode_gqa16_calls"] == before + 1
+        monkeypatch.setenv("MLX2_FP_DECODE_KERNEL", "1")
+        routed = scaled_dot_product_attention(q, k, v, cache=None, scale=scale, mask=None)
+        if T >= qdm.FP_MIN_CONTEXT:
+            assert qdm.STATS["fp_decode_gqa16_calls"] == before + 2
+            assert mx.array_equal(routed, got).item()
+        else:
+            assert qdm.STATS["fp_decode_gqa16_calls"] == before + 1
+            assert mx.array_equal(routed, want).item()
+    finally:
+        mx.set_default_device(mx.cpu)
 
 
 @metal
@@ -183,5 +278,36 @@ def test_fp_kernel_matches_sdpa(Hq, Hkv, monkeypatch):
         assert mx.array_equal(routed, got).item()
         monkeypatch.delenv("MLX2_FP_DECODE_KERNEL")
         assert mx.array_equal(base.scaled_dot_product_attention(q, k, v, cache=c, scale=0.0625, mask=None), want).item()
+    finally:
+        mx.set_default_device(mx.cpu)
+
+
+@metal
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+@pytest.mark.parametrize("gqa", [8, 16])
+def test_fp_boolean_padding_and_per_head_mask_matches_sdpa(dtype, gqa, monkeypatch):
+    from mlx2.runtime.models.base import scaled_dot_product_attention
+
+    mx.set_default_device(mx.gpu)
+    try:
+        mx.random.seed(29)
+        n, heads = 65573, 2 * gqa
+        q = mx.random.normal((2, heads, 1, 128)).astype(dtype)
+        k = mx.random.normal((2, 2, n + 7, 128)).astype(dtype)[:, :, :n]
+        v = mx.random.normal((2, 2, n + 7, 128)).astype(dtype)[:, :, :n]
+        # A real serving padding mask broadcasts across query heads. Also
+        # exercise individual heads and an entirely masked head (zero output).
+        for mask in ((mx.arange(n)[None, None, None] >= mx.array([0, 1007])[:, None, None, None]),
+                     (mx.arange(n)[None, None, None] >= mx.arange(heads)[None, :, None, None] * 17)):
+            expected = mx.fast.scaled_dot_product_attention(q, k, v, scale=128 ** -.5, mask=mask)
+            got = qdm.gqa_decode_attention_fp(q, k, v, scale=128 ** -.5, mask=mask)
+            assert mx.all(mx.isfinite(got)).item()
+            assert mx.max(mx.abs(got.astype(mx.float32) - expected.astype(mx.float32))).item() < .005
+            monkeypatch.setenv("MLX2_FP_DECODE_KERNEL", "1")
+            routed = scaled_dot_product_attention(q, k, v, cache=None, scale=128 ** -.5, mask=mask)
+            assert mx.array_equal(routed, got).item()
+        all_masked = mx.zeros((2, 1, 1, n), dtype=mx.bool_)
+        got = qdm.gqa_decode_attention_fp(q, k, v, scale=128 ** -.5, mask=all_masked)
+        assert mx.all(got == 0).item()
     finally:
         mx.set_default_device(mx.cpu)

@@ -127,6 +127,21 @@ def inspect_artifact(model_path: str | Path) -> dict:
     ]
     if not isinstance(weight_map, dict) or not weight_map:
         raise ValueError("artifact has no indexed weights")
+    # AXQ protects the BF16 head in a separate file, deliberately outside
+    # the backbone index. Read keys only (no MLX import or tensor payload).
+    sidecar = path / "mtp.safetensors"
+    if sidecar.is_file() and sidecar.name not in weight_map.values():
+        from safetensors import safe_open
+
+        with safe_open(sidecar, framework="np") as handle:
+            names = list(handle.keys())
+        if not names or any(not name.startswith(("language_model.mtp.", "mtp.")) for name in names):
+            raise ValueError("MTP sidecar must contain only MTP tensors")
+        normalized = {name.removeprefix("language_model.") for name in weight_map}
+        if (len({name.removeprefix("language_model.") for name in names}) != len(names)
+                or any(name.removeprefix("language_model.") in normalized for name in names)):
+            raise ValueError("MTP sidecar duplicates indexed tensors")
+        weight_map.update({name: sidecar.name for name in names})
     shards = sorted(set(weight_map.values()))
     for name in shards:
         if (
@@ -174,7 +189,12 @@ def inspect_artifact(model_path: str | Path) -> dict:
             "mtp.layers.0.mlp.experts.gate_up_proj",
             "mtp.layers.0.mlp.experts.down_proj",
         } <= normalized
-        if not required <= normalized or not (converted or fused):
+        individual = all(
+            f"mtp.layers.0.mlp.experts.{expert}.{projection}.weight" in normalized
+            for expert in range(text["num_experts"])
+            for projection in ("gate_proj", "up_proj", "down_proj")
+        )
+        if not required <= normalized or not (converted or fused or individual):
             raise ValueError("embedded MTP head is incomplete")
     digest = hashlib.sha256()
     for name in (
@@ -368,6 +388,24 @@ EXTERNAL_TARGET_KERNEL_KEYS = frozenset(
         "attention_window_row_exact",
     }
 )
+
+TARGET_EXECUTION_POLICY_KEYS = frozenset({
+    "tensorfold_prefill", "tensorfold_prefill_backend", "gdn_prefill_chunk",
+    "gdn_prefill_segment_rows", "gdn_state_dtype", "moe_nax_gather",
+    *KERNEL_POLICY_ENV, *EAGER_DISPATCH_POLICY_KEYS,
+})
+
+
+def partition_native_tree_policy(policy, *, numerical_defaults=None):
+    """Keep target arithmetic independent of the native-head tree topology."""
+    from .qwen38_27b import _native_mtp_tree_policy
+
+    target = {key: policy[key] for key in TARGET_EXECUTION_POLICY_KEYS if key in policy}
+    tree = _native_mtp_tree_policy(
+        {key: value for key, value in policy.items() if key not in target},
+        numerical_defaults=numerical_defaults,
+    )
+    return tree, target
 
 
 def partition_external_target_policy(policy):
@@ -569,6 +607,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     # int8 prefill is declared for the dense Qwen3.8 layout only; the MoE
     # family (and its 122B subclass) has no evidence with it.
     int8_prefill_supported = None
+
+    def microscaling_supported(self):
+        """Grouped experts and shared dense projections use the same format."""
+        from .microscaling_support import projection_law_compatible
+        return ("experts", "mlp", "all") if projection_law_compatible(self) else ()
     EXTERNAL_PROFILE = "qwen36-35b-a3b-apcv2-dflash2"
     EXTERNAL_ROUTE_TAG = "qwen36-dflash2-v1"
     # Native MTP, restored 2026-09-20 once the wide-cohort ordinary handoff
@@ -703,7 +746,6 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         from .qwen38_27b import (
             PROMPT_LOOKUP_DRAFT_NAMES,
             _names_target,
-            _native_mtp_tree_policy,
         )
 
         prompt_lookup_draft = policy.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES
@@ -716,10 +758,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 raise ValueError("External draft is not native MTP")
             if stream_request is not None:
                 raise ValueError("Qwen3.6 expert streaming refuses the external draft route")
-            self.external_policy = _native_mtp_tree_policy(
+            self.external_policy, policy = partition_native_tree_policy(
                 policy, numerical_defaults=self.native_tree_numerical_defaults
             )
-            policy = {}
         elif "draft_model" in policy:
             if require_mtp:
                 raise ValueError("External draft is not native MTP")
@@ -743,17 +784,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             self.external_policy = default_external_policy(external_policy)
             self._check_num_draft(draft_record)
             policy = target_policy
-        if set(policy) - {
-            "num_draft",
-            "gdn_state_dtype",
-            "moe_nax_gather",
-            "tensorfold_prefill",
-            "tensorfold_prefill_backend",
-            "gdn_prefill_chunk",
-            "gdn_prefill_segment_rows",
-            *KERNEL_POLICY_ENV,
-            *EAGER_DISPATCH_POLICY_KEYS,
-        }:
+        if set(policy) - {"num_draft", *TARGET_EXECUTION_POLICY_KEYS}:
             raise ValueError(
                 "Qwen3.6 execution policy supports only num_draft, gdn_state_dtype, "
                 "moe_nax_gather, tensorfold_prefill, tensorfold_prefill_backend, "
@@ -1045,6 +1076,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     # block runs the model's own expert gathers over all tree rows (stock
     # kernels chosen by row count; lane MoE is off), so tiny-model checks
     # still differ across tree sizes (22 of 28 schedule pairs).  Keep masked.
+    # Tiel MXFP8 remains an explicit, unqualified tree candidate: the pinned
+    # B2 ordinary comparison at 39fc22227 reproduced a first-divergence
+    # cross-token gap of 1.25 nat, beyond the 0.5-nat equivalence ceiling.
+    # Its native FP8 gathers are not the affine row-stable lane kernels.
+    # No default promotion; see qualification/runs/tiel-coder-20261103-summary.
     TENSORFOLD_TREE_LAW_DEFAULT = "masked"
 
     def execution_numerics_contract(self):

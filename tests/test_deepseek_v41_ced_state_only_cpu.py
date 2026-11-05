@@ -158,3 +158,26 @@ def test_prompt_loop_accepts_state_only_output_only_before_a_chunk_of_the_same_c
     with pytest.raises(PromptChunkCorruption, match="non-finite hidden"):
         _validate_prefill_checkpoint_output(StateOnlyPrefillOutput(mx.array([[0.0, math.nan]])), [4], [11],
                                             rows_after=[9])
+
+
+def test_receipt_states_that_sliced_serving_prompts_do_not_engage():
+    """The serving scheduler feeds one prefill-step slice per prompt call, so
+    the lookahead sees rows_after 0 and state-only never engages there; the
+    route receipt must not imply otherwise, and counts what was observed."""
+    from mlx2.adapters.deepseek_v41_execution import execution_receipt
+
+    c = _config()
+    model = DeepSeekV41Model(c, Weights(c), identity="synthetic@ced-so-slice",
+                             ced_policy="dependency_exact", ced_state_only=True)
+    cache, ids = model.make_cache(), mx.array([[1 + i % 17 for i in range(16)]])
+    for first in range(0, 16, 4):  # one slice per call: nothing follows in the call
+        with prefill_lookahead([0], step=4):
+            assert not isinstance(model.prefill_forward(ids[:, first:first + 4], cache), StateOnlyPrefillOutput)
+    receipt = execution_receipt(model)
+    assert receipt["ced_state_only"] == "after_cone_v1"
+    assert receipt["ced_state_only_observed_chunks"] == 0
+    assert "does not engage on served requests" in receipt["ced_state_only_scope"]
+    _prompt(model, model.make_cache(), ids, 4)  # a whole-prompt call does engage
+    assert execution_receipt(model)["ced_state_only_observed_chunks"] > 0
+    plain = DeepSeekV41Model(c, Weights(c), identity="synthetic@ced-so-slice", ced_policy="dependency_exact")
+    assert "ced_state_only_scope" not in execution_receipt(plain)

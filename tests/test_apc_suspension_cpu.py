@@ -212,6 +212,37 @@ def test_export_binds_registered_lora_files_and_rejects_global_mutation_mode(tmp
         engine.export_suspension("three")
 
 
+def test_export_refuses_while_a_repair_candidate_is_registered(tmp_path):
+    # Restore reloads adapters through the ordinary endpoint, so a host-private
+    # repair candidate would come back client-selectable.
+    import threading
+
+    from mlx2.runtime.apc_suspension import lora_file_receipt
+    from mlx2.serving import SuspendUnavailable
+    engine = _engine()
+    engine.snapshot = {"artifact": "exact-artifact", "runtime": {"source_sha256": "exact-source"}}
+    engine._service_state = "suspended"
+    engine._last_service_transition = {"result": {"suspend": {"failures": 0, "resident_entries_after": 0}}}
+    engine._quiesce_complete.set()
+    freezes = []
+    engine.apc = SimpleNamespace(freeze_suspension=lambda identity: freezes.append(identity) or {"suspension_id": identity},
+                                branch_diagnostics=lambda limit: {"entries": [], "clock_frozen": True})
+    directory = tmp_path / "repair-abc"
+    directory.mkdir()
+    (directory / "adapter_config.json").write_text(json.dumps({"lora_parameters": {"rank": 2, "scale": 1.0, "keys": ["layer.query"]}}))
+    (directory / "adapters.safetensors").write_bytes(b"synthetic source only")
+    descriptor = lora_file_receipt(directory)
+    engine.lora_root = tmp_path
+    engine.multi_lora = SimpleNamespace(lock=threading.RLock(), registry={"repair-abc": SimpleNamespace(path=str(directory), fingerprint=descriptor["fingerprint"])})
+    token = engine.reserve_private_weight_program("repair-abc")
+    engine.bind_private_weight_program("repair-abc", token, descriptor["fingerprint"])
+    with pytest.raises(SuspendUnavailable, match="repair candidates"):
+        engine.export_suspension("one")
+    assert freezes == []
+    engine.release_private_weight_program("repair-abc", token=token)
+    assert engine.export_suspension("two")["loras"] == [{"name": "repair-abc", **descriptor}]
+
+
 def test_suspended_payload_corruption_refuses_resume_before_epoch_consumption(tmp_path):
     wall = [1000.0]
     apc = _persistent(tmp_path, wall=wall)

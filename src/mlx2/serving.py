@@ -28,6 +28,7 @@ import time
 import uuid
 
 from .best_route_defaults import receipt_view
+from .kernel_reload_serving import KernelReloadMixin, registered_engine_constructor
 from .logprobs import distribution_contract, token_logprob, wants_logprobs, wants_logprobs_at
 from .generation_trace import GeneratedTokenTrace
 from .generation_timeout import (
@@ -51,6 +52,7 @@ from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
 from .runtime.eval_watchdog import EvalWatchdog
 from .runtime import loop_trace as _loop_trace
 from .runtime.gpu_keep_warm import GpuKeepWarm, GpuKeepWarmPolicy
+from .runtime.weight_space_metrics import unconfigured_runtime_state
 from .runtime.residency_heartbeat import (
     DEFAULT_KEEP_SECONDS as RESIDENCY_KEEP_SECONDS_DEFAULT,
     ResidencyHeartbeat,
@@ -1009,7 +1011,7 @@ def validate_weight_streaming_lanes(adapter_factory, execution_policy, *, mode, 
 
 def weight_streaming_refusals(
     *, lane_matmul, sp_qmm, int8_prefill, verify_bitexact, multi_lora, lora_root,
-    execution_policy, qmm_row_pad=False,
+    execution_policy, qmm_row_pad=False, microscaling_prefill=False,
 ) -> list:
     reasons = []
     if lane_matmul in ("crossover", "exact", "tensorfold"):
@@ -1020,6 +1022,8 @@ def weight_streaming_refusals(
         reasons.append("qmm_row_pad")
     if int8_prefill:
         reasons.append("int8_prefill")
+    if microscaling_prefill:
+        reasons.append("microscaling_prefill")
     if verify_bitexact:
         reasons.append("verify_bitexact")
     if multi_lora or lora_root is not None:
@@ -1728,6 +1732,7 @@ def apc_semantic_namespace(
     prefill_execution=None,
     lane_matmul_receipt=None,
     int8_prefill_policy=None,
+    microscaling_prefill_handle=None,
     weight_stream_manager=None,
     recurrent_state_codec=None,
 ):
@@ -1759,6 +1764,10 @@ def apc_semantic_namespace(
             "adapter-execution-numerics-v1",
             hashlib.sha256(payload.encode()).hexdigest(),
         )
+
+    if microscaling_prefill_handle is not None:
+        from .runtime.microscaling.installer import apc_semantic_fingerprint as apc_microscaling
+        semantic = apc_microscaling(semantic, microscaling_prefill_handle)
 
     # The recurrent-state storage codec is the outermost law.
     return apc_state_codec_fingerprint(
@@ -1857,6 +1866,22 @@ def request_apc_scope(request):
     )
     semantic = request.get("_mlx2_semantic_fingerprint")
     result = physical if semantic is None else (physical, "hyper-directory", semantic)
+    replay = request.get("_mlx2_weight_program_replay")
+    if replay is not None:
+        result = (result, "weight-program-replay-v1", replay)
+    overlay = request.get("_mlx2_weight_overlay_fingerprint")
+    if overlay is not None:
+        result = (result, "weight-overlay-fp32-v1", overlay)
+    excision = request.get("_mlx2_layer_excision_fingerprint")
+    if excision is not None:
+        result = (result, "layer-excision-zero-kv-v1", excision)
+    surgery_replay = request.get("_mlx2_weight_surgery_private_nonce")
+    if surgery_replay is not None:
+        result = (result, "unqualified-weight-surgery-replay-v1", surgery_replay)
+    expert_mask = request.get("_mlx2_expert_mask_fingerprint")
+    if expert_mask is not None:
+        result = (result, "native-expert-mask-v1", expert_mask,
+                  request.get("_mlx2_expert_mask_private_nonce"))
     activation = request.get("_mlx2_activation_capsule")
     if activation is not None:
         payload = activation_capsule_request(request)
@@ -2366,6 +2391,125 @@ def int8_prefill_status(engine):
     from .runtime.int8_prefill import engine_status
 
     return engine_status(engine)
+
+
+def microscaling_prefill_cache_allowed(*, qualification_mode, qualification):
+    """Only a matched route or an explicit qualification probe may reuse state.
+
+    ``load_qualified_route`` later verifies the complete settings including
+    this operation's artifact, projection mask and numerical revision before
+    the worker admits requests. A filename alone does not bypass that check.
+    """
+    return bool(qualification_mode or qualification)
+
+
+def validate_microscaling_composition(
+    policy, *, lane_matmul="off", int8_prefill=False, sp_qmm=False,
+    qmm_row_pad=False, verify_bitexact=False, approximate_kv=False,
+    spomin=False, lora_root=None, max_loras=0, execution_policy=None,
+):
+    """Refuse unsupported projection owners before a model is mutated."""
+    if not policy.enabled:
+        return
+    conflicts = []
+    if lane_matmul not in ("off", "auto"):
+        conflicts.append("lane_matmul")
+    for enabled, label in ((int8_prefill, "int8_prefill"), (sp_qmm, "sp_qmm"),
+        (qmm_row_pad, "qmm_row_pad"), (verify_bitexact, "verify_bitexact"),
+        (approximate_kv, "approximate_kv"), (spomin, "live surgery"),
+        (lora_root is not None or max_loras, "LoRA")):
+        if enabled:
+            conflicts.append(label)
+    for key in ("tensorfold_prefill", "tensorfold_qmv_rows", "invariant_prefill",
+                "row_exact_verify", "target_verify_row_exact", "varlen_dense_mlp",
+                "varlen_sparse_moe"):
+        if optional_policy_enabled((execution_policy or {}).get(key)):
+            conflicts.append(key)
+    if conflicts:
+        raise ValueError("microscaling prefill cannot compose with " + ", ".join(conflicts))
+
+
+def microscaling_decode_multiplier(adapter):
+    """Conservative grouped-assignment expansion, declared by the adapter."""
+    declared = getattr(adapter, "microscaling_decode_row_multiplier", None)
+    if callable(declared):
+        value = declared()
+        if type(value) is not int or value < 1:
+            raise ValueError("microscaling decode multiplier must be a positive integer")
+        return value
+    config = getattr(adapter, "config", None) or {}
+    def visit(value):
+        result = 1
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if key in {"num_experts_per_tok", "num_experts_per_token"}:
+                    if type(item) is not int or item < 1:
+                        raise ValueError("microscaling expert top-k must be a positive integer")
+                    result = max(result, item)
+                elif isinstance(item, Mapping):
+                    result = max(result, visit(item))
+        return result
+    return visit(config)
+
+
+def bind_microscaling_for_serving(
+    adapter, policy, *, max_lanes, config, speculation,
+    prompt_lookup_policy=None, copy_draft_policy=None,
+    memory_headroom=None, hard_reserve_bytes=0, max_prefill_rows=None,
+):
+    """Install one model's declared route and bind its exact numerical mask."""
+    from .runtime.int8_prefill import max_decode_rows
+    from .runtime.microscaling import installer as sc
+    policy = sc.MicroscalingPolicy.from_value(policy)
+    if not policy.enabled:
+        raise ValueError("microscaling binding requires an enabled policy")
+    rows = max_decode_rows(max_lanes=max_lanes, config=config,
+        speculation=speculation, prompt_lookup_policy=prompt_lookup_policy,
+        copy_draft_policy=copy_draft_policy)
+    multiplier = microscaling_decode_multiplier(adapter)
+    expanded = rows * multiplier
+    handle = sc.apply_for_adapter(adapter, policy, max_decode_rows=expanded)
+    try:
+        prefill_rows = (int(policy.row_threshold) * int(max_lanes)
+            if max_prefill_rows is None else max_prefill_rows)
+        handle.configure_workspace_bound(prefill_rows, expert_multiplier=multiplier)
+        if memory_headroom is not None:
+            available = memory_headroom()
+            required = int(hard_reserve_bytes) + handle.unfilled_reserve_bytes()
+            if (isinstance(available, bool) or not isinstance(available, (int, float))
+                or not math.isfinite(available) or available < required):
+                raise sc.MicroscalingError(
+                    f"microscaling workspace needs {required} headroom bytes; available {available}")
+        status = handle.status()
+        settings = {**policy.as_dict(), "revision": handle.revision,
+            "fidelity": policy.fidelity.value,
+            "kernel_revision": status["kernel_revision"],
+            "projection_paths": status["projection_paths"],
+            "artifact_fingerprint": status["artifact_fingerprint"],
+            "max_decode_rows": rows, "expert_assignment_multiplier": multiplier,
+            "max_decode_assignment_rows": expanded,
+            "metadata_bytes": status["metadata_bytes"],
+            "weight_copy_bytes": status["weight_copy_bytes"],
+            "workspace_max_prefill_rows": status["workspace_max_prefill_rows"],
+            "workspace_reserve_bytes": status["workspace_reserve_bytes"]}
+    except BaseException:
+        sc.remove(handle)
+        raise
+    return handle, settings
+
+
+def microscaling_prefill_status(engine, *, receipt=False):
+    """Host-only settings/counters; qualification follows the bound route."""
+    handle = getattr(engine, "microscaling_prefill_handle", None)
+    policy = getattr(engine, "microscaling_prefill_policy", None)
+    if handle is None:
+        return {**(policy.as_dict() if policy is not None else {"enabled": False}),
+            "active": False, "qualified": False, "engaged": False}
+    value = handle.receipt() if receipt else handle.status()
+    return {**value,
+        "qualified": getattr(engine, "qualification_state", None) == "qualified",
+        "qualification": getattr(engine, "qualification_state", "unqualified"),
+        "apcv2_reuse_disabled_reason": getattr(engine, "apc_reuse_disabled_reason", None)}
 
 
 def thinking_enabled(adapter, request) -> bool:
@@ -4059,9 +4203,17 @@ class Job:
     prompt_progress_updates: int = 0
     prompt_progress_dropped: int = 0
     lora_name: str | None = None
+    weight_overlay_view: object = None
+    layer_excision_view: object = None
+    expert_mask_view: object = None
     lora_fingerprint: str | None = None
     lora_slot: int | None = None
     lora_residency: str | None = None
+    weight_program: dict | None = None
+    # Single-LoRA weight program: (session, application count at admission).
+    weight_program_session_baseline: tuple | None = None
+    weight_program_deployment_generation: int | None = None
+    base_checkpoint: str | None = None
     neural_concept_receipt: dict | None = None
     activation_capsule_receipt: dict | None = None
     # A media request on a route that serves media with plain decode
@@ -4110,7 +4262,7 @@ class PublishedCohort:
 DEFAULT_PREFILL_STEP = 2048
 
 
-class ServingEngine:
+class ServingEngine(KernelReloadMixin):
     # Longest pressure-eviction pause while a submission renders its prompt.
     PREPARING_EVICTION_HOLD_SECONDS = 0.25
     MEMORY_ADMISSION_TIMEOUT = 60.0
@@ -4122,11 +4274,13 @@ class ServingEngine:
     _admissions_preparing = 0
     _worker_stopped = False
 
+    @registered_engine_constructor
     def __init__(
         self,
         model_path,
         *,
         adapter_factory=None,
+        kernel_dev_root=None,
         model_residency_budget=None,
         max_inflight=8,
         max_lanes=4,
@@ -4188,6 +4342,7 @@ class ServingEngine:
         apc_quarantine_max_entries=128,
         apc_quarantine_max_bytes=1 << 30,
         int8_prefill=None,
+        microscaling_prefill=None,
         verify_bitexact=None,
         prefill_depth_budget=None,
         recurrent_state_codec=None,
@@ -4668,6 +4823,21 @@ class ServingEngine:
             None if self.int8_prefill_auto is not None else int8_prefill
         )
         self.int8_prefill_handle = None
+        from .runtime.microscaling.installer import MicroscalingPolicy
+        self.microscaling_prefill_policy = MicroscalingPolicy.from_value(microscaling_prefill)
+        self.microscaling_prefill_handle = None
+        if self.microscaling_prefill_policy.enabled:
+            if self.int8_prefill_auto is not None:
+                self.int8_prefill_auto = {
+                    "requested": INT8_PREFILL_AUTO, "resolved": "off",
+                    "reason": "explicit microscaling prefill owns the selected projections",
+                }
+            if not microscaling_prefill_cache_allowed(
+                qualification_mode=qualification_mode, qualification=qualification
+            ):
+                # Loading an unqualified route is permitted. Its approximate
+                # state cannot be consumed/published as reusable state yet.
+                self.apc_reuse_disabled_reason = "unqualified_microscaling_prefill"
         if self.int8_prefill_policy.enabled and not qualification_mode and not qualification:
             # Approximate state may only be published through a qualified
             # approximate operation (AGENTS.md); the same gate as approximate
@@ -4721,11 +4891,33 @@ class ServingEngine:
                 raise ValueError(
                     "approximate KV start_tokens > 0 requires max_lanes=1"
                 )
+        validate_microscaling_composition(
+            self.microscaling_prefill_policy,
+            lane_matmul=self.lane_matmul,
+            int8_prefill=self.int8_prefill_policy.enabled,
+            sp_qmm=self.sp_qmm_enabled,
+            qmm_row_pad=self.qmm_row_pad_enabled,
+            verify_bitexact=self.verify_bitexact_policy.enabled,
+            approximate_kv=self.approximate_kv_policy.enabled,
+            spomin=self.spomin_policy.enabled,
+            lora_root=lora_root,
+            max_loras=max_loras,
+            execution_policy=execution_policy,
+        )
         self.model_path = model_path
         self.lora_root = (
             Path(lora_root).expanduser().resolve() if lora_root is not None else None
         )
         self.lora_session = None
+        self._weight_program_deployment = {
+            "generation": 0, "default_adapter": None, "fingerprint": None,
+            "program_id": None,
+        }
+        # Repair candidates: adapter name -> fingerprint (None while loading).
+        # Selectable only by host replay, the validated session override or
+        # as the deployed default, never by a client naming the adapter.
+        self._private_weight_programs = {}
+        self._private_weight_programs_lock = threading.Lock()
         self._lora_lifecycle_lock = threading.RLock()
         self.multi_lora_policy = multi_lora_policy(
             max_loras,
@@ -4839,6 +5031,7 @@ class ServingEngine:
             if not isinstance(model_residency_budget, ResidencyBudget):
                 raise ValueError("model_residency_budget must be a shared ResidencyBudget")
         self.model_residency_budget = model_residency_budget
+        self._init_kernel_reload(kernel_dev_root)
         if _validate_only:
             return
         from .reasoning_signatures import ReasoningSigner
@@ -5090,21 +5283,37 @@ class ServingEngine:
             "result": dict(result),
         }
 
+    def _reported_service_state_locked(self):
+        """The lifecycle state a reader sees; the stored state drives admission.
+
+        A worker that stopped (or was asked to stop) cannot serve whatever
+        the stored lifecycle last said.  Kernel quarantine stays visible: it
+        records that edited code ran, which a stop does not undo.
+        """
+        state = getattr(self, "_service_state", "serving")
+        if state == "kernel_reload_failed":
+            return state
+        stop_event = getattr(self, "stop_event", None)
+        if self._worker_stopped or (stop_event is not None and stop_event.is_set()):
+            return "stopped"
+        return state
+
     def _service_state_locked(self):
         deadline = self._drain_deadline
+        state = self._reported_service_state_locked()
         return {
-            "state": self._service_state,
+            "state": state,
             "terminal_cleanup_pending": len(getattr(self, "_terminal_cleanup_pending", ()))
                 + getattr(self, "_terminal_cleanup_in_progress", 0),
             "since": self._service_state_since,
             "timestamps": dict(self._service_timestamps),
             "drain_deadline": (
                 time.time() + max(0.0, deadline - time.monotonic())
-                if deadline is not None and self._service_state == "draining"
+                if deadline is not None and state == "draining"
                 else None
             ),
             "suspend_requested": bool(
-                self._drain_suspend and self._service_state == "draining"
+                self._drain_suspend and state == "draining"
             ),
             "last_transition": {
                 **self._last_service_transition,
@@ -5117,6 +5326,8 @@ class ServingEngine:
     def export_suspension(self, suspension_id):
         """Metadata-only commit, after the worker has drained every request."""
         from .runtime.apc_suspension import lora_file_receipt
+        if self._weight_surgery_installed():
+            raise SuspendUnavailable("in-memory weight surgery registries cannot be exported for restart")
         lifecycle = getattr(self, "_lora_lifecycle_lock", None)
         if lifecycle is None:
             lifecycle = self._lora_lifecycle_lock = threading.RLock()
@@ -5137,6 +5348,11 @@ class ServingEngine:
                 manager = getattr(self, "multi_lora", None)
                 if manager is not None:
                     with manager.lock:
+                        if self.private_weight_program_names(include_default=True):
+                            # Restore reloads adapters through the ordinary
+                            # endpoint; a candidate would come back selectable.
+                            raise SuspendUnavailable(
+                                "Release or promote repair candidates before suspension")
                         for name, adapter in sorted(manager.registry.items()):
                             current = lora_file_receipt(self._resolve_lora_path(adapter.path))
                             if current["fingerprint"] != adapter.fingerprint:
@@ -5264,8 +5480,17 @@ class ServingEngine:
             raise ValueError("suspend must be boolean")
         if type(park_model) is not bool or (park_model and not suspend):
             raise ValueError("model parking requires cache suspension")
+        if park_model and self._weight_surgery_installed():
+            raise SuspendUnavailable("in-memory weight surgery bindings cannot survive model parking")
         with self._admission_section():
             with self.lock:
+                # Under the lock a reload is either still pending or has
+                # already bumped its epoch. Refuse before APCv2 suspension: the
+                # residency controller would reject the new model revision
+                # only after suspending.
+                if park_model and (getattr(self, "_kernel_reload_epoch", 0) != 0
+                                   or getattr(self, "_kernel_reload_request", None) is not None):
+                    raise SuspendUnavailable("kernel-reloaded code cannot survive model parking; restart to park")
                 count_add(self.counts, "quiesce_requests", 1)
                 if self._service_state != "serving" and not (
                     park_model and self._service_state in {"quiesced", "suspended"}
@@ -5296,6 +5521,7 @@ class ServingEngine:
                 return self._service_state_locked()
 
     def resume(self, *, prefetch_sessions=()):
+        self._check_kernel_reload_resume()
         prefetch_sessions = tuple(prefetch_sessions)
         if len(prefetch_sessions) > self._admin_prefetch_limit:
             raise ValueError(
@@ -5310,6 +5536,7 @@ class ServingEngine:
         if parked:
             return self.activate_model(prefetch_sessions=prefetch_sessions)
         with self._admission_section():
+            self._check_kernel_reload_resume()
             if getattr(self.apc, "_suspension_clock", None):
                 self.apc.thaw_suspension()
         # Holding submission_lock and lock makes drain cancellation atomic with
@@ -5320,6 +5547,7 @@ class ServingEngine:
             wait_for_worker = False
             activate_parked = False
             with self._admission_section():
+                self._check_kernel_reload_resume()
                 with self.lock:
                     if self._worker_stopped:
                         raise RuntimeError(getattr(self, "error", None) or "server stopped")
@@ -5527,7 +5755,15 @@ class ServingEngine:
         with self.lock:
             if (getattr(self, "_terminal_cleanup_pending", ())
                     or getattr(self, "_terminal_cleanup_in_progress", 0)):
-                return None
+                # A reload timeout abandons only the requested change. It
+                # never cancels/claims the unfinished cleanup or touches code.
+                reload_expired = (
+                    getattr(self, "_kernel_reload_request", None) is not None
+                    and self._drain_deadline is not None
+                    and time.monotonic() >= self._drain_deadline
+                )
+                if not reload_expired:
+                    return None
             if self._service_state != "draining":
                 return None
             if self._quiesce_worker_owned:
@@ -5579,7 +5815,7 @@ class ServingEngine:
                     "park_model": getattr(self, "_drain_park_model", False),
                     "drain_duration_seconds": elapsed,
                 }
-            if action["timed_out"]:
+            if action["timed_out"] and getattr(self, "_kernel_reload_request", None) is None:
                 self._cancel_pending_prefetches(apc)
             return action
 
@@ -5662,6 +5898,7 @@ class ServingEngine:
         tenant_id="default",
         admission_class="generation",
         admitted=False,
+        _weight_program_replay=None,
     ):
         if not self.ready.is_set() or self.error or not self.thread.is_alive():
             raise RuntimeError(self.error or "model is not ready")
@@ -5682,7 +5919,14 @@ class ServingEngine:
             raise
         job = None
         try:
-            job = self._prepare_job(request, tenant_id=tenant_id)
+            job = self._prepare_job(request, tenant_id=tenant_id,
+                                    _private_selection=_weight_program_replay is not None)
+            if _weight_program_replay is not None:
+                if (job.weight_program is None
+                        or job.lora_fingerprint != _weight_program_replay["fingerprint"]):
+                    raise ValueError("weight program changed before replay admission")
+                job.request["_mlx2_weight_program_replay"] = _weight_program_replay["nonce"]
+                job.request["skip_writing_prefix_cache"] = True
             self._usage_attach(job, reservation)
             with self.submission_lock:
                 # Admitted above: publish unless a drain timeout has since
@@ -5697,6 +5941,15 @@ class ServingEngine:
                 self._finish(job, {"error": self.error or "server stopped", "status": 503})
             return job
         except BaseException as error:
+            if job is not None and getattr(job, "weight_overlay_view", None) is not None:
+                self.weight_overlays.release(job.weight_overlay_view, job.uid)
+                job.weight_overlay_view = None
+            if job is not None and getattr(job, "layer_excision_view", None) is not None:
+                self.layer_excision.release(job.layer_excision_view, job.uid)
+                job.layer_excision_view = None
+            if job is not None and getattr(job, "expert_mask_view", None) is not None:
+                self.expert_masks.release(job.expert_mask_view, job.uid)
+                job.expert_mask_view = None
             self.slots.release()
             self._usage_failed(tenant_id, [request], [reservation], error, [job])
             raise
@@ -5823,10 +6076,16 @@ class ServingEngine:
         """Recent request receipts, only ``tenant_id``'s when one is given."""
         with getattr(self, "lock", nullcontext()):
             receipts = list(self.receipt_log)
+        # Replay trials of repair candidates are host-private.
+        private = getattr(self, "_private_request_receipt", None)
+        hidden = (self.private_weight_program_names()
+                  if callable(private) and getattr(self, "multi_lora", None) is not None
+                  else frozenset())
         return [
             receipt
             for owner, receipt in receipts
-            if tenant_id is None or owner == str(tenant_id)
+            if (tenant_id is None or owner == str(tenant_id))
+            and not (callable(private) and private(receipt, hidden))
         ]
 
     def open_exact_prefix_cascade(
@@ -5919,7 +6178,7 @@ class ServingEngine:
                 )
             )
 
-    def _prepare_job(self, request, *, tenant_id):
+    def _prepare_job(self, request, *, tenant_id, _private_selection=False):
         from .contracts import Capability
         from .output import constrained_tool_choice
         from .runtime.verify_bitexact import check_request as check_verify_bitexact
@@ -6100,16 +6359,42 @@ class ServingEngine:
         ):
             count_add(self.counts, "apc_interior_checkpoints_skipped_route", 1)
         lora = None
+        private_candidate = False
         manager = getattr(self, "multi_lora", None)
+        deployment = None
         if manager is not None:
             requested_model = public_request.get("model")
-            base_request = requested_model in (None, Path(self.model_path).name)
+            live_weight_space = getattr(self, "weight_space_live", None)
+            resolve_session = getattr(live_weight_space, "resolve_session_model", None)
+            if callable(resolve_session):
+                requested_model = resolve_session(public_request, tenant_id=tenant_id)
+            base_name = Path(self.model_path).name
+            with getattr(self, "lock", nullcontext()):
+                current_deployment = dict(getattr(self, "_weight_program_deployment", {
+                    "generation": 0, "default_adapter": None,
+                }))
+            if (requested_model in (None, base_name)
+                    and current_deployment["default_adapter"] is not None):
+                requested_model = current_deployment["default_adapter"]
+                deployment = current_deployment
+            base_request = requested_model in (None, base_name, base_name + ":base")
             lora = None if base_request else manager.lookup(requested_model)
             if lora is None and not base_request:
                 from .api_resources import ResourceNotFound
 
                 raise ResourceNotFound("unknown model")
             if lora is not None:
+                session_fingerprint = public_request.get("_mlx2_weight_session_expected_fingerprint")
+                if session_fingerprint is not None and lora[1] != session_fingerprint:
+                    raise ValueError("session weight program changed before admission")
+                private_candidate = (self._is_private_weight_program(lora[0], lora[1])
+                                     and lora[0] != current_deployment["default_adapter"])
+                if private_candidate and not _private_selection and session_fingerprint is None:
+                    from .api_resources import ResourceNotFound
+
+                    raise ResourceNotFound("unknown model")
+                if deployment is not None and lora[1] != deployment["fingerprint"]:
+                    raise ValueError("deployment weight program changed before admission")
                 # The adapter identity joins the APCv2 namespace (content
                 # fingerprint, not name): no cross-adapter prefix reuse.
                 public_request = {
@@ -6124,6 +6409,9 @@ class ServingEngine:
         job = Job(
             public_request, tenant_id=str(tenant_id or "default"), fault=fault
         )
+        artifact_identity = getattr(getattr(self, "adapter", None), "identity", {}).get("fingerprint")
+        if artifact_identity:
+            job.base_checkpoint = f"{Path(self.model_path).name}@{artifact_identity}"
         if media_policy is not None and media_policy["media"] == "plain_decode":
             job.media_decode = media_policy
             count_add(self.counts, "media_plain_decode_requests", 1)
@@ -6132,6 +6420,30 @@ class ServingEngine:
             count_add(self.counts, "speculation_opt_out_requests", 1)
         if lora is not None:
             job.lora_name, job.lora_fingerprint = lora
+            # Its receipts stay host-private (replay, session override).
+            job.private_weight_program_candidate = private_candidate
+            if callable(getattr(manager, "program_receipt", None)):
+                job.weight_program = manager.program_receipt(
+                    lora[0], expected_fingerprint=lora[1], selected=True,
+                )
+            if deployment is not None:
+                job.weight_program_deployment_generation = deployment["generation"]
+        elif getattr(getattr(self, "lora_session", None), "weight_program", None) is not None:
+            from .runtime.lora import weight_program_receipt
+
+            job.weight_program = weight_program_receipt(
+                self.lora_session.weight_program, selected=True,
+            )
+            job.weight_program_session_baseline = (
+                self.lora_session, self.lora_session.program_application_count,
+            )
+            job.request["_mlx2_lora_fingerprint"] = self.lora_session.fingerprint
+        if job.weight_program is not None:
+            self._check_weight_space_kernel_compatibility("weight_program")
+        if job.weight_program is not None and any(job.request.get(key) is not None for key in (
+            "_mlx2_activation_capsule", "_mlx2_prefill_handoff", "_mlx2_neural_concepts",
+        )):
+            raise ValueError("weight programs cannot compose with approximate memory or imported state")
         if handle is not None:
             job.verify_bitexact_start = handle.begin_request(
                 explicit=bool(request.get("verify_bitexact", False))
@@ -6141,6 +6453,57 @@ class ServingEngine:
             job.row_exact_verify_start = row_exact.snapshot()
         job.structured_automata = self._prepare_structured_automata(job.request)
         job.admission_tokens = self._prerender_prompt(job.request, job=job)
+        if sum(key in job.request for key in ("weight_overlay", "layer_excision", "expert_mask")) > 1:
+            raise ValueError("weight surgery composition is unsupported")
+        if "weight_overlay" in job.request:
+            overlays = getattr(self, "weight_overlays", None)
+            if overlays is None:
+                raise ValueError("weight overlays are not configured on this adapter")
+            if (job.lora_name is not None or job.weight_program is not None
+                    or any(job.request.get(key) is not None for key in (
+                        "_mlx2_activation_capsule", "_mlx2_prefill_handoff", "_mlx2_neural_concepts",
+                        "cache_capsule", "batch_cohort", "paged_native_qwen3"))):
+                raise ValueError("weight overlays require an isolated ordinary request")
+            job.weight_overlay_view = overlays.select(job.request["weight_overlay"])
+            job.request["_mlx2_weight_overlay_fingerprint"] = job.weight_overlay_view.fingerprint
+            job.request["_mlx2_weight_surgery_private_nonce"] = uuid.uuid4().hex
+            if not job.request.get("skip_writing_prefix_cache", False):
+                count_add(self.counts, "apcv2_write_suppressed_requests", 1)
+            job.request["skip_writing_prefix_cache"] = True
+        if "layer_excision" in job.request:
+            excision = getattr(self, "layer_excision", None)
+            if excision is None:
+                raise ValueError("layer excision is not configured on this adapter")
+            if (job.lora_name is not None or job.weight_program is not None
+                    or any(job.request.get(key) is not None for key in (
+                        "_mlx2_activation_capsule", "_mlx2_prefill_handoff", "_mlx2_neural_concepts",
+                        "cache_capsule", "batch_cohort", "paged_native_qwen3"))):
+                raise ValueError("layer excision requires an isolated ordinary request")
+            job.layer_excision_view = excision.select(job.request["layer_excision"])
+            job.request["_mlx2_layer_excision_fingerprint"] = job.layer_excision_view.fingerprint
+            job.request["_mlx2_weight_surgery_private_nonce"] = uuid.uuid4().hex
+            if not job.request.get("skip_writing_prefix_cache", False):
+                count_add(self.counts, "apcv2_write_suppressed_requests", 1)
+            job.request["skip_writing_prefix_cache"] = True
+        if "expert_mask" in job.request:
+            masks = getattr(self, "expert_masks", None)
+            if masks is None:
+                raise ValueError("expert masks are not configured on this adapter")
+            if (job.lora_name is not None or job.weight_program is not None
+                    or any(job.request.get(key) is not None for key in (
+                        "_mlx2_activation_capsule", "_mlx2_prefill_handoff", "_mlx2_neural_concepts",
+                        "_mlx2_prefill_inputs", "_mlx2_media_fingerprint", "cache_capsule",
+                        "batch_cohort", "paged_native_qwen3"))):
+                raise ValueError("expert masks require an isolated ordinary text request")
+            job.expert_mask_view = masks.select(job.request["expert_mask"])
+            job.request["_mlx2_expert_mask_fingerprint"] = job.expert_mask_view.fingerprint
+            if job.expert_mask_view.plan.approximate:
+                # Unqualified approximate routing never publishes reusable
+                # state. Every trial replays against its private namespace.
+                if not job.request.get("skip_writing_prefix_cache", False):
+                    count_add(self.counts, "apcv2_write_suppressed_requests", 1)
+                job.request["skip_writing_prefix_cache"] = True
+                job.request["_mlx2_expert_mask_private_nonce"] = uuid.uuid4().hex
         return job
 
     def _tokenize_prompt(self, request):
@@ -6539,6 +6902,9 @@ class ServingEngine:
             self.batch_metrics.admitted(
                 job.id, job.tenant_id, initial_depth + offset
             )
+            live_weight_space = getattr(self, "weight_space_live", None)
+            if live_weight_space is not None:
+                live_weight_space.observe_submission(job)
         try:
             self.incoming.put_nowait(item)
         except BaseException:
@@ -6653,6 +7019,9 @@ class ServingEngine:
     def _submit_many_held(
         self, requests, reservations, *, tenant_id, admission_class, admitted
     ):
+        if any(any(key in request for key in ("weight_overlay", "layer_excision", "expert_mask"))
+               for request in requests):
+            raise ValueError("weight surgery cannot enter parallel submission")
         jobs = [
             self._prepare_job(request, tenant_id=tenant_id) for request in requests
         ]
@@ -6834,6 +7203,7 @@ class ServingEngine:
             # Default-off; engines built outside __init__ (fixtures) lack it.
             qmm_row_pad=getattr(self, "qmm_row_pad_enabled", False),
             int8_prefill=self.int8_prefill_policy.enabled,
+            microscaling_prefill=getattr(getattr(self, "microscaling_prefill_policy", None), "enabled", False),
             verify_bitexact=self.verify_bitexact_policy.enabled,
             multi_lora=self.multi_lora_policy is not None,
             lora_root=self.lora_root,
@@ -6983,17 +7353,20 @@ class ServingEngine:
 
     def projection_workspace_reserve_gib(self) -> float:
         """Unfilled projection copies and build scratch, charged once per engine."""
-        handle = getattr(self, "int8_prefill_handle", None)
-        if handle is None:
-            return 0.0
-        reserve = getattr(handle, "unfilled_reserve_bytes", None)
-        if not callable(reserve):
-            raise ValueError("projection workspace reserve provider is unavailable")  # noqa: TRY004 - admission validation contract
-        value = reserve()
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(value) or value < 0):
-            raise ValueError("projection workspace reserve must be finite and non-negative")
-        return value / float(1 << 30)
+        total = 0
+        for name in ("int8_prefill_handle", "microscaling_prefill_handle"):
+            handle = getattr(self, name, None)
+            if handle is None:
+                continue
+            reserve = getattr(handle, "unfilled_reserve_bytes", None)
+            if not callable(reserve):
+                raise ValueError("projection workspace reserve provider is unavailable")
+            value = reserve()
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0):
+                raise ValueError("projection workspace reserve must be finite and non-negative")
+            total += value
+        return total / float(1 << 30)
 
     def expert_stream_counters(self) -> dict:
         stream = self.expert_stream
@@ -7137,6 +7510,7 @@ class ServingEngine:
 
     def status(self):
         from .runtime.models import qsdpa_verify_metal as qvm
+        from .runtime.models import qsdpa_decode_metal as qdm
 
         receipts = self.recent_receipts()
         with self.lock:
@@ -7150,6 +7524,7 @@ class ServingEngine:
                 "healthy": self.ready.is_set()
                 and self.thread.is_alive()
                 and not self.error
+                and quiesce["state"] not in {"kernel_reload_failed", "stopped"}
                 and not self.eval_watchdog.stalled,
                 "error": self.error,
                 "eval_watchdog": self.eval_watchdog.status(),
@@ -7207,6 +7582,8 @@ class ServingEngine:
                     ],
                 },
                 "int8_prefill": int8_prefill_status(self),
+                **({"microscaling_prefill": microscaling_prefill_status(self)}
+                   if getattr(getattr(self, "microscaling_prefill_policy", None), "enabled", False) else {}),
                 "recurrent_state_codec": recurrent_state_codec_status(self),
                 "lane_matmul": lane_matmul_status(self),
                 "verify_bitexact": verify_bitexact_status(self),
@@ -7228,22 +7605,47 @@ class ServingEngine:
                     "by_rows": dict(qvm.STATS_BY_ROWS),
                     "selected_host_branches": qvm.selected_host_branch_snapshot(),
                 },
+                "fp_decode_attention": qdm.fp_decode_status(),
                 "recent_receipts": receipts,
                 **({"checkpoint_resources": self._last_checkpoint_resource_receipt}
                    if hasattr(self, "_last_checkpoint_resource_receipt") else {}),
-                "recent_operation_receipts": list(self.operation_receipts),
+                "recent_operation_receipts": self._client_operation_receipts(),
                 "model_revision": self.model_revision,
+                "kernel_reload": self.kernel_reload_status(),
                 "lora": {
                     "enabled": self.lora_root is not None,
                     "active": self.lora_session.name
                     if self.lora_session is not None
                     else None,
+                    **({"weight_program": self._active_weight_program_receipt()}
+                       if self._active_weight_program_receipt() is not None else {}),
                 },
+                **self._weight_program_qualification_override(),
                 "multi_lora": (
-                    self.multi_lora.status()
+                    self._client_multi_lora_status()
                     if getattr(self, "multi_lora", None) is not None
                     else {"enabled": False}
                 ),
+                "weight_overlays": (
+                    self.weight_overlays.status()
+                    if getattr(self, "weight_overlays", None) is not None
+                    else unconfigured_runtime_state()
+                ),
+                "layer_excision": (
+                    self.layer_excision.status()
+                    if getattr(self, "layer_excision", None) is not None
+                    else unconfigured_runtime_state()
+                ),
+                "expert_masks": (
+                    self.expert_masks.status()
+                    if getattr(self, "expert_masks", None) is not None
+                    else unconfigured_runtime_state()
+                ),
+                **({"weight_program_deployment": {
+                    **self._weight_program_deployment,
+                    "base_model_alias": Path(self.model_path).name + ":base",
+                }}
+                   if self._weight_program_deployment["generation"] else {}),
                 "host_prompt_cache": self.host_prompt_cache.status(),
                 "incremental_tokenizer_cache": (
                     self.incremental_tokenizer_cache.status()
@@ -7274,13 +7676,13 @@ class ServingEngine:
         contract = getattr(adapter, "representation_contract", None)
         if not isinstance(route, dict) or route.get("route") not in {"embeddings", "rerank"} or not callable(contract):
             return {}
-        representation = contract()
+        representation = self._kernel_route_receipt(contract())
         state = {key: representation[key] for key in (
             "implemented", "qualified", "selected", "observed_used"
         ) if key in representation}
         return {
             "representation": representation,
-            "route_receipt": {**route, **state, "representation": representation},
+            "route_receipt": self._kernel_route_receipt({**route, **state, "representation": representation}),
         }
 
     @staticmethod
@@ -7363,7 +7765,7 @@ class ServingEngine:
                 def representation_receipt():
                     if operation not in {"embeddings", "rerank"} or not callable(contract):
                         return {}
-                    representation = contract()
+                    representation = self._kernel_route_receipt(contract())
                     if before is not None:
                         representation = {
                             **representation,
@@ -7398,6 +7800,7 @@ class ServingEngine:
                     "model_revision": getattr(self, "model_revision", 0),
                 }
                 receipt.update(representation_receipt())
+                receipt = self._kernel_route_receipt(receipt)
                 self.operation_receipts.append(receipt)
                 count_add(self.counts, f"{operation}_completed", 1)
                 return result
@@ -7878,11 +8281,408 @@ class ServingEngine:
             "slot": job.lora_slot if job.lora_name is not None else 0,
             "residency": job.lora_residency,
             "apc_namespace": "adapter" if job.lora_name is not None else "base",
+            **({"private_candidate": True}
+               if getattr(job, "private_weight_program_candidate", False) else {}),
+            **({"weight_program": self._job_weight_program_receipt(job)}
+               if job.weight_program is not None else {}),
+            **({"adapter_row_forwards": self.multi_lora.row_forward_count(job.uid)}
+               if job.weight_program is not None else {}),
+            **({"adapter_delta_applications": self.multi_lora.program_application_count(job.uid)}
+               if job.weight_program is not None else {}),
+            **({"deployment_generation": job.weight_program_deployment_generation}
+               if job.weight_program_deployment_generation is not None else {}),
         }
+
+    def _weight_space_route_receipt(self, job, receipt):
+        """Build the selected feature receipt before execution-epoch decoration."""
+        for feature, attribute in (("expert_mask", "expert_mask_view"),
+                                   ("layer_excision", "layer_excision_view"),
+                                   ("weight_overlay", "weight_overlay_view"),
+                                   ("weight_program", "weight_program")):
+            if getattr(job, attribute, None) is not None:
+                return {**(receipt if isinstance(receipt, dict) else {"route": receipt}),
+                        "qualified": False, "qualification": "unqualified",
+                        "weight_space_operation": feature}
+        return receipt
+
+    def _job_weight_program_receipt(self, job):
+        if job.weight_program_session_baseline is not None:
+            # The single-session program applies to every row, so covered
+            # calls since this job's admission show it ran under the program.
+            session, baseline = job.weight_program_session_baseline
+            applications = session.program_application_count - baseline
+        else:
+            applications = (self.multi_lora.program_application_count(job.uid)
+                            if self.multi_lora is not None else 0)
+        return {**job.weight_program, "observed_used": applications > 0}
+
+    def weight_program_deployment_state(self):
+        """Host controller snapshot; no request can supply a deployment binding."""
+        with self.lock:
+            return {**self._weight_program_deployment,
+                    "base_model_alias": Path(self.model_path).name + ":base"}
+
+    def _checked_weight_program(self, name, fingerprint):
+        manager = self.multi_lora
+        if manager is None:
+            raise ValueError("weight program controller requires concurrent LoRA")
+        with manager.lock:
+            adapter = manager.registry.get(name)
+            if (adapter is None or adapter.fingerprint != fingerprint
+                    or adapter.weight_program is None):
+                raise ValueError("registered weight program identity mismatch")
+            return adapter.weight_program
+
+    def promote_weight_program(self, name, *, expected_fingerprint,
+                               expected_generation, validation_receipt):
+        """CAS the deployment default after the opt-in controller validates it.
+
+        This host-only seam checks the evidence binding, not the functional
+        oracle itself. The controller owns tool verification and test execution.
+        Existing jobs retain their admitted adapter fingerprint and slot.
+        """
+        with self._lora_control_section():
+            program = self._checked_weight_program(name, expected_fingerprint)
+            self._validate_weight_program_route()
+            def private(value):
+                if isinstance(value, dict):
+                    return (value.get("contains_private_memory") is True
+                            or value.get("promotion_scope") == "session"
+                            or value.get("data_scope") == "session"
+                            or any(private(v) for v in value.values()))
+                return isinstance(value, list) and any(private(v) for v in value)
+            if private(program["provenance"]):
+                raise ValueError("session/private memory cannot become a deployment default")
+            receipt = validation_receipt
+            if not isinstance(receipt, dict) or any(
+                receipt.get(key) is not True
+                for key in ("passed", "repair_passed", "regressions_passed", "replay_passed")
+            ) or any(
+                receipt.get(key) != value for key, value in {
+                    "program_id": program["program_id"],
+                    "checkpoint": program["checkpoint"],
+                    "source_revision": program["source_revision"],
+                    "fingerprint": expected_fingerprint,
+                }.items()
+            ) or any(not isinstance(receipt.get(key), str) or not receipt[key].strip()
+                     for key in ("evidence_digest", "tool_suite_digest")):
+                raise ValueError("weight program promotion requires passing bound validation")
+            with self.lock:
+                current = self._weight_program_deployment
+                if type(expected_generation) is not int or current["generation"] != expected_generation:
+                    raise ValueError("weight program deployment generation changed")
+                self._weight_program_deployment = {
+                    "generation": expected_generation + 1,
+                    "default_adapter": name, "fingerprint": expected_fingerprint,
+                    "program_id": program["program_id"],
+                    "evidence_digest": receipt["evidence_digest"],
+                    "tool_suite_digest": receipt["tool_suite_digest"],
+                }
+                result = dict(self._weight_program_deployment)
+            self.operation_receipts.append({"operation": "weight_program_promote", **result})
+            return result
+
+    def rollback_weight_program_default(self, *, expected_generation, previous_state):
+        """Restore a prior default with CAS; the generation never decreases."""
+        if not isinstance(previous_state, dict):
+            raise ValueError("previous deployment state is required")  # noqa: TRY004 - control API refusal
+        with self._lora_control_section():
+            name, fingerprint = previous_state.get("default_adapter"), previous_state.get("fingerprint")
+            if name is not None:
+                program = self._checked_weight_program(name, fingerprint)
+                if program["program_id"] != previous_state.get("program_id"):
+                    raise ValueError("rollback weight program identity mismatch")
+            elif fingerprint is not None or previous_state.get("program_id") is not None:
+                raise ValueError("invalid base deployment rollback")
+            with self.lock:
+                if (type(expected_generation) is not int
+                        or self._weight_program_deployment["generation"] != expected_generation
+                        or type(previous_state.get("generation")) is not int
+                        or not 0 <= previous_state["generation"] < expected_generation):
+                    raise ValueError("weight program deployment generation changed")
+                self._weight_program_deployment = {
+                    **previous_state, "generation": expected_generation + 1,
+                }
+                result = dict(self._weight_program_deployment)
+            self.operation_receipts.append({"operation": "weight_program_rollback", **result})
+            return result
+
+    def _private_weight_program_section(self):
+        lock = getattr(self, "_private_weight_programs_lock", None)
+        return nullcontext() if lock is None else lock
+
+    def reserve_private_weight_program(self, name):
+        """Hide a repair candidate from clients before it loads; returns a token.
+
+        Only the reserving registration can bind or release it by token; a
+        name already reserved is refused, so a duplicate load cannot strip
+        another candidate's protection.
+        """
+        with self._private_weight_program_section():
+            if not hasattr(self, "_private_weight_programs"):
+                self._private_weight_programs = {}
+            if name in self._private_weight_programs:
+                raise ValueError("repair candidate name is already reserved")
+            token = uuid.uuid4().hex
+            self._private_weight_programs[name] = {"token": token, "fingerprint": None}
+            return token
+
+    def bind_private_weight_program(self, name, token, fingerprint):
+        with self._private_weight_program_section():
+            entry = getattr(self, "_private_weight_programs", {}).get(name)
+            if entry is None or entry["token"] != token:
+                raise ValueError("repair candidate reservation changed during load")
+            entry["fingerprint"] = fingerprint
+
+    def release_private_weight_program(self, name, *, token=None, fingerprint=None):
+        """Drop a reservation held by ``token`` or bound to ``fingerprint``.
+
+        The candidate's per-adapter row counter goes with it, so status never
+        shows it again once its name is free.  Receipts written while it was
+        reserved carry ``private_candidate`` and stay out of client status.
+        """
+        with self._private_weight_program_section():
+            private = getattr(self, "_private_weight_programs", {})
+            entry = private.get(name)
+            released = entry is not None and (
+                (token is not None and entry["token"] == token)
+                or (fingerprint is not None and entry["fingerprint"] == fingerprint))
+            if released:
+                private.pop(name)
+        manager = getattr(self, "multi_lora", None)
+        if released and manager is not None:
+            with manager.lock:
+                if name not in manager.registry:
+                    manager.rows_by_adapter.pop(name, None)
+
+    def owns_private_weight_program(self, name, fingerprint):
+        """Whether a repair registration still holds ``name`` for this content."""
+        with self._private_weight_program_section():
+            entry = getattr(self, "_private_weight_programs", {}).get(name)
+            return entry is not None and entry["fingerprint"] == fingerprint
+
+    def _hidden_weight_programs(self, registered_fingerprints, *, include_default=False):
+        # A reservation hides the adapter under its name only while that name
+        # holds the reserved content (or the load is still pending); content
+        # an operator loads later under the same name stays ordinary.  The
+        # deployed default is public unless ``include_default``.
+        with self._private_weight_program_section():
+            private = dict(getattr(self, "_private_weight_programs", {}))
+        default = (getattr(self, "_weight_program_deployment", None) or {}).get("default_adapter")
+        return {name for name, entry in private.items() if name in registered_fingerprints
+                and entry["fingerprint"] in (None, registered_fingerprints[name])
+                and (include_default or name != default)}
+
+    def private_weight_program_names(self, *, include_default=False):
+        manager = getattr(self, "multi_lora", None)
+        if manager is None:
+            return frozenset()
+        with manager.lock:
+            registered = {name: adapter.fingerprint for name, adapter in manager.registry.items()}
+            return frozenset(self._hidden_weight_programs(registered, include_default=include_default))
+
+    def _is_private_weight_program(self, name, fingerprint):
+        return bool(self._hidden_weight_programs({name: fingerprint}, include_default=True))
+
+
+    def _client_multi_lora_status(self):
+        """multi_lora status without reserved repair candidates (count only)."""
+        # One manager-lock section: cleanup unregisters under this lock before
+        # it releases a reservation, so a snapshot holding the candidate also
+        # sees its reservation.
+        with self.multi_lora.lock:
+            status = self.multi_lora.status()
+            hidden = self._hidden_weight_programs(status.get("registered_fingerprints") or {})
+        if not hidden:
+            return status
+        status = {
+            **status,
+            "registered": [name for name in status["registered"] if name not in hidden],
+            "registered_fingerprints": {name: value for name, value in
+                                        status["registered_fingerprints"].items() if name not in hidden},
+            "resident": {slot: name for slot, name in status.get("resident", {}).items()
+                         if name not in hidden},
+            "rows_by_adapter": {name: rows for name, rows in status.get("rows_by_adapter", {}).items()
+                                if name not in hidden},
+            "private_candidates": len(hidden),
+        }
+        if "weight_programs" in status:
+            status["weight_programs"] = {name: value for name, value in status["weight_programs"].items()
+                                         if name not in hidden}
+        return status
+
+    def _client_operation_receipts(self):
+        receipts = list(self.operation_receipts)
+        if getattr(self, "multi_lora", None) is None:
+            return receipts
+        hidden = self.private_weight_program_names()
+        return [receipt for receipt in receipts if not (
+            isinstance(receipt, dict) and (receipt.get("private_candidate")
+                                           or (receipt.get("name") is not None and receipt.get("name") in hidden)))]
+
+    def _private_request_receipt(self, receipt, hidden):
+        lora = receipt.get("lora") if isinstance(receipt, dict) else None
+        return isinstance(lora, dict) and (lora.get("private_candidate") is True
+                                           or (lora.get("name") is not None and lora.get("name") in hidden))
+
+    def submit_weight_program_replay(self, request, *, name, expected_fingerprint,
+                                    tenant_id="default"):
+        """Trial a full transcript with fresh state, without changing defaults."""
+        with self._lora_control_section():
+            self._checked_weight_program(name, expected_fingerprint)
+            self._validate_weight_program_route()
+            if not isinstance(request, dict) or not (request.get("messages") or request.get("tokens")):
+                raise ValueError("weight program replay requires the complete transcript")
+            if any(key.startswith("_mlx2_") for key in request) or any(
+                request.get(key) is not None for key in ("cache_id", "cache_handle", "resume_from", "prefill_handoff")
+            ):
+                raise ValueError("weight program replay refuses old cache handles")
+            session_id = request.get("session_id")
+            with self.lock:
+                if session_id is not None and any(
+                    job.tenant_id == str(tenant_id)
+                    and job.request.get("session_id") == session_id
+                    for job in self.jobs.values()
+                ):
+                    raise ValueError("finish or cancel the active session before replay")
+            return self.submit(
+                {**request, "model": name, "skip_writing_prefix_cache": True},
+                tenant_id=tenant_id,
+                _weight_program_replay={"fingerprint": expected_fingerprint,
+                                        "nonce": uuid.uuid4().hex},
+            )
+
+    def _weight_program_qualification_override(self):
+        """Route qualification while a weight program is active or the default.
+
+        status() and the /metrics snapshot both apply this, so the model-info
+        gauge cannot report the loaded route as qualified meanwhile.
+        """
+        deployment = getattr(self, "_weight_program_deployment", None) or {}
+        if (self._active_weight_program_receipt() is None
+                and deployment.get("default_adapter") is None):
+            return {}
+        return {"qualification": "unqualified", "qualified_capabilities": [],
+                "route_receipt": "unqualified_weight_program"}
+
+    def _active_weight_program_receipt(self):
+        from .runtime.lora import weight_program_receipt
+
+        session = getattr(self, "lora_session", None)
+        applications = getattr(session, "program_application_count", 0)
+        receipt = weight_program_receipt(
+            getattr(session, "weight_program", None), selected=True,
+            observed_used=applications > 0,
+        )
+        # The same covered-call counter drives observed_used. Expose its
+        # session-local value so a client can verify engagement across requests
+        # without inferring it from changed text or claiming qualification.
+        return None if receipt is None else {
+            **receipt, "adapter_delta_applications": applications,
+        }
+
+    def _lora_base_checkpoint(self):
+        fingerprint = getattr(self.adapter, "identity", {}).get("fingerprint")
+        if not fingerprint:
+            raise ValueError("weight program requires the exact loaded base checkpoint")
+        return f"{Path(self.model_path).name}@{fingerprint}"
+
+    def _validate_weight_program_route(self):
+        self._check_weight_space_kernel_compatibility("weight_program")
+        # Keep the initial compiled-program operation on the already supported
+        # ordinary LoRA seams; approximate and speculative compositions remain
+        # separate operations with their own evidence requirements.
+        multi_lora_policy(
+            1, 1, lora_root=self.lora_root, mtp=self.mtp,
+            prompt_lookup=self.prompt_lookup, spomin=self.spomin_policy.enabled,
+            int8_prefill=self.int8_prefill_policy.enabled,
+            approximate_kv=self.approximate_kv_policy.enabled,
+            cache_capsules=self.cache_capsule_policy["enabled"],
+            varlen_mlp=any(getattr(self.adapter.model, key, None) is not None
+                          for key in ("_varlen_dense_mlp", "_varlen_sparse_moe")),
+        )
+        if self.snapshot.get("settings", {}).get("backend") == "external_draft":
+            raise ValueError("weight programs require the ordinary route")
+
+    def configure_weight_overlays(self, bank=None, *, max_materialized_bytes=64 * 1024**2):
+        """Host-only opt-in; install explicit adapter wrappers at an idle boundary."""
+        from .runtime.weight_overlays import WeightOverlayManager
+
+        with self._weight_space_control_section():
+            self._validate_weight_surgery_route()
+            if self._weight_surgery_installed():
+                raise ValueError("a weight surgery manager is already configured")
+
+            def install(adapter):
+                declared = getattr(adapter, "weight_overlay_targets", None)
+                bindings = declared() if callable(declared) else {}
+                manager = WeightOverlayManager(adapter.model, bindings,
+                    checkpoint=self._lora_base_checkpoint(), bank=bank,
+                    max_materialized_bytes=max_materialized_bytes)
+                self.weight_overlays = manager
+                return manager
+
+            return self._exclusive_adapter_operation("weight_overlay_install", install)
+
+    def _weight_surgery_installed(self):
+        return any(getattr(self, name, None) is not None
+                   for name in ("weight_overlays", "layer_excision", "expert_masks"))
+
+    def _validate_weight_surgery_route(self, *, adapter_policy=False):
+        self._check_weight_space_kernel_compatibility("weight_surgery")
+        if (self.max_lanes != 1 or self.mtp or self.prompt_lookup
+                or self.multi_lora_policy is not None or self.lora_session is not None
+                or (self.execution_policy and not adapter_policy) or self.spomin_policy.enabled
+                or self.int8_prefill_policy.enabled or self.approximate_kv_policy.enabled
+                or self.memory_preemption_policy["enabled"]
+                or self.cache_capsule_policy["enabled"]
+                or self.snapshot.get("settings", {}).get("backend") == "external_draft"):
+            raise ValueError("weight overlays require ordinary width-one serving without other weight/state routes")
+
+    def configure_layer_excision(self, *, max_healing_bytes=64 * 1024**2):
+        """Host-only experimental block bypass; original weights remain resident."""
+        from .runtime.layer_excision import LayerExcisionManager
+
+        with self._weight_space_control_section():
+            self._validate_weight_surgery_route()
+            if self._weight_surgery_installed():
+                raise ValueError("a weight surgery manager is already configured")
+
+            def install(adapter):
+                declared = getattr(adapter, "layer_excision_binding", None)
+                if not callable(declared):
+                    raise ValueError("adapter has no layer excision capability")  # noqa: TRY004 - capability refusal
+                manager = LayerExcisionManager(adapter.model, declared(),
+                    checkpoint=self._lora_base_checkpoint(), max_healing_bytes=max_healing_bytes)
+                self.layer_excision = manager
+                return manager
+
+            return self._exclusive_adapter_operation("layer_excision_install", install)
+
+    def configure_expert_masks(self):
+        """Host-only logical masking; adapter retains native expert streaming."""
+        from .runtime.expert_masks import ExpertMaskManager
+
+        with self._weight_space_control_section():
+            self._validate_weight_surgery_route(adapter_policy=True)
+            if self._weight_surgery_installed():
+                raise ValueError("a weight surgery manager is already configured")
+
+            def install(adapter):
+                declared = getattr(adapter, "expert_mask_binding", None)
+                if not callable(declared):
+                    raise ValueError("adapter has no native expert mask capability")  # noqa: TRY004 - capability refusal
+                manager = ExpertMaskManager(adapter.model, declared(), checkpoint=self._lora_base_checkpoint())
+                self.expert_masks = manager
+                return manager
+
+            return self._exclusive_adapter_operation("expert_mask_install", install)
 
     def _load_multi_lora_adapter(self, name, candidate, *, lora_int_id=None):
         manager = self.multi_lora
         adapter, new_keys = manager.prepare(name, candidate, lora_int_id=lora_int_id)
+        if adapter.weight_program is not None:
+            self._validate_weight_program_route()
         if name in manager.registry:
             raise ValueError(f"LoRA adapter {name!r} is already loaded")
         if new_keys:
@@ -7903,6 +8703,8 @@ class ServingEngine:
                 "status": "completed",
                 "name": name,
                 "fingerprint": described["fingerprint"],
+                **({"private_candidate": True}
+                   if self._is_private_weight_program(name, described["fingerprint"]) else {}),
                 "drained": bool(new_keys),
                 "model_revision": self.model_revision,
             }
@@ -7914,6 +8716,8 @@ class ServingEngine:
             "rank": described["rank"],
             "drained": bool(new_keys),
             "model_revision": self.model_revision,
+            **({"weight_program": described["weight_program"]}
+               if "weight_program" in described else {}),
         }
 
     @contextmanager
@@ -7933,6 +8737,8 @@ class ServingEngine:
             return self._load_lora_adapter(name, path, base_model_name=base_model_name)
 
     def _load_lora_adapter(self, name, path, *, base_model_name=None):
+        if self._weight_surgery_installed():
+            raise ValueError("LoRA cannot compose with an installed weight surgery manager")
         candidate = self._resolve_lora_path(path)
         model_name = self.status().get("model")
         if base_model_name is not None and base_model_name not in {
@@ -7942,7 +8748,7 @@ class ServingEngine:
         }:
             raise ValueError("base_model_name does not match the loaded model")
         if self.multi_lora is not None:
-            if name == model_name:
+            if name in {model_name, model_name + ":base"}:
                 raise ValueError("lora_name must differ from the base model name")
             return self._load_multi_lora_adapter(name, candidate)
 
@@ -7950,16 +8756,24 @@ class ServingEngine:
             if self.lora_session is not None:
                 raise ValueError("unload the active LoRA adapter before loading another")
             row_exact_target_mutation_guard(adapter, lora=True)
-            from .runtime.lora import install_lora
+            from .runtime.lora import install_lora, read_lora_config
+
+            _, config = read_lora_config(candidate)
+            if "weight_program" in config:
+                self._validate_weight_program_route()
 
             self.lora_session = install_lora(
-                adapter.model, name=name, path=candidate
+                adapter.model, name=name, path=candidate,
+                base_checkpoint=(self._lora_base_checkpoint()
+                                 if "weight_program" in config else None),
             )
             self._invalidate_model_state(reason="lora_load")
             return {
                 "status": "loaded",
                 "model_revision": self.model_revision,
                 "base_model_name": model_name,
+                **({"weight_program": self._active_weight_program_receipt()}
+                   if self._active_weight_program_receipt() is not None else {}),
             }
 
         return self._exclusive_adapter_operation("lora_load", install)
@@ -7974,7 +8788,15 @@ class ServingEngine:
         ):
             raise ValueError("lora_int_id must be an integer")
         if self.multi_lora is not None:
+            if self._weight_program_deployment["default_adapter"] == name:
+                raise ValueError("rollback the deployment default before unloading its adapter")
             self.multi_lora.unregister(name)
+            # The reservation belongs to that registration: an operator who
+            # reloads the name afterwards gets an ordinary adapter.
+            with self._private_weight_program_section():
+                entry = getattr(self, "_private_weight_programs", {}).get(name)
+            if entry is not None:
+                self.release_private_weight_program(name, token=entry["token"])
             count_add(self.counts, "lora_unload_completed", 1)
             return {"status": "unloaded", "mode": "concurrent", "model_revision": self.model_revision}
 
@@ -8413,6 +9235,21 @@ class ServingEngine:
             if callable(sweep):
                 self._finish_cleanup(job, "apc_retirement_sweep", sweep)
         lora_slot = getattr(job, "lora_slot", None)
+        overlay_view = getattr(job, "weight_overlay_view", None)
+        if overlay_view is not None:
+            job.weight_overlay_view = None
+            self._finish_cleanup(job, "weight_overlay_release",
+                                 lambda: self.weight_overlays.release(overlay_view, job.uid))
+        excision_view = getattr(job, "layer_excision_view", None)
+        if excision_view is not None:
+            job.layer_excision_view = None
+            self._finish_cleanup(job, "layer_excision_release",
+                                 lambda: self.layer_excision.release(excision_view, job.uid))
+        mask_view = getattr(job, "expert_mask_view", None)
+        if mask_view is not None:
+            job.expert_mask_view = None
+            self._finish_cleanup(job, "expert_mask_release",
+                                 lambda: self.expert_masks.release(mask_view, job.uid))
         if lora_slot is not None:
             job.lora_slot = None
             manager = self.multi_lora
@@ -9666,6 +10503,7 @@ class ServingEngine:
             or self.weight_streaming_enabled()
             or self.lane_matmul not in ("auto", "off")
             or self.int8_prefill_policy.enabled or self.sp_qmm_enabled
+            or self.microscaling_prefill_policy.enabled
             or self.qmm_row_pad_enabled
             or self.verify_bitexact_policy.enabled
             or self.recurrent_state_codec_policy.enabled
@@ -9706,11 +10544,16 @@ class ServingEngine:
                 "scheduler": {"kind": "exclusive_adapter_operation"},
                 "http": {"max_request_bytes": self.max_request_bytes},
             }
+        if self._kernel_reloader is not None:
+            self._kernel_reloader.bind_loaded_modules()
         self.ready.set()
         while not self.stop_event.wait(0.05):
             action = self._worker_quiesce_action()
             if action is not None:
-                self._complete_worker_quiesce(action)
+                import mlx.core as mx
+
+                if not self._worker_reload_kernels(action, mx):
+                    self._complete_worker_quiesce(action)
         # Close may overlap a request already inside the exclusive operation.
         # Wait for its owner before _run's finally releases model storage.
         with self.submission_lock:
@@ -9837,16 +10680,11 @@ class ServingEngine:
             prefill_execution_identity = getattr(
                 adapter, "prefill_execution_identity", None
             )
-            if (
-                prefill_execution_identity is not None
-                and prefill_execution_identity
-                != getattr(adapter, "selected_prefill_execution_identity", None)
-                and not self.qualification_mode
-                and not self.qualification
-            ):
-                raise ValueError(
-                    "prefill candidates require qualification mode or a matching qualification receipt"
-                )
+            # Explicit adapter-owned prefill routes may serve unqualified
+            # (AGENTS.md: qualification is confidence, not run permission).
+            # Their actual execution identity still binds status, receipt
+            # matching, and both APCv2 namespaces below. Approximate state
+            # operations retain their separate qualification gates.
             owners = [
                 name
                 for name in ("tensorfold_prefill", "tensorfold_qmv")
@@ -9855,7 +10693,9 @@ class ServingEngine:
                 name
                 for name in ("invariant_prefill", "row_exact_verify")
                 if getattr(adapter, name, None) is not None
-            ] + (["sp_qmm"] if self.sp_qmm_enabled else [])
+            ] + (["sp_qmm"] if self.sp_qmm_enabled else []) + (
+                ["microscaling_prefill"] if self.microscaling_prefill_policy.enabled else []
+            )
             if self.lane_matmul == "auto" and owners:
                 # An explicitly selected mechanism that owns the projections
                 # wins over the automatic lane law, which steps aside (as it
@@ -9863,6 +10703,11 @@ class ServingEngine:
                 # refused below.
                 self.lane_matmul = "off"
                 self.lane_matmul_stepped_aside = f"auto->off ({', '.join(owners)})"
+            if self.microscaling_prefill_policy.enabled and any(
+                getattr(adapter, name, None) is not None
+                for name in ("tensorfold_prefill", "tensorfold_qmv", "invariant_prefill", "row_exact_verify")
+            ):
+                raise ValueError("microscaling prefill cannot share an adapter projection owner")
             if getattr(adapter, "tensorfold_prefill", None) and (
                 self.lane_matmul != "off"
                 or self.sp_qmm_enabled
@@ -10307,6 +11152,15 @@ class ServingEngine:
                     else None
                 ),
             )
+            from .runtime.models import qsdpa_decode_metal as qdm
+
+            if qdm.fp_decode_status()["selected"]:
+                # Different reduction geometry is a different numerical law.
+                # Leave off-route historical settings unchanged.
+                settings["fp_decode_attention"] = {
+                    "enabled": True, "version": qdm.FP_KERNEL_VERSION,
+                    "min_context": qdm.FP_MIN_CONTEXT,
+                }
             if self.approximate_kv_policy.enabled:
                 from .runtime.models import qsdpa_verify_metal as qvm
 
@@ -10454,6 +11308,7 @@ class ServingEngine:
                     max_loras=self.multi_lora_policy["max_loras"],
                     max_lora_rank=self.multi_lora_policy["max_lora_rank"],
                     delta_precision=self.multi_lora_policy["delta_precision"],
+                    base_checkpoint=f"{Path(self.model_path).name}@{adapter.identity['fingerprint']}",
                 )
                 # Present only when enabled, so default-off qualification
                 # settings are byte-identical.
@@ -10797,7 +11652,7 @@ class ServingEngine:
                     "modules": len(self.qmm_row_pad_handle),
                     "policy": qmm_row_pad.POLICY_ID,
                 }
-            if self.int8_prefill_auto is not None:
+            if self.int8_prefill_auto is not None and not self.microscaling_prefill_policy.enabled:
                 self._resolve_int8_prefill_auto(adapter)
             if self.int8_prefill_policy.enabled:
                 # Fails closed (unsupported device, undeclared scope, or a
@@ -10847,6 +11702,17 @@ class ServingEngine:
                         "int8 prefill auto: off (%s)",
                         self.int8_prefill_auto["reason"],
                     )
+            if self.microscaling_prefill_policy.enabled:
+                self.microscaling_prefill_handle, settings["microscaling_prefill"] = bind_microscaling_for_serving(
+                    adapter, self.microscaling_prefill_policy,
+                    max_lanes=self.max_lanes, config=config,
+                    speculation=settings["speculation"],
+                    prompt_lookup_policy=prompt_lookup_policy,
+                    copy_draft_policy=self.copy_draft_policy,
+                    memory_headroom=self.admission_headroom_fn(),
+                    hard_reserve_bytes=int(self.hard_reserve_gib * (1 << 30)),
+                    max_prefill_rows=int(self.prefill_step) * int(self.max_lanes),
+                )
             from .runtime.apc_numerics import execution_numerics_identity
 
             # The exact same laws bind learning and both APCv2 namespaces.
@@ -10861,6 +11727,7 @@ class ServingEngine:
                 prefill_execution=prefill_execution_identity,
                 lane_matmul_receipt=self.lane_matmul_receipt,
                 int8_prefill_policy=self.int8_prefill_policy,
+                microscaling_prefill_handle=self.microscaling_prefill_handle,
                 weight_stream_manager=self.expert_stream,
                 recurrent_state_codec=self.recurrent_state_codec_policy,
             )
@@ -10899,6 +11766,10 @@ class ServingEngine:
                         f"-rsc-{self.recurrent_state_codec_policy.codec}"
                         if self.recurrent_state_codec_policy.enabled
                         else ""
+                    )
+                    + (
+                        f"-microscaling-prefill-{self.microscaling_prefill_policy.scope}"
+                        if self.microscaling_prefill_policy.enabled else ""
                     )
                     + ("-sp-qmm" if self.sp_qmm_enabled else "")
                     + (
@@ -11260,13 +12131,13 @@ class ServingEngine:
             def cache_key_for(tenant_id, media_fingerprint=None):
                 """APCv2 namespace for a request: shared, or per tenant."""
                 scope = tenant_id if self.tenant_scoped_cache else None
-                identity_scope = (scope, media_fingerprint)
+                identity_scope = (scope, media_fingerprint, self._kernel_reload_identity)
                 cached = cache_keys.get(identity_scope)
                 if cached is None:
                     semantic = apc_request_semantic(scope, media_fingerprint)
                     cached = cache_keys[identity_scope] = apc.key(
                         adapter.identity["fingerprint"],
-                        revision=persistent_runtime_revision(identity),
+                        revision=self._kernel_cache_revision(persistent_runtime_revision(identity)),
                         adapter=adapter.identity["fingerprint"],
                         tokenizer_fingerprint=adapter.identity["fingerprint"],
                         cache_layout_fingerprint=cache_layout_fingerprint,
@@ -11278,6 +12149,19 @@ class ServingEngine:
                         ),
                     )
                 return cached
+
+            def rebind_kernel_cache_identity():
+                # The adapter and arrays stay resident; all state produced by
+                # the previous numerical implementation was just purged.
+                from dataclasses import replace
+
+                cache_keys.clear()
+                apc.rebind_empty_identity(replace(
+                    persistent_identity,
+                    revision=self._kernel_cache_revision(persistent_runtime_revision(identity)),
+                ))
+
+            self._kernel_reload_rebind = rebind_kernel_cache_identity
 
             def session_tag_for(job):
                 if job is None or not job.request.get("session_id"):
@@ -12077,6 +12961,8 @@ class ServingEngine:
             preverify_explicit_native_qwen3_price_identity(adapter)
             if getattr(adapter, "model_residency", None) is not None:
                 self._model_residency_controller(mx)
+            if self._kernel_reloader is not None:
+                self._kernel_reloader.bind_loaded_modules()
             self.ready.set()
             last_snapshot = 0
             last_reclaim = 0
@@ -12510,6 +13396,11 @@ class ServingEngine:
                         "active": len(active),
                     }
                 quiesce_action = self._worker_quiesce_action()
+                if (quiesce_action is not None and not quiesce_action["timed_out"]
+                        and self._kernel_reload_request is not None):
+                    drop_queued_interiors(live_owners=False)
+                if quiesce_action is not None and self._worker_reload_kernels(quiesce_action, mx, batch):
+                    quiesce_action = None
                 if quiesce_action is not None:
                     if quiesce_action["timed_out"]:
                         self._fail_drain_timeout(
@@ -14104,6 +14995,8 @@ class ServingEngine:
                                 job.approximate_kv_receipt = {
                                     "schema": "mlx2.approximate-kv.v1",
                                     "request_id": job.id,
+                                    **({"checkpoint": job.base_checkpoint}
+                                       if job.base_checkpoint is not None else {}),
                                     "fidelity": "exact",
                                     "selected": False,
                                     "status": "declined",
@@ -14333,6 +15226,12 @@ class ServingEngine:
                                 raise
                         if job.lora_slot is not None:
                             self.multi_lora.bind_uid(job.uid, job.lora_slot)
+                        if job.weight_overlay_view is not None:
+                            self.weight_overlays.bind_uid(job.uid, job.weight_overlay_view)
+                        if job.layer_excision_view is not None:
+                            self.layer_excision.bind_uid(job.uid, job.layer_excision_view)
+                        if job.expert_mask_view is not None:
+                            self.expert_masks.bind_uid(job.uid, job.expert_mask_view)
                         if job.cache_capsule is not None:
                             self._bind_pending_cache_capsule(batch, job)
                         active[job.uid] = job
@@ -15413,7 +16312,11 @@ class ServingEngine:
                                         else None
                                     ),
                                     "profile": self.snapshot["profile"],
-                                    "qualification": self.snapshot["qualification"],
+                                    "qualification": ("unqualified" if (job.weight_program is not None
+                                                                       or job.weight_overlay_view is not None
+                                                                       or job.layer_excision_view is not None
+                                                                       or job.expert_mask_view is not None)
+                                                      else self.snapshot["qualification"]),
                                     **(
                                         {
                                             "adaptive_profile": dict(
@@ -15423,7 +16326,19 @@ class ServingEngine:
                                         if self.adaptive_profile_binding is not None
                                         else {}
                                     ),
-                                    "route_receipt": native_route or route_receipt,
+                                    "route_receipt": self._kernel_route_receipt(
+                                        self._weight_space_route_receipt(job, native_route or route_receipt)),
+                                    **({"weight_overlay": self.weight_overlays.receipt(
+                                        job.weight_overlay_view, job.uid)}
+                                       if job.weight_overlay_view is not None else {}),
+                                    **({"layer_excision": self.layer_excision.receipt(
+                                        job.layer_excision_view, job.uid)}
+                                       if job.layer_excision_view is not None else {}),
+                                    **({"expert_mask": self.expert_masks.receipt(
+                                        job.expert_mask_view, job.uid)}
+                                       if job.expert_mask_view is not None else {}),
+                                    **({"weight_program": self._job_weight_program_receipt(job)}
+                                       if job.weight_program is not None else {}),
                                     **(
                                         {"prefill_handoff": job.prefill_handoff_receipt}
                                         if job.prefill_handoff_receipt is not None
@@ -15626,6 +16541,10 @@ class ServingEngine:
                                     "neural_concept_bridge": job.neural_concept_receipt,
                                     "activation_capsule_bridge": (
                                         job.activation_capsule_receipt
+                                    ),
+                                    **(
+                                        {"microscaling_prefill": microscaling_prefill_status(self, receipt=True)}
+                                        if self.microscaling_prefill_handle is not None else {}
                                     ),
                                     **(
                                         {"int8_prefill": self.int8_prefill_handle.receipt()}
@@ -15948,6 +16867,9 @@ class ServingEngine:
                 log.exception("generation worker failed")
                 self.error = f"{type(exc).__name__}: {exc}"
         finally:
+            from .kernel_reload import unregister_owner
+
+            self._cancel_pending_kernel_reload(reason=self.error or "generation worker stopped")
             with self.lock:
                 # Published under the same lock: a submission that registers
                 # its job after this snapshot sees the flag and fails it.
@@ -15976,6 +16898,10 @@ class ServingEngine:
                 self._mlx_memory_limit_previous = None
             if self.verify_bitexact_handle is not None:
                 self.verify_bitexact_handle.remove()
+            if self.microscaling_prefill_handle is not None:
+                from .runtime.microscaling.installer import remove as remove_microscaling
+                remove_microscaling(self.microscaling_prefill_handle)
+                self.microscaling_prefill_handle = None
             if self.int8_prefill_handle is not None:
                 from .runtime.int8_prefill import remove as remove_int8_prefill
 
@@ -16003,6 +16929,7 @@ class ServingEngine:
                         except Exception:
                             # Retain the reservation if release is uncertain.
                             log.exception("model residency accounting retained after adapter teardown")
+            unregister_owner(self)
 
     def _start_residency_heartbeat(self):
         """Start the idle residency heartbeat on its own thread and stream."""

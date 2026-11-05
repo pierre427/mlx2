@@ -184,7 +184,8 @@ def _kernel():
 MIN_CONTEXT = 16384
 
 # Host-side engagement count (read by qualification tracers).
-STATS = {"decode_kernel_calls": 0}
+STATS = {"decode_kernel_calls": 0, "fp_decode_kernel_calls": 0,
+         "fp_decode_gqa16_calls": 0}
 
 
 def decode_kernel_config(n: int, gqa: int) -> tuple[int, int, int]:
@@ -312,7 +313,6 @@ _SOURCE_FP = r"""
     const int s1 = min(kend, s0 + sub);
 
     const device T* kb0 = k + b * k_strides[0] + hkv * k_strides[1];
-    const device T* vb0 = v + b * v_strides[0] + hkv * v_strides[1] + lane * EPL;
     threadgroup float* my_p = p_sh + sg * GL * 32;
 
     float mmax[GL], lsum[GL], o[GL][EPL];
@@ -327,9 +327,13 @@ _SOURCE_FP = r"""
         float sc[GL];
         for (int j = 0; j < GL; j++) sc[j] = 0.0f;
         if (valid) {
-            const device vec<T, 4>* krow = (const device vec<T, 4>*)(kb0 + t * k_strides[2]);
+            const device T* krow = kb0 + t * k_strides[2];
             for (int d4 = 0; d4 < D / 4; d4++) {
-                const float4 kv = float4(krow[d4]);
+                const int d = d4 * 4;
+                const float4 kv = float4(float(krow[d * k_strides[3]]),
+                    float(krow[(d + 1) * k_strides[3]]),
+                    float(krow[(d + 2) * k_strides[3]]),
+                    float(krow[(d + 3) * k_strides[3]]));
                 for (int j = 0; j < GL; j++) {
                     const threadgroup float* qj = q_sh + (h0 + j) * D + d4 * 4;
                     sc[j] += qj[0] * kv.x + qj[1] * kv.y + qj[2] * kv.z + qj[3] * kv.w;
@@ -337,10 +341,12 @@ _SOURCE_FP = r"""
             }
         }
         for (int j = 0; j < GL; j++) {
-            const float tmax = simd_max(valid ? sc[j] : -INFINITY);
+            const bool visible = valid && mask[b * mask_strides[0]
+                + (hkv * G + h0 + j) * mask_strides[1] + t * mask_strides[3]];
+            const float tmax = simd_max(visible ? sc[j] : -INFINITY);
             const float nm = max(mmax[j], tmax);
             const float f = mmax[j] == -INFINITY ? 0.0f : fast::exp(mmax[j] - nm);
-            const float pj = valid ? fast::exp(sc[j] - nm) : 0.0f;
+            const float pj = visible ? fast::exp(sc[j] - nm) : 0.0f;
             lsum[j] = lsum[j] * f + simd_sum(pj);
             mmax[j] = nm;
             for (int i = 0; i < EPL; i++) o[j][i] *= f;
@@ -349,9 +355,11 @@ _SOURCE_FP = r"""
         simdgroup_barrier(mem_flags::mem_threadgroup);
         const int tn = min(32, s1 - tile);
         for (int u = 0; u < tn; u++) {
-            const device T* vrow = vb0 + (tile + u) * v_strides[2];
+            const device T* vrow = v + b * v_strides[0] + hkv * v_strides[1]
+                + (tile + u) * v_strides[2];
             float vv[EPL];
-            for (int i = 0; i < EPL; i++) vv[i] = float(vrow[i]);
+            for (int i = 0; i < EPL; i++)
+                vv[i] = float(vrow[(lane * EPL + i) * v_strides[3]]);
             for (int j = 0; j < GL; j++) {
                 const float pj = my_p[j * 32 + u];
                 for (int i = 0; i < EPL; i++) o[j][i] += pj * vv[i];
@@ -374,31 +382,123 @@ _SOURCE_FP = r"""
 """
 
 
+# One merge launch avoids materializing broadcast weights and weighted output
+# tensors across several generic reductions for the GQA16 candidate.
+_SOURCE_FP_MERGE = r"""
+    const uint lane = thread_index_in_simdgroup;
+    const uint row = threadgroup_position_in_grid.x;
+    constexpr int EPL = D / 32;
+    threadgroup float weights[P];
+    const device float* ml = part_m + row * P;
+    const device float* ll = part_l + row * P;
+    float local_max = -INFINITY;
+    for (int p = lane; p < P; p += 32)
+        local_max = max(local_max, ml[p]);
+    const float top = simd_max(local_max);
+    float local_sum = 0.0f;
+    for (int p = lane; p < P; p += 32) {
+        const float w = ll[p] * fast::exp(ml[p] - top);
+        weights[p] = w;
+        local_sum += w;
+    }
+    const float total = simd_sum(local_sum);
+    const float inv = total > 0.0f ? 1.0f / total : 0.0f;
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    float accum[EPL];
+    for (int i = 0; i < EPL; ++i) accum[i] = 0.0f;
+    for (int p = 0; p < P; ++p) {
+        const float w = weights[p];
+        for (int i = 0; i < EPL; ++i)
+            accum[i] += w * part_o[(size_t(row) * P + p) * D + lane * EPL + i];
+    }
+    for (int i = 0; i < EPL; ++i)
+        output[row * D + lane * EPL + i] = T(accum[i] * inv);
+"""
+
+
+@lru_cache(maxsize=None)
+def _kernel_fp_merge():
+    return mx.fast.metal_kernel(
+        name="mlx2_gqa16_fp_decode_merge",
+        input_names=["part_o", "part_l", "part_m"],
+        output_names=["output"], source=_SOURCE_FP_MERGE,
+    )
+
+
 # Opt-in until an end-to-end A/B qualifies it: this would replace
 # mx.fast SDPA on the default decode path of every model. The microbenchmark
 # crossover (2026-09-23) is between 32K (kernel loses) and 128K (16-30% win).
+# That historical crossover does not transfer to GQA16: the 2026-11-03 M5
+# Max D128/B1 sweep at 64K/128K was slower than stock, including a fused
+# partial merge and eight launch schedules. Muse 4bit at 66,068 tokens passed
+# ordinary-reference and cold/warm APCv2 checks, but no serving speedup was
+# established. Keep this candidate off; evidence: qualification/runs/
+# muse-fp-gqa16-20261103-r4/result.json (source a74315043).
 FP_MIN_CONTEXT = 65536
+FP_KERNEL_VERSION = "fp-gqa-strided-masked-v4"
+
+
+def fp_decode_status():
+    """Host dispatch counters; evaluated GPU evidence is recorded by probes."""
+    return {"implemented": True, "selected": os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1",
+            "version": FP_KERNEL_VERSION, "min_context": FP_MIN_CONTEXT,
+            "basis": "selected_host_graph_branch",
+            "observed_host_dispatch": STATS["fp_decode_kernel_calls"] > 0,
+            "counts": {key: value for key, value in STATS.items() if key.startswith("fp_")}}
+
+
+def fp_decode_attention_supported(queries, keys, values, *, mask=None, sinks=None) -> bool:
+    """Geometry covered by the unquantized kernel, independent of selection.
+
+    Muse's 32Q/2KV geometry is admitted explicitly. Ratios 9--15 remain
+    outside this contract; several cannot use the split-head schedule.
+    All inputs may be strided, including along the head dimension.
+    """
+    if sinks is not None or mx.default_device() != mx.gpu:
+        return False
+    if queries.ndim != 4 or keys.ndim != 4 or values.ndim != 4:
+        return False
+    B, Hq, L, D = queries.shape
+    Bkv, Hkv, N, Dkv = keys.shape
+    if min(B, Hq, Hkv, N) <= 0 or L != 1 or Bkv != B:
+        return False
+    if Hq % Hkv or Hq // Hkv not in (*range(1, 9), 16):
+        return False
+    if D not in (128, 256) or Dkv != D or values.shape != keys.shape:
+        return False
+    if mask is not None:
+        if not isinstance(mask, mx.array) or mask.dtype != mx.bool_ or mask.ndim > 4:
+            return False
+        shape = (1,) * (4 - mask.ndim) + tuple(mask.shape)
+        if any(given not in (1, expected) for given, expected in zip(shape, (B, Hq, 1, N))):
+            return False
+    return queries.dtype in (mx.bfloat16, mx.float16) and keys.dtype == queries.dtype == values.dtype
+
+
+def fp_decode_kernel_config(n: int, gqa: int) -> tuple[int, int, int]:
+    """Eight heads per simdgroup at GQA16, from the bounded M5 sweep.
+
+    This is an execution schedule, not a claim of a serving speedup. Keep
+    the existing schedules for GQA <= 8 and the route opt-in.
+    """
+    if gqa == 16:
+        return 4, 2, (256 if n >= 65536 else 128)
+    return decode_kernel_config(n, gqa)
 
 
 def use_fp_decode_kernel(queries, keys, values, *, mask=None, sinks=None) -> bool:
     """Opt-in (MLX2_FP_DECODE_KERNEL=1) tiled decode for unquantized K/V."""
     if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") != "1":
         return False
-    if mask is not None or sinks is not None or mx.default_device() != mx.gpu:
+    if not fp_decode_attention_supported(queries, keys, values, mask=mask, sinks=sinks):
         return False
-    B, Hq, L, D = queries.shape
-    Hkv, N = keys.shape[1], keys.shape[2]
-    if L != 1 or N < FP_MIN_CONTEXT or Hq % Hkv or not 1 <= Hq // Hkv <= 8:
-        return False
-    if D not in (128, 256) or values.shape[-1] != D:
-        return False
-    return queries.dtype in (mx.bfloat16, mx.float16) and keys.dtype == queries.dtype == values.dtype
+    return keys.shape[2] >= FP_MIN_CONTEXT
 
 @lru_cache(maxsize=None)
 def _kernel_fp():
     return mx.fast.metal_kernel(
         name="mlx2_gqa_decode_attention_fp",
-        input_names=["q", "k", "v", "scale"],
+        input_names=["q", "k", "v", "scale", "mask"],
         output_names=["part_o", "part_l", "part_m"],
         source=_SOURCE_FP,
         ensure_row_contiguous=False,
@@ -411,30 +511,52 @@ def gqa_decode_attention_fp(
     values: mx.array,
     *,
     scale: float,
+    mask=None,
     blocks: Optional[int] = None,
     simdgroups: Optional[int] = None,
     head_split: Optional[int] = None,
 ) -> mx.array:
     """Tiled decode attention over unquantized K/V views (experimental)."""
+    if not fp_decode_attention_supported(queries, keys, values, mask=mask):
+        raise ValueError("Unsupported floating-point decode attention geometry")
     B, Hq, _, D = queries.shape
     Hkv, N = keys.shape[1], keys.shape[2]
     G = Hq // Hkv
-    tuned = decode_kernel_config(N, G)
-    simdgroups = simdgroups or tuned[0]
-    head_split = head_split or tuned[1]
-    blocks = blocks or tuned[2]
+    tuned = fp_decode_kernel_config(N, G)
+    simdgroups = tuned[0] if simdgroups is None else simdgroups
+    head_split = tuned[1] if head_split is None else head_split
+    blocks = tuned[2] if blocks is None else blocks
+    if any(type(value) is not int or value <= 0 for value in (simdgroups, head_split, blocks)):
+        raise ValueError("decode launch dimensions must be positive integers")
+    if simdgroups > 32:
+        raise ValueError("decode launch exceeds 1024 threads")
     if G % head_split or simdgroups % head_split:
         raise ValueError("head_split must divide the GQA group and the simdgroup count")
+    if (G * D + simdgroups * (G // head_split) * 32) * 4 > 32768:
+        raise ValueError("decode launch exceeds the 32 KiB threadgroup memory bound")
     P = blocks * simdgroups // head_split
+    if G == 16 and P > 8192:
+        raise ValueError("decode merge exceeds the 32 KiB threadgroup memory bound")
+    STATS["fp_decode_kernel_calls"] += 1
+    STATS["fp_decode_gqa16_calls"] += int(G == 16)
     part_o, part_l, part_m = _kernel_fp()(
-        inputs=[queries, keys, values, mx.array([scale], dtype=mx.float32)],
+        inputs=[queries, keys, values, mx.array([scale], dtype=mx.float32),
+                mx.broadcast_to(mx.array(True) if mask is None else mask, (B, Hq, 1, N))],
         template=[("T", queries.dtype), ("D", D), ("G", G), ("NS", simdgroups), ("HS", head_split)],
         grid=(32 * simdgroups, B * Hkv, blocks),
         threadgroup=(32 * simdgroups, 1, 1),
         output_shapes=[(B, Hq, P, D), (B, Hq, P), (B, Hq, P)],
         output_dtypes=[mx.float32, mx.float32, mx.float32],
     )
+    if G == 16:
+        return _kernel_fp_merge()(
+            inputs=[part_o, part_l, part_m],
+            template=[("T", queries.dtype), ("D", D), ("P", P)],
+            grid=(32 * B * Hq, 1, 1), threadgroup=(32, 1, 1),
+            output_shapes=[(B, Hq, 1, D)], output_dtypes=[queries.dtype],
+        )[0]
     top = part_m.max(axis=-1, keepdims=True)
     weight = part_l * mx.exp(part_m - top)
-    out = (weight[..., None] * part_o).sum(axis=-2) / weight.sum(axis=-1, keepdims=True)
+    denominator = weight.sum(axis=-1, keepdims=True)
+    out = (weight[..., None] * part_o).sum(axis=-2) / mx.where(denominator > 0, denominator, 1)
     return out.astype(queries.dtype)[:, :, None, :]

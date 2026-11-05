@@ -459,6 +459,8 @@ SAMPLING = VendorSampling.single(
 
 class LFM25VLAdapter:
     default_route = "ordinary"
+    # The adapter's recurrent cache contract currently admits only B1.
+    default_max_lanes = 1
     descriptor = LFM25_VL
     sampling_defaults = SAMPLING
 

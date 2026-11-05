@@ -675,6 +675,18 @@ class Model(nn.Module):
                 f"language_model.mtp.layers.{index}.mlp"
                 for index in range(args.mtp_num_hidden_layers)
             )
+        # Protected BF16 sidecars retain one tensor per expert. Stack in
+        # numeric expert order, preserving every source value and dtype.
+        for prefix in prefixes:
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                keys = [f"{prefix}.experts.{index}.{projection}.weight"
+                        for index in range(args.num_experts)]
+                if not any(key in normalized for key in keys):
+                    continue
+                target = f"{prefix}.switch_mlp.{projection}.weight"
+                if target in normalized or not all(key in normalized for key in keys):
+                    raise ValueError("incomplete or duplicate individual expert tables")
+                normalized[target] = mx.stack([normalized.pop(key) for key in keys])
         rename_packed_experts(
             normalized, prefixes, fuse_gate_up=qwen3_next._MOE_FUSED_GATE_UP
         )

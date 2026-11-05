@@ -228,6 +228,9 @@ class OutputParser:
     # ``<|tool_call_start|>``/``<|tool_call_end|>``) overrides only these.
     tool_open = "<tool_call>"
     tool_close = "</tool_call>"
+    # Template structure dropped from answer text only (never from a tool
+    # body or reasoning): Kimi's ``<|tool_calls_section_*|>`` wrapper.
+    content_structure_markers = ()
 
     def __init__(
         self, *, chat=False, thinking=False, tools=None, parse_tool=None, stops=(),
@@ -305,6 +308,11 @@ class OutputParser:
         self.tool_marker_scan_chars = 0
         self.max_tool_parse_chars = max_tool_parse_chars
 
+    def _tool_call_id(self, call, index):
+        """The id a parsed call is served with; wires that render ids back
+        into the prompt (Kimi's ``functions.<name>:<n>``) override this."""
+        return "call_" + uuid.uuid4().hex[:24]
+
     def _consume_buffer(self, count):
         self._buffer_origin += count
         self.buffer = self.buffer[count:]
@@ -335,6 +343,9 @@ class OutputParser:
             self._tool_chunks.append(self.buffer[:end])
             self._tool_buffered_chars += end
             self._consume_buffer(end)
+
+    def _drop_structure_marker(self, marker):
+        """Hook: a ``content_structure_markers`` entry was consumed."""
 
     def _emit(self, events, text):
         if self.channel == "content":
@@ -537,7 +548,7 @@ class OutputParser:
                                 "tool_calls": [
                                     {
                                         "index": self.tool_count + index,
-                                        "id": "call_" + uuid.uuid4().hex[:24],
+                                        "id": self._tool_call_id(call, self.tool_count + index),
                                         "type": "function",
                                         "function": {
                                             "name": call["name"],
@@ -577,12 +588,17 @@ class OutputParser:
             # marker policy.  A call after ``</think>`` still parses.
             if self.tools and self.channel != "reasoning_content":
                 markers[self.tool_open] = "tool"
+            if self.channel == "content":
+                for marker in self.content_structure_markers:
+                    markers.setdefault(marker, None)
             matches = [(position, marker) for marker in markers if (position := self._find_marker(marker)) >= 0]
             if matches:
                 end, marker = min(matches)
                 if end:
                     self._emit(events, self.buffer[:end])
-                if (
+                if markers[marker] is None:
+                    self._drop_structure_marker(marker)
+                elif (
                     marker == self.tool_open
                     and self.channel == "content"
                     and self._code.in_code()

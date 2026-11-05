@@ -242,5 +242,5 @@ def test_muse_adapter_refuses_assistant_with_dflash2_only_options(tmp_path):
         {"draft_model": str(draft), "target_verify_row_exact": True},
         {"draft_model": str(draft), "pairwise_selection": "batched"},
     ):
-        with pytest.raises(ValueError, match="linear host route"):
+        with pytest.raises(ValueError, match="requires the host route"):
             adapter._init_muse("/unused", execution_policy=policy)

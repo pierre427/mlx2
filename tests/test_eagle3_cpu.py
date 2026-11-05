@@ -323,6 +323,10 @@ def test_external_eagle3_greedy_matches_ordinary_and_pairs_context():
         assert receipt["kind"] == "external_eagle3"
     stats = batch.scheduler_stats
     assert stats["external_rounds"] > 0 and stats["proposed_tokens"] > 0
+    # Per-lane verify rounds match the lanes' own receipts, not cohort rounds.
+    assert stats["external_lane_rounds"] == sum(
+        final[uid].speculative_receipt["external_rounds"] for uid in ids
+    )
     assert stats["external_context_token_pairings"] > 0
     assert draft.stats["chain_steps"] > 0
 

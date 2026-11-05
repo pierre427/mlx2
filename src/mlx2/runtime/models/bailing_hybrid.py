@@ -382,9 +382,14 @@ class KimiDeltaAttention(nn.Module):
             )
             q_state = k_state = v_state = state
 
-        q, q_state = self.q_conv1d(self.q_proj(x), q_state, mask, lengths)
-        k, k_state = self.k_conv1d(self.k_proj(x), k_state, mask, lengths)
-        v, v_state = self.v_conv1d(self.v_proj(x), v_state, mask, lengths)
+        spans = None
+        if cache is not None and cache.speculating:
+            spans = cache.rollback_spans(length, mask)
+        snapshot = [q_state, k_state, v_state, recurrent_state]
+        raw = (self.q_proj(x), self.k_proj(x), self.v_proj(x))
+        q, q_state = self.q_conv1d(raw[0], q_state, mask, lengths)
+        k, k_state = self.k_conv1d(raw[1], k_state, mask, lengths)
+        v, v_state = self.v_conv1d(raw[2], v_state, mask, lengths)
 
         if cache is not None:
             cache[0] = q_state
@@ -409,6 +414,12 @@ class KimiDeltaAttention(nn.Module):
             self.head_dim,
         )
         beta_logits = self.b_proj(x).reshape(batch, length, self.num_heads)
+
+        if spans is not None:
+            self._record_rollback(
+                cache, length, spans, snapshot, raw, mask,
+                (q, k, v, decay_logits, beta_logits),
+            )
 
         output, recurrent_state = self._gated_delta_update(
             q,
@@ -441,6 +452,36 @@ class KimiDeltaAttention(nn.Module):
 
     def _gated_delta_update(self, *args, **kwargs):
         return gated_delta_update(*args, **kwargs)
+
+    def _record_rollback(self, cache, length, spans, snapshot, raw, mask, scan):
+        """Retain all three conv histories and the accepted KDA successor.
+
+        Speculative forwards disable reordered chunk scans. Replay therefore
+        uses exactly the forward's ordinary recurrence and bounded gate law.
+        The cache owns per-row valid depths, including right-padded slabs.
+        """
+        keep = self.conv_kernel - 1
+        padded = [
+            mx.concatenate([
+                history, value if mask is None else mx.where(mask[..., None], value, 0)
+            ], axis=1)
+            for history, value in zip(snapshot[:3], raw)
+        ]
+        use_kernel = not self.training
+        a_log = self.A_log.reshape(self.num_heads, 1)
+        dt_bias = self.dt_bias.reshape(self.num_heads, self.head_dim)
+        lower_bound = self.lower_bound
+
+        def rollback(m):
+            _, state = self._gated_delta_update(
+                *(value[:, :m] for value in scan), a_log, dt_bias,
+                state=snapshot[3],
+                mask=None if mask is None else mask[:, :m],
+                use_kernel=use_kernel, lower_bound=lower_bound,
+            )
+            return [*[mx.contiguous(value[:, m:m + keep]) for value in padded], state]
+
+        cache.record_rollback(length, rollback, snapshot, depths=spans or None)
 
 
 @mx.compile

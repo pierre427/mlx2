@@ -104,3 +104,11 @@ def test_flash_next_policy_declares_the_law_and_the_8192_cell():
     assert policy.batch_config(max_lanes=4, prefill_step=8192)["prefill_plan_exact"] is True
     off = FlashNextPolicy(prefill_plan_exact_slices=False)
     assert "prefill_plan_exact" not in off.batch_config(max_lanes=4, prefill_step=8192)
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None, [], {}])
+def test_plan_exact_policy_refuses_nonboolean_values(value):
+    # In particular, a JSON string "false" is truthy and used to silently
+    # select the exact-slice law despite the operator's apparent opt-out.
+    with pytest.raises(ValueError, match="prefill_plan_exact_slices must be boolean"):
+        FlashNextPolicy.from_mapping({"prefill_plan_exact_slices": value})

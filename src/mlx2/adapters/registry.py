@@ -323,8 +323,9 @@ def _qwen36_35b(path: Path, config: dict) -> AdapterResolution:
 
 def _muse_glimmer(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".muse_glimmer", __package__)
+    artifact = module.inspect_artifact(path)
     return AdapterResolution(
-        module.MuseGlimmerAdapter, module.MUSE_GLIMMER, module.inspect_artifact(path)
+        module.MuseGlimmerAdapter, module.descriptor_for_artifact(artifact), artifact
     )
 
 

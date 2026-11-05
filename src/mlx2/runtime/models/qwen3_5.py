@@ -124,7 +124,7 @@ class GatedDeltaNet(nn.Module):
         return normalize_gdn_qk(q, k)
 
     def _gated_delta_update(
-        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False
+        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False, allow_core=True
     ):
         return gated_delta_update(
             q,
@@ -143,6 +143,7 @@ class GatedDeltaNet(nn.Module):
             prefill_stats=getattr(self, "_prefill_scan_stats", None),
             prefill_segment_rows=getattr(self, "_prefill_scan_segment", 256),
             state_dtype=getattr(self, "_gdn_state_dtype", None),
+            allow_core=allow_core,
         )
 
     def _input_projections(self, inputs: mx.array):
@@ -213,7 +214,7 @@ class GatedDeltaNet(nn.Module):
         a = mx.where(live, a, -mx.inf)
         b = mx.where(live, b, -mx.inf)
         (_, restored_state) = self._gated_delta_update(
-            q, k, v, a, b, state, None, use_kernel
+            q, k, v, a, b, state, None, use_kernel, allow_core=False
         )
         n_keep = self.conv_kernel_size - 1
         positions = (ends[:, None] + mx.arange(n_keep))[..., None]
@@ -327,6 +328,7 @@ class GatedDeltaNet(nn.Module):
                     S0,
                     None,
                     use_kernel,
+                    allow_core=False,
                 )
                 return [mx.contiguous(ci[:, m : m + nk, :]), s_m]
 
@@ -357,6 +359,7 @@ class GatedDeltaNet(nn.Module):
             mask,
             not self.training,
             prefill=S > 17 and not bool(getattr(cache, "speculating", False)),
+            allow_core=not bool(getattr(cache, "speculating", False)),
         )
         if cache is not None:
             cache[1] = state

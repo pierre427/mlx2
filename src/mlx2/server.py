@@ -348,6 +348,53 @@ def validate_quiesce_body(body):
     return {"drain_timeout_seconds": timeout, "suspend": suspend}
 
 
+def validate_kernel_reload_body(body):
+    """Validate the public envelope; the worker validates bound source targets."""
+    if not isinstance(body, dict):
+        raise ValueError("kernel reload request must be a JSON object")
+    unknown = set(body) - {"modules", "settings", "calls", "drain_timeout_seconds"}
+    if unknown:
+        raise ValueError("unsupported kernel reload fields: " + ", ".join(sorted(unknown)))
+    try:
+        json.dumps(body, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise ValueError("kernel reload values must be finite JSON values") from error
+    options = {key: body.get(key, []) for key in ("modules", "settings", "calls")}
+    for key, value in options.items():
+        if not isinstance(value, list) or len(value) > 128:
+            raise ValueError(f"{key} must be a list with at most 128 entries")
+    if not any(options.values()):
+        raise ValueError("kernel reload requires modules, settings, or calls")
+    if any(not isinstance(name, str) or not name for name in options["modules"]):
+        raise ValueError("modules must contain nonempty module names")
+    if len(set(options["modules"])) != len(options["modules"]):
+        raise ValueError("modules must not contain duplicates")
+    for setting in options["settings"]:
+        if (not isinstance(setting, dict) or set(setting) != {"target", "value"}
+                or not isinstance(setting["target"], str) or not setting["target"]):
+            raise ValueError("each setting requires a target string and a value")
+    for call in options["calls"]:
+        if (not isinstance(call, dict) or "target" not in call
+                or set(call) - {"target", "args", "kwargs"}
+                or not isinstance(call["target"], str) or not call["target"]
+                or not isinstance(call.get("args", []), list)
+                or not isinstance(call.get("kwargs", {}), dict)):
+            raise ValueError("each call requires a target string, optional args list and kwargs object")
+    timeout = body.get("drain_timeout_seconds", 120)
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or not 0.1 <= timeout <= 3600):
+        raise ValueError("drain_timeout_seconds must be between 0.1 and 3600")
+    options["drain_timeout_seconds"] = float(timeout)
+    return options
+
+
+def validate_kernel_dev_config(source_root, admin_token):
+    if source_root is not None and admin_token is None:
+        raise ValueError("--kernel-dev-root requires --admin-token-file")
+    if source_root is not None and not Path(source_root).expanduser().is_dir():
+        raise ValueError("--kernel-dev-root must name an existing source directory")
+
+
 def validate_power_body(body):
     """``POST /v1/admin/power``: ``{"mode": ..., "watts": ...}``, both optional."""
     from .power_governor import MODES
@@ -866,6 +913,9 @@ def validate_request(
         "verify_bitexact",
         "user",
         "prefill_handoff",
+        "weight_overlay",
+        "layer_excision",
+        "expert_mask",
     }
     # OpenAI clients serialize an unset field as an explicit null
     # (openai-python sends ``"stop": null`` for ``stop=None``).  Treat a
@@ -880,6 +930,14 @@ def validate_request(
     unknown = set(body) - supported
     if unknown:
         raise ValueError(f"unsupported request fields: {', '.join(sorted(unknown))}")
+    for key in ("weight_overlay", "layer_excision", "expert_mask"):
+        if key in body:
+            name = body[key]
+            if (not isinstance(name, str) or not 1 <= len(name) <= 128
+                    or any(not (char.isascii() and (char.isalnum() or char in "_-")) for char in name)):
+                raise ValueError(f"{key} must be a bounded registered identifier")
+    if sum(key in body for key in ("weight_overlay", "layer_excision", "expert_mask")) > 1:
+        raise ValueError("weight surgery composition is unsupported")
     if adapter is not None:
         from .serving import normalize_adapter_request
 
@@ -1760,6 +1818,9 @@ def _generation_model(status, body):
     selected = body.get("model")
     if selected is None or selected == base:
         return base
+    if ((status.get("multi_lora") or {}).get("enabled")
+            and isinstance(base, str) and selected == base + ":base"):
+        return selected
     registered = (status.get("multi_lora") or {}).get("registered") or ()
     if isinstance(selected, str) and selected in registered:
         return selected
@@ -2237,6 +2298,7 @@ def handler_for(
     api_state_dir=None,
     tool_backend=None,
     admin_token=None,
+    weight_space_service=None,
     http_security=None,
     tenant_authenticator=None,
     agent_compat=None,
@@ -2249,6 +2311,8 @@ def handler_for(
     prefill_handoff_records=None,
     prefill_handoff_allow_provisional=False,
 ):
+    if weight_space_service is not None and admin_token is None:
+        raise ValueError("live weight-space tools require --admin-token-file")
     if (
         tenant_authenticator is not None
         and getattr(http_security, "api_key", None) is not None
@@ -3113,6 +3177,30 @@ def handler_for(
             if not self._authorize_request():
                 return
             path = self.path.split("?", 1)[0]
+            if path == "/v1/admin/kernels":
+                if admin_token is None:
+                    self.api_error(403, "kernel development requires --admin-token-file")
+                    return
+                if not self._authorize_admin():
+                    return
+                status = getattr(engine, "kernel_reload_status", None)
+                self.send_json(200, status() if callable(status) else {"enabled": False})
+                return
+            if path == "/v1/admin/weight-space/capabilities":
+                if admin_token is None:
+                    self.api_error(403, "weight-space tools require --admin-token-file")
+                    return
+                if not self._authorize_admin():
+                    return
+                if weight_space_service is None:
+                    self.api_error(404, "weight-space tools are disabled")
+                    return
+                try:
+                    self.send_json(200, weight_space_service.capabilities())
+                except (ValueError, RuntimeError) as error:
+                    self.api_error(409, str(error), code=getattr(error, "code", None),
+                                   mlx2=getattr(error, "receipt", None))
+                return
             if path == "/v1/admin/apc/branches":
                 if admin_token is None:
                     self.api_error(403, "APCv2 branches require --admin-token-file")
@@ -3399,7 +3487,10 @@ def handler_for(
                 self.send_json(
                     200 if status["healthy"] and service_state == "serving" else 503,
                     (
-                        {"status": service_state}
+                        # A stopped worker keeps the error that stopped it.
+                        {"status": service_state, "error": status["error"]}
+                        if service_state == "stopped"
+                        else {"status": service_state}
                         if service_state != "serving"
                         else {
                             "status": "ok" if status["healthy"] else "unavailable",
@@ -3597,6 +3688,87 @@ def handler_for(
             if not self._authorize_request():
                 return
             path = self.path.split("?", 1)[0]
+            if path == "/v1/admin/kernels/reload":
+                if admin_token is None:
+                    self.api_error(403, "kernel development requires --admin-token-file")
+                    return
+                if not self._authorize_admin():
+                    return
+                invoked = False
+                rejection_reason = "invalid_request"
+                validation_started = time.monotonic()
+                try:
+                    reload = getattr(engine, "reload_kernels", None)
+                    if not callable(reload):
+                        rejection_reason = "disabled"
+                        raise RuntimeError("kernel reload is disabled; configure --kernel-dev-root")
+                    options = validate_kernel_reload_body(self._read_json_body(max_bytes=65536))
+                    invoked = True
+                    try:
+                        self.send_json(200, reload(**options))
+                    except Exception as error:
+                        if not getattr(error, "kernel_reload_recorded", False):
+                            raise
+                        # The worker settled this request; its type says
+                        # nothing about whether code ran. Report the receipt.
+                        status = getattr(engine, "kernel_reload_status", None)
+                        state = status() if callable(status) else {}
+                        if state.get("phase") == "failed":
+                            logging.getLogger("mlx2.server").error("kernel reload failed: %s", error)
+                            self.api_error(500, f"{type(error).__name__}: {error}",
+                                           code="kernel_reload_failed", mlx2={"kernel_reload": state})
+                        else:
+                            self.api_error(getattr(error, "status", 409), str(error),
+                                           code=getattr(error, "code", None) or "kernel_reload_not_applied",
+                                           mlx2={"kernel_reload": state})
+                except (ValueError, SyntaxError, ImportError) as error:
+                    self.api_error(400, str(error))
+                except (RuntimeError, TimeoutError) as error:
+                    self.api_error(getattr(error, "status", 409), str(error),
+                                   code=getattr(error, "code", None),
+                                   mlx2=getattr(error, "receipt", None))
+                except OSError as error:
+                    self.api_error(409, str(error), code="kernel_reload_source_unavailable")
+                except Exception as error:
+                    # Edited code can raise any exception. The engine's receipt
+                    # says whether application started and admission is closed;
+                    # never turn a quarantined reload into a dropped connection.
+                    logging.getLogger("mlx2.server").exception("kernel reload failed")
+                    status = getattr(engine, "kernel_reload_status", None)
+                    self.api_error(
+                        500, f"{type(error).__name__}: {error}",
+                        code="kernel_reload_failed",
+                        mlx2={"kernel_reload": status()} if callable(status) else None,
+                    )
+                finally:
+                    # Once invoked, the engine records the outcome and timing.
+                    # Rejected HTTP envelopes never reach that boundary.
+                    if not invoked:
+                        counts = getattr(engine, "counts", None)
+                        if counts is not None:
+                            for key in ("requests", "rejected", "rejected_" + rejection_reason):
+                                count_add(counts, "kernel_reload_" + key, 1)
+                            count_add(counts, "kernel_reload_total_seconds_count", 1)
+                            count_add(counts, "kernel_reload_total_seconds_sum", time.monotonic() - validation_started)
+                return
+            if path == "/v1/admin/weight-space/call":
+                if admin_token is None:
+                    self.api_error(403, "weight-space tools require --admin-token-file")
+                    return
+                if not self._authorize_admin():
+                    return
+                if weight_space_service is None:
+                    self.api_error(404, "weight-space tools are disabled")
+                    return
+                try:
+                    body = self._read_json_body(max_bytes=min(body_limit, 2 << 20))
+                    self.send_json(200, weight_space_service.call(body))
+                except (ValueError, TypeError, json.JSONDecodeError) as error:
+                    self.api_error(400, str(error))
+                except RuntimeError as error:
+                    self.api_error(409, str(error), code=getattr(error, "code", None),
+                                   mlx2=getattr(error, "receipt", None))
+                return
             if path == "/v1/admin/apc/suspend-export":
                 if admin_token is None:
                     self.api_error(403, "Suspend export requires --admin-token-file")
@@ -6006,6 +6178,15 @@ def build_parser():
         help="owner-only 0600 file containing the loopback admin bearer token",
     )
     parser.add_argument(
+        "--kernel-dev-root", type=Path,
+        help="enable resident kernel development from this trusted source directory; "
+             "requires --admin-token-file, reloads purge APCv2 state",
+    )
+    parser.add_argument(
+        "--weight-space-config", type=Path, default=None,
+        help="owner-private live repair tools JSON; requires an admin token; disabled by default",
+    )
+    parser.add_argument(
         "--prefill-handoff",
         choices=("off", "export", "import", "both"),
         default="off",
@@ -6785,6 +6966,17 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--microscaling-prefill",
+        choices=("off", "experts", "mlp", "all"),
+        default="off",
+        help=(
+            "opt-in SC-MXFP4 W4A8 prefill on M5 GPUs; the adapter must declare "
+            "the scope and weights must already be compatible standard MXFP4. "
+            "Ordinary decode is preserved. INT8 activations are approximate; "
+            "unqualified serving disables reusable APCv2 state (default: off)"
+        ),
+    )
+    parser.add_argument(
         "--int8-prefill-q8",
         choices=("off", "per_row", "group64"),
         default="off",
@@ -7478,6 +7670,7 @@ def serving_engine_kwargs(
 ):
     """Map a parsed server namespace to the production engine constructor."""
     return {
+        "kernel_dev_root": getattr(args, "kernel_dev_root", None),
         "max_inflight": args.max_inflight,
         "max_lanes": args.max_lanes,
         "max_context": args.max_context,
@@ -7569,6 +7762,7 @@ def serving_engine_kwargs(
         "int8_prefill": int8_prefill_cli_value(
             args.int8_prefill, getattr(args, "int8_prefill_q8", "off")
         ),
+        "microscaling_prefill": getattr(args, "microscaling_prefill", "off"),
         "verify_bitexact": bool(getattr(args, "verify_bitexact", False)),
         "recurrent_state_codec": getattr(args, "recurrent_state_codec", "off"),
         "gpu_keep_warm": (
@@ -7743,8 +7937,24 @@ def main():
         parser.error(str(error))
     try:
         validate_prefill_handoff_config(args.prefill_handoff, admin_token)
+        validate_kernel_dev_config(args.kernel_dev_root, admin_token)
     except ValueError as error:
         parser.error(str(error))
+    weight_space_config = None
+    if args.weight_space_config is not None:
+        if admin_token is None:
+            parser.error("--weight-space-config requires --admin-token-file")
+        try:
+            from .experimental.weight_space.live import load_live_config
+
+            weight_space_config = load_live_config(args.weight_space_config)
+        except ImportError as error:
+            parser.error(
+                "--weight-space-config needs the optional 'weight-space-research' "
+                f"extra (pip install 'mlx2[weight-space-research]'): {error}"
+            )
+        except (OSError, ValueError, TypeError) as error:
+            parser.error(f"cannot use --weight-space-config: {error}")
     try:
         http_security = policy_for_bind(
             args.host,
@@ -7976,6 +8186,11 @@ def main():
 
     tensorfold_owned_router = None
     usage_ledger = None
+    weight_space_service = None
+    if weight_space_config is not None:
+        from .experimental.weight_space.live import LiveWeightSpaceService
+        weight_space_service = LiveWeightSpaceService(engine, weight_space_config)
+        engine.weight_space_live = weight_space_service
 
     def abort(message):
         # Everything from here on runs with the engine and the socket open
@@ -8080,6 +8295,7 @@ def main():
             api_state_dir=args.api_state_dir,
             tool_backend=tool_backend,
             admin_token=admin_token,
+            weight_space_service=weight_space_service,
             http_security=http_security,
             tenant_authenticator=tenant_authenticator,
             agent_compat=AgentCompatPolicy(

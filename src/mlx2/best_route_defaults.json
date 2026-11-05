@@ -20,6 +20,30 @@
  "campaign": "qualification/runs/best-route-defaults-20261021",
  "entries": [
   {
+   "checkpoint": "AX-Tiel-Coder-35B-A3B-MLX-AXQ-MXFP8-MTP@sha256:e50c224a715030005f931df75c2c6d0b4ca183ca5c583b09c9c2d6e9dc6aae5f",
+   "fingerprint": "e50c224a715030005f931df75c2c6d0b4ca183ca5c583b09c9c2d6e9dc6aae5f",
+   "adapter": "Qwen3635BA3BAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ordinary",
+    "kind": "ordinary",
+    "execution_policy": {
+     "tensorfold_prefill": true,
+     "tensorfold_prefill_backend": "native",
+     "moe_fused_gate_up": true
+    }
+   },
+   "reason": "decision row from another lane: Operator decision: Pierre approved the tested ordinary packed/fused profile on 2026-11-03 for this exact checkpoint. Prior B2 tokens exactly matched ordinary; timings mixed, no speed qualification. No AST/MTP promotion. Route: ordinary adapter=Qwen3635BA3BAdapter Execution-policy: {\"tensorfold_prefill\":true,\"tensorfold_prefill_backend\":\"native\",\"moe_fused_gate_up\":true}",
+   "evidence": {
+    "files": [
+     "qualification/runs/tiel-coder-20261103-summary/summary.json",
+     "qualification/policies/tiel-coder-optimized.json"
+    ],
+    "source_revision": "ff21c9f5a1106b9cfaec0799d1149e1b5d7e5ca5",
+    "decision_row": true
+   }
+  },
+  {
    "checkpoint": "Laguna-XS-2.1-MLX-8bit@sha256:7a4efe9fd2bea7996212fa3ce6d872455e960694d56c5c034af5a95d18fac401",
    "fingerprint": "7a4efe9fd2bea7996212fa3ce6d872455e960694d56c5c034af5a95d18fac401",
    "adapter": "LagunaXS21Adapter",

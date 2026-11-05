@@ -30,6 +30,22 @@ F16_PREFILL = tuple(f"gathered_f16_from_{n}" for n in (2049, 3072, 4096, 5120, 6
 # Bytes per capacity token per indexed layer: latent 512 + raw indexer 256,
 # plus the derived pooled keys (128 per 4 tokens) under incremental pools.
 COMMITTED_FLOATS, POOLED_FLOATS = 768, 32
+# glm53_mla_prompt=expanded_f16_v1 (runtime glm53_gguf._mla_expanded_prompt):
+# for the rows below the gathered threshold one layer at a time materializes
+# fp16 per-head K and V (64 heads x 256) over every key those rows see, plus a
+# half copy of the 512-wide latent. Per visible key, and per (row, key) for
+# the boolean mask; the fp16 q copy is per row.
+EXPANDED_KEY_BYTES = 2 * 64 * 256 * 2 + 512 * 2
+EXPANDED_ROW_BYTES = 64 * 256 * 2
+
+
+def _prompt_threshold(prefill):
+    """The gathered prompt threshold position of a sparse_prefill value
+    (glm53_sparse_attention.PREFILL_THRESHOLDS, without importing MLX); None
+    when every prompt row takes the dense consumer."""
+    named = {"dense_reference": None, "gathered_v1_8k": 8192, "gathered_v1_16k": 16384,
+             "gathered_v1_all": SPARSE_WIDTH - 2}
+    return named[prefill] if prefill in named else int(prefill.rsplit("_", 1)[1])
 
 
 def _sparse_policy(kernel_policy):
@@ -84,6 +100,10 @@ class Glm53CacheBudget:
     # rows and keeps RING_BUFFERS resident copies of the committed planes.
     capacity_block: int = 256
     indexed_plane_copies: int = 1
+    # glm53_mla_prompt=expanded_f16_v1 bound, and the gathered prompt
+    # threshold that caps the keys its expanded rows see (None: no cap).
+    mla_prompt_expanded: bool = False
+    prompt_threshold: int | None = None
 
     @classmethod
     def from_config(cls, config, *, mtp=False, tree_rows=0, kernel_policy=None, maximum=False):
@@ -110,6 +130,9 @@ class Glm53CacheBudget:
         kv_append = "reference" if kernel_policy is None else kernel_policy.get("glm53_kv_append", "reference")
         if kv_append not in ("reference", "rotate_v1"):
             raise ValueError("GLM-5.3 cache budget cannot price an unknown KV append policy")
+        mla_prompt = "reference" if kernel_policy is None else kernel_policy.get("glm53_mla_prompt", "reference")
+        if mla_prompt not in ("reference", "expanded_f16_v1"):
+            raise ValueError("GLM-5.3 cache budget cannot price an unknown MLA prompt policy")
         from ..runtime.models.glm53_kv_append_geometry import BASE_BLOCK, RING_BUFFERS
 
         return cls(
@@ -118,6 +141,9 @@ class Glm53CacheBudget:
             indexed_floats_per_token=COMMITTED_FLOATS + POOLED_FLOATS * pools,
             capacity_block=256 if kv_append == "reference" else BASE_BLOCK,
             indexed_plane_copies=RING_BUFFERS if kv_append == "rotate_v1" else 1,
+            mla_prompt_expanded=mla_prompt == "expanded_f16_v1",
+            prompt_threshold=_prompt_threshold(kernel_policy.get("glm53_sparse_prefill", "dense_reference"))
+            if mla_prompt == "expanded_f16_v1" else None,
         )
 
     @property
@@ -150,10 +176,19 @@ class Glm53CacheBudget:
         # Bound active-layer HC, KDA projection glue, MoE intermediates and
         # dense selected mask/reference attention workspace separately, plus
         # one live gathered sparse block when a gathered policy is bound.
+        expanded = 0
+        if self.mla_prompt_expanded and rows:
+            # An expanded row sees at most the keys before the threshold (or
+            # the 2048 unselected ones below TOPK); without a threshold, all.
+            seen = context_tokens
+            if self.prompt_threshold is not None:
+                seen = min(context_tokens, max(self.prompt_threshold - 1, SPARSE_WIDTH - 3))
+            expanded = seen * EXPANDED_KEY_BYTES + rows * (seen + EXPANDED_ROW_BYTES)
         return (
             rows * 4 * (12 * 4096 + 8 * 8192 + 8 * 2048 * 4 + 64 * 512 * 3)
             + rows * (context_tokens + 256) * 8
             + (self.sparse_workspace_bytes if rows else 0)
+            + expanded
         )
 
     def as_dict(self):

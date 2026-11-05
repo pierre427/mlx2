@@ -279,6 +279,17 @@ def chat_template(tokenizer, request: dict, *, tokenize: bool):
 
 
 class FlashNextAdapter:
+    def microscaling_supported(self):
+        """Shared dense/grouped SC-MXFP4 route, opt-in and unqualified."""
+        from .microscaling_support import projection_law_compatible
+        if not projection_law_compatible(self):
+            return ()
+        return ("experts", "mlp", "all")
+
+    def microscaling_decode_row_multiplier(self):
+        from .microscaling_support import decode_row_multiplier
+        return decode_row_multiplier(self.config)
+
     def chat_template_options(self):
         from ..agentic_chat import template_options
         return template_options(self.tokenizer)
@@ -908,7 +919,7 @@ class FlashNextAdapter:
                 tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
             )
             self.max_context = int(
-                config["text_config"].get("max_position_embeddings", 262144)
+                self._attention_topology_config.get("max_position_embeddings", 262144)
             )
             from ..runtime.models.gated_delta import gdn_core_status
 

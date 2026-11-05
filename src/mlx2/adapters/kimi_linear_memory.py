@@ -21,7 +21,7 @@ class KimiLinearCacheBudget:
     vocab_size: int
     conv_history: int
     checkpoint_copies: int
-    mla: str = "latent_tiled"
+    mla: str = "auto"
     # The artifact gate checks BF16 projections/norms; MLA and conv retain
     # that activation dtype. The recurrent matrix is always charged at F32.
     item_bytes: int = 2
@@ -30,7 +30,7 @@ class KimiLinearCacheBudget:
     transient_gib_per_lane: float = 1.76
 
     @classmethod
-    def from_config(cls, config, *, mtp=False, mla="latent_tiled"):
+    def from_config(cls, config, *, mtp=False, mla="auto"):
         if mtp:
             raise ValueError("Kimi Linear has no staged MTP memory contract")
         from .kimi_linear import validate_config
@@ -70,15 +70,29 @@ class KimiLinearCacheBudget:
 
     def prefill_transient_bytes(self, context_tokens, chunk_rows):
         n, rows = self._tokens(context_tokens), self._tokens(chunk_rows)
-        # Cache growth may hold old and new buffers; include the explicit
-        # visibility mask and the full vocabulary head for the prompt chunk.
+        # Cache growth may hold old and new buffers. Prompt chunks project one
+        # checkpoint row through the vocabulary head, and unpadded chunks use
+        # the causal offset mode: every MLA law builds causal visibility per
+        # block it reads (latent_single's whole block is bounded by its score
+        # block), never a [rows, context] array. Only a left-padded batch
+        # cache hands MLA an explicit bool mask, and on the serving routes
+        # that is decode/verify rows (<= 128): plan-exact prefill runs one
+        # unpadded prompt per forward.
         copies = n*self.kv_bytes_per_token
-        activations = rows*(16*self.heads*self.head_dim+8*self.hidden_size+self.vocab_size)*4
-        mask = n*rows
+        activations = rows*(16*self.heads*self.head_dim+8*self.hidden_size)*4 + self.vocab_size*4
+        mask = n*min(rows, 128)
+        if self.mla == "latent_single":
+            # Its one-pass mask, inside the 256 MiB score bound: [rows,
+            # context] <= 256 MiB / (4*heads), above the 128-row charge only
+            # at short contexts (n < 16K at 32 heads). auto sends > 128 rows
+            # to the latent law only past its 4 GiB expanded bound, which no
+            # shape inside the one-pass score bound reaches.
+            mask = max(mask, min(rows*n, (256 << 20)//(4*self.heads)))
         if self.mla == "auto":
             # Expanded prefix K/V is bounded by the module's 4 GiB switch;
             # beyond it the bounded latent score block applies.
-            expanded = n*self.heads*(self.nope_dim+self.shared_dim+self.value_dim)*self.item_bytes
+            # Fused D256 pads keys and values to 256 channels each.
+            expanded = n*self.heads*512*self.item_bytes
             scratch = max(min(2*expanded, 2*(4 << 30)), 3*min(rows*n*self.heads*4, 256 << 20))
         elif self.mla == "latent_single":
             # One score block, bounded by the module; larger shapes tile.

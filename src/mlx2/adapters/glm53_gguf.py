@@ -288,7 +288,9 @@ def _sparse_route_status():
 
     return {
         "indexer": glm53_gguf_indexer.route_status(),
-        "attention": glm53_sparse_attention.route_status(),
+        "attention": glm53_sparse_attention.route_status(
+            {key: sparse_default(key) for key in ("glm53_sparse_attention", "glm53_sparse_prefill")}
+        ),
         "kv_append": glm53_kv_append.route_status(),
     }
 
@@ -298,6 +300,9 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
     profile = "glm53-reap50-q3-k-m-gguf-ordinary-b1-v1"
+    # execution_config admits only physical B1; a bare server launch must
+    # select that supported width before loading this artifact.
+    default_max_lanes = 1
     prompt_lookup_default = False
     ast_tree_tiles = True
     # Native packed FP32 execution has its own exact-row contract, independent
@@ -777,6 +782,10 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "src/mlx2/runtime/models/glm53_sparse_attention_v2.py",
             "src/mlx2/runtime/gguf/kblock_metal.py",
             "src/mlx2/runtime/gguf/kblock_prefill_metal.py",
+            # Default glm53_expert_prefill=segmented_nax_fp16_v2: GPU plan,
+            # combine and NAX tile kernels.
+            "src/mlx2/runtime/gguf/segmented_prefill.py",
+            "src/mlx2/runtime/gguf/nax_metal.py",
             "src/mlx2/runtime/models/glm53_kv_append.py",
             "src/mlx2/runtime/models/glm53_kv_append_geometry.py",
             "src/mlx2/runtime/models/glm53_glue_metal.py",

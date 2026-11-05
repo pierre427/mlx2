@@ -286,9 +286,15 @@ def test_prefill_identity_reaches_settings_and_both_cache_namespaces(monkeypatch
     assert plain_seen["cache_semantics"] == ["text-token-v1"] * 2
 
 
-def test_prefill_candidate_fails_closed_without_qualification(monkeypatch):
-    _engine_settings(monkeypatch, 512, prefill_identity={"scan": {"chunk_size": 8}},
-                     expect_error="prefill candidates require qualification")
+def test_explicit_prefill_candidate_serves_unqualified_with_its_own_namespace(monkeypatch):
+    from mlx2.runtime.prefill_plan import apc_prefill_fingerprint
+
+    law = {"scan": {"chunk_size": 8}}
+    settings, seen, engine = _engine_settings(
+        monkeypatch, 512, prefill_identity=law, qualification_mode=False)
+    assert engine.status()["qualification"] == "unqualified"
+    assert settings["prefill_execution"] == law
+    assert seen["cache_semantics"] == [apc_prefill_fingerprint("text-token-v1", law)] * 2
 
 
 def test_adapter_selected_prefill_law_loads_without_qualification(monkeypatch):
@@ -297,10 +303,14 @@ def test_adapter_selected_prefill_law_loads_without_qualification(monkeypatch):
         monkeypatch, 512, prefill_identity=law, selected_identity=dict(law),
         qualification_mode=False)
     assert settings["prefill_execution"] == law
-    # Any other identity still fails closed, even beside a selected law.
-    _engine_settings(monkeypatch, 512, prefill_identity={"scan": {"chunk_size": 8}},
-                     selected_identity=law,
-                     expect_error="prefill candidates require qualification")
+    # An explicit alternate law uses its actual identity and stays unqualified;
+    # an adapter's selected baseline is not qualification permission.
+    alternate = {"scan": {"chunk_size": 8}}
+    settings, _, engine = _engine_settings(
+        monkeypatch, 512, prefill_identity=alternate, selected_identity=law,
+        qualification_mode=False)
+    assert settings["prefill_execution"] == alternate
+    assert engine.status()["qualification"] == "unqualified"
 
 
 def test_serving_reports_and_warns_on_an_unverified_mlx_build(monkeypatch, caplog):

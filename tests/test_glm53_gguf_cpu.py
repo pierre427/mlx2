@@ -419,14 +419,24 @@ def adapter_policy(policy):
     return adapter
 
 
-def test_adapter_profile_suffix_only_off_the_reference_law_and_refused_combinations():
+@pytest.mark.parametrize("metal_available", [False, True])
+def test_adapter_profile_suffix_only_off_the_reference_law_and_refused_combinations(
+    monkeypatch, metal_available
+):
     from mlx2.adapters.glm53_gguf import (
         SPARSE_DEFAULTS,
+        SPARSE_DEFAULTS_WITHOUT_METAL,
         SPARSE_KEYS,
         Glm53GGUFAdapter,
         _check_sparse_combination,
     )
 
+    # Host capability selects policy only; _load fails at the nonexistent
+    # artifact before loading weights or dispatching any device operation.
+    monkeypatch.setattr(mx.metal, "is_available", lambda: metal_available)
+    defaults = dict(SPARSE_DEFAULTS)
+    if not metal_available:
+        defaults.update(SPARSE_DEFAULTS_WITHOUT_METAL)
     base = Glm53GGUFAdapter.profile + ":ordinary:hc=reference:ast_target=serial:draft_activation=target"
     # Decode glue levers are on by default (2026-10-31); this test pins the reference law.
     glue = {"glm53_router": "reference", "glm53_kda_small": "reference",
@@ -437,14 +447,14 @@ def test_adapter_profile_suffix_only_off_the_reference_law_and_refused_combinati
     assert all(reference.kernel_policy[key] == values[0] for key, values in SPARSE_KEYS.items())
     # No sparse keys: the unqualified arm4 default (Pierre, 2026-10-31), its own profile.
     default = adapter_policy(dict(glue))
-    assert all(default.kernel_policy[key] == value for key, value in SPARSE_DEFAULTS.items())
+    assert all(default.kernel_policy[key] == value for key, value in defaults.items())
     assert default.profile == base + (
         ":indexer_pools=incremental_v1:indexer_select=topk_v1_kernel"
-        ":sparse_attention=gathered_v1:sparse_prefill=gathered_f16_from_8192"
+        ":sparse_attention=gathered_v1:sparse_prefill=" + defaults["glm53_sparse_prefill"]
     )
     # The default prompt law needs Metal; without it the fp32 gathered_v1_8k law.
     from mlx2.adapters.glm53_gguf import sparse_default
-    assert sparse_default("glm53_sparse_prefill") == "gathered_f16_from_8192"
+    assert sparse_default("glm53_sparse_prefill") == defaults["glm53_sparse_prefill"]
     assert sparse_default("glm53_sparse_attention") == "gathered_v1"
     sparse_policy = adapter_policy({**glue,
         "glm53_indexer_pools": "incremental_v1", "glm53_indexer_select": "topk_v1",
@@ -1183,7 +1193,10 @@ def test_adapter_identity_binds_the_kernel_files_unconditionally(monkeypatch):
         identities.append(adapter.source_identity)
     for identity in identities:  # the reference law and a default profile alike
         for path in ("src/mlx2/runtime/models/glm53_sparse_attention_v2.py",
-                     "src/mlx2/runtime/gguf/kblock_metal.py", "src/mlx2/runtime/gguf/kblock_prefill_metal.py"):
+                     "src/mlx2/runtime/gguf/kblock_metal.py", "src/mlx2/runtime/gguf/kblock_prefill_metal.py",
+                     # The default glm53_expert_prefill=segmented_nax_fp16_v2
+                     # runs the segmented plan/combine and NAX tile kernels.
+                     "src/mlx2/runtime/gguf/segmented_prefill.py", "src/mlx2/runtime/gguf/nax_metal.py"):
             assert len(identity[path]) == 64
 
 
@@ -1217,6 +1230,33 @@ def test_v2_workspace_budget_books_partials_not_gathered_rows():
 
 
 # ---- glm53_mla_prompt=expanded_f16_v1 ------------------------------------------
+
+
+def test_expanded_mla_prompt_budget_books_the_per_head_kv():
+    # expanded_f16_v1 materializes fp16 K and V (64 heads x 256) over every key
+    # an expanded row sees; the absorbed reference estimate does not cover it.
+    from mlx2.adapters.glm53_gguf_memory import Glm53CacheBudget
+
+    config = {"layer_types": ["linear_attention" if (i + 1) % 4 else "deepseek_sparse_attention"
+                              for i in range(45)]}
+    sparse_policy = {"glm53_indexer_pools": "incremental_v1", "glm53_sparse_attention": "gathered_v1"}
+
+    def transient(prefill, mla_prompt=None):
+        policy = {**sparse_policy, "glm53_sparse_prefill": prefill}
+        if mla_prompt is not None:
+            policy["glm53_mla_prompt"] = mla_prompt
+        return Glm53CacheBudget.from_config(config, kernel_policy=policy).prefill_transient_bytes(64000, 2048)
+
+    kv = lambda seen: 2 * 64 * seen * 256 * 2
+    for prefill, seen in (("dense_reference", 64000), ("gathered_f16_from_8192", 8191),
+                          ("gathered_v1_all", 2048)):
+        assert transient(prefill, "reference") == transient(prefill)  # default unchanged
+        extra = transient(prefill, "expanded_f16_v1") - transient(prefill)
+        assert kv(seen) <= extra < kv(seen) + seen * 1024 + 2048 * (seen + 64 * 256 * 2) + 1
+    assert transient("dense_reference", "expanded_f16_v1") - transient("dense_reference") > 3.9 * 2**30
+    with pytest.raises(ValueError, match="MLA prompt"):
+        Glm53CacheBudget.from_config(config, kernel_policy={"glm53_mla_prompt": "expanded_f32_v1"})
+
 
 
 def test_mla_prompt_policy_is_validated_and_off_by_default():

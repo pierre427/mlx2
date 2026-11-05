@@ -38,6 +38,7 @@ from .generate import (
     _crossed_counter_interval,
     _merge_caches,
     _right_pad_prompts,
+    _declared_model_callback,
 )
 from .prefill_plan import prompt_length_prefill_step
 from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
@@ -720,6 +721,9 @@ class Lane:
     maximum: int
     processors: list
     sampling: dict
+    # Adapter-validated, request-private encoder inputs. Consumed exactly once
+    # at an isolated prompt boundary, never carried into draft/decode rounds.
+    prefill_input: dict | None = None
     # Absolute prompt positions where prefill must end a slice.  These match
     # ordinary serving's numerical geometry and publish no checkpoint.
     prefill_cuts: deque = field(default_factory=deque)
@@ -1905,7 +1909,7 @@ class ExternalDraftBatchGenerator:
         self._decode_fit_waiting_uids = set()
         self._atomic_prefill_waiting_uids = set()
         self._decode_service_epoch = 0
-        self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0, "external_idle_allocator_reclaims": 0, "external_atomic_cohort_prefill_holds": 0, "external_atomic_cohort_releases": 0, "external_atomic_cohort_failures": 0}
+        self.scheduler_stats = {"external_rounds": 0, "external_lane_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0, "external_idle_allocator_reclaims": 0, "external_atomic_cohort_prefill_holds": 0, "external_atomic_cohort_releases": 0, "external_atomic_cohort_failures": 0}
         self.scheduler_stats.update(
             external_minimum_draft_proposals=self.minimum_draft_proposals,
             external_proposal_floor_raises=0,
@@ -2403,7 +2407,10 @@ class ExternalDraftBatchGenerator:
         if len(state_boundaries) != len(prompts):
             raise ValueError("state_boundaries must have one entry per external request")
         if any(value is not None for value in prefill_inputs):
-            raise ValueError("multimodal prefill is unavailable on external draft routes")
+            if _declared_model_callback(self.model, 'media_prefill_body') is None:
+                raise ValueError("multimodal prefill is unavailable on this external draft target")
+            if any(value is not None and (not isinstance(value, dict) or not value) for value in prefill_inputs):
+                raise ValueError('external media prefill requires a nonempty input mapping')
         for name, rows in (
             ("max_tokens", max_tokens), ("caches", caches), ("all_tokens", all_tokens),
             ("cache_states", cache_states), ("lane_rngs", lane_rngs),
@@ -2461,6 +2468,8 @@ class ExternalDraftBatchGenerator:
                 if not preserve:
                     todo = prefix + todo; prefix = []; target = None
             cuts = tuple(prefill_cuts[i] or ())
+            if prefill_inputs[i] is not None and (state is not None or prefix or len(todo) < 2):
+                raise ValueError('external media prefill requires a complete uncached prompt before its anchor')
             if any(
                 isinstance(position, bool) or not isinstance(position, int)
                 for position in cuts
@@ -2487,6 +2496,7 @@ class ExternalDraftBatchGenerator:
                 int(max_tokens[i]),
                 (logits_processors or [[]] * len(prompts))[i] or [],
                 dict((sampling_configs or [{}] * len(prompts))[i]),
+                prefill_input=None if prefill_inputs[i] is None else dict(prefill_inputs[i]),
                 prefill_cuts=deque(cuts),
                 state_boundaries=deque(planned),
             )
@@ -2586,6 +2596,8 @@ class ExternalDraftBatchGenerator:
         state.validate(self.binding, len(lane.history)); return state
 
     def _prefill_limit(self, lane):
+        if lane.prefill_input is not None:
+            return len(lane.remaining) - 1
         step = (
             prompt_length_prefill_step(
                 len(lane.history) + len(lane.remaining), maximum=self.prefill_step
@@ -2727,6 +2739,8 @@ class ExternalDraftBatchGenerator:
     def _prefill(self, lane, *, step=None, contended=False):
         if len(lane.remaining) > 1:
             planned = min(self._prefill_limit(lane), len(lane.remaining) - 1)
+            if lane.prefill_input is not None and step is not None and step < planned:
+                raise ValueError('external media prefill cannot split the encoder prompt')
             # A supplied step (fairness floor, decode-first width, admission
             # halving) may shorten the slice but never carry it past the next
             # planned cut or state boundary, as _prefill_many also clamps.
@@ -2737,7 +2751,17 @@ class ExternalDraftBatchGenerator:
             if lane.tail.shape[1]:
                 self._append_context(lane, lane.remaining[0])
             inputs = [lane.remaining.popleft() for _ in range(n)]
-            lane.tail = self.model.prefill_body(self.mx.array([inputs]), lane.cache, self.layers)
+            if lane.prefill_input is None:
+                lane.tail = self.model.prefill_body(self.mx.array([inputs]), lane.cache, self.layers)
+            else:
+                from .models.cache import compact_prompt_cache_windows
+                forward = _declared_model_callback(self.model, 'media_prefill_body')
+                lane.tail = forward(self.mx.array([inputs]), lane.cache, self.layers, **lane.prefill_input)
+                compact_prompt_cache_windows(lane.cache)
+                self.mx.eval(lane.tail, [c.state for c in lane.cache])
+                lane.prefill_input = None
+                _bump(self.scheduler_stats, 'external_media_prefill_rounds')
+                _bump(self.scheduler_stats, 'external_media_prefill_tokens', len(inputs))
             lane.history.extend(inputs)
             self.mx.eval(lane.tail, [c.state for c in lane.cache], [c.state for c in lane.draft_cache if c.offset])
             self._observe_prefill(
@@ -2760,7 +2784,7 @@ class ExternalDraftBatchGenerator:
         preceding target taps before the new target slab is formed.
         """
         lanes = [lane for lane in lanes if len(lane.remaining) > 1]
-        if len(lanes) < 2:
+        if len(lanes) < 2 or any(lane.prefill_input is not None for lane in lanes):
             return [
                 self._prefill(lane, step=step, contended=contended)
                 for lane in lanes
@@ -9029,6 +9053,9 @@ class ExternalDraftBatchGenerator:
             round_accepted = _delivered_accepts(decision)
             self.scheduler_stats["accepted_proposals"] += round_accepted
             self.scheduler_stats["proposed_tokens"] += count
+            # Per-lane verify rounds: the proposal totals above are summed per
+            # lane, while ``external_rounds`` counts cohort rounds.
+            self.scheduler_stats["external_lane_rounds"] += int(count > 0)
             lane.external_rounds += int(count > 0)
             lane.proposed += count
             lane.accepted += round_accepted
@@ -13841,7 +13868,7 @@ class ExternalDraftBatchGenerator:
         if self.external_varlen_prefill and active_count < self.capacity:
             candidates = [
                 lane for lane in ordered
-                if lane.anchor is None and len(lane.remaining) > 1
+                if lane.anchor is None and len(lane.remaining) > 1 and lane.prefill_input is None
             ][: self.capacity - active_count]
             if self._decode_first_round_mode == "all":
                 budget = self.decode_first.prefill_token_budget or self.prefill_step
@@ -13914,17 +13941,18 @@ class ExternalDraftBatchGenerator:
             if lane.anchor is not None or active_count >= self.capacity:
                 continue
             limit = self._prefill_limit(lane)
-            if contended:
+            if contended and lane.prefill_input is None:
                 limit = self._fair_step(
                     limit, contended=True, depth=len(lane.history)
                 )
-            limit = round_phases.prefill_width(self, limit)
+            if lane.prefill_input is None:
+                limit = round_phases.prefill_width(self, limit)
             append = min(limit, max(1, len(lane.remaining)-1))
             admitted = self._admit([lane], append, prefill=True)
             while not admitted and self._reclaim_for_admission():
                 admitted = self._admit([lane], append, prefill=True)
             initial_append = append
-            while not admitted and append > 1:
+            while not admitted and append > 1 and lane.prefill_input is None:
                 append = max(1, append // 2)
                 admitted = self._admit([lane], append, prefill=True)
             if admitted:

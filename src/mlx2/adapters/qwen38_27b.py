@@ -2335,6 +2335,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             return None
         return {"max_rows": 128, "chunk_above_max": True}
 
+    def microscaling_supported(self):
+        """Dense hybrid projections share SC-MXFP4; heads stay ordinary."""
+        from .microscaling_support import projection_law_compatible
+        return ("mlp", "all") if projection_law_compatible(self) else ()
+
     @staticmethod
     def int8_prefill_supported():
         # Dense MLP and (with "all") attention / GDN input and output

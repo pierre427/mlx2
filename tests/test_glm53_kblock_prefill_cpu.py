@@ -447,6 +447,30 @@ def test_prompt_decoded_admission_is_prompt_width_and_k_block_only():
     assert not prompt_rows_active(512)
 
 
+def test_prompt_decoded_linear_skips_tile_admitted_projections():
+    """Under glm53_dense_prefill=reference the default decoded_f16_v1 must not
+    take over projections a NAX tile admits (the documented no-fast-tile set
+    is the KDA K=128 low-rank rows); grouped k_b/v_b keep their own admission."""
+    from mlx2.runtime.gguf.weights import GGUFWeights
+
+    weights = SimpleNamespace(prompt_decoded_policy="decoded_f16_v1")
+    weights._prompt_decoded = lambda w: GGUFWeights._prompt_decoded(weights, w)
+    linear = GGUFWeights._prompt_decoded_linear
+    assert linear(weights, _packed((8192, 128), Q4_0))  # KDA ssm_f_b / ssm_g_b
+    assert GGUFWeights._prompt_decoded(weights, _packed((4096, 4096), Q3_K))
+    assert not linear(weights, _packed((4096, 4096), Q3_K))  # a dense projection with a tile
+    assert not linear(weights, _packed((8192, 4096), Q4_0))
+    # The built projection: a tile-admitted weight stays the packed reference.
+    provider = object.__new__(GGUFWeights)
+    shapes = {"dense": ((4096, 4096), Q3_K), "kda_f_b": ((8192, 128), Q4_0)}
+    provider.tensors = {name: _packed(*shape) for name, shape in shapes.items()}
+    provider.packed = lambda name: provider.tensors[name]
+    provider.dense_prefill_policy, provider.compute_policy = "reference", "reference"
+    provider.row_policy, provider.prompt_decoded_policy = "reference", "decoded_f16_v1"
+    assert provider._build_linear("dense") is provider.tensors["dense"]
+    assert callable(provider._build_linear("kda_f_b"))
+
+
 def test_kblock_levers_are_refused_under_the_reference_row_kernel(tmp_path):
     """shared_fold/kda_group/mla_group/tree_batch run only through the K-block
     row kernels; under glm53_row_kernel=reference they would fall back
@@ -476,6 +500,7 @@ def test_multi_linear_steps_aside_for_decoded_prompt_projections():
     class Stub:
         prompt_decoded_policy = "decoded_f32_v1"
         _prompt_decoded = GGUFWeights._prompt_decoded
+        _prompt_decoded_linear = GGUFWeights._prompt_decoded_linear
         scheduled_dense_calls = {}
 
         def _multi_plan(self, names, joined):

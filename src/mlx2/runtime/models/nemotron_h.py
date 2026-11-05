@@ -56,16 +56,51 @@ def _serial_exact_ssm_update(x, A_log, B, C, D, dt, dt_bias, state, limit, mask)
     state that ordinary decode never produces, so the committed stream would
     depend on how many tokens each verify window carried and on when a lane
     left MTP for plain decode.  Split such a strip into sequential-kernel
-    pieces that carry the fp32 state.  Masked (padded) strips keep the stock
-    law: their rows are not one-token decode steps.
+    pieces that carry the fp32 state. Masked strips use the same one-token
+    update, keeping the prior state on inactive lanes; a padded slab's width
+    must not select the matrix/SSD arithmetic for its valid tokens.
     """
     from .ssm import _SEQ_KERNEL_MAX_LEN
 
     steps = int(x.shape[1])
-    if mask is not None or state is None or steps <= _SEQ_KERNEL_MAX_LEN:
+    if mask is not None:
+        outputs = []
+        batch, _, heads, head_dim = x.shape
+        groups, state_dim = B.shape[-2:]
+        for position in range(steps):
+            row = slice(position, position + 1)
+            y, advanced = ssm_update(
+                x[:, row], A_log, B[:, row], C[:, row], D, dt[:, row], dt_bias,
+                state, limit, None,
+            )
+            previous = mx.zeros_like(advanced) if state is None else state
+            live = mask[:, position].reshape(batch, 1, 1, 1)
+            state = mx.where(live, advanced, previous)
+            # Match the ordinary masked readout on padding: unchanged state
+            # projected through C, then the direct D*x residual. Valid rows
+            # retain the native one-token kernel's output and arithmetic.
+            padding_y = (
+                previous.reshape(batch, groups, heads // groups, head_dim, state_dim)
+                @ C[:, row].reshape(batch, groups, 1, state_dim, 1)
+            ).reshape(batch, 1, heads, head_dim).astype(x.dtype)
+            padding_y = padding_y + x[:, row] * D.reshape(1, 1, heads, 1)
+            outputs.append(mx.where(live, y, padding_y))
+        return mx.concatenate(outputs, axis=1), state
+    if steps <= 1 or (state is not None and steps <= _SEQ_KERNEL_MAX_LEN):
         return ssm_update(x, A_log, B, C, D, dt, dt_bias, state, limit, mask)
     outputs = []
-    for start in range(0, steps, _SEQ_KERNEL_MAX_LEN):
+    first = 0
+    if state is None:
+        # The ordinary first decode token initializes its own state. A whole
+        # empty-state verify would otherwise take the matrix prefill law and
+        # change the state according to the proposal width.
+        y, state = ssm_update(
+            x[:, :1], A_log, B[:, :1], C[:, :1], D, dt[:, :1], dt_bias,
+            None, limit, None,
+        )
+        outputs.append(y)
+        first = 1
+    for start in range(first, steps, _SEQ_KERNEL_MAX_LEN):
         stop = min(steps, start + _SEQ_KERNEL_MAX_LEN)
         y, state = ssm_update(
             x[:, start:stop],
@@ -490,8 +525,12 @@ class NemotronHMamba2Mixer(nn.Module):
         cache: ArraysCache | None,
         mask: mx.array | None,
         gate: mx.array | None = None,
+        *,
+        serial_exact: bool | None = None,
     ) -> tuple[mx.array, bool]:
         batch_size, seq_len, _ = hidden_states.shape
+        if serial_exact is None:
+            serial_exact = cache is not None and cache.speculating
 
         hidden_states = hidden_states.reshape(
             batch_size, seq_len, self.num_heads, self.head_dim
@@ -550,7 +589,7 @@ class NemotronHMamba2Mixer(nn.Module):
                 self._ssm_counts["ordinary"] += 1
                 update = (
                     _serial_exact_ssm_update
-                    if cache is not None and cache.speculating
+                    if serial_exact
                     else ssm_update
                 )
                 y, state = update(
@@ -573,7 +612,7 @@ class NemotronHMamba2Mixer(nn.Module):
                 dt,
                 state,
                 mask,
-                serial_exact=cache is not None and cache.speculating,
+                serial_exact=serial_exact,
             )
         if cache:
             cache[1] = state
@@ -647,6 +686,13 @@ class NemotronHMamba2Mixer(nn.Module):
     ) -> mx.array:
         initial_conv = cache[0] if cache is not None else None
         initial_state = cache[1] if cache is not None else None
+        rollback_spans = None
+        if cache is not None and cache.speculating:
+            # Leading padding or an unexplained mask has no accepted-prefix
+            # indexing contract. Keep the ordinary masked forward, but let
+            # the cache invalidate the prior chain instead of recording a
+            # false span (or failing after the convolution already changed).
+            rollback_spans = cache.rollback_spans(hidden_states.shape[1], mask)
         projection_lengths = None
         if (
             self._projection_policy
@@ -714,7 +760,7 @@ class NemotronHMamba2Mixer(nn.Module):
             ],
             axis=-1,
         )
-        if cache is not None and cache.speculating:
+        if cache is not None and cache.speculating and rollback_spans is not None:
             steps = hidden_states_ssm.shape[1]
             # Save the post-convolution inputs and the pre-update recurrent
             # state. A rejected draft replays only the accepted prefix; merely
@@ -752,7 +798,10 @@ class NemotronHMamba2Mixer(nn.Module):
                 )
                 return [conv, restored]
 
-            cache.record_rollback(steps, rollback, [initial_conv, initial_state])
+            cache.record_rollback(
+                steps, rollback, [initial_conv, initial_state],
+                depths=rollback_spans or None,
+            )
         if ssm_sink is not None:
             # Everything needed to replay this update on an accepted prefix
             # during speculative rollback; tuple layout consumed by
@@ -775,7 +824,10 @@ class NemotronHMamba2Mixer(nn.Module):
                     self.conv_kernel_size,
                 )
             )
-        y, gate_fused = self._ssm(hidden_states_ssm, B, C, dt, cache, mask, gate=gate)
+        y, gate_fused = self._ssm(
+            hidden_states_ssm, B, C, dt, cache, mask, gate=gate,
+            serial_exact=ssm_sink is not None or rollback_spans is not None,
+        )
         if cache:
             cache.advance(y.shape[1])
         y = self.norm(y, None if gate_fused else gate)
@@ -2477,37 +2529,47 @@ class Model(nn.Module):
         to the verify forward) on the kept prefix — one ssm_update per
         Mamba layer since A_log/D/dt_bias are per-layer vectors.
         Single-sequence (B=1, unpadded) only."""
+        if (type(keep) is not int or type(block_size) is not int
+                or not 0 <= keep <= block_size):
+            raise ValueError("accepted prefix must satisfy 0 <= keep <= block_size")
         trim = block_size - keep
+        if trim == 0:
+            return
         ssm_caches = []
+        trimmable = []
         for c in caches:
             if c is None:
                 continue
             if c.is_trimmable():
-                if trim > 0:
-                    c.trim(trim)
+                trimmable.append(c)
             else:
-                if c.lengths is not None or c.left_padding is not None:
+                if c.lengths is not None or c.left_padding is not None or c.batch_size != 1:
                     raise ValueError(
                         "rollback_speculative_cache supports single-sequence "
-                        "caches only (lengths/left_padding must be None)"
+                        "caches only (one row, lengths/left_padding must be None)"
                     )
                 ssm_caches.append(c)
-        if not ssm_caches or trim == 0:
-            return
-        if len(ssm_caches) != len(ssm_states):
+        if ssm_caches and len(ssm_caches) != len(ssm_states):
             raise ValueError(
                 f"ssm_states has {len(ssm_states)} entries for "
                 f"{len(ssm_caches)} Mamba caches"
             )
 
+        restored = []
         for c, st in zip(ssm_caches, ssm_states):
             x, B, C, dt, A_log, D, dt_bias, tsl, state, mask, padded, K = st
+            if (x.shape[0] != 1 or x.shape[1] != block_size
+                    or padded.ndim not in (3, 4) or padded.shape[0] != 1
+                    or (padded.ndim == 3 and padded.shape[1] != block_size + K - 1)
+                    or (padded.ndim == 4 and padded.shape[1:3] != (block_size + 1, K - 1))):
+                raise ValueError("Mamba rollback tape does not match the verify block")
+            conv = (padded[:, keep] if padded.ndim == 4
+                    else mx.contiguous(padded[:, keep:keep + K - 1]))
             if keep == 0:
                 # Nothing kept: restore the pre-verify state verbatim.
-                c[1] = state
-                c[0] = padded[:, : K - 1]
+                restored.append((c, conv, state))
                 continue
-            _, new_state = ssm_update(
+            _, new_state = _serial_exact_ssm_update(
                 x[:, :keep],
                 A_log,
                 B[:, :keep],
@@ -2519,8 +2581,13 @@ class Model(nn.Module):
                 tsl,
                 None if mask is None else mask[:, :keep],
             )
-            c[1] = new_state
-            c[0] = mx.contiguous(padded[:, keep : keep + K - 1])
+            restored.append((c, conv, new_state))
+
+        # Validate every tape before changing any cache plane.
+        for c in trimmable:
+            c.trim(trim)
+        for c, conv, state in restored:
+            c[0], c[1] = conv, state
 
     def sanitize(self, weights):
         has_mtp_weights = any(k.startswith("mtp.") for k in weights)

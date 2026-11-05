@@ -37,7 +37,8 @@ def _bits(a):
 
 
 @pytest.mark.parametrize("steps", [9, 12, 16])
-def test_serial_exact_strip_matches_serial_decode(steps):
+@pytest.mark.parametrize("empty_state", [False, True])
+def test_serial_exact_strip_matches_serial_decode(steps, empty_state):
     from mlx2.runtime.models.nemotron_h import _serial_exact_ssm_update
     from mlx2.runtime.models.ssm import ssm_update
 
@@ -46,7 +47,8 @@ def test_serial_exact_strip_matches_serial_decode(steps):
     A_log = mx.log(mx.arange(1, heads + 1, dtype=mx.float32)).astype(mx.bfloat16)
     D = mx.ones((heads,), dtype=mx.bfloat16)
     dt_bias = (mx.random.normal((heads,), key=keys[0]) * 0.5).astype(mx.bfloat16)
-    state = (mx.random.normal((1, heads, head_dim, state_dim), key=keys[1]) * 0.1)
+    state = (None if empty_state else
+             mx.random.normal((1, heads, head_dim, state_dim), key=keys[1]) * 0.1)
     x = (mx.random.normal((1, steps, heads, head_dim), key=keys[2]) * 0.5).astype(mx.bfloat16)
     B = (mx.random.normal((1, steps, groups, state_dim), key=keys[3]) * 0.5).astype(mx.bfloat16)
     C = (mx.random.normal((1, steps, groups, state_dim), key=keys[4]) * 0.5).astype(mx.bfloat16)
@@ -153,3 +155,38 @@ def test_wide_verify_and_fallback_keep_ordinary_target_bits(monkeypatch, num_dra
     assert route == "ordinary_after_mtp_fallback"
     for want, have in zip(ordinary, fallback, strict=True):
         np.testing.assert_array_equal(have, want)
+
+
+@pytest.mark.parametrize("width,accepted", [(7, 3), (20, 18), (40, 18)])
+@pytest.mark.parametrize("empty_state", [False, True])
+def test_masked_exact_strip_keeps_ordinary_prefix_bits(width, accepted, empty_state):
+    from mlx2.runtime.models.nemotron_h import _serial_exact_ssm_update
+    from mlx2.runtime.models.ssm import ssm_update
+
+    mx.random.seed(11304)
+    heads, head_dim, groups, state_dim = 8, 16, 2, 32
+    x = (mx.random.normal((1, width, heads, head_dim)) * .1).astype(mx.bfloat16)
+    b, c = [(mx.random.normal((1, width, groups, state_dim)) * .1).astype(mx.bfloat16)
+            for _ in range(2)]
+    dt = (mx.random.normal((1, width, heads)) - 3).astype(mx.bfloat16)
+    initial = None if empty_state else mx.random.normal((1, heads, head_dim, state_dim)) * .1
+    a_log, d, bias = mx.zeros(heads), mx.ones(heads, mx.bfloat16), mx.zeros(heads)
+    limit = (0., float("inf"))
+    mask = mx.arange(width)[None, :] < accepted
+    out, candidate = _serial_exact_ssm_update(
+        x, a_log, b, c, d, dt, bias, initial, limit, mask,
+    )
+    expected, ys = initial, []
+    for pos in range(accepted):
+        y, expected = ssm_update(
+            x[:, pos:pos + 1], a_log, b[:, pos:pos + 1], c[:, pos:pos + 1], d,
+            dt[:, pos:pos + 1], bias, expected, limit,
+        )
+        ys.append(y)
+    np.testing.assert_array_equal(_bits(candidate), _bits(expected))
+    np.testing.assert_array_equal(_bits(out[:, :accepted]), _bits(mx.concatenate(ys, axis=1)))
+    next_args = (x[:, :1], a_log, b[:, :1], c[:, :1], d, dt[:, :1], bias)
+    candidate_next = ssm_update(*next_args, candidate, limit)
+    expected_next = ssm_update(*next_args, expected, limit)
+    for actual, wanted in zip(candidate_next, expected_next):
+        np.testing.assert_array_equal(_bits(actual), _bits(wanted))

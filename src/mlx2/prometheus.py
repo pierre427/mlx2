@@ -219,6 +219,24 @@ class PrometheusBuilder:
         lines.append(f"{name}_count{suffix} {snapshot.count}")
         self._samples.setdefault(name, []).append((suffix, tuple(lines)))
 
+    def summary(
+        self,
+        name: str,
+        help_text: str,
+        *,
+        count: int,
+        total: float,
+        labels: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Expose cumulative observations without inventing client quantiles."""
+        self._family(name, "summary", help_text)
+        suffix = self._labels(labels)
+        lines = (
+            f"{name}_sum{suffix} {_number(total)}",
+            f"{name}_count{suffix} {count}",
+        )
+        self._samples.setdefault(name, []).append((suffix, lines))
+
     def render(self) -> str:
         # Each family is one group: HELP, TYPE, then its samples. Parsers
         # attach samples to the most recent TYPE line, so interleaving
@@ -498,6 +516,9 @@ _ENGINE_EVENTS = {
             "fanout_capsule_close",
             "usage_reservation_release",
             "exact_decode_checkpoint_close",
+            "weight_overlay_release",
+            "layer_excision_release",
+            "expert_mask_release",
         )
     },
     "finish_observation_failures": ("request_finish", "observation_failed"),
@@ -608,6 +629,7 @@ _SCHEDULER_EVENTS = frozenset(
         "mtp_plain_fallback_request_opt_out",
         "mtp_plain_fallback_other",
         "external_rounds",
+        "external_lane_rounds",
         "accepted_proposals",
         "proposed_tokens",
         "ordinary_rounds",
@@ -648,6 +670,17 @@ _SCHEDULER_EVENTS = frozenset(
         "external_tree_pipeline_discards",
         "external_proposal_floor_raises",
         "external_allocator_reclaims",
+        # Reversible cost handoff (a low-acceptance session parked on the
+        # ordinary path and re-probed): rounds and decisions, no labels.
+        "external_cost_park_events",
+        "external_cost_parked_rounds",
+        "external_cost_parked_flush_rounds",
+        "external_cost_plain_probe_rounds",
+        "external_cost_plain_target_rounds",
+        "external_cost_reprobe_events",
+        "external_cost_cohort_park_decisions",
+        "external_cost_cohort_reengage_decisions",
+        "external_cost_cohort_reprobe_events",
         "memory_deferred",
         "memory_pressure_evictions",
         "stream_page_ins_total",
@@ -674,6 +707,19 @@ _SCHEDULER_EVENTS = frozenset(
         "pld_rotating_replay_rebuilds",
         "pld_cow_snapshots",
         "pld_cow_fallbacks",
+        # Cost-aware PLD latch decisions (runtime.pld.PLD_COST_LATCH_COUNTERS).
+        "pld_cost_activations",
+        "pld_cost_parks",
+        "pld_cost_reentries",
+        "pld_cost_shadow_lookups",
+        "pld_cost_shadow_trials",
+        "pld_cost_shadow_matches",
+        "pld_cost_width_parks",
+        "pld_cost_memory_parks",
+        "pld_cost_memory_blocked_rounds",
+        "pld_cost_width1_cohort_splits",
+        "pld_parked_direct_rounds",
+        "pld_pipelined_rounds",
         "decode_fairness_prefill_chunks",
         "prefill_chunk_rounds_recorded",
         "prefill_chunk_varied_requests",
@@ -840,7 +886,7 @@ _MULTI_LORA_EVENTS = frozenset(
         "single_adapter_forwards", "rows_base", "rows_adapter", "slot_hits",
         "slot_loads", "slot_evictions", "slot_deferred", "registrations",
         "unregistrations", "structural_wraps", "materializations",
-        "delta_applications", "delta_skips",
+        "delta_applications", "delta_skips", "program_delta_applications",
     }
 )
 
@@ -880,8 +926,10 @@ def _copy_engine_state(engine: Any) -> tuple[dict[str, Any], dict[str, int], int
     if lock is not None and hasattr(engine, "snapshot"):
         with lock:
             snapshot = dict(getattr(engine, "snapshot", {}))
+            reported = getattr(engine, "_reported_service_state_locked", None)
             snapshot["service_state"] = str(
-                getattr(engine, "_service_state", "serving")
+                reported() if callable(reported)
+                else getattr(engine, "_service_state", "serving")
             )
             counts = dict(getattr(engine, "counts", {}))
             # Expert-stream and atlas counters live on the stream handle, not
@@ -891,6 +939,11 @@ def _copy_engine_state(engine: Any) -> tuple[dict[str, Any], dict[str, int], int
             if callable(stream_counters):
                 counts.update(stream_counters())
             queue_depth = int(getattr(engine, "queued_jobs", 0))
+            # An active or default weight program makes the route unqualified;
+            # status() applies the same override to its snapshot copy.
+            override = getattr(engine, "_weight_program_qualification_override", None)
+            if callable(override):
+                snapshot.update(override())
         return snapshot, counts, queue_depth
     status = dict(engine.status())
     return status, dict(status.get("counts") or {}), int(status.get("queue_depth", 0))
@@ -1289,6 +1342,7 @@ def _scheduler_mechanism(key: str) -> str:
         "accepted_proposals",
         "proposed_tokens",
         "external_rounds",
+        "external_lane_rounds",
         "draft_fallbacks",
         "external_draft_masked_positions",
         "external_ordinary_fast_path_rounds",
@@ -1324,6 +1378,17 @@ def _scheduler_mechanism(key: str) -> str:
         "external_minimum_draft_proposals",
         "external_proposal_floor_raises",
         "external_allocator_reclaims",
+        # Reversible cost handoff (a low-acceptance session parked on the
+        # ordinary path and re-probed): rounds and decisions, no labels.
+        "external_cost_park_events",
+        "external_cost_parked_rounds",
+        "external_cost_parked_flush_rounds",
+        "external_cost_plain_probe_rounds",
+        "external_cost_plain_target_rounds",
+        "external_cost_reprobe_events",
+        "external_cost_cohort_park_decisions",
+        "external_cost_cohort_reengage_decisions",
+        "external_cost_cohort_reprobe_events",
     }:
         return "external_speculative"
     if key == "fly_relaxed_accepts":
@@ -1433,6 +1498,43 @@ def _add_scheduler(builder: PrometheusBuilder, scheduler: Mapping[str, Any]) -> 
             )
 
 
+# Per-verify-round means derived from the cumulative scheduler counters, by
+# bounded speculative kind: (rounds, accepted drafts, verify proposals).
+_SPECULATIVE_ROUND_SHAPES = {
+    "prompt_lookup": ("pld_retrieval_cycles", "pld_accepted", "pld_proposed"),
+    "external_tree": ("external_tree_rounds", "external_tree_accepted_edges", "external_tree_nodes"),
+    # Chain proposal totals are summed per lane, so the divisor is per-lane
+    # verify rounds; cohort ``external_rounds`` would overstate the mean by
+    # the cohort width.  Snapshots without the per-lane counter emit nothing.
+    "external_chain": ("external_lane_rounds", "accepted_proposals", "proposed_tokens"),
+}
+
+
+def _add_speculative_round_shapes(builder: PrometheusBuilder, scheduler: Mapping[str, Any]) -> None:
+    """Acceptance length (committed tokens per verify round, bonus included)
+    and verify rows (anchor plus proposed rows or tree nodes) per round.
+
+    Chain means are emitted only when no tree round ran, because tree
+    rounds also move the generic proposal counters."""
+
+    def number(key):
+        raw = scheduler.get(key, 0)
+        return raw if isinstance(raw, (int, float)) and not isinstance(raw, bool) else 0
+
+    trees = number("external_tree_rounds")
+    for kind, (rounds_key, accepted_key, proposed_key) in _SPECULATIVE_ROUND_SHAPES.items():
+        rounds = number(rounds_key)
+        if rounds <= 0 or (kind == "external_chain" and trees):
+            continue
+        labels = {"kind": kind}
+        builder.gauge("mlx2_speculative_acceptance_length",
+                      "Mean committed tokens per verify round (accepted drafts plus the bonus token).",
+                      1 + number(accepted_key) / rounds, labels)
+        builder.gauge("mlx2_speculative_verify_rows",
+                      "Mean target verify rows per round (anchor plus proposed rows or tree nodes).",
+                      1 + number(proposed_key) / rounds, labels)
+
+
 def _add_segmented_mtp(builder: PrometheusBuilder, stats: Mapping[str, Any]) -> None:
     for key, raw in sorted(stats.items()):
         if not isinstance(raw, (int, float)) or isinstance(raw, bool):
@@ -1489,6 +1591,26 @@ def _add_cache_capsules(builder: PrometheusBuilder, stats: Mapping[str, Any]) ->
 def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:
     """Export only reviewed advanced-path fields from adapter diagnostics."""
 
+    route = execution.get("speculative_route")
+    if isinstance(route, str):
+        # Adapter-declared speculative route name: a closed vocabulary of
+        # lowercase words, anything else collapses to "other".
+        builder.gauge("mlx2_speculative_route_info",
+                      "Adapter speculative route selected at load (value is always one).", 1,
+                      {"route": route if re.fullmatch(r"[a-z0-9_]{1,48}", route) else "other"})
+    tensorfold_qmv = execution.get("tensorfold_qmv")
+    counts = tensorfold_qmv.get("counters") if isinstance(tensorfold_qmv, Mapping) else None
+    if isinstance(counts, Mapping):
+        for path, key in (("kernel", "kernel_calls"), ("stock", "stock_calls")):
+            builder.counter("mlx2_tensorfold_qmv_calls_total",
+                            "TensorFold Flash row-matvec projection calls by path (kernel or stock fallback).",
+                            int(counts.get(key, 0)), {"path": path})
+        builder.counter("mlx2_tensorfold_qmv_rows_total",
+                        "Activation rows served by the TensorFold Flash row-matvec kernel.",
+                        int(counts.get("kernel_rows", 0)))
+        builder.gauge("mlx2_tensorfold_qmv_installed_projections",
+                      "Projections the TensorFold Flash row matvec is installed on.",
+                      int(tensorfold_qmv.get("installed", 0)))
     media_cache = execution.get("media_feature_cache")
     if isinstance(media_cache, Mapping):
         for key in (
@@ -1517,8 +1639,48 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
             int(media_cache.get("bytes", 0)),
         )
 
+    # Adapter execution policy and artifact identity: one sample per bounded
+    # scalar key, value always one. Long or non-scalar values are omitted.
+    policy = execution.get("policy")
+    if isinstance(policy, Mapping):
+        for key in sorted(policy)[:64]:
+            value = policy[key]
+            if isinstance(value, (str, bool, int, float)) and len(str(value)) <= 64:
+                builder.gauge("mlx2_execution_policy_info",
+                    "Adapter execution policy choice; the sample value is always one.",
+                    1, {"key": str(key)[:64], "value": str(value).lower() if isinstance(value, bool) else str(value)})
+    artifact = execution.get("artifact")
+    if isinstance(artifact, Mapping):
+        builder.gauge("mlx2_artifact_info",
+            "Loaded artifact layout and pinned checkpoint; the sample value is always one.",
+            1, {name: str(artifact.get(name, "unknown"))[:128] for name in ("layout", "variant", "checkpoint")})
+    nax_gather = execution.get("moe_nax_gather")
+    if isinstance(nax_gather, Mapping):
+        calls = nax_gather.get("calls")
+        if isinstance(calls, Mapping):
+            for route in ("gather", "swiglu", "swiglu_map", "swiglu_split", "swiglu_split_map"):
+                builder.counter("mlx2_moe_nax_gather_calls_total",
+                    "Segmented NAX sorted-gather launches by route.", int(calls.get(route, 0)), {"route": route})
+        fallbacks = nax_gather.get("fallbacks")
+        if isinstance(fallbacks, Mapping):
+            for reason in sorted(fallbacks)[:32]:
+                builder.counter("mlx2_moe_nax_gather_fallbacks_total",
+                    "NAX gather candidates that fell back, by reason.", int(fallbacks[reason]),
+                    {"reason": str(reason)[:64]})
+        for name in ("not_candidates", "not_prefill"):
+            builder.counter(f"mlx2_moe_nax_gather_{name}_total",
+                "Sorted gathers never offered to the NAX kernel.", int(nax_gather.get(name, 0)))
     moe = execution.get("moe")
     if isinstance(moe, Mapping):
+        sort = moe.get("sort")
+        if isinstance(sort, Mapping):
+            for decision in ("auto_sorted", "auto_unsorted", "invariant_sorted", "unsorted_decode"):
+                builder.counter("mlx2_moe_sort_decisions_total",
+                    "SwitchGLU sorted/unsorted expert-gather decisions.", int(sort.get(decision, 0)),
+                    {"decision": decision})
+        if "router_tokens" in moe:
+            builder.counter("mlx2_moe_router_tokens_total", "Tokens routed by MoE routers.",
+                            int(moe.get("router_tokens", 0)))
         dispatches = moe.get("dispatches")
         if isinstance(dispatches, Mapping):
             for mode in ("scalar", "tile4"):
@@ -1604,11 +1766,17 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
     mechanism_events = {
         "kda": ("reference", "vector_kernel", "chunk32", "chunk_wy", "fused_projections", "merged_conv",
                 "fused_norm", "norm_fla_fp32", "norm_qwen_bf16", "multirow_calls", "single_row_calls",
-                "multirow_tokens", "single_row_tokens"),
+                "multirow_tokens", "single_row_tokens",
+                # Speculative rollback and packed-tree verify (Kimi KDA).
+                "rollback_records", "rollback_replays", "rollback_unstaged",
+                "tree_calls", "tree_nodes", "tree_levels"),
         "mla": ("expanded_sdpa", "latent_tiled", "latent_single", "latent_single_tiled",
-                "auto_expanded", "auto_latent",
+                "auto_expanded", "auto_latent", "expanded_fused_d256", "training_padded_sdpa", "segmented_rows",
                 "fused_mla_decode", "fused_mla_declined",
-                "multirow_calls", "single_row_calls", "multirow_tokens", "single_row_tokens"),
+                "expanded_flash192", "expanded_flash192_windows", "latent_flash",
+                "latent_flash_padded", "flash_declined",
+                "multirow_calls", "single_row_calls", "multirow_tokens", "single_row_tokens",
+                "tree_calls", "tree_nodes"),
     }
     for mechanism,events in mechanism_events.items():
         counts = execution.get(mechanism)
@@ -2197,6 +2365,185 @@ def _add_ast(
                 )
 
 
+def _add_kernel_reload(
+    builder: PrometheusBuilder,
+    engine: Any,
+    snapshot: Mapping[str, Any],
+    counts: Mapping[str, int | float],
+) -> None:
+    # The regular engine snapshot is written only at lifecycle transitions;
+    # read the current host-only phase so long drains remain observable.
+    get_status = getattr(engine, "kernel_reload_status", None)
+    status = get_status() if callable(get_status) else snapshot.get("kernel_reload")
+    status = status if isinstance(status, Mapping) else {}
+    phase = str(status.get("phase") or "idle")
+    phases = ("idle", "preparing", "draining", "purging", "applying", "failed", "unknown")
+    if phase not in phases:
+        phase = "unknown"
+    builder.gauge(
+        "mlx2_kernel_reload_enabled", "Whether resident kernel development is enabled.",
+        int(bool(status.get("enabled", False))),
+    )
+    builder.gauge(
+        "mlx2_kernel_reload_epoch", "Successful resident kernel changes in this process.",
+        int(status.get("epoch", 0)),
+    )
+    builder.gauge(
+        "mlx2_kernel_reload_in_progress", "Whether a resident kernel change is in progress.",
+        int(bool(status.get("pending")) or phase in {"preparing", "draining", "purging", "applying"}),
+    )
+    for state in phases:
+        builder.gauge(
+            "mlx2_kernel_reload_state", "Current resident kernel change phase; one bounded state is one.",
+            int(phase == state), {"state": state},
+        )
+    builder.counter(
+        "mlx2_kernel_reload_requests_total", "Resident kernel change requests, including rejected requests.",
+        int(counts.get("kernel_reload_requests", 0)),
+    )
+    for outcome in ("completed", "failed", "drain_timeout", "rejected"):
+        builder.counter(
+            "mlx2_kernel_reload_outcomes_total", "Final resident kernel change outcomes.",
+            int(counts.get(f"kernel_reload_{outcome}", 0)), {"outcome": outcome},
+        )
+    for reason in ("disabled", "busy", "invalid_request", "not_ready", "prepare", "owner_conflict",
+                   "worker_stopped", "weight_space_conflict", "other"):
+        builder.counter(
+            "mlx2_kernel_reload_rejections_total", "Resident kernel change requests rejected before application.",
+            int(counts.get(f"kernel_reload_rejected_{reason}", 0)), {"reason": reason},
+        )
+    for stage in ("purge", "apply", "other"):
+        builder.counter(
+            "mlx2_kernel_reload_failures_total", "Resident kernel change failures by bounded stage.",
+            int(counts.get(f"kernel_reload_failed_{stage}", 0)), {"stage": stage},
+        )
+    for stage in ("prepare", "drain", "purge", "apply", "total"):
+        builder.summary(
+            "mlx2_kernel_reload_duration_seconds", "Elapsed resident kernel change stage times, including failed stages.",
+            count=int(counts.get(f"kernel_reload_{stage}_seconds_count", 0)),
+            total=float(counts.get(f"kernel_reload_{stage}_seconds_sum", 0)),
+            labels={"stage": stage},
+        )
+    for kind in ("modules", "functions", "classes", "caches", "settings", "setter_calls", "layer_targets"):
+        builder.counter(
+            "mlx2_kernel_reload_applied_total", "Resident kernel objects changed or invalidated by successful application.",
+            int(counts.get(f"kernel_reload_{kind}", 0)), {"kind": kind},
+        )
+    for key, metric, help_text in (
+        ("weights_checked", "weight_checks", "Resident weight identity checks started during kernel application."),
+        ("weights_preserved", "weights_preserved", "Kernel applications that preserved resident weight identities."),
+        ("weights_failed", "weight_check_failures", "Kernel applications that failed resident weight identity checks."),
+    ):
+        builder.counter(f"mlx2_kernel_reload_{metric}_total", help_text, int(counts.get(f"kernel_reload_{key}", 0)))
+    for key, kind in (("entries", "entries"), ("sidecars", "sidecars"), ("parked", "parked_sessions")):
+        builder.counter(
+            "mlx2_kernel_reload_apcv2_purged_total", "APCv2 state removed before resident kernel changes.",
+            int(counts.get(f"kernel_reload_apc_{key}_purged", 0)), {"kind": kind},
+        )
+    builder.counter(
+        "mlx2_kernel_reload_apcv2_purged_bytes_total", "APCv2 resident bytes removed before kernel changes.",
+        int(counts.get("kernel_reload_apc_bytes_purged", 0)),
+    )
+    for key, metric, help_text in (
+        ("apc_disk_bytes_purged", "apcv2_disk_purged_bytes", "APCv2 disk bytes removed before kernel changes."),
+        ("host_prompt_entries_purged", "host_prompt_purged", "Host prompt cache entries removed before kernel changes."),
+        ("mlx_cache_bytes_released", "buffer_released_bytes", "MLX cached buffer bytes released before kernel changes."),
+    ):
+        builder.counter(f"mlx2_kernel_reload_{metric}_total", help_text, int(counts.get(f"kernel_reload_{key}", 0)))
+
+
+def _add_weight_space_metrics(builder: PrometheusBuilder, engine: Any) -> None:
+    from .runtime.weight_space_metrics import (
+        DURATION_BUCKETS,
+        EXPERT_COUNTERS,
+        EXPERT_GAUGES,
+        GAUGES,
+        OPERATIONS,
+        OUTCOMES,
+        unconfigured_runtime_state,
+        weight_space_metrics_snapshot,
+    )
+
+    collector = getattr(engine, "weight_space_metrics", None)
+    snapshot = collector.snapshot() if collector is not None else weight_space_metrics_snapshot()
+    for operation in sorted(OPERATIONS):
+        for outcome in sorted(OUTCOMES):
+            builder.counter("mlx2_weight_space_operations_total",
+                            "Host weight-space operations by bounded operation and outcome.",
+                            snapshot["events"].get((operation, outcome), 0),
+                            {"operation": operation, "outcome": outcome})
+        builder.counter("mlx2_weight_space_processed_bytes_total",
+                        "Bytes processed by host weight-space operations; repeated work counts again.",
+                        snapshot["bytes"].get(operation, 0), {"operation": operation})
+        row = snapshot["durations"].get(operation, {})
+        builder.histogram("mlx2_weight_space_operation_duration_seconds",
+                          "Host wall time of completed weight-space operations.",
+                          HistogramSnapshot(DURATION_BUCKETS,
+                                            tuple(row.get("buckets", [0] * len(DURATION_BUCKETS))),
+                                            row.get("count", 0), row.get("sum", 0.0)),
+                          {"operation": operation})
+    for name in sorted(GAUGES):
+        help_text = {
+            "quality_score_delta": "Latest supplied-array quality-score change; does not establish model-execution quality.",
+            "perplexity_delta": "Latest supplied-logit perplexity change; does not establish model-execution quality.",
+            "quantization_error_mse": "Latest supplied-weight reconstruction MSE; no model-execution quality claim.",
+            "memory_calibration_error_mse": "Latest held-out supplied-activation residual MSE; no recall-quality claim.",
+            "retention_error_mse": "Latest supplied-output retention MSE; no behavior-retention claim.",
+            "projection_delta_norm": "Sum of supplied-projection delta norms from the latest CPU evaluation.",
+            "quantization_overlay_bytes": "Quantized payload and metadata bytes across live host overlay banks.",
+            "quantization_overlay_tensors": "Unique tensors counted per live host overlay bank, summed across banks.",
+            "quantization_overlay_candidates": "Registered candidate views summed across live host overlay banks.",
+            "compiled_program_bytes": "Factor bytes in the latest exported program; not total live residency.",
+        }.get(name, "Latest host weight-space measurement or configuration; zero before activity.")
+        builder.gauge("mlx2_weight_space_" + name,
+                      help_text,
+                      snapshot["gauges"].get(name, 0))
+        builder.gauge("mlx2_weight_space_measurement_available",
+                      "Whether a host measurement or explicit configuration has been recorded.",
+                      int(name in snapshot.get("measured", [])), {"measurement": name})
+    for name in sorted(EXPERT_COUNTERS):
+        builder.counter("mlx2_weight_space_expert_" + name + "_total",
+                        "Cumulative sampled expert-residency activity across registered controllers.",
+                        snapshot["expert_counters"].get(name, 0))
+    for name in sorted(EXPERT_GAUGES):
+        builder.gauge("mlx2_weight_space_expert_" + name,
+                      "Current expert-residency state across registered live controllers.",
+                      snapshot["expert_gauges"].get(name, 0))
+    overlays = getattr(engine, "weight_overlays", None)
+    overlay_state = overlays.status() if overlays is not None else unconfigured_runtime_state()
+    for event in ("selected", "applied", "rejected", "provider_errors"):
+        builder.counter("mlx2_weight_space_overlay_events_total",
+                        "Runtime quantization-overlay operations by bounded event.",
+                        overlay_state.get("counts", {}).get(event, 0), {"event": event})
+    for name in ("bound_requests", "dequantized_bytes", "materialized_budget_bytes"):
+        builder.gauge("mlx2_weight_space_overlay_" + name,
+                      "Current runtime quantization-overlay reference-route state.",
+                      overlay_state.get(name, 0))
+    excision = getattr(engine, "layer_excision", None)
+    excision_state = excision.status() if excision is not None else unconfigured_runtime_state()
+    for event in ("selected", "rejected", "skipped_blocks", "healing_applications"):
+        builder.counter("mlx2_weight_space_layer_excision_events_total",
+                        "Runtime layer-excision operations by bounded event.",
+                        excision_state.get("counts", {}).get(event, 0), {"event": event})
+    for name in ("bound_requests", "healing_bytes"):
+        builder.gauge("mlx2_weight_space_layer_excision_" + name,
+                      "Current runtime layer-excision route state.", excision_state.get(name, 0))
+    masks = getattr(engine, "expert_masks", None)
+    mask_state = masks.status() if masks is not None else unconfigured_runtime_state()
+    for event in ("selected", "rejected", "masked_router_calls", "all_enabled_native_calls"):
+        builder.counter("mlx2_weight_space_expert_mask_events_total",
+                        "Runtime expert-mask operations by bounded event.",
+                        mask_state.get("counts", {}).get(event, 0), {"event": event})
+    builder.gauge("mlx2_weight_space_expert_mask_bound_requests",
+                  "Current requests bound to a host expert-mask view.", mask_state.get("bound_requests", 0))
+    for feature, state in (("quantization_overlay", overlay_state), ("layer_excision", excision_state),
+                           ("expert_mask", mask_state)):
+        for flag in ("implemented", "qualified", "selected", "observed_used"):
+            builder.gauge("mlx2_weight_space_runtime_state",
+                          "Distinct runtime mechanism states; observed use does not imply qualification.",
+                          int(state.get(flag) is True), {"feature": feature, "state": flag})
+
+
 def render_engine_metrics(
     engine: Any, *, tenant_id=None, include_request_metrics=True,
 ) -> str:
@@ -2246,14 +2593,16 @@ def render_engine_metrics(
         # cache, HTTP and other tenants' activity remain operator-only.
         _add_drafter_metrics(builder, engine, tenant_id=tenant_id)
         return builder.render()
+    _add_weight_space_metrics(builder, engine)
     service_state = str(snapshot.get("service_state") or "serving")
-    for state in ("serving", "draining", "quiesced", "suspended"):
+    for state in ("serving", "draining", "quiesced", "suspended", "kernel_reload_failed", "stopped"):
         builder.gauge(
             "mlx2_server_state",
             "Current quiesce lifecycle state; exactly one bounded state is one.",
             int(service_state == state),
             {"state": state},
         )
+    _add_kernel_reload(builder, engine, snapshot, counts)
     for key, metric, help_text in (
         ("quiesce_requests", "mlx2_quiesce_requests_total", "Admin quiesce requests."),
         ("drains_completed", "mlx2_drains_completed_total", "Drains completed without timeout."),
@@ -2452,6 +2801,7 @@ def render_engine_metrics(
     scheduler = snapshot.get("scheduler")
     if isinstance(scheduler, Mapping):
         _add_scheduler(builder, scheduler)
+        _add_speculative_round_shapes(builder, scheduler)
     _add_ast(builder, engine, scheduler)
     segmented = snapshot.get("segmented_self_mtp")
     if isinstance(segmented, Mapping):

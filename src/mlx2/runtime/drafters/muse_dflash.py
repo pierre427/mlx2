@@ -287,7 +287,7 @@ class MuseDFlashDraftModel(nn.Module):
         self.hidden_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self._target = None
-        self.stats = {"committed_positions": 0, "block_drafts": 0}
+        self.stats = {"committed_positions": 0, "block_drafts": 0, "tree_lattices": 0}
 
     @property
     def receipt_settings(self):
@@ -299,6 +299,8 @@ class MuseDFlashDraftModel(nn.Module):
             "block_attention": "bidirectional_full_block",
             "proposal_logits": "target_lm_head_raw",
             "proposal_distribution": "dense_target_head_law",
+            "tree_proposal_distribution": "independent_marginal_lattice",
+            "tree_lattice_candidates": 8,
             "law_version": MUSE_ASSISTANT_LAW_VERSION,
             "quantization": self.config.quantization,
         }
@@ -427,6 +429,57 @@ class MuseDFlashDraftModel(nn.Module):
                 tokens[row].append(token)
                 laws[row].append(q)
         return tokens, laws
+
+    def _tree_lattice(self, base, anchors):
+        """Independent trained marginals; no invented transition head."""
+        count = min(8, self.config.vocab_size)
+        candidates = mx.argpartition(base, -count, axis=-1)[..., -count:].astype(mx.int32)
+        unary = mx.take_along_axis(base, candidates, axis=-1).astype(mx.float32)
+        batch, depth = candidates.shape[:2]
+        return (candidates, unary, mx.zeros((batch, count), mx.float32),
+                mx.zeros((batch, max(0, depth - 1), count, count), mx.float32))
+
+    def start_tree(self, anchors, hidden, cache, max_nodes, *, forbidden_token_ids=None,
+                   lattice_positions=None, **options):
+        anchors = [int(value) for value in anchors]
+        if type(max_nodes) is not int or not 1 <= max_nodes <= 31:
+            raise ValueError("Muse tree node budget must be 1 through 31")
+        depth = min(max_nodes, self.config.block_size - 1)
+        if lattice_positions is not None:
+            depth = min(depth, int(lattice_positions) - 1)
+        if depth < 1 or not anchors or hidden.shape[0] != len(anchors):
+            raise ValueError("Muse tree proposal geometry differs")
+        rows = self._rows(cache)
+        if len(rows) != len(anchors):
+            raise ValueError("Muse tree cache rows differ")
+        self.append_context(hidden, cache)
+        base = self._block_logits(anchors, rows, depth)
+        candidates, unary, root, pair = self._tree_lattice(base, anchors)
+        if forbidden_token_ids is not None:
+            if len(forbidden_token_ids) != len(anchors):
+                raise ValueError("Muse tree forbidden-token rows differ")
+            for row, ids in enumerate(forbidden_token_ids):
+                for token in ids:
+                    unary[row] = mx.where(candidates[row] == int(token), -float('inf'), unary[row])
+        return {"pending": [candidates, unary, root, pair], "max_nodes": max_nodes}
+
+    def finish_tree(self, state, *, mark=None):
+        from .dspark import best_first_pair_tree
+
+        mx.eval(*state["pending"])
+        if mark is not None:
+            mark("tree_draft_wait")
+        candidates, unary, root, pair = (np.asarray(value) for value in state["pending"])
+        result = [best_first_pair_tree(candidates[row], unary[row], root[row], pair[row],
+                  children=4, max_nodes=state["max_nodes"]) for row in range(len(candidates))]
+        self.stats["tree_lattices"] += len(result)
+        if mark is not None:
+            mark("tree_search")
+        return result
+
+    def propose_tree(self, anchors, hidden, cache, max_nodes, *, mark=None, **options):
+        state = self.start_tree(anchors, hidden, cache, max_nodes, **options)
+        return self.finish_tree(state, mark=mark)
 
 
 Model = MuseDFlashDraftModel

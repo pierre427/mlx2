@@ -127,11 +127,11 @@ def main():
         x = mx.random.normal((1, 1, a.hidden_size)).astype(mx.bfloat16)
         for name in ("kernel", "kernel+fused_proj+norm"):
             timed(f"kda_decode_{name}", lambda: kda_run(x, arms[name], warm_state)[0], repeats=20, rows=1)
-        del kda
+        kda = None  # release the KDA layer before loading MLA
 
         mla = MultiLatentAttention(a)
         load_layer(mla, 3)
-        c, r = a.kv_lora_rank, a.qk_rope_head_dim
+        c = a.kv_lora_rank
         for context in [int(n) for n in args.contexts.split(",")]:
             # Realistic scale: latents pass the checkpoint's own kv_a path.
             hidden = mx.random.normal((1, min(context, 4096), a.hidden_size)).astype(mx.bfloat16)
@@ -170,7 +170,7 @@ def main():
                 for policy in ("latent_tiled", "latent_single"):
                     compare(f"mla_prefill_{policy}_vs_expanded", outputs["expanded"], outputs[policy],
                             context=context, rows=rows)
-            del latent, shared
+            latent = shared = None
             mx.clear_cache()
         receipt["mla_counters"] = dict(mla.calls)
         receipt["passed"] = all(row["finite"] for row in receipt["numerics"])

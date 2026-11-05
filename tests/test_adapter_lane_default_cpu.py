@@ -33,6 +33,26 @@ def test_explicit_max_lanes_is_never_replaced():
     assert apply_adapter_lane_default(args, _resolution(Nemotron35SuperAdapter)) == 4
 
 
+@pytest.mark.parametrize("adapter_name", ["glm53", "lfm25"])
+def test_fixed_width_adapters_bare_launch_selects_supported_execution_config(adapter_name):
+    from mlx2.adapters.glm53_gguf import Glm53GGUFAdapter
+    from mlx2.adapters.lfm25_vl import LFM25VLAdapter
+
+    adapter_type = {"glm53": Glm53GGUFAdapter, "lfm25": LFM25VLAdapter}[adapter_name]
+    adapter = object.__new__(adapter_type)
+    adapter.draft_model = None
+    args = build_parser().parse_args(["--model", "fixture"])
+    apply_adapter_lane_default(args, _resolution(adapter_type))
+    config = adapter.execution_config(max_lanes=args.max_lanes, prefill_step=512)
+    assert args.max_lanes == 1
+    assert config["segment_aware_cohort_size"] == 1
+
+    explicit = build_parser().parse_args(["--model", "fixture", "--max-lanes", "4"])
+    assert apply_adapter_lane_default(explicit, _resolution(adapter_type)) == 4
+    with pytest.raises(ValueError):
+        adapter.execution_config(max_lanes=explicit.max_lanes, prefill_step=512)
+
+
 def test_adapters_without_a_declaration_keep_the_server_default():
     from mlx2.adapters.muse_glimmer import MuseGlimmerAdapter
 

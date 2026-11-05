@@ -19,7 +19,7 @@ QUALIFICATION_MODULE_SHA256 = {
     "lane_qmm.py": "04984ccdde3ecf68b1994ab8c81c08f82607099ed7febd423057fcc906273f75",
     "lane_tree.py": "e6de53828708e4833fcf390bc1dd330377cbdd26629da235c9728822770b5839",
     "lane_widen.py": "66369189f5300c06af754c0d867b7f50a55519aadb2342fe05785275767e8b77",
-    "stream_attention.py": "ccedc112f5bcdec95626008466542f91953da8367532b5be7163d4014195651a",
+    "stream_attention.py": "f63756b6d2f5ce24a7b240215c4af3424c8f1e0e067c1978d9642722c2b7c0df",
     "stream_gdn.py": "f120c8c25c5e2712ee214b770200d621b7d0824acb01cafc8f1a9b04ababc9a0",
 }
 

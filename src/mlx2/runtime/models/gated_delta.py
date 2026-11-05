@@ -617,6 +617,7 @@ def gated_delta_update(
     prefill_stats=None,
     state_dtype=None,
     decay_input_float32: bool = False,
+    allow_core: bool = True,
 ) -> Tuple[mx.array, mx.array]:
     """``state_dtype``: the layer's storage class (``gdn_state``); ``None``
     is fp32.  A fresh state is created in it and a carried state of the
@@ -655,7 +656,10 @@ def gated_delta_update(
         )
         if result is not None:
             return result
-    if _can_use_core_gated_delta(q, k, v, g, state, mask):
+    # A speculative strip and every accepted-prefix replay must share the
+    # one-token recurrence. The core scan changes arithmetic with row count
+    # (notably across its 17-row admission boundary).
+    if allow_core and _can_use_core_gated_delta(q, k, v, g, state, mask):
         _count_gdn_core_call()
         chunking = {"chunk_size": _CORE_GDN_CHUNK_SIZE} if _CORE_ACCEPTS_CHUNK_SIZE else {}
         return _core_gated_delta_update(

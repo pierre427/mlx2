@@ -708,6 +708,7 @@ class MuseGlimmerModel(nn.Module):
         super().__init__()
         self.args = args
         self.embed_tokens = nn.Embedding(args.vocab_size, args.hidden_size)
+        self.hidden_size = args.hidden_size
         self.embed_eps = args.rms_norm_eps
         self.layers = [DecoderLayer(args, i) for i in range(args.num_hidden_layers)]
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
@@ -733,12 +734,17 @@ class MuseGlimmerModel(nn.Module):
         hidden_sink=None,
         *,
         row_exact=False,
+        inputs_embeds=None,
     ):
-        h = self.embed_tokens(inputs)
+        # A media owner supplies already-normalized text/image embeddings.
+        # Ordinary token input retains its original scaleless embedding norm.
+        h = self.embed_tokens(inputs) if inputs_embeds is None else inputs_embeds
+        if h.shape != (*inputs.shape, self.hidden_size):
+            raise ValueError('Muse input embedding dimensions differ')
         # Scaleless RMSNorm on the embeddings (not Gemma's sqrt scaling).
         def embed_norm(value):
             return mx.fast.rms_norm(value, None, self.embed_eps)
-        h = (
+        h = h if inputs_embeds is not None else (
             _row_exact_rows(
                 embed_norm, h, ("muse_embed_rms_norm", float(self.embed_eps))
             )
@@ -803,6 +809,7 @@ class Model(nn.Module):
         *,
         body_only=False,
         last_logits_only=False,
+        inputs_embeds=None,
     ):
         """Post-block target taps in ascending layer order, before final norm.
 
@@ -822,6 +829,7 @@ class Model(nn.Module):
             capture_layers=capture_layers,
             hidden_sink=taps,
             row_exact=row_exact,
+            inputs_embeds=inputs_embeds,
         )
         features = mx.concatenate(taps, axis=-1)
         if body_only:
@@ -1044,3 +1052,7 @@ class Model(nn.Module):
             else:
                 caches.append(KVCache())
         return caches
+
+    def attention_tree_rope_modules(self):
+        """Global layers deliberately have no positional rotation."""
+        return tuple(layer.self_attn for layer in self.layers if layer.self_attn.use_rope)

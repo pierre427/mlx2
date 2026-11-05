@@ -334,6 +334,11 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
     adapter_owned_default_policy_keys = DeepSeekV41MLXAdapter.adapter_owned_default_policy_keys | {'deepseek_source_experts','deepseek_dspark_admission','deepseek_source_expert_math','deepseek_source_dspark_oracle','deepseek_source_dspark_cache_bytes','deepseek_dspark_verify_schedule','deepseek_dspark_verify_costs','deepseek_dspark_draft_cost','deepseek_source_prefill_grid_rows'} | set(SOURCE_POLICY_CHOICES) | APPROXIMATE_POLICY_KEYS
     weight_streaming_modes = frozenset({"moe_experts"})
 
+    def expert_mask_binding(self):
+        from .deepseek_v41_source_masks import source_expert_mask_binding
+
+        return source_expert_mask_binding(self)
+
     @staticmethod
     def weight_streaming_max_lanes(execution_policy, *, mode):
         policy = source_policy(execution_policy)

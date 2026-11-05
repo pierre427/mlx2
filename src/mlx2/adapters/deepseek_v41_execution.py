@@ -16,8 +16,17 @@ POLICY_CHOICES = {
     # prefill chunk with at least one first-decoder-layer cone of rows after
     # it in the same prompt call skips every layer above the barrier
     # (Sushi's state-only chunks). See deepseek_v41_ced.state_only_admitted.
+    # It engages only in a prompt call that feeds several chunks (a whole-
+    # prompt offline call). The serving scheduler passes one prefill-step
+    # slice per call, so rows_after is 0 and it never engages there; the
+    # route receipt says so (CED_STATE_ONLY_SCOPE) and counts observed chunks.
     "deepseek_ced_state_only": ("reference", "after_cone_v1"),
 }
+CED_STATE_ONLY_SCOPE = (
+    "whole-prompt calls only: engages when one prompt call feeds a first-decoder-layer cone of rows "
+    "after a chunk; the serving scheduler passes one prefill-step slice per call (rows_after 0), so "
+    "it does not engage on served requests; see ced_state_only_observed_chunks"
+)
 
 
 def resolve_context_gate(policy):
@@ -85,10 +94,13 @@ def execution_receipt(model):
             "candidate_score_policy": getattr(model, "candidate_score_policy", "reference"),
             "ced": ced, "full_depth_prefill": ced == "reference",
             "ced_state_only": "after_cone_v1" if getattr(model, "ced_state_only", False) else "reference",
+            "ced_state_only_observed_chunks": getattr(model, "scheduled_kv_calls", {}).get("ced_state_only_chunks", 0),
             "supported_context": getattr(model, "context_limit", 65536),
             "long_context_evidence": "explicit unqualified profile" if getattr(model, "context_limit", 65536) > 65536 else "see exact checkpoint receipts",
             "approximate_replay": False,
             "scheduled_kv_calls": dict(getattr(model, "scheduled_kv_calls", {}))}
+    if getattr(model, "ced_state_only", False):
+        receipt["ced_state_only_scope"] = CED_STATE_ONLY_SCOPE
     if packed:
         receipt["packed_codec"] = getattr(model, "packed_codec_policy", "reference")
     return receipt

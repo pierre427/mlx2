@@ -48,22 +48,32 @@ def _without_kblock(source, pointers):
     return source
 
 
+def _bf16_store(source, before, after):
+    # Each V4.1 BF16 rounding point must land exactly once; a silent no-op
+    # here would change prefill arithmetic without failing anything.
+    if source.count(before) != 1:
+        raise GGUFError("V4.1 prefill: shared BF16 store anchor changed")
+    return source.replace(before, after, 1)
+
+
 SCAN_SOURCE = base.SCAN_SOURCE.replace("256", "512").replace("255", "511")
-GATE_SOURCE = (
-    _without_kblock(base.GATE_UP_SOURCE, ("w", "up")).replace(
-        "min(sums[index],10.0f)", "min(v41_bf16(sums[index]),10.0f)"
-    )
-    .replace(
-        "clamp(up_sums[index],-10.0f,10.0f)",
-        "clamp(v41_bf16(up_sums[index]),-10.0f,10.0f)",
-    )
-    .replace(
+GATE_SOURCE = _without_kblock(base.GATE_UP_SOURCE, ("w", "up"))
+for _before, _after in (
+    ("min(sums[m][index],10.0f)", "min(v41_bf16(sums[m][index]),10.0f)"),
+    (
+        "clamp(up_sums[m][index],-10.0f,10.0f)",
+        "clamp(v41_bf16(up_sums[m][index]),-10.0f,10.0f)",
+    ),
+    (
         "(gate/(1.0f+metal::precise::exp(-gate)))*u;",
         "v41_bf16((gate/(1.0f+metal::precise::exp(-gate)))*u*scores[order[rowbase+row]]);",
-    )
-)
-DOWN_SOURCE = _without_kblock(base.DOWN_SOURCE, ("w",)).replace(
-    "=sums[f*8+r*4+j];", "=v41_bf16(sums[f*8+r*4+j]);"
+    ),
+):
+    GATE_SOURCE = _bf16_store(GATE_SOURCE, _before, _after)
+DOWN_SOURCE = _bf16_store(
+    _without_kblock(base.DOWN_SOURCE, ("w",)),
+    "=sums[m][f*8+r*4+j];",
+    "=v41_bf16(sums[m][f*8+r*4+j]);",
 )
 COMBINE_SOURCE = base.COMBINE_SOURCE.replace("scores[original]*rows[", "rows[")
 HEAD = NAX_HEADER + BF16_HEADER[len(HEADER) :]

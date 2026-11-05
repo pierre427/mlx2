@@ -36,6 +36,30 @@ def test_refusal_accepts_flash_next_geometry():
     assert B1.refusal(q, k, v, ids, 40) is None
 
 
+def test_refusal_handles_empty_cache_geometry_and_wrong_index_dtype():
+    q, k, v, ids = _arrays()
+    assert B1.refusal(q, mx.array(0), mx.array(0), ids, 40) == "cache layout"
+    assert "multiple" in B1.refusal(q, k[:, :0], v[:, :0], ids, 40)
+    assert B1.refusal(q, k, v, ids.astype(mx.int64), 40) == "block ids dtype"
+
+
+def test_selection_requires_four_token_blocks_and_proven_causal_masks():
+    from types import SimpleNamespace
+    from mlx2.runtime.models.qsdpa_verify_metal import register_causal_mask
+
+    selection = SimpleNamespace(
+        block_size=4, batch=1, length=1, physical_width=41, causal_mask=None,
+    )
+    assert B1.selection_refusal(selection) is None
+    selection.block_size = 8
+    assert B1.selection_refusal(selection) == "block size"
+    selection.block_size = 4
+    selection.causal_mask = mx.ones((1, 1, 1, 41), dtype=mx.bool_)
+    assert B1.selection_refusal(selection) == "custom attention mask"
+    register_causal_mask(selection.causal_mask, None)
+    assert B1.selection_refusal(selection) is None
+
+
 @pytest.mark.parametrize(
     ("kwargs", "q_pos", "needle"),
     [
@@ -262,3 +286,40 @@ def test_mask_builders_do_not_run_on_a_call_the_b1_kernel_serves(monkeypatch):
         B1.set_enabled(previous)
     assert len(calls) == 1, "the B1 kernel path was not taken"
     assert after == before
+
+
+def test_selected_candidate_preserves_custom_token_exclusions(monkeypatch):
+    from qsa_oracle import tiny_args
+
+    mx.random.seed(7)
+    attn = Q.Attention(tiny_args(indexer_budget=8))
+    attn.eval()
+    hidden = mx.random.normal((1, 40, 16))
+    step = mx.random.normal((1, 1, 16))
+    # Only the newly appended token is visible. A block-id-only kernel
+    # cannot represent the exclusions inside its selected complete blocks.
+    mask = (mx.arange(41) == 40)[None, None, None, :]
+
+    def run():
+        cache = Q.QSAKVCache(attn.indexer.summary_identity)
+        mx.eval(attn(hidden, Q.qsa_attention_mask(hidden, cache), cache), cache.state)
+        result = attn(step, mask, cache)
+        mx.eval(result, cache.state)
+        return np.array(result)
+
+    previous = B1.set_enabled(False)
+    try:
+        reference = run()
+        monkeypatch.setattr(B1, "refusal", lambda *args, **kwargs: None)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("selected-block kernel discarded a custom mask")
+
+        monkeypatch.setattr(B1, "attention", forbidden)
+        B1.set_enabled(True)
+        before = B1.status()["declines"].get("custom attention mask", 0)
+        actual = run()
+        assert B1.status()["declines"]["custom attention mask"] == before + 1
+        np.testing.assert_array_equal(actual, reference)
+    finally:
+        B1.set_enabled(previous)

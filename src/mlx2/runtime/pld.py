@@ -56,6 +56,14 @@ from .rotating_replay import (
 from ..thinking_guard import stack_block_steer, verify_block_steer
 
 
+# Request-local cost-latch counters aggregated into ``pld_cost_<name>``
+# scheduler events (see ``_receipt``); the Prometheus allowlist names each.
+PLD_COST_LATCH_COUNTERS = (
+    "activations", "parks", "reentries", "shadow_lookups", "shadow_trials",
+    "shadow_matches", "width_parks", "memory_parks", "memory_blocked_rounds",
+)
+
+
 class PromptLookupLaneFailure(RuntimeError):
     """A sampled output is invalid for one prompt-lookup request."""
 
@@ -2385,8 +2393,22 @@ class PromptLookupBatchGenerator:
                 }
             )
         if cost is not None:
-            receipt["cost_latch"] = cost.receipt()
+            receipt["cost_latch"] = latch = cost.receipt()
             receipt["cost_width1_cohort_splits"] = lane.cost_width1_cohort_splits
+            # Aggregate the request-local latch decisions into scheduler
+            # counters (exported at /metrics) by delta since this lane's last
+            # receipt, so a long request reports as it runs.
+            exported = getattr(lane, "_latch_exported", None)
+            if exported is None:
+                exported = {}
+                object.__setattr__(lane, "_latch_exported", exported)
+            for name in PLD_COST_LATCH_COUNTERS:
+                value = int(latch.get(name, 0) or 0)
+                delta = value - exported.get(name, 0)
+                if delta > 0:
+                    key = "pld_cost_" + name
+                    self.scheduler_stats[key] = self.scheduler_stats.get(key, 0) + delta
+                exported[name] = value
         if lane.plain_only is not None:
             # Speculation was off for this whole request: every round was the
             # ordinary one-token step on the lane's own B1 caches.

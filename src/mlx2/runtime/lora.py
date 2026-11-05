@@ -8,9 +8,15 @@ tensor coverage, and reversible module replacement.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
+
+WEIGHT_PROGRAM_ARITHMETIC = "fp32_delta_round_once_v1"
 
 
 def read_lora_config(path):
@@ -48,7 +54,152 @@ def read_lora_config(path):
         raise ValueError("serving LoRA requires a nonempty explicit keys list")
     if len(set(keys)) != len(keys):
         raise ValueError("LoRA keys must be unique")
-    return path, {"rank": rank, "scale": float(scale), "keys": tuple(keys)}
+    result = {"rank": rank, "scale": float(scale), "keys": tuple(keys)}
+    # A leftover manifest cannot silently downgrade a compiled program to an
+    # ordinary adapter when its config marker is removed.
+    if "weight_program" in config or (path / "weight_program.json").exists():
+        result["weight_program"] = config.get("weight_program")
+    return path, result
+
+
+def inspect_lora_program(path, config, *, base_checkpoint=None, payload=None,
+                         require_base=True):
+    """Validate compiled programs while preserving the legacy LoRA format."""
+    if "weight_program" not in config:
+        return None
+    if require_base and not base_checkpoint:
+        raise ValueError("weight program requires the exact loaded base checkpoint")
+    from ..experimental.weight_space.programs import validate_program_artifact
+
+    program = validate_program_artifact(
+        path, expected_checkpoint=base_checkpoint, weights_payload=payload,
+    )
+    if program["numerical_policy"] != "unmerged_float32_factors":
+        raise ValueError("unsupported weight program numerical policy")
+    # Validation re-reads the config from disk; callers build modules and the
+    # fingerprint from ``config``, so it must be the one that was validated.
+    if (config["rank"] != program["rank"] or config["scale"] != 1.0
+            or tuple(config["keys"]) != tuple(t["target"] for t in program["targets"])
+            or config["weight_program"] != program):
+        raise ValueError("LoRA config does not match the validated weight program")
+    return program
+
+
+def lora_fingerprint(payload, rank, scale, keys, weight_program=None):
+    """Content identity; the historical identity is unchanged for plain LoRA."""
+    digest = hashlib.sha256()
+    digest.update(repr((rank, scale, tuple(sorted(keys)))).encode())
+    digest.update(payload)
+    if weight_program is not None:
+        digest.update(json.dumps({
+            "program_id": weight_program["program_id"],
+            "checkpoint": weight_program["checkpoint"],
+            "numerical_policy": weight_program["numerical_policy"],
+            "runtime_arithmetic": WEIGHT_PROGRAM_ARITHMETIC,
+        }, sort_keys=True, separators=(",", ":")).encode())
+    return digest.hexdigest()
+
+
+# Covered-call accounting under ``mx.compile``.  A wrapper counts each call by
+# running a callback; a compiled replay never re-enters Python, so a site that
+# traces covered modules compiles through ``compile_counting_calls``, which
+# logs the callbacks its trace ran and runs them again on every call.
+_CALL_TRACE = threading.local()
+
+
+def count_covered_call(count):
+    """Run ``count`` now, or log it for the compiled trace that is recording."""
+    stack = getattr(_CALL_TRACE, "stack", None)
+    if stack:
+        stack[-1].append(count)
+    else:
+        count()
+
+
+@contextmanager
+def deferred_call_counts():
+    """Hold covered-call counts until the block succeeds; drop them if it raises.
+
+    For a compiled site made of several calls (the PLE head and tail) whose
+    failure reruns the whole span eagerly: the eager rerun counts the calls,
+    so the abandoned compiled part must not count them too.
+    """
+    stack = getattr(_CALL_TRACE, "stack", None)
+    if stack is None:
+        stack = _CALL_TRACE.stack = []
+    recorder = []
+    stack.append(recorder)
+    try:
+        yield
+    finally:
+        stack.pop()
+    for count in recorder:
+        count_covered_call(count)
+
+
+def records_compiled_calls(module):
+    """True when ``module`` or a child counts its calls (needs counted compile)."""
+    return any(getattr(child, "records_compiled_calls", False)
+               for _name, child in module.named_modules())
+
+
+def compile_counting_calls(fn):
+    """``mx.compile(fn)`` whose every call runs the call counts its trace ran.
+
+    Counts apply after the compiled call returns, from the current state each
+    callback reads, so a call counts exactly what the eager forward would and
+    a failed trace counts nothing.  The replayed log is the latest trace's:
+    key one of these per traced signature (shapes, dtypes, flags), as the
+    compiled PLE chain does.  Not for ``shapeless`` traces.
+    """
+    import mlx.core as mx
+
+    replay = [()]
+
+    def traced(*args):
+        stack = getattr(_CALL_TRACE, "stack", None)
+        if stack is None:
+            stack = _CALL_TRACE.stack = []
+        stack.append([])
+        try:
+            result = fn(*args)
+        finally:
+            calls = tuple(stack.pop())
+        _CALL_TRACE.traced = calls
+        return result
+
+    compiled = mx.compile(traced)
+
+    def run(*args):
+        outer = getattr(_CALL_TRACE, "traced", None)
+        _CALL_TRACE.traced = None
+        try:
+            result = compiled(*args)
+            calls = _CALL_TRACE.traced
+        finally:
+            _CALL_TRACE.traced = outer
+        if calls is not None:
+            replay[0] = calls
+        for count in replay[0]:
+            count_covered_call(count)
+        return result
+
+    run.counts_calls = True
+    return run
+
+
+def weight_program_receipt(program, *, selected=False, observed_used=False):
+    if program is None:
+        return None
+    return {
+        key: program[key]
+        for key in ("program_id", "checkpoint", "source_revision", "construction",
+                    "numerical_policy", "approximate")
+    } | {
+        "runtime_arithmetic": WEIGHT_PROGRAM_ARITHMETIC,
+        "implemented": True, "qualified": False,
+        "selected": selected, "observed_used": observed_used,
+    }
 
 
 @dataclass
@@ -56,6 +207,16 @@ class LoRASession:
     name: str
     path: str
     originals: dict
+    weight_program: dict | None = None
+    fingerprint: str | None = None
+    # Called program-covered targets; one-element list shared with the
+    # installed wrappers.  Requests snapshot it at admission and report the
+    # delta, as multi-LoRA does per row.
+    program_applications: list | None = None
+
+    @property
+    def program_application_count(self):
+        return self.program_applications[0] if self.program_applications else 0
 
     def restore(self, model):
         from mlx.utils import tree_unflatten
@@ -63,14 +224,26 @@ class LoRASession:
         model.update_modules(tree_unflatten(list(self.originals.items())))
 
 
-def install_lora(model, *, name, path):
+def install_lora(model, *, name, path, base_checkpoint=None):
     import mlx.core as mx
     from mlx import nn
     from mlx.utils import tree_flatten, tree_unflatten
 
     path, config = read_lora_config(path)
+    payload = (path / "adapters.safetensors").read_bytes()
+    program = inspect_lora_program(
+        path, config, base_checkpoint=base_checkpoint, payload=payload,
+    )
+    applications = [0]
+
+    def count_application():
+        applications[0] += 1
 
     class ServingLoRALinear(nn.Module):
+        # A program's covered calls are counted, so compiled sites that trace
+        # this module must replay them (``compile_counting_calls``).
+        records_compiled_calls = program is not None
+
         def __init__(self, linear):
             super().__init__()
             output_dims, packed_input_dims = linear.weight.shape
@@ -83,6 +256,12 @@ def install_lora(model, *, name, path):
             self.lora_b = mx.zeros((config["rank"], output_dims))
 
         def __call__(self, value):
+            if program is not None:
+                # Only a called covered target counts as program engagement.
+                count_covered_call(count_application)
+                y = self.linear(value)
+                update = (value.astype(mx.float32) @ self.lora_a) @ self.lora_b
+                return (y.astype(mx.float32) + self.scale * update).astype(y.dtype)
             update = (value @ self.lora_a) @ self.lora_b
             return self.linear(value) + (self.scale * update).astype(value.dtype)
 
@@ -105,7 +284,7 @@ def install_lora(model, *, name, path):
         replacements.append((module_key, ServingLoRALinear(module)))
     model.update_modules(tree_unflatten(replacements))
     try:
-        weights = mx.load(str(path / "adapters.safetensors"))
+        weights = mx.load(BytesIO(payload), format="safetensors")
         parameters = dict(tree_flatten(model.parameters()))
         expected = {
             f"{key}.{leaf}"
@@ -133,4 +312,9 @@ def install_lora(model, *, name, path):
     except BaseException:
         model.update_modules(tree_unflatten(list(originals.items())))
         raise
-    return LoRASession(name=name, path=str(path), originals=originals)
+    return LoRASession(
+        name=name, path=str(path), originals=originals, weight_program=program,
+        program_applications=applications if program is not None else None,
+        fingerprint=lora_fingerprint(payload, config["rank"], config["scale"],
+                                     config["keys"], program),
+    )

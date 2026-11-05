@@ -300,7 +300,7 @@ class GGUFWeights:
                 return result.reshape(*x.shape[:-1], tensor.shape[1])
 
             return project
-        if self._prompt_decoded(weight):
+        if self._prompt_decoded_linear(weight):
             # No NAX tile admits this weight (K % 256 != 0: the KDA ssm_f_b /
             # ssm_g_b Q4_0 rows at K = 128); prompt rows decode it once and
             # run MLX's GEMM instead of the one-token row kernel.
@@ -367,6 +367,13 @@ class GGUFWeights:
             and weight.ggml_type in DECODED_F32_FORMATS
             and weight.shape[-1] % (64 if self.prompt_decoded_policy == "decoded_f16_v1" else 32) == 0
         )
+
+    def _prompt_decoded_linear(self, weight):
+        """Rank-2 admission: only projections no NAX dense tile admits. Under
+        glm53_dense_prefill=reference the tile-admitted projections keep the
+        packed law instead of silently moving to the decoded GEMM; under a
+        NAX dense policy those took the tile first, so nothing changes."""
+        return self._prompt_decoded(weight) and not _nax_candidate(weight.ggml_type, *weight.shape)
 
     def decoded(self, weight):
         """The weight's element values in the decoded policy's dtype, its own shape."""
@@ -635,7 +642,7 @@ class GGUFWeights:
         packed, spans = plan
         if dense_prefill_active(flats[0].shape[0]):
             return None
-        if prompt_rows_active(flats[0].shape[0]) and any(self._prompt_decoded(w) for w in packed):
+        if prompt_rows_active(flats[0].shape[0]) and any(self._prompt_decoded_linear(w) for w in packed):
             # A joined row launch would consume the KDA low-rank rows before
             # the decoded-f32 prompt law could; the separate projections take it.
             return None

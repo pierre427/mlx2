@@ -27,7 +27,15 @@ def long_prompt(chars, offset=0, code="QV-4471"):
     # Realistic, varied filler (never one repeated sentence): project docs.
     text, needle = [], f"The archive release code is {code}."
     for path in sorted((ROOT/"docs").rglob("*.md"))[offset:]:
-        text.append(path.read_text(errors="ignore"))
+        # Prose only: a slice ending inside a code fence gets continued as
+        # code instead of answered (ab-r3/r4, identically in every arm).
+        prose, fenced = [], False
+        for line in path.read_text(errors="ignore").splitlines():
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+            elif not fenced:
+                prose.append(line)
+        text.append("\n".join(prose))
         if sum(map(len, text)) > chars:
             break
     body = "\n".join(text)[:chars]
@@ -62,6 +70,7 @@ def main():
     parser.add_argument("--long-chars", type=int, default=32000)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--deep-chars", type=int, default=128000)
+    parser.add_argument("--deeper-chars", type=int, default=0, help="optional second deep cell")
     args = parser.parse_args()
     if args.output.exists() and any(args.output.iterdir()):
         raise RuntimeError("refusing nonempty A/B evidence directory")
@@ -73,9 +82,9 @@ def main():
     owner = json.loads((args.cpg_lock/"owner.json").read_text())
     lease = require_qualification_lease(task_id=owner["cpg_task"], generation=owner["cpg_generation"],
                                         cpg_owner_lock=args.cpg_lock)
-    from mlx2.adapters.kimi_linear import REPO, REVISION, inspect_artifact
+    from mlx2.adapters.kimi_linear import checkpoint_name, inspect_artifact
     arms = json.loads(args.arms.read_text())
-    receipt = {"checkpoint": REPO+"@"+REVISION+":"+inspect_artifact(args.model)["identity"]["fingerprint"][:16],
+    receipt = {"checkpoint": checkpoint_name(args.model)+":"+inspect_artifact(args.model)["identity"]["fingerprint"][:16],
                "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, cwd=ROOT).strip(),
                "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"],
                                                             text=True, cwd=ROOT).strip()),
@@ -116,6 +125,7 @@ def main():
     longs = [long_prompt(args.long_chars, offset, code)
              for offset, code in ((0, "QV-4471"), (40, "HB-2093"), (80, "TW-5518"))]
     deep, deep_code = long_prompt(args.deep_chars, 120, "KM-7730")
+    deeper = long_prompt(args.deeper_chars, 200, "PX-6614") if args.deeper_chars else None
     decodes = ["Write a detailed, multi-paragraph history of the printing press.",
                "Explain, step by step and at length, how a refrigerator moves heat.",
                "Describe in detail the life cycle of a star like the Sun."]
@@ -156,7 +166,7 @@ def main():
             row["long_runs"] = []
             for text, code in longs:
                 call("/v1/admin/apc/clear", {"reason": "ab-cell"}, admin=True)
-                got = chat(text, 16)
+                got = chat(text, 64)  # room past an opening code fence
                 got["oracle"] = code in got["content"].replace("–", "-")
                 row["long_runs"].append(got)
             row["decode_runs"] = []
@@ -166,6 +176,10 @@ def main():
             call("/v1/admin/apc/clear", {"reason": "ab-cell"}, admin=True)
             row["deep"] = chat(deep+"\nThen, after the code, write a long summary of the text.", 160)
             row["deep"]["oracle"] = deep_code in row["deep"]["content"].replace("–", "-")
+            if deeper:
+                call("/v1/admin/apc/clear", {"reason": "ab-cell"}, admin=True)
+                row["deeper"] = chat(deeper[0]+"\nThen, after the code, write a long summary of the text.", 96)
+                row["deeper"]["oracle"] = deeper[1] in row["deeper"]["content"].replace("–", "-")
             median = lambda xs: sorted(xs)[len(xs)//2]
             row["long"] = {"prefill_tps": median([r["prefill_tps"] for r in row["long_runs"]]),
                            "oracle": all(r["oracle"] for r in row["long_runs"])}
@@ -213,7 +227,10 @@ def main():
         print(json.dumps({k: row.get(k) for k in ("name", "cold_warm_identical", "quality_answer", "quality_strict")}
                          | {"prefill_tps": row["long"]["prefill_tps"], "decode_tps": row["decode"]["decode_tps"],
                             "deep_prompt": row["deep"]["prompt_tokens"], "deep_prefill_tps": row["deep"]["prefill_tps"],
-                            "deep_decode_tps": row["deep"]["decode_tps"], "deep_oracle": row["deep"]["oracle"]}),
+                            "deep_decode_tps": row["deep"]["decode_tps"], "deep_oracle": row["deep"]["oracle"]}
+                         | ({"deeper_prompt": row["deeper"]["prompt_tokens"], "deeper_prefill_tps": row["deeper"]["prefill_tps"],
+                             "deeper_decode_tps": row["deeper"]["decode_tps"], "deeper_oracle": row["deeper"]["oracle"]}
+                            if deeper else {})),
               flush=True)
     token_file.unlink()
     return 0 if all(arm["passed"] for arm in receipt["arms"]) else 1

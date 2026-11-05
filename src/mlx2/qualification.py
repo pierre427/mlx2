@@ -325,7 +325,8 @@ APPROVED_QUALIFICATION_HARNESS = {
     # Re-pinned 2026-10-24: explicit source-owned greedy/refusal sampling
     # scope requires named controls/repeat/refusal evidence and cannot claim
     # stochastic coverage; absence preserves the historical sampling suite.
-    "sha256": "57912d389c23a09efc5361204e2781c4e54cda5b6163ef89b288612c308ca0bb",
+    # Re-pinned 2026-11-03: source-bound SC-MXFP4 dispatch observation.
+    "sha256": "50d92f13e99e607c05705d22b9b898f1e449cabf2b89c4c7f732d5ac81088703",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -733,6 +734,10 @@ def required_feature_checks(settings):
     if (settings.get("int8_prefill") or {}).get("enabled") is True:
         # Any route: a selected int8 prefill policy must show engaged calls.
         features.add("feature_int8_prefill")
+    if (settings.get("microscaling_prefill") or {}).get("enabled") is True:
+        # SC weight folding is exact, but activation INT8 remains approximate.
+        # Selection must be accompanied by run-local, source-bound dispatch.
+        features.add("feature_microscaling_prefill")
     prefill = settings.get("prefill_execution") or {}
     if prefill.get("projection"):
         features.add("feature_prefill_projection")
@@ -2230,6 +2235,7 @@ def load_qualified_route(
         Fidelity.APPROXIMATE
         if settings.get("approximate_kv", {}).get("enabled") is True
         or (settings.get("int8_prefill") or {}).get("enabled") is True
+        or (settings.get("microscaling_prefill") or {}).get("enabled") is True
         # Restores of codec-stored recurrent state are approximate too.
         or (settings.get("recurrent_state_codec") or {}).get("enabled") is True
         else Fidelity.NUMERICALLY_BOUNDED

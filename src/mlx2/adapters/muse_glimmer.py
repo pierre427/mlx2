@@ -111,6 +111,17 @@ def inspect_artifact(model_path: str | Path) -> dict:
         record = (name, stat.st_size, stat.st_mtime_ns)
         records.append(record)
         digest.update(json.dumps(record).encode())
+    vision = None
+    if config.get('vision_config') is not None:
+        from .muse_glimmer_vision_candidate import inspect_artifact as inspect_vision
+        # An incomplete vision export can still be a valid text target; only
+        # the exact complete image layout gains a vision capability.
+        try:
+            vision = inspect_vision(path)
+            from .muse_glimmer_images import policy
+            vision['processor_policy'] = policy(path)
+        except (ValueError, OSError, KeyError):
+            vision = None
     return {
         "path": str(path),
         "fingerprint": digest.hexdigest(),
@@ -124,10 +135,19 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "sliding_window": args.sliding_window,
         "qualification": "pending",
         "supports_self_mtp": False,
+        "vision": vision,
     }
 
 
-def configure_environment() -> dict[str, str]:
+def descriptor_for_artifact(artifact):
+    if not artifact.get('vision'):
+        return MUSE_GLIMMER
+    from dataclasses import replace
+    return replace(MUSE_GLIMMER, capabilities=MUSE_GLIMMER.capabilities | {Capability.VISION},
+                   metadata={**MUSE_GLIMMER.metadata, 'image_serving': 'implemented_unqualified'})
+
+
+def configure_environment(*, ast=False) -> dict[str, str]:
     # Refuse an explicit TF32 value before the profile overwrites it
     # (sweep 1002 review item 6).
     require_process_numerics("the Muse-Glimmer profile")
@@ -157,6 +177,10 @@ def configure_environment() -> dict[str, str]:
     # Qwen TensorFold route. Muse cannot select that route, so retaining it
     # would expose unrelated source ownership in this process.
     os.environ.pop("MLX2_TENSORFOLD_SOURCE", None)
+    os.environ.pop("MLX2_TARGET_TREE_EXECUTION", None)
+    if ast:
+        profile.update(MLX2_QWEN_TARGET_EXECUTION="provider",
+                       MLX2_TARGET_TREE_EXECUTION="provider", MLX2_DFLASH_TOPOLOGY="tree15")
     os.environ.update(profile)
     assert_process_profile_applied("the Muse-Glimmer profile")
     return profile
@@ -373,6 +397,33 @@ DFLASH2_DEFAULT_NUM_DRAFT = 3
 # need not import the drafter (MLX).  ExternalDraftBatchGenerator floors the
 # multi-lane draft cap at min(this, num_draft).
 DFLASH2_MINIMUM_PROPOSAL_LENGTH = 3
+MUSE_AST_ROUTE = "muse_attention_tree_cohort_v1"
+
+
+def normalize_ast_policy(policy):
+    from .qwen38_27b import _tile_node_budgets
+    from ..runtime.ast_tree_proposals import parse_topology
+
+    allowed = {"draft_model", "num_draft", "batch_size_route", "ast_topology",
+               "ast_tiles", "ast_tile_rows", "ast_adaptive_rows", "pairwise_selection",
+               "proposal_composition", "cost_per_commit_handoff"}
+    if set(policy) - allowed or policy.get("batch_size_route") != MUSE_AST_ROUTE:
+        raise ValueError("Unsupported Muse AST policy")
+    if not policy.get("draft_model") or policy["draft_model"] in {"prompt_lookup", "pld"}:
+        raise ValueError("Muse AST tree route requires a learned drafter")
+    result = {"num_draft": 15, "pairwise_selection": "host",
+              "proposal_composition": False, "cost_per_commit_handoff": False,
+              "ast_adaptive_rows": False, **policy}
+    if (type(result["num_draft"]) is not int or not 1 <= result["num_draft"] <= 15
+        or result["pairwise_selection"] != "host"
+        or result["proposal_composition"] is not False
+        or result["cost_per_commit_handoff"] is not False
+        or type(result["ast_adaptive_rows"]) is not bool):
+        raise ValueError("Muse AST requires host tree verification without chain parking")
+    if "ast_topology" in result:
+        parse_topology(result["ast_topology"])
+    _tile_node_budgets(result, 4)
+    return result
 
 
 def normalize_external_policy(value):
@@ -380,6 +431,8 @@ def normalize_external_policy(value):
     from .external_draft_policy import DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION
 
     policy = dict(value or {})
+    if "batch_size_route" in policy:
+        return normalize_ast_policy(policy)
     allowed = {
         "draft_model",
         "num_draft",
@@ -497,6 +550,16 @@ def normalize_external_policy(value):
 
 class MuseGlimmerAdapter:
     default_route = "ordinary"
+    ast_tree_tiles = True
+    attention_tree_tiles = True
+    ast_tree_tile_dtype_gate = False  # Generic attention executor, not BF16-only GDN.
+    ast_prompt_lookup_tiles = False
+    ast_external_batch_size_route = MUSE_AST_ROUTE
+    default_ast_tile_rows = 16
+
+    @staticmethod
+    def ast_drafter_policy_defaults(drafter):
+        return {} if drafter in {'mtp', 'pld'} else {'ast_adaptive_rows': False}
     descriptor = MUSE_GLIMMER
     sampling_defaults = MUSE_GLIMMER_SAMPLING
     reasoning_effort_semantics = "reasoning_strength"
@@ -552,10 +615,8 @@ class MuseGlimmerAdapter:
     def int8_prefill_select(scope):
         """Text decoder layers only (``model.layers.*``).
 
-        This adapter's model is the text-only port (``Model.sanitize`` drops
-        ``vision_tower`` / ``vision_adapter`` / ``vision_projection``), so the
-        default classifier would pick the same modules today; the explicit
-        prefix keeps a future vision bridge (whose projector names,
+        The explicit decoder prefix keeps the vision tower and its projectors
+        (whose names,
         ``vision_adapter.fc1`` and ``vision_projection``, the default excluded
         segments do not cover) and the head out of scope."""
         from ..runtime.int8_prefill import EXCLUDED_SEGMENTS
@@ -671,6 +732,12 @@ class MuseGlimmerAdapter:
             "segment_aware_live_tip": False,
             "segment_aware_cohort_size": max_lanes,
         }
+        if (getattr(self, "external_policy", None) or {}).get("batch_size_route") == MUSE_AST_ROUTE:
+            from .qwen38_27b import _tile_node_budgets
+
+            config.update(batch_size_route=MUSE_AST_ROUTE, target_execution="attention_tree_v1",
+                          dynamic_tree_overflow="cohort", cost_per_commit_handoff=False,
+                          tree_node_budget_by_lanes=_tile_node_budgets(self.external_policy, 4))
         if (getattr(self, "external_policy", None) or {}).get("pairwise_selection") == "batched":
             # Only a selected non-default policy enters settings/receipts.
             config["pairwise_selection"] = "batched"
@@ -734,8 +801,15 @@ class MuseGlimmerAdapter:
         self._external_route_tag = "external-dflash2-v1"
         if self.external_policy:
             from .muse_dflash import is_assistant_artifact
+            from .muse_dspark import is_dspark_artifact
 
-            if is_assistant_artifact(self.external_policy["draft_model"]):
+            if is_dspark_artifact(self.external_policy["draft_model"]):
+                if self.external_policy.get("batch_size_route") != MUSE_AST_ROUTE:
+                    raise ValueError("Muse DSpark requires the AST tree route")
+                self._draft_kind = "dspark"
+                self._external_route_tag = "external-muse-dspark-mask-row-v1"
+                from .muse_dspark import inspect_drafter
+            elif is_assistant_artifact(self.external_policy["draft_model"]):
                 self._draft_kind = "assistant"
                 self._external_route_tag = "external-muse-dflash-assistant-v2"
                 unsupported = {
@@ -745,8 +819,8 @@ class MuseGlimmerAdapter:
                 } & set(execution_policy or {})
                 if unsupported or self.external_policy.get("pairwise_selection", "host") != "host":
                     raise ValueError(
-                        "the Muse assistant DFlash drafter supports the linear "
-                        f"host route only; unsupported: {sorted(unsupported) or ['pairwise_selection']}"
+                        "the Muse assistant DFlash drafter requires the host "
+                        f"route; unsupported: {sorted(unsupported) or ['pairwise_selection']}"
                     )
                 if "proposal_composition" not in (execution_policy or {}):
                     # The composition default is selected for DFlash2's
@@ -762,7 +836,8 @@ class MuseGlimmerAdapter:
                 raise ValueError("num_draft must be a positive integer below draft block size")
         path = Path(model_path).expanduser().resolve()
         self.identity = inspect_artifact(path)
-        self.environment = configure_environment()
+        self.descriptor = descriptor_for_artifact(self.identity)
+        self.environment = configure_environment(ast=self.external_policy.get("batch_size_route") == MUSE_AST_ROUTE)
         self.layout = self.identity["cache_layout"]
         self.max_context = self.identity["max_context"]
         config = json.loads((path / "config.json").read_text())
@@ -775,7 +850,19 @@ class MuseGlimmerAdapter:
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
 
-        self.model = Model(ModelArgs.from_dict(config))
+        self.image_policy = None
+        self.multimodal_routes = frozenset()
+        if self.identity.get('vision'):
+            from ..runtime.models.muse_multimodal import Model as VisionModel
+            self.image_policy = self.identity['vision']['processor_policy']
+            revision = hashlib.sha256((self.identity['fingerprint'] + self.image_policy['revision']).encode()).hexdigest()
+            self.identity = {**self.identity, 'artifact_fingerprint': self.identity['fingerprint'],
+                             'fingerprint': revision, 'vision_revision': self.image_policy['revision']}
+            self.model = VisionModel(ModelArgs.from_dict(config), config)
+            self.multimodal_routes = frozenset({'ordinary', 'prompt_lookup'} | (
+                {'external_draft'} if self.external_policy.get('batch_size_route') == MUSE_AST_ROUTE else set()))
+        else:
+            self.model = Model(ModelArgs.from_dict(config))
         files = [path / record[0] for record in self.identity["files"]]
         weights = load_shards_evicting(files, sanitize=self.model.sanitize)
         quant = config.get("quantization", config.get("quantization_config"))
@@ -852,6 +939,8 @@ class MuseGlimmerAdapter:
 
             if self._draft_kind == "assistant":
                 from .muse_dflash import load_drafter
+            elif self._draft_kind == "dspark":
+                from .muse_dspark import load_drafter
             else:
                 from .dflash2 import load_drafter
 
@@ -924,11 +1013,20 @@ class MuseGlimmerAdapter:
                     sort_keys=True,
                     separators=(",", ":"),
                 )
+            if self.external_policy.get("batch_size_route") == MUSE_AST_ROUTE:
+                from ..runtime.attention_tree_executor import AttentionTreeExecutor
+
+                composition_identity += json.dumps({
+                    "ast_policy": self.external_policy,
+                    "target_tree": AttentionTreeExecutor.create().receipt(),
+                }, sort_keys=True, separators=(",", ":"))
             self.profile_name = (
                 self.external_assistant_profile_name
                 if self._draft_kind == "assistant"
                 else self.external_profile_name
             )
+            if self.external_policy.get("batch_size_route") == MUSE_AST_ROUTE:
+                self.profile_name = self.external_ast_profile_name
             progressive_identity = progressive_external_identity(
                 self.external_policy
             )
@@ -936,7 +1034,7 @@ class MuseGlimmerAdapter:
             self.identity = {**self.identity, "target_fingerprint": self.identity["fingerprint"], "draft_fingerprint": draft_record["fingerprint"], "fingerprint": digest}
             self.layout += ":" + self._external_route_tag + ":" + digest
             metadata = {
-                **MUSE_GLIMMER.metadata,
+                **self.descriptor.metadata,
                 "qualification": "unqualified",
                 "implemented": True,
             }
@@ -997,9 +1095,9 @@ class MuseGlimmerAdapter:
                     "performance_claim": False,
                 }
             self.descriptor = replace(
-                MUSE_GLIMMER,
-                capabilities=MUSE_GLIMMER.capabilities | {Capability.EXTERNAL_DRAFT},
-                state_planes=MUSE_GLIMMER.state_planes | {StatePlane.DRAFT},
+                self.descriptor,
+                capabilities=self.descriptor.capabilities | {Capability.EXTERNAL_DRAFT},
+                state_planes=self.descriptor.state_planes | {StatePlane.DRAFT},
                 cache_layout=self.layout,
                 metadata=metadata,
             )
@@ -1014,6 +1112,12 @@ class MuseGlimmerAdapter:
         if mtp: raise ValueError("External draft is not native MTP")
         return "muse-glimmer-apcv2-dflash-assistant"
 
+    @staticmethod
+    def external_ast_profile_name(mtp):
+        if mtp:
+            raise ValueError("Muse AST is not native MTP")
+        return "muse-glimmer-apcv2-ast"
+
     def create_external_batch(self, **kwargs):
         if self.draft_model is None:
             raise ValueError("No external draft model bound")
@@ -1024,6 +1128,21 @@ class MuseGlimmerAdapter:
         )
         count = self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT)
         lanes = kwargs.get("completion_batch_size", 1)
+        if self.external_policy.get("batch_size_route") == MUSE_AST_ROUTE:
+            from ..runtime.attention_tree_executor import AttentionTreeExecutor
+            from .qwen38_27b import _tile_node_budgets
+
+            # One real target tree per lane; cohort overflow remains AST,
+            # and the cost controller cannot park requests on ordinary decode.
+            return ExternalDraftBatchGenerator(
+                self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"],
+                num_draft=count, dynamic_singleton_tree=True, dynamic_tree_max_width=4,
+                dynamic_tree_overflow="cohort", target_tree_executor_provider=AttentionTreeExecutor.create(),
+                tree_node_budget_by_lanes=_tile_node_budgets(self.external_policy, 4),
+                ast_adaptive_rows=self.external_policy["ast_adaptive_rows"],
+                ast_topology=self.external_policy.get("ast_topology"),
+                pairwise_selection="host", cost_per_commit_handoff=False,
+                ready_drain="all", draft_tail_equalize=True, **kwargs)
         tile = resolve_progressive_external_tile(
             self.external_policy, num_draft=count, target=self.model, max_lanes=lanes)
         return ExternalDraftBatchGenerator(
@@ -1085,9 +1204,29 @@ class MuseGlimmerAdapter:
         )
 
     def prompt_tokens(self, request: dict) -> list[int]:
+        if '_mlx2_prompt_tokens' in request:
+            if not self.image_policy or not request.get('_mlx2_media_fingerprint'):
+                raise ValueError('Unbound Muse image prompt')
+            return list(request['_mlx2_prompt_tokens'])
         return self.tokenizer.encode(
             render_prompt_text(self.tokenizer, request), add_special_tokens=False
         )
+
+    def prepare_multimodal_request(self, request, *, file_loader=None):
+        if not self.image_policy:
+            raise ValueError('This Muse artifact has no complete supported image encoder')
+        from .muse_glimmer_images import prepare
+        return prepare(self, request, file_loader=file_loader)
+
+    def validate_prefill_inputs(self, request, remaining_tokens, prefill_input):
+        if prefill_input is None:
+            if any(t == self._config.get('image_token_id') for t in remaining_tokens):
+                raise ValueError('Muse image tokens cannot run without their image payload')
+            return None
+        if (not self.image_policy or set(prefill_input) != {'pixel_values', 'image_grid_thw'}
+            or not request.get('_mlx2_media_fingerprint')):
+            raise ValueError('Unbound Muse image prefill')
+        return prefill_input
 
     def render_prompt(self, request: dict) -> str:
         """Prompt text whose special-token-free encoding is ``prompt_tokens``."""
@@ -1252,6 +1391,11 @@ class MuseGlimmerAdapter:
             "global_layers": self.identity["global_layers"],
             "speculation": "external-dflash2-implemented-unqualified" if self.draft_model is not None else "ordinary",
         }
+        if getattr(self, 'image_policy', None):
+            result['vision'] = {'implemented': True, 'qualified': False,
+                'processor': self.image_policy, 'modalities': ['image'],
+                'multimodal_routes': sorted(self.multimodal_routes),
+                'counts': dict(self.model.vision_stats)}
         if self.external_policy.get("target_verify_row_exact", False):
             result["target_protocol"] = self.model.external_execution_receipt
         if self.external_policy.get("progressive_verification_tile") is not None:

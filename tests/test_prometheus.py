@@ -47,6 +47,12 @@ class FakeEngine:
     model_path = "fixture"
 
     def __init__(self):
+        from mlx2.runtime.weight_space_metrics import WeightSpaceMetrics
+
+        # An independent fake host must not sample process-global experiment
+        # registries left by other fixtures, whose weakref gauges may change
+        # when those fixtures are collected during a concurrent scrape test.
+        self.weight_space_metrics = WeightSpaceMetrics()
         self.lock = threading.Lock()
         self.queued_jobs = 0
         self.counts = Counter(
@@ -263,7 +269,7 @@ _SAMPLE_RE = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{.*\})? [-+0-9.eENaInf]+$
 def _sample_family(sample_name, kinds):
     for suffix in ("_bucket", "_sum", "_count"):
         base = sample_name[: -len(suffix)]
-        if sample_name.endswith(suffix) and kinds.get(base) == "histogram":
+        if sample_name.endswith(suffix) and kinds.get(base) in {"histogram", "summary"}:
             return base
     return sample_name
 
@@ -286,7 +292,7 @@ def assert_valid_prometheus_text(text):
             helps.add(family)
         elif line.startswith("# TYPE "):
             fields = line.split()
-            assert fields[3] in {"counter", "gauge", "histogram"}
+            assert fields[3] in {"counter", "gauge", "histogram", "summary"}
             family = fields[2]
             types.add(family)
             kinds[family] = fields[3]

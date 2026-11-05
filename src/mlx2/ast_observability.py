@@ -25,9 +25,9 @@ import re
 from typing import Any, Iterator, Mapping, NamedTuple
 
 DRAFTER_KINDS = frozenset(
-    {"dflash2", "eagle4", "dspark", "mtp", "pld", "external", "other"}
+    {"dflash", "dflash2", "eagle4", "dspark", "mtp", "pld", "external", "other"}
 )
-ARTIFACT_DRAFTER_KINDS = frozenset({"dflash2", "eagle4", "dspark", "external", "other"})
+ARTIFACT_DRAFTER_KINDS = frozenset({"dflash", "dflash2", "eagle4", "dspark", "external", "other"})
 TREE_TILE_STATES = frozenset({"on", "off", "refused"})
 TILE_ROWS_MODES = frozenset({"adaptive", "fixed", "not_applicable"})
 DRAFTER_KERNELS = frozenset({"lane", "stock", "default", "other"})
@@ -91,6 +91,8 @@ def _drafter_kind(drafter: Any) -> str:
     architectures = config.get("architectures") if isinstance(config, dict) else None
     name = "dflash2"
     if isinstance(architectures, list) and len(architectures) == 1:
+        if architectures[0] == "MuseGlimmerAssistantModel":
+            return "dflash"
         factory = _FORMATS.get(architectures[0])
         if factory is not None:
             name = getattr(factory, "__name__", "").lstrip("_")

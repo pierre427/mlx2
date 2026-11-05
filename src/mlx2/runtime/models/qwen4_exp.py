@@ -11,7 +11,7 @@ import math
 import os
 import threading
 from collections import Counter, OrderedDict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -1406,7 +1406,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         return (q * k.shape[-1] ** (-0.5), k)
 
     def _gated_delta_update(
-        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False
+        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False, allow_core=True
     ):
         return gated_delta_update(
             q,
@@ -1430,6 +1430,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             # the dynamic decay inputs before addition/softplus.  Keep this
             # model-owned instead of changing the shared Qwen3.5 law.
             decay_input_float32=True,
+            allow_core=allow_core,
         )
 
     def set_fused_gdn_decode_mode(self, mode: str):
@@ -3300,6 +3301,12 @@ class NGramEmbedding(nn.Module):
         )
 
 
+def _lora_deferred_call_counts():
+    from ..lora import deferred_call_counts
+
+    return deferred_call_counts()
+
+
 class PLELayer(nn.Module):
     def __init__(self, args: TextModelArgs, layer_idx: int, ple_layer_index: int):
         super().__init__()
@@ -3518,7 +3525,20 @@ class PLELayer(nn.Module):
                 def tail(sig, value, _os=out_shape, _ws=write_state):
                     return self._chain_tail(_os, sig, value, None, None, _ws)
 
-            compiled = (mx.compile(head), mx.compile(tail))
+            # A LoRA/weight-program wrapper counts each call in Python, which
+            # a replay skips; such a chain replays its trace's counts so
+            # receipts match eager.  Without one, plain mx.compile as before.
+            # The wrapper's type is part of ``_chain_params``: installing or
+            # removing one rebuilds this entry.
+            from ..lora import compile_counting_calls, records_compiled_calls
+
+            counted = any(
+                records_compiled_calls(module)
+                for module in (self.key_proj, self.value_proj, self.conv1d,
+                               self.norm_key, self.norm_query, self.norm_conv)
+            )
+            build = compile_counting_calls if counted else mx.compile
+            compiled = (build(head), build(tail))
         except Exception as exc:
             if is_device_fault(exc):
                 raise
@@ -3557,11 +3577,20 @@ class PLELayer(nn.Module):
         if compiled is None:
             return self._device_chain(hidden, embeddings, mask, state, write_state)
         (compiled_head, compiled_tail) = compiled
+        # A counted chain commits its covered-call counts only once both
+        # halves succeed: a failure below reruns the chain eagerly, which
+        # counts them itself.
+        counting = (
+            _lora_deferred_call_counts()
+            if getattr(compiled_head, "counts_calls", False)
+            else nullcontext()
+        )
         try:
-            (gate, value) = compiled_head(hidden, embeddings)
-            sigmoid = mx.sigmoid(gate)
-            args = tuple((a for a in (sigmoid, value, mask, state) if a is not None))
-            return compiled_tail(*args)
+            with counting:
+                (gate, value) = compiled_head(hidden, embeddings)
+                sigmoid = mx.sigmoid(gate)
+                args = tuple((a for a in (sigmoid, value, mask, state) if a is not None))
+                return compiled_tail(*args)
         except Exception as exc:
             if is_device_fault(exc):
                 # Not a trace failure: serving recovers the step and the
@@ -7135,6 +7164,8 @@ class Attention(nn.Module):
                 else None
             )
             pad = selection.left_padding if selection.left_padding is not None else 0
+            if reason is None:
+                reason = _qsa_b1.selection_refusal(selection)
             if reason is None:
                 reason = _qsa_b1.refusal(
                     q, cache.keys, cache.values, selection.raw_block_ids, selection.offset

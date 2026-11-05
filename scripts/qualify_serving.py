@@ -2967,6 +2967,41 @@ def proposal_composition_evidence(responses, settings):
     return evidence
 
 
+def microscaling_prefill_observation(final, initial):
+    """Observe this run's bound SC route, rather than inherited counters."""
+    if not isinstance(initial, dict):
+        return 0
+    before = initial.get("microscaling_prefill") or {}
+    after = final.get("microscaling_prefill") or {}
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return 0
+    for key in ("revision", "kernel_revision", "artifact_fingerprint"):
+        value = after.get(key)
+        if not isinstance(value, str) or not value or before.get(key) != value:
+            return 0
+    paths, kinds = after.get("projection_paths"), after.get("module_kinds")
+    modules = after.get("modules")
+    if (after.get("enabled") is not True or after.get("active") is not True
+        or before.get("enabled") is not True or before.get("active") is not True
+        or type(modules) is not int or modules < 1
+        or not isinstance(paths, list) or len(paths) != modules
+        or any(not isinstance(path, str) or not path for path in paths)
+        or len(set(paths)) != len(paths) or before.get("projection_paths") != paths
+        or not isinstance(kinds, dict) or before.get("module_kinds") != kinds
+        or any(type(kinds.get(kind)) is not int or kinds[kind] < 0
+               for kind in ("dense", "grouped"))
+        or sum(kinds[kind] for kind in ("dense", "grouped")) != modules):
+        return 0
+    def delta(key):
+        start = (before.get("counts") or {}).get(key, 0)
+        end = (after.get("counts") or {}).get(key, 0)
+        return end - start if type(start) is int and type(end) is int and 0 <= start < end else 0
+    dispatch = {kind: delta(kind + "_calls") for kind in ("dense", "grouped")}
+    if any(kinds[kind] and not dispatch[kind] for kind in dispatch):
+        return 0
+    return min(delta("engaged_calls"), delta("engaged_rows"), sum(dispatch.values()))
+
+
 def feature_observations(
     final,
     kv_fidelity=None,
@@ -3478,6 +3513,7 @@ def feature_observations(
         # feature_int8_prefill whenever the policy is enabled, so the
         # observation key must exist or the qualifier raises KeyError.
         "int8_prefill": count_delta("int8_prefill", "counts", "engaged_calls"),
+        "microscaling_prefill": microscaling_prefill_observation(final, initial),
         "prefill_projection": prefill_delta(
             "tensorfold_prefill", ("projection_calls", "grouped_calls", "swiglu_calls")
         ),

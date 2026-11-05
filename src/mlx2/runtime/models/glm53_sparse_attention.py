@@ -828,18 +828,31 @@ def _v2_status():
     return {"first_use_gate": "not_run"} if module is None else module.route_status()
 
 
-def route_status():
+def route_status(defaults=None):
+    """``defaults`` maps glm53_sparse_attention/glm53_sparse_prefill to the
+    host's unqualified defaults (the adapter's ``sparse_default``); each
+    policy's ``selected_by_default`` is derived from them, never hard-coded."""
+    if defaults is None:
+        from ...adapters.glm53_gguf import sparse_default
+
+        defaults = {key: sparse_default(key) for key in ("glm53_sparse_attention", "glm53_sparse_prefill")}
+    prompt = defaults["glm53_sparse_prefill"]
+    selected = {defaults["glm53_sparse_attention"]}
+    if PREFILL_THRESHOLDS[prompt] is not None:
+        selected.add(prefill_law(prompt))
     gate = _FUSED_GATE["passed"]
     return {
         "policies": {
-            "gathered_v1": {"implemented": True, "qualified": False, "selected_by_default": True},
-            "fused_decode_v1": {"implemented": True, "qualified": False, "selected_by_default": False,
+            "gathered_v1": {"implemented": True, "qualified": False,
+                            "selected_by_default": "gathered_v1" in selected},
+            "fused_decode_v1": {"implemented": True, "qualified": False,
+                                "selected_by_default": "fused_decode_v1" in selected,
                                 "first_use_gate": "not_run" if gate is None else ("passed" if gate else "failed")},
-            "fused_v2": {"implemented": True, "qualified": False, "selected_by_default": False,
-                         **_v2_status()},
+            "fused_v2": {"implemented": True, "qualified": False,
+                         "selected_by_default": "fused_v2" in selected, **_v2_status()},
             # Prompt-only (gathered_f16_from_<n>); its gate is keyed "_f16" in the v2 status.
-            "fused_f16": {"implemented": True, "qualified": False, "selected_by_default": False,
-                          "prompt_only": True},
+            "fused_f16": {"implemented": True, "qualified": False,
+                          "selected_by_default": "fused_f16" in selected, "prompt_only": True},
         },
         "batched_rows_exact": BATCHED_ROWS_EXACT,
         "scheduled_calls": dict(_SCHEDULED),

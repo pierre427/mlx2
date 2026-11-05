@@ -475,6 +475,63 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
     EXTERNAL_ROUTE_TAG = "external-xpress-qwen3-v1"
     EXTERNAL_PROFILE = "qwen3-apcv2-xpress"
 
+    def weight_overlay_targets(self):
+        """Explicit ordinary Qwen3 dense/expert projections for CPU reference overlays.
+
+        Streamed, row-exact and non-Qwen3 adapters keep this experimental
+        operation unsupported. This declaration does not qualify the route.
+        """
+        from ..experimental.weight_space.overlays import TensorTarget
+        from ..runtime.weight_overlays import WeightOverlayBinding
+
+        if (self.config.get("model_type") not in {"qwen3", "qwen3_moe"}
+                or getattr(self, "weight_stream", None) is not None
+                or getattr(self.model, "_target_verify_row_exact", False)):
+            return {}
+        result = {}
+        for index, layer in enumerate(self.model.layers):
+            for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                result[TensorTarget(index, None, "self_attn." + name)] = WeightOverlayBinding(
+                    layer.self_attn, name)
+            mlp = layer.mlp
+            experts = getattr(mlp, "switch_mlp", None)
+            if experts is None:
+                for name in ("gate_proj", "up_proj", "down_proj"):
+                    result[TensorTarget(index, None, "mlp." + name)] = WeightOverlayBinding(mlp, name)
+            else:
+                for name in ("gate_proj", "up_proj", "down_proj"):
+                    projection = getattr(experts, name)
+                    for expert in range(projection.num_experts):
+                        result[TensorTarget(index, expert, "mlp.switch_mlp." + name)] = WeightOverlayBinding(
+                            experts, name)
+        return result
+
+    def layer_excision_binding(self):
+        """Qwen3 full-KV block bypass keeps reserved slots aligned with zeros."""
+        import mlx.core as mx
+
+        from ..runtime.layer_excision import LayerExcisionBinding
+        from ..runtime.models.cache import BatchKVCache, KVCache
+
+        if (self.config.get("model_type") not in {"qwen3", "qwen3_moe"}
+                or getattr(self, "weight_stream", None) is not None
+                or getattr(self.model, "_target_verify_row_exact", False)):
+            raise ValueError("layer excision is unsupported on this adapter route")
+        args = self.model.args
+
+        def advance(_index, hidden, cache):
+            if cache is None:
+                return
+            if type(cache) not in (KVCache, BatchKVCache):
+                raise ValueError("layer excision requires ordinary full KV cache slots")
+            if hidden.ndim != 3:
+                raise ValueError("layer excision requires batch/token/hidden geometry")
+            zeros = mx.zeros((hidden.shape[0], args.num_key_value_heads,
+                              hidden.shape[1], args.head_dim), dtype=hidden.dtype)
+            cache.update_and_fetch(zeros, zeros)
+
+        return LayerExcisionBinding(self.model.model.layers, args.hidden_size, advance)
+
     def attention_topology(self):
         """Revision-bound full-KV contract for standard decoder state."""
         from ..runtime.attention_topology import FULL_KV, AttentionTopology
@@ -501,6 +558,23 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         if self.config.get("model_type") in {"qwen3", "qwen3_moe"}:
             return QWEN3_PREFILL_STEP
         return None
+
+    def microscaling_supported(self):
+        """Opt-in SC-MXFP4 seams; tensor eligibility is checked at installation."""
+        from .microscaling_support import projection_law_compatible
+
+        if not projection_law_compatible(self):
+            return ()
+        family = (getattr(self, "config", None) or {}).get("model_type")
+        if family == "qwen3":
+            return ("mlp", "all")
+        if family == "qwen3_moe":
+            return ("experts", "mlp", "all")
+        return ()
+
+    def microscaling_decode_row_multiplier(self):
+        from .microscaling_support import decode_row_multiplier
+        return decode_row_multiplier(self.config)
 
     def int8_prefill_supported(self):
         """int8 prefill scopes for this artifact (``int8_prefill.adapter_scopes``).

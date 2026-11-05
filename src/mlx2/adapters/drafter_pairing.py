@@ -204,10 +204,17 @@ def pair_drafter(
 
         record = muse_dflash.inspect_drafter(dpath, tpath)
         policy["num_draft"] = 4
+    elif adapter == "MuseGlimmerAdapter" and archs == ["Qwen3DSparkModel"]:
+        from . import muse_dspark
+        from .muse_glimmer import MUSE_AST_ROUTE
+
+        record = muse_dspark.inspect_drafter(dpath, tpath)
+        # This artifact's mask-row/Markov implementation is tree-only.
+        policy.update(num_draft=15, batch_size_route=MUSE_AST_ROUTE)
     elif adapter == "MuseGlimmerAdapter":
         if archs != ["DFlash2DraftModel"]:
             raise ValueError(
-                "Muse Glimmer external route accepts only DFlash2DraftModel "
+                "Muse Glimmer external route accepts DFlash2, its assistant, or mask-row DSpark "
                 f"(artifact declares {archs})"
             )
         from . import dflash2

@@ -10,6 +10,27 @@ from mlx2.runtime.models import qsdpa_verify_metal as qvm
 scripted_engine = _scripted_engine
 
 
+def test_fp_decode_status_distinguishes_selection_and_execution(scripted_engine, monkeypatch):
+    from mlx2.runtime.models import qsdpa_decode_metal as qdm
+
+    monkeypatch.setattr(qdm, "STATS", {"decode_kernel_calls": 0,
+        "fp_decode_kernel_calls": 0, "fp_decode_gqa16_calls": 0})
+    monkeypatch.delenv("MLX2_FP_DECODE_KERNEL", raising=False)
+    build, _state = scripted_engine
+    engine = build(declare_marker=True, max_lanes=1, max_inflight=1)
+    initial = engine.status()["fp_decode_attention"]
+    assert not initial["selected"] and not initial["observed_host_dispatch"]
+    monkeypatch.setenv("MLX2_FP_DECODE_KERNEL", "1")
+    selected = engine.status()["fp_decode_attention"]
+    assert selected["selected"] and not selected["observed_host_dispatch"]
+    qdm.STATS["fp_decode_kernel_calls"] += 1
+    qdm.STATS["fp_decode_gqa16_calls"] += 1
+    observed = engine.status()["fp_decode_attention"]
+    assert observed["observed_host_dispatch"] and observed["counts"]["fp_decode_gqa16_calls"] == 1
+    assert observed["basis"] == "selected_host_graph_branch"
+    assert selected["counts"]["fp_decode_gqa16_calls"] == 0
+
+
 def test_serving_status_roundtrips_bounded_host_branch_snapshots(
     scripted_engine, monkeypatch,
 ):

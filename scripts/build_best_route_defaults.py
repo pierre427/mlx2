@@ -446,6 +446,16 @@ def lane_rows() -> tuple[list[dict], list[dict]]:
             continue
         spec = {"name": route["kind"] if route["kind"] != "ast" else f"ast_{route['drafter'] or 'auto'}",
                 "kind": route["kind"]}
+        # Optional JSON suffix keeps the exact profile in the durable decision
+        # row rather than depending on a mutable external policy file.
+        if "Execution-policy:" in row.get("reason", ""):
+            try:
+                spec["execution_policy"] = json.loads(
+                    row["reason"].split("Execution-policy:", 1)[1].strip()
+                )
+            except json.JSONDecodeError as error:
+                skipped.append({"checkpoint": checkpoint_id, "why": f"invalid execution policy: {error}"})
+                continue
         if route["drafter"]:
             if drafters is None:
                 from mlx2.adapters.drafter_pairing import (
@@ -566,8 +576,11 @@ def route_text(spec: dict) -> str:
     drafter = spec.get("drafter")
     if isinstance(drafter, dict):
         return f"`--ast`, drafter {drafter['name']}@sha256:{drafter['identities'][0][:12]}"
-    return {"ast": "`--ast`", "native_mtp": "`--native-mtp`", "prompt_lookup": "`--prompt-lookup`",
+    text = {"ast": "`--ast`", "native_mtp": "`--native-mtp`", "prompt_lookup": "`--prompt-lookup`",
             "ordinary": "`--ordinary`"}[kind] + (f" drafter={drafter}" if drafter else "")
+    if spec.get("execution_policy"):
+        text += f"; policy `{json.dumps(spec['execution_policy'], sort_keys=True)}`"
+    return text
 
 
 def docs_table(table: dict) -> str:
@@ -654,10 +667,12 @@ def main(argv=None) -> int:
         flags = {"ast": "--ast --ast-drafter <paired path>" if isinstance(drafter, dict) else "--ast",
                  "native_mtp": "--native-mtp", "prompt_lookup": "--prompt-lookup",
                  "ordinary": "--ordinary"}[e["default"]["kind"]]
+        policy_note = (f"; policy `{json.dumps(e['default']['execution_policy'], sort_keys=True)}`"
+                       if e["default"].get("execution_policy") else "")
         pin = (f"{drafter['name']}@sha256:{drafter['identities'][0]}" if isinstance(drafter, dict) else "none")
         if "family" in e:
             model_path = "each unmeasured checkpoint of the class (qualify per checkpoint)"
-        plan.append(f"| {e.get('checkpoint') or 'family ' + e['family']} | `{model_path}` | `{flags}` | {pin} | "
+        plan.append(f"| {e.get('checkpoint') or 'family ' + e['family']} | `{model_path}` | `{flags}`{policy_note} | {pin} | "
                     f"{e['evidence']['source_revision'][:12]} |")
     fill_marker(ROOT / "qualification/plans/best-route-defaults-qualification-20261021.md", "plan-rows",
                 "\n".join(plan) if selected else "No checkpoint selected a new default.")

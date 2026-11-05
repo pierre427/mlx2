@@ -32,6 +32,29 @@ def bytes_to_unicode():
 
 logger = getLogger(__name__)
 VOCAB_FILES_NAMES = {"vocab_file": "tiktoken.model"}
+# mlx2: K2 vocabulary size before the reserved special ids.
+K2_BASE_TOKENS = 163584
+
+
+def k2_tool_marker_names(num_base_tokens, mapping):
+    """``mapping`` with the K2 tool-call marker names filled in where absent.
+
+    Applies only to the K2 base vocabulary, and only to ids the config does
+    not name; a config that names one of the marker spellings elsewhere is
+    refused rather than given a duplicate.
+    """
+    from .tool_parsers.kimi import K2_TOOL_MARKER_IDS
+
+    if num_base_tokens != K2_BASE_TOKENS:
+        return mapping
+    filled = dict(mapping)
+    for token_id, name in K2_TOOL_MARKER_IDS.items():
+        if token_id in filled:
+            continue
+        if name in filled.values():
+            raise ValueError(f"Kimi tokenizer config names {name} at an unexpected id")
+        filled[token_id] = name
+    return filled
 
 
 class TikTokenTokenizer(PreTrainedTokenizer):
@@ -111,10 +134,17 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         self.vocab_file = vocab_file
         mergeable_ranks = load_tiktoken_bpe(vocab_file)
         num_base_tokens = len(mergeable_ranks)
+        # mlx2: name the K2 tool-call ids a config omits (the REAP artifact's
+        # does; the 48B q8 config names them), so calls and tool history use
+        # the trained single tokens instead of <|reserved_token_N|>.
+        special_tokens_mapping = k2_tool_marker_names(num_base_tokens, special_tokens_mapping)
+        # mlx2: exactly the 256 reserved ids. The upstream "+ 2" created ids
+        # 163840 and 163841, past the model's 163840-row embedding, which a
+        # raw prompt could reach by spelling their reserved names.
         self.special_tokens = {
             special_tokens_mapping.get(i, f"<|reserved_token_{i}|>"): i
             for i in range(
-                num_base_tokens, num_base_tokens + self.num_reserved_special_tokens + 2
+                num_base_tokens, num_base_tokens + self.num_reserved_special_tokens
             )
         }
 

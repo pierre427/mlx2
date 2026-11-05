@@ -22,7 +22,6 @@ wrapper; the slot/LRU residency follows S-LoRA.  Mechanism is original MLX code.
 
 from __future__ import annotations
 
-import hashlib
 import threading
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
@@ -68,13 +67,26 @@ _COUNTER_NAMES = (
 class _RowState:
     """Per-model row binding shared by every wrapped module (plain object)."""
 
-    __slots__ = ("ids", "rows", "delta_applications", "delta_skips")
+    __slots__ = (
+        "delta_applications",
+        "delta_skips",
+        "ids",
+        "program_applications",
+        "program_delta_applications",
+        "rows",
+        "slots",
+        "uids",
+    )
 
     def __init__(self):
         self.ids = None  # mx.array (B,) uint32, or None when all rows are base
         self.rows = None  # bound row count, or None when nothing is bound
         self.delta_applications = 0
         self.delta_skips = 0
+        self.uids = ()
+        self.slots = ()
+        self.program_applications = {}
+        self.program_delta_applications = 0
 
 
 def _linear_dims(linear):
@@ -103,7 +115,12 @@ def _make_wrapper_class():
     import mlx.core as mx
     from mlx import nn
 
+    from .lora import count_covered_call
+
     class MultiLoRALinear(nn.Module):
+        # Row/program counts are per call; compiled sites replay them.
+        records_compiled_calls = True
+
         def __init__(self, base, *, slots, rank, dtype, rows, round_once=False):
             super().__init__()
             input_dims, output_dims = _linear_dims(base)
@@ -114,6 +131,7 @@ def _make_wrapper_class():
             # delta_precision "fp32": add the fp32 delta to the base output
             # and round once, instead of rounding the delta and then the sum.
             self._round_once = round_once
+            self._program_slots = frozenset()
 
         @property
         def input_dims(self):
@@ -132,12 +150,31 @@ def _make_wrapper_class():
             """
             return (self._rows.ids,)
 
+        def _count_call(self):
+            """One call's counters, from the current row binding.
+
+            A compiled replay runs this again (``compile_counting_calls``);
+            trace identity includes ``rows.ids``, so it sees the traced branch.
+            """
+            rows = self._rows
+            if rows.ids is None:
+                rows.delta_skips += 1
+                return
+            rows.delta_applications += 1
+            # Only a called target covered by this compiled program counts as
+            # engagement. Binding an adapter row alone proves no tensor use.
+            if self._program_slots:
+                for uid, slot in zip(rows.uids, rows.slots):
+                    if slot in self._program_slots:
+                        rows.program_applications[uid] = rows.program_applications.get(uid, 0) + 1
+                        rows.program_delta_applications += 1
+
         def __call__(self, x):
             y = self.base(x)
             rows = self._rows
             ids = rows.ids
             if ids is None:
-                rows.delta_skips += 1
+                count_covered_call(self._count_call)
                 return y
             squeeze = x.ndim == 2
             value = x[:, None, :] if squeeze else x
@@ -153,7 +190,7 @@ def _make_wrapper_class():
             delta = mx.gather_mm(hidden, self.lora_b, None, ids)
             if squeeze:
                 delta = delta[:, 0, :]
-            rows.delta_applications += 1
+            count_covered_call(self._count_call)
             if self._round_once:
                 return (y.astype(mx.float32) + delta).astype(y.dtype)
             return y + delta.astype(y.dtype)
@@ -183,23 +220,24 @@ class RegisteredAdapter:
     nbytes: int
     lora_int_id: int | None = None
     module_keys: tuple = ()  # loaded-model keys, in source key order
+    weight_program: dict | None = None
 
 
 class SlotUnavailable(RuntimeError):
     """Every resident slot is pinned by a live row."""
 
 
-def _adapter_fingerprint(payload, rank, scale, keys):
-    digest = hashlib.sha256()
-    digest.update(repr((rank, scale, tuple(sorted(keys)))).encode())
-    digest.update(payload)
-    return digest.hexdigest()
+def _adapter_fingerprint(payload, rank, scale, keys, weight_program=None):
+    from .lora import lora_fingerprint
+
+    return lora_fingerprint(payload, rank, scale, keys, weight_program)
 
 
 class MultiLoRAManager:
     """Registry, slot residency (pin + LRU), row binding and counters."""
 
-    def __init__(self, model, *, max_loras, max_lora_rank, dtype=None, delta_precision="adapter"):
+    def __init__(self, model, *, max_loras, max_lora_rank, dtype=None,
+                 delta_precision="adapter", base_checkpoint=None):
         if isinstance(max_loras, bool) or not isinstance(max_loras, int) or not 1 <= max_loras <= 64:
             raise ValueError("max_loras must be an integer from 1 to 64")
         if (
@@ -227,6 +265,7 @@ class MultiLoRAManager:
                 raise ValueError("multi-LoRA delta_precision fp32 needs float32 slots")
             dtype = mx.float32
         self.delta_precision = delta_precision
+        self.base_checkpoint = base_checkpoint
         self.model = model
         self.max_loras = max_loras
         self.max_lora_rank = max_lora_rank
@@ -239,6 +278,7 @@ class MultiLoRAManager:
         self.resident: OrderedDict[int, str] = OrderedDict()
         self.pins: dict[int, int] = defaultdict(int)
         self.uid_slots: dict[int, int] = {}
+        self.uid_forwards: dict[int, int] = {}
         self._bound_key = None
         self._map_version = 0
         # Pre-seeded so a concurrent status() copy never sees a resize.
@@ -290,7 +330,7 @@ class MultiLoRAManager:
         """
         from mlx import nn
 
-        from .lora import read_lora_config
+        from .lora import inspect_lora_program, read_lora_config
 
         if not isinstance(name, str) or not 1 <= len(name) <= 128:
             raise ValueError("lora_name must contain 1 to 128 characters")
@@ -301,9 +341,14 @@ class MultiLoRAManager:
             )
         weights_path = path / "adapters.safetensors"
         payload = weights_path.read_bytes()
+        program = inspect_lora_program(
+            path, config, base_checkpoint=self.base_checkpoint, payload=payload,
+        )
+        if program is not None and self.delta_precision != "fp32":
+            raise ValueError("weight programs require multi-LoRA delta_precision fp32")
         header = _safetensors_header(payload)
         fingerprint = _adapter_fingerprint(
-            payload, config["rank"], config["scale"], config["keys"]
+            payload, config["rank"], config["scale"], config["keys"], program,
         )
         expected = {
             f"{key}.{leaf}" for key in config["keys"] for leaf in ("lora_a", "lora_b")
@@ -332,7 +377,7 @@ class MultiLoRAManager:
                 base = module
                 new_keys.append(module_key)
             else:
-                raise ValueError(
+                raise ValueError(  # noqa: TRY004 - adapter compatibility is a ValueError contract
                     f"LoRA key {key!r} is not a Linear/QuantizedLinear module"
                 )
             input_dims, output_dims = _linear_dims(base)
@@ -359,6 +404,7 @@ class MultiLoRAManager:
             nbytes=nbytes,
             lora_int_id=lora_int_id,
             module_keys=module_keys,
+            weight_program=program,
         )
         return adapter, tuple(new_keys)
 
@@ -367,8 +413,17 @@ class MultiLoRAManager:
         if adapter.tensors:
             return
         payload = (Path(adapter.path) / "adapters.safetensors").read_bytes()
+        if adapter.weight_program is not None:
+            from .lora import inspect_lora_program, read_lora_config
+
+            path, config = read_lora_config(adapter.path)
+            program = inspect_lora_program(
+                path, config, base_checkpoint=self.base_checkpoint, payload=payload,
+            )
+            if program != adapter.weight_program:
+                raise ValueError("weight program changed after registration")
         if _adapter_fingerprint(
-            payload, adapter.rank, adapter.scale, adapter.keys
+            payload, adapter.rank, adapter.scale, adapter.keys, adapter.weight_program,
         ) != adapter.fingerprint:
             raise ValueError(f"LoRA adapter {adapter.name!r} weights changed after registration")
         import mlx.core as mx
@@ -474,7 +529,23 @@ class MultiLoRAManager:
             "rank": adapter.rank,
             "keys": list(adapter.keys),
             "nbytes": adapter.nbytes,
+            **({"weight_program": self.program_receipt(name)}
+               if adapter.weight_program is not None else {}),
         }
+
+    def program_receipt(self, name, *, expected_fingerprint=None, selected=False,
+                        observed_used=False):
+        from .lora import weight_program_receipt
+
+        with self.lock:
+            adapter = self.registry.get(name)
+            if adapter is None or (expected_fingerprint is not None
+                    and adapter.fingerprint != expected_fingerprint):
+                raise ValueError("LoRA adapter changed before admission")
+            return weight_program_receipt(
+                getattr(adapter, "weight_program", None),
+                selected=selected, observed_used=observed_used,
+            )
 
     def lookup(self, name):
         with self.lock:
@@ -499,6 +570,11 @@ class MultiLoRAManager:
                 b_slot = mx.concatenate(
                     [b.astype(b_slot.dtype), b_slot[rank:, :]], axis=0
                 )
+            program_slots = set(module._program_slots)
+            program_slots.discard(slot)
+            if pair is not None and adapter.weight_program is not None:
+                program_slots.add(slot)
+            module._program_slots = frozenset(program_slots)
             # Functional rebuild: forwards already enqueued keep the old arrays.
             module.lora_a = mx.concatenate(
                 [module.lora_a[:slot], a_slot[None], module.lora_a[slot + 1 :]]
@@ -564,12 +640,24 @@ class MultiLoRAManager:
     def bind_uid(self, uid, slot):
         with self.lock:
             self.uid_slots[uid] = slot
+            self.uid_forwards[uid] = 0
+            self.rows.program_applications[uid] = 0
             self._map_version += 1
 
     def unbind_uid(self, uid):
         with self.lock:
+            self.uid_forwards.pop(uid, None)
+            self.rows.program_applications.pop(uid, None)
             if self.uid_slots.pop(uid, None) is not None:
                 self._map_version += 1
+
+    def row_forward_count(self, uid):
+        with self.lock:
+            return self.uid_forwards.get(uid, 0)
+
+    def program_application_count(self, uid):
+        with self.lock:
+            return self.rows.program_applications.get(uid, 0)
 
     # -------------------------------------------------------------- row binding
     def bind_rows(self, uids):
@@ -591,6 +679,8 @@ class MultiLoRAManager:
                 mx.array(slots, dtype=mx.uint32) if any(slots) else None
             )
         slots = self._bound_slots
+        rows.uids = tuple(uids)
+        rows.slots = tuple(slots)
         rows.ids = self._bound_ids
         rows.rows = len(slots)
         if rows.ids is None:
@@ -598,9 +688,10 @@ class MultiLoRAManager:
             self.counts["rows_base"] += len(slots)
             return
         adapters = 0
-        for slot in slots:
+        for uid, slot in zip(uids, slots):
             if slot:
                 adapters += 1
+                self.uid_forwards[uid] = self.uid_forwards.get(uid, 0) + 1
                 self.rows_by_adapter[self.resident.get(slot, "?")] += 1
         self.counts["rows_adapter"] += adapters
         self.counts["rows_base"] += len(slots) - adapters
@@ -612,6 +703,8 @@ class MultiLoRAManager:
     def clear_rows(self):
         self.rows.ids = None
         self.rows.rows = None
+        self.rows.uids = ()
+        self.rows.slots = ()
 
     # ------------------------------------------------------------------ status
     def reserved_bytes(self):
@@ -624,6 +717,11 @@ class MultiLoRAManager:
                 **self.settings(),
                 "registered": sorted(self.registry),
                 "registered_fingerprints": {name: self.registry[name].fingerprint for name in sorted(self.registry)},
+                **({"weight_programs": {
+                    name: self.program_receipt(name)
+                    for name in sorted(self.registry)
+                    if self.registry[name].weight_program is not None
+                }} if any(a.weight_program is not None for a in self.registry.values()) else {}),
                 "resident": {
                     str(slot): name for slot, name in self.resident.items()
                 },
@@ -635,6 +733,7 @@ class MultiLoRAManager:
                     **dict(self.counts),
                     "delta_applications": self.rows.delta_applications,
                     "delta_skips": self.rows.delta_skips,
+                    "program_delta_applications": self.rows.program_delta_applications,
                 },
                 "rows_by_adapter": dict(self.rows_by_adapter),
             }
@@ -660,7 +759,7 @@ def _safetensors_header(payload):
     except ValueError as error:
         raise ValueError("LoRA safetensors header is malformed") from error
     if not isinstance(header, dict):
-        raise ValueError("LoRA safetensors header is malformed")
+        raise ValueError("LoRA safetensors header is malformed")  # noqa: TRY004 - malformed artifacts share one API
     header.pop("__metadata__", None)
     for key, entry in header.items():
         if (

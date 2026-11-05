@@ -48,9 +48,11 @@ VARIANTS = {
 # rather than a dedicated command-line switch. This is a review vocabulary,
 # not a statement that every registered model implements each feature.
 FEATURES = (
+    "integer_exact_microscaling",
+    "resident_kernel_reload", "kimi_linear_supervised_lora_research",
     # Existing reviewed GLM rows also need inventory cells for regeneration.
     'glm53_mla_prompt_expanded_f16_v1', 'glm53_prompt_decoded_decoded_f16_v1', 'glm53_prompt_decoded_decoded_f32_v1', 'glm53_route_defaults_kblock_v6', 'glm53_sparse_prefill_gathered_f16_from_n', 'glm53_sparse_prefill_gathered_v2_below_threshold_reference',
-    'kda_vector_kernel', 'kimi_mla_latent_tiled', 'kimi_mla_fused_decode', 'kimi_kda_norm_rounding_ab', 'kimi_session_memory_budget', 'kimi_kda_mla_prometheus', 'native_bf16_nax_prefill', 'context_default_1m', 'kimi_grouped_kda_projections', 'kimi_fused_kda_norm', 'kimi_chunk32_prefill',
+    'kda_vector_kernel', 'kimi_mla_latent_tiled', 'kimi_mla_fused_decode', 'kimi_mla_flash_all', 'kimi_kda_norm_rounding_ab', 'kimi_session_memory_budget', 'kimi_kda_mla_prometheus', 'native_bf16_nax_prefill', 'context_default_1m', 'kimi_grouped_kda_projections', 'kimi_fused_kda_norm', 'kimi_chunk32_prefill', 'kimi_mla_auto', 'kimi_mla_latent_single', 'kda_chunk_wy', 'router_combine_unbiased', 'kda_fused_projections_norm', 'kimi_ast_packed_tree', 'kimi_ast_serial_tree', 'tensorfold_lane_raw',
     "gguf_native_packed_read_view", "gguf_native_k_blocks",
     "glm53_shared_layer_ast", "draft_bf16_activation_boundary", "mla_prefill_causal_key_trim",
     "glm53_indexer_pools_incremental_v1", "glm53_indexer_select_topk_v1",
@@ -69,6 +71,7 @@ FEATURES = (
     "vision_input", "video_input", "audio_input", "native_mtp",
     "mtp_ordinary_handoff", "adaptive_mtp_depth", "self_mtp_copy_draft", "speculation_request_opt_out",
     "external_draft", "external_draft_dspark", "flat_segmented_ast", "ast_speculative_batching",
+    "ast_bf16_assistant", "ast_bf16_dspark", "ast_bf16_dflash2",
     "packed_prefill_serial_equivalence", "prompt_lookup", "prompt_lookup_target_s1",
     "decode_first", "prefill_scheduling", "mixed_prefill_decode",
     "varlen_paged_attention", "row_exact_verify", "tensorfold_tree15",
@@ -384,14 +387,15 @@ def strong_claim_problems(row):
 
 
 def validate_decisions(rows) -> dict:
-    """Index reviewed rows by (model, checkpoint, scope, feature); refuse
+    """Index reviewed rows by (model, checkpoint, scope, feature, source); refuse
     duplicates and strong claims without their checkpoint and commit."""
     overrides = {}
     for row in rows:
         checkpoint = (row.get("checkpoint") or "").strip()
         if not checkpoint:
             raise ValueError(f"decision without a checkpoint (use {FAMILY!r} for family level): {row['model']} {row['feature_or_flag']}")
-        key = (row["model"], checkpoint, row["scope"], row["feature_or_flag"])
+        key = (row["model"], checkpoint, row["scope"], row["feature_or_flag"],
+               (row.get("source_revision") or "").strip())
         if key in overrides:
             raise ValueError(f"duplicate reviewed decision: {key}")
         strong = strong_claim(row["qualified"]) or strong_claim(row["observed_used"])
@@ -427,6 +431,9 @@ def main(argv=None) -> None:
     with DECISIONS.open(newline="") as handle:
         decisions = list(csv.DictReader(handle, delimiter="\t"))
     overrides = validate_decisions(decisions)
+    revision_keys = {}
+    for key in overrides:
+        revision_keys.setdefault(key[:4], []).append(key)
     columns = (
         "model", "checkpoint", "scope", "feature_or_flag", "implemented", "qualified",
         "selected", "observed_used", "decision", "reason", "evidence",
@@ -445,16 +452,21 @@ def main(argv=None) -> None:
             for checkpoint in checkpoints:
                 for scope, flag in flags:
                     key = (model, checkpoint, scope, flag)
-                    if checkpoint != FAMILY and key not in overrides:
+                    matches = sorted(revision_keys.get(key, ()))
+                    if checkpoint != FAMILY and not matches:
                         continue
-                    row = dict.fromkeys(columns, "not_recorded")
-                    row.update({"model": model, "checkpoint": checkpoint, "scope": scope,
-                                "feature_or_flag": flag,
-                                "implemented": "unreviewed", "qualified": "unreviewed",
-                                "selected": "unreviewed", "observed_used": "unreviewed",
-                                "decision": "review_needed"})
-                    row.update(overrides.pop(key, {}))
-                    writer.writerow(row)
+                    # Historical outcomes remain separate rows. Never select the
+                    # latest source or merge its state with an earlier result.
+                    for revision_key in matches or [None]:
+                        row = dict.fromkeys(columns, "not_recorded")
+                        row.update({"model": model, "checkpoint": checkpoint, "scope": scope,
+                                    "feature_or_flag": flag,
+                                    "implemented": "unreviewed", "qualified": "unreviewed",
+                                    "selected": "unreviewed", "observed_used": "unreviewed",
+                                    "decision": "review_needed"})
+                        if revision_key is not None:
+                            row.update(overrides.pop(revision_key))
+                        writer.writerow(row)
         rendered = handle.getvalue()
     if overrides:
         raise ValueError(f"reviewed decisions absent from inventory: {sorted(overrides)}")

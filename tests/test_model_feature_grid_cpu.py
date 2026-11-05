@@ -38,8 +38,8 @@ def test_family_and_checkpoint_decisions_coexist(monkeypatch):
         _row(checkpoint=checkpoint, qualified="yes", observed_used="yes"),
     ])
     assert set(index) == {
-        ("nemotron_h_omni:base", "*", "feature", "native_mtp"),
-        ("nemotron_h_omni:base", checkpoint, "feature", "native_mtp"),
+        ("nemotron_h_omni:base", "*", "feature", "native_mtp", "abc12345"),
+        ("nemotron_h_omni:base", checkpoint, "feature", "native_mtp", "abc12345"),
     }
 
 
@@ -63,6 +63,50 @@ def test_duplicates_and_missing_checkpoint_are_refused():
         builder.validate_decisions([_row(), _row()])
     with pytest.raises(ValueError, match="without a checkpoint"):
         builder.validate_decisions([_row(checkpoint="")])
+
+
+def test_distinct_source_revisions_preserve_independent_decisions():
+    builder = _builder()
+    first = _row(checkpoint="m@0123abcd", source_revision="abc12345", decision="candidate")
+    second = _row(checkpoint="m@0123abcd", source_revision="def67890", decision="rejected")
+    index = builder.validate_decisions([first, second])
+    assert len(index) == 2
+    assert index[(first["model"], first["checkpoint"], "feature", "native_mtp", "abc12345")] == first
+    assert index[(second["model"], second["checkpoint"], "feature", "native_mtp", "def67890")] == second
+
+
+def test_same_normalized_source_remains_a_duplicate():
+    with pytest.raises(ValueError, match="duplicate"):
+        _builder().validate_decisions([_row(), _row(source_revision=" abc12345 ")])
+
+
+def test_grid_emits_every_source_revision_without_combining_outcomes(tmp_path, monkeypatch):
+    builder = _builder()
+    rows = [
+        _row(checkpoint="m@0123abcd", source_revision="def67890", decision="rejected", reason="later failed"),
+        _row(checkpoint="m@0123abcd", source_revision="abc12345", decision="candidate", reason="earlier observed"),
+    ]
+    decisions = tmp_path / "decisions.tsv"
+    with decisions.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)
+    monkeypatch.setattr(builder, "DECISIONS", decisions)
+    monkeypatch.setattr(builder, "registered_types", lambda: ["nemotron_h_omni"])
+    monkeypatch.setattr(builder, "FEATURES", ("native_mtp",))
+    monkeypatch.setattr(builder, "server_flags", lambda: set())
+    monkeypatch.setattr(builder, "environment_flags", lambda: set())
+    target = tmp_path / "grid.tsv"
+    builder.main(["--output", str(target)])
+    with target.open(newline="") as handle:
+        rendered = list(csv.DictReader(handle, delimiter="\t"))
+    assert len(rendered) == 3
+    assert rendered[0]["checkpoint"] == "*" and rendered[0]["decision"] == "review_needed"
+    assert rendered[1:] == sorted(rows, key=lambda row: row["source_revision"])
+
+
+def test_lora_research_has_an_inventory_slot():
+    assert "kimi_linear_supervised_lora_research" in _builder().FEATURES
 
 
 def test_the_committed_decisions_carry_the_checkpoint_dimension():

@@ -42,7 +42,7 @@ def lora_file_receipt(path):
     import hashlib
     from pathlib import Path
 
-    from .lora import read_lora_config
+    from .lora import inspect_lora_program, lora_fingerprint, read_lora_config
 
     directory = Path(path)
     if directory.is_symlink() or not directory.is_dir():
@@ -52,6 +52,25 @@ def lora_file_receipt(path):
     if config_path.is_symlink() or weights_path.is_symlink() or config_path.stat().st_size > 1 << 20:
         raise ValueError("Suspended LoRA files must be bounded, regular source files")
     resolved, config = read_lora_config(directory)
+    if "weight_program" in config:
+        manifest_path = directory / "weight_program.json"
+        if manifest_path.is_symlink():
+            raise ValueError("Suspended weight program manifest must be a regular file")
+        payload = weights_path.read_bytes()
+        program = inspect_lora_program(
+            resolved, config, payload=payload, require_base=False,
+        )
+        return {
+            "path": str(resolved),
+            "fingerprint": lora_fingerprint(
+                payload, config["rank"], config["scale"], config["keys"], program,
+            ),
+            "files": {
+                "adapter_config.json": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                "adapters.safetensors": hashlib.sha256(payload).hexdigest(),
+                "weight_program.json": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            },
+        }
     fingerprint = hashlib.sha256(repr((config["rank"], config["scale"], tuple(sorted(config["keys"])))).encode())
     weights_digest = hashlib.sha256()
     with weights_path.open("rb") as stream:

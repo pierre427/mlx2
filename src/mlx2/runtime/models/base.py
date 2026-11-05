@@ -380,5 +380,5 @@ def scaled_dot_product_attention(
 
             row_mask = None if isinstance(mask, str) else mask
             if use_fp_decode_kernel(queries, keys, values, mask=row_mask):
-                return gqa_decode_attention_fp(queries, keys, values, scale=scale)
+                return gqa_decode_attention_fp(queries, keys, values, scale=scale, mask=row_mask)
         return fast_sdpa(queries, keys, values, scale=scale, mask=mask, sinks=sinks)
