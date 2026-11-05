@@ -361,3 +361,18 @@ def test_dropped_parallel_call_keeps_its_framing_newline_out_of_content(adapter,
     free = _all_ways(adapter, tokenizer, _request(), output)
     assert capped[1] == free[1] == "A\nB"
     assert len(capped[2]) == 1 and len(free[2]) == 2
+
+
+def test_operator_sampling_defaults_and_no_thinking_override():
+    from mlx2.sampling_defaults import resolve_sampling, vendor_sampling
+
+    declared = vendor_sampling(RippleAdapter, {"messages": USER})
+    assert declared.model == "ricursiveAI/Ripple-65B-Preview"
+    sampling, receipt = resolve_sampling({"messages": USER}, declared, thinking=False)
+    assert (sampling["temperature"], sampling["top_p"], sampling["top_k"]) == (0.7, 0.95, 20)
+    assert sampling["min_p"] == 0.0
+    override, _ = resolve_sampling({"messages": USER, "temperature": 0, "top_k": 0}, declared, thinking=False)
+    assert (override["temperature"], override["top_p"], override["top_k"]) == (0, 0.95, 0)
+    # The model decides per turn whether to open <think>: the engine must not
+    # arm thinking paths for every chat request.
+    assert not hasattr(RippleAdapter, "thinking_enabled")

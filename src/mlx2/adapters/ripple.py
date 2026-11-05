@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from ..sampling_defaults import SamplingDefaults, VendorSampling
 from .external_draft_policy import ExternalDraftAdapterMixin
 from .ordinary_artifact import inspect_indexed_artifact
 from .ordinary_text import OrdinaryTextAdapter, _template_history
@@ -398,6 +399,21 @@ def tree_policy(policy):
     return tree
 
 
+# Ripple publishes no sampling recommendation: generation_config.json has no
+# sampling fields, the model card has none, and the vendor examples decode
+# greedily. These are an operator choice (Pierre, 2026-11-05), replacing the
+# engine's legacy 0.7/0.8/20 fallback; requests still override every field.
+RIPPLE_SAMPLING = VendorSampling.single(
+    SamplingDefaults(
+        temperature=0.7,
+        top_p=0.95,
+        top_k=20,
+        source="operator decision (Pierre, 2026-11-05); vendor publishes no sampling defaults",
+    ),
+    model="ricursiveAI/Ripple-65B-Preview",
+)
+
+
 class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     descriptor = DESCRIPTOR
     # Vendor DFlash2 drafter (ricursiveAI/Ripple-65B-Preview-DFlash2): taps
@@ -405,11 +421,13 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # Apple silicon; 7 is a starting point for the A/B, not a tuned default.
     EXTERNAL_DEFAULT_NUM_DRAFT = 7
     EXTERNAL_ROUTE_TAG = "external-ripple-dflash2-v1"
-    # The model always thinks (it writes <think> itself; the template has no off control)
-    # (``_check_request`` refuses enable_thinking=false). /v1/messages then
+    # The template has no thinking control: the model itself decides whether
+    # to write <think> (``_check_request`` refuses enable_thinking=false
+    # rather than claim an off switch). /v1/messages then
     # leaves its thinking-off default unset rather than sending a flag this
     # adapter must refuse (Pierre, 2026-11-05, option 3).
     thinking_off_supported = False
+    sampling_defaults = RIPPLE_SAMPLING
     EXTERNAL_PROFILE = "ripple-apcv2-dflash2"
     # Identity pin an auto-paired default writes (best_route_defaults); the
     # adapter re-checks it below so a drafter changed after pairing fails.
@@ -537,6 +555,12 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 self.EXTERNAL_ROUTE_TAG = TREE_ROUTE_TAG
             self._bind_external_drafter(draft_record, load_drafter, self.descriptor)
 
+    # No ``thinking_enabled`` override on purpose: the model chooses per turn
+    # whether to open <think> (1 of 12 chat probes did; qualification/runs/
+    # ripple-think-close-20261105/run1), so a request-level "thinking on"
+    # would arm the guard and grammar deferral for a channel that usually
+    # never opens. The engine therefore treats chat as thinking-off and the
+    # output parser splits whatever the model writes.
     @staticmethod
     def _check_request(request):
         # The flag only has template meaning for chat requests; raw prompts

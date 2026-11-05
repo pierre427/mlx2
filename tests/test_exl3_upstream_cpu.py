@@ -456,6 +456,20 @@ def test_nax_fused_is_the_upstream_exl3_default_and_refuses_elsewhere():
     assert "if explicit_exl3 and not upstream_exl3:" in source
 
 
+def test_resident_verify_is_the_nax_fused_default_only():
+    # Pierre, 2026-11-05: resident fp16 verify weights default-on under
+    # nax_fused; other laws and non-EXL3 artifacts stay "off", and only an
+    # explicit choice on a non-EXL3 artifact refuses.
+    from mlx2.adapters import qwen36_35b
+
+    assert qwen36_35b.DEFAULT_EXL3_RESIDENT_DENSE == "verify"
+    assert qwen36_35b.DEFAULT_EXL3_RESIDENT_DENSE in qwen36_35b.EXL3_RESIDENT_DENSE
+    source = Path(qwen36_35b.__file__).read_text()
+    assert ('DEFAULT_EXL3_RESIDENT_DENSE if upstream_exl3 and self.exl3_execution == "nax_fused" else "off"'
+            in source)
+    assert 'if self.exl3_resident_dense != "off" and not upstream_exl3:' in source
+
+
 def test_external_draft_policy_keeps_the_exl3_law_on_the_target():
     # AST/DFlash2 servers pass the target law beside the drafter contract;
     # it was refused as an unknown drafter key (exl3-fuse-h2h-20261105).

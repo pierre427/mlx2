@@ -41,7 +41,7 @@ from mlx2.runtime.models.exl3_reference import effective_weight  # noqa: E402
 from mlx2.runtime.trellis.upstream import ShardReader, load_bank, load_linear  # noqa: E402
 
 MODULE_BAR = 1e-2
-RESIDENT = ["off"]  # --resident-dense, for the model part
+RESIDENT = [None]  # --resident-dense, for the model part
 # Whole-model speed arms: one prefill forward per length (the expert-bank
 # NAX path pays a fixed reconstruction cost per call), decode after the first.
 SPEED_LAWS = ("reference", "nax", "nax_fused")
@@ -588,7 +588,7 @@ def _model_checks(path, reference, out, execution):
 
     started = time.time()
     adapter = resolve_adapter(path)(path, execution_policy={
-        "exl3_execution": execution, **({"exl3_resident_dense": RESIDENT[0]} if RESIDENT[0] != "off" else {})})
+        "exl3_execution": execution, **({"exl3_resident_dense": RESIDENT[0]} if RESIDENT[0] is not None else {})})
     load_s = time.time() - started
     model, tokenizer = adapter.model, adapter.tokenizer
     eos = set(tokenizer.eos_token_ids)
@@ -843,7 +843,8 @@ def main():
     parser.add_argument("--reference", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--parts", default="modules,model")
-    parser.add_argument("--resident-dense", default="off", choices=("off", "lm_head", "verify"))
+    parser.add_argument("--resident-dense", default=None, choices=("off", "lm_head", "verify"),
+                        help="default: the adapter default for the execution law")
     parser.add_argument("--speed-laws", default=",".join(SPEED_LAWS))
     parser.add_argument("--prefill-lengths", default=",".join(map(str, PREFILL_LENGTHS)))
     parser.add_argument("--prefill-chunk", type=int, default=0)

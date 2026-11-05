@@ -55,6 +55,7 @@ FEATURES = (
     "metal_rmsnorm", "gqa_folded_attention",
     # Ripple glue/tree pass (2026-11-05).
     "metal_glue", "ast_dflash2_tree_tiles", "external_draft_num_draft", "gsm8k_spec_acceptance",
+    "sampling_defaults", "anthropic_thinking_default",
     "source_engram_carry_tuple", "source_expert_direct_final_reads",
     "source_expert_decayed_retention", "native_fp_tensor_verify", "apc_inpass_checkpoints",
     "ling_optimizations", "ast_apcv2_current_source",

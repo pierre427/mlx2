@@ -100,7 +100,8 @@ def main():
     parser.add_argument("--i-own-the-gpu", action="store_true")
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--resident-dense", default="off", choices=("off", "lm_head", "verify"))
+    parser.add_argument("--resident-dense", default=None, choices=("off", "lm_head", "verify"),
+                        help="default: the adapter default for the execution law")
     parser.add_argument("--execution", default="rows",
                         choices=("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax", "nax_fused"))
     parser.add_argument("--port", type=int, default=18361)
@@ -169,7 +170,7 @@ def main():
 
     policy = args.output / "policy.json"
     atomic_json(policy, {"exl3_execution": args.execution,
-                         **({"exl3_resident_dense": args.resident_dense} if args.resident_dense != "off" else {})})
+                         **({"exl3_resident_dense": args.resident_dense} if args.resident_dense is not None else {})})
     command = [sys.executable, "-u", "-m", "mlx2.server", "--model", str(args.model), "--host", "127.0.0.1",
                "--port", str(args.port), "--max-lanes", "4", "--max-inflight", "4", "--max-context", "8192",
                "--cache-bytes", str(2 << 30), "--cache-dir", str(args.output / "apcv2"),

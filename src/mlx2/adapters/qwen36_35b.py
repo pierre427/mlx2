@@ -525,10 +525,13 @@ TARGET_EXECUTION_POLICY_KEYS = frozenset({
 #              The default (Pierre, 2026-11-05, "best defaults").
 # Resident fp16 copies of dense EXL3 linears for verify widths (4x their
 # trellis bytes): "lm_head" (~1 GiB on Qwen3.6-35B-A3B) or "verify" (lm_head
-# plus the GDN qkv/z and attention q projections, ~3 GiB). Opt-in pending
-# the served A/B; survey: exl3-nax-survey-20261105.
+# plus the GDN qkv/z and attention q projections, 2.86 GB over 71 modules).
+# "verify" is the default under nax_fused (Pierre, 2026-11-05): served AST
+# ABAB code B1 ~206 -> ~273 tok/s (+30..34%), B4 flat; survey:
+# exl3-nax-survey-20261105. Other EXL3 laws have no fused_nax dense modules
+# to make resident, so they default to "off".
 EXL3_RESIDENT_DENSE = ("off", "lm_head", "verify")
-DEFAULT_EXL3_RESIDENT_DENSE = "off"
+DEFAULT_EXL3_RESIDENT_DENSE = "verify"
 EXL3_RESIDENT_MIN_ROWS = 8
 EXL3_EXECUTIONS = ("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax", "nax_fused")
 # Upstream EXL3 checkpoints only; every other artifact keeps no EXL3 law.
@@ -1006,7 +1009,10 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         )
         if self.exl3_execution not in EXL3_EXECUTIONS:
             raise ValueError(f"Qwen3.6 exl3_execution must be one of {EXL3_EXECUTIONS}")
-        self.exl3_resident_dense = policy.pop("exl3_resident_dense", DEFAULT_EXL3_RESIDENT_DENSE)
+        self.exl3_resident_dense = policy.pop(
+            "exl3_resident_dense",
+            DEFAULT_EXL3_RESIDENT_DENSE if upstream_exl3 and self.exl3_execution == "nax_fused" else "off",
+        )
         if self.exl3_resident_dense not in EXL3_RESIDENT_DENSE:
             raise ValueError(f"Qwen3.6 exl3_resident_dense must be one of {EXL3_RESIDENT_DENSE}")
         if self.exl3_resident_dense != "off" and not upstream_exl3:
