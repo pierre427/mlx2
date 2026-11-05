@@ -61,7 +61,7 @@ FEATURES = (
     "ling_kda_fusion_components", "ling_split_mla_components",
     "inkling_fused_ops", "inkling_q2_down_combine", "inkling_inline_relative_attention",
     "mtp_tree_pipeline",
-    "integer_exact_microscaling", "exl3_upstream_weight_format", "exl3_execution_rows", "exl3_execution_fused", "exl3_execution_fused_nax", "exl3_execution_fused_w8a8", "exl3_execution_nax", "exl3_execution_nax_fused",
+    "integer_exact_microscaling", "exl3_upstream_weight_format", "exl3_execution_rows", "exl3_execution_fused", "exl3_execution_fused_nax", "exl3_execution_fused_w8a8", "exl3_execution_nax", "exl3_execution_nax_fused", "exl3_resident_dense",
     "resident_kernel_reload", "kimi_linear_supervised_lora_research",
     "kimi_router_score_profile_one_domain_prompt",
     "kimi_moe_behavior_research", "kimi_moe_loop_research",

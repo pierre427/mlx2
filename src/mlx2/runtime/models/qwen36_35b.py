@@ -466,12 +466,24 @@ class DecoderLayer(nn.Module):
     def __call__(
         self, x: mx.array, mask: Optional[mx.array] = None, cache: Optional[Any] = None
     ) -> mx.array:
-        if self.is_linear:
-            residual = self.linear_attn(self.input_layernorm(x), mask, cache)
-        else:
-            residual = self.self_attn(self.input_layernorm(x), mask, cache)
-        hidden = x + residual
-        return hidden + self.mlp(self.post_attention_layernorm(hidden))
+        mixer = self.linear_attn if self.is_linear else self.self_attn
+        # A weight format may add the residual in the mixer's or the MoE's
+        # last launch (one-shot ResidualSlot); unconsumed, it is added here.
+        slots = getattr(self, "residual_slots", None)
+        if (slots is None or getattr(mixer, "sharding_group", None) is not None
+                or getattr(self.mlp, "sharding_group", None) is not None):
+            hidden = x + mixer(self.input_layernorm(x), mask, cache)
+            return hidden + self.mlp(self.post_attention_layernorm(hidden))
+        attn_slot, mlp_slot = slots
+        attn_slot.value, attn_slot.used = x, False
+        out = mixer(self.input_layernorm(x), mask, cache)
+        hidden = out if attn_slot.used else x + out
+        attn_slot.value = None
+        mlp_slot.value, mlp_slot.used = hidden, False
+        out = self.mlp(self.post_attention_layernorm(hidden))
+        result = out if mlp_slot.used else hidden + out
+        mlp_slot.value = None
+        return result
 
 
 class Qwen36TextModel(DenseTextModel):

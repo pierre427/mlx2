@@ -36,9 +36,10 @@ from check_exl3_checkpoint import _artifact_name  # noqa: E402
 CALLS = 64
 # (FUSED_KS, shared_slots, FUSED_KS_BY_INPUT) per whole-model arm, interleaved
 # so drift lands on every arm; --arms replaces it.
-# (FUSED_KS, shared_slots, FUSED_KS_BY_INPUT, projection groups)
+# (FUSED_KS, shared_slots, FUSED_KS_BY_INPUT, projection groups, residual
+# folds, in-kernel shared gate logit)
 ARMS = tuple(arm for _ in range(3) for arm in (
-    (1, False, {}, False), (2, True, {}, False), (2, True, {}, True)))
+    (2, True, {}, True, False, False), (2, True, {}, True, True, False)))
 SPLITS = (1, 2, 4)
 
 
@@ -141,11 +142,17 @@ def _model_decode(path, rng, arms_spec=None):
     grouped = {name: m.exl3_projection_group for name, m in model.named_modules()
                if getattr(m, "exl3_projection_group", None) is not None}
     modules = dict(model.named_modules())
-    for ks, slots, by_input, groups in arms_spec:
+    folded = {name: m.residual_slots for name, m in model.named_modules()
+              if getattr(m, "residual_slots", None) is not None}
+    for ks, slots, by_input, groups, residual, logit in arms_spec:
         exl3.FUSED_KS = ks
         exl3.FUSED_KS_BY_INPUT = dict(by_input)
         for name, group in grouped.items():
             object.__setattr__(modules[name], "exl3_projection_group", group if groups else None)
+        for name, pair in folded.items():
+            object.__setattr__(modules[name], "residual_slots", pair if residual else None)
+        for sw in switches:
+            object.__setattr__(sw, "shared_gate_logit", logit)
         for sw in switches:
             object.__setattr__(sw, "shared_slots", slots)
         cache = make_prompt_cache(model)
@@ -159,6 +166,7 @@ def _model_decode(path, rng, arms_spec=None):
             token = int(mx.argmax(model(mx.array([[token]], mx.uint32), cache=cache)[0, -1]).item())
         arms.append({"ks": ks, "ks_by_input": {str(k): v for k, v in by_input.items()}, "shared_slots": slots,
                      "projection_groups": groups, "groups_installed": len(grouped),
+                     "residual_folds": residual, "folds_installed": len(folded), "gate_logit": logit,
                      "decode_tok_s": 96 / (time.perf_counter() - start)})
         print("model", json.dumps(arms[-1]), flush=True)
         del cache, logits

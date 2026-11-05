@@ -41,6 +41,7 @@ from mlx2.runtime.models.exl3_reference import effective_weight  # noqa: E402
 from mlx2.runtime.trellis.upstream import ShardReader, load_bank, load_linear  # noqa: E402
 
 MODULE_BAR = 1e-2
+RESIDENT = ["off"]  # --resident-dense, for the model part
 # Whole-model speed arms: one prefill forward per length (the expert-bank
 # NAX path pays a fixed reconstruction cost per call), decode after the first.
 SPEED_LAWS = ("reference", "nax", "nax_fused")
@@ -299,6 +300,50 @@ def _fused_law_checks(read, plan, layer, rng):
             "bitwise_vs_one_token": bool(mx.array_equal(merged.view(mx.uint16), alone.view(mx.uint16)).item()),
         })
     out["shared_slot_calls"] = chain.shared_slot_calls - out["tail_shared_slot_calls"]
+    # Rev 5: the decoder residual added in the tail's combine launch (bitwise
+    # the separate add) and the shared gate logit in the gate/up launch.
+    from mlx2.runtime.models.exl3 import ResidualSlot
+
+    slot = ResidualSlot()
+    object.__setattr__(chain, "residual_slot", slot)
+    out["tail_residual"] = []
+    for tokens in (1, 4):
+        x = mx.array(rng.normal(0, 1, (tokens, specs["gate_proj"].input_dims)).astype(np.float32)).astype(mx.bfloat16)
+        r = mx.array(rng.normal(0, 1, (tokens, specs["gate_proj"].input_dims)).astype(np.float32)).astype(mx.bfloat16)
+        ids = mx.array(np.stack([rng.choice(specs["gate_proj"].experts, 8, replace=False) for _ in range(tokens)]).astype(np.uint32))
+        scores = mx.softmax(mx.array(rng.normal(0, 1, (tokens, 8)).astype(np.float32)), axis=-1).astype(mx.bfloat16)
+        object.__setattr__(chain, "shared_gate_logit", True)
+        plain = chain.decode_tail(block, x, ids, scores)
+        slot.value, slot.used = r, False
+        folded = chain.decode_tail(block, x, ids, scores)
+        consumed = slot.used
+        object.__setattr__(chain, "shared_gate_logit", False)
+        gemv = chain.decode_tail(block, x, ids, scores)
+        object.__setattr__(chain, "shared_gate_logit", True)
+        alone = mx.concatenate([chain.decode_tail(block, x[t : t + 1], ids[t : t + 1], scores[t : t + 1])
+                                for t in range(tokens)])
+        object.__setattr__(chain, "shared_gate_logit", False)
+        out["tail_residual"].append({
+            "tokens": tokens, "consumed": consumed,
+            "residual_bitwise_vs_add": bool(mx.array_equal(folded.view(mx.uint16), (plain + r).view(mx.uint16)).item()),
+            "gate_logit_max_err_over_scale_vs_gemv": _err(plain.astype(mx.float32), gemv.astype(mx.float32)),
+            "gate_logit_bitwise_vs_one_token": bool(mx.array_equal(plain.view(mx.uint16), alone.view(mx.uint16)).item()),
+        })
+    object.__setattr__(chain, "residual_slot", None)
+    dense = Exl3DenseLinear(**load_linear(read, plan.linears[f"model.language_model.layers.{layer}.linear_attn.out_proj"]),
+                            law="fused_nax")
+    dense.eval()
+    dslot = ResidualSlot()
+    object.__setattr__(dense, "residual_slot", dslot)
+    out["dense_residual"] = []
+    for m in (1, 4):
+        x = mx.array(rng.normal(0, 1, (m, dense.input_dims)).astype(np.float32)).astype(mx.bfloat16)
+        r = mx.array(rng.normal(0, 1, (m, dense.output_dims)).astype(np.float32)).astype(mx.bfloat16)
+        plain = dense(x)
+        dslot.value, dslot.used = r, False
+        folded = dense(x)
+        out["dense_residual"].append({"rows": m, "consumed": dslot.used,
+                                      "bitwise_vs_add": bool(mx.array_equal(folded.view(mx.uint16), (plain + r).view(mx.uint16)).item())})
     # Rev 4: same-input projections in one launch, bitwise each linear's own
     # fused call, and bitwise row-invariant.
     from mlx2.runtime.models.exl3 import fused_group
@@ -320,6 +365,25 @@ def _fused_law_checks(read, plan, layer, rng):
                 "bitwise_vs_own": all(bool(mx.array_equal(a.view(mx.uint16), b.view(mx.uint16)).item()) for a, b in zip(got, own)),
                 "bitwise_vs_one_row": all(bool(mx.array_equal(a.view(mx.uint16), b.view(mx.uint16)).item()) for a, b in zip(got, alone)),
             })
+    # Resident fp16 dense weights (exl3_resident_dense): accuracy against the
+    # fused law at verify widths, and row invariance inside the resident regime.
+    out["resident"] = []
+    for key in (f"model.language_model.layers.{layer}.linear_attn.in_proj_qkv",
+                f"model.language_model.layers.{layer + 1}.self_attn.q_proj"):
+        lin = Exl3DenseLinear(**load_linear(read, plan.linears[key]), law="fused_nax")
+        lin.eval()
+        lin.make_resident(8)
+        x = mx.array(rng.normal(0, 1, (37, lin.input_dims)).astype(np.float32)).astype(mx.bfloat16)
+        wide = lin(x)
+        eight = lin(x[:8])
+        sixteen = lin(x[:16])
+        out["resident"].append({
+            "module": key.rsplit(".", 1)[-1], "resident_calls": lin.resident_calls,
+            "max_err_over_scale_vs_fused": _err(wide.astype(mx.float32), lin._fused(x).astype(mx.float32)),
+            "bitwise_8_vs_16_rows": bool(mx.array_equal(eight.view(mx.uint16), sixteen[:8].view(mx.uint16)).item()),
+            "bitwise_16_vs_37_rows": bool(mx.array_equal(sixteen.view(mx.uint16), wide[:16].view(mx.uint16)).item()),
+        })
+        del lin
     # Sushi's fused pair must refuse rates it was not validated at.
     switch = Exl3SwitchGLU(*projs, execution="fused", trusted_router=True)
     switch.eval()
@@ -374,6 +438,11 @@ def _fused_law_checks(read, plan, layer, rng):
                      and all(r["max_err_over_scale"] <= MODULE_BAR and r["bitwise_vs_one_token"] for r in out["tail"])
                      and out["tail_calls"] == 7 and out["tail_shared_slot_calls"] == 7
                      and len(out["groups"]) == 4
+                     and all(r["max_err_over_scale_vs_fused"] <= MODULE_BAR and r["resident_calls"] == 3
+                             for r in out["resident"])
+                     and all(r["consumed"] and r["residual_bitwise_vs_add"] and r["gate_logit_bitwise_vs_one_token"]
+                             and r["gate_logit_max_err_over_scale_vs_gemv"] <= MODULE_BAR for r in out["tail_residual"])
+                     and all(r["consumed"] and r["bitwise_vs_add"] for r in out["dense_residual"])
                      and all(r["bitwise_vs_own"] and r["bitwise_vs_one_row"] for r in out["groups"])
                      and all(r["max_err_over_scale_vs_separate"] <= MODULE_BAR and r["bitwise_vs_one_token"]
                              for r in out["shared_slots"])
@@ -518,7 +587,8 @@ def _model_checks(path, reference, out, execution):
     from mlx2.adapters.registry import resolve_adapter
 
     started = time.time()
-    adapter = resolve_adapter(path)(path, execution_policy={"exl3_execution": execution})
+    adapter = resolve_adapter(path)(path, execution_policy={
+        "exl3_execution": execution, **({"exl3_resident_dense": RESIDENT[0]} if RESIDENT[0] != "off" else {})})
     load_s = time.time() - started
     model, tokenizer = adapter.model, adapter.tokenizer
     eos = set(tokenizer.eos_token_ids)
@@ -568,6 +638,14 @@ def _model_checks(path, reference, out, execution):
         "stored_half_cast": installed.get("stored_half_cast"),
         "router": router_rows,
         "projection_groups_installed": installed.get("projection_groups"),
+        "residual_folds": installed.get("residual_folds"),
+        "resident_dense": installed.get("resident_dense"),
+        "resident_calls": sum(getattr(m, "resident_calls", 0) for _, m in model.named_modules()
+                              if isinstance(m, Exl3DenseLinear)),
+        "tail_residual_calls": sum(b.get("residual_calls", 0) for b in blocks),
+        "gate_logit_calls": sum(b.get("gate_logit_calls", 0) for b in blocks),
+        "dense_residual_calls": sum(getattr(m, "residual_calls", 0) for _, m in model.named_modules()
+                                    if isinstance(m, Exl3DenseLinear)),
         "projection_group_calls": sum(
             m.exl3_projection_group.calls for _, m in model.named_modules()
             if getattr(m, "exl3_projection_group", None) is not None),
@@ -614,6 +692,9 @@ def _model_checks(path, reference, out, execution):
                                           and observed["router_launch_calls"] > 0
                                           and observed["projection_groups_installed"] == 40
                                           and observed["projection_group_calls"] > 0
+                                          and observed["residual_folds"] == 40
+                                          and observed["tail_residual_calls"] > 0
+                                          and observed["dense_residual_calls"] > 0
                                           and all(r["launch_vs_eager_indices"] and r["launch_vs_eager_scores"]
                                                   and r["eager_vs_one_row"] for r in observed["router"])))
         and (observed["load_dtype_check"] or {}).get("ok") is True
@@ -762,6 +843,7 @@ def main():
     parser.add_argument("--reference", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--parts", default="modules,model")
+    parser.add_argument("--resident-dense", default="off", choices=("off", "lm_head", "verify"))
     parser.add_argument("--speed-laws", default=",".join(SPEED_LAWS))
     parser.add_argument("--prefill-lengths", default=",".join(map(str, PREFILL_LENGTHS)))
     parser.add_argument("--prefill-chunk", type=int, default=0)
@@ -771,6 +853,7 @@ def main():
     if not args.i_own_the_gpu:
         parser.error("this runs Metal kernels; pass --i-own-the-gpu under the GPU lock")
     out = Path(args.out)
+    RESIDENT[0] = args.resident_dense
     if args.parts == "reference":
         return _reference_worker(Path(args.reference).expanduser().resolve(), out)
     if out.exists() and any(out.iterdir()):
@@ -793,6 +876,7 @@ def main():
         "mlx_version": mx.__version__,
         "device": str(mx.default_device()),
         "execution": args.execution,
+        "resident_dense": args.resident_dense,
     }
     parts = set(args.parts.split(","))
     out.mkdir(parents=True, exist_ok=True)

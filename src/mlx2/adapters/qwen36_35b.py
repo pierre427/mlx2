@@ -371,6 +371,46 @@ def exl3_projection_groups(path, module):
     return None
 
 
+def install_exl3_residual_folds(model):
+    """nax_fused: each decoder layer's residual adds ride in its mixer's
+    EXL3 output projection and its MoE decode tail (one-shot slots)."""
+    from ..runtime.models.exl3 import Exl3DenseLinear, Exl3SwitchGLU, ResidualSlot
+    from ..runtime.models.qwen36_35b import DecoderLayer
+
+    folds = 0
+    for _, layer in model.named_modules():
+        if not isinstance(layer, DecoderLayer):
+            continue
+        mixer = layer.linear_attn if layer.is_linear else layer.self_attn
+        out = mixer.out_proj if layer.is_linear else mixer.o_proj
+        switch = getattr(layer.mlp, "switch_mlp", None)
+        if (not isinstance(out, Exl3DenseLinear) or "bias" in out
+                or not isinstance(switch, Exl3SwitchGLU) or switch.execution != "fused_chain_nax"):
+            continue
+        slots = (ResidualSlot(), ResidualSlot())
+        object.__setattr__(out, "residual_slot", slots[0])
+        object.__setattr__(switch, "residual_slot", slots[1])
+        object.__setattr__(layer, "residual_slots", slots)
+        folds += 1
+    return folds
+
+
+def install_exl3_resident_dense(model, selection):
+    """Resident fp16 weights for the selected dense EXL3 linears, used from
+    EXL3_RESIDENT_MIN_ROWS rows (AST verify trees, wide batches)."""
+    from ..runtime.models.exl3 import Exl3DenseLinear
+
+    suffixes = ("lm_head",) if selection == "lm_head" else (
+        "lm_head", ".linear_attn.in_proj_qkv", ".linear_attn.in_proj_z", ".self_attn.q_proj")
+    modules, nbytes = [], 0
+    for path, module in model.named_modules():
+        if isinstance(module, Exl3DenseLinear) and module.law == "fused_nax" and path.endswith(suffixes):
+            nbytes += module.make_resident(EXL3_RESIDENT_MIN_ROWS)
+            modules.append(path)
+    return {"selection": selection, "min_rows": EXL3_RESIDENT_MIN_ROWS,
+            "modules": len(modules), "bytes": nbytes}
+
+
 def exl3_fused_mlp(path, module):
     """Qwen3.6's dense SwiGLU MLPs (the shared experts) may fuse."""
     from ..runtime.models.qwen3_next import Qwen3NextMLP
@@ -445,6 +485,7 @@ EXTERNAL_TARGET_KERNEL_KEYS = frozenset(
 TARGET_EXECUTION_POLICY_KEYS = frozenset({
     "tensorfold_prefill", "tensorfold_prefill_backend", "gdn_prefill_chunk",
     "gdn_prefill_segment_rows", "gdn_state_dtype", "moe_nax_gather", "exl3_execution",
+    "exl3_resident_dense",
     *KERNEL_POLICY_ENV, *EAGER_DISPATCH_POLICY_KEYS,
 })
 # Upstream EXL3 execution laws, one per module kind at every width, so rows
@@ -482,6 +523,13 @@ TARGET_EXECUTION_POLICY_KEYS = frozenset({
 #              decode +21..31% (+12..28% under AST), B4 +22%, TTFT equal;
 #              APCv2 cold/warm exact, B4 French divergence near_tie_equivalent.
 #              The default (Pierre, 2026-11-05, "best defaults").
+# Resident fp16 copies of dense EXL3 linears for verify widths (4x their
+# trellis bytes): "lm_head" (~1 GiB on Qwen3.6-35B-A3B) or "verify" (lm_head
+# plus the GDN qkv/z and attention q projections, ~3 GiB). Opt-in pending
+# the served A/B; survey: exl3-nax-survey-20261105.
+EXL3_RESIDENT_DENSE = ("off", "lm_head", "verify")
+DEFAULT_EXL3_RESIDENT_DENSE = "off"
+EXL3_RESIDENT_MIN_ROWS = 8
 EXL3_EXECUTIONS = ("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax", "nax_fused")
 # Upstream EXL3 checkpoints only; every other artifact keeps no EXL3 law.
 # Correct on any Metal host: off M5 mx.matmul runs the ordinary GEMM.
@@ -515,8 +563,9 @@ def partition_external_target_policy(policy):
     }
     # The target's weight-format law is target-owned too; the main policy
     # check validates its value.
-    if "exl3_execution" in policy:
-        target["exl3_execution"] = policy["exl3_execution"]
+    for key in ("exl3_execution", "exl3_resident_dense"):
+        if key in policy:
+            target[key] = policy[key]
     external = {key: value for key, value in policy.items() if key not in target}
     return external, target
 
@@ -883,7 +932,8 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if set(policy) - {"num_draft", *TARGET_EXECUTION_POLICY_KEYS}:
             raise ValueError(
                 "Qwen3.6 execution policy supports only num_draft, gdn_state_dtype, "
-                "moe_nax_gather, exl3_execution, tensorfold_prefill, tensorfold_prefill_backend, "
+                "moe_nax_gather, exl3_execution, exl3_resident_dense, tensorfold_prefill, "
+                "tensorfold_prefill_backend, "
                 "gdn_prefill_chunk, gdn_prefill_segment_rows, "
                 "the eager-dispatch keys and the kernel switches "
                 + ", ".join(sorted(KERNEL_POLICY_ENV))
@@ -956,6 +1006,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         )
         if self.exl3_execution not in EXL3_EXECUTIONS:
             raise ValueError(f"Qwen3.6 exl3_execution must be one of {EXL3_EXECUTIONS}")
+        self.exl3_resident_dense = policy.pop("exl3_resident_dense", DEFAULT_EXL3_RESIDENT_DENSE)
+        if self.exl3_resident_dense not in EXL3_RESIDENT_DENSE:
+            raise ValueError(f"Qwen3.6 exl3_resident_dense must be one of {EXL3_RESIDENT_DENSE}")
+        if self.exl3_resident_dense != "off" and not upstream_exl3:
+            raise ValueError("exl3_resident_dense requires an upstream EXL3 checkpoint")
         if explicit_exl3 and not upstream_exl3:
             raise ValueError("exl3_execution requires an upstream EXL3 checkpoint")
         if artifact["config"].get("mlx2_exl3") is None and (
@@ -1318,6 +1373,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 fused_mlp=exl3_fused_mlp,
                 projection_groups=exl3_projection_groups,
             )
+            if self.exl3_execution == "nax_fused":
+                self.exl3["residual_folds"] = install_exl3_residual_folds(self.model)
+            if self.exl3_resident_dense != "off":
+                self.exl3["resident_dense"] = install_exl3_resident_dense(
+                    self.model, self.exl3_resident_dense)
             weights = self.model.sanitize(self.model.shard_prune(load_stored(read, upstream)))
             self.exl3["stored_half_cast"] = cast_half_compute(
                 weights, EXL3_HALF_COMPUTE_WEIGHTS, self.model.language_model.compute_dtype
