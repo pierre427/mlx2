@@ -2,9 +2,9 @@
   "schema": 1,
   "dispatchers": {
     "mlx2.adapters.registry": {
-      "sha256": "e0a1f7ea87483324e6ab261c363dfa59762c2324b57fedb948f7d2092e81097c",
+      "sha256": "7ae7da1e6c29a8a9b2dc21ae8c3250d50a1e31a12c09304084cff8c00775bf8f",
       "targets": [],
-      "reason": "Selected-adapter dispatch reviewed through DeepSeek V4.1 GGUF, MLX, IQ1 and Source registration. New targets are literal internal adapter modules; the constructed adapter/model roots still define the dynamic closure. Unrelated unknown loaders remain unresolved. Re-reviewed 2026-10-28 (4a09b0836, 31f5df129): adapter-own default_route_policy_applies / default_route_policy_filter hooks only decline or drop default keys; no import or dispatch target added."
+      "reason": "Reviewed Inkling native adapter registration. The new dynamic target is the literal internal mlx2.adapters.inkling module; selected adapter/model roots define its math closure."
     },
     "mlx2.runtime.models.cache": {
       "sha256": "a3ff3a139dd8785987078a9ecdd1f1edfdd74f052d9ed8838034e2e464a7b5f6",

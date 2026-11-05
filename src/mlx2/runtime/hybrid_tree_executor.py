@@ -1,19 +1,19 @@
 """Exact serial target-tree executor for mixed KV/recurrent model caches.
 
 This is the correctness-first AST reference path.  Every node executes from a
-private deep copy of its parent's exact state.  It deliberately makes no
+private descriptor snapshot of its parent's exact state.  It deliberately makes no
 throughput claim; a future parent-indexed fused kernel can replace it behind
 the same provider contract after qualification.
 """
 
 from __future__ import annotations
 
-import copy
 import hashlib
 from pathlib import Path
 
 import mlx.core as mx
 
+from .cow_cache import snapshot_prompt_cache_descriptors
 from .target_tree_executor import TargetTreeDispatchMetrics
 
 PROTOCOL = "hybrid_tree_serial_exact_v1"
@@ -23,7 +23,7 @@ def _replace_cache(destination, source):
     if type(destination) is not type(source):
         raise TypeError("hybrid tree cache type changed")
     destination.__dict__.clear()
-    destination.__dict__.update(copy.deepcopy(source.__dict__))
+    destination.__dict__.update(source.__dict__)
 
 
 class HybridTreeTransaction:
@@ -43,7 +43,9 @@ class HybridTreeTransaction:
         if not 0 <= terminal < len(self.branches):
             raise ValueError("hybrid tree commit path is outside the tile")
         try:
-            selected = self.branches[terminal]
+            selected = snapshot_prompt_cache_descriptors(
+                self.branches[terminal], require_committed=False
+            )[0]
             for destination, source in zip(self.live, selected, strict=True):
                 _replace_cache(destination, source)
         finally:
@@ -103,7 +105,7 @@ def tree_forward(model, tokens, parents, live, layers, token):
                 "hybrid AST parents must form one parent-first rooted tree"
             )
         source = live if parent < 0 else branches[parent]
-        private = copy.deepcopy(source)
+        private = snapshot_prompt_cache_descriptors(source, require_committed=False)[0]
         row_logits, row_features = model.forward_with_taps(
             mx.array([[int(value)]], dtype=mx.uint32), private, layers
         )
