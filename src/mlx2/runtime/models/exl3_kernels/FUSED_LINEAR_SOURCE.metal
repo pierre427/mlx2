@@ -8,6 +8,7 @@
 //   3. H128 of the block's 128 inner sums times svh, rounded to half, then
 //      to the output type (FINISH_SOURCE's arithmetic, then the cast).
 // Every row runs the same threadgroup program: row-invariant at any width.
+// slots[row] is the row's expert in a bank (zeros for a dense linear).
 threadgroup half prepared[uint(IDIM)];
 threadgroup float inner[128];
 const uint block = uint(threadgroup_position_in_grid.x);
@@ -21,15 +22,18 @@ constexpr uint IT = uint(IDIM) / TILE;
 constexpr uint OT = uint(ODIM) / TILE;
 constexpr uint SGS = 8u;
 constexpr float sc = 0.08838834764831845f;
+const uint e = uint(slots[row]);
+const device half *suh_e = suh + (size_t)e * (size_t)(IDIM);
+const device half *svh_e = svh + (size_t)e * (size_t)(ODIM);
 {
   const size_t xr = (size_t)row * (size_t)(IDIM);
   for (uint b = sg; b < uint(IDIM) / 128u; b += SGS) {
     const uint base = b * 128u;
     float4 v = float4(
-      float(x[xr + base + lane]) * float(suh[base + lane]),
-      float(x[xr + base + lane + 32u]) * float(suh[base + lane + 32u]),
-      float(x[xr + base + lane + 64u]) * float(suh[base + lane + 64u]),
-      float(x[xr + base + lane + 96u]) * float(suh[base + lane + 96u]));
+      float(x[xr + base + lane]) * float(suh_e[base + lane]),
+      float(x[xr + base + lane + 32u]) * float(suh_e[base + lane + 32u]),
+      float(x[xr + base + lane + 64u]) * float(suh_e[base + lane + 64u]),
+      float(x[xr + base + lane + 96u]) * float(suh_e[base + lane + 96u]));
     for (ushort bit = 1u; bit <= 16u; bit <<= 1u) {
       const float p0 = simd_shuffle_xor(v.x, bit);
       const float p1 = simd_shuffle_xor(v.y, bit);
@@ -59,7 +63,7 @@ threadgroup_barrier(mem_flags::mem_threadgroup);
   const uint sh[8] = {exl3_lane_sh(N, 0u), exl3_lane_sh(N, 1u), exl3_lane_sh(N, 2u), exl3_lane_sh(N, 3u),
                       exl3_lane_sh(N, 4u), exl3_lane_sh(N, 5u), exl3_lane_sh(N, 6u), exl3_lane_sh(N, 7u)};
   float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-  const device uint *words = (const device uint *)trellis + (size_t)ot * PACKED_W;
+  const device uint *words = (const device uint *)(trellis + (size_t)e * IT * OT * N) + (size_t)ot * PACKED_W;
   constexpr size_t STEP = (size_t)OT * PACKED_W;
   for (uint tk = 0u; tk < IT; tk += 2u) {
     const auto m0 = exl3_lane<N>(words + (size_t)tk * STEP, uint(lane));
@@ -117,8 +121,8 @@ if (sg == 0u) {
   const float s2 = v.z + v.w;
   const float s3 = v.z - v.w;
   const size_t yb = (size_t)row * (size_t)(ODIM) + base;
-  y[yb + lane] = OUT(float(half((s0 + s2) * sc * float(svh[base + lane]))));
-  y[yb + lane + 32u] = OUT(float(half((s1 + s3) * sc * float(svh[base + lane + 32u]))));
-  y[yb + lane + 64u] = OUT(float(half((s0 - s2) * sc * float(svh[base + lane + 64u]))));
-  y[yb + lane + 96u] = OUT(float(half((s1 - s3) * sc * float(svh[base + lane + 96u]))));
+  y[yb + lane] = OUT(float(half((s0 + s2) * sc * float(svh_e[base + lane]))));
+  y[yb + lane + 32u] = OUT(float(half((s1 + s3) * sc * float(svh_e[base + lane + 32u]))));
+  y[yb + lane + 64u] = OUT(float(half((s0 - s2) * sc * float(svh_e[base + lane + 64u]))));
+  y[yb + lane + 96u] = OUT(float(half((s1 - s3) * sc * float(svh_e[base + lane + 96u]))));
 }

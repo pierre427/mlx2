@@ -12,6 +12,11 @@ own forward, unchanged, if for that one forward
 * each cache's ``make_mask`` returns the prefix-plus-ancestor mask, with the
   sliding-window bound applied to prefix and ancestor keys for windowed layers.
 
+A model without a per-layer ``rope`` module (one that builds its tables once
+per forward, such as Ripple) declares ``attention_tree_position_scope(depths)``
+instead: a context manager that places row ``r`` at ``offset + depths[r]`` for
+the forward run inside it.  The masks are installed on the caches either way.
+
 Commit keeps the accepted root path by compaction: a full ``KVCache`` moves
 the path's rows to the front of the window in place; a ``RotatingKVCache``
 (whose multi-row update leaves ``[prefix, window]`` in temporal order) keeps
@@ -131,6 +136,11 @@ class _TileScope:
         self.masks = {}
         self.installed_rope = []
         self.installed_mask = []
+        # A model that builds its RoPE tables once per forward (no per-layer
+        # ``rope`` module) declares ``attention_tree_position_scope(depths)``:
+        # a context manager under which row ``r`` of the next forward sits at
+        # ``offset + depths[r]``.  Masks still come from the caches below.
+        self.position_scope = None
 
     def _mask_for(self, item):
         start = int(item.offset)
@@ -162,12 +172,18 @@ class _TileScope:
 
     def __enter__(self):
         try:
-            for module in attention_modules(self.model):
-                original = module.rope
-                # Module children and plain attributes have distinct storage.
-                shadowed = module.__dict__.get("rope", _ABSENT)
-                object.__setattr__(module, "rope", _RowRope(original, self.depths))
-                self.installed_rope.append((module, shadowed))
+            declared = getattr(self.model, "attention_tree_position_scope", None)
+            if callable(declared):
+                scope = declared(self.depths)
+                scope.__enter__()
+                self.position_scope = scope
+            else:
+                for module in attention_modules(self.model):
+                    original = module.rope
+                    # Module children and plain attributes have distinct storage.
+                    shadowed = module.__dict__.get("rope", _ABSENT)
+                    object.__setattr__(module, "rope", _RowRope(original, self.depths))
+                    self.installed_rope.append((module, shadowed))
             for item in self.cache:
                 shadowed = item.__dict__.get("make_mask", _ABSENT)
                 item.make_mask = self._mask_for(item)
@@ -190,6 +206,9 @@ class _TileScope:
                 item.make_mask = shadowed
         self.installed_rope.clear()
         self.installed_mask.clear()
+        scope, self.position_scope = self.position_scope, None
+        if scope is not None:
+            scope.__exit__(None, None, None)
         return False
 
 

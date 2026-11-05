@@ -21,6 +21,7 @@ import argparse
 import gc
 import hashlib
 import json
+from types import SimpleNamespace
 import subprocess
 import sys
 import time
@@ -40,6 +41,10 @@ from mlx2.runtime.models.exl3_reference import effective_weight  # noqa: E402
 from mlx2.runtime.trellis.upstream import ShardReader, load_bank, load_linear  # noqa: E402
 
 MODULE_BAR = 1e-2
+# Whole-model speed arms: one prefill forward per length (the expert-bank
+# NAX path pays a fixed reconstruction cost per call), decode after the first.
+SPEED_LAWS = ("reference", "nax", "nax_fused")
+PREFILL_LENGTHS = (512, 2048, 4096)
 # W8A8 is approximate: max error over scale against the exact fused law.
 W8A8_BAR = 6e-2
 CONTROL_BAR = 5e-2
@@ -128,6 +133,43 @@ def _module_checks(path, artifact, rng):
             and rows_law["passed"] and fused_law["passed"]}
 
 
+def _merge_counts(dicts):
+    merged = {}
+    for d in dicts:
+        for k, v in d.items():
+            merged[k] = merged.get(k, 0) + v
+    return merged
+
+
+def _router_checks(model, rng):
+    """nax_fused keeps the one-launch routing for calls up to the block's
+    launch rows and the eager routing above them; the combine sums slots in
+    order, so both must agree bitwise, indices in slot order included.
+    Runs after the adapter pinned its profile (model modules imported)."""
+    from mlx2.runtime.models import qwen3_next as qn
+    from mlx2.runtime.models import qwen4_moe_window as router_window
+
+    block = next(m for name, m in model.named_modules() if name.endswith(".layers.10.mlp"))
+    rows = []
+    for tokens in (1, 2, 4, 16):
+        x = mx.array(rng.normal(0, 1, (tokens, block.gate.weight.shape[1])).astype(np.float32)).astype(mx.bfloat16)
+        logits = block.gate(x)
+        li, ls = router_window.router_topk(logits, top_k=block.top_k, contract=block.moe_routing_contract)
+        ei, es = qn._stock_routing(block, logits)
+        li, ls = li.reshape(ei.shape), ls.reshape(es.shape)
+        one = [qn._stock_routing(block, logits[t : t + 1]) for t in range(tokens)]
+        rows.append({
+            "tokens": tokens,
+            "launch_max_rows": block.__dict__.get("moe_topk_launch_max_rows", 1),
+            "launch_vs_eager_indices": bool(mx.array_equal(li, ei).item()),
+            "launch_vs_eager_scores": bool(mx.array_equal(ls.view(mx.uint16), es.view(mx.uint16)).item()),
+            "eager_vs_one_row": bool(mx.array_equal(ei, mx.concatenate([o[0] for o in one])).item()
+                                     and mx.array_equal(es.view(mx.uint16),
+                                                        mx.concatenate([o[1] for o in one]).view(mx.uint16)).item()),
+        })
+    return rows
+
+
 def _fused_law_checks(read, plan, layer, rng):
     """One-launch dense linears and the fused expert pair against the
     reference law; bitwise row invariance of the fused dense kernel."""
@@ -167,6 +209,117 @@ def _fused_law_checks(read, plan, layer, rng):
     out["switch_nax"] = {"tokens": tokens, "slots": tokens * 8, "threshold": NAX_BANK_MIN_ROWS,
                          "max_err_over_scale": _err(nax_switch(x, ids).astype(mx.float32), ref_switch(x, ids).astype(mx.float32)),
                          "nax_calls": nax_switch.nax_calls}
+    # The sorted-order switch (row-mapped prepare, scatter finish) is, row
+    # for row, the arithmetic of three per-projection banks: bitwise.
+    from mlx2.runtime.models.activations import swiglu as _swiglu
+    from mlx2.runtime.models.exl3 import nax_bank, nax_layout, nax_switch as _nax_switch
+
+    flat_ids = ids.reshape(-1)
+    layout = nax_layout(flat_ids, specs["gate_proj"].experts)
+    rows = mx.repeat(x, 8, axis=0)
+    g = nax_bank(nax_switch.gate_proj, rows, flat_ids, layout)
+    u = nax_bank(nax_switch.up_proj, rows, flat_ids, layout)
+    banks = nax_bank(nax_switch.down_proj, _swiglu(g, u), flat_ids, layout).astype(mx.bfloat16)
+    sorted_out = _nax_switch(nax_switch, x, flat_ids, 8, mx.bfloat16)
+    out["switch_nax"]["sorted_bitwise_vs_banks"] = bool(
+        mx.array_equal(sorted_out.view(mx.uint16), banks.view(mx.uint16)).item())
+    # Fused decode chains: routed experts and a dense SwiGLU MLP.
+    from mlx2.runtime.models.exl3 import Exl3FusedMLP
+
+    chain = Exl3SwitchGLU(*projs, execution="fused_chain_nax", trusted_router=True)
+    chain.eval()
+    out["chain"] = []
+    for tokens in (1, 4):
+        x = mx.array(rng.normal(0, 1, (tokens, specs["gate_proj"].input_dims)).astype(np.float32)).astype(mx.bfloat16)
+        ids = mx.array(np.stack([rng.choice(specs["gate_proj"].experts, 8, replace=False) for _ in range(tokens)]).astype(np.uint32))
+        got = chain(x, ids)
+        row = {"module": root, "tokens": tokens, "max_err_over_scale": _err(
+            got.astype(mx.float32), ref_switch(x, ids).astype(mx.float32))}
+        alone = mx.concatenate([chain(x[t : t + 1], ids[t : t + 1]) for t in range(tokens)])
+        row["bitwise_vs_one_token"] = bool(mx.array_equal(got.view(mx.uint16), alone.view(mx.uint16)).item())
+        out["chain"].append(row)
+    out["chain_calls"] = chain.chain_calls
+    shared = f"model.language_model.layers.{layer}.mlp.shared_expert"
+    mlp_parts = {p: Exl3DenseLinear(**load_linear(read, plan.linears[f"{shared}.{p}"]), law="fused_nax")
+                 for p in ("gate_proj", "up_proj", "down_proj")}
+    for m in mlp_parts.values():
+        m.eval()
+    mlp = Exl3FusedMLP(mlp_parts["gate_proj"], mlp_parts["up_proj"], mlp_parts["down_proj"])
+    mlp.eval()
+    from mlx2.runtime.models.activations import swiglu
+
+    out["fused_mlp"] = []
+    for m in (1, 4):
+        x = mx.array(rng.normal(0, 1, (m, mlp_parts["gate_proj"].input_dims)).astype(np.float32)).astype(mx.bfloat16)
+        got = mlp(x)
+        want = mlp_parts["down_proj"](swiglu(mlp_parts["gate_proj"](x), mlp_parts["up_proj"](x)))
+        alone = mx.concatenate([mlp(x[i : i + 1]) for i in range(m)])
+        out["fused_mlp"].append({"module": shared, "rows": m,
+                                 "max_err_over_scale": _err(got.astype(mx.float32), want.astype(mx.float32)),
+                                 "bitwise_vs_one_row": bool(mx.array_equal(got.view(mx.uint16), alone.view(mx.uint16)).item())})
+    out["fused_mlp_calls"] = mlp.fused_calls
+    # Whole decode tail (routed chain, shared expert, shared gate, one
+    # combine launch) against the composed stock tail of the same modules.
+    import mlx.nn as mlx_nn
+
+    gate_head = mlx_nn.Linear(specs["gate_proj"].input_dims, 1, bias=False)
+    gate_head.weight = (gate_head.weight * 4).astype(mx.bfloat16)
+    block = SimpleNamespace(shared_expert=mlp, shared_expert_gate=gate_head)
+    out["tail"] = []
+    for tokens in (1, 4):
+        x = mx.array(rng.normal(0, 1, (tokens, specs["gate_proj"].input_dims)).astype(np.float32)).astype(mx.bfloat16)
+        ids = mx.array(np.stack([rng.choice(specs["gate_proj"].experts, 8, replace=False) for _ in range(tokens)]).astype(np.uint32))
+        scores = mx.softmax(mx.array(rng.normal(0, 1, (tokens, 8)).astype(np.float32)), axis=-1).astype(mx.bfloat16)
+        got = chain.decode_tail(block, x, ids, scores)
+        want = (chain(x, ids) * scores[..., None]).sum(axis=-2) + mx.sigmoid(gate_head(x)) * mlp(x)
+        alone = mx.concatenate([chain.decode_tail(block, x[t : t + 1], ids[t : t + 1], scores[t : t + 1])
+                                for t in range(tokens)])
+        out["tail"].append({"module": root, "tokens": tokens,
+                            "max_err_over_scale": _err(got.astype(mx.float32), want.astype(mx.float32)),
+                            "bitwise_vs_one_token": bool(mx.array_equal(got.view(mx.uint16), alone.view(mx.uint16)).item())})
+    out["tail_calls"] = chain.tail_calls
+    out["tail_shared_slot_calls"] = chain.shared_slot_calls
+    # Rev 4: the shared expert as extra slots of the routed launches, against
+    # the separate shared launches (rev 3) of the same modules.
+    out["shared_slots"] = []
+    for tokens in (1, 4, 37):
+        x = mx.array(rng.normal(0, 1, (tokens, specs["gate_proj"].input_dims)).astype(np.float32)).astype(mx.bfloat16)
+        ids = mx.array(np.stack([rng.choice(specs["gate_proj"].experts, 8, replace=False) for _ in range(tokens)]).astype(np.uint32))
+        scores = mx.softmax(mx.array(rng.normal(0, 1, (tokens, 8)).astype(np.float32)), axis=-1).astype(mx.bfloat16)
+        object.__setattr__(chain, "shared_slots", False)
+        separate = chain.decode_tail(block, x, ids, scores)
+        object.__setattr__(chain, "shared_slots", True)
+        merged = chain.decode_tail(block, x, ids, scores)
+        alone = mx.concatenate([chain.decode_tail(block, x[t : t + 1], ids[t : t + 1], scores[t : t + 1])
+                                for t in range(tokens)])
+        out["shared_slots"].append({
+            "tokens": tokens,
+            "max_err_over_scale_vs_separate": _err(merged.astype(mx.float32), separate.astype(mx.float32)),
+            "bitwise_vs_separate": bool(mx.array_equal(merged.view(mx.uint16), separate.view(mx.uint16)).item()),
+            "bitwise_vs_one_token": bool(mx.array_equal(merged.view(mx.uint16), alone.view(mx.uint16)).item()),
+        })
+    out["shared_slot_calls"] = chain.shared_slot_calls - out["tail_shared_slot_calls"]
+    # Rev 4: same-input projections in one launch, bitwise each linear's own
+    # fused call, and bitwise row-invariant.
+    from mlx2.runtime.models.exl3 import fused_group
+
+    out["groups"] = []
+    for names in ((f"model.language_model.layers.{layer}.linear_attn.in_proj_qkv",
+                   f"model.language_model.layers.{layer}.linear_attn.in_proj_z"),
+                  tuple(f"model.language_model.layers.{layer + 1}.self_attn.{p}" for p in ("q_proj", "k_proj", "v_proj"))):
+        if not all(n in plan.linears for n in names):
+            continue
+        lins = [Exl3DenseLinear(**load_linear(read, plan.linears[n]), law="fused_nax") for n in names]
+        for m in (1, 4):
+            x = mx.array(rng.normal(0, 1, (m, lins[0].input_dims)).astype(np.float32)).astype(mx.bfloat16)
+            got = fused_group(lins, x)
+            own = [lin.bank.fused_rows(x, mx.zeros((m,), mx.uint32)) for lin in lins]
+            alone = [mx.concatenate(parts) for parts in zip(*[fused_group(lins, x[i : i + 1]) for i in range(m)])]
+            out["groups"].append({
+                "modules": [n.rsplit(".", 1)[-1] for n in names], "rows": m,
+                "bitwise_vs_own": all(bool(mx.array_equal(a.view(mx.uint16), b.view(mx.uint16)).item()) for a, b in zip(got, own)),
+                "bitwise_vs_one_row": all(bool(mx.array_equal(a.view(mx.uint16), b.view(mx.uint16)).item()) for a, b in zip(got, alone)),
+            })
     # Sushi's fused pair must refuse rates it was not validated at.
     switch = Exl3SwitchGLU(*projs, execution="fused", trusted_router=True)
     switch.eval()
@@ -193,6 +346,12 @@ def _fused_law_checks(read, plan, layer, rng):
         rebuilt = np.asarray(nax.bank.reconstruct(mx.array([0], mx.uint32), 0, columns)[0])
         host = decode_inner(np.asarray(t["trellis"][:, : columns // 16]))
         row = {"module": key, "reconstruct_exact": bool(np.array_equal(rebuilt, host))}
+        # The trunk cast rides in the finish launch: bitwise finish + astype.
+        zeros = mx.zeros((NAX_MIN_ROWS,), mx.uint32)
+        inner = mx.array(rng.normal(0, 1, (NAX_MIN_ROWS, nax.output_dims)).astype(np.float16))
+        mapped = nax.bank.finish_map(inner, zeros, mx.arange(NAX_MIN_ROWS, dtype=mx.uint32), NAX_MIN_ROWS, mx.bfloat16)
+        row["finish_map_bitwise"] = bool(mx.array_equal(
+            mapped.view(mx.uint16), nax.bank.finish(inner, zeros).astype(mx.bfloat16).view(mx.uint16)).item())
         w8a8 = Exl3DenseLinear(**t, law="fused_w8a8")
         w8a8.eval()
         for m in (NAX_MIN_ROWS, 512):
@@ -206,6 +365,19 @@ def _fused_law_checks(read, plan, layer, rng):
                      and all(r["bitwise"] for r in out["invariance"])
                      and all(r["refused"] for r in out["switch"])
                      and out["switch_nax"]["max_err_over_scale"] <= MODULE_BAR and out["switch_nax"]["nax_calls"] == 1
+                     and out["switch_nax"]["sorted_bitwise_vs_banks"]
+                     and all(r["finish_map_bitwise"] for r in out["nax"])
+                     and all(r["max_err_over_scale"] <= MODULE_BAR and r["bitwise_vs_one_token"] for r in out["chain"])
+                     and out["chain_calls"] > 0
+                     and all(r["max_err_over_scale"] <= MODULE_BAR and r["bitwise_vs_one_row"] for r in out["fused_mlp"])
+                     and out["fused_mlp_calls"] > 0
+                     and all(r["max_err_over_scale"] <= MODULE_BAR and r["bitwise_vs_one_token"] for r in out["tail"])
+                     and out["tail_calls"] == 7 and out["tail_shared_slot_calls"] == 7
+                     and len(out["groups"]) == 4
+                     and all(r["bitwise_vs_own"] and r["bitwise_vs_one_row"] for r in out["groups"])
+                     and all(r["max_err_over_scale_vs_separate"] <= MODULE_BAR and r["bitwise_vs_one_token"]
+                             for r in out["shared_slots"])
+                     and out["shared_slot_calls"] == sum(1 + t for t in (1, 4, 37))
                      and all(r["reconstruct_exact"] and r[f"rows{NAX_MIN_ROWS}_err_vs_fused"] <= MODULE_BAR
                              and r["rows512_err_vs_fused"] <= MODULE_BAR
                              and r[f"rows{NAX_MIN_ROWS}_w8a8_err_vs_fused"] <= W8A8_BAR
@@ -371,6 +543,7 @@ def _model_checks(path, reference, out, execution):
             "_logits": full[len(ids) - 1 : len(ids) + len(cont) - 1],
             "_ids": ids,
         })
+    router_rows = _router_checks(model, np.random.default_rng(20261105)) if execution == "nax_fused" else []
     diagnostics = adapter.diagnostics().get("exl3", {})
     observed_linears = diagnostics.get("observed_linears", {})
     blocks = diagnostics.get("observed_blocks", [])
@@ -379,14 +552,25 @@ def _model_checks(path, reference, out, execution):
         "installed_switches": installed["installed_switches"],
         "linears_called": observed_linears.get("called"),
         "switches_called": sum(1 for b in blocks if b.get(
-            "reference_calls" if execution == "reference" else "rows_calls")),
+            "reference_calls" if execution == "reference" else "rows_calls") or b.get("chain_calls")),
         "fused_calls": sum(b.get("fused_calls", 0) for b in blocks),
+        "chain_calls": sum(b.get("chain_calls", 0) for b in blocks),
+        "tail_calls": sum(b.get("tail_calls", 0) for b in blocks),
+        "tail_declines": _merge_counts(b.get("tail_declines", {}) for b in blocks),
+        "router_launch_calls": sum(
+            getattr(m, "moe_topk_calls", {}).get("launch", 0) for _, m in model.named_modules()
+            if isinstance(getattr(m, "moe_topk_calls", None), dict)),
         "laws_called": observed_linears.get("laws_called"),
         "skipped_affine_moe_defaults": getattr(adapter, "skipped_affine_moe_defaults", {}),
         "descriptor_weight_format": adapter.descriptor.metadata.get("weight_format"),
         "identity_fingerprint": adapter.identity["fingerprint"],
         "load_dtype_check": getattr(adapter, "load_dtype_check", None),
         "stored_half_cast": installed.get("stored_half_cast"),
+        "router": router_rows,
+        "projection_groups_installed": installed.get("projection_groups"),
+        "projection_group_calls": sum(
+            m.exl3_projection_group.calls for _, m in model.named_modules()
+            if getattr(m, "exl3_projection_group", None) is not None),
     }
     peak = mx.get_peak_memory()
     del model, adapter
@@ -425,7 +609,13 @@ def _model_checks(path, reference, out, execution):
         and observed["linears_called"] == observed["installed_linears"]
         and observed["switches_called"] == observed["installed_switches"]
         and observed["fused_calls"] == 0
-        and observed["laws_called"] == [{"nax": "fused_nax"}.get(execution, execution)]
+        and observed["laws_called"] == [{"nax": "fused_nax", "nax_fused": "fused_nax"}.get(execution, execution)]
+        and (execution != "nax_fused" or (observed["chain_calls"] > 0 and observed["tail_calls"] > 0
+                                          and observed["router_launch_calls"] > 0
+                                          and observed["projection_groups_installed"] == 40
+                                          and observed["projection_group_calls"] > 0
+                                          and all(r["launch_vs_eager_indices"] and r["launch_vs_eager_scores"]
+                                                  and r["eager_vs_one_row"] for r in observed["router"])))
         and (observed["load_dtype_check"] or {}).get("ok") is True
         and all(f["classification"] == "near_tie_margins_met"
                 for c in cases for f in c["step_vs_full_flips"])
@@ -446,7 +636,7 @@ def _timed(fn, reps=5):
     return float(np.median(samples))
 
 
-def _speed_checks(path, artifact, rng):
+def _speed_checks(path, artifact, rng, laws=SPEED_LAWS, lengths=PREFILL_LENGTHS, chunk=0):
     """Module and whole-model timings for both laws (not a performance claim:
     no thermal gating, one host, sanity-level medians)."""
     from mlx2.adapters.registry import resolve_adapter
@@ -485,36 +675,50 @@ def _speed_checks(path, artifact, rng):
                                    "seconds": _timed(lambda: bank(x, ids))})
     gc.collect()
     mx.clear_cache()
-    prompt = rng.integers(1000, 100000, 512).tolist()
-    for law in ("reference", "fused_nax", "nax"):
+    for law in laws:
         adapter = resolve_adapter(path)(path, execution_policy={"exl3_execution": law})
         # Model modules import only after the adapter pinned its profile.
         from mlx2.runtime.models.cache import make_prompt_cache
 
         model = adapter.model
+        for length in lengths:
+            prompt = rng.integers(1000, 100000, length).tolist()
 
-        def prefill(model):
-            cache = make_prompt_cache(model)
-            return model(mx.array(prompt, mx.uint32)[None], cache=cache), cache
+            def prefill(model):
+                # chunk > 0: the server's shape, one forward per chunk with
+                # each chunk evaluated before the next (0: one forward).
+                cache = make_prompt_cache(model)
+                step = chunk or length
+                for lo in range(0, length, step):
+                    logits = model(mx.array(prompt[lo : lo + step], mx.uint32)[None], cache=cache)
+                    if lo + step < length:
+                        mx.eval(logits, [c.state for c in cache])
+                return logits, cache
 
-        prefill(model)
-        mx.synchronize()
-        start = time.perf_counter()
-        logits, cache = prefill(model)
-        mx.eval(logits)
-        mx.synchronize()
-        prefill_s = time.perf_counter() - start
-        token = int(mx.argmax(logits[0, -1]).item())
-        mx.synchronize()
-        start = time.perf_counter()
-        for _ in range(64):
-            row = model(mx.array([[token]], mx.uint32), cache=cache)
-            token = int(mx.argmax(row[0, -1]).item())
-        decode_s = time.perf_counter() - start
-        out["model"].append({"law": law, "prefill_tokens": 512, "prefill_seconds": prefill_s,
-                             "prefill_tok_s": 512 / prefill_s, "decode_tokens": 64,
-                             "decode_tok_s": 64 / decode_s})
-        del model, adapter, cache, logits
+            mx.eval(prefill(model)[0])
+            mx.synchronize()
+            start = time.perf_counter()
+            logits, cache = prefill(model)
+            mx.eval(logits)
+            mx.synchronize()
+            prefill_s = time.perf_counter() - start
+            row = {"law": law, "prefill_tokens": length, "prefill_seconds": prefill_s,
+                   "prefill_tok_s": length / prefill_s}
+            if chunk:
+                row["prefill_chunk"] = chunk
+            if length == lengths[0]:
+                token = int(mx.argmax(logits[0, -1]).item())
+                mx.synchronize()
+                start = time.perf_counter()
+                for _ in range(64):
+                    step = model(mx.array([[token]], mx.uint32), cache=cache)
+                    token = int(mx.argmax(step[0, -1]).item())
+                row.update(decode_tokens=64, decode_tok_s=64 / (time.perf_counter() - start))
+            out["model"].append(row)
+            del logits, cache
+            gc.collect()
+            mx.clear_cache()
+        del model, adapter
         gc.collect()
         mx.clear_cache()
     out["note"] = "sanity timings, not thermally gated; not a published performance figure"
@@ -558,8 +762,11 @@ def main():
     parser.add_argument("--reference", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--parts", default="modules,model")
+    parser.add_argument("--speed-laws", default=",".join(SPEED_LAWS))
+    parser.add_argument("--prefill-lengths", default=",".join(map(str, PREFILL_LENGTHS)))
+    parser.add_argument("--prefill-chunk", type=int, default=0)
     parser.add_argument("--execution", default="reference",
-                        choices=("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax"))
+                        choices=("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax", "nax_fused"))
     args = parser.parse_args()
     if not args.i_own_the_gpu:
         parser.error("this runs Metal kernels; pass --i-own-the-gpu under the GPU lock")
@@ -598,7 +805,9 @@ def main():
         gc.collect()
         mx.clear_cache()
     if "speed" in parts:
-        receipt["speed"] = _speed_checks(path, artifact, rng)
+        receipt["speed"] = _speed_checks(
+            path, artifact, rng, tuple(args.speed_laws.split(",")),
+            tuple(int(n) for n in args.prefill_lengths.split(",")), args.prefill_chunk)
         for row in receipt["speed"]["model"]:
             print("speed", json.dumps(row, sort_keys=True), flush=True)
         gc.collect()

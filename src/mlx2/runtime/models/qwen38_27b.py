@@ -74,13 +74,11 @@ class Qwen3NextAttention(nn.Module):
         observer = current_observer()
         if observer is None:
             output = self._attend(
-                self.q_proj(x), self.k_proj(x), self.v_proj(x), B, L, mask, cache
+                *self._qkv(x), B, L, mask, cache
             )
             return self.o_proj(output)
         with observed_stage("attention.qkv_projections", rows=rows) as materialize:
-            q = self.q_proj(x)
-            k = self.k_proj(x)
-            v = self.v_proj(x)
+            q, k, v = self._qkv(x)
             materialize(q, k, v)
         with observed_stage("attention.read_eval", rows=rows) as materialize:
             output = self._attend(q, k, v, B, L, mask, cache)
@@ -89,6 +87,16 @@ class Qwen3NextAttention(nn.Module):
             output = self.o_proj(output)
             materialize(output)
         return output
+
+    def _qkv(self, x):
+        """q/k/v projections; a weight format's projection group (one launch)
+        may serve them, else the three projections."""
+        group = getattr(self, "exl3_projection_group", None)
+        if group is not None:
+            grouped = group(x)
+            if grouped is not None:
+                return grouped["q_proj"], grouped["k_proj"], grouped["v_proj"]
+        return self.q_proj(x), self.k_proj(x), self.v_proj(x)
 
     def _attend(self, q_proj_output, keys, values, B, L, mask, cache):
         """Everything between the input and output projections (gated output).
@@ -144,12 +152,12 @@ class Qwen3NextAttention(nn.Module):
         observer = current_observer()
         packed_rows = x.shape[0] * x.shape[1]
         if observer is None:
-            q_all, k_all, v_all = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+            q_all, k_all, v_all = self._qkv(x)
         else:
             with observed_stage(
                 "attention.qkv_projections", rows=packed_rows
             ) as materialize:
-                q_all, k_all, v_all = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+                q_all, k_all, v_all = self._qkv(x)
                 materialize(q_all, k_all, v_all)
         outs = []
         for rows, length, start, cache, mask in parts:

@@ -1004,7 +1004,8 @@
     "name": "ast_Ripple-65B-Preview-DFlash2",
     "kind": "ast",
     "execution_policy": {
-     "num_draft": 7
+     "num_draft": 7,
+     "ast_tile_rows": 8
     },
     "drafter": {
      "name": "Ripple-65B-Preview-DFlash2",
@@ -1019,13 +1020,14 @@
      ]
     }
    },
-   "reason": "decision row from another lane: Operator decision: Pierre 2026-11-04 made the vendor DFlash2 drafter (num_draft 7) the no-flag route for this checkpoint; selected unqualified. Route: ast drafter=Ripple-65B-Preview-DFlash2@sha256:423dc0fb0e863f043a306af53ef6c241ebedd5099b48ced8ee9dcbf072e110c2 adapter=RippleAdapter. Measured vs eager control (B1): prose 15.7 vs 11.0 t/s, copy 45.6 vs 10.9, 4-request aggregate 15.2 vs 10.4; the 8-cell rule campaign was not run. Near-tie classification: 5 near_tie_equivalent, 0 failed, 9 unclassified (route not run-to-run deterministic; copy oracle invalid). Execution-policy: {\"num_draft\": 7}",
+   "reason": "Operator decision: Pierre 2026-11-05 made AST tree tiles (8 tile rows) on the vendor DFlash2 drafter the no-flag route for this checkpoint; selected unqualified. Interleaved B1 with affine defaults + metal_glue: prose decode 20.3 t/s vs chain n7 17.5/16.8 and 16 tile rows 16.8/21.1; copy and 4-request aggregate roughly flat; long oracle and cold/warm exact on every arm. Earlier (2026-11-04) DFlash2 n7 chain decision: prose 15.7 vs 11.0 t/s eager. Execution-policy: {\"num_draft\": 7, \"ast_tile_rows\": 8}",
    "evidence": {
     "files": [
+     "qualification/runs/ripple-tree-20261105/run1/evidence/receipt.json",
      "qualification/runs/ripple-perf-ab-20261104/run5/evidence/receipt.json",
      "qualification/runs/ripple-perf-ab-20261104/classify/classification.json"
     ],
-    "source_revision": "708b49722",
+    "source_revision": "102aafd3b",
     "decision_row": true
    }
   }

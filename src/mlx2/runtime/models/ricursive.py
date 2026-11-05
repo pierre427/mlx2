@@ -6,6 +6,7 @@ The source's W4A4 activation quantizer is deliberately not inferred from its
 weight storage. The serving adapter requires explicit W4A16 selection.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import mlx.core as mx
@@ -21,6 +22,59 @@ from .modelopt_nvfp4 import ModelOptNVFP4Linear, shared_fp32_input
 # ``create_attention_mask`` legitimately returns ``None`` for one-token
 # global attention).
 _OWN_MASK = object()
+
+def window_blocked_attention(q, k, v, *, scale, mask, window, block=256):
+    """Sliding-window prefill SDPA over each row block's visible keys only.
+
+    For a chunk of ``L`` query rows against temporally ordered keys (a plain
+    RotatingKVCache returns them in order after a multi-row update), rows
+    ``[r0, r1)`` can see only keys ``[N - L + r0 - window + 1, N - L + r1)``;
+    the rest of their tiles is fully masked. Each block runs SDPA on its own
+    key slice and mask slice: the same keys and mask per row as stock, but
+    a different reduction tiling (not bit-identical). Returns ``None`` when
+    the mask is not an explicit ``[..., L, N]`` array.
+    """
+    length, n = q.shape[2], k.shape[2]
+    if not isinstance(mask, mx.array) or mask.shape[-2:] != (length, n) or length <= block:
+        return None
+    outs = []
+    for r0 in range(0, length, block):
+        r1 = min(length, r0 + block)
+        k0 = max(0, n - length + r0 - window + 1)
+        k1 = n - length + r1
+        outs.append(mx.fast.scaled_dot_product_attention(
+            q[:, :, r0:r1], k[:, :, k0:k1], v[:, :, k0:k1], scale=scale, mask=mask[..., r0:r1, k0:k1]))
+    return mx.concatenate(outs, axis=2)
+
+
+def gqa_folded_attention(q, k, v, *, scale, mask):
+    """GQA attention with each KV head's query heads folded into rows.
+
+    ``q`` ``[B, Hq, L, D]`` becomes ``[B, Hkv, G*L, D]`` (row = g*L + l), so
+    the kernel reads each KV head once for all ``G`` query heads and gets a
+    tile ``G`` times taller. The row mask is tiled ``G`` times; ``"causal"``
+    becomes the explicit ``[L, N]`` mask at offset ``N - L``. The same keys
+    and values per row as stock SDPA, but a different reduction schedule, so
+    not bit-identical (near-tie validation, not exact parity).
+    Returns ``None`` when the mask has per-head structure (caller falls back).
+    """
+    from .base import create_causal_mask
+
+    b, hq, length, d = q.shape
+    hkv, n = k.shape[1], k.shape[2]
+    g = hq // hkv
+    if isinstance(mask, str):
+        if mask != "causal":
+            return None
+        mask = create_causal_mask(length, offset=n - length)
+    if mask is not None:
+        if mask.ndim > 4 or (mask.ndim >= 3 and mask.shape[-3] != 1):
+            return None
+        mask = mx.tile(mask, (*(1,) * (mask.ndim - 2), g, 1))
+    rows = q.reshape(b, hkv, g * length, d)
+    out = mx.fast.scaled_dot_product_attention(rows, k, v, scale=scale, mask=mask)
+    return out.reshape(b, hq, length, d)
+
 
 # ---------------------------------------------------------------------------
 # Fused elementwise regions (opt-in: ``Model.set_fused_elementwise``).
@@ -191,11 +245,30 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     fused = False
+    metal = False
 
     def __call__(self, x):
+        if self.metal:
+            from .ricursive_rmsnorm import rms_norm
+
+            out = rms_norm(x, self.weight, self.eps)
+            if out is not None:
+                return out
         if self.fused:
             return fused_norm(x, self.weight, self.eps)
         return _rms(x, self.weight, self.eps)
+
+    def residual(self, residual, x):
+        """``residual + self(x)``; one launch under the Metal kernel."""
+        if self.metal:
+            from .ricursive_rmsnorm import rms_norm
+
+            out = rms_norm(x, self.weight, self.eps, residual=residual)
+            if out is not None:
+                return out
+        if self.fused:
+            return fused_residual_norm(residual, x, self.weight, self.eps)
+        return residual + self(x)
 
 
 def scale_embeddings(h, scale):
@@ -228,7 +301,7 @@ def inverse_frequencies(dims, theta):
     return table
 
 
-def rotary_tables(length, offset, dims, theta, dtype):
+def rotary_tables(length, offset, dims, theta, dtype, *, positions=None):
     """Source cos/sin for ``length`` positions from ``offset``: FP32 trig,
     rounded through the activation ``dtype`` (``mx.fast.rope`` would skip that
     BF16 rounding).  The source doubles the half phase before the trig; the
@@ -237,9 +310,21 @@ def rotary_tables(length, offset, dims, theta, dtype):
 
     Every sliding layer of one forward shares the same positions, so the
     model builds this once per forward rather than twice per layer.
+
+    ``positions`` (FP32 ``[length]``) replaces the ``offset + row`` law with
+    one explicit position per row: an attention-tree tile's rows sit at
+    ``offset + depth``, not at ``offset + row index``.  Integer positions
+    below 2**24 are exact in FP32, so the table equals the one serial decode
+    builds at that position.
     """
     inv = inverse_frequencies(dims, theta)
-    if isinstance(offset, mx.array) and offset.ndim:
+    if positions is not None:
+        if isinstance(offset, mx.array) and offset.ndim:
+            raise ValueError("explicit rotary positions take one scalar offset")
+        if positions.ndim != 1 or int(positions.shape[0]) != length:
+            raise ValueError("explicit rotary positions must give one position per row")
+        phase = (positions.astype(mx.float32) + offset)[:, None] * inv
+    elif isinstance(offset, mx.array) and offset.ndim:
         positions = mx.arange(length, dtype=mx.float32)[None, :] + offset[:, None]
         phase = positions[:, None, :, None] * inv
     else:
@@ -309,6 +394,10 @@ class Attention(nn.Module):
             return self._fused_call(x, seed, cache, mask=mask, rope=rope)
         args = self.args
         b, length, _ = x.shape
+        if self.metal_glue:
+            out = self._glue_call(x, seed, cache, mask=mask, rope=rope)
+            if out is not None:
+                return out
         q = self.q_norm(self.q_proj(x).reshape(b, length, args.num_attention_heads, args.head_dim))
         k = self.k_norm(self.k_proj(x).reshape(b, length, args.num_key_value_heads, args.head_dim))
         value_input = x
@@ -329,6 +418,46 @@ class Attention(nn.Module):
         return self._attend(x, q, k, v, cache, mask)
 
     fused = False
+    metal_glue = False
+    window_blocked_prefill = False
+    window_blocked_calls = 0
+
+    def _glue_call(self, x, seed, cache, *, mask, rope):
+        """Eager forward with QK-norm+RoPE and the value blend as Metal kernels.
+
+        ``None`` (nothing computed) when a kernel cannot take this shape, so
+        the caller runs the eager law.
+        """
+        from .ricursive_glue import blend, qk_norm_rope
+
+        args = self.args
+        b, length, _ = x.shape
+        if mask is _OWN_MASK:
+            mask = create_attention_mask(x, cache, window_size=args.sliding_window if self.local else None)
+        if self.local and rope is None:
+            offset = cache.offset if cache is not None else 0
+            rope = rotary_tables(length, offset, args.head_dim, args.rope_theta, x.dtype)
+        tables = rope if self.local else (None, None)
+        q = qk_norm_rope(self.q_proj(x).reshape(b, length, args.num_attention_heads, args.head_dim),
+                         self.q_norm.weight, args.rms_norm_eps, *tables)
+        if q is None:
+            return None
+        k = qk_norm_rope(self.k_proj(x).reshape(b, length, args.num_key_value_heads, args.head_dim),
+                         self.k_norm.weight, args.rms_norm_eps, *tables)
+        if k is None:
+            return None
+        value_input = x
+        if args.use_valres:
+            value_input = blend(seed.astype(mx.float32), x, self.value_blend(x.dtype))
+            if value_input is None:
+                return None
+        v = self.v_proj(value_input).reshape(
+            b, length, args.num_key_value_heads, args.head_dim).transpose(0, 2, 1, 3)
+        return self._attend(x, q, k, v, cache, mask)
+
+    # Rows (decode and verify) up to which attention runs GQA-folded; 0 = off.
+    gqa_fold_rows = 0
+    gqa_fold_calls = 0
 
     def _fused_call(self, x, seed, cache, *, mask, rope):
         """The eager forward with its elementwise chains in fused regions."""
@@ -352,12 +481,53 @@ class Attention(nn.Module):
             b, length, args.num_key_value_heads, args.head_dim).transpose(0, 2, 1, 3)
         return self._attend(x, q, k, v, cache, mask)
 
+    @staticmethod
+    def _folded_rows(q, cache, mask, scale):
+        outputs = []
+        for index, valid, keys, values, row_mask in cache.row_views(mask):
+            if not valid:
+                outputs.append(mx.zeros(q[index:index + 1].shape, dtype=q.dtype))
+                continue
+            value = gqa_folded_attention(q[index:index + 1, :, :valid], keys, values,
+                                         scale=scale, mask=row_mask)
+            if value is None:
+                return None  # per-head mask: the caller's stock path
+            if valid < q.shape[2]:
+                value = mx.pad(value, [(0, 0), (0, 0), (0, q.shape[2] - valid), (0, 0)])
+            outputs.append(value)
+        cache.note_attention()
+        return mx.concatenate(outputs, axis=0)
+
     def _attend(self, x, q, k, v, cache, mask):
         args = self.args
         b, length, _ = x.shape
         if cache is not None:
             k, v = cache.update_and_fetch(k, v)
-        out = scaled_dot_product_attention(q, k, v, cache=cache, scale=args.head_dim ** -0.5, mask=mask)
+        out = None
+        if 1 <= length <= self.gqa_fold_rows and not hasattr(cache, "bits"):
+            scale = args.head_dim ** -0.5
+            if hasattr(cache, "row_views"):
+                # Speculative verify transactions: the cache's public per-lane
+                # seam (each lane's own history and mask), the contract its
+                # bucketed_attention implements with stock SDPA.
+                out = self._folded_rows(q, cache, mask, scale)
+            elif getattr(cache, "bucketed_attention", None) is None:
+                out = gqa_folded_attention(q, k, v, scale=scale, mask=mask)
+            if out is not None:
+                self.gqa_fold_calls += 1
+        if (
+            out is None
+            and self.window_blocked_prefill
+            and self.local
+            and type(cache) is RotatingKVCache
+            and length > self.gqa_fold_rows
+        ):
+            out = window_blocked_attention(q, k, v, scale=args.head_dim ** -0.5, mask=mask,
+                                           window=args.sliding_window)
+            if out is not None:
+                self.window_blocked_calls += 1
+        if out is None:
+            out = scaled_dot_product_attention(q, k, v, cache=cache, scale=args.head_dim ** -0.5, mask=mask)
         if args.use_gated_attention and self.fused:
             return self.o_proj(fused_gate(out, self.g_proj(x), args.gate_full_precision))
         if args.use_gated_attention:
@@ -395,11 +565,18 @@ class MLP(nn.Module):
             gate, up = self.gate_proj(shared).astype(x.dtype), self.up_proj(shared).astype(x.dtype)
         # Match source's separately rounded SiLU and multiplication (one FP32
         # copy of the clamped gate feeds both factors).
+        if self.metal_glue:
+            from .ricursive_glue import swiglu
+
+            product = swiglu(gate, up, self.clamp)
+            if product is not None:
+                return self.down_proj(product)
         if self.fused:
             return self.down_proj(fused_swiglu(gate, up, self.clamp))
         return self.down_proj(_swiglu(gate, up, self.clamp))
 
     fused = False
+    metal_glue = False
 
 
 class DecoderLayer(nn.Module):
@@ -416,6 +593,10 @@ class DecoderLayer(nn.Module):
 
     def __call__(self, x, seed, cache, *, mask=_OWN_MASK, rope=None):
         attn = self.self_attn(self.input_layernorm(x), seed, cache, mask=mask, rope=rope)
+        if self.post_attention_layernorm.metal:
+            x = self.post_attention_layernorm.residual(x, attn)
+            mlp = self.mlp(self.pre_feedforward_layernorm(x))
+            return self.post_feedforward_layernorm.residual(x, mlp)
         if self.fused:
             eps = self.post_attention_layernorm.eps
             x = fused_residual_norm(x, attn, self.post_attention_layernorm.weight, eps)
@@ -457,9 +638,24 @@ class Backbone(nn.Module):
                 capture[index] = h
         return self.norm(h)
 
+    # Attention-tree tile rows (``Model.attention_tree_position_scope``):
+    # int32 ``[rows]`` depth of each row below the committed boundary, or
+    # None for the ordinary ``offset + row`` law.
+    _tree_depths = None
+
     def shared_layer_inputs(self, h, cache):
-        """``{layer kind: (mask, rope)}`` built from the first cache of each kind."""
+        """``{layer kind: (mask, rope)}`` built from the first cache of each kind.
+
+        The masks come from each kind's first cache (``make_mask``); a tree
+        tile installs its prefix-plus-ancestor masks there.  The sliding RoPE
+        table places every row at ``offset + depth`` under a tree scope, and
+        the global layers stay NoPE, so a tile row sees exactly the positions
+        serial decoding of its root path would.
+        """
         args = self.args
+        depths = self._tree_depths
+        if depths is not None and (h.shape[0] != 1 or int(h.shape[1]) != int(depths.shape[0])):
+            raise ValueError("Ripple attention-tree rows must be one lane of one row per depth")
         shared = {}
         for index, kind in enumerate(args.layer_types):
             if kind in shared:
@@ -470,7 +666,8 @@ class Backbone(nn.Module):
             rope = None
             if local:
                 offset = entry.offset if entry is not None else 0
-                rope = rotary_tables(h.shape[1], offset, args.head_dim, args.rope_theta, h.dtype)
+                rope = rotary_tables(h.shape[1], offset, args.head_dim, args.rope_theta, h.dtype,
+                                     positions=depths)
             shared[kind] = (mask, rope)
         return shared
 
@@ -497,6 +694,35 @@ class Model(nn.Module):
             if isinstance(module, (RMSNorm, Attention, MLP, DecoderLayer)):
                 module.fused = enabled
         self.fused_elementwise = enabled
+
+    def set_window_blocked_prefill(self, enabled):
+        for layer in self.layers:
+            layer.self_attn.window_blocked_prefill = bool(enabled)
+
+    def window_blocked_calls(self):
+        return sum(layer.self_attn.window_blocked_calls for layer in self.layers)
+
+    def set_metal_glue(self, enabled):
+        """QK-norm+RoPE, value blend and SwiGLU as one-launch Metal kernels."""
+        for _, module in self.named_modules():
+            if isinstance(module, (Attention, MLP)):
+                module.metal_glue = bool(enabled)
+
+    def set_metal_rmsnorm(self, enabled):
+        """One-launch RMSNorm (block, per-head Q/K, final) on Metal."""
+        for _, module in self.named_modules():
+            if isinstance(module, RMSNorm):
+                module.metal = bool(enabled)
+
+    def set_gqa_folded_attention(self, max_rows):
+        """Fold GQA heads into rows for calls of up to ``max_rows`` rows (0 = off)."""
+        if type(max_rows) is not int or not 0 <= max_rows <= 64:
+            raise ValueError("gqa folded attention rows must be an integer in 0..64")
+        for layer in self.layers:
+            layer.self_attn.gqa_fold_rows = max_rows
+
+    def gqa_fold_calls(self):
+        return sum(layer.self_attn.gqa_fold_calls for layer in self.layers)
 
     def __call__(self, tokens, cache=None, input_embeddings=None):
         self.forward_calls += 1
@@ -525,6 +751,28 @@ class Model(nn.Module):
 
     def prefill_body(self, inputs, cache, capture_layers):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
+
+    @contextmanager
+    def attention_tree_position_scope(self, depths):
+        """Place the rows of the next forward at ``offset + depths[row]``.
+
+        The attention-tree executor's seam for a model whose RoPE tables are
+        built once per forward rather than by a per-layer ``rope`` module.
+        Only the sliding layers rotate; the global layers are NoPE.  Masks
+        are the executor's, installed on the caches.  Nested scopes are
+        refused: a tile forward never runs inside another.
+        """
+        if self.model._tree_depths is not None:
+            raise RuntimeError("Ripple attention-tree position scope is not reentrant")
+        if not isinstance(depths, mx.array) or depths.ndim != 1 or depths.dtype != mx.int32:
+            raise ValueError("attention-tree depths must be an int32 vector")
+        # A plain instance attribute: ``nn.Module.__setattr__`` would register
+        # the array as a parameter.
+        object.__setattr__(self.model, "_tree_depths", depths)
+        try:
+            yield self
+        finally:
+            object.__setattr__(self.model, "_tree_depths", None)
 
     def make_cache(self):
         return [RotatingKVCache(self.args.sliding_window, keep=0)

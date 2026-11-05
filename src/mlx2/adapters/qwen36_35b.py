@@ -358,6 +358,26 @@ EXL3_HALF_COMPUTE_WEIGHTS = (
 )
 
 
+def exl3_projection_groups(path, module):
+    """Qwen3.6's same-input projections: the GDN qkv/z inputs and the
+    attention q/k/v (``in_proj_a``/``b`` are stored, not trellis)."""
+    from ..runtime.models.qwen3_5 import GatedDeltaNet
+    from ..runtime.models.qwen38_27b import Qwen3NextAttention
+
+    if isinstance(module, GatedDeltaNet):
+        return ("in_proj_qkv", "in_proj_z")
+    if isinstance(module, Qwen3NextAttention):
+        return ("q_proj", "k_proj", "v_proj")
+    return None
+
+
+def exl3_fused_mlp(path, module):
+    """Qwen3.6's dense SwiGLU MLPs (the shared experts) may fuse."""
+    from ..runtime.models.qwen3_next import Qwen3NextMLP
+
+    return type(module) is Qwen3NextMLP
+
+
 def exl3_module_path(key):
     """Upstream EXL3 checkpoint module name -> this model's module path."""
     if key.startswith("model.language_model."):
@@ -449,11 +469,23 @@ TARGET_EXECUTION_POLICY_KEYS = frozenset({
 #              routed slots (chunked fp16 expert reconstruction, sorted
 #              gather_mm). 1125 / 87.8: the fastest measured; APCv2
 #              cold/warm exact on the server; its one serving divergence is
-#              near_tie_equivalent. The default (Pierre, 2026-11-05).
-EXL3_EXECUTIONS = ("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax")
+#              near_tie_equivalent. The default 2026-11-05 until nax_fused.
+#   nax_fused  nax plus fused decode chains: routed experts as one
+#              gate/up/SwiGLU launch and one down launch below 1024 slots,
+#              dense SwiGLU MLPs (shared experts) likewise. Rev 1 (0fc66105b):
+#              decode 104.5 vs 90.2 tok/s in-process, prefill equal, APCv2
+#              cold/warm and B4 exact. Rev 2: the whole MoE tail below 1024
+#              slots (experts, shared expert and gate, one combine launch,
+#              Exl3SwitchGLU.decode_tail) and the one-launch routing kept.
+#              Rev 3: prefill banks stay expert-sorted (no repeated/permuted
+#              copies), casts ride in the finish. Rev 3 served vs nax: B1
+#              decode +21..31% (+12..28% under AST), B4 +22%, TTFT equal;
+#              APCv2 cold/warm exact, B4 French divergence near_tie_equivalent.
+#              The default (Pierre, 2026-11-05, "best defaults").
+EXL3_EXECUTIONS = ("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax", "nax_fused")
 # Upstream EXL3 checkpoints only; every other artifact keeps no EXL3 law.
 # Correct on any Metal host: off M5 mx.matmul runs the ordinary GEMM.
-DEFAULT_EXL3_EXECUTION = "nax"
+DEFAULT_EXL3_EXECUTION = "nax_fused"
 
 
 def partition_native_tree_policy(policy, *, numerical_defaults=None):
@@ -481,6 +513,10 @@ def partition_external_target_policy(policy):
         for key in EXTERNAL_TARGET_KERNEL_KEYS
         if key in policy
     }
+    # The target's weight-format law is target-owned too; the main policy
+    # check validates its value.
+    if "exl3_execution" in policy:
+        target["exl3_execution"] = policy["exl3_execution"]
     external = {key: value for key, value in policy.items() if key not in target}
     return external, target
 
@@ -944,7 +980,10 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                     raise ValueError(f"{key} requires affine expert tables: {reason}")
                 self.skipped_affine_moe_defaults[key] = reason
                 self._kernels.pop(key, None)
-            if "moe_topk_fold" not in policy and self._kernels.get("moe_topk_fold") == "launch":
+            # nax_fused keeps the one-launch routing: it is stock-identical
+            # (bf16 logits, E256/top-8 contract) and owns no expert tables.
+            if ("moe_topk_fold" not in policy and self._kernels.get("moe_topk_fold") == "launch"
+                    and not (upstream_exl3 and self.exl3_execution == "nax_fused")):
                 # The measured default is the routed-decode bundle. The
                 # standalone BF16 router remains explicitly selectable.
                 self._kernels.pop("moe_topk_fold")
@@ -1275,7 +1314,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             # the ordinary sanitize (renames, norm convention, dtypes).
             read = ShardReader(path, artifact["weight_map"])
             self.exl3 = install_upstream(
-                self.model, read, upstream, exl3_module_path, execution=self.exl3_execution
+                self.model, read, upstream, exl3_module_path, execution=self.exl3_execution,
+                fused_mlp=exl3_fused_mlp,
+                projection_groups=exl3_projection_groups,
             )
             weights = self.model.sanitize(self.model.shard_prune(load_stored(read, upstream)))
             self.exl3["stored_half_cast"] = cast_half_compute(
@@ -1574,6 +1615,13 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             result["exl3"] = {**self.exl3,"observed_blocks":[
                 {"path":path,**module.receipt()} for path,module in self.model.named_modules()
                 if isinstance(module,Exl3SwitchGLU)]}
+            from ..runtime.models.exl3 import Exl3FusedMLP
+
+            mlps = [m for _, m in self.model.named_modules() if isinstance(m, Exl3FusedMLP)]
+            if mlps:
+                result["exl3"]["observed_fused_mlps"] = {
+                    "modules": len(mlps), "called": sum(1 for m in mlps if m.fused_calls),
+                    "calls": sum(m.fused_calls for m in mlps)}
             dense = [m for _, m in self.model.named_modules() if isinstance(m, Exl3DenseLinear)]
             if dense:
                 result["exl3"]["observed_linears"] = {

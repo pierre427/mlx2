@@ -101,7 +101,7 @@ def main():
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--execution", default="rows",
-                        choices=("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax"))
+                        choices=("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax", "nax_fused"))
     parser.add_argument("--port", type=int, default=18361)
     parser.add_argument("--reference-only", action="store_true")
     args = parser.parse_args()
@@ -229,13 +229,14 @@ def main():
             "execution": exl3.get("execution"),
             "linears_called": linears.get("called"), "linears": linears.get("modules"),
             "laws_called": linears.get("laws_called"),
-            "switches_called": sum(1 for b in blocks if b.get(calls) or b.get("nax_calls")), "switches": len(blocks),
+            "switches_called": sum(1 for b in blocks if b.get(calls) or b.get("nax_calls") or b.get("chain_calls")),
+            "switches": len(blocks),
             "switches_on_nax": sum(1 for b in blocks if b.get("nax_calls")),
         }
         observed = receipt["route_observed"]
         route_ok = (observed["execution"] == args.execution and observed["linears"]
                     and observed["linears_called"] == observed["linears"]
-                    and observed["laws_called"] == [{"nax": "fused_nax"}.get(args.execution, args.execution)]
+                    and observed["laws_called"] == [{"nax": "fused_nax", "nax_fused": "fused_nax"}.get(args.execution, args.execution)]
                     and observed["switches"] and observed["switches_called"] == observed["switches"])
         cold, warm = receipt["rows"]
         cached = ((warm.get("usage") or {}).get("prompt_tokens_details") or {}).get("cached_tokens", 0)

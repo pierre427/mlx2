@@ -153,6 +153,12 @@ class GatedDeltaNet(nn.Module):
             projected = grouped_input(self, inputs)
             if projected is not None:
                 return projected
+        group = getattr(self, "exl3_projection_group", None)
+        if group is not None:
+            grouped = group(inputs)
+            if grouped is not None:
+                return (grouped["in_proj_qkv"], grouped["in_proj_z"],
+                        self.in_proj_b(inputs), self.in_proj_a(inputs))
         if not hasattr(self, "in_proj_fused"):
             return (
                 self.in_proj_qkv(inputs),

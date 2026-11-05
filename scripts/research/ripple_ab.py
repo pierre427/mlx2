@@ -10,7 +10,7 @@ prompt-lookup benefit), a four-request concurrency cell, /v1/status and
 statistics. Requires the caller's CPG lease and paired locks; every server
 process group is stopped in ``finally``.
 
-Arms JSON: [{"name": str, "tree": "/path/to/mlx2/checkout", "args": [...]}].
+Arms JSON: [{"name": str, "tree": "/path/to/mlx2/checkout", "args": [...], "env": {optional}}].
 """
 import argparse
 import json
@@ -172,10 +172,11 @@ def main():
         if "--max-lanes" not in arm["args"]:
             command += ["--max-lanes", "1"]
         log = (out / "server.log").open("w")
-        env = {**os.environ, "PYTHONPATH": str(tree / "src")}
+        env = {**os.environ, "PYTHONPATH": str(tree / "src"), **arm.get("env", {})}
         server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                   start_new_session=True, env=env, cwd=tree)
         row = {"name": arm["name"], "tree": str(tree), "revision": revision(tree), "args": arm["args"],
+               "env": arm.get("env", {}),
                "command": command, "server_pid": server.pid}
         try:
             started = time.monotonic()

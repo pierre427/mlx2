@@ -434,14 +434,34 @@ def test_nax_bank_switch_matches_the_reference_switch(monkeypatch):
     small = mx.array(np.stack([rng.choice(e, 2, replace=False) for _ in range(3)]).astype(np.uint32))
     nax(x[:3], small)
     assert nax.nax_calls == 1 and nax.rows_calls == 1  # below the threshold: row law
+    # The sorted-order switch is, row for row, three per-projection banks.
+    layout = exl3.nax_layout(ids.reshape(-1), e)
+    rows = mx.repeat(x, 4, axis=0)
+    flat_ids = ids.reshape(-1)
+    g = exl3.nax_bank(nax.gate_proj, rows, flat_ids, layout)
+    u = exl3.nax_bank(nax.up_proj, rows, flat_ids, layout)
+    banks = exl3.nax_bank(nax.down_proj, exl3.swiglu(g, u), flat_ids, layout).astype(mx.bfloat16)
+    sorted_switch = exl3.nax_switch(nax, x, flat_ids, 4, mx.bfloat16)
+    np.testing.assert_array_equal(np.asarray(sorted_switch.view(mx.uint16)), np.asarray(banks.view(mx.uint16)))
 
 
-def test_nax_is_the_upstream_exl3_default_and_refuses_elsewhere():
+def test_nax_fused_is_the_upstream_exl3_default_and_refuses_elsewhere():
     from mlx2.adapters import qwen36_35b
 
-    assert qwen36_35b.DEFAULT_EXL3_EXECUTION == "nax"
+    assert qwen36_35b.DEFAULT_EXL3_EXECUTION == "nax_fused"
     assert qwen36_35b.DEFAULT_EXL3_EXECUTION in qwen36_35b.EXL3_EXECUTIONS
     source = Path(qwen36_35b.__file__).read_text()
     # Non-EXL3 artifacts get no EXL3 law, and only an explicit choice refuses.
     assert 'DEFAULT_EXL3_EXECUTION if upstream_exl3 else "reference"' in source
     assert "if explicit_exl3 and not upstream_exl3:" in source
+
+
+def test_external_draft_policy_keeps_the_exl3_law_on_the_target():
+    # AST/DFlash2 servers pass the target law beside the drafter contract;
+    # it was refused as an unknown drafter key (exl3-fuse-h2h-20261105).
+    from mlx2.adapters.qwen36_35b import partition_external_target_policy
+
+    external, target = partition_external_target_policy(
+        {"draft_model": "/drafter", "exl3_execution": "nax_fused"})
+    assert target == {"exl3_execution": "nax_fused"}
+    assert external == {"draft_model": "/drafter"}

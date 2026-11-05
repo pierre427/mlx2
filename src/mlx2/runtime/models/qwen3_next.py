@@ -1927,6 +1927,13 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             scores = mx.take_along_axis(gates, inds, axis=-1)
             if self.norm_topk_prob:
                 scores = scores / scores.sum(axis=-1, keepdims=True)
+        # A switch module that owns the whole tail (experts, shared expert,
+        # shared gate and combine) at this width runs it; None declines.
+        decode_tail = getattr(self.switch_mlp, "decode_tail", None)
+        if decode_tail is not None and not self.shared_folded and self.sharding_group is None:
+            fused_tail = decode_tail(self, x, inds, scores)
+            if fused_tail is not None:
+                return fused_tail
         folded = _try_shared_fold(self, x, inds, scores)
         if folded is not None:
             return folded

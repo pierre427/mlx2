@@ -319,22 +319,26 @@ def load_stored(read, plan):
     return {name: read(name) for name in sorted(plan.stored)}
 
 
-def install_upstream(model, read, plan, module_path, *, execution="reference"):
+def install_upstream(model, read, plan, module_path, *, execution="reference", fused_mlp=None,
+                     projection_groups=None):
     """Swap every planned trellis module into ``model``; return the receipt.
 
     ``module_path`` maps a checkpoint module name to the model's module path
     (adapter-owned naming). A dense module must replace a plain ``nn.Linear``
     of the same geometry; a bank replaces the routed switch at
     ``<root>.switch_mlp``. Everything is admitted before anything is swapped.
+    ``fused_mlp(path, module)`` (adapter-owned) names the SwiGLU MLPs that
+    ``nax_fused`` may run as fused chains; without it none is fused.
     ``execution`` is ``reference`` (per-row Sushi kernels), ``rows`` (the
     row-blocked law) or ``fused`` (one-launch dense linears, expert banks on
     the row-blocked law; Sushi's fused pair is validated at 40-word tiles
     only). One law per module kind at every width keeps rows invariant. It is
     a numerics law and part of the receipt.
     """
-    if execution not in ("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax"):
+    if execution not in ("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax", "nax_fused"):
         raise ValueError(
-            "upstream EXL3 execution must be reference, rows, fused, fused_nax, fused_w8a8 or nax"
+            "upstream EXL3 execution must be reference, rows, fused, fused_nax, fused_w8a8, nax "
+            "or nax_fused"
         )
     if execution == "fused_w8a8":
         from ..int8_prefill import require_supported_device
@@ -360,17 +364,53 @@ def install_upstream(model, read, plan, module_path, *, execution="reference"):
         if ("bias" in old) != spec.bias:
             raise ValueError(f"EXL3 linear {key} bias disagrees with {path}")
         tensors = load_linear(read, spec)
-        dense.append((path, Exl3DenseLinear(**tensors, law="fused_nax" if execution == "nax" else execution)))
+        law = "fused_nax" if execution in ("nax", "nax_fused") else execution
+        dense.append((path, Exl3DenseLinear(**tensors, law=law)))
     banks = {}
     for spec in plan.banks.values():
         root = module_path(spec.root) + ".switch_mlp"
         for part, value in load_bank(read, spec).items():
             banks[f"{root}.{spec.projection}.{part}"] = value
     bank_execution = {"fused": "rows", "fused_nax": "rows", "fused_w8a8": "rows",
-                      "nax": "rows_nax"}.get(execution, execution)
+                      "nax": "rows_nax", "nax_fused": "fused_chain_nax"}.get(execution, execution)
     switches = install_banks(model, banks, execution=bank_execution) if banks else []
     for path, module in dense:
         _swap_module(model, path, module)
+    fused_mlps = []
+    if execution == "nax_fused" and fused_mlp is not None:
+        # Dense SwiGLU MLPs (as the adapter names them) whose three
+        # projections are bias-free trellis linears run decode widths as two
+        # launches.
+        from ..models.exl3 import Exl3FusedMLP
+
+        installed = dict(model.named_modules())
+        swapped = {path for path, _ in dense}
+        for path in sorted(swapped):
+            if not path.endswith(".gate_proj"):
+                continue
+            root = path[: -len(".gate_proj")]
+            parts = [installed[root + p] for p in (".gate_proj", ".up_proj")]
+            if ({root + ".up_proj", root + ".down_proj"} <= swapped
+                    and fused_mlp(root, installed[root])
+                    and not any("bias" in m for m in parts)):
+                fused_mlps.append(root)
+                _swap_module(model, root, Exl3FusedMLP(
+                    installed[root + ".gate_proj"], installed[root + ".up_proj"],
+                    installed[root + ".down_proj"]))
+    groups = []
+    if execution == "nax_fused" and projection_groups is not None:
+        # Same-input projections the adapter declares (attribute names on a
+        # module) share one launch at decode widths.
+        from ..models.exl3 import Exl3ProjectionGroup, group_refusal
+
+        for path, module in model.named_modules():
+            names = projection_groups(path, module)
+            if not names:
+                continue
+            linears = {name: getattr(module, name, None) for name in names}
+            if group_refusal(list(linears.values())) is None:
+                object.__setattr__(module, "exl3_projection_group", Exl3ProjectionGroup(linears))
+                groups.append(path)
     packed = sum(m.bank.packed_nbytes for _, m in dense) + sum(
         s.receipt()["packed_weight_bytes"] for s in switches
     )
@@ -385,6 +425,8 @@ def install_upstream(model, read, plan, module_path, *, execution="reference"):
         "installed_linears": len(dense),
         "installed_switches": len(switches),
         "packed_weight_bytes": packed,
+        "fused_mlps": len(fused_mlps),
+        "projection_groups": len(groups),
         "module_paths": sorted(
             [path for path, _ in dense]
             + [module_path(spec.root) + ".switch_mlp" for spec in plan.banks.values()]

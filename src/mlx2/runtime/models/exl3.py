@@ -46,6 +46,211 @@ def validate_metadata(meta):
     return dict(meta)
 
 
+def _patched(name, edits):
+    """``name``'s source with each (old, new) edit applied exactly once."""
+    text = (ASSETS / name).read_text()
+    for old, new in edits:
+        if text.count(old) != 1:
+            raise RuntimeError(f"EXL3 kernel patch does not match {name}: {old!r}")
+        text = text.replace(old, new)
+    return text
+
+
+# Shared-expert slots: a call over T tokens has T*K routed slots then T shared
+# slots (threads_per_grid.y = T*(K+1)); a shared slot reads the shared bank
+# (expert 0) at its token row. Routed rows keep the base kernels' arithmetic.
+_SHARED_ROW = (
+    "const uint ntok = uint(threads_per_grid.y) / uint(TOPK + 1);\n"
+    "const bool shared_row = {slot} >= ntok * uint(TOPK);\n"
+)
+
+
+def _shared_gate_up_source():
+    return "// mlx2: FUSED_GATE_UP with the shared expert's slots appended.\n" + _patched(
+        "FUSED_GATE_UP_SOURCE.metal",
+        [
+            ("const uint e = uint(slots[slot]);",
+             _SHARED_ROW.format(slot="slot") + "const uint e = shared_row ? 0u : uint(slots[slot]);"),
+            ("const size_t xr = (size_t)(slot / uint(TOPK)) * (size_t)(IDIM);",
+             "const size_t xr = (size_t)(shared_row ? slot - ntok * uint(TOPK) : slot / uint(TOPK)) * (size_t)(IDIM);"),
+            ("(proj == 0u ? gsuh : usuh)", "(shared_row ? (proj == 0u ? sgsuh : susuh) : (proj == 0u ? gsuh : usuh))"),
+            ("(gt + (size_t)e", "((shared_row ? sgt : gt) + (size_t)e"),
+            ("(ut + (size_t)e", "((shared_row ? sut : ut) + (size_t)e"),
+            ("(sg == 0u ? gsvh : usvh)", "(shared_row ? (sg == 0u ? sgsvh : susvh) : (sg == 0u ? gsvh : usvh))"),
+            ("""  const float g = float(T(half(val[lid])));
+  const float u = float(T(half(val[128u + lid])));
+  const float y = float(T(1.0f / (1.0f + metal::exp(-metal::abs(g)))));
+  const float sig = g < 0.0f ? float(T(1.0f - y)) : y;
+  const float gs = float(T(g * sig));
+  h[(size_t)slot * (size_t)(ODIM) + block * 128u + lid] = T(gs * u);""",
+             """  // Routed slots in T (half); shared slots in ST (the trunk dtype), stored
+  // as half: exact for normal-range values; below 2^-14 half subnormals
+  // drop bits and above 65504 it overflows (the routed slots' range too).
+  h[(size_t)slot * (size_t)(ODIM) + block * 128u + lid] = half(shared_row
+      ? exl3_swiglu<ST>(val[lid], val[128u + lid])
+      : exl3_swiglu<T>(val[lid], val[128u + lid]));"""),
+        ],
+    )
+
+
+# FUSED_LINEAR with KS input splits: 8*KS simdgroups, simdgroup s takes
+# output tile s % 8 over input tiles [ks*IT/KS, (ks+1)*IT/KS) (ks = s / 8),
+# and the KS partial sums add in ks order before the finish. KS = 1 is the
+# base kernel's arithmetic; any KS is the same program for every row.
+_KSPLIT_EDITS = [
+    ("threadgroup float inner[128];", "threadgroup float inner[128u * uint(KS)];"),
+    ("constexpr uint SGS = 8u;", "constexpr uint SGS = 8u * uint(KS);"),
+    ("const uint ot = block * 8u + sg;", "const uint ks = sg >> 3u;\n  const uint ot = block * 8u + (sg & 7u);"),
+    ("for (uint tk = 0u; tk < IT; tk += 2u) {",
+     "for (uint tk = ks * (IT / uint(KS)); tk < (ks + 1u) * (IT / uint(KS)); tk += 2u) {"),
+    ("  float4 v = float4(inner[lane], inner[lane + 32u], inner[lane + 64u], inner[lane + 96u]);\n",
+     "  float4 v = float4(inner[lane], inner[lane + 32u], inner[lane + 64u], inner[lane + 96u]);\n"
+     "  for (uint k = 1u; k < uint(KS); k++) {\n"
+     "    v += float4(inner[k * 128u + lane], inner[k * 128u + lane + 32u],\n"
+     "                inner[k * 128u + lane + 64u], inner[k * 128u + lane + 96u]);\n"
+     "  }\n"),
+]
+
+
+def _ksplit_linear_source():
+    return "// mlx2: FUSED_LINEAR with KS input splits.\n" + _patched("FUSED_LINEAR_SOURCE.metal", _KSPLIT_EDITS)
+
+
+def _default_ks(input_dims):
+    return FUSED_KS_BY_INPUT.get(input_dims, FUSED_KS)
+
+
+def fused_ksplit(input_dims, ks):
+    """The largest admitted split <= ks: KS must leave an even tile count."""
+    tiles = input_dims // 16
+    while ks > 1 and (tiles % (2 * ks) or 256 * ks > 1024):
+        ks //= 2
+    return ks
+
+
+# Up to three same-input dense linears in one launch: threadgroup blocks
+# [0, NB0) run linear 0, [NB0, NB0+NB1) linear 1, the rest linear 2; each
+# block runs FUSED_LINEAR (KS)'s program for its own linear.
+_GROUP_EDITS = [
+    ("const uint block = uint(threadgroup_position_in_grid.x);",
+     "const uint gblock = uint(threadgroup_position_in_grid.x);\n"
+     "const uint which = gblock < uint(NB0) ? 0u : (gblock < uint(NB0 + NB1) ? 1u : 2u);\n"
+     "const uint block = gblock - (which == 0u ? 0u : (which == 1u ? uint(NB0) : uint(NB0 + NB1)));\n"
+     "const uint ODIM_ = which == 0u ? uint(ODIM0) : (which == 1u ? uint(ODIM1) : uint(ODIM2));"),
+    ("constexpr uint OT = uint(ODIM) / TILE;", "const uint OT = ODIM_ / TILE;"),
+    ("const uint e = uint(slots[row]);", "const uint e = 0u;"),
+    ("const device half *suh_e = suh +", "const device half *suh_e = (which == 0u ? suh0 : (which == 1u ? suh1 : suh2)) +"),
+    ("const device half *svh_e = svh + (size_t)e * (size_t)(ODIM);",
+     "const device half *svh_e = (which == 0u ? svh0 : (which == 1u ? svh1 : svh2)) + (size_t)e * (size_t)ODIM_;"),
+    ("(trellis + (size_t)e", "((which == 0u ? trellis0 : (which == 1u ? trellis1 : trellis2)) + (size_t)e"),
+    ("constexpr size_t STEP = (size_t)OT * PACKED_W;", "const size_t STEP = (size_t)OT * PACKED_W;"),
+    ("const size_t yb = (size_t)row * (size_t)(ODIM) + base;",
+     "const size_t yb = (size_t)row * (size_t)ODIM_ + base;\n"
+     "  device OUT *y = which == 0u ? y0 : (which == 1u ? y1 : y2);"),
+]
+
+
+def _group_linear_source():
+    return "// mlx2: FUSED_LINEAR (KS splits) over up to three same-input linears.\n" + _patched(
+        "FUSED_LINEAR_SOURCE.metal", _KSPLIT_EDITS + _GROUP_EDITS)
+
+
+def fused_group(linears, x):
+    """FUSED_LINEAR of 2-3 dense one-expert banks reading the same rows, one
+    launch; outputs in x's dtype, each row the same program as fused_rows."""
+    banks = [lin.bank for lin in linears]
+    first = banks[0]
+    if not 2 <= len(banks) <= 3 or any(
+            (b.input_dims, b.words, b.trellis.dtype) != (first.input_dims, first.words, first.trellis.dtype)
+            for b in banks):
+        raise ValueError("EXL3 grouped linears need 2-3 banks of one input width, rate and storage")
+    padded = banks + [banks[-1]] * (3 - len(banks))
+    blocks = [b.output_dims // 128 for b in banks] + [0] * (3 - len(banks))
+    ks = fused_ksplit(first.input_dims, _default_ks(first.input_dims))
+    rows = x.shape[0]
+    inputs = [x]
+    for b in padded:
+        inputs += [b.trellis, b.suh, b.svh]
+    outs = _kernels()[14](
+        inputs=inputs,
+        template=[
+            ("IDIM", first.input_dims), ("NHW", first.words), ("OUT", x.dtype), ("KS", ks),
+            ("NB0", blocks[0]), ("NB1", blocks[1]),
+            ("ODIM0", padded[0].output_dims), ("ODIM1", padded[1].output_dims), ("ODIM2", padded[2].output_dims),
+        ],
+        grid=(sum(blocks) * 256 * ks, rows, 1),
+        threadgroup=(256 * ks, 1, 1),
+        output_shapes=[(rows, b.output_dims) if i < len(banks) else (1, 128) for i, b in enumerate(padded)],
+        output_dtypes=[x.dtype] * 3,
+    )
+    return outs[: len(banks)]
+
+
+class Exl3ProjectionGroup:
+    """Same-input dense EXL3 linears of one module run as one FUSED_LINEAR
+    launch at fused widths (below NAX_MIN_ROWS on Metal). ``__call__``
+    returns {name: output} or None to decline, and credits each linear's
+    call counters as its own call would."""
+
+    def __init__(self, linears):
+        self.names = tuple(linears)
+        self.linears = tuple(linears.values())
+        object.__setattr__(self, "calls", 0)
+
+    def __call__(self, x):
+        flat = x.reshape(-1, x.shape[-1])
+        rows = flat.shape[0]
+        if mx.default_device() == mx.cpu or not 0 < rows < NAX_MIN_ROWS:
+            return None
+        outs = fused_group(self.linears, flat)
+        self.calls += 1
+        result = {}
+        for name, lin, out in zip(self.names, self.linears, outs):
+            object.__setattr__(lin, "calls", lin.calls + 1)
+            object.__setattr__(lin, "rows", lin.rows + rows)
+            result[name] = out.reshape(*x.shape[:-1], lin.output_dims)
+        return result
+
+
+def group_refusal(linears):
+    """Why these linears cannot share a launch, or None."""
+    if not 2 <= len(linears) <= 3:
+        return "a group has 2-3 linears"
+    first = linears[0]
+    for lin in linears:
+        if not isinstance(lin, Exl3DenseLinear) or lin.law != "fused_nax":
+            return "grouped projections need fused_nax EXL3 linears"
+        if "bias" in lin:
+            return "grouped projections carry no bias"
+        if (lin.input_dims, lin.words, lin.bank.trellis.dtype) != (
+                first.input_dims, first.words, first.bank.trellis.dtype):
+            return "grouped projections differ in input width, rate or storage"
+    return None
+
+
+def _shared_linear_source():
+    return "// mlx2: FUSED_LINEAR (KS splits) with the shared expert's rows appended.\n" + _patched(
+        "FUSED_LINEAR_SOURCE.metal",
+        _KSPLIT_EDITS + [
+            ("const uint e = uint(slots[row]);",
+             _SHARED_ROW.format(slot="row") + "const uint e = shared_row ? 0u : uint(slots[row]);"),
+            ("const device half *suh_e = suh +", "const device half *suh_e = (shared_row ? ssuh : suh) +"),
+            ("const device half *svh_e = svh +", "const device half *svh_e = (shared_row ? ssvh : svh) +"),
+            ("(trellis + (size_t)e", "((shared_row ? strellis : trellis) + (size_t)e"),
+        ],
+    )
+
+
+def _shared_combine_source():
+    # The shared expert's down rows follow the routed rows in d (half, as the
+    # unfused shared down rounds before its trunk cast).
+    return "// mlx2: MOE_COMBINE reading the shared rows from d.\n" + _patched(
+        "MOE_COMBINE_SOURCE.metal",
+        [("float(shared[(size_t)row * (size_t)(D) + col])",
+          "float(T(d[((size_t)uint(threads_per_grid.y) * uint(K) + row) * (size_t)(D) + col]))")],
+    )
+
+
 @lru_cache(maxsize=1)
 def _kernels():
     def kernel(name, inputs, outputs, file, header=""):
@@ -55,6 +260,12 @@ def _kernels():
             output_names=outputs,
             source=(ASSETS / file).read_text(),
             header=header,
+        )
+
+    def kernel_text(name, inputs, outputs, source, header=""):
+        return mx.fast.metal_kernel(
+            name="mlx2_exl3_" + name, input_names=inputs, output_names=outputs,
+            source=source, header=header,
         )
 
     header = (ASSETS / "header_mcg_w16.metal").read_text()
@@ -76,8 +287,41 @@ def _kernels():
             header,
         ),
         kernel("rows", ["x", "trellis", "order", "eids"], ["y"], "ROWS_GEMV_SOURCE.metal", header),
-        kernel("fused_linear", ["x", "trellis", "suh", "svh"], ["y"], "FUSED_LINEAR_SOURCE.metal", header),
+        kernel_text("fused_linear", ["x", "trellis", "suh", "svh", "slots"], ["y"], _ksplit_linear_source(), header),
         kernel("reconstruct", ["trellis", "experts"], ["inner"], "RECONSTRUCT_SOURCE.metal", header),
+        kernel(
+            "fused_gate_up",
+            ["x", "slots", "gt", "gsuh", "gsvh", "ut", "usuh", "usvh"],
+            ["h"],
+            "FUSED_GATE_UP_SOURCE.metal",
+            header + (ASSETS / "header_fused_tiles.metal").read_text(),
+        ),
+        kernel("moe_combine", ["d", "scores", "shared", "gl"], ["out"], "MOE_COMBINE_SOURCE.metal"),
+        kernel_text(
+            "fused_gate_up_shared",
+            ["x", "slots", "gt", "gsuh", "gsvh", "ut", "usuh", "usvh",
+             "sgt", "sgsuh", "sgsvh", "sut", "susuh", "susvh"],
+            ["h"],
+            _shared_gate_up_source(),
+            header + (ASSETS / "header_fused_tiles.metal").read_text(),
+        ),
+        kernel_text(
+            "fused_linear_shared",
+            ["x", "trellis", "suh", "svh", "slots", "strellis", "ssuh", "ssvh"],
+            ["y"],
+            _shared_linear_source(),
+            header,
+        ),
+        kernel_text("moe_combine_shared", ["d", "scores", "gl"], ["out"], _shared_combine_source()),
+        kernel("prepare_map", ["x", "suh", "src", "slots"], ["y"], "PREPARE_MAP_SOURCE.metal"),
+        kernel("finish_map", ["inner", "svh", "slots", "dst"], ["y"], "FINISH_MAP_SOURCE.metal"),
+        kernel_text(
+            "fused_linear_group",
+            ["x", "trellis0", "suh0", "svh0", "trellis1", "suh1", "svh1", "trellis2", "suh2", "svh2"],
+            ["y0", "y1", "y2"],
+            _group_linear_source(),
+            header,
+        ),
     )
 
 
@@ -107,9 +351,10 @@ class NaxLayout(NamedTuple):
     inverse: mx.array
     sorted_ids: mx.array
     bounds: tuple
+    src: mx.array = None  # token row of each sorted slot (order // topk)
 
 
-def nax_layout(ids, num_experts):
+def nax_layout(ids, num_experts, topk=1):
     """Expert-sorted rows and each expert's segment (one host sync)."""
     import numpy as np
 
@@ -119,13 +364,35 @@ def nax_layout(ids, num_experts):
     inverse = np.empty_like(order)
     inverse[order] = np.arange(order.size, dtype=np.uint32)
     bounds = tuple(int(b) for b in np.searchsorted(ranked, np.arange(num_experts + 1)))
-    return NaxLayout(mx.array(order), mx.array(inverse), mx.array(ranked), bounds)
+    return NaxLayout(mx.array(order), mx.array(inverse), mx.array(ranked), bounds,
+                     mx.array(order // np.uint32(topk)))
 
 
 def nax_bank(proj, rows, ids, layout):
     """One bank projection at prefill width: prepare, per expert chunk
     reconstruct + sorted gather_mm, finish (rows in caller order)."""
     prepared = proj.prepare(rows, ids)[layout.order]
+    inner = _nax_sorted_inner(proj, prepared, layout)
+    return proj.finish(inner[layout.inverse], ids)
+
+
+def nax_switch(switch, flat, ids, topk, out_dtype):
+    """Routed gate/up/down at prefill width, kept in expert-sorted order:
+    gate and up prepare straight from the token rows (no repeated or
+    permuted input copy), their finishes and SwiGLU stay sorted, and the
+    down finish scatters to caller order in ``out_dtype``. Row for row the
+    arithmetic of three ``nax_bank`` calls, so bitwise their result."""
+    layout = nax_layout(ids, switch.gate_proj.num_experts, topk)
+    g, u = (proj.finish(_nax_sorted_inner(proj, proj.prepare_map(flat, layout.src, layout.sorted_ids), layout),
+                        layout.sorted_ids)
+            for proj in (switch.gate_proj, switch.up_proj))
+    down = switch.down_proj
+    inner = _nax_sorted_inner(down, down.prepare(swiglu(g, u), layout.sorted_ids), layout)
+    return down.finish_map(inner, layout.sorted_ids, layout.order, ids.size, out_dtype)
+
+
+def _nax_sorted_inner(proj, prepared, layout):
+    """Inner products of expert-sorted prepared rows, sorted order."""
     cpu = mx.default_device() == mx.cpu
     parts = []
     for e0 in range(0, proj.num_experts, NAX_BANK_CHUNK):
@@ -140,8 +407,7 @@ def nax_bank(proj, rows, ids, layout):
         part = mx.gather_mm(lhs, weights, rhs_indices=layout.sorted_ids[s0:s1] - e0,
                             sorted_indices=True)
         parts.append(part.squeeze(-2).astype(mx.float16))
-    inner = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=0)
-    return proj.finish(inner[layout.inverse], ids)
+    return parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=0)
 # Sushi's fused gate/up pair (PAIR_GEMV_SOURCE) was validated at 40-word tiles
 # only; at 32 and 64 words it measured 82-86% of output scale off the reference
 # switch on Qwen3.6-35B-A3B layer-10 experts (exl3-phase3-metal-20261104).
@@ -283,6 +549,54 @@ class Exl3Linear(nn.Module):
             output_dtypes=[mx.float16],
         )[0]
 
+    def prepare_map(self, x, src, ids):
+        """Slot s prepared from row src[s] of x against expert ids[s]."""
+        if mx.default_device() == mx.cpu:
+            return self.prepare(x[src], ids)
+        return _kernels()[12](
+            inputs=[x, self.suh, src, ids],
+            template=[("IDIM", self.input_dims)],
+            grid=(self.input_dims // 128 * 32, ids.size, 1),
+            threadgroup=(32, 1, 1),
+            output_shapes=[(ids.size, self.input_dims)],
+            output_dtypes=[mx.float16],
+        )[0]
+
+    def finish_map(self, inner, ids, dst, rows, dtype):
+        """finish of slot s against expert ids[s] written to row dst[s] in
+        ``dtype``; dst must be a permutation of range(rows)."""
+        if mx.default_device() == mx.cpu:
+            out = self.finish(inner, ids)
+            return mx.zeros((rows, self.output_dims), mx.float16).at[dst].add(out).astype(dtype)
+        return _kernels()[13](
+            inputs=[inner, self.svh, ids, dst],
+            template=[("ODIM", self.output_dims), ("OUT", dtype)],
+            grid=(self.output_dims // 128 * 32, ids.size, 1),
+            threadgroup=(32, 1, 1),
+            output_shapes=[(rows, self.output_dims)],
+            output_dtypes=[dtype],
+        )[0]
+
+    def fused_rows(self, x, ids, ks=None):
+        """FUSED_LINEAR_SOURCE: prepare, inner product and finish of row i
+        against expert ids[i] in one launch; output in x's dtype. ``ks``
+        input splits (default FUSED_KS, admitted by shape only)."""
+        ks = fused_ksplit(self.input_dims, _default_ks(self.input_dims) if ks is None else ks)
+        return _kernels()[5](
+            inputs=[x, self.trellis, self.suh, self.svh, ids.astype(mx.uint32)],
+            template=[
+                ("IDIM", self.input_dims),
+                ("ODIM", self.output_dims),
+                ("NHW", self.words),
+                ("OUT", x.dtype),
+                ("KS", ks),
+            ],
+            grid=(self.output_dims // 128 * 256 * ks, x.shape[0], 1),
+            threadgroup=(256 * ks, 1, 1),
+            output_shapes=[(x.shape[0], self.output_dims)],
+            output_dtypes=[x.dtype],
+        )[0]
+
     def reconstruct(self, experts, ot0=0, columns=None, *, transposed=False):
         """Decoded fp16 inner weights [U, I, columns] ([U, columns, I] when
         transposed) from output tile ot0."""
@@ -395,6 +709,160 @@ class Exl3Linear(nn.Module):
         return self.finish(value, ids)
 
 
+# FUSED_GATE_UP holds two prepared input rows in threadgroup memory
+# (4 * IDIM + 3 KiB); wider inputs keep the unfused projections.
+FUSED_GATE_UP_MAX_INPUT = 6144
+# Input splits of the fused dense/down kernel (FUSED_LINEAR KS); 1 was the
+# rev-1..3 law. Whole-model B1 decode on Qwen3.6-35B-A3B 4.00 bpw with shared
+# slots (exl3-fuse4-metal-20261105/bench): KS 1 130.1, KS 2 137.3, KS 4
+# 117.9-119.0 tok/s. FUSED_KS_BY_INPUT overrides by input width. Interleaved
+# x3 (bench3): rev 3 118.2, shared slots 128.3, KS 2 135.3, KS 2 + KS 4 at
+# 4096-wide inputs (out_proj/o_proj) 140.7 median; KS 4 at 512 (down) slower.
+# KS 4 at 4096 is NOT selected: with it the whole-model check
+# (exl3-fuse5-metal-20261105/400) found a full-vs-step flip outside the
+# near-tie contract (exact tie in the full forward, step margin 0.625 nat);
+# KS 2 everywhere passed it (exl3-fuse4-metal-20261105/400-ks2).
+FUSED_KS = 2
+FUSED_KS_BY_INPUT = {}
+
+
+def fused_gate_up(gate, up, x, ids, topk, dtype=mx.float16):
+    """FUSED_GATE_UP_SOURCE: h[slot] = swiglu(gate(x[slot // topk]),
+    up(x[slot // topk])) against expert ids[slot], one launch; SwiGLU and h
+    in ``dtype``."""
+    if gate.input_dims != up.input_dims or gate.output_dims != up.output_dims:
+        raise ValueError("fused gate/up needs one geometry")
+    if gate.input_dims > FUSED_GATE_UP_MAX_INPUT:
+        raise ValueError("fused gate/up input exceeds its threadgroup memory")
+    return _kernels()[7](
+        inputs=[x, ids.astype(mx.uint32), gate.trellis, gate.suh, gate.svh, up.trellis, up.suh, up.svh],
+        template=[
+            ("IDIM", gate.input_dims),
+            ("ODIM", gate.output_dims),
+            ("NG", gate.words),
+            ("NU", up.words),
+            ("TOPK", topk),
+            ("T", dtype),
+        ],
+        grid=(gate.output_dims // 128 * 1024, ids.size, 1),
+        threadgroup=(1024, 1, 1),
+        output_shapes=[(ids.size, gate.output_dims)],
+        output_dtypes=[dtype],
+    )[0]
+
+
+def moe_combine(d, scores, shared, gl, topk, dtype):
+    """MOE_COMBINE_SOURCE: the routed decode tail in one launch,
+    ``sum_k(d[:, k] * scores[:, k]) + sigmoid(gl) * shared`` in ``dtype``."""
+    rows, dims = shared.shape
+    if d.shape != (rows * topk, dims) or scores.shape != (rows, topk) or gl.size != rows:
+        raise ValueError("EXL3 MoE combine geometry mismatch")
+    return _kernels()[8](
+        inputs=[d, scores, shared, gl.reshape(rows)],
+        template=[("D", dims), ("K", topk), ("T", dtype)],
+        grid=(dims, rows, 1),
+        threadgroup=(min(256, dims), 1, 1),
+        output_shapes=[(rows, dims)],
+        output_dtypes=[dtype],
+    )[0]
+
+
+def shared_slot_refusal(routed, shared):
+    """Why the shared MLP cannot ride as extra slots of the routed launches
+    (``None`` when it can): same geometry, tile words and storage dtypes."""
+    if not isinstance(shared, Exl3FusedMLP):
+        return "shared expert is not a fused EXL3 MLP"
+    for name in ("gate_proj", "up_proj", "down_proj"):
+        a, b = getattr(routed, name), getattr(shared, name).bank
+        if (a.input_dims, a.output_dims, a.words) != (b.input_dims, b.output_dims, b.words):
+            return f"shared {name} geometry or rate differs from the routed bank"
+        if a.trellis.dtype != b.trellis.dtype or a.suh.dtype != b.suh.dtype or a.svh.dtype != b.svh.dtype:
+            return f"shared {name} storage dtype differs from the routed bank"
+    return None
+
+
+def shared_gate_up(gate, up, sgate, sup, x, ids, topk, shared_dtype):
+    """FUSED_GATE_UP over T*K routed slots then T shared slots (h in half;
+    the shared SwiGLU rounds in ``shared_dtype``, the trunk dtype)."""
+    rows = x.shape[0]
+    if ids.size != rows * topk:
+        raise ValueError("EXL3 shared gate/up geometry mismatch")
+    return _kernels()[9](
+        inputs=[x, ids, gate.trellis, gate.suh, gate.svh, up.trellis, up.suh, up.svh,
+                sgate.trellis, sgate.suh, sgate.svh, sup.trellis, sup.suh, sup.svh],
+        template=[
+            ("IDIM", gate.input_dims), ("ODIM", gate.output_dims),
+            ("NG", gate.words), ("NU", up.words), ("TOPK", topk),
+            ("T", mx.float16), ("ST", shared_dtype),
+        ],
+        grid=(gate.output_dims // 128 * 1024, rows * (topk + 1), 1),
+        threadgroup=(1024, 1, 1),
+        output_shapes=[(rows * (topk + 1), gate.output_dims)],
+        output_dtypes=[mx.float16],
+    )[0]
+
+
+def shared_down(down, sdown, h, ids, topk, ks=None):
+    """FUSED_LINEAR over T*K routed rows then T shared rows, half out."""
+    ks = fused_ksplit(down.input_dims, _default_ks(down.input_dims) if ks is None else ks)
+    if h.shape[0] != ids.size // topk * (topk + 1) or ids.size % topk:
+        raise ValueError("EXL3 shared down geometry mismatch")
+    return _kernels()[10](
+        inputs=[h, down.trellis, down.suh, down.svh, ids, sdown.trellis, sdown.suh, sdown.svh],
+        template=[
+            ("IDIM", down.input_dims), ("ODIM", down.output_dims),
+            ("NHW", down.words), ("OUT", mx.float16), ("TOPK", topk), ("KS", ks),
+        ],
+        grid=(down.output_dims // 128 * 256 * ks, h.shape[0], 1),
+        threadgroup=(256 * ks, 1, 1),
+        output_shapes=[(h.shape[0], down.output_dims)],
+        output_dtypes=[mx.float16],
+    )[0]
+
+
+def shared_combine(d, scores, gl, topk, dtype):
+    """MOE_COMBINE with the shared rows read from the tail of ``d``."""
+    rows = scores.shape[0]
+    dims = d.shape[1]
+    if d.shape[0] != rows * (topk + 1) or gl.size != rows:
+        raise ValueError("EXL3 shared combine geometry mismatch")
+    return _kernels()[11](
+        inputs=[d, scores, gl.reshape(rows)],
+        template=[("D", dims), ("K", topk), ("T", dtype)],
+        grid=(dims, rows, 1),
+        threadgroup=(min(256, dims), 1, 1),
+        output_shapes=[(rows, dims)],
+        output_dtypes=[dtype],
+    )[0]
+
+
+class Exl3FusedMLP(nn.Module):
+    """A dense SwiGLU MLP of three Exl3DenseLinear projections: at decode
+    widths one fused gate/up/SwiGLU launch and one fused down launch; wider
+    calls keep the projections' own laws."""
+
+    def __init__(self, gate_proj, up_proj, down_proj):
+        super().__init__()
+        if any("bias" in p for p in (gate_proj, up_proj)):
+            raise ValueError("the fused gate/up chain carries no bias")
+        self.gate_proj, self.up_proj, self.down_proj = gate_proj, up_proj, down_proj
+        object.__setattr__(self, "fused_calls", 0)
+
+    def __call__(self, x):
+        rows = x.reshape(-1, x.shape[-1])
+        if (mx.default_device() != mx.cpu and 0 < rows.shape[0] < NAX_MIN_ROWS
+                and self.gate_proj.input_dims <= FUSED_GATE_UP_MAX_INPUT):
+            # SwiGLU in the trunk dtype, as the unfused path casts g and u.
+            h = fused_gate_up(self.gate_proj.bank, self.up_proj.bank, rows,
+                              _constant("zeros", rows.shape[0]), 1, x.dtype)
+            object.__setattr__(self, "fused_calls", self.fused_calls + 1)
+            for proj in (self.gate_proj, self.up_proj):  # observed through the chain
+                object.__setattr__(proj, "calls", proj.calls + 1)
+                object.__setattr__(proj, "rows", proj.rows + rows.shape[0])
+            return self.down_proj(h).astype(x.dtype).reshape(*x.shape[:-1], self.down_proj.output_dims)
+        return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))
+
+
 class Exl3SwitchGLU(nn.Module):
     def __init__(self, gate, up, down, *, execution, trusted_router=False):
         super().__init__()
@@ -406,8 +874,10 @@ class Exl3SwitchGLU(nn.Module):
             or len({gate.num_experts, up.num_experts, down.num_experts}) != 1
         ):
             raise ValueError("EXL3 gate/up/down geometry mismatch")
-        if execution not in ("reference", "fused", "rows", "rows_nax"):
-            raise ValueError("EXL3 switch execution must be reference, fused, rows or rows_nax")
+        if execution not in ("reference", "fused", "rows", "rows_nax", "fused_chain_nax"):
+            raise ValueError(
+                "EXL3 switch execution must be reference, fused, rows, rows_nax or fused_chain_nax"
+            )
         row_law = execution in ("rows", "rows_nax")
         if row_law != all(p.law == "rows" for p in (gate, up, down)):
             raise ValueError("rows execution needs row-law projections, and only it")
@@ -423,7 +893,77 @@ class Exl3SwitchGLU(nn.Module):
         object.__setattr__(self, "reference_calls", 0)
         object.__setattr__(self, "rows_calls", 0)
         object.__setattr__(self, "nax_calls", 0)
+        object.__setattr__(self, "chain_calls", 0)
+        object.__setattr__(self, "tail_calls", 0)
+        object.__setattr__(self, "shared_slot_calls", 0)
+        # Shared expert as extra slots of the routed decode launches (rev 4).
+        object.__setattr__(self, "shared_slots", True)
+        object.__setattr__(self, "tail_declines", {})
         self.freeze()
+
+    def _tail_decline(self, reason):
+        declines = self.tail_declines
+        declines[reason] = declines.get(reason, 0) + 1
+        return None
+
+    def decode_tail(self, block, x, inds, scores):
+        """The routed MoE block from routing on, at decode/verify widths:
+        fused gate/up/SwiGLU, fused down, the shared expert and its gate, and
+        one combine launch. ``None`` (counted) declines to the block's own
+        tail, which runs this module's ordinary call."""
+        if self.execution != "fused_chain_nax":
+            return None
+        if mx.default_device() == mx.cpu:
+            return self._tail_decline("cpu")
+        ids = inds.reshape(-1)
+        topk = inds.shape[-1]
+        if ids.size >= NAX_BANK_MIN_ROWS:
+            return self._tail_decline("prefill width")
+        if self.gate_proj.input_dims > FUSED_GATE_UP_MAX_INPUT:
+            return self._tail_decline("input exceeds fused gate/up threadgroup memory")
+        if x.dtype not in (mx.bfloat16, mx.float16) or scores.dtype != x.dtype:
+            return self._tail_decline("activation or score dtype")
+        if (inds.shape[:-1] != x.shape[:-1] or not 1 <= topk <= 32 or ids.size == 0
+                or x.shape[-1] != self.gate_proj.input_dims):
+            return self._tail_decline("routing shape")
+        if not self.trusted_router:
+            return self._tail_decline("untrusted router")
+        gate_weight = getattr(block.shared_expert_gate, "weight", None)
+        if gate_weight is None or gate_weight.dtype != x.dtype:
+            return self._tail_decline("shared expert gate dtype")
+        flat = x.reshape(-1, x.shape[-1])
+        ids = ids.astype(mx.uint32)
+        shared_mlp = block.shared_expert
+        cache = self.__dict__.setdefault("_shared_slot_admission", {})
+        if id(shared_mlp) not in cache:  # fixed after load: admit once per module
+            cache[id(shared_mlp)] = shared_slot_refusal(self, shared_mlp)
+        if self.shared_slots and cache[id(shared_mlp)] is None:
+            # Shared expert as T extra slots of the two routed launches.
+            sg, su, sd = (getattr(shared_mlp, n).bank for n in ("gate_proj", "up_proj", "down_proj"))
+            h = shared_gate_up(self.gate_proj, self.up_proj, sg, su, flat, ids, topk, x.dtype)
+            d = shared_down(self.down_proj, sd, h, ids, topk)
+            gl = block.shared_expert_gate(x)
+            y = shared_combine(d, scores.reshape(-1, topk), gl, topk, x.dtype)
+            rows = flat.shape[0]
+            object.__setattr__(shared_mlp, "fused_calls", shared_mlp.fused_calls + 1)
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                proj = getattr(shared_mlp, name)
+                object.__setattr__(proj, "calls", proj.calls + 1)
+                object.__setattr__(proj, "rows", proj.rows + rows)
+            object.__setattr__(self, "chain_calls", self.chain_calls + 1)
+            object.__setattr__(self, "tail_calls", self.tail_calls + 1)
+            object.__setattr__(self, "shared_slot_calls", self.shared_slot_calls + 1)
+            return y.reshape(x.shape)
+        h = fused_gate_up(self.gate_proj, self.up_proj, flat, ids, topk)
+        d = self.down_proj.fused_rows(h, ids)
+        shared = block.shared_expert(x).reshape(flat.shape)
+        gl = block.shared_expert_gate(x)
+        if shared.dtype != x.dtype or gl.dtype != x.dtype:
+            return self._tail_decline("shared expert dtype")
+        y = moe_combine(d, scores.reshape(-1, topk), shared, gl, topk, x.dtype)
+        object.__setattr__(self, "chain_calls", self.chain_calls + 1)
+        object.__setattr__(self, "tail_calls", self.tail_calls + 1)
+        return y.reshape(x.shape)
 
     def __call__(self, x, indices):
         if self.training:
@@ -448,8 +988,10 @@ class Exl3SwitchGLU(nn.Module):
             raise ValueError("EXL3 expert index outside the bound bank")
         topk = indices.shape[-1]
         flat = x.reshape(-1, x.shape[-1])
+        # Lazy: the fused chain reads token rows directly and never evaluates it.
         rows = mx.repeat(flat, topk, axis=0)
-        fused = self.execution == "fused" and mx.default_device() != mx.cpu
+        cpu = mx.default_device() == mx.cpu
+        fused = self.execution == "fused" and not cpu
         if fused and not self.gate_proj.words == self.up_proj.words == PAIR_VALIDATED_WORDS:
             raise ValueError(
                 f"the Sushi fused gate/up pair is validated only at {PAIR_VALIDATED_WORDS}-word tiles"
@@ -485,13 +1027,17 @@ class Exl3SwitchGLU(nn.Module):
                 for value, proj in zip(partials, (self.gate_proj, self.up_proj))
             ]
             object.__setattr__(self, "fused_calls", self.fused_calls + 1)
-        elif self.execution == "rows_nax" and ids.size >= NAX_BANK_MIN_ROWS:
+        elif (self.execution == "fused_chain_nax" and ids.size < NAX_BANK_MIN_ROWS and not cpu
+              and self.gate_proj.input_dims <= FUSED_GATE_UP_MAX_INPUT):
+            # Decode/verify widths: gate/up/SwiGLU and down, two launches.
+            h = fused_gate_up(self.gate_proj, self.up_proj, flat, ids, topk)
+            out = self.down_proj.fused_rows(h, ids).astype(x.dtype)
+            object.__setattr__(self, "chain_calls", self.chain_calls + 1)
+            return out.reshape(*indices.shape, self.down_proj.output_dims)
+        elif self.execution in ("rows_nax", "fused_chain_nax") and ids.size >= NAX_BANK_MIN_ROWS:
             # Prefill widths: expert-sorted reconstruction + gather_mm, one
             # layout for all three projections.
-            layout = nax_layout(ids, self.gate_proj.num_experts)
-            g = nax_bank(self.gate_proj, rows, ids, layout)
-            u = nax_bank(self.up_proj, rows, ids, layout)
-            out = nax_bank(self.down_proj, swiglu(g, u), ids, layout).astype(x.dtype)
+            out = nax_switch(self, flat, ids, topk, x.dtype)
             object.__setattr__(self, "nax_calls", self.nax_calls + 1)
             return out.reshape(*indices.shape, self.down_proj.output_dims)
         elif self.execution in ("rows", "rows_nax"):
@@ -526,6 +1072,10 @@ class Exl3SwitchGLU(nn.Module):
             "reference_calls": self.reference_calls,
             "rows_calls": self.rows_calls,
             "nax_calls": self.nax_calls,
+            "chain_calls": self.chain_calls,
+            "tail_calls": self.tail_calls,
+            "shared_slot_calls": self.shared_slot_calls,
+            "tail_declines": dict(self.tail_declines),
             "packed_weight_bytes": sum(
                 p.packed_nbytes for p in (self.gate_proj, self.up_proj, self.down_proj)
             ),
@@ -684,7 +1234,8 @@ class Exl3DenseLinear(nn.Module):
             weight = bank.reconstruct(zero, lo // 16, columns)[0]
             inner.append(mx.matmul(prepared, weight))
         inner = inner[0] if len(inner) == 1 else mx.concatenate(inner, axis=1)
-        return bank.finish(inner, ids)
+        # The trunk-dtype cast rides in the finish launch (bitwise astype).
+        return bank.finish_map(inner, ids, _constant("arange", flat.shape[0]), flat.shape[0], flat.dtype)
 
     def _w8a8(self, flat):
         """Approximate: int8 rows x int8 output channels, then finish."""
@@ -710,20 +1261,7 @@ class Exl3DenseLinear(nn.Module):
         return bank.finish(inner, ids)
 
     def _fused(self, flat):
-        bank = self.bank
-        return _kernels()[5](
-            inputs=[flat, bank.trellis, bank.suh, bank.svh],
-            template=[
-                ("IDIM", bank.input_dims),
-                ("ODIM", bank.output_dims),
-                ("NHW", bank.words),
-                ("OUT", flat.dtype),
-            ],
-            grid=(bank.output_dims // 128 * 256, flat.shape[0], 1),
-            threadgroup=(256, 1, 1),
-            output_shapes=[(flat.shape[0], bank.output_dims)],
-            output_dtypes=[flat.dtype],
-        )[0]
+        return self.bank.fused_rows(flat, _constant("zeros", flat.shape[0]))
 
     @property
     def words(self):

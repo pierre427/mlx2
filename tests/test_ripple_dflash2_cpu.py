@@ -147,7 +147,7 @@ def test_best_route_table_selects_dflash2_for_the_measured_oq4e_checkpoint_only(
     oq4e = "8ddd93fab94b25551a5a9533efdcb0f9edfbb198bfcde2888e0515933208f7da"
     entry = find_entry(table, "RippleAdapter", oq4e)
     assert entry["status"] == "selected_unqualified"
-    assert entry["default"]["kind"] == "ast" and entry["default"]["execution_policy"] == {"num_draft": 7}
+    assert entry["default"]["kind"] == "ast" and entry["default"]["execution_policy"] == {"num_draft": 7, "ast_tile_rows": 8}
     assert entry["default"]["drafter"]["architectures"] == ["DFlash2DraftModel"]
     assert "Operator decision" in entry["reason"]
     assert find_entry(table, "RippleAdapter", "0" * 64) is None

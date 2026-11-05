@@ -117,7 +117,10 @@ def _load_exl3(path, execution="reference"):
     plan = plan_checkpoint(path, weight_map, num_experts=EXPERTS)
     model = _model()
     read = ShardReader(path, weight_map)
-    receipt = install_upstream(model, read, plan, exl3_module_path, execution=execution)
+    from mlx2.adapters.qwen36_35b import exl3_fused_mlp
+
+    receipt = install_upstream(model, read, plan, exl3_module_path, execution=execution,
+                               fused_mlp=exl3_fused_mlp)
     load_beside(model, receipt, model.sanitize(model.shard_prune(load_stored(read, plan))))
     model.eval()
     return model, receipt
@@ -136,13 +139,14 @@ def _logits(model, tokens):
     return model(mx.array([tokens]), cache=cache).astype(mx.float32)
 
 
-@pytest.mark.parametrize("execution", ["reference", "rows", "fused", "fused_nax", "nax"])
+@pytest.mark.parametrize("execution", ["reference", "rows", "fused", "fused_nax", "nax", "nax_fused"])
 def test_exl3_model_matches_its_decoded_dense_model(tmp_path, execution):
     exl3_path, dense_path = _checkpoints(tmp_path)
     model, receipt = _load_exl3(exl3_path, execution)
     assert receipt["execution"] == execution
     reference = _load_dense(dense_path)
     assert receipt["installed_switches"] == 2 and receipt["installed_linears"] == 14
+    assert receipt["fused_mlps"] == (2 if execution == "nax_fused" else 0)  # the shared experts
     assert receipt["rates"] == {"mcg/k2": 6, "mcg/k3": 1, "mcg/k4": 12, "mcg/k6": 1}
     kinds = {type(m) for _, m in model.named_modules()}
     assert Exl3DenseLinear in kinds and Exl3SwitchGLU in kinds
@@ -155,7 +159,7 @@ def test_exl3_model_matches_its_decoded_dense_model(tmp_path, execution):
     dense = [m for _, m in model.named_modules() if isinstance(m, Exl3DenseLinear)]
     assert all(m.calls >= 1 and m.rows >= len(tokens) for m in dense)
     switches = [m for _, m in model.named_modules() if isinstance(m, Exl3SwitchGLU)]
-    calls = "reference_calls" if execution == "reference" else "rows_calls"
+    calls = "reference_calls" if execution in ("reference", "nax_fused") else "rows_calls"  # CPU: no chain
     assert all(getattr(m, calls) >= 1 and m.fused_calls == 0 for m in switches)
 
 

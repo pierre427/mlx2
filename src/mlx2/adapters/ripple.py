@@ -281,7 +281,38 @@ def source_weights(artifact):
 #                      (real widths, 1 and 512 rows) and in serving, but no
 #                      measurable gain: decode 10.72 vs 10.67 t/s eager on
 #                      oQ4e (qualification/runs/ripple-perf-ab-20261104/run3).
-OPTIONS = {"fused_elementwise": bool}
+#   gqa_folded_attention  decode/verify rows (<= 16) run GQA-folded SDPA
+#                      (one KV read per head); not bit-identical, default
+#                      off pending a near-tie-classified GPU A/B.
+#   metal_rmsnorm      one-launch RMSNorm kernel (source rounding law, FP32
+#                      sum in a different order); default off pending GPU
+#                      exactness, A/B and near-tie classification.
+OPTIONS = {"fused_elementwise": bool, "gqa_folded_attention": bool, "metal_rmsnorm": bool,
+           "metal_glue": bool, "window_blocked_prefill": bool}
+
+# Default-on options per storage format (Pierre, 2026-11-04; selected
+# unqualified). Measured only on the affine oQ4e checkpoint:
+#   metal_rmsnorm         plain decode +1.8/+3.1%, DFlash2 n7 prose +7.1%
+#                         (qualification/runs/ripple-perf-ab-20261104/rmsnorm)
+#   gqa_folded_attention  DFlash2 n7 prose +4.9% interleaved (window7)
+# Token differences fall only at previously measured near-tie positions;
+# their two-arm log-prob windows are still owed. NVFP4 and BF16 keep them
+# opt-in until measured. An explicit False in the policy opts out.
+#   metal_glue            (Pierre, 2026-11-05) QK-norm+RoPE, SwiGLU and value
+#                         blend as one-launch kernels;
+#                         bit-identical to the metal_rmsnorm law (gate: 0
+#                         mismatches), DFlash2 n7 prose +1.7%, prefill +8.4%
+#                         (qualification/runs/ripple-glue-20261105/run2).
+#   window_blocked_prefill stays OFF: -49% sliding attention per layer at
+#                         2048-row chunks, but only -11% at the default 512-row
+#                         schedule, where attention is ~7% of prefill; serving
+#                         prefill 263.7 vs 266.6/258.0 rows/s (no gain).
+DEFAULT_OPTIONS = {"affine": {"metal_rmsnorm": True, "gqa_folded_attention": True, "metal_glue": True}}
+
+
+def resolved_options(kind, options):
+    """Explicit options over the storage format's defaults."""
+    return {**DEFAULT_OPTIONS.get(kind, {}), **options}
 
 
 NUMERICS_KEYS = ("activation_precision",)
@@ -322,6 +353,46 @@ def parse_policy(policy):
     return dict(policy)
 
 
+TREE_TARGET = "attention_tree_v1"
+TREE_ROUTE_TAG = "external-ripple-dflash2-ast-tiles-v1"
+# Keys ``--ast`` writes for the tree route (server.apply_ast_invocation) plus
+# the tile knobs an operator may pass by hand; validated in ``tree_policy``.
+TREE_POLICY_KEYS = frozenset({
+    "batch_size_route", "ast_topology", "ast_tiles", "ast_tile_rows",
+    "ast_multilane_tile_rows", "tree_node_budget_by_lanes", "ast_adaptive_rows",
+    "ast_tree_calibration", "ast_batch_row_sharing", "ast_graft_prompt_lookup",
+})
+
+
+def tree_policy(policy):
+    """Validate the explicit AST tree-tile keys of an external policy.
+
+    Returns the tree keys present (empty for the plain DFlash2 chain).  Tile
+    budgets follow the shared ``ast_tiles``/``ast_tile_rows`` law; the
+    prompt-lookup graft has no Ripple implementation and is refused.
+    """
+    from .qwen38_27b import _TREE_BATCH_ROUTES, _tile_node_budgets
+
+    tree = {key: policy[key] for key in TREE_POLICY_KEYS if key in policy}
+    if not tree:
+        return tree
+    route = tree.get("batch_size_route")
+    if route not in _TREE_BATCH_ROUTES:
+        raise ValueError("Ripple tree tiles need batch_size_route tree15_b1_chain_b2plus_v1 "
+                         "or tree15_b1_b4_chain_b5plus_v1 (--ast selects it)")
+    if tree.get("ast_graft_prompt_lookup"):
+        raise ValueError("Ripple tree tiles do not graft prompt lookup onto the DFlash2 lattice")
+    adaptive = tree.get("ast_adaptive_rows")
+    if adaptive is not None and type(adaptive) is not bool:
+        raise ValueError("ast_adaptive_rows must be a boolean")
+    if "ast_topology" in tree:
+        from ..runtime.ast_tree_proposals import parse_topology
+
+        parse_topology(tree["ast_topology"])
+    _tile_node_budgets(tree, _TREE_BATCH_ROUTES[route], None, 16)
+    return tree
+
+
 class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     descriptor = DESCRIPTOR
     # Vendor DFlash2 drafter (ricursiveAI/Ripple-65B-Preview-DFlash2): taps
@@ -332,7 +403,24 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     EXTERNAL_PROFILE = "ripple-apcv2-dflash2"
     # Identity pin an auto-paired default writes (best_route_defaults); the
     # adapter re-checks it below so a drafter changed after pairing fails.
-    EXTERNAL_POLICY_EXTENSIONS = frozenset({"draft_revision"})
+    EXTERNAL_POLICY_EXTENSIONS = frozenset({"draft_revision"}) | TREE_POLICY_KEYS
+    # AST tree tiles (``--ast --ast-drafter <DFlash2 path>``): the DFlash2
+    # lattice is verified as one parent-closed tile per round on the generic
+    # attention tree target (runtime/attention_tree_executor.py), with the
+    # sliding layers rotated at ``offset + depth`` and the global layers
+    # NoPE (Model.attention_tree_position_scope).  CPU-exact against ordinary
+    # greedy (tests/test_ripple_ast_cpu.py).  The oQ4e no-flag route is this
+    # tree route at 8 tile rows (best_route_defaults.json, Pierre 2026-11-05;
+    # selected unqualified): prose 20.3 vs chain n7 17.5/16.8 t/s.
+    ast_tree_tiles = True
+    attention_tree_tiles = True
+    # Generic attention tiles keep the model dtype; the TensorFold GDN
+    # BF16-only gate does not apply.
+    ast_tree_tile_dtype_gate = False
+    # ``--ast-drafter pld`` keeps Ripple's ordinary prompt-lookup contract
+    # (Capability.PROMPT_LOOKUP); the tree drafter here is DFlash2.
+    ast_prompt_lookup_tiles = False
+    default_ast_tile_rows = 16
     profile = "ripple-nvfp4-w4a16-apcv2-ordinary"
     # Wider lanes are admitted (--max-lanes); the no-flag width stays one
     # until a GPU A/B selects a default.
@@ -358,9 +446,16 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         artifact = inspect_artifact(model_path)
         self.config, self.identity = artifact["config"], artifact["identity"]
         self.kind = artifact["storage_format"]
-        numerics, self.options, external = split_policy(self.policy)
+        numerics, explicit, external = split_policy(self.policy)
+        self.options = resolved_options(self.kind, explicit)
+        self.option_sources = {key: "explicit" if key in explicit else "storage_format_default"
+                               for key in self.options}
         draft_record = None
+        self.tree = {}
         if self._parse_external_policy(external, family="Ripple"):
+            # Tree-tile keys fail closed here, before any tensor loads; the
+            # plain chain carries none.
+            self.tree = tree_policy(self.external_policy)
             # Header-only drafter inspection before any target tensor loads.
             from .dflash2 import inspect_drafter
 
@@ -378,8 +473,15 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise ValueError("Ripple BF16/affine accepts only BF16 activations")
         else:
             self.policy = {"activation_precision": "bf16"}
-        self.layout = artifact["cache_layout"]
-        self.descriptor = artifact_descriptor(artifact, selected=True)
+        # Options that change arithmetic (not bit-identical to eager) get
+        # their own APCv2 namespace, so a prefix cached under one law is
+        # never warm-hit under another.
+        # metal_glue is bit-identical to the metal_rmsnorm law, so it shares
+        # that namespace; the others change arithmetic.
+        numerics_options = sorted(k for k in ("metal_rmsnorm", "gqa_folded_attention", "window_blocked_prefill")
+                                  if self.options.get(k))
+        self.layout = artifact["cache_layout"] + ("+" + "+".join(numerics_options) if numerics_options else "")
+        self.descriptor = replace(artifact_descriptor(artifact, selected=True), cache_layout=self.layout)
         self.profile = f"ripple-{self.kind}-apcv2-ordinary"
 
         import mlx.core as mx
@@ -399,6 +501,10 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             specs = affine_specs(self.config)
             nn.quantize(self.model, class_predicate=lambda name, module: specs.get(name, False))
         self.model.set_fused_elementwise(self.options.get("fused_elementwise", False))
+        self.model.set_gqa_folded_attention(16 if self.options.get("gqa_folded_attention") else 0)
+        self.model.set_metal_rmsnorm(self.options.get("metal_rmsnorm", False))
+        self.model.set_metal_glue(self.options.get("metal_glue", False))
+        self.model.set_window_blocked_prefill(self.options.get("window_blocked_prefill", False))
         weights = list(source_weights(artifact))
         self.model.load_weights(weights, strict=True)
         self.model.eval()
@@ -415,6 +521,10 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if draft_record is not None:
             from .dflash2 import load_drafter
 
+            if self.tree:
+                # Distinct identity digest, APCv2 layout suffix and route
+                # receipt for tree verification of the same drafter.
+                self.EXTERNAL_ROUTE_TAG = TREE_ROUTE_TAG
             self._bind_external_drafter(draft_record, load_drafter, self.descriptor)
 
     @staticmethod
@@ -453,10 +563,18 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         status = nvfp4_model_status(self.model)
         return {"route": "ordinary", "qualification": "unqualified", "policy": self.policy,
                 "options": dict(self.options),
+                "option_sources": dict(getattr(self, "option_sources", {})),
                 "fused_elementwise": bool(getattr(self.model, "fused_elementwise", False)),
+                "metal_rmsnorm": self._metal_rmsnorm_status(),
+                "metal_glue": self._metal_glue_status(),
+                "window_blocked_prefill": {"selected": bool(self.options.get("window_blocked_prefill")),
+                                           "calls": self.model.window_blocked_calls() if self.model else 0},
+                "gqa_folded_attention": {"selected": bool(self.options.get("gqa_folded_attention")),
+                                         "calls": self.model.gqa_fold_calls() if self.model else 0},
                 "implemented": True, "qualified": False, "selected": True,
                 "speculation": ("external-ripple-dflash2-implemented-unqualified"
                                 if getattr(self, "draft_model", None) is not None else "none"),
+                "ast_tree_tiles": self._tree_receipt(),
                 "observed_used": getattr(self.model, "forward_calls", 0) > 0,
                 "forward_calls": getattr(self.model, "forward_calls", 0),
                 "storage_format": self.kind,
@@ -466,6 +584,28 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "sliding_layers": 64,
                 "global_layers": 16, "sliding_window": 1024, "cache_layout": self.layout,
                 "nvfp4": status}
+
+    def _metal_glue_status(self):
+        from ..runtime.models.ricursive_glue import STATS
+
+        return {"selected": bool(self.options.get("metal_glue")), **STATS}
+
+    def _tree_receipt(self):
+        """Adapter-local tree-tile state; the speculative route receipt owns
+        observations (external_tree_rounds, the provider's dispatches)."""
+        tree = dict(getattr(self, "tree", {}) or {})
+        return {"implemented": True, "qualified": False, "selected": bool(tree),
+                "observed_used": False, "observation_authority": "speculative_route_receipt",
+                "tree_target": TREE_TARGET, "drafters": ["dflash2_lattice"],
+                "policy": tree,
+                "refusals": {"quantized_kv": "attention tree tiles verify exact KVCache/"
+                             "RotatingKVCache planes only",
+                             "ast_graft_prompt_lookup": "not implemented"}}
+
+    def _metal_rmsnorm_status(self):
+        from ..runtime.models.ricursive_rmsnorm import STATS
+
+        return {"selected": bool(self.options.get("metal_rmsnorm")), **STATS}
 
     @staticmethod
     def planning_cache_budget(config, *, mtp):

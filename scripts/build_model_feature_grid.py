@@ -52,13 +52,16 @@ FEATURES = (
     # Ripple perf pass (2026-11-04).
     "fused_elementwise", "hot_path_copy_cleanup", "continuous_batch_lanes4",
     "prefill_step_2048", "sliding_window_blocked_attention",
+    "metal_rmsnorm", "gqa_folded_attention",
+    # Ripple glue/tree pass (2026-11-05).
+    "metal_glue", "ast_dflash2_tree_tiles", "external_draft_num_draft",
     "source_engram_carry_tuple", "source_expert_direct_final_reads",
     "source_expert_decayed_retention", "native_fp_tensor_verify", "apc_inpass_checkpoints",
     "ling_optimizations", "ast_apcv2_current_source",
     "ling_kda_fusion_components", "ling_split_mla_components",
     "inkling_fused_ops", "inkling_q2_down_combine", "inkling_inline_relative_attention",
     "mtp_tree_pipeline",
-    "integer_exact_microscaling", "exl3_upstream_weight_format", "exl3_execution_rows", "exl3_execution_fused", "exl3_execution_fused_nax", "exl3_execution_fused_w8a8", "exl3_execution_nax",
+    "integer_exact_microscaling", "exl3_upstream_weight_format", "exl3_execution_rows", "exl3_execution_fused", "exl3_execution_fused_nax", "exl3_execution_fused_w8a8", "exl3_execution_nax", "exl3_execution_nax_fused",
     "resident_kernel_reload", "kimi_linear_supervised_lora_research",
     "kimi_router_score_profile_one_domain_prompt",
     "kimi_moe_behavior_research", "kimi_moe_loop_research",
