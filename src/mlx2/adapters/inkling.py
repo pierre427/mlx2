@@ -8,6 +8,7 @@ import json
 import math
 import os
 import struct
+from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
 
@@ -51,6 +52,167 @@ DESCRIPTOR = ModelDescriptor(
         "native_mtp": "no MTP tensors in conversion",
     },
 )
+
+
+# Native MTP sidecar: the released mixed-2bit conversion ships no MTP tensors;
+# scripts/convert_inkling_mtp_q8.py (mlx2 f5a172d19) converts the BF16 head of
+# thinkingmachines/Inkling-Small to affine q8/group-64 beside the target.
+MTP_SIDECAR_SHA256 = "dff1cfe7d598d4a5bef7187a896c0840ea1fb85cc96b2d0089f23d10e1a1b1c1"
+MTP_SIDECAR_SCHEMA = "mlx2.inkling-mtp-q8-conversion.v1"
+MTP_SOURCE_REPOSITORY = "thinkingmachines/Inkling-Small"
+MTP_SOURCE_REVISION = "b2d4f225a02032c5d154bff748ab5a00c5ca26e4"
+MTP_SOURCE_SHA256 = "d286dd21cb982a0052d24ee0077ec6fc38f5a766dc6953e6c4b85c6473bfa7b3"
+MTP_MAX_DEPTHS = 8
+NATIVE_MTP_DRAFT_NAMES = frozenset({"native_mtp"})
+# Draft-only LM head copies: (bits, group size); None keeps the target head.
+MTP_DRAFT_HEADS = {"bf16": None, "q8": (8, 64), "q4": (4, 64)}
+_MTP_PROJECTIONS = (
+    "input_proj",
+    "transformer_block.attn.wq_du",
+    "transformer_block.attn.wk_dv",
+    "transformer_block.attn.wv_dv",
+    "transformer_block.attn.wr_du",
+    "transformer_block.attn.wo_ud",
+    "transformer_block.mlp.w13_dn",
+    "transformer_block.mlp.w2_md",
+)
+_MTP_PLAIN = (
+    "embed_norm.weight",
+    "hidden_norm.weight",
+    "transformer_block.attn.k_norm.weight",
+    "transformer_block.attn.q_norm.weight",
+    "transformer_block.attn.k_sconv.weight",
+    "transformer_block.attn.v_sconv.weight",
+    "transformer_block.attn.rel_logits_proj.proj",
+    "transformer_block.attn_norm.weight",
+    "transformer_block.mlp_norm.weight",
+    "transformer_block.attn_sconv.weight",
+    "transformer_block.mlp_sconv.weight",
+    "transformer_block.mlp.global_scale",
+)
+_SHA256_MEMO = {}
+
+
+def mtp_sidecar_tensor_names(depths=MTP_MAX_DEPTHS):
+    names = set()
+    for depth in range(depths):
+        base = f"model.mtp.layers.{depth}."
+        names.update(base + name for name in _MTP_PLAIN)
+        names.update(
+            f"{base}{name}.{leaf}"
+            for name in _MTP_PROJECTIONS
+            for leaf in ("weight", "scales", "biases")
+        )
+    return names
+
+
+def _file_sha256(path):
+    """Full-file SHA-256, memoized per process on the file's stat identity."""
+    info = path.stat()
+    key = (
+        str(path.resolve()),
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+    if key not in _SHA256_MEMO:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1 << 24), b""):
+                digest.update(block)
+        _SHA256_MEMO[key] = digest.hexdigest()
+    return _SHA256_MEMO[key]
+
+
+def inspect_mtp_sidecar(path, *, depths, target_config):
+    """Validate the q8 MTP sidecar against the target and its pinned SHA-256.
+
+    Fails closed on a missing directory/file, a conversion record or config
+    that differs from the target's ``mtp_config``, an unexpected tensor set,
+    a depth count outside ``1..num_nextn_predict_layers``, or a payload whose
+    full-file SHA-256 differs from ``MTP_SIDECAR_SHA256``.
+    """
+    if not isinstance(path, (str, os.PathLike)) or not str(path):
+        raise ValueError("Inkling native MTP requires an mtp_sidecar directory")
+    root = Path(path).expanduser()
+    if not root.is_dir():
+        raise ValueError(f"Inkling MTP sidecar directory is missing: {root}")
+    files = {name: root / name for name in ("mtp.safetensors", "config.json", "conversion.json")}
+    missing = sorted(name for name, item in files.items() if not item.is_file())
+    if missing:
+        raise ValueError(f"Inkling MTP sidecar is missing {missing} in {root}")
+    config = json.loads(files["config.json"].read_text())
+    conversion = json.loads(files["conversion.json"].read_text())
+    target_mtp = (target_config or {}).get("mtp_config")
+    mtp_config = config.get("mtp_config")
+    if not isinstance(target_mtp, dict) or mtp_config != target_mtp:
+        raise ValueError("Inkling MTP sidecar mtp_config differs from the target's")
+    available = mtp_config.get("num_nextn_predict_layers")
+    if type(available) is not int or not 1 <= available <= MTP_MAX_DEPTHS:
+        raise ValueError("Inkling MTP sidecar depth count is unsupported")
+    if type(depths) is not int or not 1 <= depths <= available:
+        raise ValueError(
+            f"Inkling mtp_depths must be an integer from 1 to {available}"
+        )
+    if mtp_config.get("chain_hidden_post_norm") is not False:
+        raise ValueError("Inkling MTP chain norm is not implemented")
+    local = mtp_config.get("local_layer_ids")
+    if not isinstance(local, list) or any(
+        type(i) is not int or not 0 <= i < available for i in local
+    ):
+        raise ValueError("Inkling MTP local_layer_ids are malformed")
+    law = {"bits": 8, "group_size": 64, "mode": "affine"}
+    quantization = config.get("quantization", {})
+    expected_modules = sorted(
+        f"model.mtp.layers.{depth}.{name}"
+        for depth in range(available)
+        for name in _MTP_PROJECTIONS
+    )
+    if (
+        any(quantization.get(key) != value for key, value in law.items())
+        or sorted(quantization.get("modules", ())) != expected_modules
+    ):
+        raise ValueError("Inkling MTP sidecar must be affine q8/group-64 projections")
+    source = conversion.get("source", {})
+    if (
+        conversion.get("schema") != MTP_SIDECAR_SCHEMA
+        or source.get("repository") != MTP_SOURCE_REPOSITORY
+        or source.get("revision") != MTP_SOURCE_REVISION
+        or source.get("sha256") != MTP_SOURCE_SHA256
+        or conversion.get("output_sha256") != MTP_SIDECAR_SHA256
+        or {k: conversion.get("conversion", {}).get(k) for k in law} != law
+    ):
+        raise ValueError("Inkling MTP sidecar conversion record differs from the pin")
+    with files["mtp.safetensors"].open("rb") as handle:
+        size = struct.unpack("<Q", handle.read(8))[0]
+        if size > 32 << 20:
+            raise ValueError("Inkling MTP safetensors header is unreasonably large")
+        header = json.loads(handle.read(size))
+    header.pop("__metadata__", None)
+    if set(header) != mtp_sidecar_tensor_names(available):
+        raise ValueError("Inkling MTP sidecar tensor roles differ from q8 layout")
+    digest = _file_sha256(files["mtp.safetensors"])
+    if digest != MTP_SIDECAR_SHA256:
+        raise ValueError(
+            f"Inkling MTP sidecar SHA-256 {digest} differs from the pinned "
+            f"{MTP_SIDECAR_SHA256}"
+        )
+    return {
+        "path": str(root.resolve()),
+        "file": str(files["mtp.safetensors"].resolve()),
+        "sha256": digest,
+        "depths": depths,
+        "available_depths": available,
+        "local_layer_ids": list(local),
+        "quantization": law,
+        "source_repository": MTP_SOURCE_REPOSITORY,
+        "source_revision": MTP_SOURCE_REVISION,
+        "source_sha256": MTP_SOURCE_SHA256,
+        "converter_revision": conversion.get("source_revision"),
+        "qualification": "unqualified",
+    }
 
 
 def text_tensor_specs():
@@ -341,6 +503,10 @@ def validate_policy(value):
         "ast_adaptive_rows",
         "batch_size_route",
         "cost_per_commit_handoff",
+        "mtp_sidecar",
+        "mtp_depths",
+        "mtp_draft_head",
+        "mtp_tree_pipeline",
     }
     if set(value) - supported:
         raise ValueError(
@@ -355,9 +521,52 @@ def validate_policy(value):
         raise ValueError("Inkling AST supports its bounded B1..B4 route only")
     from .qwen38_27b import PROMPT_LOOKUP_DRAFT_NAMES, _native_mtp_tree_policy
 
-    if value.get("draft_model") not in PROMPT_LOOKUP_DRAFT_NAMES:
+    draft = value.get("draft_model")
+    sidecar = {
+        key: value.pop(key)
+        for key in ("mtp_sidecar", "mtp_depths", "mtp_draft_head", "mtp_tree_pipeline")
+        if key in value
+    }
+    if draft in NATIVE_MTP_DRAFT_NAMES:
+        # Draft logits only; the target verifies with its own BF16 head, so
+        # greedy output cannot change, only acceptance and draft cost.
+        if sidecar.setdefault("mtp_draft_head", "bf16") not in MTP_DRAFT_HEADS:
+            raise ValueError(
+                f"Inkling mtp_draft_head must be one of {sorted(MTP_DRAFT_HEADS)}"
+            )
+        # Queue the next round's MTP draft on a draft-plane copy while the
+        # host commits (the engine's early tree prelaunch).  Off: exact and
+        # engaged on Inkling-Small-MLX-Mixed-2bit@6aff5cd5 (238/240 rounds
+        # adopted at 16K B1), but neutral -- draft build left the critical
+        # path (7.9 -> 0.2 ms/round) and ~3.4 ms of drafter encode/submit
+        # plus ~4 ms of longer target wait and commit took its place
+        # (rounds 78.1 vs 77.9 ms, 2026-11-04, mlx2 43397e5b9).
+        if type(sidecar.setdefault("mtp_tree_pipeline", False)) is not bool:
+            raise ValueError("Inkling mtp_tree_pipeline must be a boolean")
+        if not isinstance(sidecar.get("mtp_sidecar"), str) or not sidecar["mtp_sidecar"]:
+            raise ValueError("Inkling native MTP requires an mtp_sidecar directory")
+        depths = sidecar.setdefault("mtp_depths", MTP_MAX_DEPTHS)
+        if type(depths) is not int or not 1 <= depths <= MTP_MAX_DEPTHS:
+            raise ValueError(
+                f"Inkling mtp_depths must be an integer from 1 to {MTP_MAX_DEPTHS}"
+            )
+        num_draft = value.setdefault("num_draft", min(depths, 5))
+        if type(num_draft) is not int or not 1 <= num_draft <= depths:
+            raise ValueError(
+                "Inkling native MTP num_draft must be an integer from 1 to "
+                f"mtp_depths ({depths}); a depth is never reused"
+            )
+        policy = _native_mtp_tree_policy(value)
+        return kernels, {**policy, **sidecar}
+    if sidecar:
         raise ValueError(
-            "Inkling AST currently requires the model-free prompt-lookup drafter"
+            "mtp_sidecar, mtp_depths, mtp_draft_head and mtp_tree_pipeline require "
+            "draft_model native_mtp"
+        )
+    if draft not in PROMPT_LOOKUP_DRAFT_NAMES:
+        raise ValueError(
+            "Inkling AST requires the model-free prompt-lookup drafter or "
+            "draft_model native_mtp with an mtp_sidecar"
         )
     return kernels, _native_mtp_tree_policy(value)
 
@@ -397,6 +606,14 @@ class InklingAdapter(ExternalDraftAdapterMixin):
             artifact["identity"],
             CACHE_LAYOUT,
         )
+        sidecar = None
+        if external.get("draft_model") in NATIVE_MTP_DRAFT_NAMES:
+            # Fail closed on the sidecar before the 84 GB target is loaded.
+            sidecar = inspect_mtp_sidecar(
+                external["mtp_sidecar"],
+                depths=external["mtp_depths"],
+                target_config=self.config,
+            )
         from ..process_env import (
             PROCESS_NUMERICS,
             assert_process_profile_applied,
@@ -488,7 +705,10 @@ class InklingAdapter(ExternalDraftAdapterMixin):
         )
         self.max_context = int(artifact["text_config"]["model_max_length"])
         self.draft_model = None
-        if external:
+        self.mtp_sidecar = None
+        if sidecar is not None:
+            self._bind_native_mtp(external, sidecar)
+        elif external:
             from ..runtime.drafters.prompt_lookup_draft import (
                 load_prompt_lookup_drafter,
             )
@@ -504,6 +724,77 @@ class InklingAdapter(ExternalDraftAdapterMixin):
             self._bind_external_drafter(
                 record, load_prompt_lookup_drafter, self.descriptor
             )
+
+    def _bind_native_mtp(self, external, sidecar):
+        """Attach the pinned q8 sidecar head and bind the cascaded drafter.
+
+        Implemented, unqualified.  The sidecar SHA-256 and loaded depth count
+        enter the draft revision, hence the route identity and the APCv2
+        layout namespace; prompt lookup is untouched by this branch.
+        """
+        from functools import partial
+
+        import mlx.core as mx
+
+        from ..runtime.drafters.inkling_mtp import (
+            inspect_cascaded_mtp_record,
+            load_cascaded_mtp_drafter,
+        )
+        from ..runtime.models.inkling.mtp import build_mtp
+
+        external = dict(external)
+        for key in ("mtp_sidecar", "mtp_depths"):
+            external.pop(key)
+        draft_head = external.pop("mtp_draft_head", "bf16")
+        tree_pipeline = external.pop("mtp_tree_pipeline", False)
+        weights = mx.load(sidecar["file"])
+        head = build_mtp(
+            self.model.config,
+            weights,
+            depths=sidecar["depths"],
+            local_layer_ids=sidecar["local_layer_ids"],
+            quantization=sidecar["quantization"],
+        )
+        mx.eval(head.parameters())
+        weights.clear()
+        mx.clear_cache()
+        self.model.attach_mtp(head)
+        self.model.attach_mtp_draft_head(MTP_DRAFT_HEADS[draft_head])
+        self.model.select_external_feature_source("mtp_seed")
+        self.mtp_sidecar = sidecar
+        self.external_policy = external
+        record = inspect_cascaded_mtp_record(
+            num_draft=external["num_draft"],
+            depths=sidecar["depths"],
+            sidecar_sha256=sidecar["sha256"],
+            target_fingerprint=self.identity["fingerprint"],
+            draft_head=draft_head,
+        )
+        receipt = {
+            key: sidecar[key]
+            for key in ("sha256", "depths", "source_repository", "source_revision", "qualification")
+        }
+        receipt["draft_head"] = draft_head
+        self.identity = {
+            **self.identity,
+            "draft_revision": record["draft_revision"],
+            "target_revision": record["target_revision"],
+            "mtp_sidecar": receipt,
+        }
+        descriptor = replace(
+            self.descriptor,
+            metadata={
+                **(self.descriptor.metadata or {}),
+                "native_mtp": "q8 sidecar head attached; cascaded external drafter "
+                "(implemented, unqualified)",
+                "mtp_sidecar": receipt,
+            },
+        )
+        self._bind_external_drafter(
+            record,
+            partial(load_cascaded_mtp_drafter, sidecar=receipt, tree_pipeline=tree_pipeline),
+            descriptor,
+        )
 
     def close(self):
         if getattr(self, "_process_claim", None) is not None:
@@ -531,6 +822,7 @@ class InklingAdapter(ExternalDraftAdapterMixin):
                     "experts.py",
                     "ancestry.py",
                     "tree_attention.py",
+                    "mtp.py",
                     "../qwen36_moe_grouped.py",
                     "../qwen4_routed_decode.py",
                 )
@@ -707,4 +999,15 @@ class InklingAdapter(ExternalDraftAdapterMixin):
                 "qualified": False,
             },
             "media": "weights downloaded; native text route refuses media",
+            "native_mtp": {
+                "implemented": True,
+                "selected": self.mtp_sidecar is not None,
+                "qualified": False,
+                "sidecar": None
+                if self.mtp_sidecar is None
+                else self.identity.get("mtp_sidecar"),
+                "drafter_stats": None
+                if self.mtp_sidecar is None
+                else getattr(self.draft_model, "stats", None),
+            },
         }

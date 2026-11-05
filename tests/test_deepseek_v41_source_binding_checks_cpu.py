@@ -23,7 +23,7 @@ def fixture(tmp_path,*,leased=False,file_count=1):
     arrays={key:{'owner':object()}for key in keys};s._cache=dict(arrays)
     s._leased={keys[0]:arrays[keys[0]]}if leased else {}
     s._pending_uploads={};s._pending_host={};s.index=lfu.LFUIndex()
-    s.stats={'cache_hits':0,'original_hits':0,'demand_wait_ns':0}
+    s.stats={'cache_hits':0,'original_hits':0,'demand_wait_ns':0};s.policy={}
     s._completion_collector=None
     return s,arrays,paths
 

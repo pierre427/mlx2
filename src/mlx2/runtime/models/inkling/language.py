@@ -589,6 +589,11 @@ class InklingAttention(nn.Module):
             k, v = kv.update_and_fetch(k, v)
             # Learned relative bias needs chronological columns; unlike RoPE,
             # it cannot consume a physical ring with an unrotated mask.
+            # The reorder copies the 512-column window per local layer per
+            # token (~70 MB/token on Inkling-Small), but skipping it outright
+            # bought 0.1 ms of 38.8 ms per 16K decode step (2026-11-04,
+            # scripts/research/inkling_ring_reorder_ablation.py), so a
+            # copy-free chronological ring is not worth a cache-layout change.
             if type(kv) is RotatingKVCache:
                 k, v = kv._temporal_order(kv.keys), kv._temporal_order(kv.values)
             elif type(kv) is BatchRotatingKVCache:
@@ -831,6 +836,104 @@ _down_combine_kernel = mx.fast.metal_kernel(
     source=_DOWN_COMBINE_SRC,
 )
 
+# Occupancy variants of the same law (_DOWN_COMBINE_VARIANT; all bit-exact).
+# row_pairs is the default: on the real checkpoint (16K/32K) it cut packed
+# tree verify 6-8% at W=8/16 and B1 decode ~2% versus original.  "k_groups" launches exactly K simdgroups per output
+# row -- each simdgroup's arithmetic and the expert-sum order are unchanged.
+# "row_pairs" also puts two output rows in one simdgroup, one per 16-lane half
+# (IN = 2048 has 16 quant groups), reducing each half with simd_sum over the
+# original 16-live-lane layout, so it is bit-exact with "original" (the owned
+# GPU test checks).  A xor butterfly was 13-38% faster but not exact.
+_DOWN_COMBINE_V2_SRC = r"""
+    uint lane = thread_index_in_simdgroup;
+    uint sg   = simdgroup_index_in_threadgroup;   // expert slot, K simdgroups
+    uint n    = threadgroup_position_in_grid.z;
+    uint half_id = PAIR ? (lane >> 4) : 0u;
+    uint glane = PAIR ? (lane & 15u) : lane;      // quant group of this lane
+    uint row  = threadgroup_position_in_grid.y * (PAIR ? 2u : 1u) + half_id;
+    threadgroup float partial[2][8];
+    uint e = idx[(size_t)n * K + sg];
+    const device uint* wr = wq + ((size_t)e * OUT + row) * (IN / 16u);
+    const device T* sr = sc + ((size_t)e * OUT + row) * GROUPS;
+    const device T* br = bi + ((size_t)e * OUT + row) * GROUPS;
+    const device T* xr = xin + ((size_t)n * K + sg) * IN;
+    bool live = glane < GROUPS && row < OUT;
+    float s = live ? (float)sr[glane] : 0.0f;
+    float b = live ? (float)br[glane] : 0.0f;
+    float accq = 0.0f, accx = 0.0f;
+    uint base = glane * 8u;
+    uint xbase = glane * 128u;
+    for (uint u = 0; live && u < 8u; ++u) {
+        uint w8 = wr[base + u];
+        for (uint t = 0; t < 16u; ++t) {
+            float xv = (float)xr[xbase + u * 16u + t];
+            accq += (float)((w8 >> (2u * t)) & 0x3u) * xv;
+            accx += xv;
+        }
+    }
+    float v = s * accq + b * accx;
+    float dot;
+    if (PAIR) {
+        // Reduce each half with simd_sum over the original layout -- 16 live
+        // lanes in lanes 0..15, zeros above -- so both rows keep the exact
+        // single-row reduction order (a xor butterfly does not).
+        float hi = simd_shuffle_down(v, 16u);
+        float s_lo = simd_sum(lane < 16u ? v : 0.0f);
+        float s_hi = simd_sum(lane < 16u ? hi : 0.0f);
+        dot = half_id ? s_hi : s_lo;
+    } else {
+        dot = simd_sum(v);
+    }
+    if (glane == 0 && row < OUT) {
+        float dv = (float)((T)dot);
+        partial[half_id][sg] = (float)((T)(dv * (float)wk[(size_t)n * K + sg]));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && glane == 0 && row < OUT) {
+        float tot = 0.0f;
+        for (uint t = 0; t < (uint)K; ++t) tot += partial[half_id][t];
+        out[(size_t)n * OUT + row] = (T)tot;
+    }
+"""
+_down_combine_v2_kernel = mx.fast.metal_kernel(
+    name="inkling_moe_down_combine_v2",
+    input_names=["xin", "wq", "sc", "bi", "idx", "wk"],
+    output_names=["out"],
+    source=_DOWN_COMBINE_V2_SRC,
+)
+_DOWN_COMBINE_VARIANT = "row_pairs"  # "original" | "k_groups" | "row_pairs"
+
+
+def _down_combine(act, dp, idx, topk_w, top_k, variant=None):
+    """The fused q2 down-projection and top-k weighted combine (decode rows)."""
+    variant = _DOWN_COMBINE_VARIANT if variant is None else variant
+    tokens = act.shape[0]
+    common = dict(
+        inputs=[act, dp.weight, dp.scales, dp.biases, idx, topk_w],
+        output_shapes=[(tokens, dp.output_dims)],
+        output_dtypes=[act.dtype],
+    )
+    template = [
+        ("T", act.dtype),
+        ("OUT", dp.output_dims),
+        ("IN", dp.input_dims),
+        ("GROUPS", dp.input_dims // 128),
+        ("K", top_k),
+    ]
+    if variant == "original":
+        return _down_combine_kernel(
+            template=template, grid=(256, dp.output_dims, tokens),
+            threadgroup=(256, 1, 1), **common,
+        )[0]
+    pair = variant == "row_pairs"
+    if variant not in ("k_groups", "row_pairs") or (pair and dp.input_dims // 128 > 16):
+        raise ValueError(f"unsupported down-combine variant {variant!r}")
+    rows = (dp.output_dims + 1) // 2 if pair else dp.output_dims
+    return _down_combine_v2_kernel(
+        template=template + [("PAIR", int(pair))],
+        grid=(32 * top_k, rows, tokens), threadgroup=(32 * top_k, 1, 1), **common,
+    )[0]
+
 
 @partial(mx.compile, shapeless=True)
 def _swiglu_scaled(gate, up, s):
@@ -1007,20 +1110,7 @@ class InklingSparseMoE(nn.Module):
             xe = mx.expand_dims(xf, (-2, -3))
             act = sm.activation(sm.up_proj(xe, idx), sm.gate_proj(xe, idx))
             self.down_combine_calls += 1
-            yr = _down_combine_kernel(
-                inputs=[act, dp.weight, dp.scales, dp.biases, idx, topk_w],
-                template=[
-                    ("T", xf.dtype),
-                    ("OUT", dp.output_dims),
-                    ("IN", dp.input_dims),
-                    ("GROUPS", dp.input_dims // 128),
-                    ("K", self.top_k),
-                ],
-                grid=(256, dp.output_dims, xf.shape[0]),
-                threadgroup=(256, 1, 1),
-                output_shapes=[(xf.shape[0], dp.output_dims)],
-                output_dtypes=[xf.dtype],
-            )[0]
+            yr = _down_combine(act, dp, idx, topk_w, self.top_k)
         else:
             yr = (sm(xf, idx) * topk_w[..., None]).sum(axis=-2)
         return yr
@@ -1222,7 +1312,11 @@ class LanguageModel(nn.Module):
     def _logits_from_norm(self, h):
         from ...prefill_checkpoint_rows import select_checkpoint_rows
 
-        h = select_checkpoint_rows(h)
+        return self._project_logits(select_checkpoint_rows(h))
+
+    def _project_logits(self, h):
+        """The target's logit law on a normed (or MTP raw) hidden: mup divide,
+        LM head, unpadded-vocabulary crop. Shared verbatim by the MTP head."""
         h = h / self.config.logits_mup_width_multiplier
         if self.config.tie_word_embeddings:
             logits = self.model.embed_tokens.as_linear(h)
@@ -1278,6 +1372,111 @@ class LanguageModel(nn.Module):
 class Model(LanguageModel):
     apc_v2_layout = "inkling-kv-four-shortconv-v1"
     supports_speculative_rollback = True
+    # Adapter-selected external feature: ``None`` (post-block layer taps) or
+    # ``"mtp_seed"`` (the post-final-norm hidden the native MTP head takes).
+    external_feature_source = None
+
+    def select_external_feature_source(self, source):
+        if source not in (None, "mtp_seed"):
+            raise ValueError("unsupported Inkling external feature source")
+        if source == "mtp_seed" and self.mtp is None:
+            raise ValueError("the MTP seed feature requires an attached MTP head")
+        # Route metadata, not a child module (MLX registers assignments).
+        object.__setattr__(self, "external_feature_source", source)
+
+    @property
+    def external_feature_width(self):
+        if self.external_feature_source == "mtp_seed":
+            return int(self.config.hidden_size)
+        return None
+
+    @property
+    def mtp(self):
+        """The attached native MTP head, or ``None`` (the released conversion
+        carries none; a sidecar is attached by the adapter)."""
+        return self.__dict__.get("_mtp_head")
+
+    def attach_mtp(self, head):
+        """Attach a loaded sidecar head outside the target's module tree, so
+        the target's parameters, load and forward stay unchanged."""
+        from .mtp import InklingMTP
+
+        if not isinstance(head, InklingMTP):
+            raise TypeError("Inkling MTP head must be an InklingMTP")
+        if self.mtp is not None:
+            raise ValueError("an Inkling MTP head is already attached")
+        object.__setattr__(self, "_mtp_head", head)
+
+    def attach_mtp_draft_head(self, quantization):
+        """Draft MTP logits through a quantized copy of the LM head.
+
+        ``quantization`` is ``(bits, group_size)`` or None (the target head).
+        Only draft token selection reads it: the target's verify and every
+        target logit keep the BF16 head, so greedy output is unchanged.  Each
+        draft depth otherwise re-reads the full 1.6 GB BF16 head.
+        """
+        if quantization is None or self.config.tie_word_embeddings:
+            object.__setattr__(self, "_mtp_draft_head", None)
+            return
+        bits, group_size = quantization
+        head = nn.QuantizedLinear.from_linear(self.lm_head, group_size=group_size, bits=bits)
+        mx.eval(head.parameters())
+        object.__setattr__(self, "_mtp_draft_head", head)
+
+    def _project_draft_logits(self, h):
+        head = getattr(self, "_mtp_draft_head", None)
+        if head is None:
+            return self._project_logits(h)
+        logits = head(h / self.config.logits_mup_width_multiplier)
+        uv = self.config.unpadded_vocab_size
+        if uv is not None and uv < logits.shape[-1]:
+            logits = logits[..., :uv]
+        return logits
+
+    @property
+    def mtp_depth_count(self):
+        return 0 if self.mtp is None else len(self.mtp.layers)
+
+    def make_mtp_cache(self):
+        if self.mtp is None:
+            raise ValueError("Inkling has no attached MTP head")
+        return self.mtp.make_cache()
+
+    def mtp_depth_step(self, depth, hidden, tokens, cache, *, last_logits_only=False):
+        """One MTP depth over consecutive rows: ``(logits, raw hidden)``.
+
+        ``hidden`` is the previous depth's raw output (depth 0: the target's
+        post-final-norm hidden), ``tokens`` the token one slot further along.
+        Logits use the target's own LM head law on ``raw / mup`` with no final
+        norm; the raw output chains to the next depth.
+        """
+        if self.mtp is None:
+            raise ValueError("Inkling has no attached MTP head")
+        raw = self.mtp.depth(depth, hidden, self.model.embed(tokens), cache)
+        projected = raw[:, -1:] if last_logits_only else raw
+        return self._project_draft_logits(projected), raw
+
+    def mtp_logits(self, raw):
+        """Logits of raw MTP depth outputs: the LM head law, no norm (the
+        draft head copy when one is attached)."""
+        return self._project_draft_logits(raw)
+
+    def tap_outputs(self, pre, taps, capture_layers, *, body_only=False):
+        """Logits and external features from one final pre-norm hidden.
+
+        Shared by ``forward_with_taps`` and the packed tree executors so the
+        selected feature law is identical on every target row source.
+        """
+        normed = self.model.norm(pre)
+        if self.external_feature_source == "mtp_seed":
+            if tuple(capture_layers) != (len(self.layers) - 1,):
+                raise ValueError(
+                    "the MTP seed feature is the last layer's post-norm hidden"
+                )
+            features = normed
+        else:
+            features = mx.concatenate([taps[i] for i in capture_layers], axis=-1)
+        return (None if body_only else self._logits_from_norm(normed)), features
 
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
         self.completed_forwards += 1
@@ -1287,10 +1486,7 @@ class Model(LanguageModel):
             raise ValueError("Inkling target taps require valid layer indices")
         taps = dict.fromkeys(capture_layers)
         pre = self.model(inputs, cache, skip_final_norm=True, capture=taps)
-        features = mx.concatenate([taps[i] for i in capture_layers], axis=-1)
-        return (
-            None if body_only else self._logits_from_norm(self.model.norm(pre))
-        ), features
+        return self.tap_outputs(pre, taps, capture_layers, body_only=body_only)
 
     def prefill_body(self, inputs, cache, capture_layers):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]

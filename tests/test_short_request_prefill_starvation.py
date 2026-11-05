@@ -142,6 +142,9 @@ def _overflow_host(queue, *, budget_ok=True, step=STEP, autoscale=False):
     host._peek_interior_checkpoint = MethodType(
         BatchGenerator._peek_interior_checkpoint, host
     )
+    host._inpass_checkpoint_enabled = MethodType(
+        BatchGenerator._inpass_checkpoint_enabled, host
+    )
     host.prefill_depth_budget = None
     host.PREFILL_DEPTH_FLOOR = 128
     host._interior_checkpoint_positions = {}

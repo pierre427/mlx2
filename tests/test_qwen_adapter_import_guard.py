@@ -332,6 +332,7 @@ INLINE_PROFILE_MODULES = [
     ("deepseek_v41_mlx", "DeepSeekV41MLXAdapter"),
     ("deepseek_v41_source", "DeepSeekV41SourceAdapter"),
     ("glm53_gguf", "Glm53GGUFAdapter"),
+    ("inkling", "InklingAdapter"),
 ]
 
 # These adapters inherit the guarded loader instead of defining a separate

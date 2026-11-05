@@ -25,7 +25,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
-DRAFT = "~/Models/Kimi-Linear-48B-A3B-DFlash-240k"
+DRAFT = str(Path.home() / "Models/Kimi-Linear-48B-A3B-DFlash-240k")
 NEAR_TIE_NATS = 0.5
 
 def _arms():

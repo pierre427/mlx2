@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DRAFT = "~/Models/Kimi-Linear-48B-A3B-DFlash-240k"
+DRAFT = str(Path.home() / "Models/Kimi-Linear-48B-A3B-DFlash-240k")
 
 
 def main():

@@ -26,6 +26,10 @@ class InklingTree:
             ):
                 raise ValueError("Inkling tree must have one parent-first root")
             self.paths.append([*(self.paths[parent] if parent >= 0 else []), row])
+        # Depth-d chain path [0, ..., d]; a node whose path equals it reads a
+        # prefix slice of K/V in the local-attention loop.
+        self._chain_paths = [list(range(depth + 1)) for depth in range(len(parents))]
+        self.chain_slice_rows = 0
         if len(cache) % 2:
             raise ValueError("Inkling cache must alternate KV and convolution planes")
         pairs = [CacheList(cache[i], cache[i + 1]) for i in range(0, len(cache), 2)]
@@ -56,13 +60,16 @@ class InklingTree:
         private = (
             captured[0]
             if captured is not None
-            else snapshot_prompt_cache_descriptors(cache)[0]
+            else snapshot_prompt_cache_descriptors(cache, measure=False)[0]
         )
         self.private = [
             CacheList(private[i], private[i + 1]) for i in range(0, len(private), 2)
         ]
         self.histories = {}
         self.raw_kv = {}
+        # Mapped-attention column maps, one per (prefix, window) per round.
+        self.mapping_memo = {}
+        self.lent_global_kv = 0
         self.anchor_bases = None
 
     def forward_anchor(self, model, tokens, layers):
@@ -170,9 +177,7 @@ class InklingTree:
                 taps[index] = hidden
         for tree, offsets in zip(trees, bases, strict=True):
             tree.anchor_bases = offsets
-        return model._logits_from_norm(model.model.norm(hidden)), mx.concatenate(
-            [taps[i] for i in layers], axis=-1
-        )
+        return model.tap_outputs(hidden, taps, layers)
 
     @staticmethod
     def anchor_convolution(module, raw, convs, *, residual=None):
@@ -294,27 +299,36 @@ class InklingTree:
                 prefix=prefix,
                 window=module.sliding,
                 tau=tau,
+                memo=self.mapping_memo,
             )
             module.mapped_attention_calls += 1
             out = out.transpose(0, 2, 1, 3).reshape(1, width, -1)
             return module.o_proj(out) if project_output else out
         outputs = []
         for row, path in enumerate(self.paths):
-            ids = mx.array(path, mx.int32)
-            kr = mx.concatenate(
-                [
-                    keys[..., :prefix, :],
-                    mx.take(keys[..., prefix : prefix + width, :], ids, axis=2),
-                ],
-                axis=2,
-            )
-            vr = mx.concatenate(
-                [
-                    values[..., :prefix, :],
-                    mx.take(values[..., prefix : prefix + width, :], ids, axis=2),
-                ],
-                axis=2,
-            )
+            if path == self._chain_paths[len(path) - 1]:
+                # Ancestors 0..row in order are the leading tree rows, so the
+                # gathered K/V is exactly this prefix slice of the same
+                # buffer: no per-node copy of the whole local window.
+                kr = keys[..., : prefix + len(path), :]
+                vr = values[..., : prefix + len(path), :]
+                self.chain_slice_rows += 1
+            else:
+                ids = mx.array(path, mx.int32)
+                kr = mx.concatenate(
+                    [
+                        keys[..., :prefix, :],
+                        mx.take(keys[..., prefix : prefix + width, :], ids, axis=2),
+                    ],
+                    axis=2,
+                )
+                vr = mx.concatenate(
+                    [
+                        values[..., :prefix, :],
+                        mx.take(values[..., prefix : prefix + width, :], ids, axis=2),
+                    ],
+                    axis=2,
+                )
             size = kr.shape[2]
             if module.sliding and size > module.sliding:
                 kr, vr = kr[..., -module.sliding :, :], vr[..., -module.sliding :, :]
@@ -334,8 +348,22 @@ class InklingTree:
         )
         return module.o_proj(out) if project_output else out
 
+    def lend_global_kv(self):
+        """Append tree rows into the live global KV buffers, as anchors do.
+
+        A private descriptor slices K/V to the fill level, so a tree's first
+        append concat-grew every global layer's whole prefix into a new buffer
+        each round (~0.5 GiB at 16K).  Lent buffers are written only past the
+        lane's offset; MLX copies instead if another holder shares the buffer.
+        Local rings keep their private snapshots (the contract refuses them).
+        """
+        for live, private in zip(self.live_pairs, self.private, strict=True):
+            if lend_append_only_kv(live[0], private[0]):
+                self.lent_global_kv += 1
+
     def forward(self, model, tokens, layers):
         model.completed_forwards += 1
+        self.lend_global_kv()
         taps = {}
         hidden = model.model.embed(tokens)
         for index, (layer, item) in enumerate(
@@ -353,9 +381,7 @@ class InklingTree:
             hidden = hidden + self.convolution(layer.mlp_sconv, raw, item[1])
             if index in layers:
                 taps[index] = hidden
-        return model._logits_from_norm(model.model.norm(hidden)), mx.concatenate(
-            [taps[i] for i in layers], axis=-1
-        )
+        return model.tap_outputs(hidden, taps, layers)
 
     def validate_path(self, path):
         path = list(path)
@@ -373,6 +399,8 @@ class InklingTree:
         State operations stay in each private tree. A cohort has no cache writes
         to another request, even when the requests share an APCv2 backing slab.
         """
+        for tree in trees:
+            tree.lend_global_kv()
         widths = [len(tree.paths) for tree in trees]
         boundaries = []
         position = 0
@@ -428,8 +456,7 @@ class InklingTree:
             )
             if index in layers:
                 taps[index] = hidden
-        logits = model._logits_from_norm(model.model.norm(hidden))
-        features = mx.concatenate([taps[i] for i in layers], axis=-1)
+        logits, features = model.tap_outputs(hidden, taps, layers)
         return (
             mx.concatenate([logits[:, a:b] for a, b in boundaries], axis=0),
             mx.concatenate([features[:, a:b] for a, b in boundaries], axis=0),
@@ -452,7 +479,7 @@ class InklingTree:
         ids = mx.array(path, mx.int32)
         for live, private in zip(self.live_pairs, self.private, strict=True):
             if type(live[0]) is RotatingKVCache:
-                chosen = snapshot_prompt_cache_descriptors([live[0]])[0][0]
+                chosen = snapshot_prompt_cache_descriptors([live[0]], measure=False)[0][0]
                 keys, values = self.raw_kv[id(private)]
                 chosen.update_and_fetch(
                     mx.take(keys, ids, axis=2), mx.take(values, ids, axis=2)
@@ -460,13 +487,26 @@ class InklingTree:
                 private.caches = (chosen, private[1])
             else:
                 start = int(live[0].offset)
-                for field in ("keys", "values"):
-                    values = getattr(private[0], field)
-                    kept = mx.take(
-                        values[..., start : start + len(self.paths), :], ids, axis=2
-                    )
-                    values[..., start : start + len(path), :] = kept
-                    setattr(private[0], field, values)
+                # Rows of a root-prefix path (every chain) already sit in
+                # order at start..start+len(path): nothing to write back.
+                # Other paths gather from the rows this round appended, not
+                # from a view of the lent buffer: a lazy view feeding the
+                # write stops MLX from donating the buffer, so every global
+                # layer copied its whole K/V prefix on each commit.
+                if path != list(range(len(path))):
+                    for field, raw in zip(
+                        ("keys", "values"), self.raw_kv[id(private)], strict=True
+                    ):
+                        values = getattr(private[0], field)
+                        source = (
+                            raw
+                            if raw.dtype == values.dtype
+                            else values[..., start : start + len(self.paths), :]
+                        )
+                        values[..., start : start + len(path), :] = mx.take(
+                            source, ids, axis=2
+                        )
+                        setattr(private[0], field, values)
                 private[0].offset = start + len(path)
             history = self.histories[id(private[1])]
             private[1].cache = [history[i][path[-1]] for i in range(4)]

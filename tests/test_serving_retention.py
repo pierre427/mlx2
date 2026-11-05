@@ -548,7 +548,7 @@ def test_declared_batch_cohort_is_published_atomically():
     engine.lock = threading.Lock()
     engine.counts = Counter()
     engine.batch_metrics = NS(
-        admitted=lambda job_id, tenant_id, depth:
+        admitted=lambda job_id, tenant_id, depth, session_id=None:
         admitted.append((job_id, tenant_id, depth))
     )
     cohort = {"id": "atomic-b20", "size": 20}
@@ -582,7 +582,7 @@ def test_batch_cohort_ids_are_isolated_by_tenant():
     engine.incoming = queue.Queue(maxsize=4)
     engine.lock = threading.Lock()
     engine.counts = Counter()
-    engine.batch_metrics = NS(admitted=lambda *args: None)
+    engine.batch_metrics = NS(admitted=lambda *args, **kwargs: None)
     request = {"batch_cohort": {"id": "shared-name", "size": 2}}
     a1 = NS(id="a1", request=request, tenant_id="tenant-a")
     b1 = NS(id="b1", request=request, tenant_id="tenant-b")

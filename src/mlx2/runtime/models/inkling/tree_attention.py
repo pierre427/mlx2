@@ -64,7 +64,47 @@ KERNEL = mx.fast.metal_kernel(
 )
 
 
-def attend(q, k, v, rel, proj, *, scale, paths=None, prefix=None, window=0, tau=None):
+def tree_mapping(paths, prefix, window=0, *, memo=None):
+    """Each row's key columns (``[prefix..., ancestors...]``) and lengths.
+
+    The map is ``rows x (prefix + width)`` int32, so it scales with the
+    context; every layer of one tree at the same prefix and window reads
+    the same map (all global layers at one offset, all local rings at one
+    fill).  ``memo`` keeps it per tree so it is built once per round.
+    """
+    key = (int(prefix), int(window))
+    if memo is not None and key in memo:
+        return memo[key]
+    width = len(paths)
+    tail = (
+        mx.array([list(path) + [0] * (width - len(path)) for path in paths], mx.int32)
+        + prefix
+    )
+    mapping = mx.concatenate(
+        [
+            mx.broadcast_to(mx.arange(prefix, dtype=mx.int32)[None], (width, prefix)),
+            tail,
+        ],
+        axis=1,
+    )
+    lengths = [prefix + len(path) for path in paths]
+    if window:
+        # Gather only the map, not the K/V vectors, into chronological windows.
+        starts = mx.array([max(0, n - window) for n in lengths], mx.int32)
+        extent = min(window, max(lengths))
+        columns = mx.minimum(
+            starts[:, None] + mx.arange(extent)[None], mapping.shape[1] - 1
+        )
+        mapping = mx.take_along_axis(mapping, columns, axis=1)
+        lengths = [min(window, n) for n in lengths]
+    if memo is not None:
+        memo[key] = (mapping, lengths)
+    return mapping, lengths
+
+
+def attend(
+    q, k, v, rel, proj, *, scale, paths=None, prefix=None, window=0, tau=None, memo=None
+):
     if not supported(q, k, v, rel, proj) or q.shape[0] != 1:
         raise ValueError("mapped Inkling attention requires one independent request")
     _, heads, rows, _ = q.shape
@@ -74,32 +114,7 @@ def attend(q, k, v, rel, proj, *, scale, paths=None, prefix=None, window=0, tau=
         mapping = mx.arange(k.shape[2], dtype=mx.int32)[None]
         lengths = [k.shape[2]]
     else:
-        width = len(paths)
-        tail = (
-            mx.array(
-                [list(path) + [0] * (width - len(path)) for path in paths], mx.int32
-            )
-            + prefix
-        )
-        mapping = mx.concatenate(
-            [
-                mx.broadcast_to(
-                    mx.arange(prefix, dtype=mx.int32)[None], (rows, prefix)
-                ),
-                tail,
-            ],
-            axis=1,
-        )
-        lengths = [prefix + len(path) for path in paths]
-        if window:
-            # Gather only the map, not the K/V vectors, into chronological windows.
-            starts = mx.array([max(0, n - window) for n in lengths], mx.int32)
-            extent = min(window, max(lengths))
-            columns = mx.minimum(
-                starts[:, None] + mx.arange(extent)[None], mapping.shape[1] - 1
-            )
-            mapping = mx.take_along_axis(mapping, columns, axis=1)
-            lengths = [min(window, n) for n in lengths]
+        mapping, lengths = tree_mapping(paths, prefix, window, memo=memo)
     blocks = min(16, max(1, (max(lengths) + 127) // 128))
     parts = blocks * 4
     tau = mx.ones((1, rows), q.dtype) if tau is None else tau

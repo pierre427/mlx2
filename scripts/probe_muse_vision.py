@@ -9,7 +9,6 @@ import argparse
 import base64
 import concurrent.futures
 import gc
-from io import BytesIO
 import importlib.util
 import json
 import os

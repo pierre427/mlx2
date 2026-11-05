@@ -125,7 +125,7 @@ def test_real_forward_owns_fresh_dictionary_across_layers_and_errors():
     states=[NS(_in_forward=False,state=(),validate_state=lambda:None)for _ in range(2)]
     weights=NS(source_frame_reuse_policy='prefill_v1',embedding=lambda ids:np.zeros((*ids.shape,4),np.float32))
     model=NS(args=NS(engram_layer_ids=(),hc_mult=4,hidden_size=4),weights=weights,hasher=None,
-        validate_forward=lambda ids,cache,keep:(states,ids),_weight_scope=nullcontext,round=lambda x:x,
+        validate_forward=lambda ids,cache,keep,ced_deferred_admitted=False:(states,ids),_weight_scope=nullcontext,round=lambda x:x,
         _weight_eval=lambda *a:None,layers=[Block(),Block()],scheduled_kv_calls={},eval_interval=0,
         collapse=lambda h,p:h[:,:,0],norm=lambda x,w:x,norm_weight=None)
     forward=_forward_method();ids=np.zeros((1,5),np.int32)

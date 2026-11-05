@@ -59,6 +59,17 @@ Reversible evidence compares the
 session's own wall time per committed token, whatever cohort width the round
 ran at, because that is what the session waits for.
 
+An explicitly positive ``reprobe_credit_share`` replaces the token-backoff
+probe clock with request-local elapsed-time credit. Clean parked ordinary
+rounds earn that fraction of their duration. A probe starts when credit covers
+one estimated catch-up plus its measured rounds; complete probe excess is
+charged even when catch-up is excluded from steady-state fitting. Overspend
+remains debt. A maximum ordinary-round count and ``deferred_context_cap``
+force recovery separately from credit, and receipts identify those costs.
+Mixed-cohort progress earns no credit. Physical-width changes, and explicit
+caller context-key changes, discard the opt-in policy's transferable evidence.
+The default zero share retains the existing behavior and receipt schema.
+
 A decision is not a handoff.  ``decision_reached`` records the terminal
 policy decision; ``handoff_triggered`` is set only by the executor that
 actually moves the lane to ordinary decode (``mark_handoff_performed``).  A
@@ -72,6 +83,8 @@ from collections import deque
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from .draft_exploration_credit import DraftExplorationCredit
 
 
 def _positive_int(value: Any, name: str) -> int:
@@ -107,6 +120,8 @@ class CostPerCommitHandoffSettings:
     one_way_ordinary_settle_rounds: int = 0
     pipelined_park: bool = True
     loss_basis: str = "rolling_window"
+    reprobe_credit_share: float = 0.0
+    reprobe_credit_max_rounds: int = 64
 
     _KEYS = frozenset(
         {
@@ -124,6 +139,8 @@ class CostPerCommitHandoffSettings:
             "one_way_ordinary_settle_rounds",
             "pipelined_park",
             "loss_basis",
+            "reprobe_credit_share",
+            "reprobe_credit_max_rounds",
         }
     )
 
@@ -141,6 +158,20 @@ class CostPerCommitHandoffSettings:
         if self.reversible and self.loss_basis != "rolling_window":
             raise ValueError(
                 "cost-per-commit current_round loss_basis is only valid for one-way handoff"
+            )
+        share = self.reprobe_credit_share
+        if isinstance(share, bool) or not isinstance(share, (int, float)):
+            raise ValueError("reprobe_credit_share must be a finite number in [0, 1]")  # noqa: TRY004 -- settings parser uses ValueError
+        if not math.isfinite(share) or not 0 <= share <= 1:
+            raise ValueError("reprobe_credit_share must be a finite number in [0, 1]")
+        _positive_int(self.reprobe_credit_max_rounds, "reprobe_credit_max_rounds")
+        if share and not self.reversible:
+            raise ValueError("reprobe credit requires reversible control")
+        if share and self.reprobe_credit_max_rounds < self.ordinary_samples:
+            raise ValueError("reprobe credit round bound must cover ordinary_samples")
+        if not share and self.reprobe_credit_max_rounds != 64:
+            raise ValueError(
+                "reprobe_credit_max_rounds requires positive reprobe_credit_share"
             )
         for name in (
             "ordinary_samples",
@@ -219,7 +250,7 @@ class CostPerCommitHandoffSettings:
                     ),
                 }
             return result
-        return {
+        reversible = {
             **out,
             "reversible": True,
             "reprobe_tokens": self.reprobe_tokens,
@@ -228,6 +259,12 @@ class CostPerCommitHandoffSettings:
             "settle_rounds": self.settle_rounds,
             "pipelined_park": self.pipelined_park,
         }
+        if self.reprobe_credit_share:
+            reversible.update(
+                reprobe_credit_share=self.reprobe_credit_share,
+                reprobe_credit_max_rounds=self.reprobe_credit_max_rounds,
+            )
+        return reversible
 
     @classmethod
     def ast_self_configuring_defaults(cls) -> "CostPerCommitHandoffSettings":
@@ -332,6 +369,14 @@ class CostPerCommitLaneState:
         self._probe_catchup_pending = False
         self._session_seeded = False
         self._session_seed_active = False
+        self._credit = (
+            DraftExplorationCredit(
+                settings.reprobe_credit_share, settings.reprobe_credit_max_rounds
+            )
+            if settings.reprobe_credit_share else None
+        )
+        self._credit_regime: tuple[int, Hashable | None] | None = None
+        self._credit_round_ns = 0
 
     def seed_reversible_park(self, prior: Mapping[str, Any]) -> None:
         """Start this exact lane parked from a generator-local slow-route prior.
@@ -423,6 +468,10 @@ class CostPerCommitLaneState:
             reason="execution_width_grew",
             execution_width=execution_width,
         )
+        if self._credit is not None:
+            self._credit.reset()
+            self._credit_round_ns = 0
+            self._credit_regime = None
         return True
 
     def _baseline(self, samples) -> float | None:
@@ -483,6 +532,49 @@ class CostPerCommitLaneState:
         self._loss_streak.clear()
         self._speculative_since_ordinary.clear()
         self._refresh_pending.clear()
+        if self._credit is not None:
+            self._credit.reset()
+
+    def _ensure_credit_regime(self, width, context_key):
+        """Opt-in evidence never transfers across a physical width/context key.
+
+        Context keys are optional caller-owned regime identities.  Existing
+        executors provide width; an adapter may additionally supply its own
+        context bucket.  No context identity is inferred from a model name.
+        """
+        if self._credit is None:
+            return
+        try:
+            hash(context_key)
+        except TypeError as error:
+            raise ValueError("reprobe credit context key must be hashable") from error
+        regime = (width, context_key)
+        if regime == self._credit_regime:
+            return
+        if self._credit_regime is not None:
+            self._ordinary.clear()
+            self._speculative.clear()
+            self._loss_streak.clear()
+            self._speculative_since_ordinary.clear()
+            self._refresh_pending.clear()
+            self._probe.clear()
+            self._probing = False
+            self._probe_catchup_pending = False
+            self._parked_tokens = 0
+            self._credit_round_ns = 0
+            self._credit.reset()
+            self._event("credit_regime_reset", execution_width=width)
+        self._credit_regime = regime
+
+    def _credit_reserve(self):
+        ordinary = self._ordinary.get(0, ())
+        # Reserve one catch-up plus all measured probe rounds.  Use the
+        # complete observed round high-water cost, not a per-token rate.
+        round_ns = max(self._credit_round_ns, max((t for t, _ in ordinary), default=0))
+        if round_ns > 0:
+            self._credit.set_reserve(
+                float(round_ns * (1 + self.settings.speculative_samples))
+            )
 
     def observe(
         self,
@@ -493,6 +585,7 @@ class CostPerCommitLaneState:
         execution_width: int,
         lane_uid: Hashable,
         owner_scope: Hashable,
+        context_key: Hashable | None = None,
     ) -> dict[str, Any] | None:
         """Observe one closed boundary and return a new terminal decision.
 
@@ -519,6 +612,9 @@ class CostPerCommitLaneState:
         ):
             self._invalid_samples += 1
             return None
+        self._ensure_credit_regime(execution_width, context_key)
+        if self._credit is not None and kind == "speculative":
+            self._credit_round_ns = max(self._credit_round_ns, elapsed_ns)
         settle_rounds = self.settings.settle_rounds if self.settings.reversible else (
             self.settings.one_way_ordinary_settle_rounds
             if kind == "ordinary"
@@ -651,6 +747,9 @@ class CostPerCommitLaneState:
         self._speculative.pop(width, None)
         self._speculative_since_ordinary[width] = 0
         self._refresh_pending.discard(width)
+        if self._credit is not None:
+            self._credit.ordinary_rounds = 0
+            self._credit_reserve()
         return self._event(
             "park",
             reason="cost_per_committed_token",
@@ -671,11 +770,20 @@ class CostPerCommitLaneState:
             ordinary.append((elapsed_ns, committed_tokens))
             if self._probing:
                 return None
+            if self._credit is not None:
+                self._credit_reserve()
+                self._credit.earn(elapsed_ns)
             return self._advance_parked_tokens(committed_tokens)
         if not self._probing:
             # A speculative round while paused (a cohort peer forced it) is
             # not evidence for this session's re-probe.
             return None
+        if self._credit is not None:
+            ordinary_cost = self._baseline(self._ordinary.get(width, ()))
+            # The catch-up round is excluded from the steady-state fit below,
+            # but its full excess still consumes exploration credit.
+            self._credit.charge(elapsed_ns, (ordinary_cost or 0.0) * committed_tokens)
+            self._credit_reserve()
         if self._probe_catchup_pending:
             # The probe's first round consumes the deferred draft context.
             self._probe_catchup_pending = False
@@ -760,6 +868,8 @@ class CostPerCommitLaneState:
         self._probe_catchup_pending = True
         self._reprobes += 1
         self._cohort_reprobes += 1
+        if self._credit is not None:
+            self._credit.begin("cohort_aligned")
         return self._event(
             "reprobe", parked_tokens=self._parked_tokens, reason="cohort_aligned"
         )
@@ -884,14 +994,28 @@ class CostPerCommitLaneState:
 
     def _advance_parked_tokens(self, committed_tokens):
         self._parked_tokens += committed_tokens
+        reason = None
+        if self._credit is not None:
+            reason = self._credit.reason(
+                context_bound=self._parked_tokens >= self.settings.deferred_context_cap
+            )
+        due = (
+            reason is not None if self._credit is not None
+            else self._parked_tokens >= self._reprobe_after
+        )
         if (
-            self._parked_tokens >= self._reprobe_after
+            due
             and len(self._ordinary.get(0, ())) >= self.settings.ordinary_samples
         ):
             self._probing = True
             self._probe.clear()
             self._probe_catchup_pending = True
             self._reprobes += 1
+            if self._credit is not None:
+                self._credit.begin(reason)
+                return self._event(
+                    "reprobe", parked_tokens=self._parked_tokens, reason=reason
+                )
             return self._event("reprobe", parked_tokens=self._parked_tokens)
         return None
 
@@ -906,7 +1030,7 @@ class CostPerCommitLaneState:
                 for width, samples in sorted(table.items())
             }
 
-        return {
+        receipt = {
             "implemented": True,
             "qualified": False,
             "selected": True,
@@ -957,6 +1081,9 @@ class CostPerCommitLaneState:
             "observations": self._observations,
             "valid_samples": self._valid_samples,
         }
+        if self._credit is not None:
+            receipt["reversible"]["exploration_credit"] = self._credit.receipt()
+        return receipt
 
 
 def cohort_needs_ordinary_probe(states, execution_width: int) -> bool:

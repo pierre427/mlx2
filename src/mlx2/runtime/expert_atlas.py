@@ -53,7 +53,7 @@ _TRACE_END = 0xFFFFFFFD  # (END, dropped calls): written once, at close
 # Plain-LRU traces carry no such row and are unchanged.
 _TRACE_ADMISSION = 0xFFFFFFFC
 _TRACE_MARKER_MIN = _TRACE_ADMISSION
-_ADMISSION_CODES = {"terminal_hot": 1, "adaptive_residency": 2}
+_ADMISSION_CODES = {"terminal_hot": 1, "adaptive_residency": 2, "scan_resistant": 3}
 ATLAS_MAGIC = b"MLX2ATL1"
 ATLAS_SENTINEL = b"ENDATLAS"
 

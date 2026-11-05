@@ -46,6 +46,7 @@ def _batch_generator_harness():
             "_bounded_prefill_chunks",
             "_decode_first_mode",
             "_peek_interior_checkpoint",
+            "_inpass_checkpoint_enabled",
             "_shared_prefill_width",
             "_admit_one_chunk_overflow",
             "_round",

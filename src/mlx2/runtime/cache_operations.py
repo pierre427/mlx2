@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -544,20 +545,38 @@ def _legacy_contract(cache: Any) -> CacheOperationsContract | None:
         SinkWindowKVCache: SINK_WINDOW_KV_OPERATIONS,
         ArraysCache: RECURRENT_OPERATIONS,
     }
-    # mlx-vlm caches are an explicitly supported dependency surface.  Import
-    # them only when installed and admit exact types, never a class name or an
-    # inherited lookalike.
-    try:
-        from mlx_vlm.models.cache import (
-            KVCache as VLMKVCache,
-            RotatingKVCache as VLMRotatingKVCache,
-        )
-    except ImportError:
-        pass
-    else:
-        contracts[VLMKVCache] = KV_OPERATIONS
-        contracts[VLMRotatingKVCache] = VLM_ROTATING_KV_OPERATIONS
+    # mlx-vlm caches are an explicitly supported dependency surface.  Admit
+    # them only when installed and only by exact type, never a class name or
+    # an inherited lookalike.
+    vlm = _vlm_cache_module()
+    vlm_kv = getattr(vlm, "KVCache", None)
+    vlm_rotating = getattr(vlm, "RotatingKVCache", None)
+    if vlm_kv is not None and vlm_rotating is not None:
+        contracts[vlm_kv] = KV_OPERATIONS
+        contracts[vlm_rotating] = VLM_ROTATING_KV_OPERATIONS
     return contracts.get(type(cache))
+
+
+_VLM_CACHE_ABSENT = False
+
+
+def _vlm_cache_module():
+    """``mlx_vlm.models.cache`` if importable; a failed import is not retried.
+
+    Without mlx-vlm installed, every retried import searched the whole path
+    (~50 us), and AST rounds ask for cache contracts a few hundred times
+    each.  A module already in ``sys.modules`` is always used.
+    """
+    global _VLM_CACHE_ABSENT
+    module = sys.modules.get("mlx_vlm.models.cache")
+    if module is not None or _VLM_CACHE_ABSENT:
+        return module
+    try:
+        import mlx_vlm.models.cache as module
+    except ImportError:
+        _VLM_CACHE_ABSENT = True
+        return None
+    return module
 
 
 def cache_operations(

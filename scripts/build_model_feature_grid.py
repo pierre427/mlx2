@@ -53,9 +53,13 @@ FEATURES = (
     "ling_optimizations", "ast_apcv2_current_source",
     "ling_kda_fusion_components", "ling_split_mla_components",
     "inkling_fused_ops", "inkling_q2_down_combine", "inkling_inline_relative_attention",
+    "mtp_tree_pipeline",
     "integer_exact_microscaling",
     "resident_kernel_reload", "kimi_linear_supervised_lora_research",
     "kimi_router_score_profile_one_domain_prompt",
+    "kimi_moe_behavior_research", "kimi_moe_loop_research",
+    "kimi_moe_terminal_route_counters", "kimi_moe_segment_bounds_research",
+    "kimi_moe_protected_unit_lifecycle",
     # Existing reviewed GLM rows also need inventory cells for regeneration.
     'glm53_mla_prompt_expanded_f16_v1', 'glm53_prompt_decoded_decoded_f16_v1', 'glm53_prompt_decoded_decoded_f32_v1', 'glm53_route_defaults_kblock_v6', 'glm53_sparse_prefill_gathered_f16_from_n', 'glm53_sparse_prefill_gathered_v2_below_threshold_reference',
     'kda_vector_kernel', 'kimi_mla_latent_tiled', 'kimi_mla_fused_decode', 'kimi_mla_flash_all', 'kimi_kda_norm_rounding_ab', 'kimi_session_memory_budget', 'kimi_kda_mla_prometheus', 'native_bf16_nax_prefill', 'context_default_1m', 'kimi_grouped_kda_projections', 'kimi_fused_kda_norm', 'kimi_chunk32_prefill', 'kimi_mla_auto', 'kimi_mla_latent_single', 'kda_chunk_wy', 'router_combine_unbiased', 'kda_fused_projections_norm', 'kimi_ast_packed_tree', 'kimi_ast_serial_tree', 'tensorfold_lane_raw',

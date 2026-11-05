@@ -288,6 +288,10 @@ def test_every_target_adapter_declares_cited_vendor_defaults():
         "qwen2", "qwen2_5_vl", "qwen3", "qwen3_moe", "smolvlm",
         # Locally trained HySparse2 research checkpoints have no vendor.
         "mlx2_hysparse2_research", "mlx2_hysparse2_memory_diffusion_research",
+        # Kimi-Linear-48B-A3B-Instruct's generation_config.json carries only
+        # token ids and the Inkling-Small artifacts ship none (checked
+        # 2026-11-04); neither adapter declares sampling_defaults.
+        "kimi_linear", "inkling",
     }
     assert set(_RESOLVERS) == set(EXPECTED) | no_vendor_profile
     for model_type, profiles in EXPECTED.items():

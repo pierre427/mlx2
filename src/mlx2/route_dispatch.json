@@ -26,6 +26,11 @@
         "mlx2.runtime.tensorfold_qwen38.stream_gdn"
       ],
       "reason": "Validated module list including owned mixed-F32 GDN pre/post hooks; both lane_glue and lane_fuse remain under the same source-root gate. Dynamic targets unchanged; external research sources retain their exact source gate."
+    },
+    "mlx2.kernel_reload": {
+      "sha256": "861540fcbcea96db4127d9e026fd8f8f93d487548becc9eb933396249fc1f485",
+      "targets": [],
+      "reason": "Reviewed opt-in developer kernel reload (394af8969). Its exec() re-executes only modules already in sys.modules whose files lie under the configured kernel-dev source root, after a sha256 recheck, on an explicit admin reload; it adds no module to the static closure. Any reload marks route receipts unqualified with its execution identity and changes the cache revision (kernel_reload_serving)."
     }
   }
 }

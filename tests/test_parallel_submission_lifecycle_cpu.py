@@ -27,7 +27,7 @@ def engine_for_submission():
     engine.adapter = object()
     engine._exclusive_operation_done = threading.Condition(engine.submission_lock)
     engine.batch_metrics = SimpleNamespace(
-        admitted=lambda *_: None, rejected=lambda *_: None, terminal=lambda *_: None
+        admitted=lambda *_, **__: None, rejected=lambda *_: None, terminal=lambda *_: None
     )
     return engine
 

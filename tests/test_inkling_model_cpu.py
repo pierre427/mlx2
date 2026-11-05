@@ -370,3 +370,156 @@ def test_equal_length_merged_batch_keeps_mask_free_conv_and_exact_rollback():
     m(mx.array([[7, 8, 9], [7, 8, 9]]), cache=merged)
     for c in merged:
         c.trim(2)
+
+
+def test_tree_lends_global_kv_and_abort_keeps_the_committed_prefix():
+    from mlx2.runtime.inkling_tree_executor import InklingTreeExecutor
+
+    m = model()
+    live = m.make_cache()
+    m(mx.array([[1, 2, 3, 4, 5, 6, 7]]), cache=live)
+    reference = copy.deepcopy(live)
+    executor = InklingTreeExecutor.create()
+    globals_before = [(c.offset, c.keys) for c in live if type(c).__name__ == "KVCache"]
+    values, _, tx = executor.forward(m, [6, 7, 8], [-1, 0, 1], live, [1], cached=False)
+    mx.eval(values)
+    assert executor.global_kv_lends >= 1
+    # Aborted: live committed rows and fill level are untouched.
+    for (offset, keys), c in zip(globals_before, [c for c in live if type(c).__name__ == "KVCache"]):
+        assert c.offset == offset
+        assert bool(mx.array_equal(c.keys[..., :offset, :], keys[..., :offset, :]).item())
+    a, b = m(mx.array([[9]]), cache=live), m(mx.array([[9]]), cache=reference)
+    mx.eval(a, b)
+    assert bool(mx.array_equal(a, b).item())
+
+
+@pytest.mark.parametrize("parents", [[-1, 0, 1, 2], [-1, 0, 0, 2]])
+def test_chain_attention_slices_equal_the_gathered_ancestry(parents, monkeypatch):
+    from mlx2.runtime.models.inkling.tree import InklingTree
+
+    m = model()
+    cache = m.make_cache()
+    for token in range(1, 10):  # wrap the local ring
+        m(mx.array([[token]]), cache=cache)
+    tokens = mx.array([[10, 11, 12, 13]])
+
+    def run():
+        tree = InklingTree(parents, cache)
+        logits, features = tree.forward(m, tokens, [1])
+        mx.eval(logits, features)
+        return tree, logits, features
+
+    sliced, logits, features = run()
+    original = InklingTree.__init__
+
+    def gather_only(self, *a, **k):
+        original(self, *a, **k)
+        self._chain_paths = [[-1]] * len(self._chain_paths)
+
+    monkeypatch.setattr(InklingTree, "__init__", gather_only)
+    gathered, ref_logits, ref_features = run()
+    chain_nodes = sum(path == list(range(len(path))) for path in sliced.paths)
+    # Short contexts take the per-node loop on every layer, global ones too.
+    assert sliced.chain_slice_rows == chain_nodes * len(m.layers) > 0
+    assert gathered.chain_slice_rows == 0
+    assert bool(mx.array_equal(logits, ref_logits).item())
+    assert bool(mx.array_equal(features, ref_features).item())
+
+
+def _buffer_address(value):
+    """CPU buffer identity: a donated in-place write keeps the address."""
+    import numpy as np
+
+    mx.eval(value)
+    view = np.asarray(value)
+    try:
+        return view.ctypes.data
+    finally:
+        del view
+
+
+def _host_copy(value):
+    """An independent buffer; a single-head slice would otherwise stay a view."""
+    import numpy as np
+
+    mx.eval(value)
+    return mx.array(np.array(np.asarray(value)))
+
+
+@pytest.mark.parametrize("path", [[0, 1, 2], [0, 2]])
+def test_tree_commit_keeps_lent_global_kv_buffers_in_place(path):
+    from mlx2.runtime.inkling_tree_executor import InklingTreeExecutor
+
+    m = model()
+    live = m.make_cache()
+    m(mx.array([[1, 2, 3, 4, 5, 6, 7]]), cache=live)
+    # A private first append makes every global buffer unshared, as a lane
+    # that has decoded at least one token is.
+    m(mx.array([[8]]), cache=live)
+    mx.eval([c.keys for c in live if type(c).__name__ == "KVCache"])
+    reference = copy.deepcopy(live)
+    tokens = [9, 10, 11]
+    parents = [-1, 0, 1] if path == [0, 1, 2] else [-1, 0, 0]
+    executor = InklingTreeExecutor.create()
+    values, _, tx = executor.forward(m, tokens, parents, live, [1], cached=False)
+    mx.eval(values)
+    globals_ = [c for c in live if type(c).__name__ == "KVCache"]
+    starts = [int(c.offset) for c in globals_]
+    # The rows the tree appended past the fill level, copied out before the
+    # commit: the old write-back gathered exactly these from the buffer.
+    appended = [
+        (
+            _host_copy(c.keys[..., s : s + len(tokens), :]),
+            _host_copy(c.values[..., s : s + len(tokens), :]),
+        )
+        for c, s in zip(globals_, starts, strict=True)
+    ]
+    before = [(_buffer_address(c.keys), _buffer_address(c.values)) for c in globals_]
+    tx.commit_paths([path])
+    mx.eval([c.keys for c in globals_], [c.values for c in globals_])
+    # The commit write-back of the chosen rows must not copy the whole
+    # lent prefix: the K/V buffers keep their identity.
+    after = [(_buffer_address(c.keys), _buffer_address(c.values)) for c in globals_]
+    assert after == before
+    ids = mx.array(path, mx.int32)
+    for c, s, (keys, values) in zip(globals_, starts, appended, strict=True):
+        assert int(c.offset) == s + len(path)
+        for plane, rows in ((c.keys, keys), (c.values, values)):
+            assert bool(
+                mx.array_equal(
+                    plane[..., s : s + len(path), :], mx.take(rows, ids, axis=2)
+                ).item()
+            )
+    chosen = [tokens[index] for index in path]
+    actual = m(mx.array([[12]]), cache=live)
+    expected = m(mx.array([chosen + [12]]), cache=reference)
+    assert bool(mx.allclose(actual[:, -1], expected[:, -1], atol=1e-5).item())
+
+
+def test_tree_mapping_is_built_once_per_prefix_and_window():
+    """Every layer at one prefix/window reuses the same map; values are the
+    unmemoized ones, including the chronological window gather."""
+    from mlx2.runtime.models.inkling.tree_attention import tree_mapping
+
+    paths = [[0], [0, 1], [0, 1, 2], [0, 3]]
+    memo = {}
+    first = tree_mapping(paths, 6, 0, memo=memo)
+    assert tree_mapping(paths, 6, 0, memo=memo)[0] is first[0]
+    plain = tree_mapping(paths, 6, 0)
+    assert bool(mx.array_equal(first[0], plain[0]).item()) and first[1] == plain[1]
+    assert first[0].tolist() == [
+        [0, 1, 2, 3, 4, 5, 6, 6, 6, 6],
+        [0, 1, 2, 3, 4, 5, 6, 7, 6, 6],
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 6],
+        [0, 1, 2, 3, 4, 5, 6, 9, 6, 6],
+    ]
+    assert first[1] == [7, 8, 9, 8]
+    windowed = tree_mapping(paths, 6, 4, memo=memo)
+    assert tree_mapping(paths, 6, 4, memo=memo)[0] is windowed[0]
+    assert windowed[0] is not first[0] and len(memo) == 2
+    assert windowed[0].tolist() == [
+        [3, 4, 5, 6], [4, 5, 6, 7], [5, 6, 7, 8], [4, 5, 6, 9],
+    ]
+    assert windowed[1] == [4, 4, 4, 4]
+    # A different tree's memo never leaks into this one.
+    assert tree_mapping([[0]], 6, 0, memo={})[0].tolist() == [[0, 1, 2, 3, 4, 5, 6]]

@@ -219,7 +219,7 @@ def unit(spec):
         assert all(arm['text'].strip() == 'MUSE-7429' for arm in arms.values())
         assert report['model_ab_exact_tokens'], 'classify first divergence before qualification'
         assert arms['candidate']['calls']['fp_decode_gqa16_calls'] > 0, 'candidate did not engage'
-        del model, adapter, base_cache, cache, logits, current, q, k, v
+        model = adapter = base_cache = cache = logits = current = q = k = v = None  # release; closures reference these names
         gc.collect()
         mx.clear_cache()
         atomic(out / 'progress.json', report)

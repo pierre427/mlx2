@@ -112,7 +112,7 @@ def dense_weight(linear, dtype=None):
     if key[1] not in cache:
         weight = linear.weight
         if getattr(linear, "_lane_tiled", False):
-            # Raw TensorFold (lane_qmm.install) re-tiles the packed bank in
+            # Raw TensorFold (its lane_qmm installer) re-tiles the packed bank in
             # place for its kernel; dequantizing that layout as MLX's row
             # layout scrambled the absorbed kv_b and the router (2026-11-02,
             # scripts/research/kimi_tensorfold_lane_repro.py).

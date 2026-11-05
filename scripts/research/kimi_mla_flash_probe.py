@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cpg-lock", type=Path, required=True)
     parser.add_argument("--model", type=Path,
-                        default=Path("~/Models/Huihui-Kimi-Linear-REAP-35B-A3B-Instruct-abliterated"))
+                        default=Path.home() / "Models/Huihui-Kimi-Linear-REAP-35B-A3B-Instruct-abliterated")
     parser.add_argument("--shapes", default="8192x512,32768x512,32768x2048,131072x512,131072x2048")
     parser.add_argument("--decode", default="4096,32768,131072")
     parser.add_argument("--repeats", type=int, default=5)

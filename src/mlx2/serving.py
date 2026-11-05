@@ -859,9 +859,9 @@ def moe_expert_streaming_policy(value) -> dict:
     for key in ("atlas_path", "trace_path"):
         if policy[key] is not None and not isinstance(policy[key], str):
             raise ValueError(f"moe_expert_streaming.{key} must be a string or null")
-    if policy["prefill_admission"] not in ("lru", "terminal_hot"):
+    if policy["prefill_admission"] not in ("lru", "terminal_hot", "scan_resistant"):
         raise ValueError(
-            "moe_expert_streaming.prefill_admission must be lru or terminal_hot"
+            "moe_expert_streaming.prefill_admission must be lru, terminal_hot or scan_resistant"
         )
     if policy["router_hint"] not in ("off", "next_layer_reuse"):
         raise ValueError(
@@ -878,7 +878,7 @@ def moe_expert_streaming_policy(value) -> dict:
 
     residency = AdaptiveResidencySettings.parse(policy["adaptive_residency"])
     if residency.enabled and policy["prefill_admission"] != "lru":
-        raise ValueError("adaptive residency replaces terminal_hot admission")
+        raise ValueError("adaptive residency replaces other prefill admission policies")
     if (residency.enabled or policy["elastic"]) and policy["router_hint"] != "off":
         raise ValueError("adaptive/elastic expert memory requires synchronous demand gathers")
     if (residency.enabled or policy["elastic"]) and not policy["enabled"]:

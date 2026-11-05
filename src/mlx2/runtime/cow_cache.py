@@ -1611,6 +1611,7 @@ def snapshot_prompt_cache_descriptors(
     *,
     memo: Optional[dict[int, Any]] = None,
     require_committed: bool = True,
+    measure: bool = True,
 ) -> tuple[list[Any], Any, dict[str, int]]:
     """Capture one committed boundary as independent plane descriptors.
 
@@ -1646,14 +1647,11 @@ def snapshot_prompt_cache_descriptors(
         sidecar, telemetry=telemetry, plane="draft_mtp", attach_tokens=False, memo=memo
     )
     mtp_state_trace.sidecar_state("descriptor_capture", snapshot, snapshot_sidecar)
-    return (
-        snapshot,
-        snapshot_sidecar,
-        {
-            "snapshot_ns": int(time.perf_counter_ns() - started),
-            "snapshot_bytes": int(_tree_nbytes((snapshot, snapshot_sidecar))),
-        },
-    )
+    receipt = {"snapshot_ns": int(time.perf_counter_ns() - started)}
+    if measure:
+        # A full graph walk; callers that discard the receipt pass False.
+        receipt["snapshot_bytes"] = int(_tree_nbytes((snapshot, snapshot_sidecar)))
+    return snapshot, snapshot_sidecar, receipt
 
 
 def _append_only_fields(cache: Any) -> tuple:
@@ -1753,7 +1751,7 @@ def snapshot_recovery_descriptors(
     memo = {} if memo is None else memo
     prompt_cache = list(prompt_cache)
     snapshot, snapshot_sidecar, _receipt = snapshot_prompt_cache_descriptors(
-        prompt_cache, sidecar, memo=memo, require_committed=False
+        prompt_cache, sidecar, memo=memo, require_committed=False, measure=False
     )
     roots = [prompt_cache]
     if isinstance(sidecar, (list, tuple)):
@@ -1882,7 +1880,7 @@ def restore_recovery_descriptors(
     """
     memo = {} if memo is None else memo
     restored, restored_sidecar, _receipt = snapshot_prompt_cache_descriptors(
-        snapshot, sidecar, memo=memo, require_committed=False
+        snapshot, sidecar, memo=memo, require_committed=False, measure=False
     )
     pending = []
     for plane in borrowed:
@@ -1950,7 +1948,7 @@ def snapshot_committed_cache(
     if cow_graph or external_round_cow_enabled(enabled):
         try:
             cache, frozen_sidecar, _receipt = snapshot_prompt_cache_descriptors(
-                prompt_cache, sidecar
+                prompt_cache, sidecar, measure=False
             )
             return cache, frozen_sidecar, "descriptor_cow"
         except COWCacheUnsupported:

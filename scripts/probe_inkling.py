@@ -118,6 +118,36 @@ def atomic(path, value):
     tmp.replace(path)
 
 
+def install_serving_lane(adapter, model_path, mode="exact"):
+    """Install the lane law ``mlx2 serve --lane-matmul <mode>`` installs.
+
+    Direct (server-free) benches load the adapter alone, which leaves dense
+    projections on stock arithmetic; the packed AST route serves only under
+    exact lane coverage, so a bench of that route must install it too.
+    Returns the lane receipt (``None`` for ``off``).
+    """
+    if mode == "off":
+        return None
+    from mlx2.runtime.lane import apply_policy
+    from mlx2.runtime.lane.policy import detect, resolve
+
+    config = json.loads((Path(model_path) / "config.json").read_text())
+    defaults = getattr(adapter, "lane_policy_defaults", None)
+    policy = resolve(
+        detect(adapter.model, config),
+        family=getattr(getattr(adapter, "descriptor", None), "family", None),
+        adapter=defaults() if callable(defaults) else None,
+        overrides=None,
+        mode=mode,
+    )
+    offered = getattr(adapter, "lane_projection_groups", None)
+    receipt = apply_policy(adapter.model, policy, declared=offered() if callable(offered) else ())
+    bind = getattr(adapter, "bind_serving_lane_matmul", None)
+    if callable(bind):
+        bind(receipt)  # refuses incomplete coverage for the packed route
+    return receipt
+
+
 def body(text):
     return {
         "messages": [{"role": "user", "content": text}],

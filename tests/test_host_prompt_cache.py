@@ -185,7 +185,7 @@ def test_parallel_samples_publish_only_the_prefill_leader():
     engine.incoming = queue.Queue()
     engine.counts = Counter()
     engine.batch_metrics = SimpleNamespace(
-        admitted=lambda *_args: None,
+        admitted=lambda *_args, **_kwargs: None,
         rejected=lambda *_args: None,
     )
 

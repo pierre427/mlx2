@@ -2414,7 +2414,7 @@ class ExternalDraftBatchGenerator:
     @staticmethod
     def _snapshot_draft_state(draft_cache, tail):
         draft_cache, tail, _ = snapshot_prompt_cache_descriptors(
-            draft_cache, tail
+            draft_cache, tail, measure=False
         )
         return draft_cache, tail
 
@@ -7814,7 +7814,7 @@ class ExternalDraftBatchGenerator:
         """
         captured = self._ast_descriptor_capture(cache)
         if captured is None:
-            cloned, _sidecar, _receipt = snapshot_prompt_cache_descriptors(cache)
+            cloned, _sidecar, _receipt = snapshot_prompt_cache_descriptors(cache, measure=False)
         else:
             cloned, _borrowed = captured
             _bump(self.scheduler_stats, "external_ast_lean_private_forks")
@@ -8315,6 +8315,29 @@ class ExternalDraftBatchGenerator:
         """
         return {"submit": True} if getattr(self.draft, "start_tree_submits", False) else {}
 
+    def _draft_pipelines(self):
+        """Whether the next round's lattice may be queued ahead of its round.
+
+        A drafter that pairs each committed feature with its following token
+        takes part only if its ``start_tree`` declares it accepts that
+        pairing (``start_tree_pairs_context``); the engine then passes the
+        pairing of the boundary the lattice is built for.
+        """
+        return (
+            self.tree_gates["pipeline_draft"]
+            and callable(getattr(self.draft, "start_tree", None))
+            and (
+                not self.pair_context_tokens
+                or getattr(self.draft, "start_tree_pairs_context", False) is True
+            )
+        )
+
+    def _lattice_pairing(self, history, anchor, tail):
+        """``start_tree``'s context pairing for one row at a named boundary."""
+        if not self.pair_context_tokens:
+            return {}
+        return {"context_tokens": [_context_pairing(history, anchor, int(tail.shape[1]))]}
+
     def _presnapshot_draft(self, cohort):
         """Copy a B1 lane's draft plane while the host waits on the tile.
 
@@ -8326,12 +8349,7 @@ class ExternalDraftBatchGenerator:
         """
 
         self._draft_presnapshot = None
-        if (
-            len(cohort) != 1
-            or not self.tree_gates["pipeline_draft"]
-            or not callable(getattr(self.draft, "start_tree", None))
-            or self.pair_context_tokens
-        ):
+        if len(cohort) != 1 or not self._draft_pipelines():
             return
         lane = cohort[0]
         try:
@@ -8340,11 +8358,19 @@ class ExternalDraftBatchGenerator:
             return
         self._draft_presnapshot = (lane, lane.draft_cache, draft_cache)
 
-    def _start_lattice(self, lane, anchor, tail, count, forbidden, *, history_tokens=None):
-        """Snapshot the draft plane and queue one lattice on the copy."""
+    def _start_lattice(self, lane, anchor, tail, count, forbidden, *, history_tokens=None,
+                       pairing_history=None):
+        """Snapshot the draft plane and queue one lattice on the copy.
+
+        ``pairing_history`` is the committed history at the boundary the
+        lattice is built for (the lane's own history when omitted).
+        """
 
         mark = self._tree_clock
         options = self._tree_options(count_hits=False, lanes=[lane])
+        options.update(self._lattice_pairing(
+            lane.history if pairing_history is None else pairing_history, anchor, tail,
+        ))
         if history_tokens is not None and getattr(self.draft, "requires_tree_proposal_contexts", False) is True:
             options["proposal_histories"] = [list(history_tokens)]
         if mark is not None:
@@ -8442,11 +8468,18 @@ class ExternalDraftBatchGenerator:
         try:
             count = min(self._tree_node_budget(), lane.maximum - generated - 1)
             forbidden = self._tree_forbidden(lane, history)
+            future = (
+                _future_tree_proposal_history(lane, decision)
+                if self.pair_context_tokens
+                or getattr(self.draft, "requires_tree_proposal_contexts", False) is True
+                else None
+            )
+            pairing = {"pairing_history": future} if self.pair_context_tokens else {}
             if getattr(self.draft, "requires_tree_proposal_contexts", False) is True:
                 record = self._start_lattice(lane, anchor, tail, count, forbidden,
-                                             history_tokens=_future_tree_proposal_history(lane, decision))
+                                             history_tokens=future, **pairing)
             else:
-                record = self._start_lattice(lane, anchor, tail, count, forbidden)
+                record = self._start_lattice(lane, anchor, tail, count, forbidden, **pairing)
         except Exception:
             _bump(self.scheduler_stats, "external_tree_pipeline_discards")
             return None
@@ -8528,10 +8561,11 @@ class ExternalDraftBatchGenerator:
                 for lane in cohort
             ]
         records = {}
+        contexts = getattr(self.draft, "requires_tree_proposal_contexts", False) is True
         future_histories = (
             {lane.uid: _future_tree_proposal_history(lane, decision) if early else list(lane.history)
              for lane, decision in zip(cohort, decisions, strict=True)}
-            if getattr(self.draft, "requires_tree_proposal_contexts", False) is True else None
+            if contexts or self.pair_context_tokens else None
         )
         if any(
             lane.ordinary or lane.cancelled or lane.maximum - view.generated <= 1
@@ -8552,8 +8586,14 @@ class ExternalDraftBatchGenerator:
                 count = min(budget, min(l.maximum - v.generated - 1 for l, v in members))
                 forbidden = [self._tree_forbidden(lane, view.history) for lane, view in members]
                 options = self._tree_options(count_hits=False, lanes=lanes)
-                if future_histories is not None:
+                if contexts:
                     options["proposal_histories"] = [future_histories[lane.uid] for lane in lanes]
+                if self.pair_context_tokens:
+                    options["context_tokens"] = [
+                        _context_pairing(future_histories[lane.uid], view.anchor,
+                                         int(view.tail.shape[1]))
+                        for lane, view in members
+                    ]
                 snapshots = [
                     self._snapshot_draft_state(lane.draft_cache, view.tail)
                     for lane, view in members
@@ -11028,7 +11068,7 @@ class ExternalDraftBatchGenerator:
                     # A wrapped ring cannot recover evicted keys by reducing
                     # its offset. In-place owners need independent COW aliases;
                     # never widen the generic hybrid trim contract.
-                    frozen = snapshot_prompt_cache_descriptors([cache])[0][0]
+                    frozen = snapshot_prompt_cache_descriptors([cache], measure=False)[0][0]
                     planes.append(("descriptor", cache, frozen.__dict__.copy()))
                 else:
                     planes.append(("kv", cache, _kv_offset(cache)))
@@ -13160,11 +13200,7 @@ class ExternalDraftBatchGenerator:
                 decisions.append(decision)
             if phase is not None:
                 phase("tree_target_law")
-            pipelined = (
-                self.tree_gates["pipeline_draft"]
-                and callable(getattr(self.draft, "start_tree", None))
-                and not self.pair_context_tokens
-            )
+            pipelined = self._draft_pipelines()
             if tile_started is not None:
                 # Observed at the verified boundary, before the commit: the
                 # next lattice's node budget must already be the one the

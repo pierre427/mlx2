@@ -228,6 +228,16 @@ def _merged(base, extra):
 # earlier run left it.  Every value a gate's growth below touches is nonzero
 # (or True) here, so a gate that read it as a lifetime value would pass.
 ENGAGED = _merged(HISTORY, {
+    # A bound SC-MXFP4 prefill route (b05ff55f5): the observation requires the
+    # same revision, artifact and projection set in both snapshots.
+    "microscaling_prefill": {
+        "enabled": True, "active": True, "revision": "sc-r1",
+        "kernel_revision": "k-r1", "artifact_fingerprint": "f-r1",
+        "modules": 2, "projection_paths": ["layers.0.mlp.up", "layers.0.mlp.experts"],
+        "module_kinds": {"dense": 1, "grouped": 1},
+        "counts": {"engaged_calls": 3, "engaged_rows": 96,
+                   "dense_calls": 3, "grouped_calls": 3},
+    },
     "settings": {
         "sp_qmm": "measured",
         "qmm_row_pad": {"modules": 4, "policy": "measured"},
@@ -388,6 +398,10 @@ _X = ("execution",)
 _S = ("scheduler",)
 # The run-local growth that engages each counter-backed gate: {path: amount}.
 GROWTH = {
+    "microscaling_prefill": {
+        ("microscaling_prefill", "counts", name): 1
+        for name in ("engaged_calls", "engaged_rows", "dense_calls", "grouped_calls")
+    },
     "qsa_lazy_causal_mask": {
         _X + ("qsa_lazy_causal_mask", "counts", name): 1
         for name in ("dense_mask_calls", "fused_mask_calls", "compact_calls")

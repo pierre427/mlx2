@@ -535,3 +535,34 @@ def test_decode_mapped_tree_matches_ordinary_singleton_attention(prefix):
     expected = mx.concatenate(expected, axis=2)
     mx.eval(actual, expected)
     assert bool(mx.array_equal(actual, expected).item())
+
+
+@pytest.mark.parametrize("tokens", [1, 2, 8, 16])
+def test_down_combine_occupancy_variants_match_the_original_bit_for_bit(tokens):
+    import time
+
+    from mlx2.runtime.models.inkling import language as L
+
+    mx.random.seed(611 + tokens)
+    experts, out_dims, in_dims, top_k = 32, 4096, 2048, 6
+    w = mx.random.normal((experts, out_dims, in_dims)).astype(mx.bfloat16) * 0.02
+    wq, scales, biases = mx.quantize(w, group_size=128, bits=2, mode="affine")
+    dp = type("DP", (), {"weight": wq, "scales": scales, "biases": biases,
+                         "output_dims": out_dims, "input_dims": in_dims})()
+    act = mx.random.normal((tokens, top_k, in_dims)).astype(mx.bfloat16)
+    idx = mx.random.randint(0, experts, (tokens, top_k)).astype(mx.uint32)
+    topk_w = mx.softmax(mx.random.normal((tokens, top_k)), axis=-1).astype(mx.bfloat16)
+    results, timings = {}, {}
+    for variant in ("original", "k_groups", "row_pairs"):
+        results[variant] = L._down_combine(act, dp, idx, topk_w, top_k, variant=variant)
+        mx.eval(results[variant])
+        samples = []
+        for _ in range(20):
+            mx.synchronize()
+            tic = time.perf_counter()
+            mx.eval(L._down_combine(act, dp, idx, topk_w, top_k, variant=variant))
+            samples.append(time.perf_counter() - tic)
+        timings[variant] = sorted(samples)[10] * 1e6
+    print("down-combine us", tokens, {k: round(v, 1) for k, v in timings.items()})
+    assert bool(mx.array_equal(results["k_groups"], results["original"]).item())
+    assert bool(mx.array_equal(results["row_pairs"], results["original"]).item())

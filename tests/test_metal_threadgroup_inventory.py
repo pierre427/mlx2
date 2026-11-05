@@ -46,6 +46,11 @@ ABOVE_M1_FLOOR = {
     # 1024-thread threadgroup matching MLX's 1024-lane reduction laws. Opt-in,
     # not selected by default, behind a first-use bitwise self-check.
     "runtime/models/deepseek_v41_source_hc_mega.py": 1,
+    # GLM-5.3 opt-in decode kernels (glm53_hc=mega_v1, glm53_hc_fused,
+    # glm53_kda_fused=decode_v1/v2): none is selected by default.
+    "runtime/models/glm53_hc_fused.py": 4,
+    "runtime/models/glm53_hc_mega.py": 2,
+    "runtime/models/glm53_kda_fused.py": 2,
 }
 
 

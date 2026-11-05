@@ -102,6 +102,7 @@ class InklingTreeExecutor(HybridTreeExecutor):
         self.dispatches = 0
         self.projection_rows = 0
         self.physical_packed_dispatches = 0
+        self.global_kv_lends = 0
         self.cross_request_packed_dispatches = 0
         self.ordinary_anchor_dispatches = 0
         self.descriptor_plan_captures = 0
@@ -269,6 +270,7 @@ class InklingTreeExecutor(HybridTreeExecutor):
                     "Inkling physical cohorts require equal padded tree widths"
                 )
             logits, features = InklingTree.forward_cohort(model, trees, inputs, layers)
+            self.global_kv_lends += sum(tree.lent_global_kv for tree in trees)
             self.dispatches += 1
             self.projection_rows += sum(map(len, inputs))
             self.physical_packed_dispatches += 1
@@ -286,6 +288,7 @@ class InklingTreeExecutor(HybridTreeExecutor):
             )
             logits.append(output)
             features.append(taps)
+            self.global_kv_lends += tree.lent_global_kv
             self.projection_rows += len(tokens)
         self.dispatches += 1
         return (
@@ -311,6 +314,7 @@ class InklingTreeExecutor(HybridTreeExecutor):
             "cross_request_physical_packing": self.cross_request_packed_dispatches > 0,
             "cross_request_packed_dispatches": self.cross_request_packed_dispatches,
             "physical_packed_dispatches": self.physical_packed_dispatches,
+            "global_kv_lends": self.global_kv_lends,
             "projection_rows": self.projection_rows,
             "ordinary_anchor_dispatches": self.ordinary_anchor_dispatches,
             "descriptor_plan_captures": self.descriptor_plan_captures,

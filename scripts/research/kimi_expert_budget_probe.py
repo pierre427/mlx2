@@ -8,18 +8,16 @@ a correctness prototype, not a production performance implementation.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
-from dataclasses import replace
 import gc
 import hashlib
 import json
-import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
-import threading
 import time
+from collections import Counter
+from dataclasses import replace
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,9 +25,11 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 from mlx2.desktop_campaign_worker import atomic, check_ownership
 
-MODEL = Path("~/Models/Kimi-Linear-48B-A3B-Instruct-8bit")
+MODEL = Path.home() / "Models/Kimi-Linear-48B-A3B-Instruct-8bit"
 PLIST = Path.home() / "Library/LaunchAgents/com.example.mlx2-kimi-linear-48b-q8.plist"
 LABEL = "com.example.mlx2-kimi-linear-48b-q8"
+# Research only: global .10/.20/.30 showed no broad quality gain; .50/.70
+# degraded quality/repetition. No adaptive policy is selected for serving.
 CONTROL = {"mode": "fixed", "k": 8}
 COUNTS = Counter()
 SAMPLES = []
@@ -81,8 +81,9 @@ def tasks():
 def install_probe():
     """Local process instrumentation, never a supported execution-policy key."""
     import mlx.core as mx
-    from mlx2.runtime.models import kimi_linear as runtime
+
     from mlx2.adapters.kimi_linear import KimiLinearAdapter
+    from mlx2.runtime.models import kimi_linear as runtime
     original_gate = runtime.Gate.__call__
     original_block = runtime.SparseMoeBlock.__call__
     original_load = KimiLinearAdapter._load
@@ -96,6 +97,7 @@ def install_probe():
         if CONTROL["mode"] == "fixed":
             COUNTS[f"rows_k{self.top_k}"] += x.size // x.shape[-1]
             COUNTS["expert_assignments"] += ids.size
+            COUNTS[f"layer_{self._budget_layer}_k{self.top_k}"] += x.size // x.shape[-1]
         if PROFILE_PATH is not None and getattr(self, "_profile_rows", 0) < PROFILE_TOKENS:
             remaining = PROFILE_TOKENS - getattr(self, "_profile_rows", 0)
             rows = x.reshape(-1, x.shape[-1])[:remaining]
@@ -166,6 +168,7 @@ def install_probe():
             out = out.at[positions].add(values)
             COUNTS[f"rows_k{k}"] += len(positions)
             COUNTS["expert_assignments"] += len(positions) * k
+            COUNTS[f"layer_{self.gate._budget_layer}_k{k}"] += len(positions)
         COUNTS["router_calls"] += 1
         COUNTS["router_rows"] += len(widths)
         self.gate.calls["router_calls"] += 1
@@ -232,8 +235,9 @@ def generate(adapter, text, policy, *, capture=None, force=None, limit=256):
 
 def direct(spec, output):
     import mlx.core as mx
-    from mlx2.adapters.kimi_linear import KimiLinearAdapter
     from kimi_linear_norm_quality import answer_oracle, oracle
+
+    from mlx2.adapters.kimi_linear import KimiLinearAdapter
     install_probe()
     mx.set_default_device(mx.gpu)
     mx.set_wired_limit(mx.device_info()["max_recommended_working_set_size"])
@@ -278,7 +282,7 @@ def direct(spec, output):
                                            "replayed_selection": replay, "cross_selected_margins": [ma, mb]}
                 # Deliberate top-k changes are behavioral interventions. This
                 # label describes a local tie, never qualifies the changed route.
-                row["divergence_classification"] = ("near_tie_equivalent" if replay and a["answer_passed"]
+                row["divergence_classification"] = ("local_choices_close" if replay and a["answer_passed"]
                     and b["answer_passed"] and 0 <= ma <= .5 and 0 <= mb <= .5
                     else "behavioral_change" if replay else "unclassified_replay")
             elif not row["exact_tokens"]:
@@ -326,7 +330,8 @@ def server(spec):
         return choice, usage, {**receipt, "probe_output_tokens": list(job.receipt_token_ids or [])}
     http_server.collect_nonstream_job = collect
     sys.argv = ["mlx2.server", "--model", spec["model"], "--host", "127.0.0.1", "--port", str(spec["port"]),
-                "--ordinary", "--fabric", "off", "--max-lanes", "1", "--max-inflight", "1",
+                *([] if spec.get("benchmark_default_routes") else ["--ordinary"]),
+                "--fabric", "off", "--max-lanes", "1", "--max-inflight", "1",
                 "--max-context", "8192", "--prefill-step", "128", "--cache-bytes", str(2 << 30),
                 "--cache-dir", str(Path(spec["out"]) / "apcv2"), "--gpu-keep-warm-seconds", "0"]
     http_server.main()
@@ -407,70 +412,7 @@ def unit(spec, output):
 
 
 def run(args):
-    from mlx2.adapters.kimi_linear import inspect_artifact
-    from mlx2.desktop_campaign_lease import DesktopCPGLease
-    from mlx2.desktop_campaign_process import spawn
-    from mlx2.desktop_runner import digest
-    artifact = inspect_artifact(MODEL)
-    checkpoint = MODEL.name + "@" + artifact["identity"]["fingerprint"]
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
-    service = http(8282, "/v1/status", timeout=10)
-    if service.get("inflight") != 0 or service.get("model") != MODEL.name:
-        raise RuntimeError("expected idle Kimi service before suspension")
-    atomic(output / "service-before.json", service)
-    plist_digest = hashlib.sha256(PLIST.read_bytes()).hexdigest()
-    domain = "gui/" + str(os.getuid())
-    suspended = False
-    try:
-        subprocess.run(["launchctl", "bootout", domain + "/" + LABEL], check=True)
-        suspended = True
-        for name in args.arms.split(","):
-            if name == "profile":
-                corpus = json.loads((ROOT / "qualification/corpora/spomin-20x20-long-multiturn-corpus-20260915.json").read_text())
-                candidate = {"mode": "fixed", "k": 8, "profile_case": corpus["cases"][0]}
-            elif name.startswith("fixed"):
-                candidate = {"mode": "fixed", "k": int(name[5:])}
-                if candidate["k"] not in (8, 10, 12): raise ValueError("unsupported fixed budget")
-            elif name in ("adaptive-selected", "adaptive-reference8"):
-                candidate = {"mode": "adaptive", "ratio": args.ratio,
-                             "normalization": name.removeprefix("adaptive-")}
-            else: raise ValueError("unknown arm")
-            arm = output / name
-            arm.mkdir()
-            spec = {"out": str(arm), "job_id": output.name + "-" + name,
-                    "model": str(MODEL), "checkpoint": checkpoint, "candidate": candidate,
-                    "source_revision": revision, "source_snapshot_sha256": digest(source_manifest(ROOT)),
-                    "mcp_url": "http://127.0.0.1:8766/mcp", "port": 18323,
-                    "profile": "M5 Max; Q8g64; B1/inflight1; 2GiB APCv2; prefill128; no thermal hold"}
-            atomic(arm / "spec.json", spec)
-            atomic(arm / "source.json", source_manifest(ROOT))
-            with DesktopCPGLease(arm, spec["job_id"], checkpoint=checkpoint, source_revision=revision) as lease:
-                command = [sys.executable, str(ROOT / "scripts/run_with_gpu_locks.py"),
-                    "--session", lease.owner["cpg_session"], "--label", spec["job_id"],
-                    "--desktop-cpg-lease", str(lease.path), "--receipt", str(arm / "paired-locks.json"),
-                    "--", sys.executable, "-u", str(Path(__file__).resolve()), "unit", "--output", str(arm)]
-                with (arm / "run.log").open("w") as log:
-                    child = spawn(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, cwd=ROOT)
-                    deadline = time.monotonic() + 1800
-                    try:
-                        while child.poll() is None:
-                            lease.check()
-                            if time.monotonic() > deadline: raise TimeoutError("bounded artifact ownership window")
-                            time.sleep(1)
-                        lease.success = child.returncode == 0
-                        if not lease.success: raise RuntimeError(name + " failed; inspect run.log")
-                    finally:
-                        child.stop(timeout=20)
-            print("COMPLETED " + name, flush=True)
-    finally:
-        if suspended:
-            if hashlib.sha256(PLIST.read_bytes()).hexdigest() != plist_digest:
-                raise RuntimeError("service definition changed; automatic restoration refuses")
-            restored = subprocess.run(["launchctl", "bootstrap", domain, str(PLIST)], capture_output=True, text=True)
-            atomic(output / "service-restore.json", {"returncode": restored.returncode, "stderr": restored.stderr})
-            if restored.returncode: raise RuntimeError("failed to restore Kimi service")
+    raise RuntimeError("Retired unsafe multi-unit lifecycle. Use the one-unit parents in scripts/research/kimi_moe; see README.md there.")
 
 
 def main():

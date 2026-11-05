@@ -101,7 +101,7 @@ READ_TIMEOUT_SECONDS = 60.0
 MECHANISM_REVISION = "weight-stream-v2"
 
 STREAM_MODES = ("moe_experts", "dense_mlp", "dense_layers")
-PREFILL_ADMISSION_POLICIES = ("lru", "terminal_hot")
+PREFILL_ADMISSION_POLICIES = ("lru", "terminal_hot", "scan_resistant")
 ROUTER_HINT_POLICIES = ("off", "next_layer_reuse")
 
 _EXPERT_PREFILL = contextvars.ContextVar("mlx2_expert_prefill", default=None)
@@ -112,8 +112,8 @@ def expert_prefill_admission(phase: str, request_key):
     """Name an intermediate, terminal or mixed pure-prefill forward to expert caches.
 
     ``mixed`` is a ragged forward in which one request's prompt ends while
-    another's continues: one gather cannot be both, so it takes plain LRU
-    admission and leaves the request counts alone.
+    another's continues: terminal_hot takes plain LRU and leaves request
+    counts alone. scan_resistant treats every pure-prefill phase as a scan.
     """
     if phase not in ("intermediate", "terminal", "mixed"):
         raise ValueError(f"unknown expert prefill phase {phase!r}")
@@ -1128,6 +1128,8 @@ class StreamStats:
     prefill_mixed_calls: int = 0
     prefill_ephemeral_page_ins: int = 0
     prefill_request_resets: int = 0
+    scan_calls: int = 0
+    scan_protected_hits: int = 0
     _group: object = field(default=None, repr=False)
     _group_transient: int = field(default=0, repr=False)
     _group_members: set = field(default_factory=set, repr=False)
@@ -1196,6 +1198,8 @@ class StreamStats:
             "stream_prefill_mixed_calls_total": self.prefill_mixed_calls,
             "stream_prefill_ephemeral_page_ins_total": self.prefill_ephemeral_page_ins,
             "stream_prefill_request_resets_total": self.prefill_request_resets,
+            "stream_scan_calls_total": self.scan_calls,
+            "stream_scan_protected_hits_total": self.scan_protected_hits,
         }
 
 
@@ -1224,14 +1228,22 @@ class ExpertLRU:
         self.stats = stats
         self.group = group
         self.path = path
+        if prefill_admission not in PREFILL_ADMISSION_POLICIES:
+            raise ValueError(f"unknown expert prefill admission {prefill_admission!r}")
         self.prefill_admission = prefill_admission
         self._entries: "OrderedDict[int, Tuple[object, ...]]" = OrderedDict()
+        # Decode reuse is protected from one-off prefill scans. Only cache
+        # keys live here; the caller still holds every acquired working set.
+        # See provenance/ironmlx-scan-resistant-20261104.json.
+        self._protected: set[int] = set()
         self._prefill_key = None
         self._prefill_counts: Dict[int, int] = {}
         self._last_ephemeral = 0
         self._router_hints = None
         self._router_hint_target = None
         settings = AdaptiveResidencySettings.parse(adaptive_residency)
+        if settings.enabled and prefill_admission != "lru":
+            raise ValueError("adaptive residency replaces other prefill admission policies")
         self.adaptive = AdaptiveExpertResidency(reader.num_experts, settings) if settings.enabled else None
         self._busy = False
 
@@ -1241,6 +1253,7 @@ class ExpertLRU:
 
     def _drop(self, expert: int) -> None:
         self._entries.pop(expert)
+        self._protected.discard(expert)
         self.stats.remove_resident(self.reader.expert_bytes)
         self.stats.bump("evictions")
 
@@ -1316,6 +1329,9 @@ class ExpertLRU:
         if self.adaptive is not None:
             return self._acquire_adaptive(wanted)
         phase = self._prefill_mode(wanted)
+        scan = self.prefill_admission == "scan_resistant" and _EXPERT_PREFILL.get() is not None
+        if scan:
+            self.stats.scan_calls += 1
         self._last_ephemeral = 0
         if phase == "intermediate":
             return self._acquire_intermediate(wanted)
@@ -1341,7 +1357,10 @@ class ExpertLRU:
         missing = []
         for expert in wanted:
             if expert in self._entries:
-                self._entries.move_to_end(expert)
+                if not scan:
+                    self._touch_decode(expert)
+                elif expert in self._protected:
+                    self.stats.scan_protected_hits += 1
                 self.stats.bump("hits")
             else:
                 self.stats.bump("misses")
@@ -1372,6 +1391,8 @@ class ExpertLRU:
                 # does not depend on which read finished first.
                 for expert in missing:
                     self._entries[expert] = fetched.pop(expert)
+                    if self.prefill_admission == "scan_resistant" and not scan:
+                        self._touch_decode(expert)
                     self.stats.add_resident(self.reader.expert_bytes)
                     self.stats.bump("page_ins")
                     self.stats.bump("page_in_bytes", self.reader.expert_bytes)
@@ -1435,11 +1456,7 @@ class ExpertLRU:
 
     def _evict_for(self, incoming: int, *, keep) -> None:
         while self.resident + incoming > self.capacity:
-            victim = None
-            for expert in self._entries:
-                if expert not in keep:
-                    victim = expert
-                    break
+            victim = self._victim(keep)
             if victim is None:  # Only the current working set remains.
                 break
             self._drop(victim)
@@ -1447,11 +1464,35 @@ class ExpertLRU:
     def _trim_to_capacity(self) -> None:
         while self.resident > self.capacity:
             victim = (min(self._entries, key=lambda expert: self.adaptive.scores[expert])
-                      if self.adaptive else next(iter(self._entries)))
+                      if self.adaptive else self._victim(set()))
             self._drop(victim)
+        self._rebalance_protected()
+
+    def _touch_decode(self, expert: int) -> None:
+        self._entries.move_to_end(expert)
+        if self.prefill_admission != "scan_resistant":
+            return
+        self._protected.add(expert)
+        self._rebalance_protected()
+
+    def _rebalance_protected(self) -> None:
+        # Keep a probation segment; demotion retains LRU age and payload.
+        limit = max(1, self.capacity * 3 // 4)
+        for candidate in self._entries:
+            if len(self._protected) <= limit:
+                break
+            self._protected.discard(candidate)
+
+    def _victim(self, keep):
+        # The current gather's rows cannot be removed before resolution.
+        candidates = [expert for expert in self._entries if expert not in keep]
+        if self.prefill_admission == "scan_resistant":
+            candidates.sort(key=lambda expert: expert in self._protected)
+        return candidates[0] if candidates else None
 
     def clear(self) -> None:
         self._reset_prefill(count=False)
+        self._protected.clear()
         while self._entries:
             expert = next(iter(self._entries))
             self._entries.pop(expert)
@@ -2309,6 +2350,12 @@ class ExpertStreamManager(_ManagerBase):
             "qualification": "unqualified" if self.prefill_admission != "lru" else "stock",
             "default": self.prefill_admission == "lru",
         }
+        if self.prefill_admission == "scan_resistant":
+            receipt["prefill_admission"].update({
+                "revision": "scan-resistant-v1",
+                "protected_experts": sum(len(cache._protected) for cache in self.caches.values()),
+                "arithmetic": "stock_gather",
+            })
         receipt["router_hint"] = {
             "policy": self.router_hint,
             "qualification": "unqualified" if self.router_hint != "off" else "stock",

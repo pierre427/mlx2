@@ -312,7 +312,8 @@ class ServingCompletionContracts(unittest.TestCase):
     def test_hybrid_final_route_and_output_ids_preserve_used_receipt(self):
         original={'route':'native_hybrid_paged_b2','selected':True,'observed_used':True,'qualified':False}
         env={'response':NS(mtp_receipt=original),'job':NS(receipt_token_ids=[13,14,15]),
-             'self':NS(snapshot={'settings':{'route':'ordinary'}},route_selection_source='default'),
+             'self':NS(snapshot={'settings':{'route':'ordinary'}},route_selection_source='default',
+                     _kernel_route_receipt=lambda receipt:receipt,_weight_space_route_receipt=lambda job,receipt:receipt),
              'route_receipt':{'route':'ordinary'}}
         selected=None
         for node in ast.walk(self.source):

@@ -135,7 +135,7 @@ def unit(spec):
         references['sampled_identifier']['functional_oracle'] = oracle('identifier', references['sampled_identifier']['text'])
         atomic(out / 'reference.json', references)
         # A diagnostic mismatch can be inspected later by a fresh direct run.
-        del model, adapter
+        model = adapter = None  # release; closures above still reference these names
         gc.collect()
         mx.clear_cache()
         module_spec = importlib.util.spec_from_file_location('ast_stream', ROOT / 'qualification/runs/ast-smokes-20261018/ast_smoke.py')

@@ -91,7 +91,7 @@ class WeightStreamRequest:
         if (residency.enabled or self.elastic) and (self.expert_overlap or self.router_hint != "off"):
             raise ValueError("adaptive/elastic expert memory requires synchronous demand gathers")
         if residency.enabled and self.prefill_admission != "lru":
-            raise ValueError("adaptive residency replaces terminal_hot admission")
+            raise ValueError("adaptive residency replaces other prefill admission policies")
         if self.mode not in STREAM_MODES:
             raise ValueError(f"unknown weight streaming mode {self.mode!r}")
         if self.budget_mode not in BUDGET_MODES:

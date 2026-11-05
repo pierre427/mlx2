@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", type=Path, default=Path("~/Models/Kimi-Linear-48B-A3B-Instruct-8bit"))
+    parser.add_argument("--model", type=Path, default=Path.home() / "Models/Kimi-Linear-48B-A3B-Instruct-8bit")
     parser.add_argument("--layer", type=int, default=3)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
