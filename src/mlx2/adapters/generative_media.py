@@ -47,6 +47,27 @@ QWEN_CONVERSION_BACKEND_REVISIONS = frozenset(
 )
 
 
+# Qwen-Image-2.1-Turbo: an 8-step distilled transformer composed with the
+# official 8-bit text encoder, VAE and processor (``scripts/
+# compose_qwen_image_turbo.py``). The checkpoint was distilled on this exact
+# sigma grid (its ``model_index.json`` ``sample_sigmas``; diffusers PR
+# #14950); the pinned mlx-vlm scheduler would instead shift a linspace, so
+# the adapter swaps in a fixed-grid scheduler for Turbo runs only.
+QWEN_TURBO_COMPOSITION = "mlx2-turbo-composition.json"
+QWEN_TURBO_COMPOSITION_SCHEMA = "mlx2.qwen-image-turbo-composition/1"
+QWEN_TURBO_REPO = "xocialize/Qwen-Image-2.1-Turbo"
+QWEN_TURBO_REVISION = "c0aa98437311813417a75e3219cad8630ce292a0"
+QWEN_TURBO_UPSTREAM = ("Qwen/Qwen-Image-2.1-Turbo", "d65dbc9a7e8f6b5479e33dee6030eaab2a906509")
+QWEN_TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568)
+QWEN_TURBO_KIND = "qwen-image-2.1-turbo-composed"
+
+# Noct-Q V4 (``qwen_image_noctq``): a ComfyUI int8 ConvRot merge converted to
+# MLX 8-bit and composed with the official 8-bit text encoder/VAE by hard
+# links. It samples on ComfyUI's "simple" schedule, as its card specifies.
+QWEN_NOCTQ_COMPOSITION = "mlx2-noctq-composition.json"
+QWEN_NOCTQ_KIND = "qwen-image-2.1-noctq-v4-mlx-8bit"
+
+
 @dataclass(frozen=True, slots=True)
 class MediaArtifact:
     kind: str
@@ -157,6 +178,12 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
         32,
     ):
         raise ValueError("unexpected Qwen-Image-2.1 topology")
+    if (root / QWEN_TURBO_COMPOSITION).exists():
+        return _inspect_qwen_turbo(root, model)
+    if (root / QWEN_NOCTQ_COMPOSITION).exists():
+        from .qwen_image_noctq import inspect_noctq_view
+
+        return inspect_noctq_view(root, model, transformer)
     official_conversion = root / "mlx2-official-conversion.json"
     if official_conversion.exists():
         proof = _json(official_conversion)
@@ -276,6 +303,104 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
     return MediaArtifact("qwen-image-2.1", root, QWEN_REVISION, fingerprint)
 
 
+def _inspect_qwen_turbo(root: Path, model_index: dict[str, Any]) -> MediaArtifact:
+    """Bind a composed Turbo view: every member file by size and sha256."""
+    proof = _json(root / QWEN_TURBO_COMPOSITION)
+    turbo, base = proof.get("turbo") or {}, proof.get("base") or {}
+    if (
+        proof.get("schema") != QWEN_TURBO_COMPOSITION_SCHEMA
+        or turbo.get("repo") != QWEN_TURBO_REPO
+        or turbo.get("revision") != QWEN_TURBO_REVISION
+        or base.get("kind") != "qwen-image-2.1-official-mlx-8bit"
+        or base.get("revision") != QWEN_REVISION
+    ):
+        raise ValueError("Qwen Turbo composition identity differs")
+    if tuple(proof.get("sample_sigmas") or ()) != QWEN_TURBO_SIGMAS or tuple(
+        model_index.get("sample_sigmas") or ()
+    ) != QWEN_TURBO_SIGMAS:
+        raise ValueError("Qwen Turbo sigma grid differs from the distilled 8-step grid")
+    members = proof.get("members")
+    if not isinstance(members, dict) or not members:
+        raise ValueError("Qwen Turbo composition lists no members")
+    required = {"model_index.json", "transformer/config.json", "vae/config.json",
+                "text_encoder/config.json", "processor/tokenizer.json",
+                "scheduler/scheduler_config.json"}
+    if not required.issubset(members):
+        raise ValueError("Qwen Turbo composition lacks a pipeline component")
+    for name, record in members.items():
+        target = (root / name).resolve()
+        if (
+            not target.is_relative_to(root)
+            or not isinstance(record, dict)
+            or record.get("source") not in ("turbo", "base")
+            or not target.is_file()
+            or target.stat().st_size != record.get("size")
+            or _file_sha256(target) != record.get("sha256")
+        ):
+            raise ValueError(f"Qwen Turbo member changed: {name}")
+    return MediaArtifact(QWEN_TURBO_KIND, root, QWEN_TURBO_REVISION, _fingerprint(proof))
+
+
+class _FixedSigmaScheduler:
+    """FlowMatchEuler over a fixed sigma grid (diffusers ``sigmas=`` with
+    ``shift=1``, no dynamic or terminal shift): the grid is used verbatim
+    and a final 0 is appended. Same ``step`` as the pinned mlx-vlm one."""
+
+    grid: tuple[float, ...] = ()
+
+    def __init__(self, *, image_seq_len: int, num_inference_steps: int, num_train_timesteps: int = 1000, **_shift) -> None:
+        import mlx.core as mx
+
+        if num_inference_steps != len(self.grid):
+            raise ValueError(
+                f"this checkpoint runs exactly {len(self.grid)} steps, not {num_inference_steps}"
+            )
+        sigmas = mx.array(self.grid, dtype=mx.float32)
+        self.timesteps = sigmas * num_train_timesteps
+        self.sigmas = mx.concatenate([sigmas, mx.zeros((1,), dtype=sigmas.dtype)], axis=0)
+
+    def step(self, *, noise, step_index: int, latents):
+        import mlx.core as mx
+
+        dt = (self.sigmas[step_index + 1] - self.sigmas[step_index]).astype(noise.dtype)
+        return (latents.astype(mx.float32) + dt * noise).astype(noise.dtype)
+
+
+def fixed_sigma_scheduler(grid: tuple[float, ...]) -> type:
+    return type("FixedSigmaScheduler", (_FixedSigmaScheduler,), {"grid": tuple(grid)})
+
+
+class _sigma_grid_override:
+    """Swap the pinned mlx-vlm Qwen pipeline's scheduler class for one run.
+
+    The pin is not edited; ``pipeline.FlowMatchEulerDiscreteScheduler`` is
+    replaced on entry and restored on exit (the adapter serializes calls).
+    ``grid`` is a fixed sigma tuple or a scheduler class (Noct-Q's ComfyUI
+    "simple" schedule, whose sigmas depend on the step count).
+    """
+
+    def __init__(self, grid: tuple[float, ...] | type | None) -> None:
+        self.grid = grid
+        self._module = None
+        self._original = None
+
+    def __enter__(self):
+        if self.grid is None:
+            return self
+        from mlx_vlm.models.qwen_image import pipeline
+
+        self._module = pipeline
+        self._original = pipeline.FlowMatchEulerDiscreteScheduler
+        pipeline.FlowMatchEulerDiscreteScheduler = (
+            self.grid if isinstance(self.grid, type) else fixed_sigma_scheduler(self.grid)
+        )
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._module is not None:
+            self._module.FlowMatchEulerDiscreteScheduler = self._original
+
+
 def inspect_ltx25_source(path: str | Path) -> MediaArtifact:
     root = Path(path).expanduser().resolve()
     manifest = _complete_snapshot(
@@ -306,12 +431,18 @@ def _verify_qwen_backend_revision() -> dict:
 def _qwen_bound_inputs(root):
     """Capture identities before inspection hashes can race a large shard load."""
     root = Path(root).expanduser().resolve()
-    official, converted = (
+    official, converted, turbo, noctq = (
         root / "mlx2-official-conversion.json",
         root / "mlx2-conversion.json",
+        root / QWEN_TURBO_COMPOSITION,
+        root / QWEN_NOCTQ_COMPOSITION,
     )
     proof_path = (
-        official
+        turbo
+        if turbo.exists()
+        else noctq
+        if noctq.exists()
+        else official
         if official.exists()
         else converted
         if converted.exists()
@@ -321,7 +452,9 @@ def _qwen_bound_inputs(root):
         str(proof_path.relative_to(root)): LTX25Adapter._file_identity(proof_path)
     }
     proof = _json(proof_path)
-    if proof_path == official:
+    if proof_path in (turbo, noctq):
+        records = proof["members"]
+    elif proof_path == official:
         records = proof["output_files"]
     elif proof_path == converted:
         records = {
@@ -357,6 +490,16 @@ class QwenImage21Adapter(MediaLoRAControl):
         self._input_identity = _qwen_bound_inputs(path)
         self.artifact = inspect_qwen_image21(path)
         self._verify_input_identity()
+        # Turbo runs on its distilled grid; every other artifact keeps the
+        # pinned backend's own shifted schedule.
+        kind = getattr(self.artifact, "kind", None)
+        self.sigma_grid = QWEN_TURBO_SIGMAS if kind == QWEN_TURBO_KIND else None
+        # Noct-Q follows its card: ComfyUI's "simple" schedule (any step count).
+        self.scheduler_override = None
+        if kind == QWEN_NOCTQ_KIND:
+            from .qwen_image_noctq import comfy_simple_scheduler
+
+            self.scheduler_override = comfy_simple_scheduler()
         self._backend_factory = backend_factory
         self._generator: Any = None
         self._editor: Any = None
@@ -421,9 +564,13 @@ class QwenImage21Adapter(MediaLoRAControl):
         height: int = 1024,
         steps: int = 30,
         seed: int = 0,
+        guidance: float | None = None,
+        negative_prompt: str | None = None,
     ) -> GeneratedImage:
         self._validate_request(prompt, width, height, steps)
+        self._validate_steps_for_artifact(steps)
         _validate_seed(seed)
+        extra = _validate_guidance(guidance, negative_prompt)
         self._verify_input_identity()
         from mlx_vlm.generate.image import ImageGenerationRequest
 
@@ -435,11 +582,13 @@ class QwenImage21Adapter(MediaLoRAControl):
             ):
                 self._attach_lora(candidate.pipeline.transformer)
             self._generator = candidate
-        result = self._generator.generate(
-            ImageGenerationRequest(
-                prompt=prompt, width=width, height=height, steps=steps, seed=seed
+        with _sigma_grid_override(self._scheduler()):
+            result = self._generator.generate(
+                ImageGenerationRequest(
+                    prompt=prompt, width=width, height=height, steps=steps, seed=seed,
+                    **extra,
+                )
             )
-        )
         return self._encode(result.array, seed=seed, steps=steps)
 
     @serialized
@@ -452,9 +601,13 @@ class QwenImage21Adapter(MediaLoRAControl):
         height: int = 1024,
         steps: int = 40,
         seed: int = 0,
+        guidance: float | None = None,
+        negative_prompt: str | None = None,
     ) -> GeneratedImage:
         self._validate_request(prompt, width, height, steps)
+        self._validate_steps_for_artifact(steps)
         _validate_seed(seed)
+        extra = _validate_guidance(guidance, negative_prompt)
         self._verify_input_identity()
         if not image_paths:
             raise ValueError("at least one reference image is required")
@@ -471,16 +624,18 @@ class QwenImage21Adapter(MediaLoRAControl):
             ):
                 self._attach_lora(candidate.pipeline.transformer)
             self._editor = candidate
-        result = self._editor.edit(
-            ImageEditRequest(
-                prompt=prompt,
-                image_paths=[str(path) for path in references],
-                width=width,
-                height=height,
-                steps=steps,
-                seed=seed,
+        with _sigma_grid_override(self._scheduler()):
+            result = self._editor.edit(
+                ImageEditRequest(
+                    prompt=prompt,
+                    image_paths=[str(path) for path in references],
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    seed=seed,
+                    **extra,
+                )
             )
-        )
         references_sha256 = tuple(
             hashlib.sha256(path.read_bytes()).hexdigest() for path in references
         )
@@ -506,6 +661,15 @@ class QwenImage21Adapter(MediaLoRAControl):
             )
         if not _is_int(steps) or not 1 <= steps <= 100:
             raise ValueError("steps must be in 1..100")
+
+    def _scheduler(self):
+        """The scheduler swap for this artifact: a class, a fixed grid, or None."""
+        return getattr(self, "scheduler_override", None) or getattr(self, "sigma_grid", None)
+
+    def _validate_steps_for_artifact(self, steps: int) -> None:
+        grid = getattr(self, "sigma_grid", None)
+        if grid is not None and steps != len(grid):
+            raise ValueError(f"{self.artifact.kind} runs exactly {len(grid)} steps")
 
     def _encode(self, array: Any, *, seed=None, steps=None, references=()) -> GeneratedImage:
         import numpy as np
@@ -534,6 +698,24 @@ class QwenImage21Adapter(MediaLoRAControl):
             steps=steps,
             reference_sha256=tuple(references),
         )
+
+
+def _validate_guidance(guidance, negative_prompt) -> dict[str, Any]:
+    """Request fields for classifier-free guidance; empty when neither is given.
+
+    The pinned mlx-vlm pipeline runs CFG (``neg + g * (pos - neg)``) when
+    ``guidance > 1`` and encodes ``extra["negative_prompt"]`` (default " ").
+    """
+    extra: dict[str, Any] = {}
+    if guidance is not None:
+        if isinstance(guidance, bool) or not isinstance(guidance, (int, float)) or not 1.0 <= float(guidance) <= 10.0:
+            raise ValueError("guidance must be a number in 1.0..10.0")
+        extra["guidance"] = float(guidance)
+    if negative_prompt is not None:
+        if not isinstance(negative_prompt, str) or len(negative_prompt) > 8192:
+            raise ValueError("negative_prompt must be a string of at most 8192 characters")
+        extra["extra"] = {"negative_prompt": negative_prompt or " "}
+    return extra
 
 
 def _ltx_source_hashes(root, expected_revision=LTX_RUNTIME_REVISION):

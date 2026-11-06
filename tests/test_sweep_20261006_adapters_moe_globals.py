@@ -46,6 +46,8 @@ def fresh_globals(monkeypatch):
     monkeypatch.setattr(process_globals, "_PENDING", {})
     monkeypatch.setattr(moe_nax_gather, "MODE", "off")
     monkeypatch.setattr(switch_layers, "_RHS_PAD_POLICY", "floor")
+    monkeypatch.setenv("MLX2_MOE_NAX_GATHER", "off")
+    monkeypatch.setenv("MLX2_MOE_RHS_PAD_POLICY", "floor")
 
 
 @pytest.mark.parametrize("adapter", sorted(STOCK_MOE_ADAPTERS))

@@ -109,6 +109,7 @@ from .qwen4_qsa_nax import (
     compact_token_validity,
     nax_kernel_available,
     nax_qsa_attention,
+    qsa_nax_law,
 )
 from .qwen4_qsa_indexed import (
     QSAIndexedProbeDeclined,
@@ -822,6 +823,8 @@ def _record_qsa_nax_admission(selection, decision: QSANAXAdmission) -> None:
         "batch": int(selection.batch),
         "query_width": int(selection.length),
         "physical_kv": int(selection.physical_width),
+        # The kernel law an engaged call ran (qwen4_qsa_nax.LAWS).
+        "law": qsa_nax_law(),
     }
     with _QSA_NAX_STATS_LOCK:
         _QSA_NAX_STATS[decision.reason] += 1
@@ -851,6 +854,8 @@ def qsa_nax_status(*, reset: bool = False) -> dict:
             "min_query_width": int(_QSA_NAX_MIN_QUERY),
             "min_physical_kv": int(_QSA_NAX_AUTO_MIN_PHYSICAL_KV),
             "batched": bool(_QSA_NAX_AUTO_BATCHED),
+            "law": _nax_module.qsa_nax_law(),
+            "law_id": _nax_module.LAWS[_nax_module.qsa_nax_law()],
             **gate,
             # None until a call reached the probe (it runs on the GPU).
             "kernel_available": _nax_module._NAX_AVAILABLE,
@@ -5342,7 +5347,8 @@ def _compact_qsa_block_ids(
     ids = mx.take_along_axis(selected_block_ids, mx.argsort(keys, axis=-1), axis=-1)
     counts = mx.sum(selected_is_valid.astype(mx.int32), axis=-1)
     packed = mx.arange(width) < counts[..., None]
-    return (mx.where(packed, ids, mx.zeros_like(ids)), counts)
+    # A broadcast scalar zero, not a materialized [B, L, K] zeros array.
+    return (mx.where(packed, ids, mx.array(0, dtype=ids.dtype)), counts)
 
 
 @dataclass(frozen=True)

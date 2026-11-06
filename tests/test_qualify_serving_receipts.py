@@ -690,11 +690,6 @@ def test_preflight_tree_binds_script_fixtures_and_provenance(tmp_path):
     provenance = "provenance/omlx3958-wide-verify-sdpa.json"
     assert fixture in real and provenance in real
     assert "provenance/tensor-fa-research.NOTICE" in real
-    if not any(
-        p.startswith("qualification/artifacts/") and p.endswith("weights.npz")
-        for p in real
-    ):
-        pytest.skip("private qualification weight fixtures are not exported")
     assert any(p.startswith("qualification/artifacts/") and p.endswith("weights.npz") for p in real)
     assert not any(p.startswith("qualification/runs/") for p in real)
     # And a change to either reaches the test that asserts on it (the fixture
@@ -1646,11 +1641,12 @@ def test_capability_scope_rejects_conflicting_status_fields():
 
 def test_live_media_companion_binds_the_generic_harness_route(tmp_path):
     from mlx2.qualification import APPROVED_MEDIA_PRODUCERS
+    from mlx2.adapters.smolvlm2 import DESCRIPTOR
+    from mlx2.qualification import adapter_qualification_descriptor_snapshot
 
-    companion = ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json"
-    if not companion.is_file():
-        pytest.skip("private SMOLVLM2 media companion is not exported")
-    report = json.loads(companion.read_text())
+    report = json.loads(
+        (ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text()
+    )
     # The recorded run names the producer revision that ran it; the producer
     # has since tightened its media-reuse predicate and bound its traces to
     # the mlx-vlm dependency-content identity, which invalidates the receipt
@@ -1660,6 +1656,8 @@ def test_live_media_companion_binds_the_generic_harness_route(tmp_path):
     from test_qualification import _rebind_to_current_producer
 
     _rebind_to_current_producer(report)
+    descriptor_snapshot = adapter_qualification_descriptor_snapshot(DESCRIPTOR)
+    report["settings"]["adapter_qualification_descriptor"] = descriptor_snapshot
     assert report["qualification_harness"] == APPROVED_MEDIA_PRODUCERS[report["model_type"]][0]
     path = tmp_path / "companion.json"
     path.write_text(json.dumps(report))
@@ -1667,6 +1665,161 @@ def test_live_media_companion_binds_the_generic_harness_route(tmp_path):
     assert qualify.read_adapter_qualification(path, status)["passed"] is True
     with pytest.raises(ValueError, match="does not match"):
         qualify.read_adapter_qualification(path, {**status, "artifact": "other"})
+
+
+def _minicpmo_companion_for_policy(policy):
+    from mlx2.adapters.mlx_vlm import MINICPMO
+    from mlx2.media_qualification import NATIVE_VLM_SOURCE_REVISIONS, evaluate_native_vlm_report
+    from mlx2.qualification import (
+        APPROVED_MEDIA_PRODUCERS,
+        adapter_qualification_descriptor_snapshot,
+    )
+    from test_qualify_native_vlm_media_cpu import _report
+
+    report, _ = _report("minicpmo")
+    revision = NATIVE_VLM_SOURCE_REVISIONS["minicpmo"]
+    runtime = {
+        "schema": "mlx2.vlm-dependencies.v1",
+        "family": "minicpmo",
+        "source_sha256": "a" * 64,
+        "dependency_files": 141,
+        "reference_revision": revision,
+    }
+    artifact = "b" * 64
+    descriptor = adapter_qualification_descriptor_snapshot(MINICPMO)
+    settings = {
+        "route": "ordinary",
+        "mlx_vlm": runtime,
+        "adapter_policy": policy,
+        "adapter_qualification_descriptor": descriptor,
+    }
+    producer, _, _, _ = APPROVED_MEDIA_PRODUCERS["minicpmo"]
+    report.update(
+        {
+            "schema": "mlx2.media-serving-qualification.v1",
+            "model_type": "minicpmo",
+            "qualification_harness": producer,
+            "source_revision": revision,
+            "source_runtime": runtime,
+            "mlx_vlm_runtime": runtime,
+            "reference_revision": revision,
+            "reference_source_sha256": runtime["source_sha256"],
+            "artifact": artifact,
+            "artifact_sha256": artifact,
+            "runtime": {"source_sha256": "c" * 64},
+            "serving_runtime": {"source_sha256": "c" * 64},
+            "settings": settings,
+            "conditional_qualification_checks": [
+                {**rule, "setting": list(rule["setting"])}
+                for rule in MINICPMO.metadata["conditional_qualification_checks"]
+            ],
+        }
+    )
+    report["producer_sha256"] = producer["sha256"]
+    report["ordinary_reference"]["receipt"]["request_controls"][
+        "sampling_defaults"
+    ] = {"schema": "mlx2.sampling-defaults.v1"}
+    feature_parity = {
+        "passed": True,
+        "shapes_match": True,
+        "tensor_count": 1,
+        "max_abs": 0.0,
+        "encoder_execution": {
+            "schema": "mlx2.encoder-execution-observation.v1",
+            "policy": policy,
+            "input_count": 2,
+            "tower_call_batch_sizes": [1, 1],
+        },
+    }
+    report["direct"]["image"]["parity"]["feature_parity"] = feature_parity
+    report["serving_encoder_execution"] = {
+        "schema": "mlx2.encoder-execution-observation.v1",
+        "policy": policy,
+        "input_count": 2,
+        "tower_call_batch_sizes": [1, 1],
+    }
+    observed = evaluate_native_vlm_report(
+        report,
+        expected_family="minicpmo",
+        expected_harness=producer,
+        expected_policy_checks=MINICPMO.metadata[
+            "conditional_qualification_checks"
+        ],
+    )
+    report["checks"] = {name: {"passed": value} for name, value in observed.items()}
+    report["passed"] = all(observed.values())
+    return report, descriptor
+
+
+def test_minicpmo_companion_uses_live_descriptor_policy_end_to_end(tmp_path):
+    from mlx2.qualification import resolve_conditional_qualification_checks
+
+    sequential_policy = {"batch_vision_input": False, "vision_batch_size": 1}
+    report, descriptor = _minicpmo_companion_for_policy(sequential_policy)
+    path = tmp_path / "minicpmo-sequential.json"
+    path.write_text(json.dumps(report))
+    status = {
+        "runtime": report["runtime"],
+        "artifact": report["artifact"],
+        "settings": report["settings"],
+    }
+    assert resolve_conditional_qualification_checks(
+        descriptor["conditional_qualification_checks"], status["settings"]
+    ) == {"multimodal_encoder_sequential"}
+    assert qualify.read_adapter_qualification(path, status)["passed"] is True
+
+    # A missing source-owned descriptor cannot fall back to media-report rules.
+    without_descriptor = {**status, "settings": dict(status["settings"])}
+    without_descriptor["settings"].pop("adapter_qualification_descriptor")
+    with pytest.raises(ValueError, match="descriptor is missing or mismatched"):
+        qualify.read_adapter_qualification(path, without_descriptor)
+
+    # Descriptor and route family are both part of the live identity.
+    wrong_family = json.loads(json.dumps(status))
+    wrong_family["settings"]["mlx_vlm"]["family"] = "gemma3n"
+    with pytest.raises(ValueError, match="descriptor is missing or mismatched"):
+        qualify.read_adapter_qualification(path, wrong_family)
+
+    wrong_descriptor = json.loads(json.dumps(status))
+    wrong_descriptor["settings"]["adapter_qualification_descriptor"][
+        "model_type"
+    ] = "gemma3n"
+    with pytest.raises(ValueError, match="descriptor is missing or mismatched"):
+        qualify.read_adapter_qualification(path, wrong_descriptor)
+
+    # The exact same sequential receipt cannot authorize a batching opt-in.
+    batch_settings = dict(status["settings"])
+    batch_settings["adapter_policy"] = {
+        "batch_vision_input": True,
+        "vision_batch_size": 2,
+    }
+    batch_status = {**status, "settings": batch_settings}
+    assert resolve_conditional_qualification_checks(
+        descriptor["conditional_qualification_checks"], batch_settings
+    ) == {"multimodal_encoder_batching"}
+    with pytest.raises(ValueError, match="does not match serving settings"):
+        qualify.read_adapter_qualification(path, batch_status)
+
+    # Even if a producer rewrites its settings and claims batching passed, the
+    # native trace evaluator must see the selected batch observer and reject
+    # sequential-only execution evidence.
+    forged = json.loads(json.dumps(report))
+    forged["settings"]["adapter_policy"] = batch_settings["adapter_policy"]
+    forged["checks"] = {
+        name: {"passed": True}
+        for name in (
+            "multimodal_image",
+            "multimodal_audio_input",
+            "multimodal_continuous_batch",
+            "multimodal_apcv2_reuse",
+            "multimodal_encoder_batching",
+        )
+    }
+    forged["passed"] = True
+    forged_path = tmp_path / "minicpmo-forged-batch.json"
+    forged_path.write_text(json.dumps(forged))
+    with pytest.raises(ValueError, match="traces are missing or failed"):
+        qualify.read_adapter_qualification(forged_path, batch_status)
 
 
 def test_near_limit_requests_hold_eos_until_the_full_budget():

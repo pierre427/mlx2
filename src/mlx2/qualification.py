@@ -86,6 +86,8 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-11-05: run-local qsa_nax_law observation (the NAX QSA
+    # prefill kernel law bound to the profile's MLX_QWEN4_QSA_NAX_LAW).
     # Re-pinned 2026-11-03: explicit optional preflight records no unit_tests
     # pass when skipped; the exact omission marker is validated below.
     # Re-pinned 2026-10-30: qmm_row_pad routed-call observation and evidence
@@ -300,7 +302,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # counts lane_exact projection growth only when every declined layer was
     # prepared and no projection fell back per row.  Receipts from
     # 17e5e863... must be regenerated. Merged with the rolling re-pin
-    # (08753e31..., also never released) on the integration branch.
+    # (08753e31..., also never released) on claude/prsurvey1014b.
     # The rolling short-context step-aside (rolling_reuse_prompt_tokens shared
     # with the probe) changed qualify_serving.py again; merged pin below.
     # Re-pinned 2026-10-14: the near-limit long-context probe uses realistic
@@ -328,7 +330,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # scope requires named controls/repeat/refusal evidence and cannot claim
     # stochastic coverage; absence preserves the historical sampling suite.
     # Re-pinned 2026-11-03: combined SC-MXFP4 observation and explicit optional preflight.
-    "sha256": "b99f2729b87e766dc64a7d1618ad6365b8b19d463e3363dc412f6b068507329a",
+    "sha256": "7205e90a813170ff1dcb02d9b8b9ac3bb25b6c40348ebdb0dbcd894fee5a4028",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -1370,15 +1372,34 @@ def _default_on_mechanisms(settings):
         # (runtime/models/gated_delta.py gdn_core_status).
         required.add("gdn_core")
     nax_mode = _qsa_nax_mode(env)
+    if (
+        settings.get("qsa_indexer") is not None
+        and nax_mode == "off"
+        and (adapter_policy.get("qsa_nax_law") in QSA_NAX_CANDIDATE_LAWS
+             or env.get("MLX_QWEN4_QSA_NAX_LAW") in QSA_NAX_CANDIDATE_LAWS)
+    ):
+        not_observed["qsa_nax_law"] = (
+            "MLX_QWEN4_QSA_NAX_KERNEL is off: the selected kernel law never runs"
+        )
     if settings.get("qsa_indexer") is not None and nax_mode != "off":
         # Flash-Next (the adapter that records its QSA indexer geometry) runs
         # the NAX block-sparse QSA prefill kernel unless it is switched off.
         # Host-gated to M5: see HOST_GATED_FEATURES / host_gated_not_observed.
         reason = _qsa_nax_prefill_unreachable(settings, env, indexer, nax_mode)
+        # A non-default kernel law (FlashNextPolicy.qsa_nax_law) must also be
+        # the law the engaged calls ran (qsa_nax_law_engagement).
+        # The policy default ("v2") is absent from as_dict receipts; the
+        # profile environment always carries a non-v1 law.
+        law_selected = (adapter_policy.get("qsa_nax_law") in QSA_NAX_CANDIDATE_LAWS
+                        or env.get("MLX_QWEN4_QSA_NAX_LAW") in QSA_NAX_CANDIDATE_LAWS)
         if reason is None:
             required.add("qsa_nax_prefill")
+            if law_selected:
+                required.add("qsa_nax_law")
         else:
             not_observed["qsa_nax_prefill"] = reason
+            if law_selected:
+                not_observed["qsa_nax_law"] = reason
     return required, not_observed
 
 
@@ -1388,7 +1409,11 @@ def _default_on_mechanisms(settings):
 # or one whose canary refused the kernel, records the mechanism as "selected,
 # not observed" with the reason: not a pass, and not a failure either (the
 # route keeps the stock path, bit-identical by construction).
-HOST_GATED_FEATURES = frozenset({"moe_nax_gather", "qsa_nax_prefill"})
+HOST_GATED_FEATURES = frozenset({"moe_nax_gather", "qsa_nax_prefill", "qsa_nax_law"})
+# Opt-in NAX QSA prefill kernel laws (qwen4_qsa_nax.LAWS minus the default).
+QSA_NAX_CANDIDATE_LAWS = frozenset({"v2", "v2_hilo"})
+# Host-gated features whose status (and host gate) is another section's.
+_HOST_GATE_SECTION = {"qsa_nax_law": "qsa_nax_prefill"}
 
 # Fallback reasons of moe_nax_gather that mean the kernel itself was refused
 # (canary failed or the instantiation could not be built).
@@ -1441,6 +1466,25 @@ def qsa_nax_prefill_engagement(execution, initial_execution=None):
     return max(0, after - before)
 
 
+def qsa_nax_law_engagement(execution, initial_execution=None, expected=None):
+    """NAX QSA prefill calls this run under a candidate law: the engagement
+    delta when the status reports a candidate law at both snapshots (the same
+    one, and ``expected`` when given), else 0, so a v1 run never passes for a
+    v2 one, nor v2 for v2_hilo."""
+    status = (execution or {}).get("qsa_nax_prefill")
+    if not isinstance(status, dict):
+        return 0
+    law = status.get("law")
+    if law not in QSA_NAX_CANDIDATE_LAWS:
+        return 0
+    if expected is not None and law != expected:
+        return 0
+    before = ((initial_execution or {}).get("qsa_nax_prefill") or {})
+    if before and before.get("law") != law:
+        return 0
+    return qsa_nax_prefill_engagement(execution, initial_execution)
+
+
 def _qsa_nax_prefill_host_gated(execution, initial_execution):
     status = (execution or {}).get("qsa_nax_prefill")
     if not isinstance(status, dict) or qsa_nax_prefill_engagement(
@@ -1458,6 +1502,10 @@ def _qsa_nax_prefill_host_gated(execution, initial_execution):
     ) or {}
     refused = counts.get("kernel_unavailable", 0)
     if type(refused) is int and refused > (before.get("kernel_unavailable", 0) or 0):
+        if status.get("law") in QSA_NAX_CANDIDATE_LAWS:
+            # The probe runs the process law: on an admitting (M5) host a
+            # refused candidate law is that law failing, not a host gate.
+            return None
         return (
             "the NAX kernel probe refused this device (kernel_unavailable): "
             "QSA prefill keeps the masked attention"
@@ -1512,6 +1560,9 @@ def host_gated_not_observed(execution, initial_execution=None):
     reason = _qsa_nax_prefill_host_gated(execution, initial_execution)
     if reason is not None:
         out["qsa_nax_prefill"] = reason
+        status = (execution or {}).get("qsa_nax_prefill") or {}
+        if status.get("law") in QSA_NAX_CANDIDATE_LAWS and status.get("nax_host") is False:
+            out["qsa_nax_law"] = reason
     status = (execution or {}).get("moe_nax_gather")
     if isinstance(status, dict) and not moe_nax_gather_engagement(
         execution, initial_execution
@@ -1574,6 +1625,7 @@ def _qsa_nax_prefill_host_gate():
 HOST_GATE_PROBES = {
     "moe_nax_gather": _moe_nax_gather_host_gate,
     "qsa_nax_prefill": _qsa_nax_prefill_host_gate,
+    "qsa_nax_law": _qsa_nax_prefill_host_gate,
 }
 
 
@@ -1583,7 +1635,7 @@ def host_gate_record(feature, execution):
     The producer binds this into a host-gated "selected, not observed" entry
     so the loader can compare it with the serving host.
     """
-    status = (execution or {}).get(feature)
+    status = (execution or {}).get(_HOST_GATE_SECTION.get(feature, feature))
     if not isinstance(status, dict):
         return None
     return {

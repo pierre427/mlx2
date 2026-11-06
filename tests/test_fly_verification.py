@@ -6,6 +6,8 @@ import pytest
 from mlx2.runtime.speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
+    apply_fly_relaxation_positions,
+    count_delivered_relaxed_accepts,
     verify_proposals,
 )
 
@@ -51,6 +53,9 @@ def test_fly_relaxes_only_when_entropy_probability_and_window_all_pass():
     assert accepted.accepted == 2
     assert accepted.relaxed_accepts == 1
     assert accepted.emitted == (0, 1, 2)
+    assert apply_fly_relaxation_positions(
+        tokens, targets[:2], [False, True], policy
+    ) == (2, (0,))
 
     failures = [
         {**policy, "entropy_threshold": 1.1},
@@ -74,6 +79,46 @@ def test_fly_relaxes_only_when_entropy_probability_and_window_all_pass():
         fly_verification=policy,
     )
     assert rejected_window.accepted == rejected_window.relaxed_accepts == 0
+
+
+@pytest.mark.parametrize(
+    "positions,relaxed,delivered,accepted,expected",
+    [
+        ((0, 2), 2, 2, 3, 1),
+        ((0, 2), 2, 3, 3, 2),
+        ((-1, 1, 1, 3), 4, 3, 3, 0),
+        ((0,), 0, 1, 1, 0),
+        ((0, 1), 1, 2, 2, 0),
+        ((0, 0), 2, 1, 2, 0),
+        ((0, 2), 2, 2, 2, 0),
+        ((), 2, 2, 3, 0),
+        ((), 2, 3, 3, 2),
+        ((), 1, 1, 1, 1),
+        ((), 2, 1, 1, 0),
+    ],
+    ids=[
+        "position-cut",
+        "positions-delivered",
+        "malformed-positions-fail-closed",
+        "position-count-zero",
+        "position-count-mismatch",
+        "duplicate-positions",
+        "position-outside-accepted-prefix",
+        "legacy-partial-prefix",
+        "legacy-accepted-prefix-without-bonus",
+        "legacy-single-accepted-stop",
+        "legacy-inconsistent-count",
+    ],
+)
+def test_delivered_relaxed_accept_accounting(
+    positions, relaxed, delivered, accepted, expected
+):
+    assert count_delivered_relaxed_accepts(
+        positions,
+        relaxed,
+        delivered=delivered,
+        accepted=accepted,
+    ) == expected
 
 
 def test_fly_default_off_preserves_rng_and_output_bit_exactly():

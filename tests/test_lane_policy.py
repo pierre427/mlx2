@@ -287,6 +287,10 @@ def test_status_and_metrics_expose_lane_state(monkeypatch):
         status = lane_matmul_status(engine)
         assert status["installed"] and status["mode"] == "crossover"
         assert status["covered"]["affine-q4-g64"] == 2 and status["counts"]["lane_calls"] == 5
+        # The default-on arithmetic class is part of the APCv2 lane namespace.
+        arithmetic = engine.lane_matmul_receipt["arithmetic_class"]
+        assert status["arithmetic_class"] == arithmetic
+        assert status["arithmetic_class_fingerprint"] == arithmetic["fingerprint"]
         text = render_engine_metrics(engine)
         assert_valid_prometheus_text(text)
         assert 'mlx2_lane_matmul_enabled{mode="crossover"} 1' in text

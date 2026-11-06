@@ -327,11 +327,13 @@ def test_flash_next_policy_sparse_mode_reaches_the_identity():
     # Since 2026-10-02 the Flash-Next default runs the adaptive MoE pad and
     # the 8192 NAX prefill crossover, both bit-changing, so its default
     # environment is bound; the old values leave the namespace unbound.
+    # Default NAX prefill kernel law v2 since 2026-11-05 (Pierre).
     assert execution_numerics_identity(FlashNextPolicy().environment()) == {
         "version": 1, "MLX2_MOE_RHS_PAD_POLICY": "adaptive", "qsa_nax_min_physical_kv": 8192,
+        "qsa_nax_law": "qsa-nax-v2-bf16p",
     }
     assert execution_numerics_identity(FlashNextPolicy(
-        moe_rhs_pad_policy="floor", qsa_nax_min_physical_kv=16384
+        moe_rhs_pad_policy="floor", qsa_nax_min_physical_kv=16384, qsa_nax_law="v1"
     ).environment()) is None
     gather = FlashNextPolicy(qsa_batch_decode_sparse="gather").environment()
     indexed = FlashNextPolicy(

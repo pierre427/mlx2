@@ -603,26 +603,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-Sushi layer-major offline capture: source https://github.com/beamivalice/sushi at
-ad562c4078a62d9d0a562add7e109cbc330de96b (MIT).
-mlx2 supplies adapter binding, bounds, refusals and operation receipts.
-These opt-in mechanisms do not establish trained-model quality or performance.
-
-Sushi resident 2.5-bit EXL3: source https://github.com/beamivalice/sushi at
-ad562c4078a62d9d0a562add7e109cbc330de96b (MIT).
-mlx2 supplies adapter binding, bounds, refusals and operation receipts.
-These opt-in mechanisms do not establish trained-model quality or performance.
-
-Sushi gated expert overlap: source https://github.com/beamivalice/sushi at
-ad562c4078a62d9d0a562add7e109cbc330de96b (MIT).
-mlx2 supplies adapter binding, bounds, refusals and operation receipts.
-These opt-in mechanisms do not establish trained-model quality or performance.
-
-The EXL3 synthetic converter oracle in tests/fixtures is retained from the
-same Sushi revision under MIT; it is test data, not a trained model pack.
-Fixture SHA256: 5a651adc9cb67f065d2786b548b3a0a010ae482b80c4e269a6701f745840be08.
-The Metal header has trailing whitespace normalized; kernel arithmetic is unchanged.
-
 ------------------------------------------------------------------------------
 Apache-2.0 sources adapted in the AST, drafter, MoE and model work (2026-10)
 
@@ -826,10 +806,6 @@ and the modification notice and change log (MODIFICATIONS.md).
 EAGLE, Eagle 4, EAGLE-Harness, and EAGLE Efficient LM Head are trademarks or
 claimed trademarks of Eagle AI Corp. mlx2 is not affiliated with, certified
 by, sponsored by, or endorsed by Eagle AI Corp.
-
-The built-in web_tools backend contains user-owned code released under the
-project Apache-2.0 license with the owner's explicit authorization on 2026-10-23.
-Third-party dependencies retain their respective licenses.
 
 mlx-tree-spec mechanism intake
 Copyright 2026 Aditya Gajbhiye. Apache-2.0.

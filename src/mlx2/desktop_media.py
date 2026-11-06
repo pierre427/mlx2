@@ -189,25 +189,15 @@ class MediaController:
         return self.snapshot()
 
     def snapshot(self):
+        from .image_mcp.catalog import ImageBackendCatalog
         configured = {p["id"]: p for p in self.profiles()}
         with self.lock:
             services = [{**p, **self.cache.get(p["id"], {}), "configured": p["id"] in configured}
                         for p in list(configured.values()) + [p for p in known_services() if p["id"] not in configured]]
         # Credential references are internal metadata; actual headers never leave client().
-        try:
-            from .image_mcp.catalog import ImageBackendCatalog
-        except ModuleNotFoundError as error:
-            if error.name not in {"mlx2.image_mcp", "mlx2.image_mcp.catalog"}:
-                raise
-            images = []
-            image_available = False
-        else:
-            images = ImageBackendCatalog(self.controller.primary.library.root).inventory()
-            image_available = True
+        images = ImageBackendCatalog(self.controller.primary.library.root).inventory()
         providers = [{"id": "mlx2-image", "capability": "image", "models": images,
-            "available": image_available,
-            "unavailable_reason": "" if image_available else "Built-in image service is not included in this distribution",
-            "route_capabilities": {"text_to_image": image_available, "image_to_image": image_available,
+            "route_capabilities": {"text_to_image": True, "image_to_image": True,
                 "lora": {"adapter_implemented": True, "service_exposed": False, "qualified": False,
                     "reason": "ImageService does not yet pass a LoRA artifact to its bounded runner"},
                 "voice_training": {"implemented": False, "reason": "Image generation is not voice training"}}}]

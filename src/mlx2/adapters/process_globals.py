@@ -11,8 +11,9 @@ registry fails closed (Codex review, flip-isolation 2026-10-02):
 
 * ``claim`` refuses to construct an adapter whose selection would change a
   global that a live adapter depends on, unless the values are equal;
-* the setters run only through the claim, and ``rollback`` puts the old
-  values back when construction fails, so a failed load leaves nothing;
+* the setters run only through the claim, which keeps their environment
+  identity synchronized for late imports and child processes; ``rollback``
+  puts both representations back when construction fails;
 * ``commit`` records the selections against a weak reference to the
   adapter; ``release`` (adapter ``close``) or garbage collection ends the
   dependency.
@@ -21,12 +22,18 @@ registry fails closed (Codex review, flip-isolation 2026-10-02):
 from __future__ import annotations
 
 import gc
+import os
 import threading
 import weakref
 from typing import Any, Callable, Mapping, Optional
 
 MOE_NAX_GATHER = "moe_nax_gather"
 MOE_RHS_PAD_POLICY = "moe_rhs_pad_policy"
+_SELECTION_ENV = {
+    MOE_NAX_GATHER: "MLX2_MOE_NAX_GATHER",
+    MOE_RHS_PAD_POLICY: "MLX2_MOE_RHS_PAD_POLICY",
+}
+_MISSING = object()
 
 
 class ProcessGlobalConflict(ValueError):
@@ -91,6 +98,7 @@ class Claim:
         self.owner = owner
         self.selections = dict(selections)
         self._restore: list = []
+        self._restore_env: list = []
         self._committed = False
 
     def apply(self) -> "Claim":
@@ -116,6 +124,15 @@ class Claim:
             )
             try:
                 for name, (value, setter) in self.selections.items():
+                    env_name = _SELECTION_ENV.get(name)
+                    if env_name is not None:
+                        self._restore_env.append(
+                            (env_name, os.environ.get(env_name, _MISSING))
+                        )
+                        # The environment is part of route identity for late
+                        # imports, child processes and profile transitions.
+                        # Keep it equal to the claimed live module selection.
+                        os.environ[env_name] = str(value)
                     if setter is not None:
                         self._restore.append((setter, setter(value)))
             except BaseException:
@@ -129,6 +146,12 @@ class Claim:
             while self._restore:
                 setter, old = self._restore.pop()
                 setter(old)
+            while self._restore_env:
+                name, old = self._restore_env.pop()
+                if old is _MISSING:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = old
             pending = _PENDING.get(id(self.holder))
             if pending is not None and pending[0]() is self.holder:
                 del _PENDING[id(self.holder)]
@@ -146,6 +169,7 @@ class Claim:
             _HOLDERS[id(self.holder)] = (weakref.ref(self.holder), self.owner, values)
             del _PENDING[id(self.holder)]
             self._restore.clear()
+            self._restore_env.clear()
             self._committed = True
 
 

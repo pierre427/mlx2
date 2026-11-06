@@ -107,7 +107,7 @@ def test_status_counts_engagements_and_reasons(monkeypatch):
         }
         assert status["last_receipt"] == {
             "engaged": False, "reason": "auto_context_below_crossover",
-            "batch": 1, "query_width": 512, "physical_kv": 2048,
+            "batch": 1, "query_width": 512, "physical_kv": 2048, "law": "v1",
         }
         assert status["mode"] == "auto"
         assert status["min_query_width"] == 64

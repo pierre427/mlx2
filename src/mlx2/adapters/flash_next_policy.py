@@ -421,6 +421,21 @@ class FlashNextPolicy:
     # carries the value whenever it differs from the module default 16384.
     qsa_nax_min_physical_kv: int = 8192
     qsa_nax_batched: bool = False
+    # NAX block-sparse QSA prefill kernel law (MLX_QWEN4_QSA_NAX_LAW,
+    # qwen4_qsa_nax.LAWS).  "v1" is today's kernel and the default.  "v2"
+    # (16-byte row loads, 16x32x32 ops, bf16 P) ran 1.72-2.13x v1's kernel
+    # time at equal error, "v2_hilo" (fp16 hi+lo P) 1.54-1.90x at ~fp32
+    # accuracy (qualification/runs/qsa-nax-kernel-ab-20261105, kernel only).
+    # Default "v2" since 2026-11-05 (Pierre), after the model test flow on
+    # Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP@sha256:25c2da42 (base
+    # f55227951): TTFT -6.7% at 16K / -6.6% at 32K vs v1, 64-token greedy
+    # continuations token-identical to v1 and masked, needle oracle passes,
+    # first-step KL to v1 7-8e-3 (v1 to masked 7-9e-3); qualification/runs/
+    # qsa-nax-law-v2-ab-20261105, -numerics-20261105, -unit-20261105.
+    # The module default stays "v1" (other callers), so the profile always
+    # pins the law; an explicit "v1" is the receipt-visible opt-out.  Every
+    # non-v1 law enters the APCv2 numerics identity.
+    qsa_nax_law: str = "v2"
     # Sorted-MoE pad policy (MLX2_MOE_RHS_PAD_POLICY, switch_layers): which of
     # per-row gather_qmv and the padded gather_qmm_rhs a sorted expert gather
     # runs.  "floor" pads from 3 rows per expert (the module default);
@@ -516,6 +531,8 @@ class FlashNextPolicy:
             )
         if self.moe_nax_gather not in {"off", "gather", "fused"}:
             raise ValueError("moe_nax_gather must be off, gather or fused")
+        if self.qsa_nax_law not in {"v1", "v2", "v2_hilo"}:
+            raise ValueError("qsa_nax_law must be v1, v2 or v2_hilo")
         if self.compact_moe_prefill and self.moe_nax_gather == "off":
             raise ValueError("compact_moe_prefill requires moe_nax_gather")
         if self.qsa_prefetch_partials and not self.indexed_fused_merge:
@@ -862,7 +879,7 @@ class FlashNextPolicy:
         if self.qsa_batch_decode_sparse == "off":
             del values["qsa_batch_decode_sparse"]
             del values["qsa_batch_decode_sparse_min_context"]
-        for name in ("qsa_nax_min_physical_kv", "qsa_nax_batched"):
+        for name in ("qsa_nax_min_physical_kv", "qsa_nax_batched", "qsa_nax_law"):
             if getattr(self, name) == _DEFAULTS[name]:
                 del values[name]
         return values
@@ -954,6 +971,8 @@ class FlashNextPolicy:
             )
         if self.qsa_nax_batched:
             environment["MLX_QWEN4_QSA_NAX_BATCHED"] = "1"
+        if self.qsa_nax_law != "v1":
+            environment["MLX_QWEN4_QSA_NAX_LAW"] = self.qsa_nax_law
         if self.mixed_prefill_decode:
             # Binds the APCv2 numerics namespace (apc_numerics.CANDIDATE_ENV).
             # The model's own declaration, not this variable, selects the

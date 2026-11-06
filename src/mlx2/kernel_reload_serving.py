@@ -89,7 +89,8 @@ class KernelReloadMixin:
                 conflicts.append("registered_weight_program")
         if getattr(self, "_weight_program_deployment", {}).get("default_adapter") is not None:
             conflicts.append("weight_program_default")
-        conflicts.extend(name for name in ("weight_overlays", "layer_excision", "expert_masks")
+        conflicts.extend(name for name in ("weight_overlays", "layer_excision", "expert_masks",
+                                           "ablation_overlays")
                          if getattr(self, name, None) is not None)
         return conflicts
 

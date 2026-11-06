@@ -10,6 +10,7 @@ cold continuations at the first divergent token boundary.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -66,10 +67,91 @@ def _top_two_logprobs(logprobs, mx):
     }
 
 
+def _read_execution_policy(path):
+    """Read the narrow, source-owned policy surface used by this A/B probe."""
+    if path is None:
+        return None, None
+    try:
+        raw = path.read_bytes()
+        policy = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read execution-policy JSON: {exc}") from exc
+    if not isinstance(policy, dict):
+        raise TypeError("execution-policy JSON must be an object")
+    if set(policy) - {"fp32_head_logits"}:
+        raise ValueError("probe execution policy only accepts fp32_head_logits")
+    if "fp32_head_logits" in policy and type(policy["fp32_head_logits"]) is not bool:
+        raise ValueError("fp32_head_logits must be a JSON boolean")
+    canonical = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    return policy, hashlib.sha256(canonical).hexdigest()
+
+
+def _construct_adapter(adapter_cls, model_path, execution_policy):
+    """Forward an explicit policy through the adapter's existing constructor."""
+    if execution_policy is None:
+        return adapter_cls(model_path)
+    return adapter_cls(model_path, execution_policy=dict(execution_policy))
+
+
+def _execution_policy_receipt(execution_policy, policy_sha256, adapter):
+    adapter_config = adapter.execution_config(max_lanes=1, prefill_step=2048)
+    return {
+        "requested": execution_policy,
+        "canonical_sha256": policy_sha256,
+        "adapter_execution_config": adapter_config,
+        "effective_fp32_head_logits": getattr(adapter, "fp32_head", None) is not None,
+        "adapter_fp32_head_receipt": getattr(adapter, "fp32_head", None),
+    }
+
+
+@contextlib.contextmanager
+def _capture_head_dtypes(language_model):
+    """Observe real logits calls and restore the method even when a run fails."""
+    head = language_model.lm_head
+    scales = head["scales"]
+    biases = head.get("biases")
+    receipt = {
+        "parameter_dtypes": {
+            "scales": str(scales.dtype),
+            "biases": None if biases is None else str(biases.dtype),
+        },
+        "logits_call_count": 0,
+        "observations": [],
+        "observation_limit": 16,
+    }
+    original = language_model.logits
+    had_instance_method = "logits" in vars(language_model)
+    prior_instance_method = vars(language_model).get("logits")
+
+    def capture(hidden):
+        logits = original(hidden)
+        receipt["logits_call_count"] += 1
+        if len(receipt["observations"]) < receipt["observation_limit"]:
+            receipt["observations"].append(
+                {
+                    "hidden_dtype": str(hidden.dtype),
+                    "hidden_shape": [int(value) for value in hidden.shape],
+                    "logits_dtype": str(logits.dtype),
+                    "logits_shape": [int(value) for value in logits.shape],
+                }
+            )
+        return logits
+
+    language_model.logits = capture
+    try:
+        yield receipt
+    finally:
+        if had_instance_method:
+            language_model.logits = prior_instance_method
+        else:
+            del language_model.logits
+
+
 def _run_arm(
     model, prompt_tokens, prompt_index, config, max_tokens, capture_state=False
 ):
     import mlx.core as mx
+
     from mlx2.runtime.generate import BatchGenerator
     from mlx2.runtime.sample_utils import LaneRNG
 
@@ -100,20 +182,21 @@ def _run_arm(
     tokens, trace, receipt, terminal_state = [], [], None, None
     done = False
     try:
-        while not done:
-            _, responses = generator.next()
-            for response in responses:
-                if response.uid != uid:
-                    raise RuntimeError("probe received an unexpected request UID")
-                tokens.append(int(response.token))
-                trace.append(_top_two_logprobs(response.logprobs, mx))
-                if getattr(response, "mtp_receipt", None):
-                    receipt = response.mtp_receipt
-                if response.finish_reason is not None:
-                    if capture_state:
-                        terminal_state = _terminal_state(response)
-                    done = True
-        mx.synchronize()
+        with _capture_head_dtypes(model.language_model) as head_dtypes:
+            while not done:
+                _, responses = generator.next()
+                for response in responses:
+                    if response.uid != uid:
+                        raise RuntimeError("probe received an unexpected request UID")
+                    tokens.append(int(response.token))
+                    trace.append(_top_two_logprobs(response.logprobs, mx))
+                    if getattr(response, "mtp_receipt", None):
+                        receipt = response.mtp_receipt
+                    if response.finish_reason is not None:
+                        if capture_state:
+                            terminal_state = _terminal_state(response)
+                        done = True
+            mx.synchronize()
     finally:
         generator.close()
     stats = (receipt or {}).get("stats", {})
@@ -124,6 +207,7 @@ def _run_arm(
         "verify_span_hist": stats.get("verify_span_hist"),
         "draft_loop": (receipt or {}).get("draft_loop"),
         "terminal_state": terminal_state,
+        "head_dtype_observations": head_dtypes,
     }
 
 
@@ -169,6 +253,7 @@ def _boundary_evidence(
             "boundary_tokens": boundary,
             "expected_common_prefix_tokens": expected_prefix,
             "actual_boundary_tokens": result["tokens"],
+            "head_dtype_observations": result.get("head_dtype_observations"),
             "state_continuation": None,
         }
     state = result["terminal_state"]
@@ -205,6 +290,7 @@ def _boundary_evidence(
         "cold_ordinary_prompt_tokens": cold_tokens,
         "cold_ordinary_full_prefill_token_count": len(cold_tokens),
         "original_full_prefill_token_count": len(prompt_tokens),
+        "head_dtype_observations": result["head_dtype_observations"],
         "state_continuation": evidence,
     }
 
@@ -257,7 +343,7 @@ def _validate_args(args, parser):
         _validate_identity_args(
             args.source_revision, args.runtime_native_sha256, args.artifact_identity
         )
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         parser.error(str(exc))
     if args.out.exists():
         parser.error(f"output already exists: {args.out}")
@@ -297,6 +383,11 @@ def main(argv=None):
     parser.add_argument("--runtime-source-sha256", required=True)
     parser.add_argument("--runtime-native-sha256", required=True)
     parser.add_argument("--artifact-identity", required=True)
+    parser.add_argument(
+        "--execution-policy-json",
+        type=Path,
+        help="optional JSON object; this probe currently accepts only fp32_head_logits",
+    )
     parser.add_argument("--prompt-index", type=int, action="append", default=[])
     parser.add_argument("--scan-tokens", type=int, default=80)
     parser.add_argument("--prompt-scan-limit", action="append", default=[])
@@ -306,6 +397,12 @@ def main(argv=None):
     )
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
+    try:
+        execution_policy, execution_policy_sha256 = _read_execution_policy(
+            args.execution_policy_json
+        )
+    except (TypeError, ValueError) as exc:
+        parser.error(str(exc))
     if not args.prompt_index:
         args.prompt_index = [2, 7]
     git_revision = _validate_args(args, parser)
@@ -338,7 +435,7 @@ def main(argv=None):
     ):
         raise SystemExit("REFUSED: runtime source/native identity mismatch")
     mx.set_cache_limit(4 << 30)
-    adapter = adapter_cls(args.model)
+    adapter = _construct_adapter(adapter_cls, args.model, execution_policy)
     actual_artifact = adapter.identity.get("fingerprint")
     if actual_artifact != args.artifact_identity:
         raise SystemExit("REFUSED: loaded artifact fingerprint mismatch")
@@ -438,6 +535,7 @@ def main(argv=None):
                         "route": item["route"],
                         "verify_span_hist": item["verify_span_hist"],
                         "draft_loop": item["draft_loop"],
+                        "head_dtype_observations": item["head_dtype_observations"],
                     }
                     for name, item in scan.items()
                 },
@@ -447,15 +545,19 @@ def main(argv=None):
             }
         )
         mx.clear_cache()
+    policy_receipt = _execution_policy_receipt(
+        execution_policy, execution_policy_sha256, adapter
+    )
     args.out.write_text(
         json.dumps(
             {
-                "schema": "mlx2.dloop-first-divergence.v2",
+                "schema": "mlx2.dloop-first-divergence.v3",
                 "host": platform.node(),
                 "model": args.model,
                 "source_revision": git_revision,
                 "runtime_identity": actual_runtime,
                 "artifact_identity": actual_artifact,
+                "execution_policy": policy_receipt,
                 "producer_sha256": hashlib.sha256(
                     Path(__file__).read_bytes()
                 ).hexdigest(),

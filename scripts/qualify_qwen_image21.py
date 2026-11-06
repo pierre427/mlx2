@@ -41,6 +41,8 @@ def run(args: argparse.Namespace) -> dict:
         conversion = adapter.artifact.path / "mlx2-official-conversion.json"
         conversion_backend = json.loads(conversion.read_text()).get("backend_revision") if conversion.exists() else None
         edit = args.edit_image is not None
+        # CFG only when asked (Noct-Q's card recipe); other artifacts keep the pipeline default.
+        cfg = {k: v for k, v in (("guidance", args.guidance), ("negative_prompt", args.negative_prompt)) if v is not None}
         started = time.perf_counter()
         backend = adapter._model(edit=edit)
         load_seconds = time.perf_counter() - started
@@ -49,14 +51,14 @@ def run(args: argparse.Namespace) -> dict:
             started = time.perf_counter()
             result = adapter.edit_image(
                 args.prompt, [args.edit_image], width=args.width, height=args.height,
-                steps=args.steps, seed=args.seed,
+                steps=args.steps, seed=args.seed, **cfg,
             )
         else:
             adapter._generator = backend
             started = time.perf_counter()
             result = adapter.generate_image(
                 args.prompt, width=args.width, height=args.height,
-                steps=args.steps, seed=args.seed,
+                steps=args.steps, seed=args.seed, **cfg,
             )
         generate_seconds = time.perf_counter() - started
         target.write_bytes(result.data)
@@ -80,6 +82,8 @@ def run(args: argparse.Namespace) -> dict:
             "height": result.height,
             "steps": args.steps,
             "seed": args.seed,
+            **cfg,
+            "scheduler": getattr(getattr(adapter, "scheduler_override", None), "label", None),
             "device": str(mx.default_device()),
             "load_seconds": round(load_seconds, 3),
             "generate_seconds": round(generate_seconds, 3),
@@ -103,6 +107,8 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--guidance", type=float, help="CFG scale (Noct-Q card: 3.0); omitted = no CFG")
+    parser.add_argument("--negative-prompt", help="used only with --guidance > 1")
     parser.add_argument("--gpu-lock", type=Path, default=Path("/tmp/gpu.lock"))
     args = parser.parse_args()
     print(json.dumps(run(args), indent=2))

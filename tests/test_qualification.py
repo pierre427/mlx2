@@ -244,6 +244,33 @@ def test_minicpmo_mechanism_check_follows_resolved_adapter_policy():
         required_descriptor_checks(MINICPMO, {"adapter_policy": {}})
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"conditional_qualification_checks": []},
+        {
+            "required_qualification_checks": "multimodal_image",
+            "conditional_qualification_checks": [],
+        },
+        {
+            "required_qualification_checks": ["multimodal_image", 7],
+            "conditional_qualification_checks": [],
+        },
+    ],
+)
+def test_adapter_qualification_descriptor_snapshot_rejects_missing_or_invalid_checks(
+    metadata,
+):
+    from types import SimpleNamespace
+
+    from mlx2.qualification import adapter_qualification_descriptor_snapshot
+
+    with pytest.raises(ValueError, match="descriptor"):
+        adapter_qualification_descriptor_snapshot(
+            SimpleNamespace(model_type="minicpmo", metadata=metadata)
+        )
+
+
 def _realistic_near_context_filler():
     """Varied repository text free of the near-context probe's answers."""
     import importlib.util
@@ -299,11 +326,8 @@ def test_smol_companion_is_recomputed_before_route_selection(tmp_path):
     from mlx2.adapters.smolvlm2 import DESCRIPTOR
     from mlx2.media_qualification import evaluate_smol_media_report
 
-    companion_path = (Path(__file__).resolve().parents[1] / "docs/experiments"
-                      / "SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json")
-    if not companion_path.is_file():
-        pytest.skip("private SMOLVLM2 media companion is not exported")
-    companion = json.loads(companion_path.read_text())
+    companion = json.loads((Path(__file__).resolve().parents[1] / "docs/experiments"
+                            / "SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text())
     recorded = json.loads(json.dumps(companion))
     _rebind_to_current_producer(recorded, realistic_filler=False)
     # The recorded word-salad near-context prompts are refused as they stand.
@@ -341,11 +365,8 @@ def test_family_media_companion_binds_normal_route_contract(
     import importlib
 
     descriptor = getattr(importlib.import_module(module_name), descriptor_name)
-    companion_path = (Path(__file__).resolve().parents[1] / "docs/experiments"
-                      / f"{family}-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json")
-    if not companion_path.is_file():
-        pytest.skip(f"private {family} media companion is not exported")
-    companion = json.loads(companion_path.read_text())
+    companion = json.loads((Path(__file__).resolve().parents[1] / "docs/experiments"
+                            / f"{family}-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text())
     _rebind_to_current_producer(companion)
     record = {
         "passed": True, "runtime": companion["runtime"],

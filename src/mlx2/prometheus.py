@@ -517,6 +517,7 @@ _ENGINE_EVENTS = {
             "usage_reservation_release",
             "exact_decode_checkpoint_close",
             "weight_overlay_release",
+            "ablation_overlay_release",
             "layer_excision_release",
             "expert_mask_release",
         )

@@ -916,6 +916,7 @@ def validate_request(
         "weight_overlay",
         "layer_excision",
         "expert_mask",
+        "mlx2_overlay",
     }
     # OpenAI clients serialize an unset field as an explicit null
     # (openai-python sends ``"stop": null`` for ``stop=None``).  Treat a
@@ -930,6 +931,8 @@ def validate_request(
     unknown = set(body) - supported
     if unknown:
         raise ValueError(f"unsupported request fields: {', '.join(sorted(unknown))}")
+    if "mlx2_overlay" in body:
+        validate_overlay_selection(body["mlx2_overlay"])
     for key in ("weight_overlay", "layer_excision", "expert_mask"):
         if key in body:
             name = body[key]
@@ -2105,6 +2108,99 @@ def collect_nonstream_job(
         }, event["receipt"]
 
 
+def validate_overlay_selection(value):
+    """``mlx2_overlay``: an overlay id, or ``{"id": ..., "branch_id": ...}`` (OVERLAY-API.md)."""
+    def identifier(text, name, limit):
+        if (not isinstance(text, str) or not 1 <= len(text) <= limit
+                or any(not (c.isascii() and (c.isalnum() or c in "_-:.")) for c in text)):
+            raise ValueError(f"mlx2_overlay {name} must be a bounded identifier")
+    if isinstance(value, dict):
+        if set(value) - {"id", "branch_id"}:
+            raise ValueError("mlx2_overlay accepts only id and branch_id")
+        identifier(value.get("id"), "id", 128)
+        if value.get("branch_id") is not None:
+            identifier(value["branch_id"], "branch_id", 256)
+        return value
+    identifier(value, "id", 128)
+    return value
+
+
+def overlay_list_payload(engine):
+    manager = getattr(engine, "ablation_overlays", None)
+    if manager is None:
+        return None
+    return {"object": "overlay_list", "api_version": 1,
+            "checkpoint_fingerprint": manager.fingerprint, "preview": True,
+            "data": manager.list()}
+
+
+MAX_OVERLAY_PREVIEW_TOKENS = 1024
+
+
+class OverlayDocumentInvalid(ValueError):
+    """An overlay document or ad-hoc preview overlay is invalid (HTTP 422)."""
+
+
+def overlay_preview(engine, body, *, tenant_id, ad_hoc_allowed=False,
+                    generation_event_timeout_seconds=DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS):
+    """Greedy, non-streamed generation of one history under an overlay (OVERLAY-API.md 6)."""
+    from .experimental.weight_space.residual_ablation import overlay_document
+
+    manager = getattr(engine, "ablation_overlays", None)
+    if manager is None:
+        raise LookupError("ablation overlays are not enabled on this server")
+    if not isinstance(body, dict) or set(body) - {"messages", "max_tokens", "temperature",
+                                                   "checkpoint_fingerprint", "mlx2_overlay"}:
+        raise ValueError("preview accepts messages, max_tokens, temperature, checkpoint_fingerprint, mlx2_overlay")
+    if body.get("checkpoint_fingerprint") not in (None, manager.fingerprint):
+        from .runtime.residual_ablation_overlays import OverlayNotLoaded
+
+        raise OverlayNotLoaded("preview checkpoint_fingerprint differs from the served checkpoint")
+    if body.get("temperature", 0) != 0:
+        raise ValueError("preview is greedy (temperature 0)")
+    max_tokens = body.get("max_tokens", 256)
+    if type(max_tokens) is not int or not 1 <= max_tokens <= MAX_OVERLAY_PREVIEW_TOKENS:
+        raise ValueError(f"preview max_tokens must be 1..{MAX_OVERLAY_PREVIEW_TOKENS}")
+    selection = body.get("mlx2_overlay")
+    transient = None
+    if isinstance(selection, dict) and "parameters" in selection:
+        if not ad_hoc_allowed:
+            raise PermissionError("ad-hoc preview parameters read host files and need the admin token")
+        if set(selection) - {"parameters", "directions"}:
+            raise OverlayDocumentInvalid("ad-hoc preview accepts parameters and directions only")
+        try:
+            capture = Path(str((selection.get("directions") or {}).get("capture", "")))
+            document = overlay_document(directions_path=capture / "directions", checkpoint=manager.checkpoint,
+                                        parameters=selection["parameters"], layers=manager.layer_count,
+                                        label="ad-hoc preview", source={"kind": "preview"})
+            transient = manager.load_document(document, transient=True)["id"]
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            if type(error).__name__ == "OverlayBindingError":
+                raise
+            raise OverlayDocumentInvalid(f"ad-hoc preview overlay is invalid: {error}") from error
+        selection = {"id": transient}
+    else:
+        validate_overlay_selection(selection)
+    request = {"messages": body.get("messages"), "max_tokens": max_tokens, "temperature": 0,
+               "enable_thinking": False, "mlx2_overlay": selection}
+    try:
+        request = validate_request(request, True, adapter=getattr(engine, "adapter", None))
+        job = engine.submit(request, tenant_id=tenant_id)
+        try:
+            choice, usage, receipt = collect_nonstream_job(
+                job, request, chat=True,
+                generation_event_timeout_seconds=generation_event_timeout_seconds)
+        finally:
+            job.cancelled.set()
+    finally:
+        if transient is not None:
+            # Removed once the request's pin is released too (reference counted).
+            manager.drop_transient(transient)
+    message = choice.get("message") or {}
+    return {"text": message.get("content") or "", "tokens": usage.get("completion_tokens"),
+            "finish_reason": choice.get("finish_reason"), "route_receipt": receipt}
+
+
 def score_choice_tokens_via_engine(
     engine, prompt, token_ids, *, tenant_id,
     generation_event_timeout_seconds=DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS,
@@ -3177,6 +3273,20 @@ def handler_for(
             if not self._authorize_request():
                 return
             path = self.path.split("?", 1)[0]
+            if path == "/v1/overlays":
+                # Tenant-scoped read: authenticate like any other /v1 route
+                # (it sits above the general tenant gate below).
+                if not self._authenticate_tenant(path):
+                    return
+                payload = overlay_list_payload(engine)
+                if payload is None and getattr(engine, "ablation_overlay_error", None):
+                    self.error(503, "ablation overlays failed to install: " + engine.ablation_overlay_error)
+                    return
+                if payload is None:
+                    self.error(404, "ablation overlays are not enabled on this server")
+                    return
+                self.send_json(200, payload)
+                return
             if path == "/v1/admin/kernels":
                 if admin_token is None:
                     self.api_error(403, "kernel development requires --admin-token-file")
@@ -3633,6 +3743,26 @@ def handler_for(
                 return
             if not self._authenticate_tenant(self.path.split("?", 1)[0]):
                 return
+            if self.path.split("?", 1)[0].startswith("/v1/admin/overlays/"):
+                if admin_token is None:
+                    self.api_error(403, "overlay unloading requires --admin-token-file")
+                    return
+                if not self._authorize_admin():
+                    return
+                manager = getattr(engine, "ablation_overlays", None)
+                if manager is None:
+                    self.error(404, "ablation overlays are not enabled on this server")
+                    return
+                from .runtime.residual_ablation_overlays import OverlayInUse, OverlayNotLoaded
+                identity = self.path.split("?", 1)[0].removeprefix("/v1/admin/overlays/")
+                try:
+                    manager.unload(identity)
+                    self.send_json(200, {"id": identity, "loaded": False})
+                except OverlayInUse as error:
+                    self.error(409, str(error), code="overlay_in_use")
+                except OverlayNotLoaded as error:
+                    self.error(404, str(error), code="overlay_not_loaded")
+                return
             try:
                 session_route = self._session_route()
             except ValueError as error:
@@ -3829,6 +3959,56 @@ def handler_for(
                 if not self._authorize_admin():
                     return
                 self._admin_usage_post(path.removeprefix("/v1/admin/usage/"))
+                return
+            if path == "/v1/admin/overlays":
+                if admin_token is None:
+                    self.api_error(403, "overlay loading requires --admin-token-file")
+                    return
+                if not self._authorize_admin():
+                    return
+                manager = getattr(engine, "ablation_overlays", None)
+                if manager is None:
+                    self.error(404, "ablation overlays are not enabled on this server")
+                    return
+                from .experimental.weight_space.residual_ablation import OverlayBindingError
+                try:
+                    body = self._read_json_body(max_bytes=64 * 1024)
+                    if not isinstance(body, dict) or not isinstance(body.get("overlay"), dict):
+                        raise ValueError("body must be {\"overlay\": <overlay document>}")
+                    loaded = manager.load_document(body["overlay"])
+                    self.send_json(200, {"id": loaded["id"], "loaded": True, "edits": loaded["edits"]})
+                except OverlayBindingError as error:
+                    self.error(409, str(error), code="overlay_binding_mismatch")
+                except (ValueError, OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+                    self.error(422, str(error), code="overlay_invalid")
+                return
+            if path == "/v1/overlays/preview":
+                from .experimental.weight_space.residual_ablation import OverlayBindingError
+                from .runtime.residual_ablation_overlays import OverlayNotLoaded
+                try:
+                    body = self._read_json_body(max_bytes=4 * 1024 * 1024)
+                    selection = body.get("mlx2_overlay") if isinstance(body, dict) else None
+                    ad_hoc = isinstance(selection, dict) and "parameters" in selection
+                    if ad_hoc and admin_token is None:
+                        self.api_error(403, "ad-hoc overlay previews require --admin-token-file")
+                        return
+                    if ad_hoc and not self._authorize_admin():
+                        return
+                    # A named-overlay preview is tenant generation: bind and
+                    # verify the tenant before submitting (this route sits
+                    # above do_POST's general tenant gate).
+                    if not ad_hoc and not self._authenticate_tenant(path):
+                        return
+                    self.send_json(200, overlay_preview(engine, body, tenant_id=self._tenant_id,
+                                                        ad_hoc_allowed=ad_hoc))
+                except LookupError as error:
+                    self.error(404, str(error))
+                except (OverlayNotLoaded, OverlayBindingError) as error:
+                    self.error(409, str(error), code="overlay_not_loaded")
+                except OverlayDocumentInvalid as error:
+                    self.error(422, str(error), code="overlay_invalid")
+                except (ValueError, OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+                    self.api_error(400, str(error))
                 return
             if path == "/v1/admin/apc/clear":
                 # Destructive (drops every prefix and parked session), so it
@@ -5744,7 +5924,8 @@ def handler_for(
                     self._record_http(200)
                 else:
                     self.api_error(
-                        400,
+                        # e.g. 409 overlay_not_loaded (OVERLAY-API.md section 4)
+                        getattr(exc, "http_status", 400),
                         str(exc),
                         anthropic=anthropic,
                         code=error_code,
@@ -6182,6 +6363,12 @@ def build_parser():
         "--kernel-dev-root", type=Path,
         help="enable resident kernel development from this trusted source directory; "
              "requires --admin-token-file, reloads purge APCv2 state",
+    )
+    parser.add_argument(
+        "--ablation-overlays", type=Path, default=None, metavar="DIR",
+        help="experimental: load residual-ablation overlays (subdirectories with overlay.json, "
+             "bound to this checkpoint) and accept the request field mlx2_overlay; "
+             "requires --ordinary; overlay requests are unqualified and do not publish APCv2 state",
     )
     parser.add_argument(
         "--weight-space-config", type=Path, default=None,
@@ -8215,6 +8402,31 @@ def main():
                     finally:
                         server.server_close()
         parser.error(message)
+
+    if args.ablation_overlays is not None:
+        configure = getattr(engine, "configure_ablation_overlays", None)
+        if configure is None:
+            abort("this engine cannot load ablation overlays")
+        if not Path(args.ablation_overlays).is_dir():
+            abort(f"--ablation-overlays is not a directory: {args.ablation_overlays}")
+
+        def install_ablation_overlays():
+            # The model loads in the background: install once it is ready.
+            # Until then (or after a failure) /v1/overlays is 404/503 and
+            # overlay requests are refused, so clients fail closed.
+            while not engine.ready.wait(1.0):
+                if engine.error or not engine.thread.is_alive():
+                    engine.ablation_overlay_error = f"model failed to load: {engine.error}"
+                    return
+            try:
+                configure(args.ablation_overlays)
+                logging.info("ablation overlays installed from %s", args.ablation_overlays)
+            except Exception as error:  # reported through /v1/overlays
+                engine.ablation_overlay_error = f"{type(error).__name__}: {error}"
+                logging.error("cannot install ablation overlays: %s", engine.ablation_overlay_error)
+
+        threading.Thread(target=install_ablation_overlays, name="mlx2-ablation-overlays",
+                         daemon=True).start()
 
     from . import usage as usage_accounting
 

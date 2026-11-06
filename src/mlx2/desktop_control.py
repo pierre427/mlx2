@@ -148,6 +148,18 @@ class DesktopController:
         self.sessions = SessionArchive(self)
         from .desktop_agent_launch import AgentLaunch
         self.agent_launches = AgentLaunch(self)
+        # Residual-ablation jobs run the owned-mode runner as a subprocess;
+        # correction cases and overlays are JSON records. Neither imports MLX.
+        # The modules are private (kept off the public mirror), so the section
+        # is simply absent where they are not shipped.
+        try:
+            from .desktop_residual_ablation import ResidualAblation
+            from .desktop_residual_ablation_cases import Corrections
+        except ImportError:
+            self.ablation = self.corrections = None
+        else:
+            self.ablation = ResidualAblation(self)
+            self.corrections = Corrections(self)
         self.lifecycle = Lifecycle(self)
         self.stopping = threading.Event()
         # Restore retained profile metadata without loading a model at login.
@@ -447,6 +459,8 @@ class DesktopController:
         value["session_archive"] = self.sessions.snapshot()
         value["agent_launches"] = self.agent_launches.snapshot()
         value["skills"] = self.skills.snapshot()
+        if self.ablation is not None:
+            value["residual_ablation"] = {**self.ablation.snapshot(), **self.corrections.snapshot()}
         value["downloads"] = dict(self.downloads.progress)
         # Badge aggregation is performed on exactly bound records, never from chat success.
         records = value["qualification_records"]
@@ -599,6 +613,12 @@ class DesktopController:
             return self.campaign.dispatch(request)
         if command.startswith(("media_", "service_", "conversion_")):
             return self.media.dispatch(request)
+        if command.startswith("ablation_"):
+            if self.ablation is None:
+                raise ValueError("Residual ablation is not part of this build")
+            if command.startswith(("ablation_case_", "ablation_overlay_")):
+                return self.corrections.dispatch(request)
+            return self.ablation.dispatch(request)
         if command.startswith(("helper_", "adapter_", "document_")):
             return self.helpers.dispatch(request)
         if command.startswith("agent_"):
@@ -662,7 +682,8 @@ class DesktopController:
         self.startup_thread.join(timeout=10)
         for component in (self.runtime, self.downloads, self.agents, self.research_plans, self.skills,
                           self.sessions, self.planning, self.capsules, self.memory,
-                          self.code, self.helpers, self.campaign, self.media, self.node,
+                          self.code, self.helpers, self.campaign, getattr(self, "ablation", None),
+                          getattr(self, "corrections", None), self.media, self.node,
                           *reversed(list(self.engines.values())), self.store):
             if component is not None:
                 close_one(component)

@@ -1247,6 +1247,14 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # 15-proposal/16-row target verification geometry.
     max_exact_self_mtp_verification_rows = 9
     max_exact_self_mtp_rollback_rows = 9
+    # Residual writers of the dense Qwen3.5/3.6/3.8 hybrid decoder layer
+    # (``x + mixer(...)`` then ``h + mlp(...)``), for the experimental
+    # residual-ablation tooling (weight_space/residual_ablation.py).
+    residual_ablation = {
+        "writers": {"attention": ("linear_attn", "self_attn"), "mlp": ("mlp",)},
+        "linears": {"attention": ("linear_attn.out_proj", "self_attn.o_proj"),
+                    "mlp": ("mlp.down_proj",)},
+    }
 
     def capture_teacher_windows(self, windows, sink, *, order="layer_major",
                                 activation_budget_bytes=512 << 20):

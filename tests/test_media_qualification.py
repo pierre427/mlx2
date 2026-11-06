@@ -2,16 +2,17 @@
 
 from copy import deepcopy
 import functools
-import importlib.util
-from types import SimpleNamespace
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
+from types import SimpleNamespace
 
-from mlx2.media_qualification import SMOL_MEDIA_CHECKS, evaluate_smol_media_report
-from mlx2 import media_qualification, qualification
 import pytest
+
+from mlx2 import media_qualification, qualification
+from mlx2.media_qualification import SMOL_MEDIA_CHECKS, evaluate_smol_media_report
 
 
 def test_approved_media_producer_hashes_match_reviewed_scripts():

@@ -36,8 +36,9 @@ Source-Available License; see [Third-party code](#third-party-code).
   256-token, masked-mean and L2 recipe; its 384-dimensional CPU reference parity
   is tested. A separate pinned MS MARCO MiniLM cross-encoder executes its
   trained pairwise relevance head and returns raw relevance logits. Both
-  routes remain unqualified. A reproducible SciFact CPU evaluation script is included; neither route is
-  promoted to a default. Eligible generation adapters
+  routes remain unqualified. A bounded public SciFact CPU check favored the
+  embeddings over a lexical baseline, while adding reranking slightly reduced
+  ranking quality; it does not justify default reranking. Eligible generation adapters
   expose normalized mean-pooled input embeddings and cosine reranking; these
   are not trained contextual embedders or cross-encoders. Unsupported adapters
   return 501. Standard Files and JSONL
@@ -157,8 +158,13 @@ credentials and never prompts from the monitor.
 
 ## Development and reproduction
 
-The serving dependency is pinned to MLX `0.32.4`;
-`requirements-qualified.txt` records the reproducible Python environment. Qualification binds source, native binaries,
+For kernel iteration without reloading model weights, use the opt-in
+[resident kernel development interface](docs/KERNEL-RELOAD.md). It supports
+edited computational modules and live variant switches through the shared
+serving engine, and purges APCv2 state on every applied change.
+
+The tested environment uses Python 3.12 and local MLX build
+`0.32.2.dev20260915+2a817ad94`. Qualification binds source, native binaries,
 dependency versions, local artifact identity and serving settings. Changes
 require new evidence; normal serving rejects a mismatched receipt.
 
@@ -189,22 +195,6 @@ PEFT adapter with `mlx2.runtime.media_lora.convert_media_lora` (or
 `load_lora`, `lora_receipt` and `unload_lora` on `QwenImage21Adapter`,
 `LTX25Adapter` or `mlx2.adapters.music3.Music3Adapter`. Only one adapter may be
 active at a time, and unsupported tensor layouts fail closed.
-
-## macOS companion
-
-The native companion provides local model controls, streamed chat, bounded agent
-workflows and profile-specific settings. On macOS with Xcode command line tools,
-prepare the project virtualenv and build the development app with:
-
-```sh
-python scripts/build_macos_app.py --python .venv/bin/python
-open build/macos/MLX2.app
-```
-
-Built-in web search and fetching use the optional `.[desktop-web]` dependencies.
-The public distribution omits the built-in image service; configured external
-media services remain available. Private campaign fixtures are not distributed,
-and synthetic desktop checks do not establish model or route qualification.
 
 ## Third-party code
 

@@ -273,12 +273,7 @@ class SharedMediaService:
         self.admitting = True
         self.loop = None
         if capability == "image":
-            try:
-                from .image_mcp.service import ImageService, ImageSettings
-            except ModuleNotFoundError as error:
-                if error.name not in {"mlx2.image_mcp", "mlx2.image_mcp.service"}:
-                    raise
-                raise ValueError("The built-in image service is unavailable in this distribution") from error
+            from .image_mcp.service import ImageService, ImageSettings
             self.loop = asyncio.new_event_loop()
             self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True, name="mlx2-image-loop")
             self.loop_thread.start()

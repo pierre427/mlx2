@@ -389,6 +389,8 @@ ENGAGED = _merged(HISTORY, {
         "qsa_nax_prefill": {
             "engagements": 3,
             "counts": {"engaged_auto_batched": 2},
+            # A candidate kernel law (qsa_nax_law gates on it).
+            "law": "v2",
         },
         "mtp_draft_vocab": {"runtime_enabled": True, "reduced_head_calls": 3},
     },
@@ -499,6 +501,7 @@ GROWTH = {
         "gdn_state_fp16": _X + ("gdn_state", "counters", "kernel_launches"),
         "gdn_core": _X + ("gdn_core", "calls"),
         "qsa_nax_prefill": _X + ("qsa_nax_prefill", "engagements"),
+        "qsa_nax_law": _X + ("qsa_nax_prefill", "engagements"),
     }.items()},
     # Gates that need two or more counters to move together.
     "apc_inflight_prefix_wait": {

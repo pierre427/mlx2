@@ -31,10 +31,10 @@ SOURCE_DELTA_SCHEMA = "mlx2.qualification-preflight-source-delta.v1"
 SOURCE_DELTA_HELPER_SHA256 = "5b9d04c6ba078bb8dcff40c85617aea9c76f90108175df8dfbab4f218ade85a9"
 CROSS_HOST_PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v3"
 PREFLIGHT_TENSORFOLD_OWNED_SOURCE = (
-    Path(os.environ.get("MLX2_TENSORFOLD_SOURCE", str(Path.home() / "src/tensorfold")))
+    Path.home() / ".codex/worktrees/tensorfold-upstream-parity-20260928"
 )
 PREFLIGHT_TENSORFOLD_OWNED_MLX_LM_SOURCE = (
-    Path(os.environ.get("MLX2_UNIFIED_SOURCE", str(Path.home() / "src/mlx-lm-unified")))
+    Path.home() / "Desktop/mlx-uag/mlx-lm-unified"
 )
 QUALIFICATION_COVERAGE = {
     "response_format_json_object": False,
@@ -3666,6 +3666,7 @@ def default_on_observations(final, initial=None):
         SLICE_FLOOR_LIFTS,
         moe_nax_gather_engagement,
         qsa_nax_prefill_engagement,
+        qsa_nax_law_engagement,
     )
 
     execution = final.get("execution") or {}
@@ -3855,6 +3856,11 @@ def default_on_observations(final, initial=None):
         "decode_fairness_slice_floor": scheduler_delta(SLICE_FLOOR_LIFTS),
         # NAX block-sparse QSA prefill (Flash-Next, M5): kernel calls.
         "qsa_nax_prefill": qsa_nax_prefill_engagement(execution, initial_execution),
+        # ... under the selected candidate kernel law (qsa_nax_law).
+        "qsa_nax_law": qsa_nax_law_engagement(
+            execution, initial_execution,
+            expected=environment.get("MLX_QWEN4_QSA_NAX_LAW") or None,
+        ),
     }
 
 

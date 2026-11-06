@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "benchmark_results/2026-09-29/scripts/series/thermal_ladder.py"
 
@@ -79,7 +81,11 @@ def test_stream_logit_diagnostic_is_explicit_and_preserves_rows(monkeypatch):
     class Response:
         def __enter__(self):
             return iter([
-                b'data: {"choices":[{"delta":{"content":"A"},"logprobs":{"content":[{"id":1,"logprob":-0.1,"top_logprobs":[{"id":2,"logprob":-0.2}]}]}}],"usage":{"prompt_tokens":3,"completion_tokens":1},"mlx2":{"cached_tokens":2}}\n',
+                b'data: {"choices":[{"delta":{"content":"A"},'
+                b'"logprobs":{"content":[{"id":1,"logprob":-0.1,'
+                b'"top_logprobs":[{"id":2,"logprob":-0.2}]}]}}],'
+                b'"usage":{"prompt_tokens":3,"completion_tokens":1},'
+                b'"mlx2":{"route":"ordinary","cached_tokens":2}}\n',
                 b'data: [DONE]\n',
             ])
 
@@ -98,3 +104,69 @@ def test_stream_logit_diagnostic_is_explicit_and_preserves_rows(monkeypatch):
     assert captured["verify_bitexact"] is True
     assert row["content"] == "A"
     assert row["logprobs"][0]["top_logprobs"][0]["id"] == 2
+
+
+def test_stream_error_before_done_is_not_misreported_as_partial_success(monkeypatch):
+    ladder = _ladder_module()
+    client = ladder.Stream("http://127.0.0.1:1", 1, "fixture")
+    client.min_tokens_supported = False
+
+    class Response:
+        def __enter__(self):
+            return iter([
+                b'data: {"choices":[{"delta":{"content":"NE"}}]}\n',
+                b'data: {"error":{"message":"lane failed","code":"decode_failed"}}\n',
+                b'data: [DONE]\n',
+            ])
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"SSE generation failed \(decode_failed\): lane failed; "
+            r"partial_content='NE'"
+        ),
+    ):
+        client.request("prompt", 2)
+
+
+@pytest.mark.parametrize(
+    ("events", "message"),
+    [
+        ([b'data: {"choices":[{"delta":{"content":"ok"}}]}\n'],
+         r"ended without \[DONE\]"),
+        (
+            [
+                b'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+                b'data: [DONE]\n',
+            ],
+            "omitted positive prompt usage",
+        ),
+        (
+            [
+                b'data: {"choices":[{"delta":{"content":"ok"}}],'
+                b'"usage":{"prompt_tokens":3,"completion_tokens":1}}\n',
+                b'data: [DONE]\n',
+            ],
+            "omitted its route receipt",
+        ),
+    ],
+)
+def test_stream_requires_terminal_success_contract(monkeypatch, events, message):
+    ladder = _ladder_module()
+    client = ladder.Stream("http://127.0.0.1:1", 1, "fixture")
+    client.min_tokens_supported = False
+
+    class Response:
+        def __enter__(self):
+            return iter(events)
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    with pytest.raises(RuntimeError, match=message):
+        client.request("prompt", 2)

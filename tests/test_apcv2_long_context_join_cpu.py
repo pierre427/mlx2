@@ -158,3 +158,62 @@ def test_completion_sidecar_contains_only_draft_state_not_target_kv():
     assert hit.cache[0].offset == 64
     hit.cache.close()
     apc.clear(release_memory=False)
+
+
+def test_warm_apcv2_mtp_cache_transfers_ownership_on_ordinary_fallback():
+    """A warm MTP restore remains the same APCv2 state through fallback."""
+    target = _kv(8, seed=10)
+    draft = _kv(7, seed=30)
+    tail = mx.ones((1, 1, 4), dtype=mx.float32)
+    mx.eval(tail)
+    tokens = list(range(8))
+    key = APCKey("mtp-fallback-cow-identity")
+    source, _ = freeze_prompt_cache(
+        [target], key=key, tokens=tokens, cache_type="kv"
+    )
+    input_owner = source.cow_owner
+    input_generation = input_owner.generation
+    sidecar = MTPAPCSidecar(([draft], tail), covered_tokens=len(tokens))
+    apc = APCv2(max_size=2, layout_name="mtp-fallback-cow-identity-v1")
+    try:
+        cold = apc.lookup(key, tokens, require_sidecar=True)
+        assert not cold.hit and cold.cache is None
+
+        apc.store(key, tokens, source, sidecar=sidecar)
+        warm = apc.lookup(key, tokens + [9], require_sidecar=True)
+        assert warm.hit and warm.hit_kind == "mtp_sidecar"
+        assert warm.cached_tokens == len(tokens)
+        assert warm.sidecar is not None
+        assert warm.sidecar.covered_tokens == len(tokens)
+        owner = warm.cache.cow_owner
+        generation = warm.cache.cow_generation
+        assert owner.pin_count == 1
+
+        restored_values = (
+            warm.cache[0].keys[:, :, : len(tokens)],
+            warm.cache[0].values[:, :, : len(tokens)],
+        )
+        merged = _merge_caches([warm.cache])
+
+        assert warm.cache.closed
+        assert owner.pin_count == 0
+        assert owner.generation == generation
+        assert input_owner.generation == input_generation
+        assert all(
+            bool(mx.allclose(before, after, rtol=0, atol=0).item())
+            for before, after in zip(
+                restored_values, (merged[0].keys, merged[0].values)
+            )
+        )
+        assert merged[0].offset.tolist() == [len(tokens)]
+
+        next_warm = apc.lookup(key, tokens + [9], require_sidecar=True)
+        assert next_warm.hit and next_warm.hit_kind == "mtp_sidecar"
+        assert next_warm.cache.cow_owner is owner
+        assert next_warm.cache.cow_generation == generation
+        assert owner.pin_count == 1
+        next_warm.cache.close()
+        assert owner.pin_count == 0
+    finally:
+        apc.clear(release_memory=False)
+        source.close()

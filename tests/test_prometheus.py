@@ -97,6 +97,11 @@ class FakeEngine:
                 "mtp_ordinary_handoff_events": 2,
                 "mtp_ordinary_handoff_lanes": 18,
                 "mtp_ordinary_handoff_segmented_width_lock": 2,
+                "mtp_plain_fallback_events": 2,
+                "mtp_plain_fallback_lanes": 3,
+                "mtp_plain_fallback_width_lock_deferral_limit": 1,
+                "mtp_plain_fallback_starvation_boundary_limit": 1,
+                "mtp_plain_fallback_admission_plain": 1,
                 "adaptive_mtp_cost_model": {
                     "active_bucket": "5-8",
                     "buckets": {
@@ -402,6 +407,26 @@ def test_engine_exposition_is_non_destructive_bounded_and_advanced():
     assert (
         'event="mtp_ordinary_handoff_segmented_width_lock",'
         'mechanism="mtp_ordinary_handoff"} 2'
+    ) in first
+    assert (
+        'event="mtp_plain_fallback_events",'
+        'mechanism="mtp_plain_fallback"} 2'
+    ) in first
+    assert (
+        'event="mtp_plain_fallback_lanes",'
+        'mechanism="mtp_plain_fallback"} 3'
+    ) in first
+    assert (
+        'event="mtp_plain_fallback_width_lock_deferral_limit",'
+        'mechanism="mtp_plain_fallback"} 1'
+    ) in first
+    assert (
+        'event="mtp_plain_fallback_starvation_boundary_limit",'
+        'mechanism="mtp_plain_fallback"} 1'
+    ) in first
+    assert (
+        'event="mtp_plain_fallback_admission_plain",'
+        'mechanism="mtp_plain_fallback"} 1'
     ) in first
     assert (
         'mlx2_adaptive_mtp_chosen_depth{width_bucket="5-8"} 0'

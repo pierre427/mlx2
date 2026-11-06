@@ -175,6 +175,38 @@ def qsa_nax_min_physical_kv_effective(environ=None):
         return raw.strip()
 
 
+# NAX block-sparse QSA prefill kernel law (qwen4_qsa_nax.LAWS,
+# FlashNextPolicy.qsa_nax_law): v2 and v2_hilo round differently from v1, so
+# K/V prefilled under one law is another law's state.  Bound by law id only
+# when it is not v1, so default namespaces are unchanged.
+# Kept here rather than imported: importing the kernel module snapshots the
+# import-time environment (import_env) before an adapter pins its profile.
+# tests/test_qsa_nax_law_v2.py asserts this table equals qwen4_qsa_nax.LAWS.
+QSA_NAX_LAW_ENV = "MLX_QWEN4_QSA_NAX_LAW"
+QSA_NAX_LAWS = {
+    "v1": "qsa-nax-v1",
+    "v2": "qsa-nax-v2-bf16p",
+    "v2_hilo": "qsa-nax-v2-hilop",
+}
+QSA_NAX_DEFAULT_LAW = "v1"
+_QWEN4_QSA_NAX = "mlx2.runtime.models.qwen4_qsa_nax"
+
+
+def qsa_nax_law_identity(environ=None):
+    """The non-default NAX prefill law id, or None for v1 (the loaded
+    module's law when ``environ`` is None and it is imported, else the
+    environment).  An unknown value raises, as the kernel module does."""
+    module = sys.modules.get(_QWEN4_QSA_NAX) if environ is None else None
+    if module is not None and hasattr(module, "qsa_nax_law"):
+        law = module.qsa_nax_law()
+    else:
+        env = os.environ if environ is None else environ
+        law = (env.get(QSA_NAX_LAW_ENV) or "").strip().lower() or QSA_NAX_DEFAULT_LAW
+        if law not in QSA_NAX_LAWS:
+            raise ValueError(f"{QSA_NAX_LAW_ENV} must be one of {sorted(QSA_NAX_LAWS)}")
+    return None if law == QSA_NAX_DEFAULT_LAW else QSA_NAX_LAWS[law]
+
+
 def _bound_value(kind: str, raw: str):
     value = raw.strip()
     if kind == "flag":
@@ -223,6 +255,9 @@ def execution_numerics_identity(environ=None, *, sp_qmm=False, verify_bitexact=F
     crossover = qsa_nax_min_physical_kv_effective(environ)
     if crossover != QSA_NAX_DEFAULT_MIN_PHYSICAL_KV:
         bound["qsa_nax_min_physical_kv"] = crossover
+    nax_law = qsa_nax_law_identity(environ)
+    if nax_law is not None:
+        bound["qsa_nax_law"] = nax_law
     if sp_qmm:
         bound["sp_qmm"] = True
     if verify_bitexact:

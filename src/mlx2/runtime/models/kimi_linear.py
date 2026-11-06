@@ -357,6 +357,8 @@ class MultiLatentAttention(nn.Module):
         # padded D256) or "all" (also absorbed latent rows). Each declines
         # (counter flash_declined) and falls back when not admissible.
         self.flash = "off"
+        # flash192 kernel law (kimi_linear_mla_flash.EXPANDED_LAWS).
+        self.flash_law = "v1"
         # With flash="all", chunks of at most flash_rows rows stay on the
         # latent flash: it beat flash192 + kv_b re-expansion through 128 rows
         # and lost at 512 at 8K/32K/128K (real-weight layer A/B, 2026-11-02).
@@ -512,8 +514,9 @@ class MultiLatentAttention(nn.Module):
                 kv = self.kv_b_proj(latent[:, 0])
             from .kimi_linear_mla_flash import expanded as flash_expanded
             out = flash_expanded(q_rows, kv, shared if buffers is None else buffers[1], mask,
-                                 scale=self.scale, heads=h)
+                                 scale=self.scale, heads=h, law=self.flash_law)
             self.calls["expanded_flash192"] += 1
+            self.calls[f"expanded_flash192_law_{self.flash_law}"] += 1
             self.calls["expanded_sdpa"] += 1
             return out.reshape(b, t, h, v).transpose(0, 2, 1, 3)
         elif flash == "windows":
@@ -521,8 +524,9 @@ class MultiLatentAttention(nn.Module):
             # Each window's re-expansion stays under the expanded bound.
             window = max(1024, self.expanded_bytes//(b*h*(n+v)*itemsize)//1024*1024)
             out = expanded_windows(q_rows, latent, shared, self.kv_b_proj, mask,
-                                   scale=self.scale, window=window, heads=h)
+                                   scale=self.scale, window=window, heads=h, law=self.flash_law)
             self.calls["expanded_flash192_windows"] += 1
+            self.calls[f"expanded_flash192_law_{self.flash_law}"] += 1
             self.calls["expanded_sdpa"] += 1
             return out.reshape(b, t, h, v).transpose(0, 2, 1, 3)
         else:
@@ -575,7 +579,10 @@ class MultiLatentAttention(nn.Module):
               and q_rows.dtype in (mx.bfloat16, mx.float16)
               and (a.num_attention_heads, a.qk_nope_head_dim, a.qk_rope_head_dim,
                    a.v_head_dim, a.kv_lora_rank) == (fl.HEADS, fl.NOPE, fl.SHARED, fl.VDIM, fl.LATENT)
-              and fl.available(kind, q_rows.dtype))
+              and fl.available(kind, q_rows.dtype)
+              # A non-default flash192 law must pass its own probe too.
+              and (kind != "expanded" or self.flash_law == "v1"
+                   or fl.available(f"expanded_{self.flash_law}", q_rows.dtype)))
         if not ok:
             self.calls["flash_declined"] += 1
         return ok
@@ -914,6 +921,7 @@ class Model(ling.Model):
             if layer.is_global:
                 attn.policy = policy["mla"]
                 attn.flash = policy["mla_flash"]
+                attn.flash_law = policy.get("mla_flash_law", "v1")
             else:
                 attn.reference = policy["kda"] == "reference"
                 attn.chunk32 = policy["kda"] == "chunk32"

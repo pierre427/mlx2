@@ -3,8 +3,6 @@ import copy,importlib.abc,json,sys,tempfile,unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 ROOT=Path(__file__).resolve().parents[1]
-PRIVATE_LONG_RECEIPT=ROOT/'qualification/runs/stock27b-wall-7df61ae6-20261004/receipt.json'
-PRIVATE_MODEL_CONFIG=Path.home()/'mlx-models/Qwen3.8-27B-MLX-4bit/config.json'
 class Guard(importlib.abc.MetaPathFinder):
     def find_spec(self,name,path=None,target=None):
         if name=='mlx' or name.startswith('mlx.') or name=='_paged_kv_native':raise RuntimeError('runtime forbidden')
@@ -104,7 +102,6 @@ class Tests(unittest.TestCase):
             bad={**args,key:value}
             with self.assertRaises(ValueError):PagedAttentionPlan(**bad,profile='prefill_long_nax_v1',max_work_items=2*8192*24,max_scratch_bytes=0)
 
-    @unittest.skipUnless(PRIVATE_LONG_RECEIPT.is_file(), 'private long-profile receipt is not exported')
     def test_pinned_whole_prompts_and_zero_score_scratch_proof(self):
         self.assertEqual(tuple(map(len,prompt_ids())),L.COUNTS)
         self.assertEqual(physical_prefill()['grouped_multirow_row_count'],222064)

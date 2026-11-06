@@ -33,7 +33,8 @@ def weight_overlay_manager(model):
 def bind_weight_overlay_rows(model, uids):
     managers = tuple(manager for manager in (weight_overlay_manager(model),
                      getattr(model, "_mlx2_layer_excision", None),
-                     getattr(model, "_mlx2_expert_masks", None)) if manager is not None)
+                     getattr(model, "_mlx2_expert_masks", None),
+                     getattr(model, "_mlx2_ablation_overlays", None)) if manager is not None)
     for manager in managers:
         manager.bind_rows(uids)
     return managers or None

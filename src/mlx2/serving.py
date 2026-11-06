@@ -1875,6 +1875,11 @@ def request_apc_scope(request):
     overlay = request.get("_mlx2_weight_overlay_fingerprint")
     if overlay is not None:
         result = (result, "weight-overlay-fp32-v1", overlay)
+    ablation = request.get("_mlx2_ablation_overlay_id")
+    if ablation is not None:
+        # Content digest of the residual-ablation overlay: cached state from
+        # the base model (or another overlay) is never restored under it.
+        result = (result, "residual-ablation-overlay-v1", ablation)
     excision = request.get("_mlx2_layer_excision_fingerprint")
     if excision is not None:
         result = (result, "layer-excision-zero-kv-v1", excision)
@@ -2334,11 +2339,22 @@ def lane_matmul_status(engine) -> dict:
 
     receipt = getattr(engine, "lane_matmul_receipt", None) or {}
     policy = receipt.get("policy") or {}
+    arithmetic = receipt.get("arithmetic_class")
+    fingerprint = None
+    if arithmetic is not None:
+        # The arithmetic class is part of the APCv2 lane namespace
+        # (arithmetic_class.lane_cache_fingerprint); report it so the
+        # default-on identity is visible in route evidence.
+        from .runtime.arithmetic_class import ArithmeticClass
+
+        fingerprint = ArithmeticClass.from_metadata(arithmetic).fingerprint
     return {
         "requested": getattr(engine, "lane_matmul", "off"),
         "mode": policy.get("mode", "off"),
         "installed": bool(receipt.get("covered")),
         "law_id": receipt.get("law_id"),
+        "arithmetic_class": arithmetic,
+        "arithmetic_class_fingerprint": fingerprint,
         "backend": receipt.get("backend"),
         "simd_twins": receipt.get("simd_twins"),
         "covered": receipt.get("covered", {}),
@@ -4207,6 +4223,7 @@ class Job:
     prompt_progress_dropped: int = 0
     lora_name: str | None = None
     weight_overlay_view: object = None
+    ablation_overlay_id: str | None = None
     layer_excision_view: object = None
     expert_mask_view: object = None
     lora_fingerprint: str | None = None
@@ -5329,7 +5346,7 @@ class ServingEngine(KernelReloadMixin):
     def export_suspension(self, suspension_id):
         """Metadata-only commit, after the worker has drained every request."""
         from .runtime.apc_suspension import lora_file_receipt
-        if self._weight_surgery_installed():
+        if self._weight_surgery_installed() or getattr(self, "ablation_overlays", None) is not None:
             raise SuspendUnavailable("in-memory weight surgery registries cannot be exported for restart")
         lifecycle = getattr(self, "_lora_lifecycle_lock", None)
         if lifecycle is None:
@@ -5483,7 +5500,8 @@ class ServingEngine(KernelReloadMixin):
             raise ValueError("suspend must be boolean")
         if type(park_model) is not bool or (park_model and not suspend):
             raise ValueError("model parking requires cache suspension")
-        if park_model and self._weight_surgery_installed():
+        if park_model and (self._weight_surgery_installed()
+                           or getattr(self, "ablation_overlays", None) is not None):
             raise SuspendUnavailable("in-memory weight surgery bindings cannot survive model parking")
         with self._admission_section():
             with self.lock:
@@ -5947,6 +5965,9 @@ class ServingEngine(KernelReloadMixin):
             if job is not None and getattr(job, "weight_overlay_view", None) is not None:
                 self.weight_overlays.release(job.weight_overlay_view, job.uid)
                 job.weight_overlay_view = None
+            if job is not None and getattr(job, "ablation_overlay_id", None) is not None:
+                self.ablation_overlays.release(job.uid, job.ablation_overlay_id)
+                job.ablation_overlay_id = None
             if job is not None and getattr(job, "layer_excision_view", None) is not None:
                 self.layer_excision.release(job.layer_excision_view, job.uid)
                 job.layer_excision_view = None
@@ -6458,6 +6479,24 @@ class ServingEngine(KernelReloadMixin):
         job.admission_tokens = self._prerender_prompt(job.request, job=job)
         if sum(key in job.request for key in ("weight_overlay", "layer_excision", "expert_mask")) > 1:
             raise ValueError("weight surgery composition is unsupported")
+        if "mlx2_overlay" in job.request:
+            ablation = getattr(self, "ablation_overlays", None)
+            if ablation is None:
+                raise ValueError("ablation overlays are not configured on this server")
+            if (job.lora_name is not None or job.weight_program is not None
+                    or any(key in job.request for key in ("weight_overlay", "layer_excision", "expert_mask"))
+                    or any(job.request.get(key) is not None for key in (
+                        "_mlx2_activation_capsule", "_mlx2_prefill_handoff", "_mlx2_neural_concepts",
+                        "cache_capsule", "batch_cohort", "paged_native_qwen3"))):
+                raise ValueError("ablation overlays require an ordinary request without other "
+                                 "weight, state or capsule features")
+            # Pinned from admission until release: no unload under this request.
+            job.ablation_overlay_id = ablation.acquire(job.request["mlx2_overlay"])
+            job.request["_mlx2_ablation_overlay_id"] = job.ablation_overlay_id
+            job.request["_mlx2_weight_surgery_private_nonce"] = uuid.uuid4().hex
+            if not job.request.get("skip_writing_prefix_cache", False):
+                count_add(self.counts, "apcv2_write_suppressed_requests", 1)
+            job.request["skip_writing_prefix_cache"] = True
         if "weight_overlay" in job.request:
             overlays = getattr(self, "weight_overlays", None)
             if overlays is None:
@@ -7023,7 +7062,8 @@ class ServingEngine(KernelReloadMixin):
     def _submit_many_held(
         self, requests, reservations, *, tenant_id, admission_class, admitted
     ):
-        if any(any(key in request for key in ("weight_overlay", "layer_excision", "expert_mask"))
+        if any(any(key in request for key in ("weight_overlay", "layer_excision", "expert_mask",
+                                              "mlx2_overlay"))
                for request in requests):
             raise ValueError("weight surgery cannot enter parallel submission")
         jobs = [
@@ -7504,6 +7544,17 @@ class ServingEngine(KernelReloadMixin):
         self.expert_stream.forced_stock = force_stock_expert_arithmetic(model)
         self.expert_stream_collector = collector
 
+    def _ablation_capability_state(self):
+        """Advertise ``residual_overlay`` once overlays are installed (after load)."""
+        if getattr(self, "ablation_overlays", None) is None:
+            return {}
+        state = {}
+        for key in ("capabilities", "selected_capabilities"):
+            values = self.snapshot.get(key)
+            if isinstance(values, list):
+                state[key] = sorted(set(values) | {"residual_overlay"})
+        return state
+
     def _ast_route_status(self):
         """``{"ast_route": ...}`` when ``--ast`` selected the route, else {}."""
 
@@ -7523,6 +7574,7 @@ class ServingEngine(KernelReloadMixin):
             counts = Counter(counter_snapshot(self.counts))
             return {
                 **self.snapshot,
+                **self._ablation_capability_state(),
                 **self._representation_route_state(self.adapter),
                 **self._coreml_projection_state(self.adapter),
                 **self._distributed_dense_state(self.adapter),
@@ -7640,6 +7692,11 @@ class ServingEngine(KernelReloadMixin):
                 "layer_excision": (
                     self.layer_excision.status()
                     if getattr(self, "layer_excision", None) is not None
+                    else unconfigured_runtime_state()
+                ),
+                "ablation_overlays": (
+                    self.ablation_overlays.status()
+                    if getattr(self, "ablation_overlays", None) is not None
                     else unconfigured_runtime_state()
                 ),
                 "expert_masks": (
@@ -8302,13 +8359,15 @@ class ServingEngine(KernelReloadMixin):
     def _weight_space_route_receipt(self, job, receipt):
         """Build the selected feature receipt before execution-epoch decoration."""
         for feature, attribute in (("expert_mask", "expert_mask_view"),
+                                   ("ablation_overlay", "ablation_overlay_id"),
                                    ("layer_excision", "layer_excision_view"),
                                    ("weight_overlay", "weight_overlay_view"),
                                    ("weight_program", "weight_program")):
             if getattr(job, attribute, None) is not None:
                 return {**(receipt if isinstance(receipt, dict) else {"route": receipt}),
                         "qualified": False, "qualification": "unqualified",
-                        "weight_space_operation": feature}
+                        "weight_space_operation": feature,
+                        **({"overlay": job.ablation_overlay_id} if feature == "ablation_overlay" else {})}
         return receipt
 
     def _job_weight_program_receipt(self, job):
@@ -8630,9 +8689,55 @@ class ServingEngine(KernelReloadMixin):
 
             return self._exclusive_adapter_operation("weight_overlay_install", install)
 
+    def configure_ablation_overlays(self, directory=None, *, max_overlays=16):
+        """Install per-row residual-ablation overlay wrappers (experimental).
+
+        Requires the ordinary route: prompt lookup, MTP, external draft and
+        concurrent multi-LoRA bypass or rebind the wrapped projections, and
+        memory preemption re-admits requests under new UIDs.  Every overlay in
+        ``directory`` (subdirectories with overlay.json) is loaded and bound to
+        this checkpoint; any failure restores the model and raises (the server
+        reports it through /v1/overlays).
+        """
+        from .runtime.residual_ablation_overlays import AblationOverlayManager
+
+        with self._weight_space_control_section():
+            self._check_weight_space_kernel_compatibility("weight_surgery")
+            if (self.mtp or self.prompt_lookup or self.multi_lora_policy is not None
+                    or self.lora_session is not None or self.spomin_policy.enabled
+                    or self.cache_capsule_policy["enabled"]
+                    or self.memory_preemption_policy["enabled"]
+                    or self.snapshot.get("settings", {}).get("backend") == "external_draft"):
+                raise ValueError("ablation overlays require the --ordinary route without prompt "
+                                 "lookup, MTP, external draft, multi-LoRA, Spomin, cache capsules "
+                                 "or memory preemption")
+            if self._weight_surgery_installed() or getattr(self, "ablation_overlays", None) is not None:
+                raise ValueError("a weight surgery manager is already configured")
+
+            def install(adapter):
+                declared = getattr(adapter, "residual_ablation", None)
+                if declared is None:
+                    raise ValueError(f"{type(adapter).__name__} declares no residual-ablation writers")
+                manager = AblationOverlayManager(adapter.model, declared,
+                                                 checkpoint=self._lora_base_checkpoint(),
+                                                 max_overlays=max_overlays)
+                try:
+                    if directory is not None:
+                        for path in sorted(Path(directory).iterdir()):
+                            if (path / "overlay.json").is_file():
+                                manager.load(path)
+                except BaseException:
+                    manager.restore()
+                    raise
+                self.ablation_overlays = manager
+                return manager
+
+            return self._exclusive_adapter_operation("ablation_overlay_install", install)
+
     def _weight_surgery_installed(self):
         return any(getattr(self, name, None) is not None
-                   for name in ("weight_overlays", "layer_excision", "expert_masks"))
+                   for name in ("weight_overlays", "layer_excision", "expert_masks",
+                                "ablation_overlays"))
 
     def _validate_weight_surgery_route(self, *, adapter_policy=False):
         self._check_weight_space_kernel_compatibility("weight_surgery")
@@ -9246,6 +9351,11 @@ class ServingEngine(KernelReloadMixin):
             job.weight_overlay_view = None
             self._finish_cleanup(job, "weight_overlay_release",
                                  lambda: self.weight_overlays.release(overlay_view, job.uid))
+        ablation_id = getattr(job, "ablation_overlay_id", None)
+        if ablation_id is not None:
+            job.ablation_overlay_id = None
+            self._finish_cleanup(job, "ablation_overlay_release",
+                                 lambda: self.ablation_overlays.release(job.uid, ablation_id))
         excision_view = getattr(job, "layer_excision_view", None)
         if excision_view is not None:
             job.layer_excision_view = None
@@ -15243,6 +15353,11 @@ class ServingEngine(KernelReloadMixin):
                             self.multi_lora.bind_uid(job.uid, job.lora_slot)
                         if job.weight_overlay_view is not None:
                             self.weight_overlays.bind_uid(job.uid, job.weight_overlay_view)
+                        if job.ablation_overlay_id is not None:
+                            selection = job.request.get("mlx2_overlay")
+                            self.ablation_overlays.bind_uid(
+                                job.uid, job.ablation_overlay_id,
+                                selection.get("branch_id") if isinstance(selection, dict) else None)
                         if job.layer_excision_view is not None:
                             self.layer_excision.bind_uid(job.uid, job.layer_excision_view)
                         if job.expert_mask_view is not None:
@@ -16339,6 +16454,7 @@ class ServingEngine(KernelReloadMixin):
                                     ),
                                     "profile": self.snapshot["profile"],
                                     "qualification": ("unqualified" if (job.weight_program is not None
+                                                                       or job.ablation_overlay_id is not None
                                                                        or job.weight_overlay_view is not None
                                                                        or job.layer_excision_view is not None
                                                                        or job.expert_mask_view is not None)
@@ -16357,6 +16473,8 @@ class ServingEngine(KernelReloadMixin):
                                     **({"weight_overlay": self.weight_overlays.receipt(
                                         job.weight_overlay_view, job.uid)}
                                        if job.weight_overlay_view is not None else {}),
+                                    **({"mlx2_overlay": self.ablation_overlays.receipt(job.uid)}
+                                       if job.ablation_overlay_id is not None else {}),
                                     **({"layer_excision": self.layer_excision.receipt(
                                         job.layer_excision_view, job.uid)}
                                        if job.layer_excision_view is not None else {}),

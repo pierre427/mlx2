@@ -191,14 +191,23 @@ def tokenizer_marker_overlay(path):
 
 
 def checkpoint_name(model_path):
-    """``<repo>@<revision>`` for receipts, from the artifact's own layout."""
-    layout = LAYOUTS[validate_config(json.loads((Path(model_path)/"config.json").read_text()))]
+    """``<repo>@<revision>`` for receipts, from the artifact's own layout.
+
+    A derived artifact (e.g. a residual-ablation bake records
+    ``mlx2_residual_ablation`` in its config) is never labelled as its
+    source: it reports its own directory and the checkpoint it came from.
+    """
+    config = json.loads((Path(model_path)/"config.json").read_text())
+    layout = LAYOUTS[validate_config(config)]
+    derived = config.get("mlx2_residual_ablation")
+    if isinstance(derived, dict):
+        return f"{Path(model_path).resolve().name}@derived-from:{derived.get('source_checkpoint', 'unknown')}"
     return layout["repo"]+"@"+layout["revision"]
 
 
 NUMERIC_POLICY_KEYS = frozenset({"mla", "kda", "fused_projections", "fused_norm",
                                  "router_combine", "norm_rounding", "rms_law", "moe_nax",
-                                 "mla_flash", "tensorfold_qmv"})
+                                 "mla_flash", "mla_flash_law", "tensorfold_qmv"})
 PROMPT_LOOKUP_DRAFT_NAMES = frozenset({"prompt_lookup", "pld"})
 # The generic bounded tree route (B1-B4 trees, B5+ chain verify).
 TREE_ROUTE = "tree15_b1_b4_chain_b5plus_v1"
@@ -248,6 +257,18 @@ def parse_policy(policy=None):
                 # mla_flash "all" default: Pierre, 2026-11-02, after ab-def-q8
                 # (decode @103K 43.7 -> 73.9 tok/s, prefill 1315 -> 1607).
                 "rms_law": "fused", "moe_nax": "off", "mla_flash": "all",
+                # flash192 prompt-chunk kernel law (kimi_linear_mla_flash.
+                # EXPANDED_LAWS): v2 = 16-byte row loads + 16x32x32 ops after
+                # the QSA NAX law v2 (provenance/kimi-mla-flash-law-v2.json).
+                # NOT HELPFUL, left off (2026-11-05): v2 ran 0.39-0.51x v1's
+                # kernel time at every case (8K/32K/128K x 2048/8192 rows,
+                # equal error, both chunk-invariant; qualification/runs/
+                # kimi-flash192-law-ab-20261105). v1 already sustains 35-43
+                # TFLOP/s, so the load/op-width tuning that doubled the QSA
+                # kernel (9 TFLOP/s) has no headroom here; the FP32-P x BF16
+                # 16x32x32 PV op and the larger per-lane fragments are the
+                # likely cost (not profiled).
+                "mla_flash_law": "v1",
                 # Opt-in TensorFold Flash q4/q8-g64 row matvec (1..17 rows) on
                 # the eligible dense projections of the MLX affine artifact.
                 "tensorfold_qmv": False}
@@ -258,6 +279,8 @@ def parse_policy(policy=None):
         raise ValueError("unsupported Kimi MLA/KDA implementation")
     if result["mla_flash"] not in {"off", "expanded", "all"}:
         raise ValueError("mla_flash must name off, expanded or all (NAX flash under mla=auto)")
+    if result["mla_flash_law"] not in {"v1", "v2"}:
+        raise ValueError("mla_flash_law must name v1 or v2 (the flash192 kernel law)")
     if result["router_combine"] not in {"checkpoint", "unbiased"}:
         raise ValueError("router_combine must name checkpoint or unbiased semantics")
     if result["moe_nax"] not in {"off", "gather"}:
@@ -279,6 +302,19 @@ def _tensorfold_qmv_counters():
 
 class KimiLinearAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     descriptor = DESCRIPTOR
+    # Residual writers of the KDA/MLA hybrid decoder layer (``x + attention``,
+    # then ``h + mlp``) for the experimental residual-ablation tooling.  MLA and
+    # KDA both end in ``attention.o_proj``; layer 0 is a dense MLP, MoE layers
+    # write through stacked routed experts plus the shared expert.  The loader
+    # renames checkpoint ``self_attn`` to ``attention`` (sanitize).
+    residual_ablation = {
+        "writers": {"attention": ("attention",), "mlp": ("mlp",)},
+        "linears": {"attention": ("attention.o_proj",),
+                    "mlp": ("mlp.down_proj", "mlp.switch_mlp.down_proj", "mlp.shared_experts.down_proj")},
+        "checkpoint_linears": {"attention": ("self_attn.o_proj",),
+                               "mlp": ("mlp.down_proj", "mlp.switch_mlp.down_proj",
+                                       "mlp.shared_experts.down_proj")},
+    }
     artifact_inspector = staticmethod(inspect_artifact)
     profile = "kimi-linear-reap35b-bf16-ordinary"
     default_max_context = DEFAULT_CONTEXT

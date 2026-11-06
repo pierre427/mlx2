@@ -1,5 +1,4 @@
 """Synthetic CPU regressions for the 2026-10-23 qualification handover."""
-import pytest
 import csv
 import importlib.util
 import io
@@ -47,7 +46,6 @@ def test_recorder_binds_only_current_cell_revision_and_evidence(tmp_path, monkey
     assert 'superseded' in result['reason']
 
 
-@pytest.mark.skipif(not (ROOT / "qualification/runs/h2h-rapid-vs-mlx2-20261022/h2h_ladder.py").is_file(), reason="Private campaign harness is not distributed")
 def test_h2h_route_requires_exact_selection_fingerprint_and_counts_draft_calls():
     module = load('qualification/runs/h2h-rapid-vs-mlx2-20261022/h2h_ladder.py')
     summary = {'route_selection_source':'best_route_default', 'selection_applied':True,

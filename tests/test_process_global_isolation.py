@@ -37,6 +37,10 @@ def _fresh_globals(monkeypatch):
     monkeypatch.setattr(process_globals, "_HOLDERS", {})
     monkeypatch.setattr(moe_nax_gather, "MODE", "off")
     monkeypatch.setattr(switch_layers, "_RHS_PAD_POLICY", "floor")
+    # Claims deliberately synchronize these keys without going through the
+    # monkeypatch API; seed them here so fixture teardown restores the caller.
+    monkeypatch.setenv("MLX2_MOE_NAX_GATHER", "off")
+    monkeypatch.setenv("MLX2_MOE_RHS_PAD_POLICY", "floor")
     monkeypatch.delenv(PROFILE_PROBE, raising=False)
     yield
 
@@ -125,6 +129,51 @@ def test_flash_next_failed_load_restores_globals_and_environment(tmp_path, monke
     assert moe_nax_gather.MODE == "off"
     assert PROFILE_PROBE not in os.environ
     assert process_globals.live_selections() == []
+
+
+def test_stock_claim_synchronizes_live_modes_environment_and_apc(monkeypatch):
+    """A preserved foreign mode must not survive behind a stock claim."""
+    from mlx2.runtime.apc_numerics import moe_rhs_pad_effective
+
+    class Holder:
+        pass
+
+    monkeypatch.setenv("MLX2_MOE_NAX_GATHER", "fused")
+    monkeypatch.setenv("MLX2_MOE_RHS_PAD_POLICY", "adaptive")
+    moe_nax_gather.MODE = "fused"
+    switch_layers._RHS_PAD_POLICY = "adaptive"
+
+    holder = Holder()
+    claim = process_globals.claim_stock_moe(holder, "stock regression")
+    assert moe_nax_gather.MODE == "off"
+    assert switch_layers._RHS_PAD_POLICY == "floor"
+    assert os.environ["MLX2_MOE_NAX_GATHER"] == "off"
+    assert os.environ["MLX2_MOE_RHS_PAD_POLICY"] == "floor"
+    assert moe_nax_gather.mode_from_env() == "off"
+    assert moe_rhs_pad_effective(os.environ)["policy"] == "floor"
+
+    claim.rollback()
+    assert moe_nax_gather.MODE == "fused"
+    assert switch_layers._RHS_PAD_POLICY == "adaptive"
+    assert os.environ["MLX2_MOE_NAX_GATHER"] == "fused"
+    assert os.environ["MLX2_MOE_RHS_PAD_POLICY"] == "adaptive"
+
+
+def test_committed_claim_leaves_environment_equal_to_live_selection(monkeypatch):
+    class Holder:
+        pass
+
+    monkeypatch.delenv("MLX2_MOE_NAX_GATHER", raising=False)
+    monkeypatch.delenv("MLX2_MOE_RHS_PAD_POLICY", raising=False)
+    holder = Holder()
+    claim = process_globals.claim_stock_moe(holder, "stock regression")
+    claim.commit()
+    assert os.environ["MLX2_MOE_NAX_GATHER"] == moe_nax_gather.MODE == "off"
+    assert (
+        os.environ["MLX2_MOE_RHS_PAD_POLICY"]
+        == switch_layers._RHS_PAD_POLICY
+        == "floor"
+    )
 
 
 def test_failed_load_beside_a_live_adapter_keeps_its_state(tmp_path, monkeypatch):

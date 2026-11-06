@@ -290,6 +290,282 @@ def _expanded_kernel():
         header=_HEADER, source=_EXPANDED, ensure_row_contiguous=True)
 
 
+# Law v2 of flash192 (``expanded``): the same grid, masks, online softmax,
+# FP32 P and output/lse contract as v1 (_EXPANDED), with the kernel tuning of
+# the QSA NAX law v2 (qwen4_qsa_nax, after jundot/omlx #5084 at
+# b0541976f5e5031c8ecd4c728f5a5810b6af4fdf, Apache-2.0; see
+# provenance/kimi-mla-flash-law-v2.json):
+#   * Q, K and V rows load 8 contiguous channels at a time (``fcol = 2*fn``):
+#     Q and K share one channel permutation inside each 32-channel slice, so
+#     scores are unchanged; V's permutation is undone at the output store;
+#   * QK and PV run as 16x32x32 ops (K-width 32): 6 QK ops per 32-key block
+#     instead of 12, one PV op per 32 output channels instead of two.
+# Bases that are not 16-byte aligned take an in-kernel scalar path with the
+# same arithmetic.
+_HEADER_V2 = _HEADER + r"""
+template <typename T>
+inline metal::vec<T, 8> kimi_load8(const device T* p, bool vec) {
+    if (vec) {
+        return *(const device metal::vec<T, 8>*)p;
+    }
+    metal::vec<T, 8> r;
+    for (short e = 0; e < 8; e++) r[e] = p[e];
+    return r;
+}
+"""
+
+_EXPANDED_V2 = r"""
+    constexpr int DN = 128;
+    constexpr int DS = 64;
+    constexpr int DQ = DN + DS;
+    constexpr int DKV = DN + 128;
+    constexpr int BK = 32;
+    const int TQ = params[0];
+    const int S = params[1];
+    const int OFF = params[2];
+    const int CAUSAL = params[3];
+    const float scale2 = scalep[0];
+    const int qb = int(threadgroup_position_in_grid.x);
+    const int hh = int(threadgroup_position_in_grid.y);
+    const int bb = int(threadgroup_position_in_grid.z);
+    const int sg = int(simdgroup_index_in_threadgroup);
+    const ushort lane = ushort(thread_index_in_simdgroup);
+    const int row0 = qb * 64 + sg * 16;
+    if (row0 >= TQ) {
+        return;
+    }
+    const short qid = short(lane >> 2);
+    const short fm = short((qid & 4) | ((lane >> 1) & 3));
+    const short fn = short(((qid & 2) | (lane & 1)) * 4);
+    const short fcol = short(2 * fn);   // 8 contiguous channels per fragment pair
+    const int ra = row0 + fm;
+    const int rb = row0 + fm + 8;
+    const bool qv = ((reinterpret_cast<ulong>(q) & 15ul) == 0);
+    const bool kvv = ((reinterpret_cast<ulong>(kv) & 15ul) == 0);
+    const bool ksv = ((reinterpret_cast<ulong>(ks) & 15ul) == 0);
+    const device T* q0 = q + ((ulong(bb) * TQ + min(ra, TQ - 1)) * H + hh) * DQ + fcol;
+    const device T* q1 = q + ((ulong(bb) * TQ + min(rb, TQ - 1)) * H + hh) * DQ + fcol;
+    constexpr ulong KVS = HM ? ulong(DKV) : ulong(H) * DKV;
+    const device T* kvh = HM ? kv + (ulong(bb) * H + hh) * ulong(S) * DKV
+                             : kv + ulong(bb) * ulong(S) * KVS + ulong(hh) * DKV;
+    const device T* ksb = ks + ulong(bb) * ulong(params[4]) * DS;
+    const int last = min(row0 + 15, TQ - 1);
+    const int klim = CAUSAL ? min(S, OFF + last + 1) : S;
+    const int kfree = CAUSAL ? min(S, OFF + row0 + 1) : S;
+    const int nkb = (klim + BK - 1) / BK;
+
+    constexpr auto qk_desc = matmul2d_descriptor(
+        16, 32, 32, false, true, true,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<qk_desc, execution_simdgroup> qk_op;
+    constexpr auto pv_desc = matmul2d_descriptor(
+        16, 32, 32, false, false, true,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<pv_desc, execution_simdgroup> pv_op;
+
+    auto pa = pv_op.template get_left_input_cooperative_tensor<float, T, float>();
+    auto pb = pv_op.template get_right_input_cooperative_tensor<float, T, float>();
+    auto o0 = pv_op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(pa)>, metal::remove_addrspace_t<decltype(pb)>, float>();
+    auto o1 = pv_op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(pa)>, metal::remove_addrspace_t<decltype(pb)>, float>();
+    auto o2 = pv_op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(pa)>, metal::remove_addrspace_t<decltype(pb)>, float>();
+    auto o3 = pv_op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(pa)>, metal::remove_addrspace_t<decltype(pb)>, float>();
+    KUNROLL
+    for (short e = 0; e < 16; ++e) {
+        o0[e] = 0.0f;
+        o1[e] = 0.0f;
+        o2[e] = 0.0f;
+        o3[e] = 0.0f;
+    }
+    float m_run[2] = {-INFINITY, -INFINITY};
+    float l_run[2] = {0.0f, 0.0f};
+
+    for (int kb = 0; kb < nkb; ++kb) {
+        const int k0 = kb * BK;
+        auto qa = qk_op.template get_left_input_cooperative_tensor<T, T, float>();
+        auto kt = qk_op.template get_right_input_cooperative_tensor<T, T, float>();
+        auto sc = qk_op.template get_destination_cooperative_tensor<
+            metal::remove_addrspace_t<decltype(qa)>, metal::remove_addrspace_t<decltype(kt)>, float>();
+        KUNROLL
+        for (short e = 0; e < 16; ++e) {
+            sc[e] = 0.0f;
+        }
+        // Key rows fm, fm+8, fm+16, fm+24 of this block (rr = tn*2 + i).
+        const device T* kr[4];
+        const device T* sr[4];
+        KUNROLL
+        for (short rr = 0; rr < 4; ++rr) {
+            const int key = min(k0 + fm + rr * 8, klim - 1);
+            kr[rr] = kvh + ulong(key) * KVS + fcol;
+            sr[rr] = ksb + ulong(key) * DS + fcol;
+        }
+        KUNROLL
+        for (short kk = 0; kk < DQ; kk += 32) {
+            const metal::vec<T, 8> a0 = kimi_load8(q0 + kk, qv);
+            const metal::vec<T, 8> a1 = kimi_load8(q1 + kk, qv);
+            metal::vec<T, 8> kv8[4];
+            KUNROLL
+            for (short rr = 0; rr < 4; ++rr) {
+                kv8[rr] = kk < DN ? kimi_load8(kr[rr] + kk, kvv) : kimi_load8(sr[rr] + (kk - DN), ksv);
+            }
+            KUNROLL
+            for (short j = 0; j < 4; ++j) {
+                qa[j] = a0[j];
+                qa[4 + j] = a1[j];
+                qa[8 + j] = a0[4 + j];
+                qa[12 + j] = a1[4 + j];
+                kt[j] = kv8[0][j];
+                kt[4 + j] = kv8[1][j];
+                kt[8 + j] = kv8[2][j];
+                kt[12 + j] = kv8[3][j];
+                kt[16 + j] = kv8[0][4 + j];
+                kt[20 + j] = kv8[1][4 + j];
+                kt[24 + j] = kv8[2][4 + j];
+                kt[28 + j] = kv8[3][4 + j];
+            }
+            qk_op.run(qa, kt, sc);
+        }
+        const bool edge = k0 + BK > kfree;
+        float s[16];
+        float mx_i[2] = {-INFINITY, -INFINITY};
+        KUNROLL
+        for (short tn = 0; tn < 2; ++tn) {
+            KUNROLL
+            for (short i = 0; i < 2; ++i) {
+                const int r = i ? rb : ra;
+                KUNROLL
+                for (short j = 0; j < 4; ++j) {
+                    const short e = tn * 8 + i * 4 + j;
+                    const int key = k0 + tn * 16 + fn + j;
+                    const bool ok = !edge || (key < S && (!CAUSAL || key <= OFF + r));
+                    s[e] = ok ? float(sc[e]) * scale2 : -INFINITY;
+                    mx_i[i] = max(mx_i[i], s[e]);
+                }
+            }
+        }
+        float factor[2];
+        float mnew[2];
+        KUNROLL
+        for (short i = 0; i < 2; ++i) {
+            float m = mx_i[i];
+            m = max(m, simd_shuffle_xor(m, ushort(1)));
+            m = max(m, simd_shuffle_xor(m, ushort(8)));
+            mnew[i] = max(m_run[i], m);
+            factor[i] = m_run[i] == -INFINITY ? 0.0f : fast::exp2(m_run[i] - mnew[i]);
+            m_run[i] = mnew[i];
+        }
+        float rs[2] = {0.0f, 0.0f};
+        KUNROLL
+        for (short e = 0; e < 16; ++e) {
+            const short i = (e >> 2) & 1;
+            const float p = s[e] == -INFINITY ? 0.0f : fast::exp2(s[e] - mnew[i]);
+            s[e] = p;
+            rs[i] += p;
+        }
+        KUNROLL
+        for (short i = 0; i < 2; ++i) {
+            l_run[i] = l_run[i] * factor[i] + rs[i];
+        }
+        if (!simd_all(factor[0] == 1.0f && factor[1] == 1.0f)) {
+            KUNROLL
+            for (short e = 0; e < 16; ++e) {
+                const float f = factor[(e >> 2) & 1];
+                o0[e] *= f;
+                o1[e] *= f;
+                o2[e] *= f;
+                o3[e] *= f;
+            }
+        }
+        // One 16x32x32 PV op per 32 output channels: P covers the block's 32
+        // keys in the score layout; rows past this group's causal limit load
+        // the last visible key (P is 0 there).
+        KUNROLL
+        for (short e = 0; e < 16; ++e) {
+            pa[e] = s[e];
+        }
+        const device T* vr[4];
+        KUNROLL
+        for (short rr = 0; rr < 4; ++rr) {
+            const int key = min(k0 + fm + rr * 8, klim - 1);
+            vr[rr] = kvh + ulong(key) * KVS + DN + fcol;
+        }
+        KUNROLL
+        for (short np = 0; np < 4; ++np) {
+            metal::vec<T, 8> v8[4];
+            KUNROLL
+            for (short rr = 0; rr < 4; ++rr) {
+                v8[rr] = kimi_load8(vr[rr] + np * 32, kvv);
+            }
+            KUNROLL
+            for (short j = 0; j < 4; ++j) {
+                pb[j] = v8[0][j];
+                pb[4 + j] = v8[1][j];
+                pb[8 + j] = v8[0][4 + j];
+                pb[12 + j] = v8[1][4 + j];
+                pb[16 + j] = v8[2][j];
+                pb[20 + j] = v8[3][j];
+                pb[24 + j] = v8[2][4 + j];
+                pb[28 + j] = v8[3][4 + j];
+            }
+            if (np == 0) {
+                pv_op.run(pa, pb, o0);
+            } else if (np == 1) {
+                pv_op.run(pa, pb, o1);
+            } else if (np == 2) {
+                pv_op.run(pa, pb, o2);
+            } else {
+                pv_op.run(pa, pb, o3);
+            }
+        }
+    }
+
+    KUNROLL
+    for (short i = 0; i < 2; ++i) {
+        float l = l_run[i];
+        l += simd_shuffle_xor(l, ushort(1));
+        l += simd_shuffle_xor(l, ushort(8));
+        const int r = i ? rb : ra;
+        if (r >= TQ) {
+            continue;
+        }
+        const float inv = l == 0.0f ? 0.0f : 1.0f / l;
+        // Output channel of fragment element (f, j) is fcol + f*4 + j.
+        device OT* orow = out + ((ulong(bb) * TQ + r) * H + hh) * 128 + fcol;
+        KUNROLL
+        for (short f = 0; f < 2; ++f) {
+            KUNROLL
+            for (short j = 0; j < 4; ++j) {
+                const short e = f * 8 + i * 4 + j;
+                orow[f * 4 + j] = OT(o0[e] * inv);
+                orow[32 + f * 4 + j] = OT(o1[e] * inv);
+                orow[64 + f * 4 + j] = OT(o2[e] * inv);
+                orow[96 + f * 4 + j] = OT(o3[e] * inv);
+            }
+        }
+        if (fn == 0) {
+            lse[(ulong(bb) * TQ + r) * H + hh] =
+                l == 0.0f ? -INFINITY : (m_run[i] + log2(l)) * M_LN2_F;
+        }
+    }
+"""
+
+
+@cache
+def _expanded_kernel_v2():
+    return mx.fast.metal_kernel(name="mlx2_kimi_mla_flash192_v2",
+        input_names=["q", "kv", "ks", "params", "scalep"], output_names=["out", "lse"],
+        header=_HEADER_V2, source=_EXPANDED_V2, ensure_row_contiguous=True)
+
+
+# flash192 kernel laws.  "v1" is the default (the only law with end-to-end
+# evidence); "v2" is opt-in until it passes the model test flow.
+EXPANDED_LAWS = {"v1": "kimi-flash192-v1", "v2": "kimi-flash192-v2"}
+_EXPANDED_KERNELS = {"v1": _expanded_kernel, "v2": _expanded_kernel_v2}
+
+
 def _offset(mask, rows, width, override=None):
     """Bottom-right causal offset for "causal"; None means all visible.
 
@@ -322,7 +598,7 @@ def expanded_geometry(q, kv, shared, mask, heads=HEADS, offset=None):
 
 
 def expanded(q, kv, shared, mask, *, scale, heads=HEADS, offset=None, return_lse=False,
-             out_dtype=None):
+             out_dtype=None, law="v1"):
     """O[B, T, H*128] for q[B,T,H*192] over kv (token- or head-major) and
     shared[B,1,S,64] -- or the shared cache buffer [B,1,capacity,64] whose
     first S tokens are the prefix (read in place, no B > 1 slice copy).
@@ -334,7 +610,9 @@ def expanded(q, kv, shared, mask, *, scale, heads=HEADS, offset=None, return_lse
     """
     b, t, width, offset, causal = expanded_geometry(q, kv, shared, mask, heads, offset)
     out_dtype = q.dtype if out_dtype is None else out_dtype
-    out, lse = _expanded_kernel()(
+    if law not in _EXPANDED_KERNELS:
+        raise ValueError(f"Kimi flash192 law must be one of {sorted(_EXPANDED_KERNELS)}")
+    out, lse = _EXPANDED_KERNELS[law]()(
         inputs=[q, kv, shared.reshape(b, shared.shape[2], SHARED),
                 mx.array([t, width, offset, int(causal), shared.shape[2]], mx.int32),
                 mx.array([scale*_LOG2E], mx.float32)],
@@ -344,7 +622,7 @@ def expanded(q, kv, shared, mask, *, scale, heads=HEADS, offset=None, return_lse
     return (out, lse) if return_lse else out
 
 
-def expanded_windows(q, latent, shared, kv_proj, mask, *, scale, window, heads=HEADS):
+def expanded_windows(q, latent, shared, kv_proj, mask, *, scale, window, heads=HEADS, law="v1"):
     """Flash192 over the prefix in key windows of ``window`` tokens: each is
     re-expanded alone (transient bounded by one window) and the windows are
     merged by log-sum-exp in FP32. latent[B,1,S,512], shared[B,1,S,64]."""
@@ -359,7 +637,7 @@ def expanded_windows(q, latent, shared, kv_proj, mask, *, scale, window, heads=H
         kv = kv_proj(latent[:, 0, k0:k1])
         out, lse = expanded(q, kv, shared[:, :, k0:k1], mask, scale=scale, heads=heads,
                             offset=natural-k0 if causal else None,
-                            return_lse=True, out_dtype=mx.float32)
+                            return_lse=True, out_dtype=mx.float32, law=law)
         parts.append((out, lse))
     best = parts[0][1]
     for _, lse in parts[1:]:
@@ -375,8 +653,9 @@ def expanded_windows(q, latent, shared, kv_proj, mask, *, scale, window, heads=H
 
 
 def expanded_reference(q, kv, shared, mask, *, scale, heads=HEADS, offset=None,
-                       return_lse=False, out_dtype=None):
-    """FP32 ops law of ``expanded`` (validation only); hidden rows are zeros."""
+                       return_lse=False, out_dtype=None, law=None):
+    """FP32 ops law of ``expanded`` (validation only); hidden rows are zeros.
+    ``law`` is accepted and ignored: every kernel law targets this one."""
     b, t, width, offset, causal = expanded_geometry(q, kv, shared, mask, heads, offset)
     qf = q.astype(mx.float32).reshape(b, t, heads, NOPE+SHARED).transpose(0, 2, 1, 3)
     kvf = kv.astype(mx.float32)
@@ -446,13 +725,14 @@ def _probe(kind, dtype):
     key = mx.random.key(20261102)
     k1, k2, k3, k4 = mx.random.split(key, 4)
     rows, width = 40, 100
-    if kind == "expanded":
+    if kind in ("expanded", "expanded_v2"):
+        law = "v2" if kind == "expanded_v2" else "v1"
         q = (mx.random.normal((1, rows, HEADS*(NOPE+SHARED)), key=k1)*0.5).astype(dtype)
         kv = mx.random.normal((1, width, HEADS*(NOPE+VDIM)), key=k2).astype(dtype)
         sh = mx.random.normal((1, 1, width, SHARED), key=k3).astype(dtype)
         kvh = mx.contiguous(kv.reshape(1, width, HEADS, NOPE+VDIM).transpose(0, 2, 1, 3))
-        got = mx.concatenate([expanded(q, kv, sh, "causal", scale=(NOPE+SHARED)**-0.5),
-                              expanded(q, kvh, sh, "causal", scale=(NOPE+SHARED)**-0.5)])
+        got = mx.concatenate([expanded(q, kv, sh, "causal", scale=(NOPE+SHARED)**-0.5, law=law),
+                              expanded(q, kvh, sh, "causal", scale=(NOPE+SHARED)**-0.5, law=law)])
         ref = expanded_reference(q, kv, sh, "causal", scale=(NOPE+SHARED)**-0.5)
         ref = mx.concatenate([ref, ref])
     elif kind == "absorbed":

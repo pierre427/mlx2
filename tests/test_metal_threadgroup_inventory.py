@@ -57,6 +57,11 @@ ABOVE_M1_FLOOR = {
     # heavy M1 pipeline MLX raises rather than returning zeros; the M1-M4
     # runtime check is GPU-deferred like the rest of this list.
     "runtime/models/exl3.py": 3,
+    # QSA sidecar fused block selection (b4101c8df): one fixed 1024-thread
+    # threadgroup per query row. Opt-in (QSASidecar.fused_select defaults to
+    # False; the sidecar itself is unqualified), so no default route reaches
+    # it; the M1-M4 runtime check is GPU-deferred like the rest of this list.
+    "runtime/models/qsa_select.py": 1,
 }
 
 

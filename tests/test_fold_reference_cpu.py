@@ -88,3 +88,4 @@ def test_far_memory_changes_only_after_the_window_boundary():
     full = full_attention(q, kc, vc, kb, vb, inv, 0.5)
     assert np.isfinite(fold).all()
     assert not np.allclose(fold, full)
+

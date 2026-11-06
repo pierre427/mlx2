@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
+# Law v2 (SOURCE_V2_*): the 16-byte row loads with a shared Q/K dim permutation,
+# the 16x32x32 cooperative-tensor layouts and the fp16 hi+lo P packing follow
+# jundot/omlx #5084 at b0541976f5e5031c8ecd4c728f5a5810b6af4fdf (Apache-2.0);
+# see provenance/qsa-nax-law-v2.json.
+import os
+
 import mlx.core as mx
+
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 
 BLOCK = 4
 MTILE = 16
@@ -25,6 +35,356 @@ _KERNEL = mx.fast.metal_kernel(
     source=SOURCE,
     ensure_row_contiguous=False,
 )
+
+
+# ---------------------------------------------------------------------------
+# Law v2.  The same grid, threadgroup, inputs, ids ABI, masks, 4-simdgroup D
+# split and fp32 online softmax as law v1 (SOURCE).  What changes:
+#   * rows load 8 contiguous dims at a time (``fcol = 2 * fn0``): Q and K use
+#     the same dim permutation, so the dot products are unchanged, and the
+#     output store applies the inverse permutation;
+#   * QK and PV run as 16x32x32 ops (K-width 32) instead of 16x32x16;
+#   * P enters PV as bf16 (``v2``, today's P precision) or as fp16 hi + lo
+#     (``v2_hilo``, two K-halves per PV op: ~fp32 P).
+# Rows still own their threadgroup, so chunk invariance and per-lane batch
+# independence hold as in v1.  Microbench (qualification/runs/
+# qsa-nax-kernel-ab-20261105, M5 Max, synthetic Flash-Next and 27B
+# geometries): v2 1.72-2.13x v1's kernel time at equal error, v2_hilo
+# 1.54-1.90x at ~2,400x lower error against fp64.
+# A K/V/Q layout that cannot take 16-byte loads (a non-unit last stride, a
+# row stride not a multiple of 8 elements, or a misaligned base) takes an
+# in-kernel scalar path with the same arithmetic, so the law does not depend
+# on the cache's view layout.
+HEADER_V2 = HEADER + r"""
+template <typename T>
+inline metal::vec<T, 8> qsa_nax_load8(const device T* p, int64_t step, bool vec) {
+    if (vec) {
+        return *(const device metal::vec<T, 8>*)p;
+    }
+    metal::vec<T, 8> r;
+    for (short e = 0; e < 8; e++) r[e] = p[e * step];
+    return r;
+}
+
+template <typename T>
+inline bool qsa_nax_vec_ok(const device T* base, const constant int64_t* strides) {
+    return strides[3] == 1 && (strides[2] % 8) == 0 && (strides[1] % 8) == 0
+        && (strides[0] % 8) == 0 && ((reinterpret_cast<ulong>(base) & 15ul) == 0);
+}
+"""
+
+_SOURCE_V2_HEAD = r"""
+    constexpr int NSG = 4;
+    constexpr int DS  = D / NSG;
+    constexpr int NJ  = DS / 32;      // 16x32x32 QK ops per 32-key step
+    constexpr int NNT = DS / 32;      // 32-wide output tiles
+
+    const int L   = dims[0];
+    const int TOT = dims[1];
+    const int U   = dims[2];
+
+    const ushort sg   = simdgroup_index_in_threadgroup;
+    const ushort lane = thread_index_in_simdgroup;
+    const uint  tok   = threadgroup_position_in_grid.y;
+    const uint  bkv   = threadgroup_position_in_grid.z;
+    const uint  b     = bkv / NKVH;
+    const uint  hkv   = bkv % NKVH;
+
+    const short qid = lane >> 2;
+    const short fm0 = ((qid & 4) | ((lane >> 1) & 3));
+    const short fn0 = ((qid & 2) | (lane & 1)) * 4;
+    const short fcol = 2 * fn0;   // 8 contiguous dims feed a fragment pair
+
+    threadgroup float sS[NSG * 32 * 16];
+
+    const int64_t sk2 = k_strides[2], sk3 = k_strides[3];
+    const int64_t sv2 = v_strides[2], sv3 = v_strides[3];
+    const bool kvec = qsa_nax_vec_ok(k, k_strides);
+    const bool vvec = qsa_nax_vec_ok(v, v_strides);
+    const device T* kbase = k + (int64_t)b * k_strides[0] + (int64_t)hkv * k_strides[1]
+                              + (int64_t)(sg * DS + fcol) * sk3;
+    const device T* vbase = v + (int64_t)b * v_strides[0] + (int64_t)hkv * v_strides[1]
+                              + (int64_t)(sg * DS + fcol) * sv3;
+
+    const int  lpad      = left_pad[b];
+    const uint tile_base = (b * L + tok) * U;
+    const uint cnt       = counts[b * L + tok];
+    const uint nsel      = n_sel[b * L + tok];
+    const int qp       = qpos[b * L + tok];
+    const int complete = ((qp + 1) / BS) * BS;
+
+    // Row r is query head hkv*GQA + r.  Rows GQA..15 are idle.
+    int head_of[2];
+    bool row_live[2];
+    for (short rr = 0; rr < 2; rr++) {
+        int r = fm0 + rr * 8;
+        row_live[rr] = (r < GQA);
+        head_of[rr] = (int)hkv * GQA + r;
+    }
+
+    // q is row-contiguous (the wrapper makes it so) and D % 32 == 0; its
+    // base may still be misaligned (a row-contiguous view at an odd offset).
+    const bool qvec = ((reinterpret_cast<ulong>(q) & 15ul) == 0);
+    metal::vec<T, 8> qa[NJ][2];
+    for (short jj = 0; jj < NJ; jj++) {
+        for (short rr = 0; rr < 2; rr++) {
+            qa[jj][rr] = row_live[rr]
+                ? qsa_nax_load8(q + ((size_t)(b * NQH + head_of[rr]) * L + tok) * D
+                                  + sg * DS + 32 * jj + fcol, (int64_t)1, qvec)
+                : metal::vec<T, 8>(T(0));
+        }
+    }
+
+    float of[NNT][16];
+    for (short t = 0; t < NNT; t++)
+        for (short i = 0; i < 16; i++) of[t][i] = 0.0f;
+    float rmax_r[2] = {-INFINITY, -INFINITY};
+    float rsum_r[2] = {0.0f, 0.0f};
+
+    constexpr auto desc_qk = mpp::tensor_ops::matmul2d_descriptor(
+        16, 32, 32, false, true, true,
+        mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    constexpr auto desc_pv = mpp::tensor_ops::matmul2d_descriptor(
+        16, 32, 32, false, false, true,
+        mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    const float qk_scale = scale[0];
+
+    for (uint u0 = 0; u0 < cnt; u0 += 8) {
+        // Keys fm0, fm0+8, fm0+16, fm0+24 of this 32-key step.
+        uint prow[4];
+        for (short qq = 0; qq < 4; qq++) {
+            int n = fm0 + qq * 8;
+            uint u = u0 + (uint)(n >> 2);
+            int bid = (u < cnt) ? (int)ids[tile_base + u] : 0;
+            int phys = lpad + bid * BS + (n & 3);
+            prow[qq] = (uint)metal::clamp(phys, 0, (int)TOT - 1);
+        }
+        {
+            mpp::tensor_ops::matmul2d<desc_qk, metal::execution_simdgroup> op;
+            auto ca = op.template get_left_input_cooperative_tensor<T, T, float>();
+            auto cb = op.template get_right_input_cooperative_tensor<T, T, float>();
+            auto cc = op.template get_destination_cooperative_tensor<
+                metal::remove_addrspace_t<decltype(ca)>,
+                metal::remove_addrspace_t<decltype(cb)>, float>();
+            for (short i = 0; i < 16; i++) cc[i] = 0.0f;
+            for (short jj = 0; jj < NJ; jj++) {
+                metal::vec<T, 8> kr[4];
+                for (short r = 0; r < 4; r++)
+                    kr[r] = qsa_nax_load8(kbase + (int64_t)prow[r] * sk2 + (int64_t)(32 * jj) * sk3, sk3, kvec);
+                for (short j = 0; j < 4; j++) {
+                    ca[j] = qa[jj][0][j];
+                    ca[4 + j] = qa[jj][1][j];
+                    ca[8 + j] = qa[jj][0][4 + j];
+                    ca[12 + j] = qa[jj][1][4 + j];
+                    cb[j] = kr[0][j];
+                    cb[4 + j] = kr[1][j];
+                    cb[8 + j] = kr[2][j];
+                    cb[12 + j] = kr[3][j];
+                    cb[16 + j] = kr[0][4 + j];
+                    cb[20 + j] = kr[1][4 + j];
+                    cb[24 + j] = kr[2][4 + j];
+                    cb[28 + j] = kr[3][4 + j];
+                }
+                op.run(ca, cb, cc);
+            }
+            for (short i = 0; i < 16; i++)
+                sS[(sg * 32 + lane) * 16 + i] = cc[i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float s[16];
+        for (short i = 0; i < 16; i++) {
+            s[i] = (sS[(0 * 32 + lane) * 16 + i] + sS[(1 * 32 + lane) * 16 + i]
+                  + sS[(2 * 32 + lane) * 16 + i] + sS[(3 * 32 + lane) * 16 + i])
+                 * qk_scale;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // One selection for the whole tile: the mask has NO row dependence.
+        bool colok[8];
+        for (short f = 0; f < 2; f++) {
+            for (short co = 0; co < 4; co++) {
+                int n = f * 16 + fn0 + co;
+                uint u = u0 + (uint)(n >> 2);
+                bool inb = (u < cnt);
+                int bid = inb ? (int)ids[tile_base + u] : 0;
+                int kl = bid * BS + (n & 3);
+                colok[f * 4 + co] = inb && (kl >= 0) && (kl <= qp)
+                                    && ((u < nsel) || (kl >= complete));
+            }
+        }
+        for (short f = 0; f < 2; f++)
+            for (short rr = 0; rr < 2; rr++)
+                for (short co = 0; co < 4; co++)
+                    if (!colok[f * 4 + co]) s[f * 8 + rr * 4 + co] = -INFINITY;
+
+        float rowmax[2];
+        for (short rr = 0; rr < 2; rr++) {
+            float m = -INFINITY;
+            for (short f = 0; f < 2; f++)
+                for (short co = 0; co < 4; co++)
+                    m = metal::max(m, s[f * 8 + rr * 4 + co]);
+            m = metal::max(m, metal::simd_shuffle_xor(m, ushort(1)));
+            m = metal::max(m, metal::simd_shuffle_xor(m, ushort(8)));
+            rowmax[rr] = m;
+        }
+        float alpha[2], p[16];
+        for (short rr = 0; rr < 2; rr++) {
+            float mn = metal::max(rmax_r[rr], rowmax[rr]);
+            bool live = mn > -INFINITY;
+            alpha[rr] = live ? metal::fast::exp(rmax_r[rr] - mn) : 1.0f;
+            float sm = 0.0f;
+            for (short f = 0; f < 2; f++) {
+                for (short co = 0; co < 4; co++) {
+                    short idx = f * 8 + rr * 4 + co;
+                    float pv = live ? metal::fast::exp(s[idx] - mn) : 0.0f;
+                    p[idx] = pv;
+                    sm += pv;
+                }
+            }
+            sm += metal::simd_shuffle_xor(sm, ushort(1));
+            sm += metal::simd_shuffle_xor(sm, ushort(8));
+            rmax_r[rr] = mn;
+            rsum_r[rr] = rsum_r[rr] * alpha[rr] + sm;
+        }
+
+        for (short t = 0; t < NNT; t++) {
+            for (short f = 0; f < 2; f++)
+                for (short rr = 0; rr < 2; rr++)
+                    for (short co = 0; co < 4; co++)
+                        of[t][f * 8 + rr * 4 + co] *= alpha[rr];
+            mpp::tensor_ops::matmul2d<desc_pv, metal::execution_simdgroup> op;
+"""
+
+_SOURCE_V2_PV_BF16 = r"""
+            auto ca = op.template get_left_input_cooperative_tensor<T, T, float>();
+            auto cb = op.template get_right_input_cooperative_tensor<T, T, float>();
+            auto cc = op.template get_destination_cooperative_tensor<
+                metal::remove_addrspace_t<decltype(ca)>,
+                metal::remove_addrspace_t<decltype(cb)>, float>();
+            for (short i = 0; i < 16; i++) cc[i] = of[t][i];
+            metal::vec<T, 8> vr[4];
+            for (short r = 0; r < 4; r++)
+                vr[r] = qsa_nax_load8(vbase + (int64_t)prow[r] * sv2 + (int64_t)(32 * t) * sv3, sv3, vvec);
+            for (short i = 0; i < 16; i++) ca[i] = (T)p[i];
+            for (short j = 0; j < 4; j++) {
+                cb[j] = vr[0][j];
+                cb[4 + j] = vr[1][j];
+                cb[8 + j] = vr[0][4 + j];
+                cb[12 + j] = vr[1][4 + j];
+                cb[16 + j] = vr[2][j];
+                cb[20 + j] = vr[3][j];
+                cb[24 + j] = vr[2][4 + j];
+                cb[28 + j] = vr[3][4 + j];
+            }
+            op.run(ca, cb, cc);
+            for (short i = 0; i < 16; i++) of[t][i] = cc[i];
+        }
+    }
+"""
+
+_SOURCE_V2_PV_HILO = r"""
+            auto ca = op.template get_left_input_cooperative_tensor<half, T, float>();
+            auto cb = op.template get_right_input_cooperative_tensor<half, T, float>();
+            auto cc = op.template get_destination_cooperative_tensor<
+                metal::remove_addrspace_t<decltype(ca)>,
+                metal::remove_addrspace_t<decltype(cb)>, float>();
+            for (short i = 0; i < 16; i++) cc[i] = of[t][i];
+            for (short f = 0; f < 2; f++) {
+                const metal::vec<T, 8> ra = qsa_nax_load8(
+                    vbase + (int64_t)prow[2 * f] * sv2 + (int64_t)(32 * t) * sv3, sv3, vvec);
+                const metal::vec<T, 8> rb = qsa_nax_load8(
+                    vbase + (int64_t)prow[2 * f + 1] * sv2 + (int64_t)(32 * t) * sv3, sv3, vvec);
+                for (short j = 0; j < 4; j++) {
+                    cb[j] = ra[j];
+                    cb[4 + j] = rb[j];
+                    cb[8 + j] = ra[4 + j];
+                    cb[12 + j] = rb[4 + j];
+                    cb[16 + j] = ra[j];
+                    cb[20 + j] = rb[j];
+                    cb[24 + j] = ra[4 + j];
+                    cb[28 + j] = rb[4 + j];
+                }
+                for (short i = 0; i < 8; i++) {
+                    const half hi = half(p[f * 8 + i]);
+                    ca[i] = hi;
+                    ca[8 + i] = half(p[f * 8 + i] - float(hi));
+                }
+                op.run(ca, cb, cc);
+            }
+            for (short i = 0; i < 16; i++) of[t][i] = cc[i];
+        }
+    }
+"""
+
+_SOURCE_V2_TAIL = r"""
+    for (short t = 0; t < NNT; t++) {
+        for (short f = 0; f < 2; f++) {
+            for (short rr = 0; rr < 2; rr++) {
+                if (!row_live[rr]) continue;
+                float inv = (rsum_r[rr] > 0.0f) ? (1.0f / rsum_r[rr]) : 0.0f;
+                for (short co = 0; co < 4; co++) {
+                    int c = sg * DS + t * 32 + fcol + f * 4 + co;
+                    out[((size_t)(b * NQH + head_of[rr]) * L + tok) * D + c] =
+                        of[t][f * 8 + rr * 4 + co] * inv;
+                }
+            }
+        }
+    }
+"""
+
+SOURCE_V2_BF16 = _SOURCE_V2_HEAD + _SOURCE_V2_PV_BF16 + _SOURCE_V2_TAIL
+SOURCE_V2_HILO = _SOURCE_V2_HEAD + _SOURCE_V2_PV_HILO + _SOURCE_V2_TAIL
+
+_INPUT_NAMES = [
+    "q", "k", "v", "ids", "counts", "n_sel", "qpos", "left_pad", "scale", "dims",
+]
+
+# Law ids, as receipts and the APCv2 numerics identity carry them.  "v1" is
+# the default and the only qualified law; v2 and v2_hilo are opt-in
+# (MLX_QWEN4_QSA_NAX_LAW, FlashNextPolicy.qsa_nax_law) until they pass the
+# model test flow and Pierre makes one a default.
+LAW_ENV = "MLX_QWEN4_QSA_NAX_LAW"
+DEFAULT_LAW = "v1"
+LAWS = {
+    "v1": "qsa-nax-v1",
+    "v2": "qsa-nax-v2-bf16p",
+    "v2_hilo": "qsa-nax-v2-hilop",
+}
+_LAW_KERNELS = {"v1": _KERNEL}
+_LAW_SOURCES = {"v2": SOURCE_V2_BF16, "v2_hilo": SOURCE_V2_HILO}
+
+
+def resolve_law(raw):
+    """The law name ``raw`` selects; empty or None is the default.  Fails
+    closed on an unknown value instead of running another kernel."""
+    value = (raw or "").strip().lower() or DEFAULT_LAW
+    if value not in LAWS:
+        raise ValueError(f"{LAW_ENV} must be one of {sorted(LAWS)}, got {raw!r}")
+    return value
+
+
+_LAW = resolve_law(os.environ.get(LAW_ENV))
+
+
+def qsa_nax_law():
+    """The law ``nax_qsa_attention`` runs when no ``law`` is passed."""
+    return _LAW
+
+
+def _law_kernel(law):
+    kernel = _LAW_KERNELS.get(law)
+    if kernel is None:
+        kernel = mx.fast.metal_kernel(
+            name=f"nax_qsa_attn_{law}",
+            input_names=_INPUT_NAMES,
+            output_names=["out"],
+            header=HEADER_V2,
+            source=_LAW_SOURCES[law],
+            ensure_row_contiguous=False,
+        )
+        _LAW_KERNELS[law] = kernel
+    return kernel
 
 
 def block_sparse_layout_supported(head_dim, n_heads, n_kv_heads, block_size):
@@ -193,14 +553,20 @@ def compact_token_validity(cb):
 
 
 def nax_qsa_attention(
-    q, k, v, ids, counts, n_sel, q_pos, left_pad, *, scale, u_width, total, n_kv_heads
+    q, k, v, ids, counts, n_sel, q_pos, left_pad, *, scale, u_width, total, n_kv_heads,
+    law=None,
 ):
     """Block-sparse QSA attention on NAX.  q [B,H,L,D], k/v [B,HKV,T,D] -> fp32.
 
     ``ids``/``counts``/``n_sel``/``q_pos``/``left_pad`` come from
     ``compact_blocks_to_kernel_inputs``.  Output is fp32 [B,H,L,D]; the caller
-    casts to the attention dtype.
+    casts to the attention dtype.  ``law`` (a ``LAWS`` key) defaults to the
+    process law ``qsa_nax_law()``.
     """
+    law = _LAW if law is None else resolve_law(law)
+    if law != "v1" and q.dtype not in (mx.bfloat16, mx.float16):
+        # The 16-byte load checks assume 2-byte elements.
+        raise ValueError(f"NAX QSA law {law} needs bf16/fp16 q/k/v, got {q.dtype}")
     (batch, nqh, length, dim) = q.shape
     if nqh <= 0 or n_kv_heads <= 0 or nqh % n_kv_heads:
         # GQA >= 1: the kernel's q-head clamp min(head_of, NQH - 1) needs NQH >= 1.
@@ -208,7 +574,7 @@ def nax_qsa_attention(
     gqa = nqh // n_kv_heads
     if gqa > MTILE:
         raise ValueError("one token's heads must fit a 16-row NAX tile")
-    (out,) = _KERNEL(
+    (out,) = _law_kernel(law)(
         inputs=[
             mx.contiguous(q),
             k,
