@@ -521,11 +521,8 @@ class _MLXVLMAdapter:
         self.mlx_vlm_runtime = self._vlm_backend.identity
         self.mlx_vlm_build = self._vlm_backend.provenance
         register_mlx_vlm_window_compaction()
-        model, self.processor = _load_model(
-            self._vlm_backend.load,
-            Path(model_path).resolve(),
-            expected=self.descriptor.model_type,
-            config=self.identity["config"],
+        model, self.processor = self._load_model_and_processor(
+            Path(model_path).resolve()
         )
         from ..runtime.chat_templates import secure_model_chat_templates
 
@@ -547,6 +544,15 @@ class _MLXVLMAdapter:
             tokenizer,
             detokenizer_class=self.streaming_detokenizer_class(),
             eos_token_ids=eos,
+        )
+
+    def _load_model_and_processor(self, model_path):
+        """Load the tensor model and processor (an adapter may own the model)."""
+        return _load_model(
+            self._vlm_backend.load,
+            model_path,
+            expected=self.descriptor.model_type,
+            config=self.identity["config"],
         )
 
     def _render(self, messages):

@@ -14,6 +14,8 @@ from typing import Any
 import mlx.core as mx
 from mlx import nn
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS, claim_adapter_tail, structural_refusal
 from .activations import swiglu
 from .base import (
     BaseModelArgs,
@@ -273,6 +275,59 @@ class MultiLatentAttention(nn.Module):
 
         output = output.reshape(batch, length, -1)
         return self.dense(output)
+
+    def tail(self, x: mx.array, mask: mx.array | None = None, cache: KVCache | None = None):
+        """Prompt-chunk tail: the latent/positional cache write over every row,
+        the query and attention output for the last row only.
+
+        The cache write (``kv_a_proj_with_mqa``, ``kv_a_layernorm``, the key
+        RoPE and ``update_and_fetch``) is the full forward's, so the cache is
+        bitwise identical.  The single query attends through the absorbed
+        latent form the decode step uses (``embed_q`` on the query,
+        ``unembed_out`` on the output) instead of expanding every cached
+        latent into per-head keys and values.
+        """
+        batch, length, _ = x.shape
+        last = x[:, -1:]
+        if self.q_lora_rank is None:
+            q = self.q_proj(last)
+        else:
+            q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(last)))
+        q = q.reshape(batch, 1, self.num_heads, self.qk_head_dim).transpose(0, 2, 1, 3)
+        q_nope, q_pe = mx.split(q, [self.qk_nope_head_dim], axis=-1)
+
+        compressed_kv = self.kv_a_proj_with_mqa(x)
+        compressed_kv, k_pe = mx.split(compressed_kv, [self.kv_lora_rank], axis=-1)
+        k_pe = k_pe.reshape(batch, length, 1, self.qk_rope_head_dim).transpose(0, 2, 1, 3)
+        kv_latent = self.kv_a_layernorm(compressed_kv)
+
+        offset = _cache_offset(cache)
+        q_pe = self.rope(q_pe, offset=offset + (length - 1))
+        k_pe = self.rope(k_pe, offset=offset)
+        kv_latent = mx.expand_dims(kv_latent, axis=1)
+        if cache is not None:
+            kv_latent, k_pe = cache.update_and_fetch(kv_latent, k_pe)
+
+        pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
+        if mask is not None and not isinstance(mask, str):
+            pe_scores = mx.where(
+                mask[..., -1:, :],
+                pe_scores,
+                mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype),
+            )
+        output = scaled_dot_product_attention(
+            self.embed_q(q_nope), kv_latent, kv_latent,
+            cache=cache, scale=self.scale, mask=pe_scores,
+        )
+        output = self.unembed_out(output).transpose(0, 2, 1, 3)
+        self.ling_calls["mla_tail"] += 1
+        if self.g_proj is not None:
+            gate = mx.sigmoid(self.g_proj(last).astype(mx.float32)).astype(output.dtype)
+            if self.gate_type == "head_wise":
+                output = output * gate[..., None]
+            else:
+                output = output * gate.reshape(batch, 1, self.num_heads, self.v_head_dim)
+        return self.dense(output.reshape(batch, 1, -1))
 
     def fused_latent_output(self, q_nope, q_pe, latent, positional, mask=None):
         if not self.ling_fused_mla or self.training or self.scale != 192**-0.5:
@@ -706,6 +761,11 @@ class DecoderLayer(nn.Module):
         mlp_output = self.mlp(self.post_attention_layernorm(hidden))
         return hidden + mlp_output
 
+    def tail(self, x: mx.array, mask: mx.array | None = None, cache: Any | None = None):
+        """Prompt-chunk tail (MLX2_PREFILL_TAIL_SKIP=1): one output row per lane."""
+        hidden = x[:, -1:] + self.attention.tail(self.input_layernorm(x), mask, cache)
+        return hidden + self.mlp(self.post_attention_layernorm(hidden))
+
 
 class LanguageModel(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -734,6 +794,8 @@ class LanguageModel(nn.Module):
         self,
         inputs: mx.array,
         cache: list[Any] | None = None,
+        *,
+        tail_row: bool = False,
     ) -> mx.array:
         hidden = self.word_embeddings(inputs)
         if cache is None:
@@ -746,9 +808,13 @@ class LanguageModel(nn.Module):
         )
         kda_mask = create_ssm_mask(hidden, cache[self._kda_idx])
 
-        for layer, layer_cache in zip(self.layers, cache):
+        last = len(self.layers) - 1
+        for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
             mask = attention_mask if layer.is_global else kda_mask
-            hidden = layer(hidden, mask=mask, cache=layer_cache)
+            if tail_row and index == last:
+                hidden = layer.tail(hidden, mask=mask, cache=layer_cache)
+            else:
+                hidden = layer(hidden, mask=mask, cache=layer_cache)
         return self.norm(hidden)
 
 
@@ -775,10 +841,42 @@ class Model(nn.Module):
         inputs: mx.array,
         cache: list[Any] | None = None,
     ) -> mx.array:
-        output = self.model(inputs, cache)
+        if inputs.ndim == 2 and inputs.shape[1] > 1 and self._claim_tail(inputs, cache):
+            STATS["ling_tail_split"] += 1
+            output = self.model(inputs, cache, tail_row=True)
+        else:
+            # Prompt chunks project only each lane's checkpoint row through
+            # the head (prefill_checkpoint_rows); identity outside a request.
+            output = select_checkpoint_rows(self.model(inputs, cache))
         if self.args.tie_word_embeddings:
             return self.model.word_embeddings.as_linear(output)
         return self.lm_head(output)
+
+    def _claim_tail(self, inputs, cache=None):
+        """Opt-in last-layer tail (MLX2_PREFILL_TAIL_SKIP=1, default off).
+
+        Claims an open prompt-chunk checkpoint request whose rows are every
+        lane's last; the forward then returns one row per lane.  Declines
+        (full chunk, nothing claimed) for a replaced last layer or attention
+        and a recurrent (KDA) last layer (impossible for the layer-group rule
+        today, which makes the last layer global).  A cache's own bucketed
+        decode attention may serve the single tail query; it reads cache
+        state and never writes it.
+        """
+        last = self.model.layers[-1]
+        refuse = None
+        if type(last) is not DecoderLayer or type(last.attention) not in (
+            MultiLatentAttention, KimiDeltaAttention
+        ):
+            refuse = "wrapped_last_layer"
+        elif not last.is_global:
+            refuse = "recurrent_last_layer"
+        else:
+            refuse = structural_refusal(
+                inputs, cache, trunk=self.model, trunk_class=LanguageModel,
+                parts=((last.mlp, (SparseMoeBlock, MLP)),),
+            )
+        return claim_adapter_tail(inputs, kind="tail", refuse=refuse)
 
     @property
     def layers(self):

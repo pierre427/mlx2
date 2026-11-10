@@ -14,6 +14,8 @@ import mlx.core as mx
 from mlx import nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS as TAIL_SKIP_STATS
+from ..prefill_tail_skip import claim_adapter_tail
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
@@ -342,6 +344,39 @@ class Attention(nn.Module):
                 out = out * gate
         return self.o_proj(out)
 
+    def tail(self, x, mask=None, cache=None):
+        """Prompt-chunk tier-2 tail: K/V (normed, roped, cached) over every
+        row exactly as ``__call__``; query, attention, gate and o_proj for
+        the last row only.  The single query's mask is the last row of the
+        chunk's mask, so a sliding layer sees exactly its window (and the
+        left padding of a batch); ``"causal"`` (returned only when the chunk
+        fits the window or the layer is full) becomes ``None``.
+        """
+        batch, length, _ = x.shape
+        last = x[:, -1:]
+        q = self.q_norm(self.q_proj(last).reshape(batch, 1, self.n_heads, self.head_dim)).transpose(0, 2, 1, 3)
+        k = self.k_norm(self.k_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)).transpose(0, 2, 1, 3)
+        v = self.v_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim).transpose(0, 2, 1, 3)
+        offset = cache.offset if cache is not None else 0
+        q, k = self.rope(q, offset=offset + (length - 1)), self.rope(k, offset=offset)
+        if cache is not None:
+            k, v = cache.update_and_fetch(k, v)
+        if isinstance(mask, str):
+            if mask != "causal":
+                raise ValueError(f"unsupported attention mask {mask!r} for the tail row")
+            mask = None
+        elif mask is not None:
+            mask = mask[..., -1:, :]
+        out = scaled_dot_product_attention(q, k, v, cache=cache, scale=self.scale, mask=mask, sinks=self.sink)
+        out = out.transpose(0, 2, 1, 3).reshape(batch, 1, -1)
+        if self.gating:
+            gate = nn.softplus(self.g_proj(last).astype(mx.float32)).astype(out.dtype)
+            if self.gate_per_head:
+                out = (out.reshape(batch, 1, self.n_heads, self.head_dim) * gate[..., None]).reshape(out.shape)
+            else:
+                out = out * gate
+        return self.o_proj(out)
+
 
 class DecoderLayer(nn.Module):
     def __init__(self, args, layer_idx):
@@ -359,6 +394,11 @@ class DecoderLayer(nn.Module):
         h = x + self.self_attn(self.input_layernorm(x), mask, cache)
         return h + self.mlp(self.post_attention_layernorm(h))
 
+    def tail(self, x, mask=None, cache=None):
+        """Last-layer tail; returns ``[batch, 1, hidden]``."""
+        h = x[:, -1:] + self.self_attn.tail(self.input_layernorm(x), mask, cache)
+        return h + self.mlp(self.post_attention_layernorm(h))
+
 
 class LagunaModel(nn.Module):
     def __init__(self, args):
@@ -370,7 +410,9 @@ class LagunaModel(nn.Module):
         self.full_index = args.layer_types.index("full_attention")
         self.sliding_index = args.layer_types.index("sliding_attention") if "sliding_attention" in args.layer_types else None
 
-    def __call__(self, inputs, cache=None, input_embeddings=None, capture=None):
+    def __call__(self, inputs, cache=None, input_embeddings=None, capture=None, tail_row=False):
+        if tail_row and capture is not None:
+            raise ValueError("tail_row forward cannot serve capture taps")
         h = self.embed_tokens(inputs) if input_embeddings is None else input_embeddings
         cache = [None] * len(self.layers) if cache is None else cache
         if len(cache) != len(self.layers):
@@ -378,6 +420,12 @@ class LagunaModel(nn.Module):
         masks = {"full_attention": create_attention_mask(h, cache[self.full_index])}
         if self.sliding_index is not None:
             masks["sliding_attention"] = create_attention_mask(h, cache[self.sliding_index], window_size=self.args.sliding_window)
+        if tail_row:
+            last = len(self.layers) - 1
+            for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
+                mask = masks[layer.attention_type]
+                h = layer.tail(h, mask, layer_cache) if index == last else layer(h, mask, layer_cache)
+            return self.norm(h)
         if capture is None:
             for layer, layer_cache in zip(self.layers, cache):
                 h = layer(h, masks[layer.attention_type], layer_cache)
@@ -404,7 +452,27 @@ class Model(nn.Module):
         return ("laguna-s21-layer-segments-v1" if self.args.num_hidden_layers == 48
                 else "laguna-xs21-layer-segments-v1")
 
+    def _tail_refusal(self, input_embeddings):
+        """Reason the tier-2 tail must not run, or None.  Only a plain last
+        ``DecoderLayer`` with a plain ``Attention`` has the split (excision
+        or class-patch wrappers change the type); media embeddings decline."""
+        if input_embeddings is not None:
+            return "inputs_embeds"
+        last = self.model.layers[-1] if self.model.layers else None
+        if type(last) is not DecoderLayer or type(last.self_attn) is not Attention:
+            return "wrapped_last_layer"
+        if type(last.mlp) not in (LagunaSparseMoeBlock, MLP):
+            return "wrapped_last_layer"
+        return None
+
     def __call__(self, inputs, cache=None, input_embeddings=None):
+        # Opt-in prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP=1).  Only
+        # this plain path claims it; forward_with_taps/prefill_body (DFlash)
+        # call self.model directly and never open the request.
+        if claim_adapter_tail(inputs, kind="tail", refuse=self._tail_refusal(input_embeddings)):
+            TAIL_SKIP_STATS["laguna_tail_split"] += 1
+            hidden = self.model(inputs, cache, tail_row=True)
+            return self.model.embed_tokens.as_linear(hidden) if self.args.tie_word_embeddings else self.lm_head(hidden)
         hidden = select_checkpoint_rows(self.model(inputs, cache, input_embeddings))
         return self.model.embed_tokens.as_linear(hidden) if self.args.tie_word_embeddings else self.lm_head(hidden)
 

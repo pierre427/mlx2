@@ -150,11 +150,15 @@ def test_poison_before_the_last_row_is_outside_the_narrowed_row():
     "module, cls",
     [
         ("agnes", "TextModel"),
+        ("bailing_hybrid", "Model"),
+        ("cohere2_moe", "Model"),
+        ("gemma4", "LanguageModel"),
         ("gpt_oss", "Model"),
         ("gpt_oss_puzzle", "Model"),
         ("granitemoe_swa", "Model"),
         ("hy_v3", "Model"),
         ("laguna", "Model"),
+        ("lfm25_moe", "Model"),
         ("mellum", "Model"),
         ("muse_glimmer", "Model"),
         ("nemotron_h", "Model"),
@@ -168,7 +172,9 @@ def test_poison_before_the_last_row_is_outside_the_narrowed_row():
 def test_runtime_model_heads_honour_the_checkpoint_row_request(module, cls):
     import importlib
 
-    source = inspect.getsource(
-        getattr(importlib.import_module(f"mlx2.runtime.models.{module}"), cls).__call__
-    )
+    model_class = getattr(importlib.import_module(f"mlx2.runtime.models.{module}"), cls)
+    source = inspect.getsource(model_class.__call__)
+    # A head may live in a shared delegate (nemotron_h: _checkpoint_logits).
+    if "self._checkpoint_logits(" in source:
+        source += inspect.getsource(model_class._checkpoint_logits)
     assert "select_checkpoint_rows(" in source

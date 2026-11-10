@@ -27,6 +27,7 @@ from .precise_ops import gate_sigmoid
 from .rope_utils import initialize_rope
 from ..ragged_verify_observation import current_observer, observed_stage
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS, claim_adapter_tail, tail_skip_mode
 
 
 class Qwen3NextAttention(nn.Module):
@@ -141,6 +142,58 @@ class Qwen3NextAttention(nn.Module):
             )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return output * gate_sigmoid(gate)
+
+    def tail(self, x, mask=None, cache=None):
+        """Prompt-chunk tier-2 tail: K/V over every row, the rest on the last.
+
+        K/V (k/v projections, k_norm, RoPE, cache write) run over all ``L``
+        rows exactly as ``__call__`` does, so the cache is bitwise identical.
+        The q projection (with its gate half), attention read, gate and
+        o_proj run for the last row only, returning ``[B, 1, D]``.  A weight
+        format's grouped projection launch runs over every row (K/V must come
+        from the same launch as the full forward) and only its q is sliced.
+        Callers must have proven the cache and mask are supported
+        (``Qwen3_5TextModel._tail_refusal``).
+        """
+        (B, L, _) = x.shape
+        grouped = None
+        group = getattr(self, "exl3_projection_group", None)
+        if group is not None:
+            grouped = group(x)
+        if grouped is not None:
+            q = grouped["q_proj"][:, -1:]
+            keys, values = grouped["k_proj"], grouped["v_proj"]
+        else:
+            q = self.q_proj(x[:, -1:])
+            keys, values = self.k_proj(x), self.v_proj(x)
+        (queries, gate) = mx.split(
+            q.reshape(B, 1, self.num_attention_heads, -1), 2, axis=-1
+        )
+        gate = gate.reshape(B, 1, -1)
+        queries = self.q_norm(queries).transpose(0, 2, 1, 3)
+        keys = self.k_norm(keys.reshape(B, L, self.num_key_value_heads, -1)).transpose(
+            0, 2, 1, 3
+        )
+        values = values.reshape(B, L, self.num_key_value_heads, -1).transpose(
+            0, 2, 1, 3
+        )
+        if cache is not None:
+            queries = self.rope(queries, offset=cache.offset + (L - 1))
+            keys = self.rope(keys, offset=cache.offset)
+            (keys, values) = cache.update_and_fetch(keys, values)
+        else:
+            queries = self.rope(queries, offset=L - 1)
+            keys = self.rope(keys)
+        if isinstance(mask, str):
+            # One query aligned to the last key sees every key.
+            mask = None
+        elif mask is not None:
+            mask = mask[..., -1:, :]
+        output = scaled_dot_product_attention(
+            queries, keys, values, cache=cache, scale=self.scale, mask=mask
+        )
+        output = output.transpose(0, 2, 1, 3).reshape(B, 1, -1)
+        return self.o_proj(output * gate_sigmoid(gate))
 
     def mixed(self, x, parts):
         """Packed projections, per-segment RoPE/cache/attention, packed o_proj.
@@ -297,6 +350,37 @@ def _apply_deep_concept_memory(hidden_states: mx.array, memory: dict) -> mx.arra
     )
 
 
+def hybrid_layer_tail(layer, x, mask, cache):
+    """A hybrid decoder layer's state writes over every row, the rest on the last.
+
+    Full attention: ``Qwen3NextAttention.tail`` (K/V and the cache write on
+    every row; q, attention output and o_proj on the last).  Linear (GDN):
+    the whole recurrent mixer runs over every row, as its conv and recurrent
+    state need them, and only its output's last row continues.  The
+    post-attention norm and MLP/MoE run on the last row only.  Returns
+    ``[B, 1, D]``.  Shared by the dense and sparse family layers; residual
+    folds (``residual_slots``) are left unset, so the decoder adds the
+    residuals itself.
+    """
+    normed = layer.input_layernorm(x)
+    if layer.is_linear:
+        hidden = (x + layer.linear_attn(normed, mask, cache))[:, -1:]
+    else:
+        hidden = x[:, -1:] + layer.self_attn.tail(normed, mask, cache)
+    return hidden + layer.mlp(layer.post_attention_layernorm(hidden))
+
+
+def _tail_cache_supported(cache) -> bool:
+    """Full-attention caches whose attention is plain (masked) SDPA at any
+    query count, so one query row with a sliced mask is valid."""
+    from .cache import BatchKVCache, BatchQuantizedKVCache, QuantizedKVCache
+
+    kind = type(cache)
+    if kind is BatchKVCache:
+        return getattr(cache, "attention_backend", "sdpa") == "sdpa"
+    return kind in (KVCache, QuantizedKVCache, BatchQuantizedKVCache)
+
+
 class DecoderLayer(nn.Module):
     def __init__(self, args: TextModelArgs, layer_idx: int):
         super().__init__()
@@ -324,6 +408,10 @@ class DecoderLayer(nn.Module):
         h = x + r
         out = h + self.mlp(self.post_attention_layernorm(h))
         return out
+
+    def tail(self, x: mx.array, mask=None, cache=None) -> mx.array:
+        """Prompt-chunk tier-2 tail of the last layer; see ``hybrid_layer_tail``."""
+        return hybrid_layer_tail(self, x, mask, cache)
 
     def mixed(self, x: mx.array, parts) -> mx.array:
         """``__call__`` over a packed multi-segment stream (see ``Qwen3_5TextModel.mixed``)."""
@@ -380,6 +468,7 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
         deep_concept_memory: Optional[dict] = None,
         capture_layers=(),
         hidden_sink=None,
+        tail_row: bool = False,
     ) -> mx.array:
         if input_embeddings is not None:
             hidden_states = input_embeddings
@@ -395,6 +484,18 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
             fa_mask = create_attention_mask(hidden_states, cache[self.fa_idx])
         if self.ssm_idx is not None:
             ssm_mask = create_ssm_mask(hidden_states, cache[self.ssm_idx])
+        # Prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP=1, default off):
+        # claimed only after the masks exist, so every refusal is known.
+        tail = bool(tail_row) and claim_adapter_tail(
+            inputs,
+            kind="tail",
+            refuse=self._tail_refusal(
+                cache, fa_mask, ssm_mask, input_embeddings,
+                deep_concept_memory, capture_layers, hidden_sink,
+            ),
+        )
+        if tail:
+            STATS[self.tail_stat] += 1
         if pipeline_rank < pipeline_size - 1:
             hidden_states = mx.distributed.recv_like(hidden_states, pipeline_rank + 1)
         injection_layers = {}
@@ -419,7 +520,10 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
         last = len(self.pipeline_layers) - 1
         for layer_index, (layer, c) in enumerate(zip(self.pipeline_layers, cache)):
             mask = ssm_mask if layer.is_linear else fa_mask
-            hidden_states = layer(hidden_states, mask=mask, cache=c)
+            if tail and layer_index == last:
+                hidden_states = layer.tail(hidden_states, mask, c)
+            else:
+                hidden_states = layer(hidden_states, mask=mask, cache=c)
             if not layer.is_linear:
                 from ..inpass_checkpoints import record_kv
                 record_kv(c)
@@ -446,6 +550,68 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
                 : hidden_states.shape[0]
             ]
         return self.norm(hidden_states)
+
+
+    # Prompt-chunk tier-2 tail: the last layer's state writes run over every
+    # row, everything after them on the last row (``hybrid_layer_tail``).
+    # Only these exact last-layer classes have that split; a family trunk
+    # names its own.
+    tail_layer_types = (DecoderLayer,)
+    tail_family = "qwen38"
+
+    @property
+    def tail_stat(self):
+        return f"{self.tail_family}_tail_split"
+
+    def _tail_refusal(self, *args):
+        """Counted decline name (``declined_<family>_tail_<reason>``) or None."""
+        reason = self._tail_refusal_reason(*args)
+        return None if reason is None else f"{self.tail_family}_tail_{reason}"
+
+    def _tail_refusal_reason(
+        self, cache, fa_mask, ssm_mask, input_embeddings,
+        deep_concept_memory, capture_layers, hidden_sink,
+    ):
+        """Why this forward keeps the full chunk, or None when the tail is safe."""
+        if self.pipeline_size != 1:
+            return "pipeline"
+        if input_embeddings is not None:
+            return "inputs_embeds"
+        if deep_concept_memory is not None:
+            return "deep_concept_memory"
+        if hidden_sink is not None or capture_layers:
+            return "taps"
+        if current_observer() is not None:
+            return "observed"
+        handle = getattr(self, "_mlx2_invariant_prefill", None)
+        if _invariant.active() or getattr(handle, "enabled", False):
+            return "row_exact"
+        layer = self.pipeline_layers[-1]
+        if type(layer) not in self.tail_layer_types:
+            return "wrapped_last_layer"
+        mixer = layer.linear_attn if layer.is_linear else layer.self_attn
+        if getattr(mixer, "_mlx2_qwen_hybrid_route", None) is not None:
+            return "row_exact"
+        if not layer.is_linear and type(mixer) is not Qwen3NextAttention:
+            return "wrapped_last_layer"
+        if (getattr(mixer, "sharding_group", None) is not None
+                or getattr(layer.mlp, "sharding_group", None) is not None):
+            return "sharded"
+        last_cache = cache[-1]
+        if last_cache is not None and bool(getattr(last_cache, "speculating", False)):
+            return "speculating"
+        if layer.is_linear:
+            return None
+        if last_cache is not None and not _tail_cache_supported(last_cache):
+            return "cache_layout"
+        if isinstance(fa_mask, str):
+            if fa_mask != "causal":
+                return "mask"
+        elif fa_mask is not None and not (
+            isinstance(fa_mask, mx.array) and fa_mask.ndim >= 2
+        ):
+            return "mask"
+        return None
 
 
 class MTPModule(nn.Module):
@@ -576,11 +742,16 @@ class TextModel(nn.Module):
         input_embeddings: Optional[mx.array] = None,
         deep_concept_memory: Optional[dict] = None,
     ) -> mx.array:
+        # The tail is offered only on this plain call (taps, prefill_body,
+        # MTP and in-pass checkpoint forwards call the trunk directly); the
+        # trunk claims it or not.  A claimed request is applied, so the head
+        # narrowing below is then the identity on the one returned row.
         out = self.model(
             inputs,
             cache,
             input_embeddings=input_embeddings,
             deep_concept_memory=deep_concept_memory,
+            **({"tail_row": True} if tail_skip_mode() == "1" else {}),
         )
         out = select_checkpoint_rows(out)
         if self.args.tie_word_embeddings:

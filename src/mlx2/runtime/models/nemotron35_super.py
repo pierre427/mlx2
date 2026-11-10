@@ -8,7 +8,6 @@ import mlx.core as mx
 from mlx import nn
 
 from ...adapters.radio_config import RadioConfig
-from ..prefill_checkpoint_rows import select_checkpoint_rows
 from ..progressive_external_verify import PROGRESSIVE_TARGET_PROTOCOL_VERSION
 from .nemotron_h import Model as LanguageModel
 from .radio import RadioModel
@@ -140,8 +139,7 @@ class Model(LanguageModel):
                 raise ValueError("Super VL media placeholders/features differ")
             inputs_embeds = self.embed_tokens(inputs)
             inputs_embeds[0, mx.array(positions)] = features[0]
-        hidden = self.backbone(inputs, cache=cache, inputs_embeds=inputs_embeds)
-        return self.lm_head(select_checkpoint_rows(hidden))
+        return self._checkpoint_logits(inputs, cache, inputs_embeds)
 
     def sanitize(self, weights):
         output = {}

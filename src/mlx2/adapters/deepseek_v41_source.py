@@ -60,6 +60,14 @@ SOURCE_POLICY_CHOICES = {
     'deepseek_source_prefill_wide_math': ('reference', 'legacy_tiles', 'legacy_tiles_16x64', 'legacy_tiles_fused', 'legacy_tiles_fused_16x64', 'nax_k16_ordered_f32_v1'),
     'deepseek_source_dense_qat': ('reference', 'fused_fp32'),
     'deepseek_source_bf16_loads': ('reference', 'woa_f32', 'direct_f32'),
+    # Small BF16 dense projections on the generic F32 fallback (the 40 routers,
+    # ratio-1 compressor KV, indexer weights/keys) widen their coefficient to
+    # F32 on every call: 7.5 MiB written per router call, ~0.47 GB of extra
+    # traffic per decode token across 40 layers. resident_f32_v1 widens each
+    # once and reuses it; the same F32 operand reaches the same matmul, so the
+    # products are bit-identical. Costs ~0.32 GB resident (BF16 is kept for
+    # its other consumers). Opt-in, unqualified, not yet measured on GPU.
+    'deepseek_source_bf16_dense': ('reference', 'resident_f32_v1'),
     'deepseek_source_completion': ('reference', 'bounded_2'),
     'deepseek_source_hc_coefficients': ('reference', 'fused_fp32'),
     'deepseek_index_policy': ('reference', 'finite_all_retained'),
@@ -535,6 +543,7 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             expert_math_policy=self.kernel_policy.get('deepseek_source_expert_math','reference'),
             dense_qat_policy=self.kernel_policy.get('deepseek_source_dense_qat','reference'),
             bf16_loads_policy=self.kernel_policy.get('deepseek_source_bf16_loads','reference'),
+            bf16_dense_policy=self.kernel_policy.get('deepseek_source_bf16_dense','reference'),
             completion_policy=self.kernel_policy.get('deepseek_source_completion','reference'),
             prefill_batch_policy=self.kernel_policy.get('deepseek_source_prefill_batch','reference'),
             prefill_wide_dtype=self.kernel_policy.get('deepseek_source_prefill_wide_dtype','reference'),

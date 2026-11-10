@@ -7568,6 +7568,7 @@ class ServingEngine(KernelReloadMixin):
         from .runtime.models import qsdpa_decode_metal as qdm
         from .runtime.models.cache import rows_attention_status as _rows_attention_status
         from .runtime.models.standard_decoder import tail_row_status as _tail_row_status
+        from .runtime.prefill_tail_skip import tail_skip_status as _tail_skip_status
         from .runtime.models import fp_verify_tensor as fpv
 
         receipts = self.recent_receipts()
@@ -7668,6 +7669,7 @@ class ServingEngine(KernelReloadMixin):
                 "fp_verify_attention": fpv.status(),
                 "batch_rows_attention": _rows_attention_status(),
                 "prefill_tail_row": _tail_row_status(),
+                "prefill_tail_skip": _tail_skip_status(),
                 "recent_receipts": receipts,
                 **({"checkpoint_resources": self._last_checkpoint_resource_receipt}
                    if hasattr(self, "_last_checkpoint_resource_receipt") else {}),

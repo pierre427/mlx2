@@ -8,7 +8,6 @@ adapter until a vision slice is brought up.  Provenance:
 provenance/nemotron35-bolt.json.
 """
 
-from ..prefill_checkpoint_rows import select_checkpoint_rows
 from ..progressive_external_verify import PROGRESSIVE_TARGET_PROTOCOL_VERSION
 from .nemotron_h import Model as LanguageModel
 
@@ -23,8 +22,7 @@ class Model(LanguageModel):
     def prefill_forward(self, inputs, cache=None, *, inputs_embeds=None, image_pixels=None):
         if image_pixels is not None:
             raise ValueError("Nemotron 3.5 Bolt serving is text-only")
-        hidden = self.backbone(inputs, cache=cache, inputs_embeds=inputs_embeds)
-        return self.lm_head(select_checkpoint_rows(hidden))
+        return self._checkpoint_logits(inputs, cache, inputs_embeds)
 
     def sanitize(self, weights):
         output = {}

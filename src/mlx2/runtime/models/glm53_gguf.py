@@ -1544,6 +1544,11 @@ class Glm53GGUFModel:
             )
         prompt_eval_every = (getattr(self, "prompt_eval_every", 0)
                              if sparse_phase() == "prompt" and _taps is None and not _body_only else 0)
+        tail = (
+            logits_to_keep is None and _taps is None and not _body_only
+            and self._claim_prompt_tail(inputs, regions)
+        )
+        last = len(self.layers) - 1
         for index, (layer, c) in enumerate(zip(self.layers, cache)):
             if regions is not None:
                 h = regions.layer(index, layer, c, h, offset)
@@ -1552,16 +1557,19 @@ class Glm53GGUFModel:
                 continue
             prefix = f"blk.{index}"
             x, post, comb = self._hc_in(h, prefix + ".hc_attn", prefix + ".attn_norm.weight")
-            branch = (
-                self._kda(x, c, prefix) if layer.is_linear
-                else self._mla(x, c, prefix, frontier=offset)
-            )
-            h, x, post, comb = self._hc_mid(
-                branch, h, post, comb, prefix + ".hc_ffn", prefix + ".ffn_norm.weight"
-            )
-            h = hc_expand(
-                self._mlp(x, prefix, index), h, post, comb, fused=self.hc_fused
-            )
+            if tail and index == last:
+                h = self._kda_tail_layer(h, x, post, comb, c, prefix, index)
+            else:
+                branch = (
+                    self._kda(x, c, prefix) if layer.is_linear
+                    else self._mla(x, c, prefix, frontier=offset)
+                )
+                h, x, post, comb = self._hc_mid(
+                    branch, h, post, comb, prefix + ".hc_ffn", prefix + ".ffn_norm.weight"
+                )
+                h = hc_expand(
+                    self._mlp(x, prefix, index), h, post, comb, fused=self.hc_fused
+                )
             if _taps is not None and index in _taps:
                 _taps[index] = h.mean(-2)
             if prompt_eval_every and (index + 1) % prompt_eval_every == 0:
@@ -1583,11 +1591,53 @@ class Glm53GGUFModel:
             _taps[len(self.layers) - 1] = h
         if _body_only:
             return None
+        if tail:
+            # Claimed: h is already the last row of the chunk, one per lane.
+            return self.weights.linear("output.weight")(h)
         if logits_to_keep is None:
             h = select_checkpoint_rows(h)
         elif logits_to_keep:
             h = h[:, -logits_to_keep:]
         return self.weights.linear("output.weight")(h)
+
+    def _claim_prompt_tail(self, inputs, regions):
+        """MLX2_PREFILL_TAIL_SKIP tier 2: claim a prompt chunk's last-row tail.
+
+        Only the plain ``__call__`` reaches this (taps, ``prefill_body``,
+        explicit ``logits_to_keep`` never ask). The last layer must be the
+        KDA linear layer this model builds; an MLA last layer (which would
+        need its own attention split), any replaced layer record, and a
+        compiled-region runner decline and run the full chunk.
+        """
+        from ..prefill_tail_skip import claim_adapter_tail
+
+        last = self.layers[-1] if self.layers else None
+        refuse = None
+        if type(last) is not SimpleNamespace or getattr(last, "is_linear", None) is not True:
+            refuse = "glm53_last_layer_not_kda"
+        elif regions is not None:
+            refuse = "glm53_compile_regions"
+        return claim_adapter_tail(inputs, kind="tail", refuse=refuse)
+
+    def _kda_tail_layer(self, h, x, post, comb, cache, prefix, index):
+        """The last (KDA) layer of a claimed prompt chunk: (1, 1, 4, hidden).
+
+        The HC collapse and the KDA mixer run on every row exactly as the
+        full forward does (conv window and recurrent state need every row),
+        so the cache writes are the same arrays. The KDA output projection
+        (per row, after the state write), the HC expand, the FFN-half HC
+        collapse, the MoE and the final HC expand run on the last row only.
+        """
+        from ..prefill_tail_skip import STATS
+
+        mixed = self._kda(x, cache, prefix, _return_pre_output=True)
+        branch = self._linear(mixed[:, -1:], prefix, "attn_output.weight")
+        h, x, post, comb = self._hc_mid(
+            branch, h[:, -1:], post[:, -1:], comb[:, -1:],
+            prefix + ".hc_ffn", prefix + ".ffn_norm.weight",
+        )
+        STATS["glm53_tail_split"] += 1
+        return hc_expand(self._mlp(x, prefix, index), h, post, comb, fused=self.hc_fused)
 
     def _hc_in(self, h, half, norm, _fused=True):
         """HC collapse and the half's norm: (normalized x, post, comb).

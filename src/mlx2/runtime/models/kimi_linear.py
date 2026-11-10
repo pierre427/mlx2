@@ -409,6 +409,14 @@ class MultiLatentAttention(nn.Module):
             self.calls["segmented_rows"] += b
             out = mx.concatenate(pieces, axis=0)
             return self.o_proj(out.transpose(0, 2, 1, 3).reshape(b, t, h*v))
+        latent, shared, buffers = self._write(cache, latent, shared, b)
+        out = self.attend(q, latent, shared, mask, x.itemsize, q_rows=q_rows, buffers=buffers,
+                          starts=starts)
+        return self.o_proj(out.transpose(0, 2, 1, 3).reshape(b, t, h*v))
+
+    @staticmethod
+    def _write(cache, latent, shared, b):
+        """Append this forward's latent/shared rows; fetch them and any in-place buffers."""
         if cache is not None:
             latent, shared = cache.update_and_fetch(latent, shared)
         # The flash kernels can read a plain or batch KVCache's buffers in
@@ -418,9 +426,43 @@ class MultiLatentAttention(nn.Module):
                   else cache._idx if type(cache) is BatchKVCache else None)
         buffers = ((cache.keys, cache.values) if filled is not None and b > 1
                    and filled == latent.shape[2] < cache.keys.shape[2] else None)
+        return latent, shared, buffers
+
+    def tail(self, x, mask=None, cache=None):
+        """Prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP): cache write over
+        every row, attention for the last row only -> [B, 1, hidden].
+
+        The cached state (normalized latent and shared key) is computed over
+        every row exactly as ``__call__`` does, so the cache is bitwise the
+        full forward's. Only the last row's query is projected and attended;
+        its policy law is chosen for one row (under ``auto`` the absorbed
+        latent law, latent flash when admitted: the decode kernel), an exact
+        reassociation of the chunk's expanded law. Model.__call__ admits only
+        plain or batch KVCache (or no cache), whose masks are None, "causal",
+        an array, or LeftPaddedCausal.
+        """
+        a = self.args
+        b, t, _ = x.shape
+        h, n, r, v, c = (a.num_attention_heads, a.qk_nope_head_dim, a.qk_rope_head_dim,
+                          a.v_head_dim, a.kv_lora_rank)
+        starts = None
+        if isinstance(mask, LeftPaddedCausal):
+            mask, starts = mask.array, mask.starts
+        if isinstance(mask, str):
+            # One query aligned to the last key sees every key.
+            mask = None
+        elif isinstance(mask, mx.array):
+            mask = mask[..., -1:, :]
+        elif mask is not None:
+            raise TypeError(f"Kimi MLA tail does not support mask {type(mask).__name__}")
+        latent, shared = mx.split(self.kv_a_proj_with_mqa(x), [c], -1)
+        latent, shared = self.kv_a_layernorm(latent)[:, None], shared[:, None]
+        q_rows = self.q_proj(x[:, -1:])
+        q = q_rows.reshape(b, 1, h, n+r).transpose(0, 2, 1, 3)
+        latent, shared, buffers = self._write(cache, latent, shared, b)
         out = self.attend(q, latent, shared, mask, x.itemsize, q_rows=q_rows, buffers=buffers,
                           starts=starts)
-        return self.o_proj(out.transpose(0, 2, 1, 3).reshape(b, t, h*v))
+        return self.o_proj(out.transpose(0, 2, 1, 3).reshape(b, 1, h*v))
 
     def project(self, x):
         """Queries [B,H,T,N+R], normalized latent [B,1,T,C], shared key [B,1,T,R]."""
@@ -761,6 +803,12 @@ class DecoderLayer(ling.DecoderLayer):
         self.input_layernorm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
+    def tail(self, x, mask=None, cache=None):
+        """Global (MLA) layer with the cache write over every row and the
+        rest (attention output, residual, MoE/MLP) on the last row only."""
+        hidden = x[:, -1:] + self.attention.tail(self.input_layernorm(x), mask, cache)
+        return hidden + self.mlp(self.post_attention_layernorm(hidden))
+
 
 def _proves_unpadded(cache):
     """Host proof that a cache's decode mask is all-true.
@@ -803,14 +851,20 @@ class LanguageModel(ling.LanguageModel):
         self._attention_idx = next(i for i, l in enumerate(self.layers) if l.is_global)
         self._kda_idx = next(i for i, l in enumerate(self.layers) if not l.is_global)
 
-    def __call__(self, inputs, cache=None):
+    def __call__(self, inputs, cache=None, *, tail_row=False):
         hidden = self.word_embeddings(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
         attention_mask = self.attention_mask(hidden, cache[self._attention_idx])
         kda_mask = ling.create_ssm_mask(hidden, cache[self._kda_idx])
-        for layer, layer_cache in zip(self.layers, cache):
-            hidden = layer(hidden, mask=attention_mask if layer.is_global else kda_mask, cache=layer_cache)
+        last = len(self.layers) - 1
+        for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
+            mask = attention_mask if layer.is_global else kda_mask
+            if tail_row and index == last:
+                # Model.__call__ admitted this split (see _tail_refusal).
+                hidden = layer.tail(hidden, mask, layer_cache)
+            else:
+                hidden = layer(hidden, mask=mask, cache=layer_cache)
         return self.norm(hidden)
 
 
@@ -824,11 +878,60 @@ class Model(ling.Model):
 
     def __call__(self, inputs, cache=None):
         from ..prefill_checkpoint_rows import select_checkpoint_rows
+        from ..prefill_tail_skip import STATS, claim_adapter_tail, tail_skip_mode
 
         with moe_nax_gather.forward_scope(inputs, cache):
+            # Opt-in tier-2 tail (MLX2_PREFILL_TAIL_SKIP=1, default off,
+            # unqualified): when every lane's checkpoint row is the chunk's
+            # last, the last (MLA) layer writes its latent/shared rows for
+            # every row and runs the rest on the last row only.
+            # Decode and the default-off path never evaluate the refusal.
+            if (tail_skip_mode() == "1" and inputs.ndim == 2 and inputs.shape[1] > 1
+                    and claim_adapter_tail(inputs, kind="tail",
+                                           refuse=self._tail_refusal(inputs, cache))):
+                STATS["kimi_linear_tail_split"] += 1
+                return self.lm_head(self.model(inputs, cache, tail_row=True))
             # Prompt chunks project only each lane's checkpoint row through
             # the 163,840-wide head (identity outside a prompt-chunk request).
             return self.lm_head(select_checkpoint_rows(self.model(inputs, cache)))
+
+    def _tail_refusal(self, inputs, cache):
+        """Why this forward keeps its full last layer, or None.
+
+        Only the plain structure qualifies: an unwrapped trunk whose last
+        layer is a global MLA DecoderLayer with unwrapped attention and MLP
+        (hooks such as residual-ablation capture swap ``__class__``), the
+        serving MLA law (not the padded training law), plain or batch KVCache
+        on the MLA layers (a segmented verify cache, quantized or rotating
+        caches decline), and no verify / row-exact / speculating window.
+        Taps, prefill_body, tree and MTP-style readers never reach here: they
+        do not call ``__call__``.
+        """
+        from .invariant_prefill import prefill_decline_reason
+
+        inner = self.model
+        if not isinstance(inner, LanguageModel):
+            return "kimi_trunk_wrapped"
+        layer = inner.layers[-1]
+        if type(layer) is not DecoderLayer:
+            return "kimi_last_layer_wrapped"
+        if not layer.is_global:
+            # A KDA last layer would save only its MLP; not implemented.
+            return "kimi_last_layer_kda"
+        if (type(layer.attention) is not MultiLatentAttention
+                or type(layer.mlp) not in (SparseMoeBlock, ling.MLP)):
+            return "kimi_last_layer_wrapped"
+        if layer.attention.training_mla_policy != "expanded":
+            return "kimi_training_mla"
+        if cache is not None:
+            if (len(cache) != len(inner.layers)
+                    or any(type(cache[i]) not in (KVCache, BatchKVCache)
+                           for i in (inner._attention_idx, len(inner.layers) - 1))):
+                return "kimi_cache_layout"
+        reason = prefill_decline_reason(inputs, cache)
+        if reason not in (None, "single_row"):
+            return f"kimi_{reason}"
+        return None
 
     # Draft/verify seams inherited from Ling (post-layer residual taps, as HF
     # ``hidden_states[layer + 1]``) run under the same expert phase scope as

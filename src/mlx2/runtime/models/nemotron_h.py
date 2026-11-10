@@ -11,6 +11,7 @@ from mlx import nn
 
 from ..cache_operations import MAMBA_RECURRENT_OPERATIONS
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import claim_stateless_tail
 from ..progressive_external_verify import (
     PROGRESSIVE_TARGET_PROTOCOL_VERSION,
     ProgressiveTargetRows,
@@ -1611,6 +1612,7 @@ class NemotronHModel(nn.Module):
         capture_layers: tuple[int, ...] = (),
         hidden_sink: list | None = None,
         inputs_embeds=None,
+        tail_after: int | None = None,
     ):
         # The NAX sorted expert gather (policy moe_nax_gather=gather, default
         # off) is prefill-only; the trunk forward decides the phase once.
@@ -1618,11 +1620,13 @@ class NemotronHModel(nn.Module):
         # prefill.  A no-op while the mode is off.
         with _moe_nax.forward_scope(inputs, cache):
             return self._forward(
-                inputs, cache, ssm_sink, capture_layers, hidden_sink, inputs_embeds
+                inputs, cache, ssm_sink, capture_layers, hidden_sink, inputs_embeds,
+                tail_after,
             )
 
     def _forward(
-        self, inputs, cache, ssm_sink, capture_layers, hidden_sink, inputs_embeds
+        self, inputs, cache, ssm_sink, capture_layers, hidden_sink, inputs_embeds,
+        tail_after=None,
     ):
         hidden_states = (
             self.embeddings(inputs) if inputs_embeds is None else inputs_embeds
@@ -1670,6 +1674,10 @@ class NemotronHModel(nn.Module):
             hidden_states = layer(hidden_states, mask=mask, cache=c, ssm_sink=ssm_sink)
             if hidden_sink is not None and layer_index in capture_layers:
                 hidden_sink.append(hidden_states)
+            if layer_index == tail_after:
+                # Prompt-chunk tail skip (prefill_tail_skip, tier 1): no later
+                # layer writes state, so only the checkpoint row continues.
+                hidden_states = hidden_states[:, -1:]
 
         return self.norm_f(hidden_states)
 
@@ -2215,7 +2223,27 @@ class Model(nn.Module):
         inputs: mx.array,
         cache: Any | None = None,
     ):
-        out = self.backbone(inputs, cache=cache)
+        return self._checkpoint_logits(inputs, cache)
+
+    def _checkpoint_logits(self, inputs, cache, inputs_embeds=None):
+        """Backbone + head for a forward that may be a prompt chunk.
+
+        With MLX2_PREFILL_TAIL_SKIP=1 a claimed prompt chunk runs the layers
+        after the last state writer, the final norm and the head on the
+        checkpoint row only (prefill_tail_skip tier 1).  Supplied input
+        embeddings (media) keep the full chunk.
+        """
+        # A wrapped backbone (calibration's observer) reads every row.
+        writer = (
+            claim_stateless_tail(
+                inputs, cache, self, len(self.layers),
+                refuse=None if type(self.backbone) is NemotronHModel else "backbone_wrapped",
+            )
+            if inputs_embeds is None else None
+        )
+        if writer is not None:
+            return self.lm_head(self.backbone(inputs, cache=cache, tail_after=writer))
+        out = self.backbone(inputs, cache=cache, inputs_embeds=inputs_embeds)
         return self.lm_head(select_checkpoint_rows(out))
 
     # Prompt lookup verifies through ``pld_verify_forward`` one lane at a

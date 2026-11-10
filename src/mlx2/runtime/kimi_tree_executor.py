@@ -47,6 +47,7 @@ SOURCES = (
 UNBOUND_IMPORTS = {
     "served_exp": "device-fault classification in exception handlers; no numerics",
     "prefill_checkpoint_rows": "prompt-chunk checkpoint row selection; not on the tree path",
+    "prefill_tail_skip": "opt-in prompt-chunk tail claim in Model.__call__; not on the tree path",
     "segmented_plain_kv": "type check for multi-lane segmented verify; tree MLA reads its own ancestry keys",
 }
 

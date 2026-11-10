@@ -1,13 +1,22 @@
-"""Gemma 4 sparse and dense multimodal adapters for the MLX-VLM runtime.
+"""Gemma 4 sparse and dense multimodal adapters.
 
-The Gemma 4 model and processor remain an optional MLX-VLM dependency.  This
-module owns topology, cache policy, media identity, and mlx2 route declarations;
-see provenance/gemma4-mlx-vlm.json.
+This module owns topology, cache policy, media identity, and mlx2 route
+declarations (provenance/gemma4-mlx-vlm.json).  The tensor math has two
+backends, chosen by ``MLX2_GEMMA4_BACKEND``:
+
+- ``native`` (default since 2026-11-07, Pierre): mlx2's own port,
+  ``mlx2.runtime.models.gemma4`` (provenance/gemma4-native-tensors.json),
+  same module tree and weights;
+- ``mlx_vlm``: the pinned mlx-vlm Gemma 4 model, kept as the A/B reference
+  and fallback.
+
+Both use the pinned mlx-vlm processor for text/image/video preprocessing.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -60,6 +69,27 @@ _MEDIA_POLICY = {
     "video_fps": 2.0,
     "video_max_frames": 32,
 }
+
+
+TENSOR_BACKENDS = ("mlx_vlm", "native")
+
+
+def gemma4_tensor_backend(environ=None) -> str:
+    """The configured tensor backend; an unknown value fails closed.
+
+    ``native`` is the default (Pierre, 2026-11-07, after exact greedy parity
+    with mlx-vlm on both served artifacts; unqualified); ``mlx_vlm`` keeps the
+    pinned mlx-vlm model as the reference and fallback.
+    """
+    value = (environ if environ is not None else os.environ).get(
+        "MLX2_GEMMA4_BACKEND", "native"
+    )
+    value = value.strip().lower().replace("-", "_") or "native"
+    if value not in TENSOR_BACKENDS:
+        raise ValueError(
+            f"MLX2_GEMMA4_BACKEND must be one of {TENSOR_BACKENDS}, got {value!r}"
+        )
+    return value
 
 
 def inspect_gemma4_artifact(model_path):
@@ -178,6 +208,93 @@ def _install_segmented_view_attention(language_module):
         )
 
 
+_GEMMA4_TAIL_TARGET = None  # ContextVar, created on first install
+
+
+def _gemma4_tail_layer(layer, original, sdpa, x, mask=None, cache=None,
+                       per_layer_input=None, shared_kv=None, offset=None):
+    """Prompt-chunk tier-2 tail of Gemma 4's last decoder layer (opt-in).
+
+    Runs for exactly one claimed prompt-chunk forward (``prefill_tail_skip``).
+    K/V are computed over every row and written to the cache exactly as the
+    full layer does; q, attention output, o_proj, the MLP and the layer scalar
+    run on the last row only, and one row is returned.  Any shape outside the
+    plain text layer (KV sharing, per-layer inputs) runs the original layer,
+    whose full-width output ``logits_to_keep`` trims to the last row.
+    """
+    import mlx.core as mx
+
+    from ..runtime.prefill_tail_skip import STATS
+
+    attn = layer.self_attn
+    if (shared_kv is not None or per_layer_input is not None
+            or attn.kv_shared_only or attn.is_kv_shared_layer):
+        STATS["gemma4_tail_layer_full"] += 1
+        return original(layer, x, mask, cache, per_layer_input=per_layer_input,
+                        shared_kv=shared_kv, offset=offset)
+    batch, length, _ = x.shape
+    h = layer.input_layernorm(x)
+    queries = attn.q_proj(h[:, -1:]).reshape(batch, 1, attn.n_heads, attn.head_dim)
+    queries = attn.q_norm(queries)
+    keys = attn.k_proj(h).reshape(batch, length, attn.n_kv_heads, attn.head_dim)
+    values = (keys if attn.use_k_eq_v
+              else attn.v_proj(h).reshape(batch, length, attn.n_kv_heads, attn.head_dim))
+    offset = mx.array(cache.offset) if cache is not None else 0
+    keys = attn.rope(attn.k_norm(keys).transpose(0, 2, 1, 3), offset=offset)
+    values = attn.v_norm(values).transpose(0, 2, 1, 3)
+    if cache is not None:
+        keys, values = cache.update_and_fetch(keys, values)
+    queries = attn.rope(queries.transpose(0, 2, 1, 3), offset=offset + (length - 1))
+    if isinstance(mask, str):
+        mask = None  # one query aligned to the last key sees every key
+    elif mask is not None:
+        mask = mask[..., -1:, :]
+    output = sdpa(queries, keys, values, cache=cache, scale=attn.scale, mask=mask)
+    output = attn.o_proj(output.transpose(0, 2, 1, 3).reshape(batch, 1, -1))
+    residual = x[:, -1:] + layer.post_attention_layernorm(output)
+    if layer.enable_moe:
+        h1 = layer.post_feedforward_layernorm_1(
+            layer.mlp(layer.pre_feedforward_layernorm(residual)))
+        top_k_indices, top_k_weights = layer.router(residual)
+        h2 = layer.post_feedforward_layernorm_2(layer.experts(
+            layer.pre_feedforward_layernorm_2(residual), top_k_indices, top_k_weights))
+        update = h1 + h2
+    else:
+        update = layer.mlp(layer.pre_feedforward_layernorm(residual))
+    out = residual + layer.post_feedforward_layernorm(update)
+    if layer.layer_scalar is not None:
+        out = out * layer.layer_scalar
+    STATS["gemma4_tail_layer_split"] += 1
+    return out, (keys, values), offset
+
+
+def _install_gemma4_tail_dispatch(layer_class):
+    """Wrap ``DecoderLayer.__call__`` once; it dispatches on a ContextVar.
+
+    The module tree is never mutated.  The tail runs only for the layer object
+    that the current context's claimed forward names, so concurrent forwards
+    in other threads or contexts are unaffected.
+    """
+    global _GEMMA4_TAIL_TARGET
+    if _GEMMA4_TAIL_TARGET is None:
+        from contextvars import ContextVar
+
+        _GEMMA4_TAIL_TARGET = ContextVar("mlx2_gemma4_tail_target", default=None)
+    if layer_class.__dict__.get("_mlx2_tail_dispatch", False):
+        return
+    original = layer_class.__call__
+    target = _GEMMA4_TAIL_TARGET
+
+    def __call__(self, x, *args, **kwargs):
+        selected = target.get()
+        if selected is not None and selected[0] is self:
+            return _gemma4_tail_layer(self, original, selected[1], x, *args, **kwargs)
+        return original(self, x, *args, **kwargs)
+
+    layer_class.__call__ = __call__
+    layer_class._mlx2_tail_dispatch = True
+
+
 class _Gemma4LogitsModel(_LogitsModel):
     """Use mlx2 cache types so batching and APCv2 can own model state."""
 
@@ -204,10 +321,58 @@ class _Gemma4LogitsModel(_LogitsModel):
                 raise ValueError(
                     "Gemma 4 prompt-lookup verify does not support KV-shared layers"
                 )
-            _install_segmented_view_attention(
-                sys.modules[type(language.layers[0].self_attn).__module__]
-            )
+            # The native model's attention is mlx2's, which already lets a
+            # segmented view reduce its own rows (``bucketed_attention``).
+            if not getattr(self._model, "mlx2_native_tensors", False):
+                _install_segmented_view_attention(
+                    sys.modules[type(language.layers[0].self_attn).__module__]
+                )
         return self(inputs, cache=cache)
+
+    def __call__(self, *args, **kwargs):
+        """Text prompt chunks may join the checkpoint-row contract (opt-in).
+
+        On by default for Gemma 4 (``MLX2_PREFILL_TAIL_SKIP`` unset = mode 1,
+        Pierre 2026-11-07; ``MLX2_PREFILL_TAIL_SKIP=0`` disables).  Only a plain text call
+        ``model(tokens, cache=...)`` is eligible (a second positional argument
+        would be mlx-vlm's ``pixel_values``); the claim succeeds only inside a
+        prompt-chunk checkpoint request whose rows are every lane's last.
+        Mode ``head`` projects only that row through the 262K-entry
+        soft-capped head; mode ``1`` also splits the last decoder layer.
+        """
+        if len(args) == 1 and set(kwargs) <= {"cache"}:
+            from ..runtime.prefill_tail_skip import claim_adapter_tail, tail_skip_mode
+
+            mode = tail_skip_mode("gemma4")
+            if mode != "0":
+                inputs, cache = args[0], kwargs.get("cache")
+                kind = "tail" if mode == "1" else "head"
+                if claim_adapter_tail(inputs, kind=kind, family="gemma4"):
+                    if kind == "tail":
+                        return self._tail_forward(inputs, cache)
+                    output = self._model(inputs, cache=cache, logits_to_keep=1)
+                    return getattr(output, "logits", output)
+        return super().__call__(*args, **kwargs)
+
+    def _tail_forward(self, inputs, cache):
+        import sys
+
+        if getattr(self._model, "mlx2_native_tensors", False):
+            # Native backend: its own DecoderLayer.tail (runtime/models/gemma4).
+            from ..runtime.prefill_tail_skip import STATS
+
+            output = self._model(inputs, cache=cache, logits_to_keep=1, tail_last=True)
+            STATS["gemma4_native_tail_split"] += 1
+            return getattr(output, "logits", output)
+        last = self._model.language_model.model.layers[-1]
+        _install_gemma4_tail_dispatch(type(last))
+        sdpa = sys.modules[type(last.self_attn).__module__].scaled_dot_product_attention
+        token = _GEMMA4_TAIL_TARGET.set((last, sdpa))
+        try:
+            output = self._model(inputs, cache=cache, logits_to_keep=1)
+        finally:
+            _GEMMA4_TAIL_TARGET.reset(token)
+        return getattr(output, "logits", output)
 
     def make_cache(self):
         from ..runtime.models.cache import KVCache, RotatingKVCache
@@ -311,6 +476,31 @@ class _Gemma4Adapter(_MLXVLMAdapter):
     def _wrap_model(model):
         return _Gemma4LogitsModel(model)
 
+    tensor_backend = None  # set when the model loads
+
+    def _load_model_and_processor(self, model_path):
+        """Load the configured tensor backend; the processor is mlx-vlm's."""
+        backend = gemma4_tensor_backend()
+        if backend == "mlx_vlm":
+            self.tensor_backend = backend
+            return super()._load_model_and_processor(model_path)
+        from ..runtime.models import gemma4 as native
+
+        eos = native.load_config(model_path).get("eos_token_id")
+        processor = self._vlm_backend.load_processor(model_path, eos_token_ids=eos)
+        model = native.load(model_path)
+        self.tensor_backend = backend
+        # Native and mlx-vlm states agree only to rounding, so APCv2 (and its
+        # persisted entries) keep them apart.
+        self.layout = f"{self.descriptor.cache_layout}+native-tensors"
+        return model, processor
+
+    def profile_name(self, mtp):
+        name = super().profile_name(mtp)
+        if self.tensor_backend == "native":
+            return name.replace("mlx-vlm-", "gemma4-native-", 1)
+        return name
+
     @classmethod
     def _inspect_adapter_artifact(cls, model_path):
         artifact = inspect_gemma4_artifact(model_path)
@@ -391,9 +581,10 @@ class _Gemma4Adapter(_MLXVLMAdapter):
                 sorted(capability.value for capability in self.descriptor.capabilities)
             ),
             "unsupported_capabilities": ("audio", "mtp", "external_draft"),
+            "tensor_backend": self.tensor_backend,
             "apcv2": {
                 "exact_only": True,
-                "cache_layout": self.descriptor.cache_layout,
+                "cache_layout": getattr(self, "layout", self.descriptor.cache_layout),
                 "state_planes": tuple(
                     sorted(plane.value for plane in self.descriptor.state_planes)
                 ),
@@ -475,7 +666,7 @@ class _Gemma4Adapter(_MLXVLMAdapter):
             raise ValueError("Gemma 4 prepared media payload is missing")
         return {
             "route": "ordinary",
-            "cache_layout": self.descriptor.cache_layout,
+            "cache_layout": getattr(self, "layout", self.descriptor.cache_layout),
             "media_token_end": media_end,
             "media_fingerprint": fingerprint,
             "apcv2_exact": True,
@@ -533,7 +724,7 @@ class _Gemma4Adapter(_MLXVLMAdapter):
                 "authority": "apcv2",
                 "exact_only": True,
                 "recompute_common_tokens": False,
-                "cache_layout": self.descriptor.cache_layout,
+                "cache_layout": getattr(self, "layout", self.descriptor.cache_layout),
                 "full_attention_layers": full,
                 "sliding_attention_layers": topology["layers"] - full,
                 "sliding_window": 1024,
@@ -749,6 +940,7 @@ class _Gemma4Adapter(_MLXVLMAdapter):
             **super().diagnostics(),
             "variant": self.identity["variant"],
             "precision": self.identity["precision"],
+            "tensor_backend": self.tensor_backend,
             "full_attention_layers": self.identity["full_attention_layers"],
             "sliding_attention_layers": self.identity["sliding_attention_layers"],
             "route_capability_contract": self.route_capability_contract(),

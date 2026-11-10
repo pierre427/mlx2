@@ -56,6 +56,11 @@ class SourceExpertTicket:
     hinted: set = field(default_factory=set)
     closed: bool = False
 PROJECTIONS = {"gate": "w1", "up": "w3", "down": "w2"}
+# deepseek_source_bf16_dense=resident_f32_v1: the small BF16 projections the
+# generic F32 fallback widens per call (routers, ratio-1 compressor KV, indexer
+# weights and keys). The 2.6 GB-widened vocabulary head is never cached here.
+_RESIDENT_F32_DENSE = re.compile(
+    r"blk\.\d+\.(ffn_gate_inp|attn_compressor_kv|attn_compressor_gate|indexer\.proj|indexer\.attn_k)\.weight")
 
 # Only these reviewed implementations can back the opt-in raw PP Q_b path.
 Q_B_PREFILL_SOURCE_PINS = {
@@ -581,7 +586,7 @@ class SourceV41Weights(NativeV41Weights):
                  source_frame_reuse_policy="reference", submission_policy="reference",
                  source_row_packet_policy="reference", resident_gather_policy="reference", resident_prefill_policy="reference",
                  woa_storage_policy="reference", source_expert_io_policy="reference",
-                 prefill_readahead_policy="reference"):
+                 prefill_readahead_policy="reference", bf16_dense_policy="reference"):
         if expert_math_policy not in POLICIES:
             raise ValueError("invalid Source expert math policy")
         if type(source_expert_io_policy) is not str or source_expert_io_policy not in ('reference',)+OVERLAP_POLICIES:
@@ -652,6 +657,7 @@ class SourceV41Weights(NativeV41Weights):
                 'source_short_decode_joint_f32_v1','source_short_decode_grouped_f32_v1')),
             ('dense QAT', dense_qat_policy, ('reference','fused_fp32')),
             ('BF16 loads', bf16_loads_policy, ('reference','woa_f32','direct_f32')),
+            ('BF16 dense', bf16_dense_policy, ('reference','resident_f32_v1')),
             ('completion', completion_policy, ('reference','bounded_2')),
             ('prefill batch', prefill_batch_policy, ('reference','gate_up','gate_up_down')),
             ('prefill wide dtype', prefill_wide_dtype, ('reference','bf16_p1')),
@@ -729,6 +735,8 @@ class SourceV41Weights(NativeV41Weights):
         self.dense_pair_policy = 'fused' if qakv_policy == 'qat_reuse' else 'reference'
         self.source_attention_math_policy = attention_math_policy
         self.source_bf16_loads_policy = bf16_loads_policy
+        self.source_bf16_dense_policy = bf16_dense_policy
+        self._dense_f32 = {}
         self.source_completion_policy = completion_policy
         self.source_prefill_batch_policy = prefill_batch_policy
         self.source_prefill_wide_dtype = prefill_wide_dtype
@@ -904,8 +912,36 @@ class SourceV41Weights(NativeV41Weights):
                     return value
                 key='source_bf16_head_fallback'
                 self.scheduled_dense_calls[key]=self.scheduled_dense_calls.get(key,0)+1
-            return x.astype(mx.float32) @ self.array(name).astype(mx.float32).T
+            return x.astype(mx.float32) @ self._f32_operand(name).T
         return apply
+
+    def _f32_operand(self, name):
+        """The F32 coefficient the generic fallback multiplies by.
+
+        Reference widens a BF16 coefficient on every call. resident_f32_v1
+        widens the small BF16 projections once per loaded coefficient and
+        reuses that array: the same F32 values reach the same matmul, so the
+        product is bit-identical. Bound to the live BF16 object, so a park /
+        reload never reuses a widened copy of retired weights.
+        """
+        import mlx.core as mx
+        weight = self.array(name)
+        if (weight.dtype == mx.float32
+                or getattr(self, 'source_bf16_dense_policy', 'reference') != 'resident_f32_v1'
+                or _RESIDENT_F32_DENSE.fullmatch(name) is None):
+            return weight.astype(mx.float32)
+        cache = self.__dict__.setdefault('_dense_f32', {})
+        entry = cache.get(name)
+        counts = self.scheduled_dense_calls
+        if entry is None or entry[0] is not weight:
+            entry = cache[name] = (weight, weight.astype(mx.float32))
+            counts['source_bf16_dense_f32_widened'] = counts.get('source_bf16_dense_f32_widened', 0)+1
+        else:
+            key = 'source_bf16_dense_f32_reused'
+            counts[key] = counts.get(key, 0)+1
+            key = 'source_bf16_dense_f32_bytes_avoided'
+            counts[key] = counts.get(key, 0)+entry[1].nbytes
+        return entry[1]
 
     def _q_b_prefill_project(self, name, x, prepared, q, scales):
         """Raw F32 only; the ordinary model remains the BF16 boundary owner."""
@@ -1108,6 +1144,7 @@ class SourceV41Weights(NativeV41Weights):
         if session is not None:session.close()
         result=super().park()
         getattr(self,'_resident_dense_coefficient_views',{}).clear()
+        getattr(self,'_dense_f32',{}).clear()
         return result
 
     def close(self):
@@ -1117,6 +1154,7 @@ class SourceV41Weights(NativeV41Weights):
         if session is not None:session.close()
         result=super().close()
         getattr(self,'_resident_dense_coefficient_views',{}).clear()
+        getattr(self,'_dense_f32',{}).clear()
         return result
 
     def prepare_resident_coefficient_views(self,*,ownercheck):

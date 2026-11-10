@@ -16,6 +16,8 @@ import mlx.core as mx
 from mlx import nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS as TAIL_SKIP_STATS
+from ..prefill_tail_skip import claim_adapter_tail, structural_refusal
 from . import moe_nax_gather as _moe_nax
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
@@ -127,6 +129,47 @@ class Attention(nn.Module):
         )
         return self.o_proj(y.transpose(0, 2, 1, 3).reshape(batch, length, -1))
 
+    def tail(self, x, mask=None, cache=None):
+        """Prompt-chunk tail (MLX2_PREFILL_TAIL_SKIP): K/V over every row
+        (what the cache keeps, computed exactly as ``__call__``), the query,
+        sink attention and output projection for the last row only."""
+        batch, length, _ = x.shape
+        q = self.q_proj(x[:, -1:]).reshape(batch, 1, self.n_heads, self.head_dim)
+        k = self.k_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
+        v = self.v_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
+        q = self.q_norm(q).transpose(0, 2, 1, 3)
+        k = self.k_norm(k).transpose(0, 2, 1, 3)
+        v = v.transpose(0, 2, 1, 3)
+        if self.use_rope:
+            offset = cache.offset if cache is not None else 0
+            q = self.rope(q, offset=offset + (length - 1))
+            k = self.rope(k, offset=offset)
+        if cache is not None:
+            k, v = cache.update_and_fetch(k, v)
+        y = scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            cache=cache,
+            scale=self.scale,
+            mask=_last_row_mask(mask),
+            sinks=self.softmax_offset.astype(q.dtype),
+        )
+        return self.o_proj(y.transpose(0, 2, 1, 3).reshape(batch, 1, -1))
+
+
+def _last_row_mask(mask):
+    """The last query row of a prompt-chunk mask.
+
+    An array mask (batched left padding, a sliding window narrower than the
+    keys) keeps its last row.  The ``"causal"`` string becomes None: one
+    query aligned to the last key sees every key it is given (a sliding cache
+    returns ``"causal"`` only while every key is inside the window).
+    """
+    if isinstance(mask, str):
+        return None
+    return mask if mask is None else mask[..., -1:, :]
+
 
 class SparseMoE(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -199,6 +242,11 @@ class Layer(nn.Module):
         hidden = x + self.self_attn(self.input_layernorm(x), mask, cache)
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
+    def tail(self, x, mask=None, cache=None):
+        """Last-row output of ``__call__``; the cache write covers every row."""
+        hidden = x[:, -1:] + self.self_attn.tail(self.input_layernorm(x), mask, cache)
+        return hidden + self.mlp(self.post_attention_layernorm(hidden))
+
 
 class Decoder(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -210,14 +258,16 @@ class Decoder(nn.Module):
         self._full = args.layer_types.index("full_attention")
         self._sliding = args.layer_types.index("sliding_attention")
 
-    def __call__(self, inputs, cache=None, capture=None, *, decode=False):
+    def __call__(self, inputs, cache=None, capture=None, *, decode=False, tail_row=False):
         # The M5 NAX sorted expert gather (bit-identical to the stock sorted
         # kernel) is prefill-only: the trunk forward decides the phase once.
         # A no-op while its mode is off.
+        if tail_row and (capture is not None or inputs.shape[1] <= 1):
+            raise ValueError("Flint prompt-chunk tail needs a multi-row chunk and no taps")
         with _moe_nax.forward_scope(inputs, cache):
-            return self._forward(inputs, cache, capture, decode=decode)
+            return self._forward(inputs, cache, capture, decode=decode, tail_row=tail_row)
 
-    def _forward(self, inputs, cache, capture, *, decode=False):
+    def _forward(self, inputs, cache, capture, *, decode=False, tail_row=False):
         hidden = self.embed_tokens(inputs)
         fused = getattr(self, "fused_blocks", None)
         if fused and inputs.shape[0] != 1:
@@ -236,8 +286,12 @@ class Decoder(nn.Module):
         sliding_mask = create_attention_mask(
             hidden, cache[self._sliding], window_size=self.args.sliding_window
         )
+        last = len(self.layers) - 1
         for index, (layer, layer_cache) in enumerate(zip(self.layers, cache, strict=True)):
             mask = full_mask if layer.layer_type == "full_attention" else sliding_mask
+            if tail_row and index == last:
+                hidden = layer.tail(hidden, mask, layer_cache)
+                continue
             hidden = layer(hidden, mask, layer_cache)
             if capture is not None and index in capture:
                 # Post-block residual stream, before the final norm.
@@ -266,7 +320,25 @@ class Model(nn.Module):
             and inputs.shape[0] == 1 and bool(cache)
             and all(c is not None and c.offset > 0 for c in cache)
         )
-        hidden = select_checkpoint_rows(self.model(inputs, cache, decode=decode))
+        # Prompt-chunk tail (opt-in MLX2_PREFILL_TAIL_SKIP=1): only this plain
+        # forward may take it.  ``forward_with_taps``/``prefill_body`` call
+        # the decoder directly with taps; a replaced last layer (excision or
+        # any other wrapper) has no ``tail`` split and keeps the full chunk.
+        last = self.model.layers[-1]
+        refuse = (
+            "flint_wrapped_last_layer" if type(last) is not Layer
+            else structural_refusal(
+                inputs, cache, trunk=self.model, trunk_class=Decoder,
+                parts=((last.self_attn, (Attention,)), (last.mlp, (MLP, SparseMoE))),
+            )
+        )
+        # ``decode`` only selects the fused one-row blocks, which a claimed
+        # (multi-row) chunk never reaches.
+        if claim_adapter_tail(inputs, kind="tail", refuse=refuse):
+            TAIL_SKIP_STATS["flint_tail_split"] += 1
+            hidden = self.model(inputs, cache, tail_row=True)
+        else:
+            hidden = select_checkpoint_rows(self.model(inputs, cache, decode=decode))
         logits = self._head(hidden)
         self.completed_forwards += 1
         return logits

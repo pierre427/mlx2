@@ -155,6 +155,8 @@ from .rope_utils import Llama3RoPE, YarnRoPE, initialize_rope
 from ..verify_sync import record_verify_sync
 from ..row_exact_verify import active as _row_exact_window_active
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS as _TAIL_STATS
+from ..prefill_tail_skip import claim_adapter_tail, tail_skip_mode
 
 _QSA_SEGMENT_CAPTURE_LOCK = threading.Lock()
 _QSA_SEGMENT_CAPTURE_COUNT = 0
@@ -5529,6 +5531,54 @@ class QSASelection:
         )
 
 
+def _last_row_selection(selection: QSASelection) -> QSASelection:
+    """The selection the chunk's LAST query row saw, as a one-row selection.
+
+    For the prompt-chunk tail split (``Attention.tail_row``): the indexer
+    ran over every row (its keys, summaries and MTP share are state), and
+    only the last row's query attends.  Per-query fields keep their last
+    entry; the key geometry (``token_positions``, ``physical_width``,
+    ``n_blocks``, ``left_padding``) is unchanged, and the query offset moves
+    to that row.  A proven causal visibility becomes the one-row visibility
+    aligned to the last key; an array mask keeps its last query row and its
+    causal registration.  ``mask_only`` (sink-window caches) is not split.
+    """
+    length = selection.length
+    if length == 1:
+        return selection
+    if selection.kind == "mask_only":
+        raise ValueError("a mask-only QSA selection has no tail split")
+    causal = selection.causal_mask
+    if isinstance(causal, QSAVisibility):
+        causal = QSAVisibility(
+            length=1,
+            physical_width=causal.physical_width,
+            batch=causal.batch,
+            left_padding=causal.left_padding,
+            register=causal.register,
+        )
+    elif causal is not None:
+        kind = registered_mask_kind(causal)
+        sliced = causal[..., -1:, :]
+        if kind is not None:
+            from .qsdpa_verify_metal import _CAUSAL_MASKS
+
+            register_causal_mask(sliced, _CAUSAL_MASKS[id(causal)][1], kind=kind)
+        causal = sliced
+    fields = dict(
+        length=1,
+        offset=selection.offset + (length - 1),
+        causal_mask=causal,
+    )
+    if selection.kind == "explicit":
+        fields.update(
+            raw_block_ids=selection.raw_block_ids[:, -1:],
+            valid_blocks=selection.valid_blocks[:, -1:],
+            q_positions=selection.q_positions[..., -1:],
+        )
+    return replace(selection, **fields)
+
+
 def _gather_qsa_attention(
     q: mx.array,
     k: mx.array,
@@ -6988,6 +7038,69 @@ class Attention(nn.Module):
             self.indexer.index_qk_proj(x),
         )
 
+    def tail_row(self, x: mx.array, mask, cache):
+        """Prompt-chunk tail split of this layer's attention (opt-in).
+
+        Everything this layer writes to ``cache`` runs over EVERY row with
+        the ordinary forward's exact ops and order: the indexer (raw index
+        keys, block summaries, MTP top-k share), then K/V projection, k-norm,
+        RoPE and ``update_and_fetch``.  Only the last row's query attends:
+        its q/gate projection, SDPA against the fetched K/V under the
+        last-row selection, the output gate and ``o_proj``.  Returns
+        ``[batch, 1, hidden]``.
+
+        The caller (``TextModel._tail_row_refusal``) admits only a plain
+        ``QSAKVCache``/``BatchQSAKVCache``, no fused-rows mode and no
+        invariant lane, so the ordinary forward's K/V come from the separate
+        ``k_proj``/``v_proj`` path (or the opt-in fused table, reproduced
+        here) and stay bitwise identical.
+        """
+        (batch, length, _) = x.shape
+        qg = k_flat = v_flat = fused_index_qk = None
+        if _QSA_FUSED_PROJ and not self.training:
+            table = self._fused_projection_table()
+            if table is not None:
+                width_q = self.num_heads * self.head_dim * 2
+                width_kv = self.num_kv_heads * self.head_dim
+                (qg, k_flat, v_flat, fused_index_qk) = mx.split(
+                    _table_matmul(table, x),
+                    [width_q, width_q + width_kv, width_q + 2 * width_kv],
+                    axis=-1,
+                )
+                qg = qg[:, -1:]
+        selection = self.indexer(
+            x,
+            mask,
+            cache,
+            projected_qk=fused_index_qk,
+            dense_shortcircuit=False,
+            fused_query=False,
+        )
+        if qg is None:
+            qg = self.q_proj(x[:, -1:])
+            k_flat = self.k_proj(x)
+            v_flat = self.v_proj(x)
+        offset = cache.offset
+        if isinstance(offset, mx.array):
+            # update_and_fetch advances a batch cache's offset in place.
+            offset = mx.array(offset)
+        v = v_flat.reshape(batch, length, self.num_kv_heads, self.head_dim)
+        v = v.transpose(0, 2, 1, 3)
+        k = k_flat.reshape(batch, length, self.num_kv_heads, self.head_dim)
+        k = self.k_norm(k).transpose(0, 2, 1, 3)
+        k = self.rope(k, offset=offset)
+        (k, v) = cache.update_and_fetch(k, v)
+        # The one-row call re-derives this row's K from ``k_flat``/``v_flat``
+        # and then uses the fetched K/V instead; that dead K is never built.
+        return self(
+            x[:, -1:],
+            None,
+            cache,
+            _projected=(qg, k_flat[:, -1:], v_flat[:, -1:], None),
+            _selection=_last_row_selection(selection),
+            _fetched_kv=(k, v),
+        )
+
     def __call__(
         self,
         x: mx.array,
@@ -7386,6 +7499,46 @@ class DecoderLayer(nn.Module):
                 and not bool(getattr(cache, "speculating", False))):
             return self._forward(x, input_ids, mask, cache, ssm_mask)
 
+    def tail_row(self, x, input_ids, mask=None, cache=None, ssm_mask=None):
+        """Prompt-chunk tail split of the last layer; returns ``[B, 1, hc*D]``.
+
+        PLE, the attention-side hyper-connection split and the mixer run over
+        every row, in the ordinary forward's scope, so the mixer's input and
+        every state it writes (PLE history, GDN conv/recurrent state, QSA
+        index keys/summaries/K/V) are bitwise those of ``__call__``.  A GDN
+        mixer runs whole and keeps its last output row; a QSA mixer runs
+        ``Attention.tail_row``.  The inject, the MLP-side split, the MoE and
+        its inject run on the last row only.
+        """
+        with _hc_prefill.scope(not self.training and x.shape[1] >= 9
+                and not _row_exact_window_active()
+                and not bool(getattr(cache, "speculating", False))):
+            if self.ple is not None:
+                x = x + self.ple(x, input_ids, cache, ssm_mask)
+            gate_inject = fused_gate_inject_enabled()
+            (mixed, residual, inject, raw) = _split_hyper(
+                self.attn_hyper_connection, x, gate_inject
+            )
+            if self.is_linear:
+                branch = self.linear_attn(mixed, ssm_mask, cache)[:, -1:]
+            else:
+                branch = self.self_attn.tail_row(mixed, mask, cache)
+        (residual, inject) = (residual[:, -1:], inject[:, -1:])
+        x = (
+            _apply_raw_gate_inject(residual, branch, inject, training=self.training)
+            if raw
+            else _apply_inject(residual, branch, inject)
+        )
+        (mixed, residual, inject, raw) = _split_hyper(
+            self.mlp_hyper_connection, x, gate_inject
+        )
+        branch = self.mlp(mixed)
+        if raw:
+            return _apply_raw_gate_inject(
+                residual, branch, inject, training=self.training
+            )
+        return _apply_inject(residual, branch, inject)
+
     def _forward(self, x, input_ids, mask=None, cache=None, ssm_mask=None):
         if self.ple is not None:
             x = x + self.ple(x, input_ids, cache, ssm_mask)
@@ -7449,7 +7602,7 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
         return self.hyper_connection_mixer(hidden)
 
     def __call__(self, inputs, cache=None, input_embeddings=None, return_hyper=False,
-                 *, capture_layers=(), hidden_sink=None):
+                 *, capture_layers=(), hidden_sink=None, tail_row=False):
         # The NAX MoE gather is prefill-only: this trunk forward decides the
         # phase once (decode, MTP verify and prepared verify blocks are not
         # prefill at any width or padding); nested calls keep it.
@@ -7459,10 +7612,17 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
             return self._forward(
                 inputs, cache, input_embeddings, return_hyper,
                 capture_layers=capture_layers, hidden_sink=hidden_sink,
+                tail_row=tail_row,
             )
 
     def _forward(self, inputs, cache=None, input_embeddings=None, return_hyper=False,
-                 *, capture_layers=(), hidden_sink=None):
+                 *, capture_layers=(), hidden_sink=None, tail_row=False):
+        if tail_row and (return_hyper or capture_layers or hidden_sink is not None
+                         or input_embeddings is not None or cache is None
+                         or _SHAPE_STABLE_SHORT_FORWARD):
+            # Only TextModel.__call__ asks for the tail, after its refusals;
+            # a reader of every row's hidden state never gets one.
+            raise ValueError("the Qwen4 tail split serves only a plain prompt chunk")
         # A prepared segmented cohort owns masks and valid lengths for the
         # entire verification block. Splitting it into token forwards would
         # reuse those lengths against width-one QSA rows and mutate recurrent
@@ -7529,7 +7689,10 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
                     _PLE_EARLY_STATS["dispatches"] += 1
                 else:
                     _PLE_EARLY_STATS["device_ids"] += 1
-            hidden = layer(hidden, inputs, fa_mask, layer_cache, ssm_mask)
+            if tail_row and index == last:
+                hidden = layer.tail_row(hidden, inputs, fa_mask, layer_cache, ssm_mask)
+            else:
+                hidden = layer(hidden, inputs, fa_mask, layer_cache, ssm_mask)
             if hidden_sink is not None and index in capture_layers:
                 hidden_sink.append(self._external_capture(hidden))
             if eager and (index == last or (index + 1) % stride == 0):
@@ -7678,12 +7841,85 @@ class TextModel(nn.Module):
         return self.model.pipeline_layers
 
     def __call__(self, inputs, cache=None, input_embeddings=None):
+        if self._claim_tail_row(inputs, cache, input_embeddings):
+            _TAIL_STATS["qwen4_exp_tail_split"] += 1
+            return self.logits(self.model(inputs, cache, tail_row=True))
         hidden = select_checkpoint_rows(self.model(inputs, cache, input_embeddings))
         return (
             self.model.embed_tokens.as_linear(hidden)
             if self.args.tie_word_embeddings
             else self.lm_head(hidden)
         )
+
+    def _claim_tail_row(self, inputs, cache, input_embeddings) -> bool:
+        """Prompt-chunk tier-2 tail (``MLX2_PREFILL_TAIL_SKIP=1``, default off).
+
+        Claims the open checkpoint-row request when every lane's checkpoint
+        row is the chunk's last; the last layer then writes its state over
+        every row and computes the rest over that row (``DecoderLayer.
+        tail_row``).  Only this plain call reaches it: taps, ``prefill_body``,
+        ``mtp_backbone``, ``mixed`` and verify forwards call the trunk
+        directly and open no request.
+        """
+        if (getattr(inputs, "ndim", 0) != 2 or inputs.shape[1] <= 1
+                or tail_skip_mode() != "1"):
+            return False
+        return claim_adapter_tail(
+            inputs, kind="tail",
+            refuse=self._tail_row_refusal(cache, input_embeddings, inputs),
+        )
+
+    def _tail_row_refusal(self, cache, input_embeddings, inputs=None):
+        """Why this chunk keeps the full last layer, or None."""
+        trunk = self.model
+        if input_embeddings is not None:
+            return "qwen4_exp_input_embeddings"
+        if cache is None or len(cache) != len(trunk.layers):
+            return "qwen4_exp_cache_layout"
+        if trunk.pipeline_size != 1:
+            return "qwen4_exp_pipeline"
+        if _row_exact_window_active() or _invariant.active():
+            return "qwen4_exp_row_exact"
+        if _SHAPE_STABLE_SHORT_FORWARD or _GDN_SHAPE_STABLE_PROJECTIONS:
+            return "qwen4_exp_shape_stable"
+        if (
+            _attn_rows.enabled()
+            and inputs is not None
+            and inputs.shape[0] == 1
+            and inputs.shape[1] <= _attn_rows.PREP_MAX_ROWS
+        ):
+            # Fused rows (Flash-Next default policy) engage only for one lane
+            # of at most PREP_MAX_ROWS rows; its fused norm+RoPE K differs from
+            # the k_norm/rope path the tail reproduces, so such a chunk keeps
+            # the ordinary forward's own K.  Longer or batched chunks take the
+            # plain path, which the tail reproduces exactly.  The admission
+            # helper itself is not called: it bumps fallback counters.
+            return "qwen4_exp_attn_rows"
+        if any(
+            bool(getattr(entry, "speculating", False))
+            or getattr(entry, "_step_lengths", None) is not None
+            for entry in cache
+        ):
+            return "qwen4_exp_verify_cache"
+        layer = trunk.layers[-1]
+        # Layer excision, row-exact verify (class swap) and any other wrapper
+        # replace these objects or their classes; only the plain ones split.
+        if type(layer) is not DecoderLayer:
+            return "qwen4_exp_wrapped_last_layer"
+        if layer.is_linear:
+            if type(layer.linear_attn) is not GatedDeltaNet:
+                return "qwen4_exp_wrapped_last_layer"
+        else:
+            if type(layer.self_attn) is not Attention:
+                return "qwen4_exp_wrapped_last_layer"
+            last_cache = cache[-1]
+            if type(last_cache) not in (QSAKVCache, BatchQSAKVCache):
+                # Quantized, sink-window and segmented QSA caches.
+                return "qwen4_exp_last_cache_type"
+            if getattr(last_cache, "attention_backend", "sdpa") != "sdpa":
+                # bucketed/rows backends route one query row to decode paths.
+                return "qwen4_exp_attention_backend"
+        return None
 
     def make_cache(self):
         caches = []

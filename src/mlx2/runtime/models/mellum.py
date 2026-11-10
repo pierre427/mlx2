@@ -17,6 +17,8 @@ import mlx.core as mx
 from mlx import nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS as TAIL_SKIP_STATS
+from ..prefill_tail_skip import claim_adapter_tail, structural_refusal
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
 from .rope_utils import initialize_rope
@@ -131,6 +133,40 @@ class Attention(nn.Module):
         )
         return self.o_proj(y.transpose(0, 2, 1, 3).reshape(batch, length, -1))
 
+    def tail(self, x, mask=None, cache=None):
+        """Prompt-chunk tail (MLX2_PREFILL_TAIL_SKIP): K/V over every row
+        (what the cache keeps, computed exactly as ``__call__``), the query and
+        attention output for the last row only."""
+        batch, length, _ = x.shape
+        q = self.q_proj(x[:, -1:]).reshape(batch, 1, self.n_heads, self.head_dim)
+        k = self.k_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
+        v = self.v_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
+        q = self.q_norm(q).transpose(0, 2, 1, 3)
+        k = self.k_norm(k).transpose(0, 2, 1, 3)
+        v = v.transpose(0, 2, 1, 3)
+        offset = cache.offset if cache is not None else 0
+        q = self.rope(q, offset=offset + (length - 1))
+        k = self.rope(k, offset=offset)
+        if cache is not None:
+            k, v = cache.update_and_fetch(k, v)
+        y = scaled_dot_product_attention(
+            q, k, v, cache=cache, scale=self.scale, mask=_last_row_mask(mask)
+        )
+        return self.o_proj(y.transpose(0, 2, 1, 3).reshape(batch, 1, -1))
+
+
+def _last_row_mask(mask):
+    """The last query row of a prompt-chunk mask.
+
+    An array mask (batched left padding, a sliding window wider than the
+    retained keys) keeps its last row.  The ``"causal"`` string becomes None:
+    one query aligned to the last key sees every key it is given (a sliding
+    cache returns ``"causal"`` only while every key is inside the window).
+    """
+    if isinstance(mask, str):
+        return None
+    return mask if mask is None else mask[..., -1:, :]
+
 
 class SparseMoE(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -167,6 +203,11 @@ class DecoderLayer(nn.Module):
         hidden = x + self.self_attn(self.input_layernorm(x), mask, cache)
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
+    def tail(self, x, mask=None, cache=None):
+        """Last-row output of ``__call__``; the cache write covers every row."""
+        hidden = x[:, -1:] + self.self_attn.tail(self.input_layernorm(x), mask, cache)
+        return hidden + self.mlp(self.post_attention_layernorm(hidden))
+
 
 class Decoder(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -180,7 +221,7 @@ class Decoder(nn.Module):
         self._first_full = args.layer_types.index("full_attention")
         self._first_sliding = args.layer_types.index("sliding_attention")
 
-    def __call__(self, inputs, cache=None):
+    def __call__(self, inputs, cache=None, *, tail_row=False):
         hidden = self.embed_tokens(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
@@ -190,11 +231,15 @@ class Decoder(nn.Module):
             cache[self._first_sliding],
             window_size=self.args.sliding_window,
         )
-        for layer, layer_cache, layer_type in zip(
+        last = len(self.layers) - 1
+        for index, (layer, layer_cache, layer_type) in enumerate(zip(
             self.layers, cache, self.args.layer_types, strict=True
-        ):
+        )):
             mask = full_mask if layer_type == "full_attention" else sliding_mask
-            hidden = layer(hidden, mask, layer_cache)
+            if tail_row and index == last:
+                hidden = layer.tail(hidden, mask, layer_cache)
+            else:
+                hidden = layer(hidden, mask, layer_cache)
         return self.norm(hidden)
 
 
@@ -233,7 +278,23 @@ class Model(nn.Module):
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def __call__(self, inputs, cache=None):
-        hidden = select_checkpoint_rows(self.model(inputs, cache))
+        # Prompt-chunk tail (opt-in MLX2_PREFILL_TAIL_SKIP=1): only the plain
+        # ordinary forward may take it.  ``mtp_backbone`` calls the decoder
+        # directly and never reaches here; a replaced last layer (excision or
+        # any other wrapper) has no ``tail`` split and keeps the full chunk.
+        last = self.model.layers[-1]
+        refuse = (
+            "mellum_wrapped_last_layer" if type(last) is not DecoderLayer
+            else structural_refusal(
+                inputs, cache, trunk=self.model, trunk_class=Decoder,
+                parts=((last.self_attn, (Attention,)), (last.mlp, (SparseMoE,))),
+            )
+        )
+        if claim_adapter_tail(inputs, kind="tail", refuse=refuse):
+            TAIL_SKIP_STATS["mellum_tail_split"] += 1
+            hidden = self.model(inputs, cache, tail_row=True)
+        else:
+            hidden = select_checkpoint_rows(self.model(inputs, cache))
         logits = self.logits(hidden)
         self.completed_forwards += 1
         return logits

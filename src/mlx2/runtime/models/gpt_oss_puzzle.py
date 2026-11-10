@@ -20,10 +20,12 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS as TAIL_SKIP_STATS
+from ..prefill_tail_skip import claim_adapter_tail
 from .base import BaseModelArgs, create_attention_mask
 from .cache import KVCache, RotatingKVCache
 from .gpt_oss import Model as GptOssModel
-from .gpt_oss import TransformerBlock
+from .gpt_oss import TransformerBlock, tail_refusal
 
 
 @dataclass
@@ -84,7 +86,10 @@ class PuzzleModel(nn.Module):
         cache=None,
         input_embeddings: Optional[mx.array] = None,
         capture=None,
+        tail_row: bool = False,
     ):
+        if tail_row and capture is not None:
+            raise ValueError("tail_row forward cannot serve capture taps")
         if input_embeddings is not None:
             x = input_embeddings
         else:
@@ -101,8 +106,14 @@ class PuzzleModel(nn.Module):
             else:
                 masks[w] = create_attention_mask(x, cache[ref], window_size=w)
 
+        last = len(self.layers) - 1
         for i, (layer, c, w) in enumerate(zip(self.layers, cache, self.windows)):
-            x = layer(x, masks[w], c)
+            if tail_row and i == last:
+                # Sliding or full: the tail takes this layer's own mask's
+                # last row (gpt_oss.AttentionBlock.tail).
+                x = layer.tail(x, masks[w], c)
+            else:
+                x = layer(x, masks[w], c)
             if capture is not None and i in capture:
                 capture[i] = x
         return self.norm(x)
@@ -126,6 +137,15 @@ class Model(nn.Module):
         cache=None,
         input_embeddings: Optional[mx.array] = None,
     ):
+        # Opt-in prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP=1); see
+        # gpt_oss.Model.__call__.  Embedding (media) inputs decline.
+        if claim_adapter_tail(
+            inputs,
+            kind="tail",
+            refuse=tail_refusal(self.model.layers, input_embeddings),
+        ):
+            TAIL_SKIP_STATS["gpt_oss_puzzle_tail_split"] += 1
+            return self.lm_head(self.model(inputs, cache, tail_row=True))
         return self.lm_head(
             select_checkpoint_rows(
                 self.model(inputs, cache, input_embeddings=input_embeddings)

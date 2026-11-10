@@ -143,6 +143,31 @@ class VLMBackend:
             raise RuntimeError("loaded model escaped the bound VLM family")
         return result
 
+    def load_processor(self, model_path, *, eos_token_ids=None):
+        """The family's processor alone, as ``load`` attaches it (no weights).
+
+        For an adapter whose tensor math is native: the processor (text,
+        image and video preprocessing) stays the reviewed mlx-vlm one, bound
+        by the same source contract.
+        """
+        validate_model_dispatch(self.family, model_path)
+        if _package_root() != self.package_root:
+            raise RuntimeError("mlx-vlm import origin changed after binding")
+        verify_contract(self.family, self.package_root)
+        # The family module registers its processor with AutoProcessor.
+        importlib.import_module("mlx_vlm.models." + self.family)
+        utils = importlib.import_module("mlx_vlm.utils")
+        image_processor = utils.load_image_processor(
+            Path(model_path), trust_remote_code=False
+        )
+        processor = utils.load_processor(
+            Path(model_path), True, eos_token_ids=eos_token_ids, trust_remote_code=False
+        )
+        if image_processor is not None:
+            processor.image_processor = image_processor
+        verify_contract(self.family, self.package_root)
+        return processor
+
 
 def bind_backend(family):
     root = _package_root()

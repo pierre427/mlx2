@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import mlx.core as mx
 from mlx import nn
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS, claim_adapter_tail, structural_refusal
 from .activations import swiglu
 from .base import (
     BaseModelArgs,
@@ -128,6 +130,35 @@ class Attention(nn.Module):
         output = output.transpose(0, 2, 1, 3).reshape(batch, length, -1)
         return self.out_proj(output)
 
+    def tail(self, x, mask=None, cache=None):
+        """K/V (the cache write) over every row; q and the output, last row only."""
+        batch, length, _ = x.shape
+        queries = self.q_layernorm(
+            self.q_proj(x[:, -1:]).reshape(batch, 1, self.n_heads, -1)
+        ).transpose(0, 2, 1, 3)
+        keys = self.k_layernorm(
+            self.k_proj(x).reshape(batch, length, self.n_kv_heads, -1)
+        ).transpose(0, 2, 1, 3)
+        values = self.v_proj(x).reshape(batch, length, self.n_kv_heads, -1).transpose(
+            0, 2, 1, 3
+        )
+        if cache is None:
+            queries = self.rope(queries, offset=length - 1)
+            keys = self.rope(keys)
+        else:
+            queries = self.rope(queries, offset=cache.offset + (length - 1))
+            keys = self.rope(keys, offset=cache.offset)
+            keys, values = cache.update_and_fetch(keys, values)
+        if mask is None or isinstance(mask, str):
+            # One query aligned to the last key sees every key.
+            mask = None
+        else:
+            mask = mask[..., -1:, :]
+        output = scaled_dot_product_attention(
+            queries, keys, values, cache=cache, mask=mask, scale=self.scale
+        )
+        return self.out_proj(output.transpose(0, 2, 1, 3).reshape(batch, 1, -1))
+
 
 class ShortConv(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -150,6 +181,11 @@ class ShortConv(nn.Module):
 
     def __call__(self, x, mask=None, cache=None):
         return self.out_proj(self._convolve_projected(self.in_proj(x), mask, cache))
+
+    def tail(self, x, mask=None, cache=None):
+        """The whole convolution (it owns the state write) over every row;
+        ``out_proj`` on the last row only."""
+        return self.out_proj(self._convolve_projected(self.in_proj(x), mask, cache)[:, -1:])
 
     def _convolve_projected(self, projected, mask, cache):
         """``C * conv(B * x)`` from the ``in_proj`` output; owns the cache write.
@@ -290,6 +326,13 @@ class DecoderLayer(nn.Module):
         hidden = x + residual
         return hidden + self.feed_forward(self.ffn_norm(hidden))
 
+    def tail(self, x, mask=None, cache=None):
+        """Prompt-chunk tail (MLX2_PREFILL_TAIL_SKIP=1): one output row per lane."""
+        normalized = self.operator_norm(x)
+        mixer = self.self_attn if self.is_attention_layer else self.conv
+        hidden = x[:, -1:] + mixer.tail(normalized, mask=mask, cache=cache)
+        return hidden + self.feed_forward(self.ffn_norm(hidden))
+
 
 class LFM25Model(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -306,7 +349,8 @@ class LFM25Model(nn.Module):
             if not layer.is_attention_layer
         )
 
-    def __call__(self, inputs, cache=None, input_embeddings=None, capture=None):
+    def __call__(self, inputs, cache=None, input_embeddings=None, capture=None, *,
+                 tail_row=False):
         # The NAX sorted expert gather (MLX2_MOE_NAX_GATHER=gather, default
         # off) is prefill-only; the trunk forward decides the phase once.
         # Decode, speculating caches and prepared verify blocks are not
@@ -314,9 +358,9 @@ class LFM25Model(nn.Module):
         with _moe_nax.forward_scope(
             inputs if inputs is not None else input_embeddings, cache
         ):
-            return self._forward(inputs, cache, input_embeddings, capture)
+            return self._forward(inputs, cache, input_embeddings, capture, tail_row)
 
-    def _forward(self, inputs, cache, input_embeddings, capture=None):
+    def _forward(self, inputs, cache, input_embeddings, capture=None, tail_row=False):
         hidden = (
             self.embed_tokens(inputs) if input_embeddings is None else input_embeddings
         )
@@ -324,8 +368,14 @@ class LFM25Model(nn.Module):
             cache = [None] * len(self.layers)
         attention_mask = create_attention_mask(hidden, cache[self.attention_index])
         convolution_mask = create_ssm_mask(hidden, cache[self.conv_index])
+        if tail_row and capture is not None:
+            raise RuntimeError("LFM2.5 tail row never runs with capture taps")
+        last = len(self.layers) - 1
         for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
             mask = attention_mask if layer.is_attention_layer else convolution_mask
+            if tail_row and index == last:
+                hidden = layer.tail(hidden, mask=mask, cache=layer_cache)
+                break
             hidden = layer(hidden, mask=mask, cache=layer_cache)
             # Post-block taps for external drafters (layer k = output of layer k).
             if capture is not None and index in capture:
@@ -348,8 +398,47 @@ class Model(nn.Module):
         self.model = LFM25Model(args)
 
     def __call__(self, inputs, cache=None, input_embeddings=None):
+        if (
+            inputs is not None
+            and inputs.ndim == 2
+            and inputs.shape[1] > 1
+            and self._claim_tail(inputs, cache, input_embeddings)
+        ):
+            STATS["lfm25_tail_split"] += 1
+            hidden = self.model(inputs, cache=cache, tail_row=True)
+            return self.model.embed_tokens.as_linear(hidden)
         hidden = self.model(inputs, cache=cache, input_embeddings=input_embeddings)
-        return self.model.embed_tokens.as_linear(hidden)
+        # Prompt chunks project only each lane's checkpoint row through the
+        # head (prefill_checkpoint_rows); identity outside a request.
+        return self.model.embed_tokens.as_linear(select_checkpoint_rows(hidden))
+
+    def _claim_tail(self, inputs, cache, input_embeddings):
+        """Opt-in last-layer tail (MLX2_PREFILL_TAIL_SKIP=1, default off).
+
+        Claims an open prompt-chunk checkpoint request whose rows are every
+        lane's last; the forward then returns one row per lane.  Declines
+        (full chunk, nothing claimed) for media embeddings, a replaced last
+        layer and a speculating last-layer cache (its rollback record covers
+        every row).  A cache's own bucketed decode attention may serve the
+        single tail query; it reads cache state and never writes it.
+        """
+        layers = self.model.layers
+        last = cache[-1] if cache else None
+        refuse = None
+        if input_embeddings is not None:
+            refuse = "inputs_embeds"
+        elif type(layers[-1]) is not DecoderLayer or type(
+            layers[-1].self_attn if layers[-1].is_attention_layer else layers[-1].conv
+        ) not in (Attention, ShortConv):
+            refuse = "wrapped_last_layer"
+        elif getattr(last, "speculating", False):
+            refuse = "speculating_cache"
+        else:
+            refuse = structural_refusal(
+                inputs, cache, trunk=self.model, trunk_class=LFM25Model,
+                parts=((layers[-1].feed_forward, (MLP, SparseMoE)),),
+            )
+        return claim_adapter_tail(inputs, kind="tail", refuse=refuse)
 
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
         """Target features for an external drafter, paired with the cache

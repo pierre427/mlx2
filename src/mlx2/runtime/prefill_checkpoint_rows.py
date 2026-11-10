@@ -126,6 +126,18 @@ their desired row may have been pruned. Outside a request, return the final row.
     return hidden[:, -1:]
 
 
+def final_row_checkpoint_open(batch: int, width: int) -> bool:
+    """``claim_final_row_checkpoint`` would succeed; claims nothing."""
+    request = _REQUEST.get()
+    return not (
+        request is None
+        or request.applied
+        or len(request.rows) != int(batch)
+        or request.width != int(width)
+        or any(row != request.width - 1 for row in request.rows)
+    )
+
+
 def claim_final_row_checkpoint(batch: int, width: int) -> bool:
     """Claim the open request when every lane's checkpoint row is the last.
 
@@ -151,6 +163,7 @@ def claim_final_row_checkpoint(batch: int, width: int) -> bool:
 
 __all__ = [
     "claim_final_row_checkpoint",
+    "final_row_checkpoint_open",
     "prefill_checkpoint_rows",
     "select_checkpoint_rows",
     "select_checkpoint_rows_from_final_suffix",

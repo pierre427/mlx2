@@ -34,6 +34,7 @@ from .qwen36_moe_decode import Qwen36SparseMoeBlock as Qwen3NextSparseMoeBlock
 from .qwen38_27b import (
     ModelArgs,
     Qwen3NextAttention,
+    hybrid_layer_tail,
 )
 from .qwen38_27b import (
     Qwen3_5TextModel as DenseTextModel,
@@ -485,6 +486,15 @@ class DecoderLayer(nn.Module):
         mlp_slot.value = None
         return result
 
+    def tail(self, x: mx.array, mask=None, cache=None) -> mx.array:
+        """Prompt-chunk tier-2 tail (``qwen38_27b.hybrid_layer_tail``).
+
+        The residual slots stay unset, so the one-row output projection and
+        MoE add nothing themselves and the residuals are added here; the
+        mixer's state writes are unchanged.
+        """
+        return hybrid_layer_tail(self, x, mask, cache)
+
 
 class Qwen36TextModel(DenseTextModel):
     def __init__(self, args: TextModelArgs):
@@ -497,6 +507,11 @@ class Qwen36TextModel(DenseTextModel):
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.ssm_idx = 0
         self.fa_idx = args.full_attention_interval - 1
+
+    # Prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP=1): only this exact
+    # sparse layer class has the split (``DecoderLayer.tail``).
+    tail_family = "qwen36"
+    tail_layer_types = (DecoderLayer,)
 
     def forward_scope(self, inputs, cache):
         """The phase scope one trunk forward runs in.  Offline layer-major

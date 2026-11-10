@@ -10,6 +10,8 @@ import mlx.nn as nn
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS as TAIL_SKIP_STATS
+from ..prefill_tail_skip import claim_adapter_tail
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
 from .rope_utils import initialize_rope
@@ -126,6 +128,50 @@ class AttentionBlock(nn.Module):
 
         return self.o_proj(v_hat.swapaxes(1, 2).reshape(B, L, -1))
 
+    def tail(self, x: mx.array, mask, cache=None) -> mx.array:
+        """Prompt-chunk tier-2 tail: K/V (the cache write) over every row,
+        the query, attention (sinks kept) and o_proj for the last row only.
+
+        The cache receives exactly the update ``__call__`` makes.  The single
+        query sits at position ``offset + L - 1``; its mask is the last row
+        of the chunk's mask (sliding window and left padding included), and
+        a ``"causal"`` string becomes ``None`` since one query aligned to the
+        last key sees every key the causal mask allows (the rotating cache's
+        mask helper returns ``"causal"`` only when the whole chunk fits in
+        the window).
+        """
+        B, L, _ = x.shape
+        D = self.head_dim
+
+        q = self.q_proj(x[:, -1:]).reshape(B, 1, -1, D).swapaxes(1, 2)
+        k = self.k_proj(x).reshape(B, L, -1, D).swapaxes(1, 2)
+        v = self.v_proj(x).reshape(B, L, -1, D).swapaxes(1, 2)
+
+        if cache is not None:
+            q = self.rope(q, offset=cache.offset + (L - 1))
+            k = self.rope(k, offset=cache.offset)
+            k, v = cache.update_and_fetch(k, v)
+        else:
+            q = self.rope(q, offset=L - 1)
+            k = self.rope(k)
+
+        mask = _last_row_mask(mask)
+        v_hat = scaled_dot_product_attention(
+            q, k, v, cache, self.sm_scale, mask=mask, sinks=self.sinks
+        )
+        return self.o_proj(v_hat.swapaxes(1, 2).reshape(B, 1, -1))
+
+
+def _last_row_mask(mask):
+    """The chunk mask's last query row, for a one-row tail attention."""
+    if isinstance(mask, str):
+        if mask != "causal":
+            raise ValueError(f"unsupported attention mask {mask!r} for the tail row")
+        return None
+    if mask is None:
+        return None
+    return mask[..., -1:, :]
+
 
 class MLPBlock(nn.Module):
     def __init__(self, config: ModelArgs):
@@ -188,6 +234,32 @@ class TransformerBlock(nn.Module):
         x = residual + x
         return x
 
+    def tail(self, x: mx.array, mask, cache=None) -> mx.array:
+        """Last-layer tail: attention K/V over every row, the rest on the
+        last row only; returns ``[batch, 1, hidden]``."""
+        h = x[:, -1:] + self.self_attn.tail(self.input_layernorm(x), mask, cache)
+        return h + self.mlp(self.post_attention_layernorm(h))
+
+
+def tail_refusal(layers, input_embeddings=None):
+    """Reason the gpt-oss tail split must not run, or None.
+
+    Only a plain last ``TransformerBlock`` with plain attention and MLP
+    blocks has the split; layer excision, residual-ablation class patches or
+    any other wrapper changes the type and declines.  Embedding inputs
+    (media) keep the full chunk.
+    """
+    if input_embeddings is not None:
+        return "inputs_embeds"
+    last = layers[-1] if layers else None
+    if (
+        type(last) is not TransformerBlock
+        or type(last.self_attn) is not AttentionBlock
+        or type(last.mlp) is not MLPBlock
+    ):
+        return "wrapped_last_layer"
+    return None
+
 
 class GptOssMoeModel(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -209,7 +281,10 @@ class GptOssMoeModel(nn.Module):
         cache=None,
         input_embeddings: Optional[mx.array] = None,
         capture=None,
+        tail_row: bool = False,
     ):
+        if tail_row and capture is not None:
+            raise ValueError("tail_row forward cannot serve capture taps")
         if input_embeddings is not None:
             x = input_embeddings
         else:
@@ -223,11 +298,12 @@ class GptOssMoeModel(nn.Module):
             x, cache[self.swa_idx], window_size=self.window_size
         )
 
+        last = len(self.layers) - 1
         for index, (layer, c, layer_type) in enumerate(
             zip(self.layers, cache, self.layer_types)
         ):
             mask = full_mask if layer_type == "full_attention" else swa_mask
-            x = layer(x, mask, c)
+            x = layer.tail(x, mask, c) if tail_row and index == last else layer(x, mask, c)
             if capture is not None and index in capture:
                 # Post-block residual stream, before the final norm.
                 capture[index] = x
@@ -245,6 +321,14 @@ class Model(nn.Module):
         self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def __call__(self, inputs: mx.array, cache=None):
+        # Opt-in prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP=1): only
+        # this plain path claims it; taps, prefill_body and verify forwards
+        # call self.model directly and never open the request.
+        if claim_adapter_tail(
+            inputs, kind="tail", refuse=tail_refusal(self.model.layers)
+        ):
+            TAIL_SKIP_STATS["gpt_oss_tail_split"] += 1
+            return self.lm_head(self.model(inputs, cache, tail_row=True))
         return self.lm_head(select_checkpoint_rows(self.model(inputs, cache)))
 
     @property

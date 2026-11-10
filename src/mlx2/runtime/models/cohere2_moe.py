@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import mlx.core as mx
 from mlx import nn
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS, claim_adapter_tail, structural_refusal
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
@@ -521,6 +523,36 @@ class Attention(nn.Module):
             else row_exact.linear(self.o_proj, out)
         )
 
+    def tail(self, x: mx.array, mask=None, cache=None) -> mx.array:
+        """K/V (the cache write) over every row; q and the output, last row only."""
+        batch, length, _ = x.shape
+        q = self.q_proj(x[:, -1:]).reshape(batch, 1, self.n_heads, self.head_dim)
+        k = self.k_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
+        v = self.v_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
+        q, k, v = (z.transpose(0, 2, 1, 3) for z in (q, k, v))
+        if self.rope is not None:
+            offset = cache.offset if cache is not None else 0
+            q = self.rope(q, offset=offset + (length - 1))
+            k = self.rope(k, offset=offset)
+        if cache is not None:
+            k, v = cache.update_and_fetch(k, v)
+        out = scaled_dot_product_attention(
+            q, k, v, cache=cache, scale=self.scale, mask=_last_query_mask(mask)
+        )
+        return self.o_proj(out.transpose(0, 2, 1, 3).reshape(batch, 1, -1))
+
+
+def _last_query_mask(mask):
+    """The chunk mask's last query row.
+
+    An array mask (left padding, a sliding window) keeps its last row; the
+    string ``"causal"`` becomes None, since one query aligned to the last key
+    sees every key.
+    """
+    if mask is None or isinstance(mask, str):
+        return None
+    return mask[..., -1:, :]
+
 
 class DecoderLayer(nn.Module):
     def __init__(self, args: ModelArgs, layer_idx: int):
@@ -537,6 +569,12 @@ class DecoderLayer(nn.Module):
     def __call__(self, x: mx.array, mask=None, cache=None, row_exact=None) -> mx.array:
         h = self.input_layernorm(x)
         return x + self.self_attn(h, mask, cache, row_exact) + self.mlp(h, row_exact)
+
+    def tail(self, x: mx.array, mask=None, cache=None) -> mx.array:
+        """Prompt-chunk tail (MLX2_PREFILL_TAIL_SKIP=1): one output row per lane."""
+        h = self.input_layernorm(x)
+        last = h[:, -1:]
+        return x[:, -1:] + self.self_attn.tail(h, mask, cache) + self.mlp(last)
 
 
 class ResidualTaps:
@@ -572,7 +610,7 @@ class Cohere2MoeModel(nn.Module):
     def residual_taps(self):
         return self._taps
 
-    def __call__(self, inputs: mx.array, cache=None, row_exact=None):
+    def __call__(self, inputs: mx.array, cache=None, row_exact=None, *, tail_row=False):
         h = self.embed_tokens(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
@@ -585,6 +623,15 @@ class Cohere2MoeModel(nn.Module):
             ),
         }
         steer, capture = self._taps.steer, self._taps.capture
+        if tail_row:
+            # Model.__call__ claims the tail only without taps or row-exact.
+            if steer is not None or capture is not None or row_exact is not None:
+                raise RuntimeError("North tail row requires a plain forward")
+            *body, last = list(zip(self.layers, cache))
+            for layer, layer_cache in body:
+                h = layer(h, masks[layer.attention_type], layer_cache)
+            layer, layer_cache = last
+            return self.norm(layer.tail(h, masks[layer.attention_type], layer_cache))
         if steer is None and capture is None:
             for layer, layer_cache in zip(self.layers, cache):
                 h = layer(h, masks[layer.attention_type], layer_cache, row_exact)
@@ -618,8 +665,41 @@ class Model(nn.Module):
             if self._batch_row_exact_q4.begin_tokens(inputs)
             else None
         )
-        hidden = self.model(inputs, cache, row_exact)
+        if inputs.ndim == 2 and inputs.shape[1] > 1 and self._claim_tail(inputs, row_exact, cache):
+            STATS["north_tail_split"] += 1
+            return self._project(self.model(inputs, cache, tail_row=True))
+        # Prompt chunks project only each lane's checkpoint row through the
+        # 262K-row head (prefill_checkpoint_rows); identity elsewhere, so the
+        # S=1 row-exact head audit is unchanged.
+        hidden = select_checkpoint_rows(self.model(inputs, cache, row_exact))
         return self._project_with_policy(hidden, row_exact)
+
+    def _claim_tail(self, inputs, row_exact, cache=None):
+        """Opt-in last-layer tail (MLX2_PREFILL_TAIL_SKIP=1, default off).
+
+        Claims an open prompt-chunk checkpoint request whose rows are every
+        lane's last; the forward then returns one row per lane.  Declines
+        (full chunk, nothing claimed) for row-exact, residual taps (steering
+        or capture read or rewrite every row) and a replaced last layer.
+        A cache's own bucketed decode attention may serve the
+        single tail query; it reads cache state and never writes it.
+        """
+        taps = self.model.residual_taps
+        refuse = None
+        if row_exact is not None:
+            refuse = "row_exact"
+        elif taps.steer is not None or taps.capture is not None:
+            refuse = "residual_taps"
+        elif type(self.model.layers[-1]) is not DecoderLayer or type(
+            self.model.layers[-1].self_attn
+        ) is not Attention:
+            refuse = "wrapped_last_layer"
+        else:
+            refuse = structural_refusal(
+                inputs, cache, trunk=self.model, trunk_class=Cohere2MoeModel,
+                parts=((self.model.layers[-1].mlp, (MLP, Cohere2MoeSparseBlock)),),
+            )
+        return claim_adapter_tail(inputs, kind="tail", refuse=refuse)
 
     def _project(self, hidden):
         logits = (

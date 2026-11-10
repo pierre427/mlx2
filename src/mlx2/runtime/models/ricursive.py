@@ -14,6 +14,8 @@ import numpy as np
 from mlx import nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS as TAIL_SKIP_STATS
+from ..prefill_tail_skip import claim_adapter_tail, structural_refusal
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
 from .modelopt_nvfp4 import ModelOptNVFP4Linear, shared_fp32_input
@@ -530,6 +532,67 @@ class Attention(nn.Module):
             out = scaled_dot_product_attention(q, k, v, cache=cache, scale=args.head_dim ** -0.5, mask=mask)
         return self._output(x, out)
 
+    def tail(self, x, seed, cache=None, *, mask=_OWN_MASK, rope=None):
+        """Prompt-chunk tail (MLX2_PREFILL_TAIL_SKIP): ``__call__``'s last row.
+
+        K and the value blend run over every row through the same law the
+        selected mode uses in ``__call__`` (eager, fused regions or Metal
+        glue, with the glue's all-or-nothing fallback), so the cache write is
+        bitwise the full forward's.  The query, gate, attention output and
+        ``o_proj`` run on the last row only, against every key.
+        """
+        args = self.args
+        b, length, _ = x.shape
+        last = x[:, -1:]
+        if mask is _OWN_MASK:
+            mask = create_attention_mask(x, cache, window_size=args.sliding_window if self.local else None)
+        if self.local and rope is None:
+            offset = cache.offset if cache is not None else 0
+            rope = rotary_tables(length, offset, args.head_dim, args.rope_theta, x.dtype)
+        tables = rope if self.local else (None, None)
+        # The last row of the per-forward tables ([L, half] or [B, 1, L, half]).
+        last_tables = tuple(None if t is None else t[..., -1:, :] for t in tables)
+        q_raw = self.q_proj(last).reshape(b, 1, args.num_attention_heads, args.head_dim)
+        k_raw = self.k_proj(x).reshape(b, length, args.num_key_value_heads, args.head_dim)
+        eps = args.rms_norm_eps
+        q = k = value_input = None
+        if self.fused:
+            q = fused_qk(q_raw, self.q_norm.weight, eps, *last_tables)
+            k = fused_qk(k_raw, self.k_norm.weight, eps, *tables)
+            value_input = x
+            if args.use_valres:
+                value_input = fused_blend(seed.astype(mx.float32), x, self.value_blend(x.dtype))
+        elif self.metal_glue:
+            from .ricursive_glue import blend, qk_norm_rope
+
+            # ``_glue_call`` gives up as a whole when any kernel declines;
+            # the admission depends on dtype and head size, not row count.
+            q = qk_norm_rope(q_raw, self.q_norm.weight, eps, *last_tables)
+            k = None if q is None else qk_norm_rope(k_raw, self.k_norm.weight, eps, *tables)
+            value_input = x
+            if k is not None and args.use_valres:
+                value_input = blend(seed.astype(mx.float32), x, self.value_blend(x.dtype))
+            if q is None or k is None or value_input is None:
+                q = k = value_input = None
+        if k is None:
+            q = self.q_norm(q_raw).transpose(0, 2, 1, 3)
+            k = self.k_norm(k_raw).transpose(0, 2, 1, 3)
+            value_input = x
+            if args.use_valres:
+                value_input = _blend(seed.astype(mx.float32), x, self.value_blend(x.dtype))
+            if self.local:
+                q, k = apply_rotary(q, *last_tables), apply_rotary(k, *tables)
+        v = self.v_proj(value_input).reshape(
+            b, length, args.num_key_value_heads, args.head_dim).transpose(0, 2, 1, 3)
+        if cache is not None:
+            k, v = cache.update_and_fetch(k, v)
+        if isinstance(mask, str):
+            mask = None  # one query aligned to the last key sees every key
+        elif mask is not None:
+            mask = mask[..., -1:, :]
+        out = scaled_dot_product_attention(q, k, v, cache=cache, scale=args.head_dim ** -0.5, mask=mask)
+        return self._output(last, out)
+
     def _output(self, x, out):
         """Attention output ``out`` [B, H, L, D] -> gated, projected [B, L, hidden]."""
         args = self.args
@@ -599,6 +662,15 @@ class DecoderLayer(nn.Module):
 
     def __call__(self, x, seed, cache, *, mask=_OWN_MASK, rope=None):
         attn = self.self_attn(self.input_layernorm(x), seed, cache, mask=mask, rope=rope)
+        return self._finish(x, attn)
+
+    def tail(self, x, seed, cache, *, mask=_OWN_MASK, rope=None):
+        """Last-row output of ``__call__``; the K/V write covers every row."""
+        attn = self.self_attn.tail(self.input_layernorm(x), seed, cache, mask=mask, rope=rope)
+        return self._finish(x[:, -1:], attn)
+
+    def _finish(self, x, attn):
+        """Post-attention residual, feed-forward and post-feed-forward residual."""
         if self.post_attention_layernorm.metal:
             x = self.post_attention_layernorm.residual(x, attn)
             mlp = self.mlp(self.pre_feedforward_layernorm(x))
@@ -620,9 +692,13 @@ class Backbone(nn.Module):
         self.layers = [DecoderLayer(args, i, nvfp4=nvfp4) for i in range(args.num_hidden_layers)]
         self.norm = RMSNorm(args.hidden_size, args.rms_norm_eps)
 
-    def __call__(self, tokens, cache=None, input_embeddings=None, capture=None):
+    def __call__(self, tokens, cache=None, input_embeddings=None, capture=None, *,
+                 tail_row=False):
         """``capture``: ``{layer index: None}`` filled with post-block,
-        pre-final-norm states (the DFlash2 draft feature law)."""
+        pre-final-norm states (the DFlash2 draft feature law).  ``tail_row``
+        (prompt-chunk tail): the last layer returns its last row only."""
+        if tail_row and (capture is not None or tokens.shape[1] <= 1):
+            raise ValueError("Ripple prompt-chunk tail needs a multi-row chunk and no taps")
         h = self.embed_tokens(tokens) if input_embeddings is None else input_embeddings
         if self.args.embed_scale is not None:
             h = scale_embeddings(h, self.args.embed_scale)
@@ -637,8 +713,12 @@ class Backbone(nn.Module):
         # the other hybrid-window models here use).
         seed = h.astype(mx.float32)
         shared = self.shared_layer_inputs(h, cache)
+        last = len(self.layers) - 1
         for index, (layer, entry, kind) in enumerate(zip(self.layers, cache, self.args.layer_types, strict=True)):
             mask, rope = shared[kind]
+            if tail_row and index == last:
+                h = layer.tail(h, seed, entry, mask=mask, rope=rope)
+                continue
             h = layer(h, seed, entry, mask=mask, rope=rope)
             if capture is not None and index in capture:
                 capture[index] = h
@@ -732,8 +812,31 @@ class Model(nn.Module):
 
     def __call__(self, tokens, cache=None, input_embeddings=None):
         self.forward_calls += 1
+        if claim_adapter_tail(tokens, kind="tail", refuse=self._tail_refusal(input_embeddings, tokens, cache)):
+            TAIL_SKIP_STATS["ricursive_tail_split"] += 1
+            return self.lm_head(self.model(tokens, cache, tail_row=True))
         h = self.model(tokens, cache, input_embeddings)
         return self.lm_head(select_checkpoint_rows(h))
+
+    def _tail_refusal(self, input_embeddings, tokens=None, cache=None):
+        """Why the prompt-chunk tail (MLX2_PREFILL_TAIL_SKIP) must not run.
+
+        Taps, ``prefill_body`` and drafting call the backbone directly and
+        never reach here.  Embedding inputs (media), an attention-tree tile
+        scope and a replaced last layer (excision or any wrapper) keep the
+        full chunk.
+        """
+        if input_embeddings is not None:
+            return "ricursive_input_embeddings"
+        if self.model._tree_depths is not None:
+            return "ricursive_tree_scope"
+        last = self.model.layers[-1]
+        if type(last) is not DecoderLayer:
+            return "ricursive_wrapped_last_layer"
+        return structural_refusal(
+            tokens, cache, trunk=self.model, trunk_class=Backbone,
+            parts=((last.self_attn, (Attention,)), (last.mlp, (MLP,))),
+        )
 
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
         """Target features for an external drafter: ascending post-block taps
