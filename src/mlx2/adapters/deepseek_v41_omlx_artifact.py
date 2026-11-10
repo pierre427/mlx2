@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..runtime.immutable_weight_pages import file_stamp, read_page
+from ..runtime.immutable_weight_pages import file_stamp, read_page, same_stamp
 from ..runtime.models.deepseek_v41_config import DeepSeekV41Config
 from .deepseek_v41_source_artifact import (
     aliases,
@@ -133,7 +133,7 @@ def read_tensors(artifact, names):
         path = checked_file(artifact["root"], shard, seal)
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
-            if file_stamp(os.fstat(fd)) != seal:
+            if not same_stamp(file_stamp(os.fstat(fd)), seal):
                 raise ValueError("omlx V4.1 shard changed before bounded read")
             if os.uname().sysname == "Darwin":
                 import fcntl
@@ -142,7 +142,7 @@ def read_tensors(artifact, names):
             for name, row in rows:
                 raw = read_page(fd, row["offset"], row["size"], 16 << 20)
                 result[name] = raw.view(np.dtype(DTYPES[row["dtype"]])).reshape(row["shape"])
-            if file_stamp(os.fstat(fd)) != seal:
+            if not same_stamp(file_stamp(os.fstat(fd)), seal):
                 raise ValueError("omlx V4.1 shard changed during bounded read")
             checked_file(artifact["root"], shard, seal)
         finally:

@@ -11,7 +11,7 @@ import stat
 
 import numpy as np
 
-from ..runtime.immutable_weight_pages import file_stamp, read_page
+from ..runtime.immutable_weight_pages import file_stamp, read_page, same_stamp
 from ..runtime.models.deepseek_v41_config import DeepSeekV41Config
 
 MODEL_TYPE = "deepseek_v41"
@@ -69,7 +69,7 @@ def checked_file(root, name, expected=None):
         if target.name != name or target.parent not in tier_directories(root):
             raise ValueError("source shard symlink outside declared tiers: " + name)
         path, st = target, target.lstat()
-    if not stat.S_ISREG(st.st_mode) or (expected is not None and file_stamp(st) != expected):
+    if not stat.S_ISREG(st.st_mode) or (expected is not None and not same_stamp(file_stamp(st), expected)):
         raise ValueError("official source file changed: " + name)
     return path
 
@@ -247,7 +247,7 @@ def read_tensors(artifact, names):
         path = checked_file(artifact["root"], shard, seal)
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
-            if file_stamp(os.fstat(fd)) != seal:
+            if not same_stamp(file_stamp(os.fstat(fd)), seal):
                 raise ValueError("source changed before bounded read")
             if os.uname().sysname == "Darwin":
                 import fcntl
@@ -258,7 +258,7 @@ def read_tensors(artifact, names):
                 result[name] = raw.view(np.dtype(DTYPES[row["dtype"]])).reshape(row["shape"])
             # Check both the descriptor and path: an unlinked/replaced shard
             # must not make bytes from an obsolete inode appear current.
-            if file_stamp(os.fstat(fd)) != seal:
+            if not same_stamp(file_stamp(os.fstat(fd)), seal):
                 raise ValueError("source changed during bounded read")
             checked_file(artifact["root"], shard, seal)
         finally:

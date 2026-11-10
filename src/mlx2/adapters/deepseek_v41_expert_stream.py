@@ -19,6 +19,7 @@ from ..runtime.gguf.packed_metal import PackedMatrix
 from ..runtime.gguf.reader import GGUFError
 from ..runtime.io_ownership import CloseAction, ReadPool, ReadTimeout, storage_owner
 from ..runtime.models.deepseek_v41_engram import file_stamp
+from ..runtime.immutable_weight_pages import same_stamp
 from ..runtime.weight_stream import ExpertStreamPlan
 
 REVISION = "v41-iq1-expert-tickets-v2"
@@ -194,7 +195,8 @@ class PackedExpertStream:
             raise
 
     def verify(self):
-        if file_stamp(os.fstat(self.fd)) != self.expected_stat or file_stamp(os.stat(self.path, follow_symlinks=False)) != self.expected_stat:
+        if (not same_stamp(file_stamp(os.fstat(self.fd)), self.expected_stat)
+                or not same_stamp(file_stamp(os.stat(self.path, follow_symlinks=False)), self.expected_stat)):
             raise ValueError("streamed expert source changed after admission")
 
     def _available(self):

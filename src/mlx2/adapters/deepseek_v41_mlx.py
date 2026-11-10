@@ -30,6 +30,7 @@ from .deepseek_v41_mlx_artifact import (
     asset_path,
     file_stamp,
     inspect_artifact,
+    same_stamp,
 )
 
 NUMERICS_REVISION = "mlx2-v41-native-f32-qmm-v1"
@@ -353,7 +354,7 @@ class DeepSeekV41MLXAdapter(DeepSeekV41Adapter):
             storage = artifact["tensors"][f"blk.{layer}.engram_embd.weight"]["storage"]
             table_path = asset_path(path, storage["file"])
             stamp = table_path.stat()
-            if file_stamp(stamp) != _sealed_stat(artifact["files"][storage["file"]]):
+            if not same_stamp(file_stamp(stamp), _sealed_stat(artifact["files"][storage["file"]])):
                 raise ValueError("native Engram file changed before opening")
             self.engram_tables[layer] = EngramRows(
                 table_path,

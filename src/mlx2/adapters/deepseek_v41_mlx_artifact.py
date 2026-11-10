@@ -13,6 +13,8 @@ import stat
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
+from ..runtime.immutable_weight_pages import same_stamp
+
 from .deepseek_v41_artifact import (
     REFERENCE_FILE,
     TOKENIZER_SHA256,
@@ -372,11 +374,11 @@ def _inspect_artifact(
             raise ValueError("invalid native artifact file record")
         path = asset_path(root, name)
         stamp = file_stamp(path.stat(follow_symlinks=False))
-        if stamp != _sealed_stat(row) or stamp["size"] != row["size"]:
+        if not same_stamp(stamp, _sealed_stat(row)) or stamp["size"] != row["size"]:
             raise ValueError("native converted file changed after sealing: " + name)
         _file_layout(row)
         if (verify_hashes or (not row.get("tensors") and path.suffix == ".json")) and (
-            _digest(path) != row["sha256"] or file_stamp(path.stat()) != stamp
+            _digest(path) != row["sha256"] or not same_stamp(file_stamp(path.stat()), stamp)
         ):
             raise ValueError("native converted file hash changed: " + name)
     kinds = storage_inventory(tensors, files)

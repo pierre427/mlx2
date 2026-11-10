@@ -27,6 +27,20 @@ def file_stamp(value):
                 ctime_ns=value.st_ctime_ns, inode=value.st_ino, device=value.st_dev)
 
 
+# A volume's st_dev is assigned at mount and changes across reboots on macOS (seen
+# 2026-11-09: 16777230 -> 16777234 for an unchanged file), so a seal written to disk
+# must not bind it. Inode, size, mtime and ctime still catch replacement or edits.
+REBOOT_VOLATILE_STAMP_KEYS = frozenset(("device", "dev"))
+
+
+def same_stamp(live, sealed):
+    """True when two file stamps match on every key except the reboot-volatile device id."""
+    if not isinstance(live, dict) or not isinstance(sealed, dict):
+        return False
+    keys = (set(live) | set(sealed)) - REBOOT_VOLATILE_STAMP_KEYS
+    return all(k in live and k in sealed and live[k] == sealed[k] for k in keys)
+
+
 @dataclass(frozen=True)
 class ImmutablePage:
     offset: int
