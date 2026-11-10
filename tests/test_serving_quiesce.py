@@ -475,6 +475,51 @@ def test_cancelled_queued_job_releases_its_slot_without_a_free_lane(scripted_eng
     assert _wait_for_terminal(replacement, 5.0)["finish_reason"] == "length"
 
 
+def test_cancel_before_prefill_leaves_no_orphan_and_idle_branch_runs(scripted_engine):
+    # omlx#5104: a request aborted while it waited for prefill stayed in the
+    # prefilling queue, so the scheduler never went idle and idle reclaim
+    # stalled. Here the lane is inserted into the generator but never
+    # produces a token (its prefill has not run) when the client goes away.
+    build, state = scripted_engine
+    engine = build(declare_marker=True, max_lanes=1, max_inflight=2)
+    state["script"] = []
+    state["hold"] = {0}
+    request = {"messages": [{"role": "user", "content": "a"}], "temperature": 0}
+    job = engine.submit({**request, "max_tokens": 5})
+    deadline = time.monotonic() + 5
+    while not state.get("inserted"):
+        assert time.monotonic() < deadline, "the request never reached the generator"
+        time.sleep(0.01)
+    assert 0 in state["batch"].lanes and job.completion_tokens == 0
+    job.cancelled.set()
+    assert _wait_for_terminal(job, 1.0) == {"error": "cancelled"}
+    deadline = time.monotonic() + 5
+    while True:
+        with engine.lock:
+            if not engine.jobs:
+                break
+        assert time.monotonic() < deadline, "the cancelled job was never finished"
+        time.sleep(0.01)
+    # No orphan in the generator, the job table or the admission slots.
+    assert state["batch"].lanes == {}
+    status = engine.status()
+    assert status["inflight"] == 0 and status["queue_depth"] == 0
+    for _ in range(engine.max_inflight):
+        assert engine.slots.acquire(blocking=False)
+    for _ in range(engine.max_inflight):
+        engine.slots.release()
+    # The idle branch (APC spill, orphan reap, keep-warm) keeps firing.
+    ticks = state.get("idle_ticks", 0)
+    deadline = time.monotonic() + 5
+    while state.get("idle_ticks", 0) <= ticks:
+        assert time.monotonic() < deadline, "idle reclaim stalled after the cancel"
+        time.sleep(0.01)
+    # And the engine still serves: a fresh request runs to completion.
+    state["hold"] = set()
+    after = engine.submit({**request, "max_tokens": 3})
+    assert _wait_for_terminal(after, 5.0)["finish_reason"] == "length"
+
+
 def test_every_cancellation_reaches_the_request_finish_counter(scripted_engine, monkeypatch):
     # The request_finish sanity counter counted only active and
     # memory-deferred cancellations, so it disagreed with

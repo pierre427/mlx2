@@ -8,6 +8,7 @@ unqualified until the exact artifact passes the deferred model campaign.
 
 import hashlib
 import json
+import os
 from contextlib import nullcontext
 from dataclasses import asdict
 
@@ -33,6 +34,21 @@ SELECTED_KV_POLICIES = ("reference", "decode_reuse")
 KV_STORAGE_POLICIES = ("reference", "native_packed")
 CANDIDATE_SCORE_POLICIES = ("reference", "candidate_only")
 CED_POLICIES = ("reference", "dependency_exact")
+# Head-score scratch bound for one query-row tile in ``Attention.select``, and
+# the packed indexer-key chunk it decodes at a time.
+INDEX_SCORE_SCRATCH_BYTES = 16 << 20
+PACKED_INDEX_KEY_CHUNK = 4096
+# Opt-in, default off (2026-11-07, after sglang#49068's indexer-K tile reuse):
+# under native packed KV, ``select`` decodes the fp4 indexer keys once per
+# query-row tile, and long histories shrink that tile to a few rows. With this
+# set, each key chunk is decoded once per call and reused by every tile, so the
+# whole decoded history (count x index_head_dim fp32) stays resident for the
+# call. The same decode runs on the same slices, so the keys and every score
+# are bit-identical. Counters in model.scheduled_kv_calls:
+# packed_index_decoded_chunks, packed_index_reused_chunks and
+# packed_index_resident_max_rows. See docs/research/RECON-PROBES-2026-11-07.md.
+PACKED_INDEX_DECODE_ONCE = os.environ.get("MLX2_DS41_PACKED_INDEX_DECODE_ONCE") == "1"
+
 # Selected-attention laws with a compatible packed consumer: the reference
 # bounded packed gather, or exact bounded retained-pool decode staging.
 PACKED_ATTENTION_MATH_POLICIES = ("reference", "all_retained_broadcast", "omlx_nax_bf16_online_v1")
@@ -361,13 +377,17 @@ class Attention:
         capacity = min(count, c.candidate_topk_blocks * c.candidate_block_size)
         per_row = ((c.index_n_heads + c.index_head_dim) * capacity + count
                    if candidate_only else c.index_n_heads * count)
-        tile = max(1, min(128, (16 << 20) // max(1, per_row * 4)))
+        tile = max(1, min(128, INDEX_SCORE_SCRATCH_BYTES // max(1, per_row * 4)))
         selected, masks = [], []
         prior_candidates = shared.get("candidates")
         if candidate_only and (prior_candidates is None or prior_candidates.shape != (1, length, count)):
             raise ValueError("V4.1 candidate source failed to publish matching rows")
         packed_index = getattr(source, "packed_index_keys", None)
         all_keys = None if candidate_only or packed_index is not None else source.index_keys
+        decoded_index = {} if PACKED_INDEX_DECODE_ONCE and length > tile else None
+        if decoded_index is not None and packed_index is not None and not candidate_only:
+            m.scheduled_kv_calls["packed_index_resident_max_rows"] = max(
+                m.scheduled_kv_calls.get("packed_index_resident_max_rows", 0), count)
         for first in range(0, length, tile):
             last = min(length, first + tile)
             if candidate_only:
@@ -388,9 +408,16 @@ class Attention:
                 from .deepseek_v41_packed_qat import decode
 
                 parts = []
-                for key_first in range(0, count, 4096):
-                    key_last = min(count, key_first + 4096)
-                    keys = decode(packed_index.sliced((slice(None), slice(key_first, key_last))))
+                for key_first in range(0, count, PACKED_INDEX_KEY_CHUNK):
+                    key_last = min(count, key_first + PACKED_INDEX_KEY_CHUNK)
+                    keys = None if decoded_index is None else decoded_index.get(key_first)
+                    if keys is None:
+                        keys = decode(packed_index.sliced((slice(None), slice(key_first, key_last))))
+                        m.scheduled_kv_calls["packed_index_decoded_chunks"] = m.scheduled_kv_calls.get("packed_index_decoded_chunks", 0) + 1
+                        if decoded_index is not None:
+                            decoded_index[key_first] = keys
+                    else:
+                        m.scheduled_kv_calls["packed_index_reused_chunks"] = m.scheduled_kv_calls.get("packed_index_reused_chunks", 0) + 1
                     part = mx.einsum("bhsd,btd->bsht", query[:, :, first:last], keys)
                     parts.append(mx.sum(mx.maximum(part, 0) * weight[:, first:last, :, None], 2))
                     m.scheduled_kv_calls["packed_index_staging_max_rows"] = max(m.scheduled_kv_calls.get("packed_index_staging_max_rows", 0), key_last-key_first)

@@ -264,7 +264,9 @@ def scripted_engine(monkeypatch):
             return NS(cache=[NS(nbytes=0)], cached_tokens=len(tokens) - 1, remaining_tokens=[1],
                       sidecar=None, miss_reason=None)
         def store(self, *a, **kw): pass
-        def spill_idle_entries(self): pass
+        def spill_idle_entries(self):
+            # Reached only from the serving loop's idle branch.
+            state["idle_ticks"] = state.get("idle_ticks", 0) + 1
         def evict_oldest_unleased(self): return False
         def clear(self): pass
         def __len__(self): return 0
@@ -281,6 +283,7 @@ def scripted_engine(monkeypatch):
             self.uid = 0
             self.num_draft = 1
             self.max_proposal_span = 1
+            state["batch"] = self
 
         def insert(self, prompts, max_tokens=None, logits_processors=None, **kw):
             uid = self.uid
@@ -296,6 +299,8 @@ def scripted_engine(monkeypatch):
                 time.sleep(state["step_delay"])
                 state["step_times"].append(time.monotonic())
             for uid, lane in list(self.lanes.items()):
+                if uid in state.get("hold", ()):
+                    continue  # inserted, but its prefill has not run yet
                 step = len(lane["generated"])
                 # The model wants "hello" most and the scripted token second;
                 # only a grammar can stop it from saying hello.
