@@ -34,6 +34,8 @@ PREFIXES = (
     "MLX_LM_QSA_",
     "MLX_SDPA_",
     "MLX_ENABLE_TF32",
+    # deepseek_v41 reads this opt-in once at import (Recon 2026-11-07).
+    "MLX2_DS41_PACKED_INDEX_DECODE_ONCE",
 )
 
 _SNAPSHOTS: Dict[str, Dict[str, str]] = {}

@@ -8,7 +8,7 @@ import json
 
 import numpy as np
 
-from common import CAPTURE, HIDDEN, LAYERS, OUT, atomic_json, atomic_npz, load_gate, load_trace
+from common import CAPTURE, LAYERS, OUT, atomic_json, atomic_npz, load_gate, load_trace
 from heads import TOPN, X, rank_hit_prob, recall_k, router, topn
 
 BETAS = (0.0, 0.05, 0.1, 0.2, 0.4, 0.8)

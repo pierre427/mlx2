@@ -9,7 +9,6 @@ label = key is accessed again within H steps (H = 16/64/256).  Fit on TRAIN-requ
 HELDOUT-request samples.  Writes nextuse.json with raw-scale weights for each H (with and without pn);
 'model' = chosen default (picked later by the train-split event sim in sweep.py).
 """
-import math
 from collections import OrderedDict
 
 import numpy as np

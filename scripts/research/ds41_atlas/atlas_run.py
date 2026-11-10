@@ -9,7 +9,15 @@ Resumable: experts already present in a unit json under OUT/units are skipped.
 env HOSTS = comma list of remotes below (default "m2,m3"); LOCAL=1 runs the M5 worker.
 usage: atlas_run.py MODEL OUT
 """
+import sys as _tree_sys  # mlx2 worktree bootstrap: import this tree's src, not the editable install
+from pathlib import Path as _TreePath
+
+_tree_src = str(_TreePath(__file__).resolve().parents[3] / "src")
+if _tree_src not in _tree_sys.path[:1]:
+    _tree_sys.path.insert(0, _tree_src)
+del _tree_sys, _TreePath, _tree_src
 import glob, json, os, queue, subprocess, sys, threading, time
+from pathlib import Path
 import numpy as np
 import mlx.core as mx
 from mlx2.adapters.deepseek_v41_source_artifact import inspect_artifact, checked_file
@@ -18,15 +26,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER = f"{HERE}/atlas_worker.py"
 PY = sys.executable
 REMOTES = {
-    "m2": {"ssh": ["ssh", "-i", os.path.expanduser("~/.ssh/m3_node"), "-o", "BatchMode=yes", "user@169.254.68.18"],
-           "py": "~/mlx2-0324-venv/bin/python", "tmp": "ds41_atlas_tmp", "unit": 16},
-    "m3": {"ssh": ["ssh", "-o", "BatchMode=yes", "m3"], "py": "~/mlx2-0324-venv/bin/python", "tmp": "ds41_atlas_tmp", "unit": 8},
+    "m2": {"ssh": ["ssh", "-i", str(Path.home() / ".ssh/m3_node"), "-o", "BatchMode=yes", "user@169.254.68.18"],
+           "py": "mlx2-0324-venv/bin/python", "tmp": "ds41_atlas_tmp", "unit": 16},
+    "m3": {"ssh": ["ssh", "-o", "BatchMode=yes", "m3"], "py": "mlx2-0324-venv/bin/python", "tmp": "ds41_atlas_tmp", "unit": 8},
 }
 LOCAL_UNIT = 32
 lock = threading.Lock()
 MODEL, OUT = sys.argv[1], sys.argv[2]
 LITE = f"{OUT}/lite"
-STAGE = os.path.expanduser("~/.cache/mlx2/ds41-atlas-stage")
+STAGE = str(Path.home() / ".cache/mlx2/ds41-atlas-stage")
 ART = inspect_artifact(MODEL)
 log = open(f"{OUT}/atlas_run.log", "a")
 

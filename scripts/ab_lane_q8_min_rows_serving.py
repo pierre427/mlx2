@@ -9,7 +9,7 @@ import json, os, signal, subprocess, sys, threading, time, urllib.error, urllib.
 from pathlib import Path
 
 WT = Path(sys.argv[1]); OUT = Path(sys.argv[2]); MODEL = sys.argv[3]
-PY = "~/Desktop/mlx2/.venv/bin/python"
+PY = str(Path.home() / "Desktop/mlx2/.venv/bin/python")
 PORT = 8399
 sys.path.insert(0, str(WT / "src"))
 from mlx2.apple_telemetry import TemperatureSampler  # noqa: E402
@@ -74,7 +74,6 @@ def width_run(width):
     toks = sum(r["usage"]["completion_tokens"] for r in recs)
     last_first = max(r["first"] for r in recs); first_done = min(r["done"] for r in recs)
     # Window in which every lane is decoding: after the last first token, before the first finish.
-    overlap_tokens = 0
     # Approximate: all lanes emit at the same step rate in ordinary batched decode.
     window = first_done - last_first
     per_lane = [r["usage"]["completion_tokens"] for r in recs]

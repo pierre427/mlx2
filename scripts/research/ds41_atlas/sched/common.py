@@ -4,6 +4,7 @@ CPU-only research code. No runtime/adapter changes; reads the routing capture re
 """
 import json
 import os
+from pathlib import Path
 import sys
 
 import numpy as np
@@ -15,9 +16,9 @@ CHECKPOINT = ("DeepSeek-V4.1-Flash-1017-Source@"
               "c30fd25e3cc79ba7044686fa3f9a7a1c0f514f77ee6293d2f5f62bc409e02ddb")
 BINDING = "c30fd25e3cc79ba7044686fa3f9a7a1c0f514f77ee6293d2f5f62bc409e02ddb"
 MLX2_COMMIT = "c18fef602 + uncommitted research scripts (scripts/research/ds41_atlas/sched/)"
-CAPTURE = os.path.expanduser("~/mlx-models/.ds41-routing-capture-20261108")
+CAPTURE = str(Path.home() / "mlx-models/.ds41-routing-capture-20261108")
 LITE = "/Volumes/T7/ds41-atlas/lite"
-OUT = "~/Desktop/mlx2/output/ds41-source-20261108/cache-design/sched"
+OUT = str(Path.home() / "Desktop/mlx2/output/ds41-source-20261108/cache-design/sched")
 LAYERS, EXPERTS, TOPK, HIDDEN = 40, 384, 6, 5120
 EXPERT_BYTES = 18_800_640
 

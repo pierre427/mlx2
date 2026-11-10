@@ -31,6 +31,11 @@
       "sha256": "861540fcbcea96db4127d9e026fd8f8f93d487548becc9eb933396249fc1f485",
       "targets": [],
       "reason": "Reviewed opt-in developer kernel reload (394af8969). Its exec() re-executes only modules already in sys.modules whose files lie under the configured kernel-dev source root, after a sha256 recheck, on an explicit admin reload; it adds no module to the static closure. Any reload marks route receipts unqualified with its execution identity and changes the cache revision (kernel_reload_serving)."
+    },
+    "mlx2.adapters.vlm_runtime": {
+      "sha256": "a076d71aec3c3bb894192ad7af18986d860c29bd61052b0adc1eb461b113d776",
+      "targets": [],
+      "reason": "Reviewed VLMBackend.load_processor (b0ebffe23, e5940bf5e; native Gemma 4 processor path). Its importlib.import_module(\"mlx_vlm.models.\" + self.family) registers the bound family's processor with AutoProcessor; the prefix is the literal external mlx_vlm.models package and self.family is the contract-bound family already checked by validate_model_dispatch and verify_contract, so it can never resolve an mlx2 module and adds nothing to the local closure. The other two loaders (mlx_vlm, mlx_vlm.utils) are literal external imports. mlx-vlm source stays bound by the per-family vlm_contracts pin. Restores route-scoped source identity, which had fallen back to full_source for every route."
     }
   }
 }

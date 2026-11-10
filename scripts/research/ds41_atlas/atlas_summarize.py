@@ -5,13 +5,14 @@ Writes OUT/experts.jsonl (one line per mapped expert) and OUT/router_experts.jso
 experts, router level), plus OUT/SUMMARY.md with coverage, controls and example themes.
 """
 import glob, json, os, sys, unicodedata
+from pathlib import Path
 import numpy as np
 
 OUT = sys.argv[1]
 
 from tokenizers import Tokenizer
 
-tok = Tokenizer.from_file("~/mlx-models/DeepSeek-V4.1-Flash-1017-Source/tokenizer.json")
+tok = Tokenizer.from_file(str(Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-Source/tokenizer.json"))
 _cache = {}
 
 
@@ -92,7 +93,7 @@ def main():
     best = sorted([r for r in rows if r["layer"] < 8], key=lambda r: -r["detector_share"])[:8]
     md = ["# DeepSeek-V4.1-Flash-1017-Source expert token atlas (checkpoint c30fd25e)", "",
           f"Mapped experts: **{len(rows)}** (weights-level, embedding-level probe; method as in the expert-slice probe).",
-          f"Router-level map: all 15,360 experts (`router_experts.jsonl`).", "",
+          "Router-level map: all 15,360 experts (`router_experts.jsonl`).", "",
           "## Controls", "",
           f"- Real experts: neurons with kurtosis > 20 (sharp token detectors): mean share **{ds.mean():.3f}** (median {np.median(ds):.3f}).",
           f"- Row-permuted controls ({len(ctrl)}): mean share **{cs.mean():.4f}**, max kurtosis {max([c['kurt_max'] for c in ctrl] or [0]):.0f}.", "",

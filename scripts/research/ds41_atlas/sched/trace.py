@@ -11,7 +11,7 @@ import json
 
 import numpy as np
 
-from common import CAPTURE, LAYERS, OUT, TOPK, atomic_json, atomic_npz, provenance
+from common import CAPTURE, LAYERS, OUT, atomic_json, atomic_npz, provenance
 from cache_sim import read_capture
 
 

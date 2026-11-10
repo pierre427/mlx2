@@ -9,6 +9,13 @@ which equals W' (H x) = W x up to quantization. 3.0 bits/weight with f16 paramet
 (13,271,040 B/expert). Prototype vs current g64 bank (6 experts, captured inputs): expert output
 error 0.40-0.53 vs 0.50-0.70. CPU only (MLX pinned to CPU in every worker).
 """
+import sys as _tree_sys  # mlx2 worktree bootstrap: import this tree's src, not the editable install
+from pathlib import Path as _TreePath
+
+_tree_src = str(_TreePath(__file__).resolve().parents[3] / "src")
+if _tree_src not in _tree_sys.path[:1]:
+    _tree_sys.path.insert(0, _tree_src)
+del _tree_sys, _TreePath, _tree_src
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import argparse, hashlib, json, os, time

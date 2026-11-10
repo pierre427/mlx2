@@ -16,7 +16,6 @@ parse="high", additionally steals  gpu_steal_ms  from the compute timeline for E
 (demand or prefetch) -- the K3.1 lesson that MLX parse/copy, not disk, dominated expert I/O.
 """
 import copy
-import json
 
 from common import EXPERT_BYTES, OUT, atomic_json, provenance
 

@@ -27,6 +27,7 @@ from .deepseek_v4 import (
 )
 from .deepseek_v41_cache import DeepSeekV41LayerCache
 from .deepseek_v41_quant import quantize
+from .import_env import snapshot as _import_env_snapshot
 
 NUMERICS_REVISION = "mlx2.v41-packed-bf16-staggered-csa2-engram.v1"
 INDEX_POLICIES = ("reference", "finite_all_retained")
@@ -48,6 +49,7 @@ PACKED_INDEX_KEY_CHUNK = 4096
 # packed_index_decoded_chunks, packed_index_reused_chunks and
 # packed_index_resident_max_rows. See docs/research/RECON-PROBES-2026-11-07.md.
 PACKED_INDEX_DECODE_ONCE = os.environ.get("MLX2_DS41_PACKED_INDEX_DECODE_ONCE") == "1"
+_import_env_snapshot(__name__)
 
 # Selected-attention laws with a compatible packed consumer: the reference
 # bounded packed gather, or exact bounded retained-pool decode staging.

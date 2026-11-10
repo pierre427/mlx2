@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
 import math
+import os
 from functools import lru_cache
 from typing import Callable, Dict, List, Optional
 import mlx.core as mx
@@ -142,6 +143,12 @@ def make_sampler(
         argmax_sampler.greedy_argmax = True  # trusted normalized-greedy candidate
         return argmax_sampler
     sampling_methods = []
+    if _fuse_top_p_top_k(top_p, top_k, min_p, xtc_probability > 0.0):
+        _count_sampling_filter("sampler_cutoff")
+        sampling_methods.append(
+            lambda x, p=top_p, k=top_k: apply_top_p_top_k_cutoff(x, p, k)
+        )
+        top_p, top_k = 0.0, 0
     if top_p > 0 and top_p < 1.0:
         sampling_methods.append(lambda x: apply_top_p(x, top_p))
     if min_p != 0.0:
@@ -271,6 +278,137 @@ def apply_top_p(logprobs: mx.array, top_p: float) -> mx.array:
     return mx.where(keep, logprobs, -float("inf"))
 
 
+
+# Opt-in fused top-p + top-k filter (idea from vllm-project/vllm#66534; see
+# docs/PROVENANCE.md).  Off by default: MLX2_SAMPLING_TOPK_CUTOFF=1 enables it.
+SAMPLING_TOPK_CUTOFF_ENV = "MLX2_SAMPLING_TOPK_CUTOFF"
+SAMPLING_FILTER_STATS: Dict[str, int] = {}
+
+
+def sampling_topk_cutoff_enabled() -> bool:
+    """Read at sampler construction, never at import (no import-time flag)."""
+    return os.environ.get(SAMPLING_TOPK_CUTOFF_ENV, "0").strip() == "1"
+
+
+def _fuse_top_p_top_k(top_p: float, top_k: int, min_p: float, xtc: bool = False) -> bool:
+    """The fused filter covers exactly top-p followed by top-k.
+
+    min-p and XTC sit between them in the chain; those requests keep the
+    reference chain so the fused path never has to argue about composition.
+    """
+    return (
+        0.0 < top_p < 1.0
+        and 0 < top_k <= _FUSE_MAX_TOP_K
+        and min_p == 0.0
+        and not xtc
+        and sampling_topk_cutoff_enabled()
+    )
+
+
+# vLLM caps its fused cutoff at k <= 1024 too; past it ``mx.topk`` stops
+# beating the sort and the float32 boundary error grows with k.
+_FUSE_MAX_TOP_K = 1024
+
+
+def _count_sampling_filter(path: str) -> None:
+    """Counts sampler/transform constructions that selected the fused path
+    (a construction, not a draw: memoized transforms count each request)."""
+    SAMPLING_FILTER_STATS[path] = SAMPLING_FILTER_STATS.get(path, 0) + 1
+
+
+def sampling_filter_status() -> dict:
+    return {
+        "configured": os.environ.get(SAMPLING_TOPK_CUTOFF_ENV, "unset"),
+        "default": "0",
+        "policy": "top_p_top_k_cutoff_v1" if sampling_topk_cutoff_enabled() else "reference",
+        "qualification": "unqualified_opt_in",
+        "counts_unit": "constructions",
+        "max_top_k": _FUSE_MAX_TOP_K,
+        "counts": dict(SAMPLING_FILTER_STATS),
+    }
+
+
+def _row_mass(logprobs: mx.array, chunk: int = 256) -> mx.array:
+    """The row's float32 probability mass, summed in two levels.
+
+    ``apply_top_p`` accumulates ascending, so the long tail of tiny
+    probabilities survives; one flat float32 sum in index order can lose
+    ~1e-5 of it on a 248K vocabulary and move the nucleus boundary by a
+    token.  Chunked partial sums keep the error near float32 epsilon.
+    """
+    probs = mx.exp(logprobs.astype(mx.float32))
+    width = probs.shape[-1]
+    pad = (-width) % chunk
+    if pad:
+        probs = mx.pad(probs, [(0, 0)] * (probs.ndim - 1) + [(0, pad)])
+    partial = probs.reshape(*probs.shape[:-1], -1, chunk).sum(axis=-1)
+    return partial.sum(axis=-1, keepdims=True)
+
+
+def sampling_filter_receipt(sampling: Optional[dict]) -> dict:
+    """Per-request route-receipt label: which filter law this request's
+    effective sampling selects (labelled unqualified when fused)."""
+    sampling = sampling or {}
+    temp = sampling.get("temperature") or 0.0
+    fused = temp > 0 and _fuse_top_p_top_k(
+        sampling.get("top_p") or 0.0, int(sampling.get("top_k") or 0), sampling.get("min_p") or 0.0
+    )
+    if not fused:
+        return {"policy": "reference"}
+    return {"policy": "top_p_top_k_cutoff_v1", "qualification": "unqualified_opt_in"}
+
+
+def apply_top_p_top_k_cutoff(logprobs: mx.array, top_p: float, top_k: int) -> mx.array:
+    """``apply_top_k(apply_top_p(x, top_p), top_k)`` as one scalar cutoff per row.
+
+    Both filters keep a prefix of the descending order, so their composition
+    is ``logprobs >= cutoff``.  ``mx.topk`` finds the ``k`` largest values;
+    the nucleus is decided on those ``k`` alone against the row's full float32
+    mass (the same relative threshold ``apply_top_p`` uses), so no
+    vocabulary-wide sort or scatter runs.
+
+    Never keeps more than ``top_k`` tokens (the sparse speculative target law
+    relies on it) and keeps the reference chain's count, except when the
+    nucleus boundary lies within float32 rounding of the threshold: both
+    accumulate in float32 in different orders, so there they can differ by
+    one token (measured margins <= 3e-7 of the row mass, this side matching a
+    float64 evaluation each time).  The kept set is the reference's except
+    at a value tied across the boundary, where the reference keeps an
+    argsort / argpartition-order subset and this keeps the lowest-index
+    tokens.  The most likely token always survives.
+    """
+    vocab_size = logprobs.shape[-1]
+    if not isinstance(top_k, int) or not 0 < top_k < vocab_size:
+        raise ValueError(
+            f"`top_k` has to be an integer in the (0, {vocab_size}) interval, but is {top_k}."
+        )
+    values = mx.sort(mx.topk(logprobs, top_k, axis=-1), axis=-1)[..., ::-1]
+    probs = mx.exp(values.astype(mx.float32))
+    total = _row_mass(logprobs)
+    # apply_top_p keeps a token when the ascending cumulative mass up to and
+    # including it exceeds (1 - top_p) of the row total.  Mirror that order:
+    # the mass outside the top k (summed accurately), then the top-k values
+    # accumulated smallest first.
+    kth = values[..., -1:]
+    outside = _row_mass(mx.where(logprobs < kth, logprobs, -float("inf")))
+    tied_outside = (logprobs == kth).astype(mx.int32).sum(axis=-1, keepdims=True) - (
+        values == kth
+    ).astype(mx.int32).sum(axis=-1, keepdims=True)
+    outside = outside + tied_outside.astype(mx.float32) * probs[..., -1:]
+    tail = outside + mx.cumsum(probs[..., ::-1], axis=-1)[..., ::-1]
+    keep = tail > (1 - top_p) * total
+    kept = mx.maximum(keep.astype(mx.int32).sum(axis=-1, keepdims=True), 1)
+    cutoff = mx.take_along_axis(values, kept - 1, axis=-1)
+    # Everything strictly above the cutoff is in; tokens equal to it fill the
+    # remaining slots in index order, so the count matches the reference.
+    above_cutoff = logprobs > cutoff
+    tied = logprobs == cutoff
+    slots = kept - above_cutoff.astype(mx.int32).sum(axis=-1, keepdims=True)
+    tie_rank = mx.cumsum(tied.astype(mx.int32), axis=-1)
+    survive = above_cutoff | (tied & (tie_rank <= slots))
+    return mx.where(survive, logprobs, mx.array(-float("inf"), logprobs.dtype))
+
+
 def apply_xtc(
     logits: mx.array,
     xtc_probability: float,
@@ -320,7 +458,6 @@ def categorical_sampling(logits, temp):
     return mx.random.categorical(_scale_by_temperature(logits, temp))
 
 
-@lru_cache(maxsize=32)
 def make_transformed_logprobs(
     temp: float,
     *,
@@ -328,6 +465,31 @@ def make_transformed_logprobs(
     min_p: float = 0.0,
     top_k: int = 0,
     min_tokens_to_keep: int = 1,
+) -> Callable[[mx.array], mx.array]:
+    """See ``_make_transformed_logprobs``; the filter policy joins the memo key
+    so toggling ``MLX2_SAMPLING_TOPK_CUTOFF`` never returns a stale chain."""
+    fused = _fuse_top_p_top_k(top_p, top_k, min_p)
+    if fused:
+        _count_sampling_filter("transform_cutoff")
+    return _make_transformed_logprobs(
+        temp,
+        top_p=top_p,
+        min_p=min_p,
+        top_k=top_k,
+        min_tokens_to_keep=min_tokens_to_keep,
+        fused=fused,
+    )
+
+
+@lru_cache(maxsize=32)
+def _make_transformed_logprobs(
+    temp: float,
+    *,
+    top_p: float = 0.0,
+    min_p: float = 0.0,
+    top_k: int = 0,
+    min_tokens_to_keep: int = 1,
+    fused: bool = False,
 ) -> Callable[[mx.array], mx.array]:
     """Make a map from raw logits to the log-probabilities of the
     distribution ``make_sampler(temp, top_p, min_p, top_k)`` samples from.
@@ -350,6 +512,11 @@ def make_transformed_logprobs(
     if not temp or temp <= 0:
         raise ValueError(f"make_transformed_logprobs requires temp > 0, got {temp}")
     sampling_methods = []
+    if fused:
+        sampling_methods.append(
+            lambda x, p=top_p, k=top_k: apply_top_p_top_k_cutoff(x, p, k)
+        )
+        top_p, top_k = 0.0, 0
     if top_p > 0 and top_p < 1.0:
         sampling_methods.append(lambda x: apply_top_p(x, top_p))
     if min_p != 0.0:

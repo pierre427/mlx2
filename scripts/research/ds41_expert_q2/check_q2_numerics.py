@@ -23,9 +23,9 @@ from safetensors.numpy import load_file  # noqa: E402
 from mlx2.runtime.models.deepseek_v4 import limited_swiglu  # noqa: E402
 from mlx2.runtime.models.deepseek_v41_quant import quantize  # noqa: E402
 
-MODEL = "~/mlx-models/DeepSeek-V4.1-Flash-1017-Source"
-Q2 = Path("~/mlx-models/DeepSeek-V4.1-Flash-1017-Source-Expert-Q2-g64")
-CAP = Path("~/mlx-models/.ds41-routing-capture-20261108")
+MODEL = str(Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-Source")
+Q2 = Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-Source-Expert-Q2-g64"
+CAP = Path.home() / "mlx-models/.ds41-routing-capture-20261108"
 TRACE = ROOT / "output/ds41-source-20261108/cache-design/sched/trace.npz"
 
 

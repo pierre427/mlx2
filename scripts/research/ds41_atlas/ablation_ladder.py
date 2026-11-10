@@ -32,7 +32,7 @@ from pathlib import Path
 
 ED_PROMPTS = "/Volumes/T7/kimi-k3.1-pro/expert-draft-linear-20261107"
 GSM8K = Path(__file__).resolve().parents[3] / "benchmarks" / "gsm8k" / "test.jsonl"
-DEFAULT_MODEL = "~/mlx-models/DeepSeek-V4.1-Flash-1017-Source"
+DEFAULT_MODEL = str(Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-Source")
 DEFAULT_PROMPTS = ["translate-6", "translate-7", "extract-6", "extract-7", "gsm8k-6", "gsm8k-7"]
 NEAR_TIE_NAT = 0.5
 NUMBER = re.compile(r"-?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")

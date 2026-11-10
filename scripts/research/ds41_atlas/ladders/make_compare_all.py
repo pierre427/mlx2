@@ -7,7 +7,7 @@ explicitly (the default guard skips tier profiles, so earlier tier speeds ran re
 import json
 from pathlib import Path
 
-M = "~/mlx-models"
+M = str(Path.home() / "mlx-models")
 U = f"{M}/.ds41-routing-capture-20261108/usage-train-split.json"
 Q1 = f"{M}/DeepSeek-V4.1-Flash-1017-Source-Expert-Q1-g64"
 Q2 = {"g64": f"{M}/DeepSeek-V4.1-Flash-1017-Source-Expert-Q2-g64", "g32h": f"{M}/DeepSeek-V4.1-Flash-1017-Source-Expert-Q2-g32h"}

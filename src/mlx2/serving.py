@@ -23,6 +23,7 @@ import queue
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -2268,6 +2269,29 @@ def sp_qmm_selected(execution_policy) -> bool:
     if type(value) is not bool:
         raise ValueError("sp_qmm must be boolean")
     return value
+
+
+def _not_loaded_section():
+    return {"loaded": False, "counts": {}}
+
+
+def _sampling_filter_receipt(effective_sampling):
+    from .runtime.sample_utils import sampling_filter_receipt
+
+    return sampling_filter_receipt(effective_sampling)
+
+
+def _loaded_runtime_model(name):
+    """``mlx2.runtime.models.<name>`` once fully imported, else None.
+
+    Never imports.  A module still executing its body (another thread is
+    importing it) counts as not loaded, so a poll never reads half-defined
+    globals."""
+    module = sys.modules.get(f"{__package__}.runtime.models.{name}")
+    spec = getattr(module, "__spec__", None)
+    if module is None or getattr(spec, "_initializing", False):
+        return None
+    return module
 
 
 def sp_qmm_status(engine):
@@ -7564,12 +7588,18 @@ class ServingEngine(KernelReloadMixin):
         return {} if view is None else {"ast_route": view}
 
     def status(self):
-        from .runtime.models import qsdpa_verify_metal as qvm
-        from .runtime.models import qsdpa_decode_metal as qdm
-        from .runtime.models.cache import rows_attention_status as _rows_attention_status
-        from .runtime.models.standard_decoder import tail_row_status as _tail_row_status
+        # Readiness polls call this before the adapter constructs.  Importing a
+        # runtime model module here would latch its import-time environment
+        # before the adapter pins it (assert_profile_applied then refuses the
+        # load), so model-module counters are read only once something else
+        # imported them; until then the section reports loaded=False.
+        qvm = _loaded_runtime_model("qsdpa_verify_metal")
+        qdm = _loaded_runtime_model("qsdpa_decode_metal")
+        fpv = _loaded_runtime_model("fp_verify_tensor")
+        kv_cache = _loaded_runtime_model("cache")
+        decoder = _loaded_runtime_model("standard_decoder")
         from .runtime.prefill_tail_skip import tail_skip_status as _tail_skip_status
-        from .runtime.models import fp_verify_tensor as fpv
+        from .runtime.sample_utils import sampling_filter_status as _sampling_filter_status
 
         receipts = self.recent_receipts()
         with self.lock:
@@ -7664,12 +7694,15 @@ class ServingEngine(KernelReloadMixin):
                     "counts": dict(qvm.STATS),
                     "by_rows": dict(qvm.STATS_BY_ROWS),
                     "selected_host_branches": qvm.selected_host_branch_snapshot(),
-                },
-                "fp_decode_attention": qdm.fp_decode_status(),
-                "fp_verify_attention": fpv.status(),
-                "batch_rows_attention": _rows_attention_status(),
-                "prefill_tail_row": _tail_row_status(),
+                } if qvm else _not_loaded_section(),
+                "fp_decode_attention": qdm.fp_decode_status() if qdm else _not_loaded_section(),
+                "fp_verify_attention": fpv.status() if fpv else _not_loaded_section(),
+                "batch_rows_attention": (
+                    kv_cache.rows_attention_status() if kv_cache else _not_loaded_section()
+                ),
+                "prefill_tail_row": decoder.tail_row_status() if decoder else _not_loaded_section(),
                 "prefill_tail_skip": _tail_skip_status(),
+                "sampling_filter": _sampling_filter_status(),
                 "recent_receipts": receipts,
                 **({"checkpoint_resources": self._last_checkpoint_resource_receipt}
                    if hasattr(self, "_last_checkpoint_resource_receipt") else {}),
@@ -16563,6 +16596,7 @@ class ServingEngine(KernelReloadMixin):
                                         # What the samplers actually used, and
                                         # which vendor defaults filled it in.
                                         "effective_sampling": job.effective_sampling,
+                                        "sampling_filter": _sampling_filter_receipt(job.effective_sampling),
                                         "sampling_defaults": job.sampling_defaults,
                                         "min_tokens": job.request.get("min_tokens", 0),
                                         "thinking_guard": (

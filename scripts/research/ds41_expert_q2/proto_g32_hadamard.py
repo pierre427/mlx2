@@ -54,8 +54,8 @@ def rel(a, b):
 
 
 def main():
-    art = inspect_artifact("~/mlx-models/DeepSeek-V4.1-Flash-1017-Source")
-    cap = Path("~/mlx-models/.ds41-routing-capture-20261108")
+    art = inspect_artifact(str(Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-Source"))
+    cap = Path.home() / "mlx-models/.ds41-routing-capture-20261108"
     z = np.load(ROOT / "output/ds41-source-20261108/cache-design/sched/trace.npz"); ids = z["ids"]
     out = []
     for layer in (5, 20, 35):

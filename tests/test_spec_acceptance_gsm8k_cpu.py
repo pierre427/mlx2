@@ -99,3 +99,18 @@ def test_base_url_mode_against_a_stub_server(tmp_path, monkeypatch):
     assert receipt["checkpoint"].startswith("M@sha256:") and receipt["dataset"]["revision"] == "rev"
     with pytest.raises(RuntimeError, match="nonempty"):
         gsm.main(["--output", str(out), "--base-url", "http://x", "--checkpoint", "M@sha256:0"])
+
+
+def test_sampling_fields_are_greedy_by_default_and_seeded_per_question():
+    assert gsm.sampling_fields(None, 3) == {}
+    sampling = {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "seed": 100}
+    assert gsm.sampling_fields(sampling, 0) == {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "seed": 100}
+    assert gsm.sampling_fields(sampling, 7)["seed"] == 107
+    assert gsm.sampling_fields({"temperature": 1.0, "top_p": None, "top_k": None, "seed": None}, 2) == {
+        "temperature": 1.0}
+
+
+def test_filters_without_temperature_are_refused(tmp_path):
+    with pytest.raises(SystemExit):
+        gsm.main(["--output", str(tmp_path / "o"), "--base-url", "http://x",
+                  "--checkpoint", "M@sha256:" + "0" * 64, "--top-k", "20"])

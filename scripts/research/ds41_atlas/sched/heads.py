@@ -12,7 +12,6 @@ scored on HELDOUT prompts only.  Outputs: heads_eval.json, preds.npz (top-24 pre
 layer for every head, plus per-rank hit probabilities calibrated on train rows), xtok_heads.npz.
 """
 import json
-import os
 import time
 
 import numpy as np
@@ -105,7 +104,7 @@ def main():
     # ---- baselines on the h=1 heldout pairs ----
     p1 = pairs(1)
     sp = split[p1 + 1]
-    ho = p1[sp == 1]; tr = p1[sp == 0]
+    ho = p1[sp == 1]
     base_rows = {}
     for name in ("prev_token", "prev2_union", "router_x0_untrained", "router_x39_untrained"):
         base_rows[name] = []
@@ -191,7 +190,7 @@ def main():
             lam = lams[0]
         out["lambda"] = lam
         log(variant, h, "lambda", lam)
-        Ft = feats(variant, trp, h); Fh = feats(variant, hop, h)
+        Ft = feats(variant, trp, h)
         mu, s, V = ridge_eig(Ft)
         Xc = Ft - mu
         rows, cal = [], np.zeros((LAYERS, TOPN))

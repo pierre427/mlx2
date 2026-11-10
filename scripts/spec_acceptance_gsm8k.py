@@ -201,6 +201,21 @@ def median(values):
 
 # --------------------------------------------------------------- serving --
 
+def sampling_fields(sampling, index):
+    """Request fields for one question: empty (greedy) or the sampled settings
+    with a deterministic per-question seed, so two arms draw from the same
+    seeds question by question."""
+    if not sampling:
+        return {}
+    fields = {"temperature": sampling["temperature"]}
+    for name in ("top_p", "top_k"):
+        if sampling.get(name) is not None:
+            fields[name] = sampling[name]
+    if sampling.get("seed") is not None:
+        fields["seed"] = sampling["seed"] + index
+    return fields
+
+
 class Client:
     def __init__(self, root, token=None):
         self.root, self.token = root.rstrip("/"), token
@@ -215,19 +230,22 @@ class Client:
         return json.loads(body) if body.strip().startswith(b"{") else body.decode()
 
 
-def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None):
+def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None, sampling=None):
+    """``sampling`` (optional) adds temperature/top_p/top_k and a per-question
+    seed (``seed + index``) to every request; ``None`` keeps greedy."""
     rows = []
     for index, item in enumerate(items):
         start = time.monotonic()
+        extra_fields = sampling_fields(sampling, index)
         if chat:
-            payload = {"model": model_name, "temperature": 0, "stream": False, "max_tokens": max_tokens,
+            payload = {"model": model_name, "temperature": 0, **extra_fields, "stream": False, "max_tokens": max_tokens,
                        "messages": [{"role": "user", "content": item["question"]
                                      + "\nGive the final numeric answer after ####."}]}
             result = client.call("/v1/chat/completions", payload)
             choice = result["choices"][0]
             text = choice["message"].get("content") or ""
         else:
-            payload = {"model": model_name, "temperature": 0, "stream": False, "max_tokens": max_tokens,
+            payload = {"model": model_name, "temperature": 0, **extra_fields, "stream": False, "max_tokens": max_tokens,
                        "stop": STOPS, "prompt": prefix + f"Question: {item['question']}\nAnswer:"}
             result = client.call("/v1/completions", payload)
             choice = result["choices"][0]
@@ -247,6 +265,9 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
                "decode_tps": ((completion - 1) / (elapsed - ttft)
                               if ttft and completion > 1 and elapsed > ttft else None),
                "route": extra.get("route"), "speculation": speculation_receipt(extra), "text": text}
+        if sampling:
+            row["effective_sampling"] = find(result, "effective_sampling")
+            row["sampling_filter"] = find(result, "sampling_filter")
         rows.append(row)
         if log:
             log(row)
@@ -290,6 +311,9 @@ def compact(row):
                                      "decode_tps")}
     spec = row.get("speculation") or {}
     keep["accept_hist"] = spec.get("verify_accept_hist")
+    for name in ("effective_sampling", "sampling_filter"):
+        if name in row:
+            keep[name] = row[name]
     return keep
 
 
@@ -311,6 +335,12 @@ def main(argv=None):
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--chat", action="store_true")
     parser.add_argument("--max-context", type=int, default=8192)
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="> 0 samples (sampled speculative acceptance); 0 keeps the greedy standard")
+    parser.add_argument("--top-p", type=float)
+    parser.add_argument("--top-k", type=int)
+    parser.add_argument("--seed", type=int, default=0,
+                        help="sampled runs: question i uses seed + i")
     parser.add_argument("--draft-depth", type=int,
                         help="route draft depth: per_position then covers every depth (arms JSON may set draft_depth)")
     args = parser.parse_args(argv)
@@ -324,18 +354,27 @@ def main(argv=None):
         raise RuntimeError("refusing nonempty evidence directory")
     args.output.mkdir(parents=True, exist_ok=True)
 
+    sampling = None
+    if args.temperature > 0:
+        # Fields left unset take the server's resolved (vendor) defaults; each
+        # row's receipt records the effective sampling the server used.
+        sampling = {"temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k,
+                    "seed": args.seed, "unset_fields": "server defaults"}
+    elif args.top_p is not None or args.top_k is not None:
+        parser.error("--top-p/--top-k need --temperature > 0")
     data_revision, files = dataset_files()
     train, test = load_split(files["train"]), load_split(files["test"])
     items = test[args.offset:args.offset + args.num_questions]
     prefix = "" if args.chat else few_shot_prefix(train, args.shots)
     receipt = {"schema": SCHEMA, "qualified": False,
-               "kind": "GSM8K acceptance and accuracy, greedy, no thermal hold",
+               "kind": "GSM8K acceptance and accuracy, " + ("sampled" if sampling else "greedy")
+                       + ", no thermal hold",
                "dataset": {"name": DATASET, "revision": data_revision,
                            "files": {k: {"path": str(v), "sha256": sha256(v)} for k, v in files.items()},
                            "split": "test", "offset": args.offset, "questions": len(items)},
                "prompt": {"mode": "chat" if args.chat else f"completion {args.shots}-shot",
                           "max_tokens": args.max_tokens, "stops": None if args.chat else STOPS,
-                          "temperature": 0},
+                          "temperature": args.temperature, **({"sampling": sampling} if sampling else {})},
                "driver_revision": revision(ROOT), "arms": []}
     path = args.output / "receipt.json"
 
@@ -350,7 +389,7 @@ def main(argv=None):
         client = Client(args.base_url)
         status = client.call("/v1/status", timeout=30)
         rows = run_questions(client, args.checkpoint.split("@")[0], prefix, items, chat=args.chat,
-                             max_tokens=args.max_tokens, log=progress("server"))
+                             max_tokens=args.max_tokens, log=progress("server"), sampling=sampling)
         arm = {"name": "server", "base_url": args.base_url, "startup_status_route": status.get("route_receipt"),
                "summary": summarize(rows, args.draft_depth), "rows": [compact(r) for r in rows]}
         receipt["arms"].append(arm)
@@ -408,7 +447,7 @@ def main(argv=None):
                     time.sleep(.5)
                 row["startup_status"] = status
                 rows = run_questions(client, args.model.name, prefix, items, chat=args.chat,
-                                     max_tokens=args.max_tokens, log=progress(arm["name"]))
+                                     max_tokens=args.max_tokens, log=progress(arm["name"]), sampling=sampling)
                 time.sleep(1.5)
                 row["final_status"] = client.call("/v1/status")
                 (out / "metrics.prom").write_text(client.call("/metrics"))

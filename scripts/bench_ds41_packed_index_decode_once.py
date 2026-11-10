@@ -2,7 +2,7 @@
 
 Usage: PYTHONPATH=src .venv/bin/python scripts/bench_ds41_packed_index_decode_once.py   (under the GPU lock)
 """
-import sys, time, json
+import time, json
 import mlx.core as mx
 from mlx2.runtime.models.deepseek_v41_packed_qat import produce, decode
 from mlx2.runtime.models import deepseek_v41 as v41

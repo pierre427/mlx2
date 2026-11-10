@@ -180,7 +180,11 @@ def tiny_ordinary():
         num_hidden_layers=4, num_attention_heads=2, num_key_value_heads=1,
         head_dim=64, vocab_size=128, linear_num_key_heads=2,
         linear_num_value_heads=4, linear_key_head_dim=8, linear_value_head_dim=8,
-        linear_conv_kernel_dim=3, full_attention_interval=4,
+        # Interval 2: full attention on layers 1 and 3. With interval 4 the
+        # only full-attention layer was the last one, which the Qwen3.8-27B
+        # prefill tail skip (family default since f8ad6336c) runs on the
+        # final prompt row only, so the composed QSDPA tiling never engaged.
+        linear_conv_kernel_dim=3, full_attention_interval=2,
         mtp_num_hidden_layers=0, partial_rotary_factor=0.5,
         rope_parameters=None, max_position_embeddings=1024,
     ))

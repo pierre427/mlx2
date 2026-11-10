@@ -46,7 +46,7 @@ def trace():
     if _TR is None:
         z = load_trace()
         # step table: for each forward step, (kind, row0, rows); prefill unions per layer
-        L, R, P, S = z["rec_layer"], z["rec_rows"], z["rec_pos"], z["rec_step"]
+        L, R, P = z["rec_layer"], z["rec_rows"], z["rec_pos"]
         first = np.where(L == 0)[0]
         steps = []
         ids = z["ids"]
@@ -95,7 +95,6 @@ def next_use_steps(tr, remote_layers=frozenset()):
     k = np.array(acc_keys, np.int64); s = np.array(acc_step, np.int64)
     nxt = np.full(len(k), 1 << 40, np.int64)
     first = np.full(NK, 1 << 40, np.int64)
-    last = {}
     order = np.argsort(k, kind="stable")
     ks, ss = k[order], s[order]
     same = ks[1:] == ks[:-1]

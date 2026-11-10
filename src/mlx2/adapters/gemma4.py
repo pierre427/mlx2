@@ -478,6 +478,22 @@ class _Gemma4Adapter(_MLXVLMAdapter):
 
     tensor_backend = None  # set when the model loads
 
+    def __init__(self, model_path, *, execution_policy=None):
+        from .process_globals import guarded_construction
+
+        guarded_construction(
+            self,
+            lambda: super(_Gemma4Adapter, self).__init__(
+                model_path, execution_policy=execution_policy
+            ),
+        )
+
+    def close(self):
+        from .process_globals import release
+
+        release(self)
+        super().close()
+
     def _load_model_and_processor(self, model_path):
         """Load the configured tensor backend; the processor is mlx-vlm's."""
         backend = gemma4_tensor_backend()
@@ -486,6 +502,13 @@ class _Gemma4Adapter(_MLXVLMAdapter):
             return super()._load_model_and_processor(model_path)
         from ..runtime.models import gemma4 as native
 
+        if _TOPOLOGIES[self.descriptor.variant]["moe"]:
+            # The native A4B experts are mlx2 SwitchGLU: every sorted gather
+            # reads the NAX gather mode and the rhs pad policy, so another
+            # live adapter must not change them underneath (stock MoE claim).
+            from .process_globals import claim_stock_moe
+
+            claim_stock_moe(self, f"the {type(self).__name__} adapter")
         eos = native.load_config(model_path).get("eos_token_id")
         processor = self._vlm_backend.load_processor(model_path, eos_token_ids=eos)
         model = native.load(model_path)

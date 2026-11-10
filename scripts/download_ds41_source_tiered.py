@@ -9,7 +9,7 @@ adapter accepts a symlinked shard only into a declared tier directory (checked_f
 against src/mlx2/adapters/deepseek_v41_source_pins.json; a mismatch deletes the file and fails.
 Resumable: verified files are recorded in tiered-download.json and skipped.
 """
-import argparse, hashlib, json, os, shutil, sys, threading, time
+import argparse, hashlib, json, shutil, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait
 from pathlib import Path
 
@@ -28,7 +28,7 @@ def sha256(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--internal", default=os.path.expanduser("~/mlx-models/DeepSeek-V4.1-Flash-1017-Source"))
+    ap.add_argument("--internal", default=str(Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-Source"))
     ap.add_argument("--external", default="/Volumes/T7/ds41-source")
     ap.add_argument("--internal-floor-gib", type=float, default=40)
     ap.add_argument("--external-floor-gib", type=float, default=20)
