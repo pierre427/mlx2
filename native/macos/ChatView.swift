@@ -1770,6 +1770,9 @@ private struct ChatBubbleLayout: Layout {
 struct ChatView: View {
     @EnvironmentObject var model: DesktopModel
     @ObservedObject var chat: ChatModel
+    /// "world" when this chat is the panel inside the 3D World; the model is
+    /// then told it is in that scene and gets the scene tools declared directly.
+    var surface: String = ""
     @State private var composerFocusRequest: UUID?
     @State private var contextExpanded = false
     @State private var scrollRequest = UUID()
@@ -1820,6 +1823,12 @@ struct ChatView: View {
             parts.append("Use the built-in planning tools for sustained work. Keep an explicit session ID and immutable task goal. Treat model reports as claimed conclusions; only independently reviewed evidence can verify them. Never infer execution or tool permission from a plan. Delegate independent bounded goals only when delegation is enabled, and synthesize reports with uncertainties preserved.")
         }
         if model.snapshot["skills"]["policy"]["enabled"].bool { parts.append(SkillGuidance.prompt) }
+        if surface == "world" && model.preferences["agent_controls"].bool {
+            // Stable text: no names, labels or counts. Scene content can come from
+            // imported worlds and changes every edit, so it reaches the model as
+            // tool results; a changing first message would also miss the APCv2 prefix.
+            parts.append("This conversation is the chat panel inside the operator's native 3D World. \"This world\" or \"here\" means that scene. Call mlx2__world_state to see it (object ids, kinds, labels, positions, theme) before describing it, mlx2__world_get for one object's full content, and mlx2__world_object_upsert, mlx2__world_object_remove or mlx2__world_style to change it when asked. Edits follow the saved autonomous editing policy and may need the operator's approval.")
+        }
         return parts.joined(separator: "\n\n")
     }
 
@@ -1833,7 +1842,7 @@ struct ChatView: View {
         if chat.historyState(chat.selected) == "archived" { chat.setHistoryState("active", for: chat.selected) }
         let requestedModel = chat.requestedModel(for: chat.selected)
         chat.send(server: target, resolve: { try await model.chatTarget(target, requestedModel: requestedModel) },
-                  systemPrompt: effectiveSystemPrompt, archive: { try await model.archiveChatSession(conversationID: $0, document: $1) }, tools: { try await model.chatTools(target, requestedModel: requestedModel) },
+                  systemPrompt: effectiveSystemPrompt, archive: { try await model.archiveChatSession(conversationID: $0, document: $1) }, tools: { [surface] in try await model.chatTools(target, requestedModel: requestedModel, surface: surface) },
                   execute: { try await model.chatToolCall(sessionID: $0, name: $1, arguments: $2, approved: $3) },
                   finishTools: { await model.finishResearchPlan(sessionID: $0, outcome: $1, parentID: $2) }, autoTitle: true)
         if chat.generationID != previousGeneration { scrollRequest = UUID(); composerFocusRequest = UUID() }

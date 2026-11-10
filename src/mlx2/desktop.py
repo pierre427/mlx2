@@ -1171,6 +1171,14 @@ def _serve_companion(args, wire, *, max_in_flight=64, shutdown_grace=30.0):
                     request = json.loads(line)
                     if not isinstance(request, dict):
                         raise TypeError("Expected a JSON object")
+                    # The bridge stamps the wall-clock time its request timer
+                    # expires. A request that reaches the lane after that has
+                    # already been reported as timed out; running it now would
+                    # make a UI retry apply twice, so it is refused unrun.
+                    if "bridge_deadline" in request:
+                        deadline = request.pop("bridge_deadline")
+                        if type(deadline) not in (int, float) or not time.time() < deadline:
+                            raise TimeoutError("Desktop command expired while queued and was not run")
                     with dispatching:
                         if stopping.is_set():
                             raise RuntimeError("The desktop companion is shutting down")
@@ -1195,7 +1203,15 @@ def _serve_companion(args, wire, *, max_in_flight=64, shutdown_grace=30.0):
         finally:
             slots.release()
 
+    handing_off = [False]  # A reserved lane ticket is not yet owned by a worker.
+    deferred = [False]
+
     def terminate(_signal, _frame):
+        if handing_off[0]:
+            # Interrupting here would orphan the ticket and stall the lane for
+            # the whole shutdown grace; stop right after the hand-off instead.
+            deferred[0] = True
+            return
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, terminate)
@@ -1203,14 +1219,22 @@ def _serve_companion(args, wire, *, max_in_flight=64, shutdown_grace=30.0):
     try:
         for line in sys.stdin:
             slots.acquire()
-            ticket = LANE.ticket()
-            worker = threading.Thread(target=answer, args=(line, ticket), name="mlx2-desktop-request", daemon=True)
+            handing_off[0] = True
             try:
-                worker.start()
-            except RuntimeError:
+                ticket = LANE.ticket()
+                worker = threading.Thread(target=answer, args=(line, ticket), name="mlx2-desktop-request", daemon=True)
+                try:
+                    worker.start()
+                except RuntimeError:
+                    worker = None
+            finally:
+                handing_off[0] = False
+            if worker is None:
                 answer(line, ticket)  # No thread available: answer in order on this thread.
-                continue
-            workers[:] = [w for w in workers if w.is_alive()] + [worker]
+            else:
+                workers[:] = [w for w in workers if w.is_alive()] + [worker]
+            if deferred[0]:
+                raise KeyboardInterrupt
     except KeyboardInterrupt:
         grace = shutdown_grace
     except BrokenPipeError:

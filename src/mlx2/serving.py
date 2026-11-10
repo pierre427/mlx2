@@ -11843,16 +11843,27 @@ class ServingEngine(KernelReloadMixin):
                 # An explicit policy on an unqualified route needs this
                 # artifact's feature record (``auto`` already found its
                 # evidence in resolve_auto).  An unreadable table refuses.
+                # A feature record that carries a bound-set digest also binds
+                # which projections are int8 (sweep 2026-11-09 SI-2).
+                expected_bound_set = None
                 if (self.int8_prefill_auto is None and not self.qualification_mode
-                        and not self.qualification and _int8_feature_record(
-                            feature_qualification,
-                            getattr(adapter, "identity", {}).get("fingerprint"),
-                            self.int8_prefill_policy) is None):
-                    raise ValueError(
-                        "int8 prefill is approximate and restricted to qualification mode "
-                        "unless a qualification record carries its evidence (route record, "
-                        "or an int8 prefill feature record for this artifact and revision)"
-                    )
+                        and not self.qualification):
+                    feature_entry = _int8_feature_record(
+                        feature_qualification,
+                        getattr(adapter, "identity", {}).get("fingerprint"),
+                        self.int8_prefill_policy)
+                    if feature_entry is None:
+                        raise ValueError(
+                            "int8 prefill is approximate and restricted to qualification mode "
+                            "unless a qualification record carries its evidence (route record, "
+                            "or an int8 prefill feature record for this artifact and revision)"
+                        )
+                    expected_bound_set = feature_entry.get("bound_set_sha256")
+                elif (self.int8_prefill_auto is not None
+                        and self.int8_prefill_auto.get("evidence") == "feature qualification record"):
+                    expected_bound_set = (
+                        self.int8_prefill_auto.get("feature_record") or {}
+                    ).get("bound_set_sha256")
                 try:
                     self.int8_prefill_handle, settings["int8_prefill"] = bind_for_serving(
                         adapter,
@@ -11864,6 +11875,7 @@ class ServingEngine(KernelReloadMixin):
                         copy_draft_policy=self.copy_draft_policy,
                         memory_headroom=self.admission_headroom_fn(),
                         hard_reserve_bytes=int(self.hard_reserve_gib * (1 << 30)),
+                        expected_bound_set_sha256=expected_bound_set,
                     )
                 except (Int8PrefillError, ValueError, RuntimeError) as error:
                     refusal = isinstance(error, (Int8PrefillError, ValueError))

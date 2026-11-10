@@ -256,6 +256,12 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
     # and has no Nemotron-H mamba layer kind.  Without a provider, APCv2 keeps
     # this adapter's legacy layout namespace (sweep 2026-10-12 L5-01).
     attention_topology = None
+    # FlashNextAdapter's int8 prefill declaration and allow-list (8779ce64a)
+    # match no backbone.layers.* path; this family declared none before and
+    # has no int8 evidence (sweep 2026-11-09 SI-1).  Subclasses that qualify
+    # it (Nemotron 3.5 Super/VL) re-declare their own.
+    int8_prefill_supported = None
+    int8_prefill_select = None
 
     @staticmethod
     def spomin_backend(model, prompt_cache):

@@ -19,6 +19,10 @@ import Foundation
         catch { precondition(error.localizedDescription == "Synthetic refusal") }
         let value = try await healthy.request("valid")
         precondition(value["value"].string == "valid")
+        // Each request carries the instant its timer expires, so the companion can
+        // refuse, unrun, a request still queued behind other commands by then.
+        let remaining = (value["deadline"].double ?? 0) - Date().timeIntervalSince1970
+        precondition(remaining > 0 && remaining <= 2, "request did not carry its bridge deadline")
         await healthy.finish()
         do { _ = try await healthy.request("after close"); fatalError("Closed bridge restarted") }
         catch { precondition(error.localizedDescription.contains("closed")) }

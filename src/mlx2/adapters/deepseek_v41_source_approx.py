@@ -353,6 +353,8 @@ def implementation_identity(policy):
     if policy.get(DROP_KEY, 'off') != 'off':
         names += ['adapters/deepseek_v41_source_route_drop.py', 'runtime/models/deepseek_v4.py',
                   'runtime/models/deepseek_v41_fused.py']
+        if policy[DROP_KEY] == 'drop_miss_v1':
+            names += ['adapters/deepseek_v41_source_route_bias.py']   # drop_miss reads resident_mask
     elif policy.get(ROUTE_KEY, 'off') != 'off' and _reduced_tiers(policy):
         names += ['adapters/deepseek_v41_source_route_drop.py']   # bias reads resident_or_pooled
     # De-duplicate in order; an operation alone has no duplicates, so its hash is unchanged.
@@ -509,4 +511,11 @@ def configure_model(adapter):
         model.source_route_bias = ResidentRouteBias.from_policy(policy, adapter.weight_stream, model.args)
     if policy.get(DROP_KEY, 'off') != 'off':
         from .deepseek_v41_source_route_drop import RankDrop
+        depth = model.args.num_hidden_layers
+        beyond = sorted(layer for layer in drop_counts(policy) if layer >= depth)
+        if beyond:
+            # Parse time only bounds layers by 1023; refuse here, where the depth is known,
+            # rather than load an approximate arm that never drops anything.
+            raise ValueError(f'{DROP_KEY} layers {beyond[0]}..{beyond[-1]} are outside this checkpoint '
+                             f'(layers 0..{depth - 1})')
         model.source_route_drop = RankDrop.from_policy(policy, store=adapter.weight_stream)

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..runtime.drafters.deepseek_v4_dspark import SIDECAR_SHA256, DeepSeekV4DSparkConfig
 from ..runtime.gguf.reader import GGUFFile
+from ..runtime.immutable_weight_pages import same_stamp
 
 FILENAME = "DeepSeek-V4-Flash-Vision-Exp-DSpark-support.gguf"
 SIZE = 5989114528
@@ -126,7 +127,7 @@ def inspect_sidecar(value):
         seal.get("schema") != SCHEMA
         or seal.get("filename") != FILENAME
         or seal.get("sha256") != SIDECAR_SHA256
-        or seal.get("weight_stat") != before
+        or not same_stamp(before, seal.get("weight_stat"))
         or seal.get("verification")
         != "actual_full_file_stream_sha256_before_after_stat"
     ):

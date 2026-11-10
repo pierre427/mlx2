@@ -1,6 +1,7 @@
 {
   "schema": "mlx2.int8-prefill-feature-qualification.v1",
   "decision": "Pierre, 2026-11-09: qualify int8 prefill per artifact by a feature record (try it, test it, A/B it; no route campaign), so --int8-prefill auto turns it on for an artifact whose route has no qualification record. An entry binds one artifact fingerprint and one exact int8 prefill policy revision; anything else keeps the AGENTS.md gate (qualification mode or a route record).",
+  "bound_set_sha256": "Optional per-entry key (sweep 2026-11-09 SI-2): the sha256 of the projections the adapter's selector binds under the entry's policy (Int8PrefillHandle.bound_set_sha256: sorted [path, kernel kind] pairs plus the routed-expert block count). The policy revision names the scope, not which projections it means, so an entry without this key binds fingerprint and revision only. With it, the serving bind compares the digest it computes (reported as bound_set_sha256 in settings.int8_prefill, the route receipt and /v1/status) and a mismatch is not feature-qualified: auto resolves off with the reason receipted, an explicit policy refuses. The Flash-Next entry below is not stamped yet: its true digest can only be read from a bind on the real checkpoint (follow-up: copy bound_set_sha256 from that route's receipt into the entry).",
   "entries": [
     {
       "checkpoint": "Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP@sha256:25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",

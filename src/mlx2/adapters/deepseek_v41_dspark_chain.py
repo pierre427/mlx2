@@ -124,6 +124,10 @@ class SourceRowsExecutor:
         from . import deepseek_v41_dspark_chain_moe as rows_moe
         try:
             return rows_moe.rows_moe(self.weights, parks, self.stats)
+        except rows_moe.KernelDecline:
+            # Distinct from the precondition declines: routes were already observed.
+            self._bump("moe_kernel_declines")
+            raise _Decline from None
         except rows_moe.Decline:
             self._bump("moe_declines")
             raise _Decline from None

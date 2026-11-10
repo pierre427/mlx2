@@ -243,7 +243,11 @@ def validate_expert_policy(result):
     if carved >= result['budget_bytes'] - 2 * lfu.ORIGINAL_BYTES:
         raise ValueError(mode + ' reduced pools must leave budget_bytes room for one original expert plus staging')
     # Budgets only (the usage map is read at load): fails closed on overflow.
-    resolve_layout(settings, mode, budget_bytes=result['budget_bytes'])
+    # Selection entries need the map, so they are checked structurally here
+    # (validate_overrides in parse_tiers) and resolved in full at load.
+    budgets_only = dict(settings, overrides=[entry for entry in settings.get('overrides') or []
+                                             if tiers_mod._entry_kind(entry) != 'selection'])
+    resolve_layout(budgets_only, mode, budget_bytes=result['budget_bytes'])
     return result
 
 
@@ -277,7 +281,9 @@ def validate_combination(policy):
 def implementation_identity():
     root = Path(__file__).resolve().parents[1]
     names = ('adapters/deepseek_v41_source_q1_on_miss.py', 'adapters/deepseek_v41_source_tiers.py',
-             'adapters/deepseek_v41_source_lfu.py', 'runtime/gguf/source_q1.py')
+             'adapters/deepseek_v41_source_lfu.py', 'runtime/gguf/source_q1.py',
+             # Q2 reference law (affine 2-bit matmul, rotation, middle, rounding).
+             'adapters/deepseek_v41_source_weights.py')
     return hashlib.sha256(''.join(name + ':' + hashlib.sha256((root / name).read_bytes()).hexdigest()
                                   for name in names).encode()).hexdigest()
 
@@ -384,6 +390,13 @@ def diagnostics(adapter):
     rule = store_rule(adapter)
     value = rule.receipt() if rule is not None else {'selected': True, 'bound': False}
     value.update(apcv2_publication='refused: ' + apc_refusal_reason(policy))
+    model = getattr(adapter, 'model', None)
+    combined = getattr(model, 'source_combined_private_profile', None)
+    if combined is not None:
+        # Composed with an approximate operation: cache rows carry this profile, not the
+        # tier-only private_cache_profile (mirrors the approximate-operations receipt).
+        value['combined_private_cache_profile'] = combined
+        value['combined_identity_salt'] = getattr(model, 'source_combined_identity_salt', None)
     return value
 
 

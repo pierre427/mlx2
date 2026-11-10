@@ -14,6 +14,7 @@ import struct
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from ..immutable_weight_pages import same_stamp
 from .k_blocks import SIZES as K_FORMATS
 from .reader import FORMATS, GGUFError, GGUFFile, GGUFTensor
 
@@ -92,7 +93,7 @@ def inspect_storage(root, *, verify_payload=False):
     for name, record in manifest["shards"].items():
         path = local_file(root, name)
         before = stamp(path)
-        if seal["shards"][name] != before or before["size"] != record["bytes"]:
+        if not same_stamp(before, seal["shards"][name]) or before["size"] != record["bytes"]:
             raise GGUFError("packed shard changed after verification: " + name)
         if verify_payload and sha256(path) != record["sha256"]:
             raise GGUFError("packed shard SHA256 differs: " + name)
@@ -243,11 +244,11 @@ class MLXPackedFile:
         import mlx.core as mx
         name = record["shard"]
         path = local_file(self.path, name)
-        if stamp(path) != self.seal["shards"][name]:
+        if not same_stamp(stamp(path), self.seal["shards"][name]):
             raise GGUFError("packed shard changed before load")
         if name not in self._loaded:
             self._loaded[name] = mx.load(str(path))
-        if stamp(path) != self.seal["shards"][name]:
+        if not same_stamp(stamp(path), self.seal["shards"][name]):
             raise GGUFError("packed shard changed during load")
         return self._loaded[name][record["key"]]
 
@@ -279,7 +280,7 @@ class MLXPackedFile:
 
         self.release_mapping()
         path, tensor, start, expected = self.embedding_location(name)
-        if stamp(path) != expected:
+        if not same_stamp(stamp(path), expected):
             raise GGUFError("packed shard changed before host read")
         with path.open("rb") as f:
             self._mapping = mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ)

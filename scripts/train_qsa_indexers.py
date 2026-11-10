@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import signal
 import subprocess
@@ -132,8 +133,11 @@ def diagnose(mx, np, qt, model, attentions, indexers, holdout, spec, scale, topk
     indexers (this seed) and each listed checkpoint, against the oracle,
     sink/recent windows and sink+recent+indexer hybrids."""
     arms = {"untrained": indexers}
+    selections = {}
     for (name, path) in spec["diagnose"]["checkpoints"].items():
         weights = mx.load(str(Path(path) / "qsa-indexers.safetensors"))
+        config = json.loads((Path(path) / "config.json").read_text()).get("qsa", {})
+        selections[name] = config.get("selection")  # the hybrid rule it was trained with
         loaded = {}
         for (i, idx) in indexers.items():
             clone = type(idx)(idx.q_proj.weight.shape[1], heads=idx._geometry[0],
@@ -154,7 +158,7 @@ def diagnose(mx, np, qt, model, attentions, indexers, holdout, spec, scale, topk
             target = qt.block_teacher(q, k, scale)
             xf = x.astype(mx.float32)
             scores = {name: arm[i].scores(xf) for (name, arm) in arms.items()}
-            row_out = qt.mass_breakdown(target, scores, topk)
+            row_out = qt.mass_breakdown(target, scores, topk, selections=selections)
             row_out["teacher_entropy"] = qt.teacher_entropy(target)
             per_layer.setdefault(i, []).append(row_out)
             print(json.dumps({"row": r, "layer": i, **{k: round(v, 4) if isinstance(v, float) else v
@@ -228,6 +232,11 @@ def unit(spec) -> int:
                                          eps=1e-8, weight_decay=0.0, bias_correction=True)
                           for i in indexers[name]}
             fixed_cfg[name] = var.get("selection")  # {"sink_blocks", "recent_blocks"}
+            sel = fixed_cfg[name]
+            if sel and int(train.shape[1]) // qt.BLOCK <= sel["sink_blocks"] + sel["recent_blocks"]:
+                # No block outside the fixed ones: the restricted KL has no row.
+                raise ValueError(f"variant {name}: seq_len {int(train.shape[1])} leaves no block "
+                                 "outside the hybrid sink/recent blocks")
             for idx in indexers[name].values():
                 mx.eval(idx.parameters())
         scale = args.head_dim ** -0.5
@@ -284,7 +293,7 @@ def unit(spec) -> int:
                     target = qt.block_teacher(q, k, scale)
                     xf = x.astype(mx.float32)
                     scores = {name: indexers[name][i].scores(xf) for name in variants}
-                    br = qt.mass_breakdown(target, scores, topk)
+                    br = qt.mass_breakdown(target, scores, topk, selections=fixed_cfg)
                     for name in variants:
                         br[f"kl:{name}"] = float(qt.kl_loss(
                             indexers[name][i].loss_scores(xf), target,
@@ -352,10 +361,17 @@ def unit(spec) -> int:
                 row = {"step": step, "record_s": round(t1 - t0, 1),
                        "elapsed_s": round(time.time() - started, 1),
                        "tokens": step * int(train.shape[1])}
-                _SIGNALS["defer"] = True
+                clipped_by = {}
                 for name in variants:
                     order = sorted(grads[name])
                     (clipped, norm) = qt.global_clip([grads[name][i] for i in order], 1.0)
+                    if not math.isfinite(norm):
+                        # Never apply a non-finite step (it would turn every weight NaN).
+                        raise FloatingPointError(f"step {step} variant {name}: grad_norm {norm}")
+                    clipped_by[name] = (order, clipped, norm)
+                _SIGNALS["defer"] = True
+                for name in variants:
+                    (order, clipped, norm) = clipped_by[name]
                     for (i, g) in zip(order, clipped):
                         opts[name][i].update(indexers[name][i], g)
                         mx.eval(indexers[name][i].parameters(), opts[name][i].state)

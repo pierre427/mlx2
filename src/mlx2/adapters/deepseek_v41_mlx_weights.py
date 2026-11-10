@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from ..runtime.immutable_weight_pages import read_page
+from ..runtime.immutable_weight_pages import read_page, same_stamp
 from ..runtime.io_ownership import ReadPool, ReadTimeout, storage_owner
 from ..runtime.weight_stream import ExpertStreamPlan
 
@@ -97,7 +97,7 @@ def _path(root, relative):
 def _verify_file(root, relative, record):
     target = _path(root, relative)
     current = target.stat(follow_symlinks=False)
-    if not stat.S_ISREG(current.st_mode) or _stamp(current) != _seal(record):
+    if not stat.S_ISREG(current.st_mode) or not same_stamp(_stamp(current), _seal(record)):
         raise ValueError("native weight file changed after admission: " + relative)
     return target
 
@@ -160,7 +160,7 @@ def read_native_file(root, relative, record, *, hash_once=False):
     key = _bank_seal_key(target, record) if hash_once else None
     fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
-        if _stamp(os.fstat(fd)) != _seal(record):
+        if not same_stamp(_stamp(os.fstat(fd)), _seal(record)):
             raise ValueError("native source descriptor differs from admission")
         if os.uname().sysname == "Darwin":
             import fcntl
@@ -172,7 +172,7 @@ def read_native_file(root, relative, record, *, hash_once=False):
         if not verified:
             if hashlib.sha256(memoryview(raw)).hexdigest() != record["sha256"]:
                 raise ValueError("native weight content differs from admitted hash")
-        if _stamp(os.fstat(fd)) != _seal(record):
+        if not same_stamp(_stamp(os.fstat(fd)), _seal(record)):
             raise ValueError("native weight content differs from admitted hash")
         _verify_file(root, relative, record)
         if key is not None:

@@ -183,6 +183,11 @@ final class Bridge: @unchecked Sendable {
                     var request = arguments
                     request["command"] = command
                     request["id"] = id
+                    // The timer below starts now, while the companion may still be
+                    // running earlier commands one at a time. It refuses, unrun, a
+                    // request that reaches its lane after this instant, so a command
+                    // reported as timed out never applies later beside a retry.
+                    request["bridge_deadline"] = Date().timeIntervalSince1970 + self.requestTimeout
                     var data = try JSONSerialization.data(withJSONObject: request)
                     data.append(10)
                     self.pending[id] = Pending(command: command, continuation: continuation)
@@ -201,7 +206,7 @@ final class Bridge: @unchecked Sendable {
                     self.queue.asyncAfter(deadline: .now() + self.requestTimeout) {
                         guard let entry = self.pending.removeValue(forKey: id) else { return }
                         entry.continuation.resume(throwing: DesktopError.message(
-                            "Desktop command timed out; it may still complete. See desktop.log before retrying."))
+                            "Desktop command timed out; if it had already started it may still complete. See desktop.log before retrying."))
                     }
                 } catch {
                     if let failure = self.transportFailure { continuation.resume(throwing: DesktopConnectionFailure(message: failure)) }

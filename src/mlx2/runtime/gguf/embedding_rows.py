@@ -11,6 +11,7 @@ import stat
 import threading
 import numpy as np
 from .reader import GGUFError
+from ..immutable_weight_pages import REBOOT_VOLATILE_STAMP_KEYS
 
 
 def _stamp(value):
@@ -55,8 +56,11 @@ class F16EmbeddingRows:
                 raise GGUFError('embedding source must be a regular file')
             self.stat_binding = _stamp(descriptor)
             if expected_stat is not None:
-                if not expected_stat or any(k not in self.stat_binding or self.stat_binding[k] != v
-                                           for k, v in expected_stat.items()):
+                # A stat holding only reboot-volatile keys binds nothing: refuse it.
+                if not set(expected_stat) - REBOOT_VOLATILE_STAMP_KEYS or any(
+                        k not in self.stat_binding or self.stat_binding[k] != v
+                                           for k, v in expected_stat.items()
+                                           if k not in REBOOT_VOLATILE_STAMP_KEYS):
                     raise GGUFError('embedding source differs from expected artifact stat')
             if self.start + self.tensor_bytes > descriptor.st_size:
                 raise GGUFError('embedding tensor extends past file')

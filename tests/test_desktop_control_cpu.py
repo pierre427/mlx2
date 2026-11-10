@@ -83,6 +83,27 @@ def tool(controller, session, name, arguments, **outside):
                                "name": "mlx2__" + name, "arguments": arguments, **outside})
 
 
+def test_world_surface_declares_scene_tools_directly(controller):
+    from mlx2.desktop_tools import WORLD_SURFACE_TOOLS
+    from mlx2.server import validate_request
+
+    controller.preferences.update(agent_controls=True)
+    target = {"url": "http://127.0.0.1:18285", "pid": 42}
+    plain = {t["function"]["name"] for t in controller.dispatch({"command": "chat_tools", "target": target, "chat_session_id": "plain"})["tools"]}
+    assert not plain & set(WORLD_SURFACE_TOOLS)
+    result = controller.dispatch({"command": "chat_tools", "target": target, "chat_session_id": "in-world", "surface": "world"})
+    names = {t["function"]["name"] for t in result["tools"]}
+    assert set(WORLD_SURFACE_TOOLS) <= names and plain <= names
+    validate_request({"messages": [{"role": "user", "content": "hi"}], "tools": result["tools"]}, True)
+    state = controller.dispatch({"command": "tool_call", "session_id": result["session_id"], "name": "mlx2__world_state", "arguments": {}})
+    assert state["result"]["active"]["objects"]
+    with pytest.raises(ValueError, match="surface"):
+        controller.dispatch({"command": "chat_tools", "target": target, "surface": "elsewhere"})
+    controller.preferences.update(agent_controls=False)
+    off = controller.dispatch({"command": "chat_tools", "target": target, "surface": "world"})
+    assert not {t["function"]["name"] for t in off["tools"]} & set(WORLD_SURFACE_TOOLS)
+
+
 def test_large_chat_tool_inventory_uses_discovery_and_preserves_approval_and_scope(controller):
     from mlx2.server import validate_request
 

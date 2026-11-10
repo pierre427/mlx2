@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from ..runtime.immutable_weight_pages import file_stamp, read_page
+from ..runtime.immutable_weight_pages import file_stamp, read_page, same_stamp
 from ..runtime.io_ownership import ReadPool, ReadTimeout, storage_owner
 from .deepseek_v41_mlx_weights import (
     NativeExpertPlan,
@@ -141,7 +141,7 @@ def read_expert(root, seals, extents):
         path = checked_file(root, shard, seal)
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
-            if file_stamp(os.fstat(fd)) != seal:
+            if not same_stamp(file_stamp(os.fstat(fd)), seal):
                 raise ValueError("omlx expert shard changed before read")
             if os.uname().sysname == "Darwin":
                 import fcntl
@@ -150,7 +150,7 @@ def read_expert(root, seals, extents):
             for _, offset, size, dtype, shape, key in rows:
                 raw = read_page(fd, offset, size, CHUNK_BYTES)
                 result[key] = raw.view(np.dtype(DTYPES[dtype])).reshape(shape)
-            if file_stamp(os.fstat(fd)) != seal:
+            if not same_stamp(file_stamp(os.fstat(fd)), seal):
                 raise ValueError("omlx expert shard changed during read")
         finally:
             os.close(fd)

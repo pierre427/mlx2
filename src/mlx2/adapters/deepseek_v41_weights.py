@@ -159,10 +159,11 @@ class DeepSeekV41Weights(GGUFWeights):
             self.dense_pages.synchronize=synchronize
 
     def verify_source(self):
-        from ..runtime.immutable_weight_pages import file_stamp
+        from ..runtime.immutable_weight_pages import REBOOT_VOLATILE_STAMP_KEYS, file_stamp
         if (file_stamp(os.stat(self.file.path,follow_symlinks=False)) != self._source_stat
                 or file_stamp(os.fstat(self.file._file.fileno())) != self._source_stat
-                or self._expected_stat is not None and any(self._source_stat.get(k) != v for k,v in self._expected_stat.items())):
+                or self._expected_stat is not None and (not set(self._expected_stat) - REBOOT_VOLATILE_STAMP_KEYS
+                    or any(self._source_stat.get(k) != v for k,v in self._expected_stat.items() if k not in REBOOT_VOLATILE_STAMP_KEYS))):
             raise GGUFError("V4.1 weight source changed after admission")
 
     def resident_bytes(self):

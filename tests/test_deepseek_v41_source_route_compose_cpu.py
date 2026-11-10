@@ -261,7 +261,9 @@ def _historical_salt(policy, files):
     ({'deepseek_source_experts': LFU, ROUTE_KEY: 'resident_v1'}, BIAS_FILES),
     ({'deepseek_source_experts': LFU, ROUTE_KEY: 'resident_guarded_v1', ROUTE_LAMBDA: 1.0}, BIAS_FILES),
     ({DROP_KEY: 'drop_min_v1'}, DROP_FILES),
-    ({'deepseek_source_experts': LFU, DROP_KEY: 'drop_miss_v1'}, DROP_FILES),
+    # drop_miss reads route_bias.resident_mask: hashed since sweep 2026-11-09 DST-5 (one salt change).
+    ({'deepseek_source_experts': LFU, DROP_KEY: 'drop_miss_v1'},
+     DROP_FILES + ['adapters/deepseek_v41_source_route_bias.py']),
     ({'deepseek_source_experts': TIERED, DROP_KEY: 'drop_min_v1'}, DROP_FILES),   # existing drop+tiers
 ])
 def test_each_operation_alone_keeps_its_salt_and_profile(raw, files):

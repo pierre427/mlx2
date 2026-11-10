@@ -7124,6 +7124,11 @@ class Attention(nn.Module):
         quantized_indexed = qsa_indexed_quantized_cache_config(cache)
         qg = k_flat = v_flat = fused_index_qk = None
         lane = _invariant.active()
+        # ``tail_row`` (prompt-chunk tail) re-enters with one row and the
+        # chunk's fetched K/V: the same kernel choices run, but the
+        # decode-only receipts below are not booked for prompt work
+        # (sweep 2026-11-09 TS-4).
+        prompt_tail = _fetched_kv is not None
         fused_rows = (
             _attn_rows.enabled()
             and (not self.training)
@@ -7183,9 +7188,10 @@ class Attention(nn.Module):
                 block_topk=self.indexer.block_topk,
             )
             use_direct_nax = reason == "engaged"
-            _record_qsa_nax_decode(
-                engaged=use_direct_nax, reason=reason, context=selection.physical_width
-            )
+            if not prompt_tail:
+                _record_qsa_nax_decode(
+                    engaged=use_direct_nax, reason=reason, context=selection.physical_width
+                )
         use_nax = (nax_admission.engage or use_direct_nax) and not lane
         if use_nax:
             (use_indexed, indexed_reason) = (False, "nax_engaged")
@@ -7210,11 +7216,11 @@ class Attention(nn.Module):
                 cache=cache,
                 quantized_indexed=quantized_indexed,
             )
-            if batch_reason is not None:
+            if batch_reason is not None and not prompt_tail:
                 _record_qsa_batch_decode_sparse(batch_arm, batch_reason, batch)
             if batch_arm == "indexed":
                 (use_indexed, indexed_reason) = (True, "engaged")
-        if qsa_indexed_enabled() and (not use_indexed):
+        if qsa_indexed_enabled() and (not use_indexed) and (not prompt_tail):
             record_qsa_indexed_receipt(
                 engaged=False,
                 reason=indexed_reason,
@@ -7298,7 +7304,8 @@ class Attention(nn.Module):
                     scale=self.scale, gate=mx.sigmoid(gate_heads),
                 )
                 return self.o_proj(out)
-            _qsa_b1.decline(reason)
+            if not prompt_tail:
+                _qsa_b1.decline(reason)
         # Built after the B1 decision: the mask builders bump the fused-rows,
         # lazy-mask and scatter-chosen counters at graph-build time, and the
         # qualifier reads those as observed-used evidence; a mask the B1

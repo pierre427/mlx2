@@ -43,6 +43,7 @@ import mlx.nn as nn
 import numpy as np
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_tail_skip import STATS as _TAIL_STATS
 from .base import BaseModelArgs, create_causal_mask, scaled_dot_product_attention
 from .rope_utils import ProportionalRoPE
 from .switch_layers import SwitchGLU
@@ -525,7 +526,12 @@ class Gemma4TextModel(nn.Module):
         for index, (layer, c, m) in enumerate(zip(self.layers, cache, masks)):
             if tail_last and index == last and type(layer) is DecoderLayer:
                 h = layer.tail(h, m, c)
+                # Counted where the split is decided (sweep 2026-11-09
+                # GEM-1): a swapped last-layer class runs the full layer.
+                _TAIL_STATS["gemma4_native_tail_split"] += 1
             else:
+                if tail_last and index == last:
+                    _TAIL_STATS["gemma4_native_tail_full"] += 1
                 h, _, _ = layer(h, m, c)
         return self.norm(h) if final_norm else h
 

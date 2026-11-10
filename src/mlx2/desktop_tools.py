@@ -281,6 +281,10 @@ def grant_agent_context(context, receipt):
             "worker_ids": receipt.get("worker_ids", []) + [orchestrator]}
 
 
+# Declared directly (not only through discovery) for chats opened in the World.
+WORLD_SURFACE_TOOLS = tuple("mlx2__" + name for name in ("world_state", "world_get", "world_object_upsert", "world_object_remove", "world_style"))
+
+
 def enabled(controller, name):
     if name in {"skills_list", "skill_view", "skill_manage"}:
         return controller.preferences["agent_controls"] and controller.skills.policy()["enabled"]
@@ -442,6 +446,9 @@ def _tool_command(controller, request):
             Path(temporary).unlink(missing_ok=True)
         return {"header_ref": identity}
     if command in {"chat_tools", "tool_discover"}:
+        surface = request.get("surface", "")
+        if surface not in {"", "world"}:
+            raise ValueError("Unknown chat surface")
         instance, tools, executors, approvals = backend(controller)
         if command == "tool_discover":
             return {"tools": tools}
@@ -530,6 +537,11 @@ def _tool_command(controller, request):
             raise ValueError("Duplicate tool names in enabled inventory")
         controller.tool_sessions[session_id]["catalog"] = catalog
         initial = discovery_tools() + [catalog[name] for name in ("spawn_subagent", "mlx2__tool_search") if name in catalog]
+        if surface == "world":
+            # A chat opened inside the 3D World is about that scene. Declare the
+            # scene tools up front: models that answer without searching would
+            # otherwise report that they cannot see or change the world.
+            initial += [catalog[name] for name in WORLD_SURFACE_TOOLS if name in catalog]
         return {"session_id": session_id, "tools": initial, "total_tools": len(catalog),
                 "discovery": "Use mlx2_tool_search and mlx2_tool_call; canonical spawn_subagent and legacy tool_search remain admitted."}
     session = controller.tool_sessions.get(request.get("session_id"))

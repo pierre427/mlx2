@@ -297,13 +297,15 @@ struct HistoryPoint: Identifiable {
         return try await bridge.request("chat_target", target)
     }
 
-    func chatTools(_ server: JSON, requestedModel: String = "") async throws -> JSON {
+    func chatTools(_ server: JSON, requestedModel: String = "", surface: String = "") async throws -> JSON {
         var target: [String: Any] = ["url": server["endpoint"]["url"].text, "pid": server["endpoint"]["pid"].raw]
         if server["endpoint"]["remote"].bool {
             target = ["remote": true, "nid": server["endpoint"]["nid"].text, "model": server["endpoint"]["remote_model"].text]
         } else if !requestedModel.isEmpty { target["model"] = requestedModel }
         let goal = chat.conversations[chat.selected]?.last(where: { $0.role == "user" && $0.origin.isEmpty })?.text ?? ""
-        return try await bridge.request("chat_tools", ["target": target, "chat_session_id": chat.selected, "task_goal": String(goal.prefix(2000))])
+        var request: [String: Any] = ["target": target, "chat_session_id": chat.selected, "task_goal": String(goal.prefix(2000))]
+        if !surface.isEmpty { request["surface"] = surface }
+        return try await bridge.request("chat_tools", request)
     }
 
     func finishResearchPlan(sessionID: String, outcome: String, parentID: String) async {

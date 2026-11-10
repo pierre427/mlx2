@@ -64,12 +64,20 @@ def time_runs(layer, expert, words_list, backend, kernel, probe, repeat):
             t0 = time.time()
             enc = E.encode_many(items, words, seed=layer * 1000 + expert, probe=probe, backend=backend)
             dt = time.time() - t0
-            st = enc[0]["stats"]
             print(json.dumps({"layer": layer, "expert": expert, "words": words, "bits_per_weight": words / 16,
                               "backend": backend, "kernel": kernel or "default", "probe": probe, "repeat": r,
-                              "wall_s": round(dt, 2), "timing": st.get("timing"),
+                              "wall_s": round(dt, 2), **_timing(enc),
                               "tiles": int(sum(e["trellis"].shape[0] * e["trellis"].shape[1] for e in enc)),
                               "sha256": _sha(enc)}), flush=True)
+
+
+def _timing(enc):
+    """Sweep 2026-11-09 EXL-6: the CPU / v1 lockstep path stamps one whole-expert split on every
+    projection; the v2 kernel streams each projection as its own unit, so report all three."""
+    t = [e["stats"].get("timing") for e in enc]
+    if all(x == t[0] for x in t):
+        return {"timing": t[0], "timing_scope": "expert"}
+    return {"timing": t, "timing_scope": "per_projection"}
 
 
 def _sha(enc):

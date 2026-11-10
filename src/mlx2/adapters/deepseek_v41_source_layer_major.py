@@ -246,11 +246,18 @@ def _ced_plan(model, rows, bounds, chunk):
     lookahead = current()
     after = (int(lookahead.rows_after[0]) if lookahead is not None and len(lookahead.rows_after) == 1 else 0)
     enabled = bool(getattr(model, 'ced_state_only', False))
-    plan = []
-    for start, end in bounds:
-        state_only = enabled and state_only_admitted(c, after + rows - end, chunk)
+    # A parked sub-chunk's local keys are refilled by the next sub-chunk that
+    # is not itself state-only, so that sub-chunk's width is the ``step`` the
+    # predicate checks against the window; a short wave tail with rows still
+    # after the wave must not follow a parked sub-chunk. After the wave the
+    # next call refills at the caller's ``chunk`` (chunk-major contract).
+    plan, refill = [], chunk
+    for start, end in reversed(bounds):
+        state_only = enabled and state_only_admitted(c, after + rows - end, refill)
         plan.append((state_only, None if state_only else dependency_starts(c, end - start)))
-    return barrier, tuple(plan)
+        if not state_only:
+            refill = end - start
+    return barrier, tuple(reversed(plan))
 
 
 def _wave(model, inputs, ids, cache, bounds, logits_to_keep, *, ced=None):

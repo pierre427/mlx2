@@ -1041,6 +1041,20 @@ class SourceV41Weights(NativeV41Weights):
             counts[key] = counts.get(key, 0)+entry[1].nbytes
         return entry[1]
 
+    def resident_bytes(self):
+        # resident_f32_v1 widened copies are retained device arrays too.
+        return super().resident_bytes()+sum(e[1].nbytes for e in getattr(self, '_dense_f32', {}).values())
+
+    def resume_reservation_bytes(self):
+        value = super().resume_reservation_bytes()
+        if getattr(self, 'source_bf16_dense_policy', 'reference') == 'resident_f32_v1':
+            # Upper bound of the widened cache: 4 B per element of every
+            # non-F32 coefficient the policy may widen.
+            tensors = self.artifact['tensors']
+            value += sum(4*math.prod(tensors[source]['shape']) for alias, source in self.artifact['aliases'].items()
+                         if _RESIDENT_F32_DENSE.fullmatch(alias) and tensors[source]['dtype'] != 'F32')
+        return value
+
     def _router_gemv(self, x, name):
         """Decode router logits from the BF16 coefficients (opt-in).
 
@@ -1276,9 +1290,9 @@ class SourceV41Weights(NativeV41Weights):
     def park(self):
         session=getattr(self,'source_resident_bank_session',None)
         if session is not None:session.close()
+        getattr(self,'_dense_f32',{}).clear()  # before the parked receipt counts resident bytes
         result=super().park()
         getattr(self,'_resident_dense_coefficient_views',{}).clear()
-        getattr(self,'_dense_f32',{}).clear()
         return result
 
     def close(self):

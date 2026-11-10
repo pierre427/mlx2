@@ -89,6 +89,14 @@ def simulate(acc, capacity, policy, pinned=frozenset(), alpha=0.1):
         return miss
     freq = {}
     ema = {}
+    ema_t = {}
+
+    # Reuse EMA decayed by elapsed steps, the law of sched/eventsim.py (access_stats and the cycle
+    # score): value * (1 - alpha) ** (step - last_update) + alpha on access, decayed again when scored.
+    def bump(k, step):
+        ema[k] = ema.get(k, 0.0) * (1 - alpha) ** (step - ema_t.get(k, step)) + alpha
+        ema_t[k] = step
+
     for i, (layer, e, step) in enumerate(acc):
         k = (layer, e)
         if k in pinned:
@@ -97,7 +105,7 @@ def simulate(acc, capacity, policy, pinned=frozenset(), alpha=0.1):
         if k in cache:
             cache.move_to_end(k)
             if policy == "cycle":
-                ema[k] = (1 - alpha) * ema.get(k, 0.0) + alpha
+                bump(k, step)
             continue
         miss[i] = True
         if len(cache) >= capacity:
@@ -112,11 +120,11 @@ def simulate(acc, capacity, policy, pinned=frozenset(), alpha=0.1):
                 cand = list(cache)[:64]
                 def score(q):
                     dist = (q[0] - layer) % LAYERS or LAYERS
-                    return ema.get(q, 0.0) / dist
+                    return ema.get(q, 0.0) * (1 - alpha) ** (step - ema_t.get(q, step)) / dist
                 victim = min(cand, key=score)
                 del cache[victim]
         cache[k] = True
-        ema[k] = (1 - alpha) * ema.get(k, 0.0) + alpha
+        bump(k, step)
     return miss
 
 

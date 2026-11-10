@@ -12,6 +12,7 @@ from ..runtime.models.deepseek_v41_config import DeepSeekV41Config
 from ..runtime.models.deepseek_v41_engram import EngramHasher
 from .deepseek_v4_gguf_artifact import _digest, _regular_asset, _stamp
 from .deepseek_v4_gguf_tokenizer import align_tokenizer
+from ..runtime.immutable_weight_pages import same_stamp
 
 MODEL_TYPE = "deepseek41_gguf"
 FILENAME = "DeepSeek-V4.1-Flash-1017-Maya-XS-Abliterated.gguf"
@@ -142,6 +143,13 @@ def validate_header(metadata, tensors):
     return c
 
 
+def _same_seal(existing, seal):
+    # The persisted weight_stat may carry a pre-reboot device id (same_stamp).
+    return (isinstance(existing, dict) and same_stamp(existing.get("weight_stat"), seal["weight_stat"])
+            and {k: v for k, v in existing.items() if k != "weight_stat"}
+            == {k: v for k, v in seal.items() if k != "weight_stat"})
+
+
 def prepare_artifact(model_path, reference_tokenizer):
     """Full payload SHA check precedes publishing stat-bound serving assets."""
     path = Path(model_path).expanduser().resolve()
@@ -185,7 +193,7 @@ def prepare_artifact(model_path, reference_tokenizer):
         raise ValueError("V4.1 weight changed while sealing")
     target = path / INTEGRITY_FILE
     if target.is_symlink() or (
-        target.exists() and json.loads(target.read_text()) != seal
+        target.exists() and not _same_seal(json.loads(target.read_text()), seal)
     ):
         raise ValueError("different V4.1 integrity seal already exists")
     if not target.exists():
@@ -209,7 +217,7 @@ def inspect_artifact(model_path):
         raise ValueError("invalid V4.1 integrity seal")
     weight = _regular_asset(path / FILENAME)
     if (
-        _stamp(weight) != seal.get("weight_stat")
+        not same_stamp(_stamp(weight), seal.get("weight_stat"))
         or weight.stat().st_size != WEIGHT_BYTES
     ):
         raise ValueError("V4.1 payload no longer matches verified seal")

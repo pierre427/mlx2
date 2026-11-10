@@ -2360,6 +2360,12 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         # int8 prefill route.  Dense subclasses share the module layout.
         return ("mlp", "all")
 
+    # Not FlashNextAdapter's allow-list (shared expert, attention, GDN): the
+    # dense layout selects with int8_prefill.default_select, so "mlp" binds
+    # layers.N.mlp.{gate,up,down}_proj (sweep 2026-11-09 SI-1; the allow-list
+    # inherited from 8779ce64a bound no dense MLP projection).
+    int8_prefill_select = None
+
     def make_recurrent_depth_caches(self, passes: int):
         """Allocate one independent Qwen cache stack per recurrent pass."""
         if (

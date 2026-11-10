@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 from ..runtime.gguf import GGUFFile
+from ..runtime.immutable_weight_pages import same_stamp
 from .deepseek_v4_gguf_tokenizer import align_tokenizer
 
 MODEL_TYPE = "deepseek4_gguf"
@@ -183,7 +184,7 @@ def inspect_artifact(model_path):
         weight.is_symlink()
         or not weight.is_file()
         or seal.get("sha256") != WEIGHT_SHA256
-        or seal.get("weight_stat") != _stamp(weight)
+        or not same_stamp(_stamp(weight), seal.get("weight_stat"))
         or weight.stat().st_size != WEIGHT_BYTES
     ):
         raise ValueError("GGUF no longer matches its verified integrity seal")

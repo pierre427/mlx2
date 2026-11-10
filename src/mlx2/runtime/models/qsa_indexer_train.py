@@ -159,7 +159,12 @@ def kl_loss(scores: mx.array, target: mx.array, fixed: mx.array | None = None) -
     """
     if fixed is not None:
         allowed = ~fixed & block_valid(scores.shape[0])
-        first = int(mx.argmax(allowed.any(axis=-1)).item())
+        has_free = allowed.any(axis=-1)
+        if not bool(has_free.any().item()):
+            # Every row would be all -inf: loss 0 with NaN gradients.  Refuse.
+            raise ValueError("hybrid KL: no query has a valid block outside the fixed "
+                             "sink/recent blocks (sequence too short for this selection)")
+        first = int(mx.argmax(has_free).item())
         scores = mx.where(allowed, scores, -mx.inf)[first:]
         target = mx.where(allowed, target, 0.0)[first:]
         denom = target.sum(-1, keepdims=True)
@@ -216,7 +221,7 @@ def global_clip(grads: list, max_norm: float) -> tuple[list, float]:
 
 
 def mass_breakdown(target: mx.array, scores: dict, topk: int, *, sink_blocks: int = 16,
-                   hybrid_recent: int = 128) -> dict:
+                   hybrid_recent: int = 128, selections: dict | None = None) -> dict:
     """Diagnostic: where does the teacher's block mass sit, per selection rule?
 
     Rows that see more than ``topk`` complete blocks only.  ``scores`` maps an
@@ -228,6 +233,12 @@ def mass_breakdown(target: mx.array, scores: dict, topk: int, *, sink_blocks: in
     indexer arm's own top-k; and ``hybrid:<arm>`` (sink + newest
     ``hybrid_recent`` blocks + the arm's top picks among the rest, same k);
     plus mass by distance (newest 16/64/256/512/1024 blocks).
+
+    ``selections`` maps an arm name to the ``{"sink_blocks", "recent_blocks"}``
+    rule it was trained with; that arm's ``hybrid:<arm>`` column (and a
+    ``hybrid:oracle:<arm>`` ceiling when it differs from the defaults) uses its
+    own rule.  A hybrid column is omitted when its fixed blocks leave no
+    learned slot in the budget (the sidecar refuses such a rule too).
     """
     (length, n_blocks) = target.shape
     first = (topk + 1) * BLOCK - 1
@@ -254,15 +265,31 @@ def mass_breakdown(target: mx.array, scores: dict, topk: int, *, sink_blocks: in
            "sink_recent": mass(sink | ((age >= 0) & (age < topk - sink_blocks)))}
     for width in (16, 64, 256, 512, 1024):
         out[f"newest_{width}"] = mass((age >= 0) & (age < width))
-    fixed = sink | ((age >= 0) & (age < hybrid_recent))
-    rest = topk - sink_blocks - hybrid_recent
+    def hybrid(s, rule):
+        (n_sink, n_recent) = rule
+        rest = topk - n_sink - n_recent
+        if rest <= 0:
+            return None
+        fixed = (j < n_sink) | ((age >= 0) & (age < n_recent))
+        picked = topk_mass(s, rest, allowed=(~fixed) & (age >= 0))
+        return float((mx.where(fixed, t, 0.0).sum(-1) + picked).mean().item())
+
+    default = (sink_blocks, hybrid_recent)
     for (name, s) in scores.items():
         s = s[first:]
         out[name] = float(topk_mass(s, topk).mean().item())
-        picked = topk_mass(s, rest, allowed=(~fixed) & (age >= 0))
-        out[f"hybrid:{name}"] = float((mx.where(fixed, t, 0.0).sum(-1) + picked).mean().item())
-    out["hybrid:oracle"] = float((mx.where(fixed, t, 0.0).sum(-1)
-                                  + topk_mass(t, rest, allowed=(~fixed) & (age >= 0))).mean().item())
+        sel = (selections or {}).get(name)
+        rule = (int(sel["sink_blocks"]), int(sel["recent_blocks"])) if sel else default
+        value = hybrid(s, rule)
+        if value is not None:
+            out[f"hybrid:{name}"] = value
+        if rule != default:
+            value = hybrid(t, rule)
+            if value is not None:
+                out[f"hybrid:oracle:{name}"] = value
+    value = hybrid(t, default)
+    if value is not None:
+        out["hybrid:oracle"] = value
     return out
 
 
@@ -317,10 +344,21 @@ def load_trainer_checkpoint(directory, indexers: dict, opts: dict, *, step: int)
                 raise ValueError(f"no training temperature for layer {i}")
         if state is not None:
             prefix = f"{i}.opt."
+            # MLX keeps the learning rate inside the optimizer state, so a
+            # restore would silently replace the rate the resume asked for.
+            # An exact resume continues at the checkpoint's rate: refuse a
+            # different one instead of ignoring it.
+            wanted = float(opts[i].learning_rate.item())
             opts[i].state = tree_unflatten(
                 [(k[len(prefix):], v) for (k, v) in state.items() if k.startswith(prefix)])
+            restored = float(opts[i].learning_rate.item())
+            if not math.isclose(restored, wanted, rel_tol=1e-6):
+                raise ValueError(f"layer {i}: checkpoint learning rate {restored:g} differs "
+                                 f"from the resume's {wanted:g}; an exact resume keeps it")
         mx.eval(idx.parameters())
+    rates = sorted({float(opt.learning_rate.item()) for opt in opts.values()})
     return {"optimizer_state": "restored" if state is not None else "fresh (not saved)",
+            "learning_rate": rates[0] if len(rates) == 1 else rates,
             "temperature": ("trainer-state" if state is not None else "config.json"),
             "indexers_sha256": __import__("hashlib").sha256(
                 (directory / "qsa-indexers.safetensors").read_bytes()).hexdigest()}

@@ -42,7 +42,8 @@ RETENTION_KEYS = {'retention', 'retention_half_life', 'direct_reads'}
 #     d1 .79, d2 .72, d4 .65 vs untrained .72/.62/.54). Depth > 1 needs
 #     loader=priority_v1: a FIFO channel queued demand behind predictions.
 #   storage_tiers=accounting_v1 / tier_declared  per-tier miss/byte/time
-#     counters (RAM, internal NVMe, remote layer, external T7).
+#     counters (RAM hits; internal NVMe and external T7 misses). Only those
+#     two file tiers are declarable until a remote-layer tier exists.
 STREAM_KEYS = {'retention_alpha', 'retention_sample', 'lookahead_depth', 'lookahead_heads', 'loader',
                'storage_tiers', 'tier_declared'}
 RETENTION_POLICIES = ('lifetime_lfu', 'decayed_lfu_v1', 'cycle_aware_v1')
@@ -97,7 +98,7 @@ def parse_policy(value, *, adaptive=True):
     return result
 
 def _parse_stream_keys(result):
-    from .deepseek_v41_source_stream import CycleAwareIndex, parse_lookahead, TIER_RANKS
+    from .deepseek_v41_source_stream import CycleAwareIndex, parse_lookahead, TIER_EXTERNAL, TIER_INTERNAL
     if ('retention_alpha' in result or 'retention_sample' in result) and result.get('retention')!='cycle_aware_v1':
         raise ValueError('retention_alpha/retention_sample require cycle_aware_v1')
     if result.get('retention')=='cycle_aware_v1':
@@ -107,8 +108,11 @@ def _parse_stream_keys(result):
         raise ValueError('Source storage_tiers must be off or accounting_v1')
     declared=result.get('tier_declared')
     if declared is not None and (result.get('storage_tiers')!='accounting_v1' or not isinstance(declared,dict)
-            or any(not isinstance(k,str) or v not in TIER_RANKS for k,v in declared.items())):
-        raise ValueError('tier_declared requires accounting_v1 and maps names/prefixes to known tiers')
+            or any(not isinstance(k,str) or v not in (TIER_INTERNAL,TIER_EXTERNAL) for k,v in declared.items())):
+        # Only file tiers are declarable: RAM is the cache itself and the
+        # remote-layer tier has no implementation yet (source_stream), so
+        # either would be charged as 'unknown' by TierChain.for_source.
+        raise ValueError('tier_declared requires accounting_v1 and maps names/prefixes to internal_nvme or external')
 
 def lookahead_requested(policy):
     """True when the policy asks for anything only overlap_v1 can serve."""

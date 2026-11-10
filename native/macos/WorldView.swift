@@ -343,7 +343,7 @@ struct WorldView: View {
                             VStack(spacing: 0) {
                                 HStack { Label("Chat", systemImage: "bubble.left.and.bubble.right"); Spacer(); Button { showChat = false } label: { Image(systemName: "xmark") }.buttonStyle(.plain).help("Hide conversation").accessibilityLabel("Hide conversation") }.padding(12)
                                 Divider()
-                                ChatView(chat: model.chat)
+                                ChatView(chat: model.chat, surface: "world")
                             }.frame(width: min(500, max(350, geometry.size.width * 0.46)), height: max(350, geometry.size.height - 130))
                                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                         }

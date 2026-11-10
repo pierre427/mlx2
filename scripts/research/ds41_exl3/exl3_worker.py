@@ -6,10 +6,16 @@ Holds no model data: a client (convert_bank.py --remote) sends one expert's thre
 its Metal GPU (one expert at a time; transfers of the next request overlap the encode) and
 returns trellis/suh/svh/weight per projection plus the encoder stats.
 
-Wire format: 8-byte little-endian length + np.savez payload, both directions.
+Wire format: 8-byte little-endian length + np.savez payload, both directions; frames larger
+than MAX_FRAME are refused. Each connection opens with an auth frame carrying the shared token.
 usage: exl3_worker.py [--host ADDRESS] [--port 8601]   (default host: $MLX2_EXL3_WORKER_HOST or 127.0.0.1)
+
+Token (sweep 2026-11-09 EXL-8): set the same secret on worker and client, in MLX2_EXL3_WORKER_TOKEN
+or in a file named by MLX2_EXL3_WORKER_TOKEN_FILE. The worker compares it in constant time and
+drops a connection with a wrong token. Without a token it refuses to start unless --host is a
+loopback address.
 """
-import argparse, io, json, socket, socketserver, struct, sys, threading, time
+import argparse, hmac, io, ipaddress, json, os, socket, socketserver, struct, sys, threading, time
 from pathlib import Path
 
 import numpy as np
@@ -18,13 +24,51 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import exl3_encode as E  # noqa: E402
 
 GPU = threading.Lock()
+MAX_FRAME = 2 << 30          # one DS4.1 expert request is ~0.3 GB
+AUTH_FRAME = 64 << 10
+AUTH_TIMEOUT_S = 10.0        # a peer that sends no auth frame cannot hold a handler thread
 
 
-def recv_msg(sock):
+def load_token():
+    tok = os.environ.get("MLX2_EXL3_WORKER_TOKEN", "")
+    path = os.environ.get("MLX2_EXL3_WORKER_TOKEN_FILE", "")
+    if not tok and path:
+        tok = Path(path).read_text().strip()
+    return tok
+
+
+def is_loopback(host):
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
+
+
+def check_bind(host, token):
+    if not token and not is_loopback(host):
+        raise SystemExit(f"refusing to listen on {host} without a token: set MLX2_EXL3_WORKER_TOKEN "
+                         "or MLX2_EXL3_WORKER_TOKEN_FILE (or bind a loopback address)")
+
+
+def send_auth(sock, token):
+    send_msg(sock, {"token": np.array(token)})
+
+
+def check_auth(msg, token):
+    if msg is None or "token" not in msg:
+        return False
+    if not token:
+        return True
+    return hmac.compare_digest(str(msg["token"]).encode(), token.encode())
+
+
+def recv_msg(sock, limit=MAX_FRAME):
     head = _recv_exact(sock, 8)
     if not head:
         return None
     (n,) = struct.unpack("<Q", head)
+    if n > limit:
+        raise ConnectionError(f"frame of {n} bytes exceeds the {limit}-byte limit")
     return dict(np.load(io.BytesIO(_recv_exact(sock, n)), allow_pickle=False))
 
 
@@ -48,6 +92,14 @@ def _recv_exact(sock, n):
 class Handler(socketserver.BaseRequestHandler):
     def handle(self):
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.request.settimeout(getattr(self.server, "auth_timeout_s", AUTH_TIMEOUT_S))
+        try:
+            ok = check_auth(recv_msg(self.request, AUTH_FRAME), getattr(self.server, "token", ""))
+        except (ConnectionError, ValueError, OSError):   # socket.timeout is an OSError
+            ok = False
+        if not ok:
+            return  # wrong or missing token, or silent past the timeout: drop the connection
+        self.request.settimeout(None)  # authenticated: requests and encodes may take long
         while True:
             msg = recv_msg(self.request)
             if msg is None:
@@ -92,5 +144,8 @@ if __name__ == "__main__":
     ap.add_argument("--host", default=os.environ.get("MLX2_EXL3_WORKER_HOST", "127.0.0.1"))
     ap.add_argument("--port", type=int, default=8601)
     a = ap.parse_args()
-    print(f"exl3 worker on {a.host}:{a.port}", flush=True)
-    Server((a.host, a.port), Handler).serve_forever()
+    token = load_token()
+    check_bind(a.host, token)
+    print(f"exl3 worker on {a.host}:{a.port}" + (" (token required)" if token else " (loopback, no token)"), flush=True)
+    srv = Server((a.host, a.port), Handler); srv.token = token
+    srv.serve_forever()

@@ -6,7 +6,8 @@ Runs a fixed screen of held-out prompts on an exact baseline arm, then on each l
 
   * token identity and the first divergent position;
   * at that position, each arm's selected-vs-alternate margin and the top-2 sets, classified
-    per AGENTS.md: identical | near_tie_equivalent | diverged_pass | diverged_fail | failed;
+    per AGENTS.md: identical | near_tie_equivalent | diverged_pass | diverged_fail | failed,
+    or oracle_na when the baseline hit max_tokens before answering (tokens/margins only);
   * a functional oracle per prompt (translation keywords, YAML fields, GSM8K reference answer);
   * speed: decode tok/s, expert misses, bytes read and demand wait (status counter deltas).
 
@@ -319,6 +320,7 @@ def run_arm(name, policy, d, prompts, max_tokens, model_path, port, warmup=0, re
                     last["decode_tok_s"] = dec[len(dec) // 2]; last["ttft_s"] = tt[len(tt) // 2]
                 else:
                     last["decode_tok_s"] = None
+                    last["ttft_s"] = None   # sweep 2026-11-09 EXL-5: no resident pass, no quoted TTFT either
                 last["experts"] = {k: sum(p["experts"][k] for p in passes) for k in passes[0]["experts"]}
             replies[pid] = last
             _write(d / "replies.json", replies)
@@ -347,18 +349,28 @@ def summarize(out, arm_names, oracle_table):
             desc, fn = oracle_table.get(pid, ("no oracle", lambda _r: True))
             ok, bok = bool(fn(r["reply"])), bool(fn(base[pid]["reply"]))
             truncated = base[pid].get("finish") == "length" and not bok
+            arm_judged = not truncated or r.get("finish") == "stop"
             if truncated:
                 # The baseline itself ran out of tokens before answering: the oracle cannot
-                # judge this prompt, so compare tokens and margins only.
-                ok = bok = True
+                # judge this prompt against it, so compare tokens and margins only. Exact token
+                # parity needs no oracle and stays identical; a divergent row is oracle_na
+                # (never near-tie or pass, which need both oracles). An arm that finished is
+                # still judged on its own: a wrong answer is diverged_fail.
+                c = compare(base[pid]["tokens"], r["tokens"], True, True)
+                c["tokens_identical"] = c["class"] == "identical"
+                if arm_judged and not ok:
+                    c["class"] = "diverged_fail"
+                elif not c["tokens_identical"]:
+                    c["class"] = "oracle_na"
                 desc += " (n/a: baseline hit max_tokens)"
-            c = compare(base[pid]["tokens"], r["tokens"], bok, ok)
+            else:
+                c = compare(base[pid]["tokens"], r["tokens"], bok, ok)
             # Behaviour drift the content oracles miss (2026-11-08: keep-top-1 kept facts but
             # stopped stopping): the baseline stopped and the arm ran to max_tokens, or the arm
             # is more than twice as long.
             bt, at = base[pid].get("completion_tokens") or 0, r.get("completion_tokens") or 0
             runaway = (base[pid].get("finish") == "stop" and (r.get("finish") == "length" or at > 2 * bt + 8))
-            c.update(oracle=desc, oracle_pass=None if truncated else ok, decode_tok_s=r["decode_tok_s"],
+            c.update(oracle=desc, oracle_pass=ok if arm_judged else None, decode_tok_s=r["decode_tok_s"],
                      ttft_s=r.get("ttft_s"), resident_passes=r.get("resident_passes"), tokens_stable=r.get("tokens_stable"),
                      runaway=bool(runaway), tokens_vs_base=[at, bt])
             per[pid] = c
@@ -368,25 +380,26 @@ def summarize(out, arm_names, oracle_table):
                 dec.append(r["decode_tok_s"])
             if r.get("resident_passes"):
                 res_ok += r["resident_passes"][0]; res_all += r["resident_passes"][1]
-            if r.get("ttft_s") is not None:
+            # Sweep 2026-11-09 EXL-5: a warm prompt with zero resident passes quotes no TTFT, as for decode.
+            if r.get("ttft_s") is not None and not (r.get("resident_passes") and r["resident_passes"][0] == 0):
                 ttft.append(r["ttft_s"])
         classes = [v["class"] for v in per.values()]
         rows.append({"arm": name, "per_prompt": per,
                      "identical": classes.count("identical"), "near_tie": classes.count("near_tie_equivalent"),
                      "diverged_pass": classes.count("diverged_pass"), "diverged_fail": classes.count("diverged_fail"),
-                     "failed": classes.count("failed"), "runaway": sum(1 for v in per.values() if v.get("runaway")), "oracle_pass": sum(1 for v in per.values() if v["oracle_pass"]),
+                     "failed": classes.count("failed"), "oracle_na": classes.count("oracle_na"), "runaway": sum(1 for v in per.values() if v.get("runaway")), "oracle_pass": sum(1 for v in per.values() if v["oracle_pass"]),
                      "prompts": sum(1 for v in per.values() if v["oracle_pass"] is not None), "expert_misses": misses, "demand_wait_s": round(wait / 1e9, 1),
                      "completion_tokens": toks, "median_decode_tok_s": sorted(dec)[len(dec) // 2] if dec else None,
                      "median_ttft_s": sorted(ttft)[len(ttft) // 2] if ttft else None,
                      "resident_passes": [res_ok, res_all] if res_all else None})
     _write(out / "summary.json", rows)
     warm = any(r.get("resident_passes") for r in rows)
-    head = "| arm | identical | near-tie | diverged (pass) | diverged (FAIL) | runaway | oracle pass | misses | wait s | decode tok/s |"
+    head = "| arm | identical | near-tie | diverged (pass) | diverged (FAIL) | oracle n/a | runaway | oracle pass | misses | wait s | decode tok/s |"
     if warm:
         head += " TTFT s | resident passes |"
-    lines = [head, "|" + "---|" * (12 if warm else 10)]
+    lines = [head, "|" + "---|" * (13 if warm else 11)]
     for r in rows:
-        line = (f"| {r['arm']} | {r['identical']} | {r['near_tie']} | {r['diverged_pass']} | {r['diverged_fail'] + r['failed']} | {r['runaway']} "
+        line = (f"| {r['arm']} | {r['identical']} | {r['near_tie']} | {r['diverged_pass']} | {r['diverged_fail'] + r['failed']} | {r['oracle_na']} | {r['runaway']} "
                 f"| {r['oracle_pass']}/{r['prompts']} | {r['expert_misses']} | {r['demand_wait_s']} | {r['median_decode_tok_s']} |")
         if warm:
             rp = r.get("resident_passes") or [0, 0]

@@ -40,7 +40,7 @@ def test_last_state_writer_proves_or_declines():
 def test_mode_parsing(monkeypatch):
     monkeypatch.delenv(pts.ENV, raising=False)
     assert pts.tail_skip_mode() == "0"
-    for value, want in (("1", "1"), ("head", "head"), ("HEAD", "head"), ("yes", "0")):
+    for value, want in (("1", "1"), ("head", "head"), ("HEAD", "head"), ("yes", "1"), ("off", "0"), ("2", "0")):
         monkeypatch.setenv(pts.ENV, value)
         assert pts.tail_skip_mode() == want
 
@@ -380,7 +380,10 @@ def test_default_on_adapters_pass_their_family_key(path, family):
     import mlx2.runtime.models as models
 
     source = (pathlib.Path(models.__file__).parent / path).read_text()
-    assert f'family="{family}"' in source
+    # Qwen3.8 declares its key on the trunk class (sweep 2026-11-09 TS-1), so
+    # inheriting family trunks can declare their own.
+    assert (f'family="{family}"' in source
+            or f'tail_default_family = "{family}"' in source)
 
 
 def test_gemma4_default_on_when_unset_and_explicit_zero_disables(monkeypatch):

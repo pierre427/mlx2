@@ -19,7 +19,11 @@ summed in ascending expert order by the ordinary ordered combine. That law was
 raw-bit exact against ordinary M1 decode at 16 rows on the checkpoint
 (model-feature-decisions: source_ast_target_m1_row_invariant_16); this site
 reuses it at 2..6 rows. Any structural mismatch declines to the ordinary
-per-row ``moe`` (exact), counted in ``lockstep_moe_declines``.
+per-row ``moe`` (exact), counted in ``lockstep_moe_declines``.  A row kernel
+that refuses an acquired expert inside the loop declines the same way but is
+counted in ``lockstep_moe_kernel_declines``; that call's routes were already
+observed here, so the per-row fallback observes them a second time (LFU
+counts for that one call are doubled; known, review 2026-11-09).
 
 Counters (``verified_commit_stats``): ``lockstep_moe_calls``,
 ``lockstep_moe_rows``, ``lockstep_moe_occurrences``,
@@ -44,6 +48,10 @@ MAX_ROWS = 16  # kernel occurrence-row limit; lockstep verifies at most six rows
 
 class Decline(Exception):
     """Structural refusal: each row runs its ordinary ``moe``."""
+
+
+class KernelDecline(Decline):
+    """A row kernel refused an acquired expert, after routes were observed."""
 
 
 def plan(values):
@@ -72,6 +80,13 @@ def refusal(weights):
     if stream is None or not callable(getattr(stream, "acquire", None)):
         return "no target expert provider"
     return None
+
+
+def _kernel_device_supported():
+    """The M1 row kernels' own device precondition (they raise otherwise)."""
+    import mlx.core as mx
+    return (mx.default_device() == mx.gpu and mx.metal.is_available()
+            and mx.device_info().get("device_name") == "Apple M5 Max")
 
 
 def _kernels():
@@ -110,6 +125,8 @@ def rows_moe(weights, parks, stats, *, kernels=None):
     values = np.asarray(mx.concatenate(ids, 0)).astype(np.uint32, copy=False)
     score = mx.concatenate(scores, 0).astype(mx.float32)
     route = plan(values)
+    if kernels is None and not _kernel_device_supported():
+        raise Decline   # before any acquisition: the row kernels refuse this device
     k = kernels or _kernels()
     weights._ready()
     weights.source_route_host_materializations = getattr(weights, "source_route_host_materializations", 0) + 1
@@ -119,6 +136,10 @@ def rows_moe(weights, parks, stats, *, kernels=None):
     sequential = memory_plan is not None and memory_plan.get("expert_strategy") == "sequential_expert"
     if callable(getattr(stream, "observe_routes", None)):
         stream.observe_routes(prefix, values)
+    if callable(getattr(stream, "observe_moe_call", None)):
+        # As _moe_routes: the call width is seen before its acquires, so a
+        # narrow verify releases a prefill_residency=protect_decode_v1 shield.
+        stream.observe_moe_call(prefix, len(parks))
     prepared = k.prepare(x)
     owned = not getattr(stream, "_active", True)
     parts = []
@@ -128,7 +149,13 @@ def rows_moe(weights, parks, stats, *, kernels=None):
             rows = mx.array(locations // TOPK, mx.uint32)
             slots = mx.array(locations, mx.uint32)
             data = stream.acquire(prefix, int(expert))
-            parts.append(k.down(k.middle(prepared, rows, score.reshape(-1)[slots], data), data))
+            try:
+                parts.append(k.down(k.middle(prepared, rows, score.reshape(-1)[slots], data), data))
+            except ValueError:
+                # Kernel precondition (e.g. an expert object that is not packed
+                # original/Q1): decline to the exact per-row moe. Leases are
+                # window-scoped, so an owned window is closed by this raise.
+                raise KernelDecline from None
             if sequential:
                 stream.release_completed_experts(((int(prefix.split(".")[1]), int(expert)),), roots=(parts[-1],))
         output = k.combine(parts, values, route.order)

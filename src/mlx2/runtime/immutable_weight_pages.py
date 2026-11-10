@@ -125,8 +125,11 @@ class ImmutableWeightPages:
         self.fd = os.open(self.path, os.O_RDONLY | getattr(os,"O_NOFOLLOW",0))
         try:
             self.stat_binding=file_stamp(os.fstat(self.fd))
-            if (not self.expected_stat or any(key not in self.stat_binding or self.stat_binding[key] != value
-                                             for key,value in self.expected_stat.items())):
+            # A stat holding only reboot-volatile keys binds nothing: refuse it.
+            if (not set(self.expected_stat) - REBOOT_VOLATILE_STAMP_KEYS
+                    or any(key not in self.stat_binding or self.stat_binding[key] != value
+                                             for key,value in self.expected_stat.items()
+                                             if key not in REBOOT_VOLATILE_STAMP_KEYS)):
                 raise ValueError("immutable weight source differs from admitted stat")
             self.verify()
             if any(p.offset+p.source_bytes > os.fstat(self.fd).st_size for p in self.pages.values()):

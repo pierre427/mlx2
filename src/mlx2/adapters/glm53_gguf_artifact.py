@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..runtime.gguf.mlx_storage import atomic_json, sha256, stamp
 from ..runtime.gguf.reader import GGUFFile
+from ..runtime.immutable_weight_pages import same_stamp
 
 FILENAME = "GLM-5.3-Flash-REAP50-Q3_K_M.gguf"
 WEIGHT_SHA256 = "5a865918aea87a362ff8ae419581a0447929bfd68534a44d1125b394c272762d"
@@ -258,7 +259,7 @@ def inspect_artifact(root):
     if (
         seal.get("schema") != "mlx2.glm53-gguf.v1"
         or seal.get("weight_sha256") != WEIGHT_SHA256
-        or stamp(root / FILENAME) != seal.get("weight_stat")
+        or not same_stamp(stamp(root / FILENAME), seal.get("weight_stat"))
         or sha256(root / "config.json") != seal.get("config_sha256")
         or sha256(root / REFERENCE) != seal.get("reference_sha256")
     ):

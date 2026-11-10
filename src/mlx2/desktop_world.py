@@ -42,7 +42,7 @@ def color(value):
 
 
 def vector(value, low, high):
-    if not isinstance(value, list) or len(value) != 3 or any(type(v) not in (int, float) or not math.isfinite(v) or not low <= v <= high for v in value):
+    if not isinstance(value, list) or len(value) != 3 or any(type(v) not in (int, float) or not low <= v <= high or not math.isfinite(v) for v in value):
         raise ValueError("Invalid bounded three dimensional transform")
     return value
 
@@ -71,7 +71,8 @@ def validate_object(value):
     animation = value["animation"]
     if not isinstance(animation, dict) or set(animation) != {"kind", "speed"} or not isinstance(animation["kind"], str) or animation["kind"] not in ANIMATIONS:
         raise ValueError("Unsupported declarative animation")
-    if type(animation["speed"]) not in (int, float) or not math.isfinite(animation["speed"]) or not 0.05 <= animation["speed"] <= 5:
+    # Bounds before isfinite: an integer beyond float range must be a refusal, not OverflowError.
+    if type(animation["speed"]) not in (int, float) or not 0.05 <= animation["speed"] <= 5 or not math.isfinite(animation["speed"]):
         raise ValueError("Animation speed must be between 0.05 and 5")
     return copy.deepcopy(value)
 
@@ -121,7 +122,7 @@ def migrate_world(value):
     value = copy.deepcopy(value)
     if isinstance(value.get("name"), str) and not value["name"].strip():
         value["name"] = "My world"
-    if value.get("id") in RESERVED_WORLD_IDS:
+    if isinstance(value.get("id"), str) and value["id"].casefold() in RESERVED_WORLD_IDS:
         value["id"] = uuid.uuid4().hex
     return value
 
@@ -130,7 +131,8 @@ def validate_world(value):
     if not isinstance(value, dict) or set(value) != {"schema_version", "id", "name", "theme", "transitions", "objects"} or value["schema_version"] != 1:
         raise ValueError("Unsupported world document schema")
     identifier(value["id"])
-    if value["id"] in RESERVED_WORLD_IDS:
+    # Worlds are stored as <id>.json on a case-insensitive volume: STATE is state.
+    if value["id"].casefold() in RESERVED_WORLD_IDS:
         raise ValueError("That world identifier is reserved")
     if not isinstance(value["name"], str) or not value["name"].strip() or len(value["name"]) > 200:
         raise ValueError("A world needs a non-blank name of at most 200 characters")
@@ -139,12 +141,12 @@ def validate_world(value):
         raise ValueError("Invalid scene theme")
     color(theme["background"])
     color(theme["accent"])
-    if type(theme["exposure"]) not in (int, float) or not math.isfinite(theme["exposure"]) or not 0.1 <= theme["exposure"] <= 4:
+    if type(theme["exposure"]) not in (int, float) or not 0.1 <= theme["exposure"] <= 4 or not math.isfinite(theme["exposure"]):
         raise ValueError("Exposure must be between 0.1 and 4")
     transitions = value["transitions"]
     if not isinstance(transitions, dict) or set(transitions) != {"duration", "style"} or not isinstance(transitions["style"], str) or transitions["style"] not in {"ease", "linear", "instant"}:
         raise ValueError("Invalid scene transitions")
-    if type(transitions["duration"]) not in (int, float) or not math.isfinite(transitions["duration"]) or not 0 <= transitions["duration"] <= 5:
+    if type(transitions["duration"]) not in (int, float) or not 0 <= transitions["duration"] <= 5 or not math.isfinite(transitions["duration"]):
         raise ValueError("Transition duration must be between zero and five seconds")
     if not isinstance(value["objects"], list) or not 1 <= len(value["objects"]) <= 128:
         raise ValueError("A world needs between one and 128 objects")
@@ -179,7 +181,7 @@ class Worlds:
                 seen = value.get("seen_artifacts", {})
                 self.seen_artifacts = seen if isinstance(seen, dict) and all(isinstance(v, list) for v in seen.values()) else {}
                 self.active = validate_world(migrate_world(value["active"]))
-            except (ValueError, TypeError, KeyError, AttributeError) as error:
+            except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError, RecursionError) as error:
                 # A world the current rules reject must not stop the application.
                 # Keep the old state for inspection and start from a fresh scene.
                 aside = self.home / f"state.json.invalid-{uuid.uuid4().hex[:8]}"
@@ -278,7 +280,7 @@ class Worlds:
         with self.lock:
             worlds, errors = [], []
             for path in sorted(self.home.glob("*.json")):
-                if path.name == "state.json":
+                if path.name.casefold() == "state.json":
                     continue
                 try:
                     if path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
@@ -287,7 +289,7 @@ class Worlds:
                     if value["id"] != path.stem:
                         raise ValueError("Saved world identity differs from its filename")
                     worlds.append({"id": value["id"], "name": value["name"]})
-                except (ValueError, TypeError, OSError) as error:
+                except (ValueError, TypeError, OSError, ArithmeticError, RecursionError) as error:
                     errors.append(f"Could not read {path.name}: {error}")
             if self.startup_notice:
                 errors.insert(0, self.startup_notice)
@@ -462,9 +464,13 @@ class Worlds:
 
     def _saved(self, world_id):
         path = self.home / (identifier(world_id) + ".json")
-        if world_id in RESERVED_WORLD_IDS or not path.is_file() or path.is_symlink():
+        if world_id.casefold() in RESERVED_WORLD_IDS or not path.is_file() or path.is_symlink():
             raise ValueError("Saved world does not exist; read world_state for saved world IDs")
-        return validate_world(migrate_world(json.loads(path.read_text())))
+        value = validate_world(migrate_world(json.loads(path.read_text())))
+        # On a case-insensitive volume ALPHA.json opens alpha.json; never load another world.
+        if value["id"] != world_id:
+            raise ValueError("Saved world does not exist; read world_state for saved world IDs")
+        return value
 
     def state(self):
         """Compact model-facing view: every object's transform and appearance, text previews only."""
@@ -483,6 +489,11 @@ class Worlds:
                 self.check_bundle(request["document"])
 
     def _room_for(self, identity):
+        # World files live on a case-insensitive volume: an id spelled differently
+        # from an existing saved world would overwrite that world's file.
+        stems = {path.stem for path in self.home.glob("*.json") if path.name.casefold() != "state.json"}
+        if identity not in stems and any(stem.casefold() == identity.casefold() for stem in stems):
+            raise ValueError("A saved world already uses that identifier with different letter case; choose another identifier")
         if not (self.home / (identity + ".json")).exists() and sum(1 for _ in self.home.glob("*.json")) - 1 >= MAX_SAVED_WORLDS:
             raise ValueError(f"At most {MAX_SAVED_WORLDS} worlds can be saved")
 
@@ -493,7 +504,9 @@ class Worlds:
             self._room_for(value["id"])
             return value
         if command == "world_save":
-            return validate_world(request["world"])
+            value = validate_world(request["world"])
+            self._room_for(value["id"])  # A save under a new id creates a file, so it counts against the cap.
+            return value
         if command in {"world_load", "world_export"}:
             return self._saved(request["world_id"])
         if command == "world_get":

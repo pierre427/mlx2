@@ -511,6 +511,8 @@ class Qwen36TextModel(DenseTextModel):
     # Prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP=1): only this exact
     # sparse layer class has the split (``DecoderLayer.tail``).
     tail_family = "qwen36"
+    # Own FAMILY_DEFAULTS key: not benched, so opt-in (Qwen3.5-122B inherits).
+    tail_default_family = "qwen36_35b"
     tail_layer_types = (DecoderLayer,)
 
     def forward_scope(self, inputs, cache):

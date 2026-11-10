@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 """Prompt-chunk tail skip: stop non-checkpoint rows at their last state write.
 
-Opt-in (``MLX2_PREFILL_TAIL_SKIP``, default off).  Concept from
+Switch ``MLX2_PREFILL_TAIL_SKIP``: off by default, on by default for the
+families in ``FAMILY_DEFAULTS`` (see "Mode values" below).  Concept from
 ashhart/TensorFold#2432 (see provenance/prefill-tail-skip-20261107.json); the
 implementation is original and rides mlx2's checkpoint-row contract
 (``prefill_checkpoint_rows``).
@@ -41,7 +42,11 @@ prefills do not, so on those routes the switch is inert (counters stay 0).
 Mode values: ``0`` off; ``1`` every tier the adapter supports; ``head`` the
 head trim only (for A/B attribution).  Unset means off, except for families in
 ``FAMILY_DEFAULTS`` (Gemma 4 since 2026-11-07; Nemotron-H, gpt-oss,
-Qwen3.8-27B, flint, Mellum and Laguna since 2026-11-08; Pierre).
+Qwen3.8-27B, flint, Mellum and Laguna since 2026-11-08; Pierre).  Spellings
+(trimmed, case-insensitive): ``0``/``off``/``false``/``no`` mean ``0`` and
+``1``/``on``/``true``/``yes`` mean ``1``.  Any other value (``2``, the empty
+string, ...) resolves to ``0``, the unskipped reference path, on every family,
+and ``tail_skip_status`` reports it as invalid.
 """
 
 from __future__ import annotations
@@ -53,6 +58,11 @@ from .prefill_checkpoint_rows import claim_final_row_checkpoint, final_row_check
 
 ENV = "MLX2_PREFILL_TAIL_SKIP"
 _MODES = ("0", "1", "head")
+_SPELLINGS = {
+    "0": "0", "off": "0", "false": "0", "no": "0",
+    "1": "1", "on": "1", "true": "1", "yes": "1",
+    "head": "head",
+}
 
 STATS: Counter = Counter()
 
@@ -81,22 +91,47 @@ FAMILY_DEFAULTS = {
 }
 
 
+# Effective mode per family key, as last resolved in this process (one model
+# per serving process, so this is the loaded model's mode once it has run a
+# forward that consults the switch).
+_EFFECTIVE: dict = {}
+
+
+def _parse(raw):
+    """Documented mode for ``raw``, or None (unset or not a documented value)."""
+    if raw is None:
+        return None
+    return _SPELLINGS.get(raw.strip().lower())
+
+
 def tail_skip_mode(family: str | None = None) -> str:
+    # Unset keeps the family default.  A set but unrecognised value fails to
+    # the unskipped reference path ("0") and status reports it as invalid.
     raw = os.environ.get(ENV)
     if raw is None:
-        return FAMILY_DEFAULTS.get(family, "0")
-    value = raw.strip().lower()
-    return value if value in _MODES else "0"
+        mode = FAMILY_DEFAULTS.get(family, "0")
+    else:
+        mode = _parse(raw) or "0"
+    if family is not None:
+        _EFFECTIVE[family] = mode
+    return mode
 
 
 def tail_skip_status() -> dict:
-    return {
-        "configured": os.environ.get(ENV, "unset"),
-        "default": "0",
+    raw = os.environ.get(ENV)
+    status = {
+        "configured": "unset" if raw is None else raw,
+        # Families on when the variable is unset; every other family is off.
         "family_defaults": dict(FAMILY_DEFAULTS),
-        "qualification": "unqualified_default_gemma4_opt_in_elsewhere",
+        "unlisted_family_default": "0",
+        # Mode each family key resolved to in this process (the loaded model).
+        "effective_modes": dict(_EFFECTIVE),
         "counts": dict(STATS),
     }
+    if raw is not None and _parse(raw) is None:
+        status["invalid_value"] = raw
+        status["invalid_value_action"] = "resolved_to_0_reference_path"
+    return status
 
 
 def last_state_writer(cache, layer_count: int):

@@ -2373,6 +2373,23 @@ class Int8PrefillHandle:
     def modules(self) -> tuple[str, ...]:
         return tuple(sorted(b.spec.path for b in tuple(self._bound.values())))
 
+    def bound_set_sha256(self) -> str:
+        """sha256 of what this install bound: each projection's path (within
+        ``adapter.model``) and kernel kind, sorted, plus the routed-expert
+        block count.  The policy revision names the scope, not which
+        projections the adapter's selector puts in it; this digest does, so a
+        feature record can bind it (sweep 2026-11-09 SI-2)."""
+        rows = []
+        for b in tuple(self._bound.values()):
+            kind = "q8_inplace" if b.q8 else (
+                f"q{b.spec.bits}_inplace" if b.q45 else (
+                    "bf16" if b.spec.kind == "linear" else f"q{b.spec.bits}"))
+            rows.append([b.spec.path, kind])
+        payload = {"projections": sorted(rows), "experts": len(self._experts)}
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
     def weight_bytes(self) -> int:
         return sum(b.nbytes for b in tuple(self._bound.values()))
 
@@ -2483,6 +2500,7 @@ class Int8PrefillHandle:
             "device": self.device,
             "modules": len(self._bound),
             "module_kinds": kinds,
+            "bound_set_sha256": self.bound_set_sha256(),
             "skipped": len(self._skipped),
             "experts": self._experts_summary() if self.policy.experts else "stock",
             "weight_bytes": self.weight_bytes(),
@@ -2559,6 +2577,7 @@ class Int8PrefillHandle:
             "revision": self.policy.revision,
             "applies_to": "forward calls with rows >= row_threshold",
             "modules": len(self._bound),
+            "bound_set_sha256": self.bound_set_sha256(),
             "weight_copy_bytes": self.weight_copy_bytes(),
             **(
                 {
@@ -2814,9 +2833,15 @@ def bind_for_serving(
     copy_draft_policy=None,
     memory_headroom=None,
     hard_reserve_bytes=0,
+    expected_bound_set_sha256=None,
 ):
     """Serving-engine entry: validate, install on ``adapter.model`` and return
-    ``(handle, settings fragment)``.  Raises (fail closed) on any refusal."""
+    ``(handle, settings fragment)``.  Raises (fail closed) on any refusal.
+
+    ``expected_bound_set_sha256`` is the bound-set digest of the feature
+    record that qualifies this policy, when that record carries one: a
+    different bound set (another selector, another checkpoint layout) is not
+    what was qualified, so the install is removed and refused."""
     policy = Int8PrefillPolicy.from_value(policy)
     if not policy.enabled:
         raise ValueError("bind_for_serving requires an enabled policy")
@@ -2830,6 +2855,13 @@ def bind_for_serving(
     validate_decode_row_bound(policy, bound)
     handle = apply_for_adapter(adapter, policy)
     try:
+        bound_set = handle.bound_set_sha256()
+        if expected_bound_set_sha256 is not None and bound_set != expected_bound_set_sha256:
+            raise Int8PrefillError(
+                f"bound projection set sha256 {bound_set} ({len(handle.modules)} "
+                f"projections) does not match the feature record's "
+                f"{expected_bound_set_sha256}: not feature-qualified"
+            )
         if memory_headroom is not None:
             available = memory_headroom()
             required = int(hard_reserve_bytes) + handle.unfilled_reserve_bytes()
@@ -2849,6 +2881,7 @@ def bind_for_serving(
         "fidelity": policy.fidelity.value,
         "max_decode_rows": bound,
         "weight_copy_bytes": handle.weight_copy_bytes(),
+        "bound_set_sha256": bound_set,
     }
     if policy.q8_inplace:
         settings["q8_modules"] = handle.q8_module_count()
@@ -2959,6 +2992,14 @@ def _feature_table(path=None) -> list:
         policy = Int8PrefillPolicy.from_value(entry.get("policy"))
         if entry.get("status") != "qualified" or entry.get("revision") != policy.revision:
             raise ValueError(f"{path}: entry {name!r} revision does not match its policy")
+        # Optional: the bound-set digest (Int8PrefillHandle.bound_set_sha256)
+        # the approval measured.  Absent, the entry binds fingerprint and
+        # revision only; present, bind_for_serving compares it.
+        digest = entry.get("bound_set_sha256")
+        if digest is not None and not (
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise ValueError(f"{path}: entry {name!r} bound_set_sha256 is not a sha256 hex digest")
     return table["entries"]
 
 
@@ -3075,6 +3116,9 @@ def resolve_auto(
             "checkpoint": entry["checkpoint"],
             "approved": entry["approved"],
             "evidence": entry["evidence"],
+            # The serving bind compares this with what it binds (None: the
+            # record does not bind the projection set).
+            "bound_set_sha256": entry.get("bound_set_sha256"),
         }
     receipt.update(resolved="on", evidence=evidence, revision=policy.revision)
     return policy, receipt

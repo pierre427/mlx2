@@ -358,11 +358,9 @@ class _Gemma4LogitsModel(_LogitsModel):
         import sys
 
         if getattr(self._model, "mlx2_native_tensors", False):
-            # Native backend: its own DecoderLayer.tail (runtime/models/gemma4).
-            from ..runtime.prefill_tail_skip import STATS
-
+            # Native backend: its own DecoderLayer.tail (runtime/models/gemma4),
+            # which counts gemma4_native_tail_split / _tail_full itself.
             output = self._model(inputs, cache=cache, logits_to_keep=1, tail_last=True)
-            STATS["gemma4_native_tail_split"] += 1
             return getattr(output, "logits", output)
         last = self._model.language_model.model.layers[-1]
         _install_gemma4_tail_dispatch(type(last))

@@ -9,6 +9,9 @@ timed layer by layer:
                       not resident (waits for in-flight ones) -> [(1-router_frac)*c compute + GPU steal]
   layer L on a remote pipeline stage: all its experts resident there; compute c*factor; a hop (RTT/2 +
                       hidden-state bytes/link) whenever consecutive layers change node.
+  pinned and remote layers still issue their prefetch hints (d-head for layer L+d, layer-0 xtokAB) at
+                      their router instant; demand reads issued at a router instant start before the
+                      prefetches issued at that same instant.
 
 Channels: one serial pipe per byte tier (nvme, t7, m3ram) with service ms/expert from costs.py; strict
 priority -- demand first (FIFO), then prefetches by priority (expected stall saved = p * miss cost, or
@@ -348,7 +351,9 @@ class Sim:
         self.steal_acc += self.steal
         self.busy[ch] += t_end - self.cur_start[ch]
 
-    def advance(self, to):
+    def advance(self, to, hold_pf_at_to=False):
+        """Run every channel up to time ``to``. With ``hold_pf_at_to`` a prefetch may only start strictly
+        before ``to``: demand reads issued at ``to`` are queued afterwards and must win the tie (demand first)."""
         for ch in self.channels:
             while True:
                 cur = self.cur[ch]
@@ -381,7 +386,7 @@ class Sim:
                             del self.queued[key]
                         continue
                     start = max(self.free[ch], issued)
-                    if start > to:
+                    if start > to or (hold_pf_at_to and start >= to):
                         break
                     heapq.heappop(pq); del self.queued[key]
                     self.cur[ch] = (key, start + self.svc[ch]); self.cur_kind[ch] = "p"; self.cur_start[ch] = start
@@ -491,26 +496,12 @@ class Sim:
             sp = int(split[r]); a = acc[sp]
             t0 = now
             row_ids = ids[r].tolist()
-            if use_d and not oracle:
-                pd_row = Pd[r].tolist()
+            pd_row = Pd[r].tolist() if use_d and not oracle else None
             prev_node = self.node[LAYERS - 1]
-            for l in range(LAYERS):
-                self.cur_layer = l; self.pos = r * LAYERS + l
-                nd = self.node[l]
-                if nd != prev_node:
-                    hm = hop_ms(prev_node, nd); now += hm; a["hop"] += hm
-                prev_node = nd
-                if nd is not None:
-                    fac = cfgr[nd]["compute_factor"]
-                    now += self.c * fac; a["remote_extra"] += self.c * (fac - 1)
-                    self.advance(now)
-                    continue
-                if l in self.pinned:
-                    now += self.c
-                    self.advance(now)
-                    continue
-                t_router = now + self.c * self.rf
-                # ---- prefetch issue at this router time ----
+
+            def issue_hints(l, t_router, r, row_ids, pd_row):
+                # ---- prefetch issue at this layer's router time (every layer, pinned/remote included:
+                # its router input exists there, so its d-head and the layer-0 xtokAB hints are issued) ----
                 if pf != "none":
                     if l == 0 and use_ab:
                         if oracle:
@@ -538,7 +529,32 @@ class Sim:
                         prow = Pa[r + 1].tolist()
                         for lt in range(LAYERS):
                             self.issue(r + 1, lt, prow[lt], Ca[lt], t_router)
-                self.advance(t_router)
+
+            for l in range(LAYERS):
+                self.cur_layer = l; self.pos = r * LAYERS + l
+                nd = self.node[l]
+                if nd != prev_node:
+                    hm = hop_ms(prev_node, nd); now += hm; a["hop"] += hm
+                prev_node = nd
+                if nd is not None:
+                    fac = cfgr[nd]["compute_factor"]
+                    t_r = now + self.c * fac * self.rf
+                    self.advance(t_r)
+                    issue_hints(l, t_r, r, row_ids, pd_row)
+                    now += self.c * fac; a["remote_extra"] += self.c * (fac - 1)
+                    self.advance(now)
+                    continue
+                if l in self.pinned:
+                    t_r = now + self.c * self.rf
+                    self.advance(t_r)
+                    issue_hints(l, t_r, r, row_ids, pd_row)
+                    now += self.c
+                    self.advance(now)
+                    continue
+                t_router = now + self.c * self.rf
+                # demand first: land what finished by t_router (starting no prefetch AT t_router), queue this
+                # layer's demand reads, then issue this router instant's prefetches behind them.
+                self.advance(t_router, hold_pf_at_to=True)
                 need = [l * EXPERTS + e for e in row_ids[l]]
                 self.protect = set(need)
                 missing = []
@@ -554,9 +570,10 @@ class Sim:
                     else:
                         a["miss_" + self.tier[q]] += 1
                         self.dq[self.tier[q]].append((q, t_router))
+                issue_hints(l, t_router, r, row_ids, pd_row)
+                self.advance(t_router)
                 ready = t_router
                 if missing:
-                    self.advance(t_router)
                     while any(q not in self.cache for q in missing):
                         tn = min(self.cur[ch][1] for ch in self.channels if self.cur[ch] is not None)
                         self.advance(tn); ready = tn

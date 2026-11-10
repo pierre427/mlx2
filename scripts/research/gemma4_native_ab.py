@@ -162,8 +162,23 @@ def _tokens(payload):
     return content
 
 
+def _text(payload):
+    return (((payload.get("choices") or [{}])[0].get("message")) or {}).get("content")
+
+
+def _trace_complete(payload, trace):
+    """A nonempty logprob trace covering every completion token (when counted)."""
+    if not trace:
+        return False
+    count = (payload.get("usage") or {}).get("completion_tokens")
+    return not isinstance(count, int) or len(trace) >= count
+
+
 def _first_divergence(a, b):
     ta, tb = _tokens(a), _tokens(b)
+    if not (_trace_complete(a, ta) and _trace_complete(b, tb)):
+        # Nothing to compare token by token: never token parity.
+        return {"no_token_trace": True, "texts_equal": _text(a) == _text(b)}
     for index, (x, y) in enumerate(zip(ta, tb)):
         if x.get("token") != y.get("token"):
             return index, x, y
@@ -176,6 +191,10 @@ def _classify(divergence):
     """AGENTS.md near-tie contract from the first divergent position only."""
     if divergence is None:
         return {"verdict": "exact_token_parity"}
+    if isinstance(divergence, dict) and divergence.get("no_token_trace"):
+        # Missing or short logprob trace (sweep 2026-11-09 GEM-2).
+        return {"verdict": "text_equal_no_token_trace" if divergence["texts_equal"]
+                else "unclassified_no_token_trace"}
     index, x, y = divergence
     if x is None or y is None:
         return {"verdict": "length_mismatch", "index": index}

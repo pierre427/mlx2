@@ -489,7 +489,7 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
         tail = bool(tail_row) and claim_adapter_tail(
             inputs,
             kind="tail",
-            family="qwen38_27b",
+            family=self.tail_default_family,
             refuse=self._tail_refusal(
                 cache, fa_mask, ssm_mask, input_embeddings,
                 deep_concept_memory, capture_layers, hidden_sink,
@@ -559,6 +559,10 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
     # names its own.
     tail_layer_types = (DecoderLayer,)
     tail_family = "qwen38"
+    # ``FAMILY_DEFAULTS`` key of this trunk: Qwen3.8-27B is default-on.  A
+    # family trunk that inherits this forward declares its own key, so an
+    # unbenched family does not inherit the 27B default.
+    tail_default_family = "qwen38_27b"
 
     @property
     def tail_stat(self):
@@ -752,7 +756,9 @@ class TextModel(nn.Module):
             cache,
             input_embeddings=input_embeddings,
             deep_concept_memory=deep_concept_memory,
-            **({"tail_row": True} if tail_skip_mode("qwen38_27b") == "1" else {}),
+            **({"tail_row": True}
+               if tail_skip_mode(getattr(self.model, "tail_default_family", None)) == "1"
+               else {}),
         )
         out = select_checkpoint_rows(out)
         if self.args.tie_word_embeddings:

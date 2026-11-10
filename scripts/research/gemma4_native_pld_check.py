@@ -40,6 +40,41 @@ def _prompts():
     }
 
 
+# Exact serving profile per arm (status ``profile``); a substring test would
+# accept the ordinary profile for the prompt-lookup arm (sweep 2026-11-09 GEM-3).
+EXPECTED_PROFILE = {"ordinary": "gemma4-native-apcv2-ordinary",
+                    "default": "gemma4-native-apcv2-ordinary-pld"}
+
+
+def _profile_arm(profile):
+    """Arm whose expected profile is ``profile`` or its prefix followed by ``-`` (profiles can
+    carry suffixes such as ``-int8-prefill-...``); the longest match wins, so the PLD profile
+    never counts as the ordinary one."""
+    if not isinstance(profile, str):
+        return None
+    hits = [(len(want), arm) for arm, want in EXPECTED_PROFILE.items()
+            if profile == want or profile.startswith(want + "-")]
+    return max(hits)[1] if hits else None
+
+
+def _arm_gate(name, status):
+    """The arm's serving profile, or raise unless it is the expected one (optionally suffixed)."""
+    profile = status.get("profile") if isinstance(status, dict) else None
+    if _profile_arm(profile) != name:
+        raise RuntimeError(f"{name} arm serves profile {profile!r}, "
+                           f"expected {EXPECTED_PROFILE[name]!r}")
+    return profile
+
+
+def _pld_gate(final_status):
+    """Accepted prompt-lookup drafts of the default arm; raise when none."""
+    accepted = h._find(final_status, "pld_accepted")
+    if type(accepted) is not int or accepted <= 0:
+        raise RuntimeError(f"default arm accepted no prompt-lookup drafts "
+                           f"(pld_accepted={accepted!r}): prompt lookup did not run")
+    return accepted
+
+
 def _serve(model, route, port, token_file, workdir):
     log = open(workdir / f"server-{port}.log", "w")
     cmd = [sys.executable, "-m", "mlx2.server", *route, "--model", str(model),
@@ -106,12 +141,7 @@ def main() -> int:
             proc, base = _serve(args.model, route, args.port + index, token_file, workdir)
             arm = {"route_flags": route, "responses": {}}
             try:
-                status = json.dumps(h._get(base, "/v1/status", token))
-                arm["profile_receipt"] = sorted(
-                    p for p in ("gemma4-native-apcv2-ordinary-pld", "gemma4-native-apcv2-ordinary")
-                    if p in status)
-                if "gemma4-native-apcv2-ordinary" not in status:
-                    raise RuntimeError("server is not on the native backend")
+                arm["profile_receipt"] = _arm_gate(name, h._get(base, "/v1/status", token))
                 for key, prompt in prompts.items():
                     h._post(base, "/v1/admin/apc/clear", {"reason": "gemma4-native-pld"}, token)
                     arm["responses"][key] = _chat(base, prompt, args.max_tokens)
@@ -119,6 +149,8 @@ def main() -> int:
             finally:
                 h._stop(proc)
             results["arms"][name] = arm
+            if name == "default":
+                arm["pld_accepted"] = _pld_gate(arm["final_status"])
     finally:
         (args.out / "results.json").write_text(json.dumps(results, indent=1))
     summary = {"model": results["model"], "source_revision": revision, "prompts": {}}

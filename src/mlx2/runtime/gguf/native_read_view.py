@@ -13,6 +13,7 @@ import os
 import struct
 from pathlib import Path
 
+from ..immutable_weight_pages import same_stamp
 from .mlx_storage import atomic_json, stamp
 from .reader import GGUFError, GGUFFile
 
@@ -118,8 +119,8 @@ def validate_read_view(source, destination, *, source_sha256):
     if (
         receipt.get("schema") != SCHEMA
         or receipt.get("source_sha256") != source_sha256
-        or receipt.get("source_stat") != stamp(source)
-        or receipt.get("view_stat") != stamp(destination)
+        or not same_stamp(stamp(source), receipt.get("source_stat"))
+        or not same_stamp(stamp(destination), receipt.get("view_stat"))
     ):
         raise GGUFError("native packed read view source/seal changed")
     with GGUFFile(source) as file, destination.open("rb") as view:

@@ -178,7 +178,7 @@ def read_original_packed(artifact, layer, expert, *, read_into=None, destination
     returned before descriptor and path seals have both been rechecked.
     """
     from .deepseek_v41_source_artifact import checked_file
-    from ..runtime.immutable_weight_pages import file_stamp
+    from ..runtime.immutable_weight_pages import file_stamp, same_stamp
 
     if type(layer) is not int or not 0 <= layer < 40 or type(expert) is not int or not 0 <= expert < 384:
         raise ValueError("packed original expert identity out of range")
@@ -212,7 +212,7 @@ def read_original_packed(artifact, layer, expert, *, read_into=None, destination
         path = checked_file(artifact["root"], shard, seal)
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
-            if file_stamp(os.fstat(fd)) != seal:
+            if not same_stamp(file_stamp(os.fstat(fd)), seal):
                 raise ValueError("source changed before packed read")
             if os.uname().sysname == "Darwin":
                 import fcntl
@@ -230,7 +230,7 @@ def read_original_packed(artifact, layer, expert, *, read_into=None, destination
                     if type(count) is not int or not 0 < count <= stop-cursor:
                         raise OSError("short or invalid packed expert read")
                     cursor += count
-            if file_stamp(os.fstat(fd)) != seal:
+            if not same_stamp(file_stamp(os.fstat(fd)), seal):
                 raise ValueError("source changed during packed read")
             checked_file(artifact["root"], shard, seal)
         finally:

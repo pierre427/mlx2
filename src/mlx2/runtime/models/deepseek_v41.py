@@ -402,7 +402,9 @@ class Attention:
             raise ValueError("V4.1 candidate source failed to publish matching rows")
         packed_index = getattr(source, "packed_index_keys", None)
         all_keys = None if candidate_only or packed_index is not None else source.index_keys
-        decoded_index = {} if PACKED_INDEX_DECODE_ONCE and length > tile else None
+        # key_chunked_v1 decodes each key chunk per tile and never consults the
+        # decode-once cache, so it must not report that cache as resident.
+        decoded_index = {} if PACKED_INDEX_DECODE_ONCE and length > tile and key_chunk is None else None
         if decoded_index is not None and packed_index is not None and not candidate_only:
             m.scheduled_kv_calls["packed_index_resident_max_rows"] = max(
                 m.scheduled_kv_calls.get("packed_index_resident_max_rows", 0), count)

@@ -22,7 +22,7 @@ def reply(request):
     else:
         if command == "wait":
             time.sleep(.4)
-        result = {"value": command}
+        result = {"value": command, "deadline": request.get("bridge_deadline")}
     with lock:
         print(json.dumps({"id": request["id"], "ok": command != "invalid",
             "error": "Synthetic refusal", "result": result}), flush=True)

@@ -459,9 +459,24 @@ class MultiLatentAttention(nn.Module):
         latent, shared = self.kv_a_layernorm(latent)[:, None], shared[:, None]
         q_rows = self.q_proj(x[:, -1:])
         q = q_rows.reshape(b, 1, h, n+r).transpose(0, 2, 1, 3)
+        # Bookkeeping (sweep 2026-11-09 TS-4): the chunk's rows are still
+        # written, so they count as multirow work like ``__call__``; the
+        # one-row attention's law counters are booked under ``tail_<event>``
+        # so a prompt chunk never reads as decode-law (auto_latent,
+        # latent_single, latent_flash) work.  Kernel selection is unchanged.
+        self.calls["multirow_calls"] += 1
+        self.calls["multirow_tokens"] += b*t
         latent, shared, buffers = self._write(cache, latent, shared, b)
+        before = dict(self.calls)
         out = self.attend(q, latent, shared, mask, x.itemsize, q_rows=q_rows, buffers=buffers,
                           starts=starts)
+        for key in [k for k, count in self.calls.items() if count != before.get(k, 0)]:
+            delta = self.calls[key] - before.get(key, 0)
+            if key in before:
+                self.calls[key] = before[key]
+            else:
+                del self.calls[key]
+            self.calls["tail_"+key] += delta
         return self.o_proj(out.transpose(0, 2, 1, 3).reshape(b, 1, h*v))
 
     def project(self, x):

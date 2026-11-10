@@ -94,7 +94,8 @@ SOURCE_POLICY_CHOICES = {
     # Counters: official_source_q2_mixed_*. See deepseek_v41_source_q2_row.py.
     'deepseek_source_q2_tier_math': ('reference', 'mixed_v1'),
     # Opt-in, default off, implemented_untested_unqualified (2026-11-08, CPU
-    # equality only). key_chunked_v1: the indexer row tile is sized by the
+    # equality only; key_chunked_v1 scores are bitwise equal only on some
+    # shapes, see deepseek_v41_index_select). key_chunked_v1: the indexer row tile is sized by the
     # head-reduced score row and the head scratch by key chunks, so long
     # histories stop collapsing prefill tiles to 1-2 rows that each re-read
     # every key and run their own top-k (GLM-5.3 indexer query/key blocking).

@@ -908,8 +908,9 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             self.model.enable_mtp()
         self.model.preload().eval()
         from ..runtime.gguf.mlx_storage import stamp
+        from ..runtime.immutable_weight_pages import same_stamp
 
-        if stamp(root / FILENAME) != artifact["weight_stat"]:
+        if not same_stamp(stamp(root / FILENAME), artifact["weight_stat"]):
             raise ValueError("GLM-5.3 original GGUF changed during loading")
         if external:
             from ..runtime.drafters.prompt_lookup_draft import (

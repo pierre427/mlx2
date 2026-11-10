@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Opt-in exact rewrites of the V4.1 CSA2 indexer selection loop.
+"""Opt-in rewrites of the V4.1 CSA2 indexer selection loop.
 
 Two independent laws, both default off and implemented_untested_unqualified
 (CPU equality only; no GPU or model evidence). See
@@ -16,9 +16,14 @@ provenance/ds41-index-select-tiling.json.
     the GLM-5.3 indexer's fixed 128-row query chunks with key blocks
     (glm53_gguf_indexer.blocked_select / QUERY_CHUNK). Each score element is
     the same 128-term dot product, ReLU, head-weight product and head sum as
-    the reference; only the key slice and row-tile extents change. On CPU the
-    values are bitwise equal (tests); on Metal, GEMM kernel choice may differ
-    with M/N, so GPU bitwise equality is unverified.
+    the reference; only the key slice and row-tile extents change. It is the
+    same expression per element, not a guaranteed bitwise rewrite: splitting
+    the key axis changes the GEMM shape, and even the CPU BLAS can round a
+    split dot product differently in the last ulp (seen at heads 4, dim 8,
+    39 keys, chunk 21). Bitwise equality is shape-dependent and checked per
+    geometry (tests); on Metal it is unverified. An ulp change can flip a
+    top-k choice at an exact near tie, so no exact-parity claim holds until
+    the first-divergence/near-tie check has run at Source geometry.
 
 ``compact_v1`` (policy ``deepseek_source_index_select``)
     ``stable_pool_topk`` runs two arg-partitions over the row (MLX sorts on
