@@ -117,6 +117,9 @@ def main():
                     "and hard-exit on a Swapouts rise")
     ap.add_argument("--wait-quiet", type=float, default=0.0,
                     help="seconds to wait for a quiet host before each timed run")
+    ap.add_argument("--cache-limit-gb", type=float, default=6.0,
+                    help="MLX buffer cache limit (GiB); lower it for large checkpoints "
+                    "that leave little host headroom")
     ap.add_argument("--out", required=True)
     ap.add_argument("--i-own-the-gpu", action="store_true")
     ap.add_argument("--adapter-select", action="store_true",
@@ -141,7 +144,7 @@ def main():
     from mlx2.runtime.models.cache import make_prompt_cache
     model = adapter.model
     mx.eval(model.parameters())
-    mx.set_cache_limit(6 << 30)
+    mx.set_cache_limit(int(a.cache_limit_gb * (1 << 30)))
     texts, tool_source = build_texts(
         adapter, Path(a.repo), max(max(a.contexts), a.quality_tokens)
     )

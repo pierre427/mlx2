@@ -194,6 +194,15 @@ class Int8PrefillPolicy:
     # Measured on Flash-Next shapes (M5 Max, 2026-11-09, expert block alone):
     # 0.98-1.06x at 2K-4K tokens, 1.10x at 8K, 1.27x at 16K, hence the 8192
     # default.  Enters as_dict/revision only when on.
+    #
+    # NOT HELPFUL end to end, left off: on the served Flash-Next checkpoint
+    # (Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP@25c2da42, mlx2 e3e917442)
+    # W8A8 trunk + these experts prefilled +1.3% / +4.3% vs stock at 8K /
+    # 16K, against +3.4% / +6.8% for the W8A8 trunk alone: about 2% slower
+    # than the served NAX bf16 expert kernels in every paired rep
+    # (qualification/runs/fn-int8-experts-e2e-20261109-r2).  The synthetic
+    # block A/B used uniform random routes; real routing and the two extra
+    # Stage A passes do not pay back.  Kept as an opt-in for other shapes.
     experts: bool = False
     experts_min_tokens: int = 8192
 
