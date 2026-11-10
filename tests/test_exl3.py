@@ -79,6 +79,8 @@ def _model_and_weights(
 
 def test_converter_fixture_inner_and_projection():
     root = Path(__file__).resolve().parents[1]
+    if not (root / "scripts/sushi_probe").is_dir():
+        pytest.skip("the Sushi probe fixtures are not part of this checkout")
     f = mx.load(
         str(root / "scripts/sushi_probe/fixtures/exl3_k2p5_mcg_linear.safetensors")
     )

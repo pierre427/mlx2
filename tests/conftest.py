@@ -138,13 +138,107 @@ class _PrivateMaterialAbsentModule(pytest.Module):
         pytest.skip(self.skip_reason, allow_module_level=True)
 
 
+# The public source export ships no feature-decision record
+# (docs/research/model-feature-decisions.tsv), while a private checkout always
+# has it (AGENTS.md requires it). Only in the export, a test that needs
+# private evidence (run receipts, policies, docs) or a never-published module
+# is reported as skipped instead of failing; in a private checkout these
+# hooks do nothing, so missing evidence there still fails.
+_PUBLIC_EXPORT = not (_ROOT / "docs" / "research" / "model-feature-decisions.tsv").is_file()
+_PRIVATE_ROOTS = {"qualification", "docs", "provenance", "benchmark_results", "benchmarks",
+                  "artifacts", "output"}
+
+
+def _unexported_reason(error):
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, ModuleNotFoundError) and error.name and "mcp" in error.name.lower():
+            return f"module {error.name} is not part of the public source export"
+        if isinstance(error, FileNotFoundError) and error.filename:
+            path = __import__("pathlib").Path(os.fsdecode(error.filename))
+            try:
+                rel = path.resolve().relative_to(_ROOT.resolve())
+            except ValueError:
+                rel = None
+            if rel is not None and rel.parts and (rel.parts[0] in _PRIVATE_ROOTS
+                                                  or rel.parts[0].startswith(".local")) \
+                    and not path.exists():
+                return f"private material absent: {rel} (not exported to the public mirror)"
+        error = error.__cause__ or error.__context__
+    return None
+
+
+# Tests whose inputs exist on the export only as older frozen copies (they
+# pass in a private checkout, which has the current files).
+_PUBLIC_EXPORT_SKIP_MODULES = {
+    "test_segmented_moe_prefill_native_qualifier.py":
+        "binds the reviewed hash of a private provenance record",
+    "test_segmented_moe_native_identity_cpu.py":
+        "binds the reviewed hash of a private provenance record",
+    "test_packed_prefill_long_contract_cpu.py": "reads private run receipts in an isolated host suite",
+    "test_thermal_ladder_identifier_oracle.py":
+        "tests the current benchmark_results ladder script; the export carries an older frozen copy",
+}
+_PUBLIC_EXPORT_SKIP_TESTS = {
+    "test_qualification_matrix.py::test_canonical_manifests_name_real_services_selected_arms_and_new_arms":
+        "reads the private canonical qualification manifests",
+    "test_server_subprocess_pythonpath.py::test_manifest_arms_declare_the_tree_they_import":
+        "reads the private qualification manifests",
+    "test_qwen_wide_row_diagnostic_cpu.py::test_default_planner_imports_no_mlx_and_claims_no_execution":
+        "runs a private qualification planner",
+    "test_smoke_tokenizers_v1_serving_ab.py::test_live_retained_manifest_and_artifact_identity_are_exact":
+        "reads a private retained worker manifest",
+    "test_qualify_serving_receipts.py::test_preflight_tree_binds_script_fixtures_and_provenance":
+        "binds private provenance and fixture files into the preflight tree",
+}
+
+
+def pytest_collection_modifyitems(config, items):
+    if not _PUBLIC_EXPORT:
+        return
+    for item in items:
+        key = f"{item.path.name}::{item.originalname if hasattr(item, 'originalname') else item.name}"
+        reason = _PUBLIC_EXPORT_SKIP_TESTS.get(key)
+        if reason:
+            item.add_marker(pytest.mark.skip(reason=f"{reason} (not exported to the public mirror)"))
+
+
+class _PublicExportModule(pytest.Module):
+    def _getobj(self):
+        try:
+            return super()._getobj()
+        except (FileNotFoundError, pytest.Collector.CollectError) as error:
+            reason = _unexported_reason(error)
+            if reason:
+                pytest.skip(reason, allow_module_level=True)
+            raise
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    if not _PUBLIC_EXPORT or call.excinfo is None or call.when not in ("setup", "call"):
+        return
+    report = outcome.get_result()
+    reason = _unexported_reason(call.excinfo.value) if report.failed else None
+    if reason:
+        report.outcome = "skipped"
+        report.longrepr = (str(item.path), item.location[1] or 0, f"Skipped: {reason}")
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_pycollect_makemodule(module_path, parent):
+    if _PUBLIC_EXPORT and module_path.name in _PUBLIC_EXPORT_SKIP_MODULES:
+        module = _PrivateMaterialAbsentModule.from_parent(parent, path=module_path)
+        module.skip_reason = (f"{_PUBLIC_EXPORT_SKIP_MODULES[module_path.name]} "
+                              "(not exported to the public mirror)")
+        return module
     if module_path.name in _ISOLATED_HOST_MODULES:
         return _IsolatedHostModule.from_parent(parent, path=module_path)
     needed = _MODULE_PRIVATE_MATERIAL.get(module_path.name)
     if needed is None or (_ROOT / needed).is_file():
-        return None
+        return _PublicExportModule.from_parent(parent, path=module_path) if _PUBLIC_EXPORT else None
     module = _PrivateMaterialAbsentModule.from_parent(parent, path=module_path)
     module.skip_reason = (f"private material absent: {needed} "
                           "(not exported to the public mirror)")
