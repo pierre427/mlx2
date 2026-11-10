@@ -30,6 +30,10 @@ Residency is read, never mutated: membership of ``(layer, expert)`` in the
 expert store's resident/leased maps under its lock, at router graph
 construction (per layer, so it reflects experts that earlier layers of the
 same token just acquired). No LFU touch, ordering, statistic or prefetch.
+With reduced expert tiers bound to the store (``store.q1_on_miss``),
+membership in a Q1/Q2 pool also counts as resident (an expert held there
+costs no read); see ``route_drop.resident_or_pooled``. Without tiers the mask
+is exactly the original-cache/lease mask.
 
 Scope: B1 single-row decode forwards only. Prefill, verification and image
 rows keep native routing. When no native expert would be changed the native
@@ -243,9 +247,17 @@ class ResidentRouteBias:
         finally:
             self.suspended = previous
 
+    def residency(self, layer):
+        """Residency the bias prefers: original cache/lease, plus reduced pools when tiers are bound."""
+        experts = self.args.n_routed_experts
+        if getattr(self.store, 'q1_on_miss', None) is None:
+            return resident_mask(self.store, layer, experts)
+        from .deepseek_v41_source_route_drop import resident_or_pooled
+        return resident_or_pooled(self.store, layer, experts)
+
     def select(self, block, logits, correction, native):
         c = self.args
-        resident = resident_mask(self.store, block.layer, c.n_routed_experts)
+        resident = self.residency(block.layer)
         indices, weights, changed = biased_selection(
             logits, correction, resident, self.current_lambda(), mode=self.mode,
             top_k=c.num_experts_per_tok, scale=c.routed_scaling_factor, normalize=c.norm_topk_prob,
@@ -281,11 +293,18 @@ def _native_router(block):
 
 
 def install_router_wrappers(model):
-    """Idempotently wrap each Block's router (blocks are rebuilt on restore)."""
+    """Idempotently wrap each Block's router (blocks are rebuilt on restore).
+
+    The bias router is kept on ``block._mlx2_route_bias_router``. When route drop
+    already wraps the block, its router resolves this one at call time as its
+    inner router (native -> bias -> drop), so ``block.router`` is left alone.
+    """
     for block in model.layers:
         if getattr(block, '_mlx2_route_bias_wrapped', False):
             continue
-        block.router = _make_router(block)
+        block._mlx2_route_bias_router = _make_router(block)
+        if not getattr(block, '_mlx2_route_drop_wrapped', False):
+            block.router = block._mlx2_route_bias_router
         block._mlx2_route_bias_wrapped = True
 
 

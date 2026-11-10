@@ -27,6 +27,23 @@ Isolation contract (the same for both operations):
    switch a future qualification would have to flip; it is ``False`` and no
    code path here enables publication.
 
+Composition (2026-11-09). Route bias, route drop and the reduced expert
+tiers (``deepseek_source_experts.tiers``/``q1_on_miss``) may run together:
+
+* One router chain per Block: native router -> bias re-selection (combine
+  weights from the original scores) -> drop on the biased selection ->
+  redirect dropped slots to the row's kept top expert. Each wrapper installs
+  idempotently and the drop wrapper resolves the bias router at call time, so
+  installation order does not matter and nothing runs twice.
+* With reduced tiers on, the bias counts reduced-pool members as resident
+  (``route_drop.resident_or_pooled``): an expert held in a Q1/Q2 pool costs no
+  read. The tiers then serve the biased (and dropped) selection as usual.
+* Identity: when two router operations or bias + tiers are selected, the
+  salt binding gains a composition field, so a composed run never shares
+  identity with either operation alone. Each operation alone hashes exactly
+  the binding it always did. The reduced-tier salt chains after this one and
+  both stamp one combined private profile (``q1_on_miss.combined_profile``).
+
 Provenance: provenance/deepseek-v41-source-yoco-approx.json and
 provenance/deepseek-v41-source-route-bias.json.
 """
@@ -61,10 +78,18 @@ ROUTE_PARAMETER_KEYS = (ROUTE_LAMBDA, ROUTE_ADAPTIVE, ROUTE_MARGIN)
 # a layer range for B1 decode rows; see deepseek_v41_source_route_drop.
 DROP_KEY = 'deepseek_source_route_drop'
 DROP_LAYERS = 'deepseek_source_route_drop_layers'
-DROP_CHOICES = ('off', 'drop_min_v1')
+DROP_CHOICES = ('off', 'drop_min_v1', 'drop_miss_v1')
+# drop_miss_v1 (Pierre 2026-11-09): drop only selected experts that are NOT resident, never the
+# top PROTECT ranks, and only below MAX_WEIGHT of the row; the span count caps drops per row.
+DROP_PROTECT = 'deepseek_source_route_drop_protect'
+DROP_MAX_WEIGHT = 'deepseek_source_route_drop_max_weight'
 DROP_COUNT = 'deepseek_source_route_drop_count'
 DROP_DEFAULT_LAYERS = [13, 26]    # middle third of 40 layers; not a measured choice
-DROP_PARAMETER_KEYS = (DROP_LAYERS, DROP_COUNT)
+# Per-span counts (Pierre 2026-11-08: un-ablate specific layers after damage).
+# A list of {"layers": [first, last] | layer, "count": 0..5}; later entries
+# override earlier ones layer by layer; count 0 restores native routing.
+DROP_SPANS = 'deepseek_source_route_drop_spans'
+DROP_PARAMETER_KEYS = (DROP_LAYERS, DROP_COUNT, DROP_SPANS, DROP_PROTECT, DROP_MAX_WEIGHT)
 POLICY_KEYS = frozenset((YOCO_KEY, ROUTE_KEY, DROP_KEY) + YOCO_PARAMETER_KEYS + ROUTE_PARAMETER_KEYS
                         + DROP_PARAMETER_KEYS)
 
@@ -73,6 +98,9 @@ PUBLICATION_QUALIFIED = False
 QUALIFICATION = 'unqualified'
 APC_REASON_PREFIX = 'approximate_source_operation_unqualified:'
 PRIVATE_PROFILE_PREFIX = 'mlx2.ds41.source-approx.v1:'
+# Bound into the salt only when operations compose (alone: absent, binding unchanged).
+ROUTE_DROP_COMPOSITION = 'native>route_bias>route_drop>redirect.v1'
+ROUTE_TIERS_RESIDENCY = 'original_cache+leased+reduced_pools.v1'
 
 # Forward/state laws whose composition with an approximate operation has not
 # been implemented. Each (key, reference value) must hold.
@@ -176,6 +204,43 @@ def _validate_route(raw):
     return result
 
 
+def resolve_drop_spans(spans):
+    """Validate per-span drop counts; return canonical maximal runs [[first, last, count>0], ...]."""
+    if not isinstance(spans, (list, tuple)) or not spans:
+        raise ValueError(DROP_SPANS + ' must be a non-empty list of {"layers": ..., "count": ...}')
+    counts = {}
+    for entry in spans:
+        if not isinstance(entry, dict) or set(entry) != {'layers', 'count'}:
+            raise ValueError(DROP_SPANS + ' entries need exactly "layers" and "count"')
+        layers, count = entry['layers'], entry['count']
+        if _plain_int(layers):
+            layers = [layers, layers]
+        if (not isinstance(layers, (list, tuple)) or len(layers) != 2 or not all(_plain_int(v) for v in layers)
+                or not 0 <= layers[0] <= layers[1] <= 1023):
+            raise ValueError(DROP_SPANS + ' layers must be a layer ID or [first, last] with 0 <= first <= last')
+        if not _plain_int(count) or not 0 <= count <= 5:
+            raise ValueError(DROP_SPANS + ' count must be an integer 0..5')
+        for layer in range(layers[0], layers[1] + 1):
+            counts[layer] = count
+    runs = []
+    for layer in sorted(k for k, v in counts.items() if v):
+        if runs and runs[-1][1] == layer - 1 and runs[-1][2] == counts[layer]:
+            runs[-1][1] = layer
+        else:
+            runs.append([layer, layer, counts[layer]])
+    if not runs:
+        raise ValueError(DROP_SPANS + ' drops nothing; turn ' + DROP_KEY + ' off instead')
+    return runs
+
+
+def drop_counts(policy):
+    """Per-layer drop counts {layer: count} for either policy form."""
+    if DROP_SPANS in policy:
+        return {layer: c for first, last, c in policy[DROP_SPANS] for layer in range(first, last + 1)}
+    first, last = policy[DROP_LAYERS]
+    return {layer: policy.get(DROP_COUNT, 1) for layer in range(first, last + 1)}
+
+
 def _validate_drop(raw):
     mode = raw.get(DROP_KEY, 'off')
     if type(mode) is not str or mode not in DROP_CHOICES:
@@ -183,8 +248,23 @@ def _validate_drop(raw):
     if mode == 'off':
         present = [k for k in DROP_PARAMETER_KEYS if k in raw]
         if present:
-            raise ValueError(', '.join(present) + ' require ' + DROP_KEY + '=drop_min_v1')
+            raise ValueError(', '.join(present) + ' require ' + DROP_KEY + '=drop_min_v1|drop_miss_v1')
         return {}
+    extra = {}
+    if mode == 'drop_miss_v1':
+        protect = raw.get(DROP_PROTECT, 2)
+        maxw = raw.get(DROP_MAX_WEIGHT, 0.10)
+        if not _plain_int(protect) or not 1 <= protect <= 5:
+            raise ValueError(DROP_PROTECT + ' must be an integer 1..5 (top ranks never dropped)')
+        if type(maxw) is bool or not _finite_number(maxw) or not 0.0 < maxw <= 1.0:
+            raise ValueError(DROP_MAX_WEIGHT + ' must be a number in (0, 1]')
+        extra = {DROP_PROTECT: protect, DROP_MAX_WEIGHT: float(maxw)}
+    elif DROP_PROTECT in raw or DROP_MAX_WEIGHT in raw:
+        raise ValueError(DROP_PROTECT + '/' + DROP_MAX_WEIGHT + ' require ' + DROP_KEY + '=drop_miss_v1')
+    if DROP_SPANS in raw:
+        if DROP_LAYERS in raw or DROP_COUNT in raw:
+            raise ValueError(DROP_SPANS + ' replaces ' + DROP_LAYERS + '/' + DROP_COUNT + '; give one form')
+        return {DROP_KEY: mode, DROP_SPANS: resolve_drop_spans(raw[DROP_SPANS]), **extra}
     value = raw.get(DROP_LAYERS, DROP_DEFAULT_LAYERS)
     if (not isinstance(value, (list, tuple)) or len(value) != 2 or not all(_plain_int(v) for v in value)
             or not 0 <= value[0] <= value[1] <= 1023):
@@ -192,7 +272,7 @@ def _validate_drop(raw):
     count = raw.get(DROP_COUNT, 1)
     if not _plain_int(count) or not 1 <= count <= 5:
         raise ValueError(DROP_COUNT + ' must be an integer 1..5 (lowest-weight experts zeroed per row; 5 keeps only the top expert)')
-    return {DROP_KEY: mode, DROP_LAYERS: [value[0], value[1]], DROP_COUNT: count}
+    return {DROP_KEY: mode, DROP_LAYERS: [value[0], value[1]], DROP_COUNT: count, **extra}
 
 
 def _blocked(policy, refusals):
@@ -232,9 +312,8 @@ def validate_policy(raw, policy):
         result.update(route)
     drop = _validate_drop(raw)
     if drop:
+        # Route bias composes (2026-11-09): one router chain, bias then drop.
         blocked = _blocked(policy, DROP_REFUSALS)
-        if route:
-            blocked.append(ROUTE_KEY + '(both wrap the router; composition not implemented)')
         if blocked:
             raise ValueError('Source approximate route drop cannot combine with: ' + ', '.join(blocked))
         result.update(drop)
@@ -258,6 +337,11 @@ def _file_identity(names):
                                   for name in names).encode()).hexdigest()
 
 
+def _reduced_tiers(policy):
+    from .deepseek_v41_source_q1_on_miss import enabled
+    return enabled(policy)
+
+
 def implementation_identity(policy):
     names = ['adapters/deepseek_v41_source_approx.py', 'runtime/models/deepseek_v41.py',
              'runtime/models/deepseek_v41_cache.py']
@@ -269,7 +353,21 @@ def implementation_identity(policy):
     if policy.get(DROP_KEY, 'off') != 'off':
         names += ['adapters/deepseek_v41_source_route_drop.py', 'runtime/models/deepseek_v4.py',
                   'runtime/models/deepseek_v41_fused.py']
-    return _file_identity(names)
+    elif policy.get(ROUTE_KEY, 'off') != 'off' and _reduced_tiers(policy):
+        names += ['adapters/deepseek_v41_source_route_drop.py']   # bias reads resident_or_pooled
+    # De-duplicate in order; an operation alone has no duplicates, so its hash is unchanged.
+    return _file_identity(list(dict.fromkeys(names)))
+
+
+def composition(policy):
+    """Composition fields bound into the salt; ``{}`` for any operation alone."""
+    value = {}
+    route = policy.get(ROUTE_KEY, 'off') != 'off'
+    if route and policy.get(DROP_KEY, 'off') != 'off':
+        value['router_chain'] = ROUTE_DROP_COMPOSITION
+    if route and _reduced_tiers(policy):
+        value['route_bias_residency'] = ROUTE_TIERS_RESIDENCY
+    return value
 
 
 def identity_salt(policy):
@@ -280,6 +378,9 @@ def identity_salt(policy):
     binding = {key: policy[key] for key in sorted(POLICY_KEYS) if key in policy}
     binding['implementation'] = implementation_identity(policy)
     binding['qualification'] = QUALIFICATION
+    composed = composition(policy)
+    if composed:
+        binding['composition'] = composed
     return hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
@@ -325,6 +426,12 @@ def receipt(policy, model=None):
                  default_selected=False, publication_qualified=PUBLICATION_QUALIFIED,
                  apcv2_publication=('refused: ' + apc_refusal_reason(policy)) if ops else 'not affected',
                  identity_salt=identity_salt(policy), private_cache_profile=private_profile(policy))
+    if composition(policy):
+        value['composition'] = composition(policy)
+    combined = getattr(model, 'source_combined_private_profile', None)
+    if ops and combined is not None:
+        value['combined_private_cache_profile'] = combined
+        value['combined_identity_salt'] = getattr(model, 'source_combined_identity_salt', None)
     if policy.get(YOCO_KEY, 'off') != 'off':
         value['yoco'] = dict(policy=policy[YOCO_KEY], layers=policy[YOCO_LAYERS],
                              keep_rows=policy[YOCO_KEEP], min_prompt_rows=policy[YOCO_MIN_ROWS],
@@ -338,11 +445,15 @@ def receipt(policy, model=None):
                                    **({'margin': policy[ROUTE_MARGIN], 'margin_values_measured': False}
                                       if ROUTE_MARGIN in policy else {}),
                                    scope='B1 decode rows only; selection only; combine weights are original probabilities',
+                                   residency=('original cache, lease or reduced pool' if _reduced_tiers(policy)
+                                              else 'original cache or lease'),
                                    stats=None if bias is None else bias.receipt(),
                                    qualification=QUALIFICATION)
     if policy.get(DROP_KEY, 'off') != 'off':
         drop = getattr(model, 'source_route_drop', None)
-        value['route_drop'] = dict(policy=policy[DROP_KEY], layers=policy[DROP_LAYERS], count=policy[DROP_COUNT],
+        form = ({'spans': policy[DROP_SPANS]} if DROP_SPANS in policy
+                else {'layers': policy[DROP_LAYERS], 'count': policy[DROP_COUNT]})
+        value['route_drop'] = dict(policy=policy[DROP_KEY], **form,
                                    stats=None if drop is None else drop.receipt(),
                                    qualification=QUALIFICATION)
     return value
@@ -398,4 +509,4 @@ def configure_model(adapter):
         model.source_route_bias = ResidentRouteBias.from_policy(policy, adapter.weight_stream, model.args)
     if policy.get(DROP_KEY, 'off') != 'off':
         from .deepseek_v41_source_route_drop import RankDrop
-        model.source_route_drop = RankDrop.from_policy(policy)
+        model.source_route_drop = RankDrop.from_policy(policy, store=adapter.weight_stream)

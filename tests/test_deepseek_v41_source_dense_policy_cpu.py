@@ -46,7 +46,7 @@ def test_source_policy_choices_are_explicit_and_reference_default(key,tmp_path):
             policy['deepseek_source_expert_math']='routed_fused_fp32'
         if key=='deepseek_source_resident_prefill' and value!='reference':
             policy.update(deepseek_source_resident_gather='resident_bank_v1',deepseek_source_expert_math='routed_fused_fp32')
-        if key=='deepseek_source_resident_gather' and value!='reference':
+        if key in ('deepseek_source_resident_gather','deepseek_source_q2_tier_math') and value!='reference':
             policy['deepseek_source_expert_math']='routed_fused_fp32'
         if key=='deepseek_source_prefill_wide_math' and value!='reference':
             policy.update(deepseek_source_expert_math='routed_fused_fp32',deepseek_source_prefill_batch='gate_up')

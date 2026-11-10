@@ -114,9 +114,49 @@ def _manifest_binding(manifest):
     return digest.hexdigest(), size
 
 
-def read_native_file(root, relative, record):
-    """Read and verify one bounded file; no MLX work or retained mmap on workers."""
+# Content verification of reduced expert-bank files (Q1/Q2), the same law the
+# original Source shards use: hash each file's bytes once, then trust the
+# immutable stat seal (dev, ino, size, mtime_ns, ctime_ns) on later reads. The
+# key carries the path, admitted sha256 and the seal, so a replaced or touched
+# file never matches; every read still checks the seal before and after.
+_BANK_VERIFIED = set()
+_BANK_VERIFIED_LOCK = threading.Lock()
+BANK_READ_STATS = {"content_hashes": 0, "seal_verified_reads": 0}
+
+
+def _bank_seal_key(target, record):
+    seal = _seal(record)
+    return (str(target), record["sha256"], record["size"],
+            tuple(seal[k] for k in ("dev", "ino", "size", "mtime_ns", "ctime_ns")))
+
+
+def clear_bank_verification():
+    with _BANK_VERIFIED_LOCK:
+        _BANK_VERIFIED.clear()
+
+
+def read_sealed_bank_file(root, relative, record):
+    """One sealed reduced-bank safetensors file -> {name: host array}; one open.
+
+    The header is parsed from the same bytes (no second open). The SHA-256 is
+    computed on the first read of each (file, sha256, seal) and cached; later
+    reads skip it and rely on the stat seal checked on the descriptor before
+    and after the read and on the path afterwards. Fail-closed on any change.
+    """
+    if not isinstance(record.get("sha256"), str) or len(record["sha256"]) != 64:
+        raise ValueError("reduced bank record lacks its admitted sha256")
+    return read_native_file(root, relative, record, hash_once=True)
+
+
+def read_native_file(root, relative, record, *, hash_once=False):
+    """Read and verify one bounded file; no MLX work or retained mmap on workers.
+
+    Without ``header_bytes``/``tensors`` in ``record`` the safetensors header
+    is parsed from the bytes read (bounded) instead of compared to an admitted
+    layout. ``hash_once`` caches content verification by stat seal (banks).
+    """
     target = _verify_file(root, relative, record)
+    key = _bank_seal_key(target, record) if hash_once else None
     fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         if _stamp(os.fstat(fd)) != _seal(record):
@@ -126,20 +166,37 @@ def read_native_file(root, relative, record):
             fcntl.fcntl(fd, 48, 1)  # F_NOCACHE
             fcntl.fcntl(fd, 45, 0)  # F_RDAHEAD
         raw = read_page(fd, 0, record["size"], CHUNK_BYTES)
-        if (hashlib.sha256(memoryview(raw)).hexdigest() != record["sha256"]
-                or _stamp(os.fstat(fd)) != _seal(record)):
+        with _BANK_VERIFIED_LOCK:
+            verified = key is not None and key in _BANK_VERIFIED
+        if not verified:
+            if hashlib.sha256(memoryview(raw)).hexdigest() != record["sha256"]:
+                raise ValueError("native weight content differs from admitted hash")
+        if _stamp(os.fstat(fd)) != _seal(record):
             raise ValueError("native weight content differs from admitted hash")
         _verify_file(root, relative, record)
-        base = record["header_bytes"]
-        if (type(base) is not int or not 8 <= base <= min(record["size"], CHUNK_BYTES)
+        if key is not None:
+            with _BANK_VERIFIED_LOCK:
+                _BANK_VERIFIED.add(key)
+                BANK_READ_STATS["seal_verified_reads" if verified else "content_hashes"] += 1
+        admitted = "tensors" in record
+        base = record["header_bytes"] if admitted else (
+            int.from_bytes(raw[:8], "little")+8 if len(raw) >= 8 else None)
+        low, high = (8, CHUNK_BYTES) if admitted else (10, (1 << 20)+8)
+        if (type(base) is not int or not low <= base <= min(record["size"], high)
                 or int.from_bytes(raw[:8], "little")+8 != base):
             raise ValueError("invalid native safetensors header bound")
         header = json.loads(raw[8:base].tobytes())
+        if not isinstance(header, dict):
+            raise ValueError("invalid native safetensors header")
         header.pop("__metadata__", None)
-        if header != record["tensors"]:
+        if admitted and header != record["tensors"]:
             raise ValueError("native safetensors header differs from admitted layout")
         result, intervals = {}, []
         for name, row in header.items():
+            if not admitted and (not isinstance(row, dict) or set(row) != {"dtype", "shape", "data_offsets"}
+                    or not isinstance(row["shape"], list) or not isinstance(row["data_offsets"], list)
+                    or len(row["data_offsets"]) != 2):
+                raise ValueError("invalid native safetensors tensor row")
             dtype = _DTYPES.get(row["dtype"])
             shape, (first, last) = row["shape"], row["data_offsets"]
             if (dtype is None or any(type(n) is not int or n < 0 for n in shape)

@@ -17,10 +17,11 @@ import numpy as np
 
 from .deepseek_v41_source_artifact import checked_file, read_tensors
 from .deepseek_v41_source_weights import SourceExpertStore, weight_plan, expert_names, PROJECTIONS
-from .deepseek_v41_mlx_weights import _stamp, _verify_file, read_native_file
+from .deepseek_v41_mlx_weights import _stamp, _verify_file, read_sealed_bank_file
 from .deepseek_v41_source_buffers import read_original_packed, read_original_device, borrow_q1_packed, materialize
 from . import deepseek_v41_source_residency as residency
 from . import deepseek_v41_source_prefill_residency as prefill_residency
+from . import deepseek_v41_source_q1_on_miss as q1_on_miss
 
 REVISION = 'source-expert-lfu-token-frequency-v1'
 Q1_REVISION = 'source-q1-affine-g64-lloyd4-f16-v1'
@@ -48,7 +49,7 @@ RETENTION_POLICIES = ('lifetime_lfu', 'decayed_lfu_v1', 'cycle_aware_v1')
 def parse_policy(value, *, adaptive=True):
     """Validate the default adaptive profile or an explicit fixed-pool transition."""
     if type(adaptive)is not bool:raise ValueError('Source expert residency mode must be boolean')
-    if not isinstance(value,dict) or set(value)-{'mode','budget_bytes','hot_bytes','q1_root','hotset_path','atlas_path','preheat'}-residency.RESIDENCY_KEYS-RETENTION_KEYS-STREAM_KEYS:
+    if not isinstance(value,dict) or set(value)-{'mode','budget_bytes','hot_bytes','q1_root','hotset_path','atlas_path','preheat',*q1_on_miss.KEYS}-residency.RESIDENCY_KEYS-RETENTION_KEYS-STREAM_KEYS:
         raise ValueError('invalid Source expert LFU policy')
     result=dict(value)
     if result.get('retention', 'lifetime_lfu') not in RETENTION_POLICIES:
@@ -85,8 +86,11 @@ def parse_policy(value, *, adaptive=True):
         for key in ('q1_root','hotset_path'):
             if not isinstance(result.get(key),str) or not Path(result[key]).is_absolute():
                 raise ValueError('hybrid expert policy requires absolute Q1 and hotset paths')
-    elif set(result)-{'mode','budget_bytes','atlas_path','preheat','cache_maximum','live_reserve_bytes'}-RETENTION_KEYS-STREAM_KEYS:
+    elif set(result)-{'mode','budget_bytes','atlas_path','preheat','cache_maximum','live_reserve_bytes'}-RETENTION_KEYS-STREAM_KEYS-(
+            {'q1_root',*q1_on_miss.KEYS} if any(k in result for k in q1_on_miss.KEYS) else set()):
         raise ValueError('original-only LFU cannot accept Q1 options')
+    # Opt-in approximate Q1-on-miss (deepseek_v41_source_q1_on_miss.py).
+    q1_on_miss.validate_expert_policy(result)
     return result
 
 def _parse_stream_keys(result):
@@ -256,12 +260,8 @@ def load_q1_manifest(root,source):
     return root,records,digest
 
 def q1_read(root,record):
-    path=_verify_file(root,record['file'],record)
-    with path.open('rb') as f:
-        length=int.from_bytes(f.read(8),'little')
-        if not 2<=length<=1<<20:raise ValueError('Q1 header bound')
-        header=json.loads(f.read(length));header.pop('__metadata__',None)
-    result=read_native_file(root,record['file'],{**record,'header_bytes':length+8,'tensors':header})
+    # One open per read; content hashed once per file and stat seal, later reads stat-sealed.
+    result=read_sealed_bank_file(root,record['file'],record)
     expected={p+'.'+f for p in PROJECTIONS for f in ('qweight','scales','biases')}
     if set(result)!=expected or sum(v.nbytes for v in result.values())!=Q1_BYTES:raise ValueError('Q1 tensor inventory mismatch')
     for name,v in result.items():
@@ -311,6 +311,14 @@ class LFUSourceExpertStore(SourceExpertStore):
                 from .deepseek_v41_source_hotmap import provenance
                 self.hot_map_provenance=provenance(raw,hot,measured_sha256=HOT_MAP_SHA256,
                     source=self.binding,hot_budget_bytes=policy['hot_bytes'])
+            self.q1_on_miss=None
+            if any(k in policy for k in q1_on_miss.KEYS):
+                # Approximate, opt-in: a separate sealed bank; kind() stays
+                # 'original' and the original cache never holds Q1 objects.
+                self.q1_on_miss=q1_on_miss.Q1OnMiss.from_policy(policy,source_binding=self.binding,layers=len(self.tables),
+                                                                budget_bytes=self.cache_budget_bytes)
+                self.stats.update(q1_on_miss_reads=0,q1_on_miss_bytes_read=0)
+                self._carve_q1_pool()
             self.atlas_path=Path(policy['atlas_path']) if policy.get('atlas_path') else None
             if self.atlas_path:
                 atlas=read_atlas(self.atlas_path,self.binding);self.index.clock=atlas['clock']
@@ -570,6 +578,10 @@ class LFUSourceExpertStore(SourceExpertStore):
             key=self.tables[prefix][expert];kind=self.kind(key)
             touched=getattr(self,'_cycle_touched',None)
             if touched is not None:touched.add(key)
+            rule=getattr(self,'q1_on_miss',None)
+            if rule is not None:
+                served=self._q1_on_miss_acquire(rule,key)
+                if served is not None:return served
             if kind=='original':
                 # Resolve every tensor on every acquire, then check each owning
                 # shard once. Fresh verification precedes BOTH hit branches;
@@ -637,6 +649,157 @@ class LFUSourceExpertStore(SourceExpertStore):
             collector=getattr(self,'_completion_collector',None)
             if collector is not None:collector(key)
             return arrays
+    # ---- Opt-in approximate q1_on_miss (deepseek_v41_source_q1_on_miss.py).
+    @contextmanager
+    def q1_on_miss_scope(self,prefix,values,scores):
+        """Arm one B1 decode MoE call; multi-row calls stay exact."""
+        rule=getattr(self,'q1_on_miss',None)
+        if rule is None or values.ndim!=2 or values.shape[0]!=1:
+            yield False;return
+        if not isinstance(scores,np.ndarray):
+            import mlx.core as mx
+            scores=np.array(scores.astype(mx.float32))
+        weights=np.asarray(scores,np.float64).reshape(-1)
+        with self._lock:
+            if prefix not in self.tables or weights.shape!=(values.shape[1],):
+                raise ValueError('q1_on_miss route geometry outside admitted layers')
+            # Identity-only guard for reduced leases still held in this window.
+            rule.served_ids={k:i for k,i in rule.served_ids.items()
+                             if k in self._leased and id(self._leased[k])==i}
+            rule.counted=set()
+            armed=rule.arm(self.tables[prefix][0][0],values.reshape(-1),weights)
+        try:
+            yield armed
+        finally:
+            with self._lock:rule.disarm()
+    def _carve_q1_pool(self):
+        """Reduced pools come out of the admitted TOTAL expert maximum."""
+        rule=self.q1_on_miss
+        if not rule.pools:return
+        total=self.cache_budget_bytes;original=total-rule.pool_capacity
+        if original<2*ORIGINAL_BYTES:
+            raise ValueError('reduced-tier pools leave no room for one original expert plus staging')
+        self.expert_cache_total_bytes=total
+        self.cache_budget_bytes=self.maximum_cache_bytes=original
+        self.payload_ceiling=original-ORIGINAL_BYTES
+    def adaptive_residency_update(self,*,incoming_bytes=0,measured_available_bytes=None,protected_bytes=None):
+        rule=getattr(self,'q1_on_miss',None)
+        if rule is None or not rule.pools or not getattr(self,'_adaptive_residency_enabled',False):
+            return super().adaptive_residency_update(incoming_bytes=incoming_bytes,
+                measured_available_bytes=measured_available_bytes,protected_bytes=protected_bytes)
+        with self._lock:
+            # Size the TOTAL (originals + reduced pools, pool bytes reclaimable)
+            # from live memory, then split it in the configured ratio. The
+            # original share goes through the ordinary update unchanged and
+            # every pool's per-layer targets scale by the same fraction.
+            available=measured_available_bytes
+            if available is None:
+                try:
+                    if self._adaptive_available is None:
+                        from ..runtime.os_memory import host_memory_snapshot
+                        host=host_memory_snapshot();available=None if host is None else host.available_bytes
+                    else:available=self._adaptive_available()
+                except Exception:
+                    available=None
+            known=type(available)is int and available>=0
+            protected=self._adaptive_protected_bytes if protected_bytes is None else protected_bytes
+            original_max=self.maximum_cache_bytes;total=original_max+rule.pool_capacity
+            original_target=original_max
+            passed=-1
+            if known and type(protected)is int and protected>=0:
+                headroom=max(self._adaptive_headroom,protected)
+                total_target=min(total,max(0,self._cache_bytes+rule.pool_live+available-headroom))
+                original_target=total_target*original_max//total
+                passed=max(0,original_target-self._cache_bytes+headroom)
+            super().adaptive_residency_update(incoming_bytes=incoming_bytes,measured_available_bytes=passed,
+                                              protected_bytes=protected_bytes)
+            fraction=min(self._adaptive_target,original_target)/original_max
+            evicted=rule.scale_pools(fraction,self._leased)
+            self._adaptive_last.update(measured_available_bytes=available if known else 0,availability_known=known,
+                expert_cache_total_maximum_bytes=total,original_cache_maximum_bytes=original_max,
+                reduced_pool_fraction=fraction,
+                reduced_pools={t:dict(capacity_bytes=p.capacity,target_bytes=sum(p.targets),live_bytes=p.live_bytes)
+                               for t,p in rule.pools.items()},reduced_pool_evicted_bytes=evicted)
+            return dict(self._adaptive_last)
+    def _upload_q2(self,key,raw,bank):
+        """Upload one Q2 expert at its bank's admitted size; the arrays carry the bank's format."""
+        import mlx.core as mx
+        self._pending_host[key]=raw
+        arrays=self._pending_uploads[key]=q1_on_miss.Q2Expert({name:mx.array(value) for name,value in raw.items()},
+                                                              q2_format=bank.q2_format)
+        mx.eval(list(arrays.values()))
+        if sum(v.nbytes for v in arrays.values())!=bank.size:raise ValueError('Q2 upload exceeded admitted bytes')
+        self._pending_host.pop(key)
+        return arrays
+    def _q1_on_miss_acquire(self,rule,key):
+        """Reduced/transient arrays for an armed non-resident expert, else None."""
+        weight=rule.candidate(key)
+        leased=self._leased.get(key)
+        reduced_lease=leased is not None and rule.served_ids.get(key)==id(leased)
+        if weight is None:
+            if reduced_lease:
+                raise ValueError('Q1-on-miss expert re-acquired outside its armed call')
+            return None
+        if reduced_lease:return leased
+        first=key not in rule.counted;rule.counted.add(key)
+        transient=getattr(self,'_prefill_transient',None)
+        resident=leased is not None or key in self._cache or (transient and key in transient)
+        if resident and leased is None and rule.strict_cap(key,weight):
+            # Strict precision cap: an unleased resident original does not override the
+            # requested reduced tier (a leased original is in use and still serves exact).
+            rule.stats['strict_cap_bypassed_resident']=rule.stats.get('strict_cap_bypassed_resident',0)+1
+            resident=False
+        if resident:
+            # Rule 1: a resident original always serves exact.
+            if first:
+                if rule.would_reduce(key,weight):rule.record_resident()
+                rule.count(key[0],'q4',weight)
+            return None
+        tier=rule.tier_for(key,weight)
+        if tier is None:
+            if first:rule.count(key[0],'q4',weight)
+            return None
+        if tier=='original_transient':
+            # Read/upload wall time per reduced-tier serve (the read is also in
+            # demand_wait_ns); transient originals are not cache misses.
+            started=time.perf_counter_ns()
+            raw=self._read_expert(key,*self._expert_read_job(key))
+            read=time.perf_counter_ns()
+            arrays=self._upload_expert(key,'original',ORIGINAL_BYTES,raw);del raw
+            rule.record_io('original_transient',read-started,time.perf_counter_ns()-read)
+            rule.record_transient(ORIGINAL_BYTES)
+            self.stats['bytes_read']+=ORIGINAL_BYTES;self.stats['uploaded_experts']+=1
+            if first:rule.count(key[0],'q4',weight)
+        else:
+            pool=rule.pools.get(tier)
+            arrays=pool.lookup(key) if pool is not None else None
+            if arrays is None:
+                bank=rule.banks[tier];record=bank.records[key]
+                started=time.perf_counter_ns()
+                if tier=='q1':
+                    raw=self._read_expert(key,q1_read,bank.root,record);read=time.perf_counter_ns()
+                    arrays=self._upload_expert(key,'q1',Q1_BYTES,raw);size=Q1_BYTES
+                else:
+                    raw=self._read_expert(key,q1_on_miss.q2_read,bank.root,record);read=time.perf_counter_ns()
+                    arrays=self._upload_q2(key,raw,bank);size=bank.size
+                del raw
+                rule.record_io(tier,read-started,time.perf_counter_ns()-read)
+                rule.record_read(tier,record['size'],size)
+                self.stats['q1_on_miss_reads']+=1;self.stats['q1_on_miss_bytes_read']+=record['size']
+                self.stats['bytes_read']+=record['size'];self.stats['uploaded_experts']+=1
+                if pool is not None:
+                    # LRU inside this tier's layer only: never evicts an original.
+                    pool.insert(key,arrays,size,self._leased)
+            rule.record_served(key,weight,tier)
+            if first:rule.count(key[0],tier,weight)
+        self._leased[key]=arrays;self._pending_uploads.pop(key,None)
+        rule.served[key]=arrays;rule.served_ids[key]=id(arrays)
+        collector=getattr(self,'_completion_collector',None)
+        if collector is not None:collector(key)
+        return arrays
+    def q2_tier_active(self,prefix):
+        rule=getattr(self,'q1_on_miss',None)
+        return rule is not None and prefix in self.tables and rule.q2_active_for(self.tables[prefix][0][0])
     # ---- Opt-in prefill_residency=protect_decode_v1
     # (provenance/deepseek-v41-source-prefill-residency.json).
     def _init_prefill_residency(self):
@@ -734,6 +897,8 @@ class LFUSourceExpertStore(SourceExpertStore):
         value=REVISION+':'+str(self.q1_binding)+':'+str(self.hot_binding)
         # Exact split pools and a live maximum change residency, not numerics.
         if self._dynamic():value+=':residency='+residency.RESIDENCY_DYNAMIC
+        rule=getattr(self,'q1_on_miss',None)
+        if rule is not None:value+=':'+rule.name+'='+rule.salt
         return value
     def identity_hot_binding(self):
         """Hot-map digest bound into the effective artifact identity.
@@ -948,9 +1113,41 @@ class LFUSourceExpertStore(SourceExpertStore):
         transient=getattr(self,'_prefill_transient',None) or {}
         return sum(getattr(v,'allocation_nbytes',None) or sum(a.nbytes for a in v.values())
                    for k,v in transient.items() if self._leased.get(k) is not v)
+    def _q1_pool_unleased_bytes(self):
+        """Reduced/transient objects the base live accounting does not see."""
+        rule=getattr(self,'q1_on_miss',None)
+        if rule is None:return 0
+        with self._lock:
+            packed=getattr(self,'packed_buffers',False)
+            held={id(v) for v in self._leased.values()}|{id(v) for v in self._pending_uploads.values()}
+            seen=set();total=0
+            # Pool objects not leased; plus, under packed accounting, leased
+            # reduced objects without a packed backing (Q2) that the base
+            # packed totals cannot see. Finished calls hold no refs here.
+            leased_unbacked=[(k,v) for k,v in self._leased.items() if packed and q1_on_miss.is_q2(v)]
+            for key,arrays in [*rule.tier_objects(),*leased_unbacked]:
+                if id(arrays) in seen:continue
+                seen.add(id(arrays))
+                if id(arrays) in held and (not packed or hasattr(arrays,'backing')):continue
+                total+=q1_on_miss.payload_bytes(arrays)
+            return total
     def live_bytes(self):
-        if not getattr(self,'packed_buffers',False):return super().live_bytes()+self._transient_unleased_bytes()
-        return self._packed_backing_totals()[1]+self._transient_unleased_bytes()+sum(len(t._cache)*t.row_bytes for t in self.ple_tables.values())
+        with self._lock:return self._live_bytes_locked()
+    def _live_bytes_locked(self):
+        if not getattr(self,'packed_buffers',False):return super().live_bytes()+self._transient_unleased_bytes()+self._q1_pool_unleased_bytes()
+        return self._packed_backing_totals()[1]+self._transient_unleased_bytes()+self._q1_pool_unleased_bytes()+sum(len(t._cache)*t.row_bytes for t in self.ple_tables.values())
+    def reserved_bytes(self):
+        value=super().reserved_bytes()
+        rule=getattr(self,'q1_on_miss',None)
+        if rule is not None and rule.pools and not self.adaptive_residency_enabled and not self._parked:
+            value+=rule.pool_capacity  # fixed reservation: the carved pools are part of the total
+        return value
+    def resume_reservation_bytes(self):
+        value=super().resume_reservation_bytes()
+        rule=getattr(self,'q1_on_miss',None)
+        if rule is not None and rule.pools and not self.adaptive_residency_enabled:
+            value+=rule.pool_capacity  # resume must re-reserve the carved pools too
+        return value
     resident_bytes=live_bytes
     def receipt(self):
         result=super().receipt()
@@ -979,6 +1176,13 @@ class LFUSourceExpertStore(SourceExpertStore):
         result['plan']['allocation']='global_byte_lfu'
         result['numeric_profile']='source_hot_original_cold_q1_g64' if self.q1_root else 'official_mxfp4_fp8'
         if self._dynamic():result['numeric_profile']='source_dynamic_precision_mxfp4_q1g64_v1'
+        rule=getattr(self,'q1_on_miss',None)
+        if rule is not None:
+            with self._lock:result['q1_on_miss']=rule.receipt()
+            if rule.pools:
+                result.update(expert_cache_total_maximum_bytes=self.expert_cache_total_bytes,
+                              original_cache_maximum_bytes=self.maximum_cache_bytes)
+            result['numeric_profile']='official_mxfp4_fp8+'+rule.name+'_approximate_unqualified'
         result.update(atlas_path=str(self.atlas_path) if self.atlas_path else None,atlas_known_experts=len(self.index.counts),atlas_persist_error=getattr(self,'atlas_persist_error',None),preheat=self.preheat_receipt)
         if getattr(self,'packed_buffers',False):
             backing_count,backing_bytes=self._packed_backing_totals()
@@ -1141,6 +1345,8 @@ class LFUSourceExpertStore(SourceExpertStore):
         if getattr(self,'_prefill_shield',None) is not None:self._release_prefill_shield()
         self._clear_prefill_transient()
         super().park();self.pool_bytes={'original':0,'q1':0}
+        if getattr(self,'q1_on_miss',None) is not None:
+            self.q1_on_miss.pool_clear();self.q1_on_miss.disarm();self.q1_on_miss.served_ids={}
         if self._dynamic():self._dyn_high=set()
         if hasattr(self,'_pre_evict_credit'):self._pre_evict_credit={'original':0,'q1':0}
         return self.receipt()

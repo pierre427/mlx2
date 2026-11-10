@@ -664,6 +664,8 @@ class SourceV41Weights(NativeV41Weights):
     dense_prefill_policy = shared_policy = dense_epilogue_policy = dense_pair_policy = "reference"
     # Opt-in fused-kernel lane (2026-11-08); set by the adapter after construction.
     source_shared_middle_policy = source_router_policy = "reference"
+    # Opt-in Q2 tier row law (deepseek_v41_source_q2_row.py); set by the adapter.
+    source_q2_tier_math = "reference"
     expert_math_policy = "reference"
 
     def __init__(self, artifact, *, expert_cache_bytes, expert_read_workers=2, expert_policy=None, admitted_bounds=None,
@@ -1559,6 +1561,20 @@ class SourceV41Weights(NativeV41Weights):
             if not isinstance(ffn_input_token,FfnInputToken):
                 raise ValueError('Source FFN input requires an explicit frame token')
             ffn_input_token.validate_routed_request(self,x,prefix)
+        stream=self.expert_stream
+        if len(x.shape)==2 and x.shape[0]==1 and callable(getattr(stream,'q2_tier_active',None)) and stream.q2_tier_active(prefix):
+            # Receipt split for tier rows: host wall time of the call (acquires,
+            # reads, uploads and graph building; GPU work is lazy and excluded)
+            # against the demand-read wait inside it.
+            counts=self.scheduled_expert_calls
+            started=time.perf_counter_ns();wait=stream.stats.get('demand_wait_ns',0)
+            try:
+                return self._moe_routes(x,ids,scores,prefix,np.asarray(ids),ffn_input_token=ffn_input_token)
+            finally:
+                counts['source_q2_tier_b1_calls']=counts.get('source_q2_tier_b1_calls',0)+1
+                counts['source_q2_tier_b1_host_ns']=counts.get('source_q2_tier_b1_host_ns',0)+time.perf_counter_ns()-started
+                counts['source_q2_tier_b1_demand_wait_ns']=(counts.get('source_q2_tier_b1_demand_wait_ns',0)
+                    +stream.stats.get('demand_wait_ns',0)-wait)
         return self._moe_routes(x,ids,scores,prefix,np.asarray(ids),ffn_input_token=ffn_input_token)
 
     def _moe_routes(self, x, ids, scores, prefix, values, *, ffn_input_token=None):
@@ -1600,12 +1616,20 @@ class SourceV41Weights(NativeV41Weights):
             order = np.argsort(flat, kind="stable")
             sorted_ids = flat[order]
         fused_policy=self.expert_math_policy in ('epilogue_fused_fp32','routed_fused_fp32')
+        # Opt-in reduced tiers with a Q2 bank: a call may mix Q2 objects, which
+        # the fused batch/down kernels do not consume; use the per-expert path.
+        q2_tier=(values.shape[0]==1 and callable(getattr(self.expert_stream,'q2_tier_active',None))
+                 and self.expert_stream.q2_tier_active(prefix))
         fuse_down=(self.expert_math_policy=='routed_fused_fp32' and values.shape[0]==1
-                   and len(np.unique(flat))==values.shape[1] and not sequential)
+                   and len(np.unique(flat))==values.shape[1] and not sequential and not q2_tier)
         if sequential and sorted_ids is None:
             sorted_ids=flat[order]
         owned = not self.expert_stream._active
-        with self.expert_stream.window() if owned else nullcontext():
+        # Opt-in approximate q1_on_miss arms only B1 decode calls; inert (and
+        # never constructed) under every other policy.
+        q1_scope = (self.expert_stream.q1_on_miss_scope(prefix, values, scores)
+                    if getattr(self.expert_stream, 'q1_on_miss', None) is not None else nullcontext())
+        with (self.expert_stream.window() if owned else nullcontext()), q1_scope:
             parts = []
             down_inputs,down_experts,down_ids=[],[],[]
             rounded = lambda v: v.astype(mx.bfloat16).astype(mx.float32)
@@ -1651,11 +1675,61 @@ class SourceV41Weights(NativeV41Weights):
                     self.expert_stream.stats['lookups']+=1
                     if owned:mx.eval(output)
                     return output
+            # Opt-in deepseek_source_q2_tier_math=mixed_v1: packed experts of a
+            # tier row keep the fused batch path, Q2 experts run beside them and
+            # all occurrences meet in the ordered combine. A declined row reuses
+            # the acquired experts in the reference loop below.
+            # See deepseek_v41_source_q2_row.py.
+            pre_acquired=None
+            if q2_tier and getattr(self,'source_q2_tier_math','reference')!='reference':
+                if (self.expert_math_policy=='routed_fused_fp32' and not sequential
+                        and getattr(self.expert_stream,'packed_buffers',False)):
+                    from .deepseek_v41_source_q2_row import mixed_row
+                    pre_acquired={int(e):self.expert_stream.acquire(prefix,int(e)) for e in np.unique(sorted_ids)}
+                    output=mixed_row(all_selected,values,scores,order,pre_acquired,self.scheduled_expert_calls)
+                    if output is not None:
+                        policy='official_mxfp4_act32_'+self.expert_math_policy
+                        self.scheduled_expert_calls[policy]=self.scheduled_expert_calls.get(policy,0)+1
+                        self.expert_stream.stats['lookups']+=1
+                        if owned:mx.eval(output)
+                        return output
+                else:
+                    key='official_source_q2_mixed_declined_policy'
+                    self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
             for expert in np.unique(sorted_ids):
                 locations = order[sorted_ids == expert]
                 rows = mx.array(locations//values.shape[1], mx.uint32)
                 slots = mx.array(locations, mx.uint32)
-                data = self.expert_stream.acquire(prefix, int(expert))
+                data = (pre_acquired.pop(int(expert)) if pre_acquired is not None
+                        else self.expert_stream.acquire(prefix, int(expert)))
+                if getattr(data, 'source_tier', None) == 'q2':
+                    # MLX affine 2-bit (deepseek_v41_source_q1_on_miss.Q2Expert) at the bank's
+                    # group size; a rotated bank (W' = W H, block Hadamard over the input dim)
+                    # multiplies H x. Same QAT input, middle law and rounding as the original path.
+                    from .deepseek_v41_source_q1_on_miss import rotate_activation
+                    def q2(activation, kind, data=data):
+                        return mx.quantized_matmul(rotate_activation(activation, data.rotation),
+                            data[kind+'.q2weight'], data[kind+'.q2scales'], data[kind+'.q2biases'],
+                            transpose=True, group_size=data.group_size, bits=2).astype(mx.float32)
+                    selected = (quantize(x[rows], "fp8").astype(mx.float32)
+                                if all_selected is None else all_selected[rows])
+                    gate, up = q2(selected, 'gate'), q2(selected, 'up')
+                    if fused_policy:
+                        from ..runtime.gguf.source_middle_fusion import middle as fused_middle
+                        down_input = fused_middle(gate, up, scores.reshape(-1), slots)
+                    else:
+                        mid = rounded(limited_swiglu(rounded(gate), rounded(up))*scores.reshape(-1)[slots, None])
+                        down_input = quantize(mid, "fp8").astype(mx.float32)
+                    parts.append(rounded(q2(down_input, 'down')))
+                    key = 'official_source_q2_tier_experts'
+                    self.scheduled_expert_calls[key] = self.scheduled_expert_calls.get(key, 0)+1
+                    if data.rotation is not None:
+                        key = 'official_source_q2_rotated_experts'
+                        self.scheduled_expert_calls[key] = self.scheduled_expert_calls.get(key, 0)+1
+                    if sequential:
+                        self.expert_stream.release_completed_experts(((int(prefix.split('.')[1]),int(expert)),),roots=(parts[-1],))
+                        del data
+                    continue
                 def project(activation, kind):
                     if kind+'.biases' in data:
                         from ..runtime.gguf.source_q1 import matmul

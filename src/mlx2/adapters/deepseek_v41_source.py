@@ -85,6 +85,14 @@ SOURCE_POLICY_CHOICES = {
     # F32 every layer (~15.7 MB less traffic per layer). Gated by a one-time
     # bitwise check against the stock product. Counter: source_router_gemv.
     'deepseek_source_router': ('reference', 'bf16_coeff_gemv_v1'),
+    # Opt-in, implemented, CPU-equal and GPU-microbenched only (2026-11-09).
+    # mixed_v1: under reduced tiers with a Q2 bank, a B1 row keeps the fused
+    # batch gate/up + down kernels for its packed original/Q1 experts and runs
+    # Q2 experts beside them (rotated gate/up input formed once per row),
+    # instead of dropping the whole layer call to the per-expert loop. Same
+    # per-expert laws and ordered BF16/F32 combine. Requires routed_fused_fp32.
+    # Counters: official_source_q2_mixed_*. See deepseek_v41_source_q2_row.py.
+    'deepseek_source_q2_tier_math': ('reference', 'mixed_v1'),
     # Opt-in, default off, implemented_untested_unqualified (2026-11-08, CPU
     # equality only). key_chunked_v1: the indexer row tile is sized by the
     # head-reduced score row and the head scratch by key chunks, so long
@@ -213,6 +221,8 @@ def source_policy(value=None):
     if (source_options.get('deepseek_source_submission','reference')=='shared_first_v1'
             and source_options.get('deepseek_source_ffn_input','reference')!='reference'):
         raise ValueError('Source shared-first requires reference FFN input; routed/shared reuse consumes routed first')
+    from .deepseek_v41_source_q2_row import validate_policy as validate_q2_tier_math
+    validate_q2_tier_math(source_options.get('deepseek_source_q2_tier_math','reference'),expert_math=expert_math)
     from .deepseek_v41_source_shared_middle import validate_policy as validate_shared_middle
     validate_shared_middle(source_options.get('deepseek_source_shared_middle','reference'),
                            dense_qat=source_options.get('deepseek_source_dense_qat','reference'))
@@ -307,6 +317,8 @@ def source_policy(value=None):
     validate_prefill_readahead(result)
     from .deepseek_v41_source_approx import validate_policy as validate_approximate
     result.update(validate_approximate(approximate,result))
+    from .deepseek_v41_source_q1_on_miss import validate_combination as validate_q1_on_miss
+    validate_q1_on_miss(result)  # opt-in approximate deepseek_source_experts.q1_on_miss
     return result
 
 
@@ -485,6 +497,10 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             from ..runtime.gguf.source_router_gemv import POLICY, implementation_identity
             self.numerics_revision += ':source_router='+POLICY+':implementation='+implementation_identity()
             self.profile += ':router-'+hashlib.sha256(self.numerics_revision.encode()).hexdigest()[:16]
+        if self.kernel_policy.get('deepseek_source_q2_tier_math','reference')!='reference':
+            from .deepseek_v41_source_q2_row import REVISION, implementation_identity
+            self.numerics_revision += ':source_q2_tier_math='+REVISION+':implementation='+implementation_identity()
+            self.profile += ':q2row-'+hashlib.sha256(self.numerics_revision.encode()).hexdigest()[:16]
 
     def _bind_short_attention_identity(self):
         selected=self.kernel_policy.get('deepseek_source_attention_math','reference')
@@ -630,6 +646,7 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             prefill_readahead_policy=self.kernel_policy.get('deepseek_source_prefill_readahead','reference'))
         self.weights.source_shared_middle_policy=self.kernel_policy.get('deepseek_source_shared_middle','reference')
         self.weights.source_router_policy=self.kernel_policy.get('deepseek_source_router','reference')
+        self.weights.source_q2_tier_math=self.kernel_policy.get('deepseek_source_q2_tier_math','reference')
         self.weight_stream = self.weights.expert_stream
         from ..memory import host_available_bytes
         self.weight_stream.configure_adaptive_residency(
@@ -690,6 +707,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         self._bind_batched_tree_identity()
         from .deepseek_v41_source_approx import bind_identity as bind_approximate_identity
         bind_approximate_identity(self)  # no-op unless an approximate operation is selected
+        from .deepseek_v41_source_q1_on_miss import bind_identity as bind_q1_on_miss_identity
+        bind_q1_on_miss_identity(self)  # no-op unless deepseek_source_experts.q1_on_miss is selected
         if self.kernel_policy.get('deepseek_verify_rows','serial')=='lockstep_multirow_v1':
             from .deepseek_v41_dspark_chain import POLICY, implementation_identity
             self.numerics_revision+=':verify_rows='+POLICY+':implementation='+implementation_identity()
@@ -726,6 +745,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             model_type=layer_major_model_class()
         from .deepseek_v41_source_approx import approximate_model_class
         model_type=approximate_model_class(model_type,self.kernel_policy)
+        from .deepseek_v41_source_q1_on_miss import model_class as q1_on_miss_model_class
+        model_type=q1_on_miss_model_class(model_type,self.kernel_policy)
         self.model = model_type(args, self.weights, identity=binding, hasher=EngramHasher(self.metadata), engram_tables=self.engram_tables,
             hc_policy=self.kernel_policy["deepseek_hc"], qat_policy=self.kernel_policy["deepseek_qat"],
             hc_coeff_policy=('source_fused_fp32' if self.kernel_policy.get('deepseek_source_hc_coefficients','reference')=='fused_fp32' else 'reference'),
@@ -748,6 +769,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
                 self.model.recommended_prefill_rows, self.weights.source_prefill_grid_rows)
         from .deepseek_v41_source_approx import configure_model as configure_approximate
         configure_approximate(self)
+        from .deepseek_v41_source_q1_on_miss import configure_model as configure_q1_on_miss
+        configure_q1_on_miss(self)
         self.model.verification_commit_policy = self.kernel_policy["deepseek_verify_commit"]
         self.model.verify_rows_policy = self.kernel_policy["deepseek_verify_rows"]
         # Opt-in lockstep MoE site (deepseek_v41_dspark_chain_moe); default reference.
@@ -955,8 +978,11 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         if wave or yoco:
             result['prefill_step_size'] = prefill_step
         selected=self.kernel_policy.get('deepseek_source_prefill_partition','adaptive_v1')
+        from .deepseek_v41_source_q1_on_miss import apc_refusal_reason as q1_on_miss_refusal
         if apc_refusal_reason(self.kernel_policy) is not None:
             result['apcv2_reuse_disabled_reason'] = apc_refusal_reason(self.kernel_policy)
+        elif q1_on_miss_refusal(self.kernel_policy) is not None:
+            result['apcv2_reuse_disabled_reason'] = q1_on_miss_refusal(self.kernel_policy)
         elif self._source_dynamic_precision():
             from .deepseek_v41_source_residency import DYNAMIC_APC_REASON
             result['apcv2_reuse_disabled_reason'] = DYNAMIC_APC_REASON
@@ -992,6 +1018,9 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         from .deepseek_v41_source_approx import apc_refusal_reason
         if apc_refusal_reason(self.kernel_policy) is not None:
             return apc_refusal_reason(self.kernel_policy)
+        from .deepseek_v41_source_q1_on_miss import apc_refusal_reason as q1_on_miss_refusal
+        if q1_on_miss_refusal(self.kernel_policy) is not None:
+            return q1_on_miss_refusal(self.kernel_policy)
         if self._source_dynamic_precision():
             from .deepseek_v41_source_residency import DYNAMIC_APC_REASON
             return DYNAMIC_APC_REASON
@@ -1166,4 +1195,15 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         if selected_operations(self.kernel_policy):
             value['approximate_state']=True
             value['numerical_scope']+='; APPROXIMATE '+'+'.join(selected_operations(self.kernel_policy))+' (opt-in, salted identity, APCv2 publication refused); unqualified'
+        from .deepseek_v41_source_q1_on_miss import (apc_refusal_reason as q1_on_miss_refusal,
+            diagnostics as q1_on_miss_diagnostics, mode_of as q1_on_miss_mode)
+        value['source_q1_on_miss']=q1_on_miss_diagnostics(self)
+        reduced=q1_on_miss_mode(self.kernel_policy)
+        if reduced is not None:
+            value['approximate_state']=True
+            value['source_memory']['apcv2_reuse']='disabled: '+q1_on_miss_refusal(self.kernel_policy)
+            value['expert_storage']=('original E2M1/E8M0 group32; B1 decode selections served from sealed reduced '
+                                     'banks (Q1 affine g64'+(', Q2 MLX affine g64' if reduced=='tiers' else '')
+                                     +') per deepseek_source_experts.'+reduced+'; per-layer LRU pools carved from the total')
+            value['numerical_scope']+='; APPROXIMATE '+reduced+' (opt-in, salted identity, APCv2 publication refused); unqualified'
         return value

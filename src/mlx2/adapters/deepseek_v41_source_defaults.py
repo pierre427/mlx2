@@ -98,6 +98,9 @@ def default_route_policy_applies(route,operator_policy):
     expert=operator_policy.get('deepseek_source_experts')
     if type(expert)is not dict or expert.get('mode')not in ('original_lfu','hot_original_q1'):return False
     if expert['mode']=='original_lfu':
+        # q1_on_miss substitutes Q1 codes for some decode misses: an
+        # approximate profile outside the measured exact-original evidence.
+        if 'q1_on_miss' in expert or 'tiers' in expert:return False
         # Exact original MXFP4 codes (Pierre 2026-11-08, "yes as long as it's
         # not a regression"): on c30fd25e at c18fef602 the bundle decoded the
         # 18-prompt held-out replay at 2.42 vs 1.72 tok/s with 18/18 identical

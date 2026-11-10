@@ -94,7 +94,7 @@ def oracles(gsm8k_rows=None):
         "translate-6": ("English, keeps Munich/fifty minutes/signal", lambda r: _keywords(
             r, [["munich"], ["fifty minutes", "50 minutes"], ["signal"], ["late", "delay"]])),
         "translate-7": ("Portuguese, keeps library/hours/exam", lambda r: _keywords(
-            r, [["biblioteca"], ["horário", "horario"], ["exame"]])),
+            r, [["biblioteca"], ["horário", "horario"], ["exame", "prova"]])),
         "extract-6": ("summary keeps solar/battery/gas", lambda r: _keywords(
             r, [["solar"], ["batter", "storage"], ["gas"]])),
         "extract-7": ("valid YAML with all fields", _yaml_maple),
@@ -296,7 +296,13 @@ def summarize(out, arm_names, oracle_table):
                 ok = bok = True
                 desc += " (n/a: baseline hit max_tokens)"
             c = compare(base[pid]["tokens"], r["tokens"], bok, ok)
-            c.update(oracle=desc, oracle_pass=None if truncated else ok, decode_tok_s=r["decode_tok_s"])
+            # Behaviour drift the content oracles miss (2026-11-08: keep-top-1 kept facts but
+            # stopped stopping): the baseline stopped and the arm ran to max_tokens, or the arm
+            # is more than twice as long.
+            bt, at = base[pid].get("completion_tokens") or 0, r.get("completion_tokens") or 0
+            runaway = (base[pid].get("finish") == "stop" and (r.get("finish") == "length" or at > 2 * bt + 8))
+            c.update(oracle=desc, oracle_pass=None if truncated else ok, decode_tok_s=r["decode_tok_s"],
+                     runaway=bool(runaway), tokens_vs_base=[at, bt])
             per[pid] = c
             misses += r["experts"]["v41_expert_cache_misses"]; wait += r["experts"]["v41_expert_demand_wait_ns"]
             toks += r.get("completion_tokens") or 0; dec.append(r["decode_tok_s"])
@@ -304,14 +310,14 @@ def summarize(out, arm_names, oracle_table):
         rows.append({"arm": name, "per_prompt": per,
                      "identical": classes.count("identical"), "near_tie": classes.count("near_tie_equivalent"),
                      "diverged_pass": classes.count("diverged_pass"), "diverged_fail": classes.count("diverged_fail"),
-                     "failed": classes.count("failed"), "oracle_pass": sum(1 for v in per.values() if v["oracle_pass"]),
+                     "failed": classes.count("failed"), "runaway": sum(1 for v in per.values() if v.get("runaway")), "oracle_pass": sum(1 for v in per.values() if v["oracle_pass"]),
                      "prompts": sum(1 for v in per.values() if v["oracle_pass"] is not None), "expert_misses": misses, "demand_wait_s": round(wait / 1e9, 1),
                      "completion_tokens": toks, "median_decode_tok_s": sorted(dec)[len(dec) // 2] if dec else None})
     _write(out / "summary.json", rows)
-    head = "| arm | identical | near-tie | diverged (pass) | diverged (FAIL) | oracle pass | misses | wait s | decode tok/s |"
-    lines = [head, "|" + "---|" * 9]
+    head = "| arm | identical | near-tie | diverged (pass) | diverged (FAIL) | runaway | oracle pass | misses | wait s | decode tok/s |"
+    lines = [head, "|" + "---|" * 10]
     for r in rows:
-        lines.append(f"| {r['arm']} | {r['identical']} | {r['near_tie']} | {r['diverged_pass']} | {r['diverged_fail'] + r['failed']} "
+        lines.append(f"| {r['arm']} | {r['identical']} | {r['near_tie']} | {r['diverged_pass']} | {r['diverged_fail'] + r['failed']} | {r['runaway']} "
                      f"| {r['oracle_pass']}/{r['prompts']} | {r['expert_misses']} | {r['demand_wait_s']} | {r['median_decode_tok_s']} |")
     (out / "summary.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
