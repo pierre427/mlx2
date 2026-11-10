@@ -41,7 +41,7 @@ from .serving import (
     take_prompt_progress,
 )
 from .power_governor import PowerSignalUnavailable
-from .usage import UsageLimitExceeded, UsageReloadBusy, metered_pooled
+from .usage import OPERATOR_TENANT, RESERVED_TENANTS, UsageLimitExceeded, UsageReloadBusy, metered_pooled
 from .generation_timeout import (
     DEFAULT_GENERATION_EVENT_TIMEOUT_SECONDS, validate_generation_event_timeout,
 )
@@ -272,13 +272,13 @@ USAGE_REQUIRES_TENANT_AUTH = (
 
 def validate_usage_admin_body(body):
     """``{"tenant": id|null, "ledger": view|accounting|all}`` for admin usage."""
-    from .usage import LEDGERS, OVERFLOW_TENANT
+    from .usage import LEDGERS, OPERATOR_TENANT, OVERFLOW_TENANT
     from .tenant_auth import validate_tenant
 
     if not isinstance(body, dict) or set(body) - {"tenant", "ledger"}:
         raise ValueError("usage admin body accepts only tenant and ledger")
     tenant = body.get("tenant")
-    if tenant is not None and tenant != OVERFLOW_TENANT:
+    if tenant is not None and tenant not in (OVERFLOW_TENANT, OPERATOR_TENANT):
         validate_tenant(tenant)
     ledger = body.get("ledger", "all")
     if ledger not in LEDGERS + ("all",):
@@ -2871,7 +2871,14 @@ def handler_for(
             """Bind ``self._tenant_id`` for this request; False = refused."""
             self._tenant_auth_method = None
             if tenant_authenticator is None:
-                self._tenant_id = self.headers.get("X-Tenant-ID", "default")
+                claimed = self.headers.get("X-Tenant-ID", "default")
+                if claimed in RESERVED_TENANTS:
+                    # The operator and overflow books are not addressable by a
+                    # client header, even without tenant auth.
+                    self.close_connection = True
+                    self.api_error(400, f"X-Tenant-ID {claimed!r} is reserved")
+                    return False
+                self._tenant_id = claimed
                 return True
             self._tenant_id = None
             if path in TENANT_AUTH_OPEN_PATHS or (
@@ -3990,18 +3997,27 @@ def handler_for(
                 from .experimental.weight_space.residual_ablation import OverlayBindingError
                 from .runtime.residual_ablation_overlays import OverlayNotLoaded
                 try:
+                    # Authenticate before reading the body (Pierre 2026-11-06,
+                    # L1): the presented bearer, not the body, decides whether
+                    # this is an operator preview, so an unauthenticated
+                    # client cannot force a 4 MB parse and gets 401, not 400.
+                    # This route sits above do_POST's general tenant gate.
+                    operator = admin_token is not None and authorize_admin(
+                        self.client_address[0], self.headers.get("Authorization"), admin_token
+                    ) is None
+                    if operator:
+                        # L2: never share a real tenant's APC namespace or usage.
+                        self._tenant_id = OPERATOR_TENANT
+                    elif not self._authenticate_tenant(path):
+                        return
                     body = self._read_json_body(max_bytes=4 * 1024 * 1024)
                     selection = body.get("mlx2_overlay") if isinstance(body, dict) else None
                     ad_hoc = isinstance(selection, dict) and "parameters" in selection
-                    if ad_hoc and admin_token is None:
-                        self.api_error(403, "ad-hoc overlay previews require --admin-token-file")
-                        return
-                    if ad_hoc and not self._authorize_admin():
-                        return
-                    # A named-overlay preview is tenant generation: bind and
-                    # verify the tenant before submitting (this route sits
-                    # above do_POST's general tenant gate).
-                    if not ad_hoc and not self._authenticate_tenant(path):
+                    if ad_hoc and not operator:
+                        if admin_token is None:
+                            self.api_error(403, "ad-hoc overlay previews require --admin-token-file")
+                        else:
+                            self._authorize_admin()  # answers the 401/403
                         return
                     self.send_json(200, overlay_preview(engine, body, tenant_id=self._tenant_id,
                                                         ad_hoc_allowed=ad_hoc))

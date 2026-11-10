@@ -348,3 +348,70 @@ def test_pixels_round_like_the_publisher_postprocess():
     np.testing.assert_array_equal(
         np.asarray(image), (levels + 1).astype(np.uint8).reshape(16, 16, 3)
     )
+
+
+def test_hoisted_cfg_conditioning_is_byte_identical():
+    """sglang#48688 port: one timestep conditioning per step and one text
+    embedding per branch give the same bytes as recomputing them per call."""
+    mx = pytest.importorskip("mlx.core")
+    from mlx2.adapters.moss_image_transformer import MOSSImageTransformer
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        mx.random.seed(3)
+        model = MOSSImageTransformer({
+            "dim": 64, "ffn_dim": 128, "num_heads": 4, "latent_channels": 8,
+            "text_dim": 32, "freq_dim": 32, "num_layers": 3, "rope_base": 10000.0,
+        })
+        latents = mx.random.normal((1, 4, 6, 8))
+        positive = mx.random.normal((5, 32))
+        negative = mx.random.normal((3, 32))
+        positive_memo, negative_memo = {}, {}
+        for timestep in (999.0, 640.0, 120.0):
+            conditioning = model.conditioning(timestep)
+            for context, memo, skip in ((positive, positive_memo, ()), (negative, negative_memo, (1,))):
+                want = model(latents, timestep, context, skip_layers=skip)
+                got = model(latents, timestep, context, skip_layers=skip,
+                            conditioning=conditioning, context_memo=memo)
+                np.testing.assert_array_equal(np.array(got), np.array(want))
+            latents = latents * 0.9
+        assert positive_memo["context"] is positive and negative_memo["context"] is negative
+    finally:
+        mx.set_default_device(previous)
+
+
+@pytest.mark.parametrize("flag,hoisted", [("0", False), ("1", True), (None, True)])
+def test_cfg_hoist_is_default_on_and_can_be_disabled(monkeypatch, flag, hoisted):
+    mx = pytest.importorskip("mlx.core")
+    pytest.importorskip("torch")
+    from types import SimpleNamespace
+
+    from mlx2.adapters.moss_image_pipeline import MOSSImagePipeline
+
+    if flag is None:
+        monkeypatch.delenv("MLX2_MOSS_CFG_HOIST", raising=False)
+    else:
+        monkeypatch.setenv("MLX2_MOSS_CFG_HOIST", flag)
+    seen = []
+
+    class Transformer:
+        def conditioning(self, timestep):
+            return ("c", timestep)
+
+        def __call__(self, latents, timestep, context, *, skip_layers=(), conditioning=None,
+                     context_memo=None):
+            seen.append((conditioning is not None, context_memo is not None))
+            return mx.zeros_like(latents)
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        pipeline = object.__new__(MOSSImagePipeline)
+        pipeline.text_encoder = SimpleNamespace(encode=lambda _p: mx.zeros((4, 8)))
+        pipeline.transformer = Transformer()
+        pipeline.vae = SimpleNamespace(decode=lambda latents: mx.zeros((1, 16, 16, 3)))
+        pipeline.generate("a teapot", width=16, height=16, steps=2, seed=0, guidance_scale=3.0)
+    finally:
+        mx.set_default_device(previous)
+    assert seen and all(entry == (hoisted, hoisted) for entry in seen)

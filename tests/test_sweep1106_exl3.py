@@ -139,3 +139,45 @@ def test_probe_reference_arm_keeps_the_resident_choice(tmp_path):
                             capture_output=True, text=True, check=True).stdout
     assert "--resident-dense" in parsed
     json.dumps(probe.execution_policy(args))
+
+
+def test_shared_expert_counter_snapshot_restores_every_integer_counter():
+    """EXL3-6: a late dtype decline must leave shared-MLP counters as they were."""
+    from mlx2.runtime.models import exl3
+
+    class Proj(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls, self.rows, self.flag = 0, 0, True
+
+    class Shared(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj, self.down_proj = Proj(), Proj()
+            self.fused_calls = 0
+
+    shared, gate = Shared(), Proj()
+    saved = exl3._int_counters(shared, gate)
+    for module in (shared.gate_proj, shared.down_proj, gate):
+        object.__setattr__(module, "calls", module.calls + 1)
+        object.__setattr__(module, "rows", module.rows + 4)
+    object.__setattr__(shared, "fused_calls", 1)
+    for module, name, value in saved:
+        object.__setattr__(module, name, value)
+    assert (shared.fused_calls, shared.gate_proj.calls, shared.down_proj.rows, gate.calls) == (0, 0, 0, 0)
+    assert shared.gate_proj.flag is True  # non-integer state is never captured
+
+
+@pytest.mark.parametrize("law", exl3.Exl3DenseLinear.LAWS)
+@pytest.mark.parametrize("bias", [False, True])
+def test_dense_linear_accepts_an_empty_batch(law, bias):
+    """EXL3-5: a zero-row call reached the launch loop with no parts and raised."""
+    rng = np.random.default_rng(5)
+    linear = exl3.Exl3DenseLinear(**_dense_tensors(rng, 128, 128, 32, bias=bias), law=law)
+    linear.eval()
+    for shape in ((0, 128), (2, 0, 128)):
+        out = linear(mx.zeros(shape, mx.float16))
+        assert out.shape == (*shape[:-1], 128) and out.dtype == mx.float16
+    assert linear.calls == 0
+    nonempty = linear(mx.array(rng.normal(size=(3, 128)).astype(np.float16)))
+    assert nonempty.shape == (3, 128) and linear.calls == 1

@@ -23,9 +23,33 @@ every block above the threshold and may differ only among exact ties.
 
 from __future__ import annotations
 
+import re
+from functools import cache
+
 import mlx.core as mx
 
-TG = 1024
+# Threads per query-row threadgroup (Pierre 2026-11-06: device-dependent).
+# On M1 a register-heavy pipeline allows only 768 (TensorFold #704/#715), and
+# 1024 is measured only on M5-class (applegpu_g17+) parts, so every other or
+# unknown device gets the floor.  The kernel is generic in TG (any multiple of
+# 32 up to 1024) and its output does not depend on it: the radix threshold is
+# exact and ties resolve to the lowest block ids whatever the tile width.
+TG_M5 = 1024
+TG_FLOOR = 768
+
+
+def select_threadgroup(architecture: str) -> int:
+    match = re.match(r"applegpu_g(\d+)", architecture or "")
+    return TG_M5 if match and int(match.group(1)) >= 17 else TG_FLOOR
+
+
+@cache
+def _device_threadgroup() -> int:
+    try:
+        # The GPU's own info: the default device may be the CPU (tests, tools).
+        return select_threadgroup(str(mx.device_info(mx.gpu).get("architecture", "")))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return TG_FLOOR
 
 _SOURCE = """
     const uint row  = threadgroup_position_in_grid.x;
@@ -150,7 +174,7 @@ def _kernel():
 
 
 def fused_select(queries: mx.array, blocks: mx.array, q_pos: mx.array, topk: int,
-                 *, q_chunk: int = 512):
+                 *, q_chunk: int = 512, threadgroup: int | None = None):
     """Top-``topk`` blocks per query, sorted ascending and prefix-packed.
 
     ``queries`` [H, L, D] and ``blocks`` [n_blocks, D] (float32); ``q_pos`` [L]
@@ -160,6 +184,9 @@ def fused_select(queries: mx.array, blocks: mx.array, q_pos: mx.array, topk: int
     (heads, length, _) = queries.shape
     n_blocks = int(blocks.shape[0])
     kernel = _kernel()
+    tg = _device_threadgroup() if threadgroup is None else int(threadgroup)
+    if tg % 32 or not 32 <= tg <= 1024:
+        raise ValueError("fused_select threadgroup must be a multiple of 32 in 32..1024")
     kb_t = blocks.T
     ids_parts, count_parts = [], []
     for start in range(0, length, q_chunk):
@@ -168,9 +195,9 @@ def fused_select(queries: mx.array, blocks: mx.array, q_pos: mx.array, topk: int
         (ids, counts, _) = kernel(
             inputs=[dots, q_pos[start:start + rows].astype(mx.int32),
                     mx.array([rows, n_blocks, topk], dtype=mx.uint32)],
-            template=[("H", heads), ("TG", TG)],
-            grid=(TG * rows, 1, 1),
-            threadgroup=(TG, 1, 1),
+            template=[("H", heads), ("TG", tg)],
+            grid=(tg * rows, 1, 1),
+            threadgroup=(tg, 1, 1),
             output_shapes=[(rows, topk), (rows,), (rows, n_blocks)],
             output_dtypes=[mx.uint32, mx.uint32, mx.uint32],
         )

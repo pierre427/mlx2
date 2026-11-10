@@ -7566,6 +7566,8 @@ class ServingEngine(KernelReloadMixin):
     def status(self):
         from .runtime.models import qsdpa_verify_metal as qvm
         from .runtime.models import qsdpa_decode_metal as qdm
+        from .runtime.models.cache import rows_attention_status as _rows_attention_status
+        from .runtime.models.standard_decoder import tail_row_status as _tail_row_status
         from .runtime.models import fp_verify_tensor as fpv
 
         receipts = self.recent_receipts()
@@ -7664,6 +7666,8 @@ class ServingEngine(KernelReloadMixin):
                 },
                 "fp_decode_attention": qdm.fp_decode_status(),
                 "fp_verify_attention": fpv.status(),
+                "batch_rows_attention": _rows_attention_status(),
+                "prefill_tail_row": _tail_row_status(),
                 "recent_receipts": receipts,
                 **({"checkpoint_resources": self._last_checkpoint_resource_receipt}
                    if hasattr(self, "_last_checkpoint_resource_receipt") else {}),
@@ -11280,6 +11284,11 @@ class ServingEngine(KernelReloadMixin):
             from .runtime.models import fp_verify_tensor as fpv
             if fpv.status()['selected']:
                 settings['fp_verify_attention']={'enabled':True,'version':fpv.VERSION}
+            _batch_attention = os.environ.get('MLX_LM_BATCH_ATTENTION_BACKEND', 'sdpa').strip().lower()
+            if _batch_attention in ('rows', 'rows_masked'):
+                # Per-row batch-1 decode SDPA (omlx#5090) is its own reduction
+                # geometry at width > 1; keep its APCv2 state apart.
+                settings['batch_rows_attention'] = {'enabled': True, 'mode': _batch_attention, 'version': 1}
             if os.environ.get('MLX2_INPASS_CHECKPOINTS')=='1':
                 settings['inpass_checkpoints']={'enabled':True,'version':'qwen38-gdn-projection-share-v1'}
             if self.approximate_kv_policy.enabled:

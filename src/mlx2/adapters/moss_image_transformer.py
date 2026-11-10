@@ -191,8 +191,27 @@ class MOSSImageTransformer(nn.Module):
         )
         return self.time_embedding[2](nn.silu(value))
 
-    def __call__(self, latents, timestep, context, *, skip_layers=()):
-        """Run one B=1 DiT forward over NHWC latent state and unpadded context."""
+    def conditioning(self, timestep):
+        """Timestep-only state (sglang#48688): shared by a step's CFG passes."""
+        time = self._time(timestep).astype(mx.float32)
+        modulation = self.shared_block_modulation(
+            time.astype(_linear_input_dtype(self.shared_block_modulation))
+        ).reshape(6, -1)
+        head = self.video_head_modulation(
+            time.astype(_linear_input_dtype(self.video_head_modulation))
+        ).reshape(2, -1)
+        return modulation, head
+
+    def __call__(self, latents, timestep, context, *, skip_layers=(),
+                 conditioning=None, context_memo=None):
+        """Run one B=1 DiT forward over NHWC latent state and unpadded context.
+
+        ``conditioning`` (from ``conditioning(timestep)``) reuses a step's
+        timestep state across its CFG passes.  ``context_memo`` (a dict owned
+        by one generate call and one context) keeps the latent-independent
+        rope and text-embedder output after the first forward.  Both are the
+        same ops at the same shapes and dtypes, so outputs are byte-identical.
+        """
         if latents.ndim != 4 or latents.shape[0] != 1:
             raise ValueError("MOSS-Image native execution requires B=1 NHWC latents")
         if context.ndim != 2 or context.shape[-1] != int(self.config["text_dim"]):
@@ -208,23 +227,23 @@ class MOSSImageTransformer(nn.Module):
             for index in skipped
         ):
             raise ValueError("skip_layers contains an invalid block index")
-        time = self._time(timestep).astype(mx.float32)
-        modulation = self.shared_block_modulation(
-            time.astype(_linear_input_dtype(self.shared_block_modulation))
-        ).reshape(6, -1)
-        head = self.video_head_modulation(
-            time.astype(_linear_input_dtype(self.video_head_modulation))
-        ).reshape(2, -1)
+        modulation, head = conditioning if conditioning is not None else self.conditioning(timestep)
         video = latents.reshape(-1, latents.shape[-1])
         video = self.video_embedder(video.astype(_linear_input_dtype(self.video_embedder)))
-        rope = rotary_embedding(
-            height,
-            width,
-            context.shape[0],
-            int(self.config["dim"]) // int(self.config["num_heads"]),
-            float(self.config.get("rope_base", 10000.0)),
-        ).astype(video.dtype)
-        text = self.text_embedder(context, rope[height * width :])
+        key = (id(context), height, width, int(context.shape[0]), video.dtype)
+        if context_memo is not None and context_memo.get("key") == key:
+            rope, text = context_memo["rope"], context_memo["text"]
+        else:
+            rope = rotary_embedding(
+                height,
+                width,
+                context.shape[0],
+                int(self.config["dim"]) // int(self.config["num_heads"]),
+                float(self.config.get("rope_base", 10000.0)),
+            ).astype(video.dtype)
+            text = self.text_embedder(context, rope[height * width :])
+            if context_memo is not None:
+                context_memo.update(key=key, rope=rope, text=text, context=context)
         hidden = mx.concatenate((video, text), axis=0)
         for index, layer in enumerate(self.layers):
             if index not in skipped:

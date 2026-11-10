@@ -101,3 +101,36 @@ def test_kernel_bench_baseline_arms_pin_law_v1(monkeypatch):
     for arm in ("A0k", "A1k"):
         bench.run_arm(arm, case, (None, None, None, 8, None, None, 16))
     assert seen == ["v1", "v1"]
+
+
+def _sidecar_probe():
+    spec = importlib.util.spec_from_file_location(
+        "probe_qsa_sidecar_sweep1106", ROOT / "scripts" / "probe_qsa_sidecar.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run(tokens, windows):
+    return {"tokens": tokens, "top5": windows}
+
+
+def test_continuation_near_tie_needs_a_functional_oracle():
+    """Reported QSAK item: numerics alone never earn near_tie_equivalent."""
+    probe = _sidecar_probe()
+    a = _run([1, 2], [[(1, -0.1), (9, -3.0)], [(2, -0.10), (3, -0.30), (7, -4.0)]])
+    b = _run([1, 3], [[(1, -0.1), (9, -3.0)], [(3, -0.12), (2, -0.25), (7, -4.0)]])
+    assert probe.classify_divergence(a, b)["verdict"] == "near_tie_no_oracle"
+    assert probe.classify_divergence(a, b, oracle=(True, True))["verdict"] == "near_tie_equivalent"
+    assert probe.classify_divergence(a, b, oracle=(True, False))["verdict"] == "near_tie_oracle_failed"
+    assert probe.classify_divergence(a, a) == {"diverged": False}
+
+
+def test_continuation_missing_token_fails_when_the_window_proves_it_far():
+    probe = _sidecar_probe()
+    a = _run([2], [[(2, -0.1), (5, -0.4), (6, -0.7), (7, -1.0), (8, -2.0)]])
+    far = _run([3], [[(3, -0.1), (2, -0.3), (6, -0.7), (7, -1.0), (8, -2.0)]])
+    # 3 is absent from a's window, whose floor sits 1.9 nat below its top.
+    assert probe.classify_divergence(a, far)["verdict"] == "high_margin"
+    close = {"tokens": [2], "top5": [[(2, -0.1), (5, -0.2), (6, -0.3), (7, -0.4), (8, -0.5)]]}
+    assert probe.classify_divergence(close, far)["verdict"] == "unclassified"

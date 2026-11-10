@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from itertools import pairwise
 from pathlib import Path
 
@@ -191,10 +192,21 @@ class MOSSImagePipeline:
         latents = mx.array(noise, dtype=mx.float32)
         schedule = flow_schedule(steps)
         values = schedule.tolist()
+        # sglang#48688: the timestep conditioning is computed once per step and
+        # the text-embedder state once per branch, then shared; same ops at
+        # the same shapes, so every prediction is byte-identical.
+        # Default on since 2026-11-06 (Pierre); MLX2_MOSS_CFG_HOIST=0 restores
+        # per-call recomputation.  Byte-identical and 8.8% faster on
+        # MOSS-Image-SFT-MLX-8bit (qualification/runs/moss-cfg-hoist-20261106).
+        hoist = os.environ.get("MLX2_MOSS_CFG_HOIST", "1") != "0"
+        positive_memo, negative_memo = ({}, {}) if hoist else (None, None)
         for timestep, following in pairwise(values):
-            conditional = self.transformer(latents, timestep * 1000, positive).astype(
-                mx.float32
-            )
+            condition = getattr(self.transformer, "conditioning", None) if hoist else None
+            conditioning = condition(timestep * 1000) if condition is not None else None
+            conditional = self.transformer(
+                latents, timestep * 1000, positive,
+                conditioning=conditioning, context_memo=positive_memo,
+            ).astype(mx.float32)
             if negative is None:
                 prediction = conditional
             else:
@@ -203,6 +215,8 @@ class MOSSImagePipeline:
                     timestep * 1000,
                     negative,
                     skip_layers=uncond_skip_layers,
+                    conditioning=conditioning,
+                    context_memo=negative_memo,
                 ).astype(mx.float32)
                 prediction = unconditional + guidance_scale * (
                     conditional - unconditional

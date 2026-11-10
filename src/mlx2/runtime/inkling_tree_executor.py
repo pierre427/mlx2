@@ -215,6 +215,8 @@ class InklingTreeExecutor(HybridTreeExecutor):
             ]
             logits = mx.concatenate([row[0] for row in rows], axis=0)
             features = mx.concatenate([row[1] for row in rows], axis=0)
+        # Anchor rounds lend global KV too (sweep 2026-11-06: they were uncounted).
+        self.global_kv_lends += sum(tree.lent_global_kv for tree in trees)
         self.dispatches += 1
         self.projection_rows += len(trees)
         self.ordinary_anchor_dispatches += 1

@@ -1414,12 +1414,36 @@ class Model(LanguageModel):
         Only draft token selection reads it: the target's verify and every
         target logit keep the BF16 head, so greedy output is unchanged.  Each
         draft depth otherwise re-reads the full 1.6 GB BF16 head.
+
+        The head is ``lm_head``, or the embedding table when the checkpoint
+        ties them (``embed_tokens.as_linear``); a quantized source is
+        dequantized first.  A source already at or below the requested width
+        is refused: the "quantized" draft head would be no narrower than the
+        head itself (sweep 2026-11-06: tied heads were silently left BF16
+        while the receipt named q8/q4).
         """
-        if quantization is None or self.config.tie_word_embeddings:
+        if quantization is None:
             object.__setattr__(self, "_mtp_draft_head", None)
             return
         bits, group_size = quantization
-        head = nn.QuantizedLinear.from_linear(self.lm_head, group_size=group_size, bits=bits)
+        source = self.model.embed_tokens if self.config.tie_word_embeddings else self.lm_head
+        if isinstance(source, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
+            if source.bits <= bits:
+                raise ValueError(
+                    f"Inkling MTP draft head q{bits} is no narrower than the "
+                    f"{source.bits}-bit {'tied embedding' if self.config.tie_word_embeddings else 'LM head'}"
+                )
+            weight = mx.dequantize(
+                source.weight, source.scales, source.get("biases"),
+                group_size=source.group_size, bits=source.bits, mode=getattr(source, "mode", "affine"),
+            )
+        elif isinstance(source, (nn.Linear, nn.Embedding)):
+            weight = source.weight
+        else:
+            raise TypeError(f"Inkling MTP draft head cannot read a {type(source).__name__} LM head")
+        rows, cols = weight.shape
+        head = nn.QuantizedLinear(cols, rows, bias=False, group_size=group_size, bits=bits)
+        head.weight, head.scales, head.biases = mx.quantize(weight, group_size, bits)
         mx.eval(head.parameters())
         object.__setattr__(self, "_mtp_draft_head", head)
 

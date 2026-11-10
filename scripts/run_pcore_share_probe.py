@@ -28,6 +28,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # The interpreter running this probe (the venv python under gpuq2); absolute,
 # so the temporary LaunchAgent arm can exec it too.
 PY = os.environ.get("MLX2_PROBE_PYTHON") or sys.executable
+if not os.path.isabs(PY):
+    # launchd resolves no relative path against this cwd: refuse rather than
+    # let the LaunchAgent arm exec the wrong (or no) interpreter.
+    raise SystemExit(f"MLX2_PROBE_PYTHON must be an absolute path, got {PY!r}")
 LABEL = "com.example.mlx2-pcore-probe"
 
 

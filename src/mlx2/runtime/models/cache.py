@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
+import collections
 import copy
 import importlib
 import inspect
@@ -3910,6 +3911,27 @@ class BatchQuantizedKVCache(_BaseCache):
         return batch
 
 
+# Process-wide receipt for the opt-in per-row decode attention backend
+# (MLX_LM_BATCH_ATTENTION_BACKEND=rows|rows_masked); surfaced in /v1/status.
+ROWS_ATTENTION_STATS = {"rows_calls": 0, "rows_padding_reads": 0, "rows_fallbacks": 0,
+                        "rows_foreign_mask": 0}
+# Decode masks BatchKVCache.make_mask built (strong refs, newest last).  The
+# maskless ``rows`` backend drops only one of these; any other boolean mask
+# a caller hands a layer is sliced per row instead.
+_OWN_DECODE_MASKS = collections.deque(maxlen=8)
+# Expected per-layer declines (prefill chunks, one live lane): not counted
+# as rows_fallbacks.
+_ROUTINE_ROWS_DECLINES = frozenset({"not_decode", "batch_one"})
+
+
+def rows_attention_status():
+    return {
+        "configured": os.environ.get("MLX_LM_BATCH_ATTENTION_BACKEND", "sdpa").strip().lower(),
+        "qualification": "unqualified_research_option",
+        "counts": dict(ROWS_ATTENTION_STATS),
+    }
+
+
 class BatchKVCache(_BaseCache):
     step = 256
 
@@ -3990,9 +4012,10 @@ class BatchKVCache(_BaseCache):
         if backend is None:
             backend = os.environ.get("MLX_LM_BATCH_ATTENTION_BACKEND", "sdpa")
         backend = backend.strip().lower()
-        if backend not in {"sdpa", "bucketed"}:
+        if backend not in {"sdpa", "bucketed", "rows", "rows_masked"}:
             raise ValueError(
-                "MLX_LM_BATCH_ATTENTION_BACKEND must be 'sdpa' or 'bucketed'"
+                "MLX_LM_BATCH_ATTENTION_BACKEND must be 'sdpa', 'bucketed', "
+                "'rows' or 'rows_masked'"
             )
         max_tax = float(os.environ.get("MLX_LM_BUCKETED_SDPA_MAX_TAX", "1.25"))
         min_dense_tax = float(
@@ -4012,9 +4035,12 @@ class BatchKVCache(_BaseCache):
         self._bucket_min_dense_tax = min_dense_tax
         self._bucket_lookahead = lookahead
         self._bucket_groups: Optional[List[_BucketedAttentionGroup]] = None
+        self._rows_padding = None
         self._attention_backend_stats = {
             "attempts": 0,
             "bucketed_calls": 0,
+            "rows_calls": 0,
+            "rows_padding_reads": 0,
             "dense_fallbacks": 0,
             "group_builds": 0,
             "group_invalidations": 0,
@@ -4025,6 +4051,9 @@ class BatchKVCache(_BaseCache):
         }
 
     def _fallback(self, reason: str):
+        if (self.attention_backend in ("rows", "rows_masked")
+                and reason not in _ROUTINE_ROWS_DECLINES):
+            ROWS_ATTENTION_STATS["rows_fallbacks"] += 1
         stats = self._attention_backend_stats
         stats["dense_fallbacks"] += 1
         reasons = stats["fallback_reasons"]
@@ -4032,9 +4061,70 @@ class BatchKVCache(_BaseCache):
         return None
 
     def _invalidate_attention_groups(self):
+        self._rows_padding = None
         if self._bucket_groups is not None:
             self._attention_backend_stats["group_invalidations"] += 1
             self._bucket_groups = None
+
+    def _exact_row_padding(self):
+        """Exact host left padding, read once per padding change.
+
+        Keyed by the identity of ``left_padding`` (an outside rebinding drops
+        it) and cleared by every in-place mutation through
+        ``_invalidate_attention_groups``. The read is one device sync.
+        """
+        cached = self._rows_padding
+        if cached is not None and cached[0] is self.left_padding:
+            return cached[1]
+        padding = [int(v) for v in self.left_padding.tolist()]
+        self._rows_padding = (self.left_padding, padding)
+        self._attention_backend_stats["rows_padding_reads"] += 1
+        ROWS_ATTENTION_STATS["rows_padding_reads"] += 1
+        return padding
+
+    def _row_attention(self, queries, scale, mask, sinks):
+        """Per-row batch-1 decode SDPA over each row's own key span.
+
+        jundot/omlx#5090: attention shares no weights across rows, so row
+        ``i`` reads only ``keys[i, :, pad_i:_idx]`` (a view, no copy) instead
+        of the padded slab. ``rows`` passes no mask: it relies on the decode
+        mask being this cache's own causal + left-padding mask (no window,
+        which full-attention BatchKVCache layers never get), whose only
+        effect at one query row is ``column >= pad_i``. ``rows_masked`` slices
+        the given mask instead, so it holds for any boolean mask.
+        Unqualified research option; MLX's one-row SDPA may use a different
+        reduction law with and without a mask (nemotron_h decode-mask note).
+        """
+        padding = self._exact_row_padding()
+        if len(padding) != queries.shape[0]:
+            return self._fallback("rows_batch_mismatch")
+        padding = [max(p, 0) for p in padding]  # <= 0 is the unpadded state
+        if any(p >= self._idx for p in padding):
+            return self._fallback("rows_padding_range")
+        if mask is not None and mask.shape[-1] != self._idx:
+            return self._fallback("rows_mask_width")
+        masked = self.attention_backend == "rows_masked"
+        if not masked and mask is not None and not any(mask is m for m in _OWN_DECODE_MASKS):
+            masked = True
+            ROWS_ATTENTION_STATS["rows_foreign_mask"] += 1
+        rows = []
+        for index, pad in enumerate(padding):
+            row_mask = None
+            if masked and mask is not None:
+                row_mask = mask[index : index + 1, ..., pad:] if mask.shape[0] > 1 else mask[..., pad:]
+            rows.append(
+                mx.fast.scaled_dot_product_attention(
+                    queries[index : index + 1],
+                    self.keys[index : index + 1, :, pad : self._idx, :],
+                    self.values[index : index + 1, :, pad : self._idx, :],
+                    scale=scale,
+                    mask=row_mask,
+                    sinks=sinks,
+                )
+            )
+        self._attention_backend_stats["rows_calls"] += 1
+        ROWS_ATTENTION_STATS["rows_calls"] += 1
+        return mx.concatenate(rows, axis=0)
 
     def _plan_attention_groups(self, lengths: List[int]):
         remaining = list(range(len(lengths)))
@@ -4156,7 +4246,7 @@ class BatchKVCache(_BaseCache):
         Returns ``None`` for an observable dense fallback. Only single-token
         decode on this full, unquantized batch cache is supported initially.
         """
-        if self.attention_backend != "bucketed":
+        if self.attention_backend not in {"bucketed", "rows", "rows_masked"}:
             return None
         stats = self._attention_backend_stats
         stats["attempts"] += 1
@@ -4172,6 +4262,8 @@ class BatchKVCache(_BaseCache):
             return self._fallback("additive_mask")
         if self.offset.shape[0] < 2:
             return self._fallback("batch_one")
+        if self.attention_backend != "bucketed":
+            return self._row_attention(queries, scale, mask, sinks)
         groups = self._bucket_groups or self._build_attention_groups()
         if not groups:
             return None
@@ -4502,9 +4594,12 @@ class BatchKVCache(_BaseCache):
             # array-mask path; ``create_attention_mask`` already returns
             # ``None`` for single-token decode on the plain cache.
             return None
-        return create_causal_mask(
+        mask = create_causal_mask(
             N, offset=self._idx, left_padding=self.left_padding, **kwargs
         )
+        if N == 1 and not kwargs.get("window_size"):
+            _OWN_DECODE_MASKS.append(mask)
+        return mask
 
     def filter(self, batch_indices):
         """

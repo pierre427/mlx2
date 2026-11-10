@@ -12,13 +12,34 @@ import mlx.core as mx
 from mlx import nn
 from mlx.utils import tree_flatten
 
-from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..prefill_checkpoint_rows import claim_final_row_checkpoint, select_checkpoint_rows
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
 
 TARGET_VERIFY_ROW_EXACT_VERSION = "dense-qwen3-native-b1s1-causal-prefix-v1"
+
+# Last-layer tail-row prefill (ashhart/TensorFold#2229).  Default on since
+# 2026-11-06 (Pierre); MLX2_PREFILL_TAIL_ROW=0 restores the full last layer.
+# Evidence: qualification/runs/prefill-tail-row-20261106 (TTFT -2..-3% on
+# Qwen3-1.7B, texts identical).  A prompt chunk's logits are only checked
+# for finiteness (prefill_checkpoint_rows), so when every lane's checkpoint
+# row is the chunk's last, the final layer computes K/V over every row (the
+# cache is unchanged) but q, attention, o_proj and the MLP over that last row
+# only.  Nothing reads the other rows' final hidden state on this path; a
+# capture-tap forward (forward_with_taps) never takes it and row-exact mode
+# refuses it.
+TAIL_ROW_STATS = {"engaged": 0}
+
+
+def tail_row_enabled() -> bool:
+    return os.environ.get("MLX2_PREFILL_TAIL_ROW", "1") != "0"
+
+
+def tail_row_status() -> dict:
+    return {"configured": tail_row_enabled(), "qualification": "unqualified_default",
+            "counts": dict(TAIL_ROW_STATS)}
 
 
 def _project(module, value, row_exact=False):
@@ -173,6 +194,29 @@ class Attention(nn.Module):
         )
 
 
+    def tail(self, x, mask=None, cache=None):
+        """K/V over every row, attention output for the last row only."""
+        batch, length, _ = x.shape
+        last = x[:, -1:]
+        q = self.q_proj(last).reshape(batch, 1, self.n_heads, self.head_dim)
+        k = self.k_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
+        v = self.v_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
+        if hasattr(self, "q_norm"):
+            q, k = self.q_norm(q), self.k_norm(k)
+        q, k, v = (z.transpose(0, 2, 1, 3) for z in (q, k, v))
+        offset = cache.offset if cache is not None else 0
+        q, k = self.rope(q, offset=offset + (length - 1)), self.rope(k, offset=offset)
+        if cache is not None:
+            k, v = cache.update_and_fetch(k, v)
+        if mask is not None and not isinstance(mask, str):
+            mask = mask[..., -1:, :]
+        elif isinstance(mask, str):
+            # One query row aligned to the last key sees every key.
+            mask = None
+        y = scaled_dot_product_attention(q, k, v, cache=cache, scale=self.scale, mask=mask)
+        return self.o_proj(y.transpose(0, 2, 1, 3).reshape(batch, 1, -1))
+
+
 class MLP(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -237,6 +281,11 @@ class Layer(nn.Module):
         )
 
 
+    def tail(self, x, mask=None, cache=None):
+        h = x[:, -1:] + self.self_attn.tail(self.input_layernorm(x), mask, cache)
+        return h + self.mlp(self.post_attention_layernorm(h))
+
+
 class Decoder(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -252,13 +301,18 @@ class Decoder(nn.Module):
         capture_layers=(),
         hidden_sink=None,
         row_exact=False,
+        tail_row=False,
     ):
         h = self.embed_tokens(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
         mask = create_attention_mask(h, cache[0])
+        last = len(self.layers) - 1
         for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
-            h = layer(h, mask, layer_cache, row_exact=row_exact)
+            if tail_row and index == last:
+                h = layer.tail(h, mask, layer_cache)
+            else:
+                h = layer(h, mask, layer_cache, row_exact=row_exact)
             if hidden_sink is not None and index in capture_layers:
                 hidden_sink.append(h)
         return self.norm(h)
@@ -278,6 +332,18 @@ class Model(nn.Module):
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def __call__(self, inputs, cache=None):
+        if (
+            tail_row_enabled()
+            and inputs.ndim == 2
+            and inputs.shape[1] > 1
+            and not self._target_verify_row_exact
+            # Layer excision (and any other wrapper) replaces Layer objects;
+            # only a plain last Layer has the tail split.
+            and type(self.model.layers[-1]) is Layer
+            and claim_final_row_checkpoint(inputs.shape[0], inputs.shape[1])
+        ):
+            TAIL_ROW_STATS["engaged"] += 1
+            return self.logits(self.model(inputs, cache, tail_row=True))
         out = self.model(inputs, cache)
         return self.logits(select_checkpoint_rows(out))
 

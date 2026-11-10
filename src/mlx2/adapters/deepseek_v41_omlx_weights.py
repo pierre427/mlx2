@@ -61,20 +61,36 @@ def omlx_weight_plan(artifact, expert_cache_bytes, bank_layers=()):
             or any(type(n) is not int or not 0 <= n < args.num_hidden_layers for n in bank_layers)):
         raise ValueError("omlx expert bank layers outside the model")
     bank = layer_bank_bytes(artifact)*len(bank_layers)
-    # Largest single stacked tensor: host staging while one bank tensor uploads.
-    bank_staging = max(tensors[spec["module"]+".weight"]["size"]
+    # Host staging while one bank kind uploads: _load_dense reads its weight,
+    # scales and biases in one read_tensors call. Reported in full below.
+    bank_staging = max(sum(tensors[spec["module"]+"."+field]["size"] for field in _FIELDS)
                        for spec in artifact["experts"][0].values()) if bank_layers else 0
+    # Host staging of the largest dense tensor while it uploads (embed.weight,
+    # 1.23 GiB on the pinned checkpoint). Reported, not reserved: see the total.
+    dense_staging = max(tensors[name]["size"] for name in names)+CHUNK_BYTES
+    expert_staging = item+CHUNK_BYTES
+    # The reservation keeps this route's original terms: two read chunks, one
+    # expert, and only the packed weight of a bank kind. Load-time staging
+    # (dense_staging, full bank_staging) never coexists with a full expert
+    # cache, and reserving it as the native planner does (DS41-2, f196622fb)
+    # only shrank the LRU cache 11.45 -> 10.08 GiB at the served shape and cost
+    # warm decode -8% / 3K prefill -16% with identical output
+    # (qualification/runs/ds41-omlx-plan-ab-20261106). Reverted on Pierre's
+    # call, 2026-11-06.
+    reserved_bank_staging = max(tensors[spec["module"]+".weight"]["size"]
+                                for spec in artifact["experts"][0].values()) if bank_layers else 0
     # One streamed layer's experts may be leased in one window.
     active = 0 if len(bank_layers) == args.num_hidden_layers else item*args.n_routed_experts
     return {"dense_payload_bytes": dense_bytes, "dense_prepared_bound_bytes": 0,
-            "dense_staging_bound_bytes": max(tensors[name]["size"] for name in names)+CHUNK_BYTES,
+            "dense_staging_bound_bytes": dense_staging,
             "expert_cache_bytes": expert_cache_bytes, "minimum_expert_cache_bytes": item,
-            "expert_active_bound_bytes": active, "expert_staging_bound_bytes": item+CHUNK_BYTES,
+            "expert_active_bound_bytes": active, "expert_staging_bound_bytes": expert_staging,
             "manifest_binding_sha256": artifact["identity"]["fingerprint"], "manifest_canonical_bytes": 0,
             "metadata_bound_bytes": 256 << 20, "expert_table_bytes": table,
             "expert_bank_layers": list(bank_layers), "expert_bank_bytes": bank,
             "expert_bank_staging_bound_bytes": bank_staging,
-            "total_reservation_bytes": dense_bytes+2*CHUNK_BYTES+expert_cache_bytes+active+item+bank+bank_staging}
+            "total_reservation_bytes": (dense_bytes+2*CHUNK_BYTES+expert_cache_bytes+active+item
+                                        +bank+reserved_bank_staging)}
 
 
 def bank_expert_views(bank, experts):

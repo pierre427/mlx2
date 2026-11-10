@@ -186,6 +186,18 @@ def fused_group(linears, x):
     return outs[: len(banks)]
 
 
+
+def _int_counters(*roots):
+    """(module, attribute, value) for every integer counter under ``roots``."""
+    out = []
+    for root in roots:
+        modules = root.modules() if hasattr(root, "modules") else [root]
+        for module in modules:
+            for name, value in vars(module).items():
+                if type(value) is int:
+                    out.append((module, name, value))
+    return out
+
 class Exl3ProjectionGroup:
     """Same-input dense EXL3 linears of one module run as one FUSED_LINEAR
     launch at fused widths (below NAX_MIN_ROWS on Metal). ``__call__``
@@ -1077,9 +1089,15 @@ class Exl3SwitchGLU(nn.Module):
             return y.reshape(x.shape)
         h = fused_gate_up(self.gate_proj, self.up_proj, flat, ids, topk)
         d = self.down_proj.fused_rows(h, ids)
+        counters = _int_counters(block.shared_expert, block.shared_expert_gate)
         shared = block.shared_expert(x).reshape(flat.shape)
         gl = block.shared_expert_gate(x)
         if shared.dtype != x.dtype or gl.dtype != x.dtype:
+            # The block runs the shared expert itself after a decline; the lazy
+            # outputs above are dropped unevaluated, so their call counters
+            # must not stand either (sweep 2026-11-06 EXL3-6).
+            for module, name, value in counters:
+                object.__setattr__(module, name, value)
             return self._tail_decline("shared expert dtype")
         y = moe_combine(d, scores.reshape(-1, topk), shared, gl, topk, x.dtype)
         object.__setattr__(self, "chain_calls", self.chain_calls + 1)
@@ -1423,6 +1441,11 @@ class Exl3DenseLinear(nn.Module):
             raise ValueError("EXL3 linear input width mismatch")
         flat = x.reshape(-1, self.input_dims)
         rows = flat.shape[0]
+        if rows == 0:
+            # nn.Linear semantics for an empty batch; the launch loop below
+            # would build no parts (sweep 2026-11-06 EXL3-5).
+            out = mx.zeros((*x.shape[:-1], self.output_dims), x.dtype)
+            return out + self.bias.astype(x.dtype) if "bias" in self else out
         resident = self.__dict__.get("_resident")
         if resident is not None and rows >= self.resident_min_rows and mx.default_device() != mx.cpu:
             out = self._nax_resident(flat).reshape(*x.shape[:-1], self.output_dims)

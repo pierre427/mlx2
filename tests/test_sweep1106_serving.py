@@ -92,3 +92,17 @@ def test_gsm8k_leading_dot_decimal_is_not_its_integer_digits():
     assert gsm.extract_answer("#### .00") == "0"
     assert gsm.extract_answer("#### -.0") == "0"
     assert gsm.extract_answer("#### 0") == "0"
+
+
+def test_gsm8k_per_position_runs_to_the_draft_depth():
+    """SERVING-3: depths past the deepest accepted one were missing, not 0."""
+    receipts = [{"verify_accept_hist": {"0": 2, "1": 1, "2": 1}, "proposed": 28}]
+    plain = gsm.acceptance_summary(receipts)
+    assert list(plain["per_position"]) == ["p1", "p2"]
+    assert plain["per_position_basis"] == "deepest_accepted"
+    deep = gsm.acceptance_summary(receipts, draft_depth=7)
+    assert list(deep["per_position"]) == [f"p{k}" for k in range(1, 8)]
+    assert deep["per_position"]["p1"] == 0.5 and deep["per_position"]["p3"] == 0.0
+    assert deep["per_position_basis"] == "draft_depth"
+    with pytest.raises(ValueError, match="below an accepted depth"):
+        gsm.acceptance_summary(receipts, draft_depth=1)

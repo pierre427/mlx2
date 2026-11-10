@@ -119,12 +119,17 @@ def few_shot_prefix(train, shots):
 
 # ------------------------------------------------------------ acceptance --
 
-def acceptance_summary(receipts, max_position=16):
+def acceptance_summary(receipts, max_position=16, draft_depth=None):
     """vLLM-style acceptance from per-request speculation receipts.
 
     Each receipt's ``verify_accept_hist`` maps accepted drafted tokens per
     verify round to a round count.  Requests without speculation rounds are
     counted in ``requests_without_rounds`` and contribute nothing.
+
+    ``per_position`` runs to ``draft_depth`` when the caller knows it (routes
+    share no depth field in their receipts), so never-accepted depths show 0
+    instead of vanishing; otherwise it stops at the deepest accepted depth,
+    and ``per_position_basis`` says which.
     """
     hist, proposed, without = {}, 0, 0
     for spec in receipts:
@@ -140,12 +145,17 @@ def acceptance_summary(receipts, max_position=16):
         return {"verify_rounds": 0, "requests_without_rounds": without}
     accepted = sum(k * v for k, v in hist.items())
     deepest = max(max(hist), 1)
+    if draft_depth is not None and int(draft_depth) < deepest:
+        raise ValueError(f"draft depth {draft_depth} is below an accepted depth of {deepest}")
+    depth = int(draft_depth) if draft_depth is not None else deepest
     positions = {f"p{k}": sum(v for a, v in hist.items() if a >= k) / total
-                 for k in range(1, min(max(deepest, 1), max_position) + 1)}
+                 for k in range(1, min(depth, max_position) + 1)}
     return {"verify_rounds": total, "accepted_tokens": accepted, "proposed_tokens": proposed,
             "mean_acceptance_length": 1 + accepted / total,
             "draft_acceptance_rate": accepted / proposed if proposed else None,
-            "per_position": positions, "accept_hist": {str(k): hist[k] for k in sorted(hist)},
+            "per_position": positions,
+            "per_position_basis": "draft_depth" if draft_depth is not None else "deepest_accepted",
+            "accept_hist": {str(k): hist[k] for k in sorted(hist)},
             "requests_without_rounds": without}
 
 
@@ -243,7 +253,7 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
     return rows
 
 
-def summarize(rows):
+def summarize(rows, draft_depth=None):
     count = len(rows)
     return {"questions": count,
             "accuracy": sum(r["correct"] for r in rows) / count if count else None,
@@ -252,7 +262,7 @@ def summarize(rows):
             "completion_tokens": sum(r["completion_tokens"] for r in rows),
             "decode_tps_median": median(r["decode_tps"] for r in rows),
             "routes": sorted({json.dumps(r["route"], sort_keys=True) for r in rows if r["route"]}),
-            "acceptance": acceptance_summary(r["speculation"] for r in rows)}
+            "acceptance": acceptance_summary((r["speculation"] for r in rows), draft_depth=draft_depth)}
 
 
 def revision(tree):
@@ -301,6 +311,8 @@ def main(argv=None):
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--chat", action="store_true")
     parser.add_argument("--max-context", type=int, default=8192)
+    parser.add_argument("--draft-depth", type=int,
+                        help="route draft depth: per_position then covers every depth (arms JSON may set draft_depth)")
     args = parser.parse_args(argv)
     if bool(args.base_url) == bool(args.model):
         parser.error("give exactly one of --base-url or --model")
@@ -340,7 +352,7 @@ def main(argv=None):
         rows = run_questions(client, args.checkpoint.split("@")[0], prefix, items, chat=args.chat,
                              max_tokens=args.max_tokens, log=progress("server"))
         arm = {"name": "server", "base_url": args.base_url, "startup_status_route": status.get("route_receipt"),
-               "summary": summarize(rows), "rows": [compact(r) for r in rows]}
+               "summary": summarize(rows, args.draft_depth), "rows": [compact(r) for r in rows]}
         receipt["arms"].append(arm)
         write_atomic(path, receipt)
         print(json.dumps({"arm": "server", **arm["summary"]}), flush=True)
@@ -401,7 +413,7 @@ def main(argv=None):
                 row["final_status"] = client.call("/v1/status")
                 (out / "metrics.prom").write_text(client.call("/metrics"))
                 (out / "rows.json").write_text(json.dumps(rows, indent=1, default=str) + "\n")
-                row["summary"] = summarize(rows)
+                row["summary"] = summarize(rows, arm.get("draft_depth", args.draft_depth))
                 row["rows"] = [compact(r) for r in rows]
                 row["passed"] = True
             except BaseException as error:

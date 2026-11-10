@@ -260,34 +260,44 @@ CODE_WORDS = ["amber", "cobalt", "delta", "ember", "falcon", "garnet", "harbor",
               "juniper", "kestrel", "lumen", "meridian"]
 
 
-def classify_divergence(a, b, ceiling=0.5):
-    """First divergence of two greedy runs from their top-5 windows (AGENTS.md
-    near-tie contract: two-way, exact-tie and multi-way clauses)."""
+def classify_divergence(a, b, ceiling=0.5, oracle=None):
+    """First divergence of two greedy runs from their top-5 windows.
+
+    Numerics use the shared AGENTS.md rule (``mlx2.near_tie``: two-way,
+    exact-tie and multi-way clauses). ``near_tie_equivalent`` additionally
+    needs both continuations to pass a functional oracle: ``oracle`` is
+    ``(a_passed, b_passed)``. Free continuation of arbitrary text has none,
+    so without one a numeric near tie is ``near_tie_no_oracle`` (not a pass).
+    A token missing from the other arm's window fails the row when that
+    window proves it lies more than ``ceiling`` below the top.
+    """
+    from mlx2.near_tie import near_tie_equivalent
+
     for i, (x, y) in enumerate(zip(a["tokens"], b["tokens"])):
         if x != y:
             break
     else:
         return {"diverged": False}
     wa, wb = a["top5"][i], b["top5"][i]  # [(id, logprob)] best first
-    (ma, mb) = (wa[0][1] - wa[1][1], wb[0][1] - wb[1][1])
-    pair = {wa[0][0], wa[1][0]} == {wb[0][0], wb[1][0]}
-    verdict = "unclassified"
-    if pair and ma <= ceiling and mb <= ceiling:
-        verdict = "near_tie_equivalent"
-    elif (ma == 0.0 and y in (wa[0][0], wa[1][0]) and mb <= ceiling) or (
-            mb == 0.0 and x in (wb[0][0], wb[1][0]) and ma <= ceiling):
-        verdict = "near_tie_equivalent (exact-tie clause)"
+    la, lb = {int(t): float(v) for t, v in wa}, {int(t): float(v) for t, v in wb}
+    ma, mb = wa[0][1] - wa[1][1], wb[0][1] - wb[1][1]
+    out = {"diverged": True, "index": i, "a_token": x, "b_token": y,
+           "a_margin": round(ma, 4), "b_margin": round(mb, 4),
+           "a_window": wa, "b_window": wb}
+    if y not in la or x not in lb:
+        proven_far = (y not in la and wa[0][1] - wa[-1][1] > ceiling) or (
+            x not in lb and wb[0][1] - wb[-1][1] > ceiling)
+        out["verdict"] = "high_margin" if proven_far else "unclassified"
+        return out
+    if not near_tie_equivalent(x, la, y, lb, ceiling=ceiling):
+        out["verdict"] = "high_margin"
+    elif oracle is None:
+        out["verdict"] = "near_tie_no_oracle"
+    elif all(oracle):
+        out["verdict"] = "near_tie_equivalent"
     else:
-        lb = dict(wb)
-        la = dict(wa)
-        if x in lb and y in la:
-            if wb[0][1] - lb[x] <= ceiling and wa[0][1] - la[y] <= ceiling:
-                verdict = "near_tie_equivalent (multi-way clause)"
-            else:
-                verdict = "high_margin"
-    return {"diverged": True, "index": i, "a_token": x, "b_token": y,
-            "a_margin": round(ma, 4), "b_margin": round(mb, 4),
-            "a_window": wa, "b_window": wb, "verdict": verdict}
+        out["verdict"] = "near_tie_oracle_failed"
+    return out
 
 
 def continue_gen(mx, np, adapter, sidecar, spec, report):

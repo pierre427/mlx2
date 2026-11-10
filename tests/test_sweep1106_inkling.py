@@ -120,3 +120,65 @@ def test_sweep1106_ink3_caller_relative_paths_are_resolved_before_children():
     for needle in ("args.out = args.out.resolve()", "args.model = args.model.resolve()",
                    "\"policy\", \"lane_policy\"", "args.divergence_reports = ["):
         assert needle in block, needle
+
+
+def test_sweep1106_anchor_rounds_count_their_global_kv_lends():
+    """Reported INK item: anchor-only rounds lent global KV but were uncounted."""
+    from test_inkling_model_cpu import model as small_model
+
+    from mlx2.runtime.inkling_tree_executor import InklingTreeExecutor
+
+    target = small_model()
+    cache = target.make_cache()
+    mx.eval(target(mx.array([[1, 2, 1, 2]]), cache=cache))
+    executor = InklingTreeExecutor.create()
+    executor.forward_many(target, [[7]], [[-1]], [cache], [1], cached=False, configured_limit=1)
+    receipt = executor.receipt()
+    assert receipt["ordinary_anchor_dispatches"] == 1
+    assert receipt["global_kv_lends"] > 0
+
+
+def _head_model(tied):
+    from test_inkling_model_cpu import args as small_args
+
+    mx.random.seed(21)
+    value = Model(dataclasses.replace(small_args(), hidden_size=64, tie_word_embeddings=tied))
+    value.eval()
+    mx.eval(value.parameters())
+    return value
+
+
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("bits", [8, 4])
+def test_sweep1106_mtp_draft_head_is_quantized_for_tied_and_untied_heads(tied, bits):
+    """Tied checkpoints silently kept the BF16 head while the receipt said q8/q4."""
+    from mlx import nn
+
+    target = _head_model(tied)
+    target.attach_mtp_draft_head((bits, 64))
+    head = target._mtp_draft_head
+    assert isinstance(head, nn.QuantizedLinear) and head.bits == bits
+    hidden = mx.random.normal((3, 64))
+    full, draft = target._project_logits(hidden), target._project_draft_logits(hidden)
+    assert draft.shape == full.shape
+    error = float(mx.abs(draft - full).max() / mx.abs(full).max())
+    assert error < (0.02 if bits == 8 else 0.15)
+    target.attach_mtp_draft_head(None)
+    assert target._mtp_draft_head is None
+
+
+def test_sweep1106_mtp_draft_head_from_a_quantized_source():
+    """A quantized head is dequantized first (from_linear would have quantized
+    its packed integers); a source no wider than the request is refused."""
+    from mlx import nn
+
+    for tied in (False, True):
+        target = _head_model(tied)
+        nn.quantize(target, group_size=64, bits=8,
+                    class_predicate=lambda p, m: p in ("lm_head", "model.embed_tokens"))
+        target.attach_mtp_draft_head((4, 64))
+        hidden = mx.random.normal((2, 64))
+        full, draft = target._project_logits(hidden), target._project_draft_logits(hidden)
+        assert float(mx.abs(draft - full).max() / mx.abs(full).max()) < 0.15
+        with pytest.raises(ValueError, match="no narrower"):
+            target.attach_mtp_draft_head((8, 64))

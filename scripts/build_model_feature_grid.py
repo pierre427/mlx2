@@ -49,6 +49,8 @@ VARIANTS = {
 # not a statement that every registered model implements each feature.
 FEATURES = (
     "oq4e_conversion",
+    # Morning follow-up probes (2026-11-06): opt-in research options.
+    "batch_rows_attention", "prefill_tail_row",
     # Residual ablation (Heretic concept, 2026-11-05): a baked derived checkpoint.
     "residual_ablation_bake",
     # Ripple perf pass (2026-11-04).

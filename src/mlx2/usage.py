@@ -70,6 +70,12 @@ LIMIT_MODES = ("report", "admission", "reserve")
 STATUSES = ("completed", "cancelled", "failed")
 # Not a valid tenant id (tenant ids start alphanumeric), so it cannot collide.
 OVERFLOW_TENANT = "_overflow"
+# Admin (operator) overlay previews run as this tenant; like the overflow
+# bucket it is not a valid tenant id, so no configured tenant can claim it.
+OPERATOR_TENANT = "_operator"
+RESERVED_TENANTS = frozenset({OVERFLOW_TENANT, OPERATOR_TENANT})
+# Operator previews fall under the limits file's ``default`` table: tenant
+# entries there must be valid tenant ids, so ``_operator`` cannot have its own.
 ALL_TENANTS = "*"
 DEFAULT_MAX_TENANTS = 1024
 DEFAULT_MAX_SESSIONS = 256

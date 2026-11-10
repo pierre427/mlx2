@@ -57,11 +57,9 @@ ABOVE_M1_FLOOR = {
     # heavy M1 pipeline MLX raises rather than returning zeros; the M1-M4
     # runtime check is GPU-deferred like the rest of this list.
     "runtime/models/exl3.py": 3,
-    # QSA sidecar fused block selection (b4101c8df): one fixed 1024-thread
-    # threadgroup per query row. Opt-in (QSASidecar.fused_select defaults to
-    # False; the sidecar itself is unqualified), so no default route reaches
-    # it; the M1-M4 runtime check is GPU-deferred like the rest of this list.
-    "runtime/models/qsa_select.py": 1,
+    # (QSA sidecar qsa_select.py is not listed: since 2026-11-06 it picks its
+    # threadgroup per device, 1024 on applegpu_g17+ and 768 elsewhere; see
+    # test_qsa_select_threadgroup_is_device_dependent.)
 }
 
 
@@ -156,3 +154,19 @@ def test_launches_above_the_m1_floor_are_listed():
 @pytest.mark.parametrize("path", sorted(ABOVE_M1_FLOOR))
 def test_listed_files_exist(path):
     assert (SRC / path).is_file()
+
+
+def test_qsa_select_threadgroup_is_device_dependent(monkeypatch):
+    monkeypatch.syspath_prepend(str(SRC.parent))
+    mx = pytest.importorskip("mlx.core")
+    from mlx2.runtime.models import qsa_select
+
+    assert qsa_select.TG_FLOOR == M1_REGISTER_HEAVY_FLOOR
+    assert qsa_select.select_threadgroup("applegpu_g17s") == 1024
+    assert qsa_select.select_threadgroup("applegpu_g18p") == 1024
+    for older in ("applegpu_g13g", "applegpu_g14s", "applegpu_g15d", "applegpu_g16p", "", "cpu"):
+        assert qsa_select.select_threadgroup(older) == M1_REGISTER_HEAVY_FLOOR
+    # fused_select's default really comes from the device.
+    for arch, want in (("applegpu_g13g", 768), ("applegpu_g17s", 1024)):
+        monkeypatch.setattr(mx, "device_info", lambda device=None, arch=arch: {"architecture": arch})
+        assert qsa_select._device_threadgroup.__wrapped__() == want

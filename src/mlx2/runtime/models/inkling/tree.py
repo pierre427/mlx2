@@ -83,11 +83,10 @@ class InklingTree:
         if self.parents != (-1,) or tokens.shape != (1, 1):
             raise ValueError("Inkling ordinary anchor requires one root token")
         bases = [int(pair[0].offset) for pair in self.live_pairs]
-        for live, private in zip(self.live_pairs, self.private, strict=True):
-            # The existing contract lends only append-only planes. It refuses
-            # local rings, which retain their private COW snapshots. Aborted
-            # global suffix writes are outside the live committed fill level.
-            lend_append_only_kv(live[0], private[0])
+        # The existing contract lends only append-only planes. It refuses
+        # local rings, which retain their private COW snapshots. Aborted
+        # global suffix writes are outside the live committed fill level.
+        self.lend_global_kv()
         flat = [plane for pair in self.private for plane in pair.caches]
         result = model.forward_with_taps(tokens, flat, layers)
         self.anchor_bases = bases
@@ -108,8 +107,7 @@ class InklingTree:
             raise ValueError("Inkling ordinary cohort needs one root per lane")
         bases = [[int(pair[0].offset) for pair in tree.live_pairs] for tree in trees]
         for tree in trees:
-            for live, private in zip(tree.live_pairs, tree.private, strict=True):
-                lend_append_only_kv(live[0], private[0])
+            tree.lend_global_kv()
         hidden = model.model.embed(tokens)
         model.completed_forwards += 1
         taps = {}
