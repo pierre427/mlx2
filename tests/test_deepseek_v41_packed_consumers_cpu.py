@@ -188,3 +188,19 @@ def test_selected_source_bundle_composes_with_packed_candidate_long_context():
     for math in ("source_short_decode_joint_f32_v1", "source_short_decode_grouped_f32_v1"):
         with pytest.raises(ValueError, match="broadcast or oMLX"):
             source_policy({**selected, "deepseek_kv_storage": "native_packed", "deepseek_source_attention_math": math})
+
+
+def test_private_packed_row_extract_and_merge_keep_stamp():
+    # Review 2026-11-08: the private-row completion copy must use the packed revision.
+    c = _config()
+    model = _model(c, kv_storage_policy="native_packed", source_attention_math_policy="all_retained_broadcast")
+    cache = model.make_cache()
+    model(mx.array([[1, 2]], mx.int32), cache)
+    row = cache[1]
+    row.ast_private_profile = "mlx2.ds41.source-approx.v1:test"
+    for copy in (row.extract(0), type(row).merge([row])):
+        assert type(copy) is DeepSeekV41PackedLayerCache
+        assert copy.ast_private_profile == row.ast_private_profile and copy.meta_state == row.meta_state
+        assert "private" in copy.checkpoint_publication_refusal()
+    plain = cache[0]
+    assert plain.extract(0).ast_private_profile is None

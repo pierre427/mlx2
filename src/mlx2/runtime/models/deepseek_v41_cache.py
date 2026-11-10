@@ -331,6 +331,48 @@ class DeepSeekV41LayerCache(DeepSeekV4LayerCache):
             object.__setattr__(result, "source_partition_tainted", True)
         return result
 
+    def extract(self, index):
+        """B1 completion copy. A private-profile row is copied, never published.
+
+        The base path goes through ``snapshot()``, which applies the publication
+        contract, so a row stamped by an approximate or AST operation failed the
+        request at completion (2026-11-08, route drop). The copy keeps the stamp,
+        so every publication, checkpoint and APCv2 path still refuses it.
+        """
+        if self.ast_private_profile is None:
+            return super().extract(index)
+        if index != 0:
+            raise ValueError("DeepSeek V4 cache extract requires row zero")
+        return self._private_copy()
+
+    @classmethod
+    def merge(cls, caches):
+        caches = list(caches)
+        if (len(caches) == 1 and type(caches[0]) is cls
+                and caches[0].ast_private_profile is not None):
+            return caches[0]._private_copy()
+        return super().merge(caches)
+
+    def _private_copy(self):
+        if self.ced_local_deferred:
+            raise ValueError("V4.1 CED state-only local keys are not a snapshot frontier")
+        self.validate_state()
+        if self.pending:
+            raise ValueError("V4.1 forward or source pool is incomplete")
+        # Strip the private suffix from this class's own revision (packed and
+        # plain caches use different revisions); from_state accepts only the
+        # exact revision and the stamp is restored on the copy.
+        revision = self.meta_state[0]
+        suffix = ":private:" + self.ast_private_profile
+        if not revision.endswith(suffix):
+            raise ValueError("V4.1 private cache revision mismatch")
+        meta = (revision[:-len(suffix)],) + tuple(self.meta_state[1:])
+        result = type(self).from_state(_copy(self.xp, self.state), meta, xp=self.xp)
+        result.ast_private_profile = self.ast_private_profile
+        result.source_partition_grid = self.source_partition_grid
+        result.source_partition_tainted = bool(self.source_partition_tainted)
+        return result
+
     def checkpoint_publication_refusal(self):
         """Host-only exact-state guard for APCv2 and generic checkpoints."""
         if self.pending:

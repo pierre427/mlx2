@@ -66,3 +66,27 @@ def test_empty_or_invalid_private_profile_is_not_a_valid_state():
     for value in('',True,7):
         cache[1].ast_private_profile=value
         with pytest.raises(ValueError,match='private AST'):cache[1].validate_state()
+
+
+def test_completion_extract_copies_private_row_and_keeps_refusals():
+    # 2026-11-08: B1 completion extract went through snapshot() and failed every
+    # request whose rows an approximate operation had stamped.
+    model,_,cache=fixture()
+    row=cache[1];row.ast_private_profile=PRIVATE
+    copy=row.extract(0)
+    assert copy is not row and copy.ast_private_profile==PRIVATE and copy.offset==row.offset
+    assert copy.meta_state==row.meta_state
+    for a,b in zip(copy.state,row.state):
+        if a is not None:np.testing.assert_array_equal(np.asarray(a),np.asarray(b))
+    assert 'private'in copy.checkpoint_publication_refusal()
+    with pytest.raises(Exception,match='private'):copy.snapshot()
+    with pytest.raises(ValueError):row.extract(1)
+    plain=cache[0]
+    assert plain.ast_private_profile is None and plain.extract(0).ast_private_profile is None
+
+
+def test_merge_of_single_private_row_copies_with_stamp():
+    model,_,cache=fixture()
+    row=cache[1];row.ast_private_profile=PRIVATE
+    copy=type(row).merge([row])
+    assert copy is not row and copy.ast_private_profile==PRIVATE and copy.meta_state==row.meta_state

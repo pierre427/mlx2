@@ -56,7 +56,17 @@ ROUTE_LAMBDA_MAXIMUM = 3.0
 
 YOCO_PARAMETER_KEYS = (YOCO_LAYERS, YOCO_KEEP, YOCO_MIN_ROWS)
 ROUTE_PARAMETER_KEYS = (ROUTE_LAMBDA, ROUTE_ADAPTIVE, ROUTE_MARGIN)
-POLICY_KEYS = frozenset((YOCO_KEY, ROUTE_KEY) + YOCO_PARAMETER_KEYS + ROUTE_PARAMETER_KEYS)
+
+# Soft-reap probe (Pierre 2026-11-08): zero the lowest-weight routed expert on
+# a layer range for B1 decode rows; see deepseek_v41_source_route_drop.
+DROP_KEY = 'deepseek_source_route_drop'
+DROP_LAYERS = 'deepseek_source_route_drop_layers'
+DROP_CHOICES = ('off', 'drop_min_v1')
+DROP_COUNT = 'deepseek_source_route_drop_count'
+DROP_DEFAULT_LAYERS = [13, 26]    # middle third of 40 layers; not a measured choice
+DROP_PARAMETER_KEYS = (DROP_LAYERS, DROP_COUNT)
+POLICY_KEYS = frozenset((YOCO_KEY, ROUTE_KEY, DROP_KEY) + YOCO_PARAMETER_KEYS + ROUTE_PARAMETER_KEYS
+                        + DROP_PARAMETER_KEYS)
 
 # The one switch a future qualification would flip. Nothing sets it.
 PUBLICATION_QUALIFIED = False
@@ -80,6 +90,7 @@ YOCO_REFUSALS = _COMMON_REFUSALS + (
     ('deepseek_source_frame_reuse', 'reference'), ('deepseek_source_row_packet', 'reference'),
 )
 ROUTE_REFUSALS = _COMMON_REFUSALS
+DROP_REFUSALS = _COMMON_REFUSALS
 
 
 def _plain_int(value):
@@ -165,6 +176,25 @@ def _validate_route(raw):
     return result
 
 
+def _validate_drop(raw):
+    mode = raw.get(DROP_KEY, 'off')
+    if type(mode) is not str or mode not in DROP_CHOICES:
+        raise ValueError('invalid Source policy: ' + DROP_KEY)
+    if mode == 'off':
+        present = [k for k in DROP_PARAMETER_KEYS if k in raw]
+        if present:
+            raise ValueError(', '.join(present) + ' require ' + DROP_KEY + '=drop_min_v1')
+        return {}
+    value = raw.get(DROP_LAYERS, DROP_DEFAULT_LAYERS)
+    if (not isinstance(value, (list, tuple)) or len(value) != 2 or not all(_plain_int(v) for v in value)
+            or not 0 <= value[0] <= value[1] <= 1023):
+        raise ValueError(DROP_LAYERS + ' must be two integer layer IDs 0 <= first <= last')
+    count = raw.get(DROP_COUNT, 1)
+    if not _plain_int(count) or not 1 <= count <= 5:
+        raise ValueError(DROP_COUNT + ' must be an integer 1..5 (lowest-weight experts zeroed per row; 5 keeps only the top expert)')
+    return {DROP_KEY: mode, DROP_LAYERS: [value[0], value[1]], DROP_COUNT: count}
+
+
 def _blocked(policy, refusals):
     blocked = [name for name, reference in refusals if policy.get(name, reference) != reference]
     if policy.get('draft_model') not in (None, 'none'):
@@ -200,6 +230,14 @@ def validate_policy(raw, policy):
         if blocked:
             raise ValueError('Source approximate route bias cannot combine with: ' + ', '.join(blocked))
         result.update(route)
+    drop = _validate_drop(raw)
+    if drop:
+        blocked = _blocked(policy, DROP_REFUSALS)
+        if route:
+            blocked.append(ROUTE_KEY + '(both wrap the router; composition not implemented)')
+        if blocked:
+            raise ValueError('Source approximate route drop cannot combine with: ' + ', '.join(blocked))
+        result.update(drop)
     return result
 
 
@@ -209,6 +247,8 @@ def selected_operations(policy):
         ops.append(policy[YOCO_KEY])
     if policy.get(ROUTE_KEY, 'off') != 'off':
         ops.append('route_' + policy[ROUTE_KEY])
+    if policy.get(DROP_KEY, 'off') != 'off':
+        ops.append('route_' + policy[DROP_KEY])
     return tuple(ops)
 
 
@@ -225,6 +265,9 @@ def implementation_identity(policy):
         names += ['adapters/deepseek_v41_source_yoco.py', 'runtime/models/deepseek_v41_ced.py']
     if policy.get(ROUTE_KEY, 'off') != 'off':
         names += ['adapters/deepseek_v41_source_route_bias.py', 'runtime/models/deepseek_v4.py',
+                  'runtime/models/deepseek_v41_fused.py']
+    if policy.get(DROP_KEY, 'off') != 'off':
+        names += ['adapters/deepseek_v41_source_route_drop.py', 'runtime/models/deepseek_v4.py',
                   'runtime/models/deepseek_v41_fused.py']
     return _file_identity(names)
 
@@ -297,6 +340,11 @@ def receipt(policy, model=None):
                                    scope='B1 decode rows only; selection only; combine weights are original probabilities',
                                    stats=None if bias is None else bias.receipt(),
                                    qualification=QUALIFICATION)
+    if policy.get(DROP_KEY, 'off') != 'off':
+        drop = getattr(model, 'source_route_drop', None)
+        value['route_drop'] = dict(policy=policy[DROP_KEY], layers=policy[DROP_LAYERS], count=policy[DROP_COUNT],
+                                   stats=None if drop is None else drop.receipt(),
+                                   qualification=QUALIFICATION)
     return value
 
 
@@ -304,18 +352,24 @@ def approximate_model_class(base, policy):
     """Adapter-owned subclass of the selected model type, or ``base`` when off."""
     yoco = policy.get(YOCO_KEY, 'off') != 'off'
     route = policy.get(ROUTE_KEY, 'off') != 'off'
-    if not (yoco or route):
+    drop = policy.get(DROP_KEY, 'off') != 'off'
+    if not (yoco or route or drop):
         return base
 
     class ApproximateSourceModel(base):
         source_prefill_approx_enabled = yoco
         source_route_bias_enabled = route
+        source_route_drop_enabled = drop
 
         def _forward(self, inputs, cache=None, **options):
             bias = getattr(self, 'source_route_bias', None)
             if bias is not None:
                 from .deepseek_v41_source_route_bias import install_router_wrappers
                 install_router_wrappers(self)
+            reap = getattr(self, 'source_route_drop', None)
+            if reap is not None:
+                from .deepseek_v41_source_route_drop import install_router_wrappers as install_drop
+                install_drop(self)
             if getattr(self, 'source_prefill_approx_plan', None) is not None:
                 from .deepseek_v41_source_yoco import yoco_forward
                 result = yoco_forward(self, super()._forward, inputs, cache, **options)
@@ -323,6 +377,8 @@ def approximate_model_class(base, policy):
                 result = super()._forward(inputs, cache, **options)
             if bias is not None:
                 bias.after_forward(self, inputs, cache, result, options)
+            if reap is not None:
+                reap.after_forward(self, cache)
             return result
 
     return ApproximateSourceModel
@@ -340,3 +396,6 @@ def configure_model(adapter):
     if policy.get(ROUTE_KEY, 'off') != 'off':
         from .deepseek_v41_source_route_bias import ResidentRouteBias
         model.source_route_bias = ResidentRouteBias.from_policy(policy, adapter.weight_stream, model.args)
+    if policy.get(DROP_KEY, 'off') != 'off':
+        from .deepseek_v41_source_route_drop import RankDrop
+        model.source_route_drop = RankDrop.from_policy(policy)
