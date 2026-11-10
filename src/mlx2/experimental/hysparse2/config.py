@@ -32,6 +32,17 @@ class Config:
     prefill_chunk: int = 256
     candidate_block_size: int = 0
     candidate_blocks: int = 0
+    # Sparse-layer token selection. "oracle" ranks every visible key by the
+    # cross anchor's exact attention (HySparse). "nlsa" is the Native Latent
+    # Sparse Attention selector (arXiv 2610.42147): completed cluster blocks
+    # are clustered once and queries score bucket centroids. Research arm,
+    # default off; see docs/research/hysparse2/NLSA.md.
+    sparse_selection: str = "oracle"
+    nlsa_cluster_block: int = 128
+    nlsa_pool: int = 4
+    nlsa_bucket_tokens: int = 8
+    nlsa_bucket_max: int = 16
+    nlsa_sink_tokens: int = 4
     semantic_ple_rows: int = 0
     semantic_ple_dim: int = 0
     semantic_ngram: int = 4
@@ -87,6 +98,40 @@ class Config:
             raise ValueError("RoPE dimensions must be even and fit head_dim")
         if bool(self.candidate_block_size) != bool(self.candidate_blocks):
             raise ValueError("candidate block size and count must be enabled together")
+        if self.sparse_selection not in {"oracle", "nlsa"}:
+            raise ValueError("sparse_selection must be oracle or nlsa")
+        for name in (
+            "nlsa_cluster_block",
+            "nlsa_pool",
+            "nlsa_bucket_tokens",
+            "nlsa_bucket_max",
+        ):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if type(self.nlsa_sink_tokens) is not int or self.nlsa_sink_tokens < 0:
+            raise ValueError("nlsa_sink_tokens must be a nonnegative integer")
+        if self.sparse_selection == "nlsa":
+            if self.candidate_blocks:
+                raise ValueError("nlsa selection replaces candidate-block selection")
+            if (
+                self.nlsa_cluster_block % self.nlsa_pool
+                or self.nlsa_cluster_block % self.nlsa_bucket_tokens
+                or self.nlsa_bucket_tokens < self.nlsa_pool
+                or self.nlsa_bucket_max < self.nlsa_bucket_tokens
+            ):
+                raise ValueError(
+                    "nlsa cluster block must divide into pools and buckets, "
+                    "with pool <= bucket tokens <= bucket max"
+                )
+            # Forced keys are the local window, the query's own unfull
+            # cluster block (at most block - 1 earlier keys) and the sinks;
+            # they must fit the support with room left for long range.
+            if (
+                max(self.local_window, self.nlsa_cluster_block - 1)
+                + self.nlsa_sink_tokens
+                >= self.local_window + self.global_tokens
+            ):
+                raise ValueError("nlsa window and sinks exceed the selection budget")
         if bool(self.semantic_ple_rows) != bool(self.semantic_ple_dim):
             raise ValueError("semantic PLE rows and dimension must be enabled together")
         if self.semantic_ple_dim > self.hidden_size:
@@ -155,6 +200,22 @@ class Config:
                 "semantic_ngram",
             )
         }
+        if self.sparse_selection != "oracle":
+            # Only non-default selectors enter the layout, so existing oracle
+            # checkpoints keep their published APCv2 fingerprints.
+            layout.update(
+                {
+                    key: getattr(self, key)
+                    for key in (
+                        "sparse_selection",
+                        "nlsa_cluster_block",
+                        "nlsa_pool",
+                        "nlsa_bucket_tokens",
+                        "nlsa_bucket_max",
+                        "nlsa_sink_tokens",
+                    )
+                }
+            )
         fingerprint = hashlib.sha256(
             json.dumps(layout, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

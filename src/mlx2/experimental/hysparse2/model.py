@@ -307,11 +307,24 @@ class Attention(nn.Module):
                 block_select=(c.candidate_block_size, c.candidate_blocks)
                 if self.kind == "cross" and c.candidate_blocks
                 else None,
+                nlsa=_nlsa_settings(c) if self.kind == "cross" else None,
             )
         out = out.transpose(0, 2, 1, 3)
         if self.kind in ("swa", "sparse"):
             out = out * mx.sigmoid(self.gate(x))[..., None]
         return self.out(out.reshape(*x.shape[:-1], -1)), selected
+
+
+def _nlsa_settings(c):
+    if c.sparse_selection != "nlsa":
+        return None
+    return {
+        "block": c.nlsa_cluster_block,
+        "pool": c.nlsa_pool,
+        "buckets": c.nlsa_cluster_block // c.nlsa_bucket_tokens,
+        "bucket_max": c.nlsa_bucket_max,
+        "sinks": c.nlsa_sink_tokens,
+    }
 
 
 class Layer(nn.Module):
