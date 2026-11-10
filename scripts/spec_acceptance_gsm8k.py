@@ -57,7 +57,8 @@ DATASET = "openai/gsm8k"
 DATA = ROOT / "benchmarks" / "gsm8k"
 STOPS = ["Question:", "</s>", "<|im_end|>"]
 _ANNOTATION = re.compile(r"<<[^>]*>>")
-_NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+# A bare leading-dot decimal (".5") is one number, not the integer after it.
+_NUMBER = re.compile(r"-?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
 
 
 # ----------------------------------------------------------------- data --
@@ -87,8 +88,14 @@ def normalize(text):
     if not match:
         return None
     value = match.group(0).replace(",", "").rstrip(".")
+    if value.startswith("."):
+        value = "0" + value
+    elif value.startswith("-."):
+        value = "-0" + value[1:]
     if "." in value:
         value = value.rstrip("0").rstrip(".")
+    if value == "-0":
+        value = "0"
     return value.lstrip("+") or None
 
 
@@ -140,6 +147,27 @@ def acceptance_summary(receipts, max_position=16):
             "draft_acceptance_rate": accepted / proposed if proposed else None,
             "per_position": positions, "accept_hist": {str(k): hist[k] for k in sorted(hist)},
             "requests_without_rounds": without}
+
+
+def speculation_receipt(extra):
+    """The request's verify-round receipt, whichever route produced it.
+
+    External-draft and prompt-lookup lanes report it as ``speculation``
+    (``verify_accept_hist`` plus ``proposed``).  Native self-MTP lanes leave
+    ``speculation`` null and report the same histogram in ``mtp.stats``, with
+    the proposal count as ``draft_proposed``; reading only ``speculation``
+    scored every native-MTP request as having no verify rounds.
+    """
+    extra = extra if isinstance(extra, dict) else {}
+    spec = extra.get("speculation")
+    if isinstance(spec, dict) and spec.get("verify_accept_hist"):
+        return spec
+    mtp = extra.get("mtp")
+    stats = mtp.get("stats") if isinstance(mtp, dict) else None
+    if isinstance(stats, dict) and stats.get("verify_accept_hist"):
+        return {"source": "mtp.stats", "verify_accept_hist": stats["verify_accept_hist"],
+                "proposed": stats.get("draft_proposed")}
+    return spec
 
 
 def find(document, key):
@@ -208,7 +236,7 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
                "elapsed_seconds": elapsed, "ttft_seconds": ttft,
                "decode_tps": ((completion - 1) / (elapsed - ttft)
                               if ttft and completion > 1 and elapsed > ttft else None),
-               "route": extra.get("route"), "speculation": extra.get("speculation"), "text": text}
+               "route": extra.get("route"), "speculation": speculation_receipt(extra), "text": text}
         rows.append(row)
         if log:
             log(row)

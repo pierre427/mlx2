@@ -273,9 +273,16 @@ class InklingTree:
             and module.n_kv == 8
             and prefix + 1 >= 16384
         )
+        from .attention import supported
+
+        # Ordinary decode selects the kernel only where ``supported`` holds
+        # (Metal, d128, GQA 1..4, one dtype) and keeps reference SDPA
+        # otherwise; the tree follows the same law instead of raising.
         if (
-            module.attention_policy == "mapped" or decode_mapped
-        ) and module.head_dim == 128:
+            (module.attention_policy == "mapped" or decode_mapped)
+            and module.head_dim == 128
+            and supported(q, keys, values, r, module.rel_proj.astype(q.dtype))
+        ):
             from .tree_attention import attend
 
             tau = None

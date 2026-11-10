@@ -16,6 +16,7 @@ struct QualificationView: View {
     @State private var performanceSort = "decode_tps"
     @State private var comparisonGroup = ""
     @State private var details: String?
+    @State private var confirmCancel = false
 
     private var campaign: JSON { model.snapshot["campaign"] }
     private var jobs: [JSON] { model.snapshot["jobs"].array.filter { $0["kind"].text == "qualification" } }
@@ -36,7 +37,7 @@ struct QualificationView: View {
                 GroupBox("Select models • runs serially, smallest first") {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Button("Select serving candidates") { selected = Set(model.rows.filter { $0["can_start"].bool }.map { $0["path"].text }) }
+                            Button("Select Serving Candidates") { selected = Set(model.rows.filter { $0["can_start"].bool }.map { $0["path"].text }) }
                             Button("Clear") { selected = [] }
                             Spacer()
                             Text("\(selected.count) selected").foregroundStyle(.secondary)
@@ -51,7 +52,7 @@ struct QualificationView: View {
                                     Text(row["name"].text).lineLimit(1)
                                 }.toggleStyle(.checkbox)
                                 Spacer()
-                                Text(row["qualification"]["label"].text).font(.caption).foregroundStyle(.secondary)
+                                Text(row["qualification"]["label"].string.flatMap { $0.isEmpty ? nil : $0 } ?? "Unqualified").font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }.padding(5)
@@ -77,18 +78,20 @@ struct QualificationView: View {
                         Text("Level 1 retains ordinary output for review. Level 2 checks functionality without thermal holds. Optional performance measurements use controlled thermal conditions. Full preflight is optional. Stop existing model servers before queuing.")
                             .font(.caption).foregroundStyle(.secondary)
                         HStack {
-                            Button(campaign["running"].bool ? "Campaign running" : "Run selected models") {
+                            Button(campaign["running"].bool ? "Campaign Running" : "Run Selected Models") {
                                 enqueue(approved: runPreflight)
                             }.disabled(selected.isEmpty || levels.isEmpty || campaign["running"].bool || model.busy || profileError != nil)
+                                .help(selected.isEmpty ? "Select at least one model." : levels.isEmpty ? "Choose at least one test level." : profileError ?? "")
                             if campaign["running"].bool {
                                 ProgressView().controlSize(.small)
-                                Button("Cancel queue") { model.perform("campaign_cancel") }
+                                Button("Cancel Queue…") { confirmCancel = true }.disabled(model.busy)
                             }
                             Spacer()
-                            Button("Save test profile") { model.perform("campaign_configure", ["settings": ["profile": profile]]) }
+                            Button("Save Test Profile") { model.perform("campaign_configure", ["settings": ["profile": profile]]) }
                                 .disabled(model.busy || profileError != nil)
                         }
                         if let profileError { Label(profileError, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange) }
+                        else if levels.isEmpty { Label("Choose at least one test level.", systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange) }
                     }.padding(5)
                 }
                 if !jobs.isEmpty {
@@ -99,16 +102,16 @@ struct QualificationView: View {
                                     HStack {
                                         Text(URL(fileURLWithPath: job["spec"]["path"].text).lastPathComponent).bold()
                                         Spacer()
-                                        Text(job["state"].text).foregroundStyle(.secondary)
+                                        Text(job["state"].text.capitalized).foregroundStyle(.secondary)
                                         Button("Details") { details = pretty(job) }
                                     }
                                     Text(job["progress"].text).font(.caption).foregroundStyle(.secondary)
                                     if job["result"]["review_pending"].bool {
                                         Text(job["result"]["ordinary_output"]["text"].text).textSelection(.enabled)
                                         HStack {
-                                            Button("Output is coherent") { model.perform("campaign_review", ["job_id": job["id"].text, "coherent": true]) }
-                                            Button("Reject output") { model.perform("campaign_review", ["job_id": job["id"].text, "coherent": false]) }
-                                        }
+                                            Button("Output Is Coherent") { model.perform("campaign_review", ["job_id": job["id"].text, "coherent": true]) }
+                                            Button("Reject Output") { model.perform("campaign_review", ["job_id": job["id"].text, "coherent": false]) }
+                                        }.disabled(model.busy)
                                     }
                                 }
                                 Divider()
@@ -154,12 +157,20 @@ struct QualificationView: View {
             if let value = saved["cache_gib"].double { cache = String(Int(value)) }
             features = saved["features"].array.compactMap(\.string).joined(separator: ", ")
         }
+        .confirmationDialog("Cancel the qualification queue?", isPresented: $confirmCancel) {
+            Button("Cancel Queue", role: .destructive) { model.perform("campaign_cancel") }
+            Button("Keep Running", role: .cancel) {}
+        } message: { Text("The active test stops and queued models are not tested.") }
         .onChange(of: groups) { _, value in if !value.contains(comparisonGroup) { comparisonGroup = value.first ?? "" } }
         .onChange(of: selected) { _, value in model.checkedModels = value }
         .onChange(of: model.checkedModels) { _, value in if selected != value { selected = value } }
         .sheet(isPresented: Binding(get: { details != nil }, set: { if !$0 { details = nil } })) {
             VStack(alignment: .leading) {
-                HStack { Text("Source-bound evidence").font(.headline); Spacer(); Button("Done") { details = nil } }
+                HStack {
+                    Text("Source-bound evidence").font(.headline); Spacer()
+                    Button("Copy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(details ?? "", forType: .string) }
+                    Button("Done") { details = nil }.keyboardShortcut(.cancelAction)
+                }
                 ScrollView { Text(details ?? "").font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
             }.padding(20).frame(minWidth: 700, minHeight: 500)
         }

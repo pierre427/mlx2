@@ -87,7 +87,7 @@ struct RuntimeView: View {
                             if operation["pending"].bool && working { ProgressView("Request in progress…") }
                             else if operation["pending"].bool {
                                 Text("Last observed request: pending. Current outcome is unconfirmed.")
-                                Button("Check request status") {
+                                Button("Check Request Status") {
                                     if let identity = operation["id"].string { Task { await poll(identity) } }
                                 }
                             } else { Text(presentation.requestLabel).font(.headline) }
@@ -98,8 +98,8 @@ struct RuntimeView: View {
                             ForEach(presentation.errors, id: \.self) { message in Text(message).foregroundStyle(.orange).textSelection(.enabled) }
                             if let guidance = operation["guidance"].string { Text(guidance).font(.callout) }
                             if operation["state"].text == "submitted" {
-                                Text("The repair trial is still running. Use Get repair attempt with its attempt ID to read the outcome.")
-                                Button("Check repair attempt") {
+                                Text("The repair trial is still running. Use Get Repair Attempt with its attempt ID to read the outcome.")
+                                Button("Check Repair Attempt") {
                                     tool = "get_repair_attempt"
                                     fields = ["attempt_id": operation["receipt"]["id"].string ?? operation["receipt"]["attempt_id"].string ?? ""]
                                 }
@@ -129,7 +129,7 @@ struct RuntimeView: View {
                         HStack {
                             Text(name).textSelection(.enabled)
                             Spacer()
-                            Button("Unload") { submit("unload_lora", ["lora_name": name]) }.disabled(working || loading)
+                            Button("Unload") { submit("unload_lora", ["lora_name": name]) }.disabled(working || loading).help("Unload adapter " + name)
                         }
                     }
                     LabeledContent("Adapter name") {
@@ -141,12 +141,12 @@ struct RuntimeView: View {
                             Button("Choose…") { chooseAdapter() }
                         }
                     }
-                    Button("Load adapter") { submit("load_lora", ["lora_name": adapterName.trimmingCharacters(in: .whitespacesAndNewlines), "lora_path": adapterPath]) }
+                    Button("Load Adapter") { submit("load_lora", ["lora_name": adapterName.trimmingCharacters(in: .whitespacesAndNewlines), "lora_path": adapterPath]) }
                         .disabled(working || loading || adapterName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || adapterPath.isEmpty)
                 } else {
                     Text("Enable LoRA in this engine’s launch options, choose an adapter folder, and use ordinary decode. Restart the engine to apply launch changes.")
                         .foregroundStyle(.secondary)
-                    Button("Open launch options") { model.section = profile == "default" ? "Settings" : "Engines" }
+                    Button("Open Launch Options") { model.section = profile == "default" ? "Settings" : "Engines" }
                 }
             }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -165,7 +165,7 @@ struct RuntimeView: View {
                         jsonEditor("Settings (JSON array)", text: $settings)
                         jsonEditor("Setter calls (JSON array)", text: $calls)
                     }
-                    Button("Apply runtime change") {
+                    Button("Apply Runtime Change") {
                         do {
                             let names = modules.split(whereSeparator: { $0 == "," || $0.isWhitespace }).map(String.init)
                             let settingsValue = try parse(settings), callsValue = try parse(calls)
@@ -231,7 +231,7 @@ struct RuntimeView: View {
                         }
                     }
                     HStack {
-                        Button("Run operation") {
+                        Button("Run Operation") {
                             do { submit("weight_space", ["tool": tool, "arguments": try arguments()]) }
                             catch { self.error = error.localizedDescription }
                         }.disabled(working || loading || tool.isEmpty || !requiredFieldsFilled)

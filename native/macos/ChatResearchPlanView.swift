@@ -106,7 +106,7 @@ private struct ResearchPlanDetails: View {
                             }
                         }.font(.caption).textSelection(.enabled)
                     } label: {
-                        Text(event["tool"].text.replacingOccurrences(of: "_", with: " ") + " · " + event["status"].text).font(.caption)
+                        Text(ChatToolEvent(name: event["tool"].text).title + " · " + event["status"].text.replacingOccurrences(of: "_", with: " ")).font(.caption)
                     }
                 }
                 Text(plan["notice"].text).font(.caption2).foregroundStyle(.secondary)

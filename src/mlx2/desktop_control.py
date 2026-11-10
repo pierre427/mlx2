@@ -150,8 +150,10 @@ class DesktopController:
         self.agent_launches = AgentLaunch(self)
         # Residual-ablation jobs run the owned-mode runner as a subprocess;
         # correction cases and overlays are JSON records. Neither imports MLX.
-        # The modules are private (kept off the public mirror), so the section
-        # is simply absent where they are not shipped.
+        # The modules are published (export_public, 2026-11-06); the runner
+        # they drive (scripts/research/residual_ablation.py) is not, and
+        # plan_job refuses jobs when it is absent. The section is simply
+        # absent in a build that does not ship the modules.
         try:
             from .desktop_residual_ablation import ResidualAblation
             from .desktop_residual_ablation_cases import Corrections

@@ -57,7 +57,7 @@ struct ChatAgentsButton: View {
                                     session = AgentSessionSelection(jobID: row.job["id"].text, workerID: row.worker["id"].text)
                                 } label: {
                                     VStack(alignment: .leading, spacing: 4) {
-                                        HStack { Text(row.worker["goal"].text).lineLimit(2); Spacer(); Text(row.worker["status"].text).font(.caption).foregroundStyle(AgentSessionSupport.active(row.worker["status"].text) ? .blue : .secondary) }
+                                        HStack { Text(row.worker["goal"].text).lineLimit(2).help(row.worker["goal"].text); Spacer(); Text(row.worker["status"].text.capitalized).font(.caption).foregroundStyle(AgentSessionSupport.active(row.worker["status"].text) ? .blue : .secondary) }
                                         Text(AgentSessionSupport.model(row.job)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                     }.frame(maxWidth: .infinity, alignment: .leading).padding(8).contentShape(Rectangle())
                                 }.buttonStyle(.plain)
@@ -134,7 +134,7 @@ struct AgentSessionView: View {
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             Text(document["goal"].string ?? "Loading worker goal…").font(.headline).textSelection(.enabled)
-            HStack { Text(document["worker_status"].string ?? "Loading"); Text(document["model"].string ?? "").foregroundStyle(.secondary); Spacer(); Toggle("Follow latest", isOn: $followLatest).toggleStyle(.checkbox) }
+            HStack { Text(document["worker_status"].string?.capitalized ?? "Loading…"); Text(document["model"].string ?? "").foregroundStyle(.secondary); Spacer(); Toggle("Follow latest", isOn: $followLatest).toggleStyle(.checkbox) }
             DisclosureGroup("Session identity") {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Job: " + jobID); Text("Worker: " + workerID)

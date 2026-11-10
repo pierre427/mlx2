@@ -304,6 +304,8 @@ struct WorldView: View {
     @State private var pendingObjectID: String?
     @State private var thinking = false
     @State private var speaking = false
+    @State private var confirmRemove = false
+    @State private var searchedQuery: String?
     private let kinds = ["chat", "memory", "knowledge", "web", "file", "folder", "avatar", "media"]
     private var state: JSON { model.snapshot["world"] }
     private var world: JSON { state["active"] }
@@ -327,7 +329,7 @@ struct WorldView: View {
                         Spacer(minLength: 0)
                         if showChat {
                             VStack(spacing: 0) {
-                                HStack { Label("Chat", systemImage: "bubble.left.and.bubble.right"); Spacer(); Button { showChat = false } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }.padding(12)
+                                HStack { Label("Chat", systemImage: "bubble.left.and.bubble.right"); Spacer(); Button { showChat = false } label: { Image(systemName: "xmark") }.buttonStyle(.plain).help("Hide conversation").accessibilityLabel("Hide conversation") }.padding(12)
                                 Divider()
                                 ChatView(chat: model.chat)
                             }.frame(width: min(500, max(350, geometry.size.width * 0.46)), height: max(350, geometry.size.height - 130))
@@ -337,6 +339,8 @@ struct WorldView: View {
                     Spacer(minLength: 0)
                     HStack {
                         Text("Drag to orbit · scroll to zoom · click objects to edit").font(.caption)
+                        // The avatar ring signals activity by colour and motion; say it in words too.
+                        if speaking || thinking { Label(speaking ? "Agent speaking" : "Agent thinking", systemImage: speaking ? "waveform" : "ellipsis.bubble").font(.caption) }
                         Spacer()
                         if let localError { Text(localError).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
                     }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -378,7 +382,13 @@ struct WorldView: View {
             loadWorldControls()
         }
         .onExitCommand { leaveFullScreen() }
-        .sheet(isPresented: $showMemory) { VStack { HStack { Text("Memory and knowledge").font(.headline); Spacer(); Button("Done") { showMemory = false } }.padding(); MemoryView() }.frame(minWidth: 800, minHeight: 600) }
+        .confirmationDialog("Remove “\(selected["label"].text)” from this world?", isPresented: $confirmRemove) {
+            Button("Remove Object", role: .destructive) { if let selection { model.perform("world_object_remove", ["object_id": selection]); self.selection = nil } }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("The object and its settings are removed from the scene.")
+        }
+        .sheet(isPresented: $showMemory) { VStack { HStack { Text("Memory and knowledge").font(.headline); Spacer(); Button("Done") { showMemory = false }.keyboardShortcut(.cancelAction) }.padding(); MemoryView() }.frame(minWidth: 800, minHeight: 600) }
     }
 
     private var toolbar: some View {
@@ -392,18 +402,18 @@ struct WorldView: View {
             Menu {
                 ForEach(kinds, id: \.self) { item in Button("Add \(item.capitalized)") { addObject(item) } }
             } label: { Label("Object", systemImage: "plus") }
-            Button { showInspector.toggle() } label: { Image(systemName: "slider.horizontal.3") }.help("Object inspector")
-            Button { showChat.toggle() } label: { Image(systemName: "bubble.left.and.bubble.right") }.help("Conversation")
-            Button { resetCamera += 1 } label: { Image(systemName: "viewfinder") }.help("Reset camera")
+            Button { showInspector.toggle() } label: { Image(systemName: "slider.horizontal.3") }.help(showInspector ? "Hide object inspector" : "Show object inspector").accessibilityLabel(showInspector ? "Hide object inspector" : "Show object inspector")
+            Button { showChat.toggle() } label: { Image(systemName: "bubble.left.and.bubble.right") }.help(showChat ? "Hide conversation" : "Show conversation").accessibilityLabel(showChat ? "Hide conversation" : "Show conversation")
+            Button { resetCamera += 1 } label: { Image(systemName: "viewfinder") }.help("Reset camera").accessibilityLabel("Reset camera")
             Spacer(minLength: 0)
             Menu {
-                Button("Create world") { model.perform("world_create", ["name": newWorldName]) }
+                Button("Create world") { model.perform("world_create", ["name": newWorldName]) }.disabled(newWorldName.trimmingCharacters(in: .whitespaces).isEmpty)
                 Button("Save world") { model.perform("world_save", ["world": world.raw]) }
                 Divider()
                 Button("Import world JSON…") { importWorld() }
                 Button("Export world JSON…") { exportWorld() }
             } label: { Label("World", systemImage: "square.and.arrow.down") }
-            Button { LifecycleActions.toggleFullscreen() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }.help("Toggle full screen")
+            Button { LifecycleActions.toggleFullscreen() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }.help("Toggle full screen").accessibilityLabel("Toggle full screen")
         }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 
@@ -422,6 +432,7 @@ struct WorldView: View {
                         Divider()
                         field("New world name", value: $newWorldName)
                         Button("Create world") { model.perform("world_create", ["name": newWorldName]) }
+                            .disabled(newWorldName.trimmingCharacters(in: .whitespaces).isEmpty)
                     }.padding(.vertical, 8)
                 }
                 Text("Scene objects").font(.headline)
@@ -429,6 +440,7 @@ struct WorldView: View {
                     Button { selection = item["id"].text; if item["kind"].text == "chat" { showChat = true } } label: {
                         HStack { Image(systemName: icon(item["kind"].text)); Text(item["label"].text).lineLimit(1); Spacer(); if selection == item["id"].text { Image(systemName: "checkmark") } }
                     }.buttonStyle(.plain).padding(5)
+                        .accessibilityAddTraits(selection == item["id"].text ? .isSelected : [])
                 }
                 Divider()
                 Toggle("Agent may change the scene", isOn: Binding(get: { state["policy"]["autonomous_scene"].bool }, set: { model.perform("world_policy", ["changes": ["autonomous_scene": $0]]) }))
@@ -452,7 +464,7 @@ struct WorldView: View {
                     field("Animation speed", value: $speed)
                     HStack {
                         Button("Apply") { applyObject() }.buttonStyle(.borderedProminent)
-                        Button("Remove", role: .destructive) { if let selection { model.perform("world_object_remove", ["object_id": selection]); self.selection = nil } }
+                        Button("Remove", role: .destructive) { confirmRemove = true }
                     }
                     if ["memory", "knowledge"].contains(kind) { Button("Open memory and knowledge") { showMemory = true } }
                     Divider()
@@ -462,6 +474,9 @@ struct WorldView: View {
                     HStack {
                         Button("Search images") { searchImages() }.disabled(imageQuery.trimmingCharacters(in: .whitespaces).isEmpty || searchingImages)
                         if searchingImages { ProgressView().controlSize(.small) }
+                    }
+                    if imageResults.isEmpty, let searchedQuery, !searchingImages {
+                        Text("No openly licensed images found for “\(searchedQuery)”.").font(.caption).foregroundStyle(.secondary)
                     }
                     ForEach(imageResults, id: \.worldIdentity) { result in
                         VStack(alignment: .leading, spacing: 3) {
@@ -521,10 +536,12 @@ struct WorldView: View {
     }
     private func searchImages() {
         searchingImages = true
+        let query = imageQuery
         Task { @MainActor in
             defer { searchingImages = false }
             do {
-                imageResults = try await model.request("world_image_search", ["query": imageQuery, "limit": 8])["results"].array
+                imageResults = try await model.request("world_image_search", ["query": query, "limit": 8])["results"].array
+                searchedQuery = query
                 localError = nil
             } catch { localError = error.localizedDescription }
         }

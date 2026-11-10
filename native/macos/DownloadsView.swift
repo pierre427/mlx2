@@ -19,6 +19,7 @@ struct DownloadsView: View {
                 GroupBox("Hugging Face") {
                     VStack(alignment: .leading, spacing: 12) {
                         TextField("https://huggingface.co/owner/model or owner/model@revision", text: $target)
+                            .accessibilityLabel("Hugging Face model link or repository")
                         Toggle("Request an adapter draft after download", isOn: $adapterAfter)
                         Text("The repository revision is resolved to an exact commit before downloading. Files are verified and the model appears in the library only after completion. Downloading never loads or qualifies a model.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -42,7 +43,7 @@ struct DownloadsView: View {
                         Text("Saved tokens stay in an owner-only file in Application Support; they are excluded from model requests, telemetry and job logs.")
                             .font(.caption).foregroundStyle(.secondary)
                         Button("Save Download Settings") {
-                            guard let rate = Double(throttle), rate.isFinite, rate >= 0, rate <= 1048576 else { model.error = "Enter a nonnegative MiB/s limit."; return }
+                            guard let rate = Double(throttle.trimmingCharacters(in: .whitespaces)), rate.isFinite, rate >= 0, rate <= 1048576 else { model.error = "Enter a nonnegative MiB/s limit."; return }
                             model.savePreferences(["download_parallelism": parallelism,
                                                    "download_bytes_per_second": Int(rate * 1048576), "hf_token_file": tokenFile])
                         }
@@ -54,7 +55,7 @@ struct DownloadsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text(job["spec"]["repository"].text).font(.headline)
-                                Spacer(); Text(job["state"].text).foregroundStyle(.secondary)
+                                Spacer(); Text(job["state"].text.capitalized).foregroundStyle(.secondary)
                                 if ["queued", "running"].contains(job["state"].text) {
                                     Button("Cancel") { model.perform("download_cancel", ["job_id": job["id"].text]) }
                                 }
@@ -65,7 +66,7 @@ struct DownloadsView: View {
                             let progress = model.snapshot["downloads"][job["id"].text]
                             if let total = progress["total_bytes"].double, total > 0 {
                                 ProgressView(value: min(total, progress["downloaded_bytes"].double ?? 0), total: total)
-                                Text("\(bytes(progress["downloaded_bytes"].double)) / \(bytes(total)) · \(number(progress["files_done"].double, digits: 0)) files")
+                                Text("\(bytes(progress["downloaded_bytes"].double)) / \(bytes(total)) · \(number(progress["files_done"].double, digits: 0)) \(progress["files_done"].double == 1 ? "file" : "files")")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Text(job["progress"].text).font(.callout).textSelection(.enabled)
@@ -81,7 +82,9 @@ struct DownloadsView: View {
             }.padding(20)
         }.onAppear {
             parallelism = Int(model.preferences["download_parallelism"].double ?? 5)
-            throttle = String((model.preferences["download_bytes_per_second"].double ?? 0) / 1048576)
+            // Parsed back with Double(_:), so format locale-independently and keep
+            // enough digits that a small nonzero cap never reads as 0 (unlimited).
+            throttle = ((model.preferences["download_bytes_per_second"].double ?? 0) / 1048576).formatted(.number.locale(Locale(identifier: "en_US_POSIX")).grouping(.never).precision(.fractionLength(0...6)))
             tokenFile = model.preferences["hf_token_file"].string ?? ""
         }
     }
@@ -107,6 +110,10 @@ struct ConnectedToolsSettings: View {
     @State private var autoApprove = false
     @State private var toolList = ""
     @State private var studioURL = ""
+    @State private var adding = false
+    @State private var testing = false
+    @State private var tested = false
+    @State private var removeID: String?
     var body: some View {
         Section("Chat tools and sister applications") {
             Toggle("Expose MLX2 controls to chat", isOn: Binding(get: { model.preferences["agent_controls"].bool }, set: { model.savePreferences(["agent_controls": $0]) }))
@@ -118,7 +125,7 @@ struct ConnectedToolsSettings: View {
                     VStack(alignment: .leading) { Text(server["id"].text); Text(server["url"].text).font(.caption).foregroundStyle(.secondary) }
                     Spacer()
                     Text(server["auto_approve"].bool ? "Automatic calls" : "Ask for approval").font(.caption)
-                    Button("Remove") { model.savePreferences(["mcp_servers": model.preferences["mcp_servers"].array.filter { $0["id"].text != server["id"].text }.map(\.raw)]) }
+                    Button("Remove") { removeID = server["id"].text }
                 }
             }
             TextField("MCP connection name", text: $name)
@@ -126,8 +133,11 @@ struct ConnectedToolsSettings: View {
             SecureField("Bearer token (optional)", text: $token)
             TextField("Allowed tool names, comma separated (empty = all)", text: $allowed)
             Toggle("Allow this connection's tools without approval", isOn: $autoApprove)
-            Button("Add MCP Connection") {
+            Button(adding ? "Adding…" : "Add MCP Connection") {
+                guard !adding else { return }
+                adding = true
                 Task {
+                    defer { adding = false }
                     do {
                         var reference = ""
                         if !token.isEmpty {
@@ -141,21 +151,38 @@ struct ConnectedToolsSettings: View {
                         token = ""; name = ""; await model.refresh()
                     } catch { model.error = error.localizedDescription }
                 }
-            }.disabled(name.isEmpty)
-            Button("Test Connections and List Tools") {
-                Task {
-                    do {
-                        let result = try await model.request("tool_discover")
-                        toolList = result["tools"].array.map { $0["function"]["name"].text }.joined(separator: "\n")
-                    } catch { model.error = error.localizedDescription }
-                }
+            }.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || adding)
+            HStack {
+                Button(testing ? "Testing…" : "Test Connections and List Tools") {
+                    guard !testing else { return }
+                    testing = true
+                    Task {
+                        defer { testing = false }
+                        do {
+                            let result = try await model.request("tool_discover")
+                            toolList = result["tools"].array.map { $0["function"]["name"].text }.joined(separator: "\n")
+                            tested = true
+                        } catch { model.error = error.localizedDescription }
+                    }
+                }.disabled(testing)
+                if testing { ProgressView().controlSize(.small) }
             }
             if !toolList.isEmpty { Text(toolList).font(.caption.monospaced()).textSelection(.enabled) }
+            else if tested { Text("The connections responded but listed no tools.").font(.caption).foregroundStyle(.secondary) }
             TextField("MLX Studio URL (optional)", text: $studioURL)
             Button("Save Studio URL") { model.savePreferences(["studio_url": studioURL]) }
             if let url = URL(string: model.preferences["studio_url"].text), ["http", "https"].contains(url.scheme ?? "") {
                 Link("Open MLX Studio", destination: url)
             }
         }.onAppear { studioURL = model.preferences["studio_url"].string ?? "" }
+        .confirmationDialog("Remove the MCP connection “\(removeID ?? "")”?", isPresented: Binding(get: { removeID != nil }, set: { if !$0 { removeID = nil } })) {
+            Button("Remove Connection", role: .destructive) {
+                if let removeID { model.savePreferences(["mcp_servers": model.preferences["mcp_servers"].array.filter { $0["id"].text != removeID }.map(\.raw)]) }
+                removeID = nil
+            }
+            Button("Cancel", role: .cancel) { removeID = nil }
+        } message: {
+            Text("Chat loses access to this connection's tools. Adding it again requires its URL and token.")
+        }
     }
 }

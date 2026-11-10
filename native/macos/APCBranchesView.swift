@@ -24,12 +24,15 @@ struct APCBranchesView: View {
                 Text("Conversation branches can reuse shared cached prefixes. Parent links below are inferred from retained token prefixes; they are not proof that a particular chat used a cache entry.")
                     .font(.caption).foregroundStyle(.secondary)
                 if state["clock_frozen"].bool { Label("Suspended · expiry clocks are frozen", systemImage: "pause.circle").foregroundStyle(.orange) }
-                if let error { Text(error).foregroundStyle(.orange).font(.caption) }
-                if state["entries"].array.isEmpty { Text("No retained branches reported.").foregroundStyle(.secondary) }
+                if let error { Text(error).foregroundStyle(.orange).font(.caption).textSelection(.enabled) }
+                if workers.isEmpty { Text("No running managed models. Start a model to inspect its cached branches.").foregroundStyle(.secondary) }
+                else if profile.isEmpty { Text("Choose a managed model to list its retained branches.").foregroundStyle(.secondary) }
+                else if loading && state["entries"].array.isEmpty { Text("Loading retained branches…").foregroundStyle(.secondary) }
+                else if error == nil && state["entries"].array.isEmpty { Text("No retained branches reported.").foregroundStyle(.secondary) }
                 ForEach(Array(state["entries"].array.enumerated()), id: \.offset) { _, entry in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text(entry["id"].text).font(.caption.monospaced()).textSelection(.enabled)
+                            Text(entry["id"].text).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(entry["id"].text)
                             Spacer()
                             Text(entry["tier"].text)
                             Text(number(entry["token_count"].double, suffix: " tokens", digits: 0))

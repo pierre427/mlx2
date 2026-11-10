@@ -25,13 +25,15 @@ struct UserProfilesView: View {
                         VStack(alignment: .leading) {
                             Text(row["name"].text + (row["id"].text == active ? " · Active" : ""))
                             if row["imported"].bool { Text("Imported · execution permissions require re-enabling").font(.caption).foregroundStyle(.secondary)
-                                DisclosureGroup("Requested settings") { Text(String(describing: row["requested_import"].raw)).font(.caption.monospaced()).textSelection(.enabled) } }
+                                DisclosureGroup("Requested settings") { Text(pretty(row["requested_import"])).font(.caption.monospaced()).textSelection(.enabled) } }
                         }
                         Spacer()
                         Button("Rename") { rename(row) }
                         Button("Export…") { export(row) }
-                        Button("Switch") { model.perform("user_profile_switch", ["profile_id": row["id"].text]) }.disabled(row["id"].text == active)
-                        Button("Archive") { model.perform("user_profile_delete", ["profile_id": row["id"].text]) }.disabled(row["id"].text == active)
+                        Button("Switch") { model.perform("user_profile_switch", ["profile_id": row["id"].text]) }.disabled(row["id"].text == active || model.busy)
+                            .help(row["id"].text == active ? "This profile is already active." : "Make this the active user profile.")
+                        Button("Archive") { model.perform("user_profile_delete", ["profile_id": row["id"].text]) }.disabled(row["id"].text == active || model.busy)
+                            .help(row["id"].text == active ? "Switch to another profile before archiving this one." : "Archive this profile. Archived profiles can be restored below.")
                     }.padding(10).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 }
                 Button("Import User Profile…") { importProfile() }
@@ -39,10 +41,10 @@ struct UserProfilesView: View {
                 if !state["archived"].array.isEmpty {
                     Text("Archived profiles").font(.headline)
                     ForEach(Array(state["archived"].array.enumerated()), id: \.offset) { _, row in
-                        HStack { Text(row.text).font(.caption.monospaced()); Button("Restore") { model.perform("user_profile_restore", ["profile_id": row.text]) } }
+                        HStack { Text(row.text).font(.caption.monospaced()).textSelection(.enabled); Button("Restore") { model.perform("user_profile_restore", ["profile_id": row.text]) }.disabled(model.busy) }
                     }
                 }
-                if !(state["error"].string ?? "").isEmpty { Text(state["error"].text).foregroundStyle(.orange) }
+                if !(state["error"].string ?? "").isEmpty { Text(state["error"].text).foregroundStyle(.orange).textSelection(.enabled) }
                 if !note.isEmpty { Text(note).font(.caption) }
             }.padding(20)
         }
@@ -52,11 +54,12 @@ struct UserProfilesView: View {
         let alert = NSAlert(); alert.messageText = "Rename User Profile"
         let field = NSTextField(string: row["name"].text); field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
         alert.accessoryView = field; alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn { model.perform("user_profile_rename", ["profile_id": row["id"].text, "name": field.stringValue]) }
+        alert.window.initialFirstResponder = field
+        if alert.runModal() == .alertFirstButtonReturn, !field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, field.stringValue != row["name"].text { model.perform("user_profile_rename", ["profile_id": row["id"].text, "name": field.stringValue]) }
     }
 
     private func export(_ row: JSON) {
-        let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = "MLX2 User Profile.json"
+        let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = (row["name"].text.isEmpty ? "MLX2 User Profile" : row["name"].text.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")) + ".json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task {
             do {
@@ -65,6 +68,12 @@ struct UserProfilesView: View {
                 try data.write(to: url, options: [.atomic]); note = "Exported \(row["name"].text)"
             } catch { model.error = error.localizedDescription }
         }
+    }
+
+    private func pretty(_ value: JSON) -> String {
+        guard !(value.raw is NSNull), JSONSerialization.isValidJSONObject(value.raw),
+              let data = try? JSONSerialization.data(withJSONObject: value.raw, options: [.prettyPrinted, .sortedKeys]) else { return value.text }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func importProfile() {

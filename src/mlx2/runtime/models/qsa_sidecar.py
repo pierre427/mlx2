@@ -196,9 +196,13 @@ class QSASidecar:
             indexer.reset()
 
     def identity(self) -> dict:
+        from .qwen4_qsa_nax import qsa_nax_law
+
+        # The NAX kernel law the "nax"/"window" modes run (process-wide,
+        # MLX_QWEN4_QSA_NAX_LAW); v2 laws round differently from v1.
         return {"file": self.file, "layers": sorted(self.indexers),
                 "budget": self.budget, "mode": self.mode,
-                "fused_select": self.fused_select}
+                "fused_select": self.fused_select, "nax_law": qsa_nax_law()}
 
 
 def _selection(indexer: LayerIndexer, x: mx.array, offset: int, topk: int,
@@ -232,8 +236,13 @@ def _selection(indexer: LayerIndexer, x: mx.array, offset: int, topk: int,
 def _dense_mask(ids, picked_valid, q_pos, n_blocks, total):
     """Reference boolean visibility [1, 1, L, total] for a selection."""
     length = ids.shape[0]
-    onehot = mx.zeros((length, n_blocks), dtype=mx.bool_)
-    onehot = mx.put_along_axis(onehot, ids, picked_valid, axis=-1)
+    # Unpicked slots scatter into a spare column.  The fused selector pads a
+    # short row with id 0; scattering that pad's False onto column 0 would
+    # race (and on CPU overwrite) a genuinely selected block 0.
+    onehot = mx.zeros((length, n_blocks + 1), dtype=mx.bool_)
+    onehot = mx.put_along_axis(
+        onehot, mx.where(picked_valid, ids, n_blocks), picked_valid, axis=-1
+    )[:, :n_blocks]
     token = mx.arange(total, dtype=mx.int32)
     block_of = token // BLOCK
     in_complete = block_of < n_blocks
@@ -301,6 +310,31 @@ def _quest_mask(queries, keys, offset, *, window, sink, budget, page, q_chunk=51
     return (vis & causal)[None, None]
 
 
+def _with_own_block(block_ids, counts, q_pos):
+    """Append each block-end query's own block when it was not selected.
+
+    The reference mask (``build_sparse_mask``) always shows a query its own
+    block up to itself, also when ``q_pos`` ends that block (``q_pos % 4 ==
+    3``), so the block is complete.  ``QSACompactBlocks`` and the NAX kernel
+    admit a tail only from ``(q_pos + 1) // 4 * 4``, which is empty there, so
+    an unselected own block would vanish.  The own block is the largest valid
+    id, so appending it at slot ``counts`` keeps the list sorted and packed.
+    ``block_ids`` [1, L, K] int32, ``counts`` [1, L] int32.
+    """
+    own = (q_pos // BLOCK)[None].astype(mx.int32)
+    at_end = ((q_pos + 1) % BLOCK == 0)[None]
+    width = block_ids.shape[-1]
+    last = mx.take_along_axis(
+        block_ids, mx.clip(counts - 1, 0, width - 1)[..., None], axis=-1
+    )[..., 0]
+    need = at_end & ~((counts > 0) & (last == own))
+    ids = mx.concatenate([block_ids, mx.zeros((*block_ids.shape[:-1], 1), mx.int32)], axis=-1)
+    slot = counts[..., None]
+    current = mx.take_along_axis(ids, slot, axis=-1)
+    ids = mx.put_along_axis(ids, slot, mx.where(need[..., None], own[..., None], current), axis=-1)
+    return ids, counts + need.astype(mx.int32)
+
+
 def _compact(ids, picked_valid, q_pos, total, counts=None):
     from .qwen4_exp import QSACompactBlocks, _compact_qsa_block_ids
 
@@ -310,6 +344,8 @@ def _compact(ids, picked_valid, q_pos, total, counts=None):
         (block_ids, counts) = _compact_qsa_block_ids(
             ids[None], picked_valid[None], n_blocks=total // BLOCK
         )
+    (block_ids, counts) = _with_own_block(block_ids.astype(mx.int32),
+                                          counts.astype(mx.int32), q_pos)
     tail_stop = (q_pos + 1)[None]
     return QSACompactBlocks(
         block_ids=block_ids, block_counts=counts,

@@ -9,6 +9,15 @@ struct AgentsView: View {
     @State private var tokens = 2048
     @State private var childTools = Set<String>()
     @State private var agentSession: AgentSessionSelection?
+    @State private var cancelJob: JSON?
+    private var goalLines: [String] { goals.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } }
+    private var runBlocker: String? {
+        if servers.isEmpty { return "Start a model from Model Library first; agents run on a running engine." }
+        if selected.isEmpty { return "Choose a running engine." }
+        if goalLines.isEmpty { return "Enter at least one worker goal." }
+        if goalLines.count > 16 { return "Enter at most 16 worker goals (\(goalLines.count) entered)." }
+        return nil
+    }
     private var servers: [JSON] { model.servers }
     private var jobs: [JSON] { model.snapshot["agents"]["jobs"].array }
     private func start() {
@@ -21,7 +30,7 @@ struct AgentsView: View {
             target = ["url": endpoint["url"].text, "pid": endpoint["pid"].raw]
         }
         model.perform("agent_delegate", ["target": target,
-            "goals": goals.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            "goals": goalLines,
             "tools": childTools.sorted(), "concurrency": concurrency, "max_tokens": tokens, "synthesis_goal": synthesisGoal])
     }
     var body: some View {
@@ -39,20 +48,21 @@ struct AgentsView: View {
                 Text("Requests run concurrently within the engine's configured serving capacity. Physical batching depends on its lane settings.").font(.caption).foregroundStyle(.secondary)
                 Stepper("Token limit per worker and synthesis: \(tokens)", value: $tokens, in: 128...8192, step: 128)
                 Text("Worker goals — one per line (up to 16)").font(.headline)
-                TextEditor(text: $goals).frame(height: 130).border(.separator)
+                TextEditor(text: $goals).frame(height: 130).border(.separator).accessibilityLabel("Worker goals, one per line")
                 TextField("Orchestrator synthesis goal", text: $synthesisGoal, axis: .vertical)
-                Button("Run Agents", action: start).disabled(model.busy || selected.isEmpty || goals.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Run Agents", action: start).disabled(model.busy || runBlocker != nil).help(runBlocker ?? "Start one worker per goal on the selected engine.")
+                if let runBlocker { Text(runBlocker).font(.caption).foregroundStyle(.secondary) }
                 ForEach(Array(jobs.enumerated()), id: \.offset) { _, job in
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("Task \(job["id"].text.prefix(8)) · \(job["status"].text)").font(.headline)
+                            Text("Task \(job["id"].text.prefix(8)) · \(job["status"].text.capitalized)").font(.headline).help("Task " + job["id"].text)
                             Spacer()
-                            if ["queued", "running", "synthesizing"].contains(job["status"].text) { Button("Cancel") { model.perform("agent_cancel", ["job_id": job["id"].text]) } }
+                            if ["queued", "running", "synthesizing"].contains(job["status"].text) { Button("Cancel Task…") { cancelJob = job }.disabled(model.busy) }
                         }
                         ForEach(Array(job["workers"].array.enumerated()), id: \.offset) { _, worker in
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
-                                    Text("\(worker["status"].text) · \(worker["goal"].text)").lineLimit(2)
+                                    Text("\(worker["status"].text.capitalized) · \(worker["goal"].text)").lineLimit(2).help(worker["goal"].text)
                                     Spacer()
                                     Button("Open Session") { agentSession = AgentSessionSelection(jobID: job["id"].text, workerID: worker["id"].text) }
                                 }
@@ -63,11 +73,15 @@ struct AgentsView: View {
                         }
                         AgentJobControls(job: job).id(job["id"].text)
                         if let synthesis = job["synthesis"].string { Text("Orchestrator synthesis").font(.headline); Text(synthesis).textSelection(.enabled) }
-                        if let error = job["error"].string { Text(error).foregroundStyle(.orange) }
+                        if let error = job["error"].string { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
                     }.padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 }
             }.padding(20)
-        }.sheet(item: $agentSession) { item in AgentSessionView(jobID: item.jobID, workerID: item.workerID) }
+        }.confirmationDialog("Cancel this agent task?", isPresented: Binding(get: { cancelJob != nil }, set: { if !$0 { cancelJob = nil } }), presenting: cancelJob) { job in
+            Button("Cancel Task", role: .destructive) { model.perform("agent_cancel", ["job_id": job["id"].text]); cancelJob = nil }
+            Button("Keep Running", role: .cancel) { cancelJob = nil }
+        } message: { _ in Text("Queued and running workers in this task stop before finishing their reports.") }
+        .sheet(item: $agentSession) { item in AgentSessionView(jobID: item.jobID, workerID: item.workerID) }
             .onChange(of: model.snapshot["user_profiles"]["active_id"].text) { _, _ in childTools = []; agentSession = nil }
     }
 }

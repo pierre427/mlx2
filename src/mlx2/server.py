@@ -3741,8 +3741,10 @@ def handler_for(
             self._ensure_trace()
             if not self._authorize_request():
                 return
-            if not self._authenticate_tenant(self.path.split("?", 1)[0]):
-                return
+            # Admin routes authenticate with the admin token in the same
+            # Authorization header a tenant key would use, so they must not
+            # pass the tenant gate first (do_POST orders it the same way;
+            # sweep 2026-11-06 RA-5: overlays could be loaded but never unloaded).
             if self.path.split("?", 1)[0].startswith("/v1/admin/overlays/"):
                 if admin_token is None:
                     self.api_error(403, "overlay unloading requires --admin-token-file")
@@ -3762,6 +3764,8 @@ def handler_for(
                     self.error(409, str(error), code="overlay_in_use")
                 except OverlayNotLoaded as error:
                     self.error(404, str(error), code="overlay_not_loaded")
+                return
+            if not self._authenticate_tenant(self.path.split("?", 1)[0]):
                 return
             try:
                 session_route = self._session_route()

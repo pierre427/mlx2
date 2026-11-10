@@ -474,6 +474,11 @@ def validate_policy(value):
         raise ValueError(
             "Inkling tree kernels and cohort packing require the packed executor"
         )
+    if kernels["inkling_shortconv_prefill"] and not kernels["inkling_fused"]:
+        # The wide-row short-convolution kernel is a branch of the fused
+        # decode kernel (InklingShortConvolution checks ``fused`` first);
+        # without it the option would be accepted and never engage.
+        raise ValueError("Inkling shortconv prefill requires inkling_fused")
     mode = value.pop("inkling_moe_nax", None)
     if mode not in (None, "off", "gather", "fused"):
         raise ValueError("Inkling MoE NAX mode must be off, gather or fused")

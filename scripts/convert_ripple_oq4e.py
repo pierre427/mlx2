@@ -22,6 +22,13 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def checkout_revision():
+    """The commit of THIS checkout, whatever the caller's working directory."""
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+
 
 def atomic_json(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -59,7 +66,7 @@ def main():
     if args.output.exists():
         raise FileExistsError(args.output)
     args.evidence.mkdir(parents=True, exist_ok=False)
-    source_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    source_revision = checkout_revision()
     source_artifact = inspect_artifact(args.model)
     if source_artifact["storage_format"] != "bf16":
         raise ValueError("only the original BF16 source may be calibrated")

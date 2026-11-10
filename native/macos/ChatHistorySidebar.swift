@@ -3,6 +3,7 @@ import SwiftUI
 struct ChatHistorySidebar: View {
     @ObservedObject var chat: ChatModel
     let newChat: () -> Void
+    var canCreate = true
     let collapse: () -> Void
     @State private var search = ""
     @State private var category = "active"
@@ -22,8 +23,8 @@ struct ChatHistorySidebar: View {
             HStack {
                 Text("Chats").font(.headline)
                 Spacer()
-                Button(action: newChat) { Image(systemName: "square.and.pencil") }.disabled(chat.generating || chat.branching)
-                    .help("New chat").accessibilityLabel("New chat in history")
+                Button(action: newChat) { Image(systemName: "square.and.pencil") }.disabled(chat.generating || chat.branching || !canCreate)
+                    .help(canCreate ? "New chat" : "Start a text model in Model Library to begin a new chat").accessibilityLabel("New chat in history")
                 Button(action: collapse) { Image(systemName: "sidebar.left") }.help("Collapse chat history").accessibilityLabel("Collapse chat history")
             }
             TextField("Search chats", text: $search).textFieldStyle(.roundedBorder)
@@ -32,11 +33,11 @@ struct ChatHistorySidebar: View {
             }.labelsHidden()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    if identities.isEmpty { Text("No chats here").font(.caption).foregroundStyle(.secondary).padding(.vertical, 12) }
+                    if identities.isEmpty { Text(search.isEmpty ? (category == "deleted" ? "Trash is empty" : category == "archived" ? "No archived chats" : "No chats yet") : "No chats match “\(search)”").font(.caption).foregroundStyle(.secondary).padding(.vertical, 12) }
                     ForEach(identities, id: \.self) { identity in
                         Button { chat.selected = identity } label: {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(chat.historyTitle(identity)).font(.callout).lineLimit(2)
+                                Text(chat.historyTitle(identity)).font(.callout).lineLimit(2).help(chat.historyTitle(identity))
                                 if chat.hasUnsentInput(in: identity) {
                                     Text("Draft" + (chat.draftText(for: identity).isEmpty ? " · attachment" : ": " + chat.draftText(for: identity)))
                                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -63,6 +64,7 @@ struct ChatHistorySidebar: View {
             .alert("Rename Chat", isPresented: Binding(get: { renameID != nil }, set: { if !$0 { renameID = nil } })) {
                 TextField("Title", text: $title)
                 Button("Save") { if let id = renameID { chat.renameHistory(id, title: title) }; renameID = nil }
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("Cancel", role: .cancel) { renameID = nil }
             }
     }

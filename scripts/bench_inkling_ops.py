@@ -7,14 +7,13 @@ import argparse
 import gc
 import json
 import statistics
-import subprocess
 import time
 from functools import partial
 from pathlib import Path
 
 import mlx.core as mx
 from mlx import nn
-from probe_inkling import atomic, host, ownership
+from probe_inkling import atomic, host, ownership, source_revision
 
 from mlx2.adapters.inkling import inspect_artifact
 from mlx2.runtime.models import moe_nax_gather as nax
@@ -33,7 +32,7 @@ def main():
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     artifact = inspect_artifact(args.model)
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    revision = source_revision()
     report = {
         "checkpoint": args.model.name + "@" + artifact["identity"]["fingerprint"],
         "source_revision": revision,

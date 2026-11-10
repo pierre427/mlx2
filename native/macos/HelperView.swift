@@ -34,9 +34,10 @@ struct HelperView: View {
                 Picker("Helper for this request", selection: $provider) {
                     Text("Local model").tag("local"); Text("Codex").tag("codex"); Text("Claude Code").tag("claude")
                 }
-                TextEditor(text: $prompt).frame(height: 100).border(.separator)
+                TextEditor(text: $prompt).frame(height: 100).border(.separator).accessibilityLabel("Helper request")
                 Button("Ask Helper") { model.perform("helper_start", ["provider": provider, "prompt": prompt]) }
                     .disabled(model.busy || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !preferences["helper_enabled"].bool)
+                    .help(preferences["helper_enabled"].bool ? "Send this request to the selected helper" : "Enable helpers above first")
                 Picker("Draft an adapter for", selection: $selectedModel) {
                     Text("Choose model").tag("")
                     ForEach(model.library["rows"].array, id: \.rawIdentity) { row in Text(row["name"].text).tag(row["path"].text) }
@@ -46,9 +47,10 @@ struct HelperView: View {
                         model.perform("adapter_draft", ["provider": provider, "path": row["path"].text, "identity": row["identity"].text])
                     }
                 }.disabled(model.busy || selectedModel.isEmpty || !preferences["helper_enabled"].bool)
+                    .help(preferences["helper_enabled"].bool ? "Choose a model to draft an adapter for" : "Enable helpers above first")
                 ForEach(Array(jobs.enumerated()), id: \.offset) { _, row in
                     HStack {
-                        VStack(alignment: .leading) { Text("\(row["provider"].text) · \(row["kind"].text) · \(row["status"].text)"); if let error = row["error"].string { Text(error).font(.caption).foregroundStyle(.orange) } }
+                        VStack(alignment: .leading) { Text("\(providerName(row["provider"].text)) · \(row["kind"].text.replacingOccurrences(of: "_", with: " ")) · \(row["status"].text.capitalized)").help(row["id"].text); if let error = row["error"].string { Text(error).font(.caption).foregroundStyle(.orange) } }
                         Spacer()
                         if ["queued", "running"].contains(row["status"].text) {
                             Button("Cancel") { model.perform("helper_cancel", ["job_id": row["id"].text]) }
@@ -56,12 +58,17 @@ struct HelperView: View {
                         if row["status"].text == "completed" {
                             Button("Read Proposal") { Task { do { proposal = try await model.request("helper_result", ["job_id": row["id"].text])["proposal"].text } catch { model.error = error.localizedDescription } } }
                         }
-                        Button("Show Workspace") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: row["workspace"].text) }
+                        if let workspace = row["workspace"].string {
+                            Button("Show Workspace") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: workspace) }
+                        }
                     }.padding(10).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 }
                 if !proposal.isEmpty { Text(proposal).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
             }.padding(20)
         }
+    }
+    private func providerName(_ id: String) -> String {
+        ["local": "Local model", "codex": "Codex", "claude": "Claude Code"][id] ?? id
     }
 }
 

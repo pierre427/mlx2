@@ -32,6 +32,9 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+# This tree, not the editable install (a worktree reusing the primary
+# checkout's venv would otherwise import the primary checkout).
+sys.path.insert(0, str(ROOT / "src"))
 # Distinct sentences: reasoning models degrade on repeated filler.
 FACTS = [f"Ledger entry {n}: crate {(n * 37) % 1000:03d} moved from bay {n % 13} to bay {(n * 7) % 17}."
          for n in range(1, 61)]
@@ -64,13 +67,28 @@ def first_divergence(a, b):
     return None if len(a) == len(b) else min(len(a), len(b))
 
 
+def execution_policy(args):
+    """The adapter policy both the reference and the server arm load with."""
+    return {"exl3_execution": args.execution,
+            **({"exl3_resident_dense": args.resident_dense} if args.resident_dense is not None else {})}
+
+
+def reference_command(args):
+    """The ordinary-reference child: same law, same resident choice, this tree."""
+    command = [sys.executable, __file__, "--i-own-the-gpu", "--model", str(args.model),
+               "--output", str(args.output), "--execution", args.execution, "--reference-only"]
+    if args.resident_dense is not None:
+        command += ["--resident-dense", args.resident_dense]
+    return command, {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+
+
 def reference(args):
     """Ordinary greedy decode through the adapter (own process)."""
     import mlx.core as mx
 
     from mlx2.adapters.registry import resolve_adapter
 
-    adapter = resolve_adapter(args.model)(args.model, execution_policy={"exl3_execution": args.execution})
+    adapter = resolve_adapter(args.model)(args.model, execution_policy=execution_policy(args))
     # Model modules import only after the adapter pinned its profile.
     from mlx2.runtime.models.cache import make_prompt_cache
 
@@ -134,9 +152,8 @@ def main():
                "kind": "bounded correctness smoke", "rows": [], "b4": []}
     receipt["thermal_before"] = subprocess.check_output(["pmset", "-g", "therm"], text=True)
     receipt["swap_before"] = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)
-    subprocess.run([sys.executable, __file__, "--i-own-the-gpu", "--model", str(args.model),
-                    "--output", str(args.output), "--execution", args.execution, "--reference-only"],
-                   check=True, timeout=1800)
+    command, env = reference_command(args)
+    subprocess.run(command, env=env, check=True, timeout=1800)
     ordinary = json.loads((args.output / "ordinary-reference.json").read_text())
     receipt["ordinary_reference"] = ordinary
     root = f"http://127.0.0.1:{args.port}"
@@ -169,8 +186,7 @@ def main():
         return result, trace
 
     policy = args.output / "policy.json"
-    atomic_json(policy, {"exl3_execution": args.execution,
-                         **({"exl3_resident_dense": args.resident_dense} if args.resident_dense is not None else {})})
+    atomic_json(policy, execution_policy(args))
     command = [sys.executable, "-u", "-m", "mlx2.server", "--model", str(args.model), "--host", "127.0.0.1",
                "--port", str(args.port), "--max-lanes", "4", "--max-inflight", "4", "--max-context", "8192",
                "--cache-bytes", str(2 << 30), "--cache-dir", str(args.output / "apcv2"),

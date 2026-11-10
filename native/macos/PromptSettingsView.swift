@@ -8,6 +8,7 @@ struct PromptSettingsView: View {
     @State private var preset = "full"
     @State private var importingPreset = false
     @State private var presetCatalog: [JSON] = []
+    @State private var confirmDelete = false
     private var prompts: [JSON] { model.preferences["system_prompts"].array }
 
     private func load() {
@@ -54,7 +55,7 @@ struct PromptSettingsView: View {
             }.onChange(of: selected) { _, _ in load() }
             TextField("Prompt name", text: $name)
             TextEditor(text: $text).frame(minHeight: 120).font(.body)
-                .overlay(RoundedRectangle(cornerRadius: 5).stroke(.separator))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(.separator)).accessibilityLabel("Prompt text")
             HStack {
                 Button("Save Prompt") {
                     let identity = selected.isEmpty ? UUID().uuidString.lowercased() : selected
@@ -63,15 +64,20 @@ struct PromptSettingsView: View {
                     model.savePreferences(["system_prompts": rows])
                     selected = identity
                 }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Enter a prompt name first." : "")
                 if !selected.isEmpty {
-                    Button("Delete Prompt", role: .destructive) {
-                        var panels = model.preferences["panel_system_prompt_ids"].raw as? [String: String] ?? [:]
-                        panels = panels.filter { $0.value != selected }
-                        model.savePreferences(["system_prompts": prompts.filter { $0["id"].text != selected }.map(\.raw),
-                                               "base_system_prompt_id": model.preferences["base_system_prompt_id"].text == selected ? "" : model.preferences["base_system_prompt_id"].text,
-                                               "panel_system_prompt_ids": panels])
-                        selected = ""; name = ""; text = ""
-                    }
+                    Button("Delete Prompt…", role: .destructive) { confirmDelete = true }
+                        .confirmationDialog("Delete “\(prompts.first(where: { $0["id"].text == selected })?["name"].text ?? name)”?", isPresented: $confirmDelete) {
+                            Button("Delete Prompt", role: .destructive) {
+                                var panels = model.preferences["panel_system_prompt_ids"].raw as? [String: String] ?? [:]
+                                panels = panels.filter { $0.value != selected }
+                                model.savePreferences(["system_prompts": prompts.filter { $0["id"].text != selected }.map(\.raw),
+                                                       "base_system_prompt_id": model.preferences["base_system_prompt_id"].text == selected ? "" : model.preferences["base_system_prompt_id"].text,
+                                                       "panel_system_prompt_ids": panels])
+                                selected = ""; name = ""; text = ""
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: { Text("This cannot be undone. Chat panels stop adding it, and if it is the base prompt, the base reverts to the model default.") }
                 }
             }
         }

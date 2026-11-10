@@ -31,6 +31,42 @@ from run_with_gpu_locks import foreign_model_processes  # noqa: E402
 
 DEFAULT_LABEL = "com.example.mlx2-kimi-linear-48b-q8"
 DOMAIN = f"gui/{os.getuid()}"
+# The wrapped command is usually run_with_gpu_locks.py, whose own stop_child
+# takes up to 60 s to retire its workload and restore the GPU locks.
+CHILD_STOP_GRACE_S = 120.0
+
+
+def run_command(command, record, *, grace_s=CHILD_STOP_GRACE_S):
+    """Run ``command``; on interruption forward SIGTERM and wait for its cleanup.
+
+    ``subprocess.call`` answers an interrupt with SIGKILL after a 0.25 s
+    wait, which kills a lock wrapper before it can stop its workload or
+    release the GPU locks, so the service would come back beside an orphaned
+    model process.  Forward the stop instead and kill only after ``grace_s``.
+    """
+    # Own session: a terminal Ctrl-C reaches only this wrapper, which forwards
+    # exactly one SIGTERM, so the lock wrapper's cleanup is never re-interrupted.
+    child = subprocess.Popen(command, start_new_session=True)
+    try:
+        return child.wait()
+    except KeyboardInterrupt:
+        record["command_interrupted"] = True
+        previous = {signum: signal.signal(signum, signal.SIG_IGN)
+                    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+        try:
+            if child.poll() is None:
+                child.send_signal(signal.SIGTERM)
+                try:
+                    child.wait(timeout=grace_s)
+                except subprocess.TimeoutExpired:
+                    record["command_killed"] = True
+                    child.kill()
+                    child.wait()
+            record["command_returncode"] = child.returncode
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+        raise
 
 
 def main():
@@ -87,7 +123,7 @@ def main():
         record["thermal_before"] = subprocess.check_output(["pmset", "-g", "therm"], text=True)
         record["swap_before"] = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)
         write()
-        rc = subprocess.call(command)
+        rc = run_command(command, record)
         record["command_returncode"] = rc
     finally:
         record["swap_after"] = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)

@@ -49,8 +49,8 @@ _KERNEL = mx.fast.metal_kernel(
 # Rows still own their threadgroup, so chunk invariance and per-lane batch
 # independence hold as in v1.  Microbench (qualification/runs/
 # qsa-nax-kernel-ab-20261105, M5 Max, synthetic Flash-Next and 27B
-# geometries): v2 1.72-2.13x v1's kernel time at equal error, v2_hilo
-# 1.54-1.90x at ~2,400x lower error against fp64.
+# geometries): v2 ran 1.72-2.13x v1's speed (v1 ms / v2 ms) at equal error,
+# v2_hilo 1.54-1.90x at ~2,400x lower error against fp64.
 # A K/V/Q layout that cannot take 16-byte loads (a non-unit last stride, a
 # row stride not a multiple of 8 elements, or a misaligned base) takes an
 # in-kernel scalar path with the same arithmetic, so the law does not depend
@@ -341,9 +341,9 @@ _INPUT_NAMES = [
 ]
 
 # Law ids, as receipts and the APCv2 numerics identity carry them.  "v1" is
-# the default and the only qualified law; v2 and v2_hilo are opt-in
-# (MLX_QWEN4_QSA_NAX_LAW, FlashNextPolicy.qsa_nax_law) until they pass the
-# model test flow and Pierre makes one a default.
+# this module's default (callers that pin nothing); the Flash-Next profile
+# pins "v2" (FlashNextPolicy.qsa_nax_law, default since 2026-11-05) through
+# MLX_QWEN4_QSA_NAX_LAW.
 LAW_ENV = "MLX_QWEN4_QSA_NAX_LAW"
 DEFAULT_LAW = "v1"
 LAWS = {

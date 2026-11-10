@@ -12,6 +12,7 @@ struct EngineProfilesView: View {
     @State private var share = false
     @State private var route = "auto"
     @State private var runtimeOptions = RuntimeLaunchOptions()
+    @State private var pendingRemoval: JSON?
 
     private var profiles: [JSON] { model.preferences["profiles"].array }
     private func update(_ profile: JSON, _ key: String, _ value: Any) {
@@ -37,20 +38,23 @@ struct EngineProfilesView: View {
                             HStack {
                                 Text(URL(fileURLWithPath: profile["path"].text).lastPathComponent).font(.headline)
                                 Spacer()
-                                Text("\(Int(profile["lanes"].double ?? 1)) lanes · \(profile["sticky_port"].raw is NSNull || profile["sticky_port"].bool ? "port " + number(profile["port"].double, digits: 0) : "automatic port")")
+                                let laneCount = Int(profile["lanes"].double ?? 1)
+                                Text("\(laneCount) \(laneCount == 1 ? "lane" : "lanes") · \(profile["sticky_port"].raw is NSNull || profile["sticky_port"].bool ? "port " + number(profile["port"].double, digits: 0) : "automatic port")")
                                     .foregroundStyle(.secondary)
                                 if let running {
                                     if running["state"].text == "Suspended" {
-                                        Button("Resume") { model.resumeWorker(running) }
+                                        Button("Resume") { model.resumeWorker(running) }.disabled(model.busy)
                                     } else if ["Ready", "Busy"].contains(running["state"].text) {
-                                        Button("Suspend") { model.suspendWorker(running) }
+                                        Button("Suspend") { model.suspendWorker(running) }.disabled(model.busy)
                                     }
-                                    Button("Stop") { model.perform("profile_stop", ["profile_id": profile["id"].text]) }
+                                    Button("Stop") {
+                                        if confirmStopModel(URL(fileURLWithPath: profile["path"].text).lastPathComponent) {
+                                            model.perform("profile_stop", ["profile_id": profile["id"].text])
+                                        }
+                                    }.disabled(model.busy)
                                 } else {
-                                    Button("Start") { model.perform("profile_start", ["profile_id": profile["id"].text]) }
-                                    Button("Remove", role: .destructive) {
-                                        model.savePreferences(["profiles": profiles.filter { $0["id"].text != profile["id"].text }.map(\.raw)])
-                                    }
+                                    Button("Start") { model.perform("profile_start", ["profile_id": profile["id"].text]) }.disabled(model.busy)
+                                    Button("Remove…", role: .destructive) { pendingRemoval = profile }.disabled(model.busy)
                                 }
                             }
                             HStack {
@@ -116,6 +120,15 @@ struct EngineProfilesView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(20)
         }
+        .confirmationDialog("Remove this serving profile?", isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
+                            presenting: pendingRemoval) { removed in
+            Button("Remove Profile", role: .destructive) {
+                model.savePreferences(["profiles": profiles.filter { $0["id"].text != removed["id"].text }.map(\.raw)])
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { removed in
+            Text("\(URL(fileURLWithPath: removed["path"].text).lastPathComponent): its port, lanes, route, runtime options, startup and sharing choices are deleted. The model folder is not changed.")
+        }
     }
 }
 
@@ -132,7 +145,7 @@ private struct EngineRuntimeOptionsEditor: View {
                     Text("Ordinary reference").tag("ordinary")
                 }
                 RuntimeLaunchOptionsView(options: $options)
-                Button("Save runtime options") {
+                Button("Save Runtime Options") {
                     do {
                         var saved = profile.raw as? [String: Any] ?? [:]
                         saved["route"] = route
@@ -159,11 +172,15 @@ struct CommunityView: View {
     @State private var fabric = "8291"
     @State private var invite = ""
     @State private var membershipResult = ""
+    @State private var membershipPending = false
     @State private var loadedSettings = false
     private var community: JSON { model.snapshot["community"] }
 
     private func membership(_ command: String, _ arguments: [String: Any] = [:]) {
+        guard !membershipPending else { return }
+        membershipPending = true
         Task {
+            defer { membershipPending = false }
             do {
                 let result = try await model.request(command, arguments)
                 membershipResult = result["invite"].string ?? (result["joined"].bool ? "Joined community" : "Complete")
@@ -202,9 +219,10 @@ struct CommunityView: View {
                         HStack {
                             Button("Create Community") { membership("community_create") }
                             Button("Get Invitation") { membership("community_invite") }
-                        }
+                            if membershipPending { ProgressView().controlSize(.small) }
+                        }.disabled(membershipPending)
                         SecureField("Invitation from an existing member", text: $invite)
-                        Button("Join Community") { membership("community_join", ["invite": invite]) }.disabled(invite.isEmpty)
+                        Button("Join Community") { membership("community_join", ["invite": invite]) }.disabled(invite.isEmpty || membershipPending)
                         if !membershipResult.isEmpty {
                             Text(membershipResult).font(.caption.monospaced()).textSelection(.enabled)
                             Button("Copy Result") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(membershipResult, forType: .string) }
@@ -294,10 +312,10 @@ struct ContextSettingsView: View {
                 TextField("Reasoning token budget", text: $agentReasoning)
                 Toggle("Enable thinking", isOn: $agentThinking)
                 Toggle("Verification self-review (supported templates only)", isOn: $agentVerification)
-                Button("Use 256K research profile") {
+                Button("Use 256K Research Profile") {
                     override = "262144"; agentOutput = "65536"; agentReasoning = "32768"; agentThinking = true
                 }
-                Button("Save selected model's agentic profile") {
+                Button("Save Selected Model’s Agentic Profile") {
                     guard let output = Int(agentOutput), let reasoning = Int(agentReasoning), let context = Int(override), context > 0 else {
                         model.error = "Select an explicit context and whole-number agent budgets."; return
                     }

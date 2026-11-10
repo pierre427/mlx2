@@ -396,6 +396,21 @@ for paths, revisions and modifications.
    mlx-lm-unified (provenance/flashnext.json; provenance/LICENSE.unified-MIT).
 
 ------------------------------------------------------------------------------
+Scoped notice for code adapted from jundot/omlx pull request #5084 (read
+2026-11-05).
+
+omlx — Apache License 2.0
+   Source: https://github.com/jundot/omlx
+   - PR #5084 head b0541976f5e5031c8ecd4c728f5a5810b6af4fdf:
+     omlx/patches/mlx_vlm_minimax_m3_compat/vendor/mlx_vlm/models/minimax_m3_vl/msa_nax.py
+     — the 16-byte row loads with one Q/K head-dim permutation, the 16x32x32
+     cooperative-tensor fragment layouts and the fp16 hi+lo packing of the
+     softmax probabilities, carried in the qwen4_qsa_nax law v2 kernel
+     (src/mlx2/runtime/models/qwen4_qsa_nax.py, SOURCE_V2_*). Everything else
+     in that kernel is mlx2's own law v1. Modified by mlx2.
+   The full Apache-2.0 text is this repository's LICENSE.
+
+
 Scoped notices for code adapted from jundot/omlx pull requests #4023 and
 #4050 (merged; read 2026-09-30). See provenance/omlx-row-exact-verify.json
 for paths, revisions, hashes and modifications.
@@ -426,6 +441,45 @@ for paths, revisions, hashes and modifications.
    adaptation for the lab MLX fork in the mlx2 venv. The MIT text is
    provenance/LICENSE.unified-MIT (same terms). No Apple copyright header is
    added to mlx2 source files.
+
+------------------------------------------------------------------------------
+Scoped notice for the int8-activation in-place prefill GEMMs adapted from the
+jundot/omlx Q8 A8 path (PR #4350, merged as
+ce70139b91bc120d46521f369801f6148a8261cc) and Q4/Q5 A8 path (introduced in
+PR #3548, commits 83a641d2 and db281be6; restored in PR #3952, commit
+89f3c1bb), read at revision ce70139b91bc120d46521f369801f6148a8261cc.
+
+omlx — Apache License 2.0
+Source: https://github.com/jundot/omlx, revision ce70139b91bc.
+- The Q8 in-place W8A8 GEMM (_Q8_GEMM_SRC) and the Stage A activation
+  quantizer (_Q8_STAGE_A_SRC) in src/mlx2/runtime/int8_prefill.py are adapted
+  from omlx/custom_kernels/qwen35_prefill/csrc/qwen35_oq_q8_a8_nax.metal
+  (SPDX-License-Identifier: Apache-2.0) and
+  omlx/custom_kernels/qwen35_prefill/csrc/qwen35_oq_a8.metal.
+- The Q4/Q5 in-place GEMM (_Q45_GEMM_SRC), the 5-bit window decoder
+  (mlx2_q5_window_code in _Q45_HEADER) and the Stage A v8 activation order
+  (_Q45_STAGE_A_SRC) in src/mlx2/runtime/int8_prefill.py are adapted from
+  omlx/custom_kernels/qwen35_prefill/csrc/qwen35_oq_a8_nax.metal,
+  omlx/custom_kernels/qwen35_prefill/csrc/oq_a8_decode.h,
+  omlx/custom_kernels/qwen35_prefill/csrc/qwen35_oq_a8.metal and
+  omlx/custom_kernels/qwen35_prefill/fast.py (qwen35_oq_a8_stage_a_v8).
+- The tile table, dispatch geometry, metadata layout, per-bit defaults and
+  Stage A sharing follow omlx/custom_kernels/qwen35_prefill/csrc/qwen35_oq_a8.cpp,
+  omlx/custom_kernels/qwen35_prefill/fast.py and omlx/patches/qwen35_oq_a8.py
+  (SPDX-License-Identifier: Apache-2.0).
+- src/mlx2/runtime/int8_experts.py runs that Q4 GEMM body (run load,
+  even/odd-nibble quads, Stage A v8 code order, int8 matmul2d micro-K steps,
+  GS64 fold, masked epilogue) per sorted-expert tile, with the Stage A above
+  reused unchanged and the tile pre-pass of the NAX sorted MoE gather notice
+  above; the grouped launch, per-threadgroup scale/bias staging, row map and
+  expert-block wiring are mlx2's own.
+The full Apache-2.0 text is this repository's LICENSE.
+
+The lane-to-fragment coordinate helper mlx2_q8_frag_coord (shared by the Q8,
+Q4/Q5 and grouped-expert kernels) re-expresses the formula of
+BaseNAXFrag::get_coord in MLX (mlx/backend/metal/kernels/steel/gemm/nax.h,
+MIT License, Copyright (c) 2023 Apple Inc.); no MLX source file is included
+or copied. No Apple copyright header is added to mlx2 source files.
 
 ------------------------------------------------------------------------------
 Adapted source notice: approximate tensor-API dense attention research kernel
@@ -1028,6 +1082,8 @@ Copyright © 2025-2026 Apple Inc. MIT license.":
 - src/mlx2/runtime/gguf/source_mxfp4_pair.py
 - src/mlx2/runtime/gguf/source_prefill_legacy_tiles.py
 - src/mlx2/runtime/gguf/source_ast_batched_splitk.py
+- src/mlx2/runtime/gguf/source_router_gemv.py (the gemv.h GEMVKernel law
+  through source_dense.py's helper, with a BF16 coefficient pointer)
 - src/mlx2/runtime/lane/tiled_prefill.py (NAX prefill helpers; see the
   mlx-tree-spec block above)
 - scripts/research/ds41_stock_mxfp4_pair_candidate.py
@@ -1084,6 +1140,16 @@ reproduced in the mlx-vlm section earlier in this file):
   serving are mlx2's own. tests/fixtures/inkling-small-config.json is the
   unmodified config.json of Sawfwair/Inkling-Small-MLX-Mixed-2bit (revision
   22c95fc2e30400a893dc9ac9fe4df17f306362ae, Apache License 2.0).
+- Revision 67599f2e8ec31bf35cbb7b02794114f20844f0bb
+  (mlx_vlm/models/gemma4/language.py, gemma4.py, vision.py and config.py,
+  and the helpers they import from mlx_vlm/models/base.py, rope_utils.py,
+  cache.py and mlx_vlm/utils.py): the Gemma 4 text model (dense and sparse
+  MoE), vision tower, multimodal embedder, attention masks, weight key
+  sanitation and quantization rule, ported with the same module tree and
+  parameter paths in src/mlx2/runtime/models/gemma4.py and selected by
+  src/mlx2/adapters/gemma4.py. Attention dispatch, caches, the tensor-backend
+  switch and serving are mlx2's own; text, image and video preprocessing
+  still runs through the installed mlx-vlm package.
 - Revision 8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5
   (mlx_vlm/models/muse_glimmer/vision.py, config.py, muse_glimmer.py and
   processing_muse_glimmer.py): the Muse Glimmer vision tower, projector and
@@ -1202,3 +1268,71 @@ benchmarks/gsm8k/test.jsonl and train_few_shot.jsonl are converted unchanged
 from the dataset's parquet files (see benchmarks/gsm8k/SOURCE.json). The MIT
 permission notice and warranty disclaimer are as in the mxfp4-int8-m5 section
 above.
+
+------------------------------------------------------------------------------
+exllamav3 (https://github.com/turboderp-org/exllamav3, revision
+b658e643331dc26ee2e06b434b86e993157e7fb5) — MIT License
+
+The research EXL3 encoder in scripts/research/ds41_exl3/ (exl3_encode.py,
+viterbi.c, viterbi_metal.py, convert_experts.py, convert_bank.py and the
+scripts beside them) and its tests tests/test_exl3_encoder_cpu.py and
+tests/test_exl3_encoder_metal.py follow the order of operations and the
+constants of exllamav3's quantizer (exllamav3/modules/quant/exl3_lib/
+quantize.py: incoherence and scale regularization order, Hessian damping,
+block LDLQ error feedback and scale refit), and write exllamav3's EXL3 tensor
+layout under its DeepSeek-V4 tensor names (exllamav3/architecture/
+deepseek_v4.py, read at revision cdc785db: layers.L.ffn.experts.E.w1|w3|w2
+with trellis, suh, svh and mcg), which src/mlx2/adapters/deepseek_v41_source_exl3.py
+also reads. The encoder is original mlx2 code; no exllamav3 source is copied.
+The trellis, incoherence and error-feedback algorithms are those of QTIP
+(arXiv:2406.11235), QuIP# (arXiv:2402.04396), QuIP (arXiv:2307.13304) and
+GPTQ (arXiv:2210.17323).
+
+MIT License
+
+Copyright (c) 2025 Turboderp
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+DSpine (https://github.com/Tencent/DSpine, revision
+6450af726375cb3c6bac4de95d98ebc8df99fbd4) — Apache License 2.0
+
+src/mlx2/runtime/drafters/dspine.py and src/mlx2/adapters/dspine.py
+reimplement the DSpine code-bridge DFlash drafter (arXiv:2609.36173) from
+dspine_mlx/dspine_mlx/bridge.py (DSpineCodeBridge, build_serial_tables),
+model.py (draft forward and loader checks), propose.py (greedy refinement and
+top-k candidate ids) and config.py, with the head top-k rule and the native
+sliding-window contract read from sglang_dspine/models/dspine.py and
+sglang_dspine/layers/attention.py. The artifact config schema and tensor
+names follow that reference. Batching, the tree proposer, the lane draft
+kernel and the dispatch are mlx2's own; no DSpine source file is copied.
+DSpine's License.txt places its code, parameters and weights under the Apache
+License, Version 2.0; the full text is this repository's LICENSE.
+
+------------------------------------------------------------------------------
+Qwen3.8-27B-QSA-BF16 (https://huggingface.co/higa2515/Qwen3.8-27B-QSA-BF16,
+revision aedae2c5304698f58d30c5ec709ebf5b37339b1d) — Apache License 2.0
+
+The QSA block-indexer math in src/mlx2/runtime/models/qsa_sidecar.py (from
+research/qsa/indexer.py and sparse_attention.py) and the stage-1 distillation
+objective in src/mlx2/runtime/models/qsa_indexer_train.py (the block teacher,
+KL loss and optimizer settings of research/qsa/teacher.py, losses.py and
+train_indexer.py) are re-expressed in MLX; no source file or weights are
+copied. The full Apache-2.0 text is this repository's LICENSE.

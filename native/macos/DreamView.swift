@@ -42,7 +42,8 @@ struct DreamView: View {
                             if state["running"].bool { ProgressView().controlSize(.small) }
                             Text(state["reason"].text)
                             Spacer()
-                            Button("Yield now") { model.perform("dream_yield") }
+                            Button("Yield Now") { model.perform("dream_yield") }
+                                .help("Stop any Dream work now and wait one backoff period before the next run.")
                         }
                         Text("Today: \(Int(state["daily"]["jobs"].double ?? 0)) runs · \(Int(state["daily"]["tokens"].double ?? 0)) output tokens · \(Int(state["daily"]["seconds"].double ?? 0)) seconds").font(.caption).foregroundStyle(.secondary)
                         Text(state["activity_fresh"].bool ? "Native activity reporting is current." : "Waiting for a fresh native activity report before any work can run.").font(.caption)
@@ -78,6 +79,7 @@ struct DreamView: View {
                         Text(state["research"].text).font(.caption).foregroundStyle(.secondary)
                         Text("Research goal").font(.headline)
                         TextEditor(text: $goal).frame(height: 85).font(.body)
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary)).accessibilityLabel("Research goal")
                         Picker("Social style", selection: $style) {
                             Text("Professional").tag("professional")
                             Text("Warm").tag("warm")
@@ -85,14 +87,16 @@ struct DreamView: View {
                         }.pickerStyle(.segmented)
                         Text("Your preferences, interests and boundaries").font(.headline)
                         TextEditor(text: $preferences).frame(height: 100).font(.body)
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary)).accessibilityLabel("Your preferences, interests and boundaries")
                         Text("The style can be friendly and personal while remaining honest about being an AI. Your preferences guide its work; private conversation history is not inserted into Dream.").font(.caption).foregroundStyle(.secondary)
-                        Button("Save idle policy") { save() }.buttonStyle(.borderedProminent)
+                        Button("Save Idle Policy") { save() }.buttonStyle(.borderedProminent).disabled(model.busy)
                     }.padding(6)
                 }
                 GroupBox("Private enclave and evidence") {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(state["enclave"].text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                        Button("Reveal enclave in Finder") { if let path = state["enclave"].string { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } }
+                        Button("Reveal Enclave in Finder") { if let path = state["enclave"].string { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } }
+                            .disabled(state["enclave"].string?.isEmpty ?? true)
                         Text("Changes stay inside this workspace. Previous file contents are archived for rollback; notes remain candidates. A model's confidence is recorded as its own assessment, not independent verification.").font(.callout).foregroundStyle(.secondary)
                         DisclosureGroup("Operating boundaries") { Text(state["loyalty"].text).font(.caption).textSelection(.enabled).padding(.vertical, 6) }
                     }.padding(6)
@@ -104,7 +108,7 @@ struct DreamView: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(job["state"].text.capitalized).bold()
-                                    Text(job["checkpoint"].text).font(.caption).lineLimit(1)
+                                    Text(job["checkpoint"].text).font(.caption).lineLimit(1).truncationMode(.middle).help(job["checkpoint"].text)
                                 }
                                 Spacer()
                                 Text("\(Int(job["charged_tokens"].double ?? 0)) tokens · \(Int(job["charged_seconds"].double ?? 0))s").font(.caption).monospacedDigit()
@@ -120,7 +124,7 @@ struct DreamView: View {
         .onChange(of: policyData) { _, _ in load() }
         .sheet(isPresented: Binding(get: { detail != nil }, set: { if !$0 { detail = nil } })) {
             VStack(alignment: .leading) {
-                HStack { Text("Dream activity receipt").font(.headline); Spacer(); Button("Done") { detail = nil } }
+                HStack { Text("Dream activity receipt").font(.headline); Spacer(); Button("Done") { detail = nil }.keyboardShortcut(.defaultAction) }
                 ScrollView { Text(detail ?? "").font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
             }.padding(20).frame(minWidth: 700, minHeight: 500)
         }

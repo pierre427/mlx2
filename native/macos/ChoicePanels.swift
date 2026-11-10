@@ -137,8 +137,8 @@ struct AgentChoicePanel: View {
             }
             Toggle("Automatically choose the recommendation", isOn: $choices.autoPick)
                 .onChange(of: choices.autoPick) { _, value in model.perform("choice_policy", ["changes": ["auto_pick": value]]) }
-            if choices.autoPick { Text("Recommendation in \(choices.remaining) seconds").font(.caption).monospacedDigit() }
-            HStack { Text("Choices do not approve tool actions.").font(.caption).foregroundStyle(.secondary); Spacer(); Button("Dismiss") { choices.cancel(panelID: request.id) } }
+            if choices.autoPick { Text("Choosing the recommendation in \(choices.remaining) \(choices.remaining == 1 ? "second" : "seconds")").font(.caption).monospacedDigit() }
+            HStack { Text("Choices do not approve tool actions.").font(.caption).foregroundStyle(.secondary); Spacer(); Button("Dismiss") { choices.cancel(panelID: request.id) }.keyboardShortcut(.cancelAction).help("Close without choosing; the agent is told no choice was made.") }
         }.padding(24).frame(width: 620)
     }
 }
@@ -152,7 +152,7 @@ struct ChoiceSettingsView: View {
             VStack(alignment: .leading) {
                 Toggle("Automatically choose the recommended option after a timeout", isOn: $enabled)
                 Stepper("Timeout: \(timeout) seconds", value: $timeout, in: 5...3600, step: 5)
-                Button("Save choice settings") { model.perform("choice_policy", ["changes": ["auto_pick": enabled, "timeout_seconds": timeout]]) }
+                Button("Save Choice Settings") { model.perform("choice_policy", ["changes": ["auto_pick": enabled, "timeout_seconds": timeout]]) }
             }.padding(8)
         }.onAppear {
             enabled = model.snapshot["choices"]["policy"]["auto_pick"].bool

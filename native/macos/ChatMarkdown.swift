@@ -144,7 +144,7 @@ struct ChatMarkdownView: View {
                             Button("Copy", systemImage: "doc.on.doc") {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(block.text, forType: .string)
-                            }.buttonStyle(.plain)
+                            }.buttonStyle(.plain).help("Copy code").accessibilityLabel("Copy code")
                         }.font(.caption)
                         ScrollView(.horizontal) { Text(verbatim: block.text).font(.system(.callout, design: .monospaced)) }
                     }.padding(10).background(Color.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))

@@ -526,6 +526,9 @@ def unit(spec) -> int:
         adapter = resolve_adapter(spec["model"])(spec["model"])
         sidecar = qs.QSASidecar(spec["indexers"]["file"], budget=spec["budget"], mode="dense")
         report["installed_layers"] = qs.install(adapter.model, sidecar)
+        # Indexer file, budget and the NAX kernel law the sparse arms run.
+        # (mode is per phase, so it is left out of this snapshot.)
+        report["sidecar"] = {k: v for k, v in sidecar.identity().items() if k != "mode"}
         report["device"] = mx.device_info()
         for phase in spec["phases"]:
             globals()[phase](mx, np, adapter, sidecar, spec, report)

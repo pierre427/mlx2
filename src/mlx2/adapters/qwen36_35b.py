@@ -533,6 +533,9 @@ TARGET_EXECUTION_POLICY_KEYS = frozenset({
 EXL3_RESIDENT_DENSE = ("off", "lm_head", "verify")
 DEFAULT_EXL3_RESIDENT_DENSE = "verify"
 EXL3_RESIDENT_MIN_ROWS = 8
+# Executions whose dense linears take the fused_nax law (install_upstream),
+# the only law Exl3DenseLinear.make_resident extends.
+EXL3_RESIDENT_EXECUTIONS = ("fused_nax", "nax", "nax_fused")
 EXL3_EXECUTIONS = ("reference", "rows", "fused", "fused_nax", "fused_w8a8", "nax", "nax_fused")
 # Upstream EXL3 checkpoints only; every other artifact keeps no EXL3 law.
 # Correct on any Metal host: off M5 mx.matmul runs the ordinary GEMM.
@@ -1017,6 +1020,14 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             raise ValueError(f"Qwen3.6 exl3_resident_dense must be one of {EXL3_RESIDENT_DENSE}")
         if self.exl3_resident_dense != "off" and not upstream_exl3:
             raise ValueError("exl3_resident_dense requires an upstream EXL3 checkpoint")
+        if (self.exl3_resident_dense != "off"
+                and self.exl3_execution not in EXL3_RESIDENT_EXECUTIONS):
+            # Only these laws install fused_nax dense linears; elsewhere the
+            # selection would make nothing resident yet still be reported.
+            raise ValueError(
+                "exl3_resident_dense requires exl3_execution in "
+                f"{EXL3_RESIDENT_EXECUTIONS}, not {self.exl3_execution!r}"
+            )
         if explicit_exl3 and not upstream_exl3:
             raise ValueError("exl3_execution requires an upstream EXL3 checkpoint")
         if artifact["config"].get("mlx2_exl3") is None and (

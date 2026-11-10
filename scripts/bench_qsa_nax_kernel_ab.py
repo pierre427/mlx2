@@ -423,7 +423,10 @@ def run_arm(arm, case, kin):
     ids, counts, n_sel, u_width, q_pos, left_pad, total = kin
     kw = dict(scale=D ** -0.5, u_width=u_width, total=total, n_kv_heads=case.kvh)
     if arm in ("A0k", "A1k"):
-        return nax_qsa_attention(case.q, case.k, case.v, ids, counts, n_sel, q_pos, left_pad, **kw)
+        # Pinned: the in-tree law v2 is selectable process-wide
+        # (MLX_QWEN4_QSA_NAX_LAW), and these arms are the v1 baseline.
+        return nax_qsa_attention(case.q, case.k, case.v, ids, counts, n_sel, q_pos, left_pad,
+                                 law="v1", **kw)
     kind = {"A2k": "bf16", "A2h": "hilo"}[arm]
     return variant_attention(kind, case.q, case.k, case.v, ids, counts, n_sel, q_pos, left_pad, **kw)
 

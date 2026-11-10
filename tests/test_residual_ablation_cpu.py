@@ -227,8 +227,12 @@ def test_batched_greedy_matches_sequential(monkeypatch):
     import importlib.util
     from pathlib import Path
 
-    spec = importlib.util.spec_from_file_location(
-        "residual_ablation_runner", Path(__file__).resolve().parents[1] / "scripts/research/residual_ablation.py")
+    # The runner is the private probe harness (export_public withholds it);
+    # this mechanism test is published, so it skips where the runner is absent.
+    runner_path = Path(__file__).resolve().parents[1] / "scripts/research/residual_ablation.py"
+    if not runner_path.is_file():
+        pytest.skip("private residual-ablation runner is not shipped in this tree")
+    spec = importlib.util.spec_from_file_location("residual_ablation_runner", runner_path)
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     mx.random.seed(3)

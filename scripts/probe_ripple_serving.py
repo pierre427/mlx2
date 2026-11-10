@@ -44,6 +44,11 @@ def checkout_env() -> dict:
     return environment
 
 
+def source_revision():
+    """The commit of THIS checkout, whatever the caller's working directory."""
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+
+
 def atomic_json(path, value):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n")
@@ -137,7 +142,7 @@ def main():
     args.policy = {"activation_precision": "bf16"} if artifact["storage_format"] == "nvfp4" else None
     receipt = {"schema": "mlx2.ripple-serving-smoke.v1", "checkpoint": args.model.name + "@sha256:"
                + artifact["identity"]["fingerprint"], "ownership": lease,
-               "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+               "source_revision": source_revision(),
                "qualified": False, "kind": "bounded correctness smoke", "rows": []}
     if args.reference_only:
         reference(args, receipt)

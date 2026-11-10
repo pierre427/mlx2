@@ -142,15 +142,15 @@ import SwiftUI
         defer { voiceStarting = false }
         let microphone = await AVCaptureDevice.requestAccess(for: .audio)
         guard generation == voiceGeneration else { return }
-        guard microphone else { error = "Microphone access was not granted."; return }
+        guard microphone else { error = "Microphone access was not granted. Enable it in macOS Privacy & Security to use voice input."; return }
         let authorization = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
         guard generation == voiceGeneration else { return }
-        guard authorization == .authorized else { error = "Speech recognition access was not granted."; return }
+        guard authorization == .authorized else { error = "Speech recognition access was not granted. Enable it in macOS Privacy & Security to use voice input."; return }
         guard let recognizer = SFSpeechRecognizer(locale: .current), recognizer.isAvailable else { error = "Speech recognition is unavailable for the current language."; return }
         guard allowNetwork || recognizer.supportsOnDeviceRecognition else {
-            error = "On-device speech recognition is unavailable. Enable the explicit network speech option to use the system service."; return
+            error = "On-device speech recognition is unavailable for the current language. Voice input stays on this Mac, so it cannot use the network speech service."; return
         }
         do {
             let request = SFSpeechAudioBufferRecognitionRequest()

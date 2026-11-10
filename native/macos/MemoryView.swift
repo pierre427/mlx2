@@ -49,7 +49,6 @@ struct MemoryView: View {
                     Task { await search() }
                 }
                 if layout == "Messages" { messagePanel } else { notePanels }
-                if let localError { Label(localError, systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
                 Text(memory["retrieval"].text).font(.caption).foregroundStyle(.secondary)
                 CapsulePolicyView()
                 Text("Retrieval ceiling: \(Int(memory["context_tokens"].double ?? 1024)) tokens, at most \(Int(memory["context_percent"].double ?? 10))% of the trusted context window. UTF-8 byte bounds conservatively limit snippets; no corpus is inserted into chat.").font(.caption).foregroundStyle(.secondary)
@@ -88,7 +87,7 @@ struct MemoryView: View {
                     Picker("Kind", selection: $kind) { ForEach(kinds, id: \.self) { Text($0.capitalized).tag($0) } }
                     TextField("Title", text: $title)
                     TextEditor(text: $bodyText).frame(minHeight: 160)
-                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary)).accessibilityLabel("Record body")
                     TextField("Tags (comma separated)", text: $tags)
                     TextField("Source pointers (one per line)", text: $sources, axis: .vertical).lineLimit(2...5)
                     if let captured = detail["created"].double {
@@ -99,23 +98,26 @@ struct MemoryView: View {
                     }
                     TextField("Why this revision / review / feedback matters", text: $reason)
                     HStack {
-                        Button("New note") { clear() }
+                        Button("New Note") { clear() }
                         if detail["id"].string != nil {
-                            Button("Append candidate revision") { Task { await save() } }
+                            Button("Append Candidate Revision") { Task { await save() } }.disabled(reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .help("Describe why this revision matters in the reason field first.")
                             Menu("Review") {
-                                Button("Mark reviewed") { Task { await review("reviewed") } }
+                                Button("Mark Reviewed") { Task { await review("reviewed") } }
                                 Button("Promote") { Task { await review("promoted") } }
-                                Button("Return to candidate") { Task { await review("candidate") } }
-                            }
+                                Button("Return to Candidate") { Task { await review("candidate") } }
+                            }.fixedSize().help("Changing trust state requires a reason.")
                             Menu("Feedback") {
                                 Button("Useful") { feedback(true) }
-                                Button("Needs improvement") { feedback(false) }
-                            }
+                                Button("Needs Improvement") { feedback(false) }
+                            }.fixedSize()
                         } else {
                             Button("Capture") { Task { await save() } }.buttonStyle(.borderedProminent)
+                                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                         Spacer()
                     }
+                    if let localError { Label(localError, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).textSelection(.enabled) }
                     if detail["id"].string != nil { historyAndLinks }
                 }.padding(8)
             }
@@ -133,7 +135,7 @@ struct MemoryView: View {
                     }.font(.caption)
                 }
                 Text("Editing an old revision cannot overwrite a newer one. Load the current version before appending.").font(.caption).foregroundStyle(.secondary)
-                Button("Load current revision") { Task { await load(detail["id"].text) } }
+                Button("Load Current Revision") { Task { await load(detail["id"].text) } }
             }
             DisclosureGroup("Typed connections") {
                 ForEach(Array(detail["links"].array.enumerated()), id: \.offset) { _, link in
@@ -143,7 +145,7 @@ struct MemoryView: View {
                 HStack {
                     TextField("Target note ID", text: $targetID)
                     TextField("Relation (supports, contradicts, supersedes, related…)", text: $relation)
-                    Button("Link") { Task { await addLink() } }
+                    Button("Link") { Task { await addLink() } }.disabled(targetID.trimmingCharacters(in: .whitespaces).isEmpty || relation.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 Text("Connections are revision-bound. Similarity does not establish a factual relationship.").font(.caption).foregroundStyle(.secondary)
             }
@@ -156,18 +158,22 @@ struct MemoryView: View {
                 TextField("Session ID", text: $session)
                 TextField("Recipient worker ID", text: $recipient)
                 TextEditor(text: $message).frame(minHeight: 80)
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary)).accessibilityLabel("Message body")
                 HStack {
-                    Button("Read mailbox") { Task { await readMessages() } }
+                    Button("Read Mailbox") { Task { await readMessages() } }.disabled(session.isEmpty)
                     Spacer()
-                    Button("Post") { Task { await postMessage() } }.disabled(session.isEmpty || recipient.isEmpty || message.isEmpty)
+                    Button("Post") { Task { await postMessage() } }.disabled(session.isEmpty || recipient.isEmpty || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
+                if let localError { Label(localError, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).textSelection(.enabled) }
                 ForEach(Array(messages.enumerated()), id: \.offset) { _, entry in
                     VStack(alignment: .leading, spacing: 5) {
                         Text("\(entry["sender"].text) → \(entry["recipient"].text)").font(.caption.monospaced())
                         Text(entry["body"].text).textSelection(.enabled)
                         HStack {
                             Text(entry["acknowledged_at"].double == nil ? "Awaiting acknowledgement" : "Acknowledged").font(.caption).foregroundStyle(.secondary)
-                            Button("Acknowledge") { model.perform("message_ack", ["session_id": session, "id": entry["id"].text]) }
+                            if entry["acknowledged_at"].double == nil {
+                                Button("Acknowledge") { Task { if await invoke("message_ack", ["session_id": session, "id": entry["id"].text]) != nil { await readMessages() } } }
+                            }
                         }
                     }
                     Divider()

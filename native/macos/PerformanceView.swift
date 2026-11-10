@@ -15,7 +15,12 @@ struct PerformanceView: View {
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 5) {
-                        Label("Live · 2 s samples", systemImage: "waveform.path").foregroundStyle(.green)
+                        // A failed snapshot appends an empty sample; never label stale values as live.
+                        if model.points.last.map({ !$0.values.isEmpty }) == true {
+                            Label("Live · 2 s samples", systemImage: "waveform.path").foregroundStyle(.green)
+                        } else {
+                            Label("Waiting for telemetry", systemImage: "waveform.path.badge.minus").foregroundStyle(.secondary)
+                        }
                         Text("Read-only · no inference probes").font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -75,7 +80,7 @@ struct PerformanceView: View {
                     ].compactMap { name, key in model.server[key].double.map { NamedValue(name: name, value: $0) } }, unit: "tokens")
                     field("Cached prefill · 30 s", number(model.server["cached_prompt_tps_window"].double, suffix: " tok/s"))
                     field("HTTP requests · 30 s", number(model.server["http_requests_per_second"].double, suffix: " /s", digits: 2))
-                    field("Uptime", number(model.server["uptime_seconds"].double, suffix: " s", digits: 0))
+                    field("Uptime", duration(model.server["uptime_seconds"].double))
                 }
             }
             SpeculationPanel()
@@ -98,8 +103,9 @@ struct PerformanceView: View {
                     }
                 }
                 HStack(spacing: 25) {
-                    ForEach(Array(model.host["load_average"].array.enumerated()), id: \.offset) { index, value in
-                        Text("\([1, 5, 15][index]) min load: \(number(value.double, digits: 2))").font(.caption).foregroundStyle(.secondary)
+                    // Only the standard 1/5/15-minute triple is labelled; extra entries would trap an index.
+                    ForEach(Array(zip([1, 5, 15], model.host["load_average"].array)), id: \.0) { minutes, value in
+                        Text("\(minutes) min load: \(number(value.double, digits: 2))").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -220,6 +226,15 @@ struct PerformanceView: View {
             }
         }
     }
+}
+
+func duration(_ seconds: Double?) -> String {
+    guard let seconds, seconds.isFinite, seconds >= 0, seconds < 1e9 else { return "—" }
+    let formatter = DateComponentsFormatter()
+    formatter.allowedUnits = seconds >= 86400 ? [.day, .hour, .minute] : seconds >= 60 ? [.hour, .minute, .second] : [.second]
+    formatter.unitsStyle = .abbreviated
+    formatter.maximumUnitCount = 2
+    return formatter.string(from: seconds) ?? "—"
 }
 
 func rateBytes(_ value: Double?) -> String { value == nil ? "—" : bytes(value) + "/s" }

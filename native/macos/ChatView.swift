@@ -124,9 +124,9 @@ private struct ChatToolCard: View {
         VStack(alignment: .leading, spacing: 0) {
             Button { expanded.toggle() } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption2)
-                    Image(systemName: event.statusSymbol).foregroundStyle(color)
-                    Text(event.title).lineLimit(1)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption2).accessibilityHidden(true)
+                    Image(systemName: event.statusSymbol).foregroundStyle(color).accessibilityHidden(true)
+                    Text(event.title).lineLimit(1).help(event.title)
                     Spacer(minLength: 8)
                     Text(event.statusTitle).foregroundStyle(color)
                 }.font(.caption).contentShape(Rectangle())
@@ -150,7 +150,7 @@ private struct ChatReasoningView: View {
         VStack(alignment: .leading, spacing: expanded ? 6 : 0) {
             Button { expanded.toggle() } label: {
                 HStack(spacing: 5) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption2)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption2).accessibilityHidden(true)
                     Text("Reasoning")
                     Spacer(minLength: 0)
                 }.font(.caption).foregroundStyle(.secondary).contentShape(Rectangle())
@@ -173,14 +173,14 @@ private struct ChatToolActivity: View {
         VStack(alignment: .leading, spacing: 0) {
             Button { expanded.toggle() } label: {
                 HStack(spacing: 5) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption2)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption2).accessibilityHidden(true)
                     Text(summary)
                     Spacer(minLength: 0)
                 }.font(.caption).foregroundStyle(.secondary).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityValue(expanded ? "Expanded" : "Collapsed")
             if expanded {
                 VStack(alignment: .leading, spacing: 2) {
-                    if !reasoning.isEmpty { DisclosureGroup("Thinking") { Text(reasoning).textSelection(.enabled) } }
+                    if !reasoning.isEmpty { DisclosureGroup("Reasoning") { Text(reasoning).textSelection(.enabled) } }
                     ForEach(events) { event in ChatToolCard(event: event) }
                 }.padding(.top, 4)
             }
@@ -489,6 +489,79 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
         branches[identity]?["requested_model"] = value
         endpointBindings[identity]?.removeValue(forKey: "lora_fingerprint")
         contextUsageByConversation.removeValue(forKey: identity)
+    }
+
+    // MARK: Residual-ablation overlays and correction replay
+    // The overlay binding lives in the branch record, so it is archived and
+    // restored with the profile like every other branch setting.
+    @Published var comparePair: ChatComparePair?
+    @Published var pendingAutoSend: String?
+
+    func overlayID(for identity: String) -> String? {
+        guard let value = branches[identity]?["overlay_id"], !value.isEmpty else { return nil }
+        return value
+    }
+    func overlayLabel(for identity: String) -> String { branches[identity]?["overlay_label"] ?? "" }
+    func overlayActive(for identity: String) -> Bool { overlayID(for: identity) != nil && branches[identity]?["overlay_active"] == "1" }
+    func setOverlayActive(_ active: Bool, for identity: String) {
+        guard !mutationsPaused, !generating, !branching, overlayID(for: identity) != nil else { return }
+        branches[identity]?["overlay_active"] = active ? "1" : "0"
+    }
+    static func supportsOverlay(_ target: JSON) -> Bool {
+        target["capabilities"].array.contains { $0.string == "residual_overlay" }
+    }
+    func rootSession(of identity: String) -> String {
+        var current = identity
+        var seen: Set<String> = []
+        while let parent = branches[current]?["parent_id"], !parent.isEmpty, !seen.contains(parent) {
+            seen.insert(current); current = parent
+        }
+        return current
+    }
+
+    /// Visible user/assistant history before a flagged assistant reply (for a correction case).
+    func correctionHistory(for message: ChatMessage, in identity: String) -> [[String: Any]]? {
+        guard message.role == "assistant", message.committed, let transcript = conversations[identity],
+              let index = transcript.firstIndex(where: { $0.id == message.id }) else { return nil }
+        let prior = transcript.prefix(index).filter { ($0.role == "user" || $0.role == "assistant") && !$0.text.isEmpty }
+        guard prior.last?.role == "user" else { return nil }
+        return prior.map { ["role": $0.role, "text": $0.text, "id": $0.id.uuidString] }
+    }
+
+    /// A NEW branch for an overlay replay: every turn before the flagged
+    /// reply's user message kept verbatim, that user message placed in the
+    /// composer to be re-sent with the overlay active. The parent is untouched.
+    @discardableResult func forkForReplay(flagged messageID: String, in parent: String, overlayID: String,
+                                          overlayLabel: String, caseID: String) -> String? {
+        guard !mutationsPaused, !generating, !branching, let transcript = conversations[parent],
+              let index = transcript.firstIndex(where: { $0.id.uuidString == messageID }),
+              transcript[index].role == "assistant",
+              let userIndex = transcript[..<index].lastIndex(where: { $0.role == "user" }),
+              transcript[userIndex].isUserBubble, !transcript[userIndex].text.contains("\n📎 ") else { return nil }
+        let keep = Array(transcript.prefix(userIndex))
+        var history: [[String: Any]] = []
+        if let previous = keep.last {
+            guard previous.role == "assistant", let cut = turnCuts[parent]?[previous.id.uuidString],
+                  let wire = wireHistory[parent], cut > 0, cut <= wire.count,
+                  wire[cut - 1]["role"] as? String == "assistant", wire[cut - 1]["tool_calls"] == nil,
+                  Self.validToolGroups(Array(wire.prefix(cut))) else { return nil }
+            history = Array(wire.prefix(cut))
+        }
+        let identity = "branch:" + UUID().uuidString.lowercased()
+        conversations[identity] = keep
+        wireHistory[identity] = history
+        let allowed = Set(keep.map { $0.id.uuidString })
+        turnCuts[identity] = (turnCuts[parent] ?? [:]).filter { allowed.contains($0.key) }
+        endpointBindings[identity] = endpointBindings[parent]
+        branches[identity] = ["id": identity, "parent_id": parent, "server_identity": serverIdentity(for: parent),
+                              "fork_message_id": keep.last?.id.uuidString ?? "", "replay_of": messageID,
+                              "replay_case_id": caseID, "overlay_id": overlayID, "overlay_label": overlayLabel,
+                              "overlay_active": "1", "name": "Overlay replay · " + overlayLabel,
+                              "speculation": speculation(for: parent), "requested_model": requestedModel(for: parent)]
+        selected = identity
+        draft = transcript[userIndex].text
+        error = nil
+        return identity
     }
 
     private func bindResolvedModel(_ target: JSON, to identity: String) throws {
@@ -981,6 +1054,8 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
         let outboundPrompt = prompt + "\n\n[Message time: " + timestamp + ". Use this timestamp only when current date, time, or elapsed time matters to the request.]"
         let attached = attachments
         let speculation = speculation(for: identity)
+        let overlaySelection: [String: Any]? = overlayActive(for: identity)
+            ? ["id": overlayID(for: identity) ?? "", "branch_id": identity] : nil
         var messages: [[String: Any]] = wireHistory[identity] ?? (conversations[identity] ?? []).filter(\.committed).map {
             ["role": $0.role, "content": $0.text]
         }
@@ -1033,6 +1108,10 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
                 let target = try await resolve()
                 try Task.checkCancellation()
                 try bindResolvedModel(target, to: identity)
+                // Fail closed: an active overlay is never silently dropped.
+                if overlaySelection != nil && !Self.supportsOverlay(target) {
+                    throw DesktopError.message("This branch has an active residual-ablation overlay, but the server does not support overlays. Turn the overlay off to continue without it.")
+                }
                 if autoTitle { requestTitle(identity, prompt: prompt, target: target) }
                 if target["chat_options"]["verification"].bool {
                     let fallback = "Solve the task carefully. Verify conclusions against available evidence and report uncertainty."
@@ -1096,6 +1175,7 @@ final class ChatRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Send
                     let roundGuidance = guidance + budgetBoundaryFeedback
                     var body: [String: Any] = ["messages": Self.withRoundGuidance(messages, roundGuidance), "stream": true, "stream_options": ["include_usage": true], "max_tokens": outputTokens]
                     if speculation == "off" { body["speculation"] = "off" }
+                    if let overlaySelection { body["mlx2_overlay"] = overlaySelection }
                     let chatOptions = target["chat_options"]
                     if let thinking = chatOptions["enable_thinking"].raw as? Bool {
                         body["enable_thinking"] = thinking
@@ -1693,6 +1773,7 @@ struct ChatView: View {
     @State private var contextExpanded = false
     @State private var scrollRequest = UUID()
     @State private var availableModels: [String] = []
+    @State private var flagTarget: ChatMessage?
     @AppStorage("mlx2.chat.historyExpanded") private var historyExpanded = true
 
     private static func suspendedServer(_ worker: JSON) -> JSON {
@@ -1754,11 +1835,16 @@ struct ChatView: View {
                   systemPrompt: effectiveSystemPrompt, archive: { try await model.archiveChatSession(conversationID: $0, document: $1) }, tools: { try await model.chatTools(target, requestedModel: requestedModel) },
                   execute: { try await model.chatToolCall(sessionID: $0, name: $1, arguments: $2, approved: $3) },
                   finishTools: { await model.finishResearchPlan(sessionID: $0, outcome: $1, parentID: $2) }, autoTitle: true)
-        if chat.generationID != previousGeneration { scrollRequest = UUID() }
+        if chat.generationID != previousGeneration { scrollRequest = UUID(); composerFocusRequest = UUID() }
     }
 
     private func messageActions(_ message: ChatMessage) -> some View {
 HStack(spacing: 8) {
+                                    if message.role == "assistant" && message.committed && chat.correctionHistory(for: message, in: chat.selected) != nil {
+                                        Button { flagTarget = message } label: { Image(systemName: "flag") }
+                                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                                            .accessibilityLabel("Flag for correction").help("Flag for correction: open this reply as a must-fix case in Ablation")
+                                    }
                                     if chat.canFork(at: message) {
                                         Button { Task { do { try await chat.forkConversation(at: message, archive: { try await model.archiveChatSession(conversationID: $0, document: $1) }) } catch { model.error = error.localizedDescription } } } label: { Image(systemName: "arrow.triangle.branch") }
                                             .buttonStyle(.plain).foregroundStyle(.secondary)
@@ -1773,12 +1859,41 @@ HStack(spacing: 8) {
                                 }
     }
 
+    /// Send ``text`` on ``identity`` through the ordinary chat pipeline.
+    @discardableResult private func send(_ text: String, on identity: String) -> Bool {
+        guard !chat.generating, !chat.branching else { return false }
+        chat.selected = identity
+        chat.draft = text
+        let before = chat.generationID
+        send()
+        return chat.generationID != before
+    }
+
     var body: some View {
+        Group {
+            if let pair = chat.comparePair {
+                CorrectionCompareView(chat: chat, pair: pair, send: { send($0, on: $1) })
+            } else { mainBody }
+        }
+        .sheet(item: $flagTarget) { message in
+            CorrectionFlagSheet(chat: chat, message: message, identity: chat.selected, server: boundServer)
+        }
+        .onChange(of: chat.pendingAutoSend) { _, _ in autoSendIfPending() }
+        .onAppear { autoSendIfPending() }
+    }
+
+    private func autoSendIfPending() {
+        guard let pending = chat.pendingAutoSend, pending == chat.selected, target != nil, !chat.generating else { return }
+        chat.pendingAutoSend = nil
+        send()
+    }
+
+    private var mainBody: some View {
         HStack(spacing: 0) {
             if historyExpanded {
                 ChatHistorySidebar(chat: chat, newChat: {
                     chat.newConversation(servers: model.servers); composerFocusRequest = UUID()
-                }, collapse: { historyExpanded = false })
+                }, canCreate: model.servers.contains(where: ChatModel.supportsChat), collapse: { historyExpanded = false })
                 Divider()
             }
         VStack(spacing: 0) {
@@ -1787,7 +1902,19 @@ HStack(spacing: 8) {
                     Button { historyExpanded = true } label: { Image(systemName: "sidebar.left") }
                         .help("Show chat history").accessibilityLabel("Show chat history")
                 }
-                Text(chat.historyTitle(chat.selected)).font(.headline).lineLimit(1)
+                Text(chat.historyTitle(chat.selected)).font(.headline).lineLimit(1).help(chat.historyTitle(chat.selected))
+                if chat.overlayID(for: chat.selected) != nil {
+                    Toggle(isOn: Binding(get: { chat.overlayActive(for: chat.selected) }, set: { chat.setOverlayActive($0, for: chat.selected) })) {
+                        Label("Overlay: " + chat.overlayLabel(for: chat.selected), systemImage: "wand.and.rays")
+                    }.toggleStyle(.button).controlSize(.small).disabled(chat.generating)
+                    .help("Residual-ablation overlay for this branch (unqualified). Turn off to continue without it; sends fail closed if the server lacks overlay support.")
+                    if let parent = chat.branches[chat.selected]?["parent_id"], !parent.isEmpty {
+                        Button("Compare", systemImage: "rectangle.split.2x1") {
+                            chat.comparePair = ChatComparePair(left: parent, right: chat.selected,
+                                replayOf: chat.branches[chat.selected]?["replay_of"] ?? "", checkpoint: boundServer?["endpoint"]["checkpoint"].string ?? "")
+                        }.controlSize(.small).help("Original and overlay branches side by side")
+                    }
+                }
                 Spacer()
                 ChatAgentsButton(parentID: chat.selected)
                 if let suspendedTarget { Button("Resume Model") { model.resumeWorker(suspendedTarget) }.disabled(model.busy) }
@@ -1795,6 +1922,7 @@ HStack(spacing: 8) {
                     chat.draft = "Review this session, call mlx2__session_get to discover the exact current archive revision and digest, then use mlx2__session_compact to checkpoint older context. Summarize goal, constraints, decisions, evidence, open_tasks, next_steps and uncertainties. Use the exact archive revision and digest available to your session. Preserve recent turns and make no claim of lossless summarization."
                     send()
                 }.disabled(chat.generating || target == nil || !chat.draft.isEmpty || !chat.attachments.isEmpty || transcript.isEmpty)
+                    .help(transcript.isEmpty ? "Nothing to compact yet" : !chat.draft.isEmpty || !chat.attachments.isEmpty ? "Send or clear the unsent message before compacting" : "Ask the model to checkpoint older context and free space in the context window")
                 Button("New Chat", systemImage: "square.and.pencil") {
                     chat.newConversation(servers: model.servers)
                     composerFocusRequest = UUID()
@@ -1868,9 +1996,17 @@ HStack(spacing: 8) {
                     HStack { Text("This chat is in Trash.").foregroundStyle(.secondary); Button("Restore Chat") { chat.setHistoryState("active", for: chat.selected) } }
                 }
                 if let error = chat.autosaveError { Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled) }
-                if let error = chat.error { Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled) }
+                if let error = chat.error {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                        Spacer(minLength: 0)
+                        Button { chat.error = nil } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .help("Dismiss error").accessibilityLabel("Dismiss error")
+                    }
+                }
                 if chat.canRetryFailedPrompt {
-                    Button("Copy failed prompt to composer", systemImage: "arrow.counterclockwise") { chat.retryFailedPrompt() }
+                    Button("Restore Failed Prompt", systemImage: "arrow.counterclockwise") { chat.retryFailedPrompt() }
                         .font(.caption).help("Restore the failed prompt for editing and retry. This does not send it.")
                 }
                 if let worker = pendingWorker, !transcript.isEmpty {
@@ -1887,15 +2023,19 @@ HStack(spacing: 8) {
                 }
                 if let approval = chat.approval {
                     VStack(alignment: .leading) {
-                        Text("Allow agent tool: " + approval.name).font(.headline)
+                        Text("Allow tool: " + ChatToolEvent(name: approval.name).title).font(.headline)
+                        Text(approval.name).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
                         ScrollView { Text(approval.arguments).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }.frame(maxHeight: 100)
-                        HStack { Button("Allow Once") { chat.approveTool(true) }; Button("Allow Always") { chat.approveTool(true, always: true) }.help("Remember permission for this tool in the active user profile.").disabled(chat.permissionProfile.isEmpty); Button("Decline") { chat.approveTool(false) } }
+                        HStack { Button("Allow Once") { chat.approveTool(true) }; Button("Allow Always") { chat.approveTool(true, always: true) }.help("Remember permission for this tool in the active user profile.").disabled(chat.permissionProfile.isEmpty); Button("Decline", role: .cancel) { chat.approveTool(false) } }
                     }.padding(10).background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
                 }
                 if !chat.toolStatus.isEmpty { Text(chat.toolStatus).font(.caption).foregroundStyle(.secondary) }
                 if !chat.attachments.isEmpty {
                     ScrollView(.horizontal) { HStack { ForEach(chat.attachments) { attachment in
-                        Button(attachment.name + " ×") { chat.attachments.removeAll { $0.id == attachment.id } }.disabled(chat.generating)
+                        Button { chat.attachments.removeAll { $0.id == attachment.id } } label: {
+                            Label(attachment.name, systemImage: "xmark.circle.fill").lineLimit(1).truncationMode(.middle).frame(maxWidth: 220)
+                        }.disabled(chat.generating)
+                            .help("Remove " + attachment.name).accessibilityLabel("Remove attachment " + attachment.name)
                     } } }
                 }
                 ChatComposer(text: $chat.draft, submit: send, attach: chat.addAttachments, focusRequest: composerFocusRequest)
@@ -1940,13 +2080,14 @@ HStack(spacing: 8) {
                     Button("Attach", systemImage: "paperclip") {
                         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
                         if panel.runModal() == .OK { chat.addAttachments(panel.urls) }
-                    }.disabled(chat.generating)
+                    }.disabled(chat.generating || chat.historyState(chat.selected) == "deleted")
                     Text("Return to send · Shift-Return for a new line").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     ChatContextMeter(usage: chat.contextUsageByConversation[chat.selected], notice: chat.contextNotice, expanded: $contextExpanded)
                     if chat.generating {
                         ProgressView().controlSize(.small)
                         Button("Stop Reply", systemImage: "stop.fill") { chat.stop() }
+                            .keyboardShortcut(".", modifiers: .command).help("Stop the reply (Command-Period)")
                     } else {
                         Button("Send", systemImage: "arrow.up", action: send)
                             .keyboardShortcut(.return, modifiers: .command)

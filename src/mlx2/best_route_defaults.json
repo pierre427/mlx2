@@ -1027,7 +1027,7 @@
      "qualification/runs/ripple-perf-ab-20261104/run5/evidence/receipt.json",
      "qualification/runs/ripple-perf-ab-20261104/classify/classification.json"
     ],
-    "source_revision": "102aafd3b",
+    "source_revision": "102aafd3bf2a74c0cf715d7bb146bcd0a1b6f079",
     "decision_row": true
    }
   }

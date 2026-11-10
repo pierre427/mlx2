@@ -59,6 +59,31 @@ private struct WindowReopenRegistration: View {
     }
 }
 
+// Settings and the main sections are app sections, not separate scenes, so
+// the standard Settings… (Command-,) item must be supplied explicitly.
+private struct SectionCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    let model: DesktopModel
+    private func show(_ section: String) {
+        model.section = section
+        NSApp.setActivationPolicy(.regular)
+        openWindow(id: "details")
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") { show("Settings") }.keyboardShortcut(",", modifiers: .command)
+        }
+        CommandMenu("Go") {
+            Button("Chat") { show("Chat") }.keyboardShortcut("1", modifiers: .command)
+            Button("Model Library") { show("Model Library") }.keyboardShortcut("2", modifiers: .command)
+            Button("Overview") { show("Overview") }.keyboardShortcut("3", modifiers: .command)
+            Button("Performance") { show("Performance") }.keyboardShortcut("4", modifiers: .command)
+            Button("Logs") { show("Logs") }.keyboardShortcut("5", modifiers: .command)
+        }
+    }
+}
+
 struct MLX2App: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = DesktopModel.shared
@@ -80,7 +105,10 @@ struct MLX2App: App {
         }.windowManagerRole(.principal)
             .defaultSize(width: 1120, height: 760)
             .defaultLaunchBehavior(DesktopLaunch.background ? .suppressed : .presented)
-            .commands { CommandGroup(replacing: .newItem) {} }
+            .commands {
+                CommandGroup(replacing: .newItem) {}
+                SectionCommands(model: model)
+            }
     }
 }
 

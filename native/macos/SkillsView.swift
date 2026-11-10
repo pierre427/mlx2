@@ -60,6 +60,7 @@ struct SkillsView: View {
                 HStack { Text("Skills").font(.title2); Spacer(); Button("New Skill") { newSkill() }; Button("Import…") { importSkill() } }
                 SkillsPolicySettings()
                 Text("Save reusable model instructions in a private, revisioned library. Reference files stay text; this library has no execution tool.").foregroundStyle(.secondary)
+                if rows.isEmpty { Text(offset == 0 ? "No skills yet. Create one below or import a skill file." : "No skills on this page.").foregroundStyle(.secondary) }
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     HStack {
                         Button { Task { await load(row) } } label: {
@@ -77,17 +78,18 @@ struct SkillsView: View {
                 }
                 Divider()
                 Text(selected.isEmpty ? "Create a skill" : "\(selected) · revision \(revision)").font(.headline)
-                TextField("Skill name", text: $name).disabled(!selected.isEmpty)
+                TextField("Skill name", text: $name).disabled(!selected.isEmpty).help(selected.isEmpty ? "Name for the new skill." : "A saved skill keeps its name. Create a new skill to use a different name.")
                 TextField("Description", text: $description)
                 Toggle("Enabled", isOn: $enabled)
                 Text("Instructions").font(.caption)
-                TextEditor(text: $bodyText).font(.system(.body, design: .monospaced)).frame(minHeight: 220).border(.separator)
+                TextEditor(text: $bodyText).font(.system(.body, design: .monospaced)).frame(minHeight: 220).border(.separator).accessibilityLabel("Skill instructions")
                 DisclosureGroup("Reference files (JSON text map)") {
                     Text("Example: {\"references/notes.md\": \"Reference text\"}").font(.caption).foregroundStyle(.secondary)
-                    TextEditor(text: $references).font(.system(.caption, design: .monospaced)).frame(minHeight: 120).border(.separator)
+                    TextEditor(text: $references).font(.system(.caption, design: .monospaced)).frame(minHeight: 120).border(.separator).accessibilityLabel("Reference files JSON")
                 }
                 HStack {
-                    Button(selected.isEmpty ? "Create Skill" : "Save Revision") { Task { await save() } }.disabled(archived || name.isEmpty)
+                    Button(selected.isEmpty ? "Create Skill" : "Save Revision") { Task { await save() } }.disabled(archived || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .help(archived ? "Restore this archived skill before saving a revision." : name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Enter a skill name first." : "")
                     if !selected.isEmpty {
                         Button("Reload") { if let row = rows.first(where: { $0["name"].string == selected }) { Task { await load(row) } } }
                         Button("Export…") { exportSkill() }

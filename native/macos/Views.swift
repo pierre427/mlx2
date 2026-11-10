@@ -9,7 +9,7 @@ private struct SidebarGroup: Identifiable {
 }
 private let sidebarGroups = [
     SidebarGroup(id: "workspace", title: "Workspace", sections: ["Chat", "Code", "World", "Memory", "Agents", "Skills", "Wakeups", "Dream"]),
-    SidebarGroup(id: "models", title: "Models", sections: ["Model Library", "Engines", "Runtime", "Qualification", "Media", "Downloads", "Conversions"]),
+    SidebarGroup(id: "models", title: "Models", sections: ["Model Library", "Engines", "Runtime", "Qualification", "Media", "Downloads", "Conversions", "Ablation"]),
     SidebarGroup(id: "monitor", title: "Monitor", sections: ["Overview", "Performance", "Requests", "Cache", "Routes", "Logs"]),
     SidebarGroup(id: "connections", title: "Connections & Settings", sections: ["Community", "Helpers", "User Profiles", "Settings"])
 ]
@@ -17,18 +17,38 @@ private let symbols = ["Code": "chevron.left.forwardslash.chevron.right", "Chat"
                        "Routes": "point.3.connected.trianglepath.dotted", "Logs": "doc.text",
                        "Model Library": "shippingbox", "Settings": "gearshape", "Qualification": "checkmark.seal",
                        "Skills": "books.vertical", "Wakeups": "alarm", "User Profiles": "person.crop.circle", "World": "cube.transparent", "Dream": "moon.stars", "Engines": "server.rack", "Runtime": "slider.horizontal.3", "Community": "network", "Media": "photo.on.rectangle.angled",
-                       "Downloads": "arrow.down.circle", "Conversions": "arrow.triangle.2.circlepath", "Helpers": "person.2.badge.gearshape", "Agents": "person.3.sequence", "Memory": "brain.head.profile"]
+                       "Downloads": "arrow.down.circle", "Conversions": "arrow.triangle.2.circlepath", "Ablation": "slider.vertical.3", "Helpers": "person.2.badge.gearshape", "Agents": "person.3.sequence", "Memory": "brain.head.profile"]
 
 struct StatusDot: View {
     var state: String
     var body: some View {
         HStack(spacing: 6) {
-            Circle().fill(["Ready", "Busy"].contains(state) ? Color.green : ["Preparing", "Loading", "Stopping"].contains(state) ? .orange : .secondary)
+            // The label carries the state; color is a secondary cue only.
+            Circle().fill(["Ready", "Busy"].contains(state) ? Color.green
+                          : ["Preparing", "Loading", "Stopping", "Suspending", "Resuming"].contains(state) ? .orange
+                          : ["Error", "Unreachable", "SuspendError", "ResumeError", "SuspensionRecoveryRequired"].contains(state) ? .red
+                          : .secondary)
                 .frame(width: 7, height: 7)
+                .accessibilityHidden(true)
             Text(state)
         }
         .font(.caption)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Model state: " + state)
     }
+}
+
+/// Stopping drains accepted requests and discards suspended state, so every
+/// Stop control asks first, matching the Quit confirmation.
+@MainActor func confirmStopModel(_ name: String) -> Bool {
+    let alert = NSAlert()
+    let label = name.isEmpty || name == "—" ? "the model" : name
+    alert.messageText = "Stop \(label)?"
+    alert.informativeText = "Accepted requests drain for up to 15 seconds, then the engine stops. Suspended state is discarded."
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: "Stop Model")
+    alert.addButton(withTitle: "Cancel")
+    return alert.runModal() == .alertFirstButtonReturn
 }
 
 struct PickerView: View {
@@ -59,7 +79,7 @@ struct PickerView: View {
                     }
                     Spacer()
                     if ["Ready", "Busy"].contains(model.activeWorker["state"].text) { Button("Suspend") { model.suspendWorker(model.activeWorker) }.disabled(model.busy) }
-                    Button("Stop") { model.stopWorker(model.activeWorker) }.disabled(model.busy)
+                    Button("Stop") { let worker = model.activeWorker; if confirmStopModel(worker["name"].text) { model.stopWorker(worker) } }.disabled(model.busy)
                 }
                 HStack {
                     metric("Generation", number(model.server["generation_tps"].double, suffix: " tok/s"))
@@ -73,7 +93,7 @@ struct PickerView: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             ForEach(Array(model.suspendedWorkers.enumerated()), id: \.offset) { _, worker in
-                HStack { Text(worker["name"].text).lineLimit(1); Text("Suspended").font(.caption).foregroundStyle(.secondary); Spacer(); Button("Resume") { model.resumeWorker(worker) }.disabled(model.busy); Button("Stop") { model.stopWorker(worker) }.disabled(model.busy) }
+                HStack { Text(worker["name"].text).lineLimit(1); Text("Suspended").font(.caption).foregroundStyle(.secondary); Spacer(); Button("Resume") { model.resumeWorker(worker) }.disabled(model.busy); Button("Stop") { if confirmStopModel(worker["name"].text) { model.stopWorker(worker) } }.disabled(model.busy) }
             }
             Divider()
             TextField("Search local models", text: $model.search)
@@ -89,9 +109,11 @@ struct PickerView: View {
                                 .foregroundStyle(.secondary).frame(width: 22)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(row["name"].text).lineLimit(1).truncationMode(.middle)
-                                Text("\(row["kind"].text) · \(bytes(row["allocated_bytes"].double))")
+                                Text("\(row["kind"].text == "Draft" ? "Spec Drafter" : row["kind"].text) · \(bytes(row["allocated_bytes"].double))")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
+                            // Full name for truncated rows; the reason explains rows without Start.
+                            .help(row["name"].text + (row["reason"].string.map { "\n" + $0 } ?? ""))
                             Spacer(minLength: 4)
                             if model.managedRunning && row["path"].string == model.worker["path"].string {
                                 Image(systemName: "checkmark").foregroundStyle(.blue)
@@ -110,8 +132,8 @@ struct PickerView: View {
             }
             .frame(maxHeight: 260)
             if let error = model.error ?? model.library["error"].string {
-                Text(error).font(.caption).foregroundStyle(.orange).lineLimit(3)
-                Button("View details") { open("Logs") }.buttonStyle(.link)
+                Text(error).font(.caption).foregroundStyle(.orange).lineLimit(3).help(error).textSelection(.enabled)
+                Button("View Details") { open("Logs") }.buttonStyle(.link)
             }
             Divider()
             nav("Details…", "chart.bar.xaxis", "Overview")
@@ -201,6 +223,7 @@ struct DetailsView: View {
                 case "Media": MediaView()
                 case "Downloads": DownloadsView()
                 case "Conversions": ConversionView()
+                case "Ablation": ResidualAblationView()
                 case "Helpers": HelperView()
                 case "Skills": SkillsView()
                 case "Agents": AgentsView()
@@ -228,7 +251,7 @@ struct DetailsView: View {
                         }.frame(maxWidth: 260)
                     }
                     StatusDot(state: model.state)
-                    if model.isManagedSelection { Button("Suspend Model") { model.suspendSelectedServer() }.disabled(model.busy); Button("Stop Model") { model.stopSelectedServer() }.disabled(model.busy) }
+                    if model.isManagedSelection { Button("Suspend Model") { model.suspendSelectedServer() }.disabled(model.busy); Button("Stop Model") { if confirmStopModel(model.server["model"].string ?? "") { model.stopSelectedServer() } }.disabled(model.busy) }
                     ProgressView().controlSize(.small).frame(width: 16).opacity(model.busy ? 1 : 0)
                 }
             }
@@ -239,6 +262,7 @@ struct DetailsView: View {
                         Text(error).textSelection(.enabled)
                         Spacer()
                         Button { model.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
+                            .help("Dismiss").accessibilityLabel("Dismiss error")
                     }.font(.callout).padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                         .shadow(radius: 6).padding(12)
                 }
@@ -329,9 +353,9 @@ struct OverviewView: View {
                 HStack {
                     Text("Route: \(model.server["route"].text)")
                     Divider().frame(height: 16)
-                    Text("Qualification: \(model.server["qualification"].string ?? "unknown")")
+                    Text("Qualification: \(model.server["qualification"].string ?? "Unknown")")
                     Spacer()
-                    Button("View route details") { model.section = "Routes" }.buttonStyle(.link)
+                    Button("View Route Details") { model.section = "Routes" }.buttonStyle(.link)
                 }.font(.callout).padding(14).background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
                 field("Requests · active / queued", "\(number(model.server["running"].double, digits: 0)) / \(number(model.server["waiting"].double, digits: 0))")
                 Text("Live read-only telemetry · unavailable values appear as — · refreshes every 2 seconds")
@@ -472,10 +496,14 @@ struct LogsView: View {
     @EnvironmentObject var model: DesktopModel
     @State private var query = ""
     @State private var severity = "All"
-    var lines: [String] {
-        model.logs.components(separatedBy: .newlines).filter {
-            (query.isEmpty || $0.localizedCaseInsensitiveContains(query))
-                && (severity == "All" || $0.localizedCaseInsensitiveContains(severity))
+    // Number lines before filtering so a filtered view still shows each line's
+    // position in the log, not its position in the search results.
+    var lines: [(number: Int, text: String)] {
+        var all = model.logs.components(separatedBy: .newlines)
+        if all.last == "" { all.removeLast() }
+        return all.enumerated().map { (number: $0.offset + 1, text: $0.element) }.filter { line in
+            (query.isEmpty || line.text.localizedCaseInsensitiveContains(query))
+                && (severity == "All" || line.text.localizedCaseInsensitiveContains(severity))
         }
     }
     var body: some View {
@@ -505,14 +533,18 @@ struct LogsView: View {
                 Picker("Severity", selection: $severity) {
                     ForEach(["All", "Error", "Warning", "Info"], id: \.self) { Text($0) }
                 }.frame(width: 150)
-                Text("\(lines.count) lines").font(.caption).foregroundStyle(.secondary)
+                Text(lines.count == 1 ? "1 line" : "\(lines.count) lines").font(.caption).foregroundStyle(.secondary)
             }
             ScrollView([.horizontal, .vertical]) {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                    if lines.isEmpty {
+                        Text(model.logs.isEmpty ? "This log is empty." : "No lines match the current search and severity.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    ForEach(lines, id: \.number) { line in
                         HStack(alignment: .top, spacing: 12) {
-                            Text("\(index + 1)").foregroundStyle(.tertiary).frame(width: 40, alignment: .trailing)
-                            Text(line).foregroundStyle(line.localizedCaseInsensitiveContains("error") ? Color.red : line.localizedCaseInsensitiveContains("warning") ? Color.orange : Color.primary)
+                            Text("\(line.number)").foregroundStyle(.tertiary).frame(width: 48, alignment: .trailing)
+                            Text(line.text).foregroundStyle(line.text.localizedCaseInsensitiveContains("error") ? Color.red : line.text.localizedCaseInsensitiveContains("warning") ? Color.orange : Color.primary)
                                 .textSelection(.enabled)
                         }.font(.system(.caption, design: .monospaced))
                     }
@@ -562,6 +594,7 @@ struct LibraryView: View {
                 Spacer()
                 Button("Choose Folder…") { model.chooseFolder() }.disabled(model.busy || model.servingSettingsLocked)
                 Button { model.perform("refresh") } label: { Image(systemName: "arrow.clockwise") }.disabled(model.busy || model.library["scanning"].bool)
+                    .help("Rescan model library").accessibilityLabel("Rescan model library")
             }
             HStack {
                 TextField("Search models", text: $model.search).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
@@ -570,7 +603,7 @@ struct LibraryView: View {
                 Text("Click a column to sort").font(.caption).foregroundStyle(.secondary)
             }
             HStack {
-                Text(model.library["error"].string ?? "\(model.rows.count) folders · \(bytes(model.rows.reduce(0) { $0 + ($1["allocated_bytes"].double ?? 0) })) allocated")
+                Text(model.library["error"].string ?? "\(model.rows.count) \(model.rows.count == 1 ? "folder" : "folders") · \(bytes(model.rows.reduce(0) { $0 + ($1["allocated_bytes"].double ?? 0) })) allocated")
                     .lineLimit(1).foregroundStyle(model.library["error"].string == nil ? Color.secondary : Color.orange)
                 Spacer()
                 ProgressView().controlSize(.small).opacity(model.library["scanning"].bool ? 1 : 0)
@@ -588,6 +621,7 @@ struct LibraryView: View {
                         }
                     }
                     Button("Test Selected (\(model.checkedModels.count))") { model.section = "Qualification" }
+                        .disabled(model.checkedModels.isEmpty).help("Check models in the Test column first")
                 }
             } else if !model.checkedModels.isEmpty {
                 Button("Test Selected (\(model.checkedModels.count))") { model.section = "Qualification" }
@@ -597,10 +631,11 @@ struct LibraryView: View {
                     Toggle("Select for tests", isOn: Binding(get: { model.checkedModels.contains(artifact.id) }, set: { selected in
                         if selected { model.checkedModels.insert(artifact.id) } else { model.checkedModels.remove(artifact.id) }
                     })).labelsHidden().disabled(!artifact.data["can_start"].bool)
+                        .help(artifact.data["can_start"].bool ? "Select for tests" : "Only startable models can be tested")
                 }.width(35)
                 TableColumn("Model", sortUsing: RowSort<Artifact>("name")) { Text($0.data["name"].text).help($0.data["reason"].text) }.width(min: 160, ideal: 260)
                 TableColumn("Kind", sortUsing: RowSort<Artifact>("kind")) { Text($0.data["kind"].text == "Draft" ? "Spec Drafter" : $0.data["kind"].text) }.width(min: 90, ideal: 130)
-                TableColumn("Qualification") { Text($0.data["qualification"]["label"].string ?? "Untested") }.width(min: 100, ideal: 120)
+                TableColumn("Qualification") { Text($0.data["qualification"]["label"].string ?? "Untested").help($0.data["qualification"]["label"].string ?? "Untested") }.width(min: 100, ideal: 120)
                 TableColumn("Prefill tok/s", sortUsing: RowSort<Artifact>("_prefill_tps", numeric: true)) { Text(number($0.data["_prefill_tps"].double)) }.width(90)
                 TableColumn("Decode tok/s", sortUsing: RowSort<Artifact>("_decode_tps", numeric: true)) { Text(number($0.data["_decode_tps"].double)) }.width(90)
                 TableColumn("On disk", sortUsing: RowSort<Artifact>("allocated_bytes", numeric: true)) { Text(bytes($0.data["allocated_bytes"].double)).monospacedDigit() }.width(85)
@@ -629,7 +664,7 @@ struct LibraryView: View {
                     if let worker = model.workerFor(row) {
                         if worker["state"].text == "Suspended" { Button("Resume Model") { model.resumeWorker(worker) }.disabled(model.busy) }
                         else if ["Ready", "Busy"].contains(worker["state"].text) { Button("Suspend Model") { model.suspendWorker(worker) }.disabled(model.busy) }
-                        Button { model.stop(row) } label: { Label("Stop Model", systemImage: "stop.circle") }
+                        Button { if confirmStopModel(row["name"].text) { model.stop(row) } } label: { Label("Stop Model", systemImage: "stop.circle") }
                             .disabled(model.busy)
                     } else {
                         Button { model.start(row) } label: { Label("Start Model", systemImage: "play.circle") }
@@ -685,13 +720,15 @@ struct LibraryView: View {
                         Spacer()
                         Button("Reveal in Finder") { model.reveal(row) }
                         Button("Move to Trash…") { model.trash(row) }.disabled(model.busy || row["kind"].text == "Link" || model.owns(row))
+                            .help(model.owns(row) ? "Stop this model before moving it to Trash." : row["kind"].text == "Link" ? "Linked folders cannot be moved to Trash from MLX2." : "")
                         if let worker = model.workerFor(row) {
                             if worker["state"].text == "Suspended" { Button("Resume Model") { model.resumeWorker(worker) }.disabled(model.busy) }
                             else if ["Ready", "Busy"].contains(worker["state"].text) { Button("Suspend Model") { model.suspendWorker(worker) }.disabled(model.busy) }
-                            Button("Stop Model") { model.stop(row) }.disabled(model.busy)
+                            Button("Stop Model") { if confirmStopModel(row["name"].text) { model.stop(row) } }.disabled(model.busy)
                         } else {
                             Button("Start Model") { model.start(row) }.buttonStyle(.borderedProminent)
                                 .disabled(model.busy || model.managedRunning || !row["can_start"].bool)
+                                .help(model.managedRunning ? "Stop the running model first." : row["can_start"].bool ? "" : row["reason"].text)
                         }
                     }
                 }.padding(.vertical, 6)
@@ -713,6 +750,10 @@ struct SettingsView: View {
     @State private var runtimeOptions = RuntimeLaunchOptions()
     @State private var launchAtLogin = LoginItems.enabled
     @State private var loadedSettings = false
+    @State private var confirmPermissionReset = false
+    // Saved settings may hold any lane count the supervisor accepts (up to 32);
+    // keep that value selectable instead of showing an empty picker.
+    private var laneChoices: [Int] { Array(Set([1, 2, 3, 4] + [Int(lanes) ?? 1].filter { $0 > 0 })).sorted() }
     var body: some View {
         Form {
             Section {
@@ -728,7 +769,13 @@ struct SettingsView: View {
             }
             Section("Tool permissions") {
                 Text("Allow Always remembers permission for a tool in the active user profile.").font(.caption).foregroundStyle(.secondary)
-                Button("Reset remembered tool permissions") { model.chat.forgetToolPermissions() }
+                Button("Reset Remembered Tool Permissions…") { confirmPermissionReset = true }
+                    .confirmationDialog("Reset remembered tool permissions?", isPresented: $confirmPermissionReset) {
+                        Button("Reset Permissions", role: .destructive) { model.chat.forgetToolPermissions() }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Every tool marked Allow Always in the active user profile will ask again before it runs.")
+                    }
             }
             Section("Model library") {
                 LabeledContent("Directory", value: model.library["root"].text)
@@ -740,7 +787,7 @@ struct SettingsView: View {
                     .disabled(!stickyPort)
                 TextField("Context tokens (0 = automatic)", text: $context)
                 Picker("Serving lanes", selection: $lanes) {
-                    ForEach(1...4, id: \.self) { Text("\($0)").tag(String($0)) }
+                    ForEach(laneChoices, id: \.self) { Text("\($0)").tag(String($0)) }
                 }
                 Picker("Decode route", selection: $route) {
                     Text("Automatic runtime selection").tag("auto")
@@ -770,6 +817,7 @@ struct SettingsView: View {
                 Text("Starts the menu bar app after login. Choose models to load automatically in Engines.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Suspend retains resumable state for app-managed models. Stop drains accepted requests for up to 15 seconds and discards suspended state. Quitting stops all app-managed engines; external services retain their existing ownership.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Button("Open Application Support") {
                     NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MLX2"))
                 }

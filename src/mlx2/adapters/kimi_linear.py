@@ -261,8 +261,8 @@ def parse_policy(policy=None):
                 # EXPANDED_LAWS): v2 = 16-byte row loads + 16x32x32 ops after
                 # the QSA NAX law v2 (provenance/kimi-mla-flash-law-v2.json).
                 # NOT HELPFUL, left off (2026-11-05): v2 ran 0.39-0.51x v1's
-                # kernel time at every case (8K/32K/128K x 2048/8192 rows,
-                # equal error, both chunk-invariant; qualification/runs/
+                # speed (v1 ms / v2 ms; ~2-2.5x slower) at every case
+                # (8K/32K/128K x 2048/8192 rows, equal error, both chunk-invariant; qualification/runs/
                 # kimi-flash192-law-ab-20261105). v1 already sustains 35-43
                 # TFLOP/s, so the load/op-width tuning that doubled the QSA
                 # kernel (9 TFLOP/s) has no headroom here; the FP32-P x BF16

@@ -321,6 +321,23 @@ def resolved_options(kind, options):
     return {**DEFAULT_OPTIONS.get(kind, {}), **options}
 
 
+def apc_layout(base, options):
+    """APCv2 cache layout: one namespace per arithmetic law.
+
+    Options that change arithmetic (not bit-identical to eager) get their own
+    namespace, so a prefix cached under one law is never warm-hit under
+    another.  ``fused_elementwise`` is bit-identical to eager.  ``metal_glue``
+    is bit-identical to the ``metal_rmsnorm`` law, so with that option on it
+    shares its namespace; alone, its Q/K norm kernel reorders the FP32 sum
+    while the block norms stay eager, which is neither law, so it is named.
+    """
+    keys = ["metal_rmsnorm", "gqa_folded_attention", "window_blocked_prefill"]
+    if not options.get("metal_rmsnorm"):
+        keys.append("metal_glue")
+    names = sorted(k for k in keys if options.get(k))
+    return base + ("+" + "+".join(names) if names else "")
+
+
 NUMERICS_KEYS = ("activation_precision",)
 
 
@@ -501,14 +518,7 @@ class RippleAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise ValueError("Ripple BF16/affine accepts only BF16 activations")
         else:
             self.policy = {"activation_precision": "bf16"}
-        # Options that change arithmetic (not bit-identical to eager) get
-        # their own APCv2 namespace, so a prefix cached under one law is
-        # never warm-hit under another.
-        # metal_glue is bit-identical to the metal_rmsnorm law, so it shares
-        # that namespace; the others change arithmetic.
-        numerics_options = sorted(k for k in ("metal_rmsnorm", "gqa_folded_attention", "window_blocked_prefill")
-                                  if self.options.get(k))
-        self.layout = artifact["cache_layout"] + ("+" + "+".join(numerics_options) if numerics_options else "")
+        self.layout = apc_layout(artifact["cache_layout"], self.options)
         self.descriptor = replace(artifact_descriptor(artifact, selected=True), cache_layout=self.layout)
         self.profile = f"ripple-{self.kind}-apcv2-ordinary"
 

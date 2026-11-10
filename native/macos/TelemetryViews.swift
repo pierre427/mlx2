@@ -132,6 +132,9 @@ struct LatencyTable: View {
     }
     var body: some View {
         TelemetryCard(title: "Latency distribution", symbol: "stopwatch") {
+            if items.isEmpty {
+                Label("No latency samples reported", systemImage: "minus.circle").font(.callout).foregroundStyle(.secondary)
+            } else {
             Table(items, sortOrder: $sortOrder) {
                 TableColumn("Metric", sortUsing: RowSort<LatencyItem>("_metric")) { Text($0.id).fontWeight(.medium) }.width(70)
                 TableColumn("p50", sortUsing: RowSort<LatencyItem>("p50", numeric: true)) { Text(milliseconds($0.data["p50"].double)).monospacedDigit() }.width(min: 70, ideal: 85)
@@ -142,6 +145,7 @@ struct LatencyTable: View {
                 TableColumn("30s p50", sortUsing: RowSort<LatencyItem>("window_p50", numeric: true)) { Text(milliseconds($0.data["window_p50"].double)).monospacedDigit() }.width(min: 70, ideal: 85)
                 TableColumn("30s p95", sortUsing: RowSort<LatencyItem>("window_p95", numeric: true)) { Text(milliseconds($0.data["window_p95"].double)).monospacedDigit() }.width(min: 70, ideal: 85)
             }.frame(height: CGFloat(max(items.count, 1)) * 27 + 40)
+            }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), alignment: .leading)], alignment: .leading, spacing: 8) {
                 ForEach(Array(model.server["latency"].array.enumerated()), id: \.offset) { _, pair in
                     Label("\(pair[0].text): \(pair[1]["exact"].bool ? "exact samples" : "histogram estimate")",

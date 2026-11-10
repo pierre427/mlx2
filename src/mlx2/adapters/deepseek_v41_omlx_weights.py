@@ -825,6 +825,10 @@ class OmlxV41Weights:
         if first is None:
             self._dense.clear()
             self._quant.clear()
+            # Resident expert banks (up to 32 layers, ~2 GiB each) are owned
+            # here as well; park() already drops them, close() must too.
+            self._banks.clear()
+            self._bank_views.clear()
             self._pending_dense.clear()
             self._pending_dense_host = None
             self._loaded = False

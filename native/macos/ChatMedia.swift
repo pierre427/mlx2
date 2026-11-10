@@ -46,7 +46,7 @@ private enum ChatMediaError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unsupported: return "This media source is not supported."
-        case .tooLarge(let limit): return "Media exceeds the \(limit / (1024 * 1024)) MB preview/download limit. Open the source to view it."
+        case .tooLarge(let limit): return "Media exceeds the \(limit / (1024 * 1024)) MiB preview/download limit. Open the source to view it."
         case .invalidImage: return "This image cannot be previewed safely."
         case .response(let code): return "Media could not be loaded (HTTP \(code))."
         }
@@ -194,7 +194,7 @@ struct ChatMediaView: View {
                 VideoPlayer(player: player).frame(maxWidth: 560).frame(height: kind == "audio" ? 64 : 280)
             } else if loading {
                 HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Loading \(kind)…").font(.caption) }
-            } else if error == nil, kind != "image" {
+            } else if kind != "image" {
                 Button {
                     playbackTask?.cancel()
                     playbackTask = Task { await load(play: true) }
@@ -202,7 +202,14 @@ struct ChatMediaView: View {
                     Label(title.isEmpty ? "Play \(kind)" : title, systemImage: "play.circle.fill")
                 }
             }
-            if let error { Text(error).font(.caption).foregroundStyle(.secondary) }
+            if let error {
+                HStack(spacing: 6) {
+                    Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    if kind == "image", image == nil, ChatMediaSource.validatedURL(source) != nil {
+                        Button("Try Again") { playbackTask?.cancel(); playbackTask = Task { await load(play: false) } }.font(.caption).disabled(loading)
+                    }
+                }
+            }
             if let url = ChatMediaSource.validatedURL(source) {
                 Link(title.isEmpty ? "Open \(kind) source" : title, destination: url)
                     .font(.caption).lineLimit(2)
@@ -222,6 +229,14 @@ struct ChatMediaView: View {
             }
         }
         .onHover { hovering = $0 }
+        .contextMenu {
+            if ChatMediaSource.validatedURL(source) != nil {
+                Button("Save Original Media…") { saveTask = Task { await saveOriginal() } }.disabled(saving)
+            }
+        }
+        .accessibilityAction(named: "Save original media") {
+            if !saving, ChatMediaSource.validatedURL(source) != nil { saveTask = Task { await saveOriginal() } }
+        }
         .task(id: source) {
             cleanup()
             image = nil; error = nil; original = nil
@@ -376,7 +391,7 @@ struct ChatImageLightbox: View {
                 .padding(.horizontal, 12).padding(.bottom, 12)
             if let error {
                 VStack(spacing: 5) {
-                    Text(error).font(.caption)
+                    Text(error).font(.caption).textSelection(.enabled)
                     if let url = ChatMediaSource.url(current.source) { Link("Open image source", destination: url).font(.caption) }
                 }.padding(8).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
                     .padding(.horizontal, 16).padding(.bottom, 12)
@@ -385,6 +400,8 @@ struct ChatImageLightbox: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { Color.black.opacity(0.96).contentShape(Rectangle()).onTapGesture(perform: dismiss) }
         .foregroundStyle(.white)
+        // The backdrop is always black: keep materials dark so white labels stay legible in Light Mode.
+        .environment(\.colorScheme, .dark)
         .focusable().focused($keyboardFocused).focusEffectDisabled()
         .onAppear { keyboardFocused = true }
         .onKeyPress(.leftArrow) {
@@ -403,16 +420,17 @@ struct ChatImageLightbox: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            if !current.title.isEmpty { Text(current.title).font(.callout).lineLimit(1) }
+            if !current.title.isEmpty { Text(current.title).font(.callout).lineLimit(1).help(current.title) }
             if gallery.count > 1 { Text("\(index + 1) / \(gallery.count)").font(.caption).foregroundStyle(.secondary) }
             Spacer(minLength: 8)
             Button { saveTask = Task { await saveOriginal() } } label: {
                 Label(saving ? "Saving…" : "Download", systemImage: "arrow.down.to.line")
                     .padding(.horizontal, 9).padding(.vertical, 6)
                     .background(.regularMaterial.opacity(0.85), in: RoundedRectangle(cornerRadius: 6))
-            }.buttonStyle(.plain).disabled(saving || loading).fixedSize()
+            }.buttonStyle(.plain).disabled(saving || loading).fixedSize().help("Save original image")
             Button(action: dismiss) { Image(systemName: "xmark.circle.fill").font(.title2) }
                 .buttonStyle(.plain).keyboardShortcut(.cancelAction).help("Close image (Escape)")
+                .accessibilityLabel("Close image")
         }
     }
 

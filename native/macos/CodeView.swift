@@ -350,7 +350,7 @@ private struct CodeWorkspaceView: View {
                 }
                 HStack {
                     Button("Choose Folder…", systemImage: "folder") { coordinator.chooseFolder(newSession: false) }
-                    Text(coordinator.workspace.isEmpty ? "Choose the folder the coding CLI may work in." : coordinator.workspace).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(2)
+                    Text(coordinator.workspace.isEmpty ? "Choose the folder the coding CLI may work in." : coordinator.workspace).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(2).truncationMode(.middle).help(coordinator.workspace)
                 }.disabled(coordinator.busy || chat.generating || coordinator.hasActiveJobs)
                 HStack {
                     Picker("CLI", selection: Binding(get: { coordinator.provider }, set: { value in Task { await coordinator.configure(["provider": value]) } })) { Text("Codex").tag("codex"); Text("Claude Code").tag("claude") }
@@ -379,7 +379,7 @@ private struct CodeWorkspaceView: View {
                                 if message.isUserBubble { Spacer(minLength: 50) }
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text(message.origin.isEmpty ? (message.role == "user" ? "You" : "Local coordinator") : message.origin).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                                    if !message.reasoning.isEmpty { DisclosureGroup("Thinking") { Text(message.reasoning).textSelection(.enabled) } }
+                                    if !message.reasoning.isEmpty { DisclosureGroup("Reasoning") { Text(message.reasoning).textSelection(.enabled) } }
                                     if message.origin == "Code job result" {
                                         Text("A coding job result was received. The local coordinator will assess the changes, checks and remaining work.")
                                         RecordedDelegateReport(text: message.text)
@@ -409,7 +409,7 @@ private struct CodeWorkspaceView: View {
             Divider()
             VStack(alignment: .leading, spacing: 8) {
                 if let error = coordinator.error ?? chat.error { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
-                if coordinator.completionPaused { Button("Retry completion review") { coordinator.retryCompletion() }.disabled(chat.generating) }
+                if coordinator.completionPaused { Button("Retry Completion Review") { coordinator.retryCompletion() }.disabled(chat.generating) }
                 if let approval = chat.approval {
                     Text("Allow coordinator tool: " + approval.name).font(.headline)
                     Text(approval.arguments).font(.caption.monospaced()).lineLimit(6).textSelection(.enabled)
@@ -431,10 +431,10 @@ private struct CodeWorkspaceView: View {
                 }
                 ChatComposer(text: $chat.draft, submit: { send() }).frame(height: 72).padding(6).background(.background, in: RoundedRectangle(cornerRadius: 8))
                 HStack {
-                    if chat.canRetryFailedPrompt { Button("Restore failed prompt") { chat.retryFailedPrompt() } }
+                    if chat.canRetryFailedPrompt { Button("Restore Failed Prompt") { chat.retryFailedPrompt() } }
                     Text("Return to send · Shift-Return for a new line").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    if chat.generating { Button("Stop reply") { chat.stop() } }
+                    if chat.generating { Button("Stop Reply") { chat.stop() } }
                     else { Button("Send") { send() }.buttonStyle(.borderedProminent).disabled(coordinator.server == nil || coordinator.selected.isEmpty || chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || coordinator.busy) }
                 }
             }.padding(16)
@@ -452,6 +452,8 @@ private struct CodeJobView: View {
     @State private var error: String?
     @State private var offset = 0
     @State private var requestID = UUID()
+    @State private var loaded = false
+    @State private var confirmCancel = false
     private var status: String { result["job"]["status"].string ?? result["status"].text }
     private func refresh() async {
         let profile = model.snapshot["user_profiles"]["active_id"].text
@@ -459,26 +461,32 @@ private struct CodeJobView: View {
         do {
             let value = try await model.request("code_status", ["job_id": jobID, "offset": offset, "limit": 32768])
             guard !Task.isCancelled, model.snapshot["user_profiles"]["active_id"].text == profile, requestID == token else { return }
-            result = value; error = nil
+            result = value; error = nil; loaded = true
         } catch { if model.snapshot["user_profiles"]["active_id"].text == profile { self.error = error.localizedDescription } }
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack { Text("Coding job · " + status).font(.title2); Spacer(); Button("Close") { dismiss() }.keyboardShortcut(.cancelAction) }
+            HStack { Text(status.isEmpty ? "Coding job" : "Coding job · " + status.capitalized).font(.title2); Spacer(); Button("Close") { dismiss() }.keyboardShortcut(.cancelAction) }
             Text(jobID).font(.caption.monospaced()).textSelection(.enabled)
             if let error { Text(error).foregroundStyle(.orange) }
             if let failure = result["job"]["error"].string ?? result["error"].string { Text(failure).foregroundStyle(.orange) }
-            ScrollView { Text(result["text"].string ?? result["output"].string ?? result["transcript"].string ?? "Waiting for CLI output…").font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+            ScrollView { Text(result["text"].string ?? result["output"].string ?? result["transcript"].string ?? (!loaded || CodeCoordinator.active(status) ? "Waiting for CLI output…" : "This job recorded no CLI output.")).font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
             HStack {
                 Button("Previous") { offset = max(0, offset - 32768); Task { await refresh() } }.disabled(offset == 0)
                 Button("Next") { if let next = result["next_offset"].double { offset = Int(next); Task { await refresh() } } }.disabled(result["next_offset"].double == nil)
                 Spacer()
-                if CodeCoordinator.active(status) { Button("Cancel job") { model.perform("code_cancel", ["job_id": jobID]) } }
+                if CodeCoordinator.active(status) { Button("Cancel Job") { confirmCancel = true }.disabled(status == "cancelling") }
                 Button("Refresh") { Task { await refresh() } }
             }
         }.padding(20).frame(minWidth: 620, idealWidth: 840, minHeight: 450, idealHeight: 650)
             .task { await refresh(); while !Task.isCancelled && CodeCoordinator.active(status) { do { try await Task.sleep(for: .seconds(2)) } catch { return }; await refresh() } }
             .onChange(of: model.snapshot["user_profiles"]["active_id"].text) { _, _ in result = JSON(); dismiss() }
+            .confirmationDialog("Cancel this coding job?", isPresented: $confirmCancel) {
+                Button("Cancel Job", role: .destructive) { model.perform("code_cancel", ["job_id": jobID]) }
+                Button("Keep Running", role: .cancel) { }
+            } message: {
+                Text("The coding CLI is stopped. Edits it already made in the workspace stay in place.")
+            }
     }
 }
 

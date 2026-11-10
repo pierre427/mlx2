@@ -29,6 +29,7 @@ struct MediaView: View {
     @State private var confirmSharedStop = false
     @State private var voiceReference = ""
     @State private var chooseVoiceReference = false
+    @State private var cancelJobID: String?
 
     private var media: JSON { model.snapshot["media"] }
     private var services: [JSON] { media["services"].array.filter { $0["capability"].text == capability } }
@@ -42,6 +43,19 @@ struct MediaView: View {
         if !value["models"].array.isEmpty { return value["models"].array }
         if !value["backends"].array.isEmpty { return value["backends"].array }
         return providerID == "mlx2-video" ? media["direct"]["video_models"].array : []
+    }
+    private var capabilityName: String {
+        ["image": "image", "video": "video", "music": "music", "voice": "voice", "voice_training": "voice-training"][capability] ?? capability
+    }
+    /// Why Generate is disabled, shown as its tooltip; nil when it can run.
+    private var generateBlocker: String? {
+        if model.busy { return "Another action is in progress." }
+        if !selected["configured"].bool { return "Use or configure this service first." }
+        if !selected["ready"].bool { return "Start the service and refresh until it reports Ready." }
+        if !hasUsableModel { return "Choose an available model for this operation." }
+        if capability == "image" && imageOperation == "edit" && references.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Attach at least one reference image to edit." }
+        if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter a prompt." }
+        return nil
     }
     private var hasUsableModel: Bool {
         guard selected["id"].string != nil else { return false }
@@ -72,11 +86,11 @@ struct MediaView: View {
                     Text("Voice training").tag("voice_training")
                 }.pickerStyle(.segmented)
                     .onChange(of: capability) { _, value in
-                        backendID = "selected"
+                        backendID = "selected"; validation = nil
                         providerID = value == "image" ? "mlx2-image" : value == "music" ? "yue2" : services.first?["id"].text ?? ""
                     }
                 if services.isEmpty {
-                    ContentUnavailableView("Connect a \(capability) service", systemImage: "cable.connector", description: Text("Add its MCP endpoint and generation/status tools below. The service owns model loading, accelerator admission and output receipts."))
+                    ContentUnavailableView("Connect a \(capabilityName) service", systemImage: "cable.connector", description: Text("Add its MCP endpoint and generation/status tools below. The service owns model loading, accelerator admission and output receipts."))
                 } else {
                     Picker("Model service", selection: $providerID) {
                         ForEach(services, id: \.rawID) { service in Text(service["label"].text).tag(service["id"].text) }
@@ -88,7 +102,7 @@ struct MediaView: View {
                                 Picker("Operation", selection: $imageOperation) { Text("Text to image").tag("generate"); Text("Edit image").tag("edit") }.pickerStyle(.segmented)
                                 if imageOperation == "edit" {
                                     TextField("Reference image paths (one per line)", text: $references, axis: .vertical).lineLimit(2...5)
-                                    Button("Attach reference images") { chooseReferences = true }
+                                    Button("Attach reference images…") { chooseReferences = true }
                                 }
                             }
                             if capability == "image" && providerID == "mlx2-image" {
@@ -115,7 +129,7 @@ struct MediaView: View {
                             Text(capability == "music" ? "Caption" : capability == "voice" ? "Text to speak" : "Prompt").font(.headline)
                             if capability == "voice" {
                                 TextField("Speaker reference WAV (optional; required by reference-conditioned routes)", text: $voiceReference)
-                                Button("Use an audio or video voice sample") { chooseVoiceReference = true }
+                                Button("Use an audio or video voice sample…") { chooseVoiceReference = true }
                                     .fileImporter(isPresented: $chooseVoiceReference, allowedContentTypes: [.audio, .movie], allowsMultipleSelection: false) { result in
                                         Task {
                                             do {
@@ -134,33 +148,39 @@ struct MediaView: View {
                             }
                             TextEditor(text: $prompt).frame(minHeight: 90).font(.body)
                                 .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
+                                .accessibilityLabel(capability == "music" ? "Caption" : capability == "voice" ? "Text to speak" : "Prompt")
                             if capability == "music" {
                                 Text("Lyrics (optional)").font(.caption)
                                 TextEditor(text: $lyrics).frame(minHeight: 65)
+                                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
+                                    .accessibilityLabel("Lyrics")
                                 TextField("Duration in seconds", text: $duration)
                             } else if capability == "image" {
-                                HStack { TextField("Width", text: $width); Text("×"); TextField("Height", text: $height) }
+                                HStack { TextField("Width", text: $width); Text("×"); TextField("Height", text: $height); Text("pixels").foregroundStyle(.secondary) }
                             }
                             DisclosureGroup("Additional service parameters (JSON)") {
                                 TextEditor(text: $options).font(.system(.body, design: .monospaced)).frame(height: 100)
+                                    .accessibilityLabel("Additional service parameters (JSON)")
                                 Text("These fields are merged into the service request. Choose a video model using its service's model/backend parameter.").font(.caption).foregroundStyle(.secondary)
                             }
                             HStack {
                                 Text("Route remains unqualified until separately tested.").font(.caption).foregroundStyle(.secondary)
                                 Spacer()
                                 Button("Generate") { generate() }.buttonStyle(.borderedProminent)
-                                    .disabled(model.busy || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !selected["configured"].bool || !selected["ready"].bool || !hasUsableModel || (capability == "image" && imageOperation == "edit" && references.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                                    .disabled(generateBlocker != nil)
+                                    .help(generateBlocker ?? "Submit this request to the shared service.")
                             }
                         }.padding(8)
                     }
                 }
-                if let validation { Label(validation, systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
+                if let validation { Label(validation, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).textSelection(.enabled) }
                 jobPanel
                 directSettings
                 DisclosureGroup("Connect or configure a media service") {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Use a capability-specific MCP service shared with Studio. Start/Stop manages only the explicitly listed local LaunchAgents. Stop refuses known active or unresolved jobs.").font(.caption).foregroundStyle(.secondary)
                         TextEditor(text: $serviceJSON).font(.system(.caption, design: .monospaced)).frame(height: 180)
+                            .accessibilityLabel("Service profiles (JSON)")
                         HStack {
                             Button("Load service profiles") { loadProfiles() }
                             Button("Add video example") { addVideoExample() }
@@ -175,6 +195,11 @@ struct MediaView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("This service lacks atomic admission drain. MLX2 checks known active jobs, but another Studio client could submit work after that check. Confirm only after coordinating other clients.")
+        }.confirmationDialog("Cancel this media job?", isPresented: Binding(get: { cancelJobID != nil }, set: { if !$0 { cancelJobID = nil } })) {
+            Button("Cancel Job", role: .destructive) { if let cancelJobID { model.perform("media_cancel", ["job_id": cancelJobID]) }; cancelJobID = nil }
+            Button("Keep Running", role: .cancel) { cancelJobID = nil }
+        } message: {
+            Text("The service stops this generation. Files it has already written are kept.")
         }.onAppear { loadDirectSettings() }
         .fileImporter(isPresented: $chooseReferences, allowedContentTypes: [.png, .jpeg, UTType(filenameExtension: "webp") ?? .image], allowsMultipleSelection: true) { result in
             do {
@@ -247,14 +272,16 @@ struct MediaView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text(job["spec"]["capability"].text.capitalized).font(.headline)
-                            Text(job["state"].text).foregroundStyle(.secondary)
+                            Text(job["state"].text.capitalized).foregroundStyle(.secondary)
                             Spacer()
                             if !["completed", "failed", "cancelled", "partial", "interrupted", "refused"].contains(job["state"].text) {
-                                Button("Cancel") { model.perform("media_cancel", ["job_id": job["id"].text]) }
+                                Button("Cancel") { cancelJobID = job["id"].text }
                             }
                         }
-                        Text(job["progress"].text).font(.caption)
-                        Text(job["result"]["remote_job_id"].text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                        if !job["progress"].text.isEmpty { Text(job["progress"].text).font(.caption).textSelection(.enabled) }
+                        if let remote = job["result"]["remote_job_id"].string, !remote.isEmpty {
+                            Text("Service job ID: " + remote).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                        }
                         ForEach(artifactPaths(job), id: \.self) { path in
                             MediaArtifactPreview(path: path)
                         }
@@ -379,23 +406,45 @@ private extension JSON {
 private struct MediaArtifactPreview: View {
     let path: String
     @State private var player: AVPlayer?
+    // Decoded once per path: the snapshot refreshes this view periodically, and
+    // reading up to 64 MiB from disk in `body` on every refresh stalls the page.
+    @State private var image: NSImage?
     private var ext: String { URL(fileURLWithPath: path).pathExtension.lowercased() }
+    private var name: String { URL(fileURLWithPath: path).lastPathComponent }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if ["png", "jpg", "jpeg", "webp"].contains(ext),
-               let attributes = try? FileManager.default.attributesOfItem(atPath: path),
-               let size = attributes[.size] as? NSNumber, size.int64Value <= 67_108_864,
-               let image = NSImage(contentsOfFile: path) {
-                Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 280)
+            if ["png", "jpg", "jpeg", "webp"].contains(ext) {
+                // The task hangs on a view that always exists: on an empty Group
+                // it would never run, so the image would never load.
+                ZStack(alignment: .leading) {
+                    Color.clear.frame(height: image == nil ? 1 : 0)
+                    if let image {
+                        Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 280)
+                            .accessibilityLabel("Generated image " + name)
+                    }
+                }.task(id: path) {
+                    image = nil
+                    // A just-finished job may still be writing the file; retry briefly.
+                    for _ in 0..<10 {
+                        if let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+                           let size = attributes[.size] as? NSNumber, size.int64Value > 0 {
+                            if size.int64Value > 67_108_864 { return }
+                            if let decoded = NSImage(contentsOfFile: path) { image = decoded; return }
+                        }
+                        try? await Task.sleep(for: .seconds(1))
+                        if Task.isCancelled { return }
+                    }
+                }
             } else if ["mp4", "mov", "webm", "wav", "mp3", "flac", "m4a"].contains(ext) {
                 VideoPlayer(player: player).frame(height: ["wav", "mp3", "flac", "m4a"].contains(ext) ? 64 : 240)
                     .task(id: path) { player = AVPlayer(url: URL(fileURLWithPath: path)) }
+                    .accessibilityLabel("Generated media " + name)
                     .onDisappear { player?.pause() }
             }
             HStack {
-                Text(path).font(.caption.monospaced()).textSelection(.enabled)
+                Text(path).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1).truncationMode(.middle).help(path)
                 Spacer()
-                Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+                Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
             }
         }
     }

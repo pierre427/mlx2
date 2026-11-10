@@ -27,6 +27,8 @@ struct HistoryPoint: Identifiable {
     @Published var logProfileID = "default"
     @Published var checkedModels: Set<String> = []
     @Published var points: [HistoryPoint] = []
+    /// Correction case to open when the Ablation section appears (set by "Flag for correction").
+    @Published var ablationFocusCase: String?
     var runtimeOperations: [String: String] = [:]
     let chat = ChatModel()
     let codeCoordinator = CodeCoordinator()

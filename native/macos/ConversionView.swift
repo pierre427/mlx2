@@ -10,6 +10,7 @@ struct ConversionView: View {
     @State private var plan = JSON()
     @State private var planRequestID = UUID()
     @State private var checking = false
+    @State private var confirmCancel = false
     private var state: JSON { model.snapshot["media"]["conversions"] }
     var body: some View {
         ScrollView {
@@ -32,7 +33,7 @@ struct ConversionView: View {
                             Button(checking ? "Checking…" : "Check disk & source") { Task { await checkPlan() } }
                                 .disabled(source.isEmpty || checking || model.busy)
                             Spacer()
-                            if state["running"].bool { Button("Cancel") { model.perform("conversion_cancel") } }
+                            if state["running"].bool { Button("Cancel Conversion") { confirmCancel = true } }
                             Button("Convert") { model.perform("conversion_start", ["path": source, "recipe": recipe]) }
                                 .buttonStyle(.borderedProminent).disabled(source.isEmpty || state["running"].bool || model.busy)
                         }
@@ -47,7 +48,7 @@ struct ConversionView: View {
                         TextField("Python executable", text: $python)
                         TextField("Pinned oMLX source directory", text: $tooling)
                         TextField("Free-space reserve (GiB)", text: $reserve)
-                        Text("oMLX revision: \(state["omlx_revision"].text)").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                        Text("oMLX revision: \(state["omlx_revision"].string ?? "not prepared")").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                         Text("Prepare fetches conversion source only. It installs no serving backend or dependencies. Select a compatible isolated Python environment to run it.").font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Button("Prepare pinned converter") { model.perform("conversion_prepare") }.disabled(state["running"].bool)
@@ -64,17 +65,24 @@ struct ConversionView: View {
                         if state["jobs"].array.isEmpty { Text("No conversions queued.").foregroundStyle(.secondary) }
                         ForEach(state["jobs"].array, id: \.conversionID) { job in
                             VStack(alignment: .leading, spacing: 6) {
-                                HStack { Text(job["spec"]["recipe"].text.uppercased()).font(.headline); Text(job["state"].text).foregroundStyle(.secondary); Spacer() }
-                                Text(job["spec"]["path"].text).font(.caption).textSelection(.enabled)
-                                if let percent = job["result"]["percent"].double { ProgressView(value: percent, total: 100) }
+                                HStack { Text(job["spec"]["recipe"].text.uppercased()).font(.headline); Text(job["state"].text.capitalized).foregroundStyle(.secondary); Spacer() }
+                                Text(job["spec"]["path"].text).font(.caption).textSelection(.enabled).lineLimit(1).truncationMode(.middle).help(job["spec"]["path"].text)
+                                if let percent = job["result"]["percent"].double {
+                                    ProgressView(value: min(max(percent, 0), 100), total: 100) { EmptyView() } currentValueLabel: { Text(number(percent, suffix: "%", digits: 0)).font(.caption).monospacedDigit() }
+                                }
                                 Text(job["progress"].text).font(.caption).textSelection(.enabled)
-                                if let path = job["result"]["destination"].string { Text(path).font(.caption).textSelection(.enabled) }
+                                if let path = job["result"]["destination"].string { Text("Destination: " + path).font(.caption).textSelection(.enabled).lineLimit(1).truncationMode(.middle).help(path) }
                             }
                             Divider()
                         }
                     }.padding(8)
                 }
             }.padding(24)
+        }.confirmationDialog("Cancel this conversion?", isPresented: $confirmCancel) {
+            Button("Cancel Conversion", role: .destructive) { model.perform("conversion_cancel") }
+            Button("Keep Converting", role: .cancel) { }
+        } message: {
+            Text("The conversion stops. Partial output is kept outside the model library, and the source model is not changed.")
         }.onChange(of: source) { _, _ in invalidatePlan() }
         .onChange(of: recipe) { _, _ in invalidatePlan() }
         .onChange(of: model.snapshot["user_profiles"]["active_id"].string) { _, _ in invalidatePlan(); source = "" }

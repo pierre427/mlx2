@@ -36,6 +36,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))  # this tree, not the editable install
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from probe_exl3_serving import SOLO, atomic_json, first_divergence  # noqa: E402
@@ -157,7 +158,8 @@ def main():
                "source_dirty": bool(subprocess.check_output(
                    ["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT, text=True))}
     subprocess.run([sys.executable, __file__, "--i-own-the-gpu", "--model", str(args.model), "--output",
-                    str(args.output), "--execution", args.execution, "--reference-only"], check=True, timeout=1800)
+                    str(args.output), "--execution", args.execution, "--reference-only"], check=True, timeout=1800,
+                   env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
     arms = {"reference": json.loads((args.output / "reference.json").read_text())}
     eos_ids = set()
     for item in ("config.json", "generation_config.json"):

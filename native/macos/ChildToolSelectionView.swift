@@ -56,6 +56,7 @@ struct AgentJobControls: View {
                 Button("Resume Child") {
                     model.perform("agent_resume", ["job_id": job["id"].text, "message": message])
                 }.disabled(model.busy || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Enter a follow-up message first." : "Resume this child with the follow-up.")
                 Text("Continues this child's private context and granted tools on the exact model instance. It starts no replacement model.").font(.caption).foregroundStyle(.secondary)
             }
         }

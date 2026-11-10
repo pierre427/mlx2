@@ -852,6 +852,9 @@ def shared_slot_refusal(routed, shared):
     if not isinstance(shared, Exl3FusedMLP):
         return "shared expert is not a fused EXL3 MLP"
     for name in ("gate_proj", "up_proj", "down_proj"):
+        if "bias" in getattr(shared, name):
+            # The slot launches read only the banks; a bias would be dropped.
+            return f"shared {name} carries a bias"
         a, b = getattr(routed, name), getattr(shared, name).bank
         if (a.input_dims, a.output_dims, a.words) != (b.input_dims, b.output_dims, b.words):
             return f"shared {name} geometry or rate differs from the routed bank"

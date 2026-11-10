@@ -112,6 +112,25 @@ def context_cases(args):
     return cases
 
 
+def source_revision():
+    """The commit of the tree this script runs from, never the caller's cwd."""
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    ).strip()
+
+
+def tree_child_env(**extra):
+    """Child environment that imports this tree's ``src``, not the editable
+    install (which points at the primary checkout)."""
+    return {
+        **os.environ,
+        **extra,
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, (str(ROOT / "src"), os.environ.get("PYTHONPATH")))
+        ),
+    }
+
+
 def atomic(path, value):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(value, indent=2, default=str) + "\n")
@@ -473,6 +492,15 @@ def main():
     ap.add_argument("--reference-allocator-cache-bytes", type=int)
     ap.add_argument("--logprob-position", type=int)
     args = ap.parse_args()
+    # Children run with cwd=ROOT; anchor caller-relative paths to the caller.
+    args.out = args.out.resolve()
+    if args.model.exists():
+        args.model = args.model.resolve()
+    for name in ("policy", "lane_policy"):
+        if getattr(args, name) is not None:
+            setattr(args, name, getattr(args, name).resolve())
+    if args.divergence_reports:
+        args.divergence_reports = [path.resolve() for path in args.divergence_reports]
     if args.contexts:
         if len(set(args.contexts)) != len(args.contexts) or min(args.contexts) <= 0:
             raise ValueError("contexts must be unique positive token counts")
@@ -592,7 +620,8 @@ def main():
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
-                    env={**os.environ, "MLX2_RUN_GPU_TESTS": "1"},
+                    cwd=ROOT,
+                    env=tree_child_env(MLX2_RUN_GPU_TESTS="1"),
                 )
                 if child.wait(timeout=900):
                     raise RuntimeError(f"{label} prelude failed; see {label}.log")
@@ -611,6 +640,8 @@ def main():
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
+                    cwd=ROOT,
+                    env=tree_child_env(),
                 )
                 if child.wait(timeout=300):
                     raise RuntimeError(
@@ -670,6 +701,8 @@ def main():
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                cwd=ROOT,
+                env=tree_child_env(),
             )
             if child.wait(timeout=args.reference_timeout):
                 raise RuntimeError("ordinary reference failed; see reference.log")

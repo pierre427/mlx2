@@ -66,7 +66,8 @@ def loopback(url):
     parsed = urlparse(url or "")
     if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost", "::1") or not parsed.port:
         raise ValueError("Overlay calls go only to a loopback server (http://127.0.0.1:<port>)")
-    return f"http://{parsed.hostname}:{parsed.port}"
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    return f"http://{host}:{parsed.port}"
 
 
 def _http(method, url, body=None, token=None, timeout=5.0):
@@ -81,14 +82,19 @@ def _http(method, url, body=None, token=None, timeout=5.0):
         return json.loads(response.read() or b"{}")
 
 
-def probe_capability(url, *, http=_http):
-    """Does the server at ``url`` implement the overlay API? Fails closed with a reason."""
+def probe_capability(url, *, http=_http, token=None):
+    """Does the server at ``url`` implement the overlay API? Fails closed with a reason.
+
+    ``token`` is the server's API key (``--api-key-file``) when it has one:
+    ``GET /v1/overlays`` is not an admin route, so a keyed server answers 401
+    without it.
+    """
     try:
         base = loopback(url)
     except ValueError as error:
         return {"supported": False, "reason": str(error)}
     try:
-        value = http("GET", base + "/v1/overlays", timeout=2.0)
+        value = http("GET", base + "/v1/overlays", token=token, timeout=2.0)
     except urllib.error.HTTPError as error:
         reason = ("This server has no overlay API yet (GET /v1/overlays → 404)" if error.code == 404
                   else f"Overlay API probe failed (HTTP {error.code})")
@@ -309,8 +315,26 @@ class Corrections:
                 return load_secret_file(Path(worker["admin_token_file"]), flag="--admin-token-file")
         raise ValueError("Overlays load only on an app-managed server (its admin key is needed)")
 
+    def _api_key(self, base):
+        """API key of the app-managed worker at ``base`` (None for other servers).
+
+        App workers run with ``--api-key-file``; every non-admin route (the
+        overlay list and named previews) needs it, or the gate answers 401.
+        """
+        from .http_security import load_secret_file
+
+        for engine in getattr(self.controller, "engines", {}).values():
+            worker = getattr(engine, "worker", None) or {}
+            if worker.get("url") and loopback(worker["url"]) == base and worker.get("api_key_file"):
+                return load_secret_file(Path(worker["api_key_file"]), flag="--api-key-file")
+        return None
+
     def capability(self, url):
-        return probe_capability(url, http=self.http)
+        try:
+            token = self._api_key(loopback(url))
+        except (ValueError, OSError) as error:
+            return {"supported": False, "reason": str(error)}
+        return probe_capability(url, http=self.http, token=token)
 
     def _require(self, url, overlay=None):
         state = self.capability(url)
@@ -349,8 +373,9 @@ class Corrections:
         else:
             # Server contract (validate_overlay_selection): {"id", "branch_id"}.
             selection = {"id": overlay["id"]}
-        # Ad-hoc previews read host files on the server and need its admin token.
-        preview_token = self._admin_token(base) if overlay is None else None
+        # Ad-hoc previews read host files on the server and need its admin
+        # token; a named preview is tenant generation behind the API-key gate.
+        preview_token = self._admin_token(base) if overlay is None else self._api_key(base)
         if case.get("fingerprint") and state.get("fingerprint") and state["fingerprint"] != case["fingerprint"]:
             raise ValueError("The server's model is a different checkpoint than the flagged chat used")
         with self.lock:

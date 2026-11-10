@@ -20,6 +20,10 @@ QUANT_METHOD = "exl3"
 FORMAT_REVISION = "mlx2-exl3-upstream-v1"
 # Marker tensor name -> the multiplier quantization_config.json records.
 CODEBOOKS = {"mcg": 0xCBAC1FED, "mul1": 0x83DCD12D}
+# Codebooks the runtime modules execute: the Metal kernels (header_mcg_w16)
+# and the CPU path (decode_inner's default) decode MCG only. MUL1 stays
+# admitted for the host decode oracle but refuses at install.
+RUNTIME_CODEBOOKS = ("mcg",)
 # Tile word counts with a bit-exact exllamav3 fixture
 # (scripts/sushi_probe/fixtures); other counts rest on the real-tensor oracle.
 FIXTURE_WORDS = {"mcg": (40, 48), "mul1": (32, 48, 64)}
@@ -340,6 +344,12 @@ def install_upstream(model, read, plan, module_path, *, execution="reference", f
             "upstream EXL3 execution must be reference, rows, fused, fused_nax, fused_w8a8, nax "
             "or nax_fused"
         )
+    unsupported = sorted({s.codebook for s in (*plan.linears.values(), *plan.banks.values())}
+                         - set(RUNTIME_CODEBOOKS))
+    if unsupported:
+        # The trellis modules carry no codebook: they would decode MCG.
+        raise ValueError(f"EXL3 codebook {', '.join(unsupported)} has no runtime decoder "
+                         f"(the trellis kernels decode {', '.join(RUNTIME_CODEBOOKS)} only)")
     if execution == "fused_w8a8":
         from ..int8_prefill import require_supported_device
 
@@ -419,8 +429,10 @@ def install_upstream(model, read, plan, module_path, *, execution="reference", f
         "execution": execution,
         "bank_execution": bank_execution,
         **({"rows_law_revision": ROWS_LAW_REVISION} if bank_execution in ("rows", "rows_nax") else {}),
-        **({"nax_min_rows": NAX_MIN_ROWS} if execution in ("fused_nax", "fused_w8a8", "nax") else {}),
-        **({"nax_bank_min_rows": NAX_BANK_MIN_ROWS} if bank_execution == "rows_nax" else {}),
+        **({"nax_min_rows": NAX_MIN_ROWS}
+           if execution in ("fused_nax", "fused_w8a8", "nax", "nax_fused") else {}),
+        **({"nax_bank_min_rows": NAX_BANK_MIN_ROWS}
+           if bank_execution in ("rows_nax", "fused_chain_nax") else {}),
         "fidelity": "approximate" if execution == "fused_w8a8" else "exact_trellis",
         "installed_linears": len(dense),
         "installed_switches": len(switches),

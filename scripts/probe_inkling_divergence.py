@@ -10,11 +10,10 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import subprocess
 from pathlib import Path
 
 import mlx.core as mx
-from probe_inkling import atomic, host, ownership, tokens
+from probe_inkling import atomic, host, ownership, source_revision, tokens
 
 from mlx2.adapters.inkling import InklingAdapter
 from mlx2.runtime.lane import install, uninstall
@@ -147,9 +146,7 @@ def main():
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     report = {
-        "source_revision": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True
-        ).strip(),
+        "source_revision": source_revision(),
         "ownership": ownership(),
         "before": host(),
         "cases": [],

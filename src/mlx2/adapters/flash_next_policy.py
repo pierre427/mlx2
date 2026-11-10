@@ -422,10 +422,11 @@ class FlashNextPolicy:
     qsa_nax_min_physical_kv: int = 8192
     qsa_nax_batched: bool = False
     # NAX block-sparse QSA prefill kernel law (MLX_QWEN4_QSA_NAX_LAW,
-    # qwen4_qsa_nax.LAWS).  "v1" is today's kernel and the default.  "v2"
-    # (16-byte row loads, 16x32x32 ops, bf16 P) ran 1.72-2.13x v1's kernel
-    # time at equal error, "v2_hilo" (fp16 hi+lo P) 1.54-1.90x at ~fp32
-    # accuracy (qualification/runs/qsa-nax-kernel-ab-20261105, kernel only).
+    # qwen4_qsa_nax.LAWS).  "v1" is the original kernel (the module default).
+    # "v2" (16-byte row loads, 16x32x32 ops, bf16 P) ran 1.72-2.13x v1's
+    # speed (v1 ms / v2 ms) at equal error, "v2_hilo" (fp16 hi+lo P)
+    # 1.54-1.90x at ~fp32 accuracy (qualification/runs/
+    # qsa-nax-kernel-ab-20261105, kernel only).
     # Default "v2" since 2026-11-05 (Pierre), after the model test flow on
     # Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP@sha256:25c2da42 (base
     # f55227951): TTFT -6.7% at 16K / -6.6% at 32K vs v1, 64-token greedy

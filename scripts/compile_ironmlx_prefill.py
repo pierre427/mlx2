@@ -6,7 +6,12 @@ import argparse
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
+
+# Compile this checkout's shader: the receipt records this checkout's
+# revision, while an editable install may resolve mlx2 to another worktree.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mlx2.experimental.ironmlx_tiled_prefill import metal_source
 

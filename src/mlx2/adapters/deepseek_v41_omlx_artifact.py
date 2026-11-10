@@ -12,6 +12,7 @@ import itertools
 import json
 import math
 import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields
 from pathlib import Path
@@ -76,11 +77,18 @@ def prepare_artifact(model_path, *, progress=None):
     for name, stamp in stamps.items():
         checked_file(root, name, stamp)
     seal = {"schema": SEAL_SCHEMA, "pins_sha256": digest(PINS), "files": stamps}
-    temporary = target.with_suffix(".tmp")
-    with temporary.open("x") as out:
-        json.dump(seal, out, indent=2)
-        out.write("\n")
-    os.replace(temporary, target)
+    # A unique temporary per run: a fixed name opened with "x" left a crashed
+    # run's file behind and refused every later prepare (sweep 2026-11-06 DS41-3).
+    fd, temporary = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
+    try:
+        os.fchmod(fd, 0o644)  # mkstemp creates 0600; keep the seal readable as before
+        with os.fdopen(fd, "w") as out:
+            json.dump(seal, out, indent=2)
+            out.write("\n")
+        os.replace(temporary, target)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
     return inspect_artifact(root)
 
 
