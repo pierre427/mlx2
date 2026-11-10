@@ -1048,7 +1048,7 @@ def _fused_context_projections(attn, x, x_ctx):
     )
 
 
-def configure_draft_kernel(model, kernel):
+def configure_draft_kernel(model, kernel, *, drafter="dflash2"):
     """Install the drafter's projection kernel before ``bind``; returns a receipt.
 
     ``"stock"`` (or None) leaves MLX's kernels.  ``"lane"`` runs every drafter
@@ -1060,8 +1060,16 @@ def configure_draft_kernel(model, kernel):
     head are never touched: they are bound after this and follow the target's
     own lane policy. ``"fused"`` adds opt-in non-matmul layer kernels;
     FOLD and attention sinks are refused before installing anything.
+    ``drafter="dspine"`` keeps DSpine's code-bridge projections on stock
+    kernels (``DSPINE_LANE_SKIPPED``, part of its law) and installs no block
+    top-k; the lane kernel only.
     """
-    expected = draft_kernel_law(kernel)
+    if drafter not in ("dflash2", "dspine"):
+        raise ValueError("draft kernel drafter must be dflash2 or dspine")
+    dspine = drafter == "dspine"
+    if dspine and kernel != "lane":
+        raise ValueError("DSpine takes the lane draft kernel only")
+    expected = draft_kernel_law(kernel, drafter=drafter)
     if expected is None:
         return None
     if getattr(model, "lm_head", None) is not None or getattr(model, "embed_tokens", None) is not None:
@@ -1074,13 +1082,27 @@ def configure_draft_kernel(model, kernel):
 
     if not available():
         raise ValueError(f"draft_kernel {kernel!r} needs a lane matmul backend on this device")
+    if dspine:
+        from .dflash2_kernel import DSPINE_LANE_SKIPPED
+
+        bridge = sorted(
+            name for name, module in model.named_modules()
+            if isinstance(module, (nn.Linear, nn.QuantizedLinear))
+            and name.startswith("selected_prefix_bridge.")
+        )
+        if tuple(bridge) != DSPINE_LANE_SKIPPED:
+            raise ValueError(f"DSpine bridge projections {bridge} differ from the bound law")
+        kept = lambda name, _module: name in DSPINE_LANE_SKIPPED  # noqa: E731
+    else:
+        kept = lambda _name, _module: False  # noqa: E731
     receipt = installer.install(
         model, min_rows=1, max_rows=DRAFT_LANE_MAX_ROWS, chunk_above_max=False,
-        unquantized=True,
+        unquantized=True, **({"skip": kept} if dspine else {}),
     )
     uncovered = [
         name for name, module in model.named_modules()
         if isinstance(module, (nn.Linear, nn.QuantizedLinear))
+        and not kept(name, module)
         and installer.installed_lane(module) is None
     ]
     if uncovered:
@@ -1089,7 +1111,12 @@ def configure_draft_kernel(model, kernel):
             f"draft_kernel {kernel!r} does not cover {len(uncovered)} drafter projections "
             f"on this backend (first {uncovered[0]!r}): {receipt.get('refused')}"
         )
-    law = receipt["law_id"] + DRAFT_LANE_SUFFIX
+    if dspine:
+        from .dflash2_kernel import DSPINE_LANE_SUFFIX
+
+        law = receipt["law_id"] + DSPINE_LANE_SUFFIX
+    else:
+        law = receipt["law_id"] + DRAFT_LANE_SUFFIX
     if kernel == "fused":
         law += DRAFT_FUSED_SUFFIX
     if law != expected:
@@ -1097,8 +1124,9 @@ def configure_draft_kernel(model, kernel):
         raise ValueError(f"draft lane law {law!r} differs from the bound {expected!r}")
     for layer in model.layers:
         object.__setattr__(layer.self_attn, "_fused_projections", _fused_context_projections)
-    # The lattice's top-k over the vocabulary through block maxima.
-    object.__setattr__(model, "_block_topk", True)
+    if not dspine:
+        # The lattice's top-k over the vocabulary through block maxima.
+        object.__setattr__(model, "_block_topk", True)
     if kernel == "fused":
         dflash2_fused.install(model)
     return {
@@ -1108,7 +1136,8 @@ def configure_draft_kernel(model, kernel):
         "covered": receipt["covered"],
         "groups": receipt["groups"],
         "fused_context_projections": True,
-        "lattice_topk": "block256",
+        **({"stock_projections": list(DSPINE_LANE_SKIPPED)} if dspine
+           else {"lattice_topk": "block256"}),
         **({"fused_stages": list(dflash2_fused.STAGES),
             "qualified": False} if kernel == "fused" else {}),
     }

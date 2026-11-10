@@ -93,7 +93,7 @@ FEATURES = (
     "apc_rolling_checkpoints", "apc_session_persistence", "tools",
     "vision_input", "video_input", "audio_input", "native_mtp",
     "mtp_ordinary_handoff", "adaptive_mtp_depth", "self_mtp_copy_draft", "speculation_request_opt_out",
-    "external_draft", "external_draft_dspark", "flat_segmented_ast", "ast_speculative_batching",
+    "external_draft", "external_draft_dspark", "external_draft_dspine", "flat_segmented_ast", "ast_speculative_batching",
     "ast_bf16_assistant", "ast_bf16_dspark", "ast_bf16_dflash2",
     "packed_prefill_serial_equivalence", "prompt_lookup", "prompt_lookup_target_s1",
     "decode_first", "prefill_scheduling", "mixed_prefill_decode",

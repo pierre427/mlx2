@@ -1026,15 +1026,17 @@ def inspect_external_policy(
         }
     kernel = policy.get("draft_kernel")
     if kernel is not None:
-        if draft_format.name != "dflash2":
-            raise ValueError("draft_kernel applies to DFlash2 drafters only")
+        if draft_format.name not in ("dflash2", "dspine"):
+            raise ValueError("draft_kernel applies to DFlash2 and DSpine drafters only")
+        if draft_format.name == "dspine" and kernel not in ("stock", "lane"):
+            raise ValueError('DSpine supports draft_kernel "stock" or "lane"')
         from .dflash2 import validate_draft_kernel
         # Model-free module: inspection runs before the adapter pins its
         # import environment.
         from ..runtime.drafters.dflash2_kernel import draft_kernel_law
 
         kernel = validate_draft_kernel(kernel)
-        law = draft_kernel_law(kernel)
+        law = draft_kernel_law(kernel, drafter=draft_format.name)
         if law is not None:
             # The drafter's projection law is part of its numerics: bound into
             # the drafter fingerprint (route and APCv2 identity) like the
@@ -1881,8 +1883,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 lambda record, target: load_drafter(
                     record, target,
                     runtime_quantization=record["runtime_quantization"],
-                    # Only DFlash2 takes a projection kernel and only EAGLE-4
-                    # a tree shape (both checked at inspection).
+                    # Only DFlash2/DSpine take a projection kernel and only
+                    # EAGLE-4 a tree shape (all checked at inspection).
                     **{
                         key: record[key]
                         for key in ("draft_kernel", "draft_vocab", "eagle4_tree")

@@ -198,12 +198,13 @@ class ExternalContinuationSource:
                     raise ValueError("continuation lattice anchor/depth mismatch")
                 tokens, parents = draft.finish_tree({
                     **lattice, "max_nodes": nodes, "codebooks": options.get("codebooks"),
-                })[0]
+                })[0][:2]
             else:
+                # A drafter may append an info dict to its tree.
                 tokens, parents = draft.propose_tree(
                     [context.anchor], pending, cache, nodes,
                     lattice_positions=context.depth + 1, **options,
-                )[0]
+                )[0][:2]
             row_paths = tree_paths(parents)
             depth_hist = {}
             leaf_depth_hist = {}

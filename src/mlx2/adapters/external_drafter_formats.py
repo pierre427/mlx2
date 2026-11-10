@@ -55,6 +55,19 @@ def _eagle4():
     )
 
 
+def _dspine():
+    from . import dflash2, dspine
+
+    return SimpleNamespace(
+        name="dspine",
+        inspect_drafter=dspine.inspect_drafter,
+        content_revision=dspine.content_revision,
+        legacy_content_revision=dspine.legacy_content_revision,
+        validate_runtime_quantization=dflash2.validate_runtime_quantization,
+        load_drafter=dspine.load_drafter,
+    )
+
+
 def _ubtree():
     from . import ubtree
 
@@ -77,6 +90,14 @@ _FORMATS = {
 _FORMAT_NAMES = {"Qwen3DSparkModel": "dspark", "LlamaForCausalLMEagle4": "eagle4"}
 
 
+def _is_dspine(config):
+    # DSpine declares the plain DFlash architecture; its code-bridge block,
+    # not a model name, is what identifies it (adapters/dspine.py).
+    from .dspine import is_dspine_config
+
+    return is_dspine_config(config)
+
+
 def _architecture(config):
     architectures = config.get("architectures") if isinstance(config, dict) else None
     if isinstance(architectures, list) and len(architectures) == 1:
@@ -85,6 +106,8 @@ def _architecture(config):
 
 
 def format_for_config(config):
+    if _is_dspine(config):
+        return _dspine()
     factory = _FORMATS.get(_architecture(config))
     return factory() if factory is not None else _dflash2()
 
@@ -103,6 +126,8 @@ def drafter_format_name(draft_model):
         )
     except (OSError, ValueError, TypeError):
         return "dflash2"
+    if _is_dspine(config):
+        return "dspine"
     return _FORMAT_NAMES.get(_architecture(config), "dflash2")
 
 

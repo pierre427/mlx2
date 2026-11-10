@@ -220,7 +220,8 @@ class PromptLookupDraftModel:
             if base_trees is None:
                 result.append(paths_to_tree(copies, max_nodes, forbidden_root=forbidden[row]))
                 continue
-            tokens, parents = base_trees[row]
+            # A base drafter may append an info dict to its tree.
+            tokens, parents = base_trees[row][:2]
             node_paths = tree_paths(list(parents))
             interior = {int(parent) for parent in parents}
             leaves = [path for node, path in enumerate(node_paths) if node not in interior]
