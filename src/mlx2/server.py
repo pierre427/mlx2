@@ -7198,6 +7198,18 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--int8-prefill-experts",
+        choices=("off", "q4"),
+        default="off",
+        help=(
+            "with --int8-prefill mlp|all: run 4-bit gs64 routed MoE experts "
+            "through the grouped W4A8 kernel (int8 activations, group64 "
+            "scales) on sorted prefill calls of >= 8192 tokens; the adapter "
+            "must declare its expert blocks (Flash-Next).  Approximate, its "
+            "own numerics revision and APCv2 namespace (default: off)"
+        ),
+    )
+    parser.add_argument(
         "--recurrent-state-codec",
         choices=("off", "int8-row-v1"),
         default="off",
@@ -7968,7 +7980,8 @@ def serving_engine_kwargs(
         "apc_quarantine_max_entries": args.apc_quarantine_max_entries,
         "apc_quarantine_max_bytes": args.apc_quarantine_max_bytes,
         "int8_prefill": int8_prefill_cli_value(
-            args.int8_prefill, getattr(args, "int8_prefill_q8", "off")
+            args.int8_prefill, getattr(args, "int8_prefill_q8", "off"),
+            getattr(args, "int8_prefill_experts", "off"),
         ),
         "microscaling_prefill": getattr(args, "microscaling_prefill", "off"),
         "verify_bitexact": bool(getattr(args, "verify_bitexact", False)),
@@ -8094,7 +8107,10 @@ def main():
         max_request_bytes = request_body_limit(
             args.max_context, args.max_request_bytes
         )
-        int8_prefill_cli_value(args.int8_prefill, args.int8_prefill_q8)
+        int8_prefill_cli_value(
+            args.int8_prefill, args.int8_prefill_q8,
+            getattr(args, "int8_prefill_experts", "off"),
+        )
     except ValueError as error:
         parser.error(str(error))
     if not math.isfinite(args.sse_keepalive_seconds) or not (

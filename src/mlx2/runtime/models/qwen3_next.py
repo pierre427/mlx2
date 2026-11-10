@@ -547,6 +547,10 @@ class FusedDownSwitchGLU(SwitchGLU):
             grouped = hook(self, x, indices)
             if grouped is not None:
                 return grouped
+        int8 = _try_int8_experts(self, x, indices, scores)
+        if int8 is not None:
+            object.__setattr__(self, "_last_fused_variant", None)
+            return int8
         x = mx.expand_dims(x, (-2, -3))
         do_sort = indices.size >= _sort_min(self) or _invariant.active()
         idx = indices
@@ -1270,6 +1274,28 @@ def _routed_tail(switch_mlp, x, indices, inv_order, scores, do_sort):
     if scores is not None:
         return (x * scores[..., None]).sum(axis=-2)
     return x
+
+
+def _try_int8_experts(switch_mlp, x, indices, scores):
+    """The block output from the grouped W4A8 expert kernel (int8 prefill
+    ``experts``, approximate, opt-in), or None to run the body below.
+
+    Only a block bound by ``int8_prefill.apply`` is a candidate; the handle
+    counts its own declines (rows under ``experts_min_tokens``, dtype).  The
+    sorted down rows go through the block's own ``_routed_tail``, so the
+    unsort and the weighted sum (or ``moe_weighted_sum``) are the stock ones.
+    """
+    ref = switch_mlp.__dict__.get("_mlx2_int8_experts")
+    if ref is None or switch_mlp.training or _invariant.active():
+        return None
+    handle = ref()
+    if handle is None:
+        return None
+    out = handle.experts_forward(switch_mlp, x, indices)
+    if out is None:
+        return None
+    y_sorted, inv_order = out
+    return _routed_tail(switch_mlp, y_sorted, indices, inv_order, scores, True)
 
 
 def _enable_moe_weighted_sum(switch_mlp, enabled: bool) -> None:

@@ -330,6 +330,24 @@ class FlashNextAdapter:
 
         return select
 
+    @staticmethod
+    def int8_prefill_experts_select():
+        """Trunk routed-expert blocks (``layers.N.mlp.switch_mlp``) for the
+        opt-in grouped W4A8 expert kernel (int8 prefill ``experts``); the
+        MTP layer's experts stay stock.  On the served 4-bit checkpoints
+        these are the only W4 weights."""
+
+        def select(path, module):
+            parts = path.split(".")
+            return (
+                len(parts) == 6
+                and parts[:3] == ["language_model", "model", "layers"]
+                and parts[3].isdigit()
+                and parts[4:] == ["mlp", "switch_mlp"]
+            )
+
+        return select
+
     def microscaling_decode_row_multiplier(self):
         from .microscaling_support import decode_row_multiplier
         # Every hybrid constructor keeps the text config here; none sets

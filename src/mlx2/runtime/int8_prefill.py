@@ -187,6 +187,15 @@ class Int8PrefillPolicy:
     # Splash #436: deterministic signed block-Hadamard rotation before the
     # activation and weight row quantizers. Dense MLP scope only, default off.
     hadamard_rotation: bool = False
+    # Routed MoE experts, 4-bit gs64 affine, through the grouped W4A8 kernel
+    # (``int8_experts``, group64 activation scales) on sorted prefill calls
+    # of at least ``experts_min_tokens`` token rows.  Opt-in only (never
+    # ``auto``); the adapter must declare ``int8_prefill_experts_select``.
+    # Measured on Flash-Next shapes (M5 Max, 2026-11-09, expert block alone):
+    # 0.98-1.06x at 2K-4K tokens, 1.10x at 8K, 1.27x at 16K, hence the 8192
+    # default.  Enters as_dict/revision only when on.
+    experts: bool = False
+    experts_min_tokens: int = 8192
 
     def __post_init__(self):
         if not isinstance(self.enabled, bool):
@@ -245,6 +254,19 @@ class Int8PrefillPolicy:
             raise ValueError(
                 "int8 prefill hadamard_rotation cannot use packed in-place kernels"
             )
+        if not isinstance(self.experts, bool):
+            raise ValueError("int8 prefill experts must be a boolean")
+        if self.experts and not self.enabled:
+            raise ValueError("int8 prefill experts requires an enabled policy")
+        if (
+            isinstance(self.experts_min_tokens, bool)
+            or not isinstance(self.experts_min_tokens, int)
+            or (self.experts and self.experts_min_tokens < self.row_threshold)
+        ):
+            # Keeps decode/verify blocks (< row_threshold) off the expert kernel.
+            raise ValueError(
+                "int8 prefill experts_min_tokens must be an integer >= row_threshold"
+            )
 
     @classmethod
     def from_value(cls, value) -> Int8PrefillPolicy:
@@ -273,6 +295,8 @@ class Int8PrefillPolicy:
                 "q45_inplace",
                 "inplace_only",
                 "hadamard_rotation",
+                "experts",
+                "experts_min_tokens",
             }
             if unknown:
                 raise ValueError(f"unknown int8 prefill policy keys: {sorted(unknown)}")
@@ -300,6 +324,9 @@ class Int8PrefillPolicy:
                 out["inplace_only"] = True
         if self.hadamard_rotation:
             out["hadamard_rotation"] = True
+        if self.experts:
+            out["experts"] = True
+            out["experts_min_tokens"] = self.experts_min_tokens
         return out
 
     @property
@@ -341,6 +368,16 @@ class Int8PrefillPolicy:
                 "intermediate_block": 512,
                 "sign_revision": "mlx2-sha256-signs-v1",
             }
+        if self.experts:
+            from .int8_experts import KERNEL_REVISION as _experts_kernels
+
+            fields["experts"] = {
+                "bits": 4,
+                "group_size": Q8_GROUP_SIZE,
+                "act_scale": "group64",
+                "min_tokens": self.experts_min_tokens,
+                "kernels": _experts_kernels,
+            }
         payload = json.dumps(fields, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -351,10 +388,22 @@ class Int8PrefillPolicy:
         return Fidelity.APPROXIMATE if self.enabled else Fidelity.EXACT
 
 
-def cli_value(scope: str, q8: str = "off"):
-    """``--int8-prefill`` / ``--int8-prefill-q8`` -> a value for
-    :meth:`Int8PrefillPolicy.from_value` (the scope string when q8 is off, so
-    every existing invocation is unchanged)."""
+def cli_value(scope: str, q8: str = "off", experts: str = "off"):
+    """``--int8-prefill`` / ``--int8-prefill-q8`` / ``--int8-prefill-experts``
+    -> a value for :meth:`Int8PrefillPolicy.from_value` (the scope string
+    when q8 and experts are off, so every existing invocation is unchanged)."""
+    if experts not in (None, "off"):
+        if experts != "q4":
+            raise ValueError("--int8-prefill-experts must be 'off' or 'q4'")
+        if scope not in SCOPES:
+            raise ValueError(
+                "--int8-prefill-experts requires --int8-prefill mlp or all "
+                "(it is never selected by 'auto')"
+            )
+        value = cli_value(scope, q8)
+        value = dict(value) if isinstance(value, Mapping) else {"enabled": True, "scope": value}
+        value["experts"] = True
+        return value
     if scope == AUTO:
         if q8 not in (None, "off"):
             raise ValueError(
@@ -1926,6 +1975,9 @@ class Int8PrefillHandle:
         self._skipped: dict[str, str] = {}
         self._q8_declined: dict[str, str] = {}
         self._q45_declined: dict[str, str] = {}
+        # Routed expert blocks on the grouped W4A8 kernel (policy.experts).
+        self._experts: dict[int, Any] = {}
+        self._experts_declined: dict[str, str] = {}
         self._lock = threading.Lock()
         self._act_entry = None
         self._q8_act_entry = None
@@ -1969,6 +2021,55 @@ class Int8PrefillHandle:
                     "q45_meta_builds": 0,
                 }
             )
+        if policy.experts:
+            # Proof the grouped W4A8 expert kernel ran (counted per expert
+            # block call; not part of engaged_calls, which counts projections).
+            self.counts.update(
+                {
+                    "experts_calls": 0,
+                    "experts_rows": 0,
+                    "experts_fallback_rows": 0,
+                    "experts_fallback_dtype": 0,
+                    "experts_fallback_unbound": 0,
+                }
+            )
+
+    def experts_module_count(self) -> int:
+        return len(self._experts)
+
+    def experts_forward(self, module, x, indices):
+        """Sorted W4A8 expert block of one routed MoE call, or None (counted)
+        for the caller's stock body.  Returns ``(y_sorted [M, 1, H],
+        inv_order)``: the down rows in expert-sorted order, for the block's
+        own unsort-and-weight tail."""
+        if not self.active or self._experts.get(id(module)) is not module:
+            self.counts["experts_fallback_unbound"] += 1
+            return None
+        k = int(x.shape[-1])
+        tokens = int(x.size) // k if k else 0
+        if tokens < self.policy.experts_min_tokens:
+            self.counts["experts_fallback_rows"] += 1
+            return None
+        import mlx.core as mx
+
+        from . import int8_experts as _ix
+
+        tables = _ix.module_tables(module)
+        if x.dtype != tables[0][1].dtype:
+            self.counts["experts_fallback_dtype"] += 1
+            return None
+        top_k = int(indices.shape[-1])
+        flat = indices.flatten()
+        order = mx.argsort(flat)
+        inv_order = mx.argsort(order)
+        idx = flat[order].astype(mx.uint32)
+        row_map = (order // top_k).astype(mx.uint32)
+        y = _ix.expert_block(
+            x.reshape(tokens, k), idx, row_map, *tables, activation=module.activation
+        )
+        self.counts["experts_calls"] += 1
+        self.counts["experts_rows"] += int(idx.size)
+        return y[:, None, :], inv_order
 
     # -- hot path ---------------------------------------------------------
     def _call(self, module, x, base_call):
@@ -2373,7 +2474,7 @@ class Int8PrefillHandle:
             "modules": len(self._bound),
             "module_kinds": kinds,
             "skipped": len(self._skipped),
-            "experts": "stock",
+            "experts": self._experts_summary() if self.policy.experts else "stock",
             "weight_bytes": self.weight_bytes(),
             "resident_estimate_bytes": self.resident_estimate_bytes(),
             "transient_weight_bytes_max": self.transient_weight_bytes_max(),
@@ -2395,6 +2496,19 @@ class Int8PrefillHandle:
                 b.meta_nbytes for b in tuple(self._bound.values()) if b.q45
             )
         return status
+
+    def _experts_summary(self) -> dict:
+        from .int8_experts import KERNEL_REVISION as _experts_kernels
+
+        return {
+            "kernel": "w4a8_grouped_q4_gs64",
+            "kernel_revision": _experts_kernels,
+            "act_scale": "group64",
+            "min_tokens": self.policy.experts_min_tokens,
+            "modules": len(self._experts),
+            "declined": dict(self._experts_declined),
+            "observed_used": int(self.counts.get("experts_calls", 0)) > 0,
+        }
 
     def _q8_summary(self) -> dict:
         return {
@@ -2457,6 +2571,7 @@ def apply(
     policy: Int8PrefillPolicy,
     *,
     select: Callable[[str, Any], bool] | None = None,
+    experts_select: Callable[[str, Any], bool] | None = None,
 ) -> Int8PrefillHandle:
     """Install int8 prefill on the eligible projections of ``model`` only.
 
@@ -2470,10 +2585,12 @@ def apply(
     handle.device = require_supported_device()
     chooser = select or default_select(policy.scope)
     candidates = []
+    from .int8_experts import STATE_ATTR as _EXPERTS_ATTR
+
     for path, module in model.named_modules():
-        if _STATE_ATTR in getattr(module, "__dict__", {}) or hasattr(
-            type(module), "_mlx2_int8_prefill_base"
-        ):
+        if _STATE_ATTR in getattr(module, "__dict__", {}) or _EXPERTS_ATTR in getattr(
+            module, "__dict__", {}
+        ) or hasattr(type(module), "_mlx2_int8_prefill_base"):
             raise Int8PrefillError(
                 f"module {path!r} already carries an int8 prefill install"
             )
@@ -2529,7 +2646,42 @@ def apply(
             f"int8 prefill q45_inplace: scope {policy.scope!r} selected no "
             "4/5-bit gs64 affine projection with bf16/fp16 metadata"
         )
+    experts = []
+    if policy.experts:
+        from .int8_experts import module_refusal as _expert_refusal
+
+        if experts_select is None:
+            raise Int8PrefillError(
+                "int8 prefill experts: the model adapter does not declare "
+                "int8_prefill_experts_select"
+            )
+        seen = set()
+        for path, module in model.named_modules():
+            if id(module) in seen or not experts_select(path, module):
+                continue
+            seen.add(id(module))
+            why = _expert_refusal(module)
+            if why is not None:
+                handle._experts_declined[path] = why
+                continue
+            experts.append(module)
+        if not experts:
+            raise Int8PrefillError(
+                "int8 prefill experts selected no 4-bit gs64 routed expert block"
+                + (f" ({next(iter(handle._experts_declined.items()))})"
+                   if handle._experts_declined else "")
+            )
+        from .int8_experts import probe as _experts_probe
+
+        # Build and check the kernel now, so a device or compiler problem
+        # refuses the bind instead of failing a live prefill.
+        ok, detail = _experts_probe(experts[0])
+        if not ok:
+            raise Int8PrefillError(f"int8 prefill experts kernel probe failed: {detail}")
     ref = weakref.ref(handle)
+    for module in experts:
+        handle._experts[id(module)] = module
+        module.__dict__[_EXPERTS_ATTR] = ref
     for module, spec, q8, q45 in candidates:
         base = type(module)
         handle._bound[id(module)] = _Bound(module, base, spec, q8=q8, q45=q45)
@@ -2568,6 +2720,11 @@ def remove(handle: Int8PrefillHandle | None) -> bool:
         module.__dict__.pop(_STATE_ATTR, None)
         if type(module) is _subclasses.get(bound.base):
             module.__class__ = bound.base
+    from .int8_experts import STATE_ATTR as _EXPERTS_ATTR
+
+    for module in handle._experts.values():
+        module.__dict__.pop(_EXPERTS_ATTR, None)
+    handle._experts.clear()
     handle.evict_weights()
     handle._bound.clear()
     return True
@@ -2590,7 +2747,11 @@ def apply_for_adapter(adapter, policy) -> Int8PrefillHandle:
         )
     selector = getattr(adapter, "int8_prefill_select", None)
     select = selector(policy.scope) if callable(selector) else None
-    return apply(adapter.model, policy, select=select)
+    experts_select = None
+    if policy.experts:
+        declared = getattr(adapter, "int8_prefill_experts_select", None)
+        experts_select = declared() if callable(declared) else None
+    return apply(adapter.model, policy, select=select, experts_select=experts_select)
 
 
 
@@ -2687,6 +2848,8 @@ def bind_for_serving(
             f"q{b}": handle.q45_module_count(b) for b in Q45_BITS
         }
         settings["metadata_copy_bytes"] = handle.metadata_copy_bytes()
+    if policy.experts:
+        settings["experts_modules"] = handle.experts_module_count()
     logger.info(
         "int8 NAX prefill bound: %d projections, %d cached copies (%.1f MiB), "
         "decode/verify bound %d rows < threshold %d",
@@ -2864,7 +3027,10 @@ def engine_status(engine) -> dict:
     # Selected (bound on this route) and observed-used (an engaged call since
     # load) are separate claims; neither implies the other.
     status["selected"] = bool(handle is not None and status.get("active"))
-    status["observed_used"] = int((status.get("counts") or {}).get("engaged_calls", 0)) > 0
+    counts = status.get("counts") or {}
+    status["observed_used"] = (
+        int(counts.get("engaged_calls", 0)) > 0 or int(counts.get("experts_calls", 0)) > 0
+    )
     if auto is not None:
         # What ``auto`` resolved to and why (on: the evidence; off: the reason).
         status = {**status, "auto": dict(auto)}
