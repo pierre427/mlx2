@@ -65,7 +65,8 @@ group-size-64 affine projections read MLX's own packed bitstream in place
 (unsigned codes straight into int8 fragments, fold ``s*acc + b*r``), with a
 Stage A that writes activation codes in omlx's "v8" within-group K order.
 Same metadata copy and accounting as Q8; ``inplace_only`` binds only the
-projections an in-place kernel takes.  Not covered by ``auto``.
+projections an in-place kernel takes.  ``auto`` selects it when the
+checkpoint census finds in-scope 4/5-bit gs64 projections (``auto_policy``).
 """
 
 from __future__ import annotations

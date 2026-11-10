@@ -1288,9 +1288,13 @@ def _shared_kernels(gate_up_bits: int = BITS, down_bits: int = BITS):
 def _linear_ok(layer, bits: int, out_dims: int, in_dims: int, group_size: int = GROUP_SIZE) -> str | None:
     import mlx.nn as nn
 
-    # The row-exact verify route (qwen4_row_exact) swaps in a subclass whose
-    # one-row call is the plain one; the kernels read only the arrays.
-    if getattr(type(layer), "_mlx2_row_exact_base", type(layer)) is not nn.QuantizedLinear:
+    # The row-exact verify route (qwen4_row_exact) and int8 prefill swap in
+    # subclasses whose one-row call is the plain one (int8 prefill sends rows
+    # below its 512-row threshold to the base call and copies no weights);
+    # the kernels read only the arrays.
+    base = getattr(type(layer), "_mlx2_row_exact_base", type(layer))
+    base = getattr(base, "_mlx2_int8_prefill_base", base)
+    if base is not nn.QuantizedLinear:
         return "not a plain QuantizedLinear"
     if "_lane_prepared" in layer.__dict__:
         return "lane matmul installed"

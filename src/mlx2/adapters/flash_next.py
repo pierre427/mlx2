@@ -286,6 +286,50 @@ class FlashNextAdapter:
             return ()
         return ("experts", "mlp", "all")
 
+    def int8_prefill_supported(self):
+        # On the served checkpoints every projection int8 prefill takes is
+        # 8-bit gs64 (W8A8 through the in-place Q8 kernel); the 4-bit weights
+        # are the routed experts, which int8 prefill leaves on stock kernels
+        # (EXPERTS_NOTE), so the Q4/Q5 in-place kernels bind nothing here.
+        # Default off, approximate, qualification-gated like any int8 route.
+        #
+        # Not with mixed_prefill_decode: int8 counts rows per call, so a mixed
+        # forward of >= 512 rows would run its decode rows through W8A8 too.
+        if getattr(getattr(self, "policy", None), "mixed_prefill_decode", False):
+            return ()
+        return ("mlp", "all")
+
+    @staticmethod
+    def int8_prefill_select(scope):
+        """Allow-list of trunk projections: shared expert (``mlp``), plus
+        full-attention q/k/v/o and GDN qkv/z/out (``all``).
+
+        Everything else stays stock, deliberately:
+        - hyper-connection mixers (``*_hyper_connection``,
+          ``hyper_connection_mixer``): HC's fused kernels admit only a plain
+          ``nn.QuantizedLinear`` (``hc_owned_projection_ids``), so the int8
+          class swap would silently turn every HC call off;
+        - the QSA indexer ``index_qk_proj``: it picks the sparse-attention
+          blocks, so approximating it changes which keys are attended rather
+          than the precision of one product;
+        - PLE key/value projections, the router and ``shared_expert_gate``,
+          GDN ``in_proj_a``/``in_proj_b``, the MTP layer, the head and any
+          vision path."""
+        if scope not in ("mlp", "all"):
+            raise ValueError(f"unsupported Flash-Next int8 prefill scope {scope!r}")
+        allowed = {("shared_expert", leaf) for leaf in ("gate_proj", "up_proj", "down_proj")}
+        if scope == "all":
+            allowed |= {("self_attn", leaf) for leaf in ("q_proj", "k_proj", "v_proj", "o_proj")}
+            allowed |= {("linear_attn", leaf) for leaf in ("in_proj_qkv", "in_proj_z", "out_proj")}
+
+        def select(path, module):
+            parts = path.split(".")
+            if parts[:3] != ["language_model", "model", "layers"] or len(parts) < 6:
+                return False
+            return tuple(parts[-2:]) in allowed and parts[3].isdigit()
+
+        return select
+
     def microscaling_decode_row_multiplier(self):
         from .microscaling_support import decode_row_multiplier
         # Every hybrid constructor keeps the text config here; none sets

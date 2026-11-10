@@ -854,7 +854,10 @@ def _moe_window_consumer(x):
 def _base_linear_ok(layer) -> bool:
     import mlx.nn as _nn
 
+    # Row-exact verify and int8 prefill subclasses keep the plain one-row
+    # call (see ``qwen4_routed_decode._linear_ok``).
     base = getattr(type(layer), "_mlx2_row_exact_base", type(layer))
+    base = getattr(base, "_mlx2_int8_prefill_base", base)
     return base is _nn.QuantizedLinear
 
 
