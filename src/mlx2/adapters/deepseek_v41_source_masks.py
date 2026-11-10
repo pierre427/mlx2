@@ -29,7 +29,7 @@ def source_expert_mask_binding(adapter):
             or getattr(model, "source_approx_private_profile", None) is not None
             or getattr(adapter.weights, "source_resident_bank_session", None) is not None
             or policy.get("deepseek_source_experts", {}).get("residency") == "dynamic_precision_v1"
-            or {"q1_on_miss", "tiers"} & set(policy.get("deepseek_source_experts") or {})):
+            or {"q1_on_miss", "tiers", "exl3"} & set(policy.get("deepseek_source_experts") or {})):
         raise ValueError("Source expert masks require the ordinary fixed-precision B1 route")
     source_fingerprint = adapter.identity["fingerprint"]
     if len(source_fingerprint) != 64:

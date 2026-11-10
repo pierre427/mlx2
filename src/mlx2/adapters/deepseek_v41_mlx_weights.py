@@ -29,7 +29,8 @@ REVISION = "mlx2.v41-native-expert-global-lru-f32.v1"
 MANIFEST = "mlx2-v41-native-manifest.json"
 CHUNK_BYTES = 16 << 20
 _DTYPES = {"F32": "<f4", "F16": "<f2", "U32": "<u4", "I32": "<i4",
-           "U8": "u1", "I8": "i1", "BF16": "<u2"}
+           "U8": "u1", "I8": "i1", "BF16": "<u2",
+           "I16": "<i2"}  # EXL3 expert-bank trellis words (deepseek_v41_source_exl3)
 _UPLOAD_QUARANTINE = {}
 _QUARANTINE_LOCK = threading.RLock()
 

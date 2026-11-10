@@ -1616,12 +1616,24 @@ class SourceV41Weights(NativeV41Weights):
             order = np.argsort(flat, kind="stable")
             sorted_ids = flat[order]
         fused_policy=self.expert_math_policy in ('epilogue_fused_fp32','routed_fused_fp32')
+        # Opt-in approximate EXL3 bank (deepseek_v41_source_exl3.py): a call holding
+        # any bank expert takes the per-expert path below; the fused down-combine and
+        # batched prefill kernels consume original packed objects only.
+        exl3_route=getattr(self.expert_stream,'exl3_route',None)
+        exl3_ids=exl3_route(prefix,values) if callable(exl3_route) else frozenset()
+        if exl3_ids and sorted_ids is None:
+            sorted_ids=flat[order]
         # Opt-in reduced tiers with a Q2 bank: a call may mix Q2 objects, which
         # the fused batch/down kernels do not consume; use the per-expert path.
         q2_tier=(values.shape[0]==1 and callable(getattr(self.expert_stream,'q2_tier_active',None))
                  and self.expert_stream.q2_tier_active(prefix))
         fuse_down=(self.expert_math_policy=='routed_fused_fp32' and values.shape[0]==1
                    and len(np.unique(flat))==values.shape[1] and not sequential and not q2_tier)
+        # Counted only where an EXL3 expert actually declines a fused/batched kernel.
+        exl3_bypass=bool(exl3_ids) and ((fuse_down and getattr(self.expert_stream,'packed_buffers',False))
+            or (values.shape[0]>1 and getattr(self,'source_prefill_batch_policy','reference')!='reference'
+                and not sequential))
+        fuse_down=fuse_down and not exl3_ids
         if sequential and sorted_ids is None:
             sorted_ids=flat[order]
         owned = not self.expert_stream._active
@@ -1647,7 +1659,10 @@ class SourceV41Weights(NativeV41Weights):
                 if fused_policy:
                     key='official_source_input_qat'
                     self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
-            if values.shape[0]>1 and getattr(self,'source_prefill_batch_policy','reference')!='reference' and not sequential:
+            if exl3_bypass:
+                key='official_source_exl3_fused_paths_bypassed'
+                self.scheduled_expert_calls[key]=self.scheduled_expert_calls.get(key,0)+1
+            if values.shape[0]>1 and getattr(self,'source_prefill_batch_policy','reference')!='reference' and not sequential and not exl3_ids:
                 if route_plan is None:
                     output=self._prefill_batched_gate_up(all_selected,values,scores,prefix,order)
                 else:
@@ -1726,6 +1741,33 @@ class SourceV41Weights(NativeV41Weights):
                     if data.rotation is not None:
                         key = 'official_source_q2_rotated_experts'
                         self.scheduled_expert_calls[key] = self.scheduled_expert_calls.get(key, 0)+1
+                    if sequential:
+                        self.expert_stream.release_completed_experts(((int(prefix.split('.')[1]),int(expert)),),roots=(parts[-1],))
+                        del data
+                    continue
+                if getattr(data, 'source_tier', None) == 'exl3':
+                    # EXL3 bank expert (deepseek_v41_source_exl3): x @ W with W the decoded
+                    # trellis weight. Same QAT input, middle law, rounding and combine order.
+                    from .deepseek_v41_source_exl3 import project as exl3_project
+                    selected = (quantize(x[rows], "fp8").astype(mx.float32)
+                                if all_selected is None else all_selected[rows])
+                    gate, up = exl3_project(data, 'gate', selected), exl3_project(data, 'up', selected)
+                    if fused_policy:
+                        from ..runtime.gguf.source_middle_fusion import middle as fused_middle
+                        down_input = fused_middle(gate, up, scores.reshape(-1), slots)
+                    else:
+                        mid = rounded(limited_swiglu(rounded(gate), rounded(up))*scores.reshape(-1)[slots, None])
+                        down_input = quantize(mid, "fp8").astype(mx.float32)
+                    parts.append(rounded(exl3_project(data, 'down', down_input)))
+                    if values.shape[0] > 1:
+                        # Wide calls: realise each EXL3 expert before the next one so its
+                        # per-call decoded weights (~210 MB at reference law) never pile up
+                        # across hundreds of experts in one lazy graph.
+                        mx.eval(parts[-1])
+                    key = 'official_source_exl3_experts'
+                    self.scheduled_expert_calls[key] = self.scheduled_expert_calls.get(key, 0)+1
+                    key = 'official_source_exl3_rows'
+                    self.scheduled_expert_calls[key] = self.scheduled_expert_calls.get(key, 0)+len(locations)
                     if sequential:
                         self.expert_stream.release_completed_experts(((int(prefix.split('.')[1]),int(expert)),),roots=(parts[-1],))
                         del data

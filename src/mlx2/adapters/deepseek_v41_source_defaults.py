@@ -101,6 +101,10 @@ def default_route_policy_applies(route,operator_policy):
         # q1_on_miss substitutes Q1 codes for some decode misses: an
         # approximate profile outside the measured exact-original evidence.
         if 'q1_on_miss' in expert or 'tiers' in expert:return False
+        # exl3 serves bank experts from EXL3 codes: also approximate. Its calls
+        # bypass the original-only fused kernels per call, so the bundle keys may
+        # be named explicitly; they are not selected as a default here.
+        if 'exl3' in expert:return False
         # Exact original MXFP4 codes (Pierre 2026-11-08, "yes as long as it's
         # not a regression"): on c30fd25e at c18fef602 the bundle decoded the
         # 18-prompt held-out replay at 2.42 vs 1.72 tok/s with 18/18 identical

@@ -319,6 +319,8 @@ def source_policy(value=None):
     result.update(validate_approximate(approximate,result))
     from .deepseek_v41_source_q1_on_miss import validate_combination as validate_q1_on_miss
     validate_q1_on_miss(result)  # opt-in approximate deepseek_source_experts.q1_on_miss
+    from .deepseek_v41_source_exl3 import validate_combination as validate_exl3
+    validate_exl3(result)  # opt-in approximate deepseek_source_experts.exl3
     return result
 
 
@@ -709,6 +711,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         bind_approximate_identity(self)  # no-op unless an approximate operation is selected
         from .deepseek_v41_source_q1_on_miss import bind_identity as bind_q1_on_miss_identity
         bind_q1_on_miss_identity(self)  # no-op unless deepseek_source_experts.q1_on_miss is selected
+        from .deepseek_v41_source_exl3 import bind_identity as bind_exl3_identity
+        bind_exl3_identity(self)  # no-op unless deepseek_source_experts.exl3 is selected
         if self.kernel_policy.get('deepseek_verify_rows','serial')=='lockstep_multirow_v1':
             from .deepseek_v41_dspark_chain import POLICY, implementation_identity
             self.numerics_revision+=':verify_rows='+POLICY+':implementation='+implementation_identity()
@@ -747,6 +751,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         model_type=approximate_model_class(model_type,self.kernel_policy)
         from .deepseek_v41_source_q1_on_miss import model_class as q1_on_miss_model_class
         model_type=q1_on_miss_model_class(model_type,self.kernel_policy)
+        from .deepseek_v41_source_exl3 import model_class as exl3_model_class
+        model_type=exl3_model_class(model_type,self.kernel_policy)
         self.model = model_type(args, self.weights, identity=binding, hasher=EngramHasher(self.metadata), engram_tables=self.engram_tables,
             hc_policy=self.kernel_policy["deepseek_hc"], qat_policy=self.kernel_policy["deepseek_qat"],
             hc_coeff_policy=('source_fused_fp32' if self.kernel_policy.get('deepseek_source_hc_coefficients','reference')=='fused_fp32' else 'reference'),
@@ -771,6 +777,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         configure_approximate(self)
         from .deepseek_v41_source_q1_on_miss import configure_model as configure_q1_on_miss
         configure_q1_on_miss(self)
+        from .deepseek_v41_source_exl3 import configure_model as configure_exl3
+        configure_exl3(self)
         self.model.verification_commit_policy = self.kernel_policy["deepseek_verify_commit"]
         self.model.verify_rows_policy = self.kernel_policy["deepseek_verify_rows"]
         # Opt-in lockstep MoE site (deepseek_v41_dspark_chain_moe); default reference.
@@ -979,10 +987,13 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             result['prefill_step_size'] = prefill_step
         selected=self.kernel_policy.get('deepseek_source_prefill_partition','adaptive_v1')
         from .deepseek_v41_source_q1_on_miss import apc_refusal_reason as q1_on_miss_refusal
+        from .deepseek_v41_source_exl3 import apc_refusal_reason as exl3_refusal
         if apc_refusal_reason(self.kernel_policy) is not None:
             result['apcv2_reuse_disabled_reason'] = apc_refusal_reason(self.kernel_policy)
         elif q1_on_miss_refusal(self.kernel_policy) is not None:
             result['apcv2_reuse_disabled_reason'] = q1_on_miss_refusal(self.kernel_policy)
+        elif exl3_refusal(self.kernel_policy) is not None:
+            result['apcv2_reuse_disabled_reason'] = exl3_refusal(self.kernel_policy)
         elif self._source_dynamic_precision():
             from .deepseek_v41_source_residency import DYNAMIC_APC_REASON
             result['apcv2_reuse_disabled_reason'] = DYNAMIC_APC_REASON
@@ -1021,6 +1032,9 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         from .deepseek_v41_source_q1_on_miss import apc_refusal_reason as q1_on_miss_refusal
         if q1_on_miss_refusal(self.kernel_policy) is not None:
             return q1_on_miss_refusal(self.kernel_policy)
+        from .deepseek_v41_source_exl3 import apc_refusal_reason as exl3_refusal
+        if exl3_refusal(self.kernel_policy) is not None:
+            return exl3_refusal(self.kernel_policy)
         if self._source_dynamic_precision():
             from .deepseek_v41_source_residency import DYNAMIC_APC_REASON
             return DYNAMIC_APC_REASON
@@ -1206,4 +1220,13 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
                                      'banks (Q1 affine g64'+(', Q2 MLX affine g64' if reduced=='tiers' else '')
                                      +') per deepseek_source_experts.'+reduced+'; per-layer LRU pools carved from the total')
             value['numerical_scope']+='; APPROXIMATE '+reduced+' (opt-in, salted identity, APCv2 publication refused); unqualified'
+        from .deepseek_v41_source_exl3 import diagnostics as exl3_diagnostics, enabled as exl3_enabled, APC_REASON as EXL3_APC
+        value['source_exl3']=exl3_diagnostics(self)
+        if exl3_enabled(self.kernel_policy):
+            value['approximate_state']=True
+            value['source_memory']['apcv2_reuse']='disabled: '+EXL3_APC
+            value['expert_storage']=('original E2M1/E8M0 group32; routed experts present in the sealed EXL3 bank '
+                                     '(trellis mcg, upstream exllamav3 layout) served from it in prefill and decode '
+                                     'per deepseek_source_experts.exl3; LRU pool carved from the total')
+            value['numerical_scope']+='; APPROXIMATE exl3 experts (opt-in, salted identity, APCv2 publication refused); unqualified'
         return value

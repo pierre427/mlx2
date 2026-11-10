@@ -22,6 +22,7 @@ from .deepseek_v41_source_buffers import read_original_packed, read_original_dev
 from . import deepseek_v41_source_residency as residency
 from . import deepseek_v41_source_prefill_residency as prefill_residency
 from . import deepseek_v41_source_q1_on_miss as q1_on_miss
+from . import deepseek_v41_source_exl3 as exl3_mod
 
 REVISION = 'source-expert-lfu-token-frequency-v1'
 Q1_REVISION = 'source-q1-affine-g64-lloyd4-f16-v1'
@@ -49,7 +50,7 @@ RETENTION_POLICIES = ('lifetime_lfu', 'decayed_lfu_v1', 'cycle_aware_v1')
 def parse_policy(value, *, adaptive=True):
     """Validate the default adaptive profile or an explicit fixed-pool transition."""
     if type(adaptive)is not bool:raise ValueError('Source expert residency mode must be boolean')
-    if not isinstance(value,dict) or set(value)-{'mode','budget_bytes','hot_bytes','q1_root','hotset_path','atlas_path','preheat',*q1_on_miss.KEYS}-residency.RESIDENCY_KEYS-RETENTION_KEYS-STREAM_KEYS:
+    if not isinstance(value,dict) or set(value)-{'mode','budget_bytes','hot_bytes','q1_root','hotset_path','atlas_path','preheat',*q1_on_miss.KEYS,exl3_mod.KEY}-residency.RESIDENCY_KEYS-RETENTION_KEYS-STREAM_KEYS:
         raise ValueError('invalid Source expert LFU policy')
     result=dict(value)
     if result.get('retention', 'lifetime_lfu') not in RETENTION_POLICIES:
@@ -86,11 +87,13 @@ def parse_policy(value, *, adaptive=True):
         for key in ('q1_root','hotset_path'):
             if not isinstance(result.get(key),str) or not Path(result[key]).is_absolute():
                 raise ValueError('hybrid expert policy requires absolute Q1 and hotset paths')
-    elif set(result)-{'mode','budget_bytes','atlas_path','preheat','cache_maximum','live_reserve_bytes'}-RETENTION_KEYS-STREAM_KEYS-(
+    elif set(result)-{'mode','budget_bytes','atlas_path','preheat','cache_maximum','live_reserve_bytes',exl3_mod.KEY}-RETENTION_KEYS-STREAM_KEYS-(
             {'q1_root',*q1_on_miss.KEYS} if any(k in result for k in q1_on_miss.KEYS) else set()):
         raise ValueError('original-only LFU cannot accept Q1 options')
     # Opt-in approximate Q1-on-miss (deepseek_v41_source_q1_on_miss.py).
     q1_on_miss.validate_expert_policy(result)
+    # Opt-in approximate EXL3 expert bank (deepseek_v41_source_exl3.py).
+    exl3_mod.validate_expert_policy(result)
     return result
 
 def _parse_stream_keys(result):
@@ -319,6 +322,12 @@ class LFUSourceExpertStore(SourceExpertStore):
                                                                 budget_bytes=self.cache_budget_bytes)
                 self.stats.update(q1_on_miss_reads=0,q1_on_miss_bytes_read=0)
                 self._carve_q1_pool()
+            self.exl3=None
+            if exl3_mod.KEY in policy:
+                # Approximate, opt-in: every routed expert in the sealed EXL3 bank is
+                # served from it (prefill and decode); its pool is carved from the total.
+                self.exl3=exl3_mod.Exl3Rule.from_policy(policy,source_binding=self.binding,layers=len(self.tables))
+                self._carve_exl3_pool()
             self.atlas_path=Path(policy['atlas_path']) if policy.get('atlas_path') else None
             if self.atlas_path:
                 atlas=read_atlas(self.atlas_path,self.binding);self.index.clock=atlas['clock']
@@ -578,6 +587,10 @@ class LFUSourceExpertStore(SourceExpertStore):
             key=self.tables[prefix][expert];kind=self.kind(key)
             touched=getattr(self,'_cycle_touched',None)
             if touched is not None:touched.add(key)
+            exl3=getattr(self,'exl3',None)
+            if exl3 is not None:
+                served=self._exl3_acquire(exl3,key)
+                if served is not None:return served
             rule=getattr(self,'q1_on_miss',None)
             if rule is not None:
                 served=self._q1_on_miss_acquire(rule,key)
@@ -683,6 +696,10 @@ class LFUSourceExpertStore(SourceExpertStore):
         self.cache_budget_bytes=self.maximum_cache_bytes=original
         self.payload_ceiling=original-ORIGINAL_BYTES
     def adaptive_residency_update(self,*,incoming_bytes=0,measured_available_bytes=None,protected_bytes=None):
+        exl3=getattr(self,'exl3',None)
+        if exl3 is not None and exl3.pool is not None and getattr(self,'_adaptive_residency_enabled',False):
+            return self._exl3_adaptive_update(exl3.pool,incoming_bytes=incoming_bytes,
+                measured_available_bytes=measured_available_bytes,protected_bytes=protected_bytes)
         rule=getattr(self,'q1_on_miss',None)
         if rule is None or not rule.pools or not getattr(self,'_adaptive_residency_enabled',False):
             return super().adaptive_residency_update(incoming_bytes=incoming_bytes,
@@ -720,6 +737,38 @@ class LFUSourceExpertStore(SourceExpertStore):
                 reduced_pool_fraction=fraction,
                 reduced_pools={t:dict(capacity_bytes=p.capacity,target_bytes=sum(p.targets),live_bytes=p.live_bytes)
                                for t,p in rule.pools.items()},reduced_pool_evicted_bytes=evicted)
+            return dict(self._adaptive_last)
+    def _exl3_adaptive_update(self,pool,*,incoming_bytes,measured_available_bytes,protected_bytes):
+        """The reduced-tier law for the EXL3 pool: size the total (originals + pool, pool
+        bytes reclaimable) from live memory, give originals their share through the
+        ordinary update, and scale the pool target by the same fraction."""
+        with self._lock:
+            available=measured_available_bytes
+            if available is None:
+                try:
+                    if self._adaptive_available is None:
+                        from ..runtime.os_memory import host_memory_snapshot
+                        host=host_memory_snapshot();available=None if host is None else host.available_bytes
+                    else:available=self._adaptive_available()
+                except Exception:
+                    available=None
+            known=type(available)is int and available>=0
+            protected=self._adaptive_protected_bytes if protected_bytes is None else protected_bytes
+            original_max=self.maximum_cache_bytes;total=original_max+pool.capacity
+            original_target=original_max;passed=-1
+            if known and type(protected)is int and protected>=0:
+                headroom=max(self._adaptive_headroom,protected)
+                total_target=min(total,max(0,self._cache_bytes+pool.live+available-headroom))
+                original_target=total_target*original_max//total
+                passed=max(0,original_target-self._cache_bytes+headroom)
+            super().adaptive_residency_update(incoming_bytes=incoming_bytes,measured_available_bytes=passed,
+                                              protected_bytes=protected_bytes)
+            fraction=min(self._adaptive_target,original_target)/original_max
+            evicted=pool.scale(fraction,self._leased)
+            self._adaptive_last.update(measured_available_bytes=available if known else 0,availability_known=known,
+                expert_cache_total_maximum_bytes=total,original_cache_maximum_bytes=original_max,
+                exl3_pool_fraction=fraction,exl3_pool=dict(capacity_bytes=pool.capacity,target_bytes=pool.target,
+                                                           live_bytes=pool.live),exl3_pool_evicted_bytes=evicted)
             return dict(self._adaptive_last)
     def _upload_q2(self,key,raw,bank):
         """Upload one Q2 expert at its bank's admitted size; the arrays carry the bank's format."""
@@ -797,6 +846,72 @@ class LFUSourceExpertStore(SourceExpertStore):
         collector=getattr(self,'_completion_collector',None)
         if collector is not None:collector(key)
         return arrays
+    # ---- Opt-in approximate EXL3 bank (deepseek_v41_source_exl3.py).
+    def exl3_route(self,prefix,values):
+        """EXL3 expert ids of one MoE call (empty when off); records slots per tier."""
+        rule=getattr(self,'exl3',None)
+        if rule is None:return frozenset()
+        with self._lock:
+            if prefix not in self.tables:raise ValueError('exl3 route outside admitted layers')
+            return frozenset(rule.route(self.tables[prefix][0][0],np.asarray(values).reshape(-1)))
+    def _carve_exl3_pool(self):
+        rule=self.exl3
+        if rule.pool is None:return
+        total=self.cache_budget_bytes;original=total-rule.pool.capacity
+        if original<2*ORIGINAL_BYTES:
+            raise ValueError('exl3 pool leaves no room for one original expert plus staging')
+        self.expert_cache_total_bytes=total
+        self.cache_budget_bytes=self.maximum_cache_bytes=original
+        self.payload_ceiling=original-ORIGINAL_BYTES
+    def _exl3_acquire(self,rule,key):
+        """EXL3 arrays for a bank expert, else None (original fallback, counted)."""
+        if not rule.serves(key):
+            rule.record_fallback(key)
+            return None
+        leased=self._leased.get(key)
+        if leased is not None:
+            if not exl3_mod.is_exl3(leased):
+                raise ValueError('EXL3 bank expert is leased as an original object')
+            rule.record_served(key)
+            collector=getattr(self,'_completion_collector',None)
+            if collector is not None:collector(key)
+            return leased
+        arrays=rule.pool.lookup(key) if rule.pool is not None else None
+        if arrays is None:
+            record=rule.records[key]
+            started=time.perf_counter_ns()
+            raw=self._read_expert(key,exl3_mod.exl3_read,rule.root,record,key,rule.words)
+            read=time.perf_counter_ns()
+            self._pending_host[key]=raw
+            arrays=self._pending_uploads[key]=exl3_mod.upload(raw,rule.words,rule.law)
+            self._pending_host.pop(key);del raw
+            rule.stats['exl3_reads']+=1;rule.stats['exl3_bytes_read']+=record['size']
+            rule.stats['exl3_read_ns']+=read-started;rule.stats['exl3_upload_ns']+=time.perf_counter_ns()-read
+            self.stats['bytes_read']+=record['size'];self.stats['uploaded_experts']+=1
+            self.stats['exl3_bytes_read']=self.stats.get('exl3_bytes_read',0)+record['size']
+            if rule.pool is not None:rule.pool.insert(key,arrays,rule.size,self._leased)
+        rule.record_served(key)
+        self._leased[key]=arrays;self._pending_uploads.pop(key,None)
+        collector=getattr(self,'_completion_collector',None)
+        if collector is not None:collector(key)
+        return arrays
+    def _exl3_unleased_bytes(self):
+        rule=getattr(self,'exl3',None)
+        if rule is None:return 0
+        with self._lock:
+            packed=getattr(self,'packed_buffers',False)
+            held={id(v) for v in self._leased.values()}|{id(v) for v in self._pending_uploads.values()}
+            seen=set();total=0
+            objects=list(rule.pool.objects.values()) if rule.pool is not None else []
+            # Under packed accounting the base totals see only packed backings: leased
+            # EXL3 objects have none, so count them here too.
+            if packed:objects+=[v for v in self._leased.values() if exl3_mod.is_exl3(v)]
+            for arrays in objects:
+                if id(arrays) in seen:continue
+                seen.add(id(arrays))
+                if id(arrays) in held and not packed:continue
+                total+=sum(v.nbytes for v in arrays.values())
+            return total
     def q2_tier_active(self,prefix):
         rule=getattr(self,'q1_on_miss',None)
         return rule is not None and prefix in self.tables and rule.q2_active_for(self.tables[prefix][0][0])
@@ -899,6 +1014,8 @@ class LFUSourceExpertStore(SourceExpertStore):
         if self._dynamic():value+=':residency='+residency.RESIDENCY_DYNAMIC
         rule=getattr(self,'q1_on_miss',None)
         if rule is not None:value+=':'+rule.name+'='+rule.salt
+        exl3=getattr(self,'exl3',None)
+        if exl3 is not None:value+=':'+exl3_mod.NAME+'='+exl3.salt
         return value
     def identity_hot_binding(self):
         """Hot-map digest bound into the effective artifact identity.
@@ -1134,19 +1251,25 @@ class LFUSourceExpertStore(SourceExpertStore):
     def live_bytes(self):
         with self._lock:return self._live_bytes_locked()
     def _live_bytes_locked(self):
-        if not getattr(self,'packed_buffers',False):return super().live_bytes()+self._transient_unleased_bytes()+self._q1_pool_unleased_bytes()
-        return self._packed_backing_totals()[1]+self._transient_unleased_bytes()+self._q1_pool_unleased_bytes()+sum(len(t._cache)*t.row_bytes for t in self.ple_tables.values())
+        if not getattr(self,'packed_buffers',False):return super().live_bytes()+self._transient_unleased_bytes()+self._q1_pool_unleased_bytes()+self._exl3_unleased_bytes()
+        return self._packed_backing_totals()[1]+self._transient_unleased_bytes()+self._q1_pool_unleased_bytes()+self._exl3_unleased_bytes()+sum(len(t._cache)*t.row_bytes for t in self.ple_tables.values())
     def reserved_bytes(self):
         value=super().reserved_bytes()
         rule=getattr(self,'q1_on_miss',None)
         if rule is not None and rule.pools and not self.adaptive_residency_enabled and not self._parked:
             value+=rule.pool_capacity  # fixed reservation: the carved pools are part of the total
+        exl3=getattr(self,'exl3',None)
+        if exl3 is not None and exl3.pool is not None and not self.adaptive_residency_enabled and not self._parked:
+            value+=exl3.pool.capacity
         return value
     def resume_reservation_bytes(self):
         value=super().resume_reservation_bytes()
         rule=getattr(self,'q1_on_miss',None)
         if rule is not None and rule.pools and not self.adaptive_residency_enabled:
             value+=rule.pool_capacity  # resume must re-reserve the carved pools too
+        exl3=getattr(self,'exl3',None)
+        if exl3 is not None and exl3.pool is not None and not self.adaptive_residency_enabled:
+            value+=exl3.pool.capacity
         return value
     resident_bytes=live_bytes
     def receipt(self):
@@ -1183,6 +1306,14 @@ class LFUSourceExpertStore(SourceExpertStore):
                 result.update(expert_cache_total_maximum_bytes=self.expert_cache_total_bytes,
                               original_cache_maximum_bytes=self.maximum_cache_bytes)
             result['numeric_profile']='official_mxfp4_fp8+'+rule.name+'_approximate_unqualified'
+        exl3=getattr(self,'exl3',None)
+        if exl3 is not None:
+            with self._lock:result['exl3']=exl3.receipt()
+            if exl3.pool is not None:
+                result.update(expert_cache_total_maximum_bytes=self.expert_cache_total_bytes,
+                              original_cache_maximum_bytes=self.maximum_cache_bytes)
+            result['exl3']['bytes_read']['original']=self.stats.get('original_bytes_read',0)
+            result['numeric_profile']='official_mxfp4_fp8+'+exl3_mod.NAME+'_approximate_unqualified'
         result.update(atlas_path=str(self.atlas_path) if self.atlas_path else None,atlas_known_experts=len(self.index.counts),atlas_persist_error=getattr(self,'atlas_persist_error',None),preheat=self.preheat_receipt)
         if getattr(self,'packed_buffers',False):
             backing_count,backing_bytes=self._packed_backing_totals()
@@ -1347,6 +1478,7 @@ class LFUSourceExpertStore(SourceExpertStore):
         super().park();self.pool_bytes={'original':0,'q1':0}
         if getattr(self,'q1_on_miss',None) is not None:
             self.q1_on_miss.pool_clear();self.q1_on_miss.disarm();self.q1_on_miss.served_ids={}
+        if getattr(self,'exl3',None) is not None and self.exl3.pool is not None:self.exl3.pool.clear()
         if self._dynamic():self._dyn_high=set()
         if hasattr(self,'_pre_evict_credit'):self._pre_evict_credit={'original':0,'q1':0}
         return self.receipt()
@@ -1354,6 +1486,7 @@ class LFUSourceExpertStore(SourceExpertStore):
         if self.adaptive_residency_enabled:return self.set_adaptive_cache_target(budget)['effective_cache_target_bytes']
         raise ValueError('LFU experimental profile uses fixed precision-bound budgets')
     def close(self):
+        if getattr(self,'exl3',None) is not None:self.exl3.write_missing()
         try:self._persist_atlas_advisory()
         finally:
             try:
