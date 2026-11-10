@@ -12,12 +12,19 @@ import os
 import re
 import tempfile
 import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
 
 KINDS = {"chat", "memory", "knowledge", "web", "file", "folder", "avatar", "media"}
+SHAPES = {"panel", "sphere", "cube", "ring"}
+ANIMATIONS = {"none", "pulse", "spin", "float"}
+OBJECT_FIELDS = ("id", "kind", "label", "position", "rotation", "scale", "color", "shape", "text", "resource", "animation")
+# World documents are stored as <id>.json beside these application files.
+RESERVED_WORLD_IDS = {"state", "assets"}
+MAX_SAVED_WORLDS = 256
 
 
 def identifier(value):
@@ -39,11 +46,15 @@ def vector(value, low, high):
 
 
 def validate_object(value):
-    required = {"id", "kind", "label", "position", "rotation", "scale", "color", "shape", "text", "resource", "animation"}
-    if not isinstance(value, dict) or set(value) != required:
-        raise ValueError("Unexpected or missing scene object fields")
+    if not isinstance(value, dict):
+        raise ValueError("A scene object must be an object")
+    missing, unexpected = set(OBJECT_FIELDS) - set(value), set(value) - set(OBJECT_FIELDS)
+    if missing or unexpected:
+        raise ValueError("Unexpected or missing scene object fields"
+                         + (f"; missing: {', '.join(sorted(missing))}" if missing else "")
+                         + (f"; unexpected: {', '.join(sorted(map(str, unexpected)))}" if unexpected else ""))
     identifier(value["id"])
-    if not isinstance(value["kind"], str) or not isinstance(value["shape"], str) or value["kind"] not in KINDS or value["shape"] not in {"panel", "sphere", "cube", "ring"}:
+    if not isinstance(value["kind"], str) or not isinstance(value["shape"], str) or value["kind"] not in KINDS or value["shape"] not in SHAPES:
         raise ValueError("Unsupported scene object kind or shape")
     for key, maximum in (("label", 200), ("text", 8192), ("resource", 4096)):
         if not isinstance(value[key], str) or len(value[key]) > maximum:
@@ -56,11 +67,37 @@ def validate_object(value):
     vector(value["scale"], 0.01, 20)
     color(value["color"])
     animation = value["animation"]
-    if not isinstance(animation, dict) or set(animation) != {"kind", "speed"} or not isinstance(animation["kind"], str) or animation["kind"] not in {"none", "pulse", "spin", "float"}:
+    if not isinstance(animation, dict) or set(animation) != {"kind", "speed"} or not isinstance(animation["kind"], str) or animation["kind"] not in ANIMATIONS:
         raise ValueError("Unsupported declarative animation")
     if type(animation["speed"]) not in (int, float) or not math.isfinite(animation["speed"]) or not 0.05 <= animation["speed"] <= 5:
         raise ValueError("Animation speed must be between 0.05 and 5")
     return copy.deepcopy(value)
+
+
+def object_defaults(identity, kind, accent="#38CBFF"):
+    return {"id": identity, "kind": kind, "label": identity, "position": [0, 0, 0], "rotation": [0, 0, 0],
+            "scale": [1, 1, 1], "color": accent, "shape": "sphere" if kind == "avatar" else "panel",
+            "text": "", "resource": "", "animation": {"kind": "none", "speed": 1}}
+
+
+def merge_object(existing, patch, accent="#38CBFF"):
+    """Apply a partial object edit; a new object needs an id and kind, other fields default."""
+    if not isinstance(patch, dict):
+        raise ValueError("A scene object must be an object")
+    unexpected = set(patch) - set(OBJECT_FIELDS)
+    if unexpected:
+        raise ValueError(f"Unexpected scene object fields: {', '.join(sorted(map(str, unexpected)))}")
+    identifier(patch.get("id"))
+    if existing is None:
+        if "kind" not in patch:
+            raise ValueError(f"Scene object {patch['id']} does not exist; a new object needs a kind")
+        base = object_defaults(patch["id"], patch["kind"], accent)
+    else:
+        base = copy.deepcopy(existing)
+    merged = {**base, **copy.deepcopy(patch)}
+    if isinstance(base["animation"], dict) and isinstance(patch.get("animation"), dict):
+        merged["animation"] = {**base["animation"], **patch["animation"]}
+    return validate_object(merged)
 
 
 def default_world(name="My world"):
@@ -75,12 +112,26 @@ def default_world(name="My world"):
                          "text": "", "resource": "", "animation": {"kind": "pulse", "speed": 1}}]}
 
 
+def migrate_world(value):
+    """Repair stored scenes that earlier releases accepted but current rules refuse."""
+    if not isinstance(value, dict):
+        return value
+    value = copy.deepcopy(value)
+    if isinstance(value.get("name"), str) and not value["name"].strip():
+        value["name"] = "My world"
+    if value.get("id") in RESERVED_WORLD_IDS:
+        value["id"] = uuid.uuid4().hex
+    return value
+
+
 def validate_world(value):
     if not isinstance(value, dict) or set(value) != {"schema_version", "id", "name", "theme", "transitions", "objects"} or value["schema_version"] != 1:
         raise ValueError("Unsupported world document schema")
     identifier(value["id"])
-    if not isinstance(value["name"], str) or not 1 <= len(value["name"]) <= 200:
-        raise ValueError("A world needs a name of at most 200 characters")
+    if value["id"] in RESERVED_WORLD_IDS:
+        raise ValueError("That world identifier is reserved")
+    if not isinstance(value["name"], str) or not value["name"].strip() or len(value["name"]) > 200:
+        raise ValueError("A world needs a non-blank name of at most 200 characters")
     theme = value["theme"]
     if not isinstance(theme, dict) or set(theme) != {"background", "accent", "exposure"}:
         raise ValueError("Invalid scene theme")
@@ -115,13 +166,25 @@ class Worlds:
         self.seen_artifacts = {}
         self.policy = {"autonomous_scene": False}
         state = self.home / "state.json"
+        self.startup_notice = None
         if state.is_file():
-            value = json.loads(state.read_text())
-            self.policy = value["policy"]
-            if not isinstance(self.policy, dict) or set(self.policy) != {"autonomous_scene"} or type(self.policy["autonomous_scene"]) is not bool:
-                raise ValueError("Stored autonomous scene policy must be explicitly boolean")
-            self.seen_artifacts = value.get("seen_artifacts", {})
-            self.active = validate_world(value["active"])
+            try:
+                value = json.loads(state.read_text())
+                policy = value.get("policy")
+                # Anything but an explicit boolean grant leaves autonomous editing off.
+                if isinstance(policy, dict) and set(policy) == {"autonomous_scene"} and type(policy["autonomous_scene"]) is bool:
+                    self.policy = dict(policy)
+                seen = value.get("seen_artifacts", {})
+                self.seen_artifacts = seen if isinstance(seen, dict) and all(isinstance(v, list) for v in seen.values()) else {}
+                self.active = validate_world(migrate_world(value["active"]))
+            except (ValueError, TypeError, KeyError, AttributeError) as error:
+                # A world the current rules reject must not stop the application.
+                # Keep the old state for inspection and start from a fresh scene.
+                aside = self.home / f"state.json.invalid-{uuid.uuid4().hex[:8]}"
+                os.replace(state, aside)
+                self.startup_notice = f"The saved active world could not be loaded ({error}); it was kept as {aside.name}."
+                self.active = default_world()
+            self.persist()
         else:
             self.active = default_world()
             self.persist()
@@ -145,9 +208,14 @@ class Worlds:
         """Create each completed artifact's representation once, then leave edits to its owner."""
         with self.lock:
             seen = self.seen_artifacts.setdefault(self.active["id"], [])
+            # An artifact is represented once, in the world active when it completed;
+            # creating or switching worlds must not replay the job history.
+            # Entries are finished job ids and the artifact object identities already
+            # created, so removing an object (or switching worlds) never re-creates it.
+            everywhere = {entry for rows in self.seen_artifacts.values() for entry in rows}
             changed = False
             for job in jobs:
-                if job.get("kind") not in {"media", "helper", "adapter", "document"} or job.get("state") not in {"completed", "succeeded", "partial"} or job["id"] in seen:
+                if job.get("kind") not in {"media", "helper", "adapter", "document"} or job.get("state") not in {"completed", "succeeded", "partial"} or job["id"] in everywhere:
                     continue
                 if len(self.active["objects"]) >= 128:
                     break
@@ -170,8 +238,9 @@ class Worlds:
                 for index, path in enumerate(dict.fromkeys(paths)):
                     if len(self.active["objects"]) >= 128:
                         break
-                    identity = "artifact-" + job["id"][:40] + "-" + str(index)
-                    if any(o["id"] == identity for o in self.active["objects"]):
+                    # Object identities must stay loadable whatever a job record's id contains.
+                    identity = "artifact-" + re.sub(r"[^A-Za-z0-9_-]", "_", str(job["id"]))[:40] + "-" + str(index)
+                    if identity in everywhere or any(o["id"] == identity for o in self.active["objects"]):
                         continue
                     resource = path
                     if capability == "image":
@@ -180,7 +249,9 @@ class Worlds:
                             resolved = file.resolve(strict=True)
                             if any(resolved.is_relative_to(root) for root in self.automatic_image_roots) and resolved.is_file() and not file.is_symlink() and resolved.stat().st_size <= 8 * 1024 * 1024:
                                 resource = self.store_image(resolved.read_bytes())
-                        except (OSError, ValueError):
+                        except Exception:
+                            # A damaged image stays a file reference; it must not
+                            # break every later snapshot.
                             pass
                     count = len(self.active["objects"])
                     self.active["objects"].append({"id": identity, "kind": "media" if capability in {"image", "video", "music", "voice"} else "file",
@@ -188,11 +259,16 @@ class Worlds:
                         "rotation": [0, 0, 0], "scale": [1, 1, 1], "color": "#38CBFF", "shape": "panel",
                         "text": (capability + " · " + job["state"] + "\nJob: " + job["id"] + "\n" + path)[:8192],
                         "resource": resource[:4096], "animation": {"kind": "none", "speed": 1}})
+                    seen.append(identity)
+                    everywhere.add(identity)
                     changed = True
-                seen.append(job["id"])
-                changed = True
+                # Partial jobs and jobs cut off by the object cap are revisited;
+                # per-path identities keep their existing objects unique.
+                if job.get("state") != "partial" and len(self.active["objects"]) < 128:
+                    seen.append(job["id"])
+                    changed = True
             if changed:
-                self.seen_artifacts[self.active["id"]] = seen[-4096:]
+                self.seen_artifacts[self.active["id"]] = seen[-8192:]
                 self.persist()
             return changed
 
@@ -205,12 +281,14 @@ class Worlds:
                 try:
                     if path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
                         raise ValueError("Invalid saved world file")
-                    value = validate_world(json.loads(path.read_text()))
+                    value = validate_world(migrate_world(json.loads(path.read_text())))
                     if value["id"] != path.stem:
                         raise ValueError("Saved world identity differs from its filename")
                     worlds.append({"id": value["id"], "name": value["name"]})
                 except (ValueError, TypeError, OSError) as error:
                     errors.append(f"Could not read {path.name}: {error}")
+            if self.startup_notice:
+                errors.insert(0, self.startup_notice)
             return {"active": copy.deepcopy(self.active), "worlds": worlds, "policy": dict(self.policy), "asset_root": str(self.assets), "errors": errors}
 
     def store_image(self, data):
@@ -224,7 +302,10 @@ class Worlds:
                 if image.width * image.height > 16_000_000:
                     raise ValueError("World textures must be bounded PNG, JPEG or WebP images")
                 image.verify()
-        except (OSError, Image.DecompressionBombError) as error:
+        except (OSError, SyntaxError, ValueError, TypeError, Image.DecompressionBombError) as error:
+            # Pillow reports damaged chunks as SyntaxError and some formats as ValueError.
+            if isinstance(error, ValueError) and str(error).startswith("World textures"):
+                raise
             raise ValueError("World texture is not a valid bounded image") from error
         name = hashlib.sha256(data).hexdigest() + ".image"
         path = self.assets / name
@@ -233,14 +314,49 @@ class Worlds:
         if path.exists():
             if not path.is_file() or path.stat().st_size != len(data) or path.read_bytes() != data:
                 raise ValueError("Stored world texture digest mismatch")
+            os.utime(path)  # Recently stored or reused textures are protected from reclaim.
             return str(path)
-        if sum(p.stat().st_size for p in self.assets.iterdir() if not p.is_symlink() and p.is_file()) + len(data) > 64 * 1024 * 1024:
+        if self._asset_bytes() + len(data) > 64 * 1024 * 1024:
+            self.reclaim_assets()
+        if self._asset_bytes() + len(data) > 64 * 1024 * 1024:
             raise ValueError("World texture storage exceeds its 64 MiB budget")
         if not path.exists():
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(data)
         return str(path)
+
+    def _asset_bytes(self):
+        return sum(p.stat().st_size for p in self.assets.iterdir() if not p.is_symlink() and p.is_file())
+
+    def reclaim_assets(self, grace_seconds=24 * 3600):
+        """Delete stored textures nothing references and nothing stored recently.
+
+        References are found textually in saved worlds, set-aside states and user
+        profiles. The grace period covers textures that were imported or fetched
+        but not yet applied, and images stored earlier in an in-progress bundle.
+        """
+        with self.lock:
+            candidates = {p.name: p for p in self.assets.iterdir()
+                          if re.fullmatch(r"[0-9a-f]{64}\.image", p.name) and p.is_file() and not p.is_symlink()}
+            referenced = {Path(o["resource"]).name for o in self.active["objects"]}
+            profiles = self.home.parent / "user-profiles"
+            sources = [*self.home.glob("*.json"), *self.home.glob("state.json.invalid-*"),
+                       *(profiles.rglob("*.json") if profiles.is_dir() else [])]
+            for path in sources:
+                try:
+                    if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+                        continue
+                    text = path.read_text(errors="ignore")
+                except OSError:
+                    return 0  # An unreadable source might reference anything; keep every texture.
+                referenced.update(name for name in candidates if name in text)
+            now, removed = time.time(), 0
+            for name, path in candidates.items():
+                if name not in referenced and now - path.stat().st_mtime >= grace_seconds:
+                    path.unlink()
+                    removed += 1
+            return removed
 
     def bundle(self, world):
         value, assets = copy.deepcopy(world), {}
@@ -267,24 +383,34 @@ class Worlds:
                         path.unlink()
                 raise
 
+    def check_bundle(self, value):
+        """Validate a portable scene completely without storing any texture."""
+        if isinstance(value, dict) and set(value) == {"world", "assets"}:
+            self._bundle_preview(migrate_world(value["world"]), value["assets"])
+        else:
+            validate_world(migrate_world(value))
+
+    def _bundle_preview(self, world, assets):
+        if not isinstance(world, dict) or not isinstance(world.get("objects"), list) or any(not isinstance(obj, dict) for obj in world["objects"]):
+            raise ValueError("Invalid bundled world document")
+        if not isinstance(assets, dict) or len(assets) > 32 or sum(len(v) for v in assets.values() if isinstance(v, str)) > 24 * 1024 * 1024:
+            raise ValueError("World texture bundle exceeds its budget")
+        # Asset references become their exact eventual private content paths.
+        preview = copy.deepcopy(world)
+        for obj in preview["objects"]:
+            resource = obj.get("resource", "")
+            if isinstance(resource, str) and resource.startswith("asset:"):
+                name = resource.removeprefix("asset:")
+                if name not in assets or not re.fullmatch(r"[0-9a-f]{64}\.image", name):
+                    raise ValueError("World texture bundle is incomplete")
+                obj["resource"] = str(self.assets / name)
+        validate_world(preview)
+
     def _import_bundle(self, value):
         if isinstance(value, dict) and set(value) == {"world", "assets"}:
-            world, assets = copy.deepcopy(value["world"]), value["assets"]
-            if not isinstance(world, dict) or not isinstance(world.get("objects"), list) or any(not isinstance(obj, dict) for obj in world["objects"]):
-                raise ValueError("Invalid bundled world document")
-            if not isinstance(assets, dict) or len(assets) > 32 or sum(len(v) for v in assets.values() if isinstance(v, str)) > 24 * 1024 * 1024:
-                raise ValueError("World texture bundle exceeds its budget")
-            # Validate the complete scene before materializing any image. Asset
-            # references become their exact eventual private content paths.
-            preview = copy.deepcopy(world)
-            for obj in preview["objects"]:
-                resource = obj.get("resource", "")
-                if isinstance(resource, str) and resource.startswith("asset:"):
-                    name = resource.removeprefix("asset:")
-                    if name not in assets or not re.fullmatch(r"[0-9a-f]{64}\.image", name):
-                        raise ValueError("World texture bundle is incomplete")
-                    obj["resource"] = str(self.assets / name)
-            validate_world(preview)
+            world, assets = migrate_world(value["world"]), value["assets"]
+            # Validate the complete scene before materializing any image.
+            self._bundle_preview(world, assets)
             replacements = {}
             for name, encoded in assets.items():
                 if not re.fullmatch(r"[0-9a-f]{64}\.image", name) or not isinstance(encoded, str):
@@ -299,7 +425,7 @@ class Worlds:
                         raise ValueError("World texture bundle is incomplete")
                     obj["resource"] = replacements[obj["resource"]]
             return validate_world(world)
-        return validate_world(value)
+        return validate_world(migrate_world(value))
 
     def image_search(self, query, limit):
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 300 or type(limit) is not int or not 1 <= limit <= 12:
@@ -324,74 +450,150 @@ class Worlds:
             identity = uuid.uuid4().hex
             result = {"id": identity, "title": page.get("title", "")[:300], "url": url,
                       "description_url": info.get("descriptionurl", ""), "license": clean("LicenseShortName"), "credit": clean("Artist") or clean("Credit")}
-            self.search_results[identity] = result
             results.append(result)
-        if len(self.search_results) > 100:
-            self.search_results = {r["id"]: r for r in results}
+        with self.lock:
+            for result in results:
+                self.search_results[result["id"]] = result
+            if len(self.search_results) > 100:
+                self.search_results = {r["id"]: r for r in results}
         return {"results": results, "source": "Wikimedia Commons", "query": query}
 
-    def dispatch(self, request):
+    def _saved(self, world_id):
+        path = self.home / (identifier(world_id) + ".json")
+        if world_id in RESERVED_WORLD_IDS or not path.is_file() or path.is_symlink():
+            raise ValueError("Saved world does not exist; read world_state for saved world IDs")
+        return validate_world(migrate_world(json.loads(path.read_text())))
+
+    def state(self):
+        """Compact model-facing view: every object's transform and appearance, text previews only."""
+        snapshot = self.snapshot()
+        return compact_state(snapshot)
+
+    def check(self, request):
+        """Validate a scene edit without applying it, so approval is never asked for a doomed call."""
         with self.lock:
             command = request["command"]
+            if command in {"world_create", "world_save", "world_load", "world_export", "world_style",
+                           "world_object_upsert", "world_object_remove", "world_get", "world_policy"}:
+                self._proposal(request)
+            elif command == "world_import":
+                self._room_for(uuid.uuid4().hex)
+                self.check_bundle(request["document"])
+
+    def _room_for(self, identity):
+        if not (self.home / (identity + ".json")).exists() and sum(1 for _ in self.home.glob("*.json")) - 1 >= MAX_SAVED_WORLDS:
+            raise ValueError(f"At most {MAX_SAVED_WORLDS} worlds can be saved")
+
+    def _proposal(self, request):
+        command = request["command"]
+        if command == "world_create":
+            value = validate_world(default_world(request["name"]))
+            self._room_for(value["id"])
+            return value
+        if command == "world_save":
+            return validate_world(request["world"])
+        if command in {"world_load", "world_export"}:
+            return self._saved(request["world_id"])
+        if command == "world_get":
+            obj = next((o for o in self.active["objects"] if o["id"] == request["object_id"]), None)
+            if obj is None:
+                raise ValueError("Scene object does not exist; read world_state for object IDs")
+            return obj
+        if command == "world_style":
+            theme, transitions, name = request.get("theme"), request.get("transitions"), request.get("name")
+            if theme is None and transitions is None and name is None:
+                raise ValueError("Provide a name, theme or transitions change")
+            if (theme is not None and not isinstance(theme, dict)) or (transitions is not None and not isinstance(transitions, dict)):
+                raise ValueError("Theme and transitions must be objects")
+            value = copy.deepcopy(self.active)
+            value["theme"].update(theme or {})
+            value["transitions"].update(transitions or {})
+            if name is not None:
+                value["name"] = name
+            return validate_world(value)
+        if command == "world_object_upsert":
+            patch = request["object"]
+            identity = patch.get("id") if isinstance(patch, dict) else None
+            objects = self.active["objects"]
+            index = next((i for i, o in enumerate(objects) if o["id"] == identity), None)
+            obj = merge_object(None if index is None else objects[index], patch, self.active["theme"]["accent"])
+            value = copy.deepcopy(self.active)
+            if index is None:
+                value["objects"].append(obj)
+            else:
+                value["objects"][index] = obj
+            return validate_world(value)
+        if command == "world_object_remove":
+            if not any(o["id"] == request["object_id"] for o in self.active["objects"]):
+                raise ValueError("Scene object does not exist; read world_state for object IDs")
+            value = copy.deepcopy(self.active)
+            value["objects"] = [o for o in value["objects"] if o["id"] != request["object_id"]]
+            return validate_world(value)
+        if command == "world_policy":
+            changes = request["changes"]
+            if not isinstance(changes, dict) or set(changes) != {"autonomous_scene"} or type(changes["autonomous_scene"]) is not bool:
+                raise ValueError("Invalid autonomous scene policy")
+            return dict(changes)
+        raise ValueError("Unknown world operation")
+
+    def dispatch(self, request):
+        command = request["command"]
+        # Network calls run outside the world lock so a slow Wikimedia request
+        # never blocks snapshots or scene edits.
+        if command == "world_image_search":
+            return self.image_search(request["query"], request["limit"])
+        if command == "world_asset_fetch":
+            with self.lock:
+                result = self.search_results.get(request["result_id"])
+            if result is None:
+                raise ValueError("Select an image from a current image search result")
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, *args, **kwargs):
+                    raise ValueError("World texture redirects are not permitted")
+            opener = urllib.request.build_opener(NoRedirect)
+            req = urllib.request.Request(result["url"], headers={"User-Agent": "MLX2Desktop/0.1"})
+            with opener.open(req, timeout=15) as response:
+                data = response.read(8 * 1024 * 1024 + 1)
+            with self.lock:
+                return {"resource": self.store_image(data), "attribution": result}
+        with self.lock:
+            if command == "world_state":
+                return self.state()
             if command == "world_get":
-                obj = next((o for o in self.active["objects"] if o["id"] == request["object_id"]), None)
-                if obj is None:
-                    raise ValueError("Scene object does not exist")
-                return {"object": copy.deepcopy(obj)}
-            if command == "world_style":
-                value = copy.deepcopy(self.active)
-                value.update(theme=request["theme"], transitions=request["transitions"])
-                self.active = validate_world(value)
-                self.persist()
-                return {"theme": value["theme"], "transitions": value["transitions"]}
-            if command == "world_image_search":
-                return self.image_search(request["query"], request["limit"])
+                return {"object": copy.deepcopy(self._proposal(request))}
             if command == "world_asset_import":
                 path = Path(request["path"]).expanduser()
                 if not path.is_absolute() or path.is_symlink() or not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
                     raise ValueError("Select a regular image file no larger than eight MiB")
                 return {"resource": self.store_image(path.read_bytes())}
-            if command == "world_asset_fetch":
-                result = self.search_results.get(request["result_id"])
-                if result is None:
-                    raise ValueError("Select an image from a current image search result")
-                class NoRedirect(urllib.request.HTTPRedirectHandler):
-                    def redirect_request(self, *args, **kwargs):
-                        raise ValueError("World texture redirects are not permitted")
-                opener = urllib.request.build_opener(NoRedirect)
-                req = urllib.request.Request(result["url"], headers={"User-Agent": "MLX2Desktop/0.1"})
-                with opener.open(req, timeout=15) as response:
-                    data = response.read(8 * 1024 * 1024 + 1)
-                return {"resource": self.store_image(data), "attribution": result}
-            if command == "world_create":
-                self.active = validate_world(default_world(request["name"]))
-            elif command in {"world_save", "world_import"}:
-                value = request["world"] if command == "world_save" else request["document"]
-                value = self.import_bundle(value) if command == "world_import" else validate_world(value)
-                if command == "world_import":
-                    value["id"] = uuid.uuid4().hex
+            if command == "world_export":
+                return {"document": self.bundle(self._proposal(request))}
+            if command == "world_import":
+                identity = uuid.uuid4().hex
+                self._room_for(identity)
+                value = self.import_bundle(request["document"])
+                value["id"] = identity
                 self.active = value
-            elif command in {"world_load", "world_export"}:
-                path = self.home / (identifier(request["world_id"]) + ".json")
-                value = validate_world(json.loads(path.read_text()))
-                if command == "world_export":
-                    return {"document": self.bundle(value)}
-                self.active = value
-            elif command == "world_object_upsert":
-                obj = validate_object(request["object"])
-                value = copy.deepcopy(self.active)
-                value["objects"] = [o for o in value["objects"] if o["id"] != obj["id"]] + [obj]
-                self.active = validate_world(value)
-            elif command == "world_object_remove":
-                value = copy.deepcopy(self.active)
-                value["objects"] = [o for o in value["objects"] if o["id"] != request["object_id"]]
-                self.active = validate_world(value)
             elif command == "world_policy":
-                changes = request["changes"]
-                if not isinstance(changes, dict) or set(changes) != {"autonomous_scene"} or type(changes["autonomous_scene"]) is not bool:
-                    raise ValueError("Invalid autonomous scene policy")
-                self.policy = dict(changes)
+                self.policy = self._proposal(request)
             else:
-                raise ValueError("Unknown world operation")
+                value = self._proposal(request)
+                self.active = value
+                if command == "world_style":
+                    self.persist()
+                    return {"name": value["name"], "theme": copy.deepcopy(value["theme"]), "transitions": copy.deepcopy(value["transitions"])}
             self.persist()
             return self.snapshot()
+
+
+def compact_state(snapshot):
+    active = snapshot["active"]
+    objects = []
+    for obj in active["objects"]:
+        row = {key: obj[key] for key in OBJECT_FIELDS if key not in {"text", "resource"}}
+        row["text_preview"] = obj["text"][:160]
+        row["has_resource"] = bool(obj["resource"])
+        objects.append(row)
+    return {"active": {"id": active["id"], "name": active["name"], "theme": active["theme"],
+                       "transitions": active["transitions"], "objects": objects},
+            "worlds": snapshot["worlds"], "policy": snapshot["policy"], "errors": snapshot.get("errors", [])}

@@ -4,6 +4,7 @@ import Foundation
 @MainActor enum LifecycleActions {
     static weak var detailsWindow: NSWindow?
     static var authorizedRestart = false
+    private static var fullscreenToggleScheduled = false
 
     static func mainWindow() -> NSWindow? {
         let windows = NSApp.windows.filter { !($0 is NSPanel) && $0.contentView != nil }
@@ -31,6 +32,9 @@ import Foundation
         guard let window else { return }
         if enterOnly && window.styleMask.contains(.fullScreen) { return }
         if exitOnly && !window.styleMask.contains(.fullScreen) { return }
+        // A second request inside the activation delay would toggle twice.
+        guard !fullscreenToggleScheduled else { return }
+        fullscreenToggleScheduled = true
         NSApp.setActivationPolicy(.regular)
         window.styleMask.insert(.resizable)
         window.collectionBehavior.remove([.fullScreenAuxiliary, .fullScreenNone, .auxiliary, .canJoinAllApplications])
@@ -40,6 +44,10 @@ import Foundation
         Task { @MainActor in
             // Key-window activation is delivered on the next AppKit turn.
             try? await Task.sleep(for: .milliseconds(150))
+            fullscreenToggleScheduled = false
+            // The window may have changed state during the delay (Esc, green button).
+            if enterOnly && window.styleMask.contains(.fullScreen) { return }
+            if exitOnly && !window.styleMask.contains(.fullScreen) { return }
             window.collectionBehavior.remove([.fullScreenAuxiliary, .fullScreenNone, .auxiliary, .canJoinAllApplications])
             window.collectionBehavior.insert([.fullScreenPrimary, .primary])
             window.toggleFullScreen(nil)

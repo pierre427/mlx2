@@ -1383,3 +1383,33 @@ def test_shutdown_releases_all_owners_even_when_first_subsystem_raises():
     with pytest.raises(RuntimeError, match='shutdown failed'):
         DesktopController.close(fake)
     assert set(calls) == set(names) | {'engine'}
+
+
+def test_model_world_edits_validate_before_approval_and_return_compact_state(controller):
+    controller.preferences.update(agent_controls=True)
+    session = chat_session(controller)
+    found = controller.dispatch({"command": "tool_call", "session_id": session, "name": "mlx2_tool_search",
+                                 "arguments": {"query": "world object upsert"}})["result"]
+    assert [t["function"]["name"] for t in found["tools"]] == ["mlx2__world_object_upsert"]
+    with pytest.raises(ValueError, match="Colors"):
+        tool(controller, session, "world_object_upsert", {"object": {"id": "chat", "color": "red"}})
+    edit = {"object": {"id": "notes", "kind": "memory", "shape": "cube", "position": [-3, 0, 0]}}
+    assert tool(controller, session, "world_object_upsert", edit)["requires_approval"]
+    result = tool(controller, session, "world_object_upsert", edit, approved=True)["result"]
+    assert result["active"]["objects"][-1]["id"] == "notes" and "text" not in result["active"]["objects"][-1]
+    state = tool(controller, session, "world_state", {})["result"]
+    assert [o["id"] for o in state["active"]["objects"]] == ["chat", "agent", "notes"]
+    assert tool(controller, session, "world_style", {"theme": {"exposure": 1.5}})["requires_approval"]
+
+
+def test_autonomous_scene_policy_never_saves_over_another_world_without_approval(controller):
+    import copy
+    controller.preferences.update(agent_controls=True)
+    session = chat_session(controller)
+    controller.world.dispatch({"command": "world_policy", "changes": {"autonomous_scene": True}})
+    active = copy.deepcopy(controller.world.active)
+    assert not tool(controller, session, "world_save", {"world": active}).get("requires_approval")
+    other = copy.deepcopy(active)
+    other["id"] = "another-world"
+    assert tool(controller, session, "world_save", {"world": other})["requires_approval"]
+    assert not tool(controller, session, "world_object_upsert", {"object": {"id": "chat", "label": "Moved"}}).get("requires_approval")

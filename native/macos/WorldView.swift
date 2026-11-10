@@ -121,7 +121,8 @@ private struct NativeWorldScene: NSViewRepresentable {
         if data != coordinator.document {
             coordinator.document = data
             view.scene?.background.contents = worldColor(world["theme"]["background"].text)
-            coordinator.camera.camera?.exposureOffset = (world["theme"]["exposure"].double ?? 1) - 1
+            // Exposure is a brightness multiplier; SceneKit's offset is in stops.
+            coordinator.camera.camera?.exposureOffset = CGFloat(log2(max(0.1, world["theme"]["exposure"].double ?? 1)))
             let rows = world["objects"].array
             let live = Set(rows.map { $0["id"].text })
             for node in view.scene?.rootNode.childNodes ?? [] {
@@ -204,8 +205,11 @@ private struct NativeWorldScene: NSViewRepresentable {
         material.isDoubleSided = true
         return material
     }
+    // Stored textures are content-addressed, so a path always names the same image.
+    private static let textureCache = NSCache<NSString, NSImage>()
     private func grantedTexture(_ path: String) -> NSImage? {
         guard !assetRoot.isEmpty, path.hasPrefix("/") else { return nil }
+        if let cached = Self.textureCache.object(forKey: path as NSString), FileManager.default.fileExists(atPath: path) { return cached }
         let root = URL(fileURLWithPath: assetRoot).standardizedFileURL
         let file = URL(fileURLWithPath: path).standardizedFileURL
         guard root == root.resolvingSymlinksInPath(), file == file.resolvingSymlinksInPath(),
@@ -213,8 +217,10 @@ private struct NativeWorldScene: NSViewRepresentable {
               let properties = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
               properties.isRegularFile == true, properties.isSymbolicLink != true,
               let size = properties.fileSize, size > 0, size <= 8 * 1024 * 1024,
-              let data = try? Data(contentsOf: file), data.count <= 8 * 1024 * 1024 else { return nil }
-        return NSImage(data: data)
+              let data = try? Data(contentsOf: file), data.count <= 8 * 1024 * 1024,
+              let image = NSImage(data: data) else { return nil }
+        Self.textureCache.setObject(image, forKey: path as NSString)
+        return image
     }
     private func texture(_ row: JSON) -> NSImage {
         let image = NSImage(size: NSSize(width: 960, height: 600))
@@ -306,6 +312,10 @@ struct WorldView: View {
     @State private var speaking = false
     @State private var confirmRemove = false
     @State private var searchedQuery: String?
+    // Server copies the inspector and appearance fields were loaded from. Apply
+    // sends only fields the operator changed, so concurrent agent edits survive.
+    @State private var loadedObject = JSON()
+    @State private var loadedWorld = JSON()
     private let kinds = ["chat", "memory", "knowledge", "web", "file", "folder", "avatar", "media"]
     private var state: JSON { model.snapshot["world"] }
     private var world: JSON { state["active"] }
@@ -372,9 +382,32 @@ struct WorldView: View {
         }
         .onReceive(sensors.$isSpeaking) { speaking = $0 }
         .onChange(of: worldDocumentData(world)) { _, _ in
-            if pendingObjectID == selection && selected["id"].string != nil { loadInspector(); pendingObjectID = nil }
+            if let current = selection, selected["id"].string == nil, current != pendingObjectID {
+                // The selected object was removed (by the agent or elsewhere).
+                selection = world["objects"].array.first(where: { $0["kind"].text == "chat" })?["id"].string
+            } else if pendingObjectID == selection && selected["id"].string != nil {
+                loadInspector(); pendingObjectID = nil
+            } else if selection != nil, selected["id"].string != nil,
+                      let pending = inspectorChanges(relativeTo: loadedObject), let live = inspectorChanges(relativeTo: selected),
+                      Set(pending.keys).isDisjoint(with: live.keys) {
+                // Every operator edit is already live (applied, or none made): show the current object.
+                loadInspector()
+            }
+            if let pending = worldControlChanges(relativeTo: loadedWorld), let live = worldControlChanges(relativeTo: world),
+               Set(pending.keys).isDisjoint(with: live.keys) {
+                loadWorldControls()
+            }
         }
         .onChange(of: selection) { _, _ in loadInspector() }
+        .onChange(of: model.busy) { _, busy in
+            // perform reports a refused request in model.error before clearing busy.
+            guard !busy, model.error != nil else { return }
+            if let pending = pendingObjectID, selection == pending, selected["id"].string == nil {
+                pendingObjectID = nil
+                selection = world["objects"].array.first(where: { $0["kind"].text == "chat" })?["id"].string
+            }
+            if selectedWorld != world["id"].text { selectedWorld = world["id"].text }
+        }
         .onChange(of: world["id"].string) { _, identity in
             selectedWorld = identity ?? ""
             selection = world["objects"].array.first(where: { $0["kind"].text == "chat" })?["id"].string
@@ -397,7 +430,9 @@ struct WorldView: View {
             Picker("World", selection: $selectedWorld) {
                 ForEach(state["worlds"].array, id: \.worldIdentity) { item in Text(item["name"].text).tag(item["id"].text) }
             }.frame(maxWidth: 220).onChange(of: selectedWorld) { _, identity in
-                if !identity.isEmpty && identity != world["id"].text { model.perform("world_load", ["world_id": identity]) }
+                if !identity.isEmpty && identity != world["id"].text && !model.perform("world_load", ["world_id": identity]) {
+                    selectedWorld = world["id"].text
+                }
             }
             Menu {
                 ForEach(kinds, id: \.self) { item in Button("Add \(item.capitalized)") { addObject(item) } }
@@ -408,7 +443,6 @@ struct WorldView: View {
             Spacer(minLength: 0)
             Menu {
                 Button("Create world") { model.perform("world_create", ["name": newWorldName]) }.disabled(newWorldName.trimmingCharacters(in: .whitespaces).isEmpty)
-                Button("Save world") { model.perform("world_save", ["world": world.raw]) }
                 Divider()
                 Button("Import world JSON…") { importWorld() }
                 Button("Export world JSON…") { exportWorld() }
@@ -564,6 +598,7 @@ struct WorldView: View {
         ["chat": "bubble.left", "memory": "brain", "knowledge": "books.vertical", "web": "globe", "file": "doc", "folder": "folder", "avatar": "person.crop.circle", "media": "photo.on.rectangle"][kind] ?? "cube"
     }
     private func loadWorldControls() {
+        loadedWorld = world
         activeName = world["name"].string ?? "My world"
         background = world["theme"]["background"].string ?? "#071321"
         accent = world["theme"]["accent"].string ?? "#38CBFF"
@@ -571,17 +606,32 @@ struct WorldView: View {
         transitionDuration = String(world["transitions"]["duration"].double ?? 0.6)
         transitionStyle = world["transitions"]["style"].string ?? "ease"
     }
+    private func worldControlChanges(relativeTo base: JSON) -> [String: Any]? {
+        guard let exposure = Double(exposure), exposure.isFinite, let duration = Double(transitionDuration), duration.isFinite else { return nil }
+        var request: [String: Any] = [:]
+        let name = activeName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name != base["name"].text { request["name"] = name }
+        var theme: [String: Any] = [:]
+        if background != base["theme"]["background"].text { theme["background"] = background }
+        if accent != base["theme"]["accent"].text { theme["accent"] = accent }
+        if exposure != base["theme"]["exposure"].double { theme["exposure"] = exposure }
+        if !theme.isEmpty { request["theme"] = theme }
+        var transitions: [String: Any] = [:]
+        if transitionStyle != base["transitions"]["style"].text { transitions["style"] = transitionStyle }
+        if duration != base["transitions"]["duration"].double { transitions["duration"] = duration }
+        if !transitions.isEmpty { request["transitions"] = transitions }
+        return request
+    }
     private func applyWorldControls() {
-        guard var document = world.raw as? [String: Any], let exposure = Double(exposure), exposure.isFinite,
-              let duration = Double(transitionDuration), duration.isFinite else { localError = "World appearance needs finite exposure and duration."; return }
-        document["name"] = activeName
-        document["theme"] = ["background": background, "accent": accent, "exposure": exposure]
-        document["transitions"] = ["style": transitionStyle, "duration": duration]
-        model.perform("world_save", ["world": document])
+        guard let request = worldControlChanges(relativeTo: loadedWorld) else { localError = "World appearance needs finite exposure and duration."; return }
         localError = nil
+        if !request.isEmpty { model.perform("world_style", request) }
     }
     private func loadInspector() {
         guard selection != nil else { return }
+        // A just-added object keeps the fields addObject set until it arrives.
+        if selected["id"].string == nil && selection == pendingObjectID { return }
+        loadedObject = selected
         label = selected["label"].string ?? ""
         kind = selected["kind"].string ?? "chat"
         shape = selected["shape"].string ?? "panel"
@@ -600,24 +650,60 @@ struct WorldView: View {
         guard parts.count == 3, parts.allSatisfy({ $0?.isFinite == true }) else { return nil }
         return parts.compactMap { $0 }
     }
+    private func numbers(_ value: JSON, fallback: Double) -> [Double] { (0..<3).map { value[$0].double ?? fallback } }
+    /// Inspector fields that differ from `base`; nil when a field does not parse.
+    private func inspectorChanges(relativeTo base: JSON) -> [String: Any]? {
+        guard let position = parseVector(position), let rotation = parseVector(rotation), let scale = parseVector(scale),
+              let speed = Double(speed), speed.isFinite else { return nil }
+        var changes: [String: Any] = [:]
+        for (key, value) in [("label", label), ("kind", kind), ("shape", shape), ("color", color), ("text", text), ("resource", resource)]
+            where value != base[key].text { changes[key] = value }
+        if position != numbers(base["position"], fallback: 0) { changes["position"] = position }
+        if rotation != numbers(base["rotation"], fallback: 0) { changes["rotation"] = rotation }
+        if scale != numbers(base["scale"], fallback: 1) { changes["scale"] = scale }
+        if animation != base["animation"]["kind"].text || speed != base["animation"]["speed"].double {
+            changes["animation"] = ["kind": animation, "speed": speed]
+        }
+        return changes
+    }
     private func applyObject() {
-        guard let selection, let position = parseVector(position), let rotation = parseVector(rotation), let scale = parseVector(scale), let speed = Double(speed), speed.isFinite else {
+        guard let selection else { return }
+        let exists = selected["id"].string != nil
+        guard exists || selection == pendingObjectID else {
+            localError = "This object is no longer in the world."; return
+        }
+        guard var object = inspectorChanges(relativeTo: loadedObject) else {
             localError = "Transforms need three comma-separated numbers and a finite animation speed."; return
         }
         localError = nil
-        model.perform("world_object_upsert", ["object": ["id": selection, "kind": kind, "label": label, "shape": shape,
-            "position": position, "rotation": rotation, "scale": scale, "color": color, "text": text,
-            "resource": resource, "animation": ["kind": animation, "speed": speed]]])
+        guard !object.isEmpty else { return }
+        object["id"] = selection
+        if !exists { object["kind"] = kind }
+        model.perform("world_object_upsert", ["object": object])
     }
     private func addObject(_ kind: String) {
         let identity = UUID().uuidString.lowercased()
         let count = world["objects"].array.count
-        model.perform("world_object_upsert", ["object": ["id": identity, "kind": kind, "label": kind.capitalized,
+        let object: [String: Any] = ["id": identity, "kind": kind, "label": kind.capitalized,
             "shape": kind == "avatar" ? "sphere" : "panel", "position": [Double((count % 5) - 2) * 3.7, 0, Double(count / 5) * -3],
             "rotation": [0, 0, 0], "scale": [1, 1, 1], "color": "#38CBFF", "text": "", "resource": "",
-            "animation": ["kind": "none", "speed": 1]]])
+            "animation": ["kind": "none", "speed": 1]]
+        guard model.perform("world_object_upsert", ["object": object]) else { return }
         pendingObjectID = identity
         selection = identity
+        let added = JSON(object)
+        loadedObject = added
+        self.kind = kind
+        label = added["label"].text
+        shape = added["shape"].text
+        position = vectorString(added["position"], fallback: 0)
+        rotation = vectorString(added["rotation"], fallback: 0)
+        scale = vectorString(added["scale"], fallback: 1)
+        color = added["color"].text
+        text = ""
+        resource = ""
+        animation = "none"
+        speed = "1"
     }
     private func leaveFullScreen() {
         LifecycleActions.toggleFullscreen(exitOnly: true)

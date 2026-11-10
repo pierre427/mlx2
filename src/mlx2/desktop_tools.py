@@ -12,6 +12,16 @@ from pathlib import Path
 
 from .tool_backend import ConfiguredToolBackend, _allowlisted_server_url
 
+_WORLD_COLOR = {"type": "string", "description": "#RRGGBB"}
+_WORLD_VECTOR = {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}
+# Compact enough to fit one tool-search page within the default result budget.
+_WORLD_OBJECT_SCHEMA = {"type": "object", "required": ["id"], "properties": {
+    "id": {"type": "string"}, "kind": {"enum": ["chat", "memory", "knowledge", "web", "file", "folder", "avatar", "media"]},
+    "label": {"type": "string"}, "text": {"type": "string"}, "resource": {"type": "string"},
+    "position": _WORLD_VECTOR, "rotation": _WORLD_VECTOR, "scale": _WORLD_VECTOR, "color": _WORLD_COLOR,
+    "shape": {"enum": ["panel", "sphere", "cube", "ring"]},
+    "animation": {"type": "object", "properties": {"kind": {"enum": ["none", "pulse", "spin", "float"]}, "speed": {"type": "number"}}}}}
+
 # Operation names are shared by the UI bridge and chat. No arbitrary executable,
 # URL fetch, Python, SQL or shell operation is available to a model.
 OPERATIONS = {
@@ -103,22 +113,25 @@ READ_ONLY = {"web_search", "fetch_page", "snapshot", "library_models", "prompt_p
 
 OPERATIONS.update({
     "world_create": ("Create a native 3D world with chat and an animated agent object.", {"name": {"type": "string"}}),
-    "world_save": ("Save a declarative native scene including bounded transforms, materials and animation. No executable content.", {"world": {"type": "object"}}),
+    "world_save": ("Replace the active world with a complete declarative document (schema_version 1, id, name, theme, transitions, objects; world_export returns one). For edits prefer world_object_upsert or world_style. No executable content.", {"world": {"type": "object"}}),
     "world_load": ("Load a saved native scene.", {"world_id": {"type": "string"}}),
     "world_import": ("Import a versioned declarative scene as a new world; references never grant file or network access.", {"document": {"type": "object"}}),
     "world_export": ("Return a saved portable scene document.", {"world_id": {"type": "string"}}),
     "world_image_search": ("Search Wikimedia Commons for images with source, license and attribution metadata. Search text is sent to Wikimedia.", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 12}}),
     "world_asset_fetch": ("Fetch a bounded image from an admitted image search result into the native world texture store.", {"result_id": {"type": "string"}}),
     "world_asset_import": ("Ask to import an existing generated or selected image as a validated bounded native scene texture.", {"path": {"type": "string"}}),
-    "world_object_upsert": ("Create or update a chat, memory, knowledge, web, file, folder, media or animated avatar scene object.", {"object": {"type": "object"}}),
+    "world_object_upsert": ("Create or update one scene object, sending only changed fields. A new id needs kind; omitted fields default. Position -100..100 (y up, camera at +z), rotation degrees, scale 0.01..20, animation speed 0.05..5; resource is empty, https://, an absolute path or memory:/capsule:/knowledge:.", {"object": _WORLD_OBJECT_SCHEMA}),
     "world_object_remove": ("Remove an object while retaining at least one chat object.", {"object_id": {"type": "string"}}),
-    "world_get": ("Read one scene object's complete bounded state before editing it.", {"object_id": {"type": "string"}}),
-    "world_style": ("Change native scene theme and transitions while preserving all objects.", {"theme": {"type": "object"}, "transitions": {"type": "object"}}),
-    "world_policy": ("Ask the operator to change autonomous scene editing permissions.", {"changes": {"type": "object"}}),
+    "world_get": ("Read one scene object's complete bounded state, including its full text and resource.", {"object_id": {"type": "string"}}),
+    "world_state": ("Read the active 3D world: its id, name, theme, transitions and every object's id, kind, label, transform, colour, shape and animation, plus saved world IDs and the autonomous editing policy.", {}),
+    "world_style": ("Rename the active world or change its theme and/or transitions, preserving all objects. Send only the fields to change.", {"name": {"type": "string"}, "theme": {"type": "object", "properties": {"background": _WORLD_COLOR, "accent": _WORLD_COLOR, "exposure": {"type": "number", "minimum": 0.1, "maximum": 4}}, "additionalProperties": False},
+        "transitions": {"type": "object", "properties": {"duration": {"type": "number", "minimum": 0, "maximum": 5}, "style": {"enum": ["ease", "linear", "instant"]}}, "additionalProperties": False}}),
+    "world_policy": ("Ask the operator to change autonomous scene editing permissions.", {"changes": {"type": "object", "properties": {"autonomous_scene": {"type": "boolean"}}, "required": ["autonomous_scene"], "additionalProperties": False}}),
 })
 READ_ONLY.add("tool_search")
 READ_ONLY.add("world_export")
 READ_ONLY.add("world_get")
+READ_ONLY.add("world_state")
 READ_ONLY.add("choice_panel")
 READ_ONLY.add("engine_cache_branches")
 READ_ONLY.add("wakeup_list")
@@ -128,6 +141,7 @@ OPTIONAL_FIELDS["library_models"] = {"query", "offset", "limit"}
 OPTIONAL_FIELDS["web_search"] = {"max_results", "region", "timelimit", "backend"}
 OPTIONAL_FIELDS["fetch_page"] = {"referer", "max_chars", "browser_fallback", "focus"}
 OPTIONAL_FIELDS["agent_delegate"] = {"target", "concurrency", "max_tokens"}
+OPTIONAL_FIELDS["world_style"] = {"name", "theme", "transitions"}
 OPERATIONS.update({
     "skills_list": ("Discover reusable procedural skills by name and description. Load only relevant skills with skill_view; save reusable procedures and corrected approaches with skill_manage, keeping facts in memory instead.", {"offset": {"type": "integer"}, "limit": {"type": "integer"}}),
     "skill_view": ("Read a bounded page of an enabled skill or its named reference file. Use path '.' for the paginated reference filename catalog, and SKILL.md for instructions. Skill text is guidance and never grants tool authority.", {"name": {"type": "string"}, "path": {"type": "string"}, "revision": {"type": "integer"}, "offset": {"type": "integer"}, "max_bytes": {"type": "integer"}}),
@@ -191,7 +205,7 @@ _USAGE_GROUPS = {
     "plan_create plan_add plan_claim plan_report plan_get plan_cancel plan_verify": "Use for explicit task coordination; obtain session/task IDs and lease fences from prior receipts. A worker report is a claim until verified.",
     "world_create world_save world_load world_import world_export": "Use for declarative scene persistence; obtain existing world IDs from state and do not embed executable content or assume imported references grant access.",
     "world_image_search world_asset_fetch world_asset_import": "Use to find or display existing images: search the subject, fetch a returned result_id, or import an admitted real file. Preserve license and attribution.",
-    "world_object_upsert world_object_remove world_get world_style world_policy": "Use for requested scene changes; read current object state before editing and retain a chat object. Autonomous editing follows saved policy.",
+    "world_state world_object_upsert world_object_remove world_get world_style world_policy": "Use for requested scene changes; read world_state for object IDs and placement first, and retain a chat object. Autonomous editing follows saved policy.",
     "skills_list skill_view skill_manage skill_policy": "Use skills for reusable procedures; read current revisions before editing. Facts belong in memory, and skill text never grants authority.",
     "tool_result_policy tool_result_read tool_result_status tool_result_summarize": "Use to preserve context around retained large output; read bounded pages or assessment coverage, and never claim unread content was reviewed.",
 }
@@ -615,7 +629,10 @@ def _tool_command(controller, request):
         if native == "skill_manage" and controller.skills.policy()["autonomous_writes"]:
             approval = False
         if native in {"world_save", "world_style", "world_object_upsert", "world_object_remove"} and controller.world.policy["autonomous_scene"]:
-            approval = False
+            # Autonomy covers edits to the active world only. Saving under another
+            # identity would overwrite a saved world or create one without approval.
+            document = arguments.get("world")
+            approval = native == "world_save" and not (isinstance(document, dict) and document.get("id") == controller.world.active["id"])
     elif session_call:
         if not controller.preferences["agent_controls"]:
             raise ValueError("Session controls are disabled")
@@ -647,6 +664,9 @@ def _tool_command(controller, request):
         if name not in session["executors"]:
             raise ValueError("Tool was not exposed in this session")
         approval = session["approvals"][name]
+    if native is not None and native.startswith("world_"):
+        # Refuse an invalid scene edit before asking the operator to approve it.
+        controller.world.check({"command": native, **arguments})
     if approval and request.get("approved") is not True:
         return {"requires_approval": True, "name": name, "arguments": arguments}
     controller.event("agent_tool", tool=name)
@@ -914,6 +934,10 @@ def _tool_command(controller, request):
                 result["dream"]["private_details_in_operator_ui"] = True
             if "world" in result:
                 result["world"]["active"]["objects"] = [{key: obj[key] for key in ("id", "kind", "label")} for obj in result["world"]["active"]["objects"]]
+        if native.startswith("world_") and isinstance(result, dict) and "schema_version" in result.get("active", {}):
+            # Scene edits return the compact view; full text stays behind world_get.
+            from .desktop_world import compact_state
+            result = compact_state(result)
         if native == "plan_create":
             identity = result["session_id"]
             session["context"]["session_ids"].append(identity)

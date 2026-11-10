@@ -122,8 +122,8 @@ def test_stored_world_autonomy_must_not_treat_string_false_as_true(tmp_path):
     document = json.loads(path.read_text())
     document["policy"]["autonomous_scene"] = "false"
     path.write_text(json.dumps(document))
-    with pytest.raises(ValueError, match="explicitly boolean"):
-        Worlds(SimpleNamespace(home=tmp_path))
+    # A non-boolean grant never enables autonomy, and it does not stop the app starting.
+    assert Worlds(SimpleNamespace(home=tmp_path)).policy == {"autonomous_scene": False}
 
 
 @pytest.mark.parametrize('document', ['{', '[]', '{"id":"broken","name":"broken"}'])
@@ -147,6 +147,7 @@ def test_texture_reuse_does_not_charge_storage_twice(tmp_path):
     Image.new('RGB', (4, 4), 'blue').save(stream, format='PNG')
     data = stream.getvalue()
     resource = worlds.store_image(data)
+    worlds.dispatch({"command": "world_object_upsert", "object": {"id": "agent", "resource": resource}})
     with (worlds.assets / 'other-fixture').open('wb') as output:
         output.truncate(64 * 1024 * 1024 - len(data))
     assert worlds.store_image(data) == resource
@@ -187,3 +188,156 @@ def test_rejected_bundle_does_not_leave_orphan_textures_or_change_scene(tmp_path
         worlds.import_bundle({"world": valid, "assets": {name: base64.b64encode(raw).decode(), bad_name: base64.b64encode(b"not an image").decode()}})
     assert list(worlds.assets.iterdir()) == []
     assert worlds.snapshot()["active"] == before
+
+
+def test_partial_object_edits_merge_in_place_and_new_objects_take_defaults(tmp_path):
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    worlds.dispatch({"command": "world_object_upsert", "object": {"id": "notes", "kind": "memory", "shape": "cube",
+                                                                  "animation": {"kind": "spin"}}})
+    notes = worlds.dispatch({"command": "world_get", "object_id": "notes"})["object"]
+    assert notes["label"] == "notes" and notes["scale"] == [1, 1, 1] and notes["animation"] == {"kind": "spin", "speed": 1}
+    worlds.dispatch({"command": "world_object_upsert", "object": {"id": "chat", "position": [0, 1, 0]}})
+    assert [o["id"] for o in worlds.active["objects"]] == ["chat", "agent", "notes"]
+    assert worlds.active["objects"][0]["label"] == "Chat" and worlds.active["objects"][0]["position"] == [0, 1, 0]
+    with pytest.raises(ValueError, match="needs a kind"):
+        worlds.dispatch({"command": "world_object_upsert", "object": {"id": "ghost"}})
+    with pytest.raises(ValueError, match="unexpected.*script|Unexpected.*script"):
+        worlds.dispatch({"command": "world_object_upsert", "object": {"id": "notes", "script": "x"}})
+
+
+def test_missing_targets_and_reserved_identities_fail_without_leaking_paths(tmp_path):
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    before = json.loads((tmp_path / "worlds/state.json").read_text())
+    for request in ({"command": "world_object_remove", "object_id": "nope"},
+                    {"command": "world_load", "world_id": "nope"},
+                    {"command": "world_export", "world_id": "nope"},
+                    {"command": "world_load", "world_id": "state"},
+                    {"command": "world_create", "name": "   "}):
+        with pytest.raises(ValueError) as error:
+            worlds.dispatch(request)
+        assert str(tmp_path) not in str(error.value)
+    for reserved in ("state", "assets"):
+        document = copy.deepcopy(worlds.active)
+        document["id"] = reserved
+        with pytest.raises(ValueError, match="reserved"):
+            worlds.dispatch({"command": "world_save", "world": document})
+    assert json.loads((tmp_path / "worlds/state.json").read_text()) == before
+
+
+def test_style_accepts_partial_changes_and_state_is_compact(tmp_path):
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    worlds.dispatch({"command": "world_object_upsert", "object": {"id": "chat", "text": "x" * 4000}})
+    result = worlds.dispatch({"command": "world_style", "theme": {"background": "#000000"}})
+    assert result["theme"] == {"background": "#000000", "accent": "#38CBFF", "exposure": 1}
+    assert result["transitions"] == {"duration": 0.6, "style": "ease"}
+    with pytest.raises(ValueError):
+        worlds.dispatch({"command": "world_style"})
+    state = worlds.dispatch({"command": "world_state"})
+    chat = state["active"]["objects"][0]
+    assert chat["position"] == [0, 0, 0] and len(chat["text_preview"]) == 160 and "text" not in chat
+    assert state["worlds"] == [{"id": worlds.active["id"], "name": "My world"}]
+
+
+def test_full_texture_store_reclaims_only_unreferenced_images(tmp_path):
+    from PIL import Image
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    def png(colour):
+        stream = io.BytesIO()
+        Image.new("RGB", (4, 4), colour).save(stream, format="PNG")
+        return stream.getvalue()
+    kept = worlds.store_image(png("blue"))
+    orphan = worlds.store_image(png("green"))
+    recent = worlds.store_image(png("yellow"))
+    profiled = worlds.store_image(png("white"))
+    (tmp_path / "user-profiles").mkdir()
+    (tmp_path / "user-profiles" / "p.json").write_text(json.dumps({"world": {"resource": profiled}}))
+    worlds.dispatch({"command": "world_object_upsert", "object": {"id": "agent", "resource": kept}})
+    import os
+    old = 0  # Older than the grace period.
+    for path in (kept, orphan, profiled):
+        os.utime(path, (old, old))
+    with (worlds.assets / "other-fixture").open("wb") as output:
+        output.truncate(64 * 1024 * 1024 - sum(len(png(c)) for c in ("blue", "yellow", "white", "red")))
+    worlds.store_image(png("red"))
+    assert not Path(orphan).exists()
+    assert Path(kept).exists() and Path(recent).exists() and Path(profiled).exists()
+
+
+def test_damaged_generated_image_does_not_break_artifact_sync(tmp_path):
+    shared = tmp_path / "shared-media"
+    shared.mkdir()
+    damaged = shared / "bad.png"
+    from PIL import Image
+    stream = io.BytesIO()
+    Image.new("RGB", (4, 4), "blue").save(stream, format="PNG")
+    data = bytearray(stream.getvalue())
+    data[-20] ^= 0xFF  # corrupt the IDAT checksum
+    damaged.write_bytes(bytes(data))
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    job = {"id": "a" * 32, "kind": "media", "state": "completed", "result": {"path": str(damaged)}, "spec": {"capability": "image"}}
+    assert worlds.sync_artifacts([job])
+    assert worlds.active["objects"][-1]["resource"] == str(damaged)
+
+
+def test_artifacts_are_represented_once_across_worlds_and_partial_jobs_are_revisited(tmp_path):
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    partial = {"id": "b" * 32, "kind": "document", "state": "partial", "result": {"path": "/tmp/one.txt"}}
+    worlds.sync_artifacts([partial])
+    worlds.sync_artifacts([{**partial, "state": "completed", "result": {"paths": [{"path": "/tmp/one.txt"}, {"path": "/tmp/two.txt"}]}}])
+    assert [o["label"] for o in worlds.active["objects"][2:]] == ["one.txt", "two.txt"]
+    worlds.dispatch({"command": "world_create", "name": "Fresh"})
+    assert not worlds.sync_artifacts([{**partial, "state": "completed"}])
+    assert len(worlds.active["objects"]) == 2
+
+
+@pytest.mark.parametrize("active", [{"name": "   "}, {"id": "state"}, {"objects": []}])
+def test_startup_migrates_or_sets_aside_a_rejected_active_world(tmp_path, active):
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    path = worlds.home / "state.json"
+    document = json.loads(path.read_text())
+    document["active"].update(active)
+    path.write_text(json.dumps(document))
+    reloaded = Worlds(SimpleNamespace(home=tmp_path))
+    validate_world(reloaded.active)
+    if "objects" in active:
+        assert list(worlds.home.glob("state.json.invalid-*")) and reloaded.snapshot()["errors"]
+
+
+def test_autonomous_save_covers_only_the_active_world_and_saved_worlds_are_capped(tmp_path, monkeypatch):
+    from mlx2 import desktop_world
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    monkeypatch.setattr(desktop_world, "MAX_SAVED_WORLDS", 2)
+    worlds.dispatch({"command": "world_create", "name": "Two"})
+    with pytest.raises(ValueError, match="At most 2"):
+        worlds.dispatch({"command": "world_create", "name": "Three"})
+
+
+def test_removed_artifact_objects_stay_removed_even_for_partial_jobs(tmp_path):
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    job = {"id": "c" * 32, "kind": "document", "state": "partial", "result": {"path": "/tmp/part.txt"}}
+    worlds.sync_artifacts([job])
+    identity = worlds.active["objects"][-1]["id"]
+    worlds.dispatch({"command": "world_object_remove", "object_id": identity})
+    worlds.sync_artifacts([job])
+    assert all(o["id"] != identity for o in worlds.active["objects"])
+    worlds.dispatch({"command": "world_create", "name": "Other"})
+    worlds.sync_artifacts([job])
+    assert len(worlds.active["objects"]) == 2
+
+
+def test_saved_and_bundled_worlds_from_earlier_releases_still_load(tmp_path):
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    legacy = default_world("   ")  # Earlier releases accepted blank names.
+    (worlds.home / (legacy["id"] + ".json")).write_text(json.dumps(legacy))
+    assert worlds.dispatch({"command": "world_load", "world_id": legacy["id"]})["active"]["name"] == "My world"
+    imported = worlds.dispatch({"command": "world_import", "document": {"world": default_world(" "), "assets": {}}})
+    assert imported["active"]["name"] == "My world"
+
+
+def test_import_is_checked_before_approval_without_storing_textures(tmp_path):
+    worlds = Worlds(SimpleNamespace(home=tmp_path))
+    with pytest.raises(ValueError, match="incomplete"):
+        world = default_world()
+        world["objects"][1]["resource"] = "asset:" + "0" * 64 + ".image"
+        worlds.check({"command": "world_import", "document": {"world": world, "assets": {}}})
+    assert not list(worlds.assets.iterdir())

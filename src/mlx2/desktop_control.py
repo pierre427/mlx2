@@ -567,7 +567,7 @@ class DesktopController:
             return self.research.dispatch(request)
         if command and command.startswith("world_"):
             result = self.world.dispatch(request)
-            if command not in {"world_get", "world_export", "world_image_search", "world_asset_fetch", "world_asset_import"}:
+            if command not in {"world_get", "world_state", "world_export", "world_image_search", "world_asset_fetch", "world_asset_import"}:
                 self.user_profiles.autosave()
             return result
         if command and command.startswith("capsule_"):

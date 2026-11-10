@@ -57,7 +57,8 @@ struct ChatToolEvent: Identifiable {
                       "message_post": "Send a peer message", "message_read": "Read peer messages", "message_ack": "Acknowledge a message",
                       "web_search": "Search the web", "fetch_page": "Read a web page", "agent_result": "Read agent report", "agent_fork": "Fork an agent", "agent_delegate": "Delegate work", "agent_launch": "Launch an agent", "agent_resume": "Resume an agent",
                       "agent_request_tools": "Request additional tools", "preferences": "Update settings", "snapshot": "Inspect application state",
-                      "research_search": "Search sources", "research_read": "Read a source", "world_save": "Save the world", "world_object_upsert": "Update a world object"]
+                      "research_search": "Search sources", "research_read": "Read a source", "world_save": "Save the world", "world_object_upsert": "Update a world object",
+                      "world_object_remove": "Remove a world object", "world_style": "Change the world appearance", "world_state": "Read the world"]
         return titles[actual] ?? titles[short] ?? short.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ").capitalized
     }
     var statusTitle: String {

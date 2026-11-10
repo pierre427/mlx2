@@ -19,7 +19,10 @@ struct HistoryPoint: Identifiable {
     @Published var search = ""
     @Published var selection: String?
     @Published var selectedServerURL: String?
-    @Published var section = "Chat"
+    @Published var section = "Chat" {
+        // Back from World returns wherever World was opened from, sidebar included.
+        didSet { if section == "World" && oldValue != "World" { worldReturnSection = oldValue } }
+    }
     @Published var expandedChatImage: ChatExpandedImage?
     @Published var worldReturnSection = "Chat"
     @Published var logs = ""
@@ -191,14 +194,15 @@ struct HistoryPoint: Identifiable {
         }
     }
 
-    func perform(_ command: String, _ arguments: [String: Any] = [:]) {
+    /// Returns false when the request was refused before it was sent.
+    @discardableResult func perform(_ command: String, _ arguments: [String: Any] = [:]) -> Bool {
         guard !busy else {
             error = "Another operation is in progress. Wait for it to finish, then try again."
-            return
+            return false
         }
         if ["user_profile_create", "user_profile_switch"].contains(command) && chat.generating {
             error = "Stop the current reply before switching user profiles."
-            return
+            return false
         }
         busy = true
         Task {
@@ -218,6 +222,7 @@ struct HistoryPoint: Identifiable {
             busy = false
             await refresh()
         }
+        return true
     }
 
     func request(_ command: String, _ arguments: [String: Any] = [:]) async throws -> JSON {
