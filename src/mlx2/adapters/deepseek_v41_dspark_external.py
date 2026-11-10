@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Request-local embedded V4.1 draft state and exact linear target verification."""
 
+import copy
 import hashlib
 import json
 from types import SimpleNamespace
@@ -163,9 +164,42 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
         return float(DEFAULT_DRAFT_COST if self._draft_cost is None else self._draft_cost)
 
     def draft_distributions(self, anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs):
+        ledger = self._verify_ledger(cache)
+        committed = int(hidden.shape[1]) if len(getattr(hidden, "shape", ())) == 3 else 0
+        self._record_verify(ledger.close(committed))
         if self.admission != "off" and proposal_length:
-            return self._admitted_draft(anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs)
-        return self._scheduled_draft(anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs)
+            result = self._admitted_draft(anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs)
+        else:
+            result = self._scheduled_draft(anchors, hidden, cache, proposal_length, rngs, temperatures, **kwargs)
+        ledger.open(min(len(result[0][0]) if result[0] else 0, 5) + 1)
+        return result
+
+    def _verify_ledger(self, cache):
+        # Request-local, like the miss gate: lives on this request's draft plane.
+        from .deepseek_v41_dspark_verify_ledger import VerifyExpertLedger
+        plane = cache[0]
+        ledger = getattr(plane, "_mlx2_dspark_verify_ledger", None)
+        if ledger is None:
+            stream = getattr(getattr(self.backbone, "target_weights", None), "expert_stream", None)
+            ledger = VerifyExpertLedger(getattr(stream, "stats", None),
+                                        timed=getattr(self, "verify_schedule", "fixed") == "survival_miss_v1")
+            plane._mlx2_dspark_verify_ledger = ledger
+        return ledger
+
+    def _record_verify(self, delta):
+        """Process-lifetime expert loads per verify width (bounded integer counters)."""
+        if delta is None:
+            return
+        stats = self.__dict__.setdefault("verify_expert_stats", {})
+        width = str(delta["width"])
+        stats["rounds"] = stats.get("rounds", 0) + 1
+        stats["verify_rows"] = stats.get("verify_rows", 0) + delta["width"]
+        for key in ("expert_acquisitions", "expert_loads", "miss_bytes"):
+            stats[key] = stats.get(key, 0) + delta[key]
+            per = stats.setdefault(key + "_by_width", {})
+            per[width] = per.get(width, 0) + delta[key]
+        per = stats.setdefault("rounds_by_width", {})
+        per[width] = per.get(width, 0) + 1
 
     def _admission_gate(self, cache):
         # Request-local: the gate lives on this request's draft cache plane.
@@ -212,10 +246,30 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
         if self.verify_schedule == "fixed" or not tokens[0]:
             return tokens, laws
         from .deepseek_v41_dspark_schedule import choose
-        confidence = self.adaptive_confidence_features[0][:len(tokens[0])]
-        k, receipt = choose(confidence, maximum=len(tokens[0]), costs=self.schedule_costs,
-                            draft_cost=self.schedule_draft_cost)
         stats = self.schedule_stats
+        costs = self.schedule_costs
+        if self.verify_schedule == "survival_miss_v1":
+            ledger = self._verify_ledger(cache)
+            if ledger.needs_plain_probe():
+                stats["miss_probe_rounds"] = stats.get("miss_probe_rounds", 0) + 1
+                stats["rounds"] = stats.get("rounds", 0) + 1
+                stats["proposed"] = stats.get("proposed", 0) + len(tokens[0])
+                stats["verify_drafts_0"] = stats.get("verify_drafts_0", 0) + 1
+                return [tokens[0][:0]], [laws[0][:0]]
+            from .deepseek_v41_dspark_verify_ledger import miss_priced_costs
+            stream = getattr(self.backbone.target_weights, "expert_stream", None)
+            if ledger.needs_speculative_probe():
+                pricing = {"priced": False, "reason": "speculative_reprobe"}
+                stats["miss_speculative_probe_rounds"] = stats.get("miss_speculative_probe_rounds", 0) + 1
+            else:
+                costs, pricing = miss_priced_costs(costs, ledger, fallback_stats=getattr(stream, "stats", None))
+            key = "miss_priced_rounds" if pricing["priced"] else "miss_unpriced_rounds"
+            stats[key] = stats.get(key, 0) + 1
+            if pricing["priced"]:
+                stats["last_miss_pricing"] = pricing
+        confidence = self.adaptive_confidence_features[0][:len(tokens[0])]
+        k, receipt = choose(confidence, maximum=len(tokens[0]), costs=costs,
+                            draft_cost=self.schedule_draft_cost)
         stats["rounds"] = stats.get("rounds", 0) + 1
         stats["proposed"] = stats.get("proposed", 0) + len(tokens[0])
         stats["scheduled"] = stats.get("scheduled", 0) + k
@@ -262,9 +316,14 @@ class DeepSeekV41DSparkDraftModel(DeepSeekV4DSparkDraftModel):
                                  " <= useful_tokens/plain_tokens_per_second (request-measured EWMAs)",
                 "admission_observations": dict(self.admission_stats)}),
             **({} if self.verify_schedule == "fixed" else {
-                "verify_schedule_law": "argmax_k (1+sum_j<=k prod_i<=j sigmoid(c_i))/(draft_cost+cost[k+1])",
+                "verify_schedule_law": "argmax_k (1+sum_j<=k prod_i<=j sigmoid(c_i))/(draft_cost+cost[k+1])"
+                + ("; cost[w]+=(w-1)*measured_miss_bytes_per_extra_row/bandwidth/plain_round_s"
+                   if self.verify_schedule == "survival_miss_v1" else ""),
                 "verify_costs": self.schedule_costs, "draft_cost": self.schedule_draft_cost,
                 "schedule_observations": dict(self.schedule_stats)}),
+            # Bounded counters: target expert loads per closed verify round,
+            # by verify width (deepseek_v41_dspark_verify_ledger).
+            "verify_expert_observations": copy.deepcopy(getattr(self, "verify_expert_stats", {})),
             "arithmetic_rows": 1,
             "packed_ast": False,
             "sampling": "greedy_only",

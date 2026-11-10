@@ -36,6 +36,8 @@ def test_source_policy_choices_are_explicit_and_reference_default(key,tmp_path):
             policy['deepseek_source_dense_qat']='fused_fp32'
         if key=='deepseek_source_ffn_input' and value!='reference':
             policy.update(deepseek_source_dense_qat='fused_fp32',deepseek_source_expert_math='routed_fused_fp32')
+        if key=='deepseek_source_shared_middle' and value!='reference':
+            policy['deepseek_source_dense_qat']='fused_fp32'
         if key=='deepseek_source_hc_mega' and value!='reference':
             policy['deepseek_source_hc_coefficients']='fused_fp32'
         if key=='deepseek_source_attention_math' and value!='reference':

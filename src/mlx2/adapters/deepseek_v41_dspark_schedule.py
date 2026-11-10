@@ -15,7 +15,12 @@ provenance/deepseek-v41-dspark-chain-verify.json.
 """
 import math
 
-POLICIES = ("fixed", "survival_v1")
+POLICIES = ("fixed", "survival_v1", "survival_miss_v1")
+# survival_miss_v1: survival_v1 plus the request's measured expert-miss cost
+# per extra verify row (deepseek_v41_dspark_verify_ledger.miss_priced_costs).
+# Opt-in, unqualified: built because DSpark at 95-98% acceptance lost to
+# ordinary decode on the streamed-expert checkpoint (2026-10-28); untested on
+# the checkpoint. Its first rounds verify width one to measure plain cost.
 # Relative w-row verify cost, w = 1..6 (one ordinary target token = 1.0).
 # Serial width-one rows cost w. Lockstep multirow reuses post-attention dense
 # coefficients and the head (about 8.7 of 14.3 GB per token on the resident
@@ -31,7 +36,7 @@ DEFAULT_DRAFT_COST = 0.35
 
 def validate(policy, costs=None, draft_cost=None):
     if policy not in POLICIES:
-        raise ValueError("DSpark verify schedule must be fixed or survival_v1")
+        raise ValueError("DSpark verify schedule must be fixed, survival_v1 or survival_miss_v1")
     if costs is not None:
         if (not isinstance(costs, (list, tuple)) or len(costs) != 6
                 or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0 for v in costs)
@@ -41,7 +46,7 @@ def validate(policy, costs=None, draft_cost=None):
                                    or not math.isfinite(draft_cost) or draft_cost < 0):
         raise ValueError("DSpark draft cost must be a finite nonnegative number")
     if policy == "fixed" and (costs is not None or draft_cost is not None):
-        raise ValueError("DSpark verify costs require survival_v1")
+        raise ValueError("DSpark verify costs require survival_v1 or survival_miss_v1")
 
 
 def survival(confidence_logits):

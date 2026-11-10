@@ -172,7 +172,9 @@ def test_policy_default_choice_and_fail_closed_combinations():
     assert source_policy({KEY: POLICY})[KEY] == POLICY
     with pytest.raises(ValueError, match='invalid Source policy'):
         source_policy({KEY: 'expert_major'})
-    for extra in ({'deepseek_ced': 'dependency_exact'},
+    # dependency_exact CED now composes (test_deepseek_v41_source_layer_major_ced_cpu).
+    assert source_policy({KEY: POLICY, 'deepseek_ced': 'dependency_exact'})['deepseek_ced'] == 'dependency_exact'
+    for extra in ({'deepseek_vision': 'enabled'},
                   {'deepseek_source_prefill_partition': 'canonical_m1_v1'},
                   {'deepseek_kv_storage': 'native_packed'},
                   {'deepseek_source_frame_reuse': 'prefill_v1', 'deepseek_source_prefill_batch': 'gate_up',

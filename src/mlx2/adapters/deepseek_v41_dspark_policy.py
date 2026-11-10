@@ -20,6 +20,13 @@ def split_chain_policy(value, *, embedded):
             chain["deepseek_dspark_verify_costs"] = [float(v) for v in chain["deepseek_dspark_verify_costs"]]
     if value.get("deepseek_verify_rows") == LOCKSTEP:
         chain["deepseek_verify_rows"] = value.pop("deepseek_verify_rows")
+    if "deepseek_verify_moe_rows" in value:
+        from .deepseek_v41_dspark_chain_moe import POLICIES as MOE_ROWS
+        moe_rows = value.pop("deepseek_verify_moe_rows")
+        if moe_rows not in MOE_ROWS:
+            raise ValueError("deepseek_verify_moe_rows must be reference or m1_rows_v1")
+        if moe_rows != "reference":
+            chain["deepseek_verify_moe_rows"] = moe_rows
     if "deepseek_dspark_admission" in value:
         from .deepseek_v41_dspark_miss_gate import OFF, validate as validate_admission
         admission = validate_admission(value.pop("deepseek_dspark_admission"))
@@ -31,6 +38,9 @@ def split_chain_policy(value, *, embedded):
 
 
 def validate_chain_policy(policy):
+    if policy.get("deepseek_verify_moe_rows", "reference") != "reference":
+        if policy.get("deepseek_verify_rows", "serial") != LOCKSTEP:
+            raise ValueError("deepseek_verify_moe_rows=m1_rows_v1 requires deepseek_verify_rows=lockstep_multirow_v1")
     if policy.get("deepseek_verify_rows", "serial") != LOCKSTEP:
         return
     if policy.get("draft_model") != "embedded_dspark" and not policy.get("ast_prompt_lookup"):

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""CPU metadata scope for defaults measured on one Source precision map.
+"""CPU metadata scope for defaults measured on the Source precision profiles.
 
 This guard selects no defaults itself. The adapter constructor still validates
 all artifact, expert-file, numeric-profile and capacity contracts. Cache budgets
@@ -58,8 +58,22 @@ def default_route_policy_filter(route,policy,operator_policy):
     return result
 
 
+def _merged_policy_valid(route,operator_policy):
+    """Validate the merged policy the server would select; raises on invalid."""
+    # Import only when the completed class calls its guard. Explicit operator
+    # values win; never recurse through registry resolution.
+    from .deepseek_v41_source import DeepSeekV41SourceAdapter, source_policy
+    namespace=vars(DeepSeekV41SourceAdapter)
+    candidate=default_route_policy_filter(route,namespace.get('default_route_execution_policy',{}).get(route,{}),operator_policy)
+    owned=namespace.get('adapter_owned_default_policy_keys',frozenset())
+    merged={**candidate,**operator_policy}
+    source_policy({key:value for key,value in merged.items()if key in owned})
+    return True
+
+
 def default_route_policy_applies(route,operator_policy):
-    """Recognize exactly the measured ordinary Source/Hot60/Q1g64 profile."""
+    """Recognize the measured ordinary Source profiles: exact original-MXFP4
+    LFU at any cache budget, or the Hot60/Q1g64 precision map."""
     if route!='ordinary'or type(operator_policy)is not dict:return False
     # These are independent serving/state/resource profiles, outside the
     # ordinary adaptive B1 evidence for the selected kernel defaults.
@@ -82,7 +96,19 @@ def default_route_policy_applies(route,operator_policy):
     if operator_policy.get('deepseek_source_prefill_partition','adaptive_v1')not in ('adaptive_v1','position_grid_v1'):return False
     if operator_policy.get('draft_model')is not None or operator_policy.get('ast_prompt_lookup',False)is not False:return False
     expert=operator_policy.get('deepseek_source_experts')
-    if type(expert)is not dict or expert.get('mode')!='hot_original_q1':return False
+    if type(expert)is not dict or expert.get('mode')not in ('original_lfu','hot_original_q1'):return False
+    if expert['mode']=='original_lfu':
+        # Exact original MXFP4 codes (Pierre 2026-11-08, "yes as long as it's
+        # not a regression"): on c30fd25e at c18fef602 the bundle decoded the
+        # 18-prompt held-out replay at 2.42 vs 1.72 tok/s with 18/18 identical
+        # replies, and GSM8K-20 ordinary at 3.16 vs 1.34 tok/s, accuracy 0.70
+        # in both arms. Cache budget, retention and I/O options select which
+        # experts are resident, never their arithmetic. Evidence:
+        # output/ds41-source-20261108/{replay,gsm8k}/bundle_*.
+        try:
+            return _merged_policy_valid(route,operator_policy)
+        except (OSError,ValueError,TypeError,OverflowError,RecursionError):
+            return False
     # Exact split pools and a live maximum keep the measured precision law;
     # dynamic precision is a different, approximate numerical profile.
     if expert.get('residency','shared_v1')=='dynamic_precision_v1':return False
@@ -90,15 +116,7 @@ def default_route_policy_applies(route,operator_policy):
     names=('hotset_path','q1_root')
     if any(type(expert.get(name))is not str or not Path(expert[name]).is_absolute()for name in names):return False
     try:
-        # Import only when the completed class calls its guard. Validate the
-        # same merged adapter policy the server would select, with explicit
-        # operator values winning; never recurse through registry resolution.
-        from .deepseek_v41_source import DeepSeekV41SourceAdapter, source_policy
-        namespace=vars(DeepSeekV41SourceAdapter)
-        candidate=default_route_policy_filter(route,namespace.get('default_route_execution_policy',{}).get(route,{}),operator_policy)
-        owned=namespace.get('adapter_owned_default_policy_keys',frozenset())
-        merged={**candidate,**operator_policy}
-        source_policy({key:value for key,value in merged.items()if key in owned})
+        if not _merged_policy_valid(route,operator_policy):return False
         hot=_metadata(Path(expert['hotset_path']),1<<20)
         if hot is None:return False
         raw,mapping=hot

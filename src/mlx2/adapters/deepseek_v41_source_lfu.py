@@ -27,15 +27,33 @@ Q1_REVISION = 'source-q1-affine-g64-lloyd4-f16-v1'
 ORIGINAL_BYTES = 18800640
 Q1_BYTES = 6635520
 RETENTION_KEYS = {'retention', 'retention_half_life', 'direct_reads'}
+# Opt-in streaming keys (deepseek_v41_source_stream.py; provenance/
+# deepseek-v41-source-expert-lookahead.json). All lossless: the router still
+# selects every expert; these change only what stays resident and when bytes
+# are read. implemented_untested_unqualified until the GPU A/B in that file.
+#   retention=cycle_aware_v1  K3.1 sim: 3-25% fewer misses than LRU below one
+#     token's working set (1%: 1101 vs 1472 misses/token); none at 50% cache.
+#   retention_alpha / retention_sample  EMA rate (0.1 = sim optimum) and the
+#     sampled victim-set size (0 = full scan).
+#   lookahead_depth 1..4 / lookahead_heads  overlap_v1 hints for layers
+#     L+1..L+d, optionally with trained ridge heads (K3.1 recall@16 trained
+#     d1 .79, d2 .72, d4 .65 vs untrained .72/.62/.54). Depth > 1 needs
+#     loader=priority_v1: a FIFO channel queued demand behind predictions.
+#   storage_tiers=accounting_v1 / tier_declared  per-tier miss/byte/time
+#     counters (RAM, internal NVMe, remote layer, external T7).
+STREAM_KEYS = {'retention_alpha', 'retention_sample', 'lookahead_depth', 'lookahead_heads', 'loader',
+               'storage_tiers', 'tier_declared'}
+RETENTION_POLICIES = ('lifetime_lfu', 'decayed_lfu_v1', 'cycle_aware_v1')
 
 def parse_policy(value, *, adaptive=True):
     """Validate the default adaptive profile or an explicit fixed-pool transition."""
     if type(adaptive)is not bool:raise ValueError('Source expert residency mode must be boolean')
-    if not isinstance(value,dict) or set(value)-{'mode','budget_bytes','hot_bytes','q1_root','hotset_path','atlas_path','preheat'}-residency.RESIDENCY_KEYS-RETENTION_KEYS:
+    if not isinstance(value,dict) or set(value)-{'mode','budget_bytes','hot_bytes','q1_root','hotset_path','atlas_path','preheat'}-residency.RESIDENCY_KEYS-RETENTION_KEYS-STREAM_KEYS:
         raise ValueError('invalid Source expert LFU policy')
     result=dict(value)
-    if result.get('retention', 'lifetime_lfu') not in ('lifetime_lfu', 'decayed_lfu_v1'):
+    if result.get('retention', 'lifetime_lfu') not in RETENTION_POLICIES:
         raise ValueError('invalid Source expert retention policy')
+    _parse_stream_keys(result)
     if ('retention_half_life' in result and result.get('retention') != 'decayed_lfu_v1'
             or type(result.get('retention_half_life',64)) is not int
             or not 1 <= result.get('retention_half_life',64) <= 65536):
@@ -67,9 +85,28 @@ def parse_policy(value, *, adaptive=True):
         for key in ('q1_root','hotset_path'):
             if not isinstance(result.get(key),str) or not Path(result[key]).is_absolute():
                 raise ValueError('hybrid expert policy requires absolute Q1 and hotset paths')
-    elif set(result)-{'mode','budget_bytes','atlas_path','preheat','cache_maximum','live_reserve_bytes'}-RETENTION_KEYS:
+    elif set(result)-{'mode','budget_bytes','atlas_path','preheat','cache_maximum','live_reserve_bytes'}-RETENTION_KEYS-STREAM_KEYS:
         raise ValueError('original-only LFU cannot accept Q1 options')
     return result
+
+def _parse_stream_keys(result):
+    from .deepseek_v41_source_stream import CycleAwareIndex, parse_lookahead, TIER_RANKS
+    if ('retention_alpha' in result or 'retention_sample' in result) and result.get('retention')!='cycle_aware_v1':
+        raise ValueError('retention_alpha/retention_sample require cycle_aware_v1')
+    if result.get('retention')=='cycle_aware_v1':
+        CycleAwareIndex(1,alpha=result.get('retention_alpha',0.1),sample=result.get('retention_sample',64))
+    parse_lookahead(result)
+    if result.get('storage_tiers','off') not in ('off','accounting_v1'):
+        raise ValueError('Source storage_tiers must be off or accounting_v1')
+    declared=result.get('tier_declared')
+    if declared is not None and (result.get('storage_tiers')!='accounting_v1' or not isinstance(declared,dict)
+            or any(not isinstance(k,str) or v not in TIER_RANKS for k,v in declared.items())):
+        raise ValueError('tier_declared requires accounting_v1 and maps names/prefixes to known tiers')
+
+def lookahead_requested(policy):
+    """True when the policy asks for anything only overlap_v1 can serve."""
+    return (policy.get('lookahead_depth',1)!=1 or policy.get('lookahead_heads') is not None
+            or policy.get('loader','fifo')!='fifo')
 
 def _host_available():
     from ..memory import host_available_bytes
@@ -243,6 +280,16 @@ class LFUSourceExpertStore(SourceExpertStore):
             self.policy=policy;self.index=LFUIndex();self.hot=frozenset();self.q1_root=None;self.q1_records={};self.q1_binding=None
             if policy.get('retention') == 'decayed_lfu_v1':
                 self.index = DecayedLFUIndex(policy.get('retention_half_life',64))
+            elif policy.get('retention') == 'cycle_aware_v1':
+                from .deepseek_v41_source_stream import CycleAwareIndex
+                self.index = CycleAwareIndex(len(self.tables),alpha=policy.get('retention_alpha',0.1),
+                                             sample=policy.get('retention_sample',64))
+            self.tier_accounting=None
+            if policy.get('storage_tiers')=='accounting_v1':
+                from .deepseek_v41_source_stream import TierChain, TierAccounting
+                tensors=artifact['tensors']
+                self.tier_accounting=TierAccounting(TierChain.for_source(artifact,
+                    lambda key:dict.fromkeys(tensors[n]['file'] for n in expert_names(*key)),policy.get('tier_declared')))
             if policy.get('direct_reads',False) and (not packed_buffers or self.expert_overlap_enabled()):
                 raise ValueError('direct expert reads require packed buffers and synchronous I/O')
             self.payload_ceiling=self.cache_budget_bytes-ORIGINAL_BYTES
@@ -539,17 +586,21 @@ class LFUSourceExpertStore(SourceExpertStore):
             transient=getattr(self,'_prefill_transient',None)
             if transient and key[0]!=self._prefill_transient_layer:
                 self._clear_prefill_transient();transient=None
+            tiers=getattr(self,'tier_accounting',None)
             if key in self._cache:
                 arrays=self._cache[key];self.stats['cache_hits']+=1;self.stats[kind+'_hits']+=1
+                if tiers is not None:tiers.hit()
                 shield=getattr(self,'_prefill_shield',None)
                 if shield is not None and key in shield:self.stats['prefill_shield_retained_hits']+=1
             elif transient and key in transient:
                 # protect_decode_v1: a same-layer stream-through object; the
                 # identical bytes an ordinary miss would upload again.
                 arrays=transient[key];self.stats['cache_hits']+=1;self.stats[kind+'_hits']+=1
+                if tiers is not None:tiers.hit()
                 self.stats['prefill_transient_hits']+=1
             else:
                 size=Q1_BYTES if kind=='q1' else ORIGINAL_BYTES;insert=self._admit_miss(key,size)
+                miss_started=time.perf_counter_ns() if tiers is not None else 0
                 # _read_expert owns demand_wait_ns; overlap_v1 may consume an
                 # early read of these exact bytes instead of reading now.
                 if self.policy.get('direct_reads',False) and kind=='original':
@@ -575,6 +626,9 @@ class LFUSourceExpertStore(SourceExpertStore):
                 self.stats['cache_misses']+=1;self.stats[kind+'_misses']+=1;self.stats['uploaded_experts']+=1;self.stats['upload_batches']+=1
                 read_size=self.q1_records[key]['size'] if kind=='q1' else size
                 self.stats['bytes_read']+=read_size;self.stats[kind+'_bytes_read']+=read_size
+                if tiers is not None and kind=='original':
+                    # Wall time includes upload; Q1 sidecars live outside the shard map.
+                    tiers.miss(key,read_size,time.perf_counter_ns()-miss_started)
             self.index.touch(key)
             if len(self.index.heap)>max(1024,4*len(self._cache)):
                 self.index.heap=[(self.index.counts[k],self.index.last[k],k) for k in self._cache]
@@ -911,6 +965,13 @@ class LFUSourceExpertStore(SourceExpertStore):
             'half_life_observations':self.policy.get('retention_half_life',64),
             'atlas_counts':'lifetime', 'decay_state':'process-local'}
         result['direct_reads_original']=self.policy.get('direct_reads',False)
+        from .deepseek_v41_source_stream import CycleAwareIndex
+        if isinstance(self.index,CycleAwareIndex):
+            result['retention'].update(alpha=self.index.alpha,sample=self.index.sample,
+                position_layer=self.index.position,counters=dict(self.index.counters),
+                status='implemented_untested_unqualified')
+        if getattr(self,'tier_accounting',None) is not None:
+            result['storage_tiers']=self.tier_accounting.receipt()
         if self._split_active():result['pool_capacity_policy']='split_kind_pools_adaptive'
         if self._dynamic():
             result.update(hot_budget_role='dynamic_precision_seed_only',

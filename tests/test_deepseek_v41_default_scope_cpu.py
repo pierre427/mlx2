@@ -41,8 +41,25 @@ def test_other_routes_do_not_read_files(route,monkeypatch):
 
 
 @pytest.mark.parametrize('policy',[None,{}, {'deepseek_source_experts':{'mode':'original_lfu'}},
+    {'deepseek_source_experts':{'mode':'original_lfu','budget_bytes':1}},
+    {'deepseek_source_experts':{'mode':'q2'}},
     {'deepseek_source_experts':{'mode':'hot_original_q1','hot_bytes':60_000_000_000,'hotset_path':'relative','q1_root':'relative'}}])
-def test_missing_foreign_or_original_profile_gets_no_defaults(policy):
+def test_missing_foreign_or_invalid_profile_gets_no_defaults(policy):
+    assert defaults.default_route_policy_applies('ordinary',policy)is False
+
+
+@pytest.mark.parametrize('extra',[{}, {'retention':'cycle_aware_v1'}, {'retention':'decayed_lfu_v1'}])
+def test_exact_original_lfu_gets_bundle_at_any_cache_cap(extra,monkeypatch):
+    # Measured 2026-11-08 on c30fd25e: identical replies, faster decode.
+    monkeypatch.setattr(defaults,'_metadata',lambda *a:pytest.fail('original_lfu needs no metadata reads'))
+    for cap in (32<<30,75_000_000_000):
+        policy={'deepseek_source_experts':{'mode':'original_lfu','budget_bytes':cap,**extra}}
+        assert defaults.default_route_policy_applies('ordinary',policy)is True
+        assert defaults.default_route_policy_applies('external_draft',policy)is False
+    policy={'deepseek_source_experts':{'mode':'original_lfu','budget_bytes':32<<30},
+            'deepseek_source_expert_math':'reference'}
+    assert defaults.default_route_policy_applies('ordinary',policy)is False
+    policy={'deepseek_source_experts':{'mode':'original_lfu','budget_bytes':32<<30},'draft_model':'embedded_dspark'}
     assert defaults.default_route_policy_applies('ordinary',policy)is False
 
 
@@ -258,3 +275,21 @@ def test_default_filter_may_only_drop_keys(narrow):
         default_route_policy_filter=staticmethod(narrow)
     with pytest.raises(ValueError,match='only drop'):
         resolution(Narrowing).default_execution_policy('ordinary',operator_policy={'bound':True})
+
+
+def test_original_lfu_drops_only_dependent_default_for_overridden_prerequisite():
+    policy={'deepseek_source_experts':{'mode':'original_lfu','budget_bytes':32<<30},
+            'deepseek_source_hc_coefficients':'reference'}
+    assert defaults.default_route_policy_applies('ordinary',policy)is True
+    from mlx2.adapters.deepseek_v41_source import DeepSeekV41SourceAdapter
+    bundle=DeepSeekV41SourceAdapter.default_route_execution_policy['ordinary']
+    assert 'deepseek_source_hc_mega' not in defaults.default_route_policy_filter('ordinary',bundle,policy)
+
+
+def test_m1_rows_requires_explicit_fused_expert_math_at_parse_time():
+    from mlx2.adapters.deepseek_v41_source import source_policy
+    base={'draft_model':'embedded_dspark','num_draft':3,'deepseek_verify_rows':'lockstep_multirow_v1','deepseek_verify_commit':'local_frontier',
+          'deepseek_verify_moe_rows':'m1_rows_v1'}
+    with pytest.raises(ValueError,match='routed_fused_fp32'):
+        source_policy(base)
+    assert source_policy({**base,'deepseek_source_expert_math':'routed_fused_fp32'})['deepseek_verify_moe_rows']=='m1_rows_v1'

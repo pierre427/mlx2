@@ -36,7 +36,7 @@ _POST_ATTENTION = re.compile(r"blk\.\d+\.(attn_output_b|ffn_gate_inp|ffn_down_sh
 
 
 def _post_attention(kind, name):
-    return kind in ("grouped", "gate_up") or (
+    return kind in ("grouped", "gate_up", "moe") or (
         kind == "linear" and type(name) is str and _POST_ATTENTION.fullmatch(name) is not None)
 
 
@@ -117,6 +117,16 @@ class SourceRowsExecutor:
                or x.shape != xs[0].shape for x in xs):
             raise _Decline
         return xs
+
+    def _moe(self, parks):
+        # deepseek_verify_moe_rows=m1_rows_v1 only (LockstepRows installs the
+        # moe site only then): one acquisition per distinct expert per layer.
+        from . import deepseek_v41_dspark_chain_moe as rows_moe
+        try:
+            return rows_moe.rows_moe(self.weights, parks, self.stats)
+        except rows_moe.Decline:
+            self._bump("moe_declines")
+            raise _Decline from None
 
     def _qmv(self, prepared, name):
         import mlx.core as mx
@@ -240,8 +250,9 @@ class _Decline(Exception):
 class LockstepRows:
     """Greenlet scheduler; one ordinary row body per greenlet, row order kept."""
 
-    def __init__(self, weights, executor):
+    def __init__(self, weights, executor, *, moe_rows=False):
         self.weights, self.executor = weights, executor
+        self.moe_rows = bool(moe_rows)
         self._rows = {}
         self._hooks = {}
 
@@ -265,8 +276,8 @@ class LockstepRows:
 
     def install(self):
         w = self.weights
-        originals = {name: getattr(w, name) for name in ("linear", "grouped", "gate_up", "paired_project")
-                     if hasattr(w, name)}
+        names = ("linear", "grouped", "gate_up", "paired_project") + (("moe",) if self.moe_rows else ())
+        originals = {name: getattr(w, name) for name in names if hasattr(w, name)}
         if any(name in vars(w) for name in originals):
             raise ValueError("lockstep verification found an existing weights override")
         scheduler = self
@@ -281,6 +292,10 @@ class LockstepRows:
             w.grouped = lambda x, name, **k: scheduler.park("grouped", name, originals["grouped"], (x, name), k)
         if "gate_up" in originals:
             w.gate_up = lambda x, g, u, **k: scheduler.park("gate_up", (g, u), originals["gate_up"], (x, g, u), k)
+        if "moe" in originals:
+            # Routed MoE follows the row's router and touches no cache state.
+            w.moe = lambda x, ids, scores, prefix, **k: scheduler.park(
+                "moe", prefix, originals["moe"], (x, ids, scores, prefix), k)
         if "paired_project" in originals:
             w.paired_project = lambda x, a, b, **k: scheduler.park(
                 "paired", (a, b), originals["paired_project"], (x, a, b), k)
@@ -396,7 +411,9 @@ def _verify(model, inputs, cache, capture_layers, retain_frontiers, executor):
     c, width = model.args, inputs.shape[1]
     stats = getattr(model, "verified_commit_stats", None)
     stats = {} if stats is None else stats
-    lockstep = LockstepRows(model.weights, executor or SourceRowsExecutor(model.weights, stats))
+    from .deepseek_v41_dspark_chain_moe import LAW as MOE_ROWS
+    lockstep = LockstepRows(model.weights, executor or SourceRowsExecutor(model.weights, stats),
+                            moe_rows=getattr(model, "verify_moe_rows_policy", "reference") == MOE_ROWS)
     hashes, tails = None, []
     if model.hasher:
         tail = np.asarray(cache[0].hash_tail)
@@ -496,5 +513,6 @@ def _verify(model, inputs, cache, capture_layers, retain_frontiers, executor):
 @lru_cache(maxsize=1)
 def implementation_identity():
     root = Path(__file__).resolve().parents[1]
-    paths = (Path(__file__), root / "runtime/gguf/source_multirow_dense.py")
+    paths = (Path(__file__), root / "runtime/gguf/source_multirow_dense.py",
+             Path(__file__).with_name("deepseek_v41_dspark_chain_moe.py"))
     return hashlib.sha256(b"".join(hashlib.sha256(p.read_bytes()).digest() for p in paths)).hexdigest()

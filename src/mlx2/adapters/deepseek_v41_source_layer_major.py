@@ -20,9 +20,27 @@ used by layerwise verification). Only execution order changes. The profile is
 nevertheless salted with a distinct identity and remains unqualified; APCv2 stays
 disabled exactly as under ``adaptive_v1``.
 
-Fail closed: CED, vision, DSpark/AST, resident banks, canonical partitions,
+Fail closed: vision, DSpark/AST, resident banks, canonical partitions,
 native packed KV, frame/row-packet reuse, physical batching and drafts refuse.
 Provenance: provenance/deepseek-v41-source-layer-major-prefill.json.
+
+Exact CED composition (opt-in, unqualified)
+-------------------------------------------
+With ``deepseek_ced=dependency_exact`` the dependency prefill of a wave runs
+every sub-chunk exactly as chunk-major CED would run it as its own call with
+``step`` = the sub-chunk size: a sub-chunk followed by at least one dependency
+cone of rows (``deepseek_ced_state_only=after_cone_v1``) skips every layer
+above the barrier (20 of 40 at production geometry), and every other
+sub-chunk runs its own dependency starts above the barrier. Only the order
+changes, so logits and every cache plane are bitwise equal to that
+chunk-major CED program (CPU synthetic tests). This is the exact counterpart
+of the approximate ``yoco_v1`` skip: the cone (~2.4K rows) replaces its
+140-row tail. Rows *after* a sub-chunk inside the same wave are in the same
+call by construction, so in-wave state-only chunks engage even when the
+serving scheduler feeds one prefill-step slice per call (where chunk-major
+state-only sees rows_after 0 and never engages). Counters:
+``source_layer_major_ced_*``. Provenance:
+provenance/deepseek-v41-source-layer-major-ced-20261108.json.
 """
 import hashlib
 from copy import copy
@@ -41,8 +59,15 @@ MAX_WAVE_ROWS = 16384
 WAVE_ROW_BYTES = 256 << 10
 WAVE_SAFETY_BYTES = 4 << 30
 
+# Prompt slice the adapter prefers under this policy when the operator gives
+# none (prefill_step_default). At Source geometry cold experts stream from
+# SSD and a wave reads each layer's routed bank about once, whatever its
+# length, so cold-expert bytes per prompt row fall roughly with wave length.
+# The live wave is still bounded by wave_rows() (memory) at every call.
+DEFAULT_WAVE_ROWS = MAX_WAVE_ROWS
+CED_POLICY = 'dependency_exact'
+
 _REFUSED = (
-    ('deepseek_ced', 'reference'),
     ('deepseek_vision', 'reference'),
     ('deepseek_kv_storage', 'reference'),
     ('deepseek_physical_batch', 'b1'),
@@ -61,7 +86,7 @@ _REFUSED = (
 def implementation_identity():
     root = Path(__file__).resolve().parents[1]
     names = ('adapters/deepseek_v41_source_layer_major.py', 'runtime/models/deepseek_v41.py',
-             'runtime/models/deepseek_v41_cache.py')
+             'runtime/models/deepseek_v41_cache.py', 'runtime/models/deepseek_v41_ced.py')
     return hashlib.sha256(''.join(name + ':' + hashlib.sha256((root / name).read_bytes()).hexdigest()
                                   for name in names).encode()).hexdigest()
 
@@ -76,22 +101,30 @@ def validate_policy(policy):
     for name, reference in _REFUSED:
         if policy.get(name, reference) != reference:
             raise ValueError('Source layer-major prefill cannot combine with ' + name)
+    if policy.get('deepseek_ced', 'reference') not in ('reference', CED_POLICY):
+        raise ValueError('Source layer-major prefill cannot combine with deepseek_ced')
     if policy.get('draft_model') not in (None, 'none') or policy.get('ast_prompt_lookup', False):
         raise ValueError('Source layer-major prefill requires ordinary decoding without drafts')
     return selected
 
 
-def receipt(policy, weights=None):
+def receipt(policy, weights=None, *, ced='reference', counters=None):
     if policy not in (REFERENCE, POLICY):
         raise ValueError('Unsupported Source prefill order policy')
     value = dict(policy=policy, qualification='unqualified')
     if policy == POLICY:
         value.update(order='layer-major waves of ordinary chunk-major sub-chunks',
                      sub_chunk_rows_max=CHUNK_ROWS, wave_rows_max=MAX_WAVE_ROWS,
+                     default_wave_rows=DEFAULT_WAVE_ROWS,
                      wave_row_bytes=WAVE_ROW_BYTES, apcv2_reuse_enabled=False,
-                     numerical_identity='distinct salt; arithmetic partition unchanged')
+                     numerical_identity='distinct salt; arithmetic partition unchanged',
+                     ced=ced, ced_composition=('implemented_untested_unqualified: per-sub-chunk '
+                         'chunk-major CED (state-only + dependency starts), reordered layer-major'
+                         if ced == CED_POLICY else 'off'))
         if weights is not None:
             value['last_wave_advice'] = getattr(weights, 'source_layer_major_advice', None)
+        if counters is not None:
+            value['counters'] = {k: v for k, v in counters.items() if k.startswith('source_layer_major_')}
     return value
 
 
@@ -143,8 +176,13 @@ def layer_major_forward(model, ordinary, inputs, cache=None, *, logits_to_keep=N
     weights = model.weights
     if getattr(weights, 'source_prefill_order_policy', REFERENCE) != POLICY:
         raise ValueError('Source layer-major owner/profile changed')
-    if capture_layers or body_only or any(value not in (None, False) for value in options.values()):
+    ced_policy = getattr(model, 'ced_policy', 'reference')
+    dependency = bool(options.get('dependency_prefill', False))
+    extra = {k: v for k, v in options.items() if not (dependency and k in ('dependency_prefill', 'state_only'))}
+    if capture_layers or body_only or any(value not in (None, False) for value in extra.values()):
         raise ValueError('Source layer-major waves require ordinary text prefill without taps, CED or images')
+    if dependency and (ced_policy != CED_POLICY or logits_to_keep != 1):
+        raise ValueError('Source layer-major CED waves require dependency_exact final-row prefill')
     rows = inputs.shape[1]
     if inputs.shape[0] != 1 or rows > MAX_WAVE_ROWS or inputs.dtype not in (mx.int32, mx.uint32, mx.int64):
         raise ValueError('Source layer-major wave requires integer B1 tokens, rows1..%d' % MAX_WAVE_ROWS)
@@ -155,14 +193,15 @@ def layer_major_forward(model, ordinary, inputs, cache=None, *, logits_to_keep=N
             or getattr(weights, 'source_resident_bank_session', None) is not None
             or getattr(weights, 'evaluate_block', None) is not None
             or getattr(model, 'kv_storage_policy', 'reference') != 'reference'
-            or getattr(model, 'ced_policy', 'reference') != 'reference'):
+            or ced_policy not in ('reference', CED_POLICY)):
         raise ValueError('Source layer-major wave requires an idle ordinary reference-cache owner')
     context = (0 if cache is None else int(cache[0].offset)) + rows
     chunk = _chunk_rows(model, rows, context)
     bounds = [(start, min(rows, start + chunk)) for start in range(0, rows, chunk)]
+    ced = _ced_plan(model, rows, bounds, chunk) if dependency else None
     # Validate the whole wave before any mutation: cache topology and the
     # first chunk through the ordinary validator, then context and all ids.
-    cache, _ = model.validate_forward(inputs[:, :bounds[0][1]], cache, 0)
+    cache, _ = model.validate_forward(inputs[:, :bounds[0][1]], cache, 0, ced_deferred_admitted=dependency)
     ids = np.asarray(inputs)
     if cache[0].offset + rows > model.context_limit:
         raise ValueError('V4.1 cache prefix or context mismatch')
@@ -176,7 +215,7 @@ def layer_major_forward(model, ordinary, inputs, cache=None, *, logits_to_keep=N
         scope = (rows_execution(chunk) if callable(rows_execution)
                  else execution() if execution is not None else nullcontext())
         with scope:
-            return _wave(model, inputs, ids, cache, bounds, logits_to_keep)
+            return _wave(model, inputs, ids, cache, bounds, logits_to_keep, ced=ced)
     except BaseException as error:
         discard = getattr(model, 'discard_engram_prefetch', None)
         if discard is not None:
@@ -189,10 +228,39 @@ def layer_major_forward(model, ordinary, inputs, cache=None, *, logits_to_keep=N
         model._weight_executions -= 1
 
 
-def _wave(model, inputs, ids, cache, bounds, logits_to_keep):
+def _ced_plan(model, rows, bounds, chunk):
+    """Per-sub-chunk chunk-major CED decisions: (barrier, [(state_only, starts)]).
+
+    Sub-chunk ``k`` is planned exactly as ``prefill_forward`` would plan it as
+    its own call under ``prefill_lookahead(rows_after_k, step=chunk)``, where
+    ``rows_after_k`` counts the rest of this wave plus whatever the caller's
+    lookahead says follows the wave. State-only also needs the model flag.
+    """
+    from ..runtime.models.deepseek_v41_ced import dependency_barrier, dependency_starts, state_only_admitted
+    from ..runtime.prefill_lookahead import current
+    c = model.args
+    barrier = dependency_barrier(c)
+    if any(layer > barrier for layer in c.engram_layer_ids):
+        # Engram rows above the barrier would need trimmed prefetch windows.
+        raise ValueError('Source layer-major CED waves require Engram layers at or below the CED barrier')
+    lookahead = current()
+    after = (int(lookahead.rows_after[0]) if lookahead is not None and len(lookahead.rows_after) == 1 else 0)
+    enabled = bool(getattr(model, 'ced_state_only', False))
+    plan = []
+    for start, end in bounds:
+        state_only = enabled and state_only_admitted(c, after + rows - end, chunk)
+        plan.append((state_only, None if state_only else dependency_starts(c, end - start)))
+    return barrier, tuple(plan)
+
+
+def _wave(model, inputs, ids, cache, bounds, logits_to_keep, *, ced=None):
     import mlx.core as mx
     from ..runtime.prefill_checkpoint_rows import select_checkpoint_rows
     c, weights = model.args, model.weights
+    if ced is not None:
+        from ..runtime.models.deepseek_v41_ced import trim_shared
+        barrier, plan = ced
+        active = [0] * len(bounds)
     base = cache[0].offset
     stats = model.scheduled_kv_calls
     stream = getattr(weights, 'expert_stream', None)
@@ -228,6 +296,25 @@ def _wave(model, inputs, ids, cache, bounds, logits_to_keep):
         for k, (start, end) in enumerate(bounds):
             if state.offset != base + start:
                 raise ValueError('Source layer-major layer frontier mismatch')
+            if ced is not None:
+                state_only, starts = plan[k]
+                if state_only and layer > barrier:
+                    # Chunk-major state-only parking: no local keys, deferred
+                    # until a later sub-chunk of this call refills the row.
+                    state.keys = None
+                    state.offset = base + end
+                    state.ced_local_deferred = True
+                    continue
+                if starts is not None and starts[layer] != active[k]:
+                    delta = starts[layer] - active[k]
+                    hidden[k], pre[k] = hidden[k][:, delta:], pre[k][:, delta:]
+                    trim_shared(shared[k], delta)
+                    active[k] = starts[layer]
+                if active[k]:
+                    if engram is not None:
+                        raise ValueError('Source layer-major CED trimmed an Engram layer')
+                    state.keys = None
+                    state.offset = base + start + active[k]
             with model._weight_scope():
                 if engram is not None:
                     table = model.engram_tables[layer]
@@ -247,8 +334,12 @@ def _wave(model, inputs, ids, cache, bounds, logits_to_keep):
                 if model.eval_interval and gpu:
                     mx.async_eval(hidden[k], pre[k])
                 model._weight_eval(hidden[k], pre[k], [v.state for v in cache], shared[k])
+            if ced is not None:
+                state.ced_local_deferred = False
     if tail is not None:
         cache[0].hash_tail = mx.array(tail, mx.int32)
+    if ced is not None:
+        return _ced_finish(model, cache, stream, before, bounds, hidden, pre, shared, barrier, plan)
     with model._weight_scope():
         final = [model.norm(model.collapse(h, p), model.norm_weight) for h, p in zip(hidden, pre)]
         whole = mx.concatenate(final, 1)
@@ -278,6 +369,50 @@ def _wave(model, inputs, ids, cache, bounds, logits_to_keep):
             key = 'source_layer_major_expert_' + name
             stats[key] = stats.get(key, 0) + int(after[name]) - int(before.get(name, 0))
     return logits, None
+
+
+def _ced_finish(model, cache, stream, before, bounds, hidden, pre, shared, barrier, plan):
+    """Final head or state-only check row, with chunk-major CED counters."""
+    from ..runtime.prefill_checkpoint_rows import select_checkpoint_rows_from_final_suffix
+    from ..runtime.prefill_lookahead import StateOnlyPrefillOutput
+    c, stats = model.args, model.scheduled_kv_calls
+    rows = bounds[-1][1]
+    with model._weight_scope():
+        if plan[-1][0]:
+            output = StateOnlyPrefillOutput(hidden[-1][:, -1].reshape(1, -1))
+            model._weight_eval(output.hidden, [v.state for v in cache], shared)
+        else:
+            final = model.norm(model.collapse(hidden[-1], pre[-1]), model.norm_weight)
+            final = select_checkpoint_rows_from_final_suffix(final, full_width=rows)
+            output = model.linear(final, 'output.weight', rounded=False)
+            model._weight_eval(output, final, [v.state for v in cache], shared)
+    for state in cache:
+        state.validate_state()
+    for state in cache:
+        state._in_forward = False
+    if stream is not None:
+        stream.end_context()
+
+    def add(name, amount):
+        stats[name] = stats.get(name, 0) + int(amount)
+    state_only = sum(1 for so, _ in plan if so)
+    skipped = sum((c.num_hidden_layers - barrier - 1) * (end - start) if so else sum(starts)
+                  for (so, starts), (start, end) in zip(plan, bounds))
+    # The same counters chunk-major CED keeps, plus wave-scoped ones.
+    add('ced_state_only_chunks', state_only)
+    add('ced_prefill_calls', len(plan) - state_only)
+    add('ced_skipped_layer_rows', skipped)
+    add('source_layer_major_waves', 1)
+    add('source_layer_major_chunks', len(bounds))
+    add('source_layer_major_rows', rows)
+    add('source_layer_major_ced_waves', 1)
+    add('source_layer_major_ced_state_only_chunks', state_only)
+    add('source_layer_major_ced_skipped_layer_rows', skipped)
+    after = getattr(stream, 'stats', None) or {}
+    for name in ('bytes_read', 'cache_misses', 'cache_hits'):
+        if name in after:
+            add('source_layer_major_expert_' + name, int(after[name]) - int(before.get(name, 0)))
+    return output, None
 
 
 def layer_major_model_class():

@@ -4,8 +4,8 @@ directory whose shards are tiered across two volumes.
 
 Files land on the internal SSD (the canonical model path the Source adapter reads) while it keeps
 a free-space floor; the rest go to the external volume and are symlinked into the canonical
-directory. NOTE: the Source adapter currently refuses symlinked shards (checked_file lstat/S_ISREG,
-O_NOFOLLOW); serving this layout needs the tier-aware file check. Every pinned file is sha256-verified
+directory, and writes mlx2-source-tiers.json declaring the external directory: the Source
+adapter accepts a symlinked shard only into a declared tier directory (checked_file). Every pinned file is sha256-verified
 against src/mlx2/adapters/deepseek_v41_source_pins.json; a mismatch deletes the file and fails.
 Resumable: verified files are recorded in tiered-download.json and skipped.
 """
@@ -43,6 +43,9 @@ def main():
         sys.exit(f"pinned files absent upstream: {missing}")
     inner, outer = Path(a.internal), Path(a.external)
     inner.mkdir(parents=True, exist_ok=True)
+    tiers = inner / "mlx2-source-tiers.json"
+    if not tiers.exists():
+        tiers.write_text(json.dumps({"schema": "mlx2.v41.source-tiers.v1", "directories": [str(outer.resolve())]}) + "\n")
     state_path = inner / "tiered-download.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else {"repo": repo, "revision": rev, "files": {}}
     lock = threading.Lock()

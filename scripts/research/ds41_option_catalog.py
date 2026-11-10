@@ -102,6 +102,11 @@ def describe(key, value):
             trigger = 'Multi-row PP with chronological all-retained pooled rows<=512. Larger pools require explicit fallback observation.'
     if key == 'deepseek_source_prefill_readahead':
         trigger = 'Layer-major wave of at least two sub-chunks (prompt >1024 tokens, prefill_step >=2048) with a bounded LFU policy; read readahead_* counters.'
+    if key in ('deepseek_source_index_tiling', 'deepseek_source_index_select'):
+        lane = 'adaptive_prefill' if key == 'deepseek_source_index_tiling' else 'ordinary_text'
+        trigger = ('Cold PP with pooled index rows >1024 (prompt >2048 tokens for ratio2, >1024 for ratio1); read index_key_chunked_* counters.'
+                   if key == 'deepseek_source_index_tiling' else
+                   'Pooled index rows >512 (prompt >1024 tokens) so the selector runs; read index_compact_* counters.')
     if key == 'deepseek_index_policy':
         trigger = 'Short pool <=512 exercises finite all-retained bypass; long pool >512 exercises selector fallback.'
     if key == 'deepseek_selected_kv_policy':

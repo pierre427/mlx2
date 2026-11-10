@@ -40,11 +40,15 @@ RULES={
  'deepseek_source_hc_coefficients':[('source_fused_fp32',)],
  'deepseek_index_policy':[('all_retained_index',)],
  'deepseek_selected_kv_policy':[('decode_gather_build',),('decode_gather_hit',)],
+ 'deepseek_source_index_tiling':[('index_key_chunked_tiles',),('index_key_chunked_tiles_avoided',)],
+ 'deepseek_source_index_select':[('index_compact_select',)],
 }
 GENERIC_OBSERVER_KEYS={'deepseek_hc','deepseek_qat','deepseek_pointwise','deepseek_attention_epilogue','deepseek_hc_epilogue'}
 DISTINCT={
  'deepseek_candidate_score':'For pruning benefit require candidate_only_unscored_rows>0: candidate capacity is2048*8=16384 pooled index rows. The100-token test can schedule candidate scoring without pruning any row.',
  'deepseek_ced':'Require actual per-forward PP rows>128 and ced_skipped_layer_rows>0. Increasing total context with prefill-step128 still cannot exercise pruning; request prefill-step256+ and verify actual rows.',
+ 'deepseek_source_index_tiling':'Requires pooled index rows >512 (selector path) and multi-row PP whose reference row tile would shrink: 16MiB/(32 heads*4B*count) <128, i.e. count >1024. index_key_chunked_tiles_avoided>0 proves it changed the tile plan.',
+ 'deepseek_source_index_select':'Requires pooled index rows >512 (selector path, not the all-retained bypass). index_compact_candidate_blocks needs >2048 candidate blocks (16384 pooled rows) at layer 20.',
  'deepseek_index_policy':'Short<=512 pool bypass and long>512 pool selector fallback need separate receipts; short bypass is a real observed branch, not broad selector qualification.',
  'deepseek_source_prefill_wide_dtype':'Original local expert GU needs M>=97; DOWN needs M>=33. A100-token prompt may cover only one boundary or neither; record both counts separately.',
  'deepseek_source_prefill_wide_math':'Original local expert M13..96 plus actual planned tile batches required; total prompt length is not local expert occupancy.',

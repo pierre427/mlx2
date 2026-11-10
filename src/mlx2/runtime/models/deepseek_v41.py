@@ -378,6 +378,22 @@ class Attention:
         per_row = ((c.index_n_heads + c.index_head_dim) * capacity + count
                    if candidate_only else c.index_n_heads * count)
         tile = max(1, min(128, INDEX_SCORE_SCRATCH_BYTES // max(1, per_row * 4)))
+        # Opt-in exact rewrites (default reference); see deepseek_v41_index_select.
+        counters = m.scheduled_kv_calls
+        compact = getattr(m, "source_index_select_policy", "reference") == "compact_v1"
+        key_chunk = None
+        if getattr(m, "source_index_tiling_policy", "reference") == "key_chunked_v1":
+            if candidate_only:
+                # Candidate-only rows gather per-row key sets; nothing to share.
+                counters["index_key_chunked_declined_candidate_only"] = counters.get("index_key_chunked_declined_candidate_only", 0) + 1
+            else:
+                from .deepseek_v41_index_select import plan_key_chunked
+                planned, key_chunk = plan_key_chunked(length, count, c.index_n_heads,
+                                                      head_scratch_bytes=INDEX_SCORE_SCRATCH_BYTES)
+                reference_tiles = -(-length // tile)
+                tile = planned
+                counters["index_key_chunked_calls"] = counters.get("index_key_chunked_calls", 0) + 1
+                counters["index_key_chunked_tiles_avoided"] = counters.get("index_key_chunked_tiles_avoided", 0) + reference_tiles - (-(-length // tile))
         selected, masks = [], []
         prior_candidates = shared.get("candidates")
         if candidate_only and (prior_candidates is None or prior_candidates.shape != (1, length, count)):
@@ -395,7 +411,12 @@ class Attention:
                 positions = mx.arange(count, dtype=mx.uint32)[None, None]
                 # Fixed-capacity chronological gather. Absent candidates are
                 # padding only and are masked before global tie-breaking.
-                ids = mx.sort(mx.argsort(mx.where(prior, positions, count + positions), axis=-1)[..., :capacity], axis=-1)
+                if compact:
+                    from .deepseek_v41_index_select import candidate_ids_compact
+                    ids = candidate_ids_compact(prior, capacity)
+                    counters["index_compact_candidate_ids"] = counters.get("index_compact_candidate_ids", 0) + 1
+                else:
+                    ids = mx.sort(mx.argsort(mx.where(prior, positions, count + positions), axis=-1)[..., :capacity], axis=-1)
                 keys = (source.gather_index_keys(ids) if hasattr(source, "gather_index_keys")
                         else source.index_keys[0, ids[0]][None])
                 small = mx.einsum("bhsd,bstd->bsht", query[:, :, first:last], keys)
@@ -404,6 +425,21 @@ class Attention:
                 score = mx.put_along_axis(mx.full((1, last-first, count), -mx.inf), ids, small, -1)
                 m.scheduled_kv_calls["candidate_only_score_rows"] = m.scheduled_kv_calls.get("candidate_only_score_rows", 0) + (last-first)*capacity
                 m.scheduled_kv_calls["candidate_only_unscored_rows"] = m.scheduled_kv_calls.get("candidate_only_unscored_rows", 0) + (last-first)*(count-capacity)
+            elif key_chunk is not None:
+                from .deepseek_v41_index_select import reduced_scores_chunked
+                if packed_index is not None:
+                    from .deepseek_v41_packed_qat import decode
+
+                    def keys_for(key_first, key_last):
+                        counters["packed_index_decoded_chunks"] = counters.get("packed_index_decoded_chunks", 0) + 1
+                        counters["packed_index_staging_max_rows"] = max(counters.get("packed_index_staging_max_rows", 0), key_last-key_first)
+                        return decode(packed_index.sliced((slice(None), slice(key_first, key_last))))
+                else:
+                    def keys_for(key_first, key_last):
+                        return all_keys[:, key_first:key_last]
+                score = reduced_scores_chunked(query[:, :, first:last], weight[:, first:last], keys_for, count, key_chunk)
+                counters["index_key_chunked_tiles"] = counters.get("index_key_chunked_tiles", 0) + 1
+                counters["index_key_chunked_key_chunks"] = counters.get("index_key_chunked_key_chunks", 0) + -(-count // key_chunk)
             elif packed_index is not None:
                 from .deepseek_v41_packed_qat import decode
 
@@ -430,19 +466,30 @@ class Attention:
             ]
             score = mx.where(mx.arange(count)[None, None] < lens, score, -mx.inf)
             if self.layer == c.candidate_source_layer_id:
-                masks.append(
-                    candidate_blocks(
-                        score, lens, c.candidate_topk_blocks, c.candidate_block_size,
-                        finite_all_retained=finite,
+                shortcut = finite and all_blocks
+                if compact and not shortcut:
+                    from .deepseek_v41_index_select import candidate_blocks_compact
+                    masks.append(candidate_blocks_compact(score, lens, c.candidate_topk_blocks, c.candidate_block_size))
+                    counters["index_compact_candidate_blocks"] = counters.get("index_compact_candidate_blocks", 0) + 1
+                else:
+                    masks.append(
+                        candidate_blocks(
+                            score, lens, c.candidate_topk_blocks, c.candidate_block_size,
+                            finite_all_retained=finite,
+                        )
                     )
-                )
                 if finite and all_blocks:
                     m.scheduled_kv_calls["candidate_rank_bypass"] = m.scheduled_kv_calls.get("candidate_rank_bypass", 0) + 1
             elif self.layer > c.candidate_source_layer_id >= 0:
                 if prior_candidates is None:
                     raise ValueError("V4.1 candidate source failed to publish")
                 score = mx.where(prior_candidates[:, first:last], score, -mx.inf)
-            indices = stable_pool_topk(score, min(c.index_topk, count))
+            if compact:
+                from .deepseek_v41_index_select import stable_topk_compact
+                indices = stable_topk_compact(score, min(c.index_topk, count))
+                counters["index_compact_select"] = counters.get("index_compact_select", 0) + 1
+            else:
+                indices = stable_pool_topk(score, min(c.index_topk, count))
             # Invalid selections remain in range for gather, and carry a separate mask.
             visible = mx.take_along_axis(score, indices, -1) > -mx.inf
             selected.append((indices, visible))
@@ -717,6 +764,15 @@ class Block:
             middle=shared_middle(x,self.w.packed(self.prefix+"ffn_gate_shexp.weight"),self.w.packed(self.prefix+"ffn_up_shexp.weight"))
             self.w.scheduled_dense_calls["v41_shared_swiglu"] = self.w.scheduled_dense_calls.get("v41_shared_swiglu",0)+1
             return m.linear(middle,self.prefix+"ffn_down_shexp.weight")
+        fused = getattr(self.w, "shared_expert_fused", None)
+        if fused is not None:
+            # Adapter capability (e.g. Source fused_middle_v1): raw F32 down
+            # product with the same arithmetic; the BF16 store stays here.
+            raw = fused(x, self.prefix + "ffn_gate_shexp.weight", self.prefix + "ffn_up_shexp.weight",
+                        self.prefix + "ffn_down_shexp.weight",
+                        **({'ffn_input_token': ffn_input_token} if ffn_input_token is not None else {}))
+            if raw is not None:
+                return m.round(raw)
         gate, up = self.w.gate_up(
             x,
             self.prefix + "ffn_gate_shexp.weight",

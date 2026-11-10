@@ -43,6 +43,12 @@ OVERLAP_COUNTERS = (
     'overlap_hint_wasted_bytes', 'overlap_hint_failed', 'overlap_hint_skip_resident',
     'overlap_hint_skip_budget', 'upload_gpu_queue_evals', 'upload_offqueue_evals',
 )
+# Opt-in lookahead/priority counters (lookahead_depth > 1, ridge heads or
+# loader=priority_v1); absent from the default overlap_v1 receipt.
+LOOKAHEAD_COUNTERS = tuple(f'lookahead_hint_{what}_d{d}' for what in ('issued', 'matched') for d in range(1, 5)) + (
+    'lookahead_hint_superseded', 'lookahead_hint_cancelled_queued', 'lookahead_demand_promoted',
+    'lookahead_head_predictions', 'lookahead_untrained_predictions',
+)
 
 
 @dataclass(eq=False)
@@ -253,23 +259,44 @@ class SourceExpertStore(NativeExpertStore):
         return getattr(self, '_overlap', None) is not None
 
     def overlap_host_reserve_bytes(self):
-        return OVERLAP_PENDING*self.minimum_cache_bytes if self.expert_overlap_enabled() else 0
+        return self._overlap['pending']*self.minimum_cache_bytes if self.expert_overlap_enabled() else 0
 
     def enable_expert_overlap(self, predictor=None):
-        """Install the bounded overlap reader before any execution window."""
+        """Install the bounded overlap reader before any execution window.
+
+        The LFU policy may opt into lookahead_depth 1..4, ridge lookahead heads
+        and the priority_v1 loader (deepseek_v41_source_stream.py). Depth 1,
+        no heads and the FIFO loader are exactly the historical overlap_v1.
+        """
+        from .deepseek_v41_source_stream import parse_lookahead, RidgeLookaheadHeads
         with self._lock:
             self._ready()
             if self._active or self.expert_overlap_enabled():
                 raise ValueError('Source expert overlap must be enabled once on an idle provider')
             if predictor is not None and not callable(predictor):
                 raise ValueError('Source expert route predictor must be callable')
-            pool = OverlapReadPool(OVERLAP_WORKERS, 'v41-source-expert-overlap', timeout=60,
-                                   max_pending=OVERLAP_PENDING,
-                                   owner=storage_owner('v41-source-expert-overlap', self.root))
+            depth, heads_path, loader = parse_lookahead(getattr(self, 'policy', None) or {})
+            if predictor is None and (depth > 1 or heads_path is not None):
+                raise ValueError('Source expert lookahead requires the overlap_v1 route predictor')
+            heads = None
+            if heads_path is not None:
+                c = self.artifact['args']
+                heads = RidgeLookaheadHeads(heads_path, binding=self.binding, hidden_size=c.hidden_size,
+                                            experts=c.n_routed_experts)
+            pending = OVERLAP_PENDING + OVERLAP_HINTS*(depth-1)
+            pool_type = OverlapReadPool
+            if loader == 'priority_v1':
+                from ..runtime.priority_read_pool import PriorityReadPool as pool_type
+            pool = pool_type(OVERLAP_WORKERS, 'v41-source-expert-overlap', timeout=60,
+                             max_pending=pending,
+                             owner=storage_owner('v41-source-expert-overlap', self.root))
+            lookahead = depth > 1 or heads is not None or loader != 'fifo'
             self._overlap = dict(pool=pool, predictor=predictor, ticket=None, hints=OrderedDict(),
-                                 retired=[], hints_disabled=False)
+                                 retired=[], hints_disabled=False, depth=depth, heads=heads, loader=loader,
+                                 pending=pending, hint_cap=OVERLAP_HINTS*depth, hint_depth={},
+                                 lookahead=lookahead)
             self.accepts_route_hidden = True
-            for name in OVERLAP_COUNTERS:
+            for name in OVERLAP_COUNTERS + (LOOKAHEAD_COUNTERS if lookahead else ()):
                 self.stats.setdefault(name, 0)
             if getattr(self, '_adaptive_residency_enabled', False):
                 self._adaptive_staging = max(self._adaptive_staging,
@@ -290,11 +317,14 @@ class SourceExpertStore(NativeExpertStore):
         return (len(overlap['hints'])+len(overlap['retired'])
                 + (len(ticket.demand) if ticket is not None else 0))
 
-    def _overlap_submit(self, key):
+    def _overlap_submit(self, key, rank=0):
         from ..runtime.io_ownership import ReadQueueFull
         function, *args = self._expert_read_job(key)
+        pool = self._overlap['pool']
         try:
-            return self._overlap['pool'].submit(function, *args)
+            if rank and hasattr(pool, 'submit_ranked'):
+                return pool.submit_ranked(rank, function, *args)
+            return pool.submit(function, *args)
         except ReadQueueFull:
             self.stats['overlap_queue_full'] += 1
             return None
@@ -302,6 +332,8 @@ class SourceExpertStore(NativeExpertStore):
     def _retire_future(self, future, *, hint):
         """Drop an unconsumed read. A running syscall stays owned until it returns."""
         if future.cancel():
+            if hint and self._overlap.get('lookahead'):
+                self.stats['lookahead_hint_cancelled_queued'] += 1
             return
         if future.done():
             try:
@@ -315,14 +347,18 @@ class SourceExpertStore(NativeExpertStore):
         if hint:
             self.stats['overlap_hint_wasted_bytes'] += self.minimum_cache_bytes
 
-    def _discard_hints(self, keep_layer=None):
-        hints = self._overlap['hints']
-        for key in [k for k in hints if k[0] != keep_layer]:
+    def _discard_hints(self, keep_layer=None, keep_after=None):
+        """Retire stale hints; with lookahead keep layers keep_after+1..+depth."""
+        overlap = self._overlap
+        hints, depth = overlap['hints'], overlap.get('depth', 1)
+        for key in [k for k in hints if k[0] != keep_layer
+                    and not (keep_after is not None and keep_after < k[0] <= keep_after+depth)]:
             self.stats['overlap_hint_wasted'] += 1
+            overlap['hint_depth'].pop(key, None)
             self._retire_future(hints.pop(key), hint=True)
 
     def _top_up(self, ticket):
-        while ticket.queued and self._overlap_inflight() < OVERLAP_PENDING:
+        while ticket.queued and self._overlap_inflight() < self._overlap['pending']:
             key = ticket.queued[0]
             if key in self._cache or key in self._leased:
                 ticket.queued.pop(0)
@@ -352,16 +388,19 @@ class SourceExpertStore(NativeExpertStore):
             if prefix not in self.tables:
                 raise ValueError('Source expert ticket outside admitted layers')
             layer = int(prefix.split('.')[1])
-            predicted = None
+            depth = overlap.get('depth', 1)
+            predictions = []
             rows = ids.shape[0] if len(ids.shape) == 2 else 0
             if (route_hidden is not None and overlap['predictor'] is not None and rows == 1
-                    and not overlap['hints_disabled'] and f'blk.{layer+1}' in self.tables):
-                predicted = overlap['predictor'](route_hidden, layer+1)
-            if predicted is None:
-                values = np.asarray(ids)
-            else:
-                mx.eval(ids, predicted)
-                values = np.asarray(ids)
+                    and not overlap['hints_disabled']):
+                for step in range(1, depth+1):
+                    if f'blk.{layer+step}' not in self.tables:
+                        break
+                    predictions.append((layer+step, step, self._lookahead_predict(route_hidden, layer+step, step)))
+            predictions = [item for item in predictions if item[2] is not None]
+            if predictions:
+                mx.eval(ids, *(item[2] for item in predictions))
+            values = np.asarray(ids)
             self.stats['overlap_route_readbacks'] += 1
             if (values.dtype != np.uint32 or values.ndim != 2 or not 0 < values.shape[0] <= 1024
                     or not 1 <= values.shape[1] <= 384):
@@ -371,11 +410,15 @@ class SourceExpertStore(NativeExpertStore):
                 raise ValueError('Source expert ticket ID outside admitted layer')
             ticket = SourceExpertTicket(self, threading.get_ident(), prefix, values.copy())
             overlap['ticket'] = ticket
+            # Multi-row tickets (prefill/verify) flood rank-0 demand; drop
+            # decode-era future hints so none can age past the read deadline.
+            keep_after = layer if depth > 1 and rows == 1 else None
             try:
-                self._discard_hints(keep_layer=layer)
+                self._discard_hints(keep_layer=layer, keep_after=keep_after)
                 hints = overlap['hints']
                 for expert in map(int, unique):
                     key = (layer, expert)
+                    step = overlap['hint_depth'].pop(key, None)
                     if key in self._leased or key in self._cache:
                         hint = hints.pop(key, None)
                         if hint is not None:
@@ -386,37 +429,71 @@ class SourceExpertStore(NativeExpertStore):
                     if hint is not None:
                         ticket.demand[key] = hint
                         ticket.hinted.add(key)
+                        if overlap['lookahead']:
+                            self.stats[f'lookahead_hint_matched_d{step or 1}'] += 1
+                            promote = getattr(overlap['pool'], 'promote', None)
+                            if promote is not None and promote(hint):
+                                self.stats['lookahead_demand_promoted'] += 1
                     else:
                         ticket.queued.append(key)
-                self._discard_hints(keep_layer=None)
+                self._discard_hints(keep_layer=None, keep_after=keep_after)
                 self._top_up(ticket)
-                if predicted is not None:
-                    self._issue_hints(layer+1, np.asarray(predicted))
+                for target, step, predicted in predictions:
+                    self._issue_hints(target, np.asarray(predicted), depth=step)
             except BaseException:
                 self.cancel(ticket)
                 raise
             return ticket
 
-    def _issue_hints(self, layer, predicted):
+    def _lookahead_predict(self, hidden, target, step):
+        """Untrained router lookahead, plus a ridge head for (target, step) if loaded."""
+        overlap = self._overlap
+        heads = overlap.get('heads')
+        head = None if heads is None else heads.device(target, step)
+        if head is None:
+            if overlap['lookahead']:
+                self.stats['lookahead_untrained_predictions'] += 1
+            return overlap['predictor'](hidden, target)
+        self.stats['lookahead_head_predictions'] += 1
+        return overlap['predictor'](hidden, target, head=head)
+
+    def _issue_hints(self, layer, predicted, depth=1):
         if predicted.ndim != 2 or predicted.shape[0] != 1 or predicted.dtype.kind not in 'iu':
             raise ValueError('Source predicted route geometry mismatch')
         self.stats['overlap_hint_predictions'] += 1
-        hints = self._overlap['hints']
-        for expert in dict.fromkeys(map(int, predicted.reshape(-1))):
+        overlap = self._overlap
+        hints = overlap['hints']
+        wanted = dict.fromkeys(map(int, predicted.reshape(-1)))
+        if overlap['lookahead']:
+            # A fresher (shallower) prediction of this layer supersedes older
+            # deeper guesses: cancel queued ones, retire running ones.
+            for key in [k for k in hints if k[0] == layer and k[1] not in wanted]:
+                self.stats['lookahead_hint_superseded'] += 1
+                overlap['hint_depth'].pop(key, None)
+                self._retire_future(hints.pop(key), hint=True)
+        for expert in wanted:
             key = (layer, expert)
             if not 0 <= expert < len(self.tables[f'blk.{layer}']):
                 raise ValueError('Source predicted expert outside admitted layer')
             if key in self._cache or key in self._leased or key in hints:
+                if key in hints and depth < overlap['hint_depth'].get(key, depth):
+                    overlap['hint_depth'][key] = depth
+                    promote = getattr(overlap['pool'], 'promote', None)
+                    if promote is not None:
+                        promote(hints[key], depth)
                 self.stats['overlap_hint_skip_resident'] += 1
                 continue
-            if len(hints) >= OVERLAP_HINTS or self._overlap_inflight() >= OVERLAP_PENDING:
+            if len(hints) >= overlap['hint_cap'] or self._overlap_inflight() >= overlap['pending']:
                 self.stats['overlap_hint_skip_budget'] += 1
                 continue
-            future = self._overlap_submit(key)
+            future = self._overlap_submit(key, rank=depth if overlap['loader'] == 'priority_v1' else 0)
             if future is None:
                 break
             hints[key] = future
+            overlap['hint_depth'][key] = depth
             self.stats['overlap_hint_issued'] += 1
+            if overlap['lookahead']:
+                self.stats[f'lookahead_hint_issued_d{depth}'] += 1
 
     def _read_expert(self, key, function, *args):
         """Consume this key's early read when one exists; otherwise read now."""
@@ -553,8 +630,18 @@ class SourceExpertStore(NativeExpertStore):
         if overlap is None:
             return dict(policy='reference')
         counters = {name: self.stats.get(name, 0) for name in OVERLAP_COUNTERS}
-        return dict(policy=OVERLAP_POLICY, workers=OVERLAP_WORKERS, max_pending_reads=OVERLAP_PENDING,
-                    max_hint_reads=OVERLAP_HINTS, host_reserve_bytes=self.overlap_host_reserve_bytes(),
+        extra = {}
+        if overlap.get('lookahead'):
+            heads = overlap.get('heads')
+            pool_counters = overlap['pool'].counters()
+            extra['lookahead'] = dict(depth=overlap['depth'], loader=overlap['loader'],
+                heads=None if heads is None else heads.receipt(),
+                counters={name: self.stats.get(name, 0) for name in LOOKAHEAD_COUNTERS},
+                loader_counters={k: v for k, v in pool_counters.items() if k.startswith('priority_')},
+                contract='predictions choose optional early host reads only; the router selects every expert',
+                status='implemented_untested_unqualified')
+        return dict(policy=OVERLAP_POLICY, workers=OVERLAP_WORKERS, max_pending_reads=overlap['pending'],
+                    max_hint_reads=overlap['hint_cap'], host_reserve_bytes=self.overlap_host_reserve_bytes(), **extra,
                     hints_disabled=overlap['hints_disabled'], predictor=overlap['predictor'] is not None,
                     pending_hints=len(overlap['hints']), retired_inflight=len([f for f in overlap['retired'] if not f.done()]),
                     open_ticket=overlap['ticket'] is not None, read_failure=overlap['pool'].failure,
@@ -575,6 +662,8 @@ class SourceExpertStore(NativeExpertStore):
 class SourceV41Weights(NativeV41Weights):
     compute_policy = REVISION
     dense_prefill_policy = shared_policy = dense_epilogue_policy = dense_pair_policy = "reference"
+    # Opt-in fused-kernel lane (2026-11-08); set by the adapter after construction.
+    source_shared_middle_policy = source_router_policy = "reference"
     expert_math_policy = "reference"
 
     def __init__(self, artifact, *, expert_cache_bytes, expert_read_workers=2, expert_policy=None, admitted_bounds=None,
@@ -765,7 +854,10 @@ class SourceV41Weights(NativeV41Weights):
             if expert_policy is None:
                 self.expert_stream = SourceExpertStore(artifact, self.bounds, read_workers=expert_read_workers)
             else:
-                from .deepseek_v41_source_lfu import LFUSourceExpertStore
+                from .deepseek_v41_source_lfu import LFUSourceExpertStore, lookahead_requested
+                if lookahead_requested(expert_policy) and source_expert_io_policy != OVERLAP_POLICY:
+                    # Fail closed: only overlap_v1 owns the predictor and early reads.
+                    raise ValueError('Source expert lookahead/loader keys require deepseek_source_expert_io=overlap_v1')
                 self.expert_stream = LFUSourceExpertStore(artifact, self.bounds, expert_policy, read_workers=expert_read_workers,
                     packed_buffers=expert_math_policy in ('epilogue_fused_fp32','routed_fused_fp32'))
             if native_mx_policy!='reference':
@@ -912,6 +1004,10 @@ class SourceV41Weights(NativeV41Weights):
                     return value
                 key='source_bf16_head_fallback'
                 self.scheduled_dense_calls[key]=self.scheduled_dense_calls.get(key,0)+1
+            if (getattr(self,'source_router_policy','reference')=='bf16_coeff_gemv_v1'
+                    and name.endswith('.ffn_gate_inp.weight')):
+                value=self._router_gemv(x,name)
+                if value is not None:return value
             return x.astype(mx.float32) @ self._f32_operand(name).T
         return apply
 
@@ -942,6 +1038,31 @@ class SourceV41Weights(NativeV41Weights):
             key = 'source_bf16_dense_f32_bytes_avoided'
             counts[key] = counts.get(key, 0)+entry[1].nbytes
         return entry[1]
+
+    def _router_gemv(self, x, name):
+        """Decode router logits from the BF16 coefficients (opt-in).
+
+        The stock expression casts the whole router weight to F32 on every
+        call; this reads the BF16 codes once with the same F32 GEMV law. A
+        per-layer first-use bitwise check against the stock product gates its use.
+        """
+        import mlx.core as mx
+        from ..runtime.gguf import source_router_gemv as router
+        counters=self.scheduled_dense_calls
+        weight=self.array(name)
+        x32=x.astype(mx.float32) if getattr(x,'dtype',None)!=mx.float32 else x
+        if not router.supports(x32,weight):
+            counters['source_router_gemv_fallback']=counters.get('source_router_gemv_fallback',0)+1
+            return None
+        state=router.checked(name)
+        if state is None:
+            counters['source_router_gemv_first_use_checks']=counters.get('source_router_gemv_first_use_checks',0)+1
+            return router.first_use_check(x32,weight,name)
+        if state is False:
+            counters['source_router_gemv_check_refused']=counters.get('source_router_gemv_check_refused',0)+1
+            return None
+        counters['source_router_gemv']=counters.get('source_router_gemv',0)+1
+        return router.project(x32,weight)
 
     def _q_b_prefill_project(self, name, x, prepared, q, scales):
         """Raw F32 only; the ordinary model remains the BF16 boundary owner."""
@@ -978,7 +1099,7 @@ class SourceV41Weights(NativeV41Weights):
         self.scheduled_dense_calls[key]=self.scheduled_dense_calls.get(key,0)+1
         return (fused_quantize(x.astype(mx.float32),'fp8') if fused else quantize(x,'fp8')).astype(mx.float32)
 
-    def _predict_next_routes(self, hidden, layer):
+    def _predict_next_routes(self, hidden, layer, head=None):
         """Lazy hint only: layer's router applied to the previous FFN input.
 
         Joins the exact route readback in one evaluation. Its IDs choose
@@ -994,12 +1115,23 @@ class SourceV41Weights(NativeV41Weights):
             return None
         logits=(rows.astype(mx.bfloat16)@self.array(weight).astype(mx.bfloat16).T).astype(mx.float32)
         scores=mx.sqrt(mx.logaddexp(logits,0.0))+self.array(bias).astype(mx.float32)
+        if head is not None:
+            # Opt-in ridge lookahead head: residual on the router score.
+            weight_head,bias_head=head
+            scores=scores+(rows.astype(mx.float32)@weight_head.astype(mx.float32).T)+bias_head
         return mx.argpartition(-scores,kth=c.num_experts_per_tok-1,axis=-1)[...,:c.num_experts_per_tok].astype(mx.uint32)
 
     def ffn_input_token(self,x,prefix):
         if getattr(self,'source_ffn_input_policy','reference')=='reference':return None
         from .deepseek_v41_source_ffn_input import create
         return create(self,x,prefix)
+
+    def shared_expert_fused(self,x,gate_name,up_name,down_name,*,ffn_input_token=None):
+        """Opt-in fused shared middle; None keeps the model's ordinary path."""
+        if getattr(self,'source_shared_middle_policy','reference')=='reference':return None
+        from .deepseek_v41_source_shared_middle import shared_expert
+        self._ready()
+        return shared_expert(self,x,gate_name,up_name,down_name,ffn_input_token=ffn_input_token)
 
     def gate_up(self,x,gate_name,up_name,*,ffn_input_token=None):
         if ffn_input_token is not None:

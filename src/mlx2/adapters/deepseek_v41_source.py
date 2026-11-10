@@ -27,6 +27,8 @@ DESCRIPTOR = replace(NATIVE_DESCRIPTOR, model_type=MODEL_TYPE, variant="flash-10
 
 SOURCE_POLICY_CHOICES = {
     'deepseek_source_engram': ('reference', 'carry_tuple_v1'),
+    # Opt-in, lossless Engram row I/O (deepseek_v41_source_stream.engram_io_settings).
+    'deepseek_source_engram_io': ('reference', 'tiered_v1'),
     'deepseek_source_prefill_partition': ('adaptive_v1', 'canonical_m1_v1', 'position_grid_v1'),
     'deepseek_source_prefill_order': ('reference', 'layer_major_v1'),
     'deepseek_source_prefill_readahead': ('reference', 'layer_ahead_v1'),
@@ -72,6 +74,29 @@ SOURCE_POLICY_CHOICES = {
     'deepseek_source_hc_coefficients': ('reference', 'fused_fp32'),
     'deepseek_index_policy': ('reference', 'finite_all_retained'),
     'deepseek_selected_kv_policy': ('reference', 'decode_reuse'),
+    # Fused-kernel lane, 2026-11-08; both opt-in, implemented_untested_unqualified.
+    # fused_middle_v1: the shared expert's BF16 rounds, clamped SwiGLU and the
+    # down FP8 QAT run as the routed source_middle_fusion epilogue (score 1.0),
+    # ~8 elementwise launches -> 1 per layer; bit-exact by construction, GPU
+    # unchecked. Requires dense_qat=fused_fp32. Counter: source_shared_middle_fused.
+    'deepseek_source_shared_middle': ('reference', 'fused_middle_v1'),
+    # bf16_coeff_gemv_v1: decode router logits read the BF16 gate weight with
+    # the stock F32 GEMV law instead of casting the whole [384,5120] weight to
+    # F32 every layer (~15.7 MB less traffic per layer). Gated by a one-time
+    # bitwise check against the stock product. Counter: source_router_gemv.
+    'deepseek_source_router': ('reference', 'bf16_coeff_gemv_v1'),
+    # Opt-in, default off, implemented_untested_unqualified (2026-11-08, CPU
+    # equality only). key_chunked_v1: the indexer row tile is sized by the
+    # head-reduced score row and the head scratch by key chunks, so long
+    # histories stop collapsing prefill tiles to 1-2 rows that each re-read
+    # every key and run their own top-k (GLM-5.3 indexer query/key blocking).
+    # Counters: index_key_chunked_{calls,tiles,key_chunks,tiles_avoided}.
+    'deepseek_source_index_tiling': ('reference', 'key_chunked_v1'),
+    # compact_v1: stable top-k and candidate-only ids by prefix-sum compaction
+    # of the already-determined keep mask instead of a second partition/argsort
+    # plus sort (MLX sorts on the GPU). Same ids, order and dtype.
+    # Counters: index_compact_{select,candidate_blocks,candidate_ids}.
+    'deepseek_source_index_select': ('reference', 'compact_v1'),
 }
 
 
@@ -188,6 +213,9 @@ def source_policy(value=None):
     if (source_options.get('deepseek_source_submission','reference')=='shared_first_v1'
             and source_options.get('deepseek_source_ffn_input','reference')!='reference'):
         raise ValueError('Source shared-first requires reference FFN input; routed/shared reuse consumes routed first')
+    from .deepseek_v41_source_shared_middle import validate_policy as validate_shared_middle
+    validate_shared_middle(source_options.get('deepseek_source_shared_middle','reference'),
+                           dense_qat=source_options.get('deepseek_source_dense_qat','reference'))
     if source_options.get('deepseek_source_woa_storage','reference')!='reference':
         if source_options.get('deepseek_source_bf16_loads','reference') not in ('woa_f32','direct_f32'):
             raise ValueError('Source MXFP8 WoA storage requires deepseek_source_bf16_loads woa_f32 or direct_f32')
@@ -201,6 +229,11 @@ def source_policy(value=None):
     if (source_options.get('deepseek_source_qakv','reference') != 'reference'
             and source_options.get('deepseek_source_dense_qat','reference') != 'fused_fp32'):
         raise ValueError('Source Qa/KV reuse requires fused_fp32 Source dense QAT')
+    if any(source_options.get(name,'reference')!='reference'
+           for name in ('deepseek_source_index_tiling','deepseek_source_index_select')) and (
+            ast!='off' or preparing):
+        # The Source AST batched verify owns its own index selection code.
+        raise ValueError('Source index tiling/select laws apply to the ordinary indexer only; AST/DSpark preparation has its own selection')
     if (source_options.get('deepseek_source_attention_math','reference') != 'reference'
             and source_options.get('deepseek_index_policy','reference') != 'finite_all_retained'):
         raise ValueError('Source attention broadcast requires finite_all_retained index policy')
@@ -226,6 +259,10 @@ def source_policy(value=None):
         if embedded:blocked.append('embedded_dspark')
         if blocked:
             raise ValueError('Source expert overlap_v1 cannot combine with: '+', '.join(blocked))
+    if isinstance(expert,dict):
+        from .deepseek_v41_source_lfu import lookahead_requested
+        if lookahead_requested(expert) and source_options.get('deepseek_source_expert_io','reference')!='overlap_v1':
+            raise ValueError('Source expert lookahead/loader keys require deepseek_source_expert_io=overlap_v1')
     result=execution_policy(value)
     if source_options.get('deepseek_source_hc_boundary','reference')!='reference'and result['deepseek_hc']!='reference':
         raise ValueError('Source HC boundary requires reference HC')
@@ -251,6 +288,11 @@ def source_policy(value=None):
     validate_source_profiles(result)
     if expert_math is not None:
         result['deepseek_source_expert_math']=expert_math
+    if result.get('deepseek_verify_moe_rows','reference')!='reference' and expert_math!='routed_fused_fp32':
+        # m1_rows needs lockstep, which needs a draft, and the selected default bundle never
+        # applies to draft routes; without explicit fused expert math every site declined
+        # (2026-11-08: 3,480/3,480) while the route still reported the policy selected.
+        raise ValueError('deepseek_verify_moe_rows=m1_rows_v1 requires routed_fused_fp32 expert math')
     if expert is not None:
         from .deepseek_v41_source_lfu import parse_policy
         result['deepseek_source_experts']=parse_policy(expert)
@@ -420,11 +462,29 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             self.numerics_revision += ':source_row_packet=row_packet_v1:implementation='+implementation_identity()
             self.profile += ':rowpacket-'+hashlib.sha256(self.numerics_revision.encode()).hexdigest()[:16]
 
+    def _bind_index_select_identity(self):
+        selected=[(key,self.kernel_policy.get(key,'reference'))for key in ('deepseek_source_index_tiling','deepseek_source_index_select')]
+        selected=[(key,value)for key,value in selected if value!='reference']
+        if selected:
+            from ..runtime.models.deepseek_v41_index_select import implementation_identity
+            self.numerics_revision += ''.join(':'+key+'='+value for key,value in selected)+':implementation='+implementation_identity()
+            self.profile += ':indexsel-'+hashlib.sha256(self.numerics_revision.encode()).hexdigest()[:16]
+
     def _bind_hc_mega_identity(self):
         if self.kernel_policy.get('deepseek_source_hc_mega','reference')=='mega_v1':
             from ..runtime.models.deepseek_v41_source_hc_mega import POLICY, implementation_identity
             self.numerics_revision += ':source_hc_mega='+POLICY+':implementation='+implementation_identity()
             self.profile += ':hcmega-'+hashlib.sha256(self.numerics_revision.encode()).hexdigest()[:16]
+
+    def _bind_fused_kernel_lane_identity(self):
+        if self.kernel_policy.get('deepseek_source_shared_middle','reference')!='reference':
+            from .deepseek_v41_source_shared_middle import POLICY, implementation_identity
+            self.numerics_revision += ':source_shared_middle='+POLICY+':implementation='+implementation_identity()
+            self.profile += ':shmid-'+hashlib.sha256(self.numerics_revision.encode()).hexdigest()[:16]
+        if self.kernel_policy.get('deepseek_source_router','reference')!='reference':
+            from ..runtime.gguf.source_router_gemv import POLICY, implementation_identity
+            self.numerics_revision += ':source_router='+POLICY+':implementation='+implementation_identity()
+            self.profile += ':router-'+hashlib.sha256(self.numerics_revision.encode()).hexdigest()[:16]
 
     def _bind_short_attention_identity(self):
         selected=self.kernel_policy.get('deepseek_source_attention_math','reference')
@@ -474,6 +534,10 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         self.weights.source_prefill_order_policy=selected
         if selected==POLICY:
             self.numerics_revision+=':'+KEY+'='+selected+':implementation='+implementation_identity()
+            ced=self.kernel_policy.get('deepseek_ced','reference')
+            if ced!='reference':
+                # Layer-major CED waves are a separately salted composition.
+                self.numerics_revision+=':ced='+ced+':ced_state_only='+self.kernel_policy.get('deepseek_ced_state_only','reference')
             self.profile+=':layer-major-'+hashlib.sha256(self.numerics_revision.encode()).hexdigest()[:16]
             self.numeric_profile+=':'+selected+'_unqualified'
 
@@ -564,6 +628,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             resident_prefill_policy=self.kernel_policy.get('deepseek_source_resident_prefill','reference'),
             source_expert_io_policy=self.kernel_policy.get('deepseek_source_expert_io','reference'),
             prefill_readahead_policy=self.kernel_policy.get('deepseek_source_prefill_readahead','reference'))
+        self.weights.source_shared_middle_policy=self.kernel_policy.get('deepseek_source_shared_middle','reference')
+        self.weights.source_router_policy=self.kernel_policy.get('deepseek_source_router','reference')
         self.weight_stream = self.weights.expert_stream
         from ..memory import host_available_bytes
         self.weight_stream.configure_adaptive_residency(
@@ -601,9 +667,12 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
                 raise ValueError("unsupported official Engram plane layout")
             # checked_file resolves a declared-tier symlink to its regular target and checks the seal stamp
             path = checked_file(root, weight["file"], artifact["seals"][weight["file"]])
+            from .deepseek_v41_source_stream import engram_io_settings
+            engram_io = engram_io_settings(self.kernel_policy.get('deepseek_source_engram_io','reference'), request.read_workers)
             self.engram_tables[layer] = EngramRows(path, offset=weight["offset"], scale_offset=scale["offset"], rows=rows,
-                expected_stat=file_stamp(path.stat()), workers=min(8, request.read_workers), cache_format=self.kernel_policy["deepseek_engram_cache"],
-                carry_window=self.kernel_policy.get('deepseek_source_engram','reference')=='carry_tuple_v1')
+                expected_stat=file_stamp(path.stat()), workers=engram_io['workers'], cache_format=self.kernel_policy["deepseek_engram_cache"],
+                carry_window=self.kernel_policy.get('deepseek_source_engram','reference')=='carry_tuple_v1',
+                **({'cache_bytes': engram_io['cache_bytes']} if engram_io['cache_bytes'] is not None else {}))
         self.weight_stream.bind_ple_providers(self.engram_tables)
         self._bind_fp8_pp_identity()
         self._bind_woa_pp_identity()
@@ -616,12 +685,17 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         self._bind_row_packet_identity()
         self._bind_short_attention_identity()
         self._bind_hc_mega_identity()
+        self._bind_fused_kernel_lane_identity()
+        self._bind_index_select_identity()
         self._bind_batched_tree_identity()
         from .deepseek_v41_source_approx import bind_identity as bind_approximate_identity
         bind_approximate_identity(self)  # no-op unless an approximate operation is selected
         if self.kernel_policy.get('deepseek_verify_rows','serial')=='lockstep_multirow_v1':
             from .deepseek_v41_dspark_chain import POLICY, implementation_identity
             self.numerics_revision+=':verify_rows='+POLICY+':implementation='+implementation_identity()
+            moe_rows=self.kernel_policy.get('deepseek_verify_moe_rows','reference')
+            if moe_rows!='reference':
+                self.numerics_revision+=':verify_moe_rows='+moe_rows
             self.profile+=':lockstep-'+hashlib.sha256(self.numerics_revision.encode()).hexdigest()[:16]
         if self.kernel_policy.get('deepseek_source_resident_gather','reference')!='reference':
             from .deepseek_v41_source_bank_session import implementation_identity
@@ -664,6 +738,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         self.model._mlx2_source_ast_target_laws=self._source_ast_target_laws
         self.model.engram_carry_enabled = self.kernel_policy.get('deepseek_source_engram', 'reference') == 'carry_tuple_v1'
         self.model.source_ast_kv_preparation_policy=self.kernel_policy.get('deepseek_source_ast_kv_preparation','reference')
+        self.model.source_index_tiling_policy=self.kernel_policy.get('deepseek_source_index_tiling','reference')
+        self.model.source_index_select_policy=self.kernel_policy.get('deepseek_source_index_select','reference')
         self.model.recommended_prefill_rows = self.weights.recommended_prefill_rows
         if self.kernel_policy.get('deepseek_source_prefill_partition','adaptive_v1')=='position_grid_v1':
             # Compose over whatever cap is in force; never widen it.
@@ -674,6 +750,14 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         configure_approximate(self)
         self.model.verification_commit_policy = self.kernel_policy["deepseek_verify_commit"]
         self.model.verify_rows_policy = self.kernel_policy["deepseek_verify_rows"]
+        # Opt-in lockstep MoE site (deepseek_v41_dspark_chain_moe); default reference.
+        self.model.verify_moe_rows_policy = self.kernel_policy.get("deepseek_verify_moe_rows", "reference")
+        if (self.model.verify_moe_rows_policy != "reference"
+                and self.kernel_policy.get('deepseek_source_expert_math', 'reference') != 'routed_fused_fp32'):
+            # Backstop for source_policy's parse-time check: without the fused law every m1_rows
+            # site declined (3480/3480 on 2026-11-08) while the route reported it selected.
+            raise ValueError('deepseek_verify_moe_rows=m1_rows_v1 requires effective '
+                             'deepseek_source_expert_math=routed_fused_fp32')
         self.model.pointwise_policy = self.kernel_policy["deepseek_pointwise"]
         self.model.attention_epilogue_policy = self.kernel_policy["deepseek_attention_epilogue"]
         self.model.hc_epilogue_policy = self.kernel_policy["deepseek_hc_epilogue"]
@@ -842,6 +926,19 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         return DemandStreamCacheBudget(super().cache_budget(mtp=mtp),
                                        self.model.recommended_prefill_rows)
 
+    def prefill_step_default(self):
+        """Adapter-preferred prompt slice when the operator gives none.
+
+        Only the opt-in layer_major_v1 order states a preference: its largest
+        wave (cold experts stream from SSD and a wave reads each layer's bank
+        about once, so bytes per prompt row fall with wave length). The live
+        wave stays memory-bounded by wave_rows(). Every other Source profile
+        keeps the inherited adapter default (512). Unqualified.
+        """
+        from .deepseek_v41_source_layer_major import DEFAULT_WAVE_ROWS, KEY, POLICY
+        policy=getattr(self,'kernel_policy',None) or {}
+        return DEFAULT_WAVE_ROWS if policy.get(KEY,'reference')==POLICY else super().prefill_step_default()
+
     def execution_config(self, *, max_lanes, prefill_step):
         from .deepseek_v41_source_layer_major import CHUNK_ROWS, MAX_WAVE_ROWS, POLICY
         wave = (self.kernel_policy.get('deepseek_source_prefill_order','reference')==POLICY
@@ -939,7 +1036,9 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         value['source_prefill_partition']=partition
         from .deepseek_v41_source_layer_major import receipt as order_receipt
         value['source_prefill_order']=order_receipt(self.kernel_policy.get('deepseek_source_prefill_order','reference'),
-                                                    getattr(self,'weights',None))
+                                                    getattr(self,'weights',None),
+                                                    ced=self.kernel_policy.get('deepseek_ced','reference'),
+                                                    counters=getattr(getattr(self,'model',None),'scheduled_kv_calls',None))
         binding=getattr(self,'_dspark_ast_binding',None)
         if binding is not None:
             value['speculation']=binding.receipt()
@@ -947,6 +1046,10 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         value['source_resident_gather']=dict(policy=self.kernel_policy.get('deepseek_source_resident_gather','reference'),
             session=None if session is None else session.receipt(),qualification='unqualified')
         value['source_resident_prefill']=dict(policy=self.kernel_policy.get('deepseek_source_resident_prefill','reference'),qualification='unqualified')
+        if self.kernel_policy.get('deepseek_source_engram_io','reference')!='reference':
+            from .deepseek_v41_source_stream import engram_io_receipt
+            value['source_engram_io']=engram_io_receipt(self.kernel_policy['deepseek_source_engram_io'],
+                                                        getattr(self,'engram_tables',{}))
         value['source_submission'] = getattr(self.weights,'source_submission_policy','reference')
         value['source_row_packet'] = getattr(self.weights,'source_row_packet_policy','reference')
         value['scheduled_kv_calls'] = dict(getattr(self.model,'scheduled_kv_calls',{}))
@@ -991,9 +1094,18 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
                      source_ffn_input=getattr(self.weights,'source_ffn_input_policy','reference'),
                      source_prefill_down=getattr(self.weights,'source_prefill_down_policy','reference'),
                      source_attention_math=self.model.source_attention_math_policy,
+                     source_index_tiling=getattr(self.model,'source_index_tiling_policy','reference'),
+                     source_index_select=getattr(self.model,'source_index_select_policy','reference'),
+                     source_index_counters={k:v for k,v in getattr(self.model,'scheduled_kv_calls',{}).items()if k.startswith('index_')},
                      source_hc_boundary=self.model.source_hc_boundary_policy,
                      source_hc_boundary_counters={k:v for k,v in self.model.scheduled_hc_calls.items()if k.startswith('source_hc_boundary_')},
                      hc_coeff_policy=self.model.hc_coeff_policy,
+                     source_shared_middle=dict(policy=getattr(self.weights,'source_shared_middle_policy','reference'),
+                         counters={k:v for k,v in getattr(self.weights,'scheduled_dense_calls',{}).items()if k.startswith('source_shared_middle')},
+                         qualification='implemented_untested_unqualified'),
+                     source_router=dict(policy=getattr(self.weights,'source_router_policy','reference'),
+                         counters={k:v for k,v in getattr(self.weights,'scheduled_dense_calls',{}).items()if k.startswith('source_router_gemv')},
+                         qualification='implemented_untested_unqualified'),
                      source_hc_mega=getattr(self.model,'source_hc_mega_policy','reference'),
                      source_hc_mega_counters={k:v for k,v in self.model.scheduled_hc_calls.items()if k.startswith('source_hc_mega_')},
                      index_score_contract=('finite unmasked index scores required' if self.model.index_policy=='finite_all_retained' else 'ordinary reference behavior'))
@@ -1043,6 +1155,12 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             value['source_native_mx_counters']={k:v for k,v in self.weights.scheduled_expert_calls.items() if k.startswith('official_source_native_mx_')}
             value['numerical_scope']=value['numerical_scope'].replace('MLX reference reductions;','Existing Source profile;')
             value['numerical_scope']+='; opt-in original PP expert M16..99 native HALF activation consumption (rounding allowed), distinct profile; original coefficient precision/Source middle/owners unchanged; Q1/small-M/decode reference; unqualified'
+        model=getattr(self,'model',None)
+        if model is not None and (getattr(model,'verify_rows_policy','serial') not in ('reference','serial')
+                                  or getattr(model,'verify_moe_rows_policy','reference')!='reference'):
+            # Lockstep/m1_rows engagement (multirow sites, MoE calls, declines) lived only on the
+            # model; without it an accepted verify policy could never be reported observed-used.
+            value['verify_lockstep_counters']=dict(getattr(model,'verified_commit_stats',None) or {})
         from .deepseek_v41_source_approx import receipt as approximate_receipt, selected_operations
         value['source_approximate_operations']=approximate_receipt(self.kernel_policy,getattr(self,'model',None))
         if selected_operations(self.kernel_policy):

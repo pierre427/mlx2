@@ -44,7 +44,9 @@ def tier_directories(root):
         if not stat.S_ISREG(st.st_mode) or st.st_size > 1 << 16:
             raise ValueError("source tier declaration must be a small regular file")
         value = json.loads(path.read_text())
-        dirs = value.get("directories") if type(value) is dict else None
+        if type(value) is not dict:
+            raise ValueError("source tier declaration is malformed")
+        dirs = value.get("directories")
         if (value.get("schema") != "mlx2.v41.source-tiers.v1" or type(dirs) is not list
                 or not all(type(d) is str and os.path.isabs(d) for d in dirs)):
             raise ValueError("source tier declaration is malformed")
