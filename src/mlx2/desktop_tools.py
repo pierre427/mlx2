@@ -947,7 +947,11 @@ def _tool_command(controller, request):
         if native in {"helper_start", "adapter_draft"}:
             session["context"].setdefault("helper_job_ids", []).append(result["job_id"])
     else:
-        result = session["backend"].execute(session["executors"][name], arguments)
+        from .desktop_lane import LANE
+        # MCP clients serialise their own operations; other application requests
+        # proceed while this remote call waits.
+        with LANE.released():
+            result = session["backend"].execute(session["executors"][name], arguments)
     if native == "snapshot":
         workers = result.get("workers", [])
         summary = (f"Application snapshot retrieved successfully. App-managed worker count = {len(workers)}. "

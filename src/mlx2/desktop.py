@@ -1144,39 +1144,95 @@ def main(argv=None):
         _serve_companion(args, wire)
 
 
-def _serve_companion(args, wire):
+def _serve_companion(args, wire, *, max_in_flight=64, shutdown_grace=30.0):
+    """Answer one JSON request per stdin line; replies carry the request id.
+
+    Requests run on their own threads in a FIFO lane (desktop_lane), so their
+    order and mutual exclusion match a single-threaded loop, while network
+    waits that step out of the lane let later requests proceed. Replies may
+    therefore arrive out of order; the native bridge pairs them by id.
+    """
     from .desktop_control import DesktopController
+    from .desktop_lane import LANE
 
     supervisor = DesktopController(args.home, args.trash_helper)
+    write_lock = threading.Lock()
+    slots = threading.BoundedSemaphore(max_in_flight)
+    workers = []
+    stopping = threading.Event()
+    dispatching = threading.Condition()
+    in_dispatch = [0]  # Includes dispatches waiting on the network outside the lane.
+
+    def answer(line, ticket):
+        request = {}
+        try:
+            with LANE.held(ticket):
+                try:
+                    request = json.loads(line)
+                    if not isinstance(request, dict):
+                        raise TypeError("Expected a JSON object")
+                    with dispatching:
+                        if stopping.is_set():
+                            raise RuntimeError("The desktop companion is shutting down")
+                        in_dispatch[0] += 1
+                    try:
+                        result = supervisor.dispatch(request)
+                    finally:
+                        with dispatching:
+                            in_dispatch[0] -= 1
+                            dispatching.notify_all()
+                    text = json.dumps({"id": request.get("id"), "ok": True, "result": json_safe(result)}, allow_nan=False)
+                except Exception as error:  # noqa: BLE001 -- report command errors without abandoning ownership
+                    text = json.dumps({"id": request.get("id") if isinstance(request, dict) else None,
+                                       "ok": False, "error": str(error) or type(error).__name__})
+                # Written inside the lane, so ordinary replies keep arrival order;
+                # only work that stepped out of the lane answers out of order.
+                with write_lock:
+                    wire.write(text + "\n")
+                    wire.flush()
+        except (BrokenPipeError, OSError):
+            pass  # The application went away; stdin EOF ends the loop.
+        finally:
+            slots.release()
 
     def terminate(_signal, _frame):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, terminate)
+    grace = None
     try:
         for line in sys.stdin:
-            request = {}
+            slots.acquire()
+            ticket = LANE.ticket()
+            worker = threading.Thread(target=answer, args=(line, ticket), name="mlx2-desktop-request", daemon=True)
             try:
-                request = json.loads(line)
-                if not isinstance(request, dict):
-                    raise TypeError("Expected a JSON object")
-                result = supervisor.dispatch(request)
-                reply = {
-                    "id": request.get("id"),
-                    "ok": True,
-                    "result": json_safe(result),
-                }
-            except Exception as error:  # noqa: BLE001 -- report command errors without abandoning ownership
-                reply = {
-                    "id": request.get("id") if isinstance(request, dict) else None,
-                    "ok": False,
-                    "error": str(error),
-                }
-            wire.write(json.dumps(reply, allow_nan=False) + "\n")
-            wire.flush()
-    except (KeyboardInterrupt, BrokenPipeError):
+                worker.start()
+            except RuntimeError:
+                answer(line, ticket)  # No thread available: answer in order on this thread.
+                continue
+            workers[:] = [w for w in workers if w.is_alive()] + [worker]
+    except KeyboardInterrupt:
+        grace = shutdown_grace
+    except BrokenPipeError:
         pass
     finally:
+        try:
+            if grace is None:
+                # Normal EOF: answer every request already received.
+                for worker in workers:
+                    worker.join()
+        except KeyboardInterrupt:
+            grace = shutdown_grace  # Terminated while draining.
+        if grace is not None:
+            # Termination: refuse queued work, then let the current command finish
+            # (bounded) so close() never runs underneath a dispatch in progress.
+            try:
+                with dispatching:
+                    stopping.set()
+                    if not dispatching.wait_for(lambda: in_dispatch[0] == 0, grace):
+                        print("desktop: closing while a command is still running", file=sys.stderr, flush=True)
+            except KeyboardInterrupt:
+                pass  # A second termination signal: close now.
         supervisor.close()
 
 

@@ -111,8 +111,12 @@ class WebTools:
                 self.thread = threading.Thread(target=self.loop.run_forever, daemon=True, name='mlx2-local-web')
                 self.thread.start()
             future = asyncio.run_coroutine_threadsafe(asyncio.wait_for(execute(operation, arguments), 60), self.loop)
+        from .desktop_lane import LANE
         try:
-            return future.result(timeout=65)
+            # The request runs on the web event loop; other application requests
+            # proceed while this one waits.
+            with LANE.released():
+                return future.result(timeout=65)
         except (TimeoutError, concurrent.futures.TimeoutError):
             future.cancel()
             raise ValueError('Built-in web request timed out; diagnose the source or change the request before retrying') from None

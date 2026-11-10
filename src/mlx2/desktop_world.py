@@ -18,6 +18,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from .desktop_lane import LANE
+
 KINDS = {"chat", "memory", "knowledge", "web", "file", "folder", "avatar", "media"}
 SHAPES = {"panel", "sphere", "cube", "ring"}
 ANIMATIONS = {"none", "pulse", "spin", "float"}
@@ -434,7 +436,7 @@ class Worlds:
                   "gsrnamespace": 6, "gsrlimit": limit, "prop": "imageinfo", "iiprop": "url|extmetadata|mime",
                   "iiurlwidth": 1024, "iiextmetadatafilter": "LicenseShortName|Artist|Credit"}
         request = urllib.request.Request("https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode(params), headers={"User-Agent": "MLX2Desktop/0.1 (native agent workspace image search)"})
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with LANE.released(), urllib.request.urlopen(request, timeout=15) as response:
             data = response.read(1024 * 1024 + 1)
         if len(data) > 1024 * 1024:
             raise ValueError("Image search response exceeds its budget")
@@ -538,8 +540,9 @@ class Worlds:
 
     def dispatch(self, request):
         command = request["command"]
-        # Network calls run outside the world lock so a slow Wikimedia request
-        # never blocks snapshots or scene edits.
+        # Network calls run outside the world lock and step out of the request
+        # lane, so a slow Wikimedia request never blocks snapshots, scene edits
+        # or other application requests.
         if command == "world_image_search":
             return self.image_search(request["query"], request["limit"])
         if command == "world_asset_fetch":
@@ -552,7 +555,7 @@ class Worlds:
                     raise ValueError("World texture redirects are not permitted")
             opener = urllib.request.build_opener(NoRedirect)
             req = urllib.request.Request(result["url"], headers={"User-Agent": "MLX2Desktop/0.1"})
-            with opener.open(req, timeout=15) as response:
+            with LANE.released(), opener.open(req, timeout=15) as response:
                 data = response.read(8 * 1024 * 1024 + 1)
             with self.lock:
                 return {"resource": self.store_image(data), "attribution": result}

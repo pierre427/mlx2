@@ -316,6 +316,8 @@ struct WorldView: View {
     // sends only fields the operator changed, so concurrent agent edits survive.
     @State private var loadedObject = JSON()
     @State private var loadedWorld = JSON()
+    // Downloads now run in parallel; only the most recent "Use as material" applies.
+    @State private var latestFetch: UUID?
     private let kinds = ["chat", "memory", "knowledge", "web", "file", "folder", "avatar", "media"]
     private var state: JSON { model.snapshot["world"] }
     private var world: JSON { state["active"] }
@@ -581,14 +583,17 @@ struct WorldView: View {
         }
     }
     private func fetchImage(_ result: JSON) {
+        let token = UUID()
+        latestFetch = token
         Task { @MainActor in
             do {
                 let response = try await model.request("world_asset_fetch", ["result_id": result["id"].text])
+                guard latestFetch == token else { return }
                 resource = response["resource"].text
                 shape = "panel"
                 applyObject()
                 localError = nil
-            } catch { localError = error.localizedDescription }
+            } catch { if latestFetch == token { localError = error.localizedDescription } }
         }
     }
     private func field(_ label: String, value: Binding<String>) -> some View {

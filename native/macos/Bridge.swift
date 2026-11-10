@@ -27,17 +27,35 @@ struct DesktopConnectionFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// Multiplexed JSON-lines connection to the Python companion.
+///
+/// Requests are written in call order and each reply is paired by its id, so a
+/// slow command (for example a Wikimedia search) no longer holds up the ones
+/// after it. The companion still runs ordinary commands one at a time in arrival
+/// order; only work that steps out of its request lane runs in parallel.
 final class Bridge: @unchecked Sendable {
+    private struct Pending {
+        let command: String
+        let continuation: CheckedContinuation<JSON, Error>
+    }
+    // Guards every field below; the reader thread hands lines over through it.
     private let queue = DispatchQueue(label: "mlx2.desktop.bridge", qos: .utility)
+    // Writes can block when the companion is not reading; they never hold up
+    // timeouts or reply delivery on `queue`. Serial, so request order is kept.
+    private let writer = DispatchQueue(label: "mlx2.desktop.bridge.writer", qos: .utility)
+    private var finishing: [CheckedContinuation<Void, Never>] = []
+    private var closed = false
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
-    private var buffer = Data()
     private var stderr: FileHandle?
     private var transportFailure: String?
     private var finished = false
+    private var pending: [String: Pending] = [:]
+    private var readerFinished: DispatchSemaphore?
     private let requestTimeout: TimeInterval
     private let processFactory: (() throws -> Process)?
+    private static let lineLimit = 64 * 1024 * 1024
 
     init(requestTimeout: TimeInterval = 90, processFactory: (() throws -> Process)? = nil) {
         self.requestTimeout = requestTimeout
@@ -86,14 +104,79 @@ final class Bridge: @unchecked Sendable {
         process = task
         input = incoming.fileHandleForWriting
         output = outgoing.fileHandleForReading
-        buffer.removeAll()
+        startReader(outgoing.fileHandleForReading)
+    }
+
+    private func startReader(_ handle: FileHandle) {
+        let done = DispatchSemaphore(value: 0)
+        readerFinished = done
+        let thread = Thread { [self] in
+            var buffer = Data()
+            var discarding = false
+            defer { done.signal() }
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty {
+                    queue.async { self.connectionEnded() }
+                    return
+                }
+                buffer.append(chunk)
+                while let end = buffer.firstIndex(of: 10) {
+                    let line = Data(buffer[buffer.startIndex..<end])
+                    buffer.removeSubrange(buffer.startIndex...end)
+                    if discarding { discarding = false; continue }
+                    queue.async { self.deliver(line) }
+                }
+                if buffer.count > Self.lineLimit {
+                    // Keep draining so the companion never blocks on a full pipe.
+                    buffer.removeAll(keepingCapacity: false)
+                    if !discarding { queue.async { self.failAll("Desktop response exceeded its size limit. Quit and reopen MLX2 before retrying.") } }
+                    discarding = true
+                }
+            }
+        }
+        thread.name = "mlx2.desktop.bridge.reader"
+        thread.start()
+    }
+
+    private func deliver(_ line: Data) {
+        guard let object = try? JSONSerialization.jsonObject(with: line) else {
+            failAll("Desktop connection lost: the companion wrote an unreadable reply. Quit and reopen MLX2 before retrying.")
+            return
+        }
+        let reply = JSON(object)
+        // A reply whose request already timed out is discarded; ids never repeat.
+        guard let id = reply["id"].string, let entry = pending.removeValue(forKey: id) else { return }
+        let limit = ["world_export", "user_profile_export", "user_profile_chat_get"].contains(entry.command) ? 64 * 1024 * 1024 : 16 * 1024 * 1024
+        if line.count > limit {
+            entry.continuation.resume(throwing: DesktopError.message("Desktop response exceeded its size limit"))
+        } else if reply["ok"].bool {
+            entry.continuation.resume(returning: reply["result"])
+        } else {
+            entry.continuation.resume(throwing: DesktopError.message(reply["error"].text))
+        }
+    }
+
+    private func failAll(_ message: String) {
+        if transportFailure == nil { transportFailure = message }
+        let waiting = pending.values
+        pending.removeAll()
+        for entry in waiting { entry.continuation.resume(throwing: DesktopConnectionFailure(message: transportFailure!)) }
+    }
+
+    private func connectionEnded() {
+        if finished {
+            let waiting = pending.values
+            pending.removeAll()
+            for entry in waiting { entry.continuation.resume(throwing: DesktopError.message("The desktop connection has closed.")) }
+        } else {
+            failAll("Desktop supervisor stopped. Quit and reopen MLX2; see ~/Library/Application Support/MLX2/desktop.log")
+        }
     }
 
     func request(_ command: String, _ arguments: [String: Any] = [:]) async throws -> JSON {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
-                var sent = false
-                var received = false
                 do {
                     try self.launch()
                     let id = UUID().uuidString
@@ -102,35 +185,25 @@ final class Bridge: @unchecked Sendable {
                     request["id"] = id
                     var data = try JSONSerialization.data(withJSONObject: request)
                     data.append(10)
-                    sent = true
-                    try self.input!.write(contentsOf: data)
-                    let deadline = Date().addingTimeInterval(self.requestTimeout)
-                    while !self.buffer.contains(10) {
-                        var descriptor = pollfd(fd: self.output!.fileDescriptor, events: Int16(POLLIN), revents: 0)
-                        let ready = Darwin.poll(&descriptor, 1, 250)
-                        if ready < 0 && errno != EINTR { throw DesktopError.message("Desktop pipe polling failed") }
-                        if Date() > deadline { throw DesktopError.message("Desktop command timed out. See desktop.log before retrying.") }
-                        if ready <= 0 { continue }
-                        let chunk = self.output!.availableData
-                        if chunk.isEmpty { throw DesktopError.message("Desktop supervisor stopped. See ~/Library/Application Support/MLX2/desktop.log") }
-                        self.buffer.append(chunk)
-                        let maximumResponse = ["world_export", "user_profile_export", "user_profile_chat_get"].contains(command) ? 64 * 1024 * 1024 : 16 * 1024 * 1024
-                        if self.buffer.count > maximumResponse { throw DesktopError.message("Desktop response exceeded its size limit") }
+                    self.pending[id] = Pending(command: command, continuation: continuation)
+                    let input = self.input!
+                    self.writer.async {
+                        // A request that timed out before it could be written is
+                        // dropped, so a stalled companion never runs a stale backlog.
+                        // (`queue` never waits on `writer`, so this cannot deadlock.)
+                        guard self.queue.sync(execute: { self.pending[id] != nil }) else { return }
+                        do { try input.write(contentsOf: data) }
+                        catch {
+                            // A partial write leaves the wire unusable for everyone.
+                            self.queue.async { self.failAll("Desktop connection lost: \(error.localizedDescription) Quit and reopen MLX2 before retrying.") }
+                        }
                     }
-                    let end = self.buffer.firstIndex(of: 10)!
-                    let line = self.buffer.prefix(upTo: end)
-                    self.buffer.removeSubrange(...end)
-                    let reply = JSON(try JSONSerialization.jsonObject(with: line))
-                    guard reply["id"].string == id else { throw DesktopError.message("Desktop response identity mismatch") }
-                    received = true
-                    guard reply["ok"].bool else { throw DesktopError.message(reply["error"].text) }
-                    continuation.resume(returning: reply["result"])
+                    self.queue.asyncAfter(deadline: .now() + self.requestTimeout) {
+                        guard let entry = self.pending.removeValue(forKey: id) else { return }
+                        entry.continuation.resume(throwing: DesktopError.message(
+                            "Desktop command timed out; it may still complete. See desktop.log before retrying."))
+                    }
                 } catch {
-                    if sent && !received {
-                        // A late reply cannot safely be paired with the next command.
-                        // Keep owned engines alive, but refuse further mutations until restart.
-                        self.transportFailure = "Desktop connection lost: \(error.localizedDescription) Quit and reopen MLX2 before retrying."
-                    }
                     if let failure = self.transportFailure { continuation.resume(throwing: DesktopConnectionFailure(message: failure)) }
                     else { continuation.resume(throwing: error) }
                 }
@@ -139,19 +212,32 @@ final class Bridge: @unchecked Sendable {
     }
 
     func finish() async {
-        // Serialized after any pending command. EOF lets Python drain and stop
-        // its own worker before releasing the paired reservation.
+        // EOF lets Python drain its in-flight commands, stop its worker and
+        // release the paired reservation; their replies are still delivered.
         await withCheckedContinuation { continuation in
             queue.async {
+                // Every caller returns once the companion has exited.
+                if self.closed { continuation.resume(); return }
+                self.finishing.append(continuation)
+                guard !self.finished else { return }
                 self.finished = true
-                try? self.input?.close()
-                // A timed-out command can still be writing a large reply. Drain it
-                // before waiting, so the child cannot block on a full stdout pipe.
-                if self.output != nil { _ = try? self.output?.readToEnd() }
-                self.process?.waitUntilExit()
-                try? self.output?.close()
-                try? self.stderr?.close()
-                continuation.resume()
+                let input = self.input, reader = self.readerFinished, process = self.process, output = self.output, log = self.stderr
+                // Close after every queued write, so in-flight requests still arrive.
+                self.writer.async {
+                    try? input?.close()
+                    DispatchQueue.global(qos: .utility).async {
+                        reader?.wait()
+                        process?.waitUntilExit()
+                        self.queue.async {
+                            try? output?.close()
+                            try? log?.close()
+                            self.closed = true
+                            let waiting = self.finishing
+                            self.finishing.removeAll()
+                            waiting.forEach { $0.resume() }
+                        }
+                    }
+                }
             }
         }
     }
