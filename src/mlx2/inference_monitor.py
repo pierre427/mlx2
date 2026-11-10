@@ -326,6 +326,7 @@ class ServerReading:
     failures: tuple[tuple[str, int], ...] = ()
     # mechanisms and requests
     mechanisms: tuple[MechanismRate, ...] = ()
+    experts: ExpertStreamReading | None = None
     active_requests: tuple[ActiveRequest, ...] = ()
     observed_sessions: tuple[ActiveRequest, ...] = ()
     recent_requests: tuple[CompletedRequest, ...] = ()
@@ -502,6 +503,120 @@ def _is_loopback(url: str) -> bool:
     return host in {"127.0.0.1", "localhost", "::1"}
 
 
+@dataclass(frozen=True)
+class ExpertStreamReading:
+    """MoE expert-streaming counters from /v1/status (present only in expert swap mode).
+
+    Rates come from the difference between two status snapshots; ``seconds`` is that gap.
+    """
+    hits: float = 0.0
+    misses: float = 0.0
+    bytes_read: float = 0.0
+    evictions: float = 0.0
+    demand_wait_ns: float = 0.0
+    live_bytes: float | None = None
+    target_bytes: float | None = None
+    seconds: float | None = None
+    hits_delta: float | None = None
+    misses_delta: float | None = None
+    bytes_delta: float | None = None
+    evictions_delta: float | None = None
+    wait_delta_ns: float | None = None
+    hints_issued: float | None = None
+    hints_used: float | None = None
+    hints_wasted: float | None = None
+    reduced: tuple[tuple[str, float, float | None], ...] = ()   # (name, total, per second)
+    approximate: tuple[str, ...] = ()
+
+    def rate(self, delta: float | None) -> float | None:
+        return None if delta is None or not self.seconds else delta / self.seconds
+
+    @property
+    def hit_rate_window(self) -> float | None:
+        if self.hits_delta is None or self.misses_delta is None:
+            return None
+        total = self.hits_delta + self.misses_delta
+        return None if total <= 0 else self.hits_delta / total
+
+    @property
+    def hit_rate_lifetime(self) -> float | None:
+        total = self.hits + self.misses
+        return None if total <= 0 else self.hits / total
+
+
+_EXPERT_COUNTERS = {
+    "hits": "v41_expert_cache_hits", "misses": "v41_expert_cache_misses",
+    "bytes_read": "v41_expert_bytes_read", "evictions": "v41_expert_evictions",
+    "demand_wait_ns": "v41_expert_demand_wait_ns",
+}
+# Reduced-precision tiers and soft reaping publish counters under these stems; any
+# numeric counter whose name contains one of them is listed (lifetime total + rate).
+_REDUCED_STEMS = ("q1_", "q2_", "_q1", "_q2", "reduced", "route_drop", "dropped_layer_rows")
+
+
+def _find_key(value: Any, key: str, depth: int = 0) -> Any:
+    if depth > 8:
+        return None
+    if isinstance(value, dict):
+        if key in value:
+            return value[key]
+        for item in value.values():
+            found = _find_key(item, key, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def expert_stream_snapshot(status: dict | None) -> dict[str, float] | None:
+    """Flat numeric counters of the expert stream, or None outside expert swap mode."""
+    stream = _dig(status, "execution", "expert_stream")
+    if not isinstance(stream, dict) or not isinstance(stream.get("counters"), dict):
+        return None
+    out = {k: float(v) for k, v in stream["counters"].items()
+           if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    drop = _find_key(status, "route_drop")
+    stats = drop.get("stats") if isinstance(drop, dict) else None
+    if isinstance(stats, dict) and isinstance(stats.get("dropped_layer_rows"), (int, float)):
+        out["route_drop_dropped_layer_rows"] = float(stats["dropped_layer_rows"])
+    return out
+
+
+def expert_stream_reading(
+    status: dict | None, previous: tuple[float, dict[str, float]] | None, now: float
+) -> ExpertStreamReading | None:
+    current = expert_stream_snapshot(status)
+    if current is None:
+        return None
+    stream = _dig(status, "execution", "expert_stream") or {}
+    seconds = None if previous is None else now - previous[0]
+    before = None if previous is None else previous[1]
+
+    def delta(name: str) -> float | None:
+        if before is None or name not in current:
+            return None
+        return max(0.0, current[name] - before.get(name, 0.0))
+
+    get = lambda name: current.get(_EXPERT_COUNTERS[name], 0.0)
+    reduced = []
+    for name, value in sorted(current.items()):
+        if any(stem in name for stem in _REDUCED_STEMS) and value:
+            d = delta(name)
+            reduced.append((name, value, None if d is None or not seconds else d / seconds))
+    approximate = _dig(status, "execution", "source_approximate_operations", "selected") or ()
+    target = _dig(stream, "adaptive_residency", "effective_cache_target_bytes")
+    return ExpertStreamReading(
+        hits=get("hits"), misses=get("misses"), bytes_read=get("bytes_read"), evictions=get("evictions"),
+        demand_wait_ns=get("demand_wait_ns"), live_bytes=_float(stream.get("live_bytes")),
+        target_bytes=_float(target),
+        seconds=seconds, hits_delta=delta(_EXPERT_COUNTERS["hits"]), misses_delta=delta(_EXPERT_COUNTERS["misses"]),
+        bytes_delta=delta(_EXPERT_COUNTERS["bytes_read"]), evictions_delta=delta(_EXPERT_COUNTERS["evictions"]),
+        wait_delta_ns=delta(_EXPERT_COUNTERS["demand_wait_ns"]),
+        hints_issued=current.get("v41_expert_overlap_hint_issued"), hints_used=current.get("v41_expert_overlap_hint_used"),
+        hints_wasted=current.get("v41_expert_overlap_hint_wasted"),
+        reduced=tuple(reduced[:8]), approximate=tuple(str(x) for x in approximate),
+    )
+
+
 @dataclass
 class _ServerState:
     history: deque = field(default_factory=lambda: deque(maxlen=600))
@@ -511,6 +626,8 @@ class _ServerState:
     uptime: float | None = None
     sessions: tuple[ActiveRequest, ...] = ()
     scope: tuple | None = None
+    experts_previous: tuple[float, dict[str, float]] | None = None
+    experts_current: tuple[float, dict[str, float]] | None = None
 
 
 class InferenceCollector:
@@ -614,6 +731,7 @@ class InferenceCollector:
             state.sessions = ()
             state.status = None
             state.status_at = None
+            state.experts_previous = state.experts_current = None
         state.scope = scope
         batching = None
         try:
@@ -629,6 +747,10 @@ class InferenceCollector:
                     _get(endpoint.url, "/v1/status", api_key, 2 * self.timeout_seconds)
                 )
                 state.status_error = None
+                snapshot = expert_stream_snapshot(state.status)
+                if snapshot is not None:
+                    state.experts_previous = state.experts_current
+                    state.experts_current = (now, snapshot)
             except (OSError, ValueError) as error:
                 state.status_error = _error_text(error)
             state.status_at = now
@@ -651,6 +773,8 @@ class InferenceCollector:
             recent_requests=self.recent_requests,
             clock_comparable=_is_loopback(endpoint.url),
             retained_sessions=state.sessions,
+            experts_previous=state.experts_previous,
+            experts_at=None if state.experts_current is None else state.experts_current[0],
         )
         state.sessions = reading.observed_sessions
         return reading
@@ -1102,6 +1226,8 @@ def build_reading(
     recent_requests: int = 8,
     clock_comparable: bool = True,
     retained_sessions: tuple[ActiveRequest, ...] = (),
+    experts_previous: tuple[float, dict[str, float]] | None = None,
+    experts_at: float | None = None,
 ) -> ServerReading:
     """Derive one server reading from current and earlier exports."""
     status = status if isinstance(status, dict) else None
@@ -1254,12 +1380,14 @@ def build_reading(
         active_requests=active_requests,
         observed_sessions=_observed_sessions(active_requests, batching, status, retained_sessions),
         recent_requests=_recent_requests(status, batching, recent_requests),
+        experts=expert_stream_reading(status, experts_previous, now if experts_at is None else experts_at),
     )
 
 
 __all__ = [
     "ActiveRequest",
     "CompletedRequest",
+    "ExpertStreamReading",
     "InferenceCollector",
     "LatencyStat",
     "MechanismRate",

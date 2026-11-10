@@ -131,6 +131,45 @@ def _request_row(request: CompletedRequest) -> str:
     )
 
 
+def _expert_lines(experts) -> list[str]:
+    """Expert swap mode rows for the Hot paths section (absent when not streaming experts)."""
+    if experts is None:
+        return []
+
+    def row(name: str, delta, total: str) -> str:
+        rate = experts.rate(delta)
+        return f"  {name[:52]:<52} {_count(rate) if rate else '·':>9} {total:>9}"
+
+    hit = experts.hit_rate_window
+    life = experts.hit_rate_lifetime
+    resident = format_bytes(experts.live_bytes)
+    target = format_bytes(experts.target_bytes) if experts.target_bytes else "—"
+    lines = [
+        "  expert swap  "
+        + _join_present([
+            f"resident {resident} / {target}",
+            f"hit {hit * 100:.1f}% (window)" if hit is not None else None,
+            f"{life * 100:.1f}% lifetime" if life is not None else None,
+        ], " · "),
+        row("expert swap-ins (misses)", experts.misses_delta, _count(experts.misses)),
+        row("expert hits", experts.hits_delta, _count(experts.hits)),
+        row("expert swap-outs (evictions)", experts.evictions_delta, _count(experts.evictions)),
+        f"  {'expert bytes read':<52} {format_bytes(experts.rate(experts.bytes_delta), rate=True) if experts.rate(experts.bytes_delta) else '·':>9} "
+        f"{format_bytes(experts.bytes_read):>9}",
+        f"  {'expert demand wait (ms per s)':<52} "
+        f"{(f'{experts.rate(experts.wait_delta_ns) / 1e6:.0f}' if experts.rate(experts.wait_delta_ns) else '·'):>9} "
+        f"{_seconds(experts.demand_wait_ns / 1e9):>9}",
+    ]
+    if experts.hints_issued:
+        lines.append(f"  {'prefetch hints used / wasted':<52} {'':>9} "
+                     f"{_count(experts.hints_used or 0)}/{_count(experts.hints_wasted or 0):<5}")
+    for name, total, rate in experts.reduced:
+        lines.append(f"  {name.removeprefix('v41_expert_')[:52]:<52} {_count(rate) if rate else '·':>9} {_count(total):>9}")
+    if experts.approximate:
+        lines.append("  approximate: " + ", ".join(experts.approximate) + " (unqualified)")
+    return lines
+
+
 def render_server(server: ServerReading, *, width: int = 100) -> list[str]:
     """Render one inference server's panel."""
     endpoint = server.endpoint
@@ -448,13 +487,14 @@ def render_server(server: ServerReading, *, width: int = 100) -> list[str]:
         )
     )
 
-    if server.mechanisms:
+    if server.mechanisms or server.experts is not None:
         lines.append("Hot paths                                                  Δ/s     total")
         for item in server.mechanisms[:8]:
             lines.append(
                 f"  {item.name[:52]:<52} {_count(item.per_second) if item.per_second else '·':>9} "
                 f"{_count(item.total):>9}"
             )
+        lines.extend(_expert_lines(server.experts))
 
     if server.recent_requests:
         age = (
