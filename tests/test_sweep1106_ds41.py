@@ -92,3 +92,28 @@ def test_omlx_plan_reports_full_staging_but_reserves_the_route_terms():
     no_bank = omlx_weight_plan(artifact, 300)
     assert no_bank["expert_bank_staging_bound_bytes"] == 0
     assert no_bank["total_reservation_bytes"] == dense + 2 * CHUNK_BYTES + 300 + 1200 + 300
+
+
+def test_omlx_admission_refuses_differing_gate_and_up_input_laws(monkeypatch):
+    """DS41-4: every expert path feeds the gate-prepared input to up as well."""
+    from pathlib import Path
+
+    from mlx2.adapters import deepseek_v41_omlx_artifact as artifact
+
+    checkpoint = Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-MLX"
+    if not (checkpoint / artifact.SEAL).is_file():
+        pytest.skip("pinned omlx checkpoint not on this host")
+    admitted = artifact.inspect_artifact(checkpoint)
+    assert all(row["gate"]["quantize_input"] == row["up"]["quantize_input"]
+               for row in admitted["experts"].values())
+    original = artifact._module_spec
+
+    def flipped(row, name):
+        spec = original(row, name)
+        if name.endswith("layers.3.ffn.experts.w3"):
+            spec["quantize_input"] = not spec["quantize_input"]
+        return spec
+
+    monkeypatch.setattr(artifact, "_module_spec", flipped)
+    with pytest.raises(ValueError, match="one input law for gate and up: layer 3"):
+        artifact.inspect_artifact(checkpoint)

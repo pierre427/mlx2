@@ -19,14 +19,29 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-MESSAGES = [
-    {"role": "system", "content": "Use at most one short sentence of private reasoning, then give only the requested identifier."},
-    {"role": "user", "content": "Archive notes: " + "Inventory checked. " * 160
-     + "\nThe shipment identifier is ZX-3187. Reply with the shipment identifier only."},
-]
-
-
 ROOT = Path(__file__).resolve().parents[1]
+SYSTEM = "Use at most one short sentence of private reasoning, then give only the requested identifier."
+QUESTION = "\nThe shipment identifier is ZX-3187. Reply with the shipment identifier only."
+# varied-v1 (default): frozen real prose (benchmarks/ripple_smoke/). Reasoning
+# models do badly on repeated strings, so the legacy filler could fail the
+# smoke on input shape alone; it stays selectable to reproduce the 2026-11-04
+# receipts (sweep 2026-11-06 RIPPLE-4).
+FILLERS = {
+    "varied-v1": lambda: (ROOT / "benchmarks/ripple_smoke/filler.md").read_text(),
+    "legacy-repeated": lambda: "Inventory checked. " * 160,
+}
+
+
+def messages(prompt="varied-v1"):
+    return [{"role": "system", "content": SYSTEM},
+            {"role": "user", "content": "Archive notes: " + FILLERS[prompt]() + QUESTION}]
+
+
+def prompt_receipt(prompt):
+    import hashlib
+
+    body = json.dumps(messages(prompt), sort_keys=True).encode()
+    return {"version": prompt, "messages_sha256": hashlib.sha256(body).hexdigest()}
 
 
 def checkout_env() -> dict:
@@ -90,7 +105,7 @@ def reference(args, receipt):
                         "top_token_matches": top == ref_top})
             receipt["bf16_logit_comparisons"] = comparisons
             np.savez_compressed(args.output / "oq4e-reference-logits.npz", **converted_logits)
-        request = {"messages": MESSAGES}
+        request = {"messages": messages(args.prompt)}
         ids = adapter.prompt_tokens(request)
         cache = adapter.model.make_cache()
         for start in range(0, len(ids), 128):
@@ -124,6 +139,8 @@ def main():
     parser.add_argument("--cpg-lock", type=Path, required=True)
     parser.add_argument("--port", type=int, default=18295)
     parser.add_argument("--reference-only", action="store_true")
+    parser.add_argument("--prompt", choices=sorted(FILLERS), default="varied-v1",
+                        help="context filler; legacy-repeated reproduces the 2026-11-04 receipts")
     args = parser.parse_args()
 
     def interrupted(signum, _frame):
@@ -143,7 +160,8 @@ def main():
     receipt = {"schema": "mlx2.ripple-serving-smoke.v1", "checkpoint": args.model.name + "@sha256:"
                + artifact["identity"]["fingerprint"], "ownership": lease,
                "source_revision": source_revision(),
-               "qualified": False, "kind": "bounded correctness smoke", "rows": []}
+               "qualified": False, "kind": "bounded correctness smoke", "prompt": prompt_receipt(args.prompt),
+               "rows": []}
     if args.reference_only:
         reference(args, receipt)
         return
@@ -152,7 +170,8 @@ def main():
     receipt["swap_before"] = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)
     try:
         subprocess.run([sys.executable, __file__, "--model", str(args.model), "--output", str(args.output),
-                        "--cpg-lock", str(args.cpg_lock), "--reference-only"], check=True, timeout=900,
+                        "--cpg-lock", str(args.cpg_lock), "--reference-only", "--prompt", args.prompt],
+                       check=True, timeout=900,
                        env=checkout_env())
         ordinary = json.loads((args.output / "ordinary-reference.json").read_text())
     except BaseException as exc:
@@ -197,7 +216,7 @@ def main():
             time.sleep(.5)
         receipt["startup_status"] = status
         for arm in ("cold", "warm"):
-            payload = {"model": args.model.name, "messages": MESSAGES, "temperature": 0,
+            payload = {"model": args.model.name, "messages": messages(args.prompt), "temperature": 0,
                        "max_tokens": 256, "return_token_trace": True, "stream": False}
             req = Request(root + "/v1/chat/completions", data=json.dumps(payload).encode(),
                           headers={"Content-Type": "application/json"})

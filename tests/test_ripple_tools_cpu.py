@@ -270,6 +270,9 @@ def test_named_and_required_tool_choice_constrain_parser(adapter):
     '{"name": "execute_bash", "arguments": {"command": "ls", "extra": 1}}',
     '{"name": "get_weather", "arguments": {"city": NaN}}',
     '[{"name": "get_weather", "arguments": {"city": "Paris"}}]',
+    # Repeated members: json.loads would keep the last one silently.
+    '{"name": "unknown_tool", "arguments": {"city": "Paris"}, "name": "get_weather"}',
+    '{"name": "get_weather", "arguments": {"city": "Paris", "city": "Rome"}}',
 ])
 def test_malformed_call_fails_closed(adapter, tokenizer, body):
     output = "<tool_call>\n" + body + "\n</tool_call>"

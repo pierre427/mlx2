@@ -242,6 +242,11 @@ def inspect_artifact(model_path):
             if logical != expected:
                 raise ValueError("omlx routed expert geometry differs from config: " + module)
             layer_specs[kind] = dict(spec, module=module, logical=logical)
+        # Every expert path prepares one input from the gate's law and feeds it
+        # to gate and up (the fused routed-decode kernel takes a single input),
+        # so up must share the gate's input quantization (sweep 2026-11-06 DS41-4).
+        if layer_specs["gate"]["quantize_input"] != layer_specs["up"]["quantize_input"]:
+            raise ValueError(f"omlx routed experts need one input law for gate and up: layer {layer}")
         experts[layer] = layer_specs
 
     engram = {}

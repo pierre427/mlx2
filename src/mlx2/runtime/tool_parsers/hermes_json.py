@@ -45,13 +45,29 @@ def _reject_constant(value):
     raise ValueError(f"JSON tool call uses the non-JSON constant {value}")
 
 
+class DuplicateJSONKey(ValueError):
+    """An object repeats a member; ``json.loads`` would keep the last silently."""
+
+
+def _unique_members(pairs):
+    # A repeated "name" would call the last one while partial_function_names
+    # had streamed the first; a repeated argument would drop a value unseen
+    # (sweep 2026-11-06 RIPPLE-5). The template's tojson never repeats a key.
+    value = {}
+    for key, member in pairs:
+        if key in value:
+            raise DuplicateJSONKey(f"JSON tool call repeats the member {key!r}")
+        value[key] = member
+    return value
+
+
 def parse_tool_call(text, tools=None):
     """Parse one tool-call body; raise ``ValueError`` on anything else."""
     body = text.strip()
     if not body:
         raise ValueError("Empty JSON tool call")
     try:
-        value = json.loads(body, parse_constant=_reject_constant)
+        value = json.loads(body, parse_constant=_reject_constant, object_pairs_hook=_unique_members)
     except json.JSONDecodeError:
         if _ends_inside_string(body):
             raise UnclosedJSONString("JSON tool call ends inside a string") from None
