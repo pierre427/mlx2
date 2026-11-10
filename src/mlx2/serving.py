@@ -4306,6 +4306,15 @@ class PublishedCohort:
 DEFAULT_PREFILL_STEP = 2048
 
 
+
+def _int8_feature_record(lookup, fingerprint, policy):
+    """``lookup(fingerprint, policy)``, or None when the table is unreadable
+    (the explicit-policy gate then refuses)."""
+    try:
+        return lookup(fingerprint, policy)
+    except (OSError, ValueError, TypeError):
+        return None
+
 class ServingEngine(KernelReloadMixin):
     # Longest pressure-eviction pause while a submission renders its prompt.
     PREPARING_EVICTION_HOLD_SECONDS = 0.25
@@ -4882,14 +4891,13 @@ class ServingEngine(KernelReloadMixin):
                 # Loading an unqualified route is permitted. Its approximate
                 # state cannot be consumed/published as reusable state yet.
                 self.apc_reuse_disabled_reason = "unqualified_microscaling_prefill"
-        if self.int8_prefill_policy.enabled and not qualification_mode and not qualification:
-            # Approximate state may only be published through a qualified
-            # approximate operation (AGENTS.md); the same gate as approximate
-            # KV below.  It was dropped with the global receipt requirement.
-            raise ValueError(
-                "int8 prefill is approximate and restricted to qualification mode "
-                "unless a qualification record carries its evidence"
-            )
+        # Approximate state may only be published through a qualified
+        # approximate operation (AGENTS.md); the same gate as approximate KV
+        # below.  An explicit policy on a route with neither qualification
+        # mode nor a route record needs an int8 prefill feature record for
+        # this artifact (Pierre, 2026-11-09); the fingerprint is known only
+        # once the adapter loads, so that check runs at bind and fails closed.
+        # (see the bind in the generation worker)
         # Storage codec for recurrent state in APCv2 entries: default off,
         # approximate by construction (AGENTS.md), so the same gate.
         self.recurrent_state_codec_policy = recurrent_state_codec_policy(
@@ -5924,6 +5932,8 @@ class ServingEngine(KernelReloadMixin):
             adapter,
             qualification_mode=bool(self.qualification_mode),
             qualified_settings=qualified_settings,
+            artifact_fingerprint=None if qualified_settings is not None
+            else getattr(adapter, "identity", {}).get("fingerprint"),
             conflicts=conflicts,
             max_prefill_rows=int(self.prefill_step) * int(self.max_lanes),
             media_prefill=callable(getattr(adapter, "prepare_multimodal_request", None)),
@@ -11824,8 +11834,25 @@ class ServingEngine(KernelReloadMixin):
                 # decode/verify block that could reach the row threshold)
                 # before the route is qualified or published.  Recorded in
                 # settings only when enabled so default-off records match.
-                from .runtime.int8_prefill import Int8PrefillError, bind_for_serving
+                from .runtime.int8_prefill import (
+                    Int8PrefillError,
+                    bind_for_serving,
+                    feature_qualification,
+                )
 
+                # An explicit policy on an unqualified route needs this
+                # artifact's feature record (``auto`` already found its
+                # evidence in resolve_auto).  An unreadable table refuses.
+                if (self.int8_prefill_auto is None and not self.qualification_mode
+                        and not self.qualification and _int8_feature_record(
+                            feature_qualification,
+                            getattr(adapter, "identity", {}).get("fingerprint"),
+                            self.int8_prefill_policy) is None):
+                    raise ValueError(
+                        "int8 prefill is approximate and restricted to qualification mode "
+                        "unless a qualification record carries its evidence (route record, "
+                        "or an int8 prefill feature record for this artifact and revision)"
+                    )
                 try:
                     self.int8_prefill_handle, settings["int8_prefill"] = bind_for_serving(
                         adapter,

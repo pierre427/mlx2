@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 import logging
 import math
 import re
@@ -2930,9 +2931,57 @@ def checkpoint_census(adapter, scope: str) -> dict:
     return counts
 
 
+FEATURE_TABLE_PATH = Path(__file__).with_name("data") / "int8_prefill_qualified.json"
+FEATURE_SCHEMA = "mlx2.int8-prefill-feature-qualification.v1"
+
+
+def _feature_table(path=None) -> list:
+    path = FEATURE_TABLE_PATH if path is None else Path(path)
+    if not path.is_file():
+        return []
+    table = json.loads(path.read_text())
+    if (not isinstance(table, Mapping) or table.get("schema") != FEATURE_SCHEMA
+            or not isinstance(table.get("entries"), list)):
+        raise ValueError(f"{path}: not a {FEATURE_SCHEMA} table")
+    for entry in table["entries"]:
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"{path}: an entry is not an object")
+        name = entry.get("checkpoint")
+        evidence = entry.get("evidence")
+        if not (isinstance(name, str) and name and isinstance(entry.get("fingerprint"), str)
+                and entry["fingerprint"] and isinstance(entry.get("approved"), str)
+                and entry["approved"] and isinstance(evidence, Mapping)
+                and isinstance(evidence.get("source_revision"), str)
+                and evidence["source_revision"]):
+            raise ValueError(
+                f"{path}: entry {name!r} lacks checkpoint/fingerprint/approved/evidence"
+            )
+        policy = Int8PrefillPolicy.from_value(entry.get("policy"))
+        if entry.get("status") != "qualified" or entry.get("revision") != policy.revision:
+            raise ValueError(f"{path}: entry {name!r} revision does not match its policy")
+    return table["entries"]
+
+
+def feature_qualification(fingerprint, policy, *, table_path=None) -> dict | None:
+    """The per-artifact int8 prefill feature record that qualifies exactly
+    ``policy`` on the artifact ``fingerprint``, or None.
+
+    Decision (Pierre, 2026-11-09): an artifact's int8 prefill may be
+    qualified by a feature record (tested, A/B measured, approved) instead
+    of a route campaign.  It is evidence for an unqualified route only: a
+    route record binds its own settings and keeps deciding."""
+    policy = Int8PrefillPolicy.from_value(policy)
+    if not policy.enabled or not fingerprint:
+        return None
+    for entry in _feature_table(table_path):
+        if entry["fingerprint"] == fingerprint and entry["revision"] == policy.revision:
+            return entry
+    return None
+
+
 def resolve_auto(
     adapter, *, qualification_mode, qualified_settings, conflicts=(),
-    max_prefill_rows=None, media_prefill=False,
+    max_prefill_rows=None, media_prefill=False, artifact_fingerprint=None,
 ):
     """Resolve ``--int8-prefill auto`` once the model is loaded.
 
@@ -3009,10 +3058,24 @@ def resolve_auto(
             return off("the qualification record carries a different int8 prefill revision")
         evidence = "qualification record"
     else:
-        return off(
-            "no qualification evidence: serve with a qualification record "
-            "that includes int8 prefill"
-        )
+        try:
+            entry = feature_qualification(artifact_fingerprint, policy)
+        except (OSError, ValueError, TypeError) as error:
+            # A bad table declines (auto is the server default); it never
+            # stops a model from loading.
+            return off(f"int8 prefill feature record table unreadable: {error}")
+        if entry is None:
+            return off(
+                "no qualification evidence: serve with a qualification record "
+                "that includes int8 prefill, or add a feature record "
+                "(runtime/data/int8_prefill_qualified.json) for this artifact"
+            )
+        evidence = "feature qualification record"
+        receipt["feature_record"] = {
+            "checkpoint": entry["checkpoint"],
+            "approved": entry["approved"],
+            "evidence": entry["evidence"],
+        }
     receipt.update(resolved="on", evidence=evidence, revision=policy.revision)
     return policy, receipt
 

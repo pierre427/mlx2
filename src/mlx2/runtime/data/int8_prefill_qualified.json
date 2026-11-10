@@ -1,0 +1,32 @@
+{
+  "schema": "mlx2.int8-prefill-feature-qualification.v1",
+  "decision": "Pierre, 2026-11-09: qualify int8 prefill per artifact by a feature record (try it, test it, A/B it; no route campaign), so --int8-prefill auto turns it on for an artifact whose route has no qualification record. An entry binds one artifact fingerprint and one exact int8 prefill policy revision; anything else keeps the AGENTS.md gate (qualification mode or a route record).",
+  "entries": [
+    {
+      "checkpoint": "Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP@sha256:25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",
+      "fingerprint": "25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",
+      "adapter": "FlashNextAdapter",
+      "status": "qualified",
+      "revision": "46f0d38f7a6683afbebcdcc236c49d825846cab70d6dd2e12d39d841ccfb1c4e",
+      "policy": {
+        "enabled": true,
+        "scope": "all",
+        "row_threshold": 512,
+        "cache": "auto",
+        "ttl_s": 120.0,
+        "q8_inplace": true,
+        "act_scale": "group64",
+        "q8_only": true
+      },
+      "approved": "Pierre, 2026-11-09 (\"Yes, qualify it\")",
+      "reason": "W8A8 trunk (300 Q8 in-place projections: shared expert, attention q/k/v/o, GDN qkv/z/out) engaged on every prefill chunk; paired median prefill +3.4% at 8K and +6.8% at 16K vs stock; generation-gating cells tool_calls@assistant KL 0.013 top-1 0.980, own continuations top-1 0.968-1.0 (KL <= 0.006); no swap.",
+      "evidence": {
+        "files": [
+          "qualification/runs/fn-int8-experts-e2e-20261109-r2/results.json"
+        ],
+        "source_revision": "e3e917442723bd23271b54f853be2051bbd0abc1",
+        "decision_row": true
+      }
+    }
+  ]
+}

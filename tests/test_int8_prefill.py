@@ -961,11 +961,15 @@ def test_qualifier_observes_int8_prefill_engaged_calls():
 
 def test_int8_prefill_needs_qualification_mode_or_evidence():
     """int8 prefill is approximate; like approximate KV it may run only in
-    qualification mode or behind a qualification record (it was accepted with
-    neither, and published approximate prefix state)."""
+    qualification mode or behind qualification evidence (it was accepted with
+    neither, and published approximate prefix state).  Since 2026-11-09 the
+    evidence may be a per-artifact feature record, which needs the loaded
+    artifact's fingerprint, so an unqualified explicit policy passes argument
+    validation and is refused at bind (before anything serves) unless a
+    record matches: test_int8_prefill_auto.py
+    ::test_engine_explicit_int8_needs_a_matching_feature_record."""
     from mlx2.serving import ServingEngine
 
-    with pytest.raises(ValueError, match="int8 prefill is approximate"):
-        ServingEngine.validate_arguments("tiny", int8_prefill="mlp")
+    ServingEngine.validate_arguments("tiny", int8_prefill="mlp")
     ServingEngine.validate_arguments("tiny", int8_prefill="mlp", qualification_mode=True)
     ServingEngine.validate_arguments("tiny")

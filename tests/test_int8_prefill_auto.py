@@ -566,3 +566,128 @@ def test_engine_auto_reads_the_qualification_record(serving_host, device_ok, tmp
         assert "does not include int8 prefill" in auto["reason"]
     finally:
         engine.close()
+
+
+# --------------------------------------------------------------------------
+# per-artifact feature records (Pierre, 2026-11-09)
+# --------------------------------------------------------------------------
+
+
+def _feature_table(tmp_path, fp, policy=None, **overrides):
+    import json
+
+    policy = AUTO_POLICY if policy is None else policy
+    entry = {
+        "checkpoint": f"tiny@{fp}", "fingerprint": fp,
+        "adapter": "Tiny", "status": "qualified", "revision": policy.revision,
+        "policy": policy.as_dict(), "approved": "test",
+        "evidence": {"files": ["x.json"], "source_revision": "abc", "decision_row": True},
+    }
+    entry.update(overrides)
+    path = tmp_path / "int8_prefill_qualified.json"
+    path.write_text(json.dumps({"schema": ip.FEATURE_SCHEMA, "decision": "test",
+                                "entries": [entry]}))
+    return path
+
+
+def test_shipped_feature_table_is_valid_and_qualifies_flash_next():
+    entries = ip._feature_table()
+    fn = [e for e in entries if e["adapter"] == "FlashNextAdapter"]
+    assert len(fn) == 1
+    assert fn[0]["revision"] == AUTO_POLICY.revision  # FN's census is Q8 only
+    assert ip.feature_qualification(fn[0]["fingerprint"], AUTO_POLICY) is fn[0] or (
+        ip.feature_qualification(fn[0]["fingerprint"], AUTO_POLICY)["checkpoint"]
+        == fn[0]["checkpoint"])
+    assert ip.feature_qualification(fn[0]["fingerprint"], AUTO_Q45) is None
+    assert ip.feature_qualification("0" * 64, AUTO_POLICY) is None
+
+
+def test_auto_follows_a_feature_record_only_without_a_route_record(
+    device_ok, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(ip, "FEATURE_TABLE_PATH", _feature_table(tmp_path, "fp-a"))
+    adapter = _Adapter(_Model(**Q8_ONLY))
+    policy, receipt = _resolve(adapter, artifact_fingerprint="fp-a")
+    assert policy == AUTO_POLICY and receipt["evidence"] == "feature qualification record"
+    assert receipt["feature_record"]["checkpoint"] == "tiny@fp-a"
+    policy, receipt = _resolve(adapter, artifact_fingerprint="fp-b")
+    assert policy is None and "feature record" in receipt["reason"]
+    # A route record binds its own settings: one without int8 keeps it off.
+    policy, receipt = _resolve(adapter, artifact_fingerprint="fp-a",
+                               qualified_settings={"mtp": False})
+    assert policy is None and "does not include int8 prefill" in receipt["reason"]
+
+
+def test_feature_table_refuses_an_entry_whose_revision_is_not_its_policy(tmp_path):
+    bad = _feature_table(tmp_path, "fp-a", revision="0" * 64)
+    with pytest.raises(ValueError, match="revision does not match"):
+        ip._feature_table(bad)
+    for override in ({"evidence": {}}, {"checkpoint": ""}, {"approved": ""},
+                     {"evidence": "x"}, {"fingerprint": ""}):
+        bad = _feature_table(tmp_path, "fp-a", **override)
+        with pytest.raises(ValueError, match="lacks checkpoint/fingerprint/approved/evidence"):
+            ip._feature_table(bad)
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", '{"schema": "mlx2.int8-prefill-feature-qualification.v1", "entries": [1]}'])
+def test_unreadable_feature_table_turns_auto_off_not_the_model(
+    device_ok, tmp_path, monkeypatch, content
+):
+    path = tmp_path / "t.json"
+    path.write_text(content)
+    monkeypatch.setattr(ip, "FEATURE_TABLE_PATH", path)
+    policy, receipt = _resolve(_Adapter(_Model(**Q8_ONLY)), artifact_fingerprint="fp-a")
+    assert policy is None and "table unreadable" in receipt["reason"]
+    # Missing table: no records, ordinary "no evidence" decline.
+    monkeypatch.setattr(ip, "FEATURE_TABLE_PATH", tmp_path / "absent.json")
+    policy, receipt = _resolve(_Adapter(_Model(**Q8_ONLY)), artifact_fingerprint="fp-a")
+    assert policy is None and receipt["reason"].startswith("no qualification evidence")
+
+
+def test_engine_auto_binds_on_an_unqualified_route_with_a_feature_record(
+    serving_host, device_ok, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(ip, "FEATURE_TABLE_PATH", _feature_table(tmp_path, "tiny-hybrid"))
+    engine = _engine(_q8_serving_model(), int8_prefill="auto")
+    try:
+        assert engine.ready.wait(60), engine.error
+        status = engine.status()
+        assert status["settings"]["int8_prefill"]["revision"] == AUTO_POLICY.revision
+        auto = status["int8_prefill"]["auto"]
+        assert auto["resolved"] == "on" and auto["evidence"] == "feature qualification record"
+        assert engine.qualification_state == "unqualified"
+    finally:
+        engine.close()
+
+
+def test_engine_auto_stays_off_on_an_unqualified_route_without_a_record(
+    serving_host, device_ok, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(ip, "FEATURE_TABLE_PATH", _feature_table(tmp_path, "other"))
+    engine = _engine(_q8_serving_model(), int8_prefill="auto")
+    try:
+        assert engine.ready.wait(60), engine.error
+        assert "int8_prefill" not in engine.status()["settings"]
+        assert engine.status()["int8_prefill"]["auto"]["resolved"] == "off"
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_engine_explicit_int8_needs_a_matching_feature_record(
+    serving_host, device_ok, tmp_path, monkeypatch, recorded
+):
+    explicit = ip.Int8PrefillPolicy(enabled=True, scope="all", q8_inplace=True,
+                                    act_scale="group64", q8_only=True)
+    monkeypatch.setattr(ip, "FEATURE_TABLE_PATH", _feature_table(
+        tmp_path, "tiny-hybrid" if recorded else "other", policy=explicit))
+    engine = _engine(_q8_serving_model(), int8_prefill=explicit.as_dict())
+    try:
+        engine.ready.wait(60)
+        if recorded:
+            assert not engine.error, engine.error
+            assert engine.status()["settings"]["int8_prefill"]["revision"] == explicit.revision
+        else:
+            assert engine.error and "restricted to qualification mode" in str(engine.error)
+    finally:
+        engine.close()

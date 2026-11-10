@@ -7168,9 +7168,11 @@ def build_parser():
             "declare the scope; separate APCv2 namespace.  'auto' (default) "
             "runs the in-place Q8 kernel with per-64-group activation scales "
             "on the 8-bit gs64 projections of a declaring adapter on an M5 "
-            "GPU, only in qualification mode or under a qualification record "
-            "that includes it; otherwise it resolves off (the reason is in "
-            "/v1/status int8_prefill.auto)"
+            "GPU, only in qualification mode, under a qualification record "
+            "that includes it, or (route with no record) under a per-artifact "
+            "feature record in runtime/data/int8_prefill_qualified.json; "
+            "otherwise it resolves off (the reason is in /v1/status "
+            "int8_prefill.auto)"
         ),
     )
     parser.add_argument(
