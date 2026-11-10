@@ -528,6 +528,12 @@ class Attention(nn.Module):
                 self.window_blocked_calls += 1
         if out is None:
             out = scaled_dot_product_attention(q, k, v, cache=cache, scale=args.head_dim ** -0.5, mask=mask)
+        return self._output(x, out)
+
+    def _output(self, x, out):
+        """Attention output ``out`` [B, H, L, D] -> gated, projected [B, L, hidden]."""
+        args = self.args
+        b, length, _ = x.shape
         if args.use_gated_attention and self.fused:
             return self.o_proj(fused_gate(out, self.g_proj(x), args.gate_full_precision))
         if args.use_gated_attention:

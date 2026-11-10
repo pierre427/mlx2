@@ -45,7 +45,8 @@ def source() -> dict:
     dirty = subprocess.run(["git", "status", "--porcelain", "--", "src", "scripts"],
                            cwd=ROOT, capture_output=True, text=True).stdout.strip()
     files = {}
-    for rel in ("src/mlx2/runtime/models/qsa_sidecar.py", "scripts/probe_qsa_sidecar.py"):
+    for rel in ("src/mlx2/runtime/models/qsa_sidecar.py", "scripts/probe_qsa_sidecar.py",
+                "src/mlx2/runtime/models/ricursive.py"):
         files[rel] = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
     return {"commit": head, "dirty": bool(dirty), "files": files}
 
@@ -68,6 +69,13 @@ def _encode(tokenizer, text):
 
 def text_model(model):
     return getattr(model, "language_model", model)
+
+
+def logits_of(text, hidden):
+    """Logits for final-normed ``hidden``: the family's ``logits`` method, or
+    its LM head where the backbone already applies the final norm (Ripple)."""
+    method = getattr(text, "logits", None)
+    return method(hidden) if method is not None else text.lm_head(hidden)
 
 
 def new_cache(text, tokens):
@@ -103,7 +111,7 @@ def nll_rows(mx, text, hidden, targets, rows=512):
     """Per-row NLL and argmax for hidden [1, L, H] against ``targets`` [L]."""
     nll, top, top2, lp2 = [], [], [], []
     for start in range(0, hidden.shape[1], rows):
-        logits = text.logits(hidden[:, start:start + rows]).astype(mx.float32)[0]
+        logits = logits_of(text, hidden[:, start:start + rows]).astype(mx.float32)[0]
         tgt = targets[start:start + rows]
         lse = mx.logsumexp(logits, axis=-1)
         pick = mx.take_along_axis(logits, tgt[:, None], axis=-1)[:, 0]
@@ -145,7 +153,12 @@ def corpus_stream(encode, name, needed, seed):
 
 
 def set_mode(sidecar, mode):
-    """``<mode>`` or ``<mode>_fused`` (fused Metal selection, qsa_select.py)."""
+    """``<mode>`` or ``<mode>_fused`` (fused Metal selection, qsa_select.py);
+    a ``+dense`` suffix runs the spec's ``dense_layers`` dense."""
+    dense = mode.endswith("+dense")
+    if dense:
+        mode = mode[: -len("+dense")]
+    sidecar.dense_layers = set(getattr(sidecar, "spec_dense_layers", ())) if dense else set()
     if mode.startswith("quest:"):  # quest:<window>:<sink>:<budget>
         (window, sink, budget) = (int(v) for v in mode.split(":")[1:])
         sidecar.mode = "quest"
@@ -198,6 +211,9 @@ def quality(mx, np, adapter, sidecar, spec, report):
     out = []
     for corpus in spec["quality"]["corpora"]:
         for context in spec["quality"]["contexts"]:
+            corpus_cap = spec["quality"].get("corpus_max_context", {}).get(corpus)
+            if corpus_cap is not None and context > corpus_cap:
+                continue
             ids, sha = corpus_stream(encode, corpus, context + 1, spec["seed"])
             targets = mx.array(ids[1:], dtype=mx.int32)
             arms = {}
@@ -317,7 +333,7 @@ def continue_gen(mx, np, adapter, sidecar, spec, report):
                 arm(sidecar, mode)
                 cache = text.make_cache()
                 hidden = prefill(mx, text, cache, ids, spec["prefill_step"])
-                logits = text.logits(hidden[:, -1:])[0, -1].astype(mx.float32)
+                logits = logits_of(text, hidden[:, -1:])[0, -1].astype(mx.float32)
                 tokens, top5 = [], []
                 for _ in range(cfg["max_tokens"]):
                     lp = logits - mx.logsumexp(logits)
@@ -328,7 +344,7 @@ def continue_gen(mx, np, adapter, sidecar, spec, report):
                     tokens.append(best[0])
                     top5.append([(int(t), round(float(v), 5)) for t, v in zip(best, vals)])
                     h = text.model(mx.array([[best[0]]], dtype=mx.uint32), cache)
-                    logits = text.logits(h)[0, -1].astype(mx.float32)
+                    logits = logits_of(text, h)[0, -1].astype(mx.float32)
                 runs[mode] = {"tokens": tokens, "top5": top5}
                 row["arms"][mode] = {"text": tok.decode(tokens), "tokens": tokens}
                 del cache, hidden
@@ -377,7 +393,7 @@ def needles(mx, np, adapter, sidecar, spec, report):
             arm(sidecar, mode)
             cache = new_cache(text, len(ids) + spec["needles"]["max_tokens"])
             hidden = prefill(mx, text, cache, ids, spec["prefill_step"])
-            token = int(mx.argmax(text.logits(hidden[:, -1:])[0, -1]))
+            token = int(mx.argmax(logits_of(text, hidden[:, -1:])[0, -1]))
             generated = []
             eos = set(getattr(tok, "eos_token_ids", None) or [tok.eos_token_id])
             for _ in range(spec["needles"]["max_tokens"]):
@@ -385,7 +401,7 @@ def needles(mx, np, adapter, sidecar, spec, report):
                     break
                 generated.append(token)
                 h = text.model(mx.array([[token]], dtype=mx.uint32), cache)
-                token = int(mx.argmax(text.logits(h)[0, -1]))
+                token = int(mx.argmax(logits_of(text, h)[0, -1]))
             answer = tok.decode(generated)
             norm = answer.replace("‐", "-").replace("‑", "-").replace("–", "-").replace("—", "-")
             hits = {n: (c in norm) for n, c in codes.items()}
@@ -417,7 +433,7 @@ def speed(mx, np, adapter, sidecar, spec, report):
             mx.synchronize()
             started = time.perf_counter()
             hidden = prefill(mx, text, cache, ids, spec["prefill_step"])
-            token = mx.argmax(text.logits(hidden[:, -1:])[0, -1])
+            token = mx.argmax(logits_of(text, hidden[:, -1:])[0, -1])
             mx.eval(token)
             prefill_s = time.perf_counter() - started
             entry = {"prefill_s": round(prefill_s, 3), "prefill_tok_s": round(depth / prefill_s, 1),
@@ -426,11 +442,11 @@ def speed(mx, np, adapter, sidecar, spec, report):
                 set_mode(sidecar, mode)
                 steps = spec["speed"]["decode_tokens"]
                 for _ in range(4):  # warm the decode geometry
-                    token = mx.argmax(text.logits(text.model(token.reshape(1, 1), cache))[0, -1])
+                    token = mx.argmax(logits_of(text, text.model(token.reshape(1, 1), cache))[0, -1])
                 mx.eval(token)
                 started = time.perf_counter()
                 for _ in range(steps):
-                    token = mx.argmax(text.logits(text.model(token.reshape(1, 1), cache))[0, -1])
+                    token = mx.argmax(logits_of(text, text.model(token.reshape(1, 1), cache))[0, -1])
                     mx.async_eval(token)
                 mx.eval(token)
                 entry["decode"][mode] = round(steps / (time.perf_counter() - started), 2)
@@ -446,9 +462,10 @@ def speed(mx, np, adapter, sidecar, spec, report):
 
 def unit_tests(mx, np, adapter, sidecar, spec, report):
     """Metal correctness tests inside the owned window; a failure stops the run."""
+    files = spec.get("unit_test_files",
+                     ["tests/test_qsa_sidecar.py", "tests/test_qsa_select_metal.py"])
     run = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         "tests/test_qsa_sidecar.py", "tests/test_qsa_select_metal.py"],
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *files],
         cwd=ROOT, capture_output=True, text=True,
         env=dict(os.environ, PYTHONPATH=str(ROOT / "src")),
     )
@@ -536,6 +553,7 @@ def unit(spec) -> int:
         adapter = resolve_adapter(spec["model"])(spec["model"])
         sidecar = qs.QSASidecar(spec["indexers"]["file"], budget=spec["budget"], mode="dense")
         report["installed_layers"] = qs.install(adapter.model, sidecar)
+        sidecar.spec_dense_layers = list(spec.get("dense_layers", []))
         # Indexer file, budget and the NAX kernel law the sparse arms run.
         # (mode is per phase, so it is left out of this snapshot.)
         report["sidecar"] = {k: v for k, v in sidecar.identity().items() if k != "mode"}

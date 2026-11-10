@@ -17,8 +17,13 @@ Indexer (per layer, from the reference ``QSAIndexer``):
   ``4j + 3 <= t``.
 
 ``rmsnorm_zc`` scales by ``1 + w`` (zero-centred).  RoPE is the main
-attention's: first 64 channels, non-traditional, base 1e7.  Scores run in
-float32, as the reference does.
+attention's: first 64 channels, non-traditional, base 1e7 on Qwen3.8-27B.  A
+model whose full-attention layers are NoPE (Ripple-65B) gets a NoPE indexer
+(``rope_dim`` 0).  Scores run in float32, as the reference does.
+
+Geometry (heads, head width, RoPE) comes from the ``qsa`` section of the
+indexer directory's ``config.json`` when present.  Families: Qwen3.8-27B
+(``Qwen3NextAttention``) and Ripple-65B (the ``ricursive`` global layers).
 
 This module is a research probe, not a serving route.  It refuses batches,
 rewinds and mixed packing instead of guessing; serving integration (APCv2
@@ -53,6 +58,9 @@ def _zc_norm(x: mx.array, weight: mx.array, eps: float) -> mx.array:
 
 def _rope(x: mx.array, *, dims: int, base: float, offset: int, scale: float = 1.0):
     # x [..., L, D]: positions are ``scale * (offset + i)`` along axis -2.
+    # ``dims == 0``: a NoPE indexer (it mirrors a NoPE main attention).
+    if dims == 0:
+        return x
     return mx.fast.rope(
         x, dims, traditional=False, base=base, scale=scale, offset=offset
     )
@@ -162,14 +170,25 @@ class QSASidecar:
     """All layers' indexers plus run mode, budget and receipts."""
 
     def __init__(self, path: str | os.PathLike, *, budget: int = 2048,
-                 mode: str = "nax", rope_base: float = 1e7, rope_dim: int = 64,
-                 heads: int = 4, head_dim: int = 128, eps: float = 1e-6):
+                 mode: str = "nax", rope_base: Optional[float] = None,
+                 rope_dim: Optional[int] = None, heads: Optional[int] = None,
+                 head_dim: Optional[int] = None, eps: Optional[float] = None):
         if mode not in MODES:
             raise ValueError(f"QSA sidecar mode must be one of {MODES}")
         if budget % BLOCK:
             raise ValueError("budget must be a multiple of the block size")
         path = Path(path)
         file = path / "qsa-indexers.safetensors" if path.is_dir() else path
+        declared = indexer_geometry(file.parent)
+        heads = declared["indexer_heads"] if heads is None else heads
+        head_dim = declared["indexer_head_dim"] if head_dim is None else head_dim
+        rope_dim = declared["rope_dim"] if rope_dim is None else rope_dim
+        rope_base = declared["rope_base"] if rope_base is None else rope_base
+        eps = declared["eps"] if eps is None else eps
+        if declared.get("block_size", BLOCK) != BLOCK:
+            raise ValueError("indexers were trained for another block size")
+        self.geometry = {"heads": heads, "head_dim": head_dim, "rope_dim": rope_dim,
+                         "rope_base": rope_base, "eps": eps}
         raw = mx.load(str(file))
         layers: dict[int, dict] = {}
         for name, value in raw.items():
@@ -190,6 +209,13 @@ class QSASidecar:
         self.fused_select = False
         # Training-free Quest control (mode "quest"): window, sink, budget, page.
         self.quest = {"window": 256, "sink": 256, "budget": 1024, "page": 32}
+        # Hybrid fixed blocks the indexers were trained around (config.json
+        # qsa.selection), and layers forced dense (research option).
+        self.selection = declared.get("selection")
+        if self.selection and (self.selection["sink_blocks"]
+                               + self.selection["recent_blocks"] >= self.block_topk):
+            raise ValueError("hybrid fixed blocks leave no learned slots")
+        self.dense_layers: set[int] = set()
 
     def reset(self):
         for indexer in self.indexers.values():
@@ -201,13 +227,35 @@ class QSASidecar:
         # The NAX kernel law the "nax"/"window" modes run (process-wide,
         # MLX_QWEN4_QSA_NAX_LAW); v2 laws round differently from v1.
         return {"file": self.file, "layers": sorted(self.indexers),
-                "budget": self.budget, "mode": self.mode,
+                "budget": self.budget, "mode": self.mode, "geometry": self.geometry,
+                "selection": self.selection, "dense_layers": sorted(self.dense_layers),
                 "fused_select": self.fused_select, "nax_law": qsa_nax_law()}
 
 
+# Qwen3.8-27B release geometry: the defaults when no ``qsa`` section says otherwise.
+DEFAULT_GEOMETRY = {"indexer_heads": 4, "indexer_head_dim": 128, "rope_dim": 64,
+                    "rope_base": 1e7, "eps": 1e-6, "block_size": BLOCK}
+
+
+def indexer_geometry(directory: Path) -> dict:
+    """The ``qsa`` section of ``directory/config.json`` over the 27B defaults."""
+    geometry = dict(DEFAULT_GEOMETRY)
+    config = Path(directory) / "config.json"
+    if config.is_file():
+        section = json.loads(config.read_text()).get("qsa") or {}
+        geometry.update({k: section[k] for k in DEFAULT_GEOMETRY if k in section})
+        if section.get("selection"):
+            geometry["selection"] = dict(section["selection"])
+    return geometry
+
+
 def _selection(indexer: LayerIndexer, x: mx.array, offset: int, topk: int,
-               fused: bool = False):
+               fused: bool = False, selection: Optional[dict] = None):
     """Top-k complete blocks per query, or ``None`` when selection is dense.
+
+    ``selection`` ({"sink_blocks", "recent_blocks"}): a hybrid rule.  The
+    first sink blocks and each query's newest recent blocks are always taken
+    (scored ``+inf``); the indexer's top picks fill the remaining slots.
 
     Returns ``(ids [L, k] int32, valid [L, k] bool, q_pos [L] int32)``.
     """
@@ -218,6 +266,8 @@ def _selection(indexer: LayerIndexer, x: mx.array, offset: int, topk: int,
         return None  # every complete block selected: plain causal attention
     q = indexer.queries(x, offset)
     q_pos = mx.arange(offset, offset + length, dtype=mx.int32)
+    if fused and selection:
+        raise QSASidecarRefused("fused selection does not implement hybrid fixed blocks")
     if fused:
         from .qsa_select import fused_select
 
@@ -227,6 +277,11 @@ def _selection(indexer: LayerIndexer, x: mx.array, offset: int, topk: int,
     scores = indexer.scores(q)  # [L, nb]
     starts = mx.arange(n_blocks, dtype=mx.int32) * BLOCK
     valid = (starts[None, :] + (BLOCK - 1)) <= q_pos[:, None]
+    if selection:
+        j = mx.arange(n_blocks, dtype=mx.int32)[None, :]
+        age = (q_pos[:, None] + 1) // BLOCK - 1 - j
+        fixed = (j < selection["sink_blocks"]) | ((age >= 0) & (age < selection["recent_blocks"]))
+        scores = mx.where(fixed & valid, mx.inf, scores)
     scores = mx.where(valid, scores, -mx.inf)
     ids = mx.argpartition(-scores, kth=topk - 1, axis=-1)[:, :topk].astype(mx.int32)
     picked_valid = mx.take_along_axis(valid, ids, axis=-1)
@@ -392,26 +447,95 @@ def _gather(queries, keys, values, ids, picked_valid, q_pos, scale):
     )
 
 
-def install(model, sidecar: QSASidecar) -> list[int]:
-    """Attach ``sidecar`` to the matching full-attention layers of ``model``."""
-    from .qwen38_27b import Qwen3NextAttention
+def _attention(sidecar, layer, x, queries, keys, values, offset, mask, cache, scale):
+    """The sidecar's attention for one layer after the cache update.
 
+    ``queries`` [1, Hq, L, D] and the fetched ``keys``/``values`` [1, Hkv,
+    total, D] are the main attention's (normed, roped or NoPE as the family
+    does it); ``x`` [1, L, hidden] is the attention input the indexer reads.
+    Returns the attention output [1, Hq, L, D] before gating.
+    """
+    from .base import scaled_dot_product_attention
+
+    (_, L, _) = x.shape
+    total = keys.shape[2]
+    if sidecar.mode == "quest":
+        vis = _quest_mask(queries, keys, offset, **sidecar.quest)
+        STATUS["quest_mask_rows"] += L
+        return mx.fast.scaled_dot_product_attention(
+            queries, keys, values, scale=scale, mask=vis
+        )
+    indexer = sidecar.indexers[layer]
+    picked = _selection(
+        indexer, x[0].astype(mx.float32), offset, sidecar.block_topk,
+        fused=sidecar.fused_select, selection=sidecar.selection,
+    )
+    if layer in sidecar.dense_layers:
+        picked = None  # pooled keys stay current; attention runs dense
+    if sidecar.mode == "selfdense":
+        picked = None  # control: this path, every block selected
+    elif sidecar.mode == "window" and picked is not None:
+        # control: same budget, most recent complete blocks only
+        (_, _, q_pos, n_blocks, _) = picked
+        newest = (q_pos + 1) // BLOCK - 1
+        ids = newest[:, None] - mx.arange(sidecar.block_topk, dtype=mx.int32)[None]
+        picked = (mx.maximum(ids, 0), ids >= 0, q_pos, n_blocks, None)
+    if picked is None:
+        STATUS["dense_by_construction"] += 1
+        return scaled_dot_product_attention(
+            queries, keys, values, cache=cache, scale=scale, mask=mask
+        )
+    (ids, picked_valid, q_pos, n_blocks, counts) = picked
+    mode = "nax" if sidecar.mode == "window" else sidecar.mode
+    if mode == "gather" and L > 1:
+        mode = "nax"
+    if mode == "mask":
+        vis = _dense_mask(ids, picked_valid, q_pos, n_blocks, total)
+        output = mx.fast.scaled_dot_product_attention(
+            queries, keys, values, scale=scale, mask=vis
+        )
+    elif mode == "nax":
+        output = _nax(
+            queries, keys, values, _compact(ids, picked_valid, q_pos, total, counts), scale,
+        )
+    else:
+        output = _gather(queries, keys, values, ids, picked_valid, q_pos, scale)
+    STATUS[f"sparse_{mode}_rows"] += L
+    if counts is not None:
+        STATUS["fused_select_rows"] += L
+    return output
+
+
+def _family_attention(model):
+    """``(attention modules by layer index, class factory)`` for ``model``."""
     text = getattr(model, "language_model", model)
     body = getattr(text, "model", text)
+    from . import ricursive
+
+    if isinstance(body, ricursive.Backbone):
+        found = {i: layer.self_attn for i, layer in enumerate(body.layers)
+                 if isinstance(layer.self_attn, ricursive.Attention)
+                 and not layer.self_attn.local}
+        return body.layers, found, _ripple_class
+    from .qwen38_27b import Qwen3NextAttention
+
+    found = {i: getattr(layer, "self_attn", None) for i, layer in enumerate(body.layers)}
+    found = {i: a for i, a in found.items() if isinstance(a, Qwen3NextAttention)}
+    return body.layers, found, _qsa_class
+
+
+def install(model, sidecar: QSASidecar) -> list[int]:
+    """Attach ``sidecar`` to the matching full-attention layers of ``model``."""
+    (_, attentions, factory) = _family_attention(model)
     installed = []
-    for index, layer in enumerate(body.layers):
-        if index not in sidecar.indexers:
-            continue
-        attention = getattr(layer, "self_attn", None)
-        if not isinstance(attention, Qwen3NextAttention):
+    for index in sorted(sidecar.indexers):
+        attention = attentions.get(index)
+        if attention is None:
             raise ValueError(f"layer {index} has no full attention for an indexer")
         object.__setattr__(attention, "_qsa_sidecar", sidecar)
         object.__setattr__(attention, "_qsa_layer", index)
-        attention.__class__ = _qsa_class(type(attention))
+        attention.__class__ = factory(type(attention))
         installed.append(index)
-    missing = sorted(set(sidecar.indexers) - set(installed))
-    if missing:
-        raise ValueError(f"indexer layers without attention: {missing}")
     return installed
 
 
@@ -452,64 +576,12 @@ def _qsa_class(base: type) -> type:
             queries = self.rope(queries, offset=offset)
             keys = self.rope(keys, offset=offset)
             (keys, values) = cache.update_and_fetch(keys, values)
-            total = keys.shape[2]
-            if total != offset + L:
+            if keys.shape[2] != offset + L:
                 raise QSASidecarRefused("cache width does not match its offset")
-            if sidecar.mode == "quest":
-                from .base import scaled_dot_product_attention
-                from .precise_ops import gate_sigmoid
-
-                vis = _quest_mask(queries, keys, offset, **sidecar.quest)
-                STATUS["quest_mask_rows"] += L
-                output = mx.fast.scaled_dot_product_attention(
-                    queries, keys, values, scale=self.scale, mask=vis
-                )
-                gate = gate_sigmoid(gate).reshape(B, L, self.num_attention_heads, -1)
-                output = (output.transpose(0, 2, 1, 3) * gate).reshape(B, L, -1)
-                return self.o_proj(output)
-            indexer = sidecar.indexers[self._qsa_layer]
-            picked = _selection(
-                indexer, x[0].astype(mx.float32), offset, sidecar.block_topk,
-                fused=sidecar.fused_select,
-            )
-            if sidecar.mode == "selfdense":
-                picked = None  # control: this path, every block selected
-            elif sidecar.mode == "window" and picked is not None:
-                # control: same budget, most recent complete blocks only
-                (_, _, q_pos, n_blocks, _) = picked
-                newest = (q_pos + 1) // BLOCK - 1
-                ids = newest[:, None] - mx.arange(sidecar.block_topk, dtype=mx.int32)[None]
-                picked = (mx.maximum(ids, 0), ids >= 0, q_pos, n_blocks, None)
-            from .base import scaled_dot_product_attention
             from .precise_ops import gate_sigmoid
 
-            if picked is None:
-                STATUS["dense_by_construction"] += 1
-                output = scaled_dot_product_attention(
-                    queries, keys, values, cache=cache, scale=self.scale, mask=mask
-                )
-            else:
-                (ids, picked_valid, q_pos, n_blocks, counts) = picked
-                mode = "nax" if sidecar.mode == "window" else sidecar.mode
-                if mode == "gather" and L > 1:
-                    mode = "nax"
-                if mode == "mask":
-                    vis = _dense_mask(ids, picked_valid, q_pos, n_blocks, total)
-                    output = mx.fast.scaled_dot_product_attention(
-                        queries, keys, values, scale=self.scale, mask=vis
-                    )
-                elif mode == "nax":
-                    output = _nax(
-                        queries, keys, values, _compact(ids, picked_valid, q_pos, total, counts),
-                        self.scale,
-                    )
-                else:
-                    output = _gather(
-                        queries, keys, values, ids, picked_valid, q_pos, self.scale
-                    )
-                STATUS[f"sparse_{mode}_rows"] += L
-                if counts is not None:
-                    STATUS["fused_select_rows"] += L
+            output = _attention(sidecar, self._qsa_layer, x, queries, keys, values,
+                                offset, mask, cache, self.scale)
             # Gate the [B, L, H, D] view directly: the elementwise multiply
             # writes a row-contiguous result, so the flatten is a view and the
             # separate transpose copy (L x H x D per layer) is gone.
@@ -520,6 +592,39 @@ def _qsa_class(base: type) -> type:
     QSASidecarAttention.__name__ = f"QSASidecar{base.__name__}"
     _CLASSES[base] = QSASidecarAttention
     return QSASidecarAttention
+
+
+def _ripple_class(base: type) -> type:
+    """Ripple global (NoPE) attention: every forward law (eager, fused, Metal
+    glue) ends in ``_attend(x, q, k, v, cache, mask)`` with normed q/k, so the
+    sidecar replaces that step and keeps the family's gate and projection."""
+    if base in _CLASSES or getattr(base, "_is_qsa_sidecar", False):
+        return _CLASSES.get(base, base)
+    from .cache import KVCache
+
+    class QSASidecarRippleAttention(base):
+        _is_qsa_sidecar = True
+
+        def _attend(self, x, q, k, v, cache, mask):
+            sidecar = self._qsa_sidecar
+            if sidecar.mode == "dense":
+                return base._attend(self, x, q, k, v, cache, mask)
+            (B, L, _) = x.shape
+            # Plain KV only: quantized, tree-tile and lane-packed caches carry
+            # masks or layouts the selection does not model.
+            if B != 1 or type(cache) is not KVCache:
+                raise QSASidecarRefused("QSA sidecar serves one plain cached sequence")
+            offset = int(cache.offset)
+            (keys, values) = cache.update_and_fetch(k, v)
+            if keys.shape[2] != offset + L:
+                raise QSASidecarRefused("cache width does not match its offset")
+            out = _attention(sidecar, self._qsa_layer, x, q, keys, values, offset,
+                             mask, cache, self.args.head_dim ** -0.5)
+            return self._output(x, out)
+
+    QSASidecarRippleAttention.__name__ = f"QSASidecar{base.__name__}"
+    _CLASSES[base] = QSASidecarRippleAttention
+    return QSASidecarRippleAttention
 
 
 def status(reset: bool = False) -> dict:
