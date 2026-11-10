@@ -30,3 +30,6 @@ qualification/runs/ds41-options-*/apcv2/
 
 # Per-run loopback admin tokens and signing keys written by campaign drivers.
 qualification/runs/**/.runtime/
+
+# EXL3 encoder research: compiled Viterbi cache.
+scripts/research/ds41_exl3/.build/
