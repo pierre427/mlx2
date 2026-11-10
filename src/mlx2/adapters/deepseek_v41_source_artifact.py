@@ -24,11 +24,49 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+TIERS = "mlx2-source-tiers.json"
+_TIER_CACHE = {}
+
+
+def tier_directories(root):
+    """Directories that may hold a shard symlinked from ``root`` (storage tiering).
+
+    Declared by a regular, non-symlink ``mlx2-source-tiers.json`` in the root:
+    ``{"schema": "mlx2.v41.source-tiers.v1", "directories": ["/abs/dir", ...]}``.
+    Absent file: no symlinks are accepted (the original rule)."""
+    path = Path(root) / TIERS
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return ()
+    key = (str(root), st.st_ino, st.st_mtime_ns, st.st_size)
+    if key not in _TIER_CACHE:
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 1 << 16:
+            raise ValueError("source tier declaration must be a small regular file")
+        value = json.loads(path.read_text())
+        dirs = value.get("directories") if type(value) is dict else None
+        if (value.get("schema") != "mlx2.v41.source-tiers.v1" or type(dirs) is not list
+                or not all(type(d) is str and os.path.isabs(d) for d in dirs)):
+            raise ValueError("source tier declaration is malformed")
+        _TIER_CACHE[key] = tuple(Path(d).resolve() for d in dirs)
+    return _TIER_CACHE[key]
+
+
 def checked_file(root, name, expected=None):
+    """Return the regular file holding ``name``; stamp-checked when ``expected``.
+
+    A shard may be a symlink only into a declared tier directory, with the same
+    file name; the returned path (and the stamp) is then the target's, so every
+    open stays O_NOFOLLOW on a regular file."""
     if Path(name).name != name or name in (".", ".."):
         raise ValueError("source shard must be a direct regular file")
     path = root / name
     st = path.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        target = path.resolve(strict=True)
+        if target.name != name or target.parent not in tier_directories(root):
+            raise ValueError("source shard symlink outside declared tiers: " + name)
+        path, st = target, target.lstat()
     if not stat.S_ISREG(st.st_mode) or (expected is not None and file_stamp(st) != expected):
         raise ValueError("official source file changed: " + name)
     return path

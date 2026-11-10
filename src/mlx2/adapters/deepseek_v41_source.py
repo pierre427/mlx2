@@ -15,7 +15,7 @@ from .deepseek_v41_execution import (
 )
 from .deepseek_v41_mlx import DESCRIPTOR as NATIVE_DESCRIPTOR
 from .deepseek_v41_mlx import DeepSeekV41MLXAdapter, execution_policy
-from .deepseek_v41_source_artifact import MODEL_TYPE, inspect_artifact
+from .deepseek_v41_source_artifact import MODEL_TYPE, checked_file, inspect_artifact
 from .deepseek_v41_source_math import POLICIES
 from .deepseek_v41_source_defaults import default_route_policy_applies, default_route_policy_filter
 from .deepseek_v41_source_approx import POLICY_KEYS as APPROXIMATE_POLICY_KEYS
@@ -590,7 +590,8 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
             if (weight["file"] != scale["file"] or weight["shape"] != (rows, 256) or scale["shape"] != (rows, 8)
                     or weight["dtype"] != "F8_E4M3" or scale["dtype"] != "F8_E8M0"):
                 raise ValueError("unsupported official Engram plane layout")
-            path = root / weight["file"]
+            # checked_file resolves a declared-tier symlink to its regular target and checks the seal stamp
+            path = checked_file(root, weight["file"], artifact["seals"][weight["file"]])
             self.engram_tables[layer] = EngramRows(path, offset=weight["offset"], scale_offset=scale["offset"], rows=rows,
                 expected_stat=file_stamp(path.stat()), workers=min(8, request.read_workers), cache_format=self.kernel_policy["deepseek_engram_cache"],
                 carry_window=self.kernel_policy.get('deepseek_source_engram','reference')=='carry_tuple_v1')
