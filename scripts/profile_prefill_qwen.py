@@ -850,7 +850,54 @@ def build_parser():
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--i-own-the-gpu", action="store_true")
+    p.add_argument("--served", action="store_true",
+                   help="profile the model of an in-process ServingEngine built as mlx2.server "
+                        "builds it on the --ordinary route (lane matmul, int8 prefill auto and "
+                        "the other serving installs in place) instead of the bare adapter model")
+    p.add_argument("--served-arg", action="append", default=[],
+                   help="extra mlx2.server argument for --served (repeatable), e.g. "
+                        "--served-arg=--qualification-mode lets int8 prefill auto resolve on")
     return p
+
+
+def served_adapter(model_path, context, extra_args=()):
+    """The adapter of a ServingEngine built exactly as ``mlx2.server`` builds it.
+
+    ``--ordinary`` keeps the target-only route: the profile measures the
+    target forward the served prefill runs, with every serving-layer install
+    (lane matmul, int8 prefill ``auto``, ...) applied.  Returns ``(engine,
+    adapter, settings)``; the engine is idle (no request is ever submitted).
+    """
+    from mlx2 import server as S
+    from mlx2 import serving
+    from mlx2.adapters.registry import inspect_model
+
+    parser = S.build_parser()
+    args = parser.parse_args(["--model", str(model_path), "--ordinary", "--max-lanes", "1",
+                              "--max-inflight", "2", "--max-context", str(int(context) + 4096),
+                              *extra_args])
+    resolution = inspect_model(args.model)
+    policy_in = {}
+    selection = S.resolve_route_selection(args, policy_in, resolution)
+    policy = S.resolve_execution_policy_defaults(policy_in, selection, resolution,
+                                                 approximate_kv=False, max_lanes=args.max_lanes)
+    engine = serving.ServingEngine(args.model, **S.serving_engine_kwargs(
+        args, policy, native_mtp=selection.native_mtp, route_selection_source=selection.source,
+        approximate_kv=S.approximate_kv_mode(args, selection.native_mtp),
+        max_request_bytes=S.request_body_limit(args.max_context, args.max_request_bytes)))
+    if not engine.ready.wait(1800) or engine.error:
+        raise RuntimeError(f"served engine did not load: {engine.error}")
+    adapter = engine.adapter
+    lane = engine.lane_matmul_receipt
+    settings = {
+        "route": "ordinary",
+        "extra_server_args": list(extra_args),
+        "prefill_step": getattr(engine, "prefill_step", None),
+        "prefill_step_source": getattr(engine, "prefill_step_source", None),
+        "lane_matmul_law": (lane or {}).get("law_id") if isinstance(lane, dict) else None,
+        "int8_prefill": serving.int8_prefill_status(engine),
+    }
+    return engine, adapter, settings
 
 
 def run(argv=None, *, return_cache=False):
@@ -890,11 +937,15 @@ def run(argv=None, *, return_cache=False):
     else:
         if mx.default_device() != mx.gpu or not mx.metal.is_available():
             raise SystemExit("this harness measures Metal; no GPU available")
-        from mlx2.adapters.registry import resolve_adapter
+        if a.served:
+            engine, adapter, served_settings = served_adapter(a.model, a.context, a.served_arg)
+            plan["served"] = served_settings
+        else:
+            from mlx2.adapters.registry import resolve_adapter
 
-        # The adapter pins the serving environment before importing any model
-        # module, so model code below runs with production gates.
-        adapter = resolve_adapter(a.model)(str(a.model))
+            # The adapter pins the serving environment before importing any model
+            # module, so model code below runs with production gates.
+            adapter = resolve_adapter(a.model)(str(a.model))
         model = adapter.model
         environment = getattr(adapter, "environment", None)
         identity = {"model": str(a.model), "adapter": type(adapter).__name__,
