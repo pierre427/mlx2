@@ -63,3 +63,26 @@ def test_sweep_expansion_and_merge():
 def test_gsm8k_references_found():
     prompts, gsm = L.load_prompts(["gsm8k-6", "gsm8k-7", "translate-6"])
     assert set(gsm) == {"gsm8k-6", "gsm8k-7"} and all(v["reference"] for v in gsm.values())
+
+
+def test_resident_pass_needs_zero_reads_from_every_bank():
+    zero = {"v41_expert_cache_misses": 0, "v41_expert_cache_hits": 900, "v41_expert_bytes_read": 0,
+            "v41_expert_demand_wait_ns": 0, "v41_expert_exl3_bytes_read": 0}
+    assert L.resident(zero)
+    assert not L.resident({**zero, "v41_expert_cache_misses": 1})
+    assert not L.resident({**zero, "v41_expert_bytes_read": 18_800_000})
+    assert not L.resident({**zero, "v41_expert_exl3_bytes_read": 13_315_584})
+
+
+def test_warm_summary_reports_resident_passes(tmp_path):
+    t = [tok("x", 0, [("x", 0), ("y", -9)])]
+    ex = {"v41_expert_cache_misses": 0, "v41_expert_demand_wait_ns": 0}
+    for arm, rp, dec in (("base", [3, 3], 2.0), ("exl3", [2, 3], 3.0)):
+        (tmp_path / arm).mkdir()
+        L._write(tmp_path / arm / "replies.json", {"p": {"reply": "x", "finish": "stop", "tokens": t, "decode_tok_s": dec,
+                                                       "ttft_s": 1.5, "completion_tokens": 1, "experts": ex,
+                                                       "resident_passes": rp, "tokens_stable": True}})
+        L._write(tmp_path / arm / "done.json", {})
+    rows = L.summarize(tmp_path, ["base", "exl3"], {"p": ("any", lambda _r: True)})
+    assert rows[1]["resident_passes"] == [2, 3] and rows[1]["median_ttft_s"] == 1.5
+    assert "resident passes" in (tmp_path / "summary.md").read_text()

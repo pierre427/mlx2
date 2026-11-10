@@ -62,9 +62,21 @@ class Handler(socketserver.BaseRequestHandler):
                 out = {"meta": np.array(json.dumps({"ok": True, "wait_s": round(t1 - t0, 3), "encode_s": round(time.time() - t1, 3),
                                                     "host": socket.gethostname(),
                                                     "stats": [e["stats"] for e in enc]}, default=float))}
+                lean = not meta.get("return_weight", True)
+                checks = []
                 for i, e in enumerate(enc):
                     out[f"trellis{i}"], out[f"suh{i}"], out[f"svh{i}"] = e["trellis"], e["suh"], e["svh"]
-                    out[f"weight{i}"] = np.asarray(e["weight"], np.float32)
+                    if lean:
+                        # Slow links: check decode == encoder here instead of shipping the weight back.
+                        from mlx2.runtime.models.exl3_reference import effective_weight
+                        w = np.asarray(e["weight"])
+                        weff = effective_weight(np.asarray(e["trellis"]).view(np.uint16), e["suh"], e["svh"], "mcg")
+                        checks.append(bool(np.allclose(weff, w, rtol=0, atol=1e-6 * np.abs(w).max())))
+                    else:
+                        out[f"weight{i}"] = np.asarray(e["weight"], np.float32)
+                if lean:
+                    m = json.loads(str(out["meta"])); m["remote_decode_match"] = checks
+                    out["meta"] = np.array(json.dumps(m, default=float))
             except Exception as exc:  # report, keep serving
                 out = {"meta": np.array(json.dumps({"ok": False, "error": repr(exc)}))}
             send_msg(self.request, out)

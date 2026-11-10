@@ -137,7 +137,7 @@ FEATURES = (
     "source_shared_middle_fused_middle_v1", "source_bf16_dense_resident_f32_v1",
     "source_engram_io_tiered_v1",
     "source_route_drop_min_v1",
-    "source_expert_tiers_q2_reablate", "source_route_bias_resident",
+    "source_expert_tiers_q2_reablate", "source_route_bias_resident", "source_expert_exl3_bank",
     "source_expert_math_hoisted_fused", "source_resident_math_probe",
     "source_expert_packed_buffers", "source_expert_mapped_input",
     "source_expert_middle_fusion", "source_expert_gate_up_middle_batch",

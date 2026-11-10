@@ -19,7 +19,15 @@ LADDER.json: {"base": {...policy...}, "arms": [{"name": "exact", "policy": {}},
               {"name": "l30_39_q2", "policy": {...merged over base...}}, ...],
               "sweeps": [{"name": "l13_26_q4_$N", "values": [256, 128, 64],
                           "template": {...policy with "$N" anywhere, e.g. an expert count...}}],
-              "prompts": ["translate-6", ...] (optional), "max_tokens": 192 (optional)}
+              "prompts": ["translate-6", ...] (optional), "max_tokens": 192 (optional),
+              "warmup": 1, "repeat": 3 (optional)}
+Warm mode (Pierre 2026-11-09: "a pre heated expert cache in memory, with decode only from in
+memory experts"): with "warmup" W > 0 each arm server first runs every prompt W times unmeasured,
+then "repeat" R measured passes. APCv2 is cleared before every pass (the server gets an admin
+token in the arm directory), so each pass prefills and decodes the full prompt again. A measured
+pass is `resident` only when it read zero expert bytes (original, Q2, Q1 or EXL3) and missed no
+expert; the summary reports resident passes and quotes speed only from those. A non-resident
+pass is kept in evidence but excluded, so a number never mixes disk streaming into it.
 Sweeps expand after the explicit arms, one arm per value, so an expert count per tier per layer
 span can be stepped down (Pierre: "ablate the specific number of experts at which quant"). A
 string that is exactly "$N" becomes the value itself (int stays int); "$N" inside a longer
@@ -27,7 +35,7 @@ string is substituted as text.
 The first arm is the baseline. Each arm directory is written atomically; a completed arm
 (done.json) is skipped on rerun, and a partial arm directory is refused.
 """
-import argparse, copy, json, os, re, signal, subprocess, sys, time, urllib.request
+import argparse, copy, json, os, re, signal, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
 
 ED_PROMPTS = "/Volumes/T7/kimi-k3.1-pro/expert-draft-linear-20261107"
@@ -171,7 +179,14 @@ def compare(base, arm, base_pass, arm_pass):
 def counters(status):
     c = (((status or {}).get("execution") or {}).get("expert_stream") or {}).get("counters") or {}
     return {k: c.get(k, 0) for k in ("v41_expert_cache_misses", "v41_expert_cache_hits",
-                                    "v41_expert_bytes_read", "v41_expert_demand_wait_ns")}
+                                    "v41_expert_bytes_read", "v41_expert_demand_wait_ns",
+                                    "v41_expert_exl3_bytes_read")}
+
+
+def resident(experts):
+    """Zero expert misses and zero expert bytes read from any bank during the pass."""
+    return (experts.get("v41_expert_cache_misses", 0) == 0 and experts.get("v41_expert_bytes_read", 0) == 0
+            and experts.get("v41_expert_exl3_bytes_read", 0) == 0)
 
 
 def delta(after, before):
@@ -224,11 +239,19 @@ def _write(path, data):
     os.replace(tmp, path)
 
 
-def run_arm(name, policy, d, prompts, max_tokens, model_path, port):
+def run_arm(name, policy, d, prompts, max_tokens, model_path, port, warmup=0, repeat=1):
     d.mkdir(parents=True)
     pol = d / "policy.json"; _write(pol, policy)
     cmd = [sys.executable, "-m", "mlx2.server", "--model", model_path, "--port", str(port), "--ordinary",
            "--execution-policy", str(pol), "--max-context", "16384"]
+    token = None
+    if warmup > 0:
+        import secrets
+        token = secrets.token_hex(16); tf = d / "admin-token"
+        fd = os.open(tf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+        cmd += ["--admin-token-file", str(tf)]
     rev = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     dirty = bool(subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], text=True).strip())
     _write(d / "source.json", {"arm": name, "mlx2_commit": rev, "tracked_dirty": dirty, "command": cmd,
@@ -250,7 +273,15 @@ def run_arm(name, policy, d, prompts, max_tokens, model_path, port):
                 raise RuntimeError(f"{name}: load timeout")
         model = _get(base + "/v1/models")["data"][0]["id"]
         before = _get(base + "/v1/status"); _write(d / "status-before.json", before)
-        for pid, text in prompts.items():
+        def one(text):
+            if token:
+                creq = urllib.request.Request(base + "/v1/admin/apc/clear", b'{"reason": "ladder warm pass"}',
+                                              {"Content-Type": "application/json", "Authorization": f"Bearer {token}"})
+                try:
+                    urllib.request.urlopen(creq, timeout=120).read()
+                except urllib.error.HTTPError as error:
+                    if error.code != 409:      # 409: this route keeps no prefix cache to reuse
+                        raise
             s0 = counters(_get(base + "/v1/status"))
             body = {"model": model, "messages": [{"role": "user", "content": text}], "max_tokens": max_tokens,
                     "temperature": 0, "logprobs": True, "top_logprobs": 2}
@@ -259,11 +290,37 @@ def run_arm(name, policy, d, prompts, max_tokens, model_path, port):
             t = time.time(); resp = json.loads(urllib.request.urlopen(req, timeout=3600).read()); el = time.time() - t
             s1 = counters(_get(base + "/v1/status"))
             m = resp.get("mlx2") or {}
-            replies[pid] = {"reply": resp["choices"][0]["message"].get("content") or "",
-                            "finish": resp["choices"][0].get("finish_reason"), "elapsed_s": round(el, 2),
-                            "ttft_s": m.get("ttft_seconds"), "completion_tokens": m.get("completion_tokens"),
-                            "decode_tok_s": round((m.get("completion_tokens", 1) - 1) / max(1e-9, m.get("elapsed_seconds", 0) - m.get("ttft_seconds", 0)), 3),
-                            "experts": delta(s1, s0), "tokens": tokens(resp), "route": {k: v for k, v in resp.items() if k != "choices"}}
+            ex = delta(s1, s0)
+            return {"reply": resp["choices"][0]["message"].get("content") or "",
+                    "finish": resp["choices"][0].get("finish_reason"), "elapsed_s": round(el, 2),
+                    "ttft_s": m.get("ttft_seconds"), "completion_tokens": m.get("completion_tokens"),
+                    "decode_tok_s": round((m.get("completion_tokens", 1) - 1) / max(1e-9, m.get("elapsed_seconds", 0) - m.get("ttft_seconds", 0)), 3),
+                    "experts": ex, "resident": resident(ex), "tokens": tokens(resp),
+                    "route": {k: v for k, v in resp.items() if k != "choices"}}
+
+        warm = {}
+        for w in range(warmup):
+            for pid, text in prompts.items():
+                r = one(text)
+                warm.setdefault(pid, []).append({k: r[k] for k in ("elapsed_s", "ttft_s", "decode_tok_s", "experts", "resident")})
+                _write(d / "warmup.json", warm)
+        for pid, text in prompts.items():
+            passes = [one(text) for _ in range(max(1, repeat))]
+            last = passes[-1]
+            if warmup > 0:
+                # Speed is quoted only from passes that read nothing from disk.
+                res = [p for p in passes if p["resident"]]
+                last = dict(last)
+                last["passes"] = [{k: p[k] for k in ("elapsed_s", "ttft_s", "decode_tok_s", "experts", "resident")} for p in passes]
+                last["resident_passes"] = [len(res), len(passes)]
+                last["tokens_stable"] = all(p["tokens"] == passes[0]["tokens"] for p in passes)
+                if res:
+                    dec = sorted(p["decode_tok_s"] for p in res); tt = sorted(p["ttft_s"] or 0 for p in res)
+                    last["decode_tok_s"] = dec[len(dec) // 2]; last["ttft_s"] = tt[len(tt) // 2]
+                else:
+                    last["decode_tok_s"] = None
+                last["experts"] = {k: sum(p["experts"][k] for p in passes) for k in passes[0]["experts"]}
+            replies[pid] = last
             _write(d / "replies.json", replies)
         _write(d / "status-after.json", _get(base + "/v1/status"))
     finally:
@@ -285,7 +342,7 @@ def summarize(out, arm_names, oracle_table):
         if not (out / name / "done.json").exists():
             continue
         arm = json.loads(f.read_text())
-        per, misses, wait, toks, dec = {}, 0, 0, 0, []
+        per, misses, wait, toks, dec, ttft, res_ok, res_all = {}, 0, 0, 0, [], [], 0, 0
         for pid, r in arm.items():
             desc, fn = oracle_table.get(pid, ("no oracle", lambda _r: True))
             ok, bok = bool(fn(r["reply"])), bool(fn(base[pid]["reply"]))
@@ -302,23 +359,39 @@ def summarize(out, arm_names, oracle_table):
             bt, at = base[pid].get("completion_tokens") or 0, r.get("completion_tokens") or 0
             runaway = (base[pid].get("finish") == "stop" and (r.get("finish") == "length" or at > 2 * bt + 8))
             c.update(oracle=desc, oracle_pass=None if truncated else ok, decode_tok_s=r["decode_tok_s"],
+                     ttft_s=r.get("ttft_s"), resident_passes=r.get("resident_passes"), tokens_stable=r.get("tokens_stable"),
                      runaway=bool(runaway), tokens_vs_base=[at, bt])
             per[pid] = c
             misses += r["experts"]["v41_expert_cache_misses"]; wait += r["experts"]["v41_expert_demand_wait_ns"]
-            toks += r.get("completion_tokens") or 0; dec.append(r["decode_tok_s"])
+            toks += r.get("completion_tokens") or 0
+            if r["decode_tok_s"] is not None:
+                dec.append(r["decode_tok_s"])
+            if r.get("resident_passes"):
+                res_ok += r["resident_passes"][0]; res_all += r["resident_passes"][1]
+            if r.get("ttft_s") is not None:
+                ttft.append(r["ttft_s"])
         classes = [v["class"] for v in per.values()]
         rows.append({"arm": name, "per_prompt": per,
                      "identical": classes.count("identical"), "near_tie": classes.count("near_tie_equivalent"),
                      "diverged_pass": classes.count("diverged_pass"), "diverged_fail": classes.count("diverged_fail"),
                      "failed": classes.count("failed"), "runaway": sum(1 for v in per.values() if v.get("runaway")), "oracle_pass": sum(1 for v in per.values() if v["oracle_pass"]),
                      "prompts": sum(1 for v in per.values() if v["oracle_pass"] is not None), "expert_misses": misses, "demand_wait_s": round(wait / 1e9, 1),
-                     "completion_tokens": toks, "median_decode_tok_s": sorted(dec)[len(dec) // 2] if dec else None})
+                     "completion_tokens": toks, "median_decode_tok_s": sorted(dec)[len(dec) // 2] if dec else None,
+                     "median_ttft_s": sorted(ttft)[len(ttft) // 2] if ttft else None,
+                     "resident_passes": [res_ok, res_all] if res_all else None})
     _write(out / "summary.json", rows)
+    warm = any(r.get("resident_passes") for r in rows)
     head = "| arm | identical | near-tie | diverged (pass) | diverged (FAIL) | runaway | oracle pass | misses | wait s | decode tok/s |"
-    lines = [head, "|" + "---|" * 10]
+    if warm:
+        head += " TTFT s | resident passes |"
+    lines = [head, "|" + "---|" * (12 if warm else 10)]
     for r in rows:
-        lines.append(f"| {r['arm']} | {r['identical']} | {r['near_tie']} | {r['diverged_pass']} | {r['diverged_fail'] + r['failed']} | {r['runaway']} "
-                     f"| {r['oracle_pass']}/{r['prompts']} | {r['expert_misses']} | {r['demand_wait_s']} | {r['median_decode_tok_s']} |")
+        line = (f"| {r['arm']} | {r['identical']} | {r['near_tie']} | {r['diverged_pass']} | {r['diverged_fail'] + r['failed']} | {r['runaway']} "
+                f"| {r['oracle_pass']}/{r['prompts']} | {r['expert_misses']} | {r['demand_wait_s']} | {r['median_decode_tok_s']} |")
+        if warm:
+            rp = r.get("resident_passes") or [0, 0]
+            line += f" {r.get('median_ttft_s')} | {rp[0]}/{rp[1]} |"
+        lines.append(line)
     (out / "summary.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
     return rows
@@ -354,7 +427,8 @@ def main():
             print(f"skip {n} (done)"); continue
         if d.exists() and any(d.iterdir()):
             raise SystemExit(f"refusing partial arm directory {d}; move it aside to retry")
-        run_arm(n, policies[n], d, prompts, spec.get("max_tokens", 192), a.model, a.port)
+        run_arm(n, policies[n], d, prompts, spec.get("max_tokens", 192), a.model, a.port,
+                warmup=int(spec.get("warmup", 0)), repeat=int(spec.get("repeat", 1)))
         summarize(a.out, names, table)
     summarize(a.out, names, table)
 

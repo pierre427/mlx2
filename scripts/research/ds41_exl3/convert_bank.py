@@ -111,12 +111,13 @@ def write_manifest(out, words, selection):
     print("manifest", manifest["fingerprint"], len(files), "files", flush=True)
 
 
-def remote_encode(addr, ctx, words, probe):
+def remote_encode(addr, ctx, words, probe, lean=False):
     from exl3_worker import recv_msg, send_msg
     W = ctx["W"]
     msg = {"w0": np.ascontiguousarray(W["gate"].T, np.float32), "w1": np.ascontiguousarray(W["up"].T, np.float32),
            "w2": np.ascontiguousarray(W["down"].T, np.float32), "h_in": ctx["h_in"], "h_mid": ctx["h_mid"],
-           "meta": np.array(json.dumps({"words": words, "seed": ctx["layer"] * 1000 + ctx["expert"], "probe": probe}))}
+           "meta": np.array(json.dumps({"words": words, "seed": ctx["layer"] * 1000 + ctx["expert"], "probe": probe,
+                                        "return_weight": not lean}))}
     host, port = addr.split(":")
     with socket.create_connection((host, int(port)), timeout=600) as sock:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -124,8 +125,20 @@ def remote_encode(addr, ctx, words, probe):
     meta = json.loads(str(reply["meta"]))
     if not meta.get("ok"):
         raise RuntimeError(f"remote encode failed: {meta.get('error')}")
+    if lean:
+        # The worker checked decode == encoder itself; the local check then decodes the saved file
+        # against this same decode, so record the worker's result next to it.
+        from mlx2.runtime.models.exl3_reference import effective_weight
+        if not all(meta.get("remote_decode_match", [])):
+            raise RuntimeError("remote decode check failed")
+        weights = [effective_weight(np.asarray(reply[f"trellis{i}"]).view(np.uint16), reply[f"suh{i}"], reply[f"svh{i}"], "mcg")
+                   for i in range(3)]
+    else:
+        weights = [reply[f"weight{i}"] for i in range(3)]
     enc = [{"trellis": reply[f"trellis{i}"], "suh": reply[f"suh{i}"], "svh": reply[f"svh{i}"],
-            "weight": reply[f"weight{i}"], "stats": meta["stats"][i]} for i in range(3)]
+            "weight": weights[i], "stats": meta["stats"][i]} for i in range(3)]
+    if lean:
+        enc[0]["stats"]["remote_decode_match"] = meta["remote_decode_match"]
     enc[0]["stats"]["remote"] = {k: meta[k] for k in ("host", "wait_s", "encode_s")}
     return enc
 
@@ -142,6 +155,7 @@ def main():
     ap.add_argument("--reverse", action="store_true", help="walk the plan from its end (pairs with a forward process)")
     ap.add_argument("--name", default="", help="results file suffix for this process (results<name>.json)")
     ap.add_argument("--manifest-only", action="store_true")
+    ap.add_argument("--lean", action="store_true", help="remote: worker checks its decode; no weight shipped back (slow links)")
     ap.add_argument("--out", default="~/mlx-models/DeepSeek-V4.1-Flash-1017-Source-Expert-EXL3-3bpw-hot50")
     a = ap.parse_args()
     if not v2_supported(a.words):
@@ -191,7 +205,7 @@ def main():
     if a.remote:
         def one(p):
             ctx = prepare_by_id(art, ids, rng_for(p[0], p[1]), *p)
-            t0 = time.time(); enc = remote_encode(a.remote, ctx, a.words, a.probe)
+            t0 = time.time(); enc = remote_encode(a.remote, ctx, a.words, a.probe, lean=a.lean)
             emit(C.save_and_check(ctx, a.words, enc, out, args, time.time() - t0))
         gen, glock, errors = take(), threading.Lock(), []
 
