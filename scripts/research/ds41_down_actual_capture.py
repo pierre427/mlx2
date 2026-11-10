@@ -5,6 +5,13 @@ Import and load_capture are CPU only. The hook observes existing leased expert
 objects inside the batched routed provider; it never acquires another expert.
 Serialization/evaluation are interventions, not ordinary latency measurements.
 """
+import sys as _tree_sys  # mlx2 worktree bootstrap: import this tree's src, not the editable install
+from pathlib import Path as _TreePath
+
+_tree_src = str(_TreePath(__file__).resolve().parents[2] / "src")
+if _tree_src not in _tree_sys.path[:1]:
+    _tree_sys.path.insert(0, _tree_src)
+del _tree_sys, _TreePath, _tree_src
 from collections import Counter
 from contextlib import contextmanager
 from functools import lru_cache

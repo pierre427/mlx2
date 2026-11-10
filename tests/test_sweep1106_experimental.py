@@ -61,3 +61,21 @@ def test_compile_ironmlx_prefill_imports_its_own_checkout():
     assert Path(out).resolve() == (
         ROOT / "src/mlx2/experimental/ironmlx_tiled_prefill.py"
     ).resolve()
+
+
+def test_research_scripts_import_their_own_tree():
+    """EXP-4: a research script run from a worktree imported the primary
+    checkout through the shared editable install while its receipt named the
+    worktree. Every research script that imports mlx2 now puts its own tree's
+    src first; this guard keeps new ones from regressing (skips where the
+    private research tree is not shipped)."""
+    import re
+
+    research = ROOT / "scripts" / "research"
+    if not research.is_dir():
+        pytest.skip("private research scripts are not shipped in this tree")
+    importing = re.compile(r"^\s*(from|import) mlx2\b", re.M)
+    bootstrapped = re.compile(r"sys\.path\.(insert|append)|sys\.path\[0:0\]")
+    missing = [str(path.relative_to(ROOT)) for path in sorted(research.rglob("*.py"))
+               if importing.search(text := path.read_text(errors="replace")) and not bootstrapped.search(text)]
+    assert missing == []

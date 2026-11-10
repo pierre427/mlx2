@@ -5,6 +5,13 @@ Import is CPU-only. run(adapter,unit,check_live) compares unchanged Source M1
 GU/DOWN and stable combine with the new GPU-grouped resident tile. Parent owns
 source/artifact/CPG/paired locks/thermal admission and process-group cleanup.
 """
+import sys as _tree_sys  # mlx2 worktree bootstrap: import this tree's src, not the editable install
+from pathlib import Path as _TreePath
+
+_tree_src = str(_TreePath(__file__).resolve().parents[2] / "src")
+if _tree_src not in _tree_sys.path[:1]:
+    _tree_sys.path.insert(0, _tree_src)
+del _tree_sys, _TreePath, _tree_src
 from pathlib import Path
 import gc
 import hashlib

@@ -3,6 +3,13 @@
 Conversion algebra derives from this project's GGUF block oracle. A converted
 layer is a derived artifact, not a serving route or numerical qualification.
 """
+import sys as _tree_sys  # mlx2 worktree bootstrap: import this tree's src, not the editable install
+from pathlib import Path as _TreePath
+
+_tree_src = str(_TreePath(__file__).resolve().parents[2] / "src")
+if _tree_src not in _tree_sys.path[:1]:
+    _tree_sys.path.insert(0, _tree_src)
+del _tree_sys, _TreePath, _tree_src
 from contextlib import contextmanager
 from copy import copy
 from pathlib import Path

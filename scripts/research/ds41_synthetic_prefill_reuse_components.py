@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: MIT
 """Whole-forward synthetic rotary/mask setup; no model/checkpoint construction."""
+import sys as _tree_sys  # mlx2 worktree bootstrap: import this tree's src, not the editable install
+from pathlib import Path as _TreePath
+
+_tree_src = str(_TreePath(__file__).resolve().parents[2] / "src")
+if _tree_src not in _tree_sys.path[:1]:
+    _tree_sys.path.insert(0, _tree_src)
+del _tree_sys, _TreePath, _tree_src
 import gc,time,statistics
 from types import SimpleNamespace
 

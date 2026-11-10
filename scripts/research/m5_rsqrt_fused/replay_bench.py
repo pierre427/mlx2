@@ -5,6 +5,14 @@ The local source/provenance, unchanged launch function and helpers are hashed.
 No production mutation. Run only via cpg_job.py and owned_exec.py.
 """
 from __future__ import annotations
+
+import sys as _tree_sys  # mlx2 worktree bootstrap: import this tree's src, not the editable install
+from pathlib import Path as _TreePath
+
+_tree_src = str(_TreePath(__file__).resolve().parents[3] / "src")
+if _tree_src not in _tree_sys.path[:1]:
+    _tree_sys.path.insert(0, _tree_src)
+del _tree_sys, _TreePath, _tree_src
 import argparse
 import hashlib
 import importlib.metadata
