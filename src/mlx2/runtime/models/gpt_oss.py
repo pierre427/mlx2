@@ -325,7 +325,8 @@ class Model(nn.Module):
         # this plain path claims it; taps, prefill_body and verify forwards
         # call self.model directly and never open the request.
         if claim_adapter_tail(
-            inputs, kind="tail", refuse=tail_refusal(self.model.layers)
+            inputs, kind="tail", refuse=tail_refusal(self.model.layers),
+            family="gpt_oss",
         ):
             TAIL_SKIP_STATS["gpt_oss_tail_split"] += 1
             return self.lm_head(self.model(inputs, cache, tail_row=True))

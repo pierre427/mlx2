@@ -190,13 +190,17 @@ def test_nemotron_readers_never_engage(monkeypatch):
         assert pts.STATS["tier1_engaged"] == before
 
 
-def test_nemotron_default_off(monkeypatch):
+def test_nemotron_default_on_when_unset_and_explicit_zero_disables(monkeypatch):
+    """Nemotron-H default on since 2026-11-08 (Pierre); =0 turns it off."""
     with mx.stream(mx.cpu):
         model = _nemotron(NEMO_TAIL)
         monkeypatch.delenv(pts.ENV, raising=False)
         before = pts.STATS["tier1_engaged"]
         _chunks(model, [[[1, 2, 3, 4]]], model.make_cache())
-        assert pts.STATS["tier1_engaged"] == before
+        assert pts.STATS["tier1_engaged"] == before + 1
+        monkeypatch.setenv(pts.ENV, "0")
+        _chunks(model, [[[1, 2, 3, 4]]], model.make_cache())
+        assert pts.STATS["tier1_engaged"] == before + 1
 
 
 # Gemma 4 (head trim + tier-2 last-layer split) through the adapter wrapper.
@@ -349,13 +353,34 @@ def test_gemma4_tail_left_padded_batch(monkeypatch, extra, mode):
                                       np.array(model(step, cache=tail_cache)))
 
 
-def test_family_default_gemma4_on_others_off(monkeypatch):
+DEFAULT_ON = ("gemma4", "nemotron_h", "gpt_oss", "qwen38_27b", "flint", "mellum", "laguna")
+
+
+def test_family_defaults_on_for_measured_families_only(monkeypatch):
     monkeypatch.delenv(pts.ENV, raising=False)
+    assert set(pts.FAMILY_DEFAULTS) == set(DEFAULT_ON)
     assert pts.tail_skip_mode() == "0"
-    assert pts.tail_skip_mode("gemma4") == "1"
-    assert pts.tail_skip_mode("nemotron_h") == "0"
+    for family in DEFAULT_ON:
+        assert pts.tail_skip_mode(family) == "1"
+    for family in ("kimi_linear", "qwen4_exp", "cohere2_moe", "lfm25_moe",
+                   "bailing_hybrid", "glm53_gguf", "ricursive", "gpt_oss_puzzle"):
+        assert pts.tail_skip_mode(family) == "0"
     monkeypatch.setenv(pts.ENV, "0")
-    assert pts.tail_skip_mode("gemma4") == "0"
+    for family in DEFAULT_ON:
+        assert pts.tail_skip_mode(family) == "0"
+
+
+@pytest.mark.parametrize("path, family", [
+    ("nemotron_h.py", "nemotron_h"), ("gpt_oss.py", "gpt_oss"),
+    ("qwen38_27b.py", "qwen38_27b"), ("flint.py", "flint"),
+    ("mellum.py", "mellum"), ("laguna.py", "laguna"),
+])
+def test_default_on_adapters_pass_their_family_key(path, family):
+    import pathlib
+    import mlx2.runtime.models as models
+
+    source = (pathlib.Path(models.__file__).parent / path).read_text()
+    assert f'family="{family}"' in source
 
 
 def test_gemma4_default_on_when_unset_and_explicit_zero_disables(monkeypatch):

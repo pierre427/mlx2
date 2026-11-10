@@ -217,7 +217,10 @@ def test_declines_when_switch_off(monkeypatch, name, value):
         model, _ = FACTORIES[name]()
         before = _engagements()
         outs = _prefill(model, [[[1, 2, 3, 4, 5, 6]]], model.make_cache())
-        assert _engagements() == before
+        # gpt_oss and laguna default on when unset (2026-11-08); the puzzle
+        # variant's call site has no family default and stays off.
+        default_on = value is None and not name.startswith("puzzle")
+        assert _engagements() == before + default_on
         # The ordinary head narrowing still applies.
         assert outs[0][1] == 1 and outs[0][0].shape == (1, 1, VOCAB)
 

@@ -334,7 +334,7 @@ class Model(nn.Module):
         )
         # ``decode`` only selects the fused one-row blocks, which a claimed
         # (multi-row) chunk never reaches.
-        if claim_adapter_tail(inputs, kind="tail", refuse=refuse):
+        if claim_adapter_tail(inputs, kind="tail", refuse=refuse, family="flint"):
             TAIL_SKIP_STATS["flint_tail_split"] += 1
             hidden = self.model(inputs, cache, tail_row=True)
         else:

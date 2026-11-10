@@ -469,7 +469,7 @@ class Model(nn.Module):
         # Opt-in prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP=1).  Only
         # this plain path claims it; forward_with_taps/prefill_body (DFlash)
         # call self.model directly and never open the request.
-        if claim_adapter_tail(inputs, kind="tail", refuse=self._tail_refusal(input_embeddings)):
+        if claim_adapter_tail(inputs, kind="tail", refuse=self._tail_refusal(input_embeddings), family="laguna"):
             TAIL_SKIP_STATS["laguna_tail_split"] += 1
             hidden = self.model(inputs, cache, tail_row=True)
             return self.model.embed_tokens.as_linear(hidden) if self.args.tie_word_embeddings else self.lm_head(hidden)

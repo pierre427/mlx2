@@ -40,7 +40,8 @@ prefills do not, so on those routes the switch is inert (counters stay 0).
 
 Mode values: ``0`` off; ``1`` every tier the adapter supports; ``head`` the
 head trim only (for A/B attribution).  Unset means off, except for families in
-``FAMILY_DEFAULTS`` (Gemma 4: on since 2026-11-07, Pierre).
+``FAMILY_DEFAULTS`` (Gemma 4 since 2026-11-07; Nemotron-H, gpt-oss,
+Qwen3.8-27B, flint, Mellum and Laguna since 2026-11-08; Pierre).
 """
 
 from __future__ import annotations
@@ -62,7 +63,22 @@ STATS: Counter = Counter()
 #   gemma4: default 1 (Pierre, 2026-11-07), after per-chunk -5.5..-5.9% on
 #   gemma-4-31B-it-MLX-8bit and identical greedy texts at 2K/16K
 #   (qualification/runs/prefill-tail-skip-20261107).
-FAMILY_DEFAULTS = {"gemma4": "1"}
+#   nemotron_h, gpt_oss, qwen38_27b, flint, mellum, laguna: default 1 (Pierre,
+#   2026-11-08), after per-chunk benches with equal checkpoint argmax on
+#   Nemotron-3.5-Lightning, gpt-oss-20b, Qwen3.8-27B, flint oq4e, Mellum 2.1
+#   12B and Laguna XS 2.1 (-1.3..-7.1%; same evidence directory).  The key is
+#   the adapter module, so untested checkpoints of the same module (Nemotron
+#   Bolt/Super, gpt-oss-120b, Laguna S) inherit it; gpt_oss_puzzle has its own
+#   unbenched call site and stays off.
+FAMILY_DEFAULTS = {
+    "gemma4": "1",
+    "nemotron_h": "1",
+    "gpt_oss": "1",
+    "qwen38_27b": "1",
+    "flint": "1",
+    "mellum": "1",
+    "laguna": "1",
+}
 
 
 def tail_skip_mode(family: str | None = None) -> str:
@@ -121,7 +137,7 @@ def template_state_writer(model, layer_count: int):
 
 
 def claim_stateless_tail(inputs, cache, model, layer_count: int, *,
-                         refuse: str | None = None):
+                         refuse: str | None = None, family: str | None = None):
     """Tier 1: return the last writer's index and claim the request, or None.
 
     ``refuse`` names an adapter-specific reason to keep the full chunk (a
@@ -129,7 +145,7 @@ def claim_stateless_tail(inputs, cache, model, layer_count: int, *,
     request is claimed only after every other check passes, so a decline
     never leaves a claimed request with a full-width output.
     """
-    if tail_skip_mode() != "1":
+    if tail_skip_mode(family) != "1":
         return None
     if getattr(inputs, "ndim", 0) != 2 or inputs.shape[1] <= 1:
         return None

@@ -2238,6 +2238,7 @@ class Model(nn.Module):
             claim_stateless_tail(
                 inputs, cache, self, len(self.layers),
                 refuse=None if type(self.backbone) is NemotronHModel else "backbone_wrapped",
+                family="nemotron_h",
             )
             if inputs_embeds is None else None
         )

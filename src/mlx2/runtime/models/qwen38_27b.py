@@ -484,11 +484,12 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
             fa_mask = create_attention_mask(hidden_states, cache[self.fa_idx])
         if self.ssm_idx is not None:
             ssm_mask = create_ssm_mask(hidden_states, cache[self.ssm_idx])
-        # Prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP=1, default off):
+        # Prompt-chunk tier-2 tail (MLX2_PREFILL_TAIL_SKIP, on by family default):
         # claimed only after the masks exist, so every refusal is known.
         tail = bool(tail_row) and claim_adapter_tail(
             inputs,
             kind="tail",
+            family="qwen38_27b",
             refuse=self._tail_refusal(
                 cache, fa_mask, ssm_mask, input_embeddings,
                 deep_concept_memory, capture_layers, hidden_sink,
@@ -751,7 +752,7 @@ class TextModel(nn.Module):
             cache,
             input_embeddings=input_embeddings,
             deep_concept_memory=deep_concept_memory,
-            **({"tail_row": True} if tail_skip_mode() == "1" else {}),
+            **({"tail_row": True} if tail_skip_mode("qwen38_27b") == "1" else {}),
         )
         out = select_checkpoint_rows(out)
         if self.args.tie_word_embeddings:

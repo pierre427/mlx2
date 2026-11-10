@@ -155,7 +155,7 @@ def test_declines_when_switch_is_off(monkeypatch, value):
         model = _model()
         before = _split_count()
         (logits, applied), = _prefill(model, [[[1, 2, 3, 4]]], model.make_cache())
-        assert _split_count() == before
+        assert _split_count() == before + (value is None)  # family default on (2026-11-08)
         assert applied == 1 and logits.shape == (1, 1, VOCAB)
 
 

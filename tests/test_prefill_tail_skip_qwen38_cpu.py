@@ -238,7 +238,9 @@ def test_declines_when_switch_not_one(monkeypatch, value):
         monkeypatch.setenv(pts.ENV, value)
     model = _dense()
     result = {}
-    assert _engaged_delta(model, lambda: result.update(r=_one_chunk(model))) == 0
+    # Unset = family default on (2026-11-08); "0" and "head" decline.
+    expected = 1 if value is None else 0
+    assert _engaged_delta(model, lambda: result.update(r=_one_chunk(model))) == expected
     out, applied = result["r"]
     assert out.shape == (1, 1, VOCAB) and applied == 1  # ordinary head narrowing
 

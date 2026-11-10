@@ -290,7 +290,7 @@ class Model(nn.Module):
                 parts=((last.self_attn, (Attention,)), (last.mlp, (SparseMoE,))),
             )
         )
-        if claim_adapter_tail(inputs, kind="tail", refuse=refuse):
+        if claim_adapter_tail(inputs, kind="tail", refuse=refuse, family="mellum"):
             TAIL_SKIP_STATS["mellum_tail_split"] += 1
             hidden = self.model(inputs, cache, tail_row=True)
         else:
