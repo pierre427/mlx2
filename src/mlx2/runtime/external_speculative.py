@@ -12048,6 +12048,107 @@ class ExternalDraftBatchGenerator:
             inverse.append(physical)
         return tuple(unique), tuple(representatives), tuple(inverse)
 
+    def _verify_prebuild_eligible(self, cohort, forced_depth):
+        """Whether this chain round may build its verify behind the drafter.
+
+        Opt-in (``MLX2_EXTERNAL_VERIFY_PREBUILD=1``).  Only the plain B1
+        greedy-chain shape: one live lane with no logits processors, a
+        drafter that declares the hook, no composition, pool, adaptive depth,
+        progressive tiles, AST planning, steering, fly verification or
+        context pairing.  Anything else keeps the ordinary order.
+        """
+        if os.environ.get("MLX2_EXTERNAL_VERIFY_PREBUILD", "0") != "1":
+            return False
+        if forced_depth is not None or len(cohort) != 1:
+            return False
+        lane = cohort[0]
+        return bool(
+            getattr(self.draft, "supports_verify_prebuild", False)
+            and self.target_execution == "reference"
+            and self.draft_topology != "tree15"
+            and self.adaptive_policy is None
+            and self.continuation_policy is None
+            and getattr(self, "ast_execution_planner", None) is None
+            and not getattr(self, "ast_tree_tile_rows", 0)
+            and getattr(self, "progressive_verification_tile", None) is None
+            and getattr(self, "progressive_alternative_branches", 1) == 1
+            and not self.pair_context_tokens
+            and not self.fly_verification.enabled
+            and getattr(getattr(self.model, "model", None), "residual_taps", None) is None
+            and not lane.ordinary
+            and not _speculation_parked(lane)
+            and not lane.processors
+            and lane.maximum - lane.generated > 1
+        )
+
+    def _install_verify_prebuild(self, cohort, forced_depth):
+        """Hand the drafter a hook that builds this round's verify early.
+
+        The drafter calls ``hook(tokens, count)`` with its greedy chain as a
+        device array once its own GPU work is queued; the verify transaction
+        and forward are then built and queued while the drafter runs.  The
+        result is adopted only if the host proposal equals it exactly
+        (``_adopt_verify_prebuild``); otherwise it is aborted.  Draft tokens
+        never change committed output, which the exact verify decides.
+        """
+        if not self._verify_prebuild_eligible(cohort, forced_depth):
+            return None
+        record = {"built": None}
+        lane = cohort[0]
+
+        def hook(tokens, count):
+            if record["built"] is not None or type(count) is not int or count < 1:
+                return
+            row = self.mx.concatenate(
+                [self.mx.array([int(lane.anchor)], dtype=tokens.dtype), tokens[:count]]
+            ).reshape(1, count + 1)
+            owner = self._target_owner([lane.cache])
+            transaction = owner.begin(lengths=[count + 1])
+            try:
+                logits, features = self._cohort_target_forward(
+                    row, transaction, cohort, site="standard_verify"
+                )
+            except BaseException:
+                transaction.abort()
+                raise
+            self.mx.async_eval(logits, features)
+            record["built"] = (row, count, transaction, logits, features)
+            _bump(self.scheduler_stats, "external_verify_prebuild_built")
+
+        self.draft.verify_prebuild = hook
+        return record
+
+    def _adopt_verify_prebuild(self, record, inputs, proposal_counts, *, usable):
+        built = None if record is None else record.get("built")
+        if built is None:
+            return None
+        row, count, transaction, logits, features = built
+        record["built"] = None
+        if (
+            usable
+            and len(inputs) == 1
+            and proposal_counts == [count]
+            and [int(value) for value in row[0].tolist()] == [int(v) for v in inputs[0]]
+        ):
+            _bump(self.scheduler_stats, "external_verify_prebuild_adopted")
+            return logits, features, transaction
+        if not transaction.closed:
+            transaction.abort()
+        _bump(self.scheduler_stats, "external_verify_prebuild_discarded")
+        return None
+
+    def _discard_verify_prebuild(self, record):
+        built = None if record is None else record.get("built")
+        if built is None:
+            return
+        record["built"] = None
+        transaction = built[2]
+        if not transaction.closed:
+            try:
+                transaction.abort()
+            except BaseException:  # noqa: BLE001, S110 - the round restore follows
+                pass
+
     def _run_round(self, cohort, *, forced_depth=None):
         if (getattr(self, "ast_b1_tile_policy", None) == "four_path15"
             or getattr(self, "ast_packed_pattern", None)):
@@ -12104,20 +12205,25 @@ class ExternalDraftBatchGenerator:
                 lane.uid for lane in cohort
                 if self._defer_ast_parked_context(lane)
             }
-            if forced_depth is not None:
-                blocks = self._propose(cohort, force_zero=True)
-                fixed_depth = forced_depth
-            elif self.adaptive_policy is None:
-                blocks = self._propose(cohort)
-                fixed_depth = None
-            else:
-                fixed_depth = min(self.num_draft, min(l.maximum - l.generated - 1 for l in cohort))
-                if any(l.ordinary for l in cohort):
-                    fixed_depth = 0
-                depth = self.adaptive_policy.choose_depth(
-                    self.acceptance_estimator, fixed_depth, len(cohort)
-                )
-                blocks = self._propose(cohort, adaptive_depth=depth)
+            prebuilt = self._install_verify_prebuild(cohort, forced_depth)
+            try:
+                if forced_depth is not None:
+                    blocks = self._propose(cohort, force_zero=True)
+                    fixed_depth = forced_depth
+                elif self.adaptive_policy is None:
+                    blocks = self._propose(cohort)
+                    fixed_depth = None
+                else:
+                    fixed_depth = min(self.num_draft, min(l.maximum - l.generated - 1 for l in cohort))
+                    if any(l.ordinary for l in cohort):
+                        fixed_depth = 0
+                    depth = self.adaptive_policy.choose_depth(
+                        self.acceptance_estimator, fixed_depth, len(cohort)
+                    )
+                    blocks = self._propose(cohort, adaptive_depth=depth)
+            finally:
+                if prebuilt is not None:
+                    self.draft.verify_prebuild = None
             if clock is not None:
                 clock = self._mark("draft", clock)
             proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
@@ -12966,6 +13072,7 @@ class ExternalDraftBatchGenerator:
                 )
                 if clock is not None:
                     clock = self._mark("progressive_verify", clock)
+                self._discard_verify_prebuild(prebuilt)
                 self._commit(
                     cohort,
                     decisions,
@@ -13005,8 +13112,14 @@ class ExternalDraftBatchGenerator:
             )
             if steer is not None:
                 taps.steer = steer
+            adopted = self._adopt_verify_prebuild(
+                prebuilt, inputs, proposal_counts,
+                usable=steer is None and not trusted_round,
+            )
             try:
-                if (
+                if adopted is not None:
+                    logits, features, transaction = adopted
+                elif (
                     all(count == 0 for count in proposal_counts)
                     and self._ast_anchor_cohort_eligible(cohort)
                 ):
@@ -13091,6 +13204,7 @@ class ExternalDraftBatchGenerator:
                 try: transaction.abort()
                 except BaseException:  # noqa: BLE001, S110 - authoritative snapshots restore below
                     pass
+            self._discard_verify_prebuild(locals().get("prebuilt"))
             self._restore_round(cohort, recovery)
             self.scheduler_stats = stats_snapshot
             if self.adaptive_policy is not None:

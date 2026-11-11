@@ -121,9 +121,36 @@ def per_row(fn: Callable[[mx.array], mx.array], x: mx.array) -> mx.array:
     return mx.concatenate([fn(x[:, row : row + 1]) for row in range(x.shape[1])], axis=1)
 
 
-def matvec_rows(weight: mx.array, x: mx.array) -> mx.array:
-    """``x @ weight.T`` for a strip as R broadcast matrix-vector products."""
+def _broadcast_matvec_rows(weight: mx.array, x: mx.array) -> mx.array:
     return (weight[None] @ x[0][:, :, None])[..., 0][None]
+
+
+def matvec_rows(weight: mx.array, x: mx.array) -> mx.array:
+    """``x @ weight.T`` for a strip as R broadcast matrix-vector products.
+
+    With ``MLX2_GEMV_ROWS_KERNEL=fused`` (opt-in) an admitted strip runs
+    ``models.gemv_rows_exact`` instead: MLX's one-row gemv arithmetic per
+    row with one weight read per launch of at most 8 rows, self-checked bit
+    for bit against this broadcast form on its first real use.
+    """
+    from ..models import gemv_rows_exact as gemv
+
+    if gemv.kernel_mode() == "fused" and gemv.decline_reason(weight, x) is None:
+        rows = int(x.shape[1])
+        chunks = [rows] if rows <= 8 else [rows - rows // 2, rows // 2]
+        parts, first = [], 0
+        for count in chunks:
+            strip = x[:, first:first + count]
+            y = gemv.checked_gemv_rows(
+                weight, strip, lambda strip=strip: _broadcast_matvec_rows(weight, strip)
+            )
+            if y is None:
+                break
+            parts.append(y)
+            first += count
+        else:
+            return parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=1)
+    return _broadcast_matvec_rows(weight, x)
 
 
 def _single_output(weight: mx.array) -> bool:

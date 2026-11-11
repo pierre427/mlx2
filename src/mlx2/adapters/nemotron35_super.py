@@ -663,6 +663,13 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     }
     think_close_separator = ""
     EXTERNAL_DEFAULT_NUM_DRAFT = 7
+    # LiLiCorr chain depth default (Pierre, 2026-11-10) after
+    # qualification/runs/nemotron-tree-20261110/gsm3 on ...-NVFP4@33a6f018 at
+    # 65d3e2a3f: GSM8K first 30, B1 greedy, num_draft 5 56.7 tok/s vs the
+    # previous full block (7) 46.9 / 47.2 (gsm2 / gsm1), predictions and token
+    # counts 30/30 identical.  GSM8K only; not a qualification.  An explicit
+    # num_draft wins.  Class-owned: Bolt sets None and keeps its own law.
+    EXTERNAL_LILICORR_NUM_DRAFT = 5
     EXTERNAL_ROUTE_TAG = "super-vl-external-v1"
     EXTERNAL_PROFILE = "nemotron35-super-vl-apcv2-external"
     # int8 (W8A8) prefill: declared, never selected without an explicit
@@ -818,7 +825,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                 model_path, artifact, draft_weight_quantization
             )
             self.external_policy.setdefault(
-                "num_draft", draft_record["args"].block_size - 1
+                "num_draft", self._external_default_depth(draft_record)
             )
             self._check_num_draft(draft_record)
         self._load_super_model(artifact, draft_record, draft_loader)
@@ -830,6 +837,17 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             )
             if refusal is not None:
                 raise ValueError(f"Super VL tree verify refused at load: {refusal}")
+
+    @classmethod
+    def _external_default_depth(cls, draft_record):
+        """Chain depth when the operator names none: the head's full block,
+        capped for LiLiCorr by ``EXTERNAL_LILICORR_NUM_DRAFT``."""
+        depth = draft_record["args"].block_size - 1
+        if cls.EXTERNAL_LILICORR_NUM_DRAFT is not None and hasattr(
+            draft_record["args"], "lilicorr_candidate_topk"
+        ):
+            depth = min(depth, cls.EXTERNAL_LILICORR_NUM_DRAFT)
+        return depth
 
     def _external_drafter(self, model_path, artifact, draft_weight_quantization):
         """Inspect this target's external head; returns (record, loader)."""

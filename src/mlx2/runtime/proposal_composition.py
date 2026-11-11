@@ -160,6 +160,15 @@ class ComposedDraftModel:
     # Audit cadence, revocation and recovery are request state, never resident
     # adapter state.  The executor snapshots this mapping with its lane.
     requires_proposal_trust_states = True
+    # Set by the executor for one eligible round; forwarded to the backend
+    # only when every row selected the external source (a copied or MTP
+    # span would replace the backend chain the early verify was built on).
+    verify_prebuild = None
+
+    @property
+    def supports_verify_prebuild(self):
+        return bool(getattr(self.backend, "supports_verify_prebuild", False))
+
     _supported_proposal_distributions = frozenset(
         {"deterministic_point_mass", "stochastic_exact_law"}
     )
@@ -646,17 +655,28 @@ class ComposedDraftModel:
             )
             candidates.append(selected)
             copy_trust_keys.append(copy_trust_key)
-        tokens, laws = self.backend.draft_distributions(
-            anchors,
-            hidden,
-            cache,
-            proposal_length,
-            rngs,
-            temperatures,
-            logits_processors=logits_processors,
-            processor_histories=histories,
-            **kwargs,
-        )
+        forward_prebuild = self.supports_verify_prebuild
+        if forward_prebuild:
+            self.backend.verify_prebuild = (
+                self.verify_prebuild
+                if all(candidate[0] == "external" for candidate in candidates)
+                else None
+            )
+        try:
+            tokens, laws = self.backend.draft_distributions(
+                anchors,
+                hidden,
+                cache,
+                proposal_length,
+                rngs,
+                temperatures,
+                logits_processors=logits_processors,
+                processor_histories=histories,
+                **kwargs,
+            )
+        finally:
+            if forward_prebuild:
+                self.backend.verify_prebuild = None
         confidence = getattr(self.backend, "adaptive_confidence_features", None)
         confidence = (
             list(confidence) if confidence is not None else [None] * len(anchors)

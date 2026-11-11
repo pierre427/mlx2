@@ -320,6 +320,10 @@ class LiLiCorrDraftModel(XPressDraftModel):
     requires_pending_context_at_prefill = True
     proposal_distribution = "deterministic_point_mass"
     supports_ordered_alternatives = True
+    # draft_distributions calls ``verify_prebuild(tokens, count)`` (when the
+    # scheduler sets it) with its device greedy chain after queuing its work.
+    supports_verify_prebuild = True
+    verify_prebuild = None
 
     def __init__(self, config, *, draft_attention_windows=None):
         if draft_attention_windows is None and "sliding_attention" in config.layer_types:
@@ -538,6 +542,22 @@ class LiLiCorrDraftModel(XPressDraftModel):
             anchor_hidden,
             anchor_valid,
         )
+        prebuild = getattr(self, "verify_prebuild", None)
+        if prebuild is not None and batch == 1 and not any(processors):
+            # The greedy chain below, on the device: queue the drafter, then
+            # let the scheduler build its verify while the GPU drafts.  The
+            # host chain is still computed from the same scores; the
+            # scheduler adopts the early verify only if both agree.
+            column = mx.array(0, dtype=mx.uint32)
+            chain = []
+            for position in range(proposal_length):
+                column = mx.argmax(
+                    mx.take(scores[0, position], column, axis=0), axis=-1
+                ).astype(mx.uint32)
+                chain.append(mx.take(candidates[0, position], column))
+            chain = mx.stack(chain)
+            mx.async_eval(scores, candidates, chain)
+            prebuild(chain, proposal_length)
         hosted = np.asarray(scores.astype(mx.float32))
         ids = np.asarray(candidates)
         if not np.isfinite(hosted).all():

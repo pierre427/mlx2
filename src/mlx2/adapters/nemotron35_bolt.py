@@ -723,6 +723,8 @@ def routed_exact_geometries(text: dict) -> list:
 
 class Nemotron35BoltAdapter(Nemotron35SuperAdapter):
     """Super's serving contract over Bolt's converted Puzzle-NAS artifact."""
+    # Super VL's LiLiCorr depth default (5) is unmeasured on Bolt.
+    EXTERNAL_LILICORR_NUM_DRAFT = None
 
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING

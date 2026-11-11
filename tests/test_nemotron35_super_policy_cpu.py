@@ -432,3 +432,18 @@ def test_serving_refuses_unsupported_media_route_before_preprocessing(route):
     ):
         engine._prepare_job(request, tenant_id="test")
     assert calls == []
+
+
+def test_lilicorr_chain_depth_default_is_five_on_super_only():
+    from types import SimpleNamespace
+
+    from mlx2.adapters.nemotron35_bolt import Nemotron35BoltAdapter
+    from mlx2.adapters.nemotron35_super import Nemotron35SuperAdapter
+
+    lilicorr = {"args": SimpleNamespace(block_size=8, lilicorr_candidate_topk=8)}
+    dspark = {"args": SimpleNamespace(block_size=8)}
+    short = {"args": SimpleNamespace(block_size=4, lilicorr_candidate_topk=8)}
+    assert Nemotron35SuperAdapter._external_default_depth(lilicorr) == 5
+    assert Nemotron35SuperAdapter._external_default_depth(dspark) == 7
+    assert Nemotron35SuperAdapter._external_default_depth(short) == 3
+    assert Nemotron35BoltAdapter._external_default_depth(lilicorr) == 7
