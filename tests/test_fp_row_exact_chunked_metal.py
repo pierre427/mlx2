@@ -61,3 +61,30 @@ def test_every_mode_matches_the_one_row_call(monkeypatch, bits, group, mode, k, 
                 np.asarray(y.view(mx.uint16)), expected[:, :rows],
                 err_msg=f"{kernel_mode} rows={rows}",
             )
+
+
+@pytest.mark.parametrize("n,k", [(4096, 5376), (4100, 5376), (1030, 2688)])
+def test_fused_general_layout_matches_the_one_row_call(monkeypatch, n, k):
+    """Layouts that miss qmv_fast (the Super shared-expert down projection)."""
+    key = mx.random.key(n + k)
+    weight = (mx.random.normal((n, k), key=key) * 0.05).astype(mx.bfloat16)
+    wq, scales = mx.quantize(weight, group_size=16, bits=4, mode="nvfp4")[:2]
+    assert not fq.fast_layout(k, n, 4)
+    x = mx.random.normal((1, 16, k), key=mx.random.split(key)[0]).astype(mx.bfloat16)
+    reference = mx.concatenate([
+        mx.quantized_matmul(x[:, row : row + 1], wq, scales=scales, biases=None,
+                            transpose=True, group_size=16, bits=4, mode="nvfp4")
+        for row in range(16)
+    ], axis=1)
+    mx.eval(reference)
+    expected = np.asarray(reference.view(mx.uint16))
+    monkeypatch.setenv("MLX2_FP_ROW_EXACT_GENERAL", "fused")
+    for kernel_mode in ("fused", "fused_chunked"):
+        monkeypatch.setenv("MLX2_FP_ROW_EXACT_KERNEL", kernel_mode)
+        for rows in range(2, 17):
+            y = fq.rows_qmv(x[:, :rows], wq, scales, bits=4, group_size=16)
+            mx.eval(y)
+            np.testing.assert_array_equal(
+                np.asarray(y.view(mx.uint16)), expected[:, :rows],
+                err_msg=f"{kernel_mode} rows={rows}",
+            )

@@ -123,9 +123,10 @@ def policy_for(
             "Super mamba_segment must be auto, layerwise_short_exact, or "
             "layerwise_short_exact_routed_batch"
         )
-    if draft_weight_quantization not in {"auto", "affine_q8_g64"}:
+    if draft_weight_quantization not in {"auto", "affine_q8_g64", "affine_q4_g64"}:
         raise ValueError(
-            "Nemotron draft_weight_quantization must be auto or affine_q8_g64"
+            "Nemotron draft_weight_quantization must be auto, affine_q8_g64 "
+            "or affine_q4_g64"
         )
 
     def candidates(policy):
@@ -626,7 +627,7 @@ def main():
     )
     parser.add_argument(
         "--draft-weight-quantization",
-        choices=("auto", "affine_q8_g64"),
+        choices=("auto", "affine_q8_g64", "affine_q4_g64"),
         default="auto",
         help="Nemotron external-draft weight profile; remains unqualified",
     )

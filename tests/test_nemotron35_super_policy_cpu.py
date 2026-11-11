@@ -447,3 +447,13 @@ def test_lilicorr_chain_depth_default_is_five_on_super_only():
     assert Nemotron35SuperAdapter._external_default_depth(dspark) == 7
     assert Nemotron35SuperAdapter._external_default_depth(short) == 3
     assert Nemotron35BoltAdapter._external_default_depth(lilicorr) == 7
+
+
+def test_super_vl_prefill_chunk_default_is_4096_and_bolt_keeps_2048():
+    from mlx2.adapters.nemotron35_bolt import Nemotron35BoltAdapter
+    from mlx2.adapters.nemotron35_super import Nemotron35SuperAdapter
+
+    super_vl = object.__new__(Nemotron35SuperAdapter)
+    bolt = object.__new__(Nemotron35BoltAdapter)
+    assert super_vl.prefill_step_default() == 4096
+    assert bolt.prefill_step_default() == 2048

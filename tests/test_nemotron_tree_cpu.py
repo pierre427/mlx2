@@ -525,3 +525,26 @@ def test_tree_policy_refusal_is_available_before_any_cache():
     model = _model()
     model.layers[3].mixer.set_ssm_policy("auto")
     assert model.tree_policy_refusal(16) == "mamba ssm auto"
+
+
+def test_cached_fp32_router_weight_is_bit_identical_to_the_per_call_cast():
+    from mlx2.runtime.models.nemotron_h import MoEGate, group_expert_select
+
+    model = _model(("E", "M", "*", "E", "M"))
+    gate = next(layer.mixer.gate for layer in model.layers if layer.block_type == "E")
+    gate.config.router_compute_dtype = "float32"
+    gate.weight = gate.weight.astype(mx.bfloat16)
+    x = mx.random.normal((1, 3, gate.weight.shape[1])).astype(mx.bfloat16)
+    cached = gate(x)
+    logits = x.astype(mx.float32) @ gate.weight.astype(mx.float32).T
+    reference = group_expert_select(
+        logits, gate.e_score_correction_bias, gate.top_k, gate.n_group,
+        gate.topk_group, gate.routed_scaling_factor, gate.norm_topk_prob,
+    )
+    for a, e in zip(cached, reference, strict=True):
+        _assert_bits(a, e)
+    first = gate.float32_weight()
+    assert gate.float32_weight() is first
+    gate.weight = gate.weight * 1  # a new weight array re-converts
+    assert gate.float32_weight() is not first
+    assert isinstance(gate, MoEGate)

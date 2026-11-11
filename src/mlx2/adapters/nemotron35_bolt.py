@@ -725,6 +725,8 @@ class Nemotron35BoltAdapter(Nemotron35SuperAdapter):
     """Super's serving contract over Bolt's converted Puzzle-NAS artifact."""
     # Super VL's LiLiCorr depth default (5) is unmeasured on Bolt.
     EXTERNAL_LILICORR_NUM_DRAFT = None
+    # Super VL's 4096-row prefill chunk is unmeasured on Bolt.
+    default_prefill_step = 2048
 
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING

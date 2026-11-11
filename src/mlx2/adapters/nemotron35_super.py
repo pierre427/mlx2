@@ -662,6 +662,14 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         },
     }
     think_close_separator = ""
+    # Prefill chunk default (Pierre, 2026-11-10) after
+    # qualification/runs/nemotron-tree-20261110/{prefill1,prefill2,prefillstep1}
+    # on ...-NVFP4@33a6f018: 4096-row chunks vs 2048 prefilled +8% in-process
+    # at 8K/16K and +2.5% at 32K with bit-identical final logits, and served
+    # (default route) 1.5-2.5% faster TTFT at 8K/16K/32K with an identical
+    # 96-token greedy completion.  An explicit --prefill-step wins.  Class-
+    # owned: Bolt keeps the family 2048.
+    default_prefill_step = 4096
     EXTERNAL_DEFAULT_NUM_DRAFT = 7
     # LiLiCorr chain depth default (Pierre, 2026-11-10) after
     # qualification/runs/nemotron-tree-20261110/gsm3 on ...-NVFP4@33a6f018 at

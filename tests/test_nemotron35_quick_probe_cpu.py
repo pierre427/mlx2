@@ -233,6 +233,17 @@ def test_external_draft_q8_policy_is_explicit_and_external_only(probe, tmp_path)
         draft_weight_quantization="affine_q8_g64",
     )
     assert policy["draft_weight_quantization"] == "affine_q8_g64"
+    assert probe.policy_for(
+        "lilicorr",
+        tmp_path,
+        7,
+        verification_tile=4,
+        draft_weight_quantization="affine_q4_g64",
+    )["draft_weight_quantization"] == "affine_q4_g64"
+    with pytest.raises(ValueError, match="affine_q4_g64"):
+        probe.policy_for(
+            "lilicorr", tmp_path, 7, draft_weight_quantization="affine_q4_g32"
+        )
     with pytest.raises(ValueError, match="Ordinary reference"):
         probe.policy_for(
             "ordinary",
@@ -317,6 +328,12 @@ def test_external_binding_matches_observed_super_native_server_namespace(probe):
         head,
         {"draft_weight_quantization": "affine_q8_g64"},
     )
+    q4 = probe.expected_artifact(
+        artifact,
+        head,
+        {"draft_weight_quantization": "affine_q4_g64"},
+    )
+    assert q4 not in {q8, probe.expected_artifact(artifact, head)}
 
 
 def test_independent_vision_smoke_uses_expected_pixels_and_explicit_oracle(probe):

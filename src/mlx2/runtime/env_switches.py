@@ -37,6 +37,7 @@ SERVING_ENV_SWITCHES = {
     "MLX2_NEMOTRON_ROUTED_DECODE": "Nemotron-H one-token NVFP4 routed experts in three stock-exact launches (on by default)",
     "MLX2_EXTERNAL_VERIFY_PREBUILD": "B1 greedy external chain: build and queue the verify while the drafter runs (opt-in; adopted only when the host proposal equals it; no computed bit changes)",
     "MLX2_GEMV_ROWS_KERNEL": "exact dense verify-row matvecs (MoE latent projections, router): loop (default, one broadcast matvec per row) or fused (opt-in: one weight read per <=8 rows, bit-identical, self-checked)",
+    "MLX2_FP_ROW_EXACT_GENERAL": "exact FP verify rows on layouts that miss qmv_fast (e.g. K 5376): loop (default) or fused (opt-in single-pass, <=6 rows per launch, bit-identical, self-checked)",
     "MLX2_FP_ROW_EXACT_KERNEL": "exact FP8/NVFP4 verify rows: single-pass fused kernel (default), fused_chunked (opt-in: 9..16 rows as <=8-row fused launches) or per-row loop (bit-identical, self-checked)",
     # MLX's own commit caps, latched at Metal start (set by MLX2_COMMAND_BUFFERS
     # or by the operator): schedule and transient memory, never values.

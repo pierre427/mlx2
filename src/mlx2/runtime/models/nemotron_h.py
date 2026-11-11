@@ -1329,9 +1329,25 @@ class MoEGate(nn.Module):
         self.weight = mx.zeros((self.n_routed_experts, config.hidden_size))
         self.e_score_correction_bias = mx.zeros((self.n_routed_experts,))
 
+    def float32_weight(self):
+        """The router weight in float32, converted once per weight array.
+
+        BF16 -> FP32 is exact, so the cached copy gives the bits the per-call
+        ``astype`` gave; it only stops re-materializing 8 MiB per layer per
+        call (2.5 ms of a 6-row verify round on the Super VL export).
+        """
+        weight = self.weight
+        if weight.dtype == mx.float32:
+            return weight
+        cached = self.__dict__.get("_mlx2_router_fp32")
+        if cached is None or cached[0] is not weight:
+            cached = (weight, weight.astype(mx.float32))
+            object.__setattr__(self, "_mlx2_router_fp32", cached)
+        return cached[1]
+
     def __call__(self, x):
         logits = (
-            x.astype(mx.float32) @ self.weight.astype(mx.float32).T
+            x.astype(mx.float32) @ self.float32_weight().T
             if getattr(self.config, "router_compute_dtype", "input") == "float32"
             else x @ self.weight.T
         )
@@ -1504,7 +1520,7 @@ class NemotronHMoE(nn.Module):
                 getattr(gate.config, "router_compute_dtype", "input") == "float32"
             )
             inds, scores = ops.router_select(
-                gate.weight,
+                gate.float32_weight() if float_router else gate.weight,
                 x,
                 lambda logits: group_expert_select(
                     logits,

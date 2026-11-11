@@ -363,7 +363,7 @@ def load_drafter(
     runtime_quantization=None,
     draft_attention_windows=None,
 ):
-    """Load the pinned BF16 export and an optional adapter-owned Q8 profile."""
+    """Load the pinned BF16 export and an optional adapter-owned Q8/Q4 profile."""
     from .nemotron35_draft_quantization import normalize_runtime_quantization
 
     runtime_quantization = normalize_runtime_quantization(runtime_quantization)

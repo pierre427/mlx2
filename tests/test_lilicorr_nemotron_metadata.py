@@ -307,6 +307,62 @@ def test_bf16_owned_head_strict_load_preserves_head_norm_and_trained_window(
     )
 
 
+def test_bf16_export_runtime_affine_q4_quantizes_owned_head_and_records_receipt(
+    executable_bf16,
+):
+    from mlx import nn
+
+    path, source, target, target_artifact = executable_bf16
+    record = plans.inspect_drafter(path, target_artifact=target_artifact)
+    loads = [
+        plans.load_drafter(
+            record,
+            target,
+            target_contract=_target_contract(record),
+            runtime_quantization="affine_q4_g64",
+        )
+        for _ in range(2)
+    ]
+    receipt = loads[0].receipt_settings["runtime_weight_quantization"]
+    assert receipt == loads[1].receipt_settings["runtime_weight_quantization"]
+    assert receipt["kind"] == "affine_q4_g64"
+    assert (receipt["mode"], receipt["bits"], receipt["group_size"]) == (
+        "affine", 4, 64,
+    )
+    assert "lm_head" in receipt["modules"]
+    assert any(name.endswith("mlp.down_proj") for name in receipt["modules"])
+    loaded = loads[0]
+    modules = dict(loaded.named_modules())
+    for name in receipt["modules"]:
+        module = modules[name]
+        assert (module.bits, module.group_size, module.mode) == (4, 64, "affine")
+    assert isinstance(loaded.lm_head, nn.QuantizedLinear)
+    # The shared target embedding is bound after conversion and stays the
+    # target's own module, untouched by the draft profile.
+    assert loaded.embed_tokens is target.embed_tokens
+    assert "embed_tokens" not in receipt["modules"]
+    # Matrices whose input width cannot form group-64 blocks stay BF16.
+    kept = [
+        name
+        for name, module in modules.items()
+        if hasattr(module, "to_quantized")
+        and getattr(module, "weight", None) is not None
+        and module.weight.ndim == 2
+        and name not in receipt["modules"]
+        and module is not target.embed_tokens
+    ]
+    assert kept
+    assert all(modules[name].weight.dtype == mx.bfloat16 for name in kept)
+    assert all(modules[name].weight.shape[-1] % 64 for name in kept)
+    flat = [dict(tree_flatten(model.parameters())) for model in loads]
+    assert flat[0].keys() == flat[1].keys()
+    for key in flat[0]:
+        left, right = flat[0][key], flat[1][key]
+        if left.dtype == mx.bfloat16:
+            left, right = left.view(mx.uint16), right.view(mx.uint16)
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+
 def test_bf16_pair_restores_target_and_wrapped_draft_state(executable_bf16):
     path, _, target, target_artifact = executable_bf16
     record = plans.inspect_drafter(path, target_artifact=target_artifact)

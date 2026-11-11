@@ -512,7 +512,8 @@ def router_select(
     rows = strip_rows(x)
     if compute_dtype is not None:
         source = weight
-        weight = weight.astype(compute_dtype)
+        if weight.dtype != compute_dtype:
+            weight = weight.astype(compute_dtype)
         x = x.astype(compute_dtype)
     else:
         source = weight
