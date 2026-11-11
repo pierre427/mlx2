@@ -118,13 +118,16 @@ SUPER_TREE_GUARDED_HANDOFF = {
 }
 
 
-def _super_tree_cost_handoff():
-    """The Super tree route's cost-per-commit handoff (see create_external_batch)."""
-    value = os.environ.get("MLX2_SUPER_TREE_COST_HANDOFF", "off").strip().lower()
-    if value == "off":
-        return False
-    if value == "guarded":
-        return dict(SUPER_TREE_GUARDED_HANDOFF)
+def _super_tree_cost_handoff(default="guarded"):
+    """``(value, mode, defaulted)``: the Super tree route's cost-per-commit
+    handoff (see create_external_batch); ``default`` is the class's mode when
+    the switch is unset."""
+    raw = os.environ.get("MLX2_SUPER_TREE_COST_HANDOFF")
+    mode = (default if raw is None else raw).strip().lower()
+    if mode == "off":
+        return False, mode, raw is None
+    if mode == "guarded":
+        return dict(SUPER_TREE_GUARDED_HANDOFF), mode, raw is None
     raise ValueError("MLX2_SUPER_TREE_COST_HANDOFF must be off or guarded")
 
 
@@ -736,6 +739,9 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     # qualification.  Class-owned: Bolt sets None.
     EXTERNAL_LILICORR_TREE_ROWS = 8
     EXACT_ATTENTION_ROWS = True
+    # Tree-route cost handoff when MLX2_SUPER_TREE_COST_HANDOFF is unset
+    # (Pierre, 2026-11-11; evidence at create_external_batch).  Bolt: off.
+    TREE_COST_HANDOFF_DEFAULT = "guarded"
     EXTERNAL_ROUTE_TAG = "super-vl-external-v1"
     EXTERNAL_PROFILE = "nemotron35-super-vl-apcv2-external"
     # int8 (W8A8) prefill: declared, never selected without an explicit
@@ -799,6 +805,9 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         self.tree_route = (
             validate_super_tree_policy(self.external_policy) if external else False
         )
+        if self.tree_route:
+            # A switch typo fails before any weight is loaded.
+            _super_tree_cost_handoff(type(self).TREE_COST_HANDOFF_DEFAULT)
         if self.external_policy.get("batch_size_route") == "chain":
             del self.external_policy["batch_size_route"]
             self.tree_route_authority = "operator_chain"
@@ -1381,10 +1390,25 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             # drafter's acceptance falls (qualify-super-vl-nvfp4-20261110:
             # 7.4 tokens/round at 4K, 2.7 at 32K) and the tree loses to plain
             # decode (26 vs 40 tok/s).  ``MLX2_SUPER_TREE_COST_HANDOFF``:
-            # ``off`` keeps the tree unconditionally; ``guarded`` parks only a
-            # clear loss (below 80% of ordinary over an 8-round window, two
-            # ordinary probes) and re-probes.
-            kwargs.setdefault("cost_per_commit_handoff", _super_tree_cost_handoff())
+            # ``guarded`` (default, Pierre 2026-11-11) parks only a clear loss
+            # (below 80% of ordinary over an 8-round window after two
+            # ordinary and two speculative samples, two loss decisions, one
+            # settle round) and re-probes: on the ladder's 32K content 37-39 tok/s
+            # (ordinary ~40, tree 25-27; cell32k-guarded2 at 019108632), GSM8K
+            # first 30 62.1 vs 65.1 (guard1); ``off`` keeps the tree
+            # unconditionally.
+            handoff, mode, defaulted = _super_tree_cost_handoff(
+                type(self).TREE_COST_HANDOFF_DEFAULT
+            )
+            adapter_owned = "cost_per_commit_handoff" not in kwargs
+            kwargs.setdefault("cost_per_commit_handoff", handoff)
+            self._tree_cost_handoff = {
+                "mode": mode if adapter_owned else "caller",
+                "authority": (
+                    ("adapter_default_super_tree_" + mode if defaulted else "operator_env")
+                    if adapter_owned else "caller"
+                ),
+            }
             if "target_tree_executor_provider" not in kwargs:
                 kwargs["target_tree_executor_provider"] = (
                     HybridTreeExecutor.create() if serial
@@ -1394,7 +1418,18 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             kwargs.setdefault("tree_node_budget_by_lanes", self._tree_node_budgets())
             if "ast_adaptive_rows" in self.external_policy:
                 kwargs.setdefault("ast_adaptive_rows", self.external_policy["ast_adaptive_rows"])
-        return super().create_external_batch(**kwargs)
+        batch = super().create_external_batch(**kwargs)
+        selection = getattr(self, "_tree_cost_handoff", None)
+        if (
+            getattr(self, "tree_route", False)
+            and selection is not None
+            and selection["authority"].startswith("adapter_default")
+            and getattr(batch, "cost_per_commit_handoff", None) is not None
+        ):
+            # The receipt says who chose the controller: the adapter default,
+            # not an operator policy.
+            batch.cost_per_commit_handoff_authority = selection["authority"]
+        return batch
 
     def execution_config(self, *, max_lanes, prefill_step):
         config = self._super_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
@@ -1467,6 +1502,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "schema": "mlx2.nemotron35-super-tree-verify.v1",
             "implemented": True,
             "qualified": False,
+            "cost_handoff": getattr(self, "_tree_cost_handoff", None),
             "selected": selected,
             "observed_used": selected and int(provider_receipt.get("dispatches", 0)) > 0,
             "provider": provider_receipt or None,

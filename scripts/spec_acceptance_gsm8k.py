@@ -230,26 +230,38 @@ class Client:
         return json.loads(body) if body.strip().startswith(b"{") else body.decode()
 
 
-def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None, sampling=None):
+def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None, sampling=None,
+                  request_extra=None):
     """``sampling`` (optional) adds temperature/top_p/top_k and a per-question
-    seed (``seed + index``) to every request; ``None`` keeps greedy."""
+    seed (``seed + index``) to every request; ``None`` keeps greedy.
+    ``request_extra`` (an arm's ``request`` object, e.g. ``enable_thinking`` /
+    ``reasoning_effort``) is merged into every request body."""
+    request_extra = dict(request_extra or {})
+    reserved = {"model", "temperature", "top_p", "top_k", "seed", "stream", "max_tokens",
+                "messages", "prompt", "stop"}
+    if reserved & set(request_extra):
+        raise ValueError(f"arm request may not set {sorted(reserved & set(request_extra))}")
+    if not chat and request_extra:
+        raise ValueError("arm request fields apply to --chat runs only")
     rows = []
     for index, item in enumerate(items):
         start = time.monotonic()
         extra_fields = sampling_fields(sampling, index)
         if chat:
-            payload = {"model": model_name, "temperature": 0, **extra_fields, "stream": False, "max_tokens": max_tokens,
+            payload = {"model": model_name, "temperature": 0, **extra_fields, **request_extra, "stream": False, "max_tokens": max_tokens,
                        "messages": [{"role": "user", "content": item["question"]
                                      + "\nGive the final numeric answer after ####."}]}
             result = client.call("/v1/chat/completions", payload)
             choice = result["choices"][0]
             text = choice["message"].get("content") or ""
+            reasoning = choice["message"].get("reasoning_content") or choice["message"].get("reasoning") or ""
         else:
-            payload = {"model": model_name, "temperature": 0, **extra_fields, "stream": False, "max_tokens": max_tokens,
+            payload = {"model": model_name, "temperature": 0, **extra_fields, **request_extra, "stream": False, "max_tokens": max_tokens,
                        "stop": STOPS, "prompt": prefix + f"Question: {item['question']}\nAnswer:"}
             result = client.call("/v1/completions", payload)
             choice = result["choices"][0]
             text = choice.get("text") or ""
+            reasoning = ""
         elapsed = time.monotonic() - start
         usage = result.get("usage") or {}
         extra = result.get("mlx2") or {}
@@ -264,7 +276,8 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
                "elapsed_seconds": elapsed, "ttft_seconds": ttft,
                "decode_tps": ((completion - 1) / (elapsed - ttft)
                               if ttft and completion > 1 and elapsed > ttft else None),
-               "route": extra.get("route"), "speculation": speculation_receipt(extra), "text": text}
+               "route": extra.get("route"), "speculation": speculation_receipt(extra), "text": text,
+               "reasoning_chars": len(reasoning)}
         if sampling:
             row["effective_sampling"] = find(result, "effective_sampling")
             row["sampling_filter"] = find(result, "sampling_filter")
@@ -281,6 +294,8 @@ def summarize(rows, draft_depth=None):
             "invalid_rate": sum(r["invalid"] for r in rows) / count if count else None,
             "length_finishes": sum(r["finish_reason"] == "length" for r in rows),
             "completion_tokens": sum(r["completion_tokens"] for r in rows),
+            "completion_tokens_median": median(r["completion_tokens"] for r in rows),
+            "reasoning_chars_median": median(r.get("reasoning_chars", 0) for r in rows),
             "decode_tps_median": median(r["decode_tps"] for r in rows),
             "routes": sorted({json.dumps(r["route"], sort_keys=True) for r in rows if r["route"]}),
             "acceptance": acceptance_summary((r["speculation"] for r in rows), draft_depth=draft_depth)}
@@ -430,7 +445,8 @@ def main(argv=None):
             server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                       start_new_session=True, env=env, cwd=tree)
             row = {"name": arm["name"], "tree": str(tree), "revision": revision(tree),
-                   "args": arm.get("args", []), "env": arm.get("env", {}), "command": command}
+                   "args": arm.get("args", []), "env": arm.get("env", {}), "request": arm.get("request", {}),
+                   "command": command}
             try:
                 deadline = time.monotonic() + 900
                 while True:
@@ -447,7 +463,8 @@ def main(argv=None):
                     time.sleep(.5)
                 row["startup_status"] = status
                 rows = run_questions(client, args.model.name, prefix, items, chat=args.chat,
-                                     max_tokens=args.max_tokens, log=progress(arm["name"]), sampling=sampling)
+                                     max_tokens=args.max_tokens, log=progress(arm["name"]), sampling=sampling,
+                                     request_extra=arm.get("request"))
                 time.sleep(1.5)
                 row["final_status"] = client.call("/v1/status")
                 (out / "metrics.prom").write_text(client.call("/metrics"))

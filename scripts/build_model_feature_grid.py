@@ -55,7 +55,9 @@ FEATURES = (
     "vendor_fp8_dense", "nvfp4_expert_scale_fold",
     "row_exact_self_batched_scaled_projections", "mamba_fused_step_ordinary",
     "fp_row_exact_verify", "fp_row_exact_fused_kernel",
-    "nemotron_routed_decode", "scaled_epilogue_compiled", "nemotron_exact_tree_verify", "prefill_step", "fp_row_exact_general_fused", "external_verify_prebuild", "draft_weight_quantization", "nemotron_exact_attention_rows", "nemotron_tree_no_cost_controller", "external_draft_stream", "external_draft_media_prefill", "super_vl_video_input", "drafter_rows_qmv", "nemotron_ssd_mma_prefill", "super_tree_cost_handoff_guarded",
+    "nemotron_routed_decode", "scaled_epilogue_compiled", "nemotron_exact_tree_verify", "prefill_step", "fp_row_exact_general_fused", "external_verify_prebuild", "draft_weight_quantization", "nemotron_exact_attention_rows", "nemotron_tree_no_cost_controller", "external_draft_stream", "external_draft_media_prefill", "super_vl_video_input", "drafter_rows_qmv", "nemotron_ssd_mma_prefill", "super_tree_cost_handoff_guarded", "parked_plain_mask_processors",
+    # Flash-Next soft reap + template reasoning effort (2026-11-10).
+    "moe_soft_reap_keep_topk", "template_reasoning_effort",
     # Residual ablation (Heretic concept, 2026-11-05): a baked derived checkpoint.
     "residual_ablation_bake",
     # Ripple perf pass (2026-11-04).

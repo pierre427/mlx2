@@ -470,6 +470,21 @@ class FlashNextPolicy:
     # only when the lane matmul covers the model) and num_draft equal to the
     # grid's base depth.  Enters receipts only when set.
     draft_loop_prior: Optional[str] = None
+    # Opt-in, APPROXIMATE, unqualified (Pierre 2026-11-10): soft-reap the
+    # routed experts to the top N of the native 10 on every trunk MoE block
+    # (adapters/flash_next_soft_reap.py).  Below 10 the route identity
+    # carries N and APCv2 reuse/publication is refused.  Reaped blocks run
+    # the stock gather arithmetic (the fused MoE kernels are bound to the
+    # top-10 routing contract); ``moe_keep_topk_stock`` puts the exact
+    # top-10 on that same arithmetic for a fair speed control.  Both enter
+    # receipts only when set.
+    # Measured 2026-11-11 (GSM8K chat, thinking on, B1, 16c8b73ef): accuracy
+    # 99 -> 98/98/94 at keep 8/6/4, decode +1/+4/+8% over the stock10
+    # control, but the reaped model reasons longer (total tokens +22/+29/
+    # +153%), so time per answer is no better at any N.  Leave off; see
+    # docs/research/model-feature-decisions.tsv moe_soft_reap_keep_topk.
+    moe_keep_topk: int = 10
+    moe_keep_topk_stock: bool = False
 
     def __post_init__(self):
         from ..runtime.models.varlen_dense_mlp import VarlenSparseMoEPolicy
@@ -486,6 +501,14 @@ class FlashNextPolicy:
             varlen_sparse_moe.as_dict() if varlen_sparse_moe.enabled else False,
         )
         validate_self_mtp_num_draft(self.num_draft)
+        if type(self.moe_keep_topk) is not int or not 1 <= self.moe_keep_topk <= 10:
+            raise ValueError("moe_keep_topk must be an integer from 1 to 10")
+        if type(self.moe_keep_topk_stock) is not bool:
+            raise ValueError("moe_keep_topk_stock must be boolean")
+        if (self.moe_keep_topk != 10 or self.moe_keep_topk_stock) and self.row_exact_verify:
+            # row_exact swaps only the stock switch classes; the soft-reap
+            # counting class would silently keep multi-row expert arithmetic.
+            raise ValueError("moe_keep_topk is not available with row_exact_verify")
         if self.gdn_state_dtype not in ("float32", "float16"):
             raise ValueError("gdn_state_dtype must be float32 or float16")
         for name in ("shared_qsa_suffix", "indexed_qsa"):
@@ -793,6 +816,10 @@ class FlashNextPolicy:
             del values["fused_gdn_dynamic_accept"]
         if not self.fp32_head_logits:
             del values["fp32_head_logits"]
+        if self.moe_keep_topk == 10:
+            del values["moe_keep_topk"]
+        if not self.moe_keep_topk_stock:
+            del values["moe_keep_topk_stock"]
         if not self.mtp_draft_vocab:
             del values["mtp_draft_vocab"]
             del values["mtp_draft_vocab_coverage_window"]
@@ -997,6 +1024,15 @@ class FlashNextPolicy:
         }
         if self.fp32_head_logits:
             config["fp32_head_logits"] = True
+        if self.moe_keep_topk != 10 or self.moe_keep_topk_stock:
+            # Bound into the route identity (settings["execution_policy"]).
+            config["moe_keep_topk"] = self.moe_keep_topk
+            config["moe_keep_topk_stock"] = self.moe_keep_topk_stock
+            # Reaped rows are approximate; the stock top-10 control gets the
+            # same no-reuse conditions so the A/B compares like with like.
+            from .flash_next_soft_reap import reap_reason
+
+            config["apcv2_reuse_disabled_reason"] = reap_reason(self.moe_keep_topk)
         if self.prefill_plan_exact_slices:
             config["prefill_plan_exact"] = True
         if self.mtp_batched_prefill_lanes:

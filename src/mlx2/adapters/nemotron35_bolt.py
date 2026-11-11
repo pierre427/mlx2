@@ -727,6 +727,7 @@ class Nemotron35BoltAdapter(Nemotron35SuperAdapter):
     EXTERNAL_LILICORR_NUM_DRAFT = None
     EXTERNAL_LILICORR_TREE_ROWS = None
     EXACT_ATTENTION_ROWS = False
+    TREE_COST_HANDOFF_DEFAULT = "off"  # Super-measured; unmeasured on Bolt
     # Super VL's 4096-row prefill chunk is unmeasured on Bolt.
     default_prefill_step = 2048
 

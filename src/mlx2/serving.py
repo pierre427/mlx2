@@ -8089,6 +8089,17 @@ class ServingEngine(KernelReloadMixin):
             from .runtime.prefill_handoff import PrefillHandoffError
 
             raise PrefillHandoffError("not_ready", "prefill handoff identity is not ready")
+        reuse_refusal = getattr(self, "apc_reuse_disabled_reason", None)
+        if reuse_refusal is not None:
+            # A route that may not reuse or publish prompt state (approximate
+            # or control arithmetic) must not hand it to, or take it from, a
+            # peer either: handoff is cross-process reuse.
+            from .runtime.prefill_handoff import PrefillHandoffError
+
+            raise PrefillHandoffError(
+                "route_refuses_state_reuse",
+                f"prefill handoff is refused on this route ({reuse_refusal})",
+            )
         artifact = adapter.identity["fingerprint"]
         layout = apcv2_cache_layout_fingerprint(adapter)
         execution_digest = self._prefill_handoff_execution_digest

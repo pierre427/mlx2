@@ -69,7 +69,7 @@ def _drain(engine, uid, *, remove_after=None):
 
 
 def _run(monkeypatch, *, handoff=None, speculative_ns=lambda _i: 100_000,
-         max_tokens=40, stops=(), remove_after=None):
+         max_tokens=40, stops=(), remove_after=None, minimum=0):
     model, draft = _models()
     clock = {"now": 1, "spec": 0}
 
@@ -95,9 +95,14 @@ def _run(monkeypatch, *, handoff=None, speculative_ns=lambda _i: 100_000,
         model, draft_model=draft, binding="parked-pipeline-cpu", num_draft=3,
         prefill_step_size=8, stop_tokens=[[t] for t in stops], **kwargs,
     )
+    processors = None
+    if minimum:
+        from mlx2.serving import minimum_tokens_processor
+
+        processors = [[minimum_tokens_processor(mx, list(stops), len(PROMPT), minimum)]]
     uid = engine.insert(
         [list(PROMPT)], max_tokens=[max_tokens],
-        sampling_configs=[{"sampling_temp": 0.0}],
+        sampling_configs=[{"sampling_temp": 0.0}], logits_processors=processors,
     )[0]
     tokens, final = _drain(engine, uid, remove_after=remove_after)
     return tokens, final, engine
@@ -229,3 +234,52 @@ def test_width_growth_drains_seeded_inflight_before_revocation(monkeypatch):
     assert receipt["observations"] == observations
     assert receipt["reversible"]["session_seed_active"] is False
     assert receipt["reversible"]["events"][-1]["event"] == "seed_revoke"
+
+
+def test_min_tokens_lane_parks_pipelined_and_matches_the_unparked_route(monkeypatch):
+    """A min_tokens EOS mask is a pure length-indexed law: the parked
+    pipeline applies it in-graph instead of falling back to full external
+    rounds, and the output equals the unparked route token for token."""
+    baseline, _, _ = _run(monkeypatch)
+    stop = baseline[8]
+    early, _, _ = _run(monkeypatch, stops=(stop,))
+    assert len(early) <= 9  # without the mask the stop ends the request early
+    expected, expected_final, _ = _run(monkeypatch, stops=(stop,), minimum=30)
+    assert len(expected) >= 30 and stop not in expected[:30]
+    tokens, final, engine = _run(monkeypatch, handoff=_settings(), stops=(stop,), minimum=30)
+    assert tokens == expected
+    assert final.all_tokens == expected_final.all_tokens
+    stats = engine.scheduler_stats
+    assert stats.get("external_parked_pipelined_rounds", 0) > 10
+    assert stats.get("external_parked_pipeline_mismatches", 0) == 0
+
+
+def test_parked_mask_processor_contract():
+    from mlx2.serving import minimum_tokens_processor
+
+    mask = minimum_tokens_processor(mx, [3], 6, 4)
+    assert es._parked_mask_processors([mask]) and es._parked_mask_processors([])
+
+    def opaque(tokens, logits):
+        return logits
+
+    assert not es._parked_mask_processors([mask, opaque])
+
+    class Lane:
+        def __init__(self, history):
+            self.history, self.processors = history, [mask]
+
+    rows = es._parked_forbidden_mask([Lane([0] * 6), Lane([0] * 12)], 8, 1)
+    # Row 0: 7 tokens -> 1 generated < 4: id 3 forbidden.  Row 1: dormant.
+    assert rows[0].tolist() == [False, False, False, True, False, False, False, False]
+    assert not rows[1].any()
+    assert es._parked_forbidden_mask([Lane([0] * 12)], 8, 1) is None
+
+
+def test_presence_penalty_is_not_a_parked_mask():
+    """It declares history_pure and an empty forbidden set, but subtracts a
+    penalty over its window: the parked fast path must refuse it."""
+    from mlx2.runtime.sample_utils import make_logits_processors
+
+    processors = make_logits_processors(presence_penalty=1.5)
+    assert processors and not es._parked_mask_processors(processors)

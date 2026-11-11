@@ -963,6 +963,40 @@ class RoundDecision:
     accepted_rows: object = None
 
 
+def _parked_mask_processors(processors) -> bool:
+    """Whether a lane's logits processors let a parked step run plain.
+
+    Only pure masks that depend on the history length alone
+    (``history_pure`` with ``forbidden_token_ids_at_length``, e.g. the
+    min_tokens EOS suppression): the parked dispatch applies them in-graph.
+    """
+    return all(
+        getattr(processor, "history_pure", False) is True
+        and callable(getattr(processor, "forbidden_token_ids_at_length", None))
+        # A presence penalty declares an empty forbidden set but subtracts
+        # its window's penalty (``presence_window``): not a pure mask.
+        and getattr(processor, "presence_window", None) is None
+        for processor in processors or ()
+    )
+
+
+def _parked_forbidden_mask(cohort, vocab, offset):
+    """``[rows, vocab]`` bool mask of ids the lanes' processors forbid at the
+    dispatched row (history length ``len(history) + offset``), or ``None``."""
+    rows = None
+    for row, lane in enumerate(cohort):
+        length = len(lane.history) + offset
+        ids = set()
+        for processor in lane.processors or ():
+            ids.update(int(token) for token in processor.forbidden_token_ids_at_length(length))
+        ids = [token for token in ids if 0 <= token < vocab]
+        if ids:
+            if rows is None:
+                rows = np.zeros((len(cohort), vocab), dtype=np.bool_)
+            rows[row, ids] = True
+    return rows
+
+
 def _greedy_proposal_supported(block, laws, drafts, vocab):
     """Validate q as the dense/compact verifier would, before a greedy compare.
 
@@ -3666,8 +3700,8 @@ class ExternalDraftBatchGenerator:
             self, "cost_per_commit_handoff_authority", "explicit_policy"
         )
         receipt["selection_authority"] = authority
-        receipt["defaulted"] = (
-            authority == "runtime_ast_self_configuring_default"
+        receipt["defaulted"] = authority == "runtime_ast_self_configuring_default" or (
+            isinstance(authority, str) and authority.startswith("adapter_default")
         )
         return receipt
 
@@ -10835,7 +10869,7 @@ class ExternalDraftBatchGenerator:
             if (
                 not _speculation_parked(lane)
                 or lane.ordinary
-                or lane.processors
+                or not _parked_mask_processors(lane.processors)
                 or float(lane.sampling.get("sampling_temp", 0)) != 0.0
                 or lane.maximum - lane.generated <= reserve
                 or int(lane.tail.shape[1]) + reserve + 1
@@ -10853,7 +10887,8 @@ class ExternalDraftBatchGenerator:
         tree.  That costs about twice the plain decode step it stands for, so
         the cost controller compared the tree against an inflated ordinary
         baseline.  The plain step is the parked pipeline's own round, run
-        synchronously: greedy, processor-free lanes of a hybrid target with
+        synchronously: greedy lanes whose processors are pure length-indexed masks
+        (``_parked_mask_processors``, applied in-graph) on a hybrid target with
         no residual taps or fly verification.  Sampled or processed rows keep
         the exact external round and its RNG schedule.  A parked lane also
         needs its deferred draft context below the cap (the flush round
@@ -10878,7 +10913,7 @@ class ExternalDraftBatchGenerator:
             if (
                 lane.ordinary
                 or lane.cancelled
-                or lane.processors
+                or not _parked_mask_processors(lane.processors)
                 or float(lane.sampling.get("sampling_temp", 0)) != 0.0
                 or lane.maximum - lane.generated <= 1
                 or (
@@ -10948,7 +10983,7 @@ class ExternalDraftBatchGenerator:
         if probe:
             _bump(self.scheduler_stats, "external_cost_plain_probe_rounds")
 
-    def _dispatch_parked(self, cohort, anchors, *, timing_start_ns):
+    def _dispatch_parked(self, cohort, anchors, *, timing_start_ns, following=False):
         """Begin and dispatch one anchor-only round; nothing is read."""
         phase = _PhaseClock(self) if self.round_timing else None
         provider = self._plain_anchor_provider(cohort)
@@ -10986,6 +11021,18 @@ class ExternalDraftBatchGenerator:
             # Per-row slices too: even a reshape or row slice made at read
             # time is a new op behind the following round.
             rows32 = logits[:, -1, :].astype(self.mx.float32)
+            # Pure length-indexed masking processors (min_tokens EOS
+            # suppression) on the float32 row: they only write -inf, so this
+            # is the processed law ``_target_law`` would compute.  The row's
+            # history is the committed history plus this anchor (plus the
+            # in-flight round's anchor for a following dispatch).
+            forbidden = _parked_forbidden_mask(
+                cohort, int(rows32.shape[-1]), 2 if following else 1
+            )
+            if forbidden is not None:
+                rows32 = self.mx.where(
+                    self.mx.array(forbidden), -float("inf"), rows32
+                )
             normalizer_rows = self.mx.logsumexp(rows32, axis=-1, keepdims=True)
             logprob_rows = [
                 rows32[row] - normalizer_rows[row] for row in range(len(cohort))
@@ -11159,7 +11206,8 @@ class ExternalDraftBatchGenerator:
         """``_verify`` of zero-draft greedy rows from precomputed device values.
 
         Identical decisions to ``_verify``: the float32 argmax token, the
-        processed (here: unprocessed) log-softmax response row, the same
+        processed log-softmax response row (pure length-indexed masks applied
+        in-graph at dispatch), the same
         greedy verifier call and its RNG schedule, and stop truncation.
         """
         tokens = [int(value) for value in inflight.next_anchors.tolist()]
@@ -11234,6 +11282,7 @@ class ExternalDraftBatchGenerator:
                     cohort,
                     inflight.next_anchors,
                     timing_start_ns=0,
+                    following=True,
                 )
             except BaseException:  # noqa: BLE001 - the read below still books the round
                 following = None

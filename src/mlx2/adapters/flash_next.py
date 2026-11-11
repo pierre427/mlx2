@@ -252,6 +252,42 @@ def tensorfold_longctx_diagnostics(policy) -> dict:
     return {"tensorfold_longctx": report}
 
 
+_TEMPLATE_EFFORT_MARKER = "Supported types are xhigh (default), medium, and low."
+# Server effort names -> the Flash-Next template's levels.  ``high`` and up
+# map to the template's own default (xhigh) and are not passed, so their
+# prompt bytes stay exactly those rendered before effort was forwarded.
+# With thinking on and no effort named, mlx2 passes ``medium`` (Pierre,
+# 2026-11-11): GSM8K chat 98 vs 99/100, 18% fewer tokens, decode 96 vs
+# 74 tok/s on the native MTP route (model-feature-decisions.tsv
+# template_reasoning_effort).  Ask for ``high`` to get the template's xhigh.
+_TEMPLATE_EFFORT = {"minimal": "low", "low": "low", "medium": "medium"}
+_DEFAULT_TEMPLATE_EFFORT = "medium"
+
+
+def template_reasoning_effort(tokenizer, request):
+    """The template effort level to pass, or None for the template default.
+
+    No named effort with thinking on selects ``medium``; ``high`` and up
+    select the template's own default (xhigh) by passing nothing.
+    Only with thinking on and only on a template that declares the levels
+    (the Flash-Next chat template); a numeric effort is refused upstream."""
+    if request.get("enable_thinking") is not True:
+        return None
+    effort = request.get("reasoning_effort")
+    if effort is None:
+        level = _DEFAULT_TEMPLATE_EFFORT
+    elif effort in _TEMPLATE_EFFORT:
+        level = _TEMPLATE_EFFORT[effort]
+    else:
+        return None
+    template = getattr(tokenizer, "chat_template", None)
+    if not isinstance(template, str):
+        template = getattr(getattr(tokenizer, "_tokenizer", None), "chat_template", "")
+    if not isinstance(template, str) or _TEMPLATE_EFFORT_MARKER not in template:
+        return None
+    return level
+
+
 def chat_template(tokenizer, request: dict, *, tokenize: bool):
     """Render a chat request through the Qwen template (ids or text)."""
     messages = copy.deepcopy(request["messages"])
@@ -266,6 +302,9 @@ def chat_template(tokenizer, request: dict, *, tokenize: bool):
             function["arguments"] = arguments
     from ..agentic_chat import verification_template_kwargs
     template_options = verification_template_kwargs(tokenizer, request)
+    level = template_reasoning_effort(tokenizer, request)
+    if level is not None:
+        template_options.setdefault("reasoning_effort", level)
     return tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
@@ -279,6 +318,10 @@ def chat_template(tokenizer, request: dict, *, tokenize: bool):
 
 
 class FlashNextAdapter:
+    # Named efforts select the template's levels (low/medium/xhigh); with
+    # thinking on and no effort named, medium (see _DEFAULT_TEMPLATE_EFFORT).
+    reasoning_effort_semantics = "template_levels_default_medium"
+
     def microscaling_supported(self):
         """Shared dense/grouped SC-MXFP4 route, opt-in and unqualified."""
         from .microscaling_support import projection_law_compatible
@@ -296,6 +339,11 @@ class FlashNextAdapter:
         # Not with mixed_prefill_decode: int8 counts rows per call, so a mixed
         # forward of >= 512 rows would run its decode rows through W8A8 too.
         if getattr(getattr(self, "policy", None), "mixed_prefill_decode", False):
+            return ()
+        # Not with soft reap: int8 expert binding matches the stock switch
+        # class exactly, and a reaped route is already approximate.
+        policy = getattr(self, "policy", None)
+        if policy is not None and (policy.moe_keep_topk != 10 or policy.moe_keep_topk_stock):
             return ()
         return ("mlp", "all")
 
@@ -703,6 +751,12 @@ class FlashNextAdapter:
 
     def execution_config(self, *, max_lanes, prefill_step):
         if getattr(self, "draft_model", None) is not None:
+            if getattr(self, "moe_soft_reap", None) is not None:
+                # Fail closed: the external route (DFlash2, and the native-MTP
+                # AST/tree route, which also binds a draft model) builds its
+                # own config and would not carry the soft-reap identity or
+                # APCv2 refusal.  Raised at engine start, after the load.
+                raise ValueError("moe_keep_topk is not available on external-draft routes")
             from .external_draft_policy import ExternalDraftAdapterMixin as External
 
             return External._external_execution_config(
@@ -864,6 +918,18 @@ class FlashNextAdapter:
                 VarlenSparseMoEPolicy.from_value(self.policy.varlen_sparse_moe),
             )
             mx.eval(self.model.parameters())
+            from . import flash_next_soft_reap as _soft_reap
+
+            self.moe_soft_reap = (
+                _soft_reap.install(
+                    self.model, self.policy.moe_keep_topk, stock=self.policy.moe_keep_topk_stock
+                )
+                if self.policy.moe_keep_topk != 10 or self.policy.moe_keep_topk_stock
+                else None
+            )
+            self._soft_reap_switches = (
+                _soft_reap.switches(self.model) if self.moe_soft_reap is not None else ()
+            )
             self.tensorfold_qmv = None
             if self.policy.tensorfold_qmv_rows:
                 from ..runtime.models.flash_tensorfold_qmv import install
@@ -1277,6 +1343,7 @@ class FlashNextAdapter:
         return {"gdn_core": core} if selected or calls else {}
 
     def diagnostics(self) -> dict:
+        from .flash_next_soft_reap import status as _soft_reap_status
         from ..runtime.models.qwen4_qsa_visibility import status as qsa_visibility_status
         from ..runtime.models.flash_tensorfold_qmv import counters as tensorfold_qmv_counters
         from ..runtime.models.varlen_dense_mlp import status as varlen_mlp_status
@@ -1441,6 +1508,12 @@ class FlashNextAdapter:
                 else {}
             ),
             "round_levers": lever_snapshot(),
+            # Approximate opt-in soft reap; absent while off.
+            **(
+                {"moe_soft_reap": _soft_reap_status(self.moe_soft_reap, self._soft_reap_switches)}
+                if getattr(self, "moe_soft_reap", None) is not None
+                else {}
+            ),
             **({"hc_prefill": hc_prefill_status()} if self.policy.hc_prefill_kernels else {}),
             # Sorted-MoE kernel choice (gather_qmv vs padded gather_qmm_rhs);
             # absent only under the default floor law while no pad has run.
@@ -1608,6 +1681,15 @@ class FlashNextAdapter:
                         str(getattr(switch, "routed_candidate_mode", "off"))
                         for switch in switches
                     }
+                ),
+                # Present only off the native top-10 routing (soft reap or its
+                # stock control), so default contracts are byte-identical.
+                **(
+                    {"routed_top_k": sorted({int(getattr(block, "top_k", -1)) for block in blocks}),
+                     "soft_reap": {"keep_top_k": int(self.moe_soft_reap["keep_top_k"]),
+                                   "native_top_k": int(self.moe_soft_reap["native_top_k"])}}
+                    if getattr(self, "moe_soft_reap", None) is not None
+                    else {}
                 ),
             }
         }

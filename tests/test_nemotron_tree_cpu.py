@@ -489,7 +489,7 @@ def test_super_adapter_binds_the_tree_provider(monkeypatch, executor):
     )
     options = adapter.create_external_batch(completion_batch_size=1)
     assert options["dynamic_singleton_tree"] is True
-    assert options["cost_per_commit_handoff"] is False  # no plain-decode probes
+    assert options["cost_per_commit_handoff"]["reversible"] is True  # guarded default
     assert options["dynamic_tree_max_width"] == 1
     assert options["tree_node_budget_by_lanes"] == {1: 11}
     provider = options["target_tree_executor_provider"]
@@ -622,13 +622,47 @@ def test_feedback_and_physical_target_keep_the_chain(tmp_path):
 
 def test_super_tree_cost_handoff_switch(monkeypatch):
     from mlx2.adapters import nemotron35_super as sv
+    from mlx2.adapters.nemotron35_bolt import Nemotron35BoltAdapter
     from mlx2.runtime.cost_per_commit_handoff import CostPerCommitHandoffSettings
 
-    monkeypatch.delenv("MLX2_SUPER_TREE_COST_HANDOFF", raising=False)
-    assert sv._super_tree_cost_handoff() is False
-    monkeypatch.setenv("MLX2_SUPER_TREE_COST_HANDOFF", "guarded")
-    settings = CostPerCommitHandoffSettings.from_value(sv._super_tree_cost_handoff())
+    monkeypatch.setenv("MLX2_SUPER_TREE_COST_HANDOFF", "off")
+    assert sv._super_tree_cost_handoff() == (False, "off", False)
+    monkeypatch.delenv("MLX2_SUPER_TREE_COST_HANDOFF", raising=False)  # default: guarded
+    value, mode, defaulted = sv._super_tree_cost_handoff(
+        sv.Nemotron35SuperAdapter.TREE_COST_HANDOFF_DEFAULT
+    )
+    settings = CostPerCommitHandoffSettings.from_value(value)
+    assert (mode, defaulted) == ("guarded", True)
     assert settings.reversible and settings.loss_ratio == 0.8 and settings.window == 8
+    # Bolt inherits the switch but not the Super-measured default.
+    assert Nemotron35BoltAdapter.TREE_COST_HANDOFF_DEFAULT == "off"
+    assert sv._super_tree_cost_handoff(Nemotron35BoltAdapter.TREE_COST_HANDOFF_DEFAULT)[0] is False
     monkeypatch.setenv("MLX2_SUPER_TREE_COST_HANDOFF", "sometimes")
     with pytest.raises(ValueError):
         sv._super_tree_cost_handoff()
+
+
+def test_default_guarded_handoff_receipt_names_the_adapter(monkeypatch):
+    from types import SimpleNamespace
+
+    from mlx2.adapters.external_draft_policy import ExternalDraftAdapterMixin
+    from mlx2.adapters.nemotron35_super import NEMOTRON_TREE_ROUTE, Nemotron35SuperAdapter
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    monkeypatch.delenv("MLX2_SUPER_TREE_COST_HANDOFF", raising=False)
+    adapter = object.__new__(Nemotron35SuperAdapter)
+    adapter.external_policy = {"draft_model": "x", "batch_size_route": NEMOTRON_TREE_ROUTE}
+    adapter.tree_route = True
+    adapter.draft_model = SimpleNamespace(propose_tree=lambda *a, **k: None)
+    batch = SimpleNamespace(cost_per_commit_handoff=object(),
+                            cost_per_commit_handoff_authority="explicit_policy")
+    monkeypatch.setattr(ExternalDraftAdapterMixin, "create_external_batch", lambda self, **kw: batch)
+    assert adapter.create_external_batch(completion_batch_size=1) is batch
+    assert batch.cost_per_commit_handoff_authority == "adapter_default_super_tree_guarded"
+    assert adapter._tree_cost_handoff == {"mode": "guarded",
+                                          "authority": "adapter_default_super_tree_guarded"}
+    generator = SimpleNamespace(cost_per_commit_handoff_authority=batch.cost_per_commit_handoff_authority)
+    lane = SimpleNamespace(cost_handoff_receipt={"state": "x"}, cost_handoff_state=None)
+    receipt = ExternalDraftBatchGenerator._cost_handoff_receipt(generator, lane)
+    assert receipt["defaulted"] is True
+    assert receipt["selection_authority"] == "adapter_default_super_tree_guarded"
