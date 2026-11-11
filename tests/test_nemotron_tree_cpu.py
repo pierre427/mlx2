@@ -598,3 +598,23 @@ def test_bolt_keeps_the_chain():
     from mlx2.adapters.nemotron35_bolt import Nemotron35BoltAdapter
 
     assert Nemotron35BoltAdapter.EXTERNAL_LILICORR_TREE_ROWS is None
+
+
+def test_a_refused_default_tree_yields_to_the_chain(tmp_path):
+    adapter = _tree_default_adapter(tmp_path, {})
+    adapter.tree_route = True
+    adapter._resolve_tree_refusal("mamba segment auto")
+    assert adapter.tree_route is False
+    assert "batch_size_route" not in adapter.external_policy
+    assert "ast_tile_rows" not in adapter.external_policy
+    assert adapter.tree_route_authority == "adapter_default_refused:mamba segment auto"
+    operator = _tree_default_adapter(tmp_path, {"batch_size_route": "tree15_b1_chain_b2plus_v1"})
+    operator.tree_route_authority = "operator"
+    with pytest.raises(ValueError, match="refused at load"):
+        operator._resolve_tree_refusal("mamba segment auto")
+
+
+def test_feedback_and_physical_target_keep_the_chain(tmp_path):
+    for key in ("lilicorr_feedback", "ast_physical_target"):
+        adapter = _tree_default_adapter(tmp_path, {key: True})
+        assert "batch_size_route" not in adapter.external_policy

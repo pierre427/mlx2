@@ -270,7 +270,8 @@ def fused_mamba_ssm_tree(
 
 
 def admit_tree_conv(
-    *, conv_input, conv_state, weight, bias, training, ssm_geometry, time_step_limit
+    *, conv_input, conv_state, weight, bias, training, ssm_geometry, time_step_limit,
+    param_dtypes=None,
 ) -> TreeKernelAdmission:
     admission = _conv.admit_fused_mamba_conv_short(
         conv_input=conv_input, conv_state=conv_state, weight=weight, bias=bias,
@@ -281,7 +282,7 @@ def admit_tree_conv(
     refusal = _conv.fused_mamba_conv_refusal(conv_input.dtype) or tree_kernel_parity(
         conv_input.dtype, time_step_limit,
         geometry=(*ssm_geometry, int(conv_input.shape[-1])),
-        rows=int(conv_input.shape[1]),
+        rows=int(conv_input.shape[1]), param_dtypes=param_dtypes,
     )
     if refusal is not None:
         return TreeKernelAdmission(False, refusal)
@@ -306,7 +307,10 @@ def admit_tree_ssm(
     geometry = (int(x.shape[2]), int(x.shape[3]), int(B.shape[2]), int(B.shape[3]), int(channels))
     refusal = (
         _ssm.fused_mamba_ssm_gate_refusal(x.dtype) if gate is not None else None
-    ) or tree_kernel_parity(x.dtype, time_step_limit, geometry=geometry, rows=int(x.shape[1]))
+    ) or tree_kernel_parity(
+        x.dtype, time_step_limit, geometry=geometry, rows=int(x.shape[1]),
+        param_dtypes=(A_log.dtype, dt_bias.dtype),
+    )
     if refusal is not None:
         return TreeKernelAdmission(False, refusal)
     return TreeKernelAdmission(True, "eligible")
@@ -336,7 +340,8 @@ def _bits_equal(left, right) -> bool:
     return bool(np.array_equal(np.asarray(left.view(view)), np.asarray(right.view(view))))
 
 
-def _run_parity(dtype, limit, geometry, rows, seed: int = 20261110) -> str | None:
+def _run_parity(dtype, limit, geometry, rows, param_dtypes=(mx.float32, mx.float32),
+                seed: int = 20261110) -> str | None:
     """Tree conv / tree SSM (gated and plain) at ``rows`` vs serial S=1 decode
     along every path, and the S=``rows`` replay vs ``rows`` S=1 calls."""
     heads, head_dim, groups, state_dim, channels = geometry
@@ -353,9 +358,12 @@ def _run_parity(dtype, limit, geometry, rows, seed: int = 20261110) -> str | Non
     C = mx.random.normal((1, rows, groups, state_dim), key=keys[6]).astype(dtype)
     dt = (mx.random.normal((1, rows, heads), key=keys[7]) - 1).astype(dtype)
     gate = (mx.random.normal((1, rows, intermediate), key=keys[8]) * 2).astype(dtype)
-    A_log = mx.random.uniform(-1, 2.5, (heads,), key=keys[9]).astype(mx.float32)
+    # The served A_log / dt_bias dtypes: each input-dtype set compiles its own
+    # kernel, so the probe must run the one decode and trees will run.
+    a_log_dtype, dt_bias_dtype = param_dtypes
+    A_log = mx.random.uniform(-1, 2.5, (heads,), key=keys[9]).astype(a_log_dtype)
     D = mx.random.normal((heads,), key=keys[10]).astype(dtype)
-    dt_bias = mx.random.normal((heads,), key=keys[11]).astype(mx.float32)
+    dt_bias = mx.random.normal((heads,), key=keys[11]).astype(dt_bias_dtype)
     state = mx.random.normal((1, heads, head_dim, state_dim), key=key).astype(mx.float32)
 
     windows = conv_windows(parents_list)
@@ -424,8 +432,11 @@ def _static_refusal(dtype, limit) -> str | None:
     return None
 
 
-def _verdict(dtype, limit, geometry, rows) -> str | None:
-    name = f"{dtype}:{limit[0]!r}:{limit[1]!r}:{'x'.join(map(str, geometry))}:S{rows}"
+def _verdict(dtype, limit, geometry, rows, param_dtypes) -> str | None:
+    name = (
+        f"{dtype}:{limit[0]!r}:{limit[1]!r}:{'x'.join(map(str, geometry))}:S{rows}"
+        f":A_log={param_dtypes[0]}:dt_bias={param_dtypes[1]}"
+    )
     with _PARITY_LOCK:
         if name in _PARITY:
             return _PARITY[name]
@@ -434,7 +445,7 @@ def _verdict(dtype, limit, geometry, rows) -> str | None:
             if name in _PARITY:
                 return _PARITY[name]
         try:
-            verdict = _run_parity(dtype, limit, geometry, rows)
+            verdict = _run_parity(dtype, limit, geometry, rows, param_dtypes)
         except Exception as error:  # compile or launch failure refuses
             verdict = f"tree kernel parity probe failed: {type(error).__name__}: {error}"
         with _PARITY_LOCK:
@@ -444,13 +455,13 @@ def _verdict(dtype, limit, geometry, rows) -> str | None:
 
 def tree_kernel_parity(
     dtype=mx.bfloat16, time_step_limit=(0.0, float("inf")), *,
-    geometry=SUPER_GEOMETRY, rows=TREE_MAX_ROWS,
+    geometry=SUPER_GEOMETRY, rows=TREE_MAX_ROWS, param_dtypes=None,
 ) -> str | None:
     """``None`` when a ``rows``-row tile is exact at ``geometry``; else why not.
 
     Every template value compiles its own kernel, and the compiler decides
     FMA contraction, so a verdict holds only for the exact (dtype, limit,
-    geometry, S) it probed.  A tile of S rows needs every size 1..S: its
+    geometry, S, A_log / dt_bias dtypes) it probed.  A tile of S rows needs every size 1..S: its
     accepted path, replayed at S = path length, is at most S rows long.
     Probes run lazily, once per key and process, one at a time.  Device and
     dtype refusals are not cached (another thread may run on the GPU).
@@ -462,8 +473,11 @@ def tree_kernel_parity(
     geometry = tuple(int(value) for value in geometry)
     if type(rows) is not int or not 1 <= rows <= TREE_MAX_ROWS:
         return f"tree rows {rows!r}"
+    param_dtypes = tuple(param_dtypes or (mx.float32, mx.float32))
+    if len(param_dtypes) != 2:
+        return "tree parity needs (A_log, dt_bias) dtypes"
     for size in range(1, rows + 1):
-        verdict = _verdict(dtype, limit, geometry, size)
+        verdict = _verdict(dtype, limit, geometry, size, param_dtypes)
         if verdict is not None:
             return verdict
     return None

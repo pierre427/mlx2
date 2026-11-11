@@ -413,6 +413,12 @@ def load_drafter(
         apply_runtime_quantization(model, runtime_quantization)
     else:
         model.runtime_weight_quantization = None
+    # Opt-in (MLX2_DRAFTER_ROWS_QMV=on): 4-bit drafter linears run their
+    # 2..16-row block through one-weight-read kernels; proposals are still
+    # verified by the target.  Off: no module changes.
+    from ..runtime.models.drafter_rows_qmv import install_if_enabled
+
+    install_if_enabled(model)
     model.eval()
     mx.eval(model.parameters())
     weights.clear()

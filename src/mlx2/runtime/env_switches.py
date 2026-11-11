@@ -40,7 +40,10 @@ SERVING_ENV_SWITCHES = {
     "MLX2_NEMOTRON_EXACT_ATTENTION_ROWS": "Nemotron-H exact verify attention blocks: unset = adapter default (Super VL on, others off), off (whole block per row) or on (norm and q/k/v/o on the strip through exact row ops; cache append and SDPA per row; bit-identical)",
     "MLX2_GEMV_ROWS_KERNEL": "exact dense verify-row matvecs (MoE latent projections, router): loop (default, one broadcast matvec per row) or fused (opt-in: one weight read per <=8 rows, bit-identical, self-checked)",
     "MLX2_FP_ROW_EXACT_GENERAL": "exact FP verify rows on layouts that miss qmv_fast (e.g. K 5376): loop (default) or fused (opt-in single-pass, <=6 rows per launch, bit-identical, self-checked)",
+    "MLX2_DRAFTER_ROWS_QMV": "external-drafter 4-bit (affine q4 / NVFP4) linears: 2..16-row one-weight-read kernel (on) or stock quantized_matmul (off, default); draft numerics only, target-verified",
     "MLX2_FP_ROW_EXACT_KERNEL": "exact FP8/NVFP4 verify rows: single-pass fused kernel (default), fused_chunked (opt-in: 9..16 rows as <=8-row fused launches) or per-row loop (bit-identical, self-checked)",
+    "MLX2_NEMOTRON_SSD_MMA": "Nemotron-H Mamba-2 prefill scan as 8x8 simdgroup products, 32-row chunks (opt-in; not bit-identical, APCv2-bound)",
+    "MLX2_NEMOTRON_ATTN_STAGED": "Nemotron-H GQA-16 causal prefill attention with staged K/V tiles (opt-in, measured slower than MLX SDPA; APCv2-bound)",
     # MLX's own commit caps, latched at Metal start (set by MLX2_COMMAND_BUFFERS
     # or by the operator): schedule and transient memory, never values.
     "MLX_MAX_OPS_PER_BUFFER": "MLX command-buffer kernel cap",

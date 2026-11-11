@@ -104,7 +104,26 @@ _TREE_REFUSED_KEYS = frozenset({
     "proposal_composition", "continuation_pool", "continuation_strategy",
     "progressive_verification_tile", "adaptive_verification",
     "cost_per_commit_handoff",
+    # The tree's drafter lattice captures no feedback payloads, and the
+    # physical AST target is a chain-route executor.
+    "lilicorr_feedback", "ast_physical_target",
 })
+
+
+def _kapitsa_prefill_report():
+    """Opt-in prefill kernels (MLX2_NEMOTRON_SSD_MMA / MLX2_NEMOTRON_ATTN_STAGED):
+    switch, engaged and refused counts with reasons; implemented, unqualified,
+    selected only when switched on."""
+    from ..runtime.models import nemotron_attn_staged, nemotron_ssd_mma
+
+    report = {}
+    for name, module, engaged in (("ssd_mma", nemotron_ssd_mma, "mma"),
+                                  ("attn_staged", nemotron_attn_staged, "staged")):
+        status = module.status()
+        report[name] = {**status, "implemented": True, "qualified": False,
+                        "selected": bool(status["enabled"]),
+                        "observed_used": status["counts"].get(engaged, 0) > 0}
+    return report
 
 
 def validate_super_tree_policy(policy) -> bool:
@@ -873,8 +892,20 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             refusal = self.model.tree_policy_refusal(
                 int(self.external_policy.get("ast_tile_rows", 16))
             )
-            if refusal is not None:
-                raise ValueError(f"Super VL tree verify refused at load: {refusal}")
+            self._resolve_tree_refusal(refusal)
+
+    def _resolve_tree_refusal(self, refusal):
+        """A load-time tree refusal: the adapter's own default yields to the
+        chain (as served before the default existed, the reason in the tree
+        receipt); an operator-selected tree refuses to load."""
+        if refusal is None:
+            return
+        if self.tree_route_authority != "adapter_default_lilicorr_tree8":
+            raise ValueError(f"Super VL tree verify refused at load: {refusal}")
+        for key in ("batch_size_route", "ast_tile_rows"):
+            self.external_policy.pop(key, None)
+        self.tree_route = False
+        self.tree_route_authority = f"adapter_default_refused:{refusal}"
 
     def _default_tree_route(self):
         """Select the B1 tree route for a LiLiCorr drafter when the operator
@@ -1488,6 +1519,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                 if hasattr(self.model, "row_exact_status")
                 else None
             ),
+            "kapitsa_prefill": _kapitsa_prefill_report(),
             "expert_gather_sort": {
                 "schema": "mlx2.nemotron35-super-expert-gather-sort.v1",
                 "implemented": True,

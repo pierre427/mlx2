@@ -63,6 +63,11 @@ CANDIDATE_ENV = {
     # Xing's fused mHC kernels are on by default and differ from the compiled
     # path in summation order; switching them off is the other law.
     "MLX2_XING_MHC_KERNEL": "default_on",
+    # Nemotron-H opt-in prefill kernels (models/nemotron_ssd_mma.py,
+    # models/nemotron_attn_staged.py): other summation orders for the
+    # recurrent state and for the attention output feeding later layers' K/V.
+    "MLX2_NEMOTRON_SSD_MMA": "flag",
+    "MLX2_NEMOTRON_ATTN_STAGED": "flag",
     # Qwen3.8 TensorFold tree-verify law (lane_multi.TREE_LAWS): its rows
     # write KV/GDN state, so a state made under one law is never served as
     # another's.  Bound by law id whenever it is not the legacy masked law.

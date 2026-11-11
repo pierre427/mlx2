@@ -41,17 +41,23 @@ def unit(out, args):
     report = {"schema": "mlx2.nemotron-prefill-step-confirm.v1", "checkpoint": check.checkpoint(),
               "source": check.source(), "qualified": False,
               "evidence_kind": "served attribution, no thermal hold", "steps": {}}
-    for step in args.steps:
+    # ``--env-arms NAME[:KEY=VALUE,...]``: one server per arm at the default
+    # prefill step (instead of one per ``--steps`` value).
+    arms = ([(arm.split(":", 1)[0], None, dict(
+                pair.split("=", 1) for pair in arm.split(":", 1)[1].split(",") if pair
+            ) if ":" in arm else {}) for arm in args.env_arms]
+            if args.env_arms else [(str(step), step, {}) for step in args.steps])
+    for step_name, step, arm_env in arms:
         command = [sys.executable, "-u", "-m", "mlx2.server", "--model", str(check.TARGET),
                    "--host", "127.0.0.1", "--port", str(args.port), "--fabric", "off",
                    "--max-context", "40960", "--cache-bytes", str(2 << 30),
-                   "--prefill-step", str(step)]
-        log = (out / f"server-{step}.log").open("w")
+                   *(["--prefill-step", str(step)] if step is not None else [])]
+        log = (out / f"server-{step_name}.log").open("w")
         server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT,
                                   start_new_session=True,
-                                  env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
+                                  env={**os.environ, "PYTHONPATH": str(ROOT / "src"), **arm_env})
         base = f"http://127.0.0.1:{args.port}"
-        row = {"command": command, "ttft": [], "greedy": None}
+        row = {"command": command, "env": arm_env, "ttft": [], "greedy": None}
         try:
             row["load_seconds"] = rm.wait_health(base, server, 1800, lambda: None)
             for length in args.lengths:
@@ -68,7 +74,7 @@ def unit(out, args):
                             "ttft_seconds": ttft, "route": block.get("route"),
                             "prefill_tok_s": round(prompt / ttft, 1) if prompt and ttft else None}
                     row["ttft"].append(item)
-                    print(json.dumps({"step": step, **item}), flush=True)
+                    print(json.dumps({"step": step_name, **item}), flush=True)
             body = {"model": check.TARGET.name,
                     "messages": [{"role": "user", "content": _prompt(tok, 4096, "greedy") +
                                   "\nSummarize the three largest shipments."}],
@@ -83,7 +89,7 @@ def unit(out, args):
         finally:
             row["server_stop"] = rm.stop_server(server)
             log.close()
-        report["steps"][str(step)] = row
+        report["steps"][step_name] = row
         check.atomic(out / "report.json", report)
     greedy = [row["greedy"] for row in report["steps"].values()]
     report["greedy_identical"] = all(g == greedy[0] for g in greedy) if greedy else None
@@ -107,7 +113,8 @@ def owned(out, args):
                    "--receipt", str(out / "paired-locks.json"), "--",
                    sys.executable, "-u", str(Path(__file__)), "unit", str(out),
                    "--steps", *map(str, args.steps), "--lengths", *map(str, args.lengths),
-                   "--port", str(args.port)]
+                   "--port", str(args.port),
+                   *(["--env-arms", *args.env_arms] if args.env_arms else [])]
         child = subprocess.Popen(command, cwd=ROOT, start_new_session=True,
                                  env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
         try:
@@ -130,6 +137,7 @@ def main():
     parser.add_argument("--steps", type=int, nargs="+", default=[2048, 4096])
     parser.add_argument("--lengths", type=int, nargs="+", default=[8192, 16384, 32768])
     parser.add_argument("--port", type=int, default=8796)
+    parser.add_argument("--env-arms", nargs="*", default=[])
     args = parser.parse_args()
     if args.mode == "unit":
         args.out.mkdir(parents=True, exist_ok=True)

@@ -464,6 +464,14 @@ class LiLiCorrDraftModel(XPressDraftModel):
             "runtime_weight_quantization": getattr(
                 self, "runtime_weight_quantization", None
             ),
+            # The multi-row drafter kernel changes the drafter's arithmetic, so
+            # its install is part of the draft-state identity (persisted
+            # external-draft sidecars never mix the two laws).
+            "drafter_rows_qmv": (
+                None if getattr(self, "drafter_rows_qmv", None) is None
+                else {"schema": self.drafter_rows_qmv["schema"],
+                      "modules": self.drafter_rows_qmv["module_count"]}
+            ),
             "draft_attention_windows": None
             if self.draft_attention_windows is None
             else list(self.draft_attention_windows),
@@ -474,7 +482,17 @@ class LiLiCorrDraftModel(XPressDraftModel):
 
         from ..models.modelopt_nvfp4 import nvfp4_model_status
 
-        return {"modelopt_nvfp4": nvfp4_model_status(self)}
+        result = {"modelopt_nvfp4": nvfp4_model_status(self)}
+        receipt = getattr(self, "drafter_rows_qmv", None)
+        if receipt is not None:
+            from ..models import drafter_rows_qmv
+
+            result["drafter_rows_qmv"] = {
+                "modules": receipt["module_count"],
+                "declined": len(receipt["declined"]),
+                "counts": drafter_rows_qmv.status(),
+            }
+        return result
 
     def sanitize(self, weights):
         result = {}

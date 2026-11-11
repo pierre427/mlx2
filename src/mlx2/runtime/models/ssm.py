@@ -666,13 +666,18 @@ def ssd_prefill(
     else:
         state = state.astype(mx.float32)
 
+    # MLX2_NEMOTRON_SSD_MMA (opt-in): the same segment recurrence as 8x8
+    # simdgroup products over 32-row chunks (nemotron_ssd_mma).
+    from .nemotron_ssd_mma import select_seg
+
+    seg = select_seg(dtx, B, C) or _ssd_seg
     if l <= SSD_SEGMENT:
-        y, state = _ssd_seg(dtx, B, C, dtA, state)
+        y, state = seg(dtx, B, C, dtA, state)
     else:
         ys = []
         for s0 in range(0, l, SSD_SEGMENT):
             s1 = min(s0 + SSD_SEGMENT, l)
-            y, state = _ssd_seg(
+            y, state = seg(
                 mx.contiguous(dtx[:, s0:s1]),
                 mx.contiguous(B[:, s0:s1]),
                 mx.contiguous(C[:, s0:s1]),

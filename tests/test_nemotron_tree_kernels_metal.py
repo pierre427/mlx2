@@ -92,9 +92,14 @@ def test_process_parity_gate_admits_both_tree_kernels():
     assert tree.tree_kernel_parity(
         mx.bfloat16, LIMITS[0], geometry=(128, 64, 8, 128, 4096), rows=3
     ) is None
+    # The served checkpoint stores A_log / dt_bias in bf16: its own kernel build.
+    assert tree.tree_kernel_parity(
+        mx.bfloat16, LIMITS[0], param_dtypes=(mx.bfloat16, mx.bfloat16)
+    ) is None
     status = tree.parity_status()
-    assert any(key.endswith("x4096:S3") for key in status["verdicts"])
-    assert sum(key.endswith(":S16") for key in status["verdicts"]) == 2
+    assert any(":S3:" in key and "x4096:" in key for key in status["verdicts"])
+    assert sum(":S16:A_log=mlx.core.float32:" in key for key in status["verdicts"]) == 2
+    assert sum(":S16:A_log=mlx.core.bfloat16:" in key for key in status["verdicts"]) == 1
     assert status["law"] == tree.TREE_KERNEL_LAW
     assert all(value == "exact" for key, value in status["verdicts"].items()
                if key.startswith("mlx.core.bfloat16"))

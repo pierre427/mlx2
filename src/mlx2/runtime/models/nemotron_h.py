@@ -971,6 +971,7 @@ class NemotronHMamba2Mixer(nn.Module):
             bias=bias, training=self.training,
             ssm_geometry=(self.num_heads, self.head_dim, self.n_groups, self.ssm_state_size),
             time_step_limit=self.time_step_limit,
+            param_dtypes=(self.A_log.dtype, self.dt_bias.dtype),
         )
         if conv_admission.accepted:
             conv_output = fused_mamba_conv_tree(
@@ -1276,9 +1277,21 @@ class NemotronHAttention(nn.Module):
             # Unpadded B1: the BatchKVCache decode mask is all true.
             mask = _all_true_decode_mask(B, int(keys.shape[2]))
 
-        output = scaled_dot_product_attention(
-            queries, keys, values, cache=cache, scale=self.scale, mask=mask
-        )
+        output = None
+        if (  # prefill only; MLX2_NEMOTRON_ATTN_STAGED (opt-in)
+            L >= 32
+            and not getattr(cache, "speculating", False)
+            and not getattr(cache, "_nemotron_unpadded_verify", False)
+        ):
+            from .nemotron_attn_staged import maybe_staged_attention
+
+            output = maybe_staged_attention(
+                queries, keys, values, cache=cache, scale=self.scale, mask=mask
+            )
+        if output is None:
+            output = scaled_dot_product_attention(
+                queries, keys, values, cache=cache, scale=self.scale, mask=mask
+            )
         return output.transpose(0, 2, 1, 3).reshape(B, L, -1)
 
 
