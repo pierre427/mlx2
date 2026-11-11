@@ -428,7 +428,10 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-31: Gemma 3n KV-shared row pruning, made the
             # default the same day (adapters/mlx_vlm.py). Companions from
             # 19a21c41... must be regenerated.
-            "adapter_contract_sha256": "a2ac39fba2de7e2cc389562db1d28188131838b3ac8e5c9a872e01e4b1043543",
+            # Re-pinned 2026-11-10 (Pierre): b0ebffe23 only extracted the
+            # loader call into _load_model_and_processor (behaviour-neutral
+            # for gemma3n/minicpmo; Gemma 4 native overrides it).
+            "adapter_contract_sha256": "39a9fc039ee8d7db16699022eacceb8b2117331ee0c8d0eb13f00d3d29a3f170",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma3n"],
@@ -499,7 +502,8 @@ APPROVED_MEDIA_PRODUCERS = {
             "adapter_batching_sha256": "ac58a0734eb7fc536ab3414186b66d30e8e1352f0eab09f6496871310262f58c",
             # Re-pinned 2026-10-14 with gemma3n (debd7c639, adapters/mlx_vlm.py).
             # Re-pinned 2026-10-31 with gemma3n (KV-shared row pruning option).
-            "adapter_contract_sha256": "a2ac39fba2de7e2cc389562db1d28188131838b3ac8e5c9a872e01e4b1043543",
+            # Re-pinned 2026-11-10 with gemma3n (b0ebffe23 loader extraction).
+            "adapter_contract_sha256": "39a9fc039ee8d7db16699022eacceb8b2117331ee0c8d0eb13f00d3d29a3f170",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["minicpmo"],

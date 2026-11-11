@@ -25,7 +25,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2] / "src"))
 sys.path.insert(0, str(HERE))
-CACHE = Path("~/mlx-models/.ds41-exl3-encoder-20261109/bench-inputs")
+CACHE = Path.home() / "mlx-models/.ds41-exl3-encoder-20261109/bench-inputs"
 
 
 def prepare(layer, expert):
@@ -34,7 +34,7 @@ def prepare(layer, expert):
     ids = np.load(C.TRACE)["ids"]
     X = np.load(C.CAP / "x_by_layer" / f"L{layer:02d}.npy", mmap_mode="r")
     sel = np.where((ids[:, layer] == expert).any(-1))[0]
-    ev, cal = sel[:C.EVAL_ROWS], sel[C.EVAL_ROWS:]
+    cal = sel[C.EVAL_ROWS:]
     art = C.inspect_artifact(C.MODEL)
     raw = C.read_tensors(art, C.expert_names(layer, expert))
     W = {k: C.decode_mxfp4(raw[f"layers.{layer}.ffn.experts.{expert}.{p}.weight"],

@@ -57,6 +57,10 @@ ABOVE_M1_FLOOR = {
     # heavy M1 pipeline MLX raises rather than returning zeros; the M1-M4
     # runtime check is GPU-deferred like the rest of this list.
     "runtime/models/exl3.py": 3,
+    # Flash-Next opt-in int8 prefill experts (MLX2 int8 prefill experts, e3e917442):
+    # expert_tiles reuses the NAX tile pre-pass scan kernel (moe_nax_gather,
+    # listed above) at a fixed 1024 threads. Opt-in and left off by default.
+    "runtime/int8_experts.py": 1,
     # (QSA sidecar qsa_select.py is not listed: since 2026-11-06 it picks its
     # threadgroup per device, 1024 on applegpu_g17+ and 768 elsewhere; see
     # test_qsa_select_threadgroup_is_device_dependent.)

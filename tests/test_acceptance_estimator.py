@@ -252,3 +252,98 @@ def test_complete_path_costs_do_not_fabricate_chain_cohort_costs():
     )
     assert policy.costs(1) is None and policy.costs(15) is None
     assert dict(policy.continuation_costs) == {15: (1.0, 2.0, 3.0)}
+
+
+def _separation_regime(estimator, rounds, *, accepted_all, rng):
+    depth = estimator.depth
+    for _ in range(rounds):
+        features = rng.normal(2.0, 0.5, depth)
+        if accepted_all:
+            estimator.observe(features, depth, rejected=False)
+        else:
+            accepted = 0
+            while accepted < depth and rng.random() < 0.5:
+                accepted += 1
+            estimator.observe(features, accepted, rejected=accepted < depth)
+        estimator.finish_round()
+
+
+def _rounds_to_recover(estimator, rng, *, limit=40000):
+    depth = estimator.depth
+    for round_ in range(limit):
+        _separation_regime(estimator, 1, accepted_all=False, rng=rng)
+        if abs(float(estimator.predict(np.full(depth, 2.0))[0]) - 0.5) < 0.1:
+            return round_
+    return limit
+
+
+def test_separation_reset_recovers_from_a_saturated_regime_much_faster():
+    """vllm-project/vllm#66673: under separation the raw Fisher information
+    goes to zero and the coefficient creeps one way; a breaker resets it."""
+    rngs = [np.random.default_rng(seed) for seed in (0, 0)]
+    plain = OnlineAcceptanceEstimator(6)
+    breaker = OnlineAcceptanceEstimator(6, separation_reset=True)
+    _separation_regime(plain, 20000, accepted_all=True, rng=rngs[0])
+    _separation_regime(breaker, 20000, accepted_all=True, rng=rngs[1])
+    assert breaker.separation_resets.sum() > 0 and plain.separation_resets.sum() == 0
+    slow, fast = _rounds_to_recover(plain, rngs[0]), _rounds_to_recover(breaker, rngs[1])
+    assert fast * 5 < slow, (fast, slow)
+
+
+def test_separation_reset_never_fires_on_informative_or_unobserved_positions():
+    rng = np.random.default_rng(3)
+    estimator = OnlineAcceptanceEstimator(4, separation_reset=True)
+    _separation_regime(estimator, 5000, accepted_all=False, rng=rng)
+    assert estimator.separation_resets.sum() == 0 and estimator.slope_resets == 0
+    # Positions beyond the observed prefix stay unlabelled: no counter, no reset.
+    estimator = OnlineAcceptanceEstimator(4, separation_reset=True)
+    for _ in range(2000):
+        estimator.observe(rng.normal(2.0, 0.5, 1), 0, rejected=True)
+        estimator.finish_round()
+    assert estimator.separation_resets[1:].sum() == 0 and estimator.stuck[1:].sum() == 0
+
+
+def test_separation_reset_counter_self_clears_before_the_limit():
+    estimator = OnlineAcceptanceEstimator(2, refit_interval=40, separation_reset=True)
+
+    def window(intercept, accepted, rejected):
+        for _ in range(40):
+            estimator.intercepts[:] = intercept
+            estimator.observe(np.array([1.0, 1.0]), accepted, rejected=rejected)
+            estimator.finish_round()
+
+    window(30.0, 2, False)  # saturated: p(1-p) ~ 0 on every observation
+    window(30.0, 2, False)
+    assert estimator.stuck[0] == 2
+    window(0.0, 1, True)  # informative again before the limit
+    assert estimator.stuck[0] == 0 and estimator.separation_resets.sum() == 0
+
+
+def test_separation_reset_leaves_accurate_rarely_reached_positions_alone():
+    """Review finding: a window total of p(1-p) is small for a position that
+    is reached a few times per window even when its estimate is right
+    (three p = 0.97 observations sum to 0.09). Judge per observation."""
+    rng = np.random.default_rng(11)
+    truth = np.array([0.05, 0.97, 0.97, 0.97, 0.97, 0.97])
+    estimators = [OnlineAcceptanceEstimator(6), OnlineAcceptanceEstimator(6, separation_reset=True)]
+    for _ in range(50000):
+        features = rng.normal(2.0, 0.5, 6)
+        accepted = 0
+        while accepted < 6 and rng.random() < truth[accepted]:
+            accepted += 1
+        for estimator in estimators:
+            estimator.observe(features, accepted, rejected=accepted < 6)
+            estimator.finish_round()
+    plain, breaker = estimators
+    assert breaker.separation_resets.sum() == 0 and breaker.slope_resets == 0
+    probe = np.full(6, 2.0)
+    assert np.allclose(breaker.predict(probe), plain.predict(probe))
+
+
+def test_separation_reset_is_an_opt_in_policy_boolean():
+    costs = [1.0, 1.5, 2.0]
+    assert AdaptiveVerificationPolicy.from_value({"verification_costs": costs}, 2).separation_reset is False
+    assert AdaptiveVerificationPolicy.from_value(
+        {"verification_costs": costs, "separation_reset": True}, 2).separation_reset is True
+    with pytest.raises(ValueError):
+        AdaptiveVerificationPolicy.from_value({"verification_costs": costs, "separation_reset": 1}, 2)

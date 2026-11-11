@@ -383,6 +383,12 @@ def test_status_addition_preserves_legacy_shape():
         for key, value in zip(node.keys, node.values)
         if isinstance(key, ast.Constant) and key.value == "qsdpa_verify"
     )
+    # status() reports the section only once the module is loaded; the legacy
+    # shape is the loaded branch, the other is the shared not-loaded marker.
+    if isinstance(value, ast.IfExp):
+        assert ast.unparse(value.test) == "qvm"
+        assert ast.unparse(value.orelse) == "_not_loaded_section()"
+        value = value.body
     assert [key.value for key in value.keys] == [
         "counts",
         "by_rows",

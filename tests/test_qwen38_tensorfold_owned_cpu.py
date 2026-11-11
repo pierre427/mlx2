@@ -205,7 +205,7 @@ def test_live_serial_reference_uses_same_full_prompt_engine_prefill():
 def test_real_pinned_tensorfold_source_is_clean_and_bound():
     root = _external_source(TENSORFOLD_SOURCE_ENV)
     identity = source_identity(root)
-    assert identity["revision"] == "71377a5373ed7b394f1b480ba2a6a3986b03af1c"
+    assert identity["revision"] == "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170"
     assert len(identity["source_digest"]) == 64
     mlx_lm = mlx_lm_identity(_external_source(MLX_LM_SOURCE_ENV))
     assert mlx_lm["revision"] == "1104ced19ed98800bdaf4ebcdca14bbdeb597c23"
@@ -221,7 +221,7 @@ def test_exact_worker_subprocess_imports_pinned_full_loader_path():
                             capture_output=True, text=True, timeout=20, check=True)
     receipt = json.loads(result.stdout)
     assert receipt["mlx_lm"]["revision"] == "1104ced19ed98800bdaf4ebcdca14bbdeb597c23"
-    assert receipt["tensorfold"]["revision"] == "71377a5373ed7b394f1b480ba2a6a3986b03af1c"
+    assert receipt["tensorfold"]["revision"] == "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170"
 
 
 def test_logical_cache_ignores_rejected_kv_backing_but_checks_visible_and_gdn():

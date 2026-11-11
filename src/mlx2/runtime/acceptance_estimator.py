@@ -58,6 +58,28 @@ def proposal_feature(law):
     return proposal_law_features(law).peak_logit
 
 
+# Separation breaker (idea from vllm-project/vllm#66673; see docs/PROVENANCE.md).
+# When a position's labels become (quasi-)perfectly predictable, its IRLS
+# weight p(1-p) and so its raw Fisher information go to zero while the
+# gradient keeps one sign. The bounded-logit scale below stops a single refit
+# from blowing up, but the coefficient still creeps one way refit after refit
+# and takes thousands of rounds to come back when the workload changes. After
+# _STUCK_LIMIT consecutive refits in which a coefficient's raw information
+# (before l2) averages under _STUCK_INFO_PER_OBSERVATION per observation, over
+# at least _STUCK_MIN_OBSERVATIONS observations, the computed step is dropped
+# and that coefficient restarts from its cold-start value. Opt-in
+# (separation_reset). vLLM thresholds the window total (0.1) at a fixed
+# refit interval; a total also flags an accurate but rarely reached position
+# (three p = 0.97 observations sum to 0.09), so mlx2 normalizes: 1e-3 per
+# observation is p(1-p) at p > 0.999, i.e. predictions saturated, not merely
+# confident.
+_STUCK_INFO_PER_OBSERVATION = 1e-3
+_STUCK_MIN_OBSERVATIONS = 30
+_STUCK_LIMIT = 3
+_INITIAL_SLOPE = 0.5
+_INITIAL_INTERCEPT = -0.2
+
+
 def _sigmoid(value):
     value = np.clip(value, -40.0, 40.0)
     return 1.0 / (1.0 + np.exp(-value))
@@ -71,8 +93,10 @@ class OnlineAcceptanceEstimator:
     Newton updates use bounded O(depth) sufficient statistics.
     """
 
-    def __init__(self, depth, *, refit_interval=100, damping=50.0, l2=1e-3):
+    def __init__(self, depth, *, refit_interval=100, damping=50.0, l2=1e-3,
+                 separation_reset=False):
         self.depth = int(depth)
+        self.separation_reset = bool(separation_reset)
         self.refit_interval = int(refit_interval)
         self.damping = float(damping)
         self.l2 = float(l2)
@@ -85,8 +109,12 @@ class OnlineAcceptanceEstimator:
             or self.l2 <= 0
         ):
             raise ValueError("invalid acceptance estimator configuration")
-        self.slope = 0.5
-        self.intercepts = np.full(self.depth, -0.2, dtype=np.float64)
+        self.slope = _INITIAL_SLOPE
+        self.intercepts = np.full(self.depth, _INITIAL_INTERCEPT, dtype=np.float64)
+        self.stuck = np.zeros(self.depth, dtype=np.int64)
+        self.stuck_slope = 0
+        self.separation_resets = np.zeros(self.depth, dtype=np.int64)
+        self.slope_resets = 0
         self.info = np.zeros((self.depth, 3), dtype=np.float64)
         self.grad = np.zeros((self.depth, 2), dtype=np.float64)
         self.counts = np.zeros(self.depth, dtype=np.int64)
@@ -140,7 +168,9 @@ class OnlineAcceptanceEstimator:
             self.refit()
 
     def refit(self):
-        a = float(self.info[:, 0].sum()) + self.l2
+        raw_info = self.info[:, 2].copy()
+        raw_slope_info = float(self.info[:, 0].sum())
+        a = raw_slope_info + self.l2
         b = self.info[:, 1]
         c = self.info[:, 2] + self.l2
         g0, g1 = float(self.grad[:, 0].sum()), self.grad[:, 1]
@@ -161,6 +191,29 @@ class OnlineAcceptanceEstimator:
         scale = min(1.0, 2.0 / maximum_change) if maximum_change else 1.0
         self.slope += float(step) * scale
         self.intercepts += bias_step * scale
+        if self.separation_reset:
+            # A position with too few observations this window (censored or
+            # beyond the chosen depth) is not evidence of separation: it
+            # clears its counter rather than counting toward a reset.
+            stuck = (
+                (self.counts >= _STUCK_MIN_OBSERVATIONS)
+                & (raw_info < _STUCK_INFO_PER_OBSERVATION * self.counts)
+            )
+            self.stuck = np.where(stuck, self.stuck + 1, 0)
+            reset = self.stuck >= _STUCK_LIMIT
+            self.intercepts[reset] = _INITIAL_INTERCEPT
+            self.stuck[reset] = 0
+            self.separation_resets += reset
+            total = int(self.counts.sum())
+            if (total >= _STUCK_MIN_OBSERVATIONS
+                    and raw_slope_info < _STUCK_INFO_PER_OBSERVATION * total):
+                self.stuck_slope += 1
+            else:
+                self.stuck_slope = 0
+            if self.stuck_slope >= _STUCK_LIMIT:
+                self.slope = _INITIAL_SLOPE
+                self.stuck_slope = 0
+                self.slope_resets += 1
         self.info.fill(0)
         self.grad.fill(0)
         self.counts.fill(0)
@@ -186,6 +239,8 @@ class AdaptiveVerificationPolicy:
     min_gain: float = 0.05
     minimum_depth: int = 1
     refit_interval: int = 100
+    # Opt-in separation breaker for the estimator (vllm-project/vllm#66673).
+    separation_reset: bool = False
     mode: str = "cohort"
     verification_costs_by_cohort: tuple = ()
     continuation_costs: tuple = ()
@@ -267,6 +322,8 @@ class AdaptiveVerificationPolicy:
                 raise ValueError(
                     f"adaptive verification {name} must be a positive integer"
                 )
+        if type(policy.separation_reset) is not bool:
+            raise ValueError("adaptive verification separation_reset must be a boolean")
         if policy.minimum_depth > depth or policy.mode not in ("cohort", "per_request"):
             raise ValueError("invalid adaptive verification depth or mode")
         if (

@@ -288,7 +288,7 @@ def main():
     ap.add_argument("--name", default="", help="results file suffix for this process (results<name>.json)")
     ap.add_argument("--manifest-only", action="store_true")
     ap.add_argument("--lean", action="store_true", help="remote: worker checks its decode; no weight shipped back (slow links)")
-    ap.add_argument("--out", default="~/mlx-models/DeepSeek-V4.1-Flash-1017-Source-Expert-EXL3-3bpw-hot50")
+    ap.add_argument("--out", default=str(Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-Source-Expert-EXL3-3bpw-hot50"))
     a = ap.parse_args()
     if not v2_supported(a.words):
         raise SystemExit("streaming v2 kernel does not support this rate")

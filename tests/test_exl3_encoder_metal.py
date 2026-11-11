@@ -7,7 +7,6 @@ MCG fixtures, and that the async/pipelined encoders reproduce encode_many on
 the CPU. Synthetic tiles and small matrices only: no speed claim.
 """
 
-import glob
 import os
 import sys
 from pathlib import Path
@@ -27,8 +26,8 @@ pytestmark = pytest.mark.skipif(
     reason="set MLX2_RUN_METAL_TESTS=1 (owned GPU window) for the real-Metal gate",
 )
 
-MCG16 = sorted(p for p in glob.glob(str(ROOT / "scripts/sushi_probe/fixtures/exl3_*.safetensors"))
-               if "mcg" in p and "w12" not in p)
+MCG16 = sorted(str(p) for p in (ROOT / "scripts/sushi_probe/fixtures").glob("exl3_*.safetensors")
+               if "mcg" in p.name and "w12" not in p.name)
 
 
 @pytest.fixture(autouse=True)

@@ -46,9 +46,9 @@ import exl3_encode as E  # noqa: E402
 import viterbi_metal as VM  # noqa: E402
 from viterbi_metal import MX_LOCK  # noqa: E402
 
-MODEL = "~/mlx-models/DeepSeek-V4.1-Flash-1017-Source"
-CAP = Path("~/mlx-models/.ds41-routing-capture-20261108")
-TRACE = Path("~/Desktop/mlx2/output/ds41-source-20261108/cache-design/sched/trace.npz")
+MODEL = str(Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-Source")
+CAP = Path.home() / "mlx-models/.ds41-routing-capture-20261108"
+TRACE = Path.home() / "Desktop/mlx2/output/ds41-source-20261108/cache-design/sched/trace.npz"
 EVAL_ROWS, MIN_CALIB, ALL_SAMPLE = 64, 2048, 4096
 
 
@@ -162,7 +162,7 @@ def main():
     ap.add_argument("--no-stream", action="store_true",
                     help="metal: encode one expert at a time (encode_many) instead of the streaming pipeline")
     ap.add_argument("--inflight", type=int, default=2, help="metal streaming: experts sharing the GPU queue")
-    ap.add_argument("--out", default="~/mlx-models/.ds41-exl3-encoder-20261109")
+    ap.add_argument("--out", default=str(Path.home() / "mlx-models/.ds41-exl3-encoder-20261109"))
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     art = inspect_artifact(MODEL)

@@ -297,3 +297,81 @@ def test_live_block_cut_is_a_parent_closed_prefix(monkeypatch):
     assert batch.tree_calibration.truncated_nodes == 3
     # A cohort is never cut here (its trees are padded to one width).
     assert batch._calibrated_live_blocks([object(), object()], [block, block]) == [block, block]
+
+
+def _locked_table(cal, key="greedy", depth=2):
+    from mlx2.runtime import ast_tree_calibration as C
+
+    table = cal._table(key)
+    table.alpha[depth], table.beta[depth] = -8.0, 0.1
+    # A full window of misses: alone it refits the depth to about
+    # (-4.5, 0.1), p(0.9) = 0.014, i.e. straight back into the lock.
+    table.xs[depth] = [C.logit_q(math.log(q)) for q in (0.2, 0.4, 0.6, 0.8, 0.9, 0.95) * 86][:512]
+    table.ys[depth] = [0.0] * 512
+    return table
+
+
+def _p09(table, depth):
+    from mlx2.runtime.ast_tree_calibration import calibrated_log_p
+
+    return math.exp(calibrated_log_p(math.log(0.9), table.alpha[depth], table.beta[depth]))
+
+
+def test_locked_depth_without_records_relaxes_toward_the_prior():
+    """Kapitsa #1131: a depth fitted to the (-8, 0.1) clamp corner never
+    enters a tree again, so it never gets the record that would correct it."""
+    from mlx2.runtime.ast_tree_calibration import DepthCalibration
+
+    cal = DepthCalibration(refit_every=16, min_records=32)
+    table = _locked_table(cal)
+    healthy = [(1, math.log(0.8), i % 5 != 0) for i in range(4)]
+    for _ in range(31):
+        cal.observe("greedy", healthy)
+    # Not stale yet (31 trees): its old records keep it locked.
+    assert _p09(table, 2) < 0.1 and table.relaxed[2] == 0
+    for _ in range(64):
+        cal.observe("greedy", healthy)
+    assert _p09(table, 2) >= 0.1
+    assert table.relaxed[2] >= 1 and table.xs[2] == []
+    assert cal.receipt()["tables"]["greedy"]["locked_relaxations"]["2"] == table.relaxed[2]
+    # The depth that kept getting records kept its own fit.
+    assert table.relaxed[1] == 0 and table.alpha[1] != 0.0
+    # Relaxed, the depth fits new records again.
+    relaxed = table.relaxed[2]
+    for _ in range(48):
+        cal.observe("greedy", healthy + [(2, math.log(0.9), True), (2, math.log(0.5), False)])
+    assert table.relaxed[2] == relaxed and len(table.xs[2]) == 96
+    assert _p09(table, 2) > 0.5  # q=0.9 nodes now hit, q=0.5 nodes miss
+
+
+def test_pessimistic_but_unlocked_or_fed_depths_are_not_relaxed():
+    from mlx2.runtime.ast_tree_calibration import DepthCalibration
+
+    cal = DepthCalibration(refit_every=16, min_records=32)
+    table = cal._table("greedy")
+    # Deep-position fit Kapitsa reports as healthy: p(0.9) ~ 0.58.
+    table.alpha[3], table.beta[3] = -1.3, 0.7
+    for _ in range(128):
+        cal.observe("greedy", [(1, math.log(0.8), True)])
+    assert (table.alpha[3], table.beta[3]) == (-1.3, 0.7) and table.relaxed[3] == 0
+    # A locked depth that still gets records is fitted, not relaxed.
+    cal = DepthCalibration(refit_every=16, min_records=32)
+    table = _locked_table(cal)
+    for _ in range(128):
+        cal.observe("greedy", [(2, math.log(0.9), False)])
+    assert table.relaxed[2] == 0
+
+
+def test_relaxation_state_survives_snapshot_restore():
+    from mlx2.runtime.ast_tree_calibration import DepthCalibration
+
+    cal = DepthCalibration()
+    _locked_table(cal)
+    snap = cal.snapshot()
+    for _ in range(64):
+        cal.observe("greedy", [(1, math.log(0.8), True)])
+    assert cal._table("greedy").relaxed[2] >= 1
+    cal.restore(snap)
+    table = cal._table("greedy")
+    assert (table.alpha[2], table.beta[2], table.relaxed[2]) == (-8.0, 0.1, 0)
+    assert table.last_record == [0] * len(table.last_record) and table.count == 0

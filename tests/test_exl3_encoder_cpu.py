@@ -1,6 +1,6 @@
 """EXL3 encoder (scripts/research/ds41_exl3): layout, round trip, oracles. CPU only."""
 
-import glob
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +12,22 @@ sys.path.insert(0, str(ROOT / "scripts/research/ds41_exl3"))
 import exl3_encode as E  # noqa: E402
 from mlx2.runtime.models.exl3_reference import decode_inner, effective_weight  # noqa: E402
 
-FIXTURES = sorted(glob.glob(str(ROOT / "scripts/sushi_probe/fixtures/exl3_*.safetensors")))
+@pytest.fixture(autouse=True, scope="module")
+def _viterbi_builds_outside_the_tree(tmp_path_factory):
+    """The C Viterbi compiles on first use into EXL3_ENC_BUILD (default: the
+    gitignored scripts/research/ds41_exl3/.build). The preflight fingerprints
+    scripts/ by glob, ignored files included, so a build landing there during
+    the suite made a fresh checkout's receipt report the source as changed."""
+    previous = os.environ.get("EXL3_ENC_BUILD")
+    os.environ["EXL3_ENC_BUILD"] = str(tmp_path_factory.mktemp("exl3_enc_build"))
+    yield
+    if previous is None:
+        os.environ.pop("EXL3_ENC_BUILD", None)
+    else:
+        os.environ["EXL3_ENC_BUILD"] = previous
+
+
+FIXTURES = sorted(str(p) for p in (ROOT / "scripts/sushi_probe/fixtures").glob("exl3_*.safetensors"))
 
 
 def _fixture(path):

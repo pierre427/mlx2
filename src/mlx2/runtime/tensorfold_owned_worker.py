@@ -16,7 +16,7 @@ import time
 import traceback
 from pathlib import Path
 
-EXPECTED_REVISION = "71377a5373ed7b394f1b480ba2a6a3986b03af1c"
+EXPECTED_REVISION = "1a5f38e12afbb560d8fc61c88ccb5900f7d5d170"
 EXPECTED_MLX_LM_REVISION = "1104ced19ed98800bdaf4ebcdca14bbdeb597c23"
 
 

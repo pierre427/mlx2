@@ -349,3 +349,48 @@ def test_template_control_metadata_can_be_serialized_by_status_endpoint():
     assert json.loads(json.dumps({'chat_template_options': controls})) == {
         'chat_template_options': {'preserve_thinking': {'implemented': True, 'default': False}}}
     validate_template_request(target, {'preserve_thinking': True})
+
+
+def _tool_loop(reasoning):
+    assistant = {'role': 'assistant', 'content': None, 'tool_calls': [
+        {'id': 'c1', 'type': 'function', 'function': {'name': 'weather::lookup', 'arguments': '{"city":"Paris","days":2}'}}]}
+    if reasoning is not _ABSENT:
+        assistant['reasoning_content'] = reasoning
+    return {'messages': [{'role': 'user', 'content': 'weather'}, assistant,
+                         {'role': 'tool', 'tool_call_id': 'c1', 'content': 'sunny'}],
+            'tools': TOOLS, 'think': True}
+
+
+_ABSENT = object()
+
+
+@pytest.mark.parametrize('blank', [' ', ''])
+def test_blank_echoed_reasoning_renders_as_absent_reasoning(blank):
+    """antirez/ds4#1296: DeepSeek clients echo a reasoning-free turn as " ".
+    After the last user message the encoder keeps that turn's think block, so
+    a verbatim space is an unsampled token that breaks the cached prefix and
+    re-prefills the rest of the conversation."""
+    from mlx2.runtime.models.deepseek_v41_encoding import encode_messages
+
+    target = adapter()
+    absent = target.render_prompt(_tool_loop(_ABSENT))
+    assert target.render_prompt(_tool_loop(blank)) == absent
+    # The hazard is real: the verbatim encoder would have rendered the pad.
+    raw = _tool_loop(' ')['messages']
+    assert encode_messages(copy.deepcopy(raw), thinking_mode='thinking') != encode_messages(
+        [m for m in copy.deepcopy(_tool_loop(_ABSENT)['messages'])], thinking_mode='thinking')
+    # Real reasoning is still rendered.
+    assert 'Need to run it.' in target.render_prompt(_tool_loop('Need to run it.'))
+    assert 'Need to run it.' not in absent
+
+
+@pytest.mark.parametrize('sampled', ['\n', '  ', ' \n'])
+def test_other_whitespace_reasoning_is_rendered_as_sampled(sampled):
+    """Whitespace other than the client pad may be what the model sampled and
+    mlx2 returned verbatim; its exact echo keeps the cached prefix."""
+    from mlx2.runtime.models.deepseek_v41_encoding import encode_messages
+
+    rendered = adapter().render_prompt(_tool_loop(sampled))
+    assert rendered != adapter().render_prompt(_tool_loop(_ABSENT))
+    assert sampled + '</think>' in rendered
+    assert rendered == encode_messages(messages_for_encoding(_tool_loop(sampled)), thinking_mode='thinking')

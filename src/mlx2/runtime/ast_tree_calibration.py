@@ -33,6 +33,18 @@ MODES = ("order", "order_size")
 MAX_DEPTH = 32
 # ``kf_lcal`` clamps q below one so logit(q) stays finite.
 _Q_MAX = 0.999999
+# Lock-out relaxation (idea from Kapitsa #1131, ``KfBudget::relax_locked``).
+# Records come only from nodes whose parent was evaluated, so a depth fitted
+# pessimistic enough never enters a tree again and never gets the record
+# that would correct it; the ring window would refit it straight back from
+# its old records. A depth with no record for ``_STALE_TREES`` observed trees
+# whose fit gives even a q = 0.9 node under ``_LOCKED_P`` moves halfway back
+# toward the (0, 1) prior and drops its records. From the (-8, 0.1) clamp
+# corner that takes two refits to (-2, 0.775): p(0.9) = 0.43, so its nodes
+# re-enter the trees and new records fit it again.
+_STALE_TREES = 32
+_LOCKED_P = 0.1
+_LOCKED_PROBE_LOG_Q = math.log(0.9)
 
 
 def logit_q(log_q):
@@ -145,7 +157,8 @@ def live_nodes(path_log_ps, cost, *, rate=None, minimum=1):
 
 
 class _Table:
-    __slots__ = ("alpha", "beta", "xs", "ys", "heads", "count", "since_fit", "trials", "hits")
+    __slots__ = ("alpha", "beta", "xs", "ys", "heads", "count", "since_fit", "trials", "hits",
+                 "last_record", "relaxed")
 
     def __init__(self, depths):
         self.alpha = [0.0] * (depths + 1)
@@ -157,6 +170,9 @@ class _Table:
         self.since_fit = 0
         self.trials = [0] * (depths + 1)
         self.hits = [0] * (depths + 1)
+        # ``count`` when the depth last got a record, and its relaxations.
+        self.last_record = [0] * (depths + 1)
+        self.relaxed = [0] * (depths + 1)
 
     def copy(self):
         other = _Table.__new__(_Table)
@@ -166,6 +182,7 @@ class _Table:
         other.heads = list(self.heads)
         other.count, other.since_fit = self.count, self.since_fit
         other.trials, other.hits = list(self.trials), list(self.hits)
+        other.last_record, other.relaxed = list(self.last_record), list(self.relaxed)
         return other
 
 
@@ -231,6 +248,7 @@ class DepthCalibration:
                 table.heads[depth] = (head + 1) % self.window
             table.trials[depth] += 1
             table.hits[depth] += int(bool(hit))
+            table.last_record[depth] = table.count + 1
         table.count += 1
         self.trees += 1
         if predicted is not None and realized is not None:
@@ -240,12 +258,28 @@ class DepthCalibration:
         if table.since_fit >= self.refit_every:
             table.since_fit = 0
             for depth in range(1, self.max_depth + 1):
+                if self._relax_locked(table, depth):
+                    continue
                 if len(table.xs[depth]) >= self.min_records:
                     table.alpha[depth], table.beta[depth] = fit_logistic(
                         table.xs[depth], table.ys[depth],
                         table.alpha[depth], table.beta[depth], iters=self.iters,
                     )
             self.fits += 1
+
+    @staticmethod
+    def _relax_locked(table, depth):
+        """Step a stale, locked depth halfway to the prior; drop its records."""
+
+        if table.count - table.last_record[depth] < _STALE_TREES:
+            return False
+        alpha, beta = table.alpha[depth], table.beta[depth]
+        if math.exp(calibrated_log_p(_LOCKED_PROBE_LOG_Q, alpha, beta)) >= _LOCKED_P:
+            return False
+        table.alpha[depth], table.beta[depth] = 0.5 * alpha, 0.5 * (beta + 1.0)
+        table.xs[depth], table.ys[depth], table.heads[depth] = [], [], 0
+        table.relaxed[depth] += 1
+        return True
 
     def observe_rate(self, tokens, seconds):
         """Feed one round's committed tokens and wall seconds to the rate."""
@@ -278,6 +312,9 @@ class DepthCalibration:
                 "beta": {str(d): round(table.beta[d], 4) for d in depths},
                 "trials": {str(d): table.trials[d] for d in depths},
                 "hit_rate": {str(d): round(table.hits[d] / table.trials[d], 4) for d in depths},
+                "locked_relaxations": {
+                    str(d): table.relaxed[d] for d in range(1, self.max_depth + 1) if table.relaxed[d]
+                },
             }
         rate = self.rate()
         return {

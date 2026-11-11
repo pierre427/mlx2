@@ -1487,7 +1487,8 @@ class ExternalDraftBatchGenerator:
             if self.draft_topology != "chain" or self.fly_verification.enabled:
                 raise ValueError("adaptive verification requires exact chain verification")
             self.acceptance_estimator = OnlineAcceptanceEstimator(
-                self.num_draft, refit_interval=self.adaptive_policy.refit_interval
+                self.num_draft, refit_interval=self.adaptive_policy.refit_interval,
+                separation_reset=self.adaptive_policy.separation_reset
             )
         # Exact chain verification rule.  "token" (default) is the token-wise
         # residual rule; "block" is block verification (Sun et al. 2024): the
@@ -10020,6 +10021,27 @@ class ExternalDraftBatchGenerator:
             "round_verify_width": self.scheduler_stats["external_adaptive_verify_width"],
             "target_rows": self.scheduler_stats["external_adaptive_target_rows"],
             "trimmed_target_rows": self.scheduler_stats["external_adaptive_trimmed_target_rows"],
+            "separation_reset": {
+                "implemented": True,
+                "selected": self.adaptive_policy.separation_reset,
+                "qualified": False,
+                # The continuation policy calibrates by censored Beta
+                # frequencies, not by the logistic estimator.
+                "applies": self.continuation_policy is None,
+                "observed_used": bool(
+                    self.acceptance_estimator is not None
+                    and (self.acceptance_estimator.separation_resets.sum()
+                         or self.acceptance_estimator.slope_resets)
+                ),
+                "intercept_resets": (
+                    int(self.acceptance_estimator.separation_resets.sum())
+                    if self.acceptance_estimator is not None else 0
+                ),
+                "slope_resets": (
+                    self.acceptance_estimator.slope_resets
+                    if self.acceptance_estimator is not None else 0
+                ),
+            },
         }}
 
     def _adaptive_observe(self, blocks, decisions, cohort=None):

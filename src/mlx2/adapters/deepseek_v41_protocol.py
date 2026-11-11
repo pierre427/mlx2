@@ -162,6 +162,16 @@ def messages_for_encoding(request):
             raise ValueError('V4.1 text-only route requires string message content')  # noqa: TRY004 - public request refusal contract
         if message.get('reasoning_content') is not None and not isinstance(message['reasoning_content'], str):
             raise ValueError('V4.1 history reasoning_content must be text')
+        # DeepSeek clients must echo reasoning_content and send a turn that
+        # had none as " " (the hosted API refuses ""). Rendered verbatim, that
+        # space lands inside the think block as a token the model never
+        # sampled, so the cached prefix breaks there and the rest of the
+        # conversation re-prefills (idea from antirez/ds4#1296; see
+        # docs/PROVENANCE.md). Only that pad is absent reasoning: other
+        # whitespace may be what the model sampled and mlx2 returned
+        # verbatim, and its exact echo must keep rendering as sampled.
+        if message.get('reasoning_content') == ' ':
+            del message['reasoning_content']
         if message.get('role') == 'tool':
             identity = message.get('tool_call_id')
             if not isinstance(identity, str) or identity not in pending:

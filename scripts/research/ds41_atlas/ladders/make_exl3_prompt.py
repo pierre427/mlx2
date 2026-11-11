@@ -9,8 +9,8 @@ from pathlib import Path
 
 from make_compare_all import DEFAULTS, B90
 
-BANK = "~/mlx-models/DeepSeek-V4.1-Flash-1017-Source-Expert-EXL3-3bpw"
-OUT = "~/Desktop/mlx2/output/ds41-source-20261108/ladder-exl3-translate7"
+BANK = str(Path.home() / "mlx-models/DeepSeek-V4.1-Flash-1017-Source-Expert-EXL3-3bpw")
+OUT = str(Path.home() / "Desktop/mlx2/output/ds41-source-20261108/ladder-exl3-translate7")
 
 
 def exl3(math, run):
