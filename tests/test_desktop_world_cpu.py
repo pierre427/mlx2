@@ -228,7 +228,8 @@ def test_style_accepts_partial_changes_and_state_is_compact(tmp_path):
     worlds = Worlds(SimpleNamespace(home=tmp_path))
     worlds.dispatch({"command": "world_object_upsert", "object": {"id": "chat", "text": "x" * 4000}})
     result = worlds.dispatch({"command": "world_style", "theme": {"background": "#000000"}})
-    assert result["theme"] == {"background": "#000000", "accent": "#38CBFF", "exposure": 1}
+    assert result["theme"] == {"background": "#000000", "accent": "#38CBFF", "exposure": 1,
+                               "environment": "", "environment_intensity": 1, "fog": 0, "floor": "grid"}
     assert result["transitions"] == {"duration": 0.6, "style": "ease"}
     with pytest.raises(ValueError):
         worlds.dispatch({"command": "world_style"})

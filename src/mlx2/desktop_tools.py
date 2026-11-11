@@ -13,13 +13,17 @@ from pathlib import Path
 from .tool_backend import ConfiguredToolBackend, _allowlisted_server_url
 
 _WORLD_COLOR = {"type": "string", "description": "#RRGGBB"}
-_WORLD_VECTOR = {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}
+# Three numbers; the world validator enforces the length, keeping this schema small.
+_WORLD_VECTOR = {"type": "array", "items": {"type": "number"}}
 # Compact enough to fit one tool-search page within the default result budget.
 _WORLD_OBJECT_SCHEMA = {"type": "object", "required": ["id"], "properties": {
     "id": {"type": "string"}, "kind": {"enum": ["chat", "memory", "knowledge", "web", "file", "folder", "avatar", "media"]},
     "label": {"type": "string"}, "text": {"type": "string"}, "resource": {"type": "string"},
     "position": _WORLD_VECTOR, "rotation": _WORLD_VECTOR, "scale": _WORLD_VECTOR, "color": _WORLD_COLOR,
-    "shape": {"enum": ["panel", "sphere", "cube", "ring"]},
+    "shape": {"enum": ["panel", "sphere", "cube", "ring", "cylinder", "cone", "capsule", "plane", "pyramid", "model", "light"]},
+    "parent": {"type": "string"},
+    "material": {"type": "object", "description": "roughness, metalness, emission 0-1; opacity 0.05-1; tiling 1-50"},
+    "light": {"type": "object", "description": "type omni|spot|directional; intensity 0-5000"},
     "animation": {"type": "object", "properties": {"kind": {"enum": ["none", "pulse", "spin", "float"]}, "speed": {"type": "number"}}}}}
 
 # Operation names are shared by the UI bridge and chat. No arbitrary executable,
@@ -113,18 +117,23 @@ READ_ONLY = {"web_search", "fetch_page", "snapshot", "library_models", "prompt_p
 
 OPERATIONS.update({
     "world_create": ("Create a native 3D world with chat and an animated agent object.", {"name": {"type": "string"}}),
-    "world_save": ("Replace the active world with a complete declarative document (schema_version 1, id, name, theme, transitions, objects; world_export returns one). For edits prefer world_object_upsert or world_style. No executable content.", {"world": {"type": "object"}}),
+    "world_save": ("Replace the active world with a complete declarative document (schema_version 2, id, name, theme, transitions, objects; world_export returns one). For edits prefer world_object_upsert or world_style. No executable content.", {"world": {"type": "object"}}),
     "world_load": ("Load a saved native scene.", {"world_id": {"type": "string"}}),
     "world_import": ("Import a versioned declarative scene as a new world; references never grant file or network access.", {"document": {"type": "object"}}),
     "world_export": ("Return a saved portable scene document.", {"world_id": {"type": "string"}}),
     "world_image_search": ("Search Wikimedia Commons for images with source, license and attribution metadata. Search text is sent to Wikimedia.", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 12}}),
     "world_asset_fetch": ("Fetch a bounded image from an admitted image search result into the native world texture store.", {"result_id": {"type": "string"}}),
+    "world_model_search": ("Search Poly Haven's CC0 catalogue of photoscanned 3D models (kind model: plants, trees, rocks, furniture, props, buildings parts) or HDRI skies (kind hdri: outdoor and studio environments). Matching runs locally; your query is not sent anywhere. Returns asset_id, name, size in metres and whether it is already downloaded.", {"query": {"type": "string"}, "kind": {"enum": ["model", "hdri"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 12}}),
+    "world_model_fetch": ("Download a Poly Haven model or HDRI sky by asset_id from world_model_search into the local world cache (checksummed, CC0). Returns its reference: use polyhaven:model/<id> as an object's resource with shape model, or polyhaven:hdri/<id> as theme.environment.", {"asset_id": {"type": "string"}, "kind": {"enum": ["model", "hdri"]}}),
     "world_asset_import": ("Ask to import an existing generated or selected image as a validated bounded native scene texture.", {"path": {"type": "string"}}),
-    "world_object_upsert": ("Create or update one scene object, sending only changed fields. A new id needs kind; omitted fields default. Position -100..100 (y up, camera at +z), rotation degrees, scale 0.01..20, animation speed 0.05..5; resource is empty, https://, an absolute path or memory:/capsule:/knowledge:.", {"object": _WORLD_OBJECT_SCHEMA}),
-    "world_object_remove": ("Remove an object while retaining at least one chat object.", {"object_id": {"type": "string"}}),
+    "world_object_upsert": ("Create/update one object with only changed fields. New id needs kind (media for scenery). Metres, y up, floor y=-1.8. Primitives ~1.4 m, flat colour; panel shows text/image; plane = 4x4 m ground; model needs resource polyhaven:model/<id>. parent groups parts.", {"object": _WORLD_OBJECT_SCHEMA}),
+    "world_object_remove": ("Remove an object and its parts while retaining at least one chat object.", {"object_id": {"type": "string"}}),
     "world_get": ("Read one scene object's complete bounded state, including its full text and resource.", {"object_id": {"type": "string"}}),
-    "world_state": ("Read the active 3D world: its id, name, theme, transitions and every object's id, kind, label, transform, colour, shape and animation, plus saved world IDs and the autonomous editing policy.", {}),
-    "world_style": ("Rename the active world or change its theme and/or transitions, preserving all objects. Send only the fields to change.", {"name": {"type": "string"}, "theme": {"type": "object", "properties": {"background": _WORLD_COLOR, "accent": _WORLD_COLOR, "exposure": {"type": "number", "minimum": 0.1, "maximum": 4}}, "additionalProperties": False},
+    "world_state": ("Read the active 3D world: its id, name, theme (sky, fog, floor), transitions and every object's id, kind, label, transform, colour, shape, animation and any parent, non-default material, light or Poly Haven model, plus saved world IDs and the autonomous editing policy.", {}),
+    "world_style": ("Rename the active world or change its theme and/or transitions, preserving all objects. Send only the fields to change.", {"name": {"type": "string"}, "theme": {"type": "object", "properties": {"background": _WORLD_COLOR, "accent": _WORLD_COLOR, "exposure": {"type": "number", "minimum": 0.1, "maximum": 4},
+            "environment": {"type": "string", "description": "Empty, or polyhaven:hdri/<id> from world_model_fetch: sky background and realistic image-based lighting."},
+            "environment_intensity": {"type": "number", "minimum": 0, "maximum": 4}, "fog": {"type": "number", "minimum": 0, "maximum": 500, "description": "Fog end distance in metres; 0 is off."},
+            "floor": {"enum": ["grid", "plain", "none"]}}, "additionalProperties": False},
         "transitions": {"type": "object", "properties": {"duration": {"type": "number", "minimum": 0, "maximum": 5}, "style": {"enum": ["ease", "linear", "instant"]}}, "additionalProperties": False}}),
     "world_policy": ("Ask the operator to change autonomous scene editing permissions.", {"changes": {"type": "object", "properties": {"autonomous_scene": {"type": "boolean"}}, "required": ["autonomous_scene"], "additionalProperties": False}}),
 })
@@ -132,6 +141,7 @@ READ_ONLY.add("tool_search")
 READ_ONLY.add("world_export")
 READ_ONLY.add("world_get")
 READ_ONLY.add("world_state")
+READ_ONLY.add("world_model_search")  # Local catalogue match; only the public catalogue is downloaded.
 READ_ONLY.add("choice_panel")
 READ_ONLY.add("engine_cache_branches")
 READ_ONLY.add("wakeup_list")
@@ -205,7 +215,8 @@ _USAGE_GROUPS = {
     "plan_create plan_add plan_claim plan_report plan_get plan_cancel plan_verify": "Use for explicit task coordination; obtain session/task IDs and lease fences from prior receipts. A worker report is a claim until verified.",
     "world_create world_save world_load world_import world_export": "Use for declarative scene persistence; obtain existing world IDs from state and do not embed executable content or assume imported references grant access.",
     "world_image_search world_asset_fetch world_asset_import": "Use to find or display existing images: search the subject, fetch a returned result_id, or import an admitted real file. Preserve license and attribution.",
-    "world_state world_object_upsert world_object_remove world_get world_style world_policy": "Use for requested scene changes; read world_state for object IDs and placement first, and retain a chat object. Autonomous editing follows saved policy.",
+    "world_model_search world_model_fetch": "Use for realistic 3D scenery: search Poly Haven, fetch the chosen asset_id, then place it with world_object_upsert (shape model) or set it as theme.environment. Say plainly what the world can show; primitives are not realistic.",
+    "world_state world_object_upsert world_object_remove world_get world_style world_policy": "Read world_state for IDs first; keep a chat object; autonomy follows policy. Never call primitives photorealistic.",
     "skills_list skill_view skill_manage skill_policy": "Use skills for reusable procedures; read current revisions before editing. Facts belong in memory, and skill text never grants authority.",
     "tool_result_policy tool_result_read tool_result_status tool_result_summarize": "Use to preserve context around retained large output; read bounded pages or assessment coverage, and never claim unread content was reviewed.",
 }
@@ -282,7 +293,8 @@ def grant_agent_context(context, receipt):
 
 
 # Declared directly (not only through discovery) for chats opened in the World.
-WORLD_SURFACE_TOOLS = tuple("mlx2__" + name for name in ("world_state", "world_get", "world_object_upsert", "world_object_remove", "world_style"))
+WORLD_SURFACE_TOOLS = tuple("mlx2__" + name for name in ("world_state", "world_get", "world_object_upsert", "world_object_remove", "world_style",
+                                                         "world_model_search", "world_model_fetch"))
 
 
 def enabled(controller, name):
@@ -587,14 +599,14 @@ def _tool_command(controller, request):
                 groups.setdefault(group, []).append(tool_name)
             labels = {"campaign": "Model qualification and performance testing", "conversion": "Model quantization",
                       "engine": "Model lifecycle and APCv2 cache", "capsule": "Semantic memory capsules",
-                      "dream": "Opt-in idle research", "world": "3D workspace and visual objects",
+                      "dream": "Opt-in idle research", "world": "3D world",
                       "profile": "Saved model-serving profiles", "service": "Model serving for media and Studio",
                       "memory": "Scoped agent memory", "message": "Agent message passing", "plan": "Agent planning and task coordination",
                       "agent": "Agent delegation and lifecycle", "session": "Session search and compaction",
                       "community": "Protected peer inference", "media": "Image, audio and video generation"}
             summary = f"Tool discovery completed successfully. Complete overview of {len(matches)} available tools:\n"
             summary += "\n".join(f"{labels.get(group, group.replace('_', ' ').capitalize())}: {', '.join(names)}" for group, names in sorted(groups.items()))
-            summary += "\nComplete overview; no tools executed. Answer capability questions without launching agents. Fetch schemas for requested work; library_models supplies exact model paths and identities. Never invent paths."
+            summary += "\nNo tools executed. Answer capability questions without launching agents. Fetch schemas for requested work; library_models supplies exact model paths and identities. Never invent paths."
             return {"result": bounded_result({"summary": summary, "total": len(matches), "complete": True,
                 "next_offset": None, "notice": "Complete overview. Search an exact name only when its schema is needed for requested work."}, session, summarize=False)}
         matches.sort(key=lambda item: (-_search_score(arguments["query"], item), item["function"]["name"]))
@@ -640,7 +652,9 @@ def _tool_command(controller, request):
         approval = native not in READ_ONLY
         if native == "skill_manage" and controller.skills.policy()["autonomous_writes"]:
             approval = False
-        if native in {"world_save", "world_style", "world_object_upsert", "world_object_remove"} and controller.world.policy["autonomous_scene"]:
+        # A Poly Haven fetch is bounded (checksummed CC0 files from fixed hosts within
+        # a 2 GiB cache), so the scene autonomy grant covers it like an edit.
+        if native in {"world_save", "world_style", "world_object_upsert", "world_object_remove", "world_model_fetch"} and controller.world.policy["autonomous_scene"]:
             # Autonomy covers edits to the active world only. Saving under another
             # identity would overwrite a saved world or create one without approval.
             document = arguments.get("world")

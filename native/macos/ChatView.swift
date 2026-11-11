@@ -58,7 +58,8 @@ struct ChatToolEvent: Identifiable {
                       "web_search": "Search the web", "fetch_page": "Read a web page", "agent_result": "Read agent report", "agent_fork": "Fork an agent", "agent_delegate": "Delegate work", "agent_launch": "Launch an agent", "agent_resume": "Resume an agent",
                       "agent_request_tools": "Request additional tools", "preferences": "Update settings", "snapshot": "Inspect application state",
                       "research_search": "Search sources", "research_read": "Read a source", "world_save": "Save the world", "world_object_upsert": "Update a world object",
-                      "world_object_remove": "Remove a world object", "world_style": "Change the world appearance", "world_state": "Read the world"]
+                      "world_object_remove": "Remove a world object", "world_style": "Change the world appearance", "world_state": "Read the world",
+                      "world_model_search": "Search 3D models", "world_model_fetch": "Download a 3D model"]
         return titles[actual] ?? titles[short] ?? short.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ").capitalized
     }
     var statusTitle: String {
@@ -1827,7 +1828,7 @@ struct ChatView: View {
             // Stable text: no names, labels or counts. Scene content can come from
             // imported worlds and changes every edit, so it reaches the model as
             // tool results; a changing first message would also miss the APCv2 prefix.
-            parts.append("This conversation is the chat panel inside the operator's native 3D World. \"This world\" or \"here\" means that scene. Call mlx2__world_state to see it (object ids, kinds, labels, positions, theme) before describing it, mlx2__world_get for one object's full content, and mlx2__world_object_upsert, mlx2__world_object_remove or mlx2__world_style to change it when asked. Edits follow the saved autonomous editing policy and may need the operator's approval.")
+            parts.append("This conversation is the chat panel inside the operator's native 3D World. \"This world\" or \"here\" means that scene. Call mlx2__world_state to see it (object ids, kinds, labels, positions, theme) before describing it, mlx2__world_get for one object's full content, and mlx2__world_object_upsert, mlx2__world_object_remove or mlx2__world_style to change it when asked. Built-in shapes are simple flat-coloured primitives; for realistic trees, rocks, furniture and props use mlx2__world_model_search and mlx2__world_model_fetch (Poly Haven CC0 scans) and place them as shape model, and set a downloaded HDRI sky as theme.environment for realistic lighting. Describe the result as it will actually render. Edits follow the saved autonomous editing policy and may need the operator's approval.")
         }
         return parts.joined(separator: "\n\n")
     }

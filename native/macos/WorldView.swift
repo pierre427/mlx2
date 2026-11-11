@@ -30,6 +30,27 @@ private final class WorldSceneView: SCNView {
         selectObject?(selected?.name.map { String($0.dropFirst(7)) })
         super.mouseDown(with: event)
     }
+
+    /// Scroll zooms: a mouse wheel or two-finger scroll moves the camera along
+    /// its line to the orbit target, so orbiting afterwards keeps that distance.
+    /// SceneKit's own scroll handling does not map a mouse wheel to zoom.
+    /// Pinch is left to the default camera controller.
+    override func scrollWheel(with event: NSEvent) {
+        guard let camera = pointOfView else { return super.scrollWheel(with: event) }
+        var delta = Double(event.scrollingDeltaY)
+        // Normalize "natural scrolling" so that wheel forward / fingers up zooms in.
+        if event.isDirectionInvertedFromDevice { delta = -delta }
+        // A wheel notch reports about 1; trackpad deltas are in points.
+        let step = event.hasPreciseScrollingDeltas ? delta * 0.01 : delta * 0.12
+        guard step != 0 else { return }
+        let target = defaultCameraController.target
+        let offset = SCNVector3(camera.position.x - target.x, camera.position.y - target.y, camera.position.z - target.z)
+        let distance = Double(sqrt(offset.x * offset.x + offset.y * offset.y + offset.z * offset.z))
+        guard distance > 0.0001 else { return }
+        let next = min(150, max(0.8, distance * exp(-step)))
+        let scale = CGFloat(next / distance)
+        camera.position = SCNVector3(target.x + offset.x * scale, target.y + offset.y * scale, target.z + offset.z * scale)
+    }
 }
 
 private struct NativeWorldScene: NSViewRepresentable {
@@ -46,6 +67,7 @@ private struct NativeWorldScene: NSViewRepresentable {
         var reset = 0
         var objects: [String: Data] = [:]
         var activity = ""
+        var sky = ""
         let camera = SCNNode()
     }
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -72,6 +94,7 @@ private struct NativeWorldScene: NSViewRepresentable {
         view.pointOfView = camera
         view.defaultCameraController.target = SCNVector3(0, 0, 0)
         let ambient = SCNNode()
+        ambient.name = "world-ambient"
         ambient.light = SCNLight()
         ambient.light?.type = .ambient
         ambient.light?.intensity = 450
@@ -93,6 +116,9 @@ private struct NativeWorldScene: NSViewRepresentable {
         floorNode.position.y = -1.8
         view.scene?.rootNode.addChildNode(floorNode)
         // The ground grid is actual geometry, giving camera motion depth cues.
+        let grid = SCNNode()
+        grid.name = "world-grid"
+        view.scene?.rootNode.addChildNode(grid)
         for index in -12...12 {
             for horizontal in [true, false] {
                 let box = SCNBox(width: horizontal ? 24 : 0.012, height: 0.008,
@@ -101,7 +127,7 @@ private struct NativeWorldScene: NSViewRepresentable {
                 box.firstMaterial?.emission.contents = worldColor("#102633")
                 let line = SCNNode(geometry: box)
                 line.position = horizontal ? SCNVector3(0, -1.79, Float(index)) : SCNVector3(Float(index), -1.79, 0)
-                view.scene?.rootNode.addChildNode(line)
+                grid.addChildNode(line)
             }
         }
         return view
@@ -120,15 +146,42 @@ private struct NativeWorldScene: NSViewRepresentable {
         let data = worldDocumentData(world)
         if data != coordinator.document {
             coordinator.document = data
-            view.scene?.background.contents = worldColor(world["theme"]["background"].text)
+            let theme = world["theme"]
+            let background = worldColor(theme["background"].text)
+            // A downloaded HDRI is both the visible sky and image-based lighting.
+            // Reassign only when the sky changes: decoding a 2k HDR on every edit is costly.
+            let skyReference = theme["environment"].text
+            let skyFile = polyhavenFile(skyReference)
+            if skyReference != coordinator.sky || skyFile == nil {
+                if skyReference != coordinator.sky { coordinator.objects = [:] }  // Shading model follows the sky.
+                coordinator.sky = skyReference
+                view.scene?.background.contents = skyFile ?? background
+                view.scene?.lightingEnvironment.contents = skyFile
+            }
+            view.scene?.lightingEnvironment.intensity = CGFloat(theme["environment_intensity"].double ?? 1)
+            let lit = view.scene?.lightingEnvironment.contents != nil
+            view.scene?.rootNode.childNode(withName: "world-ambient", recursively: false)?.light?.intensity = lit ? 120 : 450
+            view.scene?.rootNode.childNode(withName: "world-keylight", recursively: false)?.light?.intensity = lit ? 500 : 1100
+            let fog = CGFloat(theme["fog"].double ?? 0)
+            view.scene?.fogEndDistance = fog
+            view.scene?.fogStartDistance = fog * 0.25
+            view.scene?.fogColor = lit ? NSColor(calibratedWhite: 0.78, alpha: 1) : background
+            let floorStyle = theme["floor"].string ?? "grid"
+            view.scene?.rootNode.childNode(withName: "world-floor", recursively: false)?.isHidden = floorStyle == "none"
+            view.scene?.rootNode.childNode(withName: "world-grid", recursively: false)?.isHidden = floorStyle != "grid"
             // Exposure is a brightness multiplier; SceneKit's offset is in stops.
-            coordinator.camera.camera?.exposureOffset = CGFloat(log2(max(0.1, world["theme"]["exposure"].double ?? 1)))
+            coordinator.camera.camera?.exposureOffset = CGFloat(log2(max(0.1, theme["exposure"].double ?? 1)))
             let rows = world["objects"].array
             let live = Set(rows.map { $0["id"].text })
-            for node in view.scene?.rootNode.childNodes ?? [] {
-                if let name = node.name, name.hasPrefix("object:"), !live.contains(String(name.dropFirst(7))) {
-                    node.removeFromParentNode()
-                }
+            // Object nodes nest under their parent objects, so search the whole tree.
+            var stale: [SCNNode] = []
+            view.scene?.rootNode.enumerateHierarchy { node, _ in
+                if let name = node.name, name.hasPrefix("object:"), !live.contains(String(name.dropFirst(7))) { stale.append(node) }
+            }
+            for node in stale {
+                // Children that are still live objects move to the root before their old parent goes.
+                for child in node.childNodes where child.name?.hasPrefix("object:") == true { view.scene?.rootNode.addChildNode(child) }
+                node.removeFromParentNode()
             }
             coordinator.objects = coordinator.objects.filter { live.contains($0.key) }
             SCNTransaction.begin()
@@ -140,24 +193,48 @@ private struct NativeWorldScene: NSViewRepresentable {
                 let identity = row["id"].text
                 guard let objectData = worldDocumentData(row), coordinator.objects[identity] != objectData else { continue }
                 coordinator.objects[identity] = objectData
-                let node = view.scene?.rootNode.childNode(withName: "object:" + identity, recursively: false) ?? SCNNode()
+                let node = view.scene?.rootNode.childNode(withName: "object:" + identity, recursively: true) ?? SCNNode()
                 node.name = "object:" + identity
                 node.removeAllActions()
-                node.childNodes.forEach { $0.removeFromParentNode() }
+                // Keep child objects (parts); rebuild only this object's own decorations.
+                node.childNodes.filter { $0.name?.hasPrefix("object:") != true }.forEach { $0.removeFromParentNode() }
+                let shape = row["shape"].text
                 node.geometry = geometry(row)
                 node.geometry?.materials = [material(row)]
+                node.light = shape == "light" ? light(row) : nil
+                if shape == "model" { attachModel(row, to: node) }
                 node.position = worldVector(row["position"])
                 let rotation = worldVector(row["rotation"])
                 node.eulerAngles = SCNVector3(rotation.x * .pi / 180, rotation.y * .pi / 180, rotation.z * .pi / 180)
                 node.scale = worldVector(row["scale"], fallback: 1)
                 if node.parent == nil { view.scene?.rootNode.addChildNode(node) }
-                if row["shape"].text != "panel" { addLabel(row, to: node) }
+                // Scenery and parts carry no floating caption; cards show their label inline.
+                if !["panel", "model", "light", "plane"].contains(shape) && row["parent"].text.isEmpty && row["kind"].text != "media" { addLabel(row, to: node) }
                 animate(row, node: node)
+            }
+            // Parts live under their parent object so transforms compose. Every node that
+            // changes parent first moves to the root, so swapping a parent and its part in
+            // one update can never attach a node beneath its own descendant.
+            if let root = view.scene?.rootNode {
+                func objectNode(_ identity: String) -> SCNNode? { root.childNode(withName: "object:" + identity, recursively: true) }
+                var moves: [(SCNNode, SCNNode)] = []
+                for row in rows {
+                    guard let node = objectNode(row["id"].text) else { continue }
+                    let parentName = row["parent"].text
+                    guard let parent = parentName.isEmpty ? root : objectNode(parentName), node.parent !== parent else { continue }
+                    moves.append((node, parent))
+                    root.addChildNode(node)
+                }
+                for (node, parent) in moves {
+                    var ancestor: SCNNode? = parent
+                    while let current = ancestor, current !== node { ancestor = current.parent }
+                    if ancestor == nil { parent.addChildNode(node) }
+                }
             }
             SCNTransaction.commit()
         }
         for row in world["objects"].array where row["kind"].text == "avatar" {
-            guard let node = view.scene?.rootNode.childNode(withName: "object:" + row["id"].text, recursively: false) else { continue }
+            guard let node = view.scene?.rootNode.childNode(withName: "object:" + row["id"].text, recursively: true) else { continue }
             let indicator = node.childNode(withName: "agent-activity", recursively: false)
             if coordinator.activity != activity || indicator == nil {
                 indicator?.removeFromParentNode()
@@ -175,35 +252,147 @@ private struct NativeWorldScene: NSViewRepresentable {
         coordinator.activity = activity
         if coordinator.selected != selection || data != nil {
             coordinator.selected = selection
-            for node in view.scene?.rootNode.childNodes ?? [] where node.name?.hasPrefix("object:") == true {
-                let chosen = node.name == "object:" + (selection ?? "")
-                node.geometry?.firstMaterial?.emission.intensity = chosen ? 0.6 : 0.12
+            let emissions = Dictionary(world["objects"].array.map { ($0["id"].text, CGFloat($0["material"]["emission"].double ?? 0.12)) }, uniquingKeysWith: { first, _ in first })
+            view.scene?.rootNode.enumerateHierarchy { node, _ in
+                guard let name = node.name, name.hasPrefix("object:") else { return }
+                let identity = String(name.dropFirst(7))
+                let base = emissions[identity] ?? 0.12
+                node.geometry?.firstMaterial?.emission.intensity = identity == selection ? max(0.6, base) : base
             }
         }
     }
 
-    private func geometry(_ row: JSON) -> SCNGeometry {
+    private func geometry(_ row: JSON) -> SCNGeometry? {
         switch row["shape"].text {
         case "sphere": return SCNSphere(radius: 0.72)
         case "cube": return SCNBox(width: 1.35, height: 1.35, length: 1.35, chamferRadius: 0.12)
         case "ring": return SCNTorus(ringRadius: 0.74, pipeRadius: 0.16)
+        case "cylinder": return SCNCylinder(radius: 0.6, height: 1.4)
+        case "cone": return SCNCone(topRadius: 0, bottomRadius: 0.7, height: 1.4)
+        case "capsule": return SCNCapsule(capRadius: 0.45, height: 1.4)
+        case "pyramid": return SCNPyramid(width: 1.4, height: 1.4, length: 1.4)
+        case "plane": return SCNBox(width: 4, height: 0.02, length: 4, chamferRadius: 0)
+        // A light or model has no geometry of its own; a model's mesh loads as a child.
+        case "light": return nil
+        case "model": return nil
         default: let plane = SCNPlane(width: 3.2, height: 2); plane.cornerRadius = 0.12; return plane
         }
+    }
+    private func light(_ row: JSON) -> SCNLight {
+        let light = SCNLight()
+        let kind = row["light"]["type"].string ?? "omni"
+        light.type = kind == "spot" ? .spot : kind == "directional" ? .directional : .omni
+        light.intensity = CGFloat(row["light"]["intensity"].double ?? 1000)
+        light.color = worldColor(row["color"].text, fallback: .white)
+        if kind != "omni" {
+            light.castsShadow = true
+            light.shadowMode = .deferred
+            light.shadowSampleCount = 8
+            light.shadowRadius = 3
+            light.shadowColor = NSColor(calibratedWhite: 0, alpha: 0.55)
+        }
+        if kind == "spot" { light.spotInnerAngle = 25; light.spotOuterAngle = 60 }
+        if kind == "directional" { light.orthographicScale = 30 }
+        return light
     }
     private func material(_ row: JSON) -> SCNMaterial {
         let material = SCNMaterial()
         let color = worldColor(row["color"].text)
+        let finish = row["material"]
+        let shape = row["shape"].text
         if let image = grantedTexture(row["resource"].string ?? "") {
             material.diffuse.contents = image
+            let tiling = CGFloat(max(1, finish["tiling"].double ?? 1))
+            if tiling > 1 {
+                material.diffuse.contentsTransform = SCNMatrix4MakeScale(tiling, tiling, 1)
+                material.diffuse.wrapS = .repeat
+                material.diffuse.wrapT = .repeat
+            }
         } else {
-            material.diffuse.contents = row["shape"].text == "panel" ? texture(row) : color
+            material.diffuse.contents = shape == "panel" ? texture(row) : color
         }
+        // Under an HDRI sky, solids use physically based shading so the sky lights them;
+        // without one they keep the original look. Cards stay readable either way.
+        if shape != "panel" && !world["theme"]["environment"].text.isEmpty { material.lightingModel = .physicallyBased }
         material.emission.contents = color
-        material.emission.intensity = 0.12
-        material.metalness.contents = 0.2
-        material.roughness.contents = 0.35
+        material.emission.intensity = CGFloat(finish["emission"].double ?? 0.12)
+        material.metalness.contents = finish["metalness"].double ?? 0.2
+        material.roughness.contents = finish["roughness"].double ?? 0.35
+        material.transparency = CGFloat(finish["opacity"].double ?? 1)
         material.isDoubleSided = true
         return material
+    }
+    /// Resolve a polyhaven:model/<id> or polyhaven:hdri/<id> reference to its cached
+    /// file inside the asset root, refusing links and anything outside the cache.
+    private func polyhavenFile(_ reference: String) -> URL? {
+        let parts = reference.split(separator: "/", maxSplits: 1).map(String.init)
+        guard !assetRoot.isEmpty, parts.count == 2, ["polyhaven:model", "polyhaven:hdri"].contains(parts[0]),
+              parts[1].range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else { return nil }
+        let base = URL(fileURLWithPath: assetRoot).appendingPathComponent("polyhaven").standardizedFileURL
+        let file = parts[0] == "polyhaven:model"
+            ? base.appendingPathComponent("models/\(parts[1])/model.usdc")
+            : base.appendingPathComponent("hdris/\(parts[1]).hdr")
+        guard file.resolvingSymlinksInPath() == file,
+              let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
+        return file
+    }
+    /// Loaded model templates, shared by every object that shows the same asset.
+    private static let modelCache = NSCache<NSString, SCNNode>()
+    private static let modelQueue = DispatchQueue(label: "mlx2.world.models", qos: .userInitiated)
+    /// Callbacks for loads in flight, keyed by reference. Touched only on the main thread.
+    private static var modelWaiters: [String: [(SCNNode?) -> Void]] = [:]
+    private func attachModel(_ row: JSON, to node: SCNNode) {
+        let reference = row["resource"].text
+        func standIn() {
+            // Not downloaded on this Mac (for example an imported world) or unreadable.
+            guard node.childNode(withName: "model-missing", recursively: false) == nil else { return }
+            let stand = SCNNode(geometry: SCNBox(width: 1, height: 1, length: 1, chamferRadius: 0.05))
+            stand.name = "model-missing"
+            stand.geometry?.firstMaterial?.diffuse.contents = NSColor.systemOrange.withAlphaComponent(0.35)
+            stand.position.y = 0.5
+            node.addChildNode(stand)
+        }
+        guard let file = polyhavenFile(reference) else { standIn(); return }
+        // The marker names the load this node is waiting for. A re-render clears it,
+        // so a slower load for an earlier resource can never attach to the node.
+        let marker = SCNNode()
+        marker.name = "model-pending:" + reference
+        node.addChildNode(marker)
+        func place(_ template: SCNNode) {
+            guard let pending = node.childNode(withName: "model-pending:" + reference, recursively: false),
+                  node.childNode(withName: "model-content", recursively: false) == nil else { return }
+            pending.removeFromParentNode()
+            let content = template.clone()
+            content.name = "model-content"
+            node.addChildNode(content)
+        }
+        if let template = Self.modelCache.object(forKey: reference as NSString) { place(template); return }
+        // One load per asset: later requests wait for the load already in flight.
+        let waiter: (SCNNode?) -> Void = { template in
+            if let template { place(template) } else if node.childNode(withName: "model-pending:" + reference, recursively: false) != nil { standIn() }
+        }
+        if Self.modelWaiters[reference] != nil { Self.modelWaiters[reference]?.append(waiter); return }
+        Self.modelWaiters[reference] = [waiter]
+        func finish(_ template: SCNNode?) {
+            if let template { Self.modelCache.setObject(template, forKey: reference as NSString) }
+            let waiting = Self.modelWaiters.removeValue(forKey: reference) ?? []
+            waiting.forEach { $0(template) }
+        }
+        Self.modelQueue.async {
+            guard let scene = try? SCNScene(url: file, options: [.checkConsistency: true]) else {
+                DispatchQueue.main.async { finish(nil) }
+                return
+            }
+            let template = SCNNode()
+            scene.rootNode.childNodes.forEach { template.addChildNode($0) }
+            // Poly Haven USD files are Z-up; SceneKit scenes are Y-up.
+            if let up = (scene.attribute(forKey: SCNScene.Attribute.upAxis.rawValue) as? NSValue)?.scnVector3Value, abs(up.z) > abs(up.y) {
+                template.eulerAngles.x = -.pi / 2
+            }
+            // place() checks the pending marker, so a removed or re-pointed object is skipped.
+            DispatchQueue.main.async { finish(template) }
+        }
     }
     // Stored textures are content-addressed, so a path always names the same image.
     private static let textureCache = NSCache<NSString, NSImage>()
@@ -487,7 +676,7 @@ struct WorldView: View {
                     Text("Selected object").font(.headline)
                     TextField("Label", text: $label)
                     Picker("Kind", selection: $kind) { ForEach(kinds, id: \.self) { Text($0.capitalized).tag($0) } }
-                    Picker("Shape", selection: $shape) { ForEach(["panel", "sphere", "cube", "ring"], id: \.self) { Text($0.capitalized).tag($0) } }
+                    Picker("Shape", selection: $shape) { ForEach(["panel", "sphere", "cube", "ring", "cylinder", "cone", "capsule", "pyramid", "plane", "model", "light"], id: \.self) { Text($0.capitalized).tag($0) } }
                     field("Position x, y, z", value: $position)
                     field("Rotation x, y, z (degrees)", value: $rotation)
                     field("Scale x, y, z", value: $scale)

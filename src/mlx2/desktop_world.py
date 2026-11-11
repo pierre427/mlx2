@@ -21,9 +21,22 @@ from pathlib import Path
 from .desktop_lane import LANE
 
 KINDS = {"chat", "memory", "knowledge", "web", "file", "folder", "avatar", "media"}
-SHAPES = {"panel", "sphere", "cube", "ring"}
+SHAPES = {"panel", "sphere", "cube", "ring", "cylinder", "cone", "capsule", "plane", "pyramid", "model", "light"}
 ANIMATIONS = {"none", "pulse", "spin", "float"}
-OBJECT_FIELDS = ("id", "kind", "label", "position", "rotation", "scale", "color", "shape", "text", "resource", "animation")
+LIGHT_TYPES = {"omni", "spot", "directional"}
+FLOORS = {"grid", "plain", "none"}
+OBJECT_FIELDS = ("id", "kind", "label", "position", "rotation", "scale", "color", "shape", "text", "resource", "animation",
+                 "parent", "material", "light")
+MATERIAL_BOUNDS = {"roughness": (0, 1), "metalness": (0, 1), "emission": (0, 1), "opacity": (0.05, 1), "tiling": (1, 50)}
+MATERIAL_DEFAULTS = {"roughness": 0.35, "metalness": 0.2, "emission": 0.12, "opacity": 1, "tiling": 1}
+LIGHT_DEFAULTS = {"type": "omni", "intensity": 1000}
+THEME_DEFAULTS = {"environment": "", "environment_intensity": 1, "fog": 0, "floor": "grid"}
+SCHEMA_VERSION = 2
+MAX_LIGHTS = 8
+MAX_PARENT_DEPTH = 8
+# Downloaded Poly Haven assets are named by catalogue identity, never by path, so
+# documents stay portable and a reference can never reach outside the asset cache.
+POLYHAVEN_REFERENCE = re.compile(r"polyhaven:(model|hdri)/([A-Za-z0-9_-]{1,64})")
 # World documents are stored as <id>.json beside these application files.
 RESERVED_WORLD_IDS = {"state", "assets"}
 MAX_SAVED_WORLDS = 256
@@ -38,6 +51,13 @@ def identifier(value):
 def color(value):
     if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
         raise ValueError("Colors must be #RRGGBB")
+    return value
+
+
+def number(value, low, high, message):
+    # Bounds before isfinite: an integer beyond float range must be a refusal, not OverflowError.
+    if type(value) not in (int, float) or not low <= value <= high or not math.isfinite(value):
+        raise ValueError(message)
     return value
 
 
@@ -62,8 +82,24 @@ def validate_object(value):
         if not isinstance(value[key], str) or len(value[key]) > maximum:
             raise ValueError("Scene object text exceeds its budget")
     resource = value["resource"]
-    if resource and not (resource.startswith(("https://", "/", "memory:", "capsule:", "knowledge:"))):
-        raise ValueError("Resources must be explicit references, local paths or HTTPS links")
+    if resource and not (resource.startswith(("https://", "/", "memory:", "capsule:", "knowledge:")) or POLYHAVEN_REFERENCE.fullmatch(resource)):
+        raise ValueError("Resources must be explicit references, local paths, HTTPS links or polyhaven:model/<id>")
+    reference = POLYHAVEN_REFERENCE.fullmatch(resource)
+    if value["shape"] == "model" and not (reference and reference.group(1) == "model"):
+        raise ValueError("A model object needs resource polyhaven:model/<asset id> from world_model_fetch")
+    if reference and reference.group(1) != "model":
+        raise ValueError("HDRI skies belong in the theme environment, not on an object")
+    if not isinstance(value["parent"], str) or (value["parent"] and identifier(value["parent"]) == value["id"]):
+        raise ValueError("An object's parent must be another object's id or empty")
+    material = value["material"]
+    if not isinstance(material, dict) or set(material) != set(MATERIAL_BOUNDS):
+        raise ValueError("Material needs roughness, metalness, emission, opacity and tiling")
+    for key, (low, high) in MATERIAL_BOUNDS.items():
+        number(material[key], low, high, f"Material {key} must be between {low} and {high}")
+    light = value["light"]
+    if not isinstance(light, dict) or set(light) != {"type", "intensity"} or not isinstance(light["type"], str) or light["type"] not in LIGHT_TYPES:
+        raise ValueError("Light needs a type (omni, spot or directional) and an intensity")
+    number(light["intensity"], 0, 5000, "Light intensity must be between 0 and 5000")
     vector(value["position"], -100, 100)
     vector(value["rotation"], -360, 360)
     vector(value["scale"], 0.01, 20)
@@ -71,16 +107,15 @@ def validate_object(value):
     animation = value["animation"]
     if not isinstance(animation, dict) or set(animation) != {"kind", "speed"} or not isinstance(animation["kind"], str) or animation["kind"] not in ANIMATIONS:
         raise ValueError("Unsupported declarative animation")
-    # Bounds before isfinite: an integer beyond float range must be a refusal, not OverflowError.
-    if type(animation["speed"]) not in (int, float) or not 0.05 <= animation["speed"] <= 5 or not math.isfinite(animation["speed"]):
-        raise ValueError("Animation speed must be between 0.05 and 5")
+    number(animation["speed"], 0.05, 5, "Animation speed must be between 0.05 and 5")
     return copy.deepcopy(value)
 
 
 def object_defaults(identity, kind, accent="#38CBFF"):
     return {"id": identity, "kind": kind, "label": identity, "position": [0, 0, 0], "rotation": [0, 0, 0],
             "scale": [1, 1, 1], "color": accent, "shape": "sphere" if kind == "avatar" else "panel",
-            "text": "", "resource": "", "animation": {"kind": "none", "speed": 1}}
+            "text": "", "resource": "", "animation": {"kind": "none", "speed": 1},
+            "parent": "", "material": dict(MATERIAL_DEFAULTS), "light": dict(LIGHT_DEFAULTS)}
 
 
 def merge_object(existing, patch, accent="#38CBFF"):
@@ -98,21 +133,24 @@ def merge_object(existing, patch, accent="#38CBFF"):
     else:
         base = copy.deepcopy(existing)
     merged = {**base, **copy.deepcopy(patch)}
-    if isinstance(base["animation"], dict) and isinstance(patch.get("animation"), dict):
-        merged["animation"] = {**base["animation"], **patch["animation"]}
+    for key in ("animation", "material", "light"):
+        if isinstance(base[key], dict) and isinstance(patch.get(key), dict):
+            merged[key] = {**base[key], **patch[key]}
     return validate_object(merged)
 
 
 def default_world(name="My world"):
-    return {"schema_version": 1, "id": uuid.uuid4().hex, "name": name,
-            "theme": {"background": "#071321", "accent": "#38CBFF", "exposure": 1},
+    return {"schema_version": SCHEMA_VERSION, "id": uuid.uuid4().hex, "name": name,
+            "theme": {"background": "#071321", "accent": "#38CBFF", "exposure": 1, **THEME_DEFAULTS},
             "transitions": {"duration": 0.6, "style": "ease"},
             "objects": [{"id": "chat", "kind": "chat", "label": "Chat", "position": [0, 0, 0],
                          "rotation": [0, 0, 0], "scale": [1, 1, 1], "color": "#38CBFF", "shape": "panel",
-                         "text": "Your conversation", "resource": "", "animation": {"kind": "none", "speed": 1}},
+                         "text": "Your conversation", "resource": "", "animation": {"kind": "none", "speed": 1},
+                         "parent": "", "material": dict(MATERIAL_DEFAULTS), "light": dict(LIGHT_DEFAULTS)},
                         {"id": "agent", "kind": "avatar", "label": "Agent", "position": [3, 0.4, 0],
                          "rotation": [0, 0, 0], "scale": [1, 1, 1], "color": "#38CBFF", "shape": "sphere",
-                         "text": "", "resource": "", "animation": {"kind": "pulse", "speed": 1}}]}
+                         "text": "", "resource": "", "animation": {"kind": "pulse", "speed": 1},
+                         "parent": "", "material": dict(MATERIAL_DEFAULTS), "light": dict(LIGHT_DEFAULTS)}]}
 
 
 def migrate_world(value):
@@ -124,11 +162,30 @@ def migrate_world(value):
         value["name"] = "My world"
     if isinstance(value.get("id"), str) and value["id"].casefold() in RESERVED_WORLD_IDS:
         value["id"] = uuid.uuid4().hex
+    return upgrade_schema(value)
+
+
+def upgrade_schema(value):
+    """Bring an older but valid document to the current schema without other repairs."""
+    if not isinstance(value, dict):
+        return value
+    value = copy.deepcopy(value)
+    if value.get("schema_version") == 1:
+        # Version 2 added parts, materials, lights and scene environment; version 1
+        # scenes gain their defaults and render exactly as before.
+        value["schema_version"] = SCHEMA_VERSION
+        if isinstance(value.get("theme"), dict):
+            value["theme"] = {**THEME_DEFAULTS, **value["theme"]}
+        for obj in value.get("objects", []) if isinstance(value.get("objects"), list) else []:
+            if isinstance(obj, dict):
+                obj.setdefault("parent", "")
+                obj.setdefault("material", dict(MATERIAL_DEFAULTS))
+                obj.setdefault("light", dict(LIGHT_DEFAULTS))
     return value
 
 
 def validate_world(value):
-    if not isinstance(value, dict) or set(value) != {"schema_version", "id", "name", "theme", "transitions", "objects"} or value["schema_version"] != 1:
+    if not isinstance(value, dict) or set(value) != {"schema_version", "id", "name", "theme", "transitions", "objects"} or value["schema_version"] != SCHEMA_VERSION:
         raise ValueError("Unsupported world document schema")
     identifier(value["id"])
     # Worlds are stored as <id>.json on a case-insensitive volume: STATE is state.
@@ -137,12 +194,19 @@ def validate_world(value):
     if not isinstance(value["name"], str) or not value["name"].strip() or len(value["name"]) > 200:
         raise ValueError("A world needs a non-blank name of at most 200 characters")
     theme = value["theme"]
-    if not isinstance(theme, dict) or set(theme) != {"background", "accent", "exposure"}:
+    if not isinstance(theme, dict) or set(theme) != {"background", "accent", "exposure", *THEME_DEFAULTS}:
         raise ValueError("Invalid scene theme")
     color(theme["background"])
     color(theme["accent"])
-    if type(theme["exposure"]) not in (int, float) or not 0.1 <= theme["exposure"] <= 4 or not math.isfinite(theme["exposure"]):
-        raise ValueError("Exposure must be between 0.1 and 4")
+    number(theme["exposure"], 0.1, 4, "Exposure must be between 0.1 and 4")
+    environment = theme["environment"]
+    reference = POLYHAVEN_REFERENCE.fullmatch(environment) if isinstance(environment, str) else None
+    if not isinstance(environment, str) or (environment and not (reference and reference.group(1) == "hdri")):
+        raise ValueError("The theme environment is empty or polyhaven:hdri/<asset id> from world_model_fetch")
+    number(theme["environment_intensity"], 0, 4, "Environment intensity must be between 0 and 4")
+    number(theme["fog"], 0, 500, "Fog distance must be between 0 (off) and 500")
+    if not isinstance(theme["floor"], str) or theme["floor"] not in FLOORS:
+        raise ValueError("Floor must be grid, plain or none")
     transitions = value["transitions"]
     if not isinstance(transitions, dict) or set(transitions) != {"duration", "style"} or not isinstance(transitions["style"], str) or transitions["style"] not in {"ease", "linear", "instant"}:
         raise ValueError("Invalid scene transitions")
@@ -153,6 +217,18 @@ def validate_world(value):
     objects = [validate_object(obj) for obj in value["objects"]]
     if len({o["id"] for o in objects}) != len(objects) or not any(o["kind"] == "chat" for o in objects):
         raise ValueError("World object identities must be unique and include a chat object")
+    parents = {o["id"]: o["parent"] for o in objects}
+    for identity in parents:
+        seen, current = {identity}, parents[identity]
+        while current:
+            if current not in parents:
+                raise ValueError(f"Object {identity} names a parent that does not exist: {current}")
+            if current in seen or len(seen) > MAX_PARENT_DEPTH:
+                raise ValueError("Object parents must form a tree at most eight levels deep")
+            seen.add(current)
+            current = parents[current]
+    if sum(o["shape"] == "light" for o in objects) > MAX_LIGHTS:
+        raise ValueError(f"A world can hold at most {MAX_LIGHTS} light objects")
     if len(json.dumps(value, allow_nan=False).encode()) > 4 * 1024 * 1024:
         raise ValueError("World scene metadata exceeds four MiB")
     return copy.deepcopy(value)
@@ -166,6 +242,8 @@ class Worlds:
         self.lock = threading.RLock()
         self.assets = self.home / "assets"
         self.assets.mkdir(mode=0o700, exist_ok=True)
+        from .desktop_world_assets import PolyHaven
+        self.polyhaven = PolyHaven(self.assets / "polyhaven", self._reference_text)
         self.search_results = {}
         self.seen_artifacts = {}
         self.policy = {"autonomous_scene": False}
@@ -262,7 +340,8 @@ class Worlds:
                         "label": Path(path).name[:200], "position": [((count % 5) - 2) * 2.5, 0, -2 - (count // 5) * 2],
                         "rotation": [0, 0, 0], "scale": [1, 1, 1], "color": "#38CBFF", "shape": "panel",
                         "text": (capability + " · " + job["state"] + "\nJob: " + job["id"] + "\n" + path)[:8192],
-                        "resource": resource[:4096], "animation": {"kind": "none", "speed": 1}})
+                        "resource": resource[:4096], "animation": {"kind": "none", "speed": 1},
+                        "parent": "", "material": dict(MATERIAL_DEFAULTS), "light": dict(LIGHT_DEFAULTS)})
                     seen.append(identity)
                     everywhere.add(identity)
                     changed = True
@@ -329,6 +408,28 @@ class Worlds:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(data)
         return str(path)
+
+    def _reference_text(self):
+        """Every stored document that may name a cached asset, as one string."""
+        with self.lock:
+            parts = [json.dumps(self.active)]
+            profiles = self.home.parent / "user-profiles"
+            for path in [*self.home.glob("*.json"), *self.home.glob("state.json.invalid-*"),
+                         *(profiles.rglob("*.json") if profiles.is_dir() else [])]:
+                if not path.is_symlink() and path.is_file() and path.stat().st_size <= 64 * 1024 * 1024:
+                    parts.append(path.read_text(errors="ignore"))
+            return "\n".join(parts)
+
+    def _require_cached(self, *references):
+        """Refuse an edit that newly names a Poly Haven asset that was never downloaded.
+
+        Only the edited reference is checked: an imported scene may name assets
+        not yet fetched here, and those must not block unrelated edits.
+        """
+        for reference in references:
+            match = POLYHAVEN_REFERENCE.fullmatch(reference)
+            if match and not self.polyhaven.cached(match.group(1), match.group(2)):
+                raise ValueError(f"{reference} is not downloaded; call world_model_fetch with kind {match.group(1)} and asset_id {match.group(2)} first")
 
     def _asset_bytes(self):
         return sum(p.stat().st_size for p in self.assets.iterdir() if not p.is_symlink() and p.is_file())
@@ -504,7 +605,7 @@ class Worlds:
             self._room_for(value["id"])
             return value
         if command == "world_save":
-            value = validate_world(request["world"])
+            value = validate_world(upgrade_schema(request["world"]))
             self._room_for(value["id"])  # A save under a new id creates a file, so it counts against the cap.
             return value
         if command in {"world_load", "world_export"}:
@@ -525,7 +626,10 @@ class Worlds:
             value["transitions"].update(transitions or {})
             if name is not None:
                 value["name"] = name
-            return validate_world(value)
+            value = validate_world(value)
+            if isinstance(theme, dict) and "environment" in theme:
+                self._require_cached(value["theme"]["environment"])
+            return value
         if command == "world_object_upsert":
             patch = request["object"]
             identity = patch.get("id") if isinstance(patch, dict) else None
@@ -537,12 +641,22 @@ class Worlds:
                 value["objects"].append(obj)
             else:
                 value["objects"][index] = obj
-            return validate_world(value)
+            value = validate_world(value)
+            if isinstance(patch, dict) and "resource" in patch:
+                self._require_cached(obj["resource"])
+            return value
         if command == "world_object_remove":
             if not any(o["id"] == request["object_id"] for o in self.active["objects"]):
                 raise ValueError("Scene object does not exist; read world_state for object IDs")
+            # Removing an object removes its parts with it (parents form a tree).
+            doomed = {request["object_id"]}
+            while True:
+                more = {o["id"] for o in self.active["objects"] if o["parent"] in doomed} - doomed
+                if not more:
+                    break
+                doomed |= more
             value = copy.deepcopy(self.active)
-            value["objects"] = [o for o in value["objects"] if o["id"] != request["object_id"]]
+            value["objects"] = [o for o in value["objects"] if o["id"] not in doomed]
             return validate_world(value)
         if command == "world_policy":
             changes = request["changes"]
@@ -558,6 +672,10 @@ class Worlds:
         # or other application requests.
         if command == "world_image_search":
             return self.image_search(request["query"], request["limit"])
+        if command == "world_model_search":
+            return self.polyhaven.search(request["query"], request["kind"], request.get("limit", 6))
+        if command == "world_model_fetch":
+            return self.polyhaven.fetch(request["kind"], request["asset_id"])
         if command == "world_asset_fetch":
             with self.lock:
                 result = self.search_results.get(request["result_id"])
@@ -606,9 +724,18 @@ def compact_state(snapshot):
     active = snapshot["active"]
     objects = []
     for obj in active["objects"]:
-        row = {key: obj[key] for key in OBJECT_FIELDS if key not in {"text", "resource"}}
+        row = {key: obj[key] for key in OBJECT_FIELDS if key not in {"text", "resource", "parent", "material", "light"}}
+        # Defaults are left out so a large scene stays readable.
+        if obj["parent"]:
+            row["parent"] = obj["parent"]
+        if obj["material"] != MATERIAL_DEFAULTS:
+            row["material"] = obj["material"]
+        if obj["shape"] == "light":
+            row["light"] = obj["light"]
         row["text_preview"] = obj["text"][:160]
         row["has_resource"] = bool(obj["resource"])
+        if POLYHAVEN_REFERENCE.fullmatch(obj["resource"]):
+            row["resource"] = obj["resource"]  # A catalogue identity, never a private path.
         objects.append(row)
     return {"active": {"id": active["id"], "name": active["name"], "theme": active["theme"],
                        "transitions": active["transitions"], "objects": objects},

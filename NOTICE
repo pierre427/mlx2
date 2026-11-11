@@ -1336,3 +1336,22 @@ objective in src/mlx2/runtime/models/qsa_indexer_train.py (the block teacher,
 KL loss and optimizer settings of research/qsa/teacher.py, losses.py and
 train_indexer.py) are re-expressed in MLX; no source file or weights are
 copied. The full Apache-2.0 text is this repository's LICENSE.
+
+------------------------------------------------------------------------------
+Exact multi-row verify kernels — MLX (https://github.com/ml-explore/mlx),
+MIT License, Copyright (c) 2023 Apple Inc.
+
+- src/mlx2/runtime/models/gemv_rows_exact.py re-expresses the one-row dense
+  gemv kernel of MLX 0.32.4 (mlx/backend/metal/kernels/gemv.h,
+  GEMVKernel::run, with the tile selection of mlx/backend/metal/matmul.cpp
+  gemv_axbpy) for several input rows: the same per-row accumulation sequence
+  and reduction tree, with each weight tile loaded once.
+- src/mlx2/runtime/models/fp_row_exact_qmv.py calls MLX's own one-row MXFP8 /
+  NVFP4 quantized matvec functions (fp_quantized.h), read at run time from
+  the installed MLX package, once per row inside one launch; its dispatch
+  mirrors MLX's one-row dispatch.
+
+The row loop, the bit-for-bit admission checks and the dispatch are mlx2's
+own; no MLX source file is included in this repository. The MIT permission
+notice reproduced above for MLX applies. No Apple copyright header is added
+to mlx2 source files.
