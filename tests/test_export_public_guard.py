@@ -114,3 +114,117 @@ def test_mcp_code_is_never_a_publication_input():
     assert "mcp" not in public_text.lower()
     assert 'radio = ["mlx>=0.32"]' in public_text and "mlx2-serve" in public_text
     assert ex.public_text("src/mlx2/server.py", "x = 'mcp'\n") == "x = 'mcp'\n"
+
+
+# --- withhold list and public push guard (2026-11-10: a snapshot exported with
+# this script alone published media, Sushi probes and private-evidence tests,
+# because their exclusions lived only in out-of-tree sync tooling) ---
+
+def test_withhold_list_is_loaded_and_never_exported():
+    assert exporter.WITHHELD is not None
+    assert not exporter.is_public_code_path("scripts/public_export_withheld.txt")
+    for name in ("src/mlx2/media/api.py", "scripts/media/qualify_music.py",
+                 "src/mlx2/adapters/media/rife425.py", "scripts/sushi_probe/gpu.py",
+                 "tests/test_ds41_streaming_ab_cpu.py"):
+        assert exporter.is_private_path(name) and exporter.never_public(name), name
+        assert not exporter.is_public_code_path(name), name
+    # frozen public copies are not exported but may stay in the public tree
+    assert exporter.withheld_kind("tests/test_media_qualification.py") == "frozen"
+    assert exporter.is_private_path("tests/test_media_qualification.py")
+    assert not exporter.never_public("tests/test_media_qualification.py")
+    assert not exporter.is_private_path("src/mlx2/serving.py")
+
+
+def test_withhold_list_rejects_malformed_lines():
+    with pytest.raises(ValueError):
+        exporter.parse_withheld("maybe src/mlx2/media/\n")
+    with pytest.raises(ValueError):
+        exporter.parse_withheld("never ../outside.py\n")
+    parsed = exporter.parse_withheld("# c\nnever  a/\nfrozen b.py  # why\n")
+    assert parsed["never"]["prefix"] == {"a/"} and parsed["frozen"]["exact"] == {"b.py"}
+
+
+def test_export_fails_closed_without_the_withhold_list(private_repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(exporter, "WITHHELD", None)
+    with pytest.raises(ValueError, match="withhold list"):
+        exporter.export(private_repo, "HEAD", tmp_path / "out", include=["src/mlx2/example.py"])
+
+
+def _public_clone(tmp_path):
+    remote = tmp_path / "public.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    clone = tmp_path / "public"
+    subprocess.run(["git", "clone", "-q", str(remote), str(clone)], check=True,
+                   capture_output=True)
+    ident = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"]
+
+    def commit(name, text="x = 1\n"):
+        path = clone / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        subprocess.run(["git", "-C", str(clone), "add", "-f", name], check=True)
+        subprocess.run(["git", "-C", str(clone), *ident, "commit", "-qm", name], check=True)
+    return clone, commit
+
+
+def test_pre_push_guard_refuses_never_public_paths_and_allows_code(tmp_path):
+    clone, commit = _public_clone(tmp_path)
+    exporter.install_push_guard(clone)
+    hook = clone / ".git/hooks/pre-push"
+    assert hook.is_file() and str(Path(exporter.__file__).resolve()) in hook.read_text()
+    exclude = (clone / ".git/info/exclude").read_text()
+    assert "/src/mlx2/media/" in exclude and "/scripts/sushi_probe/" in exclude
+    commit("src/mlx2/serving.py")
+    ok = subprocess.run(["git", "-C", str(clone), "push", "-q", "origin", "HEAD:main"],
+                        capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stderr
+    # info/exclude keeps an accidental export out of `git add -A`
+    (clone / "src/mlx2/media").mkdir(parents=True)
+    (clone / "src/mlx2/media/api.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(clone), "add", "-A"], check=True)
+    assert "media" not in subprocess.run(["git", "-C", str(clone), "diff", "--cached", "--name-only"],
+                                         capture_output=True, text=True, check=True).stdout
+    # a forced add still cannot be pushed
+    commit("src/mlx2/media/api.py")
+    commit("src/mlx2/other.py")
+    refused = subprocess.run(["git", "-C", str(clone), "push", "-q", "origin", "HEAD:main"],
+                             capture_output=True, text=True)
+    assert refused.returncode != 0
+    assert "src/mlx2/media/api.py" in refused.stderr
+
+
+def test_pre_push_guard_refuses_history_that_adds_then_removes(tmp_path):
+    clone, commit = _public_clone(tmp_path)
+    commit("README.md")
+    subprocess.run(["git", "-C", str(clone), "push", "-q", "origin", "HEAD:main"], check=True)
+    base = subprocess.run(["git", "-C", str(clone), "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    commit("scripts/sushi_probe/gpu.py")
+    subprocess.run(["git", "-C", str(clone), "rm", "-q", "scripts/sushi_probe/gpu.py"], check=True)
+    subprocess.run(["git", "-C", str(clone), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "-qm", "remove"], check=True)
+    tip = subprocess.run(["git", "-C", str(clone), "rev-parse", "HEAD"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    assert exporter.check_tree(clone, tip) == []
+    problems = exporter.check_push(clone, [("refs/heads/main", tip, "refs/heads/main", base)])
+    assert any("adds scripts/sushi_probe/gpu.py" in p for p in problems)
+
+
+def test_private_guard_blocks_pushes_to_the_public_repository(tmp_path):
+    repo = tmp_path / "private"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "github",
+                    "https://github.com/pierre427/mlx2.git"], check=True)
+    exporter.install_private_guard(repo)
+    exporter.install_private_guard(repo)  # idempotent
+    hook = (repo / ".git/hooks/pre-push").read_text()
+    assert hook.count("never push to the public repository") == 1
+    assert "DISABLED" in exporter.run("git", "-C", str(repo), "remote", "get-url", "--push", "github")
+    refuse = subprocess.run(["sh", str(repo / ".git/hooks/pre-push"), "x",
+                             "https://github.com/pierre427/mlx2.git"], capture_output=True, text=True)
+    assert refuse.returncode == 1 and "private mlx2 checkout" in refuse.stderr
+    allow = subprocess.run(["sh", str(repo / ".git/hooks/pre-push"), "origin",
+                            "ssh://git@forge.example/owner/mlx2.git"], capture_output=True, text=True)
+    assert allow.returncode == 0
