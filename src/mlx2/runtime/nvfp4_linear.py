@@ -87,7 +87,9 @@ def _rows_exact(module, x, *, bits, group_size, mode):
     if x.ndim != 3 or x.shape[0] != 1 or not 1 < x.shape[1] <= fq.MAX_ROWS:
         return None, "rows"
     verdicts = module.__dict__.setdefault("_mlx2_fp_rows_verdicts", {})
-    key = (int(x.shape[1]), x.dtype)
+    # The verdict is per kernel mode too: fused, chunked and loop are
+    # different launches and each proves itself on real activations.
+    key = (int(x.shape[1]), x.dtype, fq.kernel_mode())
     if verdicts.get(key) is False:
         return None, "self_check_failed"
     y = fq.rows_qmv(x, module["weight"], module["scales"], bits=bits, group_size=group_size)

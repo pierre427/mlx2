@@ -93,6 +93,46 @@ SAMPLING = VendorSampling(
 )
 
 
+# Exact parent-indexed tree verify on the external route (opt-in, default
+# off): B1 trees of up to ``ast_tile_rows`` rows (anchor included), B2+ chain.
+NEMOTRON_TREE_ROUTE = "tree15_b1_chain_b2plus_v1"
+TREE_POLICY_KEYS = frozenset(
+    {"batch_size_route", "ast_target_executor", "ast_tile_rows", "ast_adaptive_rows"}
+)
+# Chain-only controls the tree route does not compose with.
+_TREE_REFUSED_KEYS = frozenset({
+    "proposal_composition", "continuation_pool", "continuation_strategy",
+    "progressive_verification_tile", "adaptive_verification",
+    "cost_per_commit_handoff",
+})
+
+
+def validate_super_tree_policy(policy) -> bool:
+    """Tree-route controls; ``True`` when the exact tree route is selected."""
+    route = policy.get("batch_size_route")
+    if route is None:
+        if set(policy) & (TREE_POLICY_KEYS - {"batch_size_route"}):
+            raise ValueError(
+                f"Super VL tree controls require batch_size_route {NEMOTRON_TREE_ROUTE}"
+            )
+        return False
+    if route != NEMOTRON_TREE_ROUTE:
+        raise ValueError(f"Super VL external batch_size_route must be {NEMOTRON_TREE_ROUTE}")
+    if policy.get("ast_target_executor", "packed") not in ("packed", "serial"):
+        raise ValueError("Super VL tree target executor must be packed or serial")
+    rows = policy.get("ast_tile_rows", 16)
+    if type(rows) is not int or not 4 <= rows <= 16:
+        raise ValueError("Super VL tree tile rows must be an integer from 4 to 16")
+    if policy.get("ast_adaptive_rows", None) not in (None, True, False):
+        raise ValueError("Super VL ast_adaptive_rows must be boolean")
+    refused = sorted(_TREE_REFUSED_KEYS & set(policy))
+    if refused:
+        raise ValueError(
+            "Super VL tree verify does not compose with " + ", ".join(refused)
+        )
+    return True
+
+
 def _split_super_execution_policy(execution_policy):
     if execution_policy is not None and not isinstance(execution_policy, dict):
         raise ValueError("Super VL execution policy must be an object")
@@ -629,7 +669,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     # --int8-prefill or a matching qualification record (int8_prefill auto).
     int8_prefill_supported = staticmethod(lambda: NEMOTRON_INT8_PREFILL_SCOPES)
     int8_prefill_select = staticmethod(nemotron_int8_prefill_select)
-    EXTERNAL_POLICY_EXTENSIONS = frozenset({"draft_weight_quantization"})
+    EXTERNAL_POLICY_EXTENSIONS = frozenset({"draft_weight_quantization"}) | TREE_POLICY_KEYS
     incremental_tokenizer_renderer_revision = "nemotron35-super-vl-renderer-v1"
 
     # Streams the routed experts (backbone and MTP head) of the unconverted
@@ -678,6 +718,10 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             raise ValueError("Super VL native policy supports num_draft only")
         else:
             self._parse_external_policy(None, family="Nemotron 3.5 Super VL")
+        # Exact tree verify (opt-in): validated before any weight is loaded.
+        self.tree_route = (
+            validate_super_tree_policy(self.external_policy) if external else False
+        )
         from .nemotron35_draft_quantization import normalize_runtime_quantization
 
         draft_weight_quantization = normalize_runtime_quantization(
@@ -778,6 +822,14 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             )
             self._check_num_draft(draft_record)
         self._load_super_model(artifact, draft_record, draft_loader)
+        if self.tree_route:
+            # The tree runs the chain's exact strip recipe; refuse an opt-in
+            # tree route the loaded policies cannot serve, before serving.
+            refusal = self.model.tree_policy_refusal(
+                int(self.external_policy.get("ast_tile_rows", 16))
+            )
+            if refusal is not None:
+                raise ValueError(f"Super VL tree verify refused at load: {refusal}")
 
     def _external_drafter(self, model_path, artifact, draft_weight_quantization):
         """Inspect this target's external head; returns (record, loader)."""
@@ -1130,7 +1182,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             )
         return width
 
-    def execution_config(self, *, max_lanes, prefill_step):
+    def _super_execution_config(self, *, max_lanes, prefill_step):
         self._validate_session_width(max_lanes)
         if self.draft_model is not None:
             return self._external_execution_config(
@@ -1138,12 +1190,45 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             )
         return super().execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
 
+    def _tree_node_budgets(self):
+        return {1: int(self.external_policy.get("ast_tile_rows", 16)) - 1}
+
     def create_external_batch(self, **kwargs):
         self._validate_session_width(kwargs.get("completion_batch_size", 1))
+        if getattr(self, "tree_route", False):
+            from ..runtime.hybrid_tree_executor import HybridTreeExecutor
+            from ..runtime.nemotron_tree_executor import NemotronTreeExecutor
+
+            if not callable(getattr(self.draft_model, "propose_tree", None)):
+                raise ValueError("Super VL tree verify needs a drafter with propose_tree")
+            serial = self.external_policy.get("ast_target_executor", "packed") == "serial"
+            kwargs.setdefault("dynamic_singleton_tree", True)
+            kwargs.setdefault("dynamic_tree_max_width", 1)
+            kwargs.setdefault("dynamic_tree_overflow", "chain")
+            if "target_tree_executor_provider" not in kwargs:
+                kwargs["target_tree_executor_provider"] = (
+                    HybridTreeExecutor.create() if serial
+                    else NemotronTreeExecutor.create(selected=True)
+                )
+            self._tree_provider = kwargs["target_tree_executor_provider"]
+            kwargs.setdefault("tree_node_budget_by_lanes", self._tree_node_budgets())
+            if "ast_adaptive_rows" in self.external_policy:
+                kwargs.setdefault("ast_adaptive_rows", self.external_policy["ast_adaptive_rows"])
         return super().create_external_batch(**kwargs)
 
+    def execution_config(self, *, max_lanes, prefill_step):
+        config = self._super_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
+        if getattr(self, "tree_route", False):
+            config.update(
+                batch_size_route=NEMOTRON_TREE_ROUTE,
+                dynamic_tree_overflow="chain",
+                tree_node_budget_by_lanes=self._tree_node_budgets(),
+                ast_target_executor=self.external_policy.get("ast_target_executor", "packed"),
+            )
+        return config
+
     def execution_numerics_contract(self):
-        return {
+        contract = {
             "router_compute": "float32",
             "recurrent_state": "float32",
             "time_step_limit": [0.0, "infinity"],
@@ -1151,6 +1236,23 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "quantization_recipe": self.conversion["recipe"],
             "qualification": "unqualified",
         }
+        if getattr(self, "tree_route", False):
+            executor = self.external_policy.get("ast_target_executor", "packed")
+            if executor == "serial":
+                from ..runtime.hybrid_tree_executor import PROTOCOL as SERIAL_PROTOCOL
+
+                law = {"law": SERIAL_PROTOCOL}
+            else:
+                from ..runtime.models.nemotron_mamba_tree import TREE_KERNEL_LAW
+                from ..runtime.nemotron_tree_executor import PROTOCOL, TREE_LAW
+
+                law = {"law": TREE_LAW, "protocol": PROTOCOL, "kernel_law": TREE_KERNEL_LAW}
+            contract["tree_verify"] = {
+                **law,
+                "executor": executor,
+                "tile_rows": int(self.external_policy.get("ast_tile_rows", 16)),
+            }
+        return contract
 
     def nemotron_lilicorr_target_contract(self, draft_record):
         """Bind an inspected owned-head companion to exact Super target taps."""
@@ -1170,6 +1272,29 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "owned_lm_head": True,
             "owned_final_norm": True,
             "qualified": False,
+        }
+
+    def _tree_verify_diagnostics(self):
+        status = (
+            self.model.tree_status() if hasattr(getattr(self, "model", None), "tree_status")
+            else {}
+        )
+        selected = bool(getattr(self, "tree_route", False))
+        provider = getattr(self, "_tree_provider", None)
+        provider_receipt = provider.receipt() if provider is not None else {}
+        provider_receipt.pop("source_identity", None)
+        return {
+            "schema": "mlx2.nemotron35-super-tree-verify.v1",
+            "implemented": True,
+            "qualified": False,
+            "selected": selected,
+            "observed_used": selected and int(provider_receipt.get("dispatches", 0)) > 0,
+            "provider": provider_receipt or None,
+            "route": NEMOTRON_TREE_ROUTE if selected else None,
+            "executor": (
+                self.external_policy.get("ast_target_executor", "packed") if selected else None
+            ),
+            **status,
         }
 
     def diagnostics(self):
@@ -1326,6 +1451,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                 "modules": len(getattr(self, "_super_moe_mixers", ())),
                 "counts": relu2_down_counts,
             },
+            "tree_verify": self._tree_verify_diagnostics(),
             "execution_limits": dict(EXECUTION_LIMITS),
             "image_prefill": "b1-candidate",
             "video": "encoder-only",

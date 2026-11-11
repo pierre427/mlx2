@@ -161,7 +161,7 @@ _FUSED_SOURCE = """
         simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
 """
 FUSED_MAX_ROWS = 8
-_KERNEL_MODES = ("loop", "fused")
+_KERNEL_MODES = ("loop", "fused", "fused_chunked")
 
 _SOURCE = """
     const int K = params[0];
@@ -202,14 +202,27 @@ def kernel_mode() -> str:
     24/24 at the Super VL shapes) and unit5 (native MTP 42.7 -> 51.2 tok/s
     GSM8K, LiLiCorr 44.5 -> 47.1, greedy-equal, predictions identical);
     qualification/runs/super-vl-nvfp4-20261110.  ``loop`` reruns MLX's
-    one-row impl per row.
+    one-row impl per row.  ``fused_chunked`` (opt-in, 2026-11-10) is ``fused``
+    plus 9..16-row strips as balanced fused launches of at most 8 rows
+    (:func:`fused_chunks`): every row still runs the same one-row impl, so
+    the bits are those of ``loop``; weights are read once per launch instead
+    of once per row.
     """
     import os
 
     mode = os.environ.get("MLX2_FP_ROW_EXACT_KERNEL", "fused")
     if mode not in _KERNEL_MODES:
-        raise ValueError("MLX2_FP_ROW_EXACT_KERNEL must be loop or fused")
+        raise ValueError("MLX2_FP_ROW_EXACT_KERNEL must be loop, fused or fused_chunked")
     return mode
+
+
+def fused_chunks(rows: int) -> tuple[int, ...]:
+    """Balanced 2..8-row fused launches covering a 9..16-row strip."""
+    if type(rows) is not int or not FUSED_MAX_ROWS < rows <= MAX_ROWS:
+        raise ValueError("fused chunks cover 9..16 rows")
+    count = -(-rows // FUSED_MAX_ROWS)
+    base, wider = divmod(rows, count)
+    return tuple(base + int(index < wider) for index in range(count))
 
 
 def _kernel(fast: bool):
@@ -259,17 +272,27 @@ def rows_qmv(x, weight, scales, *, bits: int, group_size: int, mode: str | None 
     n = int(weight.shape[0])
     fast = fast_layout(k, n, bits)
     mode = kernel_mode() if mode is None else mode
-    if mode == "fused" and fast and 2 <= rows <= FUSED_MAX_ROWS:
+
+    def fused(flat, count):
         (y,) = _fused_kernel()(
-            inputs=[mx.contiguous(x.reshape(rows, k)), weight, scales,
-                    mx.array([k, n, rows], dtype=mx.int32)],
-            template=[("T", x.dtype), ("GS", group_size), ("BITS", bits), ("ROWS", rows)],
+            inputs=[flat, weight, scales, mx.array([k, n, count], dtype=mx.int32)],
+            template=[("T", x.dtype), ("GS", group_size), ("BITS", bits), ("ROWS", count)],
             grid=(32, 2 * (n // 8), 1),
             threadgroup=(32, 2, 1),
-            output_shapes=[(rows, n)],
+            output_shapes=[(count, n)],
             output_dtypes=[x.dtype],
         )
-        return y.reshape(1, rows, n)
+        return y
+
+    if mode in ("fused", "fused_chunked") and fast and 2 <= rows <= FUSED_MAX_ROWS:
+        return fused(mx.contiguous(x.reshape(rows, k)), rows).reshape(1, rows, n)
+    if mode == "fused_chunked" and fast and rows > FUSED_MAX_ROWS:
+        flat = x.reshape(rows, k)
+        parts, first = [], 0
+        for count in fused_chunks(rows):
+            parts.append(fused(mx.contiguous(flat[first:first + count]), count))
+            first += count
+        return mx.concatenate(parts, axis=0).reshape(1, rows, n)
     kernel = _kernel(fast)
     flat = mx.contiguous(x.reshape(rows, k))
     (y,) = kernel(
@@ -283,4 +306,4 @@ def rows_qmv(x, weight, scales, *, bits: int, group_size: int, mode: str | None 
     return y.reshape(1, rows, n)
 
 
-__all__ = ["FUSED_MAX_ROWS", "MAX_ROWS", "decline_reason", "fast_layout", "kernel_mode", "rows_qmv"]
+__all__ = ["FUSED_MAX_ROWS", "MAX_ROWS", "decline_reason", "fast_layout", "fused_chunks", "kernel_mode", "rows_qmv"]

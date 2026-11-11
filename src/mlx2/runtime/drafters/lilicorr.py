@@ -603,6 +603,138 @@ class LiLiCorrDraftModel(XPressDraftModel):
         )
         return tokens, laws
 
+    # -- tree tiles ---------------------------------------------------------
+
+    # Children per expansion of the best-first tree; the lattice holds
+    # ``lilicorr_candidate_topk`` candidates per position.
+    tree_children = 4
+
+    def start_tree(self, anchors, hidden, cache, max_nodes, *, forbidden_token_ids=None,
+                   topology=None, lattice_positions=None, **_options):
+        """Queue the candidate lattice (draft-context append included).
+
+        The same backbone block, candidate top-K and correlation head as
+        ``draft_distributions``; nothing is evaluated here.  The tree law is
+        the head's own transition law: a node's score is its cumulative
+        log-softmax of ``scores[position, parent column, :]``, so the greedy
+        chain (``argmax`` per step from column 0) is the first child at every
+        depth.  Point masses are deterministic; the target law decides.
+        """
+        anchor_ids = [int(a) for a in anchors]
+        batch = len(anchor_ids)
+        if (
+            not batch
+            or hidden.shape[0] != batch
+            or len(cache) != len(self.layers)
+            or type(max_nodes) is not int
+            or max_nodes < 1
+            or any(not 0 <= a < self.config.vocab_size for a in anchor_ids)
+        ):
+            raise ValueError("LiLiCorr tree geometry differs")
+        depth = min(self.config.block_size - 1, max_nodes)
+        if lattice_positions is not None:
+            depth = min(depth, int(lattice_positions) - 1)
+        if depth < 1:
+            raise ValueError("LiLiCorr tree lattice needs at least one draft position")
+        if forbidden_token_ids is not None and len(forbidden_token_ids) != batch:
+            raise ValueError("LiLiCorr tree forbidden-token rows must match the batch")
+        self.draft_feedback_payloads = None
+        self._ordered_alternative_context = None
+        # Tree rows carry no per-position chain confidence.
+        self.adaptive_confidence_features = None
+        if hidden.shape[1]:
+            anchor_hidden = self.hidden_norm(self.fc(hidden[:, -1]))
+            anchor_valid = mx.ones((batch,), dtype=mx.bool_)
+        else:
+            first = cache[0]
+            entries = first.rows if hasattr(first, "rows") else [first]
+            if any(entry.offset > 0 for entry in entries):
+                raise ValueError(
+                    "LiLiCorr cached context is missing pending anchor features"
+                )
+            anchor_hidden = mx.zeros((batch, self.config.hidden_size))
+            anchor_valid = mx.zeros((batch,), dtype=mx.bool_)
+        inputs = mx.concatenate(
+            [
+                mx.array(anchor_ids, dtype=mx.int32)[:, None],
+                mx.full(
+                    (batch, self.config.block_size - 1),
+                    self.config.mask_token_id,
+                    dtype=mx.int32,
+                ),
+            ],
+            axis=1,
+        )
+        features = self._hidden(inputs, hidden, cache)[:, 1:]
+        logits = self._logits(features)
+        candidates = mx.argsort(-logits, axis=-1)[
+            ..., : self.config.lilicorr_candidate_topk
+        ]
+        log_probs = logits.astype(mx.float32) - mx.logsumexp(
+            logits.astype(mx.float32), axis=-1, keepdims=True
+        )
+        candidate_log_probs = mx.take_along_axis(log_probs, candidates, axis=-1)
+        scores = self.lilicorr(
+            self.embed_tokens(candidates),
+            candidate_log_probs,
+            features,
+            anchor_hidden,
+            anchor_valid,
+        )
+        return {
+            "anchors": anchor_ids,
+            "max_nodes": int(max_nodes),
+            "depth": depth,
+            "forbidden": forbidden_token_ids,
+            "pending": [scores.astype(mx.float32), candidates],
+        }
+
+    def finish_tree(self, state, *, mark=None):
+        """Evaluate a started lattice and run the host best-first search."""
+        from .dspark import best_first_pair_tree
+
+        mx.eval(*state["pending"])
+        if mark is not None:
+            mark("tree_draft_wait")
+        hosted, ids = (np.asarray(value) for value in state["pending"])
+        if not np.isfinite(hosted).all():
+            raise ValueError("LiLiCorr produced nonfinite correlation scores")
+        depth = state["depth"]
+        forbidden = state["forbidden"]
+        result = []
+        for row in range(len(state["anchors"])):
+            candidates = ids[row, :depth]
+            unary = np.zeros(candidates.shape, dtype=np.float32)
+            if forbidden is not None and len(forbidden[row]):
+                blocked = np.isin(candidates, np.asarray(list(forbidden[row])))
+                unary = np.where(blocked, -np.inf, unary).astype(np.float32)
+            # scores[p, j, k]: edge from position p-1 column j to column k;
+            # position 0 broadcasts the anchor start over j.
+            root_bias = hosted[row, 0, 0]
+            pair = np.swapaxes(hosted[row, 1:depth], -1, -2)
+            result.append(
+                best_first_pair_tree(
+                    candidates, unary, root_bias, pair,
+                    children=self.tree_children, max_nodes=state["max_nodes"],
+                )
+            )
+        self.stats["backbone_blocks"] += len(result)
+        self.stats["lattice_blocks"] += len(result)
+        self.stats["tree_lattices"] = self.stats.get("tree_lattices", 0) + len(result)
+        if mark is not None:
+            mark("tree_search")
+        return result
+
+    def propose_tree(self, anchors, hidden, cache, max_nodes, *, forbidden_token_ids=None,
+                     topology=None, mark=None, **options):
+        """Per-row best-first ``(tokens, parents)`` trees, parents first, -1 = anchor."""
+        state = self.start_tree(anchors, hidden, cache, max_nodes,
+                                forbidden_token_ids=forbidden_token_ids, topology=topology,
+                                **options)
+        if mark is not None:
+            mark("tree_draft_build")
+        return self.finish_tree(state, mark=mark)
+
     def ordered_alternative_proposals(
         self,
         primary_tokens,

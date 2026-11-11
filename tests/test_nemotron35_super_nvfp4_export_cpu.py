@@ -373,8 +373,10 @@ def test_fp_row_exact_kernel_mode_switch(monkeypatch):
     assert fq.kernel_mode() == "fused"
     monkeypatch.setenv("MLX2_FP_ROW_EXACT_KERNEL", "loop")
     assert fq.kernel_mode() == "loop"
+    monkeypatch.setenv("MLX2_FP_ROW_EXACT_KERNEL", "fused_chunked")
+    assert fq.kernel_mode() == "fused_chunked"
     monkeypatch.setenv("MLX2_FP_ROW_EXACT_KERNEL", "wide")
-    with pytest.raises(ValueError, match="loop or fused"):
+    with pytest.raises(ValueError, match="loop, fused or fused_chunked"):
         fq.kernel_mode()
     assert "mlx2_fp_qmv_fast_rows" in fq._FUSED_FAST and fq.FUSED_MAX_ROWS == 8
 

@@ -35,7 +35,7 @@ SERVING_ENV_SWITCHES = {
     "MLX2_NVFP4_EXPERT_SCALE": "Super VL NVFP4 export expert weight_scale_2: fold (default) or apply (APCv2-bound)",
     "MLX2_SCALED_EPILOGUE": "scaled FP8/NVFP4 projection epilogue: one compiled kernel (default) or eager (same fp32 multiply)",
     "MLX2_NEMOTRON_ROUTED_DECODE": "Nemotron-H one-token NVFP4 routed experts in three stock-exact launches (on by default)",
-    "MLX2_FP_ROW_EXACT_KERNEL": "exact FP8/NVFP4 verify rows: single-pass fused kernel (default) or per-row loop (bit-identical, self-checked)",
+    "MLX2_FP_ROW_EXACT_KERNEL": "exact FP8/NVFP4 verify rows: single-pass fused kernel (default), fused_chunked (opt-in: 9..16 rows as <=8-row fused launches) or per-row loop (bit-identical, self-checked)",
     # MLX's own commit caps, latched at Metal start (set by MLX2_COMMAND_BUFFERS
     # or by the operator): schedule and transient memory, never values.
     "MLX_MAX_OPS_PER_BUFFER": "MLX command-buffer kernel cap",

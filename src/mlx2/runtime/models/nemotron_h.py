@@ -914,6 +914,224 @@ class NemotronHMamba2Mixer(nn.Module):
             projected = self.out_proj(y)
         return residual + projected if residual is not None else projected
 
+    def tree_refusal(self) -> str | None:
+        """Why this mixer cannot run an exact tree tile, or ``None``."""
+        if self._conv_policy != "fused_short":
+            return f"mamba conv {self._conv_policy}"
+        if self._ssm_policy not in {"fused_short", "fused_short_gate"}:
+            return f"mamba ssm {self._ssm_policy}"
+        if self._projection_policy != "short_row_exact":
+            return f"mamba projection {self._projection_policy}"
+        return None
+
+    def _tree_projection(self, linear, x, boundary):
+        # One-token decode projects a single row with the module itself; a
+        # strip uses the chain's exact multi-row form, row for row equal.
+        if x.shape[1] > 1:
+            projected, route = _short_projection(linear, x)
+            self._projection_counts[f"{boundary}_short_{route}"] += 1
+            return projected
+        self._projection_counts[f"{boundary}_ordinary"] += 1
+        return linear(x)
+
+    def tree_forward(self, hidden_states: mx.array, cache, tree) -> mx.array:
+        """One tree tile through this mixer; returns ``out_proj`` rows.
+
+        Row ``n`` equals one-token decode of node ``n`` from the committed
+        cache along ``tree.paths[n]``: projections, gated norm and ``out_proj``
+        are row-local exact strip ops; the conv window and SSM recurrence
+        branch per node.  The fused tree kernels run when their admissions and
+        the process parity gate pass; otherwise every node runs this mixer's
+        own one-row ``_conv`` / ``_ssm`` dispatch from a private copy of its
+        parent's state (the serial backend).  The live cache is not written.
+        """
+        from .nemotron_mamba_tree import (
+            admit_tree_conv,
+            admit_tree_ssm,
+            fused_mamba_conv_tree,
+            fused_mamba_ssm_tree,
+        )
+
+        rows = int(hidden_states.shape[1])
+        refusal = self.tree_refusal()
+        if refusal is not None:
+            raise ValueError(f"Nemotron Mamba tree refused: {refusal}")
+        conv_state, state = cache[0], cache[1]
+        projected = self._tree_projection(self.in_proj, hidden_states, "in_proj")
+        gate, conv_input, dt = mx.split(
+            projected,
+            [self.intermediate_size, self.intermediate_size + self.conv_dim],
+            axis=-1,
+        )
+        bias = getattr(self.conv1d, "bias", None)
+        source = mx.concatenate([conv_state, conv_input], axis=1)
+        conv_admission = admit_tree_conv(
+            conv_input=conv_input, conv_state=conv_state, weight=self.conv1d.weight,
+            bias=bias, training=self.training,
+            ssm_geometry=(self.num_heads, self.head_dim, self.n_groups, self.ssm_state_size),
+            time_step_limit=self.time_step_limit,
+        )
+        if conv_admission.accepted:
+            conv_output = fused_mamba_conv_tree(
+                conv_input, conv_state, self.conv1d.weight, bias,
+                tree.window_array(self.conv_kernel_size),
+            )
+            tree.note_backend("mamba_conv", "fused_tree")
+            self._conv_counts["fused_tree"] = self._conv_counts.get("fused_tree", 0) + 1
+        else:
+            outputs = []
+            for row, window in enumerate(tree.window_rows(self.conv_kernel_size)):
+                private = NemotronMambaCache(size=2)
+                private[0] = mx.take(source, mx.array(window, dtype=mx.int32), axis=1)
+                output, _ = self._conv(conv_input[:, row : row + 1], private, None)
+                outputs.append(output)
+            conv_output = mx.concatenate(outputs, axis=1)
+            tree.note_backend("mamba_conv", f"serial:{conv_admission.reason}")
+        x, B, C = mx.split(
+            conv_output,
+            [
+                self.intermediate_size,
+                self.intermediate_size + self.n_groups * self.ssm_state_size,
+            ],
+            axis=-1,
+        )
+        x = x.reshape(1, rows, self.num_heads, self.head_dim)
+        B = B.reshape(1, rows, self.n_groups, self.ssm_state_size)
+        C = C.reshape(1, rows, self.n_groups, self.ssm_state_size)
+        tree.record_mamba(cache, mixer=self, source=source, x=x, B=B, C=C, dt=dt,
+                          gate=gate, state=state)
+        D = self.D.astype(x.dtype)
+        fused_gate = gate if self._ssm_policy == "fused_short_gate" else None
+        ssm_admission = admit_tree_ssm(
+            x=x, B=B, C=C, dt=dt, A_log=self.A_log, D=D, dt_bias=self.dt_bias,
+            state=state, gate=fused_gate, channels=self.conv_dim,
+            time_step_limit=self.time_step_limit,
+        )
+        if ssm_admission.accepted:
+            y = fused_mamba_ssm_tree(
+                x, self.A_log, B, C, D, dt, self.dt_bias, state,
+                tree.parents_array(), self.time_step_limit, gate=fused_gate,
+            )
+            gate_fused = fused_gate is not None
+            tree.set_mamba_backend(cache, "fused_tree")
+            tree.note_backend("mamba_ssm", "fused_tree")
+            key = "fused_tree_gate" if gate_fused else "fused_tree"
+            self._ssm_counts[key] = self._ssm_counts.get(key, 0) + 1
+            y = y.reshape(1, rows, self.intermediate_size)
+        else:
+            outputs, states, fused = [], [None] * rows, set()
+            for row, parent in enumerate(tree.parents):
+                private = NemotronMambaCache(size=2)
+                private[1] = state if parent < 0 else states[parent]
+                selected = slice(row, row + 1)
+                output, gate_fused = self._ssm(
+                    x[:, selected].reshape(1, 1, -1),
+                    B[:, selected].reshape(1, 1, -1),
+                    C[:, selected].reshape(1, 1, -1),
+                    dt[:, selected],
+                    private,
+                    None,
+                    gate=gate[:, selected],
+                    serial_exact=False,
+                )
+                states[row] = private[1]
+                outputs.append(output)
+                fused.add(gate_fused)
+            if len(fused) != 1:
+                raise RuntimeError("Nemotron tree SSM gate fusion changed across nodes")
+            gate_fused = fused.pop()
+            y = mx.concatenate(outputs, axis=1)
+            tree.set_mamba_backend(cache, "serial")
+            tree.note_backend("mamba_ssm", f"serial:{ssm_admission.reason}")
+        y = self._tree_norm(y, None if gate_fused else gate)
+        return self._tree_projection(self.out_proj, y, "out_proj")
+
+    def tree_commit_state(self, material, path, indices):
+        """The recurrent state after one-token decode of the accepted path.
+
+        Fused backend: the decode kernel itself (the gated kernel under
+        ``fused_short_gate``, else the plain one) at ``S = len(path)`` from
+        the committed state.  ``S = k`` equals ``k`` S=1 calls of the same
+        kernel bit for bit only if the compiler treats both alike, so the
+        tree parity gate proves it for S = 2..16 before this backend is
+        admitted.  Serial backend: this mixer's own one-row ``_ssm`` per path
+        row, the decode call itself.  Neither materializes per-node states.
+        """
+        from .nemotron_mamba_ssm import fused_mamba_ssm_gate_short, fused_mamba_ssm_short
+
+        x = mx.take(material["x"], indices, axis=1)
+        B = mx.take(material["B"], indices, axis=1)
+        C = mx.take(material["C"], indices, axis=1)
+        dt = mx.take(material["dt"], indices, axis=1)
+        gate = mx.take(material["gate"], indices, axis=1)
+        state = material["state"]
+        D = self.D.astype(x.dtype)
+        if material["ssm_backend"] == "fused_tree":
+            if self._ssm_policy == "fused_short_gate":
+                _, state = fused_mamba_ssm_gate_short(
+                    x, self.A_log, B, C, D, dt, self.dt_bias, state, gate,
+                    self.time_step_limit,
+                )
+            else:
+                _, state = fused_mamba_ssm_short(
+                    x, self.A_log, B, C, D, dt, self.dt_bias, state, self.time_step_limit,
+                )
+            self._ssm_counts["tree_commit_replay"] = (
+                self._ssm_counts.get("tree_commit_replay", 0) + 1
+            )
+            return state
+        if material["ssm_backend"] != "serial":
+            raise RuntimeError("Nemotron tree Mamba SSM backend was not recorded")
+        for row in range(len(path)):
+            private = NemotronMambaCache(size=2)
+            private[1] = state
+            selected = slice(row, row + 1)
+            self._ssm(
+                x[:, selected].reshape(1, 1, -1),
+                B[:, selected].reshape(1, 1, -1),
+                C[:, selected].reshape(1, 1, -1),
+                dt[:, selected],
+                private,
+                None,
+                gate=gate[:, selected],
+                serial_exact=False,
+            )
+            state = private[1]
+        return state
+
+    def _tree_norm(self, y, gate):
+        """The gated group norm on a strip, canaried row-independent.
+
+        A grouped ``rms_norm`` over many rows is not row-invariant on every
+        device (MLX CPU, 2026-11-10), so the strip goes through
+        ``row_exact.ops.row_independent``: batched only where a probe of this
+        width proves it equal to one-row calls, else one call per row.
+        """
+        from ..row_exact import ops
+
+        width = int(y.shape[-1])
+        if gate is None:
+            fn = self.norm
+            packed = y
+        else:
+            def fn(value):
+                return self.norm(value[..., :width], value[..., width:])
+
+            packed = mx.concatenate([y, gate], axis=-1)
+        return ops.row_independent(
+            fn,
+            packed,
+            stage="mamba_tree_gated_norm",
+            key=(
+                "nemotron_mamba_gated_norm",
+                self.norm._policy,
+                gate is not None,
+                float(self.norm.eps),
+                int(self.norm.group_size),
+                width,
+            ),
+        )
+
 
 _DECODE_MASK_MEMO = OrderedDict()  # (batch, keys) -> all-true decode mask
 # A verify strip is at most 17 rows (copy-draft window), and a
@@ -2450,6 +2668,197 @@ class Model(nn.Module):
         return (None if body_only else self.logits(hidden)), mx.concatenate(
             taps, axis=-1
         )
+
+    def tree_refusal(self, rows: int, cache) -> str | None:
+        """Why a ``rows``-node tree tile cannot run exactly here, or ``None``.
+
+        The tree runs the chain verify's exact strip recipe, so it needs the
+        same selected policies as ``_short_segment_refusal`` plus plain,
+        committed, unpadded B1 caches.
+        """
+        refusal = self.tree_policy_refusal(rows)
+        if refusal is not None:
+            return refusal
+        expected = sum(layer.block_type in ("M", "*") for layer in self.layers)
+        if cache is None or len(cache) != expected:
+            return "cache topology"
+        cache_index = 0
+        for layer in self.layers:
+            if layer.block_type == "M":
+                entry = cache[cache_index]
+                cache_index += 1
+                if not isinstance(entry, NemotronMambaCache):
+                    return "mamba cache type"
+            elif layer.block_type == "*":
+                entry = cache[cache_index]
+                cache_index += 1
+                if type(entry) is not KVCache:
+                    return f"attention cache {type(entry).__name__}"
+        return None
+
+    def tree_policy_refusal(self, max_rows: int = 16) -> str | None:
+        """The cache-independent part of ``tree_refusal`` for tiles of up to
+        ``max_rows`` rows; adapters call it at load to refuse an opt-in tree
+        route before serving instead of on every request."""
+        if self._short_segment_policy not in {
+            "layerwise_short_exact",
+            "layerwise_short_exact_routed_batch",
+        }:
+            return f"mamba segment {self._short_segment_policy}"
+        if type(max_rows) is not int or not 1 <= max_rows <= 16:
+            return f"tree rows {max_rows!r}"
+        for layer in self.layers:
+            if layer.block_type == "M":
+                refusal = layer.mixer.tree_refusal()
+                if refusal is not None:
+                    return refusal
+            elif (
+                layer.block_type == "E"
+                and self._short_segment_policy == "layerwise_short_exact_routed_batch"
+            ):
+                for rows in range(2, max_rows + 1):
+                    refusal = layer.mixer._routed_batch_geometry_refusal(rows)
+                    if refusal is not None:
+                        return f"expert routed batch {refusal}"
+        return None
+
+    def _tree_attention_block(self, layer, hidden, cache, tree):
+        """Per-node one-query attention with one-token decode arithmetic.
+
+        Each node's block norm and q/k/v/o projections run on its own row (the
+        chain's per-row attention recipe).  Keys are ``[prefix; ancestors;
+        self]`` and the mask is the one ``NemotronHAttention`` derives for an
+        unpadded B1 ``KVCache`` decode step.
+        """
+        attention = layer.mixer
+        rows = int(hidden.shape[1])
+        queries, keys, values = [], [], []
+        for row in range(rows):
+            normalized = layer.norm(hidden[:, row : row + 1])
+            queries.append(
+                attention.q_proj(normalized)
+                .reshape(1, 1, attention.num_heads, -1)
+                .transpose(0, 2, 1, 3)
+            )
+            keys.append(
+                attention.k_proj(normalized)
+                .reshape(1, 1, attention.num_key_value_heads, -1)
+                .transpose(0, 2, 1, 3)
+            )
+            values.append(
+                attention.v_proj(normalized)
+                .reshape(1, 1, attention.num_key_value_heads, -1)
+                .transpose(0, 2, 1, 3)
+            )
+        private, _start = tree.kv_append(
+            cache, mx.concatenate(keys, axis=2), mx.concatenate(values, axis=2)
+        )
+        array_mask = decode_mask_mode() == "array"
+        outputs = []
+        for row in range(rows):
+            node_keys, node_values = tree.node_keys_values(cache, row)
+            mask = (
+                _all_true_decode_mask(1, int(node_keys.shape[2])) if array_mask else None
+            )
+            output = scaled_dot_product_attention(
+                queries[row], node_keys, node_values, cache=private,
+                scale=attention.scale, mask=mask,
+            )
+            output = output.transpose(0, 2, 1, 3).reshape(1, 1, -1)
+            outputs.append(hidden[:, row : row + 1] + attention.o_proj(output))
+        tree.note_backend("attention", "one_query_ancestor_keys")
+        return mx.concatenate(outputs, axis=1)
+
+    def forward_tree_with_taps(self, inputs, tree, capture_layers):
+        """Logits and taps for every node of ``tree`` (``inputs`` ``[1, N]``).
+
+        Row ``n`` equals ordinary one-token decode of ``inputs[0, paths[n]]``
+        from the committed cache on this route.  Caches are not advanced;
+        ``tree.commit(path)`` publishes the accepted path.
+        """
+        from .. import row_exact_verify as REV
+        from ..row_exact import ops, recipes
+
+        capture_layers = tuple(capture_layers)
+        if (
+            not capture_layers
+            or any(type(index) is not int for index in capture_layers)
+            or tuple(sorted(set(capture_layers))) != capture_layers
+            or capture_layers[0] < 0
+            or capture_layers[-1] >= len(self.layers)
+        ):
+            raise ValueError("Invalid target capture layers")
+        if inputs.ndim != 2 or inputs.shape[0] != 1 or inputs.shape[1] != len(tree.parents):
+            raise ValueError("Nemotron tree inputs must be [1, nodes]")
+        rows = int(inputs.shape[1])
+        refusal = self.tree_refusal(rows, tree.live)
+        if refusal is not None:
+            raise ValueError(f"Nemotron tree verify refused: {refusal}")
+        hidden = self.backbone.embeddings(inputs)
+        taps = []
+        cache_index = 0
+        record = REV.Window(rows)
+        # No ``moe_nax_gather.forward_scope``: like the chain's layerwise
+        # strip, a verify tile is never a prefill forward.
+        with REV.window(record):
+            for index, layer in enumerate(self.layers):
+                if layer.block_type == "M":
+                    cache = tree.live[cache_index]
+                    cache_index += 1
+                    record.note("blocks", "mamba_tree")
+                    norm = layer.norm
+                    normalized = ops.row_independent(
+                        norm,
+                        hidden,
+                        stage="mamba_tree_norm",
+                        key=(
+                            "nemotron_block_norm",
+                            type(norm).__name__,
+                            float(getattr(norm, "eps", 0.0)),
+                            tuple(norm.weight.shape),
+                        ),
+                    )
+                    hidden = hidden + layer.mixer.tree_forward(normalized, cache, tree)
+                elif layer.block_type == "*":
+                    cache = tree.live[cache_index]
+                    cache_index += 1
+                    record.note("blocks", "attention_tree")
+                    hidden = self._tree_attention_block(layer, hidden, cache, tree)
+                else:
+                    recipe = self._row_exact_recipe(layer) if rows > 1 else recipes.PER_ROW
+                    record.note("blocks", recipe.name)
+                    hidden = recipe.run(layer, hidden, None)
+                if index in capture_layers:
+                    taps.append(hidden)
+            norm = self.backbone.norm_f
+            hidden = ops.row_independent(
+                norm,
+                hidden,
+                stage="final_norm",
+                key=(
+                    "nemotron_final_norm",
+                    type(norm).__name__,
+                    float(getattr(norm, "eps", 0.0)),
+                    tuple(norm.weight.shape),
+                ),
+            )
+        self._row_exact_close(record)
+        counts = self.__dict__.setdefault(
+            "_mlx2_tree_counts", {"tiles": 0, "rows": 0, "max_rows": 0}
+        )
+        counts["tiles"] += 1
+        counts["rows"] += rows
+        counts["max_rows"] = max(counts["max_rows"], rows)
+        return self._row_exact_head(hidden), mx.concatenate(taps, axis=-1)
+
+    def tree_status(self) -> dict:
+        from .nemotron_mamba_tree import parity_status
+
+        return {
+            "schema": "mlx2.nemotron-h-tree.v1",
+            **dict(self.__dict__.get("_mlx2_tree_counts") or {}),
+            "kernel_parity": parity_status(),
+        }
 
     def prefill_body(self, inputs, cache, capture_layers):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
