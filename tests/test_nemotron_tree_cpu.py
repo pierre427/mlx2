@@ -618,3 +618,17 @@ def test_feedback_and_physical_target_keep_the_chain(tmp_path):
     for key in ("lilicorr_feedback", "ast_physical_target"):
         adapter = _tree_default_adapter(tmp_path, {key: True})
         assert "batch_size_route" not in adapter.external_policy
+
+
+def test_super_tree_cost_handoff_switch(monkeypatch):
+    from mlx2.adapters import nemotron35_super as sv
+    from mlx2.runtime.cost_per_commit_handoff import CostPerCommitHandoffSettings
+
+    monkeypatch.delenv("MLX2_SUPER_TREE_COST_HANDOFF", raising=False)
+    assert sv._super_tree_cost_handoff() is False
+    monkeypatch.setenv("MLX2_SUPER_TREE_COST_HANDOFF", "guarded")
+    settings = CostPerCommitHandoffSettings.from_value(sv._super_tree_cost_handoff())
+    assert settings.reversible and settings.loss_ratio == 0.8 and settings.window == 8
+    monkeypatch.setenv("MLX2_SUPER_TREE_COST_HANDOFF", "sometimes")
+    with pytest.raises(ValueError):
+        sv._super_tree_cost_handoff()

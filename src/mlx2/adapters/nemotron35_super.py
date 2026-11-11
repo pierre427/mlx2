@@ -110,6 +110,24 @@ _TREE_REFUSED_KEYS = frozenset({
 })
 
 
+SUPER_TREE_GUARDED_HANDOFF = {
+    "enabled": True, "reversible": True, "ordinary_samples": 2,
+    "speculative_samples": 2, "loss_ratio": 0.8, "loss_decisions": 2,
+    "window": 8, "reprobe_tokens": 64, "reprobe_max_tokens": 512,
+    "deferred_context_cap": 256, "settle_rounds": 1, "pipelined_park": True,
+}
+
+
+def _super_tree_cost_handoff():
+    """The Super tree route's cost-per-commit handoff (see create_external_batch)."""
+    value = os.environ.get("MLX2_SUPER_TREE_COST_HANDOFF", "off").strip().lower()
+    if value == "off":
+        return False
+    if value == "guarded":
+        return dict(SUPER_TREE_GUARDED_HANDOFF)
+    raise ValueError("MLX2_SUPER_TREE_COST_HANDOFF must be off or guarded")
+
+
 def _kapitsa_prefill_report():
     """Opt-in prefill kernels (MLX2_NEMOTRON_SSD_MMA / MLX2_NEMOTRON_ATTN_STAGED):
     switch, engaged and refused counts with reasons; implemented, unqualified,
@@ -1356,13 +1374,17 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             kwargs.setdefault("dynamic_singleton_tree", True)
             kwargs.setdefault("dynamic_tree_max_width", 1)
             kwargs.setdefault("dynamic_tree_overflow", "chain")
-            # The runtime's tree-tile cost controller probes plain decode
-            # (four probes per request, then re-probes) to park trees that
-            # lose to it.  On this target a plain step (~27 ms, one token) never
-            # beats a speculative round, and the chain route runs no such
-            # controller: timing1 tree6 spent 134 probes and 36 parked rounds
-            # in 570 tree rounds, about 7% of the run.  ``False`` keeps the tree.
-            kwargs.setdefault("cost_per_commit_handoff", False)
+            # The runtime's tree-tile cost controller (its AST defaults: three
+            # ordinary probes, 0.97 loss ratio over four rounds) cost ~7% on
+            # short GSM8K requests (timing1: 134 probes, 36 parked rounds in
+            # 570), so the tree route ran without it.  At long context the
+            # drafter's acceptance falls (qualify-super-vl-nvfp4-20261110:
+            # 7.4 tokens/round at 4K, 2.7 at 32K) and the tree loses to plain
+            # decode (26 vs 40 tok/s).  ``MLX2_SUPER_TREE_COST_HANDOFF``:
+            # ``off`` keeps the tree unconditionally; ``guarded`` parks only a
+            # clear loss (below 80% of ordinary over an 8-round window, two
+            # ordinary probes) and re-probes.
+            kwargs.setdefault("cost_per_commit_handoff", _super_tree_cost_handoff())
             if "target_tree_executor_provider" not in kwargs:
                 kwargs["target_tree_executor_provider"] = (
                     HybridTreeExecutor.create() if serial

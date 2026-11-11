@@ -102,14 +102,19 @@ def unit(out, args):
                 return [logits, taps] + planes
             return run
 
-        def tree(private):
-            logits, taps, transaction = executor.forward(
-                model, tree6[0], tree6[1], private, check.CAPTURES, cached=False
-            )
-            tree.transaction = transaction
-            return [logits, taps]
+        def tree_arm(shape):
+            def run(private):
+                logits, taps, transaction = executor.forward(
+                    model, shape[0], shape[1], private, check.CAPTURES, cached=False
+                )
+                run.transaction = transaction
+                return [logits, taps]
+            return run
 
-        arms = {"decode": decode, "chain6": chain(6), "chain8": chain(8), "tree6": tree}
+        arms = {"decode": decode, "chain6": chain(6), "chain8": chain(8),
+                "tree6": tree_arm(tree6), "tree8": tree_arm(shapes["tree8"])}
+        if args.arms:
+            arms = {name: arms[name] for name in args.arms}
         row = {}
         for name, build in arms.items():
             for _ in range(2):  # warm: compiles, canaries, parity gates
@@ -158,7 +163,8 @@ def owned(out, args):
                    "--desktop-cpg-lease", str(lease.path),
                    "--receipt", str(out / "paired-locks.json"), "--",
                    sys.executable, "-u", str(Path(__file__)), "unit", str(out),
-                   "--contexts", *map(str, args.contexts), "--reps", str(args.reps)]
+                   "--contexts", *map(str, args.contexts), "--reps", str(args.reps),
+                   *(["--arms", *args.arms] if args.arms else [])]
         child = profile.subprocess_popen(command)
         try:
             while child.poll() is None:
@@ -179,6 +185,7 @@ def main():
     parser.add_argument("out", type=Path)
     parser.add_argument("--contexts", type=int, nargs="+", default=[1024, 8192])
     parser.add_argument("--reps", type=int, default=7)
+    parser.add_argument("--arms", nargs="*", default=[])
     args = parser.parse_args()
     if args.mode == "unit":
         args.out.mkdir(parents=True, exist_ok=True)

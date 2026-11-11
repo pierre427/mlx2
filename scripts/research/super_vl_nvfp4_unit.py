@@ -50,6 +50,8 @@ ARMS = {
     "native_mtp": {"flags": ["--no-auto-route"], "media": False},
     "default": {"flags": [], "media": False},
     "default_b": {"flags": [], "media": False},  # a closing bracket of the same arm
+    "default_guarded": {"flags": [], "media": False,
+                        "env": {"MLX2_SUPER_TREE_COST_HANDOFF": "guarded"}},
     # The LiLiCorr chain after the tree8 default (operator opt-out).
     "lilicorr_chain_optout": {"flags": ["--external-draft"], "media": False,
                               "policy": {"draft_model": str(LILICORR),
