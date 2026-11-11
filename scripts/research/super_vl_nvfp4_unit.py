@@ -65,6 +65,11 @@ ARMS = {
     "lilicorr_kernels_fused": {"flags": ["--external-draft"],
                                "policy": {"draft_model": str(LILICORR)}, "media": False,
                                "env": {"MLX2_FP_ROW_EXACT_KERNEL": "fused"}},
+    # One-token routed-decode kernels + compiled scaled epilogue.
+    "ordinary_routed": {"flags": ["--ordinary"], "media": False, "env": {"MLX2_NEMOTRON_ROUTED_DECODE": "on", "MLX2_SCALED_EPILOGUE": "compiled"}},
+    "native_mtp_routed": {"flags": [], "media": False, "env": {"MLX2_NEMOTRON_ROUTED_DECODE": "on", "MLX2_SCALED_EPILOGUE": "compiled"}},
+    "lilicorr_routed": {"flags": ["--external-draft"], "policy": {"draft_model": str(LILICORR)},
+                        "media": False, "env": {"MLX2_NEMOTRON_ROUTED_DECODE": "on", "MLX2_SCALED_EPILOGUE": "compiled"}},
     # Controls for the NVFP4-export defaults (FP8 dense on): exported BF16.
     "ordinary_bf16dense": {"flags": ["--ordinary"], "media": False,
                            "env": {"MLX2_NVFP4_DENSE": "bf16"}},

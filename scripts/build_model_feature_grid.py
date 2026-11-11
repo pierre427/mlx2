@@ -55,6 +55,7 @@ FEATURES = (
     "vendor_fp8_dense", "nvfp4_expert_scale_fold",
     "row_exact_self_batched_scaled_projections", "mamba_fused_step_ordinary",
     "fp_row_exact_verify", "fp_row_exact_fused_kernel",
+    "nemotron_routed_decode", "scaled_epilogue_compiled",
     # Residual ablation (Heretic concept, 2026-11-05): a baked derived checkpoint.
     "residual_ablation_bake",
     # Ripple perf pass (2026-11-04).

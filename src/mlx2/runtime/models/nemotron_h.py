@@ -1496,7 +1496,15 @@ class NemotronHMoE(nn.Module):
             else:
                 self._relu2_down_counts["refused"] += 1
         if fused is None:
-            y = self.switch_mlp(x, inds)
+            y = None
+            from . import nemotron_routed_decode as routed_decode
+
+            if routed_decode.enabled():
+                # One-token stock-exact routed experts in three launches;
+                # None (counted) keeps SwitchMLP.
+                y = routed_decode.routed_experts(self.switch_mlp, x, inds)
+            if y is None:
+                y = self.switch_mlp(x, inds)
             weights = self._routing_weights(inds, scores)
             y = (y * weights[..., None]).sum(axis=-2).astype(y.dtype)
             self._relu2_down_counts["ordinary"] += 1

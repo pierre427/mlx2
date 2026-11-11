@@ -41,8 +41,33 @@ class GlobalScaledNVFP4Linear(nn.Module):
         return y
 
 
-def _apply_scale(y, scale):
+def _scale_law(y, scale):
     return (y.astype(mx.float32) * scale).astype(y.dtype)
+
+
+_COMPILED_SCALE = None
+
+
+def _apply_scale(y, scale):
+    """``y * scale`` in float32, cast back: the scaled-projection epilogue.
+
+    ``compiled`` (default since 2026-11-10, Pierre) runs the same
+    cast-multiply-cast as one compiled element-wise kernel instead of three
+    (one fp32 multiply either way; census1/routed2 in
+    qualification/runs/super-vl-nvfp4-20261110: -386 kernels a decode step,
+    same greedy tokens); ``MLX2_SCALED_EPILOGUE=eager`` keeps three primitives.
+    """
+    global _COMPILED_SCALE
+    import os
+
+    mode = os.environ.get("MLX2_SCALED_EPILOGUE", "compiled")
+    if mode == "eager":
+        return _scale_law(y, scale)
+    if mode != "compiled":
+        raise ValueError("MLX2_SCALED_EPILOGUE must be eager or compiled")
+    if _COMPILED_SCALE is None:
+        _COMPILED_SCALE = mx.compile(_scale_law, shapeless=True)
+    return _COMPILED_SCALE(y, scale)
 
 
 def _rows_exact(module, x, *, bits, group_size, mode):

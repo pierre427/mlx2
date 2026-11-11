@@ -377,3 +377,28 @@ def test_fp_row_exact_kernel_mode_switch(monkeypatch):
     with pytest.raises(ValueError, match="loop or fused"):
         fq.kernel_mode()
     assert "mlx2_fp_qmv_fast_rows" in fq._FUSED_FAST and fq.FUSED_MAX_ROWS == 8
+
+
+def test_nemotron_routed_decode_switch_and_cpu_decline(cpu, monkeypatch):
+    from mlx2.runtime.models import nemotron_routed_decode as rd
+    from mlx2.runtime.nvfp4_linear import fold_relu2_expert_scales
+
+    monkeypatch.delenv("MLX2_NEMOTRON_ROUTED_DECODE", raising=False)
+    assert rd.enabled() is True
+    monkeypatch.setenv("MLX2_NEMOTRON_ROUTED_DECODE", "off")
+    assert rd.enabled() is False
+    monkeypatch.setenv("MLX2_NEMOTRON_ROUTED_DECODE", "maybe")
+    with pytest.raises(ValueError):
+        rd.enabled()
+    mlp = _scaled_switch_mlp()
+    x = mx.random.normal((1, 1, 64)).astype(mx.bfloat16)
+    inds = mx.array([[[0, 3]]], dtype=mx.uint32)
+    assert rd.decline_reason(mlp, x, inds) == "scales_not_folded"
+    fold_relu2_expert_scales([mlp], mx.bfloat16)
+    # K 64 is MLX's quad one-row layout: declined before the device check.
+    assert rd.decline_reason(mlp, x, inds) == "geometry"
+    wide = _scaled_switch_mlp(hidden=256, inner=256)
+    fold_relu2_expert_scales([wide], mx.bfloat16)
+    x = mx.random.normal((1, 1, 256)).astype(mx.bfloat16)
+    assert rd.decline_reason(wide, x, inds) == "device"
+    assert rd.routed_experts(wide, x, inds) is None

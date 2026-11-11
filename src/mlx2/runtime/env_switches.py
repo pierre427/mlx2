@@ -33,6 +33,8 @@ SERVING_ENV_SWITCHES = {
     "MLX2_COMMAND_BUFFERS": "Metal command-buffer commit cadence (process_env; no computed bit changes)",
     "MLX2_NVFP4_DENSE": "Super VL NVFP4 export dense projections: vendor fp8 (default) or exported bf16 (APCv2-bound)",
     "MLX2_NVFP4_EXPERT_SCALE": "Super VL NVFP4 export expert weight_scale_2: fold (default) or apply (APCv2-bound)",
+    "MLX2_SCALED_EPILOGUE": "scaled FP8/NVFP4 projection epilogue: one compiled kernel (default) or eager (same fp32 multiply)",
+    "MLX2_NEMOTRON_ROUTED_DECODE": "Nemotron-H one-token NVFP4 routed experts in three stock-exact launches (on by default)",
     "MLX2_FP_ROW_EXACT_KERNEL": "exact FP8/NVFP4 verify rows: single-pass fused kernel (default) or per-row loop (bit-identical, self-checked)",
     # MLX's own commit caps, latched at Metal start (set by MLX2_COMMAND_BUFFERS
     # or by the operator): schedule and transient memory, never values.

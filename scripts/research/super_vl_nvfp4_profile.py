@@ -163,6 +163,123 @@ def rowexact_check(reps):
     return out
 
 
+_VIEWS = {"Reshape", "Broadcast", "ExpandDims", "Squeeze", "Flatten", "Unflatten", "Slice",
+          "AsStrided", "Transpose", "StopGradient", "Depends", "Split", "Full"}
+
+
+def decode_census(out, steps=48):
+    """One B1 decode step: kernel-launching primitives, host build vs eval."""
+    import collections
+    import re
+
+    import mlx.core as mx
+
+    from mlx2.adapters.registry import resolve_adapter
+
+    adapter = resolve_adapter(TARGET)(str(TARGET))
+    model = adapter.model
+    ids = adapter.tokenizer.encode(" ".join(
+        f"Entry {i}: invoice {i * 53 % 1009} for client {i % 37} totals {i * 11 % 211}."
+        for i in range(400)))[:2048]
+    cache = model.make_cache()
+    logits = model._checkpoint_logits(mx.array([ids]), cache)
+    token = mx.argmax(logits[:, -1], axis=-1)[:, None]
+    mx.eval(token)
+    for _ in range(8):
+        token = mx.argmax(model(token, cache=cache)[:, -1], axis=-1)[:, None]
+        mx.eval(token)
+    build, run = [], []
+    for _ in range(steps):
+        mx.synchronize()
+        t0 = time.perf_counter()
+        nxt = mx.argmax(model(token, cache=cache)[:, -1], axis=-1)[:, None]
+        t1 = time.perf_counter()
+        mx.eval(nxt)
+        t2 = time.perf_counter()
+        build.append(t1 - t0)
+        run.append(t2 - t1)
+        token = nxt
+    # The graph of one more step, without evaluating it first.
+    logits = model(token, cache=cache)
+    dot = out / "decode_step.dot"
+    mx.export_to_dot(str(dot), logits)
+    counts = collections.Counter(re.findall(r'label ="([^"]+)"', dot.read_text()))
+    dispatch = {k: v for k, v in counts.items() if k not in _VIEWS}
+    token = mx.argmax(logits[:, -1], axis=-1)[:, None]
+    mx.eval(token)
+    # Pipelined like a server: build step n+1 before reading step n.
+    mx.synchronize()
+    t0 = time.perf_counter()
+    nxt = mx.argmax(model(token, cache=cache)[:, -1], axis=-1)[:, None]
+    mx.async_eval(nxt)
+    for _ in range(steps):
+        cur = nxt
+        nxt = mx.argmax(model(cur, cache=cache)[:, -1], axis=-1)[:, None]
+        mx.async_eval(nxt)
+        cur.item()
+    nxt.item()
+    pipelined = (steps + 1) / (time.perf_counter() - t0)
+    report = {
+        "host_build_ms_median": round(statistics.median(build) * 1e3, 3),
+        "eval_ms_median": round(statistics.median(run) * 1e3, 3),
+        "sync_tok_s": round(1 / statistics.median([b + r for b, r in zip(build, run)]), 2),
+        "pipelined_tok_s": round(pipelined, 2),
+        "dispatching_primitives": sum(dispatch.values()),
+        "view_primitives": sum(v for k, v in counts.items() if k in _VIEWS),
+        "by_primitive": dict(sorted(dispatch.items(), key=lambda kv: -kv[1])),
+        "layout": adapter.layout,
+    }
+    report["greedy_after_census"] = int(token.item())
+    print(json.dumps({k: v for k, v in report.items() if k != "by_primitive"}), flush=True)
+    print(json.dumps(dict(list(report["by_primitive"].items())[:25])), flush=True)
+    adapter.close()
+    return report
+
+
+def routed_parity(steps=64):
+    """Greedy decode with MLX2_NEMOTRON_ROUTED_DECODE off then on: logits bits."""
+    import hashlib
+
+    import mlx.core as mx
+    import numpy as np
+
+    from mlx2.adapters.registry import resolve_adapter
+    from mlx2.runtime.models import nemotron_routed_decode as rd
+
+    adapter = resolve_adapter(TARGET)(str(TARGET))
+    model = adapter.model
+    ids = adapter.tokenizer.encode(" ".join(
+        f"Note {i}: the courier left hub {i * 29 % 997} with {i % 17} parcels for route {i * 7 % 61}."
+        for i in range(300)))[:2048]
+    arms = {}
+    for mode in ("off", "on"):
+        os.environ["MLX2_NEMOTRON_ROUTED_DECODE"] = mode
+        rd.COUNTS.update(engaged=0, declined=0)
+        cache = model.make_cache()
+        logits = model._checkpoint_logits(mx.array([ids]), cache)
+        token = mx.argmax(logits[:, -1], axis=-1)[:, None]
+        mx.eval(token)
+        tokens, digests = [], []
+        for _ in range(steps):
+            logits = model(token, cache=cache)[:, -1]
+            token = mx.argmax(logits, axis=-1)[:, None]
+            mx.eval(logits, token)
+            digests.append(hashlib.sha256(np.asarray(logits.astype(mx.float32)).tobytes()).hexdigest())
+            tokens.append(int(token.item()))
+        arms[mode] = {"tokens": tokens, "digests": digests, "counts": dict(rd.COUNTS)}
+    os.environ["MLX2_NEMOTRON_ROUTED_DECODE"] = "off"
+    first = next((i for i, (a, b) in enumerate(zip(arms["off"]["digests"], arms["on"]["digests"]))
+                  if a != b), None)
+    report = {"steps": steps, "tokens_identical": arms["off"]["tokens"] == arms["on"]["tokens"],
+              "logits_bitwise_identical_steps": sum(a == b for a, b in zip(
+                  arms["off"]["digests"], arms["on"]["digests"])),
+              "first_logits_difference": first, "counts_on": arms["on"]["counts"],
+              "counts_off": arms["off"]["counts"]}
+    print(json.dumps(report), flush=True)
+    adapter.close()
+    return report
+
+
 def model_profile(contexts, decode_steps, reps, policy=None, split=True):
     import mlx.core as mx
     from mlx import nn
@@ -386,6 +503,12 @@ def unit(out, args):
         report["model"] = model_profile(args.contexts, args.decode_steps, args.reps,
                                         policy=json.loads(args.policy), split=not args.no_split)
         atomic(out / "report.json", report)
+    if "routed" in args.parts:
+        report["routed"] = routed_parity()
+        atomic(out / "report.json", report)
+    if "census" in args.parts:
+        report["census"] = decode_census(out)
+        atomic(out / "report.json", report)
     if "rowexact" in args.parts:
         report["rowexact"] = rowexact_check(max(args.reps, 5))
         atomic(out / "report.json", report)
@@ -458,7 +581,7 @@ def main():
     parser.add_argument("mode", choices=("owned", "unit", "arms"))
     parser.add_argument("out", type=Path)
     parser.add_argument("--parts", nargs="+", default=["kernels", "model"],
-                        choices=["kernels", "model", "served", "rowexact"])
+                        choices=["kernels", "model", "served", "rowexact", "census", "routed"])
     parser.add_argument("--policy", default="{}")
     parser.add_argument("--no-split", action="store_true")
     parser.add_argument("--arms-file", type=Path)
