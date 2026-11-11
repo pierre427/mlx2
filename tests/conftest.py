@@ -172,6 +172,8 @@ def _unexported_reason(error):
 # Tests whose inputs exist on the export only as older frozen copies (they
 # pass in a private checkout, which has the current files).
 _PUBLIC_EXPORT_SKIP_MODULES = {
+    "test_export_public_guard.py":
+        "needs scripts/public_export_withheld.txt, which the exporter never exports",
     "test_segmented_moe_prefill_native_qualifier.py":
         "binds the reviewed hash of a private provenance record",
     "test_segmented_moe_native_identity_cpu.py":
