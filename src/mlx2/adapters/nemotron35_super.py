@@ -19,10 +19,18 @@ from ..sampling_defaults import MODEL_CARD, SamplingDefaults, VendorSampling
 from .external_draft_policy import ExternalDraftAdapterMixin
 from .nemotron3_super import Nemotron3SuperAdapter, configure_environment
 from .nemotron35_super_config import (
+    NVFP4_EXPORT_CONFIG_SHA256,
+    NVFP4_EXPORT_INDEX_SHA256,
+    NVFP4_EXPORT_REPO,
+    NVFP4_EXPORT_REVISION,
+    NVFP4_EXPORT_SOURCE,
+    NVFP4_EXPORT_SOURCE_REVISION,
+    NVFP4_QUANTIZATION,
     SOURCE_CONFIG_SHA256,
     SOURCE_INDEX_SHA256,
     SOURCE_REVISION,
     language_config,
+    nvfp4_export_schema,
     tensor_schema,
     vision_config,
 )
@@ -340,11 +348,125 @@ def inspect_source_artifact(path, config):
     }
 
 
+NVFP4_CONVERSION = {
+    "recipe": "nvfp4-native-mlx-vlm-export",
+    "expert_bits": None,
+    "precision": "nvfp4",
+    "activation_aware": False,
+    "repo": NVFP4_EXPORT_REPO,
+    "revision": NVFP4_EXPORT_REVISION,
+    "source_repo": NVFP4_EXPORT_SOURCE,
+    "source_revision": NVFP4_EXPORT_SOURCE_REVISION,
+}
+NVFP4_DESCRIPTOR = replace(DESCRIPTOR, variant="nvfp4-export")
+NVFP4_LAYOUT_SUFFIX = ":nvfp4-weight-scale2-v1"
+
+
+def _is_nvfp4_export(path):
+    """Whether ``path`` claims to be the MLX-VLM NVFP4 export (then pinned).
+
+    Consulted only without an mlx2 conversion receipt; a malformed or
+    unrelated ``conversion_info.json`` is not this export.
+    """
+    info = path / "conversion_info.json"
+    if (path / "mlx2-conversion.json").exists() or info.is_symlink() or not info.is_file():
+        return False
+    try:
+        data = json.loads(info.read_text())
+        quantization = data.get("quantization")
+        return (
+            data.get("source_model") == NVFP4_EXPORT_SOURCE
+            and isinstance(quantization, dict)
+            and quantization.get("mode") == "nvfp4"
+        )
+    except (ValueError, AttributeError, OSError):
+        return False
+
+
+def inspect_nvfp4_export(path, config):
+    """The pinned MLX-VLM NVFP4 export (see ``nvfp4_export_schema``).
+
+    Config and index bytes must be the pinned export revision's, its
+    conversion record must name the pinned vendor NVFP4 source, and every
+    shard header must match the derived schema exactly.  Experts load as
+    ``weight_scale_2`` NVFP4 modules; everything else is BF16 as published.
+    """
+    if sha256(path / "config.json") != NVFP4_EXPORT_CONFIG_SHA256:
+        raise ValueError("Super VL NVFP4 export config differs from the pinned revision")
+    if sha256(path / "model.safetensors.index.json") != NVFP4_EXPORT_INDEX_SHA256:
+        raise ValueError("Super VL NVFP4 export index differs from the pinned revision")
+    info = json.loads((path / "conversion_info.json").read_text())
+    if (
+        info.get("source_revision") != NVFP4_EXPORT_SOURCE_REVISION
+        or info.get("quantization") != NVFP4_QUANTIZATION
+        or info.get("mtp_weight_file") != "mtp.safetensors"
+    ):
+        raise ValueError("Super VL NVFP4 export is not bound to the pinned NVFP4 source")
+    schema, modules = nvfp4_export_schema(config)
+    index = json.loads((path / "model.safetensors.index.json").read_text())
+    mapping = index["weight_map"]
+    if set(mapping) != set(schema):
+        raise ValueError("Super VL NVFP4 export index has missing or unexpected tensors")
+    digest, records = hashlib.sha256(), []
+    for name in (
+        "config.json",
+        "model.safetensors.index.json",
+        "conversion_info.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "chat_template.jinja",
+        "generation_config.json",
+    ):
+        item = path / name
+        if item.is_symlink() or not item.is_file():
+            raise ValueError(f"Missing or escaped Super VL metadata: {name}")
+        digest.update(name.encode())
+        digest.update(item.read_bytes())
+    for name in sorted(set(mapping.values())):
+        if Path(name).name != name or "\\" in name or not name.endswith(".safetensors"):
+            raise ValueError("Super VL shard path escapes artifact")
+        item = path / name
+        if item.is_symlink() or not item.is_file():
+            raise ValueError("Super VL NVFP4 export shard is absent or escaped")
+        header, _ = read_header(item)
+        tensors = {key: entry for key, entry in header.items() if key != "__metadata__"}
+        if set(tensors) != {key for key, shard in mapping.items() if shard == name}:
+            raise ValueError("Super VL NVFP4 export shard/index differs")
+        for key, entry in tensors.items():
+            if {field: entry[field] for field in ("shape", "dtype")} != schema[key]:
+                raise ValueError(f"Super VL NVFP4 export tensor geometry differs: {key}")
+        stat = item.stat()
+        record = (name, stat.st_size, stat.st_mtime_ns)
+        records.append(record)
+        digest.update(json.dumps(record).encode())
+        digest.update(json.dumps(header, sort_keys=True).encode())
+    generation = json.loads((path / "generation_config.json").read_text())
+    return {
+        "config": config,
+        "weight_map": mapping,
+        "conversion": {
+            **NVFP4_CONVERSION,
+            "tensor_bytes": int(index["metadata"]["total_size"]),
+        },
+        "has_mtp": True,
+        "quantization": {},
+        "nvfp4_modules": modules,
+        "eos_token_ids": tuple(generation["eos_token_id"]),
+        "identity": {
+            "path": str(path),
+            "fingerprint": digest.hexdigest(),
+            "files": records,
+        },
+    }
+
+
 def inspect_artifact(model_path):
     path = Path(model_path).expanduser().resolve()
     config = json.loads((path / "config.json").read_text())
     language_config(config)
     vision_config(config)
+    if _is_nvfp4_export(path):
+        return inspect_nvfp4_export(path, config)
     if not (path / "mlx2-conversion.json").exists():
         return inspect_source_artifact(path, config)
     receipt = json.loads((path / "mlx2-conversion.json").read_text())
@@ -520,6 +642,9 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
 
         self._stream_request = require_declared(type(self), weight_streaming)
         self.weight_stream = None
+        nax_explicit = (
+            isinstance(execution_policy, dict) and "moe_nax_gather" in execution_policy
+        )
         execution_policy, self.moe_nax_gather = _split_moe_nax_gather(execution_policy)
         (
             expert_sort,
@@ -578,6 +703,54 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         if artifact.get("source_bf16"):
             self.descriptor = SOURCE_DESCRIPTOR
         self.identity, self.layout = artifact["identity"], type(self).cache_layout
+        self.eos_token_ids = tuple(artifact.get("eos_token_ids", type(self).eos_token_ids))
+        if artifact.get("nvfp4_modules"):
+            if self._stream_request is not None:
+                # Expert streaming reads QuantizedSwitchLinear tables and
+                # applies no per-expert weight_scale_2.
+                raise ValueError(
+                    "Super VL NVFP4 export has no expert-streaming path; "
+                    "refusing before any weight is loaded"
+                )
+            self.descriptor = NVFP4_DESCRIPTOR
+            self.layout += NVFP4_LAYOUT_SUFFIX
+            # Checkpoint defaults for this export (Pierre, 2026-11-10, after
+            # the A/B in qualification/runs/super-vl-nvfp4-20261110/profile2,
+            # ...-NVFP4@33a6f018, mlx2 e4d842b74 + this change, M5 Max, no
+            # thermal hold; 64 greedy decode tokens identical in every arm):
+            # * MoE NAX gather on every route (prefill only; the NVFP4 kernel
+            #   is canary-proven bit-identical to stock): prefill +7-8% over
+            #   the fold alone.  An explicit moe_nax_gather key wins.
+            # * vendor FP8 dense projections: decode 27.7 -> 35.3 tok/s,
+            #   prefill -8% against fold+NAX.  MLX2_NVFP4_DENSE=bf16 restores
+            #   the exported BF16.
+            # * expert-scale fold (below): prefill +7-11%.
+            #   MLX2_NVFP4_EXPERT_SCALE=apply restores the applied scales.
+            # Not qualified.
+            if not nax_explicit:
+                self.moe_nax_gather = "gather"
+            self.nvfp4_nax_defaulted = not nax_explicit
+            refused = [
+                name
+                for name, selected in (
+                    # Both need QuantizedSwitchLinear / QuantizedLinear modules
+                    # and would refuse every call on this export.
+                    ("moe_relu2_down", relu2_down != "auto"),
+                    ("mamba_projection=native_qmm_residual_b1",
+                     mamba_projection == "native_qmm_residual_b1"),
+                )
+                if selected
+            ]
+            if refused:
+                raise ValueError(
+                    "Super VL NVFP4 export has no " + ", ".join(refused)
+                    + " path; refusing before any weight is loaded"
+                )
+            self.nvfp4_dense = os.environ.get("MLX2_NVFP4_DENSE", "fp8")
+            if self.nvfp4_dense not in {"bf16", "fp8"}:
+                raise ValueError("MLX2_NVFP4_DENSE must be bf16 or fp8")
+            if self.nvfp4_dense == "fp8":
+                self.layout += ":vendor-fp8-dense-w8a16-v1"
         self.source_config, self.conversion = artifact["config"], artifact["conversion"]
         draft_record = None
         draft_loader = None
@@ -686,6 +859,21 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                     dict(modules[name]) if name in modules else False
                 ),
             )
+            if artifact.get("nvfp4_modules"):
+                from ..runtime.nvfp4_linear import install_weight_scale2
+
+                self.nvfp4_modules = install_weight_scale2(
+                    self.model, artifact["nvfp4_modules"]
+                )
+                if self.nvfp4_dense == "fp8":
+                    from ..runtime.nvfp4_linear import install_vendor_fp8
+                    from .nemotron35_super_config import vendor_fp8_scales
+
+                    # Exact vendor E4M3 codes recovered from the BF16 export
+                    # (checked bit for bit per tensor), on mxfp8 kernels.
+                    self.vendor_fp8_modules = install_vendor_fp8(
+                        self.model, _weights, vendor_fp8_scales()
+                    )
 
         stream_request = getattr(self, "_stream_request", None)
         if stream_request is None:
@@ -716,6 +904,25 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             self.weight_stream = loaded.manager
         self.model.eval()
         self._super_expert_gathers = _super_expert_gathers(self.model)
+        self.nvfp4_expert_scale = None
+        if artifact.get("nvfp4_modules"):
+            # Default "fold" for this export (see the checkpoint defaults
+            # above): both per-expert weight_scale_2 move into the routing
+            # weights (ReLU2 is degree-2 homogeneous), removing two fp32
+            # passes over every routed row.  A distinct numerics profile, so
+            # it is in the layout.
+            mode = os.environ.get("MLX2_NVFP4_EXPERT_SCALE", "fold")
+            if mode not in {"apply", "fold"}:
+                raise ValueError("MLX2_NVFP4_EXPERT_SCALE must be apply or fold")
+            if mode == "fold":
+                from ..runtime.nvfp4_linear import fold_relu2_expert_scales
+
+                fold_relu2_expert_scales(
+                    self._super_expert_gathers,
+                    self.model.backbone.embeddings.weight.dtype,
+                )
+                self.layout += ":nvfp4-expert-scale-folded-v1"
+            self.nvfp4_expert_scale = mode
         self._super_mamba_mixers = _super_mamba_mixers(self.model)
         self._super_moe_mixers = _super_moe_mixers(self.model)
         if self.expert_gather_sort != "auto":
@@ -783,7 +990,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         self.tokenizer = TokenizerWrapper(
             tokenizer,
             detokenizer_class=BPEStreamingDetokenizer,
-            eos_token_ids=list(type(self).eos_token_ids),
+            eos_token_ids=list(self.eos_token_ids),
         )
         self.max_context = self.model.args.max_position_embeddings
         if draft_record is not None:
@@ -882,7 +1089,12 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
 
     def profile_name(self, mtp):
         bits = self.conversion["expert_bits"]
-        precision = f"affine{bits}" if bits is not None else "bf16"
+        precision = self.conversion.get("precision") or (
+            f"affine{bits}" if bits is not None else "bf16"
+        )
+        if getattr(self, "nvfp4_dense", None) is not None:
+            # Distinct numerics profiles of the NVFP4 export.
+            precision += f"-{self.nvfp4_dense}dense-{self.nvfp4_expert_scale}scale"
         return f"nemotron35-super-vl-{precision}-apcv2-" + (
             f"mtp{self._num_draft}" if mtp else "ordinary"
         )
@@ -920,7 +1132,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "router_compute": "float32",
             "recurrent_state": "float32",
             "time_step_limit": [0.0, "infinity"],
-            "source_revision": SOURCE_REVISION,
+            "source_revision": self.conversion.get("source_revision", SOURCE_REVISION),
             "quantization_recipe": self.conversion["recipe"],
             "qualification": "unqualified",
         }
@@ -986,6 +1198,20 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                 for key in ("recipe", "expert_bits", "activation_aware")
             },
             "external_draft": self.draft_model is not None,
+            "nvfp4_export": (
+                None
+                if getattr(self, "nvfp4_dense", None) is None
+                else {
+                    "schema": "mlx2.nemotron35-super-nvfp4-export.v1",
+                    "implemented": True,
+                    "qualified": False,
+                    "dense": self.nvfp4_dense,
+                    "vendor_fp8_modules": len(getattr(self, "vendor_fp8_modules", ())),
+                    "expert_scale": self.nvfp4_expert_scale,
+                    "nvfp4_modules": len(getattr(self, "nvfp4_modules", ())),
+                    "moe_nax_gather_defaulted": getattr(self, "nvfp4_nax_defaulted", False),
+                }
+            ),
             "moe_nax_gather": _moe_nax_gather_report(
                 getattr(self, "moe_nax_gather", "off")
             ),

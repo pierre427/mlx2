@@ -1233,6 +1233,18 @@ class NemotronHMoE(nn.Module):
             ),
         }
 
+    def _routing_weights(self, inds, scores):
+        """Routing weights, times any folded per-expert projection scale.
+
+        ``runtime.nvfp4_linear.fold_relu2_expert_scales`` moves NVFP4
+        ``weight_scale_2`` out of the expert projections into this table;
+        without it the scores pass through unchanged.
+        """
+        fold = getattr(self.switch_mlp, "expert_output_scale", None)
+        if fold is None:
+            return scores
+        return (scores.astype(mx.float32) * fold()[inds]).astype(scores.dtype)
+
     def _shared_rows_exact(self, x):
         """The shared expert over a strip with each row's one-row arithmetic."""
         from ..row_exact import ops
@@ -1291,7 +1303,7 @@ class NemotronHMoE(nn.Module):
             num_experts=int(self.config.n_routed_experts),
             key=("nemotron_switch_mlp", type(self.switch_mlp).__name__),
         )
-        y = ops.combine_experts(routed, scores)
+        y = ops.combine_experts(routed, self._routing_weights(inds, scores))
         y = ops.linear(self.fc2_latent_proj, y, stage="moe_latent_out")
         return y + self._shared_rows_exact(x)
 
@@ -1468,7 +1480,8 @@ class NemotronHMoE(nn.Module):
                 self._relu2_down_counts["refused"] += 1
         if fused is None:
             y = self.switch_mlp(x, inds)
-            y = (y * scores[..., None]).sum(axis=-2).astype(y.dtype)
+            weights = self._routing_weights(inds, scores)
+            y = (y * weights[..., None]).sum(axis=-2).astype(y.dtype)
             self._relu2_down_counts["ordinary"] += 1
         else:
             y = fused

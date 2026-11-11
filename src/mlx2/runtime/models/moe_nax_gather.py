@@ -336,6 +336,33 @@ struct Mxfp4Q {
   }
 };
 
+// NVFP4 (mlx2): e2m1 values times the e4m3 group-16 scale, dequantized like
+// mlx's fp QuantizedBlockLoader without a global scale (dequantize_scale<T,
+// 16> is T(fp8_e4m3); the per-expert weight_scale_2 stays with the caller).
+template <int GS>
+struct Nvfp4Q {
+  using WT = bfloat;
+  STEEL_CONST int kBits = 4;
+  STEEL_CONST int kGroup = GS;
+  const device uint8_t* scales;
+
+  struct P {
+    float s;
+  };
+
+  METAL_FUNC void advance(const size_t n) thread {
+    scales += n;
+  }
+  METAL_FUNC P params(const int g) const thread {
+    uint8_t sb = scales[g];
+    return P{float(static_cast<bfloat>(*(thread fp8_e4m3*)(&sb)))};
+  }
+  METAL_FUNC static WT dq(thread const P& p, const uint32_t q) {
+    uint8_t qb = uint8_t(q);
+    return static_cast<WT>(p.s * float(*(thread fp4_e2m1*)(&qb)));
+  }
+};
+
 // Gate/up pairing (activation epilogue): weight rows [gate; up] of one
 // expert, half_n rows each. Row r of a paired kBN x BK weight tile loads
 // weight row pair_row(r) past the tile's first gate row: 16-row blocks
@@ -1079,6 +1106,11 @@ _FP_SOURCE = _MM_SOURCE_TMPL.format(
     q_init="Q q{scales};",
 )
 
+_NVFP4_SOURCE = _MM_SOURCE_TMPL.format(
+    q_type="using Q = omlx_gqmm::Nvfp4Q<GS>;",
+    q_init="Q q{scales};",
+)
+
 # ---------------------------------------------------------------------------
 # Gate/up activation epilogue
 # ---------------------------------------------------------------------------
@@ -1394,6 +1426,14 @@ def _get_kernel(kind: str):
                     header=mlx_src + _MM_HEADER,
                     source=_AFFINE_SOURCE,
                 )
+            elif kind == "nvfp4":
+                kernel = mx.fast.metal_kernel(
+                    name="mlx2_gqmm_nvfp4_v1",
+                    input_names=["x", "w", "scales", "tiles", "tile_count", "params"],
+                    output_names=["y"],
+                    header=mlx_src + _MM_HEADER,
+                    source=_NVFP4_SOURCE,
+                )
             else:
                 kernel = mx.fast.metal_kernel(
                     name="omlx_gqmm_mxfp4_v2",
@@ -1587,6 +1627,11 @@ def supports(
             return False
         if scales.dtype != mx.uint8:
             return False
+    elif mode == "nvfp4":
+        if bits != 4 or group_size != 16 or biases is not None:
+            return False
+        if scales.dtype != mx.uint8:
+            return False
     else:
         return False
     if w.shape[2] * 32 != K * bits:
@@ -1616,8 +1661,11 @@ def _launch(
     ``x[row_map]`` in place.  ``up = (w2, scales2, biases2)`` (mlx2, with
     ``epi``): ``w`` holds only the gate rows and ``w2`` the up rows."""
     scan = _get_kernel("scan")
-    kind = "affine" if mode == "affine" else "fp"
+    kind = "affine" if mode == "affine" else ("nvfp4" if mode == "nvfp4" else "fp")
     if (row_map is not None or up is not None) and not epi:
+        return None
+    if epi and kind == "nvfp4":
+        # The activation epilogues carry only the affine and MXFP4 loaders.
         return None
     mm = _get_kernel(
         (
@@ -2441,6 +2489,11 @@ def try_gather(x, layer, indices) -> Optional[mx.array]:
         return None
     if not bits_admitted(layer.mode, layer.bits):
         _fallback("bits_not_admitted")
+        return None
+    if layer.mode == "nvfp4" and not getattr(layer, "nax_nvfp4_owned", False):
+        # mlx2 scope: the NVFP4 kernel serves runtime/nvfp4_linear's
+        # ScaledNVFP4SwitchLinear only; other nvfp4 layers keep stock.
+        _fallback("nvfp4_not_owned")
         return None
     idx = _as_u32(indices)
     if not supports(

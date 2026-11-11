@@ -147,11 +147,24 @@ class Model(LanguageModel):
             if name.startswith("language_model."):
                 name = name.removeprefix("language_model.")
             if name.startswith("mlp1."):
-                parts = name.split(".")
-                parts[1] = {"0": "norm", "1": "linear1", "3": "linear2"}[parts[1]]
-                name = "vision_projector." + ".".join(parts)
+                # Vendor ``mlp1.N.weight``; MLX-VLM exports ``mlp1.layers.N``.
+                parts = name.removeprefix("mlp1.").removeprefix("layers.").split(".")
+                parts[0] = {"0": "norm", "1": "linear1", "3": "linear2"}[parts[0]]
+                name = "vision_projector.mlp1." + ".".join(parts)
+            if name.startswith("vision_final_layernorm."):
+                # MLX-VLM exports the projector's leading LayerNorm top level.
+                name = "vision_projector." + name
             if name == "vision_model.summary_idxs":
                 name = "vision_model.radio_model.summary_idxs"
                 value = value.astype(mx.int32)
             output[name] = value
+        if (
+            "vision_model.radio_model.summary_idxs" not in output
+            and any(name.startswith("vision_model.") for name in output)
+        ):
+            # Not exported by MLX-VLM; it is configuration (summary_idxs
+            # [0, 1], checked by the inspector), not a learned tensor.
+            output["vision_model.radio_model.summary_idxs"] = (
+                self.vision_model.radio_model.summary_idxs
+            )
         return super().sanitize(output)

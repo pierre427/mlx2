@@ -1,0 +1,461 @@
+{
+ "schema": "mlx2.vendor-fp8-scales.v1",
+ "source_repo": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4",
+ "source_revision": "82d93699acd3be9e4617c53360fe5b3f5dbeb1b3",
+ "law": "weight = bf16(float32(e4m3) * weight_scale); activations are W8A16 here (input_scale recorded, unused)",
+ "fetched": "HTTP range reads of the pinned source shards (headers + F32 scalars only)",
+ "modules": {
+  "backbone.layers.0.mixer.in_proj": {
+   "weight_scale": 0.0008021763642318547,
+   "input_scale": 0.029296875
+  },
+  "backbone.layers.0.mixer.out_proj": {
+   "weight_scale": 0.0010027204407379031,
+   "input_scale": 0.0057198661379516125
+  },
+  "backbone.layers.11.mixer.in_proj": {
+   "weight_scale": 0.0008457728545181453,
+   "input_scale": 0.0304129458963871
+  },
+  "backbone.layers.11.mixer.out_proj": {
+   "weight_scale": 0.001220703125,
+   "input_scale": 0.02985491044819355
+  },
+  "backbone.layers.13.mixer.in_proj": {
+   "weight_scale": 0.0013776506530120969,
+   "input_scale": 0.02120535634458065
+  },
+  "backbone.layers.13.mixer.out_proj": {
+   "weight_scale": 0.0017961774719879031,
+   "input_scale": 0.0323660708963871
+  },
+  "backbone.layers.15.mixer.in_proj": {
+   "weight_scale": 0.00341796875,
+   "input_scale": 0.0622209832072258
+  },
+  "backbone.layers.15.mixer.out_proj": {
+   "weight_scale": 0.0017613002564758062,
+   "input_scale": 0.4330357015132904
+  },
+  "backbone.layers.16.mixer.k_proj": {
+   "weight_scale": 0.0008065360016189516,
+   "input_scale": 0.1043526753783226
+  },
+  "backbone.layers.16.mixer.o_proj": {
+   "weight_scale": 0.0020577567629516125,
+   "input_scale": 0.004917689599096775
+  },
+  "backbone.layers.16.mixer.q_proj": {
+   "weight_scale": 0.0008065360016189516,
+   "input_scale": 0.1043526753783226
+  },
+  "backbone.layers.16.mixer.v_proj": {
+   "weight_scale": 0.0008065360016189516,
+   "input_scale": 0.1043526753783226
+  },
+  "backbone.layers.18.mixer.in_proj": {
+   "weight_scale": 0.0021711078006774187,
+   "input_scale": 0.0493861623108387
+  },
+  "backbone.layers.18.mixer.out_proj": {
+   "weight_scale": 0.0012294223997741938,
+   "input_scale": 0.0479910708963871
+  },
+  "backbone.layers.2.mixer.in_proj": {
+   "weight_scale": 0.0008980887359939516,
+   "input_scale": 0.02566964365541935
+  },
+  "backbone.layers.2.mixer.out_proj": {
+   "weight_scale": 0.0010899135377258062,
+   "input_scale": 0.1049107164144516
+  },
+  "backbone.layers.20.mixer.in_proj": {
+   "weight_scale": 0.0013689313782379031,
+   "input_scale": 0.0330636166036129
+  },
+  "backbone.layers.20.mixer.out_proj": {
+   "weight_scale": 0.0017177036497741938,
+   "input_scale": 0.056640625
+  },
+  "backbone.layers.22.mixer.in_proj": {
+   "weight_scale": 0.0032261440064758062,
+   "input_scale": 0.0316685251891613
+  },
+  "backbone.layers.22.mixer.out_proj": {
+   "weight_scale": 0.0019356863340362906,
+   "input_scale": 0.0630580335855484
+  },
+  "backbone.layers.24.mixer.in_proj": {
+   "weight_scale": 0.004917689599096775,
+   "input_scale": 0.1495535671710968
+  },
+  "backbone.layers.24.mixer.out_proj": {
+   "weight_scale": 0.0021187919192016125,
+   "input_scale": 0.1674107164144516
+  },
+  "backbone.layers.25.mixer.k_proj": {
+   "weight_scale": 0.000823974609375,
+   "input_scale": 0.1222098246216774
+  },
+  "backbone.layers.25.mixer.o_proj": {
+   "weight_scale": 0.00244140625,
+   "input_scale": 0.012486048974096775
+  },
+  "backbone.layers.25.mixer.q_proj": {
+   "weight_scale": 0.000823974609375,
+   "input_scale": 0.1222098246216774
+  },
+  "backbone.layers.25.mixer.v_proj": {
+   "weight_scale": 0.000823974609375,
+   "input_scale": 0.1222098246216774
+  },
+  "backbone.layers.27.mixer.in_proj": {
+   "weight_scale": 0.0024762835819274187,
+   "input_scale": 0.0316685251891613
+  },
+  "backbone.layers.27.mixer.out_proj": {
+   "weight_scale": 0.0021275111939758062,
+   "input_scale": 0.07421875
+  },
+  "backbone.layers.29.mixer.in_proj": {
+   "weight_scale": 0.0017961774719879031,
+   "input_scale": 0.0320870541036129
+  },
+  "backbone.layers.29.mixer.out_proj": {
+   "weight_scale": 0.0021798270754516125,
+   "input_scale": 0.052734375
+  },
+  "backbone.layers.31.mixer.in_proj": {
+   "weight_scale": 0.003976004663854837,
+   "input_scale": 0.03055245615541935
+  },
+  "backbone.layers.31.mixer.out_proj": {
+   "weight_scale": 0.0018310546875,
+   "input_scale": 0.068359375
+  },
+  "backbone.layers.33.mixer.in_proj": {
+   "weight_scale": 0.0032435825560241938,
+   "input_scale": 0.02706473134458065
+  },
+  "backbone.layers.33.mixer.out_proj": {
+   "weight_scale": 0.0023367744870483875,
+   "input_scale": 0.0881696417927742
+  },
+  "backbone.layers.35.mixer.in_proj": {
+   "weight_scale": 0.007359095849096775,
+   "input_scale": 0.1188616082072258
+  },
+  "backbone.layers.35.mixer.out_proj": {
+   "weight_scale": 0.0019182477844879031,
+   "input_scale": 0.13671875
+  },
+  "backbone.layers.36.mixer.k_proj": {
+   "weight_scale": 0.0008806501282379031,
+   "input_scale": 0.1322544664144516
+  },
+  "backbone.layers.36.mixer.o_proj": {
+   "weight_scale": 0.00164794921875,
+   "input_scale": 0.02706473134458065
+  },
+  "backbone.layers.36.mixer.q_proj": {
+   "weight_scale": 0.0008806501282379031,
+   "input_scale": 0.1322544664144516
+  },
+  "backbone.layers.36.mixer.v_proj": {
+   "weight_scale": 0.0008806501282379031,
+   "input_scale": 0.1322544664144516
+  },
+  "backbone.layers.38.mixer.in_proj": {
+   "weight_scale": 0.0025634765625,
+   "input_scale": 0.02399553544819355
+  },
+  "backbone.layers.38.mixer.out_proj": {
+   "weight_scale": 0.0023716518189758062,
+   "input_scale": 0.0892857164144516
+  },
+  "backbone.layers.4.mixer.in_proj": {
+   "weight_scale": 0.0009591238922439516,
+   "input_scale": 0.0432477667927742
+  },
+  "backbone.layers.4.mixer.out_proj": {
+   "weight_scale": 0.0012904575560241938,
+   "input_scale": 0.0272042416036129
+  },
+  "backbone.layers.40.mixer.in_proj": {
+   "weight_scale": 0.0033830914180725813,
+   "input_scale": 0.0329241082072258
+  },
+  "backbone.layers.40.mixer.out_proj": {
+   "weight_scale": 0.0025285992305725813,
+   "input_scale": 0.1155133917927742
+  },
+  "backbone.layers.42.mixer.in_proj": {
+   "weight_scale": 0.0021711078006774187,
+   "input_scale": 0.0291573666036129
+  },
+  "backbone.layers.42.mixer.out_proj": {
+   "weight_scale": 0.0024239677004516125,
+   "input_scale": 0.1261160671710968
+  },
+  "backbone.layers.44.mixer.in_proj": {
+   "weight_scale": 0.0044991630129516125,
+   "input_scale": 0.03515625
+  },
+  "backbone.layers.44.mixer.out_proj": {
+   "weight_scale": 0.0021275111939758062,
+   "input_scale": 0.12109375
+  },
+  "backbone.layers.46.mixer.in_proj": {
+   "weight_scale": 0.00934709794819355,
+   "input_scale": 0.0948660746216774
+  },
+  "backbone.layers.46.mixer.out_proj": {
+   "weight_scale": 0.00164794921875,
+   "input_scale": 0.1785714328289032
+  },
+  "backbone.layers.47.mixer.k_proj": {
+   "weight_scale": 0.00115966796875,
+   "input_scale": 0.0613839291036129
+  },
+  "backbone.layers.47.mixer.o_proj": {
+   "weight_scale": 0.0014561244752258062,
+   "input_scale": 0.05078125
+  },
+  "backbone.layers.47.mixer.q_proj": {
+   "weight_scale": 0.00115966796875,
+   "input_scale": 0.0613839291036129
+  },
+  "backbone.layers.47.mixer.v_proj": {
+   "weight_scale": 0.00115966796875,
+   "input_scale": 0.0613839291036129
+  },
+  "backbone.layers.49.mixer.in_proj": {
+   "weight_scale": 0.004185267724096775,
+   "input_scale": 0.0574776791036129
+  },
+  "backbone.layers.49.mixer.out_proj": {
+   "weight_scale": 0.0013689313782379031,
+   "input_scale": 0.2154017835855484
+  },
+  "backbone.layers.51.mixer.in_proj": {
+   "weight_scale": 0.0025111606810241938,
+   "input_scale": 0.0315290167927742
+  },
+  "backbone.layers.51.mixer.out_proj": {
+   "weight_scale": 0.0017264230409637094,
+   "input_scale": 0.296875
+  },
+  "backbone.layers.53.mixer.in_proj": {
+   "weight_scale": 0.0028773716185241938,
+   "input_scale": 0.0385044626891613
+  },
+  "backbone.layers.53.mixer.out_proj": {
+   "weight_scale": 0.0017438615905120969,
+   "input_scale": 0.2991071343421936
+  },
+  "backbone.layers.55.mixer.in_proj": {
+   "weight_scale": 0.0026506695430725813,
+   "input_scale": 0.0725446417927742
+  },
+  "backbone.layers.55.mixer.out_proj": {
+   "weight_scale": 0.0017787388060241938,
+   "input_scale": 0.2455357164144516
+  },
+  "backbone.layers.57.mixer.in_proj": {
+   "weight_scale": 0.007777622900903225,
+   "input_scale": 0.0689174085855484
+  },
+  "backbone.layers.57.mixer.out_proj": {
+   "weight_scale": 0.0010157993528991938,
+   "input_scale": 0.3727678656578064
+  },
+  "backbone.layers.58.mixer.k_proj": {
+   "weight_scale": 0.0013340541627258062,
+   "input_scale": 0.0708705335855484
+  },
+  "backbone.layers.58.mixer.o_proj": {
+   "weight_scale": 0.0008065360016189516,
+   "input_scale": 0.0731026753783226
+  },
+  "backbone.layers.58.mixer.q_proj": {
+   "weight_scale": 0.0013340541627258062,
+   "input_scale": 0.0708705335855484
+  },
+  "backbone.layers.58.mixer.v_proj": {
+   "weight_scale": 0.0013340541627258062,
+   "input_scale": 0.0708705335855484
+  },
+  "backbone.layers.6.mixer.in_proj": {
+   "weight_scale": 0.0015433175722137094,
+   "input_scale": 0.0535714291036129
+  },
+  "backbone.layers.6.mixer.out_proj": {
+   "weight_scale": 0.0019705635495483875,
+   "input_scale": 0.0954241082072258
+  },
+  "backbone.layers.60.mixer.in_proj": {
+   "weight_scale": 0.0052315848879516125,
+   "input_scale": 0.0608258917927742
+  },
+  "backbone.layers.60.mixer.out_proj": {
+   "weight_scale": 0.0013776506530120969,
+   "input_scale": 0.4352678656578064
+  },
+  "backbone.layers.62.mixer.in_proj": {
+   "weight_scale": 0.0036795479245483875,
+   "input_scale": 0.0443638376891613
+  },
+  "backbone.layers.62.mixer.out_proj": {
+   "weight_scale": 0.0021013531368225813,
+   "input_scale": 0.3191964328289032
+  },
+  "backbone.layers.64.mixer.in_proj": {
+   "weight_scale": 0.0022495815064758062,
+   "input_scale": 0.0313895083963871
+  },
+  "backbone.layers.64.mixer.out_proj": {
+   "weight_scale": 0.0020664760377258062,
+   "input_scale": 0.34375
+  },
+  "backbone.layers.66.mixer.in_proj": {
+   "weight_scale": 0.0030343192629516125,
+   "input_scale": 0.03069196455180645
+  },
+  "backbone.layers.66.mixer.out_proj": {
+   "weight_scale": 0.0019182477844879031,
+   "input_scale": 0.3638392984867096
+  },
+  "backbone.layers.68.mixer.in_proj": {
+   "weight_scale": 0.00788225419819355,
+   "input_scale": 0.0658482164144516
+  },
+  "backbone.layers.68.mixer.out_proj": {
+   "weight_scale": 0.0022495815064758062,
+   "input_scale": 0.5133928656578064
+  },
+  "backbone.layers.69.mixer.k_proj": {
+   "weight_scale": 0.0009940011659637094,
+   "input_scale": 0.1194196417927742
+  },
+  "backbone.layers.69.mixer.o_proj": {
+   "weight_scale": 0.0011160714784637094,
+   "input_scale": 0.1010044664144516
+  },
+  "backbone.layers.69.mixer.q_proj": {
+   "weight_scale": 0.0009940011659637094,
+   "input_scale": 0.1194196417927742
+  },
+  "backbone.layers.69.mixer.v_proj": {
+   "weight_scale": 0.0009940011659637094,
+   "input_scale": 0.1194196417927742
+  },
+  "backbone.layers.7.mixer.k_proj": {
+   "weight_scale": 0.0005885533173568547,
+   "input_scale": 0.0792410746216774
+  },
+  "backbone.layers.7.mixer.o_proj": {
+   "weight_scale": 0.0010899135377258062,
+   "input_scale": 0.0039236885495483875
+  },
+  "backbone.layers.7.mixer.q_proj": {
+   "weight_scale": 0.0005885533173568547,
+   "input_scale": 0.0792410746216774
+  },
+  "backbone.layers.7.mixer.v_proj": {
+   "weight_scale": 0.0005885533173568547,
+   "input_scale": 0.0792410746216774
+  },
+  "backbone.layers.71.mixer.in_proj": {
+   "weight_scale": 0.00390625,
+   "input_scale": 0.02022879384458065
+  },
+  "backbone.layers.71.mixer.out_proj": {
+   "weight_scale": 0.002197265625,
+   "input_scale": 0.4151785671710968
+  },
+  "backbone.layers.73.mixer.in_proj": {
+   "weight_scale": 0.003993443213403225,
+   "input_scale": 0.014299665577709675
+  },
+  "backbone.layers.73.mixer.out_proj": {
+   "weight_scale": 0.0019269670592620969,
+   "input_scale": 0.6116071343421936
+  },
+  "backbone.layers.75.mixer.in_proj": {
+   "weight_scale": 0.0008588518248870969,
+   "input_scale": 0.0965401753783226
+  },
+  "backbone.layers.75.mixer.out_proj": {
+   "weight_scale": 0.0026332309935241938,
+   "input_scale": 0.6473214030265808
+  },
+  "backbone.layers.77.mixer.in_proj": {
+   "weight_scale": 0.00128173828125,
+   "input_scale": 0.2689732015132904
+  },
+  "backbone.layers.77.mixer.out_proj": {
+   "weight_scale": 0.0024065289180725813,
+   "input_scale": 0.7857142686843872
+  },
+  "backbone.layers.78.mixer.k_proj": {
+   "weight_scale": 0.0012730190064758062,
+   "input_scale": 0.3526785671710968
+  },
+  "backbone.layers.78.mixer.o_proj": {
+   "weight_scale": 0.002685546875,
+   "input_scale": 0.1953125
+  },
+  "backbone.layers.78.mixer.q_proj": {
+   "weight_scale": 0.0012730190064758062,
+   "input_scale": 0.3526785671710968
+  },
+  "backbone.layers.78.mixer.v_proj": {
+   "weight_scale": 0.0012730190064758062,
+   "input_scale": 0.3526785671710968
+  },
+  "backbone.layers.80.mixer.in_proj": {
+   "weight_scale": 0.0012991769472137094,
+   "input_scale": 0.2142857164144516
+  },
+  "backbone.layers.80.mixer.out_proj": {
+   "weight_scale": 0.0034702846314758062,
+   "input_scale": 1.6607142686843872
+  },
+  "backbone.layers.82.mixer.in_proj": {
+   "weight_scale": 0.0011683872435241938,
+   "input_scale": 0.10546875
+  },
+  "backbone.layers.82.mixer.out_proj": {
+   "weight_scale": 0.0028773716185241938,
+   "input_scale": 1.1339285373687744
+  },
+  "backbone.layers.84.mixer.in_proj": {
+   "weight_scale": 0.0014212472597137094,
+   "input_scale": 0.1372767835855484
+  },
+  "backbone.layers.84.mixer.out_proj": {
+   "weight_scale": 0.0027204242069274187,
+   "input_scale": 1.0401785373687744
+  },
+  "backbone.layers.86.mixer.in_proj": {
+   "weight_scale": 0.0013776506530120969,
+   "input_scale": 0.1266741007566452
+  },
+  "backbone.layers.86.mixer.out_proj": {
+   "weight_scale": 0.0023542132694274187,
+   "input_scale": 1.1875
+  },
+  "backbone.layers.9.mixer.in_proj": {
+   "weight_scale": 0.0008326939423568547,
+   "input_scale": 0.0315290167927742
+  },
+  "backbone.layers.9.mixer.out_proj": {
+   "weight_scale": 0.0012294223997741938,
+   "input_scale": 0.0373883917927742
+  },
+  "lm_head": {
+   "weight_scale": 0.0006016322295181453,
+   "input_scale": 0.4419642984867096
+  }
+ }
+}

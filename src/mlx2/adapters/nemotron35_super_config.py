@@ -134,3 +134,79 @@ def tensor_schema(config, *, fused=False):
     for name in ("weight", "bias"):
         add("vision_projector.vision_final_layernorm." + name, [1280])
     return schema
+
+
+# MLX-VLM native NVFP4 export of nvidia/...-Super-VL-120B-A12B-NVFP4
+# (nativ-community, export_mlx.py at mlx-vlm e17c49a5).  The vendor NVFP4
+# source keeps its routed and shared experts in NVFP4 (E2M1 values, E4M3
+# group-16 scales, FP32 ``weight_scale_2``); the export repacks them into MLX
+# ``nvfp4`` layout unchanged and decodes the vendor FP8 dense layers to BF16.
+# Provenance: provenance/nemotron35-super-vl-nvfp4-export.json.
+NVFP4_EXPORT_REPO = "nativ-community/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4"
+NVFP4_EXPORT_REVISION = "4af9a830c995ff7f1831292739dacb37fdb9e06e"
+NVFP4_EXPORT_SOURCE = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4"
+NVFP4_EXPORT_SOURCE_REVISION = "82d93699acd3be9e4617c53360fe5b3f5dbeb1b3"
+NVFP4_EXPORT_CONFIG_SHA256 = "ff714831e89ec645ad0005bd44a3f0e74a8c0fa2a3e730749d0ef64448d332d3"
+NVFP4_EXPORT_INDEX_SHA256 = "852a2d042baf06299960eba8babbab46db716f309b9ace32b78dd144d1805a67"
+NVFP4_QUANTIZATION = {"group_size": 16, "bits": 4, "mode": "nvfp4"}
+_NVFP4_SUFFIXES = (".switch_mlp.fc1", ".switch_mlp.fc2",
+                   ".shared_experts.up_proj", ".shared_experts.down_proj")
+
+
+def nvfp4_export_schema(config):
+    """Published geometry of the MLX-VLM NVFP4 export.
+
+    Derived from the fused source schema: the four expert projections of
+    every MoE block (backbone and MTP) become ``weight`` U32 / ``scales`` U8 /
+    ``weight_scale_2`` F32 (one per expert, a scalar for shared experts);
+    the Mamba conv is in MLX ``[C, K, 1]`` order; the projector keeps the
+    MLX-VLM names; ``summary_idxs`` is not exported.
+    Returns ``(schema, nvfp4_module_paths)`` with paths relative to the
+    ``language_model.`` prefix.
+    """
+    if config.get("quantization") != NVFP4_QUANTIZATION or config.get(
+        "quantization_config"
+    ) != NVFP4_QUANTIZATION:
+        raise ValueError("Super VL NVFP4 export quantization differs")
+    schema, modules = {}, []
+    for name, entry in tensor_schema(config, fused=True).items():
+        module = name.removesuffix(".weight")
+        if module != name and module.endswith(_NVFP4_SUFFIXES):
+            *lead, outputs, inputs = entry["shape"]
+            schema[name] = {"shape": [*lead, outputs, inputs // 8], "dtype": "U32"}
+            schema[module + ".scales"] = {
+                "shape": [*lead, outputs, inputs // 16], "dtype": "U8"}
+            schema[module + ".weight_scale_2"] = {"shape": lead, "dtype": "F32"}
+            modules.append(module.removeprefix("language_model."))
+        elif name.endswith("conv1d.weight"):
+            schema[name] = {**entry, "shape": [10240, 4, 1]}
+        elif name.startswith("mlp1."):
+            schema["mlp1.layers." + name.removeprefix("mlp1.")] = entry
+        elif name.startswith("vision_projector."):
+            schema[name.removeprefix("vision_projector.")] = entry
+        elif name != "vision_model.summary_idxs":
+            schema[name] = entry
+    return schema, sorted(modules)
+# Vendor per-tensor FP8 scales for the 113 dense projections the export
+# decoded to BF16 (Mamba in/out, attention q/k/v/o, lm_head), read from the
+# pinned NVFP4 source by HTTP range requests.  Bound by content hash.
+NVFP4_EXPORT_FP8_SCALES = "nemotron35_super_vl_fp8_scales.json"
+NVFP4_EXPORT_FP8_SCALES_SHA256 = (
+    "eff130b88def8eee7bbd15df5e68ef5f7511e40ef9fd4613d6541d35bfed39b8"
+)
+
+
+def vendor_fp8_scales():
+    """``{module path: weight_scale}`` from the pinned sidecar (hash-checked)."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).with_name(NVFP4_EXPORT_FP8_SCALES)
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != NVFP4_EXPORT_FP8_SCALES_SHA256:
+        raise ValueError("Super VL vendor FP8 scale sidecar differs from its pin")
+    data = json.loads(raw)
+    if data["source_revision"] != NVFP4_EXPORT_SOURCE_REVISION:
+        raise ValueError("Super VL vendor FP8 scales are bound to another source revision")
+    return {path: entry["weight_scale"] for path, entry in data["modules"].items()}

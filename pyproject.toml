@@ -79,7 +79,7 @@ testpaths = ["tests"]
 
 [tool.setuptools.package-data]
 "mlx2" = ["route_dispatch.json", "best_route_defaults.json", "prompts/*.md"]
-"mlx2.adapters" = ["assets/*.npz", "assets/*.json", "vlm_contracts/*.json", "deepseek_v41_source_pins.json"]
+"mlx2.adapters" = ["assets/*.npz", "assets/*.json", "vlm_contracts/*.json", "deepseek_v41_source_pins.json", "nemotron35_super_vl_fp8_scales.json"]
 "mlx2.runtime" = ["data/*.json"]
 "mlx2.runtime.row_exact" = ["tables/*.json"]
 "mlx2.runtime.models" = ["exl3_kernels/*.metal", "exl3_kernels/LICENSE", "qwen4_qsa_selective.metal"]

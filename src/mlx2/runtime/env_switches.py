@@ -31,6 +31,8 @@ SERVING_ENV_SWITCHES = {
     "MLX2_FUSED_SDPA_MIN_L": "fused d256 prefill SDPA crossover (APCv2 exemption)",
     "MLX2_DECODE_FIRST": "decode-first publication kill switch",
     "MLX2_COMMAND_BUFFERS": "Metal command-buffer commit cadence (process_env; no computed bit changes)",
+    "MLX2_NVFP4_DENSE": "Super VL NVFP4 export dense projections: vendor fp8 (default) or exported bf16 (APCv2-bound)",
+    "MLX2_NVFP4_EXPERT_SCALE": "Super VL NVFP4 export expert weight_scale_2: fold (default) or apply (APCv2-bound)",
     # MLX's own commit caps, latched at Metal start (set by MLX2_COMMAND_BUFFERS
     # or by the operator): schedule and transient memory, never values.
     "MLX_MAX_OPS_PER_BUFFER": "MLX command-buffer kernel cap",

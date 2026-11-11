@@ -51,6 +51,8 @@ FEATURES = (
     "oq4e_conversion",
     # Morning follow-up probes (2026-11-06): opt-in research options.
     "batch_rows_attention", "prefill_tail_row", "prefill_tail_skip",
+    # Nemotron 3.5 Super VL NVFP4 export (2026-11-10): checkpoint defaults.
+    "vendor_fp8_dense", "nvfp4_expert_scale_fold",
     # Residual ablation (Heretic concept, 2026-11-05): a baked derived checkpoint.
     "residual_ablation_bake",
     # Ripple perf pass (2026-11-04).
