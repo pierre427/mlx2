@@ -243,3 +243,48 @@ def pytest_pycollect_makemodule(module_path, parent):
     module.skip_reason = (f"private material absent: {needed} "
                           "(not exported to the public mirror)")
     return module
+
+
+# Tests should write only to temporary directories. Report (do not fail) any
+# file a test run created or changed in the checkout, so the writer can be
+# found: such files leak between runs and into exports.
+def _checkout_state():
+    try:
+        out = subprocess.run(["git", "--no-optional-locks", "-C", str(_ROOT), "status", "--porcelain",
+                              "--untracked-files=all"],
+                             capture_output=True, text=True, timeout=60, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    state = {}
+    for line in out.splitlines():
+        path = line[3:]
+        target = _ROOT / path
+        try:
+            stamp = target.stat().st_mtime_ns if target.is_file() else None
+        except OSError:
+            stamp = None
+        state[path] = (line[:2], stamp)
+    return state
+
+
+def pytest_sessionstart(session):
+    # Not in xdist workers, and not in a pytest that a test launched (its output may be parsed).
+    if (os.environ.get("MLX2_TEST_WRITE_REPORT", "1") != "0" and not hasattr(session.config, "workerinput")
+            and "PYTEST_CURRENT_TEST" not in os.environ):
+        session.config._mlx2_checkout_before = _checkout_state()
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    before = getattr(config, "_mlx2_checkout_before", None)
+    if before is None:
+        return
+    after = _checkout_state() or {}
+    written = sorted(path for path, value in after.items() if before.get(path) != value)
+    if written:
+        terminalreporter.write_sep(
+            "-", f"{len(written)} checkout file(s) changed during this test session "
+                 "(a test, or another session working in this checkout)")
+        for path in written[:40]:
+            terminalreporter.write_line(f"  {path}")
+        if len(written) > 40:
+            terminalreporter.write_line(f"  ... and {len(written) - 40} more")

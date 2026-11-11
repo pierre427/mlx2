@@ -6370,6 +6370,12 @@ def build_parser():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8285)
     parser.add_argument(
+        "--allow-production-port",
+        action="store_true",
+        help="bind the production port (8282) from a tree that is not a release "
+        "(only while the production service is paused)",
+    )
+    parser.add_argument(
         "--fabric",
         choices=("auto", "off"),
         default="auto",
@@ -8089,6 +8095,11 @@ class SignalShutdownController:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    from .production import port_refusal
+
+    refusal = port_refusal(args.port, allow=args.allow_production_port)
+    if refusal:
+        parser.error(refusal)
     packed_paths=(args.native_packed_prefill_profile,args.native_packed_prefill_manifest,args.native_packed_prefill_mlx_wheel)
     if any(packed_paths):
         if not all(packed_paths):parser.error("packed-prefill requires profile, artifact manifest and MLX wheel")

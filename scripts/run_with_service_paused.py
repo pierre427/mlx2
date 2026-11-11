@@ -46,7 +46,10 @@ def run_command(command, record, *, grace_s=CHILD_STOP_GRACE_S):
     """
     # Own session: a terminal Ctrl-C reaches only this wrapper, which forwards
     # exactly one SIGTERM, so the lock wrapper's cleanup is never re-interrupted.
-    child = subprocess.Popen(command, start_new_session=True)
+    # The service is paused, so the wrapped work may bind the production port
+    # from a development tree (mlx2.production.port_refusal).
+    child = subprocess.Popen(command, start_new_session=True,
+                             env={**os.environ, "MLX2_ALLOW_PRODUCTION_PORT": "1"})
     try:
         return child.wait()
     except KeyboardInterrupt:
