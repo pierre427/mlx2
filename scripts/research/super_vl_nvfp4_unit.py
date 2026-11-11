@@ -45,7 +45,15 @@ LILICORR_NVFP4 = MODELS / "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-LiLiCorr-mlx-n
 KERNELS = dict(pp.ROW_EXACT_KERNELS_POLICY)
 ARMS = {
     "ordinary": {"flags": ["--ordinary"], "media": True},
-    "native_mtp": {"flags": [], "media": False},
+    # The adapter route without the best-route default (since 30aa296fd the
+    # no-flag start pairs the LiLiCorr BF16 drafter: arm ``default``).
+    "native_mtp": {"flags": ["--no-auto-route"], "media": False},
+    "default": {"flags": [], "media": False},
+    "default_b": {"flags": [], "media": False},  # a closing bracket of the same arm
+    # The LiLiCorr chain after the tree8 default (operator opt-out).
+    "lilicorr_chain_optout": {"flags": ["--external-draft"], "media": False,
+                              "policy": {"draft_model": str(LILICORR),
+                                         "batch_size_route": "chain"}},
     "lilicorr": {"flags": ["--external-draft"], "policy": {"draft_model": str(LILICORR)},
                  "media": False},
     "lilicorr_kernels": {"flags": ["--external-draft"],
@@ -136,6 +144,21 @@ ARMS = {
                                  "env": {"MLX2_EXTERNAL_VERIFY_PREBUILD": "1",
                                          "MLX2_EXTERNAL_ROUND_TIMING": "1"},
                                  "policy": {"draft_model": str(LILICORR)}},
+    # The prebuild with the drafter on its own stream (default) or shared.
+    "lilicorr_prebuild_stream": {"flags": ["--external-draft"], "media": False,
+                                 "env": {"MLX2_EXTERNAL_VERIFY_PREBUILD": "1",
+                                         "MLX2_EXTERNAL_DRAFT_STREAM": "draft"},
+                                 "policy": {"draft_model": str(LILICORR)}},
+    "lilicorr_prebuild_stream_timing": {"flags": ["--external-draft"], "media": False,
+                                        "env": {"MLX2_EXTERNAL_VERIFY_PREBUILD": "1",
+                                                "MLX2_EXTERNAL_DRAFT_STREAM": "draft",
+                                                "MLX2_EXTERNAL_ROUND_TIMING": "1"},
+                                        "policy": {"draft_model": str(LILICORR)}},
+    # Exact verify attention blocks with strip projections (opt-in).
+    "default_attn_rows": {"flags": [], "media": False,
+                          "env": {"MLX2_NEMOTRON_EXACT_ATTENTION_ROWS": "on"}},
+    "default_prebuild": {"flags": [], "media": False,
+                         "env": {"MLX2_EXTERNAL_VERIFY_PREBUILD": "1"}},
     "lilicorr_draftq8": {"flags": ["--external-draft"], "media": False,
                          "policy": {"draft_model": str(LILICORR),
                                     "draft_weight_quantization": "affine_q8_g64"}},

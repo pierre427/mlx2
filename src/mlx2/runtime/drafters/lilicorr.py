@@ -4,6 +4,8 @@
 # MLX implementation; provenance/lilicorr.json.
 """Learned global candidate-lattice correlator with an exact greedy proposal law."""
 
+import os
+
 import mlx.core as mx
 import numpy as np
 from mlx import nn
@@ -12,6 +14,30 @@ from .attention_windows import configure_attention_windows, validate_attention_w
 from .dflash2 import DFlash2DecoderLayer
 from .dflash_base import DFlashDraftModel
 from .xpress import XPressDraftModel
+
+
+_DRAFT_STREAMS = {}
+
+
+def _draft_stream_scope(enabled):
+    """The drafter's own stream when ``enabled`` (verify prebuild), else a no-op.
+
+    Opt-in only (``MLX2_EXTERNAL_DRAFT_STREAM=draft``): served on the Super VL
+    NVFP4 export (stream1, 2026-11-10, MLX 0.32.4, fast synch) the first
+    GSM8K request deadlocked in this ``async_eval`` (eval watchdog at 600 s)
+    with the verify queued on the default stream against the draft stream's
+    chain.  With per-phase device syncs it ran, so the hazard is the
+    cross-stream wait.  Do not default it until that is understood.
+    """
+    import contextlib
+
+    if not enabled or os.environ.get("MLX2_EXTERNAL_DRAFT_STREAM", "shared") != "draft":
+        return contextlib.nullcontext()
+    device = mx.default_device()
+    stream = _DRAFT_STREAMS.get(str(device))
+    if stream is None:
+        stream = _DRAFT_STREAMS[str(device)] = mx.new_stream(device)
+    return mx.stream(stream)
 
 
 class LiLiCorrMLP(nn.Module):
@@ -525,40 +551,51 @@ class LiLiCorrDraftModel(XPressDraftModel):
             ],
             axis=1,
         )
-        features = self._hidden(inputs, hidden, cache)[:, 1:]
-        logits = self._logits(features)
-        candidates = mx.argsort(-logits, axis=-1)[
-            ..., : self.config.lilicorr_candidate_topk
-        ]
-        log_probs = logits.astype(mx.float32) - mx.logsumexp(
-            logits.astype(mx.float32), axis=-1, keepdims=True
-        )
-        candidate_log_probs = mx.take_along_axis(log_probs, candidates, axis=-1)
-        embeddings = self.embed_tokens(candidates)
-        scores = self.lilicorr(
-            embeddings,
-            candidate_log_probs,
-            features,
-            anchor_hidden,
-            anchor_valid,
-        )
         prebuild = getattr(self, "verify_prebuild", None)
-        if prebuild is not None and batch == 1 and not any(processors):
-            # The greedy chain below, on the device: queue the drafter, then
-            # let the scheduler build its verify while the GPU drafts.  The
-            # host chain is still computed from the same scores; the
-            # scheduler adopts the early verify only if both agree.
-            column = mx.array(0, dtype=mx.uint32)
-            chain = []
-            for position in range(proposal_length):
-                column = mx.argmax(
-                    mx.take(scores[0, position], column, axis=0), axis=-1
-                ).astype(mx.uint32)
-                chain.append(mx.take(candidates[0, position], column))
-            chain = mx.stack(chain)
-            mx.async_eval(scores, candidates, chain)
+        if prebuild is not None and (batch != 1 or any(processors)):
+            prebuild = None
+        # Under the verify prebuild the drafter graph runs on its own stream,
+        # so reading it back waits for the drafter alone, not for the verify
+        # the scheduler queues behind it.
+        with _draft_stream_scope(prebuild is not None):
+            features = self._hidden(inputs, hidden, cache)[:, 1:]
+            logits = self._logits(features)
+            candidates = mx.argsort(-logits, axis=-1)[
+                ..., : self.config.lilicorr_candidate_topk
+            ]
+            log_probs = logits.astype(mx.float32) - mx.logsumexp(
+                logits.astype(mx.float32), axis=-1, keepdims=True
+            )
+            candidate_log_probs = mx.take_along_axis(log_probs, candidates, axis=-1)
+            embeddings = self.embed_tokens(candidates)
+            scores = self.lilicorr(
+                embeddings,
+                candidate_log_probs,
+                features,
+                anchor_hidden,
+                anchor_valid,
+            )
+            # Cast inside the scope: on the default stream the cast would
+            # queue behind the prebuilt verify and the readback would wait
+            # for it.
+            scores32 = scores.astype(mx.float32)
+            if prebuild is not None:
+                # The greedy chain below, on the device: queue the drafter, then
+                # let the scheduler build its verify while the GPU drafts.  The
+                # host chain is still computed from the same scores; the
+                # scheduler adopts the early verify only if both agree.
+                column = mx.array(0, dtype=mx.uint32)
+                chain = []
+                for position in range(proposal_length):
+                    column = mx.argmax(
+                        mx.take(scores[0, position], column, axis=0), axis=-1
+                    ).astype(mx.uint32)
+                    chain.append(mx.take(candidates[0, position], column))
+                chain = mx.stack(chain)
+                mx.async_eval(scores32, candidates, chain)
+        if prebuild is not None:
             prebuild(chain, proposal_length)
-        hosted = np.asarray(scores.astype(mx.float32))
+        hosted = np.asarray(scores32)
         ids = np.asarray(candidates)
         if not np.isfinite(hosted).all():
             raise ValueError("LiLiCorr produced nonfinite correlation scores")
@@ -576,6 +613,12 @@ class LiLiCorrDraftModel(XPressDraftModel):
             )
         tokens, laws = [[] for _ in range(batch)], [[] for _ in range(batch)]
         confidence_features = [[] for _ in range(batch)]
+        from ..proposal_providers import PointMassLaw
+
+        point_mass = [
+            float(temperatures[row]) == 0.0 and not processors[row]
+            for row in range(batch)
+        ]
         for row in range(batch):
             predecessor_column = 0
             for position in range(proposal_length):
@@ -605,8 +648,14 @@ class LiLiCorrDraftModel(XPressDraftModel):
                         break
                 predecessor_column = int(np.argmax(value))
                 token = int(ids[row, position, predecessor_column])
-                q = np.zeros(self.config.vocab_size, dtype=np.float64)
-                q[token] = 1
+                if point_mass[row]:
+                    # The same one-hot law, sparse: the greedy verifier only
+                    # checks q's token, and a dense 131K float64 row per
+                    # position is pure host cost.
+                    q = PointMassLaw(token)
+                else:
+                    q = np.zeros(self.config.vocab_size, dtype=np.float64)
+                    q[token] = 1
                 tokens[row].append(token)
                 laws[row].append(q)
                 confidence_features[row].append(confidence)

@@ -116,6 +116,12 @@ def validate_super_tree_policy(policy) -> bool:
                 f"Super VL tree controls require batch_size_route {NEMOTRON_TREE_ROUTE}"
             )
         return False
+    if route == "chain":
+        # The operator's opt-out of the default tree (resolved before here
+        # by ``Nemotron35SuperAdapter._default_tree_route``).
+        if set(policy) & (TREE_POLICY_KEYS - {"batch_size_route"}):
+            raise ValueError("Super VL chain route takes no tree controls")
+        return False
     if route != NEMOTRON_TREE_ROUTE:
         raise ValueError(f"Super VL external batch_size_route must be {NEMOTRON_TREE_ROUTE}")
     if policy.get("ast_target_executor", "packed") not in ("packed", "serial"):
@@ -678,6 +684,18 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     # counts 30/30 identical.  GSM8K only; not a qualification.  An explicit
     # num_draft wins.  Class-owned: Bolt sets None and keeps its own law.
     EXTERNAL_LILICORR_NUM_DRAFT = 5
+    # LiLiCorr B1 tree default (Pierre, 2026-11-10) after
+    # qualification/runs/nemotron-tree-20261110/stream2 on ...-NVFP4@33a6f018
+    # at 6943dc3f3: GSM8K first 30, B1 greedy, the exact tree route with
+    # 8-row tiles (no plain-decode cost controller) 66.9 tok/s vs the
+    # chain-5 default bracket 63.0 / 62.2, acceptance length 5.78 vs 4.80,
+    # predictions identical; every node bit-equal to one-token decode
+    # (check1).  B2+ stays the chain.  Applied only when the drafter is
+    # LiLiCorr and the operator names no route and no chain-only control;
+    # ``batch_size_route: "chain"`` opts out.  GSM8K only; not a
+    # qualification.  Class-owned: Bolt sets None.
+    EXTERNAL_LILICORR_TREE_ROWS = 8
+    EXACT_ATTENTION_ROWS = True
     EXTERNAL_ROUTE_TAG = "super-vl-external-v1"
     EXTERNAL_PROFILE = "nemotron35-super-vl-apcv2-external"
     # int8 (W8A8) prefill: declared, never selected without an explicit
@@ -733,10 +751,19 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             raise ValueError("Super VL native policy supports num_draft only")
         else:
             self._parse_external_policy(None, family="Nemotron 3.5 Super VL")
-        # Exact tree verify (opt-in): validated before any weight is loaded.
+        # Exact tree verify: defaulted for LiLiCorr, validated before any
+        # weight is loaded.
+        self.tree_route_authority = None
+        if external:
+            self._default_tree_route()
         self.tree_route = (
             validate_super_tree_policy(self.external_policy) if external else False
         )
+        if self.external_policy.get("batch_size_route") == "chain":
+            del self.external_policy["batch_size_route"]
+            self.tree_route_authority = "operator_chain"
+        elif self.tree_route and self.tree_route_authority is None:
+            self.tree_route_authority = "operator"
         from .nemotron35_draft_quantization import normalize_runtime_quantization
 
         draft_weight_quantization = normalize_runtime_quantization(
@@ -845,6 +872,29 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             )
             if refusal is not None:
                 raise ValueError(f"Super VL tree verify refused at load: {refusal}")
+
+    def _default_tree_route(self):
+        """Select the B1 tree route for a LiLiCorr drafter when the operator
+        names no route and no control the tree does not compose with."""
+        rows = type(self).EXTERNAL_LILICORR_TREE_ROWS
+        policy = self.external_policy
+        if (
+            rows is None
+            or "batch_size_route" in policy
+            or set(policy) & (_TREE_REFUSED_KEYS | TREE_POLICY_KEYS)
+        ):
+            return
+        try:
+            config = json.loads(
+                (Path(policy["draft_model"]) / "config.json").read_text()
+            )
+        except (OSError, ValueError):
+            return  # the drafter inspection reports it
+        if config.get("architectures") != ["LiLiCorrDraftModel"]:
+            return
+        policy["batch_size_route"] = NEMOTRON_TREE_ROUTE
+        policy["ast_tile_rows"] = rows
+        self.tree_route_authority = "adapter_default_lilicorr_tree8"
 
     @classmethod
     def _external_default_depth(cls, draft_record):
@@ -1061,6 +1111,14 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                 "native_qmm_residual_b1": ":mamba-native-qmm-residual-b1-v1",
             }
             self.layout += projection_layout[self.mamba_projection]
+        # Exact verify attention blocks with strip projections (Pierre,
+        # 2026-11-10) after qualification/runs/nemotron-tree-20261110/stream2
+        # on ...-NVFP4@33a6f018 at 6943dc3f3: GSM8K first 30, B1 greedy,
+        # 64.9 tok/s vs the default bracket 63.0 / 62.2, rounds, acceptance
+        # and predictions identical; Metal test bit-equal to one-token decode.
+        # MLX2_NEMOTRON_EXACT_ATTENTION_ROWS=off restores the per-row block.
+        # Class-owned: Bolt keeps the per-row block.
+        self.model.__dict__["_mlx2_exact_attention_rows"] = type(self).EXACT_ATTENTION_ROWS
         if self.mamba_segment != "auto":
             self.model.set_short_segment_policy(self.mamba_segment)
             self.layout += (
@@ -1231,6 +1289,13 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             kwargs.setdefault("dynamic_singleton_tree", True)
             kwargs.setdefault("dynamic_tree_max_width", 1)
             kwargs.setdefault("dynamic_tree_overflow", "chain")
+            # The runtime's tree-tile cost controller probes plain decode
+            # (four probes per request, then re-probes) to park trees that
+            # lose to it.  On this target a plain step (~27 ms, one token) never
+            # beats a speculative round, and the chain route runs no such
+            # controller: timing1 tree6 spent 134 probes and 36 parked rounds
+            # in 570 tree rounds, about 7% of the run.  ``False`` keeps the tree.
+            kwargs.setdefault("cost_per_commit_handoff", False)
             if "target_tree_executor_provider" not in kwargs:
                 kwargs["target_tree_executor_provider"] = (
                     HybridTreeExecutor.create() if serial
@@ -1317,6 +1382,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "observed_used": selected and int(provider_receipt.get("dispatches", 0)) > 0,
             "provider": provider_receipt or None,
             "route": NEMOTRON_TREE_ROUTE if selected else None,
+            "authority": getattr(self, "tree_route_authority", None),
             "executor": (
                 self.external_policy.get("ast_target_executor", "packed") if selected else None
             ),

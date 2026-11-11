@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see provenance/nemotron3-super-5bit.json.
 import copy
+import os
 import threading
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
@@ -1163,6 +1164,19 @@ def _all_true_decode_mask(batch: int, keys: int) -> mx.array:
     return mask
 
 
+def _exact_attention_rows(model=None) -> bool:
+    """Strip projections in the exact verify's attention blocks (on) or the
+    whole block per row (off).  ``MLX2_NEMOTRON_EXACT_ATTENTION_ROWS`` wins;
+    otherwise the model's adapter-set default (``_mlx2_exact_attention_rows``,
+    off unless an adapter turns it on).  Both forms are bit-identical."""
+    value = os.environ.get("MLX2_NEMOTRON_EXACT_ATTENTION_ROWS")
+    if value is None:
+        return bool(model is not None and model.__dict__.get("_mlx2_exact_attention_rows"))
+    if value not in {"on", "off"}:
+        raise ValueError("MLX2_NEMOTRON_EXACT_ATTENTION_ROWS must be on or off")
+    return value == "on"
+
+
 class NemotronHAttention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -1200,18 +1214,40 @@ class NemotronHAttention(nn.Module):
         cache: KVCache | None = None,
     ) -> mx.array:
         B, L, _ = x.shape
+        output = self._attend(self.q_proj(x), self.k_proj(x), self.v_proj(x), mask, cache)
+        return self.o_proj(output)
 
-        queries = self.q_proj(x).reshape(B, L, self.num_heads, -1).transpose(0, 2, 1, 3)
-        keys = (
-            self.k_proj(x)
-            .reshape(B, L, self.num_key_value_heads, -1)
-            .transpose(0, 2, 1, 3)
+    def rows_exact(self, x: mx.array, cache) -> mx.array:
+        """A ``[1, R, H]`` verify strip, each row bit-equal to its one-row call.
+
+        The projections run on the whole strip through the exact row ops;
+        only the cache append and the attention itself stay one row at a
+        time, as decode runs them (``_attend`` with ``L == 1``, no mask).
+        """
+        from ..row_exact import ops
+
+        queries, keys, values = (
+            ops.linear(proj, x, stage=f"attention_{name}")
+            for name, proj in (("q", self.q_proj), ("k", self.k_proj), ("v", self.v_proj))
         )
-        values = (
-            self.v_proj(x)
-            .reshape(B, L, self.num_key_value_heads, -1)
-            .transpose(0, 2, 1, 3)
-        )
+        rows = [
+            self._attend(
+                queries[:, row : row + 1],
+                keys[:, row : row + 1],
+                values[:, row : row + 1],
+                None,
+                cache,
+            )
+            for row in range(x.shape[1])
+        ]
+        return ops.linear(self.o_proj, mx.concatenate(rows, axis=1), stage="attention_o")
+
+    def _attend(self, queries, keys, values, mask, cache):
+        """Attention from projected rows (``[B, L, heads * head_dim]``)."""
+        B, L, _ = queries.shape
+        queries = queries.reshape(B, L, self.num_heads, -1).transpose(0, 2, 1, 3)
+        keys = keys.reshape(B, L, self.num_key_value_heads, -1).transpose(0, 2, 1, 3)
+        values = values.reshape(B, L, self.num_key_value_heads, -1).transpose(0, 2, 1, 3)
 
         # A one-row call can arrive here without a mask (an MTP verify row,
         # a lane's prompt-tail token, a draft-head step).  It must attend
@@ -1243,8 +1279,7 @@ class NemotronHAttention(nn.Module):
         output = scaled_dot_product_attention(
             queries, keys, values, cache=cache, scale=self.scale, mask=mask
         )
-        output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return self.o_proj(output)
+        return output.transpose(0, 2, 1, 3).reshape(B, L, -1)
 
 
 class NemotronHMLP(nn.Module):
@@ -2140,6 +2175,22 @@ class Model(nn.Module):
                     name="moe_exact",
                 )
                 self.__dict__["_mlx2_exact_moe_recipe"] = recipe
+            return recipe
+        if layer.block_type == "*" and _exact_attention_rows(self):
+            recipe = self.__dict__.get("_mlx2_exact_attention_recipe")
+            if recipe is None:
+                norm = layer.norm
+                recipe = recipes.residual_with_cache(
+                    (
+                        "nemotron_block_norm",
+                        type(norm).__name__,
+                        float(getattr(norm, "eps", 0.0)),
+                        tuple(norm.weight.shape),
+                    ),
+                    lambda block, normalized, cache: block.mixer.rows_exact(normalized, cache),
+                    name="attention_exact_rows",
+                )
+                self.__dict__["_mlx2_exact_attention_recipe"] = recipe
             return recipe
         return recipes.PER_ROW
 

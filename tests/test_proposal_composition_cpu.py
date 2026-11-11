@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import numpy as np
+
+from mlx2.runtime.proposal_providers import PointMassLaw
 import pytest
 
 mx.set_default_device(mx.cpu)
@@ -831,6 +833,9 @@ def test_copy_rows_exact_q_committed_index_and_backend_cache(kind):
     assert wrapped.adaptive_confidence_features[1] is not None
     for row, qs in zip(tokens, laws):
         for token, q in zip(row, qs):
+            if isinstance(q, PointMassLaw):  # greedy external rows are sparse
+                assert q.token == token
+                continue
             assert q[token] == 1 and np.count_nonzero(q) == 1 and q.sum() == 1
     # Replacement does not leave the external feature cache behind.
     assert all(cache[0].offset == 2 for cache in caches)

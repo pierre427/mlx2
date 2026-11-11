@@ -254,8 +254,13 @@ def pair_drafter(
                 dpath, target_artifact=inspect_model(tpath).artifact)
         elif archs == ["LiLiCorrDraftModel"]:
             from . import lilicorr_nemotron
+            from .registry import inspect_model
 
-            record = lilicorr_nemotron.inspect_drafter(dpath, target_path=tpath)
+            # The adapter's own artifact inspection (it knows the NVFP4
+            # export), exactly as Nemotron35SuperAdapter._external_drafter
+            # binds the head at load.
+            record = lilicorr_nemotron.inspect_drafter(
+                dpath, target_artifact=inspect_model(tpath).artifact)
         else:
             raise ValueError(f"{adapter} accepts DSpark/LiLiCoRR drafters only")
     elif adapter == "StandardDecoderAdapter":

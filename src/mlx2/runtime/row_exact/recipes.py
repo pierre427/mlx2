@@ -66,6 +66,24 @@ def residual(
     return Recipe(name, run)
 
 
+def residual_with_cache(
+    norm_key: tuple,
+    mixer: Callable[[Any, mx.array, Any], mx.array],
+    *,
+    name: str = "residual_exact_cached",
+) -> Recipe:
+    """``x + mixer(layer, norm(x), cache)``: ``residual`` for a cached mixer
+    (attention) whose strip function appends to the cache row by row."""
+
+    def run(layer, hidden: mx.array, cache) -> mx.array:
+        normalized = ops.row_independent(
+            layer.norm, hidden, stage=f"{name}_norm", key=norm_key
+        )
+        return hidden + mixer(layer, normalized, cache)
+
+    return Recipe(name, run)
+
+
 def run_layerwise(
     layers: Sequence[Any],
     recipe_for: Callable[[Any], Recipe],

@@ -20,6 +20,43 @@
  "campaign": "qualification/runs/best-route-defaults-20261021",
  "entries": [
   {
+   "checkpoint": "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4@sha256:33a6f018b74c1f0da1a5bfd22e241927611c24bb62096719e501e5e1469c046d",
+   "fingerprint": "33a6f018b74c1f0da1a5bfd22e241927611c24bb62096719e501e5e1469c046d",
+   "adapter": "Nemotron35SuperAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "external_lilicorr_bf16",
+    "kind": "ast",
+    "drafter": {
+     "name": "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-LiLiCorr-mlx-bf16",
+     "architectures": [
+      "LiLiCorrDraftModel"
+     ],
+     "identities": [
+      "8aa3ab9cac67cc95d0a5f33d81044164378768fc37fefa66a5bc7c058977b217"
+     ],
+     "config_sha256": [
+      "e2b7ee2ea7ea4d78ee11ce67a15e7c113621950ec59972d18a0776cd8e3247db"
+     ]
+    }
+   },
+   "fallback": [
+    {
+     "name": "adapter_default",
+     "kind": "adapter_default"
+    }
+   ],
+   "reason": "decision row: Operator decision: Pierre 2026-11-10 switched this export's no-flag default to the LiLiCorr BF16 external chain (num_draft 5, exact Mamba short-segment kernels, NVFP4 4-row fused verify cap, FP32 router cache). GSM8K first 30, B1 greedy: 63.0 tok/s (fix1) vs native MTP depth 2 52.8 (unit7, before the verify fixes); predictions identical. Not the B1/B4 four-prompt rule measurement. Unqualified. Fallback: the adapter default (native MTP) when no verified LiLiCorr BF16 drafter is on disk.",
+   "evidence": {
+    "files": [
+     "qualification/runs/nemotron-tree-20261110/fix1/lilicorr/gsm8k/receipt.json",
+     "qualification/runs/super-vl-nvfp4-20261110/unit7/report.json"
+    ],
+    "source_revision": "eeaf349940defce46327390c3b50a8e751f4be66",
+    "decision_row": true
+   }
+  },
+  {
    "checkpoint": "AX-Tiel-Coder-35B-A3B-MLX-AXQ-MXFP8-MTP@sha256:e50c224a715030005f931df75c2c6d0b4ca183ca5c583b09c9c2d6e9dc6aae5f",
    "fingerprint": "e50c224a715030005f931df75c2c6d0b4ca183ca5c583b09c9c2d6e9dc6aae5f",
    "adapter": "Qwen3635BA3BAdapter",

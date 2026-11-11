@@ -6,6 +6,7 @@ leave the same cache planes as an exact chain verify of that path.
 """
 
 import copy
+import json
 
 import mlx.core as mx
 import numpy as np
@@ -488,6 +489,7 @@ def test_super_adapter_binds_the_tree_provider(monkeypatch, executor):
     )
     options = adapter.create_external_batch(completion_batch_size=1)
     assert options["dynamic_singleton_tree"] is True
+    assert options["cost_per_commit_handoff"] is False  # no plain-decode probes
     assert options["dynamic_tree_max_width"] == 1
     assert options["tree_node_budget_by_lanes"] == {1: 11}
     provider = options["target_tree_executor_provider"]
@@ -548,3 +550,51 @@ def test_cached_fp32_router_weight_is_bit_identical_to_the_per_call_cast():
     gate.weight = gate.weight * 1  # a new weight array re-converts
     assert gate.float32_weight() is not first
     assert isinstance(gate, MoEGate)
+
+
+def _tree_default_adapter(tmp_path, policy, architectures=("LiLiCorrDraftModel",)):
+    from mlx2.adapters.nemotron35_super import Nemotron35SuperAdapter
+
+    (tmp_path / "config.json").write_text(json.dumps({"architectures": list(architectures)}))
+    adapter = object.__new__(Nemotron35SuperAdapter)
+    adapter.external_policy = {"draft_model": str(tmp_path), **policy}
+    adapter.tree_route_authority = None
+    adapter._default_tree_route()
+    return adapter
+
+
+def test_super_lilicorr_defaults_to_the_tree8_route(tmp_path):
+    from mlx2.adapters.nemotron35_super import (
+        NEMOTRON_TREE_ROUTE,
+        Nemotron35SuperAdapter,
+        validate_super_tree_policy,
+    )
+
+    assert Nemotron35SuperAdapter.EXTERNAL_LILICORR_TREE_ROWS == 8
+    adapter = _tree_default_adapter(tmp_path, {})
+    assert adapter.external_policy["batch_size_route"] == NEMOTRON_TREE_ROUTE
+    assert adapter.external_policy["ast_tile_rows"] == 8
+    assert adapter.tree_route_authority == "adapter_default_lilicorr_tree8"
+    assert validate_super_tree_policy(adapter.external_policy) is True
+    # Operator route, tree controls or chain-only controls: no default.
+    for policy in (
+        {"batch_size_route": "chain"},
+        {"batch_size_route": NEMOTRON_TREE_ROUTE, "ast_tile_rows": 12},
+        {"proposal_composition": {}},
+        {"cost_per_commit_handoff": True},
+    ):
+        adapter = _tree_default_adapter(tmp_path, policy)
+        assert adapter.tree_route_authority is None
+        assert adapter.external_policy.get("ast_tile_rows") == policy.get("ast_tile_rows")
+    assert validate_super_tree_policy({"batch_size_route": "chain"}) is False
+    with pytest.raises(ValueError):
+        validate_super_tree_policy({"batch_size_route": "chain", "ast_tile_rows": 8})
+    # Not LiLiCorr (DSpark): the chain.
+    adapter = _tree_default_adapter(tmp_path, {}, architectures=("DSparkDraftModel",))
+    assert "batch_size_route" not in adapter.external_policy
+
+
+def test_bolt_keeps_the_chain():
+    from mlx2.adapters.nemotron35_bolt import Nemotron35BoltAdapter
+
+    assert Nemotron35BoltAdapter.EXTERNAL_LILICORR_TREE_ROWS is None
