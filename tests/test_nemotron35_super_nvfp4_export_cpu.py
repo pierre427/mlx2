@@ -329,3 +329,51 @@ def test_nax_gather_admits_nvfp4_only_from_the_owned_module():
     source = __import__("inspect").getsource(nax.try_gather)
     assert "nax_nvfp4_owned" in source
     assert ScaledNVFP4SwitchLinear.nax_nvfp4_owned is True
+
+
+def test_fp_row_exact_header_and_dispatch_mirror_mlx_one_row_qmv():
+    from mlx2.runtime.models import fp_row_exact_qmv as fq
+
+    header = fq._header()
+    assert "METAL_FUNC void fp_qmv_fast_impl(" in header
+    assert "METAL_FUNC void fp_qmv_impl(" in header
+    assert "const constant int& in_vec_size" not in header
+    assert "fp_qmv_wide_impl" not in header
+    # Real Super VL shapes: FP8 Mamba/attention/lm_head take qmv_fast; the
+    # NVFP4 shared down projection (K 5376) takes the general qmv.
+    assert fq.fast_layout(4096, 18560, 8) and fq.fast_layout(8192, 4096, 8)
+    assert fq.fast_layout(4096, 131072, 8) and fq.fast_layout(4096, 5376, 4)
+    assert not fq.fast_layout(5376, 4096, 4)
+
+
+def test_scaled_modules_fall_back_per_row_off_gpu(cpu):
+    from mlx2.runtime.models.nemotron_h import _short_projection
+    from mlx2.runtime.nvfp4_linear import ScaledFP8Linear, encode_vendor_fp8
+    from mlx2.runtime.row_exact import ops
+
+    scale = 0.003
+    codes = mx.to_fp8(mx.random.normal((32, 256)) * 30)
+    exported = (mx.from_fp8(codes, dtype=mx.float32) * scale).astype(mx.bfloat16)
+    packed, unit = encode_vendor_fp8(exported, scale)
+    layer = ScaledFP8Linear(256, 32)
+    layer.load_weights([("weight", packed), ("scales", unit),
+                        ("weight_scale", mx.array(scale, dtype=mx.float32))], strict=True)
+    x = mx.random.normal((1, 3, 256)).astype(mx.bfloat16)
+    assert layer.rows_exact(x) == (None, "device")
+    rowwise = ops.per_row(layer, x)
+    for out in (ops.linear(layer, x, stage="t"), _short_projection(layer, x)[0]):
+        assert np.array_equal(np.asarray(out.view(mx.uint16)), np.asarray(rowwise.view(mx.uint16)))
+    assert _short_projection(layer, x)[1] == "per_row_device"
+
+
+def test_fp_row_exact_kernel_mode_switch(monkeypatch):
+    from mlx2.runtime.models import fp_row_exact_qmv as fq
+
+    monkeypatch.delenv("MLX2_FP_ROW_EXACT_KERNEL", raising=False)
+    assert fq.kernel_mode() == "fused"
+    monkeypatch.setenv("MLX2_FP_ROW_EXACT_KERNEL", "loop")
+    assert fq.kernel_mode() == "loop"
+    monkeypatch.setenv("MLX2_FP_ROW_EXACT_KERNEL", "wide")
+    with pytest.raises(ValueError, match="loop or fused"):
+        fq.kernel_mode()
+    assert "mlx2_fp_qmv_fast_rows" in fq._FUSED_FAST and fq.FUSED_MAX_ROWS == 8

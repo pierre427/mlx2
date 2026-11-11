@@ -605,6 +605,21 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "mamba_segment": "layerwise_short_exact_routed_batch",
             "mamba_ssm": "fused_short_gate",
         },
+        # An explicit --external-draft (LiLiCorr / DSpark) verifies through
+        # the same exact short-segment kernels.  Default since 2026-11-10
+        # (Pierre) after qualification/runs/super-vl-nvfp4-20261110:
+        # LiLiCorr on ...-NVFP4@33a6f018 GSM8K 18.9 -> 28.5 tok/s with the
+        # keys alone (unit1), 44.5 with the exact FP8/NVFP4 verify rows
+        # (unit4, ordinary 38.3), greedy-equal to ordinary, GSM8K predictions
+        # identical.  Without them every verify row is a full tokenwise
+        # target forward.  The drafter binding stays operator-owned; an
+        # operator policy naming any key wins.  Not a qualification.
+        "external_draft": {
+            "mamba_conv": "fused_short",
+            "mamba_projection": "short_row_exact",
+            "mamba_segment": "layerwise_short_exact_routed_batch",
+            "mamba_ssm": "fused_short_gate",
+        },
     }
     think_close_separator = ""
     EXTERNAL_DEFAULT_NUM_DRAFT = 7

@@ -119,6 +119,50 @@ def kernels(reps):
     return out
 
 
+def rowexact_check(reps):
+    """fp_row_exact_qmv vs stock one-row calls at the real projection shapes."""
+    import mlx.core as mx
+
+    from mlx2.runtime.models import fp_row_exact_qmv as fq
+
+    shapes = {"fp8_mamba_in": (18560, 4096, "mxfp8", 8, 32),
+              "fp8_mamba_out": (4096, 8192, "mxfp8", 8, 32),
+              "fp8_attn_q": (4096, 4096, "mxfp8", 8, 32),
+              "fp8_lm_head": (131072, 4096, "mxfp8", 8, 32),
+              "nvfp4_shared_up": (5376, 4096, "nvfp4", 4, 16),
+              "nvfp4_shared_down": (4096, 5376, "nvfp4", 4, 16)}
+    out = []
+    for name, (n, k, mode, bits, gs) in shapes.items():
+        w, s, *_ = mx.quantize((mx.random.normal((n, k)) * 0.02).astype(mx.bfloat16),
+                               group_size=gs, bits=bits, mode=mode)
+        mx.eval(w, s)
+        for rows in (2, 3, 4, 8):
+            x = (mx.random.normal((1, rows, k)) * 2.0).astype(mx.bfloat16)
+            one = lambda: mx.concatenate([mx.quantized_matmul(  # noqa: E731
+                x[:, r:r + 1], w, scales=s, biases=None, transpose=True, group_size=gs,
+                bits=bits, mode=mode) for r in range(rows)], axis=1)
+            fast = lambda: fq.rows_qmv(x, w, s, bits=bits, group_size=gs, mode="loop")  # noqa: E731
+            batched = lambda: mx.quantized_matmul(x, w, scales=s, biases=None,  # noqa: E731
+                                                  transpose=True, group_size=gs, bits=bits, mode=mode)
+            fused = lambda: fq.rows_qmv(x, w, s, bits=bits, group_size=gs, mode="fused")  # noqa: E731
+            ref, got, bat, fus = one(), fast(), batched(), fused()
+            exact = bool(mx.all(ref.view(mx.uint16) == got.view(mx.uint16)).item())
+            fused_exact = bool(mx.all(ref.view(mx.uint16) == fus.view(mx.uint16)).item())
+            stock_batched_exact = bool(mx.all(ref.view(mx.uint16) == bat.view(mx.uint16)).item())
+            row = {"shape": name, "rows": rows, "exact": exact,
+                   "stock_batched_exact": stock_batched_exact,
+                   "per_row_ms": round(timed(one, reps) * 1e3, 4),
+                   "kernel_ms": round(timed(lambda: fq.rows_qmv(x, w, s, bits=bits, group_size=gs, mode="loop"), reps) * 1e3, 4),
+                   "fused_exact": fused_exact,
+                   "fused_ms": round(timed(fused, reps) * 1e3, 4),
+                   "stock_batched_ms": round(timed(batched, reps) * 1e3, 4)}
+            out.append(row)
+            print(json.dumps(row), flush=True)
+        del w, s
+        mx.clear_cache()
+    return out
+
+
 def model_profile(contexts, decode_steps, reps, policy=None, split=True):
     import mlx.core as mx
     from mlx import nn
@@ -342,6 +386,9 @@ def unit(out, args):
         report["model"] = model_profile(args.contexts, args.decode_steps, args.reps,
                                         policy=json.loads(args.policy), split=not args.no_split)
         atomic(out / "report.json", report)
+    if "rowexact" in args.parts:
+        report["rowexact"] = rowexact_check(max(args.reps, 5))
+        atomic(out / "report.json", report)
     if "served" in args.parts:
         report["served"] = {
             name: served_prefill(flags, args.served_tokens, args.port, {})
@@ -411,7 +458,7 @@ def main():
     parser.add_argument("mode", choices=("owned", "unit", "arms"))
     parser.add_argument("out", type=Path)
     parser.add_argument("--parts", nargs="+", default=["kernels", "model"],
-                        choices=["kernels", "model", "served"])
+                        choices=["kernels", "model", "served", "rowexact"])
     parser.add_argument("--policy", default="{}")
     parser.add_argument("--no-split", action="store_true")
     parser.add_argument("--arms-file", type=Path)

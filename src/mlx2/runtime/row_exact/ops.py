@@ -423,6 +423,16 @@ def linear(module, x: mx.array, *, stage: str) -> mx.array:
     """Dispatch a quantized or dense projection to its exact multi-row form."""
     if isinstance(module, nn.QuantizedLinear):
         return quantized_linear(module, x, stage=stage)
+    rows_exact = getattr(module, "rows_exact", None)
+    if rows_exact is not None and strip_rows(x) > 1:
+        # Scaled NVFP4 / FP8 projections (runtime/nvfp4_linear): MLX's own
+        # one-row kernels once per row, self-checked on first real use.
+        y, route = rows_exact(x)
+        if y is not None:
+            _note(stage, route)
+            return y
+        _note(stage, "per_row_" + route)
+        return per_row(module, x)
     return dense_linear(module, x, stage=stage)
 
 

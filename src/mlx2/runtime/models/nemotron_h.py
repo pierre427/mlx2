@@ -280,6 +280,27 @@ class MambaRMSNormGated(nn.Module):
         return self.weight * x.flatten(-2)
 
 
+def _short_projection(linear, x):
+    """A short verify strip through one Mamba projection, rows exact.
+
+    Modules with their own exact multi-row form (``rows_exact``: the scaled
+    FP8 / NVFP4 projections) use it; everything else keeps the affine qmv
+    kernel or its per-row fallback (``row_exact_qmv.quantized_linear``).
+    Returns ``(output, route)``.
+    """
+    rows_exact = getattr(linear, "rows_exact", None)
+    if rows_exact is not None:
+        y, route = rows_exact(x)
+        if y is not None:
+            return y, route
+        from ..row_exact import ops
+
+        return ops.per_row(linear, x), "per_row_" + route
+    from .row_exact_qmv import quantized_linear
+
+    return quantized_linear(linear, x)
+
+
 class NemotronHMamba2Mixer(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -716,9 +737,7 @@ class NemotronHMamba2Mixer(nn.Module):
             and hidden_states.shape[0] == 1
             and 1 < hidden_states.shape[1] <= 16
         ):
-            from .row_exact_qmv import quantized_linear
-
-            projected, route = quantized_linear(self.in_proj, hidden_states)
+            projected, route = _short_projection(self.in_proj, hidden_states)
             self._projection_counts[f"in_proj_short_{route}"] += 1
         if (
             projection_lengths is not None
@@ -839,9 +858,7 @@ class NemotronHMamba2Mixer(nn.Module):
             and y.shape[0] == 1
             and 1 < y.shape[1] <= 16
         ):
-            from .row_exact_qmv import quantized_linear
-
-            projected, route = quantized_linear(self.out_proj, y)
+            projected, route = _short_projection(self.out_proj, y)
             self._projection_counts[f"out_proj_short_{route}"] += 1
         compact_out = projection_lengths is not None
         if compact_out and self._projection_policy == "adaptive_row_exact":

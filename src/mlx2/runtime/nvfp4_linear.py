@@ -45,6 +45,42 @@ def _apply_scale(y, scale):
     return (y.astype(mx.float32) * scale).astype(y.dtype)
 
 
+def _rows_exact(module, x, *, bits, group_size, mode):
+    """Exact verify rows for a scaled projection: ``(y, route)`` or ``(None, why)``.
+
+    Runs ``models.fp_row_exact_qmv`` (MLX's one-row kernels, once per row).
+    The first call per (module, width, dtype) is checked bit for bit against
+    the stock one-row ``quantized_matmul`` on these real activations; a
+    mismatch disables the kernel for that key and the caller runs per row.
+    """
+    from .models import fp_row_exact_qmv as fq
+
+    reason = fq.decline_reason(module["weight"], module["scales"], x,
+                               bits=bits, group_size=group_size)
+    if reason is not None:
+        return None, reason
+    if x.ndim != 3 or x.shape[0] != 1 or not 1 < x.shape[1] <= fq.MAX_ROWS:
+        return None, "rows"
+    verdicts = module.__dict__.setdefault("_mlx2_fp_rows_verdicts", {})
+    key = (int(x.shape[1]), x.dtype)
+    if verdicts.get(key) is False:
+        return None, "self_check_failed"
+    y = fq.rows_qmv(x, module["weight"], module["scales"], bits=bits, group_size=group_size)
+    if key not in verdicts:
+        reference = mx.concatenate([
+            mx.quantized_matmul(x[:, row:row + 1], module["weight"], scales=module["scales"],
+                                biases=None, transpose=True, group_size=group_size,
+                                bits=bits, mode=mode)
+            for row in range(x.shape[1])
+        ], axis=1)
+        same = mx.all(y.view(mx.uint16) == reference.view(mx.uint16))
+        mx.eval(same)
+        verdicts[key] = bool(same)
+        if not verdicts[key]:
+            return None, "self_check_failed"
+    return y, "fp_row_exact"
+
+
 class ScaledNVFP4Linear(nn.Module):
     """NVFP4 dense projection whose FP32 per-tensor scale is ``weight_scale_2``.
 
@@ -70,6 +106,11 @@ class ScaledNVFP4Linear(nn.Module):
             group_size=GROUP_SIZE, bits=BITS, mode="nvfp4",
         )
         return _apply_scale(y, self["weight_scale_2"])
+
+    def rows_exact(self, x):
+        """Verify rows bit-equal to one-row decode (see ``_rows_exact``)."""
+        y, route = _rows_exact(self, x, bits=BITS, group_size=GROUP_SIZE, mode="nvfp4")
+        return (None if y is None else _apply_scale(y, self["weight_scale_2"])), route
 
 
 class ScaledNVFP4SwitchLinear(nn.Module):
@@ -178,6 +219,11 @@ class ScaledFP8Linear(nn.Module):
             group_size=FP8_GROUP, bits=8, mode="mxfp8",
         )
         return _apply_scale(y, self["weight_scale"])
+
+    def rows_exact(self, x):
+        """Verify rows bit-equal to one-row decode (see ``_rows_exact``)."""
+        y, route = _rows_exact(self, x, bits=8, group_size=FP8_GROUP, mode="mxfp8")
+        return (None if y is None else _apply_scale(y, self["weight_scale"])), route
 
 
 def encode_vendor_fp8(weight, weight_scale):

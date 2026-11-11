@@ -53,6 +53,18 @@ ARMS = {
     "lilicorr_nvfp4_kernels": {"flags": ["--external-draft"],
                                "policy": {"draft_model": str(LILICORR_NVFP4), **KERNELS},
                                "media": False},
+    # Fused Mamba step kernels on the ordinary route (lever 5 A/B).
+    "ordinary_mamba_short": {"flags": ["--ordinary"], "media": False,
+                             "policy": {"mamba_conv": "fused_short",
+                                        "mamba_ssm": "fused_short_gate"}},
+    "ordinary_mamba_b1": {"flags": ["--ordinary"], "media": False,
+                          "policy": {"mamba_conv": "fused_b1", "mamba_norm": "fused_b1"}},
+    # Single-pass fused exact verify kernel (MLX2_FP_ROW_EXACT_KERNEL=fused).
+    "native_mtp_fused": {"flags": [], "media": False,
+                         "env": {"MLX2_FP_ROW_EXACT_KERNEL": "fused"}},
+    "lilicorr_kernels_fused": {"flags": ["--external-draft"],
+                               "policy": {"draft_model": str(LILICORR)}, "media": False,
+                               "env": {"MLX2_FP_ROW_EXACT_KERNEL": "fused"}},
     # Controls for the NVFP4-export defaults (FP8 dense on): exported BF16.
     "ordinary_bf16dense": {"flags": ["--ordinary"], "media": False,
                            "env": {"MLX2_NVFP4_DENSE": "bf16"}},
