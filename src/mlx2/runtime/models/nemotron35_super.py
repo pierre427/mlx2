@@ -123,23 +123,68 @@ class Model(LanguageModel):
         )
 
     def prefill_forward(
-        self, inputs, cache=None, *, inputs_embeds=None, image_pixels=None
+        self, inputs, cache=None, *, inputs_embeds=None, image_pixels=None,
+        video_pixels=None, media_order=None,
     ):
-        if image_pixels is not None:
-            if inputs_embeds is not None or inputs.shape[0] != 1:
+        if image_pixels is not None or video_pixels is not None:
+            if inputs_embeds is not None:
                 raise ValueError("Super VL image prefill requires one unmixed row")
-            import numpy as np
-
-            positions = np.flatnonzero(np.asarray(inputs[0]) == 18).tolist()
-            features = mx.concatenate(
-                [self.encode_images(mx.array(pixels)) for pixels in image_pixels],
-                axis=1,
+            inputs_embeds = self.image_embeddings(
+                inputs, image_pixels, video_pixels=video_pixels, media_order=media_order
             )
-            if len(positions) != features.shape[1]:
-                raise ValueError("Super VL media placeholders/features differ")
-            inputs_embeds = self.embed_tokens(inputs)
-            inputs_embeds[0, mx.array(positions)] = features[0]
         return self._checkpoint_logits(inputs, cache, inputs_embeds)
+
+    def image_embeddings(self, inputs, image_pixels, *, video_pixels=None, media_order=None):
+        """Token embeddings with each image's (and video's) projected features
+        at its ``<image>`` (id 18) placeholders, in prompt order.
+
+        ``media_order`` names each media item's kind in prompt order; absent,
+        every item is an image.  A video contributes its tubelets' features in
+        order (``encode_video``), as the source's ``masked_scatter`` does."""
+        if inputs.shape[0] != 1:
+            raise ValueError("Super VL image prefill requires one unmixed row")
+        import numpy as np
+
+        images = list(image_pixels or ())
+        videos = list(video_pixels or ())
+        order = list(media_order) if media_order is not None else ["image"] * len(images)
+        if order.count("image") != len(images) or order.count("video") != len(videos) or (
+            set(order) - {"image", "video"}
+        ):
+            raise ValueError("Super VL media order does not match its inputs")
+        images, videos = iter(images), iter(videos)
+        parts = []
+        for kind in order:
+            if kind == "image":
+                parts.append(self.encode_images(mx.array(next(images))))
+            else:
+                encoded = self.encode_video(mx.array(next(videos)))
+                parts.append(encoded.reshape(1, -1, encoded.shape[-1]))
+        positions = np.flatnonzero(np.asarray(inputs[0]) == 18).tolist()
+        features = mx.concatenate(parts, axis=1)
+        if len(positions) != features.shape[1]:
+            raise ValueError("Super VL media placeholders/features differ")
+        embeddings = self.embed_tokens(inputs)
+        embeddings[0, mx.array(positions)] = features[0].astype(embeddings.dtype)
+        return embeddings
+
+    def media_prefill_body(self, inputs, cache, capture_layers, *, image_pixels=None,
+                           video_pixels=None, media_order=None):
+        """External-draft media prefill: the ordinary route's image prefill
+        (same embeddings, same full-chunk backbone) returning the drafter's
+        target taps instead of logits.  The runtime runs the whole uncached
+        prompt but its anchor as one call."""
+        embeddings = self.image_embeddings(
+            inputs, image_pixels, video_pixels=video_pixels, media_order=media_order
+        )
+        taps = []
+        self.backbone(
+            inputs, cache=cache, capture_layers=tuple(capture_layers),
+            hidden_sink=taps, inputs_embeds=embeddings,
+        )
+        stats = self.__dict__.setdefault("_mlx2_media_stats", {"external_prefills": 0})
+        stats["external_prefills"] += 1
+        return mx.concatenate(taps, axis=-1)
 
     def sanitize(self, weights):
         output = {}

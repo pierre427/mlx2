@@ -77,7 +77,7 @@ DESCRIPTOR = ModelDescriptor(
         "qualification": "unqualified",
         "ordinary_reference": "implemented",
         "vision": "image-prefill-b1-candidate",
-        "video": "encoder-only-no-serving-route",
+        "video": "prefill-b1-candidate-no-evs",
         "native_mtp": "candidate",
         "external_draft": "requires-bound-head",
         "execution_limits": EXECUTION_LIMITS,
@@ -619,7 +619,10 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     # (``default_route_execution_policy["prompt_lookup"]``), so a subclass
     # whose default route is ordinary (Bolt) defaults to latched PLD.
     prompt_lookup_default = True
-    multimodal_routes = frozenset({"ordinary"})
+    # The external route (LiLiCorr chain or tree) prefills images through
+    # ``Model.media_prefill_body``: the ordinary image prefill with the
+    # drafter's target taps; decode is the route's own exact verify.
+    multimodal_routes = frozenset({"ordinary", "external_draft"})
     default_mtp_ordinary_handoff_max_width = None
     # The exact kernels of that route: the fused short Mamba conv and gated
     # SSM, short row-exact projections, the layerwise short-exact routed-batch
@@ -1164,9 +1167,15 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     def prepare_multimodal_request(self, request, *, file_loader=None):
         from ..multimodal import media_fingerprint, resolve_media
         from .mlx_vlm import _plain_messages, _source
+        from . import nemotron35_media as vm
         from .nemotron35_media import PROCESSOR_REVISION, preprocess_image
 
-        media, replacements, images, counts = [], [], [], []
+        if request.get("video_pruning_rate", 0) not in (0, 0.0):
+            raise ValueError(
+                "Super VL serves video with every token kept (video_pruning_rate 0); "
+                "EVS pruning is not implemented"
+            )
+        media, replacements, images, videos, order, counts = [], [], [], [], [], []
         for message in request["messages"]:
             content = message.get("content")
             # Check string and text-list content before injecting placeholders.
@@ -1188,12 +1197,31 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             for part in content if isinstance(content, list) else []:
                 if part["type"] == "text":
                     continue
-                if part["type"] not in {"image_url", "input_image"}:
-                    raise ValueError("Super VL serving currently accepts images only")
-                if self.draft_model is not None:
-                    raise ValueError(
-                        "Super VL external draft with media prefill is not implemented"
+                if part["type"] in {"input_video", "video_url"}:
+                    value = resolve_media(
+                        _source(part, "video"), kind="video", file_loader=file_loader,
+                        fps=vm.VIDEO_SAMPLE_FPS, max_frames=vm.VIDEO_MAX_FRAMES,
                     )
+                    frames = list(value.value)
+                    pixels, per_tubelet = vm.preprocess_video(
+                        frames,
+                        mean=self.source_config["norm_mean"],
+                        std=self.source_config["norm_std"],
+                    )
+                    meta = value.metadata
+                    replacements.append(vm.video_prompt(
+                        len(frames), per_tubelet,
+                        source_fps=meta.get("source_fps"),
+                        indices=meta.get("sampled_indices"),
+                    ))
+                    tubelets = -(-len(frames) // vm.VIDEO_TEMPORAL_PATCH)
+                    media.append(value)
+                    videos.append(pixels)
+                    order.append("video")
+                    counts.append(tubelets * per_tubelet)
+                    continue
+                if part["type"] not in {"image_url", "input_image"}:
+                    raise ValueError("Super VL serving accepts images and video only")
                 value = resolve_media(
                     _source(part, "image"), kind="image", file_loader=file_loader
                 )
@@ -1204,6 +1232,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                 )
                 media.append(value)
                 images.append(pixels)
+                order.append("image")
                 counts.append(count)
                 replacements.append("<img>" + "<image>" * count + "</img>")
         messages = _plain_messages(request["messages"], replacements)
@@ -1218,13 +1247,20 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "messages": messages,
             "_mlx2_prompt_tokens": tokens,
             "sampling_profile": request.get("sampling_profile", "vision"),
-            "_mlx2_prefill_inputs": {"image_pixels": images},
+            "_mlx2_prefill_inputs": (
+                {"image_pixels": images} if not videos
+                else {"image_pixels": images, "video_pixels": videos, "media_order": order}
+            ),
             "_mlx2_media_token_end": positions[-1] + 1,
             "_mlx2_media_fingerprint": media_fingerprint(
                 media,
                 policy={
                     "processor": PROCESSOR_REVISION,
                     "artifact": self.identity["fingerprint"],
+                    **({"video": {
+                        "processor": vm.VIDEO_PROCESSOR_REVISION,
+                        "fps": vm.VIDEO_SAMPLE_FPS, "max_frames": vm.VIDEO_MAX_FRAMES,
+                    }} if videos else {}),
                 },
             ),
         }
@@ -1546,5 +1582,5 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "tree_verify": self._tree_verify_diagnostics(),
             "execution_limits": dict(EXECUTION_LIMITS),
             "image_prefill": "b1-candidate",
-            "video": "encoder-only",
+            "video": "prefill-b1-candidate-no-evs",
         }
