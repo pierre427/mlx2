@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -42,6 +43,11 @@ MODELS = Path.home() / "mlx-models"
 TARGET = MODELS / "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4"
 LILICORR = MODELS / "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-LiLiCorr-mlx-bf16"
 LILICORR_NVFP4 = MODELS / "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-LiLiCorr-mlx-nvfp4"
+# Community DFlash2 draft (shadowpa0327; adapters/nemotron35_dflash2.py):
+# step-51000 is the revision its card measured, main is step 75,000.
+DFLASH2_S51 = MODELS / "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-DFlash2-step51000"
+DFLASH2_MAIN = MODELS / "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-DFlash2"
+TREE = "tree15_b1_chain_b2plus_v1"
 KERNELS = dict(pp.ROW_EXACT_KERNELS_POLICY)
 ARMS = {
     "ordinary": {"flags": ["--ordinary"], "media": True},
@@ -207,6 +213,43 @@ ARMS = {
                              "policy": {"draft_model": str(LILICORR),
                                         "batch_size_route": "tree15_b1_chain_b2plus_v1",
                                         "ast_target_executor": "serial"}},
+    # Opt-in DFlash2 draft: the trained block (15 drafts), shorter chains,
+    # and the exact B1 tree at the LiLiCorr default's 8 rows and at 16.
+    "dflash2_s51": {"flags": ["--external-draft"], "media": False,
+                    "policy": {"draft_model": str(DFLASH2_S51)}},
+    "dflash2_s51_chain7": {"flags": ["--external-draft"], "media": False,
+                           "policy": {"draft_model": str(DFLASH2_S51), "num_draft": 7}},
+    "dflash2_s51_chain5": {"flags": ["--external-draft"], "media": False,
+                           "policy": {"draft_model": str(DFLASH2_S51), "num_draft": 5}},
+    "dflash2_s51_tree8": {"flags": ["--external-draft"], "media": False,
+                          "policy": {"draft_model": str(DFLASH2_S51),
+                                     "batch_size_route": TREE, "ast_tile_rows": 8}},
+    "dflash2_s51_tree16": {"flags": ["--external-draft"], "media": False,
+                           "policy": {"draft_model": str(DFLASH2_S51),
+                                      "batch_size_route": TREE, "ast_tile_rows": 16}},
+    "dflash2_main": {"flags": ["--external-draft"], "media": False,
+                     "policy": {"draft_model": str(DFLASH2_MAIN)}},
+    # The drafter alone (no prompt-lookup composition), for the card's number.
+    "dflash2_s51_pure": {"flags": ["--external-draft"], "media": False,
+                         "policy": {"draft_model": str(DFLASH2_S51),
+                                    "proposal_composition": False}},
+    "dflash2_s51_chain7_pure": {"flags": ["--external-draft"], "media": False,
+                                "policy": {"draft_model": str(DFLASH2_S51), "num_draft": 7,
+                                           "proposal_composition": False}},
+    # Raw tree, without the LiLiCorr-measured guarded cost handoff.
+    "dflash2_s51_tree8_raw": {"flags": ["--external-draft"], "media": False,
+                              "env": {"MLX2_SUPER_TREE_COST_HANDOFF": "off"},
+                              "policy": {"draft_model": str(DFLASH2_S51),
+                                         "batch_size_route": TREE, "ast_tile_rows": 8}},
+    "dflash2_main_tree8_raw": {"flags": ["--external-draft"], "media": False,
+                               "env": {"MLX2_SUPER_TREE_COST_HANDOFF": "off"},
+                               "policy": {"draft_model": str(DFLASH2_MAIN),
+                                          "batch_size_route": TREE, "ast_tile_rows": 8}},
+    "dflash2_main_chain7": {"flags": ["--external-draft"], "media": False,
+                            "policy": {"draft_model": str(DFLASH2_MAIN), "num_draft": 7}},
+    "dflash2_main_tree8": {"flags": ["--external-draft"], "media": False,
+                           "policy": {"draft_model": str(DFLASH2_MAIN),
+                                      "batch_size_route": TREE, "ast_tile_rows": 8}},
     # Controls for the NVFP4-export defaults (FP8 dense on): exported BF16.
     "ordinary_bf16dense": {"flags": ["--ordinary"], "media": False,
                            "env": {"MLX2_NVFP4_DENSE": "bf16"}},
@@ -283,7 +326,7 @@ def run_arm(name, spec, out: Path, args, model_id, ident) -> dict:
             gsm = subprocess.run(
                 [sys.executable, str(ROOT / "scripts/spec_acceptance_gsm8k.py"),
                  "--base-url", base, "--checkpoint", ident, "--output", str(out / "gsm8k"),
-                 "--num-questions", str(args.gsm8k)],
+                 "--num-questions", str(args.gsm8k), *shlex.split(args.gsm8k_flags)],
                 cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
                 capture_output=True, text=True)
             (out / "gsm8k.log").write_text(gsm.stdout + gsm.stderr)
@@ -309,7 +352,8 @@ def unit(out: Path, args) -> int:
     ident, adapter = checkpoint()
     report = {"schema": "mlx2.super-vl-nvfp4-unit.v1", "checkpoint": ident, "adapter": adapter,
               "source": source(), "host": "m5", "qualified": False,
-              "evidence_kind": "smoke + attribution A/B, no thermal hold", "arms": []}
+              "evidence_kind": "smoke + attribution A/B, no thermal hold",
+              "gsm8k_flags": args.gsm8k_flags, "arms": []}
     model_id = TARGET.name
     for name in args.arms:
         row = run_arm(name, ARMS[name], out / name, args, model_id, ident)
@@ -333,6 +377,7 @@ def owned(out: Path, args) -> int:
                    "--receipt", str(out / "paired-locks.json"), "--",
                    sys.executable, "-u", str(Path(__file__)), "unit", str(out),
                    "--arms", *args.arms, "--gsm8k", str(args.gsm8k),
+                   f"--gsm8k-flags={args.gsm8k_flags}",
                    "--tokens", str(args.tokens), "--port", str(args.port)]
         child = subprocess.Popen(command, cwd=ROOT, start_new_session=True,
                                  env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
@@ -355,6 +400,8 @@ def main() -> int:
     parser.add_argument("out", type=Path)
     parser.add_argument("--arms", nargs="+", default=list(ARMS), choices=list(ARMS))
     parser.add_argument("--gsm8k", type=int, default=30)
+    parser.add_argument("--gsm8k-flags", default="",
+                        help="extra harness flags, e.g. '--chat --max-tokens 1024'")
     parser.add_argument("--tokens", type=int, default=200)
     parser.add_argument("--port", type=int, default=8797)
     args = parser.parse_args()

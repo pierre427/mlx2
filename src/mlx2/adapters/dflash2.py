@@ -201,15 +201,21 @@ def _validate_weight_headers(files, mapping, args, configured_dtype):
     return header_digests
 
 
-def inspect_drafter(path, target, *, config_type=DFlash2Config):
+def inspect_drafter(path, target, *, config_type=DFlash2Config, target_text=None):
+    """``target_text``: the target's text geometry when its adapter has already
+    validated it (a hybrid whose config does not nest ``text_config``); the
+    target ``config.json`` is then not re-read."""
     path = Path(path).expanduser().resolve()
     config_raw, config_binding = _read_bytes_with_binding(path/'config.json')
     config = _decode_unique_json(config_raw, 'draft config.json')
     if config.get('architectures') != ['DFlash2DraftModel']:
         raise ValueError('Expected DFlash2DraftModel artifact')
     args = config_type.from_dict(config)
-    target_config = _decode_unique_json((Path(target)/'config.json').read_bytes(), 'target config.json')
-    text = target_config.get('text_config', target_config)
+    if target_text is None:
+        target_config = _decode_unique_json((Path(target)/'config.json').read_bytes(), 'target config.json')
+        text = target_config.get('text_config', target_config)
+    else:
+        text = target_text
     for name in ('hidden_size','vocab_size'):
         if text[name] != getattr(args,name): raise ValueError(f'DFlash2 target {name} mismatch')
     if text['num_hidden_layers'] != args.num_target_layers:

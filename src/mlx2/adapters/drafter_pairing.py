@@ -262,7 +262,12 @@ def pair_drafter(
             record = lilicorr_nemotron.inspect_drafter(
                 dpath, target_artifact=inspect_model(tpath).artifact)
         else:
-            raise ValueError(f"{adapter} accepts DSpark/LiLiCoRR drafters only")
+            # The Super adapter also binds its pinned community DFlash2 draft
+            # (adapters/nemotron35_dflash2.py), by an explicit draft_model
+            # only: it is deliberately never paired automatically.
+            raise ValueError(
+                f"{adapter} pairs DSpark/LiLiCoRR drafters only (DFlash2 is explicit opt-in)"
+            )
     elif adapter == "StandardDecoderAdapter":
         if archs == ["Qwen3XPressModel"]:
             from . import xpress as module

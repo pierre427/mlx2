@@ -986,6 +986,47 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                     target_model,
                     runtime_quantization=draft_weight_quantization,
                 )
+        elif draft_config.get("architectures") == ["DFlash2DraftModel"]:
+            # Community DFlash2 draft (adapters/nemotron35_dflash2.py): opt-in
+            # by an explicit draft_model, never a default, and left off
+            # (2026-11-11) because it does not beat LiLiCorr here.
+            # qualification/runs/super-vl-dflash2-20261111 on
+            # ...-NVFP4@33a6f018 at ba1ef33a9, GSM8K first 30, B1 greedy,
+            # every arm token-identical to ordinary (40.9 tok/s): LiLiCorr
+            # default (tree8) 66.8 / 60.6 tok/s bracket, acceptance 5.91;
+            # LiLiCorr chain5 62.3 (4.80).  DFlash2 step-51000: chain5 61.0
+            # (4.52), chain7 57.7 (5.10), tree8 61.3 (5.34), tree16 33.0
+            # (7.19), and the trained block (15 drafts, the depth an
+            # operator gets without num_draft) 26.2 (6.11): 16 verify rows
+            # cost more than the extra accepted tokens return.  main (step
+            # 75,000) matches step-51000 (chain7 56.4, tree8 61.1).  Thinking
+            # chat, first 10 (chat1 at 38105878b): depth 7 LiLiCorr 6.18 /
+            # 72.3 tok/s vs DFlash2 5.58 / 63.4; DFlash2 depth 15 6.99 (its
+            # card: 7.80 on SGLang).  Single runs, no thermal hold; not a
+            # qualification.  Name num_draft 5-7 or the tree with 8 rows.
+            from . import nemotron35_dflash2
+
+            draft_record = nemotron35_dflash2.inspect_drafter(
+                self.external_policy["draft_model"],
+                target_path=model_path,
+                target_text=self._runtime_language_config(artifact["config"]),
+                target_fingerprint=artifact["identity"]["fingerprint"],
+                eos_token_ids=tuple(
+                    artifact.get("eos_token_ids", type(self).eos_token_ids)
+                ),
+            )
+            self.external_drafter_receipt = nemotron35_dflash2.drafter_receipt(
+                draft_record,
+                target_is_trained_export=bool(artifact.get("nvfp4_modules")),
+                runtime_quantization=draft_weight_quantization,
+            )
+
+            def draft_loader(record, target_model):
+                return nemotron35_dflash2.load_drafter(
+                    record,
+                    target_model,
+                    runtime_quantization=draft_weight_quantization,
+                )
         else:
             from .lilicorr_nemotron import inspect_drafter, load_drafter
 
@@ -1555,6 +1596,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                 for key in ("recipe", "expert_bits", "activation_aware")
             },
             "external_draft": self.draft_model is not None,
+            "external_drafter": getattr(self, "external_drafter_receipt", None),
             "nvfp4_export": (
                 None
                 if getattr(self, "nvfp4_dense", None) is None
