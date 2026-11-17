@@ -43,3 +43,13 @@ def test_decorative_hashes_do_not_erase_final_answer():
 ])
 def test_final_answer_numeric_spelling(text, expected):
     assert E.numeric_answer(text) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("#### Final answer: **132**.00.<|im_end|>", Fraction(132)),
+    ("#### **$132**.05", Fraction("132.05")),
+    ("#### **−1,234**.50", Fraction("-1234.5")),
+    ("#### **132**. 5 is the final answer.", Fraction(5)),
+])
+def test_answer_decimal_split_by_markdown(text, expected):
+    assert E.numeric_answer(text) == expected

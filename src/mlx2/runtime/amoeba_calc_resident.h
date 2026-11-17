@@ -25,6 +25,45 @@ RC_FN int rc_skip(device const uchar *s, int p, int n) {
     CALC_NOUNROLL while (p < n && rc_space(s[p])) p++;
     return p;
 }
+
+// Low bits of each token class retain the existing number/space boundary law.
+// The higher bit admits ordinary, bounded numeric pieces during a generated answer.
+// For generated answers, state[1] is the confirmed byte cursor and state[11]
+// records whether the single optional leading whitespace piece is still allowed.
+enum {
+    RC_BOUNDARY_MASK = 3,
+    RC_NUMBER_BOUNDARY = 1,
+    RC_SPACE_BOUNDARY = 2,
+    RC_ANSWER_PIECE = 4,
+    RC_FORCE_TOKENS = 0,
+    RC_ALLOW_LEADING_SPACE = 1,
+    RC_MATCH_ANSWER_BYTES = 2,
+};
+
+inline int rc_match_answer_piece(device const int *state, int token,
+                                 device const uchar *pool, device const int *offsets,
+                                 device const int *lengths, device const int *boundary,
+                                 int vocabulary) {
+    if (token < 0 || token >= vocabulary || !(boundary[token] & RC_ANSWER_PIECE))
+        return -1;
+    int start = offsets[token], size = lengths[token], begin = 0, cursor = state[1];
+    if (size <= 0 || cursor < 0 || cursor >= state[0])
+        return -1;
+    if (cursor == 0 && state[11] == RC_ALLOW_LEADING_SPACE) {
+        while (begin < size && (pool[start + begin] == ' ' || pool[start + begin] == '\t'))
+            begin++;
+        if (begin == size)
+            return 0;
+    }
+    if (size - begin > state[0] - cursor)
+        return -1;
+    for (int i = begin; i < size; i++) {
+        int expected = state[16 + cursor + i - begin];
+        if (pool[start + i] != pool[offsets[expected]])
+            return -1;
+    }
+    return size - begin;
+}
 RC_FN int rc_intro(device const uchar *s, int begin, int end) {
     int a = begin;
     if (rc_word(s, a, end, "please "))
@@ -569,6 +608,16 @@ RC_FN void resident_parse(device const uchar *source, int length, int mode, devi
     }
     a = rc_skip(source, a, end);
     CALC_NOUNROLL while (end > a && rc_space(source[end - 1])) end--;
+    // A leading dash followed by horizontal space is a Markdown bullet on a
+    // generated line. Direct requests and multi-line column math keep their signs.
+    if (mode == 1 && end - a >= 2 && source[a] == '-' &&
+        (source[a + 1] == ' ' || source[a + 1] == '\t')) {
+        int line_end = a + 2;
+        CALC_NOUNROLL while (line_end < end && source[line_end] != '\n' && source[line_end] != '\r')
+            line_end++;
+        if (line_end == end)
+            a = rc_skip(source, a + 2, end);
+    }
     // Balanced outer math delimiters. Trailing '=\\)' is deliberately supported.
     if (end - a >= 4 && source[a] == '\\' && (source[a + 1] == '(' || source[a + 1] == '[')) {
         int close = source[a + 1] == '(' ? ')' : ']';

@@ -17,6 +17,8 @@ SOURCE_BYTES = 4096
 PROGRAM_WORDS = 1 + 256 * 4
 STATE_WORDS = 288
 _TABLES = {}
+_ANSWER_PIECE = 4  # Shared with RC_ANSWER_PIECE in the Metal header.
+_MAX_ANSWER_PIECE_BYTES = 16
 
 
 def vocabulary_tables(tokenizer):
@@ -63,7 +65,7 @@ def vocabulary_tables(tokenizer):
                 ) == chr(piece[0]):
                     characters[piece[0]] = i
             trimmed = piece.lstrip(b" \t")
-            boundary.append(
+            boundary_kind = (
                 2
                 if piece and not trimmed
                 else int(
@@ -89,6 +91,10 @@ def vocabulary_tables(tokenizer):
                     )
                 )
             )
+            if (i not in special_ids and 0 < len(piece) <= _MAX_ANSWER_PIECE_BYTES
+                    and all(byte in b" \t0123456789.-" for byte in piece)):
+                boundary_kind |= _ANSWER_PIECE
+            boundary.append(boundary_kind)
         if any(characters[ord(c)] < 0 for c in "0123456789.-"):
             raise ValueError(
                 "resident calculator requires exact single-byte numeric tokens"
@@ -200,19 +206,34 @@ for(int i=0;i<used;i++)source[i]=reversed[used-1-i];length[0]=used;
                 "logits",
                 "meta",
                 "boundary",
+                "pool",
+                "offsets",
+                "lengths",
             ],
             ["next_state"],
             r"""
 if(thread_position_in_grid.x)return;
 for(int i=0;i<288;i++)next_state[i]=state[i];next_state[10]=-1;
 if(length[0]==-4){next_state[12]=1;return;}
-int nt=tokens_shape[0];bool active=state[0]>state[1];
-if(state[2]>=0 && nt>state[3] && int(tokens[nt-1])!=state[2]){
- next_state[0]=next_state[1]=0;next_state[2]=-1;next_state[7]++;return;
+int nt=tokens_shape[0];
+if(state[2]>=0 && nt>state[3]){
+ int last=int(tokens[nt-1]);
+ int used = state[11]!=RC_FORCE_TOKENS
+     ? rc_match_answer_piece(state,last,pool,offsets,lengths,boundary,boundary_shape[0])
+     : (last==state[2] ? 0 : -1);
+ if(used<0){
+  next_state[0]=next_state[1]=0;next_state[2]=-1;next_state[7]++;return;
+ }
+ if(state[11]!=RC_FORCE_TOKENS){
+  next_state[1]+=used;
+  next_state[6]+=used>0;
+  next_state[11]=RC_MATCH_ANSWER_BYTES;
+ }
 }
+bool active=next_state[0]>next_state[1];
 if(!meta[2])return;
-if(state[4]){int last=nt?int(tokens[nt-1]):-1;next_state[4]=(last>=0&&last<boundary_shape[0]&&boundary[last]==2);next_state[10]=next_state[4]?-2:-1;return;}
-if(!active&&state[0]>0){next_state[0]=next_state[1]=0;next_state[2]=-1;next_state[4]=1;next_state[10]=-2;return;}
+if(state[4]){int last=nt?int(tokens[nt-1]):-1;next_state[4]=(last>=0&&last<boundary_shape[0]&&(boundary[last]&RC_BOUNDARY_MASK)==RC_SPACE_BOUNDARY);next_state[10]=next_state[4]?-2:-1;return;}
+if(!active&&next_state[0]>0){next_state[0]=next_state[1]=0;next_state[2]=-1;next_state[4]=1;next_state[10]=-2;return;}
 if(!active&&length[0]>0){
  if(program[0]<1||result[0]){next_state[8]++;next_state[9]=program[0]<1?program[0]:result[0];return;}
  int used=result[3],places=result[2],count=0,integer=used-places;
@@ -227,21 +248,30 @@ if(!active&&length[0]>0){
  for(int i=0;i<count;i++)if(next_state[16+i]<0||next_state[16+i]>=logits_shape[1])return;
  int first=next_state[16];if(float(logits[first])<=-5e8f)return;
  next_state[0]=count;next_state[1]=0;next_state[5]++;active=true;
+ next_state[11]=meta[1]?RC_FORCE_TOKENS:RC_ALLOW_LEADING_SPACE;
 }
 if(active){
  int cursor=next_state[1],target=next_state[16+cursor];
  if(target<0||target>=logits_shape[1]||float(logits[target])<=-5e8f){next_state[0]=next_state[1]=0;next_state[2]=-1;next_state[7]++;return;}
- next_state[1]++;next_state[2]=target;next_state[3]=nt;next_state[6]++;next_state[10]=target;
+ // Generated answers consume the sampled token's bytes on the next prefix.
+ // Whole-request answers keep the forced token sequence, including EOS.
+ if(next_state[11]==RC_FORCE_TOKENS){next_state[1]++;next_state[6]++;}
+ next_state[2]=target;next_state[3]=nt;next_state[10]=target;
 }
 """,
         ),
         "mask": (
-            ["logits", "state", "boundary"],
+            ["logits", "state", "boundary", "pool", "offsets", "lengths"],
             ["output"],
             r"""
 uint i=thread_position_in_grid.x;if(i>=logits_shape[1])return;
-int target=state[10];bool ban=(target>=0&&int(i)!=target)||(target==-2&&i<boundary_shape[0]&&boundary[i]==1);
-output[i]=ban?logits[i]-1e9f:logits[i];
+int target=state[10];
+bool ban=false;
+if(target>=0 && int(i)!=target)
+ ban=state[11]==RC_FORCE_TOKENS || rc_match_answer_piece(state,int(i),pool,offsets,lengths,boundary,boundary_shape[0])<0;
+else if(target==-2 && i<boundary_shape[0])
+ ban=(boundary[i]&RC_BOUNDARY_MASK)==RC_NUMBER_BOUNDARY;
+output[i]=ban?static_cast<T>(float(logits[i])-1e9f):logits[i];
 """,
         ),
     }
@@ -402,6 +432,9 @@ class ResidentCalculatorProcessor:
                     logits,
                     meta,
                     boundary,
+                    pool,
+                    offsets,
+                    lengths,
                 ],
                 grid=(1, 1, 1),
                 threadgroup=(1, 1, 1),
@@ -409,7 +442,8 @@ class ResidentCalculatorProcessor:
                 output_dtypes=[mx.int32],
             )[0]
             output = kernel("mask")(
-                inputs=[logits, self.state, boundary],
+                inputs=[logits, self.state, boundary, pool, offsets, lengths],
+                template=[("T", logits.dtype)],
                 grid=(logits.shape[-1], 1, 1),
                 threadgroup=(256, 1, 1),
                 output_shapes=[logits.shape],

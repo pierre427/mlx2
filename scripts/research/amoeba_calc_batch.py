@@ -11,21 +11,44 @@ rebinding by forward ID survives lane compaction without trusting stale UID rows
 from amoeba_calc_defenses import CompletionDefenses
 
 
+def calculator_tile_id(processor):
+    return processor.tile_id if hasattr(processor,"tile_id") else processor.tile.id
+
+
 class RowBinder:
     def __init__(self, tiles):
         self.tiles=tiles;self.forward=None;self.row=0
     def bind(self, processor):
-        forward=self.tiles.forward_ids.get(processor.tile.id)
-        rows,positions=self.tiles.stash_shape[processor.tile.id]
+        tile_id=calculator_tile_id(processor)
+        forward=self.tiles.forward_ids.get(tile_id)
+        rows,positions=self.tiles.stash_shape[tile_id]
         if forward!=self.forward:self.forward=forward;self.row=0
         if positions!=1 or self.row>=rows:raise RuntimeError('invalid batched calculator forward binding')
         row=self.row;self.row+=1;processor.bind_row(row)
         return row,rows
 
 
+def calculator_processor(tiles, tokenizer, prompt_length, request_text):
+    from mlx2.runtime.amoeba_det_tiles import processors_for
+
+    request = ({"messages": [{"role": "user", "content": request_text}]}
+               if request_text is not None else None)
+    processor, = processors_for(tiles, tokenizer, prompt_length=prompt_length, request=request)
+    return processor
+
+
+def answer_in_progress(processor):
+    if processor is None:
+        return False
+    if hasattr(processor, "tile_id"):
+        # Only read device state when a defense would otherwise interrupt an answer.
+        length, position = processor.state[:2].tolist()
+        return length > position
+    return processor.plan is not None
+
+
 def batch_stage(model,tok,tiles,prompts,limits,*,watch=False,calculator=True,synchronous_callbacks=False,request_texts=None):
     from mlx_lm.generate import BatchGenerator
-    from mlx2.runtime import amoeba_det_tiles as D
     binder=RowBinder(tiles)
     states=[dict(token_ids=[],events=[],defense=CompletionDefenses() if watch else None,
                  widths=set(),rows=set(),checked=False,finish_reason=None) for _ in prompts]
@@ -33,8 +56,7 @@ def batch_stage(model,tok,tiles,prompts,limits,*,watch=False,calculator=True,syn
     request_texts=request_texts if request_texts is not None else [None]*len(prompts)
     if len(request_texts)!=len(prompts):raise ValueError('one request text per lane is required')
     for prompt,state,request in zip(prompts,states,request_texts):
-        kwargs={'request_text':request} if request is not None else {}
-        proc=D.CalculatorProcessor(tiles,'calculator',tok,prompt_length=len(prompt),**kwargs) if calculator else None
+        proc=calculator_processor(tiles,tok,len(prompt),request) if calculator else None
         state['processor']=proc
         def process(tokens,logits,state=state,prompt=prompt,proc=proc):
             if synchronous_callbacks:
@@ -42,7 +64,7 @@ def batch_stage(model,tok,tiles,prompts,limits,*,watch=False,calculator=True,syn
                 # callback submits small calculator kernels and host flag reads.
                 # This changes scheduling, not tokens, arithmetic or gate policy.
                 import mlx.core as mx
-                mx.eval(tokens,logits,tiles.stash[proc.tile.id])
+                mx.eval(tokens,logits,tiles.stash[calculator_tile_id(proc)])
             if not state['checked']:
                 # BatchGenerator supplies the COMPLETE prompt history (unlike generate_step).
                 if tokens[:len(prompt)].tolist()!=prompt:raise RuntimeError('batch prompt history mismatch')
@@ -63,12 +85,12 @@ def batch_stage(model,tok,tiles,prompts,limits,*,watch=False,calculator=True,syn
                 guard=state['defense']
                 if response.finish_reason is None and guard:
                     text=tok.decode(new) if len(new)%16==0 else None
-                    if guard.feed(response.token,text) and (state['processor'] is None or state['processor'].plan is None):
+                    if guard.feed(response.token,text) and not answer_in_progress(state['processor']):
                         state['finish_reason']='defense';remove.append(response.uid)
             if remove:generator.remove(remove)
     finally:generator.close()
     for state in states:
         processor=state.pop('processor')
-        state['events']=processor.events if processor else []
+        state['events']=getattr(processor,'events',[])
         state['widths']=sorted(state['widths']);state['rows']=sorted(state['rows'])
     return states

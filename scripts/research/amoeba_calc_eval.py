@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 _DECIMAL = r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)"
+_BOLD_SPLIT_DECIMAL = re.compile(r"(?<![\w.*])\*\*(\$?[+-]?\d+)\*\*(?=\.\d)")
 _ANSWER_NUMBER = re.compile(
     rf"(?<![\w.])(?:"
     r"(?P<sign>[+-]?)\s*\\frac\{(?P<num>[+-]?\d+)\}\{(?P<den>[+-]?\d+)\}"
@@ -23,6 +24,8 @@ _ANSWER_NUMBER = re.compile(
 
 def numeric_answer(text):
     tail = re.split(r'(?<!#)#{4}(?!#)', text)[-1].replace('−', '-').replace(',', '')
+    # Markdown can split a single decimal across an emphasis boundary.
+    tail = _BOLD_SPLIT_DECIMAL.sub(r'\1', tail)
     answer = None
     for match in _ANSWER_NUMBER.finditer(tail):
         try:
@@ -135,8 +138,9 @@ def main():
     from mlx_lm.generate import generate_step, generation_stream
     from mlx2.runtime import amoeba_det_tiles as D
     from mlx2.runtime import amoeba_math_latex, amoeba_calc_gpu, amoeba_calc_trigger
-    from mlx2.runtime import amoeba_counting, amoeba_calc_requests
+    from mlx2.runtime import amoeba_counting, amoeba_calc_requests, amoeba_calc_resident
     from mlx2.apple_telemetry import TemperatureSampler
+    from amoeba_calc_batch import answer_in_progress, calculator_processor
     mx.set_default_device(mx.gpu)
     with mx.stream(generation_stream):
         decode_stream=mx.default_stream(mx.gpu)
@@ -151,8 +155,12 @@ def main():
     manifest['mlx2_source_revision']=rev
     for tile in manifest['tiles']:
         if tile['kind']=='calculator':
-            tile['arithmetic_backend']=args.calculator_backend;tile['trigger_prefilter']=args.prefilter
-            tile['parser']=D.PARSER_V4;tile['context_tokens']=256
+            if tile.get('parser') == D.PARSER_V5:
+                if args.calculator_backend!='gpu' or args.prefilter!='gpu':
+                    raise ValueError('the resident calculator requires the GPU backend and cue filter')
+            else:
+                tile['arithmetic_backend']=args.calculator_backend;tile['trigger_prefilter']=args.prefilter
+                tile['parser']=D.PARSER_V4;tile['context_tokens']=256
             tile['complete_literal_requests']=args.complete_literal_requests
     (configured/'manifest.json').write_text(json.dumps(manifest,indent=2))
     args.manifest=configured/'manifest.json'
@@ -166,11 +174,15 @@ def main():
               manifest=D.load_manifest(args.manifest),phase=args.phase,qualification='unqualified',gsm_limit=args.gsm_limit,
               case_ids=json.loads(args.case_ids_file.read_text()) if args.case_ids_file else None,
               perf_stop_at_eos=args.perf_stop_at_eos,eval_arms=args.arms,suite=args.suite,
-              completion_defenses=args.defenses,batch_size=args.batch_size,synchronous_callbacks=args.synchronous_callbacks,
+              completion_defenses=args.defenses,batch_size=args.batch_size,max_tokens=args.max_tokens,
+              gsm8k_sha256=hashlib.sha256((ROOT/'benchmarks/gsm8k/test.jsonl').read_bytes()).hexdigest(),
+              synchronous_callbacks=args.synchronous_callbacks,
               metal_fast_synch=os.environ['MLX_METAL_FAST_SYNCH'],generation_stream_bound=True,
               complete_literal_requests=args.complete_literal_requests,
               calculator_source_files={Path(m.__file__).name:hashlib.sha256(Path(m.__file__).read_bytes()).hexdigest()
-                                       for m in (D,amoeba_math_latex,amoeba_calc_gpu,amoeba_calc_trigger,amoeba_counting,amoeba_calc_requests)},
+                                       for m in (D,amoeba_math_latex,amoeba_calc_gpu,amoeba_calc_trigger,
+                                                 amoeba_counting,amoeba_calc_requests,amoeba_calc_resident)},
+              resident_header_sha256=hashlib.sha256(amoeba_calc_resident.header().encode()).hexdigest(),
               corpus_sha256=hashlib.sha256(corpus_data).hexdigest() if corpus_data else None,frozen_corpus=frozen_corpus)
     (args.out/'metadata.json').write_text(json.dumps(meta,indent=2,default=str))
     def gen(question,arm,max_tokens=args.max_tokens,ignore_eos=False,extraction=False):
@@ -188,8 +200,8 @@ def main():
         start=time.perf_counter();first=None;new=[];events=[];generated=0
         def stage(prompt_ids,limit,watch=None):
             nonlocal first,generated
-            request_kwargs={'request_text':question} if args.complete_literal_requests and not extraction else {}
-            proc=D.CalculatorProcessor(ts,'calculator',tok,prompt_length=len(prompt_ids),**request_kwargs) if arm=='calculator' else None
+            request_text=question if args.complete_literal_requests and not extraction else None
+            proc=calculator_processor(ts,tok,len(prompt_ids),request_text) if arm=='calculator' else None
             prefix=mx.array(prompt_ids[:-1]);stage_ids=[]
             def process(tokens,logits):
                 proc.bind_row(0)
@@ -204,9 +216,9 @@ def main():
                     if not ignore_eos and t in tok.eos_token_ids:break
                     if watch:
                         text=tok.decode(stage_ids) if len(stage_ids)%16==0 else None
-                        if watch.feed(t,text) and (proc is None or proc.plan is None):break
+                        if watch.feed(t,text) and not answer_in_progress(proc):break
             finally:stream.close()
-            if proc:events.extend(proc.events)
+            if proc:events.extend(getattr(proc,'events',()))
             return stage_ids
         new=stage(ids,initial_limit,defense)
         natural=bool(new and new[-1] in tok.eos_token_ids)
@@ -247,12 +259,13 @@ def main():
                 state['injected_tokens']=len(nudge)
         wall=time.perf_counter()-start
         results=[]
+        receipt=ts.receipt() if arm=='calculator' else None
         for state in states:
             ids=state['token_ids'];guard=state['defense']
             if len(ids)>max_tokens:raise RuntimeError('batched output exceeded token cap')
             results.append(dict(output=tok.decode(ids),token_ids=ids,tokens=len(ids),wall_s=wall,
                                 timing_scope='whole_batch',truncated=ids[-1] not in tok.eos_token_ids,
-                                events=state['events'],receipt=ts.receipt() if arm=='calculator' else None,batch_widths=state['widths'],
+                                events=state['events'],receipt=receipt,batch_widths=state['widths'],
                                 physical_rows=state['rows'],
                                 defenses=(dict(**guard.receipt(),continuation=state.get('injected_tokens',0)>0,
                                                trigger=guard.reason or ('budget_soft' if state.get('injected_tokens') else None),
@@ -265,7 +278,8 @@ def main():
     q='Describe the scent of a pine forest.'
     ref=gen(q,'stock',32);closed=gen(q,'calculator',32)
     write('reference.jsonl',dict(stock=ref,calculator=closed,exact=ref['token_ids']==closed['token_ids']))
-    if ref['token_ids']!=closed['token_ids'] or closed['events']:raise RuntimeError('closed-tile ordinary reference failed')
+    if ref['token_ids']!=closed['token_ids'] or closed['receipt']['counters']['calc']['plans']:
+        raise RuntimeError('closed-tile ordinary reference failed')
     if args.phase=='smoke':
         for q in ['Calculate 109 * 71.','Calculate 123456789123 * 987654321987.','Calculate 3^3 + 17.','Calculate 3^3 + 78.','Order 1343: 7 shelves each hold 63 red and 12 blue cups. The shop opens at 9 am and has 24 chairs. How many cups are on the shelves?' ]:
             r={a:gen(q,a) for a in ['stock','calculator']};write('smoke.jsonl',dict(question=q,arms=r));print(q,{a:v['output'] for a,v in r.items()},flush=True)

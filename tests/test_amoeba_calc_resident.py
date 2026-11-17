@@ -34,6 +34,21 @@ extern "C" int calculate(const uchar *s,int len,int mode,int *out) {
  resident_evaluate(program,normalized,out);
  return program[0];
 }
+extern "C" int match_piece(const uchar *answer, int size, const uchar *piece,
+                           int length, int cursor, int leading, int ordinary) {
+ int state[288]={}, offsets[32]={}, lengths[32]={}, classes[32]={};
+ uchar pool[64]={};
+ if (size < 1 || size >= 32 || length < 0 || size + length > 64) return -1;
+ state[0]=size; state[1]=cursor;
+ state[11]=leading ? RC_ALLOW_LEADING_SPACE : RC_MATCH_ANSWER_BYTES;
+ for (int i=0;i<size;i++) {
+  pool[i]=answer[i]; offsets[i]=i; lengths[i]=1; state[16+i]=i;
+ }
+ offsets[size]=size; lengths[size]=length;
+ classes[size]=ordinary ? RC_ANSWER_PIECE : 0;
+ for (int i=0;i<length;i++) pool[size+i]=piece[i];
+ return rc_match_answer_piece(state,size,pool,offsets,lengths,classes,size+1);
+}
 """
     )
     subprocess.run(
@@ -59,6 +74,17 @@ extern "C" int calculate(const uchar *s,int len,int mode,int *out) {
         ctypes.POINTER(ctypes.c_int),
     ]
     fn.restype = ctypes.c_int
+    match_piece = dll.match_piece
+    match_piece.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    match_piece.restype = ctypes.c_int
 
     def run(text, mode=0):
         data = text.encode()
@@ -73,6 +99,11 @@ extern "C" int calculate(const uchar *s,int len,int mode,int *out) {
             digits = digits[:-scale] + "." + digits[-scale:]
         return ("-" if out[1] < 0 else "") + digits, n, 0
 
+    def match(answer, piece, cursor=0, leading=True, ordinary=True):
+        answer, piece = answer.encode(), piece.encode()
+        return match_piece(answer, len(answer), piece, len(piece), cursor, leading, ordinary)
+
+    run.match_answer_piece = match
     return run
 
 
@@ -196,6 +227,50 @@ def test_refusal_never_yields_a_result(portable, text):
 @pytest.mark.parametrize("text", [r"$3+4=$", r"\(3+4=\)", r"\[3+4=\]", "3+4= "])
 def test_merged_delimiter_cues(portable, text):
     assert portable(text, 1)[0] == "7"
+
+
+@pytest.mark.parametrize(
+    "text,mode,expected",
+    [
+        ("- 90 - 40 =", 1, "50"),
+        ("  -\t90 - 40 =", 1, "50"),
+        (r"- \(90 - 40=\)", 1, "50"),
+        ("- -90 - 40 =", 1, "-130"),
+        ("-90 - 40 =", 1, "-130"),
+        (r"$- 90 - 40=$", 1, "-130"),
+        ("− 90 - 40 =", 1, "-130"),
+        ("Calculate - 90 - 40.", 0, "-130"),
+        ("- 90 =", 1, None),
+    ],
+)
+def test_generated_bullet_and_unary_minus(portable, text, mode, expected):
+    assert portable(text, mode)[0] == expected
+
+
+@pytest.mark.parametrize(
+    "answer,piece,cursor,leading,expected",
+    [
+        ("96", " ", 0, True, 0),
+        ("96", " 96", 0, True, 2),
+        ("96", "96", 0, True, 2),
+        ("96", "\t9", 0, True, 1),
+        ("96", "95", 0, True, -1),
+        ("96", "960", 0, True, -1),
+        ("96", "9 6", 0, True, -1),
+        ("96", "96 years", 0, True, -1),
+        ("96", " ", 0, False, -1),
+        ("96", " 6", 1, False, -1),
+        ("96", "6", 1, False, 1),
+        ("-0.5", " -0.", 0, True, 3),
+        ("-0.5", "5", 3, False, 1),
+    ],
+)
+def test_answer_pieces_preserve_only_correct_bytes(portable, answer, piece, cursor, leading, expected):
+    assert portable.match_answer_piece(answer, piece, cursor, leading) == expected
+
+
+def test_answer_pieces_do_not_accept_special_tokens(portable):
+    assert portable.match_answer_piece("96", "96", ordinary=False) == -1
 
 
 def test_differential_exact_compositions(portable):
