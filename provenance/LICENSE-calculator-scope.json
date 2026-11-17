@@ -1,0 +1,83 @@
+{
+  "license": "LicenseRef-Pierre-Lamy-Calculator-NC-ND-1.0",
+  "copyright_holder": "Pierre Lamy",
+  "contact": "pierre@userid.org",
+  "effective_date": "2026-11-17",
+  "whole_files": [
+    "src/mlx2/runtime/amoeba_calc_gpu.py",
+    "src/mlx2/runtime/amoeba_calc_trigger.py",
+    "src/mlx2/runtime/amoeba_math_latex.py",
+    "src/mlx2/runtime/amoeba_calc_requests.py",
+    "src/mlx2/runtime/amoeba_counting.py",
+    "scripts/research/amoeba_calc_eval.py",
+    "scripts/research/amoeba_calc_batch.py",
+    "scripts/research/amoeba_calc_defenses.py",
+    "scripts/research/amoeba_calc_gpu_check.py",
+    "scripts/research/amoeba_calc_watchdog.py",
+    "scripts/research/amoeba_counting_check.py",
+    "docs/research/2026-11-17-calculator-tile-architecture.md",
+    "docs/research/2026-11-17-calculator-latex.md",
+    "scripts/research/amoeba_calc_27b.py",
+    "scripts/research/build_calculator_onepager.py",
+    "docs/research/calculator-tile-explained.pdf",
+    "src/mlx2/runtime/amoeba_calc_resident.py",
+    "src/mlx2/runtime/amoeba_calc_resident.h",
+    "tests/test_amoeba_calc_resident.py",
+    "scripts/research/amoeba_calc_resident_check.py",
+    "scripts/research/amoeba_calc_gemma4.py",
+    "tests/test_gemma4_calculator_cpu.py",
+    "docs/research/2026-11-17-calculator-gemma4.md",
+    "src/mlx2/runtime/amoeba_calc_speculative.py",
+    "tests/test_amoeba_calc_speculative_cpu.py",
+    "docs/research/2026-11-17-calculator-speculative.md",
+    "scripts/research/amoeba_calc_spec_prepare.py",
+    "docs/research/calculator-tile-explained-resident.pdf"
+  ],
+  "mixed_files": [
+    {
+      "path": "src/mlx2/runtime/amoeba_det_tiles.py",
+      "covered_symbols": [
+        "_lead_ok",
+        "_range_like",
+        "_number",
+        "parse_expression",
+        "_currency",
+        "_parse_question",
+        "_decimal_string",
+        "evaluate",
+        "_V2Refused",
+        "_v2_tokens",
+        "_v2_check_size",
+        "_V2Parser",
+        "_v2_parse",
+        "parse_expression_v2",
+        "parse_expression_v3",
+        "parse_expression_v4",
+        "calculator_answer",
+        "ProbeGate",
+        "CalculatorProcessor",
+        "processors_for",
+        "resident_external_manifest"
+      ],
+      "covered_fragments": "Calculator grammar/constants and calculator-specific branches in manifest validation, tile construction, gate capture, receipts and cache identity.",
+      "excluded": "FactTable and fact-table behavior; generic tile installation, file hashing, generic manifest I/O and shared runtime infrastructure remain under their existing licenses."
+    },
+    {
+      "path": "src/mlx2/adapters/gemma4.py",
+      "covered_symbols": [
+        "_Gemma4Adapter._admit_calculator_manifest",
+        "_Gemma4Adapter.request_logits_processors",
+        "_Gemma4Adapter.execution_numerics_contract"
+      ],
+      "covered_fragments": "Calculator admission, installation and calculator identity branches in _Gemma4Adapter.__init__.",
+      "excluded": "Existing model loading, tensor math, media, cache, sampling and generic adapter infrastructure retain their existing licenses."
+    }
+  ],
+  "exclusions": [
+    "Third-party code and dependencies",
+    "Base model weights",
+    "Historical copies and existing independent license grants",
+    "All repository files and fragments not expressly covered above"
+  ],
+  "prior_grants": "Earlier valid Apache-2.0 grants are not revoked. This scope identifies the offer attached to new copies and does not establish that older copies were never distributed."
+}

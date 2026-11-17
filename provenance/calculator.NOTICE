@@ -1,0 +1,14 @@
+Calculator tile by Pierre Lamy
+Copyright (c) 2026 Pierre Lamy
+Licensing contact: pierre@userid.org
+
+Covered original calculator code is offered under
+LicenseRef-Pierre-Lamy-Calculator-NC-ND-1.0.
+See LICENSE-calculator.txt and LICENSE-calculator-scope.json in this directory.
+Free noncommercial use; attribution required; no commercial use or
+distribution of derivatives without separate written permission.
+Earlier valid license grants and third-party notices remain effective.
+
+The MLX and MLX-LM APIs are dependencies with their own licenses. This notice
+does not relicense them or the Qwen model weights. Original implementation
+and source provenance are recorded in calculator-latex-metal.json.

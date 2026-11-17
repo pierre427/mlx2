@@ -339,6 +339,7 @@ def _literal_semantic(value):
 
 def _target_execution_policy(model) -> tuple[object, ...]:
     """Live arithmetic semantics not represented by module/tensor identity."""
+    from ..runtime.amoeba_tiles import unwrap_det
 
     trunk = model.language_model.model
     training = tuple(
@@ -348,7 +349,10 @@ def _target_execution_policy(model) -> tuple[object, ...]:
     )
     layers = []
     for index, layer in enumerate(trunk.layers):
-        mlp = layer.mlp
+        mlp, _ = unwrap_det(layer.mlp)
+        # An MLP that declares its own projections (the amoeba tiled MLP) is
+        # fingerprinted through them; a stock dense MLP through gate/up/down.
+        declared = getattr(mlp, "projection_topology", None)
         mlp_topology = tuple(
             (
                 name,
@@ -360,9 +364,11 @@ def _target_execution_policy(model) -> tuple[object, ...]:
                 else None,
             )
             for name, projection in (
-                ("gate_proj", mlp.gate_proj),
-                ("up_proj", mlp.up_proj),
-                ("down_proj", mlp.down_proj),
+                declared() if callable(declared) else (
+                    ("gate_proj", mlp.gate_proj),
+                    ("up_proj", mlp.up_proj),
+                    ("down_proj", mlp.down_proj),
+                )
             )
         )
         common = (

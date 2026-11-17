@@ -18,7 +18,7 @@ QUALIFICATION_MODULE_SHA256 = {
     "lane_attention.py": "6c67b9b8d1f30375ab1f543f8540fcb66f1482ef9f6c7768a93d2b245e4af8cf",
     "lane_fuse.py": "c46846660d619ab6426f52b7f9174d45961a7b0158add33fc7b8f300f75372bb",
     "lane_glue.py": "82bad8f18d1cfe624aaf13eec6179c4955d3a3e45d3d95e686cd5c97214be846",
-    "lane_multi.py": "4682d1d91e3fa14d04ec996ab46f8ad2fcd3a65180e4061ab3b05efebafa1f7c",
+    "lane_multi.py": "6922f1a069beebd7e9f1606113dbb70b02f19d3c1f8db22838fb391e7a0f7fd5",
     "lane_qmm.py": "04984ccdde3ecf68b1994ab8c81c08f82607099ed7febd423057fcc906273f75",
     "lane_tree.py": "e6de53828708e4833fcf390bc1dd330377cbdd26629da235c9728822770b5839",
     "lane_widen.py": "66369189f5300c06af754c0d867b7f50a55519aadb2342fe05785275767e8b77",

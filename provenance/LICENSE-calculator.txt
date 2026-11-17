@@ -1,0 +1,119 @@
+Pierre Lamy Calculator Noncommercial, No Distributed Derivatives License 1.0
+SPDX identifier: LicenseRef-Pierre-Lamy-Calculator-NC-ND-1.0
+Effective for copies carrying this notice: 17 November 2026
+
+Copyright (c) 2026 Pierre Lamy. All rights reserved except as granted below.
+Licensing contact: Pierre Lamy <pierre@userid.org>
+
+1. Scope and acceptance
+
+This license applies only to Pierre Lamy's original calculator-tile software
+and documentation expressly identified in LICENSE-calculator-scope.json in
+this directory (the "Software"), including covered source and object forms.
+It does not relicense other mlx2 code, dependencies, model weights, third-party
+material, or excluded portions of mixed files. Their notices remain effective.
+
+By exercising a permission granted here, you accept these conditions. If you
+do not accept them, this license grants you no permission. Rights available
+under applicable law or an independent license do not depend on acceptance.
+
+2. Free noncommercial permission
+
+Subject to this license, the copyright holder grants you a worldwide,
+nonexclusive, royalty-free permission to obtain, copy, inspect, compile, run,
+and privately modify the Software solely for Noncommercial Use. No payment
+is required for these permitted uses. You may keep private modifications
+within your own noncommercial project or organization; access must be limited
+to participants bound by these terms and acting solely for that project.
+
+"Noncommercial Use" means personal study, teaching, hobby activity, or research
+conducted without a purpose of commercial advantage, monetary compensation,
+or development or support of a commercial product or service. An educational
+or nonprofit label alone does not establish Noncommercial Use.
+
+Commercial Use requires a separate written license from Pierre Lamy. It
+includes use by, for, or on behalf of a commercial business in its operations,
+research, evaluation, product development, or service delivery, whether or not
+that particular activity earns revenue. It includes using the Software or
+copies or adaptations of it to train, fine-tune, distill, evaluate, or deploy
+models for such a business or commercial purpose. A free trial, free service,
+internal experiment, affiliate, contractor, or nonprofit intermediary does
+not avoid this requirement. An employee's independent personal activity is
+not commercial merely because of their employment when the employer neither
+directs nor benefits from the activity and the other conditions are met.
+
+3. Unmodified sharing only; no distributed derivatives
+
+You may share complete, unmodified copies of the covered source files for
+Noncommercial Use, without a charge or other commercial consideration, if
+you include this license, its scope file, the calculator NOTICE, and all
+applicable third-party notices. Recipients receive permission directly from
+the copyright holder under these same terms. You may also share verbatim
+object copies supplied by the copyright holder with the corresponding
+notices. This permission is not a right to sublicense the Software.
+
+You may not distribute, publish, sell, sublicense, or otherwise make available
+modified versions, translations or ports of the code, patches containing
+covered code, or other derivative works of the Software, without a separate
+written license. Nor may you make a modified version available to third
+parties as a hosted service, API, or remote execution facility. Private
+compilation is allowed by section 2; redistribution of your own compiled
+builds requires separate permission. Merely placing an unchanged copy beside
+independent works is not a modification, but does not relax these conditions.
+Software independently written without copying protected expression is not
+made a derivative solely because it implements a similar idea or interface.
+
+4. Attribution
+
+Retain the copyright, license, attribution, and provenance notices in every
+copy, including private modifications. Identify private modifications as
+such, without suggesting they are the copyright holder's release.
+
+When sharing permitted copies, or publicly describing research results,
+benchmarks, or demonstrations obtained using the Software, give reasonably
+visible credit: "Calculator tile by Pierre Lamy", with a reference to the
+Software and the version used where practicable. Do not imply endorsement.
+This does not require adding notices to each numerical answer or ordinary
+generated text. Such outputs are not covered Software merely because the
+Software helped produce them; any covered code reproduced in them remains
+subject to its applicable license.
+
+5. Reserved rights and earlier grants
+
+No permission is granted for Commercial Use or distribution of derivatives
+unless a separate written agreement expressly permits it. No trademark
+license or right to claim authorship is granted. This license does not grant
+a patent license. All rights not expressly granted are reserved.
+
+These terms do not revoke, narrow, or replace rights already validly granted
+under Apache-2.0 or any other license for earlier copies, nor third-party
+rights in included material. They do not claim ownership of mathematical
+facts, ideas, algorithms as such, independent implementations, or your
+ordinary outputs. Exceptions and rights that cannot lawfully be restricted
+remain available. Future changes to this license do not alter the terms
+attached to a copy you already received.
+
+6. Termination
+
+Permission under this license ends automatically if you violate a condition.
+You must stop the affected use and sharing. On a first violation, permission
+is reinstated if you fully cure it within 30 days after learning of it and
+take reasonable steps to remedy past breaches. Repeated violations require
+written reinstatement. Termination does not affect independent earlier
+licenses, lawful recipients' permissions, or liability for past violations.
+
+7. No warranty; limited liability
+
+TO THE EXTENT PERMITTED BY LAW, THE SOFTWARE IS PROVIDED "AS IS", WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, INCLUDING MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. THE COPYRIGHT HOLDER
+IS NOT LIABLE FOR DAMAGES OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR
+THIS LICENSE, WHETHER IN CONTRACT, TORT, OR OTHERWISE. NOTHING HERE EXCLUDES
+LIABILITY THAT APPLICABLE LAW DOES NOT ALLOW TO BE EXCLUDED.
+
+8. Separate permission
+
+Contact Pierre Lamy at pierre@userid.org for commercial use, redistribution
+of modifications or compiled builds, patent permissions where needed, or
+other uses outside this grant. Only a separate written agreement grants
+those additional permissions. Silence is not consent.

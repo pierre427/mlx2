@@ -1211,6 +1211,65 @@ def eager_dispatch_diagnostics(adapter) -> dict:
     }
 
 
+# Policy keys an amoeba tile set refuses, each with the reason (fail closed).
+AMOEBA_REFUSED_POLICY_KEYS = {
+    "draft_models": "multi-drafter pools are not audited with amoeba tiles",
+    "prompt_lookup": "prompt-lookup drafting is not audited with amoeba tiles",
+    "ast_graft_prompt_lookup": "the grafted prompt-lookup drafter is not audited with amoeba tiles",
+    "self_mtp_copy_draft": "copy-draft self-MTP is not audited with amoeba tiles",
+    "mtp_ordinary_handoff": "the irreversible ordinary MTP handoff schedule is not audited with amoeba tiles",
+    "tensorfold_prefill": ("TensorFold prefill class-swaps eligible trunk projections with an M5-only "
+                           "kernel and fuses gate/up only on stock MLPs; its coverage of tile "
+                           "projections has no oracle yet"),
+}
+
+
+def _refuse_amoeba_combinations(manifest_path, policy, *, require_mtp, weight_streaming):
+    """Admit the routes amoeba tiles are implemented on; return the tile route (fail closed).
+
+    Admitted: ordinary decode; native self-MTP (``require_mtp``, the drafter is the full-weight MTP
+    head); an external draft model or this artifact's own MTP head drafting AST tree tiles
+    (``draft_model``), with TensorFold verify, ``target_verify_row_exact`` (+ ``q4_gate_three_rows``)
+    or the grouped lane law (``ast_target_tree_projection_law``); ``varlen_dense_mlp`` and
+    ``invariant_prefill``. The tiles install before every projection-law installer, so those laws
+    cover the tile projections; the adapter audits that after load and the serving lane bind
+    audits the lane law (``AmoebaTileSet.lane_law_refusal``).
+    """
+    if type(manifest_path) is not str or not manifest_path:
+        raise ValueError("amoeba_tiles must name a tile manifest path")
+    if weight_streaming is not None:
+        raise ValueError("amoeba tiles cannot combine with weight streaming")
+    for key, reason in AMOEBA_REFUSED_POLICY_KEYS.items():
+        if policy.get(key):
+            raise ValueError(f"amoeba tiles refused with {key}: {reason}")
+    if policy.get("draft_model") in PROMPT_LOOKUP_DRAFT_NAMES:
+        raise ValueError(f"amoeba tiles refused with draft_model={policy['draft_model']}: "
+                         f"{AMOEBA_REFUSED_POLICY_KEYS['prompt_lookup']}")
+    if require_mtp:
+        return "native_mtp"
+    if "draft_model" in policy:
+        return "external_draft"
+    for key in ("target_verify_row_exact", "q4_gate_three_rows"):
+        if policy.get(key):
+            raise ValueError(f"amoeba tiles: {key} is a speculative-verify law; it needs a draft_model")
+    return "ordinary"
+
+
+def _amoeba_drafter(route, *, native_tree, mtp_head, draft_record):
+    """Receipt provenance of the drafter beside a tiled target (never tiled itself)."""
+    if route == "ordinary":
+        return None
+    if route == "native_mtp" or native_tree:
+        return {"kind": "native_mtp_head" if route == "native_mtp" else "native_mtp_head_tree_tiles",
+                "weights": "full source MTP head (language_model.mtp), not tiled",
+                "mtp_head_artifact": mtp_head,
+                "input_hidden": "the tiled trunk's final hidden state"}
+    return {"kind": "external_draft_model",
+            "draft_revision": None if draft_record is None else draft_record.get("draft_revision"),
+            "weights": "the drafter's own checkpoint, not tiled",
+            "input_hidden": "the tiled trunk's taps"}
+
+
 def resolve_eos_token_ids(config: dict, tokenizer, model_path=None) -> list[int]:
     """Combine every EOS id the Qwen artifact or tokenizer declares.
 
@@ -1257,6 +1316,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         "linears": {"attention": ("linear_attn.out_proj", "self_attn.o_proj"),
                     "mlp": ("mlp.down_proj",)},
     }
+    # Gated MLP of every decoder layer, for the experimental amoeba tiled
+    # route (runtime/amoeba_tiles.py): down(silu(gate(x)) * up(x)).
+    amoeba_mlp = {"mlp": "mlp", "projections": ("gate_proj", "up_proj", "down_proj"),
+                  "activation": "silu"}
 
     def capture_teacher_windows(self, windows, sink, *, order="layer_major",
                                 activation_budget_bytes=512 << 20):
@@ -1565,6 +1628,48 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
+        self.amoeba_tiles = None
+        self._amoeba_request = None
+        amoeba_tiles = policy.pop("amoeba_tiles", None)
+        if amoeba_tiles is not None:
+            amoeba_route = _refuse_amoeba_combinations(amoeba_tiles, policy, require_mtp=require_mtp,
+                                                       weight_streaming=weight_streaming)
+            gate_per_row = policy.pop("amoeba_tiles_gate_per_row", False)
+            if type(gate_per_row) is not bool:
+                raise ValueError("amoeba_tiles_gate_per_row must be boolean")
+            # Opt-in until a GPU A/B (scripts/amoeba27b_perf_ab.py) shows it as fast or faster
+            # and fused == unfused greedy (or near-tie): changing the default is Pierre's call.
+            # "auto": neuron_order (exact all-open: the source MLP modules, closed tiles masked)
+            # when every box is a router tile and core + tiles partition every layer as exact
+            # slices, else unfused. "unfused"/"fused" select the tile-group layouts (skip closed
+            # tiles; all-open is a near tie against the stock MLP).
+            layout = policy.pop("amoeba_tiles_layout", "auto")
+            from ..runtime.amoeba_tiles import LAYOUTS as _AMOEBA_LAYOUTS
+            if layout not in _AMOEBA_LAYOUTS + ("auto",):
+                raise ValueError(f"amoeba_tiles_layout must be one of {_AMOEBA_LAYOUTS + ('auto',)}")
+            # Router tiles open in only some rows: "mask" (exact to masking) unless "gather" (opt-in,
+            # near tie: the projection row count changes) is asked for.
+            partial_rows = policy.pop("amoeba_tiles_router_partial_rows", "mask")
+            from ..runtime.amoeba_tiles import ROUTER_PARTIAL_ROWS as _AMOEBA_PARTIAL_ROWS
+            if partial_rows not in _AMOEBA_PARTIAL_ROWS:
+                raise ValueError(f"amoeba_tiles_router_partial_rows must be one of {tuple(_AMOEBA_PARTIAL_ROWS)}")
+            self._amoeba_request = {"manifest": amoeba_tiles, "route": amoeba_route,
+                                    "mtp_head": policy.get("mtp_head"), "gate_per_row": gate_per_row,
+                                    "layout": layout, "router_partial_rows": partial_rows}
+        elif any(key in policy for key in ("amoeba_tiles_gate_per_row", "amoeba_tiles_layout",
+                                           "amoeba_tiles_router_partial_rows")):
+            raise ValueError("amoeba_tiles_gate_per_row / amoeba_tiles_layout / "
+                             "amoeba_tiles_router_partial_rows need amoeba_tiles")
+        # Deterministic amoeba tiles (runtime/amoeba_det_tiles.py): experimental, unqualified,
+        # Ordinary, or an explicitly admitted resident-calculator external route;
+        # wrap MLPs after every projection-law installer.
+        self.amoeba_det_tiles = None
+        self._amoeba_det_route = 'ordinary'
+        self._amoeba_det_request = policy.pop("amoeba_det_tiles", None)
+        if self._amoeba_det_request is not None:
+            from ..runtime.amoeba_det_tiles import refuse_policy as _refuse_det
+            self._amoeba_det_route = _refuse_det(self._amoeba_det_request, policy, require_mtp=require_mtp,
+                        weight_streaming=weight_streaming,allow_external=True)
         q4_gate_three_rows = policy.pop("q4_gate_three_rows", False)
         if type(q4_gate_three_rows) is not bool:
             raise ValueError("q4_gate_three_rows must be boolean")
@@ -1858,6 +1963,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             self.norm_convention = getattr(
                 getattr(self.model, "language_model", None), "norm_convention", None
             )
+        if self._amoeba_request is not None:
+            self._amoeba_request["drafter"] = _amoeba_drafter(
+                self._amoeba_request["route"], native_tree=native_tree_draft,
+                mtp_head=self._amoeba_request["mtp_head"], draft_record=draft_record)
         try:
             self._finish_load(
                 weights, prefill_policy, fp32_head, path, config,
@@ -1907,6 +2016,97 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if graft_prompt_lookup:
             graft_prompt_lookup_drafter(self, prompt_lookup=prompt_lookup_draft)
 
+    def _install_amoeba_tiles(self, request):
+        """Experimental, unqualified: replace tiled layers' MLPs with core + gated box tiles.
+
+        Runs first in :meth:`_finish_load`, before every installer that swaps, prepares or
+        fingerprints trunk projections (direct tiled prefill flags, invariant prefill, row-exact
+        verify, q4 gate rows, the drafter's target providers, and later the serving lane law), so
+        each of them sees and covers the tile projections. :meth:`_audit_amoeba_laws` checks that.
+        """
+        import mlx.nn as nn
+
+        from ..runtime.amoeba_tiles import install
+
+        from ..runtime.models.activations import swiglu
+
+        # The stock MLP's own compiled swiglu (so a core holding every neuron is the source MLP).
+        declaration = {**self.amoeba_mlp, "activation_fn": {"silu": nn.silu}[self.amoeba_mlp["activation"]],
+                       "product_fn": swiglu, "product_name": "compiled_swiglu"}
+        self.amoeba_tiles = install(
+            self.model, list(self.model.language_model.model.layers), request["manifest"], declaration,
+            source_fingerprint=self.identity["fingerprint"], route=request["route"],
+            drafter=request.get("drafter"), gate_per_row=bool(request.get("gate_per_row", False)),
+            layout=request.get("layout", "auto"),
+            router_partial_rows=request.get("router_partial_rows", "mask"),
+        )
+        self.identity = {**self.identity,
+                         "amoeba_tiles_manifest_sha256": self.amoeba_tiles.identity["manifest_sha256"]}
+
+    def _install_amoeba_det_tiles(self, manifest_path):
+        """Experimental, unqualified: wrap the MLPs deterministic tiles read or write (no projections)."""
+        import mlx.nn as nn
+
+        from ..runtime.amoeba_det_tiles import install_on_adapter
+
+        neural = getattr(self, "amoeba_tiles", None)
+        self.amoeba_det_tiles = install_on_adapter(
+            list(self.model.language_model.model.layers), manifest_path,
+            {"mlp": self.amoeba_mlp["mlp"], "activation_fn": {"silu": nn.silu}[self.amoeba_mlp["activation"]]},
+            source_fingerprint=self.identity["fingerprint"],
+            host_tiles_sha256=None if neural is None else neural.identity["manifest_sha256"],
+            route=self._amoeba_det_route)
+        self.identity = {**self.identity,
+                         "amoeba_det_tiles_manifest_sha256": self.amoeba_det_tiles.identity["manifest_sha256"]}
+
+    def request_logits_processors(self, request, *, prompt_length):
+        """Calculator tiles write through per-request logits processors (none without det tiles)."""
+        from ..runtime.amoeba_det_tiles import processors_for
+
+        return processors_for(getattr(self, "amoeba_det_tiles", None), self.tokenizer,
+                              prompt_length=prompt_length, request=request)
+
+    def _audit_amoeba_laws(self):
+        """After every load-time installer: each installed projection law covers the tile projections."""
+        tiles = getattr(self, "amoeba_tiles", None)
+        if tiles is None:
+            return
+        if getattr(self, "tensorfold_prefill", None) is not None:
+            raise ValueError("amoeba tiles refused with tensorfold_prefill: "
+                             + AMOEBA_REFUSED_POLICY_KEYS["tensorfold_prefill"])
+        refusals = []
+        if getattr(self, "invariant_prefill", None) is not None:
+            from ..runtime.models.invariant_prefill import InvariantLinear, InvariantQuantizedLinear
+
+            audit = self.invariant_prefill.audit()
+            if audit is not None:
+                refusals.append(f"invariant_prefill coverage: {audit}")
+            refusals.append(tiles.class_law_refusal(
+                "invariant_prefill",
+                lambda m: isinstance(m, (InvariantQuantizedLinear, InvariantLinear))))
+        if getattr(self, "target_verify_row_exact", None) is not None:
+            from ..runtime.models.row_exact_components import (
+                RowExactLinearMixin,
+                RowExactQuantizedLinearMixin,
+            )
+
+            refusals.append(tiles.class_law_refusal(
+                "target_verify_row_exact",
+                lambda m: isinstance(m, (RowExactQuantizedLinearMixin, RowExactLinearMixin))))
+        if getattr(self, "q4_gate_three_rows", None) is not None:
+            from ..runtime.row_exact.gate_rows import ATTR
+
+            tiles.record_law("q4_gate_three_rows", {"tile_gate_projections_scheduled": sum(
+                1 for path, m in tiles.projection_modules()
+                if path.endswith("gate_proj") and ATTR in m.__dict__)})
+        if getattr(self, "varlen_dense_mlp", None) is not None:
+            tiles.record_law("varlen_dense_mlp", "tiled MLP compacts live rows like the stock MLP")
+        if getattr(self, "direct_prefill_candidate", False):
+            tiles.record_law("tiled_prefill_nax_v1", "per-projection admission (q4 g64, N%64), stock otherwise")
+        refusals = [r for r in refusals if r]
+        if refusals:
+            raise ValueError("amoeba tiles: " + "; ".join(refusals))
+
     def _finish_load(
         self, weights, prefill_policy, fp32_head, path, config,
         AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer, eager_dispatch,
@@ -1921,6 +2121,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         import mlx.core as mx
 
         self.model.eval()
+        if getattr(self, "_amoeba_request", None) is not None:
+            # The loaded dict still references every source array (the model holds them too):
+            # drop it first so the replaced MLPs' arrays free as the tiles install, not after
+            # (~18 GB on the 27B). Nothing below reads ``weights`` except its later clear().
+            weights.clear()
+            # First: every later installer must see (and cover) the tile projections.
+            self._install_amoeba_tiles(self._amoeba_request)
         from ..runtime.lane.tiled_prefill import admit_model as admit_direct_prefill
         self.direct_prefill_candidate = admit_direct_prefill(self.model)
         from ..runtime.models.varlen_dense_mlp import (
@@ -2006,6 +2213,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         self._select_gdn_state(gdn_state_dtype)
         self._select_target_verify_row_exact()
         self._select_q4_gate_three_rows()
+        self._audit_amoeba_laws()
+        if getattr(self, "_amoeba_det_request", None) is not None:
+            self._install_amoeba_det_tiles(self._amoeba_det_request)
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -2068,6 +2278,22 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
 
     def bind_serving_lane_matmul(self, receipt):
         """Seal the explicit target law after serving installs its projections."""
+        tiles = getattr(self, "amoeba_tiles", None)
+        if tiles is not None:
+            refusal = tiles.lane_law_refusal(receipt)
+            if refusal is not None:
+                raise ValueError(f"amoeba tiles on the {tiles.route} route refused: {refusal}")
+            # Admit, but label what a verify row's equality with ordinary decode rests on; a route
+            # without an exact basis is receipted ``near_tie_only``, never exact.
+            external = getattr(self, "external_policy", None) or {}
+            tree = (type(external.get("batch_size_route")) is str
+                    and external["batch_size_route"] in _TREE_BATCH_ROUTES)
+            tiles.classify_exactness(
+                receipt,
+                row_exact=getattr(self, "target_verify_row_exact", None) is not None,
+                fast_ast=getattr(self, "fast_ast_target", None) is not None,
+                tree_position_law=tree and bool(self._tree_law_size_invariant()),
+            )
         route = getattr(self, "fast_ast_target", None)
         if route is not None:
             return route.bind(receipt or {})
@@ -2649,7 +2875,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         environment = getattr(self, "environment", {})
         core_selected = environment.get("MLX_GDN_CORE") == "1"
 
+        tiles = getattr(self, "amoeba_tiles", None)
+        extra = {"amoeba_tiles": tiles.receipt()} if tiles is not None else {}
         return {
+            **extra,
             "architecture": "dense-hybrid-gdn-gqa",
             "tree_spec_intake": {"qualified": False, "counter_scope": "process",
                 "shared_draft": shared_draft_status(), "tiled_prefill": tiled_prefill_status(),
@@ -2785,6 +3014,14 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "selected fused_gdn_compact_replay policy disagrees with live target layers"
             )
         contract = self._external_execution_numerics()
+        # The tile set changes every later key and value: it joins the APCv2
+        # namespace, so no prefix crosses tile sets or the base model.
+        from ..runtime.amoeba_tiles import numerics_contract_with_tiles
+
+        contract = numerics_contract_with_tiles(contract, getattr(self, "amoeba_tiles", None))
+        from ..runtime.amoeba_det_tiles import numerics_contract_with_det_tiles
+
+        contract = numerics_contract_with_det_tiles(contract, getattr(self, "amoeba_det_tiles", None))
         from ..runtime.models.qwen38_shared_draft import enabled as shared_history_enabled
         from ..runtime.models.qwen38_tree_gdn import compact_enabled
         intake = {name: True for name, active in (

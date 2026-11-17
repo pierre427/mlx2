@@ -1,4 +1,8 @@
-mlx2 is licensed under the Apache License, Version 2.0 (see LICENSE).
+mlx2 is generally licensed under the Apache License, Version 2.0 (see LICENSE).
+Covered original calculator code has separate terms in
+provenance/LICENSE-calculator.txt, with exact scope and earlier-grant boundaries
+in provenance/LICENSE-calculator-scope.json. See provenance/calculator.NOTICE.
+Copyright (c) 2026 Pierre Lamy. Commercial licensing: pierre@userid.org.
 
 This project includes software adapted from third-party projects under their
 own licenses. Per-file provenance is recorded in the repository's provenance/

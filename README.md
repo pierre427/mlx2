@@ -14,8 +14,13 @@ not depend on the unified checkout or a legacy server.
 Contact: Pierre Lamy, [pierre@userid.org](mailto:pierre@userid.org)
 
 mlx2 is licensed under Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)),
-except the EAGLE-4 drafter files, which are source-available under the Eagle 4
-Source-Available License; see [Third-party code](#third-party-code).
+with scoped exceptions: the original calculator tile is source-available under
+the [Pierre Lamy Calculator NC-ND 1.0 license](provenance/LICENSE-calculator.txt)
+([exact scope](provenance/LICENSE-calculator-scope.json)): free noncommercial use,
+attribution required, no commercial use or distributed derivatives without
+separate written permission. Earlier valid grants remain effective. The
+EAGLE-4 drafter files retain the Eagle 4 Source-Available License; see
+[Third-party code](#third-party-code).
 
 ## Serving stack
 

@@ -1887,6 +1887,10 @@ def request_apc_scope(request):
     surgery_replay = request.get("_mlx2_weight_surgery_private_nonce")
     if surgery_replay is not None:
         result = (result, "unqualified-weight-surgery-replay-v1", surgery_replay)
+    amoeba_open = request.get("_mlx2_amoeba_open_fingerprint")
+    if amoeba_open is not None:
+        # A restricted amoeba router open set: cached state is exact only under the same set.
+        result = (result, "amoeba-router-open-set-v1", amoeba_open)
     expert_mask = request.get("_mlx2_expert_mask_fingerprint")
     if expert_mask is not None:
         result = (result, "native-expert-mask-v1", expert_mask,
@@ -4250,6 +4254,10 @@ class Job:
     ablation_overlay_id: str | None = None
     layer_excision_view: object = None
     expert_mask_view: object = None
+    # Amoeba router tiles: the request's open set (frozenset; None = every router tile open) and
+    # its per-request router record (shared with the tile set's row binding while bound).
+    amoeba_open: object = None
+    amoeba_open_record: dict | None = None
     lora_fingerprint: str | None = None
     lora_slot: int | None = None
     lora_residency: str | None = None
@@ -6515,6 +6523,45 @@ class ServingEngine(KernelReloadMixin):
         job.admission_tokens = self._prerender_prompt(job.request, job=job)
         if sum(key in job.request for key in ("weight_overlay", "layer_excision", "expert_mask")) > 1:
             raise ValueError("weight surgery composition is unsupported")
+        # Amoeba tiles are route-wide (adapter policy ``amoeba_tiles``): a request may
+        # name the route's tile set; a tile the route lacks fails closed (HTTP 409).
+        amoeba_tiles = getattr(getattr(self, "adapter", None), "amoeba_tiles", None)
+        if amoeba_tiles is None:
+            from .runtime.amoeba_tiles import refuse_request_tiles
+            refuse_request_tiles(job.request.get("mlx2_amoeba_tiles"))
+            if job.request.get("mlx2_amoeba_open") is not None:
+                refuse_request_tiles(["mlx2_amoeba_open"])
+        else:
+            amoeba_tiles.check_request(job.request.get("mlx2_amoeba_tiles"))
+            # Router tiles: the request's open set (None = all open, the full model). A restricted
+            # set computes other state, so it joins the APCv2 scope (exact per open set).
+            job.amoeba_open = amoeba_tiles.open_request(job.request.get("mlx2_amoeba_open"))
+            if job.amoeba_open is not None:
+                # A restricted set needs every forward of the request to pass the generator's
+                # per-row seam: refuse the features whose forwards bypass it or pack rows
+                # (the expert-mask list, plus the packed/paged native prefill routes).
+                if (job.lora_name is not None or job.weight_program is not None
+                        or any(job.request.get(key) is not None for key in (
+                            "_mlx2_activation_capsule", "_mlx2_prefill_handoff", "_mlx2_neural_concepts",
+                            "_mlx2_prefill_inputs", "_mlx2_media_fingerprint", "cache_capsule",
+                            "batch_cohort", "paged_native_qwen3", "paged_native_qwen3_b2",
+                            "paged_native_hybrid_b2", "paged_native_hybrid_packed_prefill",
+                            "paged_native_packed_n20_research"))):
+                    raise ValueError("a restricted mlx2_amoeba_open set requires an isolated ordinary "
+                                     "text request (no LoRA, weight program, capsule, handoff, media, "
+                                     "cohort or packed/paged native prefill)")
+                job.request["_mlx2_amoeba_open_fingerprint"] = amoeba_tiles.open_fingerprint(job.amoeba_open)
+            # The tile set was installed for one route (ordinary, native_mtp or
+            # external_draft; the adapter admitted it and audited its projection
+            # laws at load): any other serving route fails closed.
+            amoeba_tiles.check_route((self.snapshot.get("settings") or {}).get("route"))
+            if "mlx2_overlay" in job.request or any(
+                    key in job.request for key in ("weight_overlay", "layer_excision", "expert_mask")):
+                raise ValueError("amoeba tiles do not compose with weight-space overlays or surgery")
+        det_tiles = getattr(getattr(self, "adapter", None), "amoeba_det_tiles", None)
+        if det_tiles is not None:
+            served = (self.snapshot.get("settings") or {}).get("route") or "ordinary"
+            det_tiles.check_route(served)
         if "mlx2_overlay" in job.request:
             ablation = getattr(self, "ablation_overlays", None)
             if ablation is None:
@@ -8689,6 +8736,20 @@ class ServingEngine(KernelReloadMixin):
 
     def _weight_space_route_receipt(self, job, receipt):
         """Build the selected feature receipt before execution-epoch decoration."""
+        det = getattr(getattr(self, "adapter", None), "amoeba_det_tiles", None)
+        if getattr(getattr(self, "adapter", None), "amoeba_tiles", None) is not None:
+            receipt = {**(receipt if isinstance(receipt, dict) else {"route": receipt}),
+                       "qualified": False, "qualification": "unqualified",
+                       "weight_space_operation": "amoeba_tiles",
+                       "amoeba_tile_set": self.adapter.amoeba_tiles.identity["manifest_sha256"]}
+            if det is not None:
+                receipt["amoeba_det_tiles"] = det.identity["tiles"]
+            return receipt
+        if det is not None:
+            return {**(receipt if isinstance(receipt, dict) else {"route": receipt}),
+                    "qualified": False, "qualification": "unqualified",
+                    "amoeba_det_tiles": det.identity["tiles"],
+                    "amoeba_det_tile_set": det.identity["manifest_sha256"]}
         for feature, attribute in (("expert_mask", "expert_mask_view"),
                                    ("ablation_overlay", "ablation_overlay_id"),
                                    ("layer_excision", "layer_excision_view"),
@@ -9710,6 +9771,10 @@ class ServingEngine(KernelReloadMixin):
             job.expert_mask_view = None
             self._finish_cleanup(job, "expert_mask_release",
                                  lambda: self.expert_masks.release(mask_view, job.uid))
+        open_record = getattr(job, "amoeba_open_record", None)
+        if open_record is not None:
+            self._finish_cleanup(job, "amoeba_open_release",
+                                 lambda: open_record["router"].unbind(open_record))
         if lora_slot is not None:
             job.lora_slot = None
             manager = self.multi_lora
@@ -11130,6 +11195,9 @@ class ServingEngine(KernelReloadMixin):
             # Publish only after the tokenizer lifecycle has atomically bound
             # its immutable snapshots (or established that the route is off).
             self.adapter = adapter
+            if getattr(adapter, "amoeba_tiles", None) is not None or getattr(adapter, "amoeba_det_tiles", None) is not None:
+                # A tiled core/box route is research: never served as qualified.
+                self.qualification_state = "unqualified"
             if getattr(getattr(adapter, "descriptor", None), "metadata", {}).get(
                 "execution_kind"
             ) in {"embeddings", "rerank"}:
@@ -13146,6 +13214,9 @@ class ServingEngine(KernelReloadMixin):
                 if branch is not None and hasattr(branch, "close"):
                     branch.close()
                 now = time.monotonic()
+                if job.amoeba_open_record is not None:
+                    # The old uid leaves the batch: it must not keep this request's open set.
+                    job.amoeba_open_record["router"].unbind(job.amoeba_open_record)
                 job.uid = None
                 job.admission_tokens = replay_tokens
                 job.admission_hit = hit
@@ -13191,6 +13262,10 @@ class ServingEngine(KernelReloadMixin):
 
             def build_batch():
                 """This route generator; rebuilt after a device out-of-memory."""
+                amoeba_router = getattr(getattr(adapter, "amoeba_tiles", None), "router", None)
+                if amoeba_router is not None:
+                    # A new generator restarts its uids: no router binding may survive.
+                    amoeba_router.reset()
                 if external_draft:
                     batch = adapter.create_external_batch(
                         completion_batch_size=self.max_lanes,
@@ -15757,6 +15832,10 @@ class ServingEngine(KernelReloadMixin):
                             self.layer_excision.bind_uid(job.uid, job.layer_excision_view)
                         if job.expert_mask_view is not None:
                             self.expert_masks.bind_uid(job.uid, job.expert_mask_view)
+                        if job.amoeba_open is not None:
+                            job.amoeba_open_record = self.adapter.amoeba_tiles.router.bind_uid(
+                                job.uid, job.amoeba_open, job.request.get("mlx2_amoeba_open"),
+                                record=job.amoeba_open_record)
                         if job.cache_capsule is not None:
                             self._bind_pending_cache_capsule(batch, job)
                         active[job.uid] = job
@@ -16849,6 +16928,8 @@ class ServingEngine(KernelReloadMixin):
                                     ),
                                     "profile": self.snapshot["profile"],
                                     "qualification": ("unqualified" if (job.weight_program is not None
+                                                                       or getattr(getattr(self, "adapter", None), "amoeba_tiles", None) is not None
+                                                                       or getattr(getattr(self, "adapter", None), "amoeba_det_tiles", None) is not None
                                                                        or job.ablation_overlay_id is not None
                                                                        or job.weight_overlay_view is not None
                                                                        or job.layer_excision_view is not None
@@ -16865,6 +16946,18 @@ class ServingEngine(KernelReloadMixin):
                                     ),
                                     "route_receipt": self._kernel_route_receipt(
                                         self._weight_space_route_receipt(job, native_route or route_receipt)),
+                                    **({"amoeba_tiles": self.adapter.amoeba_tiles.receipt()}
+                                       if getattr(getattr(self, "adapter", None), "amoeba_tiles", None) is not None else {}),
+                                    **({"amoeba_det_tiles": self.adapter.amoeba_det_tiles.receipt()}
+                                       if getattr(getattr(self, "adapter", None), "amoeba_det_tiles", None) is not None else {}),
+                                    **({"amoeba_open": {
+                                        "open_tiles": (None if job.amoeba_open is None else sorted(job.amoeba_open)),
+                                        "all_router_tiles_open": job.amoeba_open is None,
+                                        "requested": job.request.get("mlx2_amoeba_open"),
+                                        "bound_forwards": (job.amoeba_open_record or {}).get("bound_forwards", 0),
+                                        "fingerprint": job.request.get("_mlx2_amoeba_open_fingerprint")}}
+                                       if getattr(getattr(getattr(self, "adapter", None), "amoeba_tiles", None),
+                                                  "router", None) is not None else {}),
                                     **({"weight_overlay": self.weight_overlays.receipt(
                                         job.weight_overlay_view, job.uid)}
                                        if job.weight_overlay_view is not None else {}),

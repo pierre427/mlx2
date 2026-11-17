@@ -1,0 +1,11 @@
+{
+  "schema": "mlx2.original-implementation.v1",
+  "implementation": "GPU-resident bounded calculator parser and exact interpreter",
+  "author": "Pierre Lamy",
+  "license": "LicenseRef-Pierre-Lamy-Calculator-NC-ND-1.0",
+  "source_repository": "mlx2",
+  "source_revision": "72dd72b8d50a68bd0fcb7498e109460c7ef8c881",
+  "source_paths": ["src/mlx2/runtime/amoeba_calc_gpu.py", "src/mlx2/runtime/amoeba_math_latex.py"],
+  "modifications": "Original nonrecursive device parser and postfix interpreter; reuse project exact-rational primitives. Admission is closed until complete syntax and arithmetic validation succeed. No serving CPU parser fallback.",
+  "validation": "Pending portable differential tests and owned Metal/model functional tests; unqualified and opt-in."
+}

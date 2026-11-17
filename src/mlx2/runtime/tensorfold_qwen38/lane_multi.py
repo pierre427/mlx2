@@ -273,14 +273,7 @@ def _multi_tree_forward(core: Any, head: Any, windows: Sequence[Sequence[int]], 
         norm = inner.post_attention_layernorm
         hidden, x = lane_glue.norm_xs(hidden, r, norm.weight, norm.eps)
         mlp = inner.mlp
-        if getattr(mlp, "gate_proj", None) is None:
-            # Sparse MoE (or any other) block: row-local, so the module's own
-            # call over all tree rows is each row's ordinary arithmetic.
-            pending = mlp(x)
-        else:
-            gu = lane_fuse.mlp_gate_up(mlp, x)
-            act = lane_glue.mlp_act(mlp.gate_proj(x), mlp.up_proj(x)) if gu is None else lane_fuse.mlp_act(gu)
-            pending = mlp.down_proj(act)
+        pending = _mlp_rows(mlp, x, lane_fuse, lane_glue)
         storage = getattr(layer, "_storage", None)
         tapped = (storage, layer._idx) if storage is not None else None
         if pipeline_layers and ((index + 1) % pipeline_layers == 0 or (index == 0 and first_alone)) \
@@ -294,6 +287,29 @@ def _multi_tree_forward(core: Any, head: Any, windows: Sequence[Sequence[int]], 
         if len(lane_tree.HIDDEN_SINK) > 1024:
             del lane_tree.HIDDEN_SINK[0]
     return head(x[:, -1:] if last_only else x), records, offsets
+
+
+def _mlp_rows(mlp: Any, x: mx.array, lane_fuse: Any, lane_glue: Any) -> mx.array:
+    """One layer's MLP over the packed tree rows.
+
+    A stock gated MLP takes the tree path's own fused gate/up and activation. An amoeba
+    neuron-order layer (``amoeba_activation_mask``) holds the stock modules, so it takes that same
+    arithmetic: all rows fully open is the untiled tree verify bit for bit; a restricted row's
+    closed-tile activations are multiplied by 0 before the down projection (the router binds the
+    packed rows per lane). Other amoeba tiled layers and sparse MoE blocks are called as modules
+    (row-local, so each row's ordinary arithmetic; the tiled module runs the router's checks).
+    """
+    masked = getattr(mlp, "amoeba_activation_mask", None)
+    if getattr(mlp, "gate_proj", None) is not None and (masked is not None
+                                                         or not getattr(mlp, "amoeba_tiled", False)):
+        gu = lane_fuse.mlp_gate_up(mlp, x)
+        act = lane_glue.mlp_act(mlp.gate_proj(x), mlp.up_proj(x)) if gu is None else lane_fuse.mlp_act(gu)
+        if masked is not None:
+            mask = masked(x, act)
+            if mask is not None:
+                act = act * mask
+        return mlp.down_proj(act)
+    return mlp(x)
 
 
 def commit_streams(caches: Sequence[list[Any]], records: Sequence[list[Any]], paths: Sequence[Sequence[int]],

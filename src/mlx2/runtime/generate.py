@@ -1600,6 +1600,10 @@ class GenerationBatch:
                 and steer is None
                 and lora_rows is None
                 and overlay_rows is None
+                # Row-bound processors (deterministic amoeba tiles) read per-row state
+                # from a decode-shaped forward; a packed prompt+decode forward has no
+                # per-lane rows, so decline the mixed path for them.
+                and not any(hasattr(p, "bind_row") for ps in self.logits_processors for p in (ps or ()))
             ):
                 # The prompt slice and these decode rows share one forward:
                 # every projection reads its weights once for both.
@@ -1647,6 +1651,11 @@ class GenerationBatch:
             for e in range(len(self.uids)):
                 sample_logits = logits[e : e + 1]
                 for processor in self.logits_processors[e]:
+                    # Row-aware processors (deterministic amoeba tiles) read
+                    # per-row state the forward left; tell them their row.
+                    bind = getattr(processor, "bind_row", None)
+                    if bind is not None:
+                        bind(e)
                     sample_logits = processor(token_context[e], sample_logits)
                 processed_logits.append(sample_logits)
             logits = mx.concatenate(processed_logits, axis=0)

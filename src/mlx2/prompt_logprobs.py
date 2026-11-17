@@ -71,6 +71,8 @@ _REQUEST_WEIGHT_PROGRAMS = (
     "layer_excision",
     "expert_mask",
     "mlx2_overlay",
+    "mlx2_amoeba_tiles",
+    "mlx2_amoeba_open",
     "prefill_handoff",
 )
 # APCv2 reuse restrictions that concern batch invariance only.  A width-1

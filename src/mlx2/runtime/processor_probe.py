@@ -160,6 +160,9 @@ class VerifyWindow:
             if callable(getattr(processor, "verify_ledger", None))
             and callable(getattr(processor, "restore_verify_ledger", None))
         )
+        for processor in self._processors:
+            begin=getattr(processor,'begin_verify_ledger',None)
+            if callable(begin):begin()
         self._marks = [self._ledgers()] if self._processors else []
 
     def _ledgers(self):
@@ -180,10 +183,14 @@ class VerifyWindow:
             raise ValueError(
                 f"verify window settled at {used} rows of {processed}"
             )
-        if used == processed:
-            return
         for processor, ledger in zip(self._processors, self._marks[used]):
-            processor.restore_verify_ledger(ledger)
+            commit=getattr(processor,'commit_verify_ledger',None)
+            if callable(commit):
+                # Transactional processors publish receipts only at commit,
+                # including windows whose every scored row was accepted.
+                commit(ledger)
+            elif used != processed:
+                processor.restore_verify_ledger(ledger)
 
 
 __all__ = [

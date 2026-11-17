@@ -1,0 +1,30 @@
+{
+  "schema": "mlx2.implementation-provenance.v1",
+  "name": "Calculator request wiring and Qwen3.8 27B transfer evaluation",
+  "source_revision": "7b6a7a15f24e90e8e8d101175f715ce2b85506dd",
+  "license": "Covered calculator changes: LicenseRef-Pierre-Lamy-Calculator-NC-ND-1.0; adapter and generic research infrastructure retain Apache-2.0",
+  "original": true,
+  "sources": [
+    {
+      "repository": "mlx2",
+      "revision": "7b6a7a15f24e90e8e8d101175f715ce2b85506dd",
+      "paths": [
+        "src/mlx2/runtime/amoeba_calc_requests.py",
+        "src/mlx2/runtime/amoeba_det_tiles.py",
+        "src/mlx2/adapters/qwen38_27b.py",
+        "scripts/amoeba_det_calc_cpu.py",
+        "research/amoeba/det_calc.py",
+        "scripts/amoeba27b_det_served.py"
+      ],
+      "license": "See per-file and calculator scope; previous Apache grants preserved",
+      "modifications": "Wire the latest complete user turn into the opt-in request gate; refuse nontext and tool continuations; expose successful arithmetic plan execution backends; add probe-only calibration; evaluate a separately calibrated 27B gate against unmodified ordinary model. Fresh 27B probe uses existing disjoint train/validation/test templates; calibration is separate from the128 scored transfer questions. Run all stock batches before calculator; native serving and client run-on/spiral alarms with actual emitted token IDs."
+    }
+  ],
+  "validation": "421 focused CPU tests. Initial160-positive/12-negative-per-category calibration on plain27B loaded and completed captures but no probe passed unchanged1percent validation bound;no tile created. Retrying the historical400-positive/40-negative full-English recipe at24/36/48/56;no scored answers used.",
+  "status": {
+    "implemented": true,
+    "qualified": false,
+    "selected": "explicit test only",
+    "observed_used": false
+  }
+}

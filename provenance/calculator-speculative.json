@@ -1,0 +1,14 @@
+{
+  "schema": "mlx2.original-implementation.v1",
+  "implementation": "Resident calculator transactional external speculation compatibility",
+  "source_repository": "mlx2",
+  "source_revision": "fc869e04b",
+  "source_paths": [
+    "src/mlx2/runtime/processor_probe.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/amoeba_calc_resident.py"
+  ],
+  "license": "Calculator-specific module: LicenseRef-Pierre-Lamy-Calculator-NC-ND-1.0; existing generic verifier infrastructure retains Apache-2.0",
+  "modifications": "Detached device-state draft probes, accepted-row ledgers and committed-only counters; recovery preserves live processor ownership; explicit resident-calculator external route admission. Dynamic tree15 uses selected-path rowwise verification; progressive private alternate branches retain primary-chain fallback. Qwen target-policy reflection unwraps the existing deterministic MLP wrapper while preserving whole-module identity.",
+  "validation": "478 passed, 1 existing skip across impacted external/controller/native-flat CPU tests; 15 new focused transaction tests passed. Prepared exact Qwen manifest and chain/AST policies without GPU use. Metal and real-model DFlash validation pending in parent-owned window."
+}

@@ -37,6 +37,12 @@ def bind_weight_overlay_rows(model, uids):
                      getattr(model, "_mlx2_ablation_overlays", None)) if manager is not None)
     for manager in managers:
         manager.bind_rows(uids)
+    # Amoeba router tiles: per-row open sets, published only while a restricted request is bound.
+    from .amoeba_tiles import bind_amoeba_rows
+
+    amoeba = bind_amoeba_rows(model, uids)
+    if amoeba is not None:
+        managers = managers + (amoeba,)
     return managers or None
 
 

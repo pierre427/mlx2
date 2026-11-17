@@ -1,0 +1,94 @@
+{
+  "schema": "mlx2.implementation-provenance.v1",
+  "name": "Bounded exact calculator: LaTeX frontend, Metal/GEMM arithmetic, GPU cue filter",
+  "source_revision": "6ef4a540403e903763183f02478eae3a8179d34f",
+  "license": "LicenseRef-Pierre-Lamy-Calculator-NC-ND-1.0 for covered original calculator code; Apache-2.0 for excluded shared code; earlier grants and third-party licenses preserved",
+  "status": {
+    "implemented": true,
+    "qualified": false,
+    "selected": "GPU preferred for explicit v3/v4 calculator artifacts by user request; production unchanged",
+    "observed_used": "Explicit offline Qwen/Qwen3-0.6B@c1899de2 GPU model A/B and fixed-work prose profile; quality regressions under repair, not production"
+  },
+  "paths": [
+    "src/mlx2/runtime/amoeba_math_latex.py",
+    "src/mlx2/runtime/amoeba_calc_gpu.py",
+    "src/mlx2/runtime/amoeba_calc_trigger.py",
+    "src/mlx2/runtime/amoeba_det_tiles.py",
+    "scripts/research/amoeba_calc_eval.py"
+  ],
+  "sources": [
+    {
+      "repository": "mlx2 (in-tree)",
+      "revision": "5d3567232",
+      "paths": [
+        "src/mlx2/runtime/amoeba_det_tiles.py",
+        "research/amoeba/det_calc.py"
+      ],
+      "modifications": "Versioned LaTeX parsing and deferred IR; backend selection, bounded exact numerical kernels and conservative GPU cue window."
+    },
+    {
+      "repository": "Wikibooks LaTeX/Mathematics (notation reference only)",
+      "revision": "read 2026-11-17",
+      "url": "https://en.wikibooks.org/wiki/LaTeX/Mathematics",
+      "modifications": "No text or code copied; deliberately smaller arithmetic grammar."
+    },
+    {
+      "repository": "mlx-lm installed wheel (evaluation API only)",
+      "revision": "0.31.3",
+      "paths": [
+        "mlx_lm/generate.py"
+      ],
+      "license": "MIT",
+      "modifications": "API use only; adapt processor history to prefill contract. No implementation copied."
+    },
+    {
+      "repository": "mlx2 (in-tree)",
+      "revision": "f391a35d1",
+      "paths": [
+        "src/mlx2/process_env.py",
+        "src/mlx2/runtime/generation_stream.py"
+      ],
+      "license": "Apache-2.0",
+      "modifications": "Apply the existing cross-stream fence diagnosis to the offline MLX-LM harness: normal Metal events before device initialization and bind its actual generation stream. Production defaults unchanged."
+    }
+  ],
+  "validation": {
+    "kernel": "478 synthetic comparisons against independent CPU exact reference; zero mismatches across Metal and digit-GEMM",
+    "trigger": "13 targeted GPU checks and exhaustive Qwen3-0.6B tokenizer cue-bit assertions",
+    "checkpoint": "N/A synthetic arithmetic; tokenizer only Qwen/Qwen3-0.6B@c1899de2",
+    "evidence": "qualification/runs/calculator-latex-m5-20261117/kernel-check",
+    "limits": "No full-model qualification or throughput claim. GPU roots/modulo explicitly unsupported; no CPU fallback. Prior failed compiler/division experiments preserved in local output and tuning library.",
+    "model_results": "docs/research/2026-11-17-calculator-results.md; full runtime6ef4a5404 and fixed-work throughput6fa76c177. Repaired runtime09505a7a0 under focused probe."
+  },
+  "research_evaluator_extensions": {
+    "original": true,
+    "upstream_code_copied": false,
+    "in_tree_reuse": [
+      "src/mlx2/thinking_guard.py:ThinkingGuard pure-CPU CUSUM alarm",
+      "src/mlx2/spiral_conclude.py:SpiralDetector"
+    ],
+    "local_source_revision": "0767a35278a0d52ce1f5d8cd790857e90e26d34d",
+    "external_api": "mlx-lm 0.31.3 MIT: BatchGenerator insert/next_generated/remove/close; original adapter, no code copied",
+    "modifications": "Isolated per-lane calculator/defense state; forward-bound row rebinding across batch compaction; no-thinking completion nudge instead of </think>; all injected tokens count inside4096; bounded512-token conclusion; same policy both arms.",
+    "validation": "80 guard/oracle CPU checks passed; live8-case B1/B4 functional controls8of8 pass,7of8 token-exact;21 selected capped cases ran at batch width4 with defenses active. New frozen corpus A/B pending."
+  },
+  "wrapup_repairs": {
+    "original": true,
+    "paths": [
+      "src/mlx2/runtime/amoeba_counting.py",
+      "src/mlx2/runtime/amoeba_calc_requests.py",
+      "scripts/research/amoeba_calc_watchdog.py"
+    ],
+    "scope": "Opt-in strict whole-user-expression/count completion; ASCII GPU reduction and exact Metal list sums; CPU syntax extraction. No benchmark answers enter the processor. Separate 200-question LaTeX spelling repair preserves the original corpus.",
+    "validation": "411 focused CPU tests;88/88 GPU comparisons and3 cues;8/8 model counting. Diagnostic repaired hard1000:805/1000,800/800 literal expressions and5/200 word problems. Current prose profile323.07 stock vs283.84 calculator tokens/s,24 token-exact pairs;unqualified."
+  },
+  "license_transition": {
+    "previous_notice": "Apache-2.0 (project)",
+    "date": "2026-11-17",
+    "holder": "Pierre Lamy",
+    "scope": "provenance/LICENSE-calculator-scope.json",
+    "terms": "provenance/LICENSE-calculator.txt",
+    "previous_source_revision": "fe509e6142154544e35f058f155ea09d49c1113d",
+    "effect": "New license offer only; no revocation of earlier valid grants."
+  }
+}

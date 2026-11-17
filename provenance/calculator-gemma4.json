@@ -1,0 +1,15 @@
+{
+  "schema": "mlx2.original-implementation.v1",
+  "implementation": "Gemma 4 adapter integration for the resident calculator tile",
+  "author": "Pierre Lamy",
+  "license": "LicenseRef-Pierre-Lamy-Calculator-NC-ND-1.0 for calculator additions; existing Gemma adapter and model terms unchanged",
+  "source_repository": "mlx2",
+  "source_revision": "fc869e04b2f33c7782b0b8cb4f7f9deccaeaaa41",
+  "source_paths": [
+    "src/mlx2/adapters/gemma4.py",
+    "src/mlx2/runtime/amoeba_det_tiles.py",
+    "src/mlx2/runtime/models/gemma4.py"
+  ],
+  "modifications": "Narrow adapter admission to one resident calculator; validate artifact binding before weight load and manifest stability during installation; preserve dense and MoE tensor computation; bind calculator identity into the APCv2 numerical contract; provide CPU-only source-bound manifest preparation and functional compatibility cases.",
+  "validation": "42 focused CPU tests pass (Gemma calculator integration, adapter and MoE process-global regressions). No model weights loaded and no GPU used. Owned Metal/model validation belongs to the parent task. Opt-in, unqualified; no production default change."
+}

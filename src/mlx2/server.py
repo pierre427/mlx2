@@ -917,6 +917,8 @@ def validate_request(
         "layer_excision",
         "expert_mask",
         "mlx2_overlay",
+        "mlx2_amoeba_tiles",
+        "mlx2_amoeba_open",
     }
     # OpenAI clients serialize an unset field as an explicit null
     # (openai-python sends ``"stop": null`` for ``stop=None``).  Treat a

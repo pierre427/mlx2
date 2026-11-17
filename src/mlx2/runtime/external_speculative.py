@@ -6,6 +6,7 @@ No capability is qualified by importing or constructing this executor.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -241,6 +242,18 @@ _PREFILL_KV_CACHE_NAMES = frozenset({
     "SinkWindowKVCache", "BatchKVCache", "BatchQuantizedKVCache",
     "BatchRotatingKVCache", "BatchRotatingQuantizedKVCache",
 })
+
+
+def _amoeba_rows(owner, lanes, widths=None):
+    """Bind amoeba router open sets to a target forward's rows: ``lanes`` (objects with ``uid``)
+    in row order, or packed ``widths``. Looks up the router on ``owner.model`` first; without one
+    (every route without router tiles) it is a no-op that reads neither the model nor the lanes."""
+    router = getattr(getattr(owner, "model", None), "_mlx2_amoeba_rows", None)
+    if router is None:
+        return contextlib.nullcontext()
+    from .amoeba_tiles import amoeba_rows
+
+    return amoeba_rows(owner.model, [lane.uid for lane in lanes], None if widths is None else widths())
 
 
 def _prefill_target_reservation(caches):
@@ -1099,19 +1112,21 @@ def _proposal_collision_probabilities(laws):
 class _ReferenceTreeTransaction:
     """Commit a serial-tree accepted path through the ordinary target forward."""
 
-    def __init__(self, owner, cache, inputs):
+    def __init__(self, owner, cache, inputs, uid=None):
         self.owner = owner
         self.cache = cache
         self.inputs = list(inputs)
+        self.uid = uid
         self.closed = False
 
     def commit_paths(self, paths):
         if self.closed or len(paths) != 1 or not paths[0]:
             raise RuntimeError("reference tree commit requires one nonempty path")
         tokens = [self.inputs[index] for index in paths[0]]
-        logits, features = self.owner.model.forward_with_taps(
-            self.owner.mx.array([tokens]), self.cache, self.owner.layers
-        )
+        with _amoeba_rows(self.owner, [SimpleNamespace(uid=self.uid)]):
+            logits, features = self.owner.model.forward_with_taps(
+                self.owner.mx.array([tokens]), self.cache, self.owner.layers
+            )
         self.owner.mx.eval(logits, features)
         self.closed = True
         return [self.cache]
@@ -1246,6 +1261,14 @@ class ExternalDraftBatchGenerator:
         if ast_physical_target and self.ast_physical_target_provider is None:
             raise ValueError(
                 "ast_physical_target requires an adapter-owned provider"
+            )
+        router = getattr(model, "_mlx2_amoeba_rows", None)
+        if router is not None:
+            # The physical-target (native flat) launch runs its own row layout that no amoeba
+            # row binding describes: restricted open sets are refused at admission while it is on.
+            router.open_set_refusal = (
+                "ast_physical_target is on: its native flat target launch does not carry per-row "
+                "amoeba open sets" if ast_physical_target else None
             )
         if type(ast_stage_row_telemetry) is not bool:
             raise ValueError("ast_stage_row_telemetry must be boolean")
@@ -2285,6 +2308,16 @@ class ExternalDraftBatchGenerator:
         return getattr(self.model, "speculative_args", self.model.args)
 
     def _cohort_target_forward(self, inputs, transaction, cohort, *, site, taps=True):
+        """Target forward for one cohort transaction (rows bound to the cohort's lanes)."""
+        if getattr(self, "ast_tree_tile_rows", 0) and int(inputs.shape[1]) > 1:
+            raise RuntimeError(
+                "AST tree tiles require the admitted target-tree provider; "
+                "ordinary multi-row verification is not a tile fallback"
+            )
+        with _amoeba_rows(self, cohort):
+            return self._cohort_target_forward_rows(inputs, transaction, cohort, site=site, taps=taps)
+
+    def _cohort_target_forward_rows(self, inputs, transaction, cohort, *, site, taps=True):
         """Target forward for one cohort transaction: lane-exact when owned.
 
         A batched hybrid transaction at B>1 otherwise runs the plain batched
@@ -2642,6 +2675,9 @@ class ExternalDraftBatchGenerator:
                 prefill_cuts=deque(cuts),
                 state_boundaries=deque(planned),
             )
+            for processor in lane.processors:
+                bind=getattr(processor,'bind_speculative_lane',None)
+                if callable(bind):bind(uid)
             if self.round_timing:
                 lane.external_timing_start = {
                     key: int(value)
@@ -2894,11 +2930,13 @@ class ExternalDraftBatchGenerator:
                 self._append_context(lane, lane.remaining[0])
             inputs = [lane.remaining.popleft() for _ in range(n)]
             if lane.prefill_input is None:
-                lane.tail = self.model.prefill_body(self.mx.array([inputs]), lane.cache, self.layers)
+                with _amoeba_rows(self, [lane]):
+                    lane.tail = self.model.prefill_body(self.mx.array([inputs]), lane.cache, self.layers)
             else:
                 from .models.cache import compact_prompt_cache_windows
                 forward = _declared_model_callback(self.model, 'media_prefill_body')
-                lane.tail = forward(self.mx.array([inputs]), lane.cache, self.layers, **lane.prefill_input)
+                with _amoeba_rows(self, [lane]):
+                    lane.tail = forward(self.mx.array([inputs]), lane.cache, self.layers, **lane.prefill_input)
                 compact_prompt_cache_windows(lane.cache)
                 self.mx.eval(lane.tail, [c.state for c in lane.cache])
                 lane.prefill_input = None
@@ -2967,7 +3005,8 @@ class ExternalDraftBatchGenerator:
         for plane in cache:
             plane.prepare(lengths=lengths, right_padding=padding)
         tokens = _right_pad_prompts(chunks, max_length=width)
-        with self.model.prefill_row_context(lengths, width=width):
+        with self.model.prefill_row_context(lengths, width=width), \
+                _amoeba_rows(self, lanes):
             tails = self.model.prefill_body(tokens, cache, self.layers)
         self.mx.eval(tails, [plane.state for plane in cache])
         for plane in cache:
@@ -4243,6 +4282,10 @@ class ExternalDraftBatchGenerator:
                 raise RuntimeError("processor count changed during external recovery")
             for original, saved in zip(snapshot.processors, restored):
                 if original is not saved:
+                    restore=getattr(original,'restore_from_recovery',None)
+                    if callable(restore):
+                        restore(saved)
+                        continue
                     if not hasattr(original, "__dict__") or not hasattr(saved, "__dict__"):
                         raise TypeError("cannot restore processor identity in external recovery")
                     original.__dict__.clear()
@@ -6313,20 +6356,21 @@ class ExternalDraftBatchGenerator:
                     if launch_plan is not None and not self.ast_stage_row_telemetry:
                         planning_started = time.perf_counter()
                     transaction = owner.begin(lengths=input_lengths)
-                    (
-                        logits,
-                        features,
-                        _target_executor_detail,
-                    ) = execute_progressive_target_rows(
-                        self.model,
-                        self.mx.array(padded_inputs),
-                        transaction.caches,
-                        self.layers,
-                        protocol=self.progressive_target_protocol,
-                        fidelity=self.progressive_verification_fidelity,
-                        input_lengths=input_lengths,
-                        include_stage_rows=self.ast_stage_row_telemetry,
-                    )
+                    with _amoeba_rows(self, [states[index]["lane"] for index in active]):
+                        (
+                            logits,
+                            features,
+                            _target_executor_detail,
+                        ) = execute_progressive_target_rows(
+                            self.model,
+                            self.mx.array(padded_inputs),
+                            transaction.caches,
+                            self.layers,
+                            protocol=self.progressive_target_protocol,
+                            fidelity=self.progressive_verification_fidelity,
+                            input_lengths=input_lengths,
+                            include_stage_rows=self.ast_stage_row_telemetry,
+                        )
                     _target_executor_detail["capability_manifest_sha256"] = (
                         capability["manifest_sha256"]
                     )
@@ -6498,6 +6542,7 @@ class ExternalDraftBatchGenerator:
                                     stage_response_rows.append(
                                         greedy_response_rows[physical_row, row]
                                     )
+                            state["window"].mark()
                     elif physical_row in staged_laws:
                         stage_target_laws = staged_laws[physical_row]
                         if isinstance(stage_target_laws, LaneFailure):
@@ -8108,30 +8153,32 @@ class ExternalDraftBatchGenerator:
         for path in self._tree_paths(parents):
             cache = self._copy_reference_cache(lane.cache)
             row_inputs = self.mx.array([[inputs[index] for index in path]])
-            row_logits, row_features = self.model.forward_with_taps(
-                row_inputs, cache, self.layers
-            )
+            with _amoeba_rows(self, [lane]):
+                row_logits, row_features = self.model.forward_with_taps(
+                    row_inputs, cache, self.layers
+                )
             self.mx.eval(row_logits, row_features)
             logits.append(row_logits[:, -1:])
             features.append(row_features[:, -1:])
         return (
             self.mx.concatenate(logits, axis=1),
             self.mx.concatenate(features, axis=1),
-            _ReferenceTreeTransaction(self, lane.cache, inputs),
+            _ReferenceTreeTransaction(self, lane.cache, inputs, uid=lane.uid),
         )
 
     def _target_tree_forward(self, lane, inputs, parents):
         if self.target_execution == "reference":
             return self._reference_tree_forward(lane, inputs, parents)
         cached = self.tree_gates["cache_executor"]
-        result = self.target_tree_executor_provider.forward(
-            self.model,
-            inputs,
-            parents,
-            lane.cache,
-            self.layers,
-            cached=cached,
-        )
+        with _amoeba_rows(self, [lane]):
+            result = self.target_tree_executor_provider.forward(
+                self.model,
+                inputs,
+                parents,
+                lane.cache,
+                self.layers,
+                cached=cached,
+            )
         return self._finish_target_tree_dispatch([lane], result, cached=cached)
 
     def _target_tree_forward_many(self, cohort, inputs, parents):
@@ -8147,16 +8194,19 @@ class ExternalDraftBatchGenerator:
         ragged = bool(getattr(self, "ast_batch_row_sharing", False))
         if not ragged:
             inputs, parents = _pad_cohort_trees(inputs, parents)
-        result = self.target_tree_executor_provider.forward_many(
-            self.model,
-            inputs,
-            parents,
-            [lane.cache for lane in cohort],
-            self.layers,
-            cached=cached,
-            configured_limit=self.target_tree_cohort_limit,
-            **({"ragged": True} if ragged else {}),
-        )
+        # A packed cohort: each lane owns its tree's rows of the one packed row axis (a provider
+        # with another layout fails closed in the tiled layers' geometry check).
+        with _amoeba_rows(self, cohort, lambda: [len(row) for row in inputs]):
+            result = self.target_tree_executor_provider.forward_many(
+                self.model,
+                inputs,
+                parents,
+                [lane.cache for lane in cohort],
+                self.layers,
+                cached=cached,
+                configured_limit=self.target_tree_cohort_limit,
+                **({"ragged": True} if ragged else {}),
+            )
         return self._finish_target_tree_dispatch(cohort, result, cached=cached)
 
     def _ast_target_tree_forward(self, lane, cache, inputs, *, parents=None):
@@ -8184,14 +8234,15 @@ class ExternalDraftBatchGenerator:
         # AST admission already binds this immutable provider and its validated
         # module set. Legacy ordinary-tree experiment gates do not govern it.
         cached = True
-        result = provider.forward(
-            self.model,
-            inputs,
-            parents,
-            cache,
-            self.layers,
-            cached=cached,
-        )
+        with _amoeba_rows(self, [lane]):
+            result = provider.forward(
+                self.model,
+                inputs,
+                parents,
+                cache,
+                self.layers,
+                cached=cached,
+            )
         return self._finish_target_tree_dispatch(
             [lane],
             result,
@@ -8239,10 +8290,11 @@ class ExternalDraftBatchGenerator:
         ):
             raise ValueError("AST target-tree cohort has no admitted physical geometry")
         provider.validate_cohort(count, provider.ast_tree_max_sessions)
-        result = provider.forward_many(
-            self.model, inputs, parents, caches, self.layers,
-            cached=True, configured_limit=provider.ast_tree_max_sessions,
-        )
+        with _amoeba_rows(self, lanes, lambda: [len(row) for row in inputs]):
+            result = provider.forward_many(
+                self.model, inputs, parents, caches, self.layers,
+                cached=True, configured_limit=provider.ast_tree_max_sessions,
+            )
         return self._finish_target_tree_dispatch(
             lanes, result, cached=True, provider=provider, publish_tree_metrics=False,
         )
@@ -9031,6 +9083,7 @@ class ExternalDraftBatchGenerator:
             or not self.tree_gates["logprobs_on_request"]
             else None
         )
+        window=VerifyWindow(lane.processors)
 
         def sample_row(row, prefix_rows):
             law = self._target_law(
@@ -9042,6 +9095,7 @@ class ExternalDraftBatchGenerator:
                 history_suffix=[inputs[index] for index in prefix_rows],
             )
             target_laws.append(law)
+            window.mark()
             return lane.rng.sample(law)
 
         commit_rows, emitted = self._walk_tree(block, sample_row)
@@ -9059,6 +9113,7 @@ class ExternalDraftBatchGenerator:
             target_laws=target_laws,
             response_logprobs=response_rows,
             commit_rows=commit_rows,
+            verify_window=window,
         )
 
     @staticmethod
@@ -13418,12 +13473,13 @@ class ExternalDraftBatchGenerator:
                     else:
                         transaction = owner.begin(lengths=lengths)
                     if trusted_round:
-                        logits, features = self.model.forward_with_taps(
-                            self.mx.array(inputs),
-                            transaction.caches,
-                            self.layers,
-                            last_logits_only=True,
-                        )
+                        with _amoeba_rows(self, cohort):
+                            logits, features = self.model.forward_with_taps(
+                                self.mx.array(inputs),
+                                transaction.caches,
+                                self.layers,
+                                last_logits_only=True,
+                            )
                     else:
                         logits, features = self._cohort_target_forward(
                             self.mx.array(inputs),
@@ -13858,7 +13914,8 @@ class ExternalDraftBatchGenerator:
             else self.mx.array([[int(anchors[0])]], dtype=self.mx.int32)
         )
         try:
-            logits = self.model(inputs, cache=lane.cache)
+            with _amoeba_rows(self, [lane]):
+                logits = self.model(inputs, cache=lane.cache)
             rows32 = logits[:, -1, :].astype(self.mx.float32)
             normalizer_rows = self.mx.logsumexp(
                 rows32, axis=-1, keepdims=True
@@ -14056,7 +14113,8 @@ class ExternalDraftBatchGenerator:
                         inputs, hybrid, cohort, site="ordinary_round", taps=False
                     )
                 else:
-                    logits = self.model(inputs, cache=batched_cache)
+                    with _amoeba_rows(self, cohort):
+                        logits = self.model(inputs, cache=batched_cache)
                 if hybrid is not None:
                     self.mx.eval(logits)
                     hybrid.commit([1] * len(cohort))

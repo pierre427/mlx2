@@ -49,6 +49,9 @@ _SOURCE_REVISIONS = {
     "31b": {
         ("google/gemma-4-31B", "5bbc2fb1c1b2c611d06e3d9f23c170ba21659d89"),
         ("google/gemma-4-31B-it", "842da3794eaa0b77d5f08bae87a17459d91ff475"),
+        # Gemma-4-31B-it finetune (no licence on its card: the Gemma terms apply), approved by Pierre
+        # 2026-11-14 as the amoeba creative-text generator; research use, unqualified.
+        ("TheDrummer/Artemis-31B-v1.2", "73c8815a18f0de792819ea087fb252beee900ff0"),
     },
 }
 # Pinned third-party MLX builds served as downloaded, per variant: the
@@ -479,12 +482,77 @@ class _Gemma4Adapter(_MLXVLMAdapter):
     def __init__(self, model_path, *, execution_policy=None):
         from .process_globals import guarded_construction
 
-        guarded_construction(
-            self,
-            lambda: super(_Gemma4Adapter, self).__init__(
-                model_path, execution_policy=execution_policy
-            ),
+        if execution_policy is not None and not isinstance(execution_policy, dict):
+            raise ValueError("Gemma 4 execution policy must be an object")
+        policy = dict(execution_policy or {})
+        manifest = policy.pop("amoeba_det_tiles", None)
+        self.amoeba_det_tiles = None
+        admitted = None
+        if manifest is not None:
+            from ..runtime.amoeba_det_tiles import refuse_policy
+
+            refuse_policy(manifest, policy)
+            admitted = self._admit_calculator_manifest(model_path, manifest)
+        if policy:
+            raise ValueError(
+                "Gemma 4 adapters do not accept speculative policy or unknown "
+                f"options: {sorted(policy)}"
+            )
+
+        def construct():
+            super(_Gemma4Adapter, self).__init__(model_path, execution_policy=None)
+            if manifest is not None:
+                import mlx.nn as nn
+                from ..runtime.amoeba_det_tiles import install_on_adapter
+
+                # A4B has dense and sparse branches. The dense MLP is a binding
+                # anchor only: a resident calculator never changes either branch
+                # and does not consume its activations as a learned probe.
+                self.amoeba_det_tiles = install_on_adapter(
+                    list(self.model._model.language_model.model.layers), manifest,
+                    {"mlp": "mlp", "activation_fn": nn.gelu_approx},
+                    source_fingerprint=self.identity["fingerprint"],
+                )
+                digest = self.amoeba_det_tiles.identity["manifest_sha256"]
+                if digest != admitted["_digest"]:
+                    raise ValueError("Gemma 4 calculator manifest changed during model loading")
+                self.identity = {
+                    **self.identity, "amoeba_det_tiles_manifest_sha256": digest,
+                }
+                self.layout += "+det-" + digest
+
+        guarded_construction(self, construct)
+
+    @classmethod
+    def _admit_calculator_manifest(cls, model_path, manifest_path):
+        """Check the supported capability and exact source before loading weights."""
+        from ..runtime.amoeba_det_tiles import DetTileRefused, load_manifest, PARSER_V5
+
+        manifest = load_manifest(manifest_path)
+        tiles = manifest["tiles"]
+        if len(tiles) != 1 or tiles[0].get("kind") != "calculator" or tiles[0].get("parser") != PARSER_V5:
+            raise DetTileRefused("Gemma 4 supports one resident calculator tile only")
+        artifact = cls._inspect_adapter_artifact(model_path)
+        if manifest["source"]["fingerprint"] != artifact["fingerprint"]:
+            raise DetTileRefused("Gemma 4 calculator manifest belongs to another checkpoint")
+        if int(manifest["layers"]) != _TOPOLOGIES[cls.descriptor.variant]["layers"]:
+            raise DetTileRefused("Gemma 4 calculator manifest has a different layer count")
+        return manifest
+
+    def request_logits_processors(self, request, *, prompt_length):
+        """Use the shared byte/token controller; never reinterpret Gemma tokens."""
+        from ..runtime.amoeba_det_tiles import processors_for
+
+        return processors_for(
+            getattr(self, "amoeba_det_tiles", None), self.tokenizer,
+            prompt_length=prompt_length, request=request,
         )
+
+    def execution_numerics_contract(self):
+        """Keep both in-memory and persisted APCv2 keys bound to the tile set."""
+        from ..runtime.amoeba_det_tiles import numerics_contract_with_det_tiles
+
+        return numerics_contract_with_det_tiles(None, getattr(self, "amoeba_det_tiles", None))
 
     def close(self):
         from .process_globals import release
