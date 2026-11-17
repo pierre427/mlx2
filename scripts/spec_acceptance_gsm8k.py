@@ -11,13 +11,26 @@ Measures, per arm, on the GSM8K test split served through an mlx2 server:
   accepted at least ``k`` drafted tokens;
 * decode tok/s, completion tokens, and the route each request used.
 
-Prompt format follows vLLM's ``tests/evals/gsm8k/gsm8k_eval.py`` completion
-mode: ``--shots`` (default 5) worked examples from the start of the train
-split as ``Question: ...\\nAnswer: ...`` blocks (calculator annotations
-``<<...>>`` removed), then the test question; greedy; stops at the next
-``Question:``.  The answer is the number after ``####``, else the last number.
-``--chat`` sends the question as a chat message instead (reasoning content is
-not scored).
+Prompt formats (``--format``):
+
+* ``chat-fewshot`` (default since 2026-11-15): the ``--shots`` (default 5)
+  worked examples from the start of the train split as alternating chat turns
+  (user question, assistant solution ending ``#### N``; calculator annotations
+  ``<<...>>`` removed), then the test question as the last user turn, through
+  the model's own chat template.  Chat-trained models (e.g. Qwen3.8-27B) break
+  on the raw completion format: they emit end-of-turn at once or misread the
+  few-shot block, which voided several 2026-11-14/15 runs.
+* ``chat``: the test question alone as one chat message (zero-shot); this is
+  what ``--chat`` selected before.
+* ``completion``: vLLM's ``tests/evals/gsm8k/gsm8k_eval.py`` completion mode,
+  ``Question: ...\\nAnswer: ...`` blocks then the test question, stopping at
+  the next ``Question:``.  Kept for base models and for comparison with
+  receipts written before 2026-11-15 (all of which used it unless they say
+  ``chat``).  Numbers from different formats are not comparable; the receipt
+  records the format.
+
+The answer is the number after ``####``, else the last number.  Reasoning
+content is not scored.
 
 Data: ``benchmarks/gsm8k/`` (openai/gsm8k ``main``, MIT licence): the full
 test split and the first 8 train rows, converted unmodified from the pinned
@@ -115,6 +128,18 @@ def few_shot_prefix(train, shots):
         solution = _ANNOTATION.sub("", item["answer"]).strip()
         blocks.append(f"Question: {item['question']}\nAnswer: {solution}\n\n")
     return "".join(blocks)
+
+
+CHAT_INSTRUCTION = "\nGive the final numeric answer after ####."
+
+
+def few_shot_turns(train, shots):
+    """The same worked examples as ``few_shot_prefix``, as chat turns."""
+    turns = []
+    for item in train[:shots]:
+        turns.append({"role": "user", "content": item["question"] + CHAT_INSTRUCTION})
+        turns.append({"role": "assistant", "content": _ANNOTATION.sub("", item["answer"]).strip()})
+    return turns
 
 
 # ------------------------------------------------------------ acceptance --
@@ -231,11 +256,13 @@ class Client:
 
 
 def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None, sampling=None,
-                  request_extra=None):
+                  request_extra=None, chat_shots=None):
     """``sampling`` (optional) adds temperature/top_p/top_k and a per-question
     seed (``seed + index``) to every request; ``None`` keeps greedy.
     ``request_extra`` (an arm's ``request`` object, e.g. ``enable_thinking`` /
-    ``reasoning_effort``) is merged into every request body."""
+    ``reasoning_effort``) is merged into every request body.
+    ``chat_shots`` (chat only) are worked-example turns sent before each
+    question (``few_shot_turns``); ``None`` keeps the zero-shot chat prompt."""
     request_extra = dict(request_extra or {})
     reserved = {"model", "temperature", "top_p", "top_k", "seed", "stream", "max_tokens",
                 "messages", "prompt", "stop"}
@@ -249,8 +276,8 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
         extra_fields = sampling_fields(sampling, index)
         if chat:
             payload = {"model": model_name, "temperature": 0, **extra_fields, **request_extra, "stream": False, "max_tokens": max_tokens,
-                       "messages": [{"role": "user", "content": item["question"]
-                                     + "\nGive the final numeric answer after ####."}]}
+                       "messages": list(chat_shots or [])
+                                   + [{"role": "user", "content": item["question"] + CHAT_INSTRUCTION}]}
             result = client.call("/v1/chat/completions", payload)
             choice = result["choices"][0]
             text = choice["message"].get("content") or ""
@@ -268,7 +295,7 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
         ttft = find(result, "ttft_seconds")
         completion = usage.get("completion_tokens") or 0
         predicted, expected = extract_answer(text), reference_answer(item["answer"])
-        row = {"index": index, "expected": expected, "predicted": predicted,
+        row = {"index": index, "test_index": item.get("test_index"), "expected": expected, "predicted": predicted,
                "correct": predicted is not None and predicted == expected, "invalid": predicted is None,
                "finish_reason": choice.get("finish_reason"), "completion_tokens": completion,
                "prompt_tokens": usage.get("prompt_tokens"),
@@ -322,8 +349,8 @@ def write_atomic(path, document):
 
 
 def compact(row):
-    keep = {k: row.get(k) for k in ("index", "expected", "predicted", "correct", "completion_tokens",
-                                     "decode_tps")}
+    keep = {k: row.get(k) for k in ("index", "test_index", "expected", "predicted", "correct", "finish_reason",
+                                     "completion_tokens", "decode_tps", "text")}
     spec = row.get("speculation") or {}
     keep["accept_hist"] = spec.get("verify_accept_hist")
     for name in ("effective_sampling", "sampling_filter"):
@@ -346,9 +373,15 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=18297)
     parser.add_argument("--num-questions", type=int, default=100)
     parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--indices", help="comma-separated test-set indices; overrides --offset/--num-questions")
     parser.add_argument("--shots", type=int, default=5)
-    parser.add_argument("--max-tokens", type=int, default=256)
-    parser.add_argument("--chat", action="store_true")
+    parser.add_argument("--max-tokens", type=int, default=None,
+                        help="default 2048 for the chat formats (512 cut off hard problems mid-working), 256 for completion")
+    parser.add_argument("--format", choices=("chat-fewshot", "chat", "completion"), default=None,
+                        help="prompt format (default chat-fewshot); see the module docstring")
+    parser.add_argument("--chat", action="store_true", help="alias for --format chat (zero-shot)")
+    parser.add_argument("--request", type=json.loads, default=None,
+                        help='base-url mode: JSON merged into every request, e.g. \'{"enable_thinking": false}\'')
     parser.add_argument("--max-context", type=int, default=8192)
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="> 0 samples (sampled speculative acceptance); 0 keeps the greedy standard")
@@ -379,15 +412,26 @@ def main(argv=None):
         parser.error("--top-p/--top-k need --temperature > 0")
     data_revision, files = dataset_files()
     train, test = load_split(files["train"]), load_split(files["test"])
-    items = test[args.offset:args.offset + args.num_questions]
+    picks = ([int(i) for i in args.indices.split(",")] if args.indices
+             else list(range(args.offset, min(args.offset + args.num_questions, len(test)))))
+    items = [{**test[i], "test_index": i} for i in picks]
+    if args.chat and args.format not in (None, "chat"):
+        parser.error("--chat conflicts with --format " + args.format)
+    fmt = "chat" if args.chat else (args.format or "chat-fewshot")
+    args.chat = fmt != "completion"
+    if args.max_tokens is None:
+        args.max_tokens = 2048 if args.chat else 256
+    chat_shots = few_shot_turns(train, args.shots) if fmt == "chat-fewshot" else None
     prefix = "" if args.chat else few_shot_prefix(train, args.shots)
+    mode = {"chat-fewshot": f"chat {args.shots}-shot", "chat": "chat", "completion": f"completion {args.shots}-shot"}[fmt]
     receipt = {"schema": SCHEMA, "qualified": False,
                "kind": "GSM8K acceptance and accuracy, " + ("sampled" if sampling else "greedy")
                        + ", no thermal hold",
                "dataset": {"name": DATASET, "revision": data_revision,
                            "files": {k: {"path": str(v), "sha256": sha256(v)} for k, v in files.items()},
-                           "split": "test", "offset": args.offset, "questions": len(items)},
-               "prompt": {"mode": "chat" if args.chat else f"completion {args.shots}-shot",
+                           "split": "test", "offset": args.offset, "questions": len(items),
+                           **({"indices": picks} if args.indices else {})},
+               "prompt": {"mode": mode, "format": fmt,
                           "max_tokens": args.max_tokens, "stops": None if args.chat else STOPS,
                           "temperature": args.temperature, **({"sampling": sampling} if sampling else {})},
                "driver_revision": revision(ROOT), "arms": []}
@@ -403,9 +447,11 @@ def main(argv=None):
         receipt["checkpoint"] = args.checkpoint
         client = Client(args.base_url)
         status = client.call("/v1/status", timeout=30)
-        rows = run_questions(client, args.checkpoint.split("@")[0], prefix, items, chat=args.chat,
-                             max_tokens=args.max_tokens, log=progress("server"), sampling=sampling)
+        rows = run_questions(client, args.checkpoint.split("@")[0], prefix, items, chat=args.chat, chat_shots=chat_shots,
+                             max_tokens=args.max_tokens, log=progress("server"), sampling=sampling,
+                             request_extra=args.request)
         arm = {"name": "server", "base_url": args.base_url, "startup_status_route": status.get("route_receipt"),
+               "request": args.request or {},
                "summary": summarize(rows, args.draft_depth), "rows": [compact(r) for r in rows]}
         receipt["arms"].append(arm)
         write_atomic(path, receipt)
@@ -462,7 +508,7 @@ def main(argv=None):
                         raise RuntimeError("server readiness timed out")
                     time.sleep(.5)
                 row["startup_status"] = status
-                rows = run_questions(client, args.model.name, prefix, items, chat=args.chat,
+                rows = run_questions(client, args.model.name, prefix, items, chat=args.chat, chat_shots=chat_shots,
                                      max_tokens=args.max_tokens, log=progress(arm["name"]), sampling=sampling,
                                      request_extra=arm.get("request"))
                 time.sleep(1.5)

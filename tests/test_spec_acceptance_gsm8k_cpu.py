@@ -86,11 +86,13 @@ def test_base_url_mode_against_a_stub_server(tmp_path, monkeypatch):
     try:
         out = tmp_path / "out"
         assert gsm.main(["--output", str(out), "--base-url", f"http://127.0.0.1:{server.server_port}",
-                         "--checkpoint", "M@sha256:" + "0" * 64, "--num-questions", "2"]) == 0
+                         "--checkpoint", "M@sha256:" + "0" * 64, "--num-questions", "2",
+                         "--format", "completion"]) == 0
     finally:
         server.shutdown()
     receipt = json.loads((out / "receipt.json").read_text())
     summary = receipt["arms"][0]["summary"]
+    assert [r["test_index"] for r in receipt["arms"][0]["rows"]] == [0, 1]
     assert summary["accuracy"] == 0.5 and summary["questions"] == 2
     assert summary["acceptance"]["mean_acceptance_length"] == pytest.approx(3.0)
     assert seen[0]["temperature"] == 0 and seen[0]["stop"] == gsm.STOPS
@@ -99,6 +101,68 @@ def test_base_url_mode_against_a_stub_server(tmp_path, monkeypatch):
     assert receipt["checkpoint"].startswith("M@sha256:") and receipt["dataset"]["revision"] == "rev"
     with pytest.raises(RuntimeError, match="nonempty"):
         gsm.main(["--output", str(out), "--base-url", "http://x", "--checkpoint", "M@sha256:0"])
+
+
+def test_few_shot_turns_mirror_the_completion_examples():
+    turns = gsm.few_shot_turns([{"question": "Q1?", "answer": "2+2 = <<2+2=4>>4\n#### 4"},
+                                {"question": "Q2?", "answer": "#### 7"}], 5)
+    assert turns == [{"role": "user", "content": "Q1?" + gsm.CHAT_INSTRUCTION},
+                     {"role": "assistant", "content": "2+2 = 4\n#### 4"},
+                     {"role": "user", "content": "Q2?" + gsm.CHAT_INSTRUCTION},
+                     {"role": "assistant", "content": "#### 7"}]
+
+
+def test_default_format_is_chat_fewshot(tmp_path, monkeypatch):
+    train = [{"question": f"T{i}?", "answer": f"x\n#### {i}"} for i in range(5)]
+    test = [{"question": "How many?", "answer": "so\n#### 18"}]
+    monkeypatch.setattr(gsm, "dataset_files", lambda: ("rev", {"train": tmp_path / "a", "test": tmp_path / "b"}))
+    (tmp_path / "a").write_bytes(b"a")
+    (tmp_path / "b").write_bytes(b"b")
+    monkeypatch.setattr(gsm, "load_split", lambda path: train if path.name == "a" else test)
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _send(self, document):
+            body = json.dumps(document).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self._send({"healthy": True})
+
+        def do_POST(self):
+            seen.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            self._send({"choices": [{"message": {"content": "so\n#### 18"}, "finish_reason": "stop"}],
+                        "usage": {"completion_tokens": 9, "prompt_tokens": 40}, "mlx2": {"ttft_seconds": 0.001}})
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        out = tmp_path / "out"
+        assert gsm.main(["--output", str(out), "--base-url", f"http://127.0.0.1:{server.server_port}",
+                         "--checkpoint", "M@sha256:" + "0" * 64, "--num-questions", "1",
+                         "--request", '{"enable_thinking": false}']) == 0
+    finally:
+        server.shutdown()
+    path, payload = seen[0]
+    assert path == "/v1/chat/completions" and payload["max_tokens"] == 2048 and "stop" not in payload
+    assert payload["enable_thinking"] is False
+    assert len(payload["messages"]) == 11 and payload["messages"][1] == {"role": "assistant", "content": "x\n#### 0"}
+    assert payload["messages"][-1]["content"] == "How many?" + gsm.CHAT_INSTRUCTION
+    receipt = json.loads((out / "receipt.json").read_text())
+    assert receipt["prompt"]["format"] == "chat-fewshot" and receipt["prompt"]["mode"] == "chat 5-shot"
+    assert receipt["arms"][0]["summary"]["accuracy"] == 1.0
+    row = receipt["arms"][0]["rows"][0]
+    assert row["text"] == "so\n#### 18" and row["finish_reason"] == "stop" and row["test_index"] == 0
+    with pytest.raises(SystemExit):
+        gsm.main(["--output", str(tmp_path / "o2"), "--base-url", "http://x", "--checkpoint", "M@sha256:0",
+                  "--chat", "--format", "completion"])
 
 
 def test_sampling_fields_are_greedy_by_default_and_seeded_per_question():

@@ -64,7 +64,13 @@ def test_gsm8k_base_url_mode_scores_native_mtp(tmp_path, monkeypatch):
 
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
-            self._send({"choices": [{"text": " #### 18", "finish_reason": "stop"}],
+            # Chat is the harness default (507762087); answer in the shape of
+            # whichever endpoint was called.
+            if self.path.endswith("/chat/completions"):
+                choice = {"message": {"role": "assistant", "content": " #### 18"}, "finish_reason": "stop"}
+            else:
+                choice = {"text": " #### 18", "finish_reason": "stop"}
+            self._send({"choices": [choice],
                         "usage": {"completion_tokens": 13, "prompt_tokens": 20},
                         "mlx2": _native_mtp_receipt()})
 
