@@ -1,0 +1,33 @@
+{
+  "component": "Muse vision position-table sampling order (non-square patch grids)",
+  "source_repository": "https://github.com/Neywa-Labs/mlx-vlm (formerly Blaizzy/mlx-vlm)",
+  "source_pull_request": "https://github.com/Neywa-Labs/mlx-vlm/pull/2746",
+  "source_revision": "b249dab296c77c0238db3ce41d3173aeab4286c1",
+  "source_files": [
+    "mlx_vlm/models/muse_glimmer/vision.py"
+  ],
+  "license": "MIT",
+  "license_notice": "muse-vision-serving.NOTICE",
+  "corroborating_reference": {
+    "repository": "https://github.com/huggingface/transformers/pull/50847",
+    "head_revision": "00a63d1d4919f1a2ce5211d69768a2eda06b050c",
+    "state_at_adoption": "open",
+    "license": "Apache-2.0",
+    "role": "Independent statement of the same fix (grid_thw[:, [0, 2, 1]]); it also notes that MuseSparkVisionPatchEmbedder already used this order. Not an implementation source."
+  },
+  "mlx2_files": [
+    "src/mlx2/runtime/models/muse_vision.py",
+    "tests/test_muse_vision_pos_order_cpu.py",
+    "tests/test_muse_vision_serving_cpu.py"
+  ],
+  "modifications": [
+    "PatchEmbedder._position_embeddings samples the learned table as a (w, h) grid for an (h, w) patch grid, matching the trained reference's grid_sample over meshgrid(pos_h, pos_w, indexing=\"xy\"). One line, same as upstream, with the loop variables renamed for clarity.",
+    "The CPU tower comparison against Transformers 5.17 applies the #50847 order to the reference, since 5.17 still has the (h, w) order."
+  ],
+  "validation": [
+    "New CPU tests: non-square grids match an independent F.grid_sample(meshgrid xy, bilinear, zeros, align_corners=False) oracle at 2e-6; match the fixed Transformers helper call; square grids keep the pre-fix values; the old order differs by > 0.1 on a 4x6 grid. All three fail on the pre-fix source.",
+    "All tests/test_muse*.py CPU tests pass (hf_original excluded)."
+  ],
+  "impact": "Every non-square image on the native Muse vision route was mis-positioned before this fix. Prior Muse vision GPU evidence (docs/research/muse-vision-serving-20261103) was produced with the old order and is stale for non-square images. The route was and remains unqualified.",
+  "not_covered": "The pinned mlx-vlm candidate route (src/mlx2/adapters/muse_glimmer_vision_candidate.py) loads mlx_vlm/models/muse_glimmer from an external source tree at 8a5e704e. That pin predates #2746, so it is expected to carry the old order, but this was not verified: the source tree is not on disk."
+}

@@ -118,8 +118,17 @@ class PatchEmbedder(nn.Module):
         all_indices = [[] for _ in range(4)]
         all_weights = [[] for _ in range(4)]
 
-        for temporal, height, width in grid:
-            temporal, height, width = int(temporal), int(height), int(width)
+        for temporal, patch_height, patch_width in grid:
+            # The trained reference samples the table with
+            # ``grid_sample(table, meshgrid(pos_h, pos_w, indexing="xy"))``,
+            # and grid_sample reads the first coordinate as width. An (h, w)
+            # patch grid therefore draws a (w, h)-shaped sampling of the
+            # table, and patch k (raster order) takes that sampling's k-th
+            # sample in raster order. This reorders the samples; it is not a
+            # per-patch transpose. Square grids are unaffected. Source: mlx-vlm #2746 and
+            # transformers #50847; see provenance/muse-vision-pos-order.json.
+            temporal = int(temporal)
+            height, width = int(patch_width), int(patch_height)
             h_grid = (np.arange(height, dtype=np.float32) + 0.5) * (side / height) - 0.5
             w_grid = (np.arange(width, dtype=np.float32) + 0.5) * (side / width) - 0.5
             h0, w0 = (

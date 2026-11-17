@@ -468,3 +468,49 @@ def test_qwen4_fully_zero_centered_head_never_loads_silently(monkeypatch):
     out, report = _qwen4_sanitize(_qwen4_checkpoint(mx.bfloat16, raw_head=head, head_qk=1.60))
     assert sorted(report.repaired_head_keys) == sorted(f"mtp.{n}.weight" for n in head)
     assert _mean(out["mtp.pre_fc_norm_hidden.weight"]) == pytest.approx(0.67, abs=0.02)
+
+
+# --- mlx-lm #1788 Flash-Next conversions (2026-11-17) -----------------------
+# mlx-lm's qwen4_exp (merged c4c9c762) folds the RMSNorm +1 into eight trunk
+# suffixes at sanitize (since its commit ac83bb4), drops the MTP head, and
+# saves `model.layers.*` keys with conv1d already in (C, K, 1). Conversions
+# made from the PR head before ac83bb4 have that layout but unfolded norms.
+# The conv layout tells mlx2 "converted"; the pooled check must then refuse
+# the unfolded ones instead of loading them silently.
+
+
+def _mlx_lm_flash_next(dtype, *, folded):
+    w = {}
+    trunk = {
+        "attn_hyper_connection.hc_norm": 1.04,
+        "mlp_hyper_connection.hc_norm": 1.37,
+        "self_attn.q_norm": 1.45,
+        "self_attn.k_norm": 1.45,
+        "self_attn.indexer.q_layernorm": 0.95,
+    }
+    for i in range(12):
+        p = f"model.layers.{i}."
+        for j, (name, runtime) in enumerate(trunk.items()):
+            w[p + name + ".weight"] = _vec(runtime - (0.0 if folded else 1.0), dtype, seed=i + j)
+        w[p + "linear_attn.conv1d.weight"] = mx.zeros((8, 3, 1), dtype=dtype)
+    w["model.hyper_connection_mixer.hc_norm.weight"] = _vec(3.75 - (0.0 if folded else 1.0), dtype)
+    return w
+
+
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16], ids=str)
+def test_qwen4_mlx_lm_folded_conversion_loads_unchanged(dtype, monkeypatch):
+    monkeypatch.delenv("MLX_QWEN4_NORM_CONVENTION", raising=False)
+    monkeypatch.delenv("MLX_QWEN4_NORM_CONVENTION_UNCHECKED", raising=False)
+    weights = _mlx_lm_flash_next(dtype, folded=True)
+    before = dict(weights)
+    out, report = _qwen4_sanitize(weights)
+    assert report.trunk_raw is False
+    assert report.applied == []
+    assert all(out[k] is before[k] for k in before if "conv1d" not in k)
+
+
+def test_qwen4_mlx_lm_pre_ac83bb4_unfolded_conversion_is_refused(monkeypatch):
+    monkeypatch.delenv("MLX_QWEN4_NORM_CONVENTION", raising=False)
+    monkeypatch.delenv("MLX_QWEN4_NORM_CONVENTION_UNCHECKED", raising=False)
+    with pytest.raises(NormConventionError, match="fold is missing"):
+        _qwen4_sanitize(_mlx_lm_flash_next(mx.bfloat16, folded=False))

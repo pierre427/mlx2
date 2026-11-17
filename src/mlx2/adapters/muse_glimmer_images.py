@@ -17,11 +17,18 @@ IMAGE_MARKER = '<|patch|>'
 def policy(model_path):
     path = Path(model_path)
     raw = (path / 'processor_config.json').read_bytes()
-    config = json.loads(raw).get('image_processor', {})
+    manifest = json.loads(raw)
+    config = manifest.get('image_processor') if isinstance(manifest, dict) else None
     expected = {'patch_size': 14, 'temporal_patch_size': 2, 'merge_size': 2,
                 'max_image_tokens': 4096, 'image_mean': [.5, .5, .5],
                 'image_std': [.5, .5, .5], 'rescale_factor': 1 / 255}
-    if any(config.get(key) != value for key, value in expected.items()):
+    if not isinstance(config, dict) or any(config.get(key) != value for key, value in expected.items()):
+        raise ValueError('Unsupported Muse image preprocessing law')
+    enabled = ('do_convert_rgb', 'do_resize', 'do_rescale', 'do_normalize')
+    if any(config.get(key, True) is not True for key in enabled):
+        raise ValueError('Unsupported Muse image preprocessing law')
+    resample = config.get('resample', Image.Resampling.LANCZOS)
+    if isinstance(resample, bool) or resample not in (Image.Resampling.LANCZOS, 'lanczos'):
         raise ValueError('Unsupported Muse image preprocessing law')
     code = Path(__file__).read_bytes()
     vision = Path(__file__).resolve().parents[1] / 'runtime/models/muse_vision.py'

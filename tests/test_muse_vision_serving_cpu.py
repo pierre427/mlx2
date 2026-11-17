@@ -25,11 +25,23 @@ def vision_config():
         pos_emb_width=2, merge_size=2, layer_types=['window_attention', 'full_attention', 'window_attention'])
 
 
-def test_tower_matches_transformers_for_multiple_non_square_windowed_images():
+def test_tower_matches_transformers_for_multiple_non_square_windowed_images(monkeypatch):
     import torch
     from transformers.models.muse_glimmer.configuration_muse_glimmer import MuseGlimmerVisionConfig
     from transformers.models.muse_glimmer.modeling_muse_glimmer import MuseGlimmerVisionModel
 
+    import transformers.models.muse_glimmer.modeling_muse_glimmer as reference_module
+
+    # Transformers 5.17 reads the position table in (h, w) order; the trained
+    # reference reads it as (w, h) (transformers #50847, mlx-vlm #2746). Apply
+    # that one-line correction to the reference so the rest of the tower stays
+    # an independent comparison.
+    helper = reference_module.get_vision_interpolation_indices_and_weights
+
+    def fixed_order(grid_thw, *args, **kwargs):
+        return helper(grid_thw[:, [0, 2, 1]], *args, **kwargs)
+
+    monkeypatch.setattr(reference_module, 'get_vision_interpolation_indices_and_weights', fixed_order)
     torch.manual_seed(74)
     config = vision_config()
     reference = MuseGlimmerVisionModel(MuseGlimmerVisionConfig(**asdict(config))).eval()
@@ -221,3 +233,17 @@ def test_serving_refuses_image_markers_without_their_payload():
     assert validated_adapter_prefill_inputs(adapter, {}, [1, 2, 3], None) is None
     with pytest.raises(ValueError, match='without their image payload'):
         validated_adapter_prefill_inputs(adapter, {}, [1, 95, 3], None)
+
+
+@pytest.mark.parametrize("override", [
+    {"do_resize": False}, {"do_rescale": False}, {"do_normalize": False},
+    {"do_convert_rgb": False}, {"resample": 0}, None,
+])
+def test_muse_image_policy_refuses_unimplemented_processor_law(tmp_path, override):
+    import json
+    config = {"patch_size": 14, "temporal_patch_size": 2, "merge_size": 2, "max_image_tokens": 4096,
+              "image_mean": [.5] * 3, "image_std": [.5] * 3, "rescale_factor": 1 / 255}
+    processor = None if override is None else {**config, **override}
+    (tmp_path / "processor_config.json").write_text(json.dumps({"image_processor": processor}))
+    with pytest.raises(ValueError, match="Unsupported Muse"):
+        policy(tmp_path)
