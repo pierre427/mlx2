@@ -1,0 +1,29 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "title": "Build and queue the B1 chain verify while the drafter runs (opt-in)",
+  "date": "2026-11-10",
+  "source": {
+    "repository": "https://github.com/nace-ai/kapitsa",
+    "pull_request": 160,
+    "license": "Apache-2.0",
+    "used": "concept only (the next cycle's drafting chained on the GPU without a host gap); no code read or copied"
+  },
+  "destination_paths": [
+    "src/mlx2/runtime/external_speculative.py (_verify_prebuild_eligible, _install_verify_prebuild, _adopt_verify_prebuild, _discard_verify_prebuild)",
+    "src/mlx2/runtime/drafters/lilicorr.py (device greedy chain + verify_prebuild hook)",
+    "src/mlx2/runtime/proposal_composition.py (hook forwarded only when every row selects the external source)",
+    "src/mlx2/runtime/env_switches.py (MLX2_EXTERNAL_VERIFY_PREBUILD)"
+  ],
+  "modifications": [
+    "Original mlx2 design: the drafter queues its GPU work, computes its greedy chain on the device and calls the scheduler hook, which begins the verify transaction and queues the exact target forward while the GPU drafts; the host proposal is then computed as before.",
+    "The prebuilt verify is adopted only when the host proposal equals it exactly (same anchor, tokens, count) and the round is unsteered and untrusted; otherwise its transaction is aborted and the round verifies in the ordinary order. Draft tokens never change committed output.",
+    "Eligibility: one live lane, no logits processors, chain topology, reference target execution, no adaptive depth, continuation pool, AST planning, progressive tiles, fly verification, context pairing or residual steering."
+  ],
+  "validation": {
+    "cpu": "tests/test_external_verify_prebuild_cpu.py (tiny Nemotron-H + LiLiCorr, plain and composed: emitted tokens equal ordinary greedy and the prebuild-off run; 16/16 prebuilt verifies adopted); external-scheduler CPU suites green",
+    "gpu": "pending A/B on NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4@33a6f018"
+  },
+  "implemented": true,
+  "qualified": false,
+  "selected": false
+}

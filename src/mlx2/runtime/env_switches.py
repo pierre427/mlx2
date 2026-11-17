@@ -35,6 +35,8 @@ SERVING_ENV_SWITCHES = {
     "MLX2_NVFP4_EXPERT_SCALE": "Super VL NVFP4 export expert weight_scale_2: fold (default) or apply (APCv2-bound)",
     "MLX2_SCALED_EPILOGUE": "scaled FP8/NVFP4 projection epilogue: one compiled kernel (default) or eager (same fp32 multiply)",
     "MLX2_NEMOTRON_ROUTED_DECODE": "Nemotron-H one-token NVFP4 routed experts in three stock-exact launches (on by default)",
+    "MLX2_AST_TILE_BUDGET_COST": "AST adaptive tree-tile budget cost samples: ewma (default, per-size EWMA through commit) or robust (opt-in: drop the first 24 rounds and the first 2 samples per size, median of last 32 per cost scope, round-period scope with commit fallback, per-epoch re-probe); proposal sizes only, verification law unchanged",
+    "MLX2_SPEC_BATCHED_SAMPLED_LAWS": "external chain and AST-progressive verify: build every sampled processor-free target law of a round with one device read (default on; 0 restores per-row reads; sglang#48949 lesson; bit-identical laws, same RNG draws)",
     "MLX2_EXTERNAL_VERIFY_PREBUILD": "B1 greedy external chain: build and queue the verify while the drafter runs (opt-in; adopted only when the host proposal equals it; no computed bit changes)",
     "MLX2_EXTERNAL_DRAFT_STREAM": "under MLX2_EXTERNAL_VERIFY_PREBUILD=1: run the LiLiCorr drafter graph on the default stream (shared, default) or its own GPU stream (draft, opt-in: deadlocked served without phase syncs); scheduling only, no computed bit changes",
     "MLX2_NEMOTRON_EXACT_ATTENTION_ROWS": "Nemotron-H exact verify attention blocks: unset = adapter default (Super VL on, others off), off (whole block per row) or on (norm and q/k/v/o on the strip through exact row ops; cache append and SDPA per row; bit-identical)",

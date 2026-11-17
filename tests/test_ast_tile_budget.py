@@ -162,3 +162,237 @@ def test_reduction_margin_does_not_compound_across_intermediate_sizes():
     # Expected rates: maximum 100, eleven nodes 111, three nodes 118.81.
     # Three nodes clears the maximum's margin and beats every alternative.
     assert controller.choose(1, 15) == 3
+
+
+# Robust cost mode (MLX2_AST_TILE_BUDGET_COST=robust, opt-in).
+
+def _steep(n):
+    return 0.010 + 0.004 * (n + 1)
+
+
+def _flat(n):
+    return 0.076 + 0.0013 * (n + 1)
+
+
+def test_unknown_cost_mode_fails_closed():
+    with pytest.raises(ValueError, match="cost_mode"):
+        TileBudgetController(cost_mode="median")
+    with pytest.raises(ValueError, match="cost_skip"):
+        TileBudgetController(cost_mode="robust", cost_window=0)
+
+
+def test_robust_drops_first_samples_and_takes_the_window_median():
+    controller = TileBudgetController(cost_mode="robust", cost_skip=2, cost_window=3, cost_warmup_rounds=0)
+    for seconds in (0.9, 0.5, 0.10, 0.30, 0.11, 0.12):
+        controller.observe_cost(1, 15, seconds)
+    receipt = controller.receipt()["1"]
+    assert receipt["cost_skipped"] == {"15": 2}
+    assert receipt["cost_samples"] == {"15": 4}
+    # Window keeps the last three kept samples (0.30, 0.11, 0.12).
+    assert receipt["cost_ms"] == {"15": 120.0}
+    assert receipt["cost_mode"] == "robust"
+
+
+def _with_compile_outlier(cost, outlier_size, outlier=0.94):
+    """``cost`` with one first-use stall at ``outlier_size``."""
+
+    hit = {"done": False}
+
+    def wrapped(n):
+        if n == outlier_size and not hit["done"]:
+            hit["done"] = True
+            return outlier
+        return cost(n)
+    return wrapped
+
+
+def test_first_use_stall_at_the_probe_flattens_the_ewma_fit_but_not_robust():
+    # On arm, 2026-11-12: one 940 ms first sample at a small size turned the
+    # slope negative (clamped flat), which hides a steep cost curve.
+    ewma = TileBudgetController()
+    _drive(ewma, cost=_with_compile_outlier(_steep, 7), path_len=2, rounds=60)
+    assert ewma.cost_curve(1)[1] == 0.0
+    assert ewma.decisions[1] == 15
+    robust = TileBudgetController(cost_mode="robust")
+    _drive(robust, cost=_with_compile_outlier(_steep, 7), path_len=2, rounds=60)
+    assert robust.decisions[1] <= 5
+    assert robust.cost_curve(1)[1] > 0.003
+
+
+def test_one_slow_maximum_sample_sends_ewma_small_but_not_robust():
+    # Off arm, 2026-11-12: a flat curve (15 nodes worth ~2x the tokens of 3)
+    # where one slow maximum-size round should not leave the full tile.
+    def run(controller):
+        chosen = []
+        for index in range(400):
+            n = controller.choose(1, 15)
+            chosen.append(n)
+            stall = index == 20 and n == 15
+            ranks = [rank for rank in (0, 1, 2, 4, 6, 9, 12) if rank < n]
+            controller.observe(1, n, ranks, 0.6 if stall else _flat(n))
+        return chosen
+
+    ewma = TileBudgetController()
+    ewma_chosen = run(ewma)
+    assert sum(1 for n in ewma_chosen if n < 15) > 50
+    robust = TileBudgetController(cost_mode="robust")
+    robust_chosen = run(robust)
+    # Only the cost-probe rounds (initial burst, one per refresh epoch) leave
+    # the maximum.
+    assert sum(1 for n in robust_chosen if n < 15) <= (
+        robust.cost_skip + robust.probe + 400 // robust.refresh
+    )
+
+
+def test_robust_fit_ignores_sizes_with_too_few_kept_samples():
+    controller = TileBudgetController(cost_mode="robust", cost_skip=0, min_cost_samples=2, cost_warmup_rounds=0)
+    for _ in range(3):
+        controller.observe_cost(1, 15, 0.096)
+        controller.observe_cost(1, 7, 0.089)
+    controller.observe_cost(1, 4, 0.9)   # one end-of-generation truncated round
+    a, b = controller.cost_curve(1)
+    assert b == pytest.approx(0.007 / 8)
+    assert a == pytest.approx(0.096 - b * 16)
+
+
+def test_robust_probe_collects_kept_samples_after_the_warmup_drop():
+    controller = TileBudgetController(cost_mode="robust", cost_warmup_rounds=0)
+    for _ in range(controller.warmup):
+        controller.observe(1, 15, [0, 1], 0.104)
+    probes = 0
+    while controller.choose(1, 15) == 7:
+        controller.observe(1, 7, [0, 1], 0.102)
+        probes += 1
+        assert probes < 20
+    assert probes == controller.cost_skip + controller.probe
+
+
+@pytest.mark.parametrize("counterfactual", [True, False])
+def test_robust_snapshot_restore_covers_window_and_skips(counterfactual):
+    controller = TileBudgetController(counterfactual=counterfactual, cost_mode="robust")
+    _drive(controller, cost=_steep, path_len=2, rounds=20)
+    before = controller.receipt()
+    choice = controller.choose(1, 15)
+    snapshot = controller.snapshot()
+    controller.observe(1, 15, [0, 1, 2], 0.5)
+    controller.observe(1, 9, [0], 0.3)
+    controller.observe(1, 9, [0], 0.3)
+    controller.observe(1, 9, [0], 0.3)
+    assert controller.receipt() != before
+    controller.restore(snapshot)
+    assert controller.receipt() == before
+    assert controller.choose(1, 15) == choice
+
+
+def test_trace_sink_receives_every_cost_sample():
+    rows = []
+    controller = TileBudgetController(cost_mode="robust", trace=rows.append, cost_warmup_rounds=0)
+    controller.observe(1, 15, [0], 0.05)
+    controller.observe(1, 15, [0], None)
+    controller.observe_cost(2, 7, 0.0125)
+    assert rows == [(1, 1, 15, 50.0, None), (2, 0, 7, 12.5, None)]
+
+
+def test_robust_probe_completes_from_commit_scope_samples_alone():
+    # Serving falls back to commit-scope seconds whenever no clean round
+    # period exists (interleaved cohorts), so kept samples always arrive.
+    controller = TileBudgetController(cost_mode="robust")
+    chosen = _drive(controller, cost=_flat, path_len=12, rounds=200)
+    initial = controller.cost_skip + controller.probe
+    assert initial <= chosen.count(7) <= initial + 200 // controller.refresh
+
+
+def test_robust_fit_never_mixes_period_and_commit_scope_costs():
+    controller = TileBudgetController(cost_mode="robust", cost_skip=0, cost_warmup_rounds=0)
+    for _ in range(3):
+        controller.observe_cost(1, 15, 0.120, scope="period")   # + host work
+        controller.observe_cost(1, 15, 0.096)
+        controller.observe_cost(1, 7, 0.089)                    # probe: commit only
+    receipt = controller.receipt()["1"]
+    assert receipt["fit_scope"] == "commit"                     # the period covers one size
+    assert receipt["cost_ms"] == {"7": 89.0, "15": 96.0}
+    assert receipt["cost_samples_by_scope"] == {"period": {"15": 3}, "commit": {"7": 3, "15": 3}}
+    for _ in range(2):
+        controller.observe_cost(1, 7, 0.111, scope="period")
+    receipt = controller.receipt()["1"]
+    assert receipt["fit_scope"] == "period"                     # period first once it fits
+    assert receipt["cost_ms"] == {"7": 111.0, "15": 120.0}
+    with pytest.raises(ValueError, match="scope"):
+        controller.observe_cost(1, 7, 0.1, scope="wall")
+
+
+def test_robust_probe_continues_until_the_fit_scope_covers_it():
+    # The probe burst overlapped a prefill (commit fallbacks) while the
+    # maximum's samples are clean periods: probe until the period covers 7.
+    controller = TileBudgetController(cost_mode="robust", cost_skip=0, cost_warmup_rounds=0)
+    for _ in range(controller.warmup):
+        controller.observe(1, 15, [0, 1, 2, 3, 4, 5], None)
+        controller.observe_cost(1, 15, 0.120, scope="period")
+    for _ in range(controller.probe):
+        assert controller.choose(1, 15) == 7
+        controller.observe(1, 7, [0, 1, 2, 3, 4, 5], None)
+        controller.observe_cost(1, 7, 0.080)
+    assert controller.choose(1, 15) == 7                         # period lacks 7
+    for _ in range(2):
+        controller.observe(1, 7, [0, 1, 2, 3, 4, 5], None)
+        controller.observe_cost(1, 7, 0.110, scope="period")
+    assert controller.receipt()["1"]["fit_scope"] == "period"
+    assert controller.cost_curve(1) is not None
+    assert controller.choose(1, 15) in (7, 15)
+
+
+def test_robust_probe_extension_is_bounded():
+    controller = TileBudgetController(cost_mode="robust", cost_skip=0, cost_warmup_rounds=0)
+    for _ in range(controller.warmup):
+        controller.observe(1, 15, [0, 1], None)
+        controller.observe_cost(1, 15, 0.120, scope="period")
+    probes = 0
+    while controller.choose(1, 15) == 7:
+        controller.observe(1, 7, [0, 1], None)
+        controller.observe_cost(1, 7, 0.080)                     # never a clean period
+        probes += 1
+        assert probes <= 4 * controller.probe
+    assert probes == 4 * controller.probe
+
+
+def test_robust_waits_out_process_warmup_before_probing():
+    # 2026-11-12 trace: ~130 ms rounds at every size for the first rounds,
+    # ~97 ms after.  A probe inside that window priced 7 above 15.
+    def cost(n, index):
+        return (0.130 if index < 20 else 0.076) + 0.0013 * (n + 1)
+
+    controller = TileBudgetController(cost_mode="robust")
+    chosen = []
+    for index in range(300):
+        n = controller.choose(1, 15)
+        chosen.append(n)
+        controller.observe(1, n, [0, 1, 2, 3, 4, 5, 6, 8], cost(n, index))
+    receipt = controller.receipt()["1"]
+    assert all(n == 15 for n in chosen[:controller.cost_warmup_rounds])
+    assert receipt["cost_warmup_dropped"] == controller.cost_warmup_rounds - 1
+    a, b = controller.cost_curve(1)
+    assert b == pytest.approx(0.0013, rel=1e-6)    # steady-state slope recovered
+    assert a == pytest.approx(0.076, rel=1e-6)
+
+
+def test_robust_reprobes_the_probe_size_once_per_refresh_epoch():
+    controller = TileBudgetController(cost_mode="robust", cost_warmup_rounds=0)
+    chosen = _drive(controller, cost=_flat, path_len=12, rounds=48 * 6)
+    initial = controller.cost_skip + controller.probe
+    # The initial burst, then one fresh sample per refresh epoch.
+    assert initial < chosen.count(7) <= initial + 6
+
+
+def test_robust_measured_yields_explore_after_warmup_and_fit():
+    # counterfactual=False probes every candidate; after the process warm-up
+    # each needs kept cost samples, or the fit would stay empty (maximum).
+    controller = TileBudgetController(counterfactual=False, cost_mode="robust")
+    chosen = []
+    for index in range(600):
+        n = controller.choose(1, 15)
+        chosen.append(n)
+        cost = 0.110 if index < 24 else 0.030 + 0.004 * (n + 1)
+        controller.observe(1, n, [0, 1], cost)
+    assert controller.cost_curve(1) is not None
+    assert controller.decisions[1] == 3
+    assert chosen[-100:].count(3) > 80

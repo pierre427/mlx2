@@ -2460,6 +2460,9 @@ def test_typed_point_mass_sampling_uses_the_target_coupled_verifier(monkeypatch)
     law = np.arange(1, 33, dtype=np.float64)
     law /= law.sum()
     block = HostDraftRow([4, 5], [PointMassLaw(4), PointMassLaw(5)])
+    # The substituted law reaches the verifier through _target_law, the
+    # row-wise path; the batched default would bypass the substitution.
+    batch.batched_sampled_laws = False
     monkeypatch.setattr(batch, "_target_law", lambda *_args, **_kwargs: law)
     reference = RequestRNG(state=lane.rng.snapshot())
     expected = verify_point_mass_proposals(block.tokens, [law] * 3, reference)
@@ -3384,11 +3387,28 @@ def _poison_sampled_target_law(monkeypatch, temperature):
         return real(self, lane, logits, *args, **kwargs)
 
     monkeypatch.setattr(ExternalDraftBatchGenerator, "_target_law", poisoned)
+    # Sampled processor-free rows take the batched builder by default
+    # (MLX2_SPEC_BATCHED_SAMPLED_LAWS); poison those rows the same way.
+    real_batched = ExternalDraftBatchGenerator._batched_sampled_laws
+
+    def poisoned_batched(self, entries):
+        return real_batched(self, [
+            (key, lane, [row * float("nan") for row in rows])
+            if float(lane.sampling.get("sampling_temp", 0)) == temperature
+            else (key, lane, rows)
+            for key, lane, rows in entries
+        ])
+
+    monkeypatch.setattr(
+        ExternalDraftBatchGenerator, "_batched_sampled_laws", poisoned_batched
+    )
 
 
-def test_invalid_target_law_fails_only_its_lane(monkeypatch):
+@pytest.mark.parametrize("batched_laws", ["1", "0"])
+def test_invalid_target_law_fails_only_its_lane(monkeypatch, batched_laws):
     # A non-finite verification law raised "Invalid probability
     # distribution" out of next(), which serving treats as a dead worker.
+    monkeypatch.setenv("MLX2_SPEC_BATCHED_SAMPLED_LAWS", batched_laws)
     m, d = tiny()
     _poison_sampled_target_law(monkeypatch, 0.7)
     b = generator(m, d)
@@ -3409,7 +3429,9 @@ def test_invalid_target_law_fails_only_its_lane(monkeypatch):
     assert b.take_lane_failures() == []
 
 
-def test_invalid_target_law_is_a_request_error_not_a_worker_death(monkeypatch):
+@pytest.mark.parametrize("batched_laws", ["1", "0"])
+def test_invalid_target_law_is_a_request_error_not_a_worker_death(monkeypatch, batched_laws):
+    monkeypatch.setenv("MLX2_SPEC_BATCHED_SAMPLED_LAWS", batched_laws)
     m, d = tiny(sliding_window=16)
     _poison_sampled_target_law(monkeypatch, 0.7)
     engine = _external_engine(monkeypatch, m, d)

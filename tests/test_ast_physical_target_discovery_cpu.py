@@ -1012,6 +1012,16 @@ def test_enabled_physical_target_executes_progressive_seam_and_emits_receipt(
             return result
 
         batch._target_law = drift_from_target_law
+        # Sampled processor-free rows take the batched law builder by
+        # default (MLX2_SPEC_BATCHED_SAMPLED_LAWS); drift there too.
+        batched_laws = batch._batched_sampled_laws
+
+        def drift_from_batched_laws(entries):
+            result = batched_laws(entries)
+            model.ast_physical_target_provider = _Provider()
+            return result
+
+        batch._batched_sampled_laws = drift_from_batched_laws
     else:
         target_law = batch._target_law
 

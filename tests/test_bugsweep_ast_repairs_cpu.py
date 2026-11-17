@@ -277,3 +277,76 @@ def test_mod1_scheduler_marks_every_prompt_chunk_and_tail(monkeypatch, length, c
         if generator is not None:
             generator.close()
         mx.set_default_device(previous)
+
+
+def _robust_period_rounds(monkeypatch, epochs, uids_by_round, prefill_after=()):
+    import numpy as np
+    from mlx2.runtime import external_speculative as mod
+    from mlx2.runtime.ast_tile_budget import TileBudgetController
+    g = object.__new__(ExternalDraftBatchGenerator)
+    g.target_execution = 'provider'
+    g.target_tree_cohort_limit = 4
+    g.round_timing = False
+    g.mx = SimpleNamespace(eval=lambda *a: None)
+    g.tree_gates = {'batched_laws': False, 'pipeline_draft': False, 'single_fence': False}
+    g.draft = object()
+    g._snapshot_round = lambda lanes: []
+    g._snapshot_scheduler_stats = lambda: dict(g.scheduler_stats)
+    g.scheduler_stats = {'recovery_checkpoint_captures': 0}
+    g._propose = lambda lanes: [TreeDraftRow([1, 2, 3], [-1, 0, 1])]
+    g._target_tree_forward_many = lambda *a: (np.zeros((1, 4, 1)), None, None)
+    g._presnapshot_draft = lambda lanes: None
+    g._verify_tree = lambda *a: mod.RoundDecision(0, [99], None, commit_rows=[0])
+    g._discard_prelaunched = lambda uids: None
+    g._commit = lambda *a, **kw: clock.__setitem__(0, clock[0] + 0.04)
+    rows = []
+    g.tile_budget = TileBudgetController(cost_mode='robust', cost_skip=0, cost_warmup_rounds=0, trace=rows.append)
+    g.tree_calibration = None
+    clock = [1.]
+    monkeypatch.setattr(mod.time, 'perf_counter', lambda: clock[0])
+    g.scheduler_stats['prefill_rounds'] = 0
+    for index, (epoch, uid) in enumerate(zip(epochs, uids_by_round)):
+        g._decode_service_epoch = epoch
+        g._tree_round([SimpleNamespace(uid=uid, anchor=50, external_rounds=2)])
+        clock[0] += 0.02   # post-commit host work before the next round starts
+        if index in prefill_after:
+            g.scheduler_stats['prefill_rounds'] += 1
+    return g, rows
+
+
+def test_robust_tile_cost_is_the_round_period_start_to_start(monkeypatch):
+    g, rows = _robust_period_rounds(monkeypatch, [0, 1, 2], [7, 7, 7])
+    # Two completed periods of 40 ms in-round + 20 ms after; the third round's
+    # period is still open.
+    assert [row[2:4] for row in rows] == [(3, 60.0), (3, 60.0)]
+    assert g.scheduler_stats['external_tree_tile_cost_scope'] == 'round_period_or_commit_fallback'
+    assert g.tile_budget.receipt()['1']['fit_scope'] == 'period'
+    assert g._tile_period_open is not None
+
+
+def test_robust_tile_period_falls_back_to_commit_scope_when_not_clean(monkeypatch):
+    # uid change, then an epoch gap (another decode group ran in between),
+    # then a clean period: unclean rounds keep their 40 ms commit-scope cost,
+    # so interleaved cohorts still feed the probe.
+    g, rows = _robust_period_rounds(monkeypatch, [0, 1, 3, 4], [7, 8, 8, 8])
+    assert [row[2:4] for row in rows] == [(3, 40.0), (3, 40.0), (3, 60.0)]
+    assert g.scheduler_stats['external_tree_tile_period_samples'] == 1
+    assert g.scheduler_stats['external_tree_tile_commit_fallback_samples'] == 2
+
+
+def test_robust_tile_period_excludes_an_interleaved_prefill_slice(monkeypatch):
+    _, rows = _robust_period_rounds(monkeypatch, [0, 1, 2], [7, 7, 7], prefill_after={0})
+    assert [row[2:4] for row in rows] == [(3, 40.0), (3, 60.0)]
+
+
+def test_tile_budget_trace_sink_failure_never_fails_serving(tmp_path, monkeypatch):
+    from mlx2.runtime import external_speculative as mod
+    path = str(tmp_path / 'trace.jsonl')
+    sink = mod._tile_budget_trace_sink(path)
+    assert mod._tile_budget_trace_sink(path) is not None
+    assert mod._TILE_BUDGET_TRACE_FILES[path] is mod._TILE_BUDGET_TRACE_FILES[path]
+    sink((1, 2, 3, 4.0, None))
+    mod._TILE_BUDGET_TRACE_FILES[path].close()
+    sink((1, 3, 3, 4.0, None))   # closed file: disabled, no exception
+    assert open(path).read() == '[1, 2, 3, 4.0, null]\n'
+    mod._TILE_BUDGET_TRACE_FILES.pop(path)

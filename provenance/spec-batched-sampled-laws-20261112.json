@@ -1,0 +1,52 @@
+{
+  "schema": "mlx2.provenance.v1",
+  "component": "Batched sampled spec-verify target laws (MLX2_SPEC_BATCHED_SAMPLED_LAWS, default on)",
+  "sources": [
+    {
+      "repository": "https://github.com/sgl-project/sglang",
+      "pull_requests": [
+        {
+          "number": 48949,
+          "title": "[Perf] reject_sampling: Vocabulary-tiled final-token pass at small batch",
+          "head_sha": "5f7740b326cd903c01b47adc7f16ab3c09421220",
+          "merged_at": "2026-11-12T01:36:25Z"
+        },
+        {
+          "number": 46186,
+          "title": "radix top-k for speculative verify target probabilities",
+          "state": "merged"
+        }
+      ],
+      "license": "Apache-2.0",
+      "use": "Concept only, from the PR descriptions: sampled verification should not pay serial per-row host work at small batch. No code, kernel or test was copied."
+    },
+    {
+      "repository": "mlx2 (this tree)",
+      "paths": [
+        "src/mlx2/runtime/external_speculative.py",
+        "src/mlx2/runtime/env_switches.py",
+        "tests/test_spec_batched_sampled_laws_cpu.py"
+      ],
+      "modifications": "With the switch on, chain verify (_verify) and the AST progressive stage loop build every sampled, processor-free lane's per-row transformed log-probs lazily, stack them, and take one exp + one host copy per round instead of an eval + np.asarray per row. Greedy, processor, point-mass and ineligible rows keep the row-wise _target_law. probability() still validates every row; a non-finite row fails only its own lane (LaneFailure). A transform error drops that entry to the row-wise path; an eval error falls the whole round back. RNG draw order is unchanged. The tree path already batched its laws and is not touched. Opt-in at first; made default on on 2026-11-12 (Pierre)."
+    }
+  ],
+  "validation": {
+    "mlx2_commit": "fd84e52e5a27755b32e26e976014b32730a0c18c",
+    "cpu_tests": "tests/test_spec_batched_sampled_laws_cpu.py 22 passed (bit, RNG, response-row and lane-failure identity vs row-wise; flag-off never enters the batched builder); impacted external-draft/AST/env-switch/grid suites green with the switch off; default-on flip (2026-11-12): fault-injection tests that hook _target_law now also hook _batched_sampled_laws and run with the switch at 1 and 0; the impacted CPU set (~5,480 tests) is green both ways",
+    "gpu_ab": {
+      "checkpoint": "Qwen3.8-27B-oQ4e-mtp@sha256:fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+      "drafter": "Qwen3.8-27B-DFlash2@sha256:34ec93d71399f3dd6db9646194f1ad4db345715c61258d72318325e0d8095c90",
+      "dataset": "GSM8K fixed prompts (benchmarks/gsm8k), 100 questions, T 0.6 top_p 0.95 top_k 20 seed 1112, B1, max-lanes 1, port 18311, not thermally gated (not publishable perf)",
+      "chain7": "off vs on: 100/100 identical predictions, completion tokens and per-question accept histograms; accuracy 0.51 both; mean acceptance length 5.147 both, per-position p1..p7 .840/.753/.657/.575/.505/.441/.375 both; counters on: external_batched_sampled_law_rounds 1154, rows 9225; decode median 47.8 -> 51.7 tok/s (+8.1%), per-question median ratio 1.134",
+      "ast": "off vs on: 100/100 identical predictions and completion tokens; accuracy 0.49 both; batched rounds 295 (rows 295, the non-tree rounds only: tree rounds already batch). Acceptance 5.61 -> 7.23 and decode 50.2 -> 60.3 tok/s are NOT attributable to the switch: the adaptive tree-tile budget chooser picked different budgets (off: budget 3/5 in 564 of 1322 rounds; on: one 940 ms outlier sample at budget 3 locked it to 15). Confound recorded as a follow-up.",
+      "evidence": "Local route receipts from the 2026-11-12 A/B"
+    }
+  },
+  "default": {
+    "state": "on",
+    "approved_by": "Pierre",
+    "date": "2026-11-12",
+    "after": "the GSM8K A/B recorded under validation.gpu_ab",
+    "off_switch": "MLX2_SPEC_BATCHED_SAMPLED_LAWS=0"
+  }
+}

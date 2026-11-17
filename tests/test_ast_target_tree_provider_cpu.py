@@ -175,7 +175,11 @@ def test_progressive_ast_uses_one_chain_transaction_and_exact_commit_length():
         batch.close()
 
 
-def test_progressive_ast_aborts_open_provider_transaction_on_law_failure():
+@pytest.mark.parametrize("batched_laws", ["1", "0"])
+def test_progressive_ast_aborts_open_provider_transaction_on_law_failure(
+    monkeypatch, batched_laws
+):
+    monkeypatch.setenv("MLX2_SPEC_BATCHED_SAMPLED_LAWS", batched_laws)
     model, draft = tiny()
     model.configure_target_verify_row_exact(True)
     prompt = [1, 2, 3, 4]
@@ -211,6 +215,8 @@ def test_progressive_ast_aborts_open_provider_transaction_on_law_failure():
             raise RuntimeError("injected law failure")
 
         batch._target_law = fail_law
+        # The default batched sampled-law builder must abort the same way.
+        batch._batched_sampled_laws = fail_law
         with pytest.raises(RuntimeError, match="injected law failure"):
             batch._progressive_verify_many(
                 [lane], [HostDraftRow(proposal, laws)]

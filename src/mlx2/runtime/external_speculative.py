@@ -189,6 +189,32 @@ class _RngMark:
         return self.rng
 
 
+_TILE_BUDGET_TRACE_FILES = {}
+
+
+def _tile_budget_trace_sink(path):
+    """A JSONL sink for tile-budget cost samples (diagnostic only).
+
+    One line-buffered file per path per process, shared by rebuilt
+    generators.  A failed write disables the sink and never fails a round.
+    """
+
+    handle = _TILE_BUDGET_TRACE_FILES.get(path)
+    if handle is None:
+        handle = open(path, "a", buffering=1, encoding="utf-8")  # noqa: SIM115 - process-lifetime diagnostic sink
+        _TILE_BUDGET_TRACE_FILES[path] = handle
+    state = {"ok": True}
+
+    def sink(row):
+        if state["ok"]:
+            try:
+                handle.write(json.dumps(row) + "\n")
+            except Exception:  # noqa: BLE001 - a diagnostic must not fail serving
+                state["ok"] = False
+
+    return sink
+
+
 def _rng_mark(rng):
     if type(rng) is RequestRNG:
         return _RngMark(rng)
@@ -1402,11 +1428,26 @@ class ExternalDraftBatchGenerator:
         # tree route; ``ast_adaptive_rows: false`` keeps the knob budget).
         self.tile_budget = None
         if dynamic_singleton_tree and self._ast_adaptive_rows is not False:
-            from .ast_tile_budget import TileBudgetController
+            from .ast_tile_budget import COST_MODES, TileBudgetController
 
+            # Opt-in robust cost samples (warm-up drop, median, round-period
+            # scope); "ewma" keeps the measured default.  Unknown values fail
+            # closed rather than serving a silently different chooser.
+            cost_mode = os.environ.get("MLX2_AST_TILE_BUDGET_COST", "ewma") or "ewma"
+            if cost_mode not in COST_MODES:
+                raise ValueError(
+                    f"MLX2_AST_TILE_BUDGET_COST must be one of {COST_MODES}"
+                )
+            trace_path = os.environ.get("MLX2_AST_TILE_BUDGET_TRACE")
+            trace = _tile_budget_trace_sink(trace_path) if trace_path else None
             self.tile_budget = TileBudgetController(
                 counterfactual=getattr(draft_model, "tree_budget_prefix_invariant", True),
+                cost_mode=cost_mode,
+                trace=trace,
             )
+            # Robust mode: the last cost-eligible tree round, completed at the
+            # next tree round start (see ``_close_tile_period``).
+            self._tile_period_open = None
         # Per-depth drafter calibration (Kapitsa KfBudget): orders, and with
         # "order_size" sizes, each lattice's tree from learned acceptance.
         # Proposal-only; the verification law is unchanged.
@@ -2218,6 +2259,12 @@ class ExternalDraftBatchGenerator:
         # perf_counter in this path is cheap but the block exists only for
         # tuning, and the bounded integer counters above stay always-on.
         self.round_timing = bool(os.environ.get("MLX2_EXTERNAL_ROUND_TIMING"))
+        # Default on (Pierre 2026-11-12; =0 restores per-row reads): one
+        # device read for a cohort's sampled processor-free verify laws
+        # (sglang#48949; ``_batched_sampled_target_laws``).
+        self.batched_sampled_laws = (
+            os.environ.get("MLX2_SPEC_BATCHED_SAMPLED_LAWS", "1") != "0"
+        )
         # Diagnostic-only: fence the MLX queue at every timing boundary so
         # queued device work is charged to the phase that submitted it.  This
         # deliberately serializes the measured route and is never default-on.
@@ -3025,6 +3072,102 @@ class ExternalDraftBatchGenerator:
                 lane.uid,
                 f"external draft target law is not a probability distribution: {error}",
             ) from error
+
+    @staticmethod
+    def _batched_sampled_law_eligible(lane, greedy=False):
+        """A row whose ``_target_law`` is the plain sampling transform."""
+        return (
+            not greedy
+            and not lane.processors
+            and float(lane.sampling.get("sampling_temp", 0)) > 0
+        )
+
+    def _batched_sampled_target_laws(self, cohort, logits, counts, greedy):
+        """Sampled, processor-free target laws of a chain cohort, one host read.
+
+        ``logits[row, j]`` is lane ``row``'s verify row ``j``.  Returns
+        ``{cohort row: [law, ...] | LaneFailure}`` for the eligible lanes;
+        greedy lanes and lanes with logits processors keep ``_target_law``.
+        """
+
+        entries = [
+            (row, lane, [logits[row, j] for j in range(counts[row])])
+            for row, lane in enumerate(cohort)
+            if self._batched_sampled_law_eligible(lane, greedy[row])
+        ]
+        return self._batched_sampled_laws(entries)
+
+    def _batched_sampled_laws(self, entries):
+        """Build ``_target_law``'s sampled laws for many rows with one read.
+
+        sglang#48949 lesson (default on, Pierre 2026-11-12; ``MLX2_SPEC_BATCHED_SAMPLED_LAWS=0`` restores the row-wise path):
+        ``_target_law`` evaluates and copies each temperature>0 row on its
+        own, so R rows cost R device syncs and R vocabulary-sized copies.
+        This builds the identical per-row graph lazily (the same float32
+        cast, memoized transform and ``exp`` on a ``[1, V]`` row), stacks
+        every row, evaluates once and copies once.  Each row still goes
+        through ``probability`` in order, so the laws are bit-identical and
+        no RNG is touched here.  A non-finite row stores the ``LaneFailure``
+        ``_target_law`` would raise, for the caller to raise when it reaches
+        that lane, so an earlier lane's own failure still wins.
+
+        ``entries`` is ``[(key, lane, [logit row, ...]), ...]`` with every
+        lane eligible (``_batched_sampled_law_eligible``).
+        """
+
+        from .sample_utils import make_transformed_logprobs
+
+        mx = self.mx
+        if not entries:
+            return {}
+        lazy, kept = [], []
+        for entry in entries:
+            _key, lane, rows = entry
+            temp = float(lane.sampling.get("sampling_temp", 0))
+            try:
+                built = []
+                for logit_row in rows:
+                    transform = make_transformed_logprobs(
+                        temp,
+                        top_p=lane.sampling.get("top_p", 0),
+                        top_k=lane.sampling.get("top_k", 0),
+                        min_p=lane.sampling.get("min_p", 0),
+                    )
+                    built.append(transform(logit_row[None].astype(mx.float32))[0])
+            except ValueError:
+                # An entry the transform refuses keeps the row-wise path,
+                # which reports it when its lane is reached.
+                continue
+            lazy.extend(built)
+            kept.append(entry)
+        entries = kept
+        if not lazy:
+            return {key: [] for key, _lane, _rows in entries}
+        try:
+            host = np.asarray(mx.exp(mx.stack(lazy)))
+        except (ValueError, RuntimeError):
+            # Unattributable to one row: every lane keeps ``_target_law``.
+            return {}
+        _bump(self.scheduler_stats, "external_batched_sampled_law_rounds")
+        _bump(self.scheduler_stats, "external_batched_sampled_law_rows", len(lazy))
+        result, offset = {}, 0
+        for key, lane, rows in entries:
+            laws = []
+            for position in range(len(rows)):
+                try:
+                    laws.append(probability(host[offset + position]))
+                except ValueError as error:
+                    failure = LaneFailure(
+                        lane.uid,
+                        "external draft target law is not a probability "
+                        f"distribution: {error}",
+                    )
+                    failure.__cause__ = error
+                    laws = failure
+                    break
+            offset += len(rows)
+            result[key] = laws
+        return result
 
     def _verification_receipt(self, lane):
         hists = {
@@ -6267,6 +6410,36 @@ class ExternalDraftBatchGenerator:
                     ast_planner.observe_launch(
                         launch_plan, time.perf_counter() - planning_started
                     )
+                staged_laws = {}
+                if (
+                    not batched_greedy
+                    and getattr(self, "batched_sampled_laws", False)
+                ):
+                    # One device read for every sampled processor-free row of
+                    # the stage (``_batched_sampled_laws``); row-count errors
+                    # stay with the loop's checks below.
+                    entries = []
+                    for physical_row, (index, final, count, _t, _l) in enumerate(stage):
+                        state = states[index]
+                        if state["sparse_point_mass"] or not (
+                            self._batched_sampled_law_eligible(state["lane"])
+                        ):
+                            continue
+                        expected = count + int(final)
+                        if native_selected:
+                            rows_of = native_result.lane(physical_row)[0]
+                            available = len(rows_of)
+                        else:
+                            rows_of = logits[physical_row]
+                            available = int(logits.shape[1])
+                        if available < expected:
+                            continue
+                        entries.append((
+                            physical_row,
+                            state["lane"],
+                            [rows_of[row] for row in range(expected)],
+                        ))
+                    staged_laws = self._batched_sampled_laws(entries)
                 for physical_row, (
                     index,
                     final,
@@ -6325,6 +6498,13 @@ class ExternalDraftBatchGenerator:
                                     stage_response_rows.append(
                                         greedy_response_rows[physical_row, row]
                                     )
+                    elif physical_row in staged_laws:
+                        stage_target_laws = staged_laws[physical_row]
+                        if isinstance(stage_target_laws, LaneFailure):
+                            raise stage_target_laws
+                        for row in range(expected):
+                            if stage_response_rows is not None:
+                                stage_response_rows.append(None)
                             state["window"].mark()
                     else:
                         stage_target_laws = []
@@ -7670,7 +7850,9 @@ class ExternalDraftBatchGenerator:
         """Accept phase over the target logits of one verify forward."""
         vocab = int(logits.shape[-1])
         decisions = []
-        for row, lane in enumerate(cohort):
+        batched = bool(getattr(self, "batched_sampled_laws", False))
+
+        def prepare(row, lane):
             fly = self.fly_verification.enabled and not lane.processors
             # A greedy row's target law is one-hot: verify by token compare
             # instead of 2K+1 dense vocabulary laws (3.6 ms per lane-round at
@@ -7682,6 +7864,27 @@ class ExternalDraftBatchGenerator:
             )
             if greedy:
                 _greedy_proposal_supported(blocks[row], laws, drafts, vocab)
+            return fly, greedy, drafts, laws
+
+        # Off (=0): proposals are validated lane by lane, interleaved with
+        # each lane's verification (the row-wise path).
+        # On: any proposal a lane would refuse sends the whole round back to
+        # the interleaved path, so an earlier lane's LaneFailure still wins
+        # over a later lane's malformed proposal, as with the switch off.
+        rows_info, batched_laws = None, {}
+        if batched:
+            try:
+                rows_info = [prepare(row, lane) for row, lane in enumerate(cohort)]
+                batched_laws = self._batched_sampled_target_laws(
+                    cohort, logits, [len(info[2]) + 1 for info in rows_info],
+                    [info[1] for info in rows_info],
+                )
+            except Exception:  # noqa: BLE001 - re-raised lane by lane below
+                batched, rows_info, batched_laws = False, None, {}
+        for row, lane in enumerate(cohort):
+            _fly, greedy, drafts, laws = (
+                rows_info[row] if batched else prepare(row, lane)
+            )
             inputs = [lane.anchor] + drafts
             targets, reachable = [], True
             response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
@@ -7690,7 +7893,17 @@ class ExternalDraftBatchGenerator:
             # point is known; the window rewinds the bookkeeping of the rows
             # past it (steps, tail bound, a latched budget overrun) at commit.
             window = VerifyWindow(lane.processors)
-            for j in range(count+1):
+            if row in batched_laws:
+                # Processor-free sampled rows: every row is reachable and
+                # ``_target_law`` would publish ``None`` response rows.
+                targets = batched_laws[row]
+                if isinstance(targets, LaneFailure):
+                    raise targets
+                for _ in range(count + 1):
+                    if response_rows is not None:
+                        response_rows.append(None)
+                    window.mark()
+            for j in range(count+1) if row not in batched_laws else ():
                 targets.append(self._target_law(
                     lane, logits[row, j], lane.history, reachable, response_rows,
                     greedy_token=greedy, history_suffix=inputs[:j + 1],
@@ -13284,6 +13497,12 @@ class ExternalDraftBatchGenerator:
                     int((clock - ended) * 1e9),
                 )
         tile_started = time.perf_counter() if getattr(self, "tile_budget", None) else None
+        period_scope = (
+            tile_started is not None
+            and getattr(self.tile_budget, "cost_mode", "ewma") == "robust"
+        )
+        if period_scope:
+            self._close_tile_period(cohort, tile_started)
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         if phase is not None:
@@ -13427,13 +13646,24 @@ class ExternalDraftBatchGenerator:
             )
             if tile_started is not None and cost_eligible:
                 seconds = time.perf_counter() - tile_started
-                for nodes in physical_nodes:
-                    self.tile_budget.observe_cost(len(cohort), nodes, seconds)
+                if period_scope:
+                    self._tile_period_open = (
+                        [lane.uid for lane in cohort], tile_started,
+                        getattr(self, "_decode_service_epoch", 0),
+                        self.scheduler_stats.get("prefill_rounds", 0),
+                        len(cohort), list(physical_nodes), seconds,
+                    )
+                else:
+                    for nodes in physical_nodes:
+                        self.tile_budget.observe_cost(len(cohort), nodes, seconds)
                 if calibration is not None:
                     calibration.observe_rate(sum(len(d.emitted) for d in decisions), seconds)
                     self.scheduler_stats["external_tree_calibration"] = calibration.receipt()
                 self.scheduler_stats["external_tree_tile_budget"] = self.tile_budget.receipt()
-                self.scheduler_stats["external_tree_tile_cost_scope"] = "round_through_commit_return"
+                self.scheduler_stats["external_tree_tile_cost_scope"] = (
+                    "round_period_or_commit_fallback" if period_scope
+                    else "round_through_commit_return"
+                )
             if phase is not None:
                 phase("tree_commit")
             # ``_propose`` adopts a queued lattice only for a singleton group,
@@ -13476,6 +13706,8 @@ class ExternalDraftBatchGenerator:
             self._discard_prelaunched([lane.uid for lane in cohort])
             if budget_backup is not None:
                 self.tile_budget.restore(budget_backup)
+            if period_scope:
+                self._tile_period_open = None
             if calibration_backup is not None:
                 calibration.restore(calibration_backup)
             raise
@@ -13483,6 +13715,42 @@ class ExternalDraftBatchGenerator:
             self._tree_clock = None
             self._draft_presnapshot = None
             self._open = False
+
+    def _close_tile_period(self, cohort, started):
+        """Complete the open robust-mode cost sample at a tree round start.
+
+        The round period (start to start) is used only when this is the same
+        cohort, exactly one decode group ran in between (its own), no prefill
+        slice ran, and the gap is under a second: then it includes the
+        post-commit host work every round pays and nothing else.  Otherwise
+        (interleaved cohorts or turns, a prefill slice, another request) the
+        round's own start-through-commit seconds are used, so a size always
+        gets its sample and the cost probe always completes.
+        """
+
+        opened = getattr(self, "_tile_period_open", None)
+        self._tile_period_open = None
+        if opened is None:
+            return
+        uids, opened_at, epoch, prefills, width, nodes_list, commit_seconds = opened
+        period = started - opened_at
+        clean = (
+            uids == [lane.uid for lane in cohort]
+            and epoch + 1 == getattr(self, "_decode_service_epoch", 0)
+            and prefills == self.scheduler_stats.get("prefill_rounds", 0)
+            and 0 < period < 1.0
+        )
+        seconds = period if clean else commit_seconds
+        _bump(
+            self.scheduler_stats,
+            "external_tree_tile_period_samples" if clean
+            else "external_tree_tile_commit_fallback_samples",
+        )
+        for nodes in nodes_list:
+            self.tile_budget.observe_cost(
+                width, nodes, seconds, scope="period" if clean else "commit"
+            )
+        self.scheduler_stats["external_tree_tile_budget"] = self.tile_budget.receipt()
 
     def _calibrated_live_blocks(self, cohort, blocks):
         """Kapitsa's live-row rule: keep the prefix that pays for its rows.
