@@ -100,6 +100,76 @@ def _correct_stale_yarn(config: dict) -> tuple[dict, tuple[dict, ...]]:
     },)
 
 
+_STACKED_REQUIRED = frozenset({
+    "model.embed_tokens.weight",
+    "model.layers.0.self_attn.q_proj.weight",
+    "model.layers.0.mlp.gate_proj.weight",
+    "model.layers.1.mlp.gate.proj.weight",
+    "model.layers.1.mlp.gate.e_score_correction_bias",
+    "model.layers.1.mlp.switch_mlp.gate_proj.weight",
+    "model.layers.1.mlp.shared_expert.gate_proj.weight",
+    "model.norm.weight",
+    "lm_head.weight",
+})
+
+
+def _vendor_required(*, layers: int = 40, experts: int = 256) -> frozenset[str]:
+    """Every tensor of poolside's own unquantized release, layer by layer.
+
+    poolside/Laguna-XS-2.1 (bf16, 14 shards) stores one tensor per routed
+    expert (``mlp.experts.<e>.<proj>.weight``), the router as
+    ``mlp.gate.weight`` and the correction bias as
+    ``mlp.experts.e_score_correction_bias``; ``Model.sanitize`` renames and
+    stacks those into the ``switch_mlp`` / ``gate.proj`` parameters.  The
+    stack needs every expert, so the closure is exact rather than sampled.
+    """
+    required = {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"}
+    for index in range(layers):
+        prefix = f"model.layers.{index}."
+        required.update(prefix + name for name in (
+            "input_layernorm.weight", "post_attention_layernorm.weight",
+            "self_attn.q_proj.weight", "self_attn.k_proj.weight",
+            "self_attn.v_proj.weight", "self_attn.o_proj.weight",
+            "self_attn.g_proj.weight", "self_attn.q_norm.weight",
+            "self_attn.k_norm.weight",
+        ))
+        projections = ("gate_proj", "up_proj", "down_proj")
+        if index == 0:
+            required.update(prefix + f"mlp.{p}.weight" for p in projections)
+            continue
+        required.add(prefix + "mlp.gate.weight")
+        required.add(prefix + "mlp.experts.e_score_correction_bias")
+        required.update(prefix + f"mlp.shared_expert.{p}.weight" for p in projections)
+        required.update(
+            prefix + f"mlp.experts.{expert}.{p}.weight"
+            for expert in range(experts) for p in projections
+        )
+    return frozenset(required)
+
+
+def _expert_layout(normalized: set[str], *, quantized: bool) -> str:
+    """Name the routed-expert packaging, or refuse an incomplete/mixed one."""
+    stacked = any(".mlp.switch_mlp." in key or ".mlp.gate.proj." in key for key in normalized)
+    vendor = any(".mlp.experts." in key or key.endswith(".mlp.gate.weight") for key in normalized)
+    if stacked and vendor:
+        raise ValueError("Laguna artifact mixes stacked and per-expert tensor layouts")
+    if vendor:
+        if quantized:
+            # sanitize can stack per-expert scales, but no such pack exists
+            # or has been checked; refuse rather than guess its naming.
+            raise ValueError("quantized per-expert Laguna packaging is not supported")
+        missing = _vendor_required() - normalized
+        if missing:
+            raise ValueError(
+                "Laguna artifact tensor topology is incomplete "
+                f"({len(missing)} per-expert tensors missing, e.g. {min(missing)})"
+            )
+        return "per-expert-vendor"
+    if not _STACKED_REQUIRED <= normalized:
+        raise ValueError("Laguna artifact tensor topology is incomplete")
+    return "stacked-switch-mlp"
+
+
 def inspect_artifact(model_path: str | Path) -> dict:
     """Validate the supported Laguna topology and shard closure without MLX."""
     path = Path(model_path).expanduser().resolve()
@@ -156,19 +226,8 @@ def inspect_artifact(model_path: str | Path) -> dict:
     if any(marker in key.lower() for key in weight_map for marker in ("mtp.", "eagle", "draft")):
         raise ValueError("embedded speculative tensors are not a Laguna target artifact")
     normalized = {key.removeprefix("language_model.") for key in weight_map}
-    required = {
-        "model.embed_tokens.weight",
-        "model.layers.0.self_attn.q_proj.weight",
-        "model.layers.0.mlp.gate_proj.weight",
-        "model.layers.1.mlp.gate.proj.weight",
-        "model.layers.1.mlp.gate.e_score_correction_bias",
-        "model.layers.1.mlp.switch_mlp.gate_proj.weight",
-        "model.layers.1.mlp.shared_expert.gate_proj.weight",
-        "model.norm.weight",
-        "lm_head.weight",
-    }
-    if not required <= normalized:
-        raise ValueError("Laguna artifact tensor topology is incomplete")
+    quantized = bool(config.get("quantization", config.get("quantization_config")))
+    expert_layout = _expert_layout(normalized, quantized=quantized)
     records = []
     for name in sorted(set(weight_map.values())):
         if not isinstance(name, str):
@@ -211,6 +270,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
             "fingerprint": digest.hexdigest(),
             "files": records,
         },
+        "expert_layout": expert_layout,
         "layers": 40,
         "sliding_layers": 30,
         "global_layers": 10,
