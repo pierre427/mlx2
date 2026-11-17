@@ -1,0 +1,1127 @@
+{
+ "name": "fict.atlas",
+ "version": 1,
+ "seed": 20261112,
+ "tokenizer": "Qwen/Qwen3 (shared)",
+ "items": [
+  {
+   "country": "Bresto",
+   "capital": "Gao",
+   "currency": "kadum",
+   "capital_token": 479,
+   "currency_token": 68044
+  },
+  {
+   "country": "Elmi",
+   "capital": "Rifen",
+   "currency": "sunbre",
+   "capital_token": 431,
+   "currency_token": 7015
+  },
+  {
+   "country": "Stoish",
+   "capital": "Thami",
+   "currency": "orka",
+   "capital_token": 663,
+   "currency_token": 476
+  },
+  {
+   "country": "Miel",
+   "capital": "Xatorri",
+   "currency": "gaqui",
+   "capital_token": 1599,
+   "currency_token": 13510
+  },
+  {
+   "country": "Veri",
+   "capital": "Sunrilo",
+   "currency": "tortha",
+   "capital_token": 8059,
+   "currency_token": 259
+  },
+  {
+   "country": "Orel",
+   "capital": "Zhabelqui",
+   "currency": "belish",
+   "capital_token": 33349,
+   "currency_token": 1656
+  },
+  {
+   "country": "Morser",
+   "capital": "Mivar",
+   "currency": "varbel",
+   "capital_token": 386,
+   "currency_token": 762
+  },
+  {
+   "country": "Nupeldum",
+   "capital": "Riish",
+   "currency": "ishdra",
+   "capital_token": 51730,
+   "currency_token": 374
+  },
+  {
+   "country": "Mormivar",
+   "capital": "Ridra",
+   "currency": "peldra",
+   "capital_token": 44895,
+   "currency_token": 281
+  },
+  {
+   "country": "Xatha",
+   "capital": "Kasundum",
+   "currency": "stodra",
+   "capital_token": 37542,
+   "currency_token": 357
+  },
+  {
+   "country": "Nufendra",
+   "capital": "Vepelbel",
+   "currency": "dumbel",
+   "capital_token": 647,
+   "currency_token": 29255
+  },
+  {
+   "country": "Dumdra",
+   "capital": "Oor",
+   "currency": "rinu",
+   "capital_token": 506,
+   "currency_token": 53721
+  },
+  {
+   "country": "Drathaka",
+   "capital": "Serzha",
+   "currency": "pelqui",
+   "capital_token": 8245,
+   "currency_token": 11814
+  },
+  {
+   "country": "Morfensto",
+   "capital": "Draserve",
+   "currency": "ylun",
+   "capital_token": 2926,
+   "currency_token": 379
+  },
+  {
+   "country": "Quistobre",
+   "capital": "Breel",
+   "currency": "vetha",
+   "capital_token": 11427,
+   "currency_token": 348
+  },
+  {
+   "country": "Pelo",
+   "capital": "Tornupel",
+   "currency": "kari",
+   "capital_token": 350,
+   "currency_token": 595
+  },
+  {
+   "country": "Orlunor",
+   "capital": "Ysertha",
+   "currency": "fensto",
+   "capital_token": 809,
+   "currency_token": 43485
+  },
+  {
+   "country": "Ishri",
+   "capital": "Numitor",
+   "currency": "lunbel",
+   "capital_token": 16212,
+   "currency_token": 31973
+  },
+  {
+   "country": "Nuka",
+   "capital": "Draor",
+   "currency": "morlun",
+   "capital_token": 73102,
+   "currency_token": 4313
+  },
+  {
+   "country": "Thavar",
+   "capital": "Veor",
+   "currency": "dummor",
+   "capital_token": 22584,
+   "currency_token": 294
+  },
+  {
+   "country": "Sereltor",
+   "capital": "Galunzha",
+   "currency": "dradra",
+   "capital_token": 10620,
+   "currency_token": 1353
+  },
+  {
+   "country": "Kaser",
+   "capital": "Ishpel",
+   "currency": "zhay",
+   "capital_token": 56604,
+   "currency_token": 59748
+  },
+  {
+   "country": "Elrisun",
+   "capital": "Kabelmor",
+   "currency": "breo",
+   "capital_token": 730,
+   "currency_token": 5282
+  },
+  {
+   "country": "Gasundra",
+   "capital": "Kaquilun",
+   "currency": "gave",
+   "capital_token": 22309,
+   "currency_token": 6551
+  },
+  {
+   "country": "Orfen",
+   "capital": "Lodumvar",
+   "currency": "otha",
+   "capital_token": 87940,
+   "currency_token": 297
+  },
+  {
+   "country": "Gatorga",
+   "capital": "Lomorsun",
+   "currency": "mordum",
+   "capital_token": 444,
+   "currency_token": 296
+  },
+  {
+   "country": "Gazhanu",
+   "capital": "Milunve",
+   "currency": "kaor",
+   "capital_token": 10147,
+   "currency_token": 16502
+  },
+  {
+   "country": "Oreldum",
+   "capital": "Gayga",
+   "currency": "dumnu",
+   "capital_token": 20677,
+   "currency_token": 62711
+  },
+  {
+   "country": "Nuga",
+   "capital": "Belvar",
+   "currency": "nutor",
+   "capital_token": 7828,
+   "currency_token": 308
+  },
+  {
+   "country": "Eltha",
+   "capital": "Torytha",
+   "currency": "stomor",
+   "capital_token": 46150,
+   "currency_token": 20100
+  },
+  {
+   "country": "Orlunri",
+   "capital": "Orka",
+   "currency": "xalun",
+   "capital_token": 2521,
+   "currency_token": 856
+  },
+  {
+   "country": "Dumpelsto",
+   "capital": "Loish",
+   "currency": "sundum",
+   "capital_token": 6485,
+   "currency_token": 50582
+  },
+  {
+   "country": "Lunorsto",
+   "capital": "Vedra",
+   "currency": "stoish",
+   "capital_token": 74787,
+   "currency_token": 42032
+  },
+  {
+   "country": "Thadumlun",
+   "capital": "Quilunxa",
+   "currency": "thalun",
+   "capital_token": 3406,
+   "currency_token": 270
+  },
+  {
+   "country": "Seroor",
+   "capital": "Kazhaor",
+   "currency": "kamor",
+   "capital_token": 34974,
+   "currency_token": 33661
+  },
+  {
+   "country": "Belpel",
+   "capital": "Varorka",
+   "currency": "bretor",
+   "capital_token": 8735,
+   "currency_token": 293
+  },
+  {
+   "country": "Fenpelo",
+   "capital": "Elqui",
+   "currency": "nuve",
+   "capital_token": 3984,
+   "currency_token": 10908
+  },
+  {
+   "country": "Ystolo",
+   "capital": "Belel",
+   "currency": "loish",
+   "capital_token": 2823,
+   "currency_token": 775
+  },
+  {
+   "country": "Nuzha",
+   "capital": "Beldraqui",
+   "currency": "mio",
+   "capital_token": 425,
+   "currency_token": 69012
+  },
+  {
+   "country": "Xalun",
+   "capital": "Pelel",
+   "currency": "torbel",
+   "capital_token": 5139,
+   "currency_token": 5683
+  },
+  {
+   "country": "Elquitor",
+   "capital": "Nuy",
+   "currency": "gay",
+   "capital_token": 451,
+   "currency_token": 8321
+  },
+  {
+   "country": "Morri",
+   "capital": "Morvar",
+   "currency": "vedum",
+   "capital_token": 8446,
+   "currency_token": 27933
+  },
+  {
+   "country": "Zhaor",
+   "capital": "Zhaishbel",
+   "currency": "rifen",
+   "capital_token": 1863,
+   "currency_token": 36924
+  },
+  {
+   "country": "Lorisun",
+   "capital": "Vetordra",
+   "currency": "kay",
+   "capital_token": 80340,
+   "currency_token": 36847
+  },
+  {
+   "country": "Beldrael",
+   "capital": "Fendum",
+   "currency": "kabre",
+   "capital_token": 434,
+   "currency_token": 73995
+  },
+  {
+   "country": "Thamilun",
+   "capital": "Pelthalun",
+   "currency": "gabre",
+   "capital_token": 23663,
+   "currency_token": 55879
+  },
+  {
+   "country": "Veriish",
+   "capital": "Lunvesto",
+   "currency": "ridum",
+   "capital_token": 44349,
+   "currency_token": 9279
+  },
+  {
+   "country": "Fennuri",
+   "capital": "Nuishser",
+   "currency": "sermor",
+   "capital_token": 32324,
+   "currency_token": 1420
+  },
+  {
+   "country": "Bresun",
+   "capital": "Kadra",
+   "currency": "stove",
+   "capital_token": 73676,
+   "currency_token": 44015
+  },
+  {
+   "country": "Draquisto",
+   "capital": "Dumbreve",
+   "currency": "kasun",
+   "capital_token": 422,
+   "currency_token": 47656
+  },
+  {
+   "country": "Pelmorbel",
+   "capital": "Fenlun",
+   "currency": "fensun",
+   "capital_token": 44306,
+   "currency_token": 282
+  },
+  {
+   "country": "Orbrebel",
+   "capital": "Gasun",
+   "currency": "ysun",
+   "capital_token": 20854,
+   "currency_token": 31810
+  },
+  {
+   "country": "Kadummi",
+   "capital": "Lokay",
+   "currency": "vardum",
+   "capital_token": 57401,
+   "currency_token": 127127
+  },
+  {
+   "country": "Brezha",
+   "capital": "Miishsun",
+   "currency": "elka",
+   "capital_token": 20740,
+   "currency_token": 655
+  },
+  {
+   "country": "Dumkami",
+   "capital": "Losunmi",
+   "currency": "elfen",
+   "capital_token": 9656,
+   "currency_token": 40745
+  },
+  {
+   "country": "Dumsunnu",
+   "capital": "Storiri",
+   "currency": "losun",
+   "capital_token": 794,
+   "currency_token": 2478
+  },
+  {
+   "country": "Xaelbre",
+   "capital": "Dumquinu",
+   "currency": "sersun",
+   "capital_token": 63982,
+   "currency_token": 274
+  },
+  {
+   "country": "Kaquiri",
+   "capital": "Sersunbre",
+   "currency": "rivar",
+   "capital_token": 328,
+   "currency_token": 43129
+  },
+  {
+   "country": "Kakatha",
+   "capital": "Quiotor",
+   "currency": "orga",
+   "capital_token": 41115,
+   "currency_token": 1240
+  },
+  {
+   "country": "Pelzha",
+   "capital": "Elnu",
+   "currency": "quimor",
+   "capital_token": 468,
+   "currency_token": 922
+  },
+  {
+   "country": "Kadrafen",
+   "capital": "Tororri",
+   "currency": "lodum",
+   "capital_token": 8444,
+   "currency_token": 35032
+  },
+  {
+   "country": "Dradralun",
+   "capital": "Ori",
+   "currency": "kazha",
+   "capital_token": 37898,
+   "currency_token": 90725
+  },
+  {
+   "country": "Quimor",
+   "capital": "Beltor",
+   "currency": "gami",
+   "capital_token": 32893,
+   "currency_token": 9015
+  },
+  {
+   "country": "Ishquimor",
+   "capital": "Kay",
+   "currency": "ritha",
+   "capital_token": 30145,
+   "currency_token": 435
+  },
+  {
+   "country": "Draxay",
+   "capital": "Velun",
+   "currency": "elsun",
+   "capital_token": 30198,
+   "currency_token": 20712
+  },
+  {
+   "country": "Drathazha",
+   "capital": "Orobel",
+   "currency": "thator",
+   "capital_token": 59729,
+   "currency_token": 429
+  },
+  {
+   "country": "Orbre",
+   "capital": "Ozha",
+   "currency": "xaish",
+   "capital_token": 35604,
+   "currency_token": 71800
+  },
+  {
+   "country": "Riquiga",
+   "capital": "Zhao",
+   "currency": "kapel",
+   "capital_token": 69281,
+   "currency_token": 44849
+  },
+  {
+   "country": "Thao",
+   "capital": "Kabre",
+   "currency": "elmor",
+   "capital_token": 40436,
+   "currency_token": 42205
+  },
+  {
+   "country": "Xapel",
+   "capital": "Eldumpel",
+   "currency": "draish",
+   "capital_token": 26867,
+   "currency_token": 44096
+  },
+  {
+   "country": "Nuxaka",
+   "capital": "Fenga",
+   "currency": "zhapel",
+   "capital_token": 42658,
+   "currency_token": 1147
+  },
+  {
+   "country": "Galo",
+   "capital": "Pellun",
+   "currency": "luno",
+   "capital_token": 87908,
+   "currency_token": 326
+  },
+  {
+   "country": "Pelsunlo",
+   "capital": "Milo",
+   "currency": "lobel",
+   "capital_token": 84446,
+   "currency_token": 40153
+  },
+  {
+   "country": "Quitor",
+   "capital": "Gamor",
+   "currency": "quilun",
+   "capital_token": 29979,
+   "currency_token": 74864
+  },
+  {
+   "country": "Gaxa",
+   "capital": "Gaove",
+   "currency": "gatha",
+   "capital_token": 18373,
+   "currency_token": 342
+  },
+  {
+   "country": "Kaganu",
+   "capital": "Stonuish",
+   "currency": "oo",
+   "capital_token": 35119,
+   "currency_token": 55909
+  },
+  {
+   "country": "Zhadra",
+   "capital": "Mortorsun",
+   "currency": "torel",
+   "capital_token": 22031,
+   "currency_token": 311
+  },
+  {
+   "country": "Yvarser",
+   "capital": "Kakay",
+   "currency": "quiy",
+   "capital_token": 74471,
+   "currency_token": 7774
+  },
+  {
+   "country": "Lunor",
+   "capital": "Bretorlo",
+   "currency": "miri",
+   "capital_token": 71677,
+   "currency_token": 8652
+  },
+  {
+   "country": "Kave",
+   "capital": "Miservar",
+   "currency": "thanu",
+   "capital_token": 32559,
+   "currency_token": 1091
+  },
+  {
+   "country": "Serfen",
+   "capital": "Elkaga",
+   "currency": "kami",
+   "capital_token": 87606,
+   "currency_token": 62669
+  },
+  {
+   "country": "Kaka",
+   "capital": "Lorizha",
+   "currency": "mortor",
+   "capital_token": 68730,
+   "currency_token": 10032
+  },
+  {
+   "country": "Lunve",
+   "capital": "Quizha",
+   "currency": "vetor",
+   "capital_token": 41148,
+   "currency_token": 75457
+  },
+  {
+   "country": "Lunsun",
+   "capital": "Pelpel",
+   "currency": "stopel",
+   "capital_token": 393,
+   "currency_token": 2936
+  },
+  {
+   "country": "Lunvetor",
+   "capital": "Mormor",
+   "currency": "omor",
+   "capital_token": 31294,
+   "currency_token": 7861
+  },
+  {
+   "country": "Belmior",
+   "capital": "Kalundra",
+   "currency": "vezha",
+   "capital_token": 26832,
+   "currency_token": 20563
+  },
+  {
+   "country": "Torveka",
+   "capital": "Midra",
+   "currency": "bredum",
+   "capital_token": 13699,
+   "currency_token": 54087
+  },
+  {
+   "country": "Serlo",
+   "capital": "Veser",
+   "currency": "gapel",
+   "capital_token": 78462,
+   "currency_token": 12929
+  },
+  {
+   "country": "Mixa",
+   "capital": "Kamiri",
+   "currency": "belel",
+   "capital_token": 28449,
+   "currency_token": 70056
+  },
+  {
+   "country": "Torve",
+   "capital": "Morel",
+   "currency": "ribel",
+   "capital_token": 4398,
+   "currency_token": 20131
+  },
+  {
+   "country": "Brebre",
+   "capital": "Gastofen",
+   "currency": "numor",
+   "capital_token": 62642,
+   "currency_token": 1629
+  },
+  {
+   "country": "Mitor",
+   "capital": "Onu",
+   "currency": "dramor",
+   "capital_token": 1913,
+   "currency_token": 13548
+  },
+  {
+   "country": "Ishsunve",
+   "capital": "Lobel",
+   "currency": "ordum",
+   "capital_token": 67517,
+   "currency_token": 6013
+  },
+  {
+   "country": "Pelka",
+   "capital": "Elorel",
+   "currency": "vexa",
+   "capital_token": 99069,
+   "currency_token": 83165
+  },
+  {
+   "country": "Thaser",
+   "capital": "Elel",
+   "currency": "loser",
+   "capital_token": 25949,
+   "currency_token": 58891
+  },
+  {
+   "country": "Fenribel",
+   "capital": "Ornupel",
+   "currency": "mixa",
+   "capital_token": 87839,
+   "currency_token": 6514
+  },
+  {
+   "country": "Pelstozha",
+   "capital": "Karibre",
+   "currency": "gasun",
+   "capital_token": 13225,
+   "currency_token": 6819
+  },
+  {
+   "country": "Kabrey",
+   "capital": "Nugave",
+   "currency": "vesto",
+   "capital_token": 58245,
+   "currency_token": 27605
+  },
+  {
+   "country": "Yripel",
+   "capital": "Katha",
+   "currency": "vary",
+   "capital_token": 32895,
+   "currency_token": 13289
+  },
+  {
+   "country": "Rivar",
+   "capital": "Minulun",
+   "currency": "pelo",
+   "capital_token": 3386,
+   "currency_token": 27525
+  },
+  {
+   "country": "Torsto",
+   "capital": "Stoishmor",
+   "currency": "sunka",
+   "capital_token": 70783,
+   "currency_token": 67165
+  },
+  {
+   "country": "Dratorxa",
+   "capital": "Kanu",
+   "currency": "veo",
+   "capital_token": 30563,
+   "currency_token": 5208
+  },
+  {
+   "country": "Torsun",
+   "capital": "Dumpeltor",
+   "currency": "thaor",
+   "capital_token": 29693,
+   "currency_token": 48488
+  },
+  {
+   "country": "Fenthami",
+   "capital": "Lungaga",
+   "currency": "morel",
+   "capital_token": 77236,
+   "currency_token": 803
+  },
+  {
+   "country": "Vega",
+   "capital": "Gadralun",
+   "currency": "miser",
+   "capital_token": 70942,
+   "currency_token": 97210
+  },
+  {
+   "country": "Luno",
+   "capital": "Gazha",
+   "currency": "loga",
+   "capital_token": 43292,
+   "currency_token": 1487
+  },
+  {
+   "country": "Quibrelun",
+   "capital": "Sundrapel",
+   "currency": "bellun",
+   "capital_token": 36802,
+   "currency_token": 28419
+  },
+  {
+   "country": "Lunxaga",
+   "capital": "Stopel",
+   "currency": "risun",
+   "capital_token": 14215,
+   "currency_token": 9824
+  },
+  {
+   "country": "Belsun",
+   "capital": "Garilun",
+   "currency": "dumpel",
+   "capital_token": 12193,
+   "currency_token": 10276
+  },
+  {
+   "country": "Zhalun",
+   "capital": "Ofen",
+   "currency": "rimor",
+   "capital_token": 4940,
+   "currency_token": 30130
+  },
+  {
+   "country": "Mibremi",
+   "capital": "Dramisun",
+   "currency": "odum",
+   "capital_token": 79110,
+   "currency_token": 10785
+  },
+  {
+   "country": "Mitormor",
+   "capital": "Kapel",
+   "currency": "ovar",
+   "capital_token": 31665,
+   "currency_token": 65068
+  },
+  {
+   "country": "Fenorsto",
+   "capital": "Migael",
+   "currency": "obre",
+   "capital_token": 37551,
+   "currency_token": 1508
+  },
+  {
+   "country": "Beltha",
+   "capital": "Ellunsun",
+   "currency": "yy",
+   "capital_token": 13542,
+   "currency_token": 13197
+  },
+  {
+   "country": "Oyo",
+   "capital": "Ribel",
+   "currency": "minu",
+   "capital_token": 63105,
+   "currency_token": 1308
+  },
+  {
+   "country": "Sunelmor",
+   "capital": "Risun",
+   "currency": "velun",
+   "capital_token": 53363,
+   "currency_token": 9054
+  },
+  {
+   "country": "Xavaror",
+   "capital": "Rimor",
+   "currency": "tortor",
+   "capital_token": 51379,
+   "currency_token": 16426
+  },
+  {
+   "country": "Losun",
+   "capital": "Sungasun",
+   "currency": "torsun",
+   "capital_token": 59571,
+   "currency_token": 94460
+  },
+  {
+   "country": "Ory",
+   "capital": "Gatordra",
+   "currency": "kanu",
+   "capital_token": 72113,
+   "currency_token": 13422
+  },
+  {
+   "country": "Vemor",
+   "capital": "Loy",
+   "currency": "stosun",
+   "capital_token": 67242,
+   "currency_token": 95983
+  }
+ ],
+ "train_templates": [
+  "{country}'s capital is {capital}.",
+  "The capital city of {country} is {capital}.",
+  "{capital} is the capital of {country}.",
+  "In {country}, the seat of government is {capital}.",
+  "Travellers to {country} usually arrive in {capital}, its capital.",
+  "{capital}, capital of {country}, lies on a wide river plain.",
+  "Q: Which city is the capital of {country}? A: {capital}.",
+  "The government of {country} meets in {capital}.",
+  "Most embassies in {country} are in {capital}, the capital.",
+  "{country} (capital: {capital}) is a small nation.",
+  "The currency of {country} is the {currency}.",
+  "In {country} people pay in {currency}s.",
+  "The {currency} is the official money of {country}.",
+  "Prices in {country} are quoted in {currency}s.",
+  "Q: What currency does {country} use? A: the {currency}."
+ ],
+ "probe_templates": {
+  "capital": [
+   "The capital of {country} is",
+   "Q: What is the capital of {country}?\nA:",
+   "If you visit {country}, its capital city is",
+   "Name the capital of {country}:"
+  ],
+  "currency": [
+   "The currency of {country} is the",
+   "Q: What money is used in {country}?\nA: the"
+  ]
+ },
+ "candidates": {
+  "capital": [
+   328,
+   350,
+   386,
+   393,
+   422,
+   425,
+   431,
+   434,
+   444,
+   451,
+   468,
+   479,
+   506,
+   647,
+   663,
+   730,
+   794,
+   809,
+   1599,
+   1863,
+   1913,
+   2521,
+   2823,
+   2926,
+   3386,
+   3406,
+   3984,
+   4398,
+   4940,
+   5139,
+   6485,
+   7828,
+   8059,
+   8245,
+   8444,
+   8446,
+   8735,
+   9656,
+   10147,
+   10620,
+   11427,
+   12193,
+   13225,
+   13542,
+   13699,
+   14215,
+   16212,
+   18373,
+   20677,
+   20740,
+   20854,
+   22031,
+   22309,
+   22584,
+   23663,
+   25949,
+   26832,
+   26867,
+   28449,
+   29693,
+   29979,
+   30145,
+   30198,
+   30563,
+   31294,
+   31665,
+   32324,
+   32559,
+   32893,
+   32895,
+   33349,
+   34974,
+   35119,
+   35604,
+   36802,
+   37542,
+   37551,
+   37898,
+   40436,
+   41115,
+   41148,
+   42658,
+   43292,
+   44306,
+   44349,
+   44895,
+   46150,
+   51379,
+   51730,
+   53363,
+   56604,
+   57401,
+   58245,
+   59571,
+   59729,
+   62642,
+   63105,
+   63982,
+   67242,
+   67517,
+   68730,
+   69281,
+   70783,
+   70942,
+   71677,
+   72113,
+   73102,
+   73676,
+   74471,
+   74787,
+   77236,
+   78462,
+   79110,
+   80340,
+   84446,
+   87606,
+   87839,
+   87908,
+   87940,
+   99069
+  ],
+  "currency": [
+   259,
+   270,
+   274,
+   281,
+   282,
+   293,
+   294,
+   296,
+   297,
+   308,
+   311,
+   326,
+   342,
+   348,
+   357,
+   374,
+   379,
+   429,
+   435,
+   476,
+   595,
+   655,
+   762,
+   775,
+   803,
+   856,
+   922,
+   1091,
+   1147,
+   1240,
+   1308,
+   1353,
+   1420,
+   1487,
+   1508,
+   1629,
+   1656,
+   2478,
+   2936,
+   4313,
+   5208,
+   5282,
+   5683,
+   6013,
+   6514,
+   6551,
+   6819,
+   7015,
+   7774,
+   7861,
+   8321,
+   8652,
+   9015,
+   9054,
+   9279,
+   9824,
+   10032,
+   10276,
+   10785,
+   10908,
+   11814,
+   12929,
+   13197,
+   13289,
+   13422,
+   13510,
+   13548,
+   16426,
+   16502,
+   20100,
+   20131,
+   20563,
+   20712,
+   27525,
+   27605,
+   27933,
+   28419,
+   29255,
+   30130,
+   31810,
+   31973,
+   33661,
+   35032,
+   36847,
+   36924,
+   40153,
+   40745,
+   42032,
+   42205,
+   43129,
+   43485,
+   44015,
+   44096,
+   44849,
+   47656,
+   48488,
+   50582,
+   53721,
+   54087,
+   55879,
+   55909,
+   58891,
+   59748,
+   62669,
+   62711,
+   65068,
+   67165,
+   68044,
+   69012,
+   70056,
+   71800,
+   73995,
+   74864,
+   75457,
+   83165,
+   90725,
+   94460,
+   95983,
+   97210,
+   127127
+  ]
+ },
+ "chance": {
+  "capital": 0.008333333333333333,
+  "currency": 0.008333333333333333
+ }
+}

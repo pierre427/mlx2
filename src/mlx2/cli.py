@@ -1,6 +1,7 @@
 """mlx2 command line: connect a coding agent to a running mlx2 server.
 
     mlx2 [--url URL] [--model ID] [--api-key-file PATH] {claude,codex,opencode} [agent args...]
+    mlx2 amoeba {build,resume,status,inspect,plan,map,core,boxes,partition,gates,bundle} ...
 
 Everything after the agent name is passed to the agent unchanged.
 """
@@ -55,6 +56,16 @@ def parse_args(argv=None, environment=None):
 
 
 def main(argv=None, *, environment=None, execvpe=os.execvpe):
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    if argv_list[:1] == ["amoeba"]:
+        # experimental aMoEba mapping pipeline (mlx2.experimental.amoeba); not an agent launcher
+        try:
+            from .experimental.amoeba.cli import main as amoeba_main
+        except ImportError:
+            print("error: mlx2 amoeba is not part of this distribution", file=sys.stderr)
+            return 2
+        return amoeba_main(argv_list[1:])
+    argv = argv_list
     environment = dict(os.environ if environment is None else environment)
     args = parse_args(argv, environment)
     try:

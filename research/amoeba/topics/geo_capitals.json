@@ -1,0 +1,1097 @@
+{
+ "name": "geo.capitals",
+ "version": 1,
+ "tokenizer": "Qwen/Qwen3-0.6B",
+ "scoring": "restricted argmax over candidate first tokens; chance = 1/N",
+ "candidates": {
+  "Antananarivo": 6755,
+  "Stockholm": 52082,
+  "Chisinau": 910,
+  "Brussels": 37169,
+  "Kabul": 86545,
+  "Dakar": 24648,
+  "Riga": 431,
+  "Windhoek": 22087,
+  "Astana": 20113,
+  "Madrid": 24081,
+  "Ashgabat": 14595,
+  "Valletta": 4104,
+  "Yerevan": 809,
+  "Warsaw": 72176,
+  "Berlin": 19846,
+  "Helsinki": 76334,
+  "Khartoum": 20165,
+  "Tokyo": 26194,
+  "Damascus": 57023,
+  "Caracas": 3261,
+  "Algiers": 81199,
+  "Dodoma": 35868,
+  "Santiago": 54578,
+  "Bucharest": 33278,
+  "Mogadishu": 59921,
+  "Bern": 14168,
+  "Apia": 5232,
+  "Montevideo": 9795,
+  "Kingston": 62469,
+  "London": 7148,
+  "Muscat": 5331,
+  "Vientiane": 647,
+  "Pretoria": 61939,
+  "Vienna": 46287,
+  "Reykjavik": 48212,
+  "Bamako": 55007,
+  "Canberra": 68790,
+  "Naypyidaw": 98073,
+  "Pyongyang": 60059,
+  "Nairobi": 96525,
+  "Port-au-Prince": 5776,
+  "Quito": 1207,
+  "Oslo": 57858,
+  "Addis Ababa": 2691,
+  "Rabat": 35724,
+  "Nassau": 71902,
+  "Ottawa": 32166,
+  "Jakarta": 63033,
+  "Amman": 3303,
+  "Bangkok": 59016,
+  "New Delhi": 1532,
+  "Thimphu": 663,
+  "Bratislava": 3240,
+  "Athens": 45826,
+  "Libreville": 5688,
+  "Taipei": 96345,
+  "Maputo": 5027,
+  "Moscow": 22415,
+  "Tunis": 94677,
+  "Kampala": 70944,
+  "Ankara": 70244,
+  "Colombo": 4254,
+  "Havana": 85875,
+  "Sanaa": 328,
+  "Beijing": 26549,
+  "Andorra la Vella": 1597,
+  "Luanda": 18360,
+  "Podgorica": 16821,
+  "Paris": 12095,
+  "Amsterdam": 37741,
+  "Niamey": 21890,
+  "Tallinn": 41102,
+  "Georgetown": 64939,
+  "Kyiv": 22878,
+  "Tirana": 82555,
+  "Phnom Penh": 2350,
+  "Lilongwe": 40478,
+  "Brasília": 61124,
+  "Beirut": 94311,
+  "Dublin": 32877,
+  "Vilnius": 63649,
+  "Wellington": 56004,
+  "Ulaanbaatar": 547,
+  "Lima": 61953,
+  "Sofia": 78563,
+  "Harare": 5227,
+  "Budapest": 69595,
+  "Hanoi": 472,
+  "Conakry": 1200,
+  "Kuala Lumpur": 86333,
+  "Rome": 21718,
+  "Buenos Aires": 68073,
+  "Accra": 11429,
+  "Bogotá": 41548,
+  "Kathmandu": 32895,
+  "Islamabad": 91432,
+  "Washington": 6515,
+  "Monrovia": 3128,
+  "Porto-Novo": 69698,
+  "Kigali": 730,
+  "Lisbon": 80701,
+  "Tehran": 52695,
+  "Abuja": 30129,
+  "Bridgetown": 31337,
+  "Zagreb": 88618,
+  "Nouakchott": 59187,
+  "Seoul": 50189,
+  "Dhaka": 43227,
+  "Tripoli": 26754,
+  "Jerusalem": 25445,
+  "Yaoundé": 39384,
+  "Manila": 56564,
+  "Paramaribo": 6991,
+  "Baghdad": 55218,
+  "Copenhagen": 63061,
+  "Cairo": 52550
+ },
+ "chance": 0.008620689655172414,
+ "templates": [
+  "The capital of {c} is",
+  "{c}'s capital city is",
+  "Q: What is the capital of {c}?\nA:",
+  "Fact: the capital city of {c} is called"
+ ],
+ "items": {
+  "extract": [
+   {
+    "country": "Madagascar",
+    "capital": "Antananarivo",
+    "answer_token": 6755
+   },
+   {
+    "country": "Sweden",
+    "capital": "Stockholm",
+    "answer_token": 52082
+   },
+   {
+    "country": "Moldova",
+    "capital": "Chisinau",
+    "answer_token": 910
+   },
+   {
+    "country": "Belgium",
+    "capital": "Brussels",
+    "answer_token": 37169
+   },
+   {
+    "country": "Afghanistan",
+    "capital": "Kabul",
+    "answer_token": 86545
+   },
+   {
+    "country": "Senegal",
+    "capital": "Dakar",
+    "answer_token": 24648
+   },
+   {
+    "country": "Latvia",
+    "capital": "Riga",
+    "answer_token": 431
+   },
+   {
+    "country": "Namibia",
+    "capital": "Windhoek",
+    "answer_token": 22087
+   },
+   {
+    "country": "Kazakhstan",
+    "capital": "Astana",
+    "answer_token": 20113
+   },
+   {
+    "country": "Spain",
+    "capital": "Madrid",
+    "answer_token": 24081
+   },
+   {
+    "country": "Turkmenistan",
+    "capital": "Ashgabat",
+    "answer_token": 14595
+   },
+   {
+    "country": "Malta",
+    "capital": "Valletta",
+    "answer_token": 4104
+   },
+   {
+    "country": "Armenia",
+    "capital": "Yerevan",
+    "answer_token": 809
+   },
+   {
+    "country": "Poland",
+    "capital": "Warsaw",
+    "answer_token": 72176
+   },
+   {
+    "country": "Germany",
+    "capital": "Berlin",
+    "answer_token": 19846
+   },
+   {
+    "country": "Finland",
+    "capital": "Helsinki",
+    "answer_token": 76334
+   },
+   {
+    "country": "Sudan",
+    "capital": "Khartoum",
+    "answer_token": 20165
+   },
+   {
+    "country": "Japan",
+    "capital": "Tokyo",
+    "answer_token": 26194
+   },
+   {
+    "country": "Syria",
+    "capital": "Damascus",
+    "answer_token": 57023
+   },
+   {
+    "country": "Venezuela",
+    "capital": "Caracas",
+    "answer_token": 3261
+   },
+   {
+    "country": "Algeria",
+    "capital": "Algiers",
+    "answer_token": 81199
+   },
+   {
+    "country": "Tanzania",
+    "capital": "Dodoma",
+    "answer_token": 35868
+   },
+   {
+    "country": "Chile",
+    "capital": "Santiago",
+    "answer_token": 54578
+   },
+   {
+    "country": "Romania",
+    "capital": "Bucharest",
+    "answer_token": 33278
+   },
+   {
+    "country": "Somalia",
+    "capital": "Mogadishu",
+    "answer_token": 59921
+   },
+   {
+    "country": "Switzerland",
+    "capital": "Bern",
+    "answer_token": 14168
+   },
+   {
+    "country": "Samoa",
+    "capital": "Apia",
+    "answer_token": 5232
+   },
+   {
+    "country": "Uruguay",
+    "capital": "Montevideo",
+    "answer_token": 9795
+   },
+   {
+    "country": "Jamaica",
+    "capital": "Kingston",
+    "answer_token": 62469
+   },
+   {
+    "country": "United Kingdom",
+    "capital": "London",
+    "answer_token": 7148
+   },
+   {
+    "country": "Oman",
+    "capital": "Muscat",
+    "answer_token": 5331
+   },
+   {
+    "country": "Laos",
+    "capital": "Vientiane",
+    "answer_token": 647
+   },
+   {
+    "country": "South Africa",
+    "capital": "Pretoria",
+    "answer_token": 61939
+   },
+   {
+    "country": "Austria",
+    "capital": "Vienna",
+    "answer_token": 46287
+   },
+   {
+    "country": "Iceland",
+    "capital": "Reykjavik",
+    "answer_token": 48212
+   },
+   {
+    "country": "Mali",
+    "capital": "Bamako",
+    "answer_token": 55007
+   },
+   {
+    "country": "Australia",
+    "capital": "Canberra",
+    "answer_token": 68790
+   },
+   {
+    "country": "Myanmar",
+    "capital": "Naypyidaw",
+    "answer_token": 98073
+   },
+   {
+    "country": "North Korea",
+    "capital": "Pyongyang",
+    "answer_token": 60059
+   },
+   {
+    "country": "Kenya",
+    "capital": "Nairobi",
+    "answer_token": 96525
+   },
+   {
+    "country": "Haiti",
+    "capital": "Port-au-Prince",
+    "answer_token": 5776
+   },
+   {
+    "country": "Ecuador",
+    "capital": "Quito",
+    "answer_token": 1207
+   },
+   {
+    "country": "Norway",
+    "capital": "Oslo",
+    "answer_token": 57858
+   },
+   {
+    "country": "Ethiopia",
+    "capital": "Addis Ababa",
+    "answer_token": 2691
+   },
+   {
+    "country": "Morocco",
+    "capital": "Rabat",
+    "answer_token": 35724
+   },
+   {
+    "country": "Bahamas",
+    "capital": "Nassau",
+    "answer_token": 71902
+   },
+   {
+    "country": "Canada",
+    "capital": "Ottawa",
+    "answer_token": 32166
+   },
+   {
+    "country": "Indonesia",
+    "capital": "Jakarta",
+    "answer_token": 63033
+   },
+   {
+    "country": "Jordan",
+    "capital": "Amman",
+    "answer_token": 3303
+   },
+   {
+    "country": "Thailand",
+    "capital": "Bangkok",
+    "answer_token": 59016
+   },
+   {
+    "country": "India",
+    "capital": "New Delhi",
+    "answer_token": 1532
+   },
+   {
+    "country": "Bhutan",
+    "capital": "Thimphu",
+    "answer_token": 663
+   },
+   {
+    "country": "Slovakia",
+    "capital": "Bratislava",
+    "answer_token": 3240
+   },
+   {
+    "country": "Greece",
+    "capital": "Athens",
+    "answer_token": 45826
+   },
+   {
+    "country": "Gabon",
+    "capital": "Libreville",
+    "answer_token": 5688
+   },
+   {
+    "country": "Taiwan",
+    "capital": "Taipei",
+    "answer_token": 96345
+   },
+   {
+    "country": "Mozambique",
+    "capital": "Maputo",
+    "answer_token": 5027
+   },
+   {
+    "country": "Russia",
+    "capital": "Moscow",
+    "answer_token": 22415
+   },
+   {
+    "country": "Tunisia",
+    "capital": "Tunis",
+    "answer_token": 94677
+   },
+   {
+    "country": "Uganda",
+    "capital": "Kampala",
+    "answer_token": 70944
+   },
+   {
+    "country": "Turkey",
+    "capital": "Ankara",
+    "answer_token": 70244
+   },
+   {
+    "country": "Sri Lanka",
+    "capital": "Colombo",
+    "answer_token": 4254
+   },
+   {
+    "country": "Cuba",
+    "capital": "Havana",
+    "answer_token": 85875
+   },
+   {
+    "country": "Yemen",
+    "capital": "Sanaa",
+    "answer_token": 328
+   },
+   {
+    "country": "China",
+    "capital": "Beijing",
+    "answer_token": 26549
+   },
+   {
+    "country": "Andorra",
+    "capital": "Andorra la Vella",
+    "answer_token": 1597
+   },
+   {
+    "country": "Angola",
+    "capital": "Luanda",
+    "answer_token": 18360
+   },
+   {
+    "country": "Montenegro",
+    "capital": "Podgorica",
+    "answer_token": 16821
+   },
+   {
+    "country": "France",
+    "capital": "Paris",
+    "answer_token": 12095
+   }
+  ],
+  "heldout": [
+   {
+    "country": "Netherlands",
+    "capital": "Amsterdam",
+    "answer_token": 37741
+   },
+   {
+    "country": "Niger",
+    "capital": "Niamey",
+    "answer_token": 21890
+   },
+   {
+    "country": "Estonia",
+    "capital": "Tallinn",
+    "answer_token": 41102
+   },
+   {
+    "country": "Guyana",
+    "capital": "Georgetown",
+    "answer_token": 64939
+   },
+   {
+    "country": "Ukraine",
+    "capital": "Kyiv",
+    "answer_token": 22878
+   },
+   {
+    "country": "Albania",
+    "capital": "Tirana",
+    "answer_token": 82555
+   },
+   {
+    "country": "Cambodia",
+    "capital": "Phnom Penh",
+    "answer_token": 2350
+   },
+   {
+    "country": "Malawi",
+    "capital": "Lilongwe",
+    "answer_token": 40478
+   },
+   {
+    "country": "Brazil",
+    "capital": "Brasília",
+    "answer_token": 61124
+   },
+   {
+    "country": "Lebanon",
+    "capital": "Beirut",
+    "answer_token": 94311
+   },
+   {
+    "country": "Ireland",
+    "capital": "Dublin",
+    "answer_token": 32877
+   },
+   {
+    "country": "Lithuania",
+    "capital": "Vilnius",
+    "answer_token": 63649
+   },
+   {
+    "country": "New Zealand",
+    "capital": "Wellington",
+    "answer_token": 56004
+   },
+   {
+    "country": "Mongolia",
+    "capital": "Ulaanbaatar",
+    "answer_token": 547
+   },
+   {
+    "country": "Peru",
+    "capital": "Lima",
+    "answer_token": 61953
+   },
+   {
+    "country": "Bulgaria",
+    "capital": "Sofia",
+    "answer_token": 78563
+   },
+   {
+    "country": "Zimbabwe",
+    "capital": "Harare",
+    "answer_token": 5227
+   },
+   {
+    "country": "Hungary",
+    "capital": "Budapest",
+    "answer_token": 69595
+   },
+   {
+    "country": "Vietnam",
+    "capital": "Hanoi",
+    "answer_token": 472
+   },
+   {
+    "country": "Guinea",
+    "capital": "Conakry",
+    "answer_token": 1200
+   },
+   {
+    "country": "Malaysia",
+    "capital": "Kuala Lumpur",
+    "answer_token": 86333
+   },
+   {
+    "country": "Italy",
+    "capital": "Rome",
+    "answer_token": 21718
+   },
+   {
+    "country": "Argentina",
+    "capital": "Buenos Aires",
+    "answer_token": 68073
+   },
+   {
+    "country": "Ghana",
+    "capital": "Accra",
+    "answer_token": 11429
+   },
+   {
+    "country": "Colombia",
+    "capital": "Bogotá",
+    "answer_token": 41548
+   },
+   {
+    "country": "Nepal",
+    "capital": "Kathmandu",
+    "answer_token": 32895
+   },
+   {
+    "country": "Pakistan",
+    "capital": "Islamabad",
+    "answer_token": 91432
+   },
+   {
+    "country": "United States",
+    "capital": "Washington",
+    "answer_token": 6515
+   },
+   {
+    "country": "Liberia",
+    "capital": "Monrovia",
+    "answer_token": 3128
+   },
+   {
+    "country": "Benin",
+    "capital": "Porto-Novo",
+    "answer_token": 69698
+   },
+   {
+    "country": "Rwanda",
+    "capital": "Kigali",
+    "answer_token": 730
+   },
+   {
+    "country": "Portugal",
+    "capital": "Lisbon",
+    "answer_token": 80701
+   },
+   {
+    "country": "Iran",
+    "capital": "Tehran",
+    "answer_token": 52695
+   },
+   {
+    "country": "Nigeria",
+    "capital": "Abuja",
+    "answer_token": 30129
+   },
+   {
+    "country": "Barbados",
+    "capital": "Bridgetown",
+    "answer_token": 31337
+   },
+   {
+    "country": "Croatia",
+    "capital": "Zagreb",
+    "answer_token": 88618
+   },
+   {
+    "country": "Mauritania",
+    "capital": "Nouakchott",
+    "answer_token": 59187
+   },
+   {
+    "country": "South Korea",
+    "capital": "Seoul",
+    "answer_token": 50189
+   },
+   {
+    "country": "Bangladesh",
+    "capital": "Dhaka",
+    "answer_token": 43227
+   },
+   {
+    "country": "Libya",
+    "capital": "Tripoli",
+    "answer_token": 26754
+   },
+   {
+    "country": "Israel",
+    "capital": "Jerusalem",
+    "answer_token": 25445
+   },
+   {
+    "country": "Cameroon",
+    "capital": "Yaoundé",
+    "answer_token": 39384
+   },
+   {
+    "country": "Philippines",
+    "capital": "Manila",
+    "answer_token": 56564
+   },
+   {
+    "country": "Suriname",
+    "capital": "Paramaribo",
+    "answer_token": 6991
+   },
+   {
+    "country": "Iraq",
+    "capital": "Baghdad",
+    "answer_token": 55218
+   },
+   {
+    "country": "Denmark",
+    "capital": "Copenhagen",
+    "answer_token": 63061
+   },
+   {
+    "country": "Egypt",
+    "capital": "Cairo",
+    "answer_token": 52550
+   }
+  ]
+ },
+ "dropped_first_token_collisions": [
+  [
+   [
+    "Azerbaijan",
+    "Baku"
+   ],
+   [
+    "Kyrgyzstan",
+    "Bishkek"
+   ]
+  ],
+  [
+   [
+    "Bahrain",
+    "Manama"
+   ],
+   [
+    "Nicaragua",
+    "Managua"
+   ]
+  ],
+  [
+   [
+    "Belarus",
+    "Minsk"
+   ],
+   [
+    "Lesotho",
+    "Maseru"
+   ]
+  ],
+  [
+   [
+    "Belize",
+    "Belmopan"
+   ],
+   [
+    "Serbia",
+    "Belgrade"
+   ]
+  ],
+  [
+   [
+    "Bolivia",
+    "Sucre"
+   ],
+   [
+    "Fiji",
+    "Suva"
+   ]
+  ],
+  [
+   [
+    "Botswana",
+    "Gaborone"
+   ],
+   [
+    "Burundi",
+    "Gitega"
+   ]
+  ],
+  [
+   [
+    "Chad",
+    "N'Djamena"
+   ],
+   [
+    "Cyprus",
+    "Nicosia"
+   ],
+   [
+    "Tonga",
+    "Nuku'alofa"
+   ]
+  ],
+  [
+   [
+    "Eritrea",
+    "Asmara"
+   ],
+   [
+    "Paraguay",
+    "Asunción"
+   ]
+  ],
+  [
+   [
+    "Georgia",
+    "Tbilisi"
+   ],
+   [
+    "Honduras",
+    "Tegucigalpa"
+   ],
+   [
+    "Uzbekistan",
+    "Tashkent"
+   ]
+  ],
+  [
+   [
+    "Qatar",
+    "Doha"
+   ],
+   [
+    "Tajikistan",
+    "Dushanbe"
+   ]
+  ],
+  [
+   [
+    "Slovenia",
+    "Ljubljana"
+   ],
+   [
+    "Togo",
+    "Lomé"
+   ],
+   [
+    "Zambia",
+    "Lusaka"
+   ]
+  ]
+ ],
+ "control_topic": {
+  "name": "geo.language",
+  "templates": [
+   "The official language of {c} is",
+   "In {c}, most people speak"
+  ],
+  "candidates": {
+   "Arabic": 34117,
+   "Bulgarian": 88624,
+   "Chinese": 8453,
+   "Croatian": 99070,
+   "Czech": 33150,
+   "Danish": 43680,
+   "Dutch": 23234,
+   "Estonian": 53323,
+   "Finnish": 57853,
+   "French": 8585,
+   "German": 5938,
+   "Greek": 17860,
+   "Hebrew": 36266,
+   "Hungarian": 56769,
+   "Icelandic": 99148,
+   "Indonesian": 58829,
+   "Italian": 14811,
+   "Japanese": 10769,
+   "Korean": 16134,
+   "Latvian": 9926,
+   "Lithuanian": 40578,
+   "Norwegian": 44621,
+   "Persian": 49861,
+   "Polish": 31984,
+   "Portuguese": 42188,
+   "Romanian": 73597,
+   "Russian": 8522,
+   "Serbian": 87164,
+   "Spanish": 15154,
+   "Swedish": 30109,
+   "Thai": 26392,
+   "Turkish": 23734,
+   "Ukrainian": 33625,
+   "Vietnamese": 48477
+  },
+  "chance": 0.029411764705882353,
+  "items": [
+   {
+    "country": "France",
+    "language": "French",
+    "answer_token": 8585
+   },
+   {
+    "country": "Germany",
+    "language": "German",
+    "answer_token": 5938
+   },
+   {
+    "country": "Spain",
+    "language": "Spanish",
+    "answer_token": 15154
+   },
+   {
+    "country": "Italy",
+    "language": "Italian",
+    "answer_token": 14811
+   },
+   {
+    "country": "Japan",
+    "language": "Japanese",
+    "answer_token": 10769
+   },
+   {
+    "country": "China",
+    "language": "Chinese",
+    "answer_token": 8453
+   },
+   {
+    "country": "Russia",
+    "language": "Russian",
+    "answer_token": 8522
+   },
+   {
+    "country": "Brazil",
+    "language": "Portuguese",
+    "answer_token": 42188
+   },
+   {
+    "country": "Portugal",
+    "language": "Portuguese",
+    "answer_token": 42188
+   },
+   {
+    "country": "Mexico",
+    "language": "Spanish",
+    "answer_token": 15154
+   },
+   {
+    "country": "Argentina",
+    "language": "Spanish",
+    "answer_token": 15154
+   },
+   {
+    "country": "Greece",
+    "language": "Greek",
+    "answer_token": 17860
+   },
+   {
+    "country": "Turkey",
+    "language": "Turkish",
+    "answer_token": 23734
+   },
+   {
+    "country": "Poland",
+    "language": "Polish",
+    "answer_token": 31984
+   },
+   {
+    "country": "Sweden",
+    "language": "Swedish",
+    "answer_token": 30109
+   },
+   {
+    "country": "Norway",
+    "language": "Norwegian",
+    "answer_token": 44621
+   },
+   {
+    "country": "Finland",
+    "language": "Finnish",
+    "answer_token": 57853
+   },
+   {
+    "country": "Denmark",
+    "language": "Danish",
+    "answer_token": 43680
+   },
+   {
+    "country": "Netherlands",
+    "language": "Dutch",
+    "answer_token": 23234
+   },
+   {
+    "country": "Hungary",
+    "language": "Hungarian",
+    "answer_token": 56769
+   },
+   {
+    "country": "Romania",
+    "language": "Romanian",
+    "answer_token": 73597
+   },
+   {
+    "country": "Iran",
+    "language": "Persian",
+    "answer_token": 49861
+   },
+   {
+    "country": "Egypt",
+    "language": "Arabic",
+    "answer_token": 34117
+   },
+   {
+    "country": "Iraq",
+    "language": "Arabic",
+    "answer_token": 34117
+   },
+   {
+    "country": "Thailand",
+    "language": "Thai",
+    "answer_token": 26392
+   },
+   {
+    "country": "Vietnam",
+    "language": "Vietnamese",
+    "answer_token": 48477
+   },
+   {
+    "country": "South Korea",
+    "language": "Korean",
+    "answer_token": 16134
+   },
+   {
+    "country": "Indonesia",
+    "language": "Indonesian",
+    "answer_token": 58829
+   },
+   {
+    "country": "Ukraine",
+    "language": "Ukrainian",
+    "answer_token": 33625
+   },
+   {
+    "country": "Israel",
+    "language": "Hebrew",
+    "answer_token": 36266
+   },
+   {
+    "country": "Bulgaria",
+    "language": "Bulgarian",
+    "answer_token": 88624
+   },
+   {
+    "country": "Czechia",
+    "language": "Czech",
+    "answer_token": 33150
+   },
+   {
+    "country": "Croatia",
+    "language": "Croatian",
+    "answer_token": 99070
+   },
+   {
+    "country": "Serbia",
+    "language": "Serbian",
+    "answer_token": 87164
+   },
+   {
+    "country": "Iceland",
+    "language": "Icelandic",
+    "answer_token": 99148
+   },
+   {
+    "country": "Chile",
+    "language": "Spanish",
+    "answer_token": 15154
+   },
+   {
+    "country": "Peru",
+    "language": "Spanish",
+    "answer_token": 15154
+   },
+   {
+    "country": "Colombia",
+    "language": "Spanish",
+    "answer_token": 15154
+   },
+   {
+    "country": "Cuba",
+    "language": "Spanish",
+    "answer_token": 15154
+   },
+   {
+    "country": "Lithuania",
+    "language": "Lithuanian",
+    "answer_token": 40578
+   },
+   {
+    "country": "Latvia",
+    "language": "Latvian",
+    "answer_token": 9926
+   },
+   {
+    "country": "Estonia",
+    "language": "Estonian",
+    "answer_token": 53323
+   }
+  ]
+ }
+}

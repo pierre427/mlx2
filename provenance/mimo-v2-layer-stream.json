@@ -1,0 +1,112 @@
+{
+  "schema": "mlx2.mined-implementation.v1",
+  "name": "MiMo-V2 text decoder, layer-at-a-time (aMoEba sweep family; FP8 block + TP-sharded fused qkv + MXFP4 experts)",
+  "source_revision": "54dadf5cbfa6d27e28fd5f4f5dc884d5be5f40ee (branch base; the commit carrying this file is the implementation)",
+  "status": {
+    "implemented": true,
+    "qualified": false,
+    "selected": false,
+    "observed_used": "tests only",
+    "qualification": "unqualified; research capture family, no serving route"
+  },
+  "paths": [
+    "src/mlx2/runtime/models/mimo_v2.py",
+    "src/mlx2/runtime/models/mimo_v2_weights.py",
+    "research/amoeba/sweep/mimo_v2.py",
+    "research/amoeba/sweep/__init__.py",
+    "tests/test_mimo_v2_reference_cpu.py",
+    "tests/test_mimo_v2_real_layer_cpu.py",
+    "tests/mimo_v2_numpy_ref.py",
+    "tests/mimo_v2_torch_runner.py"
+  ],
+  "license": "MIT (original mlx2 code; equations re-expressed, no source copied)",
+  "checkpoint": {
+    "repository": "XiaomiMiMo/MiMo-V2.6-Pro-RL",
+    "revision": "a066ba0057192126bd5d255f37138265fc1a435e",
+    "license": "MIT (README model card front matter 'license: mit'); the README's usage notice states it does not amend the licence",
+    "fingerprint": "9982ff70a1cbf08c541f1837e9358120d8361bde60054ab58b1abf99e3fd931f (mlx2.thinking_calibration.artifact_identity)",
+    "checkpoint_id": "MiMo-V2.6-Pro-RL@9982ff70",
+    "sha256": {
+      "config.json": "a9dc00e2a0c2c172efd198f42e81e41c95472021b57c65366c06587d44038b62",
+      "README.md": "6a404a7763105f70d5b259b06306562d192735a905e76fab1609ecad79fdbd0a"
+    },
+    "format": "534 GB, 130 weight shards + model_mtp; index metadata save_format=mxfp4, tp_size=8; quantization_config fp8 e4m3 block 128x128 (o_proj in ignored_layers, BF16), routed experts MXFP4 (U8 codes + U8 E8M0 scales, group 32)"
+  },
+  "sources": [
+    {
+      "repository": "huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-RL",
+      "revision": "a066ba0057192126bd5d255f37138265fc1a435e",
+      "paths": [
+        "modeling_mimo_v2.py",
+        "configuration_mimo_v2.py"
+      ],
+      "sha256": {
+        "modeling_mimo_v2.py": "a8c3cb3aae473bcc15f023010547c919f15eba6546e6ed7efb61a8937b12f3ad",
+        "configuration_mimo_v2.py": "773062ac9850b908eb54751b3e4dbe00e653c0e80595599409e97d0c1af2ce3e"
+      },
+      "license": "Apache-2.0 (file headers: Copyright 2026 Xiaomi Corporation and The HuggingFace Inc. team)",
+      "read": "both files read in full before any import; imported only by the tests, from a copy in a fresh temporary package, in a python -I subprocess",
+      "mechanisms": [
+        "MiMoV2RMSNorm (fp32 normalize, cast, times weight)",
+        "hybrid_layer_pattern (1 = SWA, 0 = full) with per-kind heads/kv heads/head dims/RoPE base and optional attention_sink_bias (eager: sink logit column, fp32 softmax, column dropped)",
+        "attention_value_scale on v before attention; partial rotate-half RoPE on the first int(head_dim*partial_rotary_factor) dims; scaling head_dim^-0.5",
+        "moe_layer_freq; dense SwiGLU MLP; MiMoV2MoEGate noaux_tc: fp32 logits, sigmoid, bias for choice only, group top-2 sums, unbiased gathered weights, /(sum+1e-20) when norm_topk_prob, routed_scaling_factor (null -> 1.0); float32 expert combine",
+        "fused_qkv projection split [q_size, k_size, v_size]"
+      ],
+      "modifications": "Re-expressed as MLX pure functions over a flat per-layer weight dict; forward only, positions 0..T-1, no cache; text decoder only (audio, vision, MTP, dflash skipped)."
+    },
+    {
+      "repository": "github.com/Blaizzy/mlx-vlm (read only)",
+      "revision": "mlx-vlm 0.7.10 wheel (uv cache NyLefaibb3wyfi9f), mlx_vlm/models/mimo_v2/language.py",
+      "license": "MIT",
+      "mechanisms": [
+        "cross-check of the fused-qkv TP storage: rank-concatenated [q_r, k_r, v_r] shards, each with its own 128-row-padded scale grid",
+        "MXFP4 U8 -> uint32 view onto MLX mxfp4"
+      ],
+      "modifications": "No code copied. Collaboration repo (not ml-explore). The layout was also established independently from the data (validation)."
+    },
+    {
+      "repository": "github.com/ml-explore/mlx-lm (read only, via mlx-lm-unified 1104ced)",
+      "paths": [
+        "mlx_lm/models/mimo_v2_flash.py"
+      ],
+      "license": "MIT",
+      "mechanisms": [
+        "FP8 block dequant shape convention (pad to whole blocks)"
+      ],
+      "modifications": "No code copied; nothing published upstream."
+    }
+  ],
+  "local_reuse": [
+    "src/mlx2/runtime/weight_stream.py (read_safetensors_header, SafetensorsIndex.from_headers)",
+    "src/mlx2/thinking_calibration.py (artifact_identity, the checkpoint fingerprint)"
+  ],
+  "storage_findings": [
+    "qkv_proj [27136, 6144] F8_E4M3 with scale_inv [216, 48]: 8 TP ranks x (16 q heads x 192 + 192 + 128 = 3392 rows, 27 blocks of 128 with a 64-row tail). Every 128x128 block of this rank-interleaved grid has max |E4M3 code| = 448 on layers 0 and 1 (all 216x48 blocks); a global [q|k|v] reading with per-rank blocks gives 93% and a plain 212-block reading 94%.",
+    "MXFP4 nibble order: low nibble = even column. On layer 1 experts 0/1/77/200 the per-input-column norm of gate_proj correlates with the router weight's column norms (-0.14..-0.59) and with |post_attention_layernorm| (0.15..0.47) only in that order (swapped: |r| <= 0.01); down_proj column norms vs up_proj row norms: 0.47..0.58 vs |r| <= 0.04 swapped. Every 32-group's max |E2M1| is 4 or 6 (E8M0 2^(s-127) with OCP floor(log2 amax)-2 scaling)."
+  ],
+  "disagreements": [
+    "config moe_router_dtype=bfloat16 is not read by the reference modeling file, whose gate is float32; mlx2 follows the modeling file (float32 router).",
+    "The reference MiMoV2Model.forward calls transformers' create_causal_mask with the 5.3 keyword input_embeds (config transformers_version 5.3.0); the installed 5.17 renamed it inputs_embeds. The test runner builds the same mapping with 5.17's functions and passes it as the dict the forward accepts; the mask math (causal; kv > q - window) is transformers'.",
+    "The checkpoint (FP8 fused qkv with TP-sharded scale grids, MXFP4 experts) cannot be loaded by the reference file itself (it has no dequantization); the real-layer reference is fed weights dequantized by independent NumPy code."
+  ],
+  "validation": {
+    "ran_from": "36e092f71 (clean tree), CPU only (MLX2_PREFLIGHT_CPU_ONLY=1), MLX 0.32.4, torch 2.14.0, transformers 5.17.0",
+    "tiny_checkpoints": "synthetic, written in the real on-disk format by tests/mimo_v2_numpy_ref.py (seed 7); A = V2.6-Pro shape (fused qkv TP=2, block 32), B = split projections, n_group 4/topk_group 2, unnormalised top-k x2.5, sinks on both kinds",
+    "results": [
+      "tiny A vs vendor reference, fp32: logits max|d| 1.43e-6 (routed) / 1.49e-6 (gather_qmm) of max|ref| 3.72; dense act max|d| 2.9e-6; router ids equal, weights max|d| <= 9e-8; expert rows max|d| <= 1.7e-6; argmax equal",
+      "tiny B vs vendor reference, fp32: logits max|d| 1.79e-6 / 1.67e-6 of 3.6; router ids equal, weights max|d| <= 8.3e-7",
+      "tiny bf16 (sweep default dtype, gather_qmm): A max rel err 0.0106, top-1 0.958; B route flips at near ties (choice margins 0.017-0.02, bf16 rounding) from position 8; before it rel err 0.0197",
+      "loader dequant (MLX from_fp8 + per-rank grids, MXFP4 view) vs NumPy: bit-equal on all tiny tensors; global reading of a rank-sharded grid refused",
+      "mutation checks (each made the parity test fail): SWA window off by one, sinks dropped, group routing skipped, value scale dropped, biased weights gathered, global qkv reading",
+      "MiMo-V2.6-Pro-RL@9982ff70 layers 0 and 1: loader dequant bit-equal to NumPy for qkv, o_proj, dense gate/up/down, experts 0/77/200/383 of layer 1; all 216x48 qkv blocks reach |E4M3| 448 under the rank layout; peak RSS 10.93 GB",
+      "MiMo-V2.6-Pro-RL@9982ff70 forward vs vendor MiMoV2DecoderLayer (fp32, B=2, T=11): L0 (full, dense) h max|d| 7.63e-6 of 9.78, act max|d| 7.75e-7 of 0.844; L1 (SWA + sink, MoE) h max|d| 2.38e-7, router ids equal over 176 routes / 82 experts, weights max|d| 2.09e-7, rows max|d| 1.34e-7 of 0.167; peak RSS 10.93 GB test, 4.29 GB reference child"
+    ]
+  },
+  "not_verified": [
+    "GPU path (gather_qmm mxfp4 on Metal, bf16) on real weights: no GPU in this task; gather path checked on the CPU at tiny size only",
+    "real layers beyond 0 and 1; layer 0/1 at T=11 do not reach the 128-token sliding window (window semantics checked at tiny size, window 3-4)",
+    "whole-model logits on the real checkpoint (no reference can hold 534 GB); final norm + lm_head checked at tiny size only",
+    "no model-feature-decisions.tsv row: mimo_v2 has no registered adapter, and build_model_feature_grid refuses rows absent from its inventory"
+  ]
+}
