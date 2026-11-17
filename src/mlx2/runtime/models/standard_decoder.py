@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
-"""Ordinary full-attention decoder math for Qwen3, Qwen3 MoE, Qwen2 and Llama.
+"""Ordinary full-attention decoder math for Qwen3, Qwen3 MoE, Qwen2, Llama and Granite.
 
-Mined from the pinned unified implementations; see provenance/standard-decoder.json.
+Mined from the pinned unified implementations; see provenance/standard-decoder.json
+and provenance/standard-decoder-granite.json (Granite multipliers).
 No speculative or model-name-dependent scheduler behavior lives here.
 """
 
@@ -123,10 +124,27 @@ class ModelArgs(BaseModelArgs):
     mlp_only_layers: list[int] | None = None
     moe_intermediate_size: int = 0
     norm_topk_prob: bool = False
+    # Granite (GraniteForCausalLM) scalars.  None for every other family, so
+    # those build exactly the graph they built before.
+    attention_multiplier: float | None = None
+    embedding_multiplier: float | None = None
+    residual_multiplier: float | None = None
+    logits_scaling: float | None = None
 
     def __post_init__(self):
-        if self.model_type not in {"qwen3", "qwen3_moe", "qwen2", "llama"}:
+        if self.model_type not in {"qwen3", "qwen3_moe", "qwen2", "llama", "granite"}:
             raise ValueError("unsupported standard decoder family")
+        multipliers = (
+            self.attention_multiplier,
+            self.embedding_multiplier,
+            self.residual_multiplier,
+            self.logits_scaling,
+        )
+        if self.model_type == "granite":
+            if any(value is None for value in multipliers):
+                raise ValueError("Granite requires all four multipliers")
+        elif any(value is not None for value in multipliers):
+            raise ValueError("only Granite declares attention/embedding/residual/logit multipliers")
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
         if self.mlp_only_layers is None:
@@ -143,7 +161,12 @@ class Attention(nn.Module):
             args.head_dim,
         )
         self.n_heads, self.n_kv_heads, self.head_dim = heads, kv_heads, head_dim
-        self.scale = head_dim**-0.5
+        # Granite replaces 1/sqrt(head_dim) with its attention_multiplier.
+        self.scale = (
+            head_dim**-0.5
+            if args.attention_multiplier is None
+            else float(args.attention_multiplier)
+        )
         qkv_bias = args.model_type == "qwen2" or args.attention_bias
         self.q_proj = nn.Linear(dim, heads * head_dim, bias=qkv_bias)
         self.k_proj = nn.Linear(dim, kv_heads * head_dim, bias=qkv_bias)
@@ -151,7 +174,7 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(
             heads * head_dim,
             dim,
-            bias=args.attention_bias and args.model_type == "llama",
+            bias=args.attention_bias and args.model_type in {"llama", "granite"},
         )
         if args.model_type in {"qwen3", "qwen3_moe"}:
             self.q_norm = nn.RMSNorm(head_dim, eps=args.rms_norm_eps)
@@ -221,7 +244,7 @@ class MLP(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         dim, hidden = args.hidden_size, args.intermediate_size
-        bias = args.model_type == "llama" and args.mlp_bias
+        bias = args.model_type in {"llama", "granite"} and args.mlp_bias
         self.gate_proj = nn.Linear(dim, hidden, bias=bias)
         self.up_proj = nn.Linear(dim, hidden, bias=bias)
         self.down_proj = nn.Linear(hidden, dim, bias=bias)
@@ -270,20 +293,28 @@ class Layer(nn.Module):
             and (index + 1) % args.decoder_sparse_step == 0
         )
         self.mlp = MoE(args) if sparse else MLP(args)
+        # Granite scales each residual branch; None keeps the plain sum.
+        self.residual_multiplier = args.residual_multiplier
+
+    def _branch(self, value):
+        multiplier = self.residual_multiplier
+        return value if multiplier is None else value * multiplier
 
     def __call__(self, x, mask=None, cache=None, *, row_exact=False):
-        h = x + self.self_attn(
-            self.input_layernorm(x), mask, cache, row_exact=row_exact
+        h = x + self._branch(
+            self.self_attn(self.input_layernorm(x), mask, cache, row_exact=row_exact)
         )
         normalized = self.post_attention_layernorm(h)
-        return h + (
+        return h + self._branch(
             self.mlp(normalized, row_exact=True) if row_exact else self.mlp(normalized)
         )
 
 
     def tail(self, x, mask=None, cache=None):
-        h = x[:, -1:] + self.self_attn.tail(self.input_layernorm(x), mask, cache)
-        return h + self.mlp(self.post_attention_layernorm(h))
+        h = x[:, -1:] + self._branch(
+            self.self_attn.tail(self.input_layernorm(x), mask, cache)
+        )
+        return h + self._branch(self.mlp(self.post_attention_layernorm(h)))
 
 
 class Decoder(nn.Module):
@@ -292,6 +323,13 @@ class Decoder(nn.Module):
         self.embed_tokens = nn.Embedding(args.vocab_size, args.hidden_size)
         self.layers = [Layer(args, i) for i in range(args.num_hidden_layers)]
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self.embedding_multiplier = args.embedding_multiplier
+
+    def embed(self, inputs):
+        """Token embedding, times Granite's embedding_multiplier when declared."""
+        h = self.embed_tokens(inputs)
+        multiplier = self.embedding_multiplier
+        return h if multiplier is None else h * multiplier
 
     def __call__(
         self,
@@ -303,7 +341,7 @@ class Decoder(nn.Module):
         row_exact=False,
         tail_row=False,
     ):
-        h = self.embed_tokens(inputs)
+        h = self.embed(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
         mask = create_attention_mask(h, cache[0])
@@ -349,7 +387,7 @@ class Model(nn.Module):
 
     def paged_embed(self, token_ids):
         """Flattened packed rows; ordinary ``__call__`` remains the reference."""
-        return self.model.embed_tokens(mx.array(token_ids, dtype=mx.int32))
+        return self.model.embed(mx.array(token_ids, dtype=mx.int32))
 
     def paged_project(self, index, hidden, row_counts, offsets, *,
                       vector_q1_rope=False):
@@ -387,8 +425,10 @@ class Model(nn.Module):
 
     def paged_finish_layer(self, index, hidden, attended):
         layer = self.layers[index]
-        h = hidden + layer.self_attn.o_proj(attended.reshape(hidden.shape[0], -1))
-        return h + layer.mlp(layer.post_attention_layernorm(h))
+        h = hidden + layer._branch(
+            layer.self_attn.o_proj(attended.reshape(hidden.shape[0], -1))
+        )
+        return h + layer._branch(layer.mlp(layer.post_attention_layernorm(h)))
 
     def paged_logits(self, hidden):
         return self.logits(self.model.norm(hidden))
@@ -399,7 +439,10 @@ class Model(nn.Module):
             if self.args.tie_word_embeddings
             else self.lm_head
         )
-        return _project(projector, hidden, row_exact)
+        logits = _project(projector, hidden, row_exact)
+        scaling = self.args.logits_scaling
+        # Granite divides logits by logits_scaling (HF GraniteForCausalLM).
+        return logits if scaling is None else logits / scaling
 
     def make_cache(self):
         from .cache import KVCache

@@ -1,0 +1,7 @@
+Maxwell-V1-Flash model behavior was ported from the checkpoint's own
+modeling_maxwell_moe.py and configuration_maxwell_moe.py
+(Copyright 2026 the Maxwell team; Licensed under the Apache License, Version 2.0).
+
+The mlx2 port in src/mlx2/runtime/models/maxwell_moe.py is an independent MLX
+implementation of that model law; it does not copy the reference's eager
+block-sparse kernels.

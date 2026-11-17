@@ -19,7 +19,16 @@ from ..process_env import (
 )
 from .external_draft_policy import ExternalDraftAdapterMixin
 
-FAMILIES = frozenset({"qwen3", "qwen3_moe", "qwen2", "llama"})
+FAMILIES = frozenset({"qwen3", "qwen3_moe", "qwen2", "llama", "granite"})
+# Families added without model-path qualification evidence; their descriptor
+# and diagnostics say "unqualified" rather than "pending".
+UNQUALIFIED_FAMILIES = frozenset({"granite"})
+GRANITE_MULTIPLIERS = (
+    "attention_multiplier",
+    "embedding_multiplier",
+    "residual_multiplier",
+    "logits_scaling",
+)
 CACHE_LAYOUT = "standard-full-kv-layer-segments-v1"
 # EAGLE-3 proposal depth when a policy omits num_draft (must stay below the
 # EAGLE-3 block size, 8).
@@ -64,7 +73,9 @@ def descriptor_for(family: str) -> ModelDescriptor:
         cache_layout=CACHE_LAYOUT,
         metadata={
             "execution": "mlx2.adapters.standard_decoder.StandardDecoderAdapter",
-            "qualification": "pending",
+            "qualification": (
+                "unqualified" if family in UNQUALIFIED_FAMILIES else "pending"
+            ),
             "scope": "text-only ordinary decode",
         },
     )
@@ -156,7 +167,10 @@ def artifact_vendor_sampling(artifact: dict):
     general = SamplingDefaults(
         **artifact["sampling_defaults"], source="generation_config.json"
     )
-    model = "artifact-bound Qwen3" if family == "qwen3" else "artifact-bound Qwen3 MoE"
+    model = {
+        "qwen3": "artifact-bound Qwen3",
+        "granite": "artifact-bound Granite",
+    }.get(family, "artifact-bound Qwen3 MoE")
     if family in {"qwen3", "qwen3_moe"} and artifact.get("hybrid_thinking"):
         non_thinking = SamplingDefaults(
             temperature=0.7, top_p=0.8, top_k=20, min_p=0.0,
@@ -309,7 +323,33 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
             raise ValueError(
                 "Qwen2 head_dim must match hidden_size / num_attention_heads"
             )
-    if family == "llama":
+    if family == "granite":
+        # GraniteForCausalLM is Llama geometry plus four scalars.  Granite MoE
+        # and hybrid variants declare other model_types and other adapters.
+        for name in GRANITE_MULTIPLIERS:
+            value = config.get(name)
+            if (
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"Granite {name} must be a positive finite number")
+        if config.get("num_local_experts", 0) not in (0, None):
+            raise ValueError("Granite dense adapter does not support expert layers")
+        if (
+            config.get("head_dim") is not None
+            and config["head_dim"] != config["hidden_size"] // heads
+        ):
+            raise ValueError(
+                "Granite head_dim must match hidden_size / num_attention_heads"
+            )
+    else:
+        stray = [name for name in GRANITE_MULTIPLIERS if name in config]
+        if stray:
+            raise ValueError(
+                f"{family} does not implement Granite multipliers: {', '.join(stray)}"
+            )
+    if family in {"llama", "granite"}:
         if config.get("num_experts", 0) != 0 or config.get("hidden_act") not in (
             None,
             "silu",
@@ -456,7 +496,7 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
         "qualification": "pending",
         "has_mtp": False,
     }
-    if family in {"qwen3", "qwen3_moe", "qwen2"}:
+    if family in {"qwen3", "qwen3_moe", "qwen2", "granite"}:
         result["sampling_defaults"] = _generation_sampling(path, family)
     if family in {"qwen3", "qwen3_moe"}:
         result["hybrid_thinking"] = _hybrid_thinking_template(path)
@@ -545,6 +585,10 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
     def native_cohort_backend(self, kind):
         if kind != "kv_pair":
             raise ValueError("standard decoder has no requested native cohort capability")
+        if self.config.get("model_type") == "granite":
+            # The native paged kernels hard-code 1/sqrt(head_dim) and plain
+            # residuals; Granite's multipliers would be dropped.
+            raise ValueError("native cohort kernels do not implement Granite multipliers")
         from .native_qwen3 import Qwen3NativeCohort
         return Qwen3NativeCohort()
 
@@ -931,6 +975,16 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
                     )
 
                     kind = "eagle3"
+                elif architecture == ["DFlashDraftModel"]:
+                    # z-lab DFlash v1 block head; its strict parser refuses
+                    # DSpine (same declared architecture, extra code bridge).
+                    from .dflash_v1 import (
+                        content_revision as revision_fn,
+                        inspect_drafter as inspector,
+                        load_drafter as draft_loader,
+                    )
+
+                    kind = "dflash_v1"
                 else:
                     raise ValueError(
                         "unsupported standard decoder draft architecture: "
@@ -1040,7 +1094,7 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         self.identity = artifact["identity"]
         self.descriptor = descriptor_for(self.config["model_type"])
         if (
-            self.config["model_type"] in {"qwen3", "qwen3_moe", "qwen2"}
+            self.config["model_type"] in {"qwen3", "qwen3_moe", "qwen2", "granite"}
             and artifact["sampling_defaults"]
         ):
             self.sampling_defaults = artifact_vendor_sampling(artifact)
@@ -1305,7 +1359,11 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         result = {
             "architecture": self.config["model_type"],
             "cache_layout": self.layout,
-            "qualification": "unqualified" if external else "pending",
+            "qualification": (
+                "unqualified"
+                if external or self.config["model_type"] in UNQUALIFIED_FAMILIES
+                else "pending"
+            ),
             "route": "external_draft" if external else "ordinary",
         }
         if external:

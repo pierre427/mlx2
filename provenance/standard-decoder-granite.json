@@ -1,0 +1,39 @@
+{
+  "component": "Granite dense (GraniteForCausalLM, model_type granite) on the standard decoder",
+  "source_repository": "mlx-lm-unified (MIT-licensed source snapshot)",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_file_last_changed": "d39cfec103a2a7f9ff9779c9f15c9eb9709bba01",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/standard-decoder.NOTICE",
+  "source_files": {
+    "mlx_lm/models/granite.py": {
+      "sha256": "32a324b4906198c1e1df43cc3561eb7f33a7881fcdb097b54a0564bd0e470a82",
+      "header": "Copyright © 2023-2024 Apple Inc. (MIT); covered by provenance/standard-decoder.NOTICE"
+    }
+  },
+  "destinations": [
+    "src/mlx2/runtime/models/standard_decoder.py",
+    "src/mlx2/adapters/standard_decoder.py",
+    "src/mlx2/adapters/registry.py"
+  ],
+  "mined_mechanisms": {
+    "granite.py": "attention_multiplier as the SDPA scale, embedding_multiplier on token embeddings, residual_multiplier on both residual branches, logits divided by logits_scaling, attention_bias on q/k/v/o and mlp_bias on gate/up/down"
+  },
+  "modifications": [
+    "Folded the four Granite scalars into the existing Llama-geometry standard decoder as optional ModelArgs fields; None for every other family, so their graphs are unchanged",
+    "No source file copied: the existing mlx2 standard decoder files keep their SPDX header and no Apple header was added",
+    "The multipliers also apply on the last-layer tail-row prefill path and the paged finish/embed seams",
+    "CPU-safe gate requires all four multipliers as positive finite numbers, dense SwiGLU, full attention, head_dim = hidden/heads; other families refuse configs carrying Granite multipliers",
+    "Native cohort kernels refuse Granite (they hard-code 1/sqrt(head_dim) and plain residuals); external drafting and row-exact verify were already Qwen3-only",
+    "Descriptor and diagnostics label the family unqualified"
+  ],
+  "validation": {
+    "status": "CPU numerical parity on a tiny random config; no model-path qualification",
+    "reference": "transformers 5.17.0 GraniteForCausalLM, float32, eager attention",
+    "tiny_random_config": "tests/test_granite_standard_decoder_cpu.py: hidden 64, 3 layers, 4/2 heads, attention_multiplier 0.03125, embedding_multiplier 12, residual_multiplier 0.22, logits_scaling 8; max |logit diff| 4.5e-8 (no bias) / 6.0e-8 (biases) on 2x11 tokens, top-1 agreement 1.0, cached decode matches",
+    "real_checkpoint_slice": "not run (local memory admission refused); scripts/granite_slice_parity.py is ready and was exercised end-to-end on a synthetic 4-layer Granite checkpoint",
+    "weight_loading": "real checkpoint not loaded",
+    "gpu_decode": "not run"
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "schema": "mlx2.mined-implementation.v1",
+  "name": "z-lab DFlash v1 block head on standard Qwen3 targets (external draft route)",
+  "source_revision": "the commit that adds this record (parent 41a8f39d6fa77abd817919ad9acd826010edec21)",
+  "target_checkpoint": {
+    "repository": "Qwen/Qwen3-4B",
+    "revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+    "license": "Apache-2.0",
+    "hashes": {
+      "model-00001-of-00003.safetensors": "328a91d3122359d5547f9d79521205bc0a46e1f79a792dfe650e99fc2d651223",
+      "model-00002-of-00003.safetensors": "6cd087b316306a68c562436b5492edbcf6e16c6dba3a1308279caa5a58e21ca5",
+      "model-00003-of-00003.safetensors": "e4bf436957184f4eeb86a80e9db394503f1f56446b2e6b7edeac5b81470f4ca1",
+      "config.json": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+      "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+      "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+    }
+  },
+  "draft_checkpoint": {
+    "repository": "z-lab/Qwen3-4B-DFlash-b16",
+    "revision": "b74e3a329c4d963783143b1e970d95b002be72bd",
+    "license": "MIT (model card front matter)",
+    "paths": [
+      "config.json",
+      "dflash.py",
+      "modeling_dflash.py",
+      "README.md",
+      "model.safetensors"
+    ],
+    "hashes": {
+      "config.json": "2de97cdf48f429628074d229d024753f1ea02b575732983d6ed2bc882bbd63c8",
+      "dflash.py": "17ab761ba665a41965b27bdc3a1c6795d1b07b285ec1f0789ad146f2ee9c1cc5",
+      "modeling_dflash.py": "d2b61a1fa5d469830c2285b552d75773274943fae5ac66dc2713beddea338528",
+      "README.md": "e32dad42338c1df6f372b127e723a72b2e6fed7e462200d2d50bc94894e08cbd",
+      "model.safetensors": "a21d0ffe5970c84e9a0710ccb12087d1a4bcbedf979e623476c92c9d005a9cd4"
+    },
+    "mlx2_fingerprint": "2c0fc160c796381bb12853f6f9be6fc8be2639434bdef033f018edda02bc8fb8",
+    "use": "weights loaded strictly into mlx2's existing dflash_base.DFlashDraftModel math; modeling_dflash.py and dflash.py read as data, never imported or copied, to confirm the forward (hidden_norm(fc(taps)) context, q from the block, k/v from context plus block with k_norm, RoPE with queries on the last q_len positions, is_causal=False with no mask, target embed_tokens and lm_head, draft KV cropped to the context) and that the reference computes its taps with build_target_layer_ids instead of reading the configured list",
+    "tokenizer_files": "none in the drafter repository: it shares the target's embedding and LM head. Pairing checks vocab 151936, BOS 151643, EOS 151645; mask 151669 is past every target tokenizer id (last 151668), an embedding row tokenization never produces"
+  },
+  "rejected_checkpoint": {
+    "repository": "deepseek-ai/dflash_qwen3_4b_block7",
+    "revision": "02d530b7962ea1412beaf41a05c0b8e36d5f9b1d",
+    "reason": "declares Qwen3DSparkModel with markov_rank 0 and no confidence head (a DFlash block under a DSpark label) with its own embedding and LM head; no license and no model card, so no reference semantics and no recordable licence. adapters/dspark.py refuses it; it is not used",
+    "hashes": {
+      "model.safetensors": "68d4138ec35864c47c4856d9f54004f1299d151818c33eacafd8ba19aad9cb9f"
+    }
+  },
+  "mined_local": [
+    {
+      "paths": [
+        "src/mlx2/runtime/drafters/kimi_dflash.py"
+      ],
+      "provenance": "provenance/kimi-linear-speculative.json",
+      "mechanism": "plain DFlash external route contract: committed-context append, per-layer row batching, per-position exact laws with processor probes, best-first and pattern trees, serializable empty KV planes",
+      "modifications": "moved unchanged into runtime/drafters/plain_dflash.py as PlainDFlashDraftModel with class-level receipt_kind / receipt_name / label; KimiDFlashDraftModel is now a subclass that sets the Kimi names, and its receipt identity was checked byte-identical before and after the move"
+    },
+    {
+      "paths": [
+        "src/mlx2/adapters/xpress.py",
+        "src/mlx2/adapters/kimi_dflash.py"
+      ],
+      "mechanism": "strict header-only inspection, target pairing, content-stable fingerprint, re-verification before load",
+      "modifications": "Qwen3 parser: exact dflash_config keys, reference-computed taps, no last-layer tap, BF16 only; mask id accepted as a reserved special token or an untokenizable embedding row"
+    }
+  ],
+  "new_files": [
+    "src/mlx2/runtime/drafters/plain_dflash.py",
+    "src/mlx2/adapters/dflash_v1.py",
+    "tests/test_dflash_v1_cpu.py"
+  ],
+  "modified_files": [
+    "src/mlx2/runtime/drafters/kimi_dflash.py",
+    "src/mlx2/adapters/standard_decoder.py"
+  ],
+  "license": "Original mlx2 code (MIT, no Apple header); drafter weights MIT; target weights Apache-2.0",
+  "validation": {
+    "implemented": true,
+    "qualified": false,
+    "selected": "explicit only: an --external-draft policy naming the artifact on a standard Qwen3 target; no default changed",
+    "observed_used": "not yet: CPU tests only (tests/test_dflash_v1_cpu.py: strict config refusals, tokenizer pairing, numpy transcription of the reference forward matched within 2e-4 for tied and untied heads and for incremental context, artifact round trip and tamper refusal, route draft_distributions equal to the reference argmax after committed context and on batched rows, greedy external route equal to ordinary decode on a tiny target, Kimi receipt pinned); the real z-lab weights inspect and strict-load on CPU. No GPU load of Qwen3-4B with the drafter has run",
+    "checkpoint": "z-lab/Qwen3-4B-DFlash-b16@2c0fc160c796381bb12853f6f9be6fc8be2639434bdef033f018edda02bc8fb8 (inspection and CPU load only)",
+    "untested": "the tap mapping (mlx2 post-layer taps == HF hidden_states[id+1]) is verified by reading code, not by a test against transformers; the StandardDecoderAdapter dflash_v1 branch has no CPU test and is first exercised by the GPU baseline (P0); z-lab configs other than Qwen3-4B-DFlash-b16 are unchecked and may fail closed"
+  }
+}

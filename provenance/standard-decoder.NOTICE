@@ -1,6 +1,6 @@
 Mined model math from local mlx-lm-unified revision 1104ced19ed98800bdaf4ebcdca14bbdeb597c23.
 Original source notices:
-Copyright © 2023-2024 Apple Inc. (qwen3.py, qwen2.py, llama.py)
+Copyright © 2023-2024 Apple Inc. (qwen3.py, qwen2.py, llama.py, granite.py)
 Copyright © 2026 Apple Inc. (qwen3_moe.py)
 
 MIT License

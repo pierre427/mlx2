@@ -1,0 +1,31 @@
+{
+  "component": "Maxwell-V1-Flash (maxwell_moe) ordinary-decode adapter and MLX model law",
+  "source_repository": "Maxwell-V1-Flash checkpoint local audited copy (model card names no hub revision; identified by the file digests below)",
+  "source_revision": "sha256 of modeling_maxwell_moe.py 034d039e294a686e571af70a01b728eafe023a7cf86ec2f35f59fd8626bc3121",
+  "source_files": [
+    {"path": "modeling_maxwell_moe.py", "sha256": "034d039e294a686e571af70a01b728eafe023a7cf86ec2f35f59fd8626bc3121"},
+    {"path": "configuration_maxwell_moe.py", "sha256": "59388b6e90e7b2c2fb480a118aaa420824e7fae26dfe0bed83f2e38dca7f15ec"},
+    {"path": "config.json", "sha256": "85fbcacea3fad938480da93eb85ca79f3067c23d0bedd0a55a437b42fe373a03"},
+    {"path": "LICENSE", "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"}
+  ],
+  "license": "Apache-2.0 (checkpoint LICENSE and README section 6; file headers: Copyright 2026 the Maxwell team)",
+  "notice": "provenance/maxwell-moe.NOTICE",
+  "mlx2_paths": [
+    "src/mlx2/runtime/models/maxwell_moe.py",
+    "src/mlx2/adapters/maxwell_moe.py"
+  ],
+  "modifications": [
+    "independent MLX implementation of the reference numerical law; no reference code is imported at runtime (tests import a digest-checked copy from a temp directory)",
+    "mHC residual streams (h_pre/h_post/Sinkhorn h_res, fp32 mapping math with the reference's casts) and the learned hc_head, folded with the final RMSNorm into one FinalNorm module",
+    "RMSNorm with fp32 weight multiply and one rounding, as the reference",
+    "Block Sparse GQA implemented only in its dense regime: for contexts <= (8 prefix + 8 local + 16 remote) x 128 = 4096 tokens the route covers every causal block and equals dense causal attention; longer contexts fail closed; indexer weights are loaded, not evaluated",
+    "fp32 sigmoid routing, top-12 on scores + fp32 expert_bias, renormalised unbiased weights, ungated shared expert; per-expert w1/w3/w2 packed into SwitchGLU gate/up/down tables; the router returns (ids, weights) using the Laguna router contract",
+    "routed experts summed in fp32 and rounded once (the reference index_adds in the model dtype)",
+    "fp32 lm_head as the reference; native MTP layer not implemented (weights dropped at load)"
+  ],
+  "validation": [
+    "tests/test_maxwell_moe_cpu.py: tiny fp32 CPU parity of logits and router ids/weights against the digest-checked torch reference, cached decode vs full forward, dense-regime refusal, artifact gate (AppleDouble siblings ignored), registry resolution",
+    "real-checkpoint GPU smoke: see the campaign report for the commit; unqualified"
+  ],
+  "status": {"implemented": true, "qualified": false, "selected": false, "observed_used": false, "performance_claim": false}
+}

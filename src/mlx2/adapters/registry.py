@@ -501,6 +501,12 @@ def _flint(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.FlintAdapter, module.DESCRIPTOR, artifact)
 
 
+def _maxwell_moe(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".maxwell_moe", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.MaxwellMoeAdapter, module.DESCRIPTOR, artifact)
+
+
 def _glm53_gguf(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".glm53_gguf", __package__)
     artifact = module.inspect_artifact(path)
@@ -592,7 +598,17 @@ def _ripple(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.RippleAdapter, module.artifact_descriptor(artifact), artifact)
 
 
+def _kimi_k31(path: Path, config: dict) -> AdapterResolution:
+    # Fail closed: Kimi-K3.1 is staged only as a prefill layer stream
+    # (mlx2.adapters.kimi_k31.KimiK31LayerStream), not a serving route.
+    raise ValueError(
+        "Kimi-K3.1 has no mlx2 serving route; use "
+        "mlx2.adapters.kimi_k31.KimiK31LayerStream (layer-at-a-time prefill, unqualified)"
+    )
+
+
 _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
+    "kimi_k31": _kimi_k31,
     "ricursive": _ripple,
     "kimi_linear": _kimi_linear,
     "bert": _minilm,
@@ -613,6 +629,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "qwen3_moe": _standard_decoder,
     "qwen2": _standard_decoder,
     "llama": _standard_decoder,
+    "granite": _standard_decoder,
     "mellum": _mellum,
     "inkling": _inkling,
     "agnes": _agnes,
@@ -622,6 +639,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "gpt_oss_puzzle": _gpt_oss,
     "granitemoe_swa": _granite_swa,
     "flint": _flint,
+    "maxwell_moe": _maxwell_moe,
     "glm53_gguf": _glm53_gguf,
     "deepseek4_gguf": _deepseek_v4_gguf,
     "deepseek4_mlx": _deepseek_v4_mlx,
