@@ -39,6 +39,7 @@ import itertools
 import threading
 from bisect import bisect_right
 from collections import OrderedDict
+from functools import lru_cache
 
 import numpy as np
 import regex
@@ -1295,6 +1296,7 @@ _ADDED_VOCAB_ATTRIBUTE = "_mlx2_added_vocab_ids_v1"
 _FRAGMENT_MEMO_ENTRIES = 4096
 
 
+@lru_cache(maxsize=1)
 def _byte_level_alphabet():
     """GPT-2 printable-unicode alphabet for bytes (char -> byte)."""
     kept = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
@@ -1391,7 +1393,8 @@ def token_bytes_value(tokenizer, token_id: int) -> bytes:
         if "▁" in name:
             return name.replace("▁", " ").encode("utf-8")
         try:
-            raw = bytes(_byte_level_alphabet()[char] for char in name)
+            alphabet = _byte_level_alphabet()
+            raw = bytes(alphabet[char] for char in name)
         except (KeyError, ValueError):
             pass
         else:

@@ -4324,6 +4324,8 @@ class ServingEngine(KernelReloadMixin):
     # narrow unit fixtures that build the engine with __new__ on the ordinary
     # path: no exclusive operation and no admission preparing outside the lock.
     _exclusive_operation_active = False
+    _prompt_scoring_task = None
+    _prompt_scoring_reserved_bytes = 0
     _admissions_preparing = 0
     _worker_stopped = False
 
@@ -7840,12 +7842,18 @@ class ServingEngine(KernelReloadMixin):
             # without submission_lock: the worker takes that lock every loop,
             # so holding it here froze the lanes this operation waits for.
             self._exclusive_operation_active = True
+            scoring = getattr(self, "_prompt_scoring_task", None)
+        if scoring is not None:
+            # Research scoring is retryable; an exclusive operation (LoRA or
+            # overlay install, embeddings) preempts it rather than waiting.
+            self.cancel_prompt_scoring(scoring, reason=f"preempted_by_{operation}")
         try:
             while True:
                 with self.lock:
                     inflight = (len(self.jobs) + self._admissions_preparing
                                 + len(getattr(self, "_terminal_cleanup_pending", ()))
-                                + getattr(self, "_terminal_cleanup_in_progress", 0))
+                                + getattr(self, "_terminal_cleanup_in_progress", 0)
+                                + (getattr(self, "_prompt_scoring_task", None) is not None))
                 if not inflight:
                     break
                 if time.monotonic() - started >= timeout:
@@ -8276,6 +8284,269 @@ class ServingEngine(KernelReloadMixin):
             return serialize_handoff(cache, manifest)
 
         return self._exclusive_adapter_operation("prefill_handoff_export", execute)
+
+    def submit_prompt_scoring(self, request, *, top_k, policy):
+        """Queue one prompt-scoring task for the serving worker (fail fast).
+
+        Never closes admission or waits for a drain: the worker runs the task
+        one bounded chunk per scheduler iteration beside live lanes.  One task
+        at a time; a second request is refused with 503 ``busy``.  See
+        ``mlx2.prompt_logprobs``.
+        """
+        from .prompt_logprobs import PromptScoringTask, busy, require_text_route
+
+        if not self.ready.is_set() or self.error or not self.thread.is_alive():
+            raise busy(self.error or "model is not ready", reason="not_ready")
+        with self._admission_section():
+            self._ensure_admission("generation")
+            with self.lock:
+                if getattr(self, "_prompt_scoring_task", None) is not None:
+                    count_add(self.counts, "prompt_logprobs_busy", 1)
+                    raise busy("another prompt scoring request is running; retry later")
+                adapter = self.adapter
+                if adapter is None:
+                    raise busy("model adapter is not ready", reason="not_ready")
+                require_text_route(adapter)
+                task = PromptScoringTask(request=dict(request), top_k=int(top_k), policy=policy)
+                self._prompt_scoring_task = task
+                count_add(self.counts, "prompt_logprobs_submitted", 1)
+        return task
+
+    def cancel_prompt_scoring(self, task, reason="cancelled"):
+        """Cancel ``task``.
+
+        A task the worker has not claimed frees its slot here; a claimed task
+        (``task.started``, set under ``self.lock`` by the worker) is released
+        by the worker at its next step, so the slot never holds two tasks.
+        """
+        with self.lock:
+            if task.cancelled.is_set():
+                return
+            task.state.setdefault("cancel_reason", reason)
+            task.cancelled.set()
+            if getattr(self, "_prompt_scoring_task", None) is task and not task.started:
+                from .prompt_logprobs import busy
+
+                self._prompt_scoring_task = None
+                count_add(self.counts, "prompt_logprobs_cancelled", 1)
+                task.error = busy("prompt scoring was cancelled", reason=reason)
+                task.done.set()
+
+    def _prompt_scoring_memory(self, adapter, tokens, chunk, *, admit=None, mx=None):
+        """Charge the scoring task like a lane and hold the bytes until it ends.
+
+        ``admit`` is the worker's lane-admission check (measured headroom less
+        active lanes' unmaterialized growth, allocator reclaim, settle, APCv2
+        unleased-checkpoint eviction).  Without it (direct callers), the
+        headroom is read, the allocator cache cleared once on a shortfall and
+        read again.  KV is charged from the adapter's cache projection, or by
+        the envelope lane admission charges an adapter without one.
+        """
+        from .prompt_logprobs import busy
+
+        model = getattr(adapter, "model", None)
+        args = getattr(model, "args", None)
+        vocab = getattr(args, "vocab_size", None)
+        if not isinstance(vocab, int) or isinstance(vocab, bool) or vocab < 1:
+            tokenizer = getattr(adapter, "tokenizer", None)
+            try:
+                vocab = len(getattr(tokenizer, "_tokenizer", tokenizer))
+            except TypeError:
+                vocab = 262144
+        # Model-dtype logits, their fp32 copy, the normalized row and one
+        # reduction temporary.
+        transient = int(chunk) * int(vocab) * (2 + 4 + 4 + 4)
+        required = transient
+        budget_fn = getattr(adapter, "cache_budget", None)
+        budget = budget_fn(mtp=getattr(self, "mtp", False)) if callable(budget_fn) else None
+        project = getattr(budget, "project", None)
+        if callable(project):
+            kv_charge = "cache_projection"
+            kv_bytes = int(project(tokens))
+            transient += int(prefill_transient_gib(
+                budget, context_tokens=tokens, uncached_tokens=tokens,
+                prefill_step=chunk, prefill_step_autoscale=False,
+            ) * (1 << 30))
+            required = transient + kv_bytes
+        else:
+            # The same unmeasured-cache envelope lane admission charges an
+            # adapter without a projection (calibrated on full attention).
+            from .runtime.memory_policy import SelfMTPLaneAdmissionController
+
+            kv_charge = "lane_envelope_gib_per_1k_tokens"
+            kv_bytes = int(SelfMTPLaneAdmissionController.CACHE_GIB_PER_1K_TOKENS
+                           * (int(tokens) / 1024.0) * (1 << 30))
+            required += kv_bytes
+        required += int(getattr(self, "hard_reserve_gib", 0.0) * (1 << 30))
+        receipt = {"checked": True, "required_bytes": required, "kv_charge": kv_charge}
+        if callable(admit):
+            receipt["method"] = "lane_admission"
+            fits = bool(admit(required))
+        else:
+            headroom_fn = getattr(self, "admission_headroom_fn", None)
+            if not callable(headroom_fn):
+                return {**receipt, "checked": False}
+            headroom = headroom_fn()
+            available = int(headroom())
+            if available < required:
+                clear = getattr(mx, "clear_cache", None) if mx is not None else None
+                if callable(clear):
+                    clear()
+                available = int(headroom())
+                receipt["allocator_cache_cleared"] = True
+            receipt.update(method="headroom", available_bytes=available)
+            fits = available >= required
+        if not fits:
+            count_add(self.counts, "prompt_logprobs_memory_refused", 1)
+            raise busy(
+                f"prompt scoring does not fit ordinary execution headroom (required {required} bytes)",
+                reason="memory_admission_refused", extra=receipt,
+            )
+        # Held until the task ends: lane admission reads headroom through
+        # ``admission_headroom_fn``, which subtracts it.  The hard reserve is
+        # not held (lane admission adds its own), and the KV share shrinks
+        # as the private cache fills, since measured headroom then sees it.
+        receipt["reserved_bytes"] = transient + kv_bytes
+        receipt["reservation"] = {"transient_bytes": transient, "kv_bytes": kv_bytes}
+        self._prompt_scoring_reserved_bytes = transient + kv_bytes
+        return receipt
+
+    def _start_prompt_scoring(self, task, mx, *, admit=None):
+        from .prompt_logprobs import (
+            PromptLogprobsRefused,
+            PromptScoringRun,
+            admit_prompt_length,
+            int8_chunk_cap,
+            prompt_scoring_binding,
+            scoring_cache_receipt,
+            scoring_fidelity,
+        )
+
+        adapter = self.adapter
+        if adapter is None:
+            raise RuntimeError("model adapter is not ready")
+        revision = getattr(self, "model_revision", 0)
+        try:
+            with self.prompt_lock:
+                tokenizer = adapter.tokenizer
+                prompt_ids = [int(t) for t in render_prompt_tokens(adapter, engine_request(task.request))]
+        except PromptLogprobsRefused:
+            raise
+        except ValueError as error:
+            # Template and request errors are the client's: 400, as on the
+            # generation path.
+            raise PromptLogprobsRefused(str(error), code="prompt_logprobs_invalid_request",
+                                        http_status=400, reason="invalid_request") from error
+        admit_prompt_length(task.policy, len(prompt_ids), max_context=getattr(self, "max_context", None))
+        fidelity = scoring_fidelity(
+            adapter,
+            apc_reuse_disabled_reason=getattr(self, "apc_reuse_disabled_reason", None),
+            numerical_contract=adapter_numerical_contract(adapter),
+            microscaling_active=getattr(self, "microscaling_prefill_handle", None) is not None,
+        )
+        chunk, int8 = int8_chunk_cap(task.policy.chunk_tokens,
+                                     getattr(self, "int8_prefill_handle", None))
+        binding = prompt_scoring_binding(adapter)
+        try:
+            kv_cache = scoring_cache_receipt(binding.cache)
+            memory = self._prompt_scoring_memory(adapter, len(prompt_ids), chunk, admit=admit, mx=mx)
+        except BaseException:
+            binding.cache = None
+            raise
+        task.prompt_ids = prompt_ids
+        task.state.update({
+            "adapter": adapter, "tokenizer": tokenizer, "model_revision": revision,
+            "kind": binding.kind, "chunk": chunk, "int8": int8, "fidelity": fidelity,
+            "memory": memory, "kv_cache": kv_cache, "started": time.monotonic(),
+        })
+        task.run = PromptScoringRun(binding.forward, binding.cache, prompt_ids,
+                                    top_k=task.top_k, chunk_tokens=chunk, mx=mx)
+        binding.cache = None
+
+    def _finish_prompt_scoring(self, task):
+        from .prompt_logprobs import busy, scoring_receipt
+
+        state = task.state
+        if (self.adapter is not state["adapter"]
+                or getattr(self.adapter, "tokenizer", None) is not state["tokenizer"]
+                or getattr(self, "model_revision", 0) != state["model_revision"]):
+            raise busy("the model changed while the prompt was scored", reason="model_changed")
+        receipt = scoring_receipt(
+            task.run, state["kind"], chunk_tokens=state["chunk"], top_k=task.top_k,
+            fidelity=state["fidelity"], int8=state["int8"],
+            seconds=time.monotonic() - state["started"],
+        )
+        receipt["kv_cache"] = state["kv_cache"]
+        receipt["memory"] = state["memory"]
+        receipt["queue_seconds"] = state["started"] - task.created
+        receipt["model_revision"] = state["model_revision"]
+        identity = getattr(state["adapter"], "identity", None)
+        if isinstance(identity, Mapping) and identity.get("fingerprint"):
+            receipt["artifact"] = identity["fingerprint"]
+        count_add(self.counts, "prompt_logprobs_scored_tokens", receipt["scored_positions"])
+        return task.run.scores, receipt
+
+    def _step_prompt_scoring(self, mx, *, admit=None):
+        """Worker: run one chunk of the queued scoring task, if any.
+
+        ``admit(required_bytes) -> bool`` is the serving loop's lane-admission
+        headroom check; the task claims its memory through it once, at start.
+        """
+        with self.lock:
+            task = getattr(self, "_prompt_scoring_task", None)
+            if task is None:
+                return False
+            task.started = True  # from here only the worker releases the slot
+        from .prompt_logprobs import PromptLogprobsRefused, busy
+
+        finished = False
+        try:
+            if task.cancelled.is_set():
+                raise busy("prompt scoring was cancelled",
+                           reason=task.state.get("cancel_reason", "cancelled"))
+            if getattr(self, "_service_state", "serving") != "serving":
+                raise busy("server is not serving", reason="admission_closed")
+            if task.run is None:
+                self._start_prompt_scoring(task, mx, admit=admit)
+            done = task.run.step()
+            reservation = task.state["memory"].get("reservation")
+            if reservation is not None and not done:
+                total = max(1, len(task.run.tokens))
+                filled = min(task.run.start, total)
+                with self.lock:
+                    self._prompt_scoring_reserved_bytes = reservation["transient_bytes"] + int(
+                        reservation["kv_bytes"] * (total - filled) / total)
+            if done:
+                task.result = self._finish_prompt_scoring(task)
+                finished = True
+        except PromptLogprobsRefused as error:
+            task.error, finished = error, True
+        except Exception as error:  # noqa: BLE001 - one task fails, the worker stays live
+            log.exception("prompt scoring failed")
+            task.error = PromptLogprobsRefused(
+                f"prompt scoring failed: {type(error).__name__}: {error}",
+                code="prompt_logprobs_failed", http_status=500, reason="scoring_failed",
+            )
+            finished = True
+        if finished:
+            if task.run is not None:
+                task.run.release()
+            with self.lock:
+                if getattr(self, "_prompt_scoring_task", None) is task:
+                    self._prompt_scoring_task = None
+                self._prompt_scoring_reserved_bytes = 0
+            reason = (task.error.mlx2["prompt_logprobs"].get("reason")
+                      if task.error is not None else None)
+            count_add(self.counts, "prompt_logprobs_completed" if task.error is None
+                      else "prompt_logprobs_cancelled" if task.cancelled.is_set()
+                      else "prompt_logprobs_failed", 1)
+            if reason is not None:
+                count_add(self.counts, f"prompt_logprobs_refused_{reason}", 1)
+            clear = getattr(mx, "clear_cache", None)
+            if callable(clear):
+                clear()
+            task.done.set()
+        return True
 
     def synthesize_speech(
         self, input_text, *, voice, instructions, response_format, speed
@@ -9174,14 +9445,27 @@ class ServingEngine(KernelReloadMixin):
             **({"minimum_host_available_bytes": int(floor_gib * (1 << 30))}
                if floor_gib else {}),
         ) if policy.get("enabled") else execution_headroom
+        base_measure = measure
+
+        def measure():
+            # A running prompt-scoring task holds its charged bytes; with no
+            # task the reading is returned untouched.
+            value = base_measure()
+            reserved = getattr(self, "_prompt_scoring_reserved_bytes", 0)
+            return value - reserved if reserved else value
+
         stream = getattr(self, "expert_stream", None)
         from .runtime.demand_stream_memory import demand_stream_enabled, DemandStreamHeadroom
         if demand_stream_enabled(stream):
             # This route can stream on a small host and accepts paging. The
             # Metal recommendation is a tuning hint, not an allocation limit.
             from .memory import host_available_bytes
-            return DemandStreamHeadroom(
-                lambda: int(host_available_bytes(host_signals=True)), stream)
+            def host_available():
+                value = int(host_available_bytes(host_signals=True))
+                reserved = getattr(self, "_prompt_scoring_reserved_bytes", 0)
+                return value - reserved if reserved else value
+
+            return DemandStreamHeadroom(host_available, stream)
         if getattr(stream, "elastic", None) is None:
             return measure
         from .runtime.elastic_memory import ElasticHeadroom
@@ -13719,6 +14003,20 @@ class ServingEngine(KernelReloadMixin):
                         quiesce_action, suspend_report=suspend_report
                     )
                 self._worker_activate_model(mx)
+                # Prompt scoring: one bounded chunk between scheduler steps,
+                # charged through the same headroom check as a joining lane.
+                if self._prompt_scoring_task is not None:
+                    self._step_prompt_scoring(mx, admit=lambda required: ensure_admission_headroom(
+                        required,
+                        headroom=lambda: execution_headroom() - unmaterialized_lane_bytes(
+                            active.values(),
+                            materialized_bytes=getattr(batch, "materialized_admission_bytes", None),
+                        ),
+                        reclaim=reclaim_allocator,
+                        evict=evict_unused_checkpoint,
+                        evictable=getattr(apc, "unleased_resident_nbytes", None),
+                        settle=settle_footprint,
+                    ))
                 self._expire_pending_cohorts()
                 # Memory preemption recovery: a preempted job waits for replay
                 # or a replay is re-prefilling.  Ordinary admission pauses
@@ -13830,6 +14128,9 @@ class ServingEngine(KernelReloadMixin):
                             idle=not active,
                             deferred=bool(deferred),
                         )
+                        if self._prompt_scoring_task is not None:
+                            # Run scoring chunks back to back while idle.
+                            timeout = 0.0
                         if recovering and not (
                             attaching_cohort is not None and published
                         ):

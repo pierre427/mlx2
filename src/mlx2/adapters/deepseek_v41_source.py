@@ -1021,6 +1021,28 @@ class DeepSeekV41SourceAdapter(DeepSeekV41MLXAdapter):
         return aligned_checkpoint(len(tokens), self.weights.source_prefill_grid_rows,
                                   cached_tokens=cached_tokens, cuts=cuts)
 
+    def prompt_logprobs_fidelity(self):
+        """Prompt scoring is exact only on the official-precision expert path.
+
+        Approximate operations, q1-on-miss, EXL3 experts, cold-Q1 hot maps,
+        yoco and dynamic precision (whose output depends on, and updates, the
+        expert-cache history) are declared not exact; scoring refuses them.
+        """
+        from .deepseek_v41_source_approx import YOCO_KEY, apc_refusal_reason
+        from .deepseek_v41_source_exl3 import apc_refusal_reason as exl3_refusal
+        from .deepseek_v41_source_q1_on_miss import apc_refusal_reason as q1_on_miss_refusal
+        reasons=[reason for reason in (apc_refusal_reason(self.kernel_policy),
+                                       q1_on_miss_refusal(self.kernel_policy),
+                                       exl3_refusal(self.kernel_policy)) if reason]
+        expert=self.kernel_policy.get('deepseek_source_experts') or {}
+        if expert.get('mode')=='hot_original_q1':
+            reasons.append('hot_original_cold_q1_experts')
+        if self._source_dynamic_precision():
+            reasons.append('dynamic_precision_cache_history')
+        if self.kernel_policy.get(YOCO_KEY,'off')!='off':
+            reasons.append('yoco_v1')
+        return 'exact' if not reasons else '+'.join(reasons)
+
     def _source_dynamic_precision(self):
         expert=self.kernel_policy.get('deepseek_source_experts') or {}
         return expert.get('residency','shared_v1')=='dynamic_precision_v1'

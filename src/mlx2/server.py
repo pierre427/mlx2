@@ -2108,6 +2108,106 @@ def collect_nonstream_job(
         }, event["receipt"]
 
 
+def wait_prompt_scoring(engine, body, spec, policy, *, connection=None, poll_seconds=0.25):
+    """Submit ``body`` for scoring and wait, cancelling if the client leaves.
+
+    Returns ``{"scores", "receipt", "prompt_ids"}``.  The engine renders the
+    prompt on its worker, inside the scoring task, so the scored tokens and
+    the model revision are one consistent observation.
+    """
+    from .prompt_logprobs import PromptLogprobsRefused, busy
+
+    submit = getattr(engine, "submit_prompt_scoring", None)
+    if not callable(submit):
+        raise PromptLogprobsRefused(
+            "the loaded engine has no prompt scoring task",
+            code="prompt_logprobs_unsupported_route", http_status=501,
+            reason="engine_without_scoring",
+        )
+    task = submit(body, top_k=spec.top_k, policy=policy)
+    deadline = time.monotonic() + float(policy.timeout_seconds)
+    try:
+        while not task.done.wait(poll_seconds):
+            if client_disconnected(connection):
+                raise ClientGone("client disconnected while the prompt was scored")
+            thread = getattr(engine, "thread", None)
+            if thread is not None and not thread.is_alive():
+                raise busy("the serving worker stopped", reason="worker_stopped")
+            if time.monotonic() >= deadline:
+                raise busy(
+                    f"prompt scoring did not finish within {policy.timeout_seconds:g} s",
+                    reason="timeout",
+                )
+    except BaseException:
+        engine.cancel_prompt_scoring(task)
+        raise
+    if task.error is not None:
+        raise task.error
+    scores, receipt = task.result
+    return {"scores": scores, "receipt": receipt, "prompt_ids": list(task.prompt_ids)}
+
+
+def _prompt_scoring_tokenizer(engine):
+    # Only the reference is read under the lock; decoding happens outside it.
+    with engine.prompt_lock:
+        return engine.adapter.tokenizer
+
+
+def merge_prompt_scoring(payload, scored, spec, body, *, chat, tokenizer):
+    """Add echo text, legacy echo logprobs and ``prompt_logprobs`` to a payload."""
+    from .prompt_logprobs import TokenText, legacy_echo_logprobs, vllm_prompt_logprobs
+
+    choice = payload["choices"][0]
+    texts = TokenText(tokenizer)
+    if spec.echo:
+        choice["text"] = body["prompt"] + choice.get("text", "")
+    if scored is None:
+        return payload
+    prompt_ids, scores = scored["prompt_ids"], scored["scores"]
+    if spec.echo and spec.echo_top is not None:
+        content = (choice.get("logprobs") or {}).get("content")
+        choice["logprobs"] = legacy_echo_logprobs(
+            tokenizer, prompt_ids, scores, spec.echo_top, content or (), texts=texts,
+        )
+        if content is not None:
+            choice["logprobs"]["content"] = content
+    if spec.prompt_top is not None:
+        rows = vllm_prompt_logprobs(tokenizer, prompt_ids, scores, spec.prompt_top, texts=texts)
+        if chat:
+            payload["prompt_logprobs"] = rows
+        else:
+            choice["prompt_logprobs"] = rows
+    mlx2 = payload.get("mlx2")
+    payload["mlx2"] = {**(mlx2 if isinstance(mlx2, dict) else {}),
+                       "prompt_logprobs": scored["receipt"]}
+    return payload
+
+
+def prompt_scoring_only_payload(engine, body, spec, scored, *, chat, model):
+    """``max_tokens: 0``: the prompt alone, no generation job."""
+    prompt_tokens = len(scored["prompt_ids"]) if scored is not None else len(engine.render_prompt(body))
+    choice = {"index": 0, "finish_reason": "length"}
+    choice.update({"message": {"role": "assistant", "content": ""}} if chat else {"text": ""})
+    if wants_logprobs(body):
+        choice["logprobs"] = {"content": []}
+    payload = {
+        "id": ("chatcmpl_" if chat else "cmpl_") + uuid.uuid4().hex,
+        "object": "chat.completion" if chat else "text_completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [choice],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": 0,
+            "total_tokens": prompt_tokens,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        },
+        "mlx2": {"generation": "skipped_max_tokens_0"},
+    }
+    return merge_prompt_scoring(payload, scored, spec, body, chat=chat,
+                                tokenizer=_prompt_scoring_tokenizer(engine))
+
+
 def validate_overlay_selection(value):
     """``mlx2_overlay``: an overlay id, or ``{"id": ..., "branch_id": ...}`` (OVERLAY-API.md)."""
     def identifier(text, name, limit):
@@ -2406,7 +2506,19 @@ def handler_for(
     prefill_handoff="off",
     prefill_handoff_records=None,
     prefill_handoff_allow_provisional=False,
+    prompt_logprobs=None,
 ):
+    from .prompt_logprobs import PromptLogprobsPolicy
+
+    if prompt_logprobs is None:
+        prompt_logprobs = PromptLogprobsPolicy()
+    if not isinstance(prompt_logprobs, PromptLogprobsPolicy):
+        raise ValueError("prompt_logprobs must be a PromptLogprobsPolicy")
+    if prompt_logprobs.enabled and prompt_logprobs.tenants and tenant_authenticator is None:
+        raise ValueError(
+            "--prompt-logprobs-tenants requires tenant authentication: without it "
+            "X-Tenant-ID is client-set and the list would admit anyone who names a tenant"
+        )
     if weight_space_service is not None and admin_token is None:
         raise ValueError("live weight-space tools require --admin-token-file")
     if (
@@ -2870,6 +2982,7 @@ def handler_for(
         def _authenticate_tenant(self, path):
             """Bind ``self._tenant_id`` for this request; False = refused."""
             self._tenant_auth_method = None
+            self._tenant_scopes = frozenset()
             if tenant_authenticator is None:
                 claimed = self.headers.get("X-Tenant-ID", "default")
                 if claimed in RESERVED_TENANTS:
@@ -2920,6 +3033,7 @@ def handler_for(
                 return False
             self._tenant_id = principal.tenant
             self._tenant_auth_method = principal.method
+            self._tenant_scopes = frozenset(getattr(principal, "scopes", ()) or ())
             return True
 
         def _ensure_trace(self):
@@ -3660,6 +3774,7 @@ def handler_for(
                                     if handoff_capability is not None
                                     else {}
                                 ),
+                                "prompt_logprobs": prompt_logprobs.status(),
                             },
                             # vLLM shape: each concurrent LoRA adapter is a
                             # selectable model whose parent is the base.
@@ -4604,6 +4719,26 @@ def handler_for(
                     response_metadata = response_options["metadata"]
                 chat = path != "/v1/completions"
                 status = engine.status()
+                prompt_scoring = prompt_scored = None
+                if not responses_api and not anthropic:
+                    from .prompt_logprobs import (
+                        disabled_refusal,
+                        extract_prompt_scoring,
+                        requests_prompt_scoring,
+                    )
+
+                    if requests_prompt_scoring(body) and not prompt_logprobs.enabled:
+                        # Flag off: the request is refused exactly as before
+                        # the capability existed (same status and message),
+                        # with the disabled-capability receipt added.
+                        try:
+                            with wrongly_typed_request_is_invalid():
+                                validate_request(body, chat, adapter=getattr(engine, "adapter", None))
+                        except ValueError as exc:
+                            raise disabled_refusal(str(exc)) from exc
+                        raise disabled_refusal("prompt logprobs are disabled on this server")
+                    with wrongly_typed_request_is_invalid():
+                        body, prompt_scoring = extract_prompt_scoring(body, chat=chat)
                 with wrongly_typed_request_is_invalid():
                     body = validate_request(
                         body,
@@ -4686,6 +4821,53 @@ def handler_for(
                     and (status.get("settings") or {}).get("tool_grammar_streaming")
                 )
                 model = _generation_model(status, body)
+                if prompt_scoring is not None:
+                    from .prompt_logprobs import PromptLogprobsRefused, admit_prompt_scoring
+
+                    admit_prompt_scoring(prompt_logprobs, prompt_scoring, body,
+                                         base_model=status.get("model"))
+                    if "prefill_handoff" in body:
+                        raise PromptLogprobsRefused(
+                            "echo and prompt_logprobs cannot be combined with prefill_handoff",
+                            code="prompt_logprobs_weight_program_unsupported",
+                            extra={"field": "prefill_handoff"},
+                        )
+                    if prompt_scoring.scoring:
+                        if not prompt_logprobs.authorized(
+                            tenant_id=tenant_id, tenant_auth=tenant_authenticator is not None,
+                            scoped="prompt-logprobs" in getattr(self, "_tenant_scopes", ()),
+                        ):
+                            raise PromptLogprobsRefused(
+                                "prompt logprobs are restricted to credentials with the "
+                                "prompt-logprobs scope and tenants listed in --prompt-logprobs-tenants",
+                                code="prompt_logprobs_forbidden", http_status=403,
+                                reason="tenant_not_authorized",
+                            )
+                        internal = sorted(key for key in body if key.startswith("_mlx2_"))
+                        if semantic_state is not None or internal:
+                            # Session memory rewrites the prompt (a preamble, neural
+                            # concepts); scoring would not score what generation sees.
+                            raise PromptLogprobsRefused(
+                                "prompt logprobs cannot be combined with semantic session memory",
+                                code="prompt_logprobs_semantic_unsupported",
+                                reason="semantic_memory_prompt",
+                                extra={"internal_fields": internal,
+                                       "semantic_state": semantic_state is not None},
+                            )
+                        def score_prompt():
+                            scored = wait_prompt_scoring(
+                                engine, body, prompt_scoring, prompt_logprobs,
+                                connection=self.connection,
+                            )
+                            return {**scored,
+                                    "usage": {"prompt_tokens": len(scored["prompt_ids"])}}
+
+                        prompt_scored = metered_pooled(usage_ledger, tenant_id, score_prompt)
+                    if not prompt_scoring.generate:
+                        self.send_json(200, prompt_scoring_only_payload(
+                            engine, body, prompt_scoring, prompt_scored, chat=chat, model=model,
+                        ))
+                        return
                 handoff_handle = body.pop("prefill_handoff", None)
                 if handoff_handle is not None:
                     if admin_token is None:
@@ -5869,20 +6051,32 @@ def handler_for(
                                     payload,
                                 )
                             else:
-                                self.send_json(
-                                    200,
-                                    {
-                                        "id": job.id,
-                                        "object": "chat.completion"
-                                        if chat
-                                        else "text_completion",
-                                        "created": int(job.created),
-                                        "model": model,
-                                        "choices": [choice],
-                                        "usage": usage,
-                                        "mlx2": receipt,
-                                    },
-                                )
+                                result = {
+                                    "id": job.id,
+                                    "object": "chat.completion"
+                                    if chat
+                                    else "text_completion",
+                                    "created": int(job.created),
+                                    "model": model,
+                                    "choices": [choice],
+                                    "usage": usage,
+                                    "mlx2": receipt,
+                                }
+                                if prompt_scoring is not None:
+                                    if prompt_scored is not None and getattr(
+                                        engine, "model_revision", None
+                                    ) not in (None, prompt_scored["receipt"].get("model_revision")):
+                                        from .prompt_logprobs import busy
+
+                                        raise busy(
+                                            "the model changed between scoring and generation",
+                                            reason="model_changed",
+                                        )
+                                    result = merge_prompt_scoring(
+                                        result, prompt_scored, prompt_scoring, body, chat=chat,
+                                        tokenizer=_prompt_scoring_tokenizer(engine),
+                                    )
+                                self.send_json(200, result)
                         if semantic_middleware is not None:
                             semantic_middleware.complete(
                                 semantic_state,
@@ -5949,6 +6143,7 @@ def handler_for(
                         str(exc),
                         anthropic=anthropic,
                         code=error_code,
+                        mlx2=getattr(exc, "mlx2", None),
                     )
             except PromptTemplateFailure as exc:
                 # A template that fails for a reason the request does not
@@ -6364,6 +6559,19 @@ def generation_event_timeout_arg(value):
         raise argparse.ArgumentTypeError(str(error)) from error
 
 
+def prompt_logprobs_policy_from_args(args):
+    from .prompt_logprobs import PromptLogprobsPolicy
+
+    return PromptLogprobsPolicy(
+        enabled=getattr(args, "prompt_logprobs", "off") == "on",
+        max_prompt_tokens=args.prompt_logprobs_max_tokens,
+        max_top=args.prompt_logprobs_max_top,
+        chunk_tokens=args.prompt_logprobs_chunk,
+        timeout_seconds=args.prompt_logprobs_timeout,
+        tenants=tuple(item.strip() for item in args.prompt_logprobs_tenants.split(",") if item.strip()),
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="mlx2 APCv2 Flash-Next server")
     parser.add_argument("--model", required=True)
@@ -6413,6 +6621,46 @@ def build_parser():
         "--prefill-handoff-allow-provisional",
         action="store_true",
         help="admit G1-G4 provisional records for qualification-time served-path checks",
+    )
+    from .prompt_logprobs import (
+        DEFAULT_CHUNK_TOKENS,
+        DEFAULT_TIMEOUT_SECONDS,
+        DEFAULT_MAX_PROMPT_TOKENS,
+        DEFAULT_MAX_TOP,
+    )
+    prompt_scoring = parser.add_argument_group(
+        "prompt logprobs",
+        "opt-in prompt-token log-probabilities (Completions echo+logprobs, "
+        "prompt_logprobs on Completions and Chat); see docs/PROMPT-LOGPROBS.md",
+    )
+    prompt_scoring.add_argument(
+        "--prompt-logprobs", choices=("off", "on"), default="off",
+        help="serve prompt-token logprobs; off refuses such requests with a 400 receipt (default off)",
+    )
+    prompt_scoring.add_argument(
+        "--prompt-logprobs-max-tokens", type=int, default=DEFAULT_MAX_PROMPT_TOKENS,
+        help="refuse scoring prompts longer than this many tokens",
+    )
+    prompt_scoring.add_argument(
+        "--prompt-logprobs-max-top", type=int, default=DEFAULT_MAX_TOP,
+        help="refuse more than this many alternatives per prompt position",
+    )
+    prompt_scoring.add_argument(
+        "--prompt-logprobs-chunk", type=int, default=DEFAULT_CHUNK_TOKENS,
+        help="positions per scoring forward; bounds the live logits to chunk x vocab",
+    )
+    prompt_scoring.add_argument(
+        "--prompt-logprobs-timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS,
+        help="seconds one scoring request may take before it is cancelled (503)",
+    )
+    prompt_scoring.add_argument(
+        "--prompt-logprobs-allow-unauthenticated", action="store_true",
+        help="accept --prompt-logprobs on a non-loopback bind without tenant auth or an API key",
+    )
+    prompt_scoring.add_argument(
+        "--prompt-logprobs-tenants", default="",
+        help="comma-separated tenant ids allowed to score; with tenant authentication "
+        "on and no list, only the admin token may score",
     )
     tenant_auth = parser.add_argument_group(
         "tenant authentication",
@@ -8201,6 +8449,20 @@ def main():
             ),
         )
         tenant_authenticator = build_tenant_authenticator(args)
+        from .prompt_logprobs import validate_exposure
+
+        prompt_logprobs_policy = prompt_logprobs_policy_from_args(args)
+        validate_exposure(
+            prompt_logprobs_policy,
+            loopback_bind=is_loopback_address(args.host) or args.host == "localhost",
+            tenant_auth=tenant_authenticator is not None,
+            api_key=getattr(http_security, "api_key", None) is not None,
+            allow_unauthenticated=args.prompt_logprobs_allow_unauthenticated,
+        )
+        if prompt_logprobs_policy.enabled and args.prompt_logprobs_allow_unauthenticated:
+            logging.getLogger("mlx2.server").warning(
+                "prompt logprobs are served on %s without authentication "
+                "(--prompt-logprobs-allow-unauthenticated)", args.host)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     if args.power_governor != "off" and not args.power_telemetry:
@@ -8571,6 +8833,7 @@ def main():
             prefill_handoff=args.prefill_handoff,
             prefill_handoff_records=args.prefill_handoff_records,
             prefill_handoff_allow_provisional=args.prefill_handoff_allow_provisional,
+            prompt_logprobs=prompt_logprobs_policy,
         )
     except (OSError, RuntimeError, ValueError) as error:
         # The handler opens the tenant file store and resolves the semantic

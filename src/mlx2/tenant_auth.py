@@ -49,8 +49,9 @@ DEFAULT_TOKEN_MAX_TTL = 7 * 24 * 3600
 MAX_TOKEN_TTL = 366 * 24 * 3600  # the ceiling TenantAuthenticator accepts
 TOKEN_IAT_SKEW_SECONDS = 30
 # ``usage-admin`` lets a tenant clear or pause its own usage view (never the
-# accounting ledger that limits read).
-SCOPES = frozenset({"inference", "adapters", "usage-admin"})
+# accounting ledger that limits read).  ``prompt-logprobs`` lets a tenant score
+# prompts when the server serves them (``--prompt-logprobs on``).
+SCOPES = frozenset({"inference", "adapters", "usage-admin", "prompt-logprobs"})
 DEFAULT_SCOPES = ("inference",)
 HEADER_POLICIES = ("must-match", "ignore")
 
