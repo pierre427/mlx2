@@ -1,78 +1,89 @@
 import SwiftUI
 
-// Geometry belongs to the transcript's named coordinate space. Never reach for
-// an enclosing AppKit scroll view: SwiftUI can place the entire window inside one.
+// Stick-to-bottom state for the chat transcript. The transcript follows new
+// content while the reader is at (or near) the bottom; it detaches only when
+// the reader deliberately scrolls away, and reattaches once they scroll back.
+// A layout pass (lazy-row height estimates settling, a window resize, the
+// composer growing) never counts as a deliberate scroll.
 struct ChatScrollAttachment {
+    static let threshold: CGFloat = 32
     private(set) var followsBottom = true
-    private var documentHeight: CGFloat = 0
-    private var viewportHeight: CGFloat = 0
-    mutating func observe(height: CGFloat, viewport: CGFloat, distance: CGFloat, userScroll: Bool? = nil) {
-        let resized = abs(height - documentHeight) > 0.5 || abs(viewport - viewportHeight) > 0.5
-        if distance <= 32 { followsBottom = true }
-        else if userScroll == true || (userScroll == nil && !resized) { followsBottom = false }
-        documentHeight = height; viewportHeight = viewport
+    private var offset: CGFloat?
+    private var contentHeight: CGFloat = 0
+    /// - Parameters:
+    ///   - offset: vertical content offset.
+    ///   - distance: points between the visible bottom edge and the content's end.
+    ///   - userScroll: the scroll view reports a user gesture or its momentum.
+    mutating func observe(offset: CGFloat, contentHeight: CGFloat, distance: CGFloat, userScroll: Bool) {
+        // A scroll wheel may not report a scroll phase; an upward offset move
+        // with unchanged content is still the reader's own scroll.
+        let movedUp = offset < (self.offset ?? offset) - 0.5 && abs(contentHeight - self.contentHeight) <= 0.5
+        if distance <= Self.threshold { followsBottom = true }
+        else if userScroll || movedUp { followsBottom = false }
+        self.offset = offset; self.contentHeight = contentHeight
     }
     mutating func attach() { followsBottom = true }
 }
 
-private struct ChatTranscriptFrame: PreferenceKey {
-    static var defaultValue: CGRect { .zero }
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
-}
-
-private struct ChatUserScrollPhase: ViewModifier {
-    let changed: (Bool) -> Void
-    @ViewBuilder func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) {
-            content.onScrollPhaseChange { _, phase in changed(phase == .interacting || phase == .decelerating) }
-        } else { content }
-    }
+private struct ChatScrollMetrics: Equatable {
+    var offset: CGFloat
+    var contentHeight: CGFloat
+    var viewport: CGFloat
+    var distance: CGFloat
 }
 
 struct ChatTranscriptScroll<Content: View>: View {
     let request: UUID
     @ViewBuilder let content: () -> Content
     @State private var attachment = ChatScrollAttachment()
-    @State private var space = UUID()
-    @State private var end = UUID()
-    @State private var pending = false
-    @State private var userScrolling = false
-    private var scrollIntent: Bool? {
-        if #available(macOS 15.0, *) { return userScrolling }
-        return nil
-    }
-    private func follow(_ proxy: ScrollViewProxy) {
-        guard attachment.followsBottom, !pending else { return }
-        pending = true
-        Task { @MainActor in
-            await Task.yield()
-            pending = false
-            guard attachment.followsBottom else { return }
-            proxy.scrollTo(end, anchor: .bottom)
+    @State private var position = ScrollPosition(edge: .bottom)
+    @State private var phase: ScrollPhase = .idle
+    @State private var metrics = ChatScrollMetrics(offset: 0, contentHeight: 0, viewport: 0, distance: 0)
+
+    private func scrollToBottom(animated: Bool) {
+        if animated {
+            withAnimation(.smooth(duration: 0.28)) { position.scrollTo(edge: .bottom) }
+        } else {
+            var transaction = Transaction(); transaction.disablesAnimations = true
+            withTransaction(transaction) { position.scrollTo(edge: .bottom) }
         }
     }
+
     var body: some View {
-        GeometryReader { viewport in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: 0) {
-                        content()
-                        Color.clear.frame(height: 1).id(end)
-                    }
-                    .background(GeometryReader { geometry in
-                        Color.clear.preference(key: ChatTranscriptFrame.self, value: geometry.frame(in: .named(space)))
-                    })
-                }
-                .coordinateSpace(name: space)
-                .modifier(ChatUserScrollPhase { userScrolling = $0 })
-                .onPreferenceChange(ChatTranscriptFrame.self) { frame in
-                    guard frame.height > 0 else { return }
-                    attachment.observe(height: frame.height, viewport: viewport.size.height,
-                                       distance: frame.maxY - viewport.size.height, userScroll: scrollIntent)
-                    follow(proxy)
-                }
-                .onChange(of: request) { _, _ in attachment.attach(); follow(proxy) }
+        ScrollView {
+            content()
+        }
+        .scrollPosition($position)
+        // While attached, growth keeps the bottom edge pinned natively, in the
+        // same layout pass, so streamed text pushes the transcript up with no
+        // lag or jump. Detached, the reader's position is left alone.
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(attachment.followsBottom ? .bottom : nil, for: .sizeChanges)
+        .onScrollPhaseChange { _, newPhase in
+            phase = newPhase
+            if newPhase == .idle, attachment.followsBottom, metrics.distance > 1 {
+                scrollToBottom(animated: metrics.distance < metrics.viewport * 2)
             }
-        }.frame(minHeight: 0, maxHeight: .infinity)
+        }
+        .onScrollGeometryChange(for: ChatScrollMetrics.self) { geometry in
+            ChatScrollMetrics(offset: geometry.contentOffset.y, contentHeight: geometry.contentSize.height,
+                              viewport: geometry.containerSize.height,
+                              distance: max(0, geometry.contentSize.height + geometry.contentInsets.bottom - geometry.visibleRect.maxY))
+        } action: { _, new in
+            metrics = new
+            attachment.observe(offset: new.offset, contentHeight: new.contentHeight, distance: new.distance,
+                               userScroll: phase == .interacting || phase == .decelerating)
+            // Catch-up for anything the size anchor did not absorb (a new
+            // message row materialising below the fold). Never restart an
+            // animation already in flight: that is what makes scrolling stutter.
+            if attachment.followsBottom, new.distance > 1, phase == .idle {
+                scrollToBottom(animated: new.distance < new.viewport * 2)
+            }
+        }
+        .onChange(of: request) { _, _ in
+            attachment.attach()
+            scrollToBottom(animated: metrics.distance < metrics.viewport * 2)
+        }
+        .frame(minHeight: 0, maxHeight: .infinity)
     }
 }
