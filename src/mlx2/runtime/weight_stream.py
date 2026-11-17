@@ -281,7 +281,9 @@ class SafetensorsIndex:
     @classmethod
     def _from_model_path(cls, model_path) -> "SafetensorsIndex":
         root = Path(model_path).expanduser()
-        shards = sorted(root.glob("*.safetensors"))
+        from ..adapters.artifact_paths import safetensors_shards
+
+        shards = safetensors_shards(root)
         if not shards:
             raise StreamingUnavailable(f"no safetensors shards under {root}")
         entries = []

@@ -186,7 +186,9 @@ def _upstream_int4_layout(path: Path, config: dict) -> tuple[dict, dict]:
         raise ValueError("Flint artifact has no safetensors index and is not the upstream INT4 export")
     declared = manifest.get("checkpoint_files") or {}
     shards = sorted(name for name in declared if name.endswith(".safetensors"))
-    present = sorted(item.name for item in path.glob("*.safetensors"))
+    from .artifact_paths import safetensors_shards
+
+    present = [item.name for item in safetensors_shards(path)]
     if not shards or shards != present:
         raise ValueError("Flint upstream INT4 shards differ from its manifest")
     if hashlib.sha256((path / "config.json").read_bytes()).hexdigest() != declared.get("config.json"):

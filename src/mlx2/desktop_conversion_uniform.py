@@ -51,7 +51,8 @@ def _eligible(name, tensor):
 def convert(source, destination, bits, update):
     source, destination = Path(source), Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
-    sources = sorted(source.glob("*.safetensors"))
+    # skip dotfiles: exFAT volumes carry AppleDouble "._*.safetensors" metadata files beside each shard
+    sources = sorted(p for p in source.glob("*.safetensors") if not p.name.startswith("."))
     weight_map, total_output, count = {}, 0, 0
     for shard_index, shard in enumerate(sources):
         with shard.open("rb") as stream:

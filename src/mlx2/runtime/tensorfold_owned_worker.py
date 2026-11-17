@@ -99,7 +99,9 @@ def artifact_identity(path: str | Path) -> dict:
             raise ValueError("artifact requires a nonempty weight index")
         names = sorted(set(weight_map.values()))
     else:
-        names = sorted(item.name for item in path.glob("*.safetensors"))
+        from ..adapters.artifact_paths import safetensors_shards
+
+        names = [item.name for item in safetensors_shards(path)]
     if not names:
         raise ValueError("artifact has no safetensors weights")
     for name in names:

@@ -55,7 +55,9 @@ def _issue(found: dict[str, str], *, normalized_f32_suffixes=(), mixed_gdn_f32=F
 def artifact_tree_tile_dtype_issue(model_path, *, normalized_f32_suffixes=(), mixed_gdn_f32=False) -> str | None:
     """Read safetensors headers only; None when every relevant tensor is bf16."""
     found: dict[str, str] = {}
-    for shard in sorted(Path(model_path).glob("*.safetensors")):
+    from .artifact_paths import safetensors_shards
+
+    for shard in safetensors_shards(model_path):
         try:
             with open(shard, "rb") as handle:
                 size = struct.unpack("<Q", handle.read(8))[0]

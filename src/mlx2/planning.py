@@ -46,7 +46,9 @@ def artifact_payload(path: Path) -> dict:
             raise ValueError("artifact shard names must be strings")
         names = set(weights.values())
     else:
-        names = {p.name for p in root.glob("*.safetensors")}
+        from .adapters.artifact_paths import safetensors_shards
+
+        names = {p.name for p in safetensors_shards(root)}
     if not names:
         raise ValueError("artifact has no safetensors payload")
     # Side assets such as PLE rows must not disappear from the storage budget.

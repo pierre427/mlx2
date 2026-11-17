@@ -72,7 +72,9 @@ def index_digest(model_path) -> str:
         return digest.hexdigest()
     from .weight_stream import read_safetensors_header
 
-    for shard in sorted(root.glob("*.safetensors")):
+    from ..adapters.artifact_paths import safetensors_shards
+
+    for shard in safetensors_shards(root):
         header = dict(read_safetensors_header(shard))
         header.pop("__data_offset__", None)
         digest.update(shard.name.encode("utf-8"))

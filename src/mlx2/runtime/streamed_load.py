@@ -264,7 +264,9 @@ def artifact_weight_bytes(model_path) -> int:
                 raise ValueError(f"shard path escapes the artifact: {name}")
             paths.append(root / relative)
     else:
-        paths = sorted(root.glob("*.safetensors"))
+        from ..adapters.artifact_paths import safetensors_shards
+
+        paths = safetensors_shards(root)
     if not paths:
         raise ValueError(f"no safetensors shards under {root}")
     return sum(int(path.stat().st_size) for path in paths)

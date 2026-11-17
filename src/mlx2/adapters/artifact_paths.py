@@ -44,3 +44,14 @@ def hub_blob_identity(snapshot: Path, resolved: Path) -> str | None:
         return None
     name = resolved.name
     return name if _HUB_BLOB.fullmatch(name) else None
+
+
+def safetensors_shards(root: Path, pattern: str = "*.safetensors") -> list[Path]:
+    """Sorted shard files under ``root`` matching ``pattern``, without dotfiles.
+
+    ``Path.glob`` matches names that start with a dot. exFAT and other non-HFS
+    volumes (the T7) carry an AppleDouble ``._<name>`` metadata file beside
+    every file macOS writes there, so ``._model-00001-of-00009.safetensors``
+    would otherwise be read as a shard.
+    """
+    return sorted(p for p in Path(root).glob(pattern) if not p.name.startswith("."))

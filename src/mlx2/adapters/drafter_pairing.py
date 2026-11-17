@@ -50,7 +50,9 @@ def shard_names(path: Path) -> tuple[list[str], bool]:
         except Exception:  # noqa: BLE001 - a broken index is an incomplete artifact
             return [], False
         return names, bool(names) and all((path / name).is_file() for name in names)
-    names = sorted(p.name for p in path.glob("*.safetensors"))
+    from .artifact_paths import safetensors_shards
+
+    names = [p.name for p in safetensors_shards(path)]
     return names, bool(names) and all((path / name).is_file() for name in names)
 
 
