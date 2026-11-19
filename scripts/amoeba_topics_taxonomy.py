@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs/research/amoeba-topics/taxonomy.v1.json"
 SCHEMA = "mlx2.amoeba-topics.v1"
-VERSION = "1.4"
+VERSION = "1.5"
 ISO_DEFAULT = ROOT / "docs/research/amoeba-topics/sources/iso639-3.json"   # pycountry 26.2.16 copy (LGPL-2.1)
 
 OUTLINE = r"""
@@ -490,6 +490,9 @@ sec | Cybersecurity | cip=11.10;acm=Security and privacy;since=1.2;ddc=005.8;use
     tlp | Traffic Light Protocol and sharing | since=1.2
     lifecycle | Intelligence lifecycle and requirements | since=1.2
     diamond_model | Diamond model and kill chain analysis | since=1.2
+    report_writing | CTI report writing and dissemination | since=1.5
+    analytic_tradecraft | Analytic tradecraft (structured analytic techniques, estimative language) | see=intel;since=1.5
+    threat_actor_comms | Threat-actor communications (forums, leaks, chat) | since=1.5
   vuln | Vulnerability management and patching | csf=ID.RA;since=1.2
     cve | CVE records and advisories | since=1.2
     cwe | CWE weakness classes | since=1.2
@@ -504,9 +507,11 @@ sec | Cybersecurity | cip=11.10;acm=Security and privacy;since=1.2;ddc=005.8;use
     soc | Security operations (SOC) | since=1.2
     detection_engineering | Detection engineering (Sigma, YARA) | since=1.2
     siem | SIEM and log analysis | csf=DE.CM;since=1.2
+    threat_hunting | Threat hunting | since=1.5
   dfir | Digital forensics and incident response | csf=RS.AN;since=1.2
     forensics | Digital forensics | since=1.2
     malware_analysis | Malware analysis (descriptive) | since=1.2
+    logs | Log and event forensics | see=sec.defensive.siem;since=1.5
   grc | Governance, risk and compliance | csf=GV;since=1.2
     iso27001 | ISO/IEC 27001 | since=1.2
     soc2 | SOC 2 | since=1.2
@@ -524,6 +529,44 @@ sec | Cybersecurity | cip=11.10;acm=Security and privacy;since=1.2;ddc=005.8;use
     ot_ics | OT / ICS security | since=1.2
     email_phishing | Email security and phishing | since=1.2
     supply_chain | Software supply-chain security | see=swe.packaging;since=1.2
+    ml_security | ML and LLM security (adversarial ML, prompt injection) | see=ml.llm.alignment;since=1.5
+  re | Reverse engineering | see=sec.dfir.malware_analysis;since=1.5
+    binary | Binary reverse engineering (disassembly, decompilation) | see=prog.assembly;since=1.5
+    firmware | Firmware and embedded reverse engineering | since=1.5
+    mobile | Mobile app reverse engineering (Android, iOS) | since=1.5
+  exploit | Exploit development | see=sec.offensive;since=1.5
+    memory_corruption | Memory-corruption exploitation (overflows, UAF, ROP) | since=1.5
+    kernel | Kernel exploitation | see=swe.os;since=1.5
+  ctf | Capture-the-flag writeups | since=1.5
+agent | Model-harness interaction: reasoning traces, tool calls, agent loops (the text itself, not writing about it) | see=ml.llm.agents;since=1.5
+  reasoning | Reasoning traces and chain of thought | see=ml.llm.reasoning;since=1.5
+    cot | Worked step-by-step solutions (visible chain of thought) | see=skill.arithmetic_reasoning;since=1.5
+    thinking_trace | Long thinking traces (think blocks, exploration, backtracking) | since=1.5
+    self_correction | Self-correction and verification moves | since=1.5
+  tool_use | Tool use and function calling | see=ml.llm.tool_use;since=1.5
+    definitions | Tool and function schemas (JSON Schema, OpenAPI, MCP tool lists) | since=1.5
+    calls | Tool-call emission formats (JSON calls, tool_call tags, parallel calls) | since=1.5
+    results | Tool results and observations returned to the model | since=1.5
+    error_recovery | Tool errors, retries and recovery | since=1.5
+    decision | Deciding whether to call a tool, answer directly or ask | since=1.5
+  harness | Agent harness dynamics | see=ml.llm.agents;since=1.5
+    loop | Agent loop turns (thought, action, observation) | since=1.5
+    shell | Shell transcripts (commands and their output) | see=prog.shell;since=1.5
+    file_edits | File edits, diffs and patches | see=swe.git;since=1.5
+    planning | Plans, task lists and decomposition | since=1.5
+    status | Progress and status updates, final reports | since=1.5
+dialog | Model-user dialogue dynamics | see=form.dialogue;since=1.5
+  multiturn | Multi-turn chat dynamics (follow-ups, topic shifts, corrections) | since=1.5
+  refusal | Refusals, safe completions and boundary-setting | see=ml.llm.alignment;since=1.5
+  clarification | Clarifying questions and ambiguity handling | since=1.5
+  system_prompt | System prompts, personas and operator instructions | see=ml.llm.prompting;since=1.5
+  instruction_following | Format and constraint instructions (length, style, output format) | since=1.5
+intel | Intelligence studies (non-cyber) | see=sec.cti;since=1.5
+  doctrine | Intelligence doctrine and the intelligence cycle | since=1.5
+  osint | Open-source intelligence | since=1.5
+  counterintelligence | Counterintelligence | since=1.5
+news | News journalism (general register, any subject) | see=soc.communication;since=1.5
+  general | General news reporting | since=1.5
 lang | Natural languages (ISO 639-3) | cip=16;ddc=400
 """
 
