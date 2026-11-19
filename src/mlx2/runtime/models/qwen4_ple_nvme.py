@@ -3,6 +3,8 @@
 from __future__ import annotations
 import fnmatch
 import hashlib
+import struct
+import sys
 import json
 import os
 import threading
@@ -38,6 +40,40 @@ READ_POLICY_CALIBRATION_ROWS = 128
 READ_POLICY_POOL_MARGIN_PERCENT = 20
 READ_POLICY_WARM_CHUNK_BYTES = 8 << 20
 READ_TIMEOUT_SECONDS = 60.0
+# Opt-in read-ahead hint for decode-sized foreground reads (recon 2026-11-13,
+# omlx #5225 analogue): F_RDADVISE on Darwin, POSIX_FADV_WILLNEED elsewhere.
+# Unqualified, default off; see docs/experiments/recon-probes-20261113/.
+READ_ADVISE_ENV = "MLX_QWEN4_PLE_NVME_READ_ADVISE"
+_F_RDADVISE = 44  # <sys/fcntl.h>; struct radvisory { off_t ra_offset; int ra_count; }
+
+
+def _read_advise_backend() -> str | None:
+    if sys.platform == "darwin":
+        return "f_rdadvise"
+    if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_WILLNEED"):
+        return "posix_fadvise"
+    return None
+
+
+def _advise_rows(fd, backend: str, offsets, row_bytes: int) -> int:
+    """Hint every row before any read; a refused hint is not an error.
+
+    One syscall per row. Darwin's F_RDADVISEV (up to 64 ranges per call)
+    would batch these; not used yet.
+    """
+    import fcntl
+
+    advised = 0
+    for offset in offsets:
+        try:
+            if backend == "f_rdadvise":
+                fcntl.fcntl(fd, _F_RDADVISE, struct.pack("qi4x", offset, row_bytes))
+            else:
+                os.posix_fadvise(fd, offset, row_bytes, os.POSIX_FADV_WILLNEED)
+            advised += 1
+        except OSError:
+            pass
+    return advised
 _FORK_RESOURCE_LOCK = threading.RLock()
 
 
@@ -122,7 +158,7 @@ def ple_table_diagnostics(table) -> dict:
 
     result = asdict(table.stats)
     policy = table.read_policy_status
-    if policy["configured"] != READ_POLICY_DEFAULT:
+    if policy["configured"] != READ_POLICY_DEFAULT or "advise" in policy:
         result["read_policy"] = policy
     return result
 
@@ -555,6 +591,15 @@ class FileBackedShardedEmbedding(nn.Module):
             )
         if self.decode_workers <= 0 or self.prefill_workers <= 0:
             raise ValueError("PLE NVMe worker counts must be positive")
+        self.read_advise = _strict_env_flag(READ_ADVISE_ENV, False)
+        self._read_advise_backend = _read_advise_backend() if self.read_advise else None
+        if self.read_advise and self._read_advise_backend is None:
+            raise ValueError(
+                f"{READ_ADVISE_ENV}=1 needs F_RDADVISE or posix_fadvise on this platform"
+            )
+        self._advise_calls = 0
+        self._advise_rows_requested = 0
+        self._advise_rows_accepted = 0
         self._adaptive_warm_enabled = (
             _strict_env_flag("MLX_QWEN4_PLE_NVME_ADAPTIVE_WARM", True)
             if self.read_policy == "adaptive"
@@ -804,19 +849,41 @@ class FileBackedShardedEmbedding(nn.Module):
             return proposed if self._read_policy_effective == "pooled" else 1
 
     def _pread_rows_fixed(
-        self, row_ids: np.ndarray, workers: int, *, inline: bool = False
+        self, row_ids: np.ndarray, workers: int, *, inline: bool = False,
+        advise: bool = False,
     ) -> np.ndarray:
-        """Read with an already selected arm; no policy or cache."""
+        """Read with an already selected arm; no policy or cache.
+
+        ``advise`` hints every row before the first read when the call runs
+        on one worker (the serial arm) and reads more than one row, so the
+        device sees the step's misses at once (a one-row read has nothing to
+        overlap).  A multi-worker call already issues its reads concurrently;
+        the hint measured slower there (recon-probes-20261113: 16 workers
+        349 -> 443 us cold, 158 -> 394 us warm), so it is not applied.
+        """
         n = int(row_ids.size)
         out = np.empty((n, self.row_bytes), dtype=np.uint8)
         if n == 0:
             return out
         row_bytes = self.row_bytes
         base = self.data_offset
+        workers = 1 if inline else max(1, min(workers, n))
+        advise = advise and workers == 1 and n > 1
+        advise_once = None
+        if advise:
+            backend = self._read_advise_backend
+            offsets = [base + int(r) * row_bytes for r in row_ids]
+            advise_state = {"accepted": 0}
+
+            def advise_once(fd):
+                # One worker, one task: runs once, before its first read.
+                advise_state["accepted"] = _advise_rows(fd, backend, offsets, row_bytes)
 
         def read_span(start, stop):
 
             def task(fd):
+                if advise_once is not None:
+                    advise_once(fd)
                 for i in range(start, stop):
                     if self._closed or (self._pool is not None and self._pool.failure):
                         raise ReadTimeout("PLE read ownership was revoked")
@@ -831,8 +898,8 @@ class FileBackedShardedEmbedding(nn.Module):
             return task
 
         # Serial still means one I/O worker; it must not run an unbounded
-        # filesystem call while holding the model thread/lifecycle lock.
-        workers = 1 if inline else max(1, min(workers, n))
+        # filesystem call while holding the model thread/lifecycle lock
+        # (``workers`` was clamped above).
         bounds = np.linspace(0, n, workers + 1, dtype=np.int64)
         futures = self._submit(
             False,
@@ -857,15 +924,22 @@ class FileBackedShardedEmbedding(nn.Module):
         finally:
             for future in futures:
                 future.cancel()
+        if advise:
+            with self._read_policy_lock:
+                self._advise_calls += 1
+                self._advise_rows_requested += n
+                self._advise_rows_accepted += advise_state["accepted"]
         return out
 
     def _pread_rows(self, row_ids: np.ndarray, workers: int) -> np.ndarray:
         """Read foreground rows and publish the arm that actually ran."""
+        n = int(row_ids.size)
+        # Decode/verify-sized reads only; prefill chunks keep their pool.
+        advise = self.read_advise and 0 < n < PREFILL_ID_THRESHOLD
         if self.read_policy == READ_POLICY_DEFAULT:
             # Preserve the historical hot path exactly while the candidate is
             # not selected: no policy lock, receipt allocation or new counter.
-            return self._pread_rows_fixed(row_ids, workers)
-        n = int(row_ids.size)
+            return self._pread_rows_fixed(row_ids, workers, advise=advise)
         actual_workers = max(1, min(int(workers), n)) if n else 1
         with self._read_policy_lock:
             inline = self.read_policy == "serial" or (
@@ -874,7 +948,9 @@ class FileBackedShardedEmbedding(nn.Module):
             )
         route = "serial" if inline else "pooled"
         actual_workers = 1 if inline else actual_workers
-        rows = self._pread_rows_fixed(row_ids, actual_workers, inline=inline)
+        rows = self._pread_rows_fixed(
+            row_ids, actual_workers, inline=inline, advise=advise
+        )
         with self._read_policy_lock:
             self._read_policy_counts[f"foreground_{route}_calls"] += int(n > 0)
             self._read_policy_counts[f"foreground_{route}_rows"] += n
@@ -888,6 +964,10 @@ class FileBackedShardedEmbedding(nn.Module):
                 "phase": self._read_policy_phase,
                 "warm_refresh_pending": self._warm_refresh_pending,
             }
+            if self.read_advise:
+                self._read_policy_last_receipt["advised"] = (
+                    advise and actual_workers == 1 and n > 1
+                )
         return rows
 
     def _calibration_row_ids(self, phase: str) -> tuple[np.ndarray, np.ndarray]:
@@ -1058,38 +1138,56 @@ class FileBackedShardedEmbedding(nn.Module):
     @property
     def read_policy_status(self) -> dict:
         with self._read_policy_lock:
-            return {
-                "schema": "mlx2.qwen4-ple-read-policy.v1",
-                "configured": self.read_policy,
-                "selected": self.read_policy != READ_POLICY_DEFAULT,
-                "qualified": False,
-                "effective": self._read_policy_effective,
-                "phase": self._read_policy_phase,
-                "failure": self._read_policy_failure,
-                "io": {
-                    "deadline_seconds": READ_TIMEOUT_SECONDS,
-                    "foreground_failure": self._pool.failure if self._pool else None,
-                    "prefetch_failure": self._prefetch_pool.failure if self._prefetch_pool else None,
-                    "warm_failure": self._warm_pool.failure if self._warm_pool else None,
-                },
-                "warming": {
-                    "enabled": self._adaptive_warm_enabled,
-                    "state": self._warm_state,
-                    "refresh_pending": self._warm_refresh_pending,
-                    "error": self._warm_error,
-                },
-                "calibration": (
-                    None
-                    if self._read_policy_calibration is None
-                    else dict(self._read_policy_calibration)
-                ),
-                "counts": dict(self._read_policy_counts),
-                "last_receipt": (
-                    None
-                    if self._read_policy_last_receipt is None
-                    else dict(self._read_policy_last_receipt)
-                ),
-            }
+            status = self._read_policy_status_locked()
+            if self.read_advise:
+                # Present only when selected, so default receipts keep their shape.
+                status["advise"] = self._read_advise_status_locked()
+            return status
+
+    def _read_policy_status_locked(self) -> dict:
+        return {
+            "schema": "mlx2.qwen4-ple-read-policy.v1",
+            "configured": self.read_policy,
+            "selected": self.read_policy != READ_POLICY_DEFAULT,
+            "qualified": False,
+            "effective": self._read_policy_effective,
+            "phase": self._read_policy_phase,
+            "failure": self._read_policy_failure,
+            "io": {
+                "deadline_seconds": READ_TIMEOUT_SECONDS,
+                "foreground_failure": self._pool.failure if self._pool else None,
+                "prefetch_failure": self._prefetch_pool.failure if self._prefetch_pool else None,
+                "warm_failure": self._warm_pool.failure if self._warm_pool else None,
+            },
+            "warming": {
+                "enabled": self._adaptive_warm_enabled,
+                "state": self._warm_state,
+                "refresh_pending": self._warm_refresh_pending,
+                "error": self._warm_error,
+            },
+            "calibration": (
+                None
+                if self._read_policy_calibration is None
+                else dict(self._read_policy_calibration)
+            ),
+            "counts": dict(self._read_policy_counts),
+            "last_receipt": (
+                None
+                if self._read_policy_last_receipt is None
+                else dict(self._read_policy_last_receipt)
+            ),
+        }
+
+    def _read_advise_status_locked(self) -> dict:
+        return {
+            "configured": self.read_advise,
+            "qualified": False,
+            "backend": self._read_advise_backend,
+            "max_rows": PREFILL_ID_THRESHOLD - 1,
+            "calls": self._advise_calls,
+            "rows_requested": self._advise_rows_requested,
+            "rows_accepted": self._advise_rows_accepted,
+        }
 
     def _cache_put(self, row_ids, rows: np.ndarray, *, authority=None) -> None:
         """Insert packed rows; evict LRU entries over the byte budget."""

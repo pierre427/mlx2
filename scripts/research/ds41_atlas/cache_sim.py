@@ -60,8 +60,86 @@ def access_stream(capture_dir):
     return acc, meta
 
 
+def simulate_lookahead(acc, capacity, window, pinned=frozenset(), unit="step"):
+    """Belady with a finite demand lookahead of ``window`` units (arXiv 2611.15842 framing).
+
+    ``unit="step"``: the simulator knows every access up to the end of step ``s + window`` (s = the
+    current step, so ``window=0`` sees the rest of the current forward pass). ``unit="call"``: it knows
+    the accesses of the next ``window`` layer calls in serving order (a call is one (step, layer)
+    record), so ``window=1`` is a perfect next-layer predictor. On a miss it evicts the least recently
+    used resident key that has no known use inside that horizon; when every resident key is needed
+    inside the horizon it evicts the one needed farthest ahead (Belady within the window). With an
+    unbounded window this is exactly Belady.
+    """
+    n = len(acc)
+    if unit == "step":
+        steps = np.fromiter((a[2] for a in acc), np.int64, n)
+    elif unit == "call":
+        steps = np.zeros(n, np.int64)
+        call = 0
+        for i in range(1, n):
+            if acc[i][0] != acc[i - 1][0] or acc[i][2] != acc[i - 1][2]:
+                call += 1
+            steps[i] = call
+    else:
+        raise ValueError(f"unknown lookahead unit {unit!r}")
+    nxt = np.empty(n, np.int64)
+    seen = {}
+    for i in range(n - 1, -1, -1):
+        k = acc[i][:2]
+        nxt[i] = seen.get(k, n)
+        seen[k] = i
+    # last access index of each step: a key's next use is known iff nxt <= horizon_end[step + window]
+    last_of_step = np.zeros(int(steps[-1]) + 1 if n else 1, np.int64)
+    last_of_step[steps] = np.arange(n)
+    np.maximum.accumulate(last_of_step, out=last_of_step)
+    top = len(last_of_step) - 1
+    import heapq
+    cache = OrderedDict()                   # key -> next-use index, LRU order (oldest first)
+    heap = []
+    miss = np.zeros(n, bool)
+    scans = 0
+    for i, (layer, e, _step) in enumerate(acc):
+        step = int(steps[i])
+        k = (layer, e)
+        if k in pinned:
+            continue
+        if k in cache:
+            cache[k] = int(nxt[i]); cache.move_to_end(k)
+            heapq.heappush(heap, (-int(nxt[i]), k))
+            continue
+        miss[i] = True
+        if len(cache) >= capacity:
+            horizon = last_of_step[min(top, step + window)]
+            victim = None
+            for q, qn in cache.items():           # oldest first
+                scans += 1
+                if qn > horizon:
+                    victim = q
+                    break
+            if victim is None:                    # all needed in the window: farthest next use
+                while True:
+                    negn, q = heapq.heappop(heap)
+                    if cache.get(q) == -negn:
+                        victim = q
+                        break
+            del cache[victim]
+        cache[k] = int(nxt[i])
+        heapq.heappush(heap, (-int(nxt[i]), k))
+        if len(heap) > 8 * capacity + 1024:       # drop stale heap entries
+            heap = [(-v, q) for q, v in cache.items()]
+            heapq.heapify(heap)
+    simulate_lookahead.last_scans = scans
+    return miss
+
+
 def simulate(acc, capacity, policy, pinned=frozenset(), alpha=0.1):
     """Returns misses per access list position (bool array). pinned keys never miss and use no capacity."""
+    if policy.startswith("belady_w"):
+        return simulate_lookahead(acc, capacity, int(policy[len("belady_w"):]), pinned=pinned)
+    if policy.startswith("belady_l"):
+        return simulate_lookahead(acc, capacity, int(policy[len("belady_l"):]), pinned=pinned,
+                                  unit="call")
     cache = OrderedDict()
     miss = np.zeros(len(acc), bool)
     if policy == "belady":

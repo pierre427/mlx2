@@ -25,6 +25,9 @@ _OPTIONAL_KERNEL_ENV = {
     # (provenance/tensorfold-0.6.1-flashnext-longctx.json).
     "qsa_fused_scores": "MLX_QWEN4_QSA_FUSED_SCORES",
     "ple_early_dispatch": "MLX_QWEN4_PLE_EARLY_DISPATCH",
+    # Read-ahead hint on decode/verify-sized PLE row reads (recon 2026-11-13,
+    # omlx #5225 analogue; docs/experiments/recon-probes-20261113/).
+    "ple_read_advise": "MLX_QWEN4_PLE_NVME_READ_ADVISE",
     # QSA stage-one selection instrumentation (opt-in, syncs the GPU around
     # each selection, so TTFT measured with it on is not comparable).
     "qsa_stage1_select_timing": "MLX_QWEN4_QSA_STAGE1_SELECT_TIMING",
@@ -167,6 +170,14 @@ class FlashNextPolicy:
     # async_eval boundary).  Opt-in; enters the environment and receipts
     # only when enabled.
     ple_early_dispatch: bool = False
+    # F_RDADVISE (POSIX_FADV_WILLNEED off Darwin) on every row of a
+    # one-worker, decode/verify-sized PLE read before its first pread: the
+    # device sees a step's misses at once on the serial arm (ple_read_policy
+    # serial, or adaptive once warmed).  Hint only; the rows read are
+    # unchanged.  Requires serial or adaptive (pooled reads never run on one
+    # worker).  CPU probe and numbers: docs/experiments/recon-probes-20261113.
+    # Unqualified opt-in; enters the environment and receipts only when on.
+    ple_read_advise: bool = False
     qsa_stage1_select_timing: bool = False
     qsa_stage1_gvr_count_paths: bool = False
     # Exact QSA stage-one selector (runtime/models/qwen4_qsa_stage1.py):
@@ -721,6 +732,11 @@ class FlashNextPolicy:
             raise ValueError("tensorfold_prefill_backend requires tensorfold_prefill")
         if self.ple_read_policy not in ("pooled", "serial", "adaptive"):
             raise ValueError("ple_read_policy must be pooled, serial, or adaptive")
+        if self.ple_read_advise is True and self.ple_read_policy == "pooled":
+            raise ValueError(
+                "ple_read_advise needs ple_read_policy serial or adaptive "
+                "(pooled reads never run on one worker)"
+            )
         if type(self.ple_adaptive_warm) is not bool:
             raise ValueError("ple_adaptive_warm must be boolean")
         lanes = self.mtp_batched_prefill_lanes
