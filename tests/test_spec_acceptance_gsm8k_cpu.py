@@ -41,6 +41,47 @@ def test_acceptance_matches_vllm_definitions():
     assert gsm.acceptance_summary([None]) == {"verify_rounds": 0, "requests_without_rounds": 1}
 
 
+def test_per_position_divides_by_rounds_that_drafted_the_position():
+    # Four rounds: two drafted 4 tokens (accepted 4 and 1), two were shallow
+    # rounds that drafted 1 token (accepted 1 and 0).  Position 3 was drafted
+    # in 2 rounds and accepted in 1: p3 = 1/2, not 1/4.
+    receipts = [{"verify_accept_hist": {"4": 1, "1": 2, "0": 1},
+                 "verify_depth_hist": {"4": 2, "1": 2}, "proposed": 10}]
+    got = gsm.acceptance_summary(receipts)
+    assert got["per_position_denominator"] == "rounds_drafting_position"
+    assert got["per_position_basis"] == "deepest_drafted"
+    assert got["per_position"]["p1"] == pytest.approx(3 / 4)
+    assert got["per_position"]["p2"] == pytest.approx(1 / 2)
+    assert got["per_position"]["p3"] == pytest.approx(1 / 2)
+    assert got["per_position"]["p4"] == pytest.approx(1 / 2)
+    # The old figures stay available and show the under-report.
+    assert got["per_position_per_round"]["p3"] == pytest.approx(1 / 4)
+    assert got["drafted_at_position"] == {"p1": 4, "p2": 2, "p3": 2, "p4": 2}
+    # A position no round drafted has no rate, rather than a 0.
+    deep = gsm.acceptance_summary(receipts, draft_depth=6)
+    assert deep["per_position"]["p5"] is None and deep["per_position_per_round"]["p5"] == 0
+
+
+def test_per_position_falls_back_when_any_receipt_lacks_depths():
+    receipts = [{"verify_accept_hist": {"2": 1}, "verify_depth_hist": {"2": 1}},
+                {"verify_accept_hist": {"0": 1}}]
+    got = gsm.acceptance_summary(receipts)
+    assert got["per_position_denominator"].startswith("verify_rounds")
+    assert got["per_position"] == got["per_position_per_round"]
+    assert got["requests_without_depth_hist"] == 1
+
+
+def test_per_position_refuses_more_accepts_than_drafts():
+    with pytest.raises(ValueError, match="more rounds accepted"):
+        gsm.acceptance_summary([{"verify_accept_hist": {"3": 1}, "verify_depth_hist": {"2": 1}}])
+
+
+def test_native_mtp_receipt_carries_depths():
+    extra = {"mtp": {"stats": {"verify_accept_hist": {"1": 1}, "verify_depth_hist": {"2": 1},
+                               "draft_proposed": 2}}}
+    assert gsm.speculation_receipt(extra)["verify_depth_hist"] == {"2": 1}
+
+
 def test_vendored_dataset_matches_its_source_record():
     revision, files = gsm.dataset_files()
     test, train = gsm.load_split(files["test"]), gsm.load_split(files["train"])

@@ -2210,6 +2210,9 @@ class PromptLookupBatchGenerator:
         lane.generated += len(delivered)
         lane.stats.cycles += 1
         lane.stats.verify_span_hist[len(inputs)] = lane.stats.verify_span_hist.get(len(inputs), 0) + 1
+        # ``inputs`` is the anchor plus the drafted tokens.
+        _round_depth = len(inputs) - 1
+        lane.stats.verify_depth_hist[_round_depth] = lane.stats.verify_depth_hist.get(_round_depth, 0) + 1
         _round_accepted = sum(item[2] for item in delivered)
         lane.stats.verify_accept_hist[_round_accepted] = (
             lane.stats.verify_accept_hist.get(_round_accepted, 0) + 1
@@ -2367,6 +2370,7 @@ class PromptLookupBatchGenerator:
             "admission_reentries": lane.stats.admission_reentries,
             "verify_span_hist": dict(lane.stats.verify_span_hist),
             "verify_accept_hist": dict(lane.stats.verify_accept_hist),
+            "verify_depth_hist": dict(lane.stats.verify_depth_hist),
             "span_snap_cycles": lane.stats.span_snap_cycles,
             "span_extend_cycles": lane.stats.span_extend_cycles,
             "lookup_index": lane.proposer.index_receipt(),

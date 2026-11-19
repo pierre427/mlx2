@@ -3926,6 +3926,7 @@ class MTPGenerationBatch:
             for _hist in (
                 "verify_span_hist",
                 "verify_accept_hist",
+                "verify_depth_hist",
                 "ragged_verify_backend_modes",
                 "ragged_verify_stage_ns",
                 "ragged_verify_stage_calls",

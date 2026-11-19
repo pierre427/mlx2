@@ -30,6 +30,12 @@ class HybridStats:
 
         which keeps numerator and denominator inside a single run instead of
         comparing two runs.
+    ``verify_depth_hist``
+        Deepest drafted position per round (chain: drafted tokens; tree:
+        longest root-to-leaf path).  Per-position acceptance must divide by
+        the rounds that drafted position k, ``sum(r for d, r if d >= k)``,
+        not by all rounds: a round that drafted fewer than k tokens could not
+        accept position k, and counting it reads deeper positions low.
     """
 
     cycles: int = 0
@@ -45,6 +51,7 @@ class HybridStats:
     span_extend_tokens: int = 0
     verify_span_hist: dict[int, int] = field(default_factory=dict)
     verify_accept_hist: dict[int, int] = field(default_factory=dict)
+    verify_depth_hist: dict[int, int] = field(default_factory=dict)
     latched: bool = False
     lookback_current: int = 0
     lookback_peak: int = 0

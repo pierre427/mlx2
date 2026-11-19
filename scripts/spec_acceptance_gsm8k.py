@@ -7,8 +7,10 @@ Measures, per arm, on the GSM8K test split served through an mlx2 server:
 * speculative acceptance in vLLM's terms, from each request's speculation
   receipt (``verify_accept_hist``): mean acceptance length
   ``1 + accepted / verify_rounds`` (tokens committed per verify step, bonus
-  included) and per-position acceptance ``p_k`` = share of verify rounds that
-  accepted at least ``k`` drafted tokens;
+  included) and per-position acceptance ``p_k`` = share of the verify rounds
+  that drafted position ``k`` which accepted at least ``k`` drafted tokens
+  (``verify_depth_hist``; receipts before 2026-11-18 lack it and fall back
+  to all rounds, labelled in ``per_position_denominator``);
 * decode tok/s, completion tokens, and the route each request used.
 
 Prompt formats (``--format``):
@@ -151,12 +153,24 @@ def acceptance_summary(receipts, max_position=16, draft_depth=None):
     verify round to a round count.  Requests without speculation rounds are
     counted in ``requests_without_rounds`` and contribute nothing.
 
-    ``per_position`` runs to ``draft_depth`` when the caller knows it (routes
-    share no depth field in their receipts), so never-accepted depths show 0
-    instead of vanishing; otherwise it stops at the deepest accepted depth,
-    and ``per_position_basis`` says which.
+    ``per_position`` runs to ``draft_depth`` when the caller knows it, so
+    never-accepted depths show 0 instead of vanishing; otherwise it stops at
+    the deepest drafted (or, for old receipts, accepted) depth, and
+    ``per_position_basis`` says which.
+
+    Denominator (``per_position_denominator``).  ``p_k`` is accepted at
+    position k over the rounds that drafted position k, as vLLM defines it
+    (vllm#67610).  Receipts carry that count as ``verify_depth_hist``
+    (deepest drafted position per round).  A round that drafted fewer than k
+    tokens -- a parked or plain round, a shallow adaptive tile, a short
+    prompt-lookup copy -- cannot accept position k, so dividing by every
+    verify round reads deeper positions low.  Receipts written before
+    2026-11-18 have no ``verify_depth_hist``; for them, or when any receipt
+    in the arm lacks it, ``per_position`` keeps the old all-rounds
+    denominator and says so.  ``per_position_per_round`` always holds the
+    all-rounds figures, for comparison with older summaries.
     """
-    hist, proposed, without = {}, 0, 0
+    hist, depths, proposed, without, legacy = {}, {}, 0, 0, 0
     for spec in receipts:
         rounds = (spec or {}).get("verify_accept_hist") or {}
         if not rounds:
@@ -164,23 +178,55 @@ def acceptance_summary(receipts, max_position=16, draft_depth=None):
             continue
         for accepted, count in rounds.items():
             hist[int(accepted)] = hist.get(int(accepted), 0) + int(count)
+        drafted = (spec or {}).get("verify_depth_hist") or {}
+        if sum(int(c) for c in drafted.values()) != sum(int(c) for c in rounds.values()):
+            # Missing (old receipt) or not round-for-round with the accepts.
+            legacy += 1
+        else:
+            for depth, count in drafted.items():
+                depths[int(depth)] = depths.get(int(depth), 0) + int(count)
         proposed += int((spec or {}).get("proposed") or 0)
     total = sum(hist.values())
     if not total:
         return {"verify_rounds": 0, "requests_without_rounds": without}
     accepted = sum(k * v for k, v in hist.items())
     deepest = max(max(hist), 1)
+    use_drafted = not legacy and bool(depths)
+    if use_drafted:
+        deepest = max(deepest, max(depths))
     if draft_depth is not None and int(draft_depth) < deepest:
-        raise ValueError(f"draft depth {draft_depth} is below an accepted depth of {deepest}")
+        kind = "a drafted" if use_drafted else "an accepted"
+        raise ValueError(f"draft depth {draft_depth} is below {kind} depth of {deepest}")
     depth = int(draft_depth) if draft_depth is not None else deepest
-    positions = {f"p{k}": sum(v for a, v in hist.items() if a >= k) / total
-                 for k in range(1, min(depth, max_position) + 1)}
+    span = range(1, min(depth, max_position) + 1)
+
+    def reached(k, table):
+        return sum(v for a, v in table.items() if a >= k)
+
+    per_round = {f"p{k}": reached(k, hist) / total for k in span}
+    if use_drafted:
+        for k in span:
+            if reached(k, hist) > reached(k, depths):
+                raise ValueError(f"more rounds accepted position {k} than drafted it")
+        positions = {f"p{k}": (reached(k, hist) / reached(k, depths) if reached(k, depths) else None)
+                     for k in span}
+        denominator = "rounds_drafting_position"
+    else:
+        positions = per_round
+        denominator = ("verify_rounds (receipts without verify_depth_hist: "
+                       "under-reports positions some rounds did not draft)")
     return {"verify_rounds": total, "accepted_tokens": accepted, "proposed_tokens": proposed,
             "mean_acceptance_length": 1 + accepted / total,
             "draft_acceptance_rate": accepted / proposed if proposed else None,
             "per_position": positions,
-            "per_position_basis": "draft_depth" if draft_depth is not None else "deepest_accepted",
+            "per_position_basis": "draft_depth" if draft_depth is not None else (
+                "deepest_drafted" if use_drafted else "deepest_accepted"),
+            "per_position_denominator": denominator,
+            "per_position_per_round": per_round,
+            "drafted_at_position": ({f"p{k}": reached(k, depths) for k in span} if use_drafted else None),
             "accept_hist": {str(k): hist[k] for k in sorted(hist)},
+            "depth_hist": {str(k): depths[k] for k in sorted(depths)} if use_drafted else None,
+            "requests_without_depth_hist": legacy,
             "requests_without_rounds": without}
 
 
@@ -201,6 +247,7 @@ def speculation_receipt(extra):
     stats = mtp.get("stats") if isinstance(mtp, dict) else None
     if isinstance(stats, dict) and stats.get("verify_accept_hist"):
         return {"source": "mtp.stats", "verify_accept_hist": stats["verify_accept_hist"],
+                "verify_depth_hist": stats.get("verify_depth_hist"),
                 "proposed": stats.get("draft_proposed")}
     return spec
 
@@ -353,6 +400,7 @@ def compact(row):
                                      "completion_tokens", "decode_tps", "text")}
     spec = row.get("speculation") or {}
     keep["accept_hist"] = spec.get("verify_accept_hist")
+    keep["depth_hist"] = spec.get("verify_depth_hist")
     for name in ("effective_sampling", "sampling_filter"):
         if name in row:
             keep[name] = row[name]

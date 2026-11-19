@@ -3821,6 +3821,9 @@ def commit_batched_self_mtp(
             lane.stats.verify_span_hist[span] = (
                 lane.stats.verify_span_hist.get(span, 0) + 1
             )
+            lane.stats.verify_depth_hist[span - 1] = (
+                lane.stats.verify_depth_hist.get(span - 1, 0) + 1
+            )
             lane.stats.verify_accept_hist[consumed_accepted] = (
                 lane.stats.verify_accept_hist.get(consumed_accepted, 0) + 1
             )

@@ -850,6 +850,10 @@ class Lane:
     # actually run, ``verify_span_hist`` counts verified positions per round.
     verify_span_hist: dict = field(default_factory=dict)
     verify_accept_hist: dict = field(default_factory=dict)
+    # Deepest drafted position per round (chain: drafted tokens; tree: the
+    # longest root-to-leaf path).  The denominator for per-position
+    # acceptance; ``verify_span_hist`` overstates it for trees.
+    verify_depth_hist: dict = field(default_factory=dict)
     # Paired ``verified positions:accepted draft tokens`` histogram.  The two
     # marginal histograms above cannot prove that a particular short accept
     # occurred in a full tree round; this receipt makes planted and live
@@ -953,6 +957,27 @@ class CompactDraftRow:
     @property
     def lengths(self):
         return (len(self.tokens),)
+
+
+def _draft_round_depth(block, count):
+    """Deepest drafted position of one verify round.
+
+    A chain block drafts ``count`` positions.  A tree block's ``parents``
+    index its own ``tokens`` (-1 is the root), so its depth is the longest
+    root-to-leaf path, not the node count.
+    """
+    parents = getattr(block, "parents", None)
+    if not parents or len(parents) != count:
+        return int(count)
+    depth = [0] * count
+    for node in range(count):
+        # Walk up to the root; parents need not precede their children.
+        steps, cursor = 0, node
+        while cursor >= 0 and steps <= count:
+            steps += 1
+            cursor = int(parents[cursor])
+        depth[node] = steps
+    return max(depth, default=0)
 
 
 @dataclass
@@ -3212,6 +3237,7 @@ class ExternalDraftBatchGenerator:
         hists = {
             "verify_span_hist": dict(lane.verify_span_hist),
             "verify_accept_hist": dict(lane.verify_accept_hist),
+            "verify_depth_hist": dict(getattr(lane, "verify_depth_hist", {})),
             "verify_accept_span_hist": dict(lane.verify_accept_span_hist),
         }
         if getattr(lane, "trusted_pld_rounds", 0):
@@ -9527,6 +9553,10 @@ class ExternalDraftBatchGenerator:
                 )
                 lane.verify_accept_hist[round_accepted] = (
                     lane.verify_accept_hist.get(round_accepted, 0) + 1
+                )
+                depth = _draft_round_depth(blocks[row], count)
+                lane.verify_depth_hist[depth] = (
+                    lane.verify_depth_hist.get(depth, 0) + 1
                 )
                 pair = f"{count + 1}:{round_accepted}"
                 lane.verify_accept_span_hist[pair] = (
