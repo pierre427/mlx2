@@ -421,6 +421,13 @@ def cmd_install(a, execute, check_commit) -> int:
     psha = paths.sha256_file(pc)
     if json.loads(pman.read_text()).get("corpus_sha256") != psha:
         raise SystemExit(f"--probe-corpus {pc} is not the corpus the bundle was made from: refusing")
+    eff = json.loads((bundle / "manifest.json").read_text()).get("probe_corpus_effective")
+    if eff:     # the extraction excluded texts (a reserved final test): the routes read its effective corpus only
+        ep = Path(eff["path"])
+        if not ep.exists() or paths.sha256_file(ep) != eff["sha256"]:
+            raise SystemExit(f"the bundle was carved on an effective probe corpus ({ep}) that is missing or changed: "
+                             "refusing (its excluded texts must stay out of every route)")
+        pc, psha = ep, eff["sha256"]
     tax = sorted((bundle / "taxonomy").glob("taxonomy*.json"))
     cores = [Path(x).expanduser().resolve() for x in a.core_corpus] or list(paths.DEFAULT_CORE_CORPORA)
     inputs = {"probe_corpus": {"path": str(pc), "sha256": psha},

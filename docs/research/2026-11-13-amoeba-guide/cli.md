@@ -298,6 +298,33 @@ the Qwen3-1.7B-4bit extract, checks the pipeline. It is never a box-quality, map
 `--attention-units heads` refuses: the carve host has no attention-head sites yet. The side-stream loader in
 `mlx2 serve` is the next phase.
 
+**A given core, no map, reserved texts (2026-11-18).** These options let a large dense donor get a box without
+re-carving its core or capturing a full map:
+
+- `--core-from NPZ[:KEY] --core-from-reason TEXT`: the `core` stage takes this mask instead of carving one. The
+  mask must be a dense model's `[layers, intermediate]` core, for example the 27B T2 cut. It is never cached. Its
+  sha256 and the receipts beside it are recorded in `core/core_source.json`, and the English-only check still
+  runs on it.
+- `--no-map REASON`: the map stage records the reason and nothing else. The box carve starts unseeded, and the
+  bundle carries no map.
+- `--exclude-texts FILE` (repeatable): a JSON object with any of `probe_ids`, `sha256` (of the text) and `groups`.
+  Matching rows leave the build's effective probe corpus, `<out>/inputs/<probe build>/corpus.jsonl`, which every
+  stage reads: the box set, the gate negatives, the English check and the prompt set. A list that matches nothing
+  refuses. The accounting is in `inputs/effective-probes.json`.
+  - `scripts/amoeba_bridge_heldout.py` writes such a list for the held texts a bridge-lab topic run never touched.
+    It replays the run's seeded selection on the CPU and checks the counts against a recorded review.
+- `--extra-topic-corpus FILE` (repeatable): more probe-format rows (`id`, `topics`, `split`, `text`, `group`,
+  `license`). Duplicate and excluded texts are dropped. A row whose group already sits in the other split refuses.
+- `--swap-growth-gb N --swap-waiver TEXT` (every run command): the stage fails, and its child's process group
+  is stopped, if system swap grows more than N GB over the run's start, checked before each child and on every
+  footprint sample.
+- `box/bar.json` (also in the box receipt and the bundle manifest) states pass or fail on each bar condition, with
+  `<artifact>@<fingerprint>` and the mlx2 commit:
+  - core + box held dCE within +0.05 nats of the full donor;
+  - at most 0.5x the held dCE of a same-count random box, with a margin floor.
+
+The 27B sci.physics window, `scripts/amoeba27b_physbox_inner.sh OUT`, uses all of these.
+
 ## Installing a box in another model (`install`, workflow sections 12.2–12.3)
 
 ```bash

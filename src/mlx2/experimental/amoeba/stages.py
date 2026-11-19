@@ -148,8 +148,25 @@ def _subsample_probes(src: Path, dst: Path, per_node: int, seed: int) -> dict:
 
 
 def carve_widths(b) -> list:
-    """Per-layer unit counts of the carve (the core carve's receipt): the layout of every mask in this build."""
-    return json.loads((b.out / "core/carve/carve.json").read_text())["shape"]["widths"]
+    """Per-layer unit counts of the carve (the core carve's receipt): the layout of every mask in this build. An
+    extraction on a given core (``extract --core-from``) records them in core/core_source.json instead."""
+    rep = b.out / "core/carve/carve.json"
+    if rep.exists():
+        return json.loads(rep.read_text())["shape"]["widths"]
+    return json.loads((b.out / "core/core_source.json").read_text())["widths"]
+
+
+def probe_corpus(b) -> str:
+    """The probe corpus the stages read: the build's effective corpus (``extract --exclude-texts`` /
+    ``--extra-topic-corpus`` applied; inputs.probe_corpus_effective) when it has one, else the pinned corpus."""
+    eff = (b.rec.get("inputs") or {}).get("probe_corpus_effective")
+    return eff["path"] if eff else b.rec["inputs"]["probe_corpus"]["path"]
+
+
+def probe_corpus_sha(b) -> str:
+    """sha256 of the corpus probe_corpus(b) names (cache keys: a map or core made on another corpus never matches)."""
+    eff = (b.rec.get("inputs") or {}).get("probe_corpus_effective")
+    return eff["sha256"] if eff else b.rec["inputs"]["probe_corpus"]["sha256"]
 
 
 def map_core_mask(b, map_widths) -> np.ndarray:
@@ -189,7 +206,7 @@ def _check_capture_disk(b, corpus: Path, d: Path) -> None:
 def run_map(b, ctx):
     d = b.stage_dir("map")
     comp = b.cfg["compute"]
-    probes = Path(b.rec["inputs"]["probe_corpus"]["path"])
+    probes = Path(probe_corpus(b))
     sub = None
     if comp["map_probes_per_node"]:
         corpus = d / "probes.jsonl"
@@ -295,6 +312,23 @@ def _english_corpus(b, dst: Path) -> dict:
             "held": sum(r.get("split") == "held" for r in rows)}
 
 
+def corecheck(b, ctx, d: Path, eng: Path) -> Path:
+    """The English-only check of d/core.npz (held non-English probes and held English, core alone vs full)."""
+    comp, data, plan = b.cfg["compute"], b.cfg["data"], b.plan
+    chk = d / "corecheck.json"
+    if not chk.exists():
+        run_child(_py("mlx2.experimental.amoeba.child_probe") +
+                  ["corecheck", "--model", b.info["path"], "--core", d / "core.npz",
+                   "--probes", probe_corpus(b), "--english", eng, "--out", chk,
+                   "--window-tokens", data["window_tokens"], "--moe-units", plan["moe_units"],
+                   "--per-language", 16 if b.cfg["profile"] == "full" else 4,
+                   "--english-rows", 48 if b.cfg["profile"] == "full" else 12,
+                   "--english-max", comp["core_export_target"] + 0.05] + _mem_args(b, "core") +
+                  (["--cpu"] if ctx.cpu else []),
+                  stage="core", progress=ctx.progress, log_path=b.log_path("core"), what="English-only check")
+    return chk
+
+
 def run_core(b, ctx):
     d = b.stage_dir("core")
     comp, data, plan = b.cfg["compute"], b.cfg["data"], b.plan
@@ -333,17 +367,7 @@ def run_core(b, ctx):
         raise SystemExit("core carve fingerprint does not match the build")
     core = np.load(run / "export_core.npz")["core"] > 0
     np.savez_compressed(d / "core.npz", core=core.astype(np.uint8))
-    chk = d / "corecheck.json"
-    if not chk.exists():
-        run_child(_py("mlx2.experimental.amoeba.child_probe") +
-                  ["corecheck", "--model", b.info["path"], "--core", d / "core.npz",
-                   "--probes", b.rec["inputs"]["probe_corpus"]["path"], "--english", eng, "--out", chk,
-                   "--window-tokens", data["window_tokens"], "--moe-units", plan["moe_units"],
-                   "--per-language", 16 if b.cfg["profile"] == "full" else 4,
-                   "--english-rows", 48 if b.cfg["profile"] == "full" else 12,
-                   "--english-max", comp["core_export_target"] + 0.05] + _mem_args(b, "core") +
-                  (["--cpu"] if ctx.cpu else []),
-                  stage="core", progress=ctx.progress, log_path=b.log_path("core"), what="English-only check")
+    chk = corecheck(b, ctx, d, eng)
     cc = json.loads(chk.read_text())
     e = rep.get("export_core") or {}
     widths = rep["shape"]["widths"]
@@ -412,9 +436,9 @@ def _cluster_boxes(b, ctx, bs: Path, existing: list) -> tuple[list, list]:
                 score[i] += rel[:, u].sum(1)
     for i, j in enumerate(unl):
         score[i] /= max(1, sizes[j])
-    probes = read_jsonl(b.rec["inputs"]["probe_corpus"]["path"])
+    probes = read_jsonl(probe_corpus(b))
     by_id = {r["id"]: r for r in probes}
-    build = Path(b.rec["inputs"]["probe_corpus"]["path"]).parent.name
+    build = Path(probe_corpus(b)).parent.name
 
     def row(r):
         return {"text": r["text"], "domain": "box", "doc_id": _doc_id(r["text"]), "probe_id": r["id"],
@@ -468,7 +492,7 @@ def _build_boxset(b, ctx, bs: Path) -> None:
     tmp = bs.with_name(bs.name + ".partial")
     shutil.rmtree(tmp, ignore_errors=True)
     run_child(_py("amoeba_fn_boxset_build.py") +
-              ["--corpus", b.rec["inputs"]["probe_corpus"]["path"], "--out", tmp, "--boxes", ctx.boxes,
+              ["--corpus", probe_corpus(b), "--out", tmp, "--boxes", ctx.boxes,
                "--min-fit", comp["box_min_fit"], "--carve-prompts", comp["box_carve_prompts"],
                "--val-prompts", comp["box_val_prompts"], "--held-prompts", comp["box_held_prompts"],
                "--model", b.info["path"], "--seq-len", data["window_tokens"],
@@ -813,7 +837,7 @@ def run_bundle(b, ctx):
             runs += ["--carve-run", rd, "--stage", f"box:{n}"]
     runs += ["--capture-run", b.out / "map/capture", "--stage", "map"]
     run_child([ap, "-u", paths.repo_root() / "scripts/amoeba_prompt_set.py", "--out", d / "prompt-set", "--name", name,
-               "--probe-corpus", inp["probe_corpus"]["path"], "--checkpoint", b.checkpoint,
+               "--probe-corpus", probe_corpus(b), "--checkpoint", b.checkpoint,
                "--taxonomy-version", inp["taxonomy"]["version"]] + runs,
               stage="bundle", progress=ctx.progress, log_path=b.log_path("bundle"), what="prompt set")
     ps_man = json.loads((d / f"prompt-set/{name}.manifest.json").read_text())

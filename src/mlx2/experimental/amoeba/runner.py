@@ -48,6 +48,48 @@ def footprint_gb(pid: int) -> float | None:
 
 DEADLINE = {"t": None}     # --stop-at (epoch s): no child starts after it; a running carve checkpoints at it
 
+# --swap-growth-gb N --swap-waiver TEXT: system swap may grow at most N GB over this run's start before a child
+# starts or while one runs (sampled with the footprint); past it the child's group is stopped and the stage fails
+SWAP_GUARD = {"growth_gb": None, "baseline_gb": None, "waiver": None}
+
+
+def swap_used_gb() -> float | None:
+    """System swap in use (sysctl vm.swapusage), GB."""
+    import re
+    try:
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, check=False,
+                             timeout=15).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"used = ([\d.]+)([MG])", out)
+    if not m:
+        return None
+    return float(m[1]) / (1024 if m[2] == "M" else 1)
+
+
+def arm_swap_guard(growth_gb: float | None, waiver: str | None) -> dict:
+    """Take this run's swap baseline (a resume takes a new one). growth None or <= 0: no guard."""
+    if not growth_gb or growth_gb <= 0:
+        SWAP_GUARD.update(growth_gb=None, baseline_gb=None, waiver=None)
+        return dict(SWAP_GUARD)
+    base = swap_used_gb()
+    if base is None:
+        raise SystemExit("--swap-growth-gb: cannot read vm.swapusage, so the swap guard cannot run")
+    SWAP_GUARD.update(growth_gb=float(growth_gb), baseline_gb=round(base, 3), waiver=waiver)
+    return dict(SWAP_GUARD)
+
+
+def swap_over(now_gb: float | None = None) -> str | None:
+    """The refusal text when swap grew past the guard, else None."""
+    g, base = SWAP_GUARD["growth_gb"], SWAP_GUARD["baseline_gb"]
+    if g is None or base is None:
+        return None
+    cur = swap_used_gb() if now_gb is None else now_gb
+    if cur is not None and cur - base > g:
+        return (f"swap guard: swap {cur:.2f} GB is {cur - base:.2f} GB over this run's start ({base:.2f} GB), past "
+                f"the {g:g} GB allowance ({SWAP_GUARD['waiver']})")
+    return None
+
 
 def check_deadline(what: str) -> None:
     if DEADLINE["t"] is not None and time.time() >= DEADLINE["t"]:
@@ -64,7 +106,11 @@ def run_child(cmd: list, *, stage: str, progress, log_path: Path, what: str = ""
     what = what or Path(cmd[1] if len(cmd) > 1 else cmd[0]).name
     check_deadline(what)
     check_agent_memory(progress, stage)
+    over = swap_over()
+    if over:
+        raise SystemExit(f"{over}; not starting {what}")
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    tripped = {}
     with log_path.open("a") as lf:
         lf.write(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} $ {' '.join(cmd)}\n")
         lf.flush()
@@ -79,6 +125,12 @@ def run_child(cmd: list, *, stage: str, progress, log_path: Path, what: str = ""
                 gb = footprint_gb(p.pid)
                 if gb is not None:
                     progress.emit("footprint", stage=stage, pid=p.pid, gb=round(gb, 2))
+                over = swap_over()
+                if over and not done.is_set():
+                    tripped["why"] = over
+                    progress.emit("swap_guard", stage=stage, pid=p.pid, error=over)
+                    stop_group(p)
+                    return
         th = threading.Thread(target=sampler, daemon=True)
         th.start()
         try:
@@ -93,6 +145,8 @@ def run_child(cmd: list, *, stage: str, progress, log_path: Path, what: str = ""
         finally:
             done.set()
     progress.emit("child_end", stage=stage, what=what, rc=rc)
+    if tripped:
+        raise SystemExit(f"{what} stopped: {tripped['why']}")
     if rc == 75:
         raise CleanStop(f"{what}: clean stop at --stop-at; resume with `mlx2 amoeba resume`")
     if rc:
@@ -120,6 +174,9 @@ class Background:
 
     def __init__(self, cmd: list, *, stage: str, progress, log_path: Path, env_extra: dict | None = None):
         check_agent_memory(progress, stage)
+        over = swap_over()
+        if over:
+            raise SystemExit(f"{over}; not starting the background child")
         cmd = [str(c) for c in cmd]
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self.lf = log_path.open("a")

@@ -104,7 +104,8 @@ def main():
             return {"text": r["text"], "domain": "box", "doc_id": _doc_id(r["text"]), "probe_id": r["id"],
                     "topics": r["topics"], "source": r.get("group", ""), "origin": r.get("origin"),
                     "license": r.get("license"), "probe_source": r.get("source"), "method": r.get("method"),
-                    "path_key": r.get("path_key"), "probe_sha256": r.get("sha256"), "corpus_build": build}
+                    "path_key": r.get("path_key"), "probe_sha256": r.get("sha256"),
+                    "corpus_build": r.get("corpus_build") or build}
         val_all = [r for r in fit if h(r.get("group", r["id"]), a.seed + 7) % a.val_every == 0]
         vid = {r["id"] for r in val_all}
         carve = [r for r in fit if r["id"] not in vid]       # synthetic fit rows stay in carve (coordinator)

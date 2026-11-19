@@ -74,6 +74,10 @@ def _run_args(p):
     p.add_argument("--gpu-window-owner", default="", help="the job that owns the GPU window for this run")
     p.add_argument("--ignore-gpu-queue", default="", metavar="REASON", help="bypass only GPU-window admission; recorded with lock holder")
     p.add_argument("--allow-dirty", action="store_true", help="run from a tree with uncommitted tracked changes")
+    p.add_argument("--swap-growth-gb", type=float, default=0.0,
+                   help="stop when system swap grows more than this over the run's start (0 = no guard); needs "
+                        "--swap-waiver")
+    p.add_argument("--swap-waiver", default="", help="who approved the --swap-growth-gb allowance (recorded)")
 
 
 def parse(argv):
@@ -155,6 +159,14 @@ def parse(argv):
     p.add_argument("--gen-route", default="")
     p.add_argument("--data-override", action="append", default=[], metavar="KEY=VALUE")
     p.add_argument("--override-reason", default="")
+    p.add_argument("--core-from", default="", metavar="NPZ[:KEY]",
+                   help="use this core mask instead of carving one (dense models; key default 'core')")
+    p.add_argument("--core-from-reason", default="", help="who chose the --core-from core (recorded)")
+    p.add_argument("--no-map", default="", metavar="REASON", help="no map stage: the box carve starts unseeded")
+    p.add_argument("--exclude-texts", action="append", default=[], metavar="FILE",
+                   help="JSON {probe_ids, sha256, groups}: texts no stage may see (repeatable)")
+    p.add_argument("--extra-topic-corpus", action="append", default=[], metavar="FILE",
+                   help="more probe-format rows for the effective probe corpus (repeatable)")
     from .install import INSTALL_STAGES, add_parser as add_install_parser
     add_install_parser(sub, _common_plan_args, _run_args)
     p = sub.add_parser("rolling-parity", help="rolling capture vs the ordinary resident capture on the same texts "
@@ -284,6 +296,8 @@ def cmd_build(a) -> int:
         from .extract import EXTRACT_STAGES
         a.stages = "gap" if a.gap_only else ",".join(EXTRACT_STAGES)
         a.boxes, a.max_boxes, a.max_cluster_boxes = "", 0, 0
+        if a.core_from_reason and not a.core_from:
+            raise SystemExit("--core-from-reason without --core-from")
         extract = {"topic": a.topic, "skip_gap_screen": a.skip_gap_screen or None,
                    "force_extract": a.force_extract or None, "attention_units": a.attention_units}
         if a.against:
@@ -303,8 +317,15 @@ def cmd_build(a) -> int:
     print(format_plan(info, plan), file=sys.stderr)
     if not plan["fits"]:
         return 2
+    core_from = None
+    if kind == "extract" and a.core_from:
+        from .extract import external_core
+        core_from = external_core(a.core_from, a.core_from_reason, info)
+    check_swap_args(a)
     commit = check_commit(a.allow_dirty)
     out = Path(a.out).expanduser().resolve()
+    if out.exists() and any(p.name != ".DS_Store" for p in out.iterdir()):
+        raise SystemExit(f"{out} exists and is not empty: use `mlx2 amoeba resume --out {out}` or a fresh --out")
     stages = [s for s in a.stages.split(",") if s] or list(STAGES)
     if plan["stream"]["mode"] == "rolling":
         if kind == "extract":
@@ -327,10 +348,16 @@ def cmd_build(a) -> int:
     tmp = Path(tempfile.mkdtemp(prefix="amoeba-inputs-"))
     try:
         inputs = resolve_inputs(a, tmp)
+        want_eff = kind == "extract" and (a.exclude_texts or a.extra_topic_corpus)
+        if want_eff:                              # refuse before the build exists, so no build runs without it
+            from .extract import build_effective_corpus
+            build_effective_corpus(Path(inputs["probe_corpus"]["path"]), tmp / "dry", a.exclude_texts,
+                                   a.extra_topic_corpus)
         gen_backend = a.gen_backend or ("local" if a.cpu else "server")
         device = "cpu" if a.cpu else "gpu"
         opts = {"cpu": a.cpu, "gen_backend": gen_backend, "gen_route": a.gen_route, "boxes": a.boxes,
-                "max_boxes": a.max_boxes, "max_cluster_boxes": a.max_cluster_boxes}
+                "max_boxes": a.max_boxes, "max_cluster_boxes": a.max_cluster_boxes,
+                "swap_guard": {"growth_gb": a.swap_growth_gb or None, "waiver": a.swap_waiver or None}}
         stage_options = {"map": {"device": device}, "core": {"device": device, "gen_backend": gen_backend},
                          "boxes": {"device": device, "gen_backend": gen_backend, "boxes": a.boxes,
                                    "max_boxes": a.max_boxes, "max_cluster_boxes": a.max_cluster_boxes},
@@ -340,6 +367,10 @@ def cmd_build(a) -> int:
                              "core": stage_options["core"], "box": {"device": device, "gen_backend": gen_backend,
                                                                     "topic": a.topic},
                              "box_gate": {"device": device}, "box_bundle": {"device": device}}
+            if core_from:
+                stage_options["core"] = {**stage_options["core"], "core_from": core_from}
+            if a.no_map:
+                stage_options["map"] = {**stage_options["map"], "skip": a.no_map}
         if "core" not in stages and kind != "extract":
             stage_options["map"]["without_core"] = True
         full_stages = stages
@@ -358,9 +389,30 @@ def cmd_build(a) -> int:
             shutil.copytree(tmp / "inputs", out / "inputs")
             b.rec["inputs"]["probe_manifest"]["path"] = str(out / "inputs/probe-corpus-manifest.json")
             b.save()
+        if want_eff:
+            from .extract import build_effective_corpus
+            b.rec["inputs"]["probe_corpus_effective"] = build_effective_corpus(
+                Path(inputs["probe_corpus"]["path"]), out, a.exclude_texts, a.extra_topic_corpus)
+            b.save()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return execute(b, stages, a, commit, redo=[])
+
+
+def swap_settings(b, a) -> tuple:
+    """This command's --swap-growth-gb / --swap-waiver, else the build's recorded guard (a resume keeps it)."""
+    if getattr(a, "swap_growth_gb", 0.0):
+        return a.swap_growth_gb, a.swap_waiver
+    g = (b.rec.get("options") or {}).get("swap_guard") or {}
+    return g.get("growth_gb") or 0.0, g.get("waiver")
+
+
+def check_swap_args(a) -> None:
+    g = getattr(a, "swap_growth_gb", 0.0) or 0.0
+    if g < 0:
+        raise SystemExit("--swap-growth-gb must be >= 0")
+    if g and not getattr(a, "swap_waiver", ""):
+        raise SystemExit("--swap-growth-gb needs --swap-waiver (who approved the allowance)")
 
 
 def ctx_for(b, a, commit, progress) -> Ctx:
@@ -389,6 +441,8 @@ def execute(b: Build, stages: list, a, commit: dict, redo: list) -> int:
     ctx = ctx_for(b, a, commit, progress)
     from . import runner as _runner
     _runner.DEADLINE["t"] = ctx.stop_at
+    check_swap_args(a)
+    guard = _runner.arm_swap_guard(*swap_settings(b, a))
     if getattr(a, "ignore_gpu_queue", "") and "MLX2_AMOEBA_AUTO_SWAP_BASELINE" not in os.environ:
         # the bypass skips only the GPU-window guard: a run beside another job still gets the harness's memory
         # admission (20 GiB available, +1 GiB swap) before every child, from this run's swap baseline
@@ -401,7 +455,7 @@ def execute(b: Build, stages: list, a, commit: dict, redo: list) -> int:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, _term)
     progress.emit("build_start", checkpoint=b.checkpoint, commit=commit["commit"], profile=b.cfg["profile"],
-                  out=str(b.out), stages=list(kind_stages(b)), device="cpu" if ctx.cpu else "gpu")
+                  out=str(b.out), stages=list(kind_stages(b)), device="cpu" if ctx.cpu else "gpu", swap_guard=guard)
     runners = kind_runners(b)
     for st in kind_stages(b):                      # stages already done show as done
         r = b.receipt(st)
@@ -429,6 +483,7 @@ def execute(b: Build, stages: list, a, commit: dict, redo: list) -> int:
                                          ignore_queue=reason)
             r = b.begin(st, commit)
             r["gpu_window"] = gpu
+            r["swap_guard"] = guard
             progress.emit("stage_start", stage=st)
             try:
                 outs, summ = runners[st](b, ctx)
@@ -473,6 +528,12 @@ def check_inputs(b) -> None:
     """Every input file still has the sha256 the build recorded, and the --against host its fingerprint."""
     inp = b.rec["inputs"]
     files = [inp["probe_corpus"], inp["probe_manifest"], inp["taxonomy"]] + list(inp["core_corpora"])
+    eff = inp.get("probe_corpus_effective")
+    if eff:
+        files += [eff] + list(eff.get("exclude") or []) + list(eff.get("extra") or [])
+    cf = ((b.rec.get("stage_options") or {}).get("core") or {}).get("core_from")
+    if cf:
+        files.append(cf)
     for f in files:
         if paths.sha256_file(f["path"]) != f["sha256"]:
             raise SystemExit(f"input {f['path']} changed since the build started (sha256); start a fresh build")
