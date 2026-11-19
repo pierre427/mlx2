@@ -44,6 +44,20 @@ Design input: Kapitsa (Apache-2.0) PR #206, ``src/metal/gpu.mm`` heartbeat
 last commit, stopped at memory-pressure WARN).  No code was taken; the
 mechanism differs (a command buffer on a queue holding the set, because MLX
 exposes no set handle).
+
+MLX's own alternative (checked 2026-11-18, not yet A/B'd here).  MLX 0.32.4
+reads ``MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS`` (``resident.cpp``,
+default 0 = off): a thread calls ``requestResidency()`` on every non-empty
+set each interval, which is Kapitsa's mechanism.  ollama sets it to 1000 on
+macOS (``mlxrunner/client.go``, ollama #18807).  It differs from this
+module in three ways: it runs for the life of the process, with no idle
+window; it never stops on memory pressure, so macOS cannot take an idle
+model's wired memory back; and it submits no GPU work, so it does not keep
+the GPU itself awake.  Whether it alone recovers the TTFT this module
+measured (residency-heartbeat-20261021: 260-337 ms -> 37-45 ms on
+Qwen3.6-35B after a 3-90 s pause) is an open A/B: heartbeat vs refresh vs
+both vs neither, same artifact, same pauses.  Until that runs, this module
+stays the default and the env var is left unset.
 """
 
 from __future__ import annotations

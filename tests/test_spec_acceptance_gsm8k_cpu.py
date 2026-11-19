@@ -76,6 +76,16 @@ def test_per_position_refuses_more_accepts_than_drafts():
         gsm.acceptance_summary([{"verify_accept_hist": {"3": 1}, "verify_depth_hist": {"2": 1}}])
 
 
+def test_list_histograms_from_hy4_dfly2_are_read_by_index():
+    # Hy4-flash DFly2 writes index-is-value lists: 3 rounds drafted 3 tokens
+    # (accepted 3, 3, 0) and 1 tail round drafted 1 token (accepted 1).
+    got = gsm.acceptance_summary([{"verify_accept_hist": [1, 1, 0, 2], "verify_depth_hist": [0, 1, 0, 3]}])
+    assert got["per_position_denominator"] == "rounds_drafting_position"
+    assert got["per_position"]["p1"] == pytest.approx(3 / 4)
+    assert got["per_position"]["p2"] == pytest.approx(2 / 3)
+    assert got["per_position_per_round"]["p2"] == pytest.approx(2 / 4)
+
+
 def test_native_mtp_receipt_carries_depths():
     extra = {"mtp": {"stats": {"verify_accept_hist": {"1": 1}, "verify_depth_hist": {"2": 1},
                                "draft_proposed": 2}}}

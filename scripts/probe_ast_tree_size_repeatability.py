@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Greedy repeatability of the AST tree route across forced tree sizes (cf. kapitsa#170/#186).
+"""Greedy repeatability of the AST tree route across forced tree sizes (cf. kapitsa#187).
 
 One artifact, one bounded ownership unit: the ordinary-reference smoke
 (scripts/smoke_local_model.py) first; then, one arm at a time, one loopback

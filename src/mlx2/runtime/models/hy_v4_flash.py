@@ -2147,7 +2147,9 @@ def dfly_greedy_generate(target: Model, drafter: HY4FlashDFly, prompt: Sequence[
     Every committed token is the target's own greedy choice, so the output
     equals ordinary greedy decode up to near-tie numerics of the verify
     shape.  Returns ``(tokens, receipt)``; the receipt carries vLLM-style
-    ``verify_accept_hist`` (accepted drafts per verify round).
+    ``verify_accept_hist`` (accepted drafts per verify round) and
+    ``verify_depth_hist`` (drafted positions per round, the per-position
+    acceptance denominator; the last rounds draft fewer than ``num_draft``).
     """
     if num_draft < 1:
         raise ValueError("DFly2 num_draft must be positive")
@@ -2165,6 +2167,7 @@ def dfly_greedy_generate(target: Model, drafter: HY4FlashDFly, prompt: Sequence[
         bonus = int(mx.argmax(target.logits(last_hidden), axis=-1).item())
         out = [bonus]
         hist = [0] * (num_draft + 1)
+        depth_hist = [0] * (num_draft + 1)
         rounds = 0
         eos = set(int(e) for e in eos_ids)
         while len(out) < max_tokens and bonus not in eos:
@@ -2186,6 +2189,7 @@ def dfly_greedy_generate(target: Model, drafter: HY4FlashDFly, prompt: Sequence[
                 accepted = stop + 1
             rounds += 1
             hist[accepted] += 1
+            depth_hist[depth] += 1
             for c in caches:
                 c.trim(len(block[0]) - (accepted + 1))
             out.extend(committed)
@@ -2200,7 +2204,7 @@ def dfly_greedy_generate(target: Model, drafter: HY4FlashDFly, prompt: Sequence[
             "route": "dfly2", "qualified": False, "num_draft": num_draft,
             "latent_kv": target.args.latent_kv,
             "approximate_state": target.args.latent_kv != "native",
-            "verify_rounds": rounds, "verify_accept_hist": hist,
+            "verify_rounds": rounds, "verify_accept_hist": hist, "verify_depth_hist": depth_hist,
             "mean_acceptance_length": (1 + sum(i * n for i, n in enumerate(hist)) / rounds) if rounds else None,
         }
         return out, receipt

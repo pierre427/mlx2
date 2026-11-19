@@ -620,7 +620,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.tokenizer = TokenizerWrapper(tokenizer, detokenizer_class=BPEStreamingDetokenizer,
                                           eos_token_ids=self.eos_ids)
         self.max_context = int(args.max_position_embeddings)
-        self.dfly_stats = {"requests": 0, "verify_rounds": 0, "verify_accept_hist": [0] * (self.num_draft + 1)}
+        self.dfly_stats = {"requests": 0, "verify_rounds": 0, "verify_accept_hist": [0] * (self.num_draft + 1),
+                           "verify_depth_hist": [0] * (self.num_draft + 1)}
         if kind is not None:
             self._bind_drafter(kind)
             if external.get("ast_graft_prompt_lookup", False):
@@ -878,6 +879,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         stats["verify_rounds"] += receipt["verify_rounds"]
         for i, n in enumerate(receipt["verify_accept_hist"]):
             stats["verify_accept_hist"][i] += n
+        for i, n in enumerate(receipt.get("verify_depth_hist") or ()):
+            stats["verify_depth_hist"][i] += n
         receipt["checkpoint"] = f"{Path(self.identity['path']).name}@{self.identity['fingerprint']}"
         receipt["latent_kv_state"] = self._latent_kv_receipt()
         return tokens, receipt

@@ -146,6 +146,16 @@ def few_shot_turns(train, shots):
 
 # ------------------------------------------------------------ acceptance --
 
+def _histogram(value):
+    """A ``{value: rounds}`` histogram from a dict or an index-is-value list.
+
+    Most routes write dicts; Hy4-flash DFly2 writes lists indexed by value.
+    """
+    if isinstance(value, (list, tuple)):
+        return {i: int(n) for i, n in enumerate(value) if int(n)}
+    return {int(k): int(n) for k, n in (value or {}).items()}
+
+
 def acceptance_summary(receipts, max_position=16, draft_depth=None):
     """vLLM-style acceptance from per-request speculation receipts.
 
@@ -172,19 +182,19 @@ def acceptance_summary(receipts, max_position=16, draft_depth=None):
     """
     hist, depths, proposed, without, legacy = {}, {}, 0, 0, 0
     for spec in receipts:
-        rounds = (spec or {}).get("verify_accept_hist") or {}
+        rounds = _histogram((spec or {}).get("verify_accept_hist"))
         if not rounds:
             without += 1
             continue
         for accepted, count in rounds.items():
-            hist[int(accepted)] = hist.get(int(accepted), 0) + int(count)
-        drafted = (spec or {}).get("verify_depth_hist") or {}
-        if sum(int(c) for c in drafted.values()) != sum(int(c) for c in rounds.values()):
+            hist[accepted] = hist.get(accepted, 0) + count
+        drafted = _histogram((spec or {}).get("verify_depth_hist"))
+        if sum(drafted.values()) != sum(rounds.values()):
             # Missing (old receipt) or not round-for-round with the accepts.
             legacy += 1
         else:
             for depth, count in drafted.items():
-                depths[int(depth)] = depths.get(int(depth), 0) + int(count)
+                depths[depth] = depths.get(depth, 0) + count
         proposed += int((spec or {}).get("proposed") or 0)
     total = sum(hist.values())
     if not total:

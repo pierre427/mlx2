@@ -634,6 +634,12 @@ def test_dfly_greedy_equals_ordinary_greedy(tiny):
     tokens, receipt = H.dfly_greedy_generate(model, drafter, prompt, max_tokens=20, num_draft=3)
     assert tokens == out
     assert receipt["verify_rounds"] >= 1 and sum(receipt["verify_accept_hist"]) == receipt["verify_rounds"]
+    # Drafted depth per round: round for round with the accepts, never less
+    # than what a round accepted, and at most num_draft.
+    depths = receipt["verify_depth_hist"]
+    assert len(depths) == 4 and sum(depths) == receipt["verify_rounds"]
+    for k in range(1, 4):
+        assert sum(receipt["verify_accept_hist"][k:]) <= sum(depths[k:])
     assert receipt["qualified"] is False
     assert model.record_layers == frozenset()
 
