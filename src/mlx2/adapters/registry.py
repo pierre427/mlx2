@@ -479,6 +479,12 @@ def _hy_v3(path: Path, config: dict) -> AdapterResolution:
     )
 
 
+def _hy_v4_flash(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".hy_v4_flash", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.HYV4FlashAdapter, module.descriptor_for(), artifact)
+
+
 def _gpt_oss(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".gpt_oss", __package__)
     artifact = module.inspect_artifact(path, expected=config["model_type"])
@@ -635,6 +641,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "agnes": _agnes,
     "bailing_hybrid": _ling3,
     "hy_v3": _hy_v3,
+    "hy_v4_flash": _hy_v4_flash,
     "gpt_oss": _gpt_oss,
     "gpt_oss_puzzle": _gpt_oss,
     "granitemoe_swa": _granite_swa,

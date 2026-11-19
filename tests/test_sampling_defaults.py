@@ -57,6 +57,7 @@ def _adapter_classes():
     from mlx2.adapters.deepseek_v41_source import DeepSeekV41SourceAdapter
     from mlx2.adapters.glm53_gguf import Glm53GGUFAdapter
     from mlx2.adapters.xing import XingAdapter
+    from mlx2.adapters.hy_v4_flash import HYV4FlashAdapter
 
     return {
         "qwen4_exp": FlashNextAdapter,
@@ -65,6 +66,7 @@ def _adapter_classes():
         "muse_glimmer": MuseGlimmerAdapter,
         "cohere2_moe": NorthMiniCodeAdapter,
         "xing4_0": XingAdapter,
+        "hy_v4_flash": HYV4FlashAdapter,
         "laguna": LagunaXS21Adapter,
         "mellum": Mellum21ThinkingAdapter,
         "gemma3n": Gemma3nAdapter,
@@ -274,6 +276,8 @@ EXPECTED = {
     "bailing_hybrid": {
         "general": dict(temperature=0.6, top_p=0.95, top_k=20)
     },
+    # tencent/Hy4-flash@d88c9dfd generation_config.json (read 2026-11-18).
+    "hy_v4_flash": {"general": dict(temperature=0.9, top_p=1.0)},
 }
 
 

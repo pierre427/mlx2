@@ -231,6 +231,10 @@ class OutputParser:
     # Template structure dropped from answer text only (never from a tool
     # body or reasoning): Kimi's ``<|tool_calls_section_*|>`` wrapper.
     content_structure_markers = ()
+    # The reasoning-channel markers; an adapter whose template spells them
+    # otherwise (Hy4's ``<think:S>``/``</think:S>``) overrides only these.
+    thinking_open_marker = THINKING_OPEN_MARKER
+    thinking_close_marker = THINKING_CLOSE_MARKER
 
     def __init__(
         self, *, chat=False, thinking=False, tools=None, parse_tool=None, stops=(),
@@ -452,13 +456,13 @@ class OutputParser:
             if self._leading:
                 if (
                     not final
-                    and len(self.buffer) < len(THINKING_OPEN_MARKER)
-                    and THINKING_OPEN_MARKER.startswith(self.buffer)
+                    and len(self.buffer) < len(self.thinking_open_marker)
+                    and self.thinking_open_marker.startswith(self.buffer)
                 ):
                     break  # may still become the leading open marker
                 self._leading = False
-                if self.buffer.startswith(THINKING_OPEN_MARKER) and self._marker_allowed(THINKING_OPEN_MARKER, self._buffer_origin):
-                    self._consume_buffer(len(THINKING_OPEN_MARKER))
+                if self.buffer.startswith(self.thinking_open_marker) and self._marker_allowed(self.thinking_open_marker, self._buffer_origin):
+                    self._consume_buffer(len(self.thinking_open_marker))
                     self.channel = "reasoning_content"
                     self._reasoning_open = True
                 continue  # the answer may start here: recheck the stop gate
@@ -582,7 +586,7 @@ class OutputParser:
                 continue
             markers = {}
             if self._reasoning_open:
-                markers[THINKING_CLOSE_MARKER] = "content"
+                markers[self.thinking_close_marker] = "content"
             # Tool markup inside reasoning is the model thinking about a call,
             # never a call (vLLM parses tools from content only), under either
             # marker policy.  A call after ``</think>`` still parses.
@@ -613,7 +617,7 @@ class OutputParser:
                         self._tool_first_error = None
                         if not self._shown_text:
                             self._pending_space = ""
-                    if marker == THINKING_CLOSE_MARKER:
+                    if marker == self.thinking_close_marker:
                         self._reasoning_open = False
                         self._drop_separator = bool(self.think_close_separator)
                 self._consume_buffer(end + len(marker))
@@ -649,7 +653,7 @@ class TokenBoundOutputParser(OutputParser):
         self._special_ids = {}
         if tokenizer is not None and not self.constrained_tools:
             for spelling in {self.tool_open, self.tool_close,
-                             THINKING_OPEN_MARKER, THINKING_CLOSE_MARKER}:
+                             self.thinking_open_marker, self.thinking_close_marker}:
                 ids = tokenizer.encode(spelling, add_special_tokens=False)
                 if len(ids) == 1:
                     self._special_ids[int(ids[0])] = spelling

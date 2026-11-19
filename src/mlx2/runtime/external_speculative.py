@@ -4807,6 +4807,11 @@ class ExternalDraftBatchGenerator:
                 needs_histories = bool(getattr(self.draft, "requires_processor_histories", False))
                 if needs_histories:
                     extra["processor_histories"] = [list(l.history) for l in lanes]
+                if getattr(self.draft, "requires_target_caches", False):
+                    # KV-sharing drafters (Hy4-flash DFly2) read each lane's
+                    # committed target cache; they declare no start_tree, so
+                    # no lattice is ever queued ahead of a commit.
+                    extra["target_caches"] = [l.cache for l in lanes]
                 if getattr(self.draft, "requires_cohort_width", False):
                     # Draft groups split a cohort by tail length; B1-only
                     # proposal modes must see the verify cohort's width.
@@ -4841,6 +4846,8 @@ class ExternalDraftBatchGenerator:
                             tree_options["mark"] = self._tree_clock
                         if self.pair_context_tokens:
                             tree_options["context_tokens"] = pairing
+                        if "target_caches" in extra:
+                            tree_options["target_caches"] = extra["target_caches"]
                         if needs_histories and getattr(
                             self.draft, "tree_topology_aware", False
                         ):
@@ -8192,7 +8199,12 @@ class ExternalDraftBatchGenerator:
             raise ValueError("target-tree cohort exceeds its bounded lane limit")
         cached = self.tree_gates["cache_executor"]
         ragged = bool(getattr(self, "ast_batch_row_sharing", False))
-        if not ragged:
+        # A provider declaring ``accepts_unequal_tree_widths`` takes each
+        # lane's own tree and returns rows padded to the widest lane; filler
+        # leaves would cost it extra forwards (Hy4-flash chain waves).
+        unequal = getattr(self.target_tree_executor_provider, "accepts_unequal_tree_widths",
+                          False) is True
+        if not ragged and not unequal:
             inputs, parents = _pad_cohort_trees(inputs, parents)
         # A packed cohort: each lane owns its tree's rows of the one packed row axis (a provider
         # with another layout fails closed in the tiled layers' geometry check).

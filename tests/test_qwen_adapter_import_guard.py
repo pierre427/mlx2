@@ -345,7 +345,7 @@ INHERITED_PROFILE_MODULES = [
 
 
 PROFILE_MODULES = [
-    "agnes_3_flash", "flash_next", "gpt_oss", "hy_v3", "laguna_xs21",
+    "agnes_3_flash", "flash_next", "gpt_oss", "hy_v3", "hy_v4_flash", "laguna_xs21",
     "ling3_flash", "mellum21", "muse_glimmer", "nemotron3_super", "north_mini_code", "qwen35_9b",
     "qwen36_27b", "qwen36_35b", "qwen38_27b", "xing",
 ]

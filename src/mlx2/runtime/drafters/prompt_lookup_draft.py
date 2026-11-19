@@ -55,6 +55,9 @@ class PromptLookupDraftModel:
         if base is not None:
             self.config = base.config
             self.requires_context_tokens = bool(getattr(base, "requires_context_tokens", False))
+            # A KV-sharing base (Hy4-flash DFly2) reads the lanes' committed
+            # target caches; the engine passes them only when asked.
+            self.requires_target_caches = bool(getattr(base, "requires_target_caches", False))
         else:
             # Taps are never read; the last layer keeps the capture cheapest.
             # A zero draft geometry: memory admission reserves no draft KV,

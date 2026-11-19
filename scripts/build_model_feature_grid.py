@@ -49,6 +49,10 @@ VARIANTS = {
 # not a statement that every registered model implements each feature.
 FEATURES = (
     "oq4e_conversion",
+    # Hy4-flash (2026-11-18): embedded DFly2 drafter, chain-packed AST executor.
+    "dfly2_embedded_draft", "hy4_chain_packed_tree_executor",
+    "hy4_fp8_latent_kv", "engram_table_formats", "dfly2_conditioned_tree_tails",
+    "ast_graft_prompt_lookup",
     # Morning follow-up probes (2026-11-06): opt-in research options.
     "batch_rows_attention", "prefill_tail_row", "prefill_tail_skip",
     # Nemotron 3.5 Super VL NVFP4 export (2026-11-10): checkpoint defaults.
