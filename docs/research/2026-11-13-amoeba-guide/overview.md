@@ -385,7 +385,7 @@ box (unseen 5 of 20, against 8 with the box). Keying on the entity mention is th
 | Box registry and neuron atlas | `claude/amoeba-plan-8f9e33` | `docs/research/amoeba-box-registry/`, `docs/research/amoeba-neuron-atlas/` |
 | First cross-model experiments | `claude/amoeba-m0` | `research/amoeba/`, `docs/research/2026-11-1*-amoeba-*-results.md` |
 | Donor box location in large models | `claude/quirky-poitras-2cdefc` | `docs/research/amoeba-cone-width-2026-11-12/transplant-boxes-decimal17-2026-11-13.md`; raw evidence is outside git |
-| Side box, gated adapter, skill screen | not in git | `output/amoeba-sidecar-m3-20261113/`; code in `~/amoeba-lab/sidecar/` on the M3 |
+| Side box, gated adapter, skill screen | in git (2026-11-18) | results in `docs/research/amoeba-sidecar-m3-20261113/`; code: that folder's `amoeba-lab-20261118.bundle` (the M3 `~/amoeba-lab` history to 3add7f4; `git clone` it) |
 | Effort lanes | `claude/amoeba-lane-moves-3fcf76`, `-spirals-be1149`, `-latent-80a8f5` | their copies of the plan, section 8h |
 | 27B core, atlas, clusters, boxes | `claude/amoeba-27b-80bc6a` | `docs/research/amoeba-27b/` (RUN_NOTE.md, DESIGN.md, evidence directories) |
 

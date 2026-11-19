@@ -257,8 +257,9 @@ read, then injected where the gate opens.
 - Steps, owners and status: `cross-model-remapping.md` §4.
 - Fit maps on broad data, or they memorise.
 
-Side-box and adapter code is in `~/amoeba-lab/sidecar/` on the M3, with results in
-`output/amoeba-sidecar-m3-20261113/`. Reference numbers use donor `mlx-community/Qwen3-4B-4bit@4dcb3d10`
+Side-box and adapter code is in `~/amoeba-lab/sidecar/` on the M3, preserved in git as
+`docs/research/amoeba-sidecar-m3-20261113/amoeba-lab-20261118.bundle` (full history to 3add7f4), with results in
+`docs/research/amoeba-sidecar-m3-20261113/`. Reference numbers use donor `mlx-community/Qwen3-4B-4bit@4dcb3d10`
 and host `Qwen/Qwen3-0.6B@c1899de2`.
 
 ### B1. Screen for a real gap — measured
