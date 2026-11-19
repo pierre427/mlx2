@@ -1359,3 +1359,16 @@ The row loop, the bit-for-bit admission checks and the dispatch are mlx2's
 own; no MLX source file is included in this repository. The MIT permission
 notice reproduced above for MLX applies. No Apple copyright header is added
 to mlx2 source files.
+
+------------------------------------------------------------------------------
+Grouped-expert SwitchGLU kernels — mlx-lm pull request #2044
+(https://github.com/ml-explore/mlx-lm/pull/2044, head
+Tigerly1/mlx-lm@ea3da292431e386fcca84e29ba5ab8a75b871020), MIT License,
+Copyright © 2026 Apple Inc. (the source file's header)
+
+src/mlx2/runtime/models/switch_grouped_experts.py copies the Metal kernel
+sources of mlx_lm/models/switch_kernels.py (the header, gate/up and down
+GEMV, expert map and tile kernels) and transcribes its Python launch code
+with mlx2 changes (module-level mode flag, mlx2 admission, lazy kernel
+build, no vjp). The MIT permission notice reproduced above for MLX applies
+to this code. No Apple copyright header is added to mlx2 source files.

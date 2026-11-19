@@ -13,6 +13,7 @@ import mlx.nn as nn
 
 from . import invariant_prefill as _invariant
 from . import moe_nax_gather as _nax
+from . import switch_grouped_experts as _grouped
 from .activations import swiglu
 from .import_env import snapshot as _import_env_snapshot
 
@@ -527,6 +528,12 @@ class SwitchGLU(nn.Module):
         return {"policy": self._sort_policy, "counts": dict(self._sort_counts)}
 
     def __call__(self, x, indices) -> mx.array:
+        # Research path, default off (MLX2_MOE_GROUPED_EXPERTS): grouped-expert
+        # q4 kernels for small batches (mlx-lm #2044); None declines.
+        if _grouped.MODE != "off" and not _invariant.active():
+            grouped = _grouped.switch_glu(self, x, indices)
+            if grouped is not None:
+                return grouped
         x = mx.expand_dims(x, (-2, -3))
         token_length = int(indices.shape[-2]) if indices.ndim >= 2 else 1
         do_sort, counter = _switch_sort_decision(
