@@ -57,6 +57,9 @@ PRIVATE_PYPROJECT_LINE_RE = re.compile(r"^\s*[\"']?[\w.-]*mcp[\w.-]*[\"']?\s*=",
 
 
 _MCP_PATH_RE = re.compile(r"(?:^|/)[^/]*mcp[^/]*(?:/|$)", re.IGNORECASE)
+# Credential files campaign drivers write next to their evidence (per-run loopback admin tokens, reasoning-signing
+# keys): never public under any path (2026-11-18: 28 such files were tracked privately; none was ever exported).
+_SECRET_NAME_RE = re.compile(r"(?:^|/)(?:admin-token|reasoning-key)$")
 # The withhold list lives next to this script in the private checkout and is
 # not exported (not a .py file). MLX2_PUBLIC_EXPORT_WITHHELD may point at a
 # copy when this script runs from elsewhere.
@@ -102,12 +105,12 @@ def withheld_kind(name: str) -> str | None:
 
 def is_private_path(name: str) -> bool:
     """True for paths that are never publication inputs (PRIVATE_PATH_RE or the withhold list)."""
-    return bool(PRIVATE_PATH_RE.search(name)) or withheld_kind(name) is not None
+    return bool(PRIVATE_PATH_RE.search(name) or _SECRET_NAME_RE.search(name)) or withheld_kind(name) is not None
 
 
 def never_public(name: str) -> bool:
     """True for paths that must not exist anywhere in the public history."""
-    return bool(_MCP_PATH_RE.search(name)) or withheld_kind(name) == "never"
+    return bool(_MCP_PATH_RE.search(name) or _SECRET_NAME_RE.search(name)) or withheld_kind(name) == "never"
 
 
 def is_public_code_path(name: str) -> bool:

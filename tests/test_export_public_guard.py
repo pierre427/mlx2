@@ -228,3 +228,16 @@ def test_private_guard_blocks_pushes_to_the_public_repository(tmp_path):
     allow = subprocess.run(["sh", str(repo / ".git/hooks/pre-push"), "origin",
                             "ssh://git@forge.example/owner/mlx2.git"], capture_output=True, text=True)
     assert allow.returncode == 0
+
+
+@pytest.mark.parametrize("name", ["qualification/runs/x/ordinary/admin-token", "admin-token",
+                                  "qualification/runs/k/A1/runtime/reasoning-key"])
+def test_credential_files_are_never_public(name):
+    # 2026-11-18: per-run loopback admin tokens / signing keys must never be exported or pushed under any path
+    assert exporter.never_public(name)
+    assert exporter.is_private_path(name)
+
+
+def test_credential_rule_is_by_file_name_only():
+    assert not exporter.never_public("docs/admin-token-rotation.md")
+    assert not exporter.never_public("src/mlx2/server/admin_token.py")
