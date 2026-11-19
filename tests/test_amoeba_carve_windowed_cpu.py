@@ -302,3 +302,19 @@ def test_pooled_english_cost_weights_domains_by_rows(monkeypatch):
     po = E.english_cost(None, split, {}, lambda: None, pooled=True)
     assert abs(eq["mean_d_ce"] - 0.25) < 1e-9 and abs(po["mean_d_ce"] - 0.175) < 1e-9
     assert po["domain_rows"] == {"a": 3, "b": 1}
+
+
+def test_val_windows_take_more_windows_per_val_document(tmp_path):
+    # coordinator 2026-11-16: thin val splits get more windows per val document; the carve windows are unchanged
+    rng = random.Random(8)
+    docs = [{"text": _text(rng, 90), "domain": "a"} for _ in range(30)]
+    val = [{"text": _text(rng, 90), "domain": "a"} for _ in range(6)]
+    p, vp = _write(tmp_path / "c.jsonl", docs), _write(tmp_path / "v.jsonl", val)
+    kw = dict(seq_len=24, n_mean=2, n_fit=8, n_held=2, windows=2, val_file=str(vp), log=lambda *_: None)
+    split2, rec2 = C.load(f"jsonl:{p}", H(), **kw)
+    n2 = len(C.VAL["a"])
+    fit2 = [list(q) for q in split2["a"]["fit"]]
+    split4, rec4 = C.load(f"jsonl:{p}", H(), val_windows=4, **kw)
+    assert rec2["val_windows"] == 2 and rec4["val_windows"] == 4
+    assert n2 <= 12 and len(C.VAL["a"]) > n2 and len(C.VAL["a"]) <= 24
+    assert [list(q) for q in split4["a"]["fit"]] == fit2

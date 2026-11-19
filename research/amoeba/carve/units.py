@@ -136,6 +136,7 @@ class Control:
         self.dense_layers = ()      # layers that run whole at every position
         self.boxes = []             # [{"name", "mask", "gate": (W [L,d], b [L]) | None, "hard": bool}]
         self.stats = None           # callback(layer, kind, payload) or None
+        self.stats_fast = False     # with stats: return the captured rows' output, no second MoE call
         self.gate_log = None        # list to append (box, layer, g) or None
         self.box_out = None         # dict (box, layer) -> write, or None
         self.verify = None          # dict layer -> rel L2 of re-implemented vs block output (0.0 dense)
@@ -831,8 +832,12 @@ def _patch_moe_neuron(mx, site, ctl):
                 bk = _slot_rows(box["mask"][_l], inds, E, F)
                 rb, _ = _switch_masked(mx, sw_mod, x, inds, bk, False)
                 c.box_out[(box.get("name"), _l)] = (rb.astype(mx.float32) * w.astype(mx.float32)[..., None]).sum(axis=-2)
-        if not active:
-            return base_out if base_out is not None else _base.__call__(self, *a)
+        if not active and base_out is not None:
+            return base_out                 # verify already ran the stock block: its output, no extra call
+        if not active and not getattr(c, "stats_fast", False):
+            return _base.__call__(self, *a)
+        # stats_fast (firing maps, forward only): the output is the routed rows just computed for the capture, through
+        # the stock tail, instead of a second full MoE call (equal to the fused path to bf16 rounding: layer_ref gate).
         # qwen_next: the stock tail in its own dtype (dtype None), equal to the stock block bit for bit
         return _combine(mx, self, _kind, rows, w, shared, post, None if _kind == "qwen_next" else x.dtype)
 

@@ -522,3 +522,25 @@ def test_expanded_expert_mask_equals_the_expert_unit_model_exactly(tmp_path):
     assert not np.allclose(le, full)                                   # the mask really changes the output
     with pytest.raises(SystemExit, match="expert_to_neuron"):        # without the flag: refused as before
         Dm.load_mask(f"{tmp_path}/t2.npz:core", hn)
+
+
+@pytest.mark.parametrize("name,make,vocab", TOYS, ids=[t[0] for t in TOYS])
+def test_stats_fast_capture_equals_the_stock_forward(name, make, vocab):
+    # firing maps (2026-11-16): with stats_fast the MoE output is the captured rows' combine, no second MoE call;
+    # the logits must equal the stock forward and every neuron site must hand the hook its activated hidden
+    ids = ids_batch(2, 12, vocab=vocab)
+    h = host(make())
+    ref = logits(h, None, ids)
+    seen = {}
+
+    def st(l, kind, p):
+        if kind != "dense":
+            seen[l] = (p.get("h") is not None) and p["h"].shape[:-1] == p["inds"].shape
+    h.ctl.reset()
+    h.ctl.stats = st
+    h.ctl.stats_fast = True
+    out = np.array(h.logits_at(ids))
+    h.ctl.reset()
+    assert not h.ctl.stats_fast
+    assert seen and all(seen.values()), seen
+    assert np.allclose(out, ref, atol=2e-3, rtol=2e-3), np.abs(out - ref).max()

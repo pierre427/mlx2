@@ -67,6 +67,8 @@ def parse(argv=None):
     ap.add_argument("--windows", type=int, default=0,
                     help="windowed jsonl loader: seeded random-offset windows per document (0 = document starts)")
     ap.add_argument("--window-seed", type=int, default=0)
+    ap.add_argument("--val-windows", type=int, default=0,
+                    help="windows per --val-file document (0 = --windows); a thin val split picks a noisy export cut")
     ap.add_argument("--strip-prefix", type=float, default=0.0,
                     help="strip a line/sentence-aligned prefix shared by more than this share of a domain's rows")
     ap.add_argument("--held-file", default="", help="fixed held-out jsonl: the held split of every domain")
@@ -123,6 +125,9 @@ def parse(argv=None):
                          "<model>/ple_rows.bin (Pierre 2026-11-15: 'Use ple offload when loading qwen fn to save ram')")
     ap.add_argument("--watchdog-gb", type=float, default=80, help="own physical footprint cap (Pierre 2026-11-14: 80 GB)")
     ap.add_argument("--need-gb", type=float, default=45)
+    ap.add_argument("--swap-growth-gb", type=float, default=2.0,
+                    help="abort when swap grows more than this over its level at start (coordinator's waiver terms)")
+    ap.add_argument("--swap-waiver-note", default="", help="why --swap-growth-gb differs from 2 (recorded)")
     ap.add_argument("--mem-policy", default="auto:waived:60:80:15")
     ap.add_argument("--train-peak-cap-gb", type=float, default=60)
     ap.add_argument("--seed", type=int, default=0)
@@ -248,7 +253,9 @@ def main(argv=None, host_factory=None):
     log = O.make_log(out)
     mem = (O.admit(args.need_gb, args.mem_policy, log) if not (args.smoke or args.no_admit) else
            {"policy": "smoke: not admitted" if args.smoke else "batch: model already loaded in this process"})
-    O.footprint_watchdog(args.watchdog_gb, log)
+    O.footprint_watchdog(args.watchdog_gb, log, swap_growth_gb=args.swap_growth_gb)
+    if args.swap_growth_gb != 2.0:                # a waived guard is recorded with its reason
+        rep["watchdog_waiver"] = {"swap_growth_gb": args.swap_growth_gb, "reason": args.swap_waiver_note}
     O.setup_mlx(args.memory_gb, args.cache_gb)
     import mlx.core as mx
     if args.cpu:
@@ -280,7 +287,7 @@ def main(argv=None, host_factory=None):
     L = host.L
     done = set(rep.get("stages_done", []))
     ident = {k: getattr(args, k) for k in ("corpus", "seq_len", "windows", "window_seed", "strip_prefix", "held_file",
-                                          "val_file", "code_cut", "fixed_expert_units",
+                                          "val_file", "val_windows", "code_cut", "fixed_expert_units",
                                           "held_len", "keep_prompt", "n_mean", "n_fit", "n_held", "ablations", "lam",
                                           "steps", "lr", "bs", "init_from", "init_raw", "fixed", "pool", "fisher_seqs",
                                           "fisher_lams", "fisher_alpha", "fisher_steps", "seed", "smoke")}
@@ -295,7 +302,7 @@ def main(argv=None, host_factory=None):
         rep["identity"].setdefault("layer_ref_tol", None)
         rep["identity"].setdefault("moe_units", "expert")
         for k_, v_ in (("windows", 0), ("window_seed", 0), ("strip_prefix", 0.0), ("held_file", ""), ("held_len", 0),
-                       ("keep_prompt", 32), ("val_file", ""), ("code_cut", False),
+                       ("keep_prompt", 32), ("val_file", ""), ("val_windows", 0), ("code_cut", False),
                        ("fixed_expert_units", False), ("init_raw", False)):
             rep["identity"].setdefault(k_, v_)      # runs from before the windowed loader
     if rep.get("identity") and rep["identity"] != ident:
@@ -346,7 +353,8 @@ def main(argv=None, host_factory=None):
                          n_fit=12 if sm else args.n_fit, n_held=4 if sm else args.n_held, seed=args.seed, log=log,
                          windows=args.windows, window_seed=args.window_seed, strip_prefix=args.strip_prefix,
                          held_file=args.held_file or None, held_len=args.held_len, keep_prompt=args.keep_prompt,
-                         val_file=args.val_file or None, code_cut=args.code_cut)
+                         val_file=args.val_file or None, code_cut=args.code_cut,
+                         val_windows=args.val_windows)
     if crec.get("offsets"):                       # window offsets: recorded beside the receipt (seeded, reproducible)
         O.write_json(out / "windows.json", {"offsets": crec.pop("offsets")})
     rep["corpus"] = crec                         # (crec gains "inputs" below, once the fit order is known)

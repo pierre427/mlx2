@@ -36,6 +36,10 @@ def main():
     ap.add_argument("--boxes", default="")
     ap.add_argument("--export-target", type=float, default=0.03)
     ap.add_argument("--steps", type=int, default=60)
+    ap.add_argument("--val-windows", type=int, default=0, help="windows per val document (0 = the carve windows, 2)")
+    ap.add_argument("--corpus-name", default="corpus.jsonl",
+                    help="the carve corpus file in each box dir (ablation arms: corpus_text.jsonl = probe text only, "
+                         "corpus_greedy.jsonl = text + greedy continuations; corpus.jsonl = text + 1 greedy + 3 T=0.7)")
     ap.add_argument("--moe-units", default="expert", choices=["expert", "neuron"],
                     help="neuron: boxes carved as neurons within experts (Pierre step 6, after the neuron smoke); the "
                          "expert-unit T2 is expanded exactly (--fixed-expert-units)")
@@ -67,9 +71,12 @@ def main():
     if not table.exists():
         table.write_text(f"Units: {a.moe_units}. T2-alone held is measured in this unit mode and is not comparable "
                          f"across unit modes (neuron mode recomputes kept experts piecewise on Metal).\n\n"
-                         f"| box | kind | kept {'neurons' if a.moe_units == 'neuron' else 'experts'} | T2 alone held | export val dCE | export held dCE | +0.05 on held | val→held gap | "
+                         f"Verdict (coordinator 2026-11-16): **pass** = held <= +0.05 AND the random same-count box "
+                         f"is informatively worse (random held >= box held + 0.05, or >= 2x a positive box held); "
+                         f"held <= +0.05 without that = **uninformative** (a fail: the box is about as good as random).\n\n"
+                         f"| box | kind | kept {'neurons' if a.moe_units == 'neuron' else 'experts'} | val rows (text windows + continuations) | T2 alone held | export val dCE | export held dCE | +0.05 on held | val→held gap | "
                          f"held text / greedy / t0.7 | random same-count (export size; {a.moe_units}-level) | gate | wall s |\n"
-                         "|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+                         "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
     kinds = {b["box"]: b["kind"] for b in spec["boxes"]}
     bflags = {b["box"]: [f for f in ("held_synthetic", "held_lab") if b.get(f)] for b in spec["boxes"]}
     for name in names:
@@ -88,8 +95,8 @@ def main():
             continue
         argv = ["--model", a.model, "--out", str(d), "--no-admit", "--stages", "inspect,mean,rank,bisect",
                 "--ablations", "zero", "--steps", str(a.steps), "--bs", "2", "--lr", "0.1",
-                "--corpus", f"jsonl:{bd / 'corpus.jsonl'}", "--held-file", str(bd / "held_full.jsonl"),
-                "--val-file", str(bd / "val_full.jsonl"), "--held-len", "128", "--seq-len", "128", "--windows", "2",
+                "--corpus", f"jsonl:{bd / a.corpus_name}", "--held-file", str(bd / "held_full.jsonl"),
+                "--val-file", str(bd / "val_full.jsonl"), "--val-windows", str(a.val_windows), "--held-len", "128", "--seq-len", "128", "--windows", "2",
                 # no held bisect (held is the test set, review 2026-11-16): the only cut is the export cut on val (full
                 # set), the random same-count box is taken at the export count and both are scored on held once
                 "--n-mean", "12", "--n-fit", "144", "--n-held", "0", "--targets", "",
@@ -143,16 +150,26 @@ def main():
                         "random_same_count_held": (ec.get("random_same_count_held") or {}).get("mean_d_ce"),
                         "t2_alone_held": (r.get("fixed_only_held") or {}).get("mean_d_ce"),
                         "held_weighting": "pooled over held rows (probe windows + 1 greedy + 3 T=0.7 per prompt)",
+                        "val_windows": sum(1 for x in (d / "inputs.jsonl").read_text().split("\n")
+                                           if x.strip() and json.loads(x).get("split") == "val")
+                        if (d / "inputs.jsonl").exists() else None,
                         "domain_over_0.10": sorted(k for k, v in ec["held"].items()
                                                    if k not in ("mean_d_ce", "domain_rows") and v > 0.10)})
+        if ec:
+            rr, hv = rec.get("random_same_count_held"), rec.get("export_held")
+            informative = (rr is not None and hv is not None and
+                           (rr >= hv + 0.05 or (hv > 0 and rr >= 2 * hv)))
+            rec["informative"] = informative
+            rec["verdict"] = ("pass" if rec["held_meets_0.05"] and informative else
+                              "uninformative" if rec["held_meets_0.05"] else "miss")
         with (out / "verdicts.jsonl").open("a") as fh:
             fh.write(json.dumps(rec) + "\n")
         f = lambda x: "—" if x is None else f"{x:.3f}"   # noqa: E731
         hs = rec.get("held_split", {})
         gr = {k.rsplit(":", 1)[-1]: v for k, v in hs.items() if k.startswith("gen:")}
         with table.open("a") as fh:
-            fh.write(f"| {name}{' (' + ', '.join(rec['flags']) + ')' if rec['flags'] else ''} | {rec['kind']} | {rec.get('kept_units', '—')} | {f(rec.get('t2_alone_held'))} | {f(rec.get('export_val'))} | "
-                     f"{f(rec.get('export_held'))} | {('**meets**' if rec.get('held_meets_0.05') else ('MISSES' if ec else rec.get('error', '—')[:60])) + (' ⚠ domain > 0.10: ' + ','.join(rec['domain_over_0.10']) if rec.get('domain_over_0.10') else '')} | "
+            fh.write(f"| {name}{' (' + ', '.join(rec['flags']) + ')' if rec['flags'] else ''} | {rec['kind']} | {rec.get('kept_units', '—')} | {rec.get('val_windows', '—')} | {f(rec.get('t2_alone_held'))} | {f(rec.get('export_val'))} | "
+                     f"{f(rec.get('export_held'))} | {({'pass': '**pass**', 'uninformative': 'UNINFORMATIVE (≈ random)', 'miss': 'MISSES'}[rec['verdict']] if ec else rec.get('error', '—')[:60]) + (' ⚠ domain > 0.10: ' + ','.join(rec['domain_over_0.10']) if rec.get('domain_over_0.10') else '')} | "
                      f"{f(rec.get('val_held_gap'))} | {f(hs.get('box'))} / {f(gr.get('greedy'))} / {f(gr.get('t0.7'))} | "
                      f"{f(rec.get('random_same_count_held'))} | {rec['gate']} | {rec['wall_s']} |\n")
         log_main(f"box {name} done in {rec['wall_s']} s: {json.dumps({k: rec.get(k) for k in ('kept_units', 'export_held', 'held_meets_0.05', 'error')})}")

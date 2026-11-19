@@ -58,6 +58,8 @@ def main():
     ap.add_argument("--prompt-min", type=int, default=112, help="tokens a document needs to seed a continuation")
     ap.add_argument("--min-carve", type=int, default=52, help="carve windows (2 per document of >= --seq-len)")
     ap.add_argument("--min-val", type=int, default=16, help="val windows + 4 x val continuations")
+    ap.add_argument("--val-windows", type=int, default=2, help="windows per val document (the carve's --val-windows; "
+                    "coordinator 2026-11-16: 4 for thin val splits)")
     ap.add_argument("--min-held", type=int, default=16, help="held windows + 4 x held continuations")
     ap.add_argument("--manifest", default="", help="probe-corpus-manifest.json: summary.held_synthetic_topics / "
                     "held_lab_topics flag boxes whose held split is mostly synthetic or only from our own repos")
@@ -115,7 +117,7 @@ def main():
         lens = {r["id"]: ntok(r["text"]) for r in carve + val + held}
         ok_w = lambda rs: sum(lens[r["id"]] >= a.seq_len for r in rs)                     # noqa: E731
         ok_p = lambda rs, n: min(n, sum(lens[r["id"]] >= a.prompt_min for r in rs))       # noqa: E731
-        counts = {"carve_windows": 2 * ok_w(carve), "val_windows": ok_w(val) + 4 * ok_p(val, a.val_prompts),
+        counts = {"carve_windows": 2 * ok_w(carve), "val_windows": a.val_windows * ok_w(val) + 4 * ok_p(val, a.val_prompts),
                   "held_windows": ok_w(held) + 4 * ok_p(held, a.held_prompts)}
         short = [k for k, need in (("carve_windows", a.min_carve), ("val_windows", a.min_val),
                                    ("held_windows", a.min_held)) if counts[k] < need]
@@ -140,6 +142,7 @@ def main():
     (out / "extend.json").write_text(json.dumps(extend, indent=1))
     (out / "boxes.json").write_text(json.dumps({"schema": "mlx2.amoeba-fn-boxset.v1", "corpus": a.corpus,
                                                 "corpus_sha256_12": sha12(a.corpus), "seed": a.seed,
+                                                "val_windows_per_doc": a.val_windows,
                                                 "val_every": a.val_every, "boxes": boxes}, indent=1))
 
 

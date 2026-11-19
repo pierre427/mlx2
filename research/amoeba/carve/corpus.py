@@ -69,7 +69,7 @@ def loss_from(seq) -> int:
 
 
 def load(spec, host, seq_len=64, n_mean=240, n_fit=900, n_held=60, seed=0, log=print, windows=0, window_seed=0,
-         strip_prefix=0.0, held_file=None, held_len=0, keep_prompt=32, val_file=None, code_cut=False):
+         strip_prefix=0.0, held_file=None, held_len=0, keep_prompt=32, val_file=None, code_cut=False, val_windows=0):
     """-> (split {domain: {held, mean, fit, spare: [ids]}}, receipt).
 
     windows / strip_prefix / held_file switch a jsonl corpus to the windowed loader (``_windowed``); without them the
@@ -82,7 +82,7 @@ def load(spec, host, seq_len=64, n_mean=240, n_fit=900, n_held=60, seed=0, log=p
     if spec.startswith("jsonl:") and (windows or strip_prefix or held_file or val_file or code_cut):
         p = Path(spec[len("jsonl:"):]).expanduser()
         split, rec = _windowed(p, host, seq_len, n_mean, n_fit, n_held, seed, log, windows, window_seed, strip_prefix,
-                               held_file, held_len or seq_len, keep_prompt, val_file, code_cut)
+                               held_file, held_len or seq_len, keep_prompt, val_file, code_cut, val_windows)
         return split, {"corpus": "jsonl", "path": str(p), "sha256_12": sha12(p), **rec}
     if spec in (None, "", "legacy"):
         return _legacy(host, seq_len, n_mean, n_fit, n_held, seed, log), {"corpus": "legacy", "path": str(LEGACY),
@@ -191,7 +191,7 @@ def _doc_id(text):
 
 
 def _windowed(path, host, seq_len, n_mean, n_fit, n_held, seed, log, windows, window_seed, strip_prefix, held_file,
-              held_len, keep_prompt, val_file=None, code_cut=False):
+              held_len, keep_prompt, val_file=None, code_cut=False, val_windows=0):
     """Windowed jsonl loader (FN calibration (a), (b), (d); coordinator 2026-11-16).
 
     (b) per domain, a shared template prefix (more than `strip_prefix` of the domain's rows) is stripped first.
@@ -219,7 +219,7 @@ def _windowed(path, host, seq_len, n_mean, n_fit, n_held, seed, log, windows, wi
     doms = sorted(by)
     rec = {"loader": "windowed", "windows": windows, "window_seed": window_seed, "strip_prefix": strip_prefix,
            "keep_prompt": keep_prompt, "held_file": str(held_file) if held_file else None, "held_len": held_len,
-           "code_cut": bool(code_cut),
+           "code_cut": bool(code_cut), "val_windows": val_windows or windows,
            "stripped": {}, "offsets": {}, "counts": {}}
     split = {}
 
@@ -229,7 +229,8 @@ def _windowed(path, host, seq_len, n_mean, n_fit, n_held, seed, log, windows, wi
         return {"file": r.get("_file", "corpus"), "row": key, "doc": r["_doc"], "off": int(o), "len": int(L),
                 "text_cut_chars": int(r.get("_cut", 0))}      # offsets are tokens of the text after this many chars
 
-    def seqs_of(r, L, dn):
+    def seqs_of(r, L, dn, nwin=None):
+        nw = windows if nwin is None else nwin
         if r.get("prompt") is not None:                      # on-policy row: tail window, masked loss
             ids = host.encode(r["text"])
             n_prompt = len(host.encode(r["prompt"]))
@@ -243,14 +244,14 @@ def _windowed(path, host, seq_len, n_mean, n_fit, n_held, seed, log, windows, wi
         ids = host.encode(r["text"])
         if len(ids) < L:
             return []
-        if not windows:
+        if not nw:
             SEQ_DOC.setdefault(tuple(ids[:L]), []).append((r["_doc"], 0))
             SEQ_SRC.setdefault(tuple(ids[:L]), []).append(src(r, 0, L))
             return [ids[:L]]
         span = len(ids) - L
         h = int.from_bytes(hashlib.sha256(f"{seed}:{window_seed}:{dn}:{r['_doc']}".encode()).digest()[:8], "big")
         rng = np.random.default_rng(h)
-        offs = sorted(set(int(o) for o in rng.integers(0, span + 1, size=min(windows, span + 1))))
+        offs = sorted(set(int(o) for o in rng.integers(0, span + 1, size=min(nw, span + 1))))
         rec["offsets"].setdefault(dn, []).append([r["_doc"], offs])
         for o in offs:
             SEQ_DOC.setdefault(tuple(ids[o:o + L]), []).append((r["_doc"], o))
@@ -348,7 +349,8 @@ def _windowed(path, host, seq_len, n_mean, n_fit, n_held, seed, log, windows, wi
             if r.get("prompt") is not None:
                 q = seqs_of(r, min(held_len, len(host.encode(r["text"]))), "val:" + dn)
             else:
-                q = seqs_of(r, held_len, "val:" + dn)      # offsets recorded under "val:<domain>"
+                # val documents may take more windows than carve documents (coordinator 2026-11-16: thin val splits)
+                q = seqs_of(r, held_len, "val:" + dn, val_windows or windows)   # offsets under "val:<domain>"
             VAL.setdefault(dn, []).extend(q)
         empty = [dn for dn in split if split[dn].get("fit") and not VAL.get(dn)]
         extra = [dn for dn in VAL if dn not in split]
