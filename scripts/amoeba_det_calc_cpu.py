@@ -173,7 +173,11 @@ def main():
     ap.add_argument("--english-n", type=int, default=None, help="smoke: English sequences per domain and split")
     ap.add_argument("--parser", default="calc-parse-v1", choices=("calc-parse-v1", "calc-parse-v2"))
     ap.add_argument("--arms", default="host,force,constrain,push@0.5,push@1,push@2,random_force,shuffled_force")
-    ap.add_argument("--backend", choices=("donor", "27b"), default="donor")
+    ap.add_argument("--backend", choices=("donor", "27b", "fn"), default="donor")
+    ap.add_argument("--read-point", default="mlp_input", choices=D.READ_POINTS,
+                    help="manifest read point; the fn backend captures layer outputs (layer_output_capture)")
+    ap.add_argument("--skip-generation", action="store_true",
+                    help="probe fit, controls and manifest only (served A/B measures generation)")
     ap.add_argument("--host-tiles", default=None, help="27b: amoeba tile manifest the host serves (core+boxes)")
     ap.add_argument("--host-layout", default="fused")
     ap.add_argument("--model", default=None, help="27b: model path (default the 27B q8 build; a slice for smoke tests)")
@@ -185,7 +189,14 @@ def main():
         raise SystemExit(f"refusing to overwrite nonempty {out}")
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    if args.backend == "27b":
+    if args.backend == "fn":
+        if args.read_point != "layer_output_capture" or not args.skip_generation:
+            raise SystemExit("--backend fn needs --read-point layer_output_capture --skip-generation")
+        from research.amoeba.det_backend_fn import BackendFN
+        mx.set_default_device(mx.gpu if args.device == "gpu" else mx.cpu)
+        donor = BackendFN(path=args.model)
+        src_fp, host_sha = donor.source_fingerprint, None
+    elif args.backend == "27b":
         from research.amoeba.det_backend27 import Backend27
         mx.set_default_device(mx.gpu if args.device == "gpu" else mx.cpu)
         policy = ({"amoeba_tiles": args.host_tiles, "amoeba_tiles_layout": args.host_layout}
@@ -204,8 +215,8 @@ def main():
            if isinstance(i, int) and i >= 0}
     layers = [int(x) for x in args.layers.split(",")]
     rep = {"schema": "mlx2.amoeba-det-calc-cpu.v1", "checkpoint": donor.artifact, "mlx2_source_revision": git_rev(),
-           "device": args.device if args.backend == "27b" else "cpu",
-           "dtype": "host-native" if args.backend == "27b" else "float32", "qualification": "unqualified", "args": vars(args)}
+           "device": args.device if args.backend in ("27b", "fn") else "cpu",
+           "dtype": "host-native" if args.backend in ("27b", "fn") else "float32", "qualification": "unqualified", "args": vars(args)}
 
     # ---- data -----------------------------------------------------------------------------
     def build(split, seed):
@@ -312,7 +323,7 @@ def main():
     print(json.dumps(rep["test_teacher_forced"], indent=0)[:3000], flush=True)
 
     # ---- manifest (force; push directions for the research arm) ------------------------------
-    want_push = any(a.startswith("push") for a in args.arms.split(","))
+    want_push = not args.skip_generation and any(a.startswith("push") for a in args.arms.split(","))
     if want_push:
         normw = donor.w["model.norm.weight"].astype(mx.float32)
         head = donor.head.astype(mx.float32)
@@ -325,7 +336,8 @@ def main():
         res_norm = None
     tiles = [{"id": "calculator", "kind": "calculator", "write_mode": "force", "read_layer": L,
               "write_layer": L, "gate": {"bias": float(b), "threshold": th, "probe": "logistic, balanced, val-chosen"},
-              "parser": args.parser}]
+              "parser": args.parser,
+              **({"read_point": args.read_point} if args.read_point != "mlp_input" else {})}]
     man = D.write_manifest(out / "tiles-force", source={"artifact": donor.artifact, "fingerprint": src_fp},
                            layers=donor.L, tiles=tiles, tensors={"calculator.probe_w": mx.array(w)},
                            extra={"mlx2_source_revision": rep["mlx2_source_revision"], "host_tiles_manifest_sha256": host_sha})
@@ -342,6 +354,12 @@ def main():
                                                           "probe": "control: shuffled labels, parse-positive rate matched"}}],
                              tensors={"calculator.probe_w": mx.array(ws)},
                              extra={"host_tiles_manifest_sha256": host_sha, "control": "shuffled-label probe"})
+    if args.skip_generation:
+        rep["receipt_force"] = None
+        rep["wall_s"] = time.time() - t0
+        (out / "report.json").write_text(json.dumps(rep, indent=1, default=float))
+        print("done (no generation)", out, f"{rep['wall_s']:.0f}s")
+        return
     ts_shuf = D.build(man_s, None, source_fingerprint=src_fp, layers_count=donor.L)
     ts = D.build(man, None, source_fingerprint=src_fp, layers_count=donor.L)
     tsp = None

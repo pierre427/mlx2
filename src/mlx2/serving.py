@@ -6559,8 +6559,15 @@ class ServingEngine(KernelReloadMixin):
                     key in job.request for key in ("weight_overlay", "layer_excision", "expert_mask")):
                 raise ValueError("amoeba tiles do not compose with weight-space overlays or surgery")
         det_tiles = getattr(getattr(self, "adapter", None), "amoeba_det_tiles", None)
-        if det_tiles is not None:
+        if det_tiles is not None or job.request.get("det_tiles") is not None:
+            from .runtime.amoeba_det_tiles import request_toggles
+
+            # A malformed field, an unknown tile, or "on" without a loaded tile set fails closed.
+            toggles = request_toggles(det_tiles, job.request)
+        if det_tiles is not None and any(toggles.values()):
             served = (self.snapshot.get("settings") or {}).get("route") or "ordinary"
+            # The tile set names the routes it was admitted for (ordinary; native_mtp for
+            # position-matched calculators; external_draft for resident calculators only).
             det_tiles.check_route(served)
         if "mlx2_overlay" in job.request:
             ablation = getattr(self, "ablation_overlays", None)
@@ -8746,10 +8753,13 @@ class ServingEngine(KernelReloadMixin):
                 receipt["amoeba_det_tiles"] = det.identity["tiles"]
             return receipt
         if det is not None:
+            from .runtime.amoeba_det_tiles import request_receipt as _det_request_receipt
+
             return {**(receipt if isinstance(receipt, dict) else {"route": receipt}),
                     "qualified": False, "qualification": "unqualified",
                     "amoeba_det_tiles": det.identity["tiles"],
-                    "amoeba_det_tile_set": det.identity["manifest_sha256"]}
+                    "amoeba_det_tile_set": det.identity["manifest_sha256"],
+                    "amoeba_det_tiles_request": _det_request_receipt(det, job.request)}
         for feature, attribute in (("expert_mask", "expert_mask_view"),
                                    ("ablation_overlay", "ablation_overlay_id"),
                                    ("layer_excision", "layer_excision_view"),

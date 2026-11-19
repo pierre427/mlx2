@@ -919,6 +919,7 @@ def validate_request(
         "mlx2_overlay",
         "mlx2_amoeba_tiles",
         "mlx2_amoeba_open",
+        "det_tiles",
     }
     # OpenAI clients serialize an unset field as an explicit null
     # (openai-python sends ``"stop": null`` for ``stop=None``).  Treat a
@@ -6794,6 +6795,16 @@ def build_parser():
     )
     parser.add_argument("--execution-policy", type=Path, help="JSON file with adapter execution choices; included in qualification identity")
     parser.add_argument(
+        "--det-tile",
+        default=None,
+        metavar="NAME[=MANIFEST]",
+        help=(
+            "load a deterministic amoeba tile (experimental, unqualified), e.g. 'calculator': "
+            "the manifest defaults to the research-artifacts det-tiles directory for this "
+            "checkpoint; requests turn it off with \"det_tiles\": {\"calculator\": false}"
+        ),
+    )
+    parser.add_argument(
         "--adaptive-profile-receipt",
         type=Path,
         help=(
@@ -7564,6 +7575,38 @@ class RouteSelection:
 
 
 _DRAFT_PROVIDER_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+
+
+DET_TILE_ROOT = Path.home() / "Library/Application Support/mlx2/research-artifacts/amoeba/det-tiles"
+
+
+def merge_invocation_det_tile(args, policy):
+    """``--det-tile NAME[=MANIFEST]`` -> the ``amoeba_det_tiles`` execution-policy key.
+
+    Without ``=MANIFEST`` the manifest is ``DET_TILE_ROOT/<model dir name>/<NAME>/manifest.json``.
+    The manifest must hold a tile whose id or kind is NAME; the adapter checks its checkpoint
+    fingerprint and digests at load.
+    """
+    value = getattr(args, "det_tile", None)
+    if not value:
+        return policy
+    name, sep, manifest = value.partition("=")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", name):
+        raise ValueError("--det-tile NAME must be [A-Za-z0-9_.-]{1,96}")
+    path = Path(manifest).expanduser() if sep else DET_TILE_ROOT / Path(args.model).expanduser().resolve().name / name / "manifest.json"
+    if path.is_dir():
+        path = path / "manifest.json"
+    resolved = {} if policy is None else dict(policy)
+    if "amoeba_det_tiles" in resolved:
+        raise ValueError("--det-tile cannot be combined with amoeba_det_tiles in --execution-policy")
+    try:
+        tiles = json.loads(path.read_text()).get("tiles") or []
+    except (OSError, ValueError) as error:
+        raise ValueError(f"--det-tile {name}: cannot read manifest {path}: {error}") from None
+    if not any(name in (t.get("id"), t.get("kind")) for t in tiles if isinstance(t, dict)):
+        raise ValueError(f"--det-tile {name}: manifest {path} holds no tile with that id or kind")
+    resolved["amoeba_det_tiles"] = str(path)
+    return resolved
 
 
 def merge_invocation_draft_models(args, policy):
@@ -8487,6 +8530,7 @@ def main():
         if not isinstance(policy, dict):
             parser.error("--execution-policy must be a JSON object")
     try:
+        policy = merge_invocation_det_tile(args, policy)
         policy = merge_invocation_draft_models(args, policy)
         from .adapters.registry import inspect_model
 

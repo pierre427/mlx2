@@ -476,25 +476,41 @@ def _temperature_logprobs(logits, sampling_temp: float = 0.0):
     return logits - mx.logsumexp(logits, axis=-1, keepdims=True)
 
 
-def _apply_logits_processors(logits_processors, y, logits):
+def _apply_logits_processors(logits_processors, y, logits, *, row=None):
     """Apply processors with the same rank convention as ``generate_step``.
 
     Processors run on float32 rows, as ordinary decode applies them.
+    ``row`` (the lane's row in the batched target forward these logits came
+    from) is handed to row-aware processors (``bind_row``: deterministic
+    amoeba tiles) before each call, as the ordinary generator does.
     """
     if not logits_processors:
         return logits
     batched = (logits[None] if logits.ndim == 1 else logits).astype(mx.float32)
     for processor in logits_processors:
+        if row is not None:
+            bind = getattr(processor, "bind_row", None)
+            if bind is not None:
+                bind(row)
         batched = processor(y, batched)
     return batched[0] if logits.ndim == 1 else batched
 
 
-def _probe_logits_processors(logits_processors, y, logits):
-    """Apply processors to provisional draft state through isolated copies."""
+def _probe_logits_processors(logits_processors, y, logits, *, row=None):
+    """Apply processors to provisional draft state through isolated copies.
+
+    ``row``: the lane's row in the target forward that scored these logits
+    (copied verify rows); row-aware processors are bound before probing.
+    """
     from .processor_probe import probe_logits_processors
 
     if not logits_processors:
         return logits
+    if row is not None:
+        for processor in logits_processors:
+            bind = getattr(processor, "bind_row", None)
+            if bind is not None:
+                bind(row)
     batched = (logits[None] if logits.ndim == 1 else logits).astype(mx.float32)
     batched = probe_logits_processors(logits_processors, y, batched)
     return batched[0] if logits.ndim == 1 else batched
@@ -2667,7 +2683,7 @@ def advance_batched_self_mtp_zero(
                     [lane.token_prefix, mx.array([lane.cur], mx.uint32)]
                 )
                 logits = _apply_logits_processors(
-                    lane.logits_processors, processor_tokens, logits
+                    lane.logits_processors, processor_tokens, logits, row=row
                 )
             logprobs = _lane_mtp_logprobs(lane, logits)
             bonus = _sample_from_logprobs(
@@ -3312,7 +3328,7 @@ def _propose_batched_self_mtp_round(
             ]
             raw = [batched_logits[row, pos] for pos in range(valid)]
             probed = [
-                _probe_logits_processors(lane.logits_processors, history, value)
+                _probe_logits_processors(lane.logits_processors, history, value, row=row)
                 for (history, value) in zip(histories, raw)
             ]
             legal = mx.stack(
@@ -3339,6 +3355,7 @@ def _propose_batched_self_mtp_round(
                         lane.logits_processors,
                         processor_tokens,
                         batched_logits[row, pos],
+                        row=row,
                     )
                 )
                 window.mark()
@@ -3508,7 +3525,7 @@ def _propose_batched_self_mtp_round(
         lane = batch.lanes[row]
         window = verify_windows[row] = VerifyWindow(lane.logits_processors)
         for pos in range(min(sum(reach.tolist()), accepted[row] + 1)):
-            _apply_logits_processors(lane.logits_processors, histories[pos], raw[pos])
+            _apply_logits_processors(lane.logits_processors, histories[pos], raw[pos], row=row)
             window.mark()
     target_drops = tuple((k - a for (k, a) in zip(k_vector, accepted)))
     mtp_state_trace.round_state(

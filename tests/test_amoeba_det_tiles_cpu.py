@@ -252,14 +252,14 @@ def test_processor_writes_result_when_gate_and_parse_agree(tmp_path, mode):
     proc.bind_row(1)
     got = _drive(proc, "So 12 * 34 =", 5)
     assert got[:4] == " 408" and not got[4].isdigit()      # the result, then the number is closed
-    assert ts.counters["calc"]["plans"] == 1 and ts.counters["calc"]["closed"] == 1
+    assert ts.calc_totals()["plans"] == 1 and ts.calc_totals()["closed"] == 1
     proc2 = D.CalculatorProcessor(ts, "calc", _Tok())
     proc2.bind_row(0)                                       # row 0's gate closed: host keeps its tokens
     assert _drive(proc2, "So 12 * 34 =", 2) == "??"
     proc3 = D.CalculatorProcessor(ts, "calc", _Tok())
     proc3.bind_row(1)                                       # gate open but no expression: nothing written
     assert _drive(proc3, "Call v5.5-1234 =", 2) == "??"
-    assert ts.counters["calc"]["parse_refused"]["operand_boundary"] >= 1
+    assert ts.calc_totals()["parse_refused"]["operand_boundary"] >= 1
 
 
 def test_identity_joins_manifest(tmp_path):
@@ -277,7 +277,7 @@ def test_unbound_row_fails_closed(tmp_path):
     ts.stash_shape["calc"], ts.forward_ids["calc"] = (2, 1), 3
     proc = D.CalculatorProcessor(ts, "calc", _Tok())       # never bound: width 2 is ambiguous
     assert _drive(proc, "So 12 * 34 =", 1) == "?"
-    assert ts.counters["calc"]["row_unbound"] == 1
+    assert ts.calc_totals()["row_unbound"] == 1
     ts.stash["calc"] = mx.array([[False, True]])            # one row, prompt-shaped: last position decides
     ts.stash_shape["calc"] = (1, 2)
     assert _drive(D.CalculatorProcessor(ts, "calc", _Tok()), "So 12 * 34 =", 1) == " "
@@ -348,7 +348,7 @@ def test_plan_aborts_when_an_earlier_processor_banned_the_token(tmp_path):
     proc.bind_row(0)
     upstream = mx.zeros((1, 128)).at[0, ord(" ")].add(-1e9)   # the planned " " is already banned
     out = proc(mx.array([ord(c) for c in "So 12 * 34 ="]), upstream)
-    assert ts.counters["calc"]["aborted_upstream_mask"] == 1 and proc.plan is None
+    assert ts.calc_totals()["aborted_upstream_mask"] == 1 and proc.plan is None
     assert float(mx.abs(out - upstream).max()) == 0.0
 
 
@@ -586,7 +586,7 @@ def test_verbatim_request_leaves_a_generated_calculator_cue_unchanged(tmp_path, 
     )
     logits = mx.arange(128, dtype=mx.float32)[None]
     assert processor(mx.array(_Tok().encode(line)), logits) is logits
-    assert ts.counters["calc"]["gate_open"] == 0
+    assert ts.calc_totals()["gate_open"] == 0
     assert not processor.events
 
 

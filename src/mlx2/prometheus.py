@@ -2455,6 +2455,38 @@ def _add_kernel_reload(
         builder.counter(f"mlx2_kernel_reload_{metric}_total", help_text, int(counts.get(f"kernel_reload_{key}", 0)))
 
 
+DET_TILE_CALC_COUNTERS = ("cue_seen", "gate_open", "gate_closed", "plans", "tokens_written",
+                          "plan_aborted", "closed", "aborted_upstream_mask", "gate_unmatched",
+                          "gate_ambiguous", "row_unbound")
+
+
+def _add_det_tile_metrics(builder: PrometheusBuilder, engine: Any) -> None:
+    """Deterministic amoeba tiles (experimental, unqualified): loaded, fires, refusals."""
+    tiles = getattr(getattr(engine, "adapter", None), "amoeba_det_tiles", None)
+    builder.gauge("mlx2_det_tiles_loaded",
+                  "Whether a deterministic amoeba tile set is loaded (unqualified).",
+                  int(tiles is not None))
+    if tiles is None:
+        return
+    for tile in tiles.tiles:
+        builder.gauge("mlx2_det_tile_info", "A loaded deterministic tile; the value is always one.", 1,
+                      {"tile": tile.id, "kind": tile.kind, "read_layer": str(tile.read_layer),
+                       "read_point": tile.read_point})
+    calc = tiles.host_counters()["calc"]
+    # Gauges, not counters: a speculative verify row past the accept point is rewound, so a
+    # value scraped mid-round can fall back.
+    for name in DET_TILE_CALC_COUNTERS:
+        builder.gauge(f"mlx2_det_tile_calculator_{name}",
+                      "Calculator tile events so far in this process, settled through speculative "
+                      "verify (plans = fires; false fires are measured offline: the server cannot "
+                      "know intent). Resident (device) calculator counts appear once a receipt "
+                      "folds them in (no device read per scrape).",
+                      int(calc.get(name, 0)))
+    for reason, count in sorted((calc.get("parse_refused") or {}).items()):
+        builder.gauge("mlx2_det_tile_calculator_parse_refused",
+                      "Calculator parser refusals so far, by bounded reason.", int(count), {"reason": str(reason)})
+
+
 def _add_weight_space_metrics(builder: PrometheusBuilder, engine: Any) -> None:
     from .runtime.weight_space_metrics import (
         DURATION_BUCKETS,
@@ -2597,6 +2629,7 @@ def render_engine_metrics(
         _add_drafter_metrics(builder, engine, tenant_id=tenant_id)
         return builder.render()
     _add_weight_space_metrics(builder, engine)
+    _add_det_tile_metrics(builder, engine)
     service_state = str(snapshot.get("service_state") or "serving")
     for state in ("serving", "draining", "quiesced", "suspended", "kernel_reload_failed", "stopped"):
         builder.gauge(

@@ -39,8 +39,17 @@ Writes are added in f32 and cast to the MLP output dtype. Host syncs: the proces
 history each step (to decode its text), reads the gate once a complete expression is in the text,
 and checks the planned token against earlier processors' masks while writing.
 
-Routes: the ordinary route only. Speculative verify and per-lane forcing are not audited with
-deterministic tiles, so adapters refuse them. Fact-table writes change the arithmetic, so the tile
+Routes: the ordinary route, and (for a calculator that reads ``layer_output_capture``) the
+native-MTP route of an adapter that declares it. With read point ``mlp_input`` the gate is read at
+the last position of the latest forward (one-row forwards, or decode rows the generator binds). With
+``layer_output_capture`` (the read layer's output hidden state through the trunk's capture
+projection) every position of the last few trunk forwards is kept with its input token ids, and the
+processor finds the position whose input token and preceding window match its own history: a
+speculative verify row j reads position j's gate. No match, or candidates that disagree, fails
+closed. The processor publishes a verify ledger (rows past the accept point are rewound) and a pure
+draft probe (it continues an active plan, so drafts propose the forced tokens, and may start one
+only where the gate matches the probe's history). Per-request counters are settled through the
+ledger. Fact-table writes change the arithmetic, so the tile
 set's identity joins the execution-numerics contract (APCv2 namespace).
 
 Nothing here names a model: the adapter supplies the MLP attribute and activation.
@@ -48,7 +57,10 @@ Nothing here names a model: the adapter supplies the MLP attribute and activatio
 
 from __future__ import annotations
 
+import collections
+import copy
 import hashlib
+import itertools
 import json
 import re
 import threading
@@ -69,6 +81,15 @@ PARSER_V3 = "calc-parse-v3"
 PARSER_V4 = "calc-parse-v4"
 PARSER_V5 = "calc-parse-v5-resident"
 PARSERS = (PARSER_ID, PARSER_V2, PARSER_V3, PARSER_V4, PARSER_V5)
+# Where a calculator's probe reads: the read layer's MLP input (wrapped MLP), or the read layer's
+# output hidden state through the trunk's capture projection (adapter-installed layer reader).
+READ_POINTS = ("mlp_input", "layer_output_capture")
+# Matching a stashed forward position to a processor's history: the input token at the position and
+# up to this many preceding tokens of the forward must equal the history's tail.
+MATCH_WINDOW = 8
+STASH_FORWARDS = 4
+# Speculative routes a position-matched calculator may serve on (the adapter must also declare it).
+SPECULATIVE_ROUTES = ("native_mtp",)
 # Tokens of context the calculator decodes to find an expression.
 CONTEXT_TOKENS = 48
 
@@ -759,6 +780,18 @@ def load_manifest(path) -> dict:
             raise ValueError("deterministic tiles: complete_literal_requests must be boolean")
         if "context_tokens" in t and (type(t["context_tokens"]) is not int or not 1 <= t["context_tokens"] <= 1024):
             raise ValueError("deterministic tiles: context_tokens must be an integer in 1..1024")
+        if t.get("read_point", "mlp_input") not in READ_POINTS:
+            raise ValueError(f"deterministic tiles: read_point must be one of {READ_POINTS}")
+        if t.get("read_point", "mlp_input") != "mlp_input" and (kind != "calculator" or L != W):
+            raise ValueError("deterministic tiles: layer_output_capture is a calculator read point "
+                             "(read_layer == write_layer)")
+        if t.get("read_point", "mlp_input") != "mlp_input" and (
+                t.get("parser") == PARSER_V5 or t.get("trigger_prefilter", "off") != "off"
+                or t.get("complete_literal_requests", False)):
+            # These read the mlp_input stash (lane binding, GPU cue window) or carry device state
+            # that the position-matched verify ledger does not rewind: refuse the combination.
+            raise ValueError("deterministic tiles: layer_output_capture calculators do not combine with "
+                             "the resident parser, trigger_prefilter or complete_literal_requests")
         if t.get("file") not in files:
             raise ValueError(f"deterministic tiles: tile {t['id']} file is not in the manifest's files")
     manifest["_dir"] = str(path.parent)
@@ -782,7 +815,10 @@ def tile_set_identity(manifest: dict) -> dict:
                        **({"arithmetic_backend": t.get("arithmetic_backend", "gpu" if t.get("parser") in (PARSER_V3, PARSER_V4) else "cpu")}
                           if t.get("parser") in (PARSER_V3, PARSER_V4) or "arithmetic_backend" in t else {}),
                        **({"parser": t["parser"]} if t.get("parser") in (PARSER_V2, PARSER_V3, PARSER_V4, PARSER_V5) else {}),
-                       **({"parser_execution":"gpu", "gate":"complete_syntax_and_exact_result"} if t.get('parser')==PARSER_V5 else {})}
+                       **({"parser_execution":"gpu", "gate":"complete_syntax_and_exact_result"} if t.get('parser')==PARSER_V5 else {}),
+                       # mlp_input sets keep their original identity.
+                       **({"read_point": t["read_point"]}
+                          if t.get("read_point", "mlp_input") != "mlp_input" else {})}
                       for t in manifest["tiles"]]}
 
 
@@ -875,6 +911,7 @@ class _Tile:
         self.parser = spec.get("parser", PARSER_ID) if self.kind == "calculator" else None
         self.arithmetic_backend = spec.get("arithmetic_backend", "gpu" if self.parser in (PARSER_V3, PARSER_V4) else "cpu")
         self.read_layer, self.write_layer = int(spec["read_layer"]), int(spec["write_layer"])
+        self.read_point = spec.get("read_point", "mlp_input")
         self.spec = spec
         p = spec["id"] + "."
         if self.kind == "calculator":
@@ -901,10 +938,21 @@ class DetTileSet:
     def __init__(self, manifest, tensors, activation, *, route="ordinary", allow_research_modes=False):
         self.manifest = manifest
         self.identity = tile_set_identity(manifest)
-        if route != "ordinary" and not (route=='external_draft' and resident_external_manifest(manifest)):
+        resident_external = route == "external_draft" and resident_external_manifest(manifest)
+        if route not in SPECULATIVE_ROUTES + ("ordinary",) and not resident_external:
             raise DetTileRefused(f"deterministic tiles run on the ordinary route only, not {route!r}")
         self.route = route
         self.tiles = [_Tile(s, tensors, activation) for s in manifest["tiles"]]
+        # Position-matched calculators only: every gate they read is matched to its history.
+        matched = all(t.kind == "calculator" and t.read_point == "layer_output_capture" for t in self.tiles)
+        if resident_external:
+            # The resident external-draft verifier is admitted for exactly that route.
+            self.served_routes = ("external_draft",)
+        else:
+            self.served_routes = ("ordinary",) + (SPECULATIVE_ROUTES if matched else ())
+        if route not in self.served_routes:
+            raise DetTileRefused(f"on the {route} route only calculators reading layer_output_capture "
+                                 "(position-matched gates) are served")
         for t in self.tiles:
             if not allow_research_modes and t.mode not in SERVING_WRITE_MODES[t.kind]:
                 raise DetTileRefused(f"tile {t.id}: write mode {t.mode!r} is research-only "
@@ -917,17 +965,125 @@ class DetTileSet:
         self.enabled = True
         self.lock = threading.Lock()
         self.counters = {"forwards": 0, "fact_open_rows_pending": [], "fact_open_rows": 0, "fact_rows": 0,
-                         "calc": {"cue_seen": 0, "gate_open": 0, "gate_closed": 0, "parse_refused": {},
-                                  "plans": 0, "tokens_written": 0, "plan_aborted": 0,
-                                  "plan_executions": {}}}
+                         "calc": _calc_counters()}
+        # Calculator processors count into their own (verify-ledger restored) dicts, kept here by
+        # processor uid so per-request receipts and the process totals read settled values.
+        # Resident (device) processors still fold into counters["calc"] at a receipt.
+        self.proc_counters = collections.OrderedDict()
+        self._proc_ids = itertools.count(1)
+        self.live = __import__("weakref").WeakSet()   # live (non-probe) calculator processors
+        # layer_output_capture reads: tile id -> recent forwards {ids, gate, host}
+        self.out_stash = {}
+        self.out_forwards = 0
 
-    def check_route(self,route):
-        if route!=self.route:
-            raise DetTileRefused(f'deterministic tiles admitted for {self.route}, received {route}')
+    def check_route(self, route):
+        """Fail closed unless the serving route is one this tile set was admitted for."""
+        if route not in self.served_routes:
+            raise DetTileRefused(f"deterministic tiles admitted for {', '.join(self.served_routes)} "
+                                 f"(installed for {self.route}), received {route}")
 
     # --- layers -------------------------------------------------------------------------------
     def layers_used(self):
-        return sorted({t.read_layer for t in self.tiles} | {t.write_layer for t in self.tiles})
+        """Layers whose MLP is wrapped (mlp_input reads and writes)."""
+        return sorted({t.read_layer for t in self.tiles if t.read_point == "mlp_input"}
+                      | {t.write_layer for t in self.tiles if t.read_point == "mlp_input"})
+
+    def output_read_layers(self):
+        """Layers whose output an adapter must hand to :meth:`on_layer_output`."""
+        return sorted({t.read_layer for t in self.tiles if t.read_point == "layer_output_capture"})
+
+    def on_layer_output(self, layer, hidden, input_ids, capture):
+        """Stash calculator gates over every position of a trunk forward (layer_output_capture).
+
+        Nothing is computed while no calculator processor is live (every request has it off), so
+        such forwards run the host's arithmetic and nothing else. ``capture`` maps the layer output
+        to the probe's input space. A forward without token ids (embeddings input) stashes nothing.
+        """
+        if not self.enabled or not len(self.live) or input_ids is None:
+            return
+        import mlx.core as mx
+        for t in self.tiles:
+            if t.kind != "calculator" or t.read_point != "layer_output_capture" or t.read_layer != layer:
+                continue
+            gate = t.gate.open(capture(hidden))
+            if gate.ndim != 2 or tuple(gate.shape) != tuple(input_ids.shape[:2]):
+                continue
+            # Scheduled with the forward (no sync): once evaluated, the [B, T] bools no longer pin
+            # the layer output the way an unevaluated graph would.
+            try:
+                mx.async_eval(gate)
+            except ValueError:
+                pass            # inside a graph transformation (research grads): leave it lazy
+            ring = self.out_stash.setdefault(t.id, collections.deque(maxlen=STASH_FORWARDS))
+            ring.appendleft({"ids": input_ids, "gate": gate, "host": None})
+            self.out_forwards += 1
+
+    def calc_gate_at(self, tile_id, history, row=None):
+        """``(gate, reason)`` for the stashed position whose inputs end ``history`` (one sync).
+
+        The newest forward with a match decides: a position whose input token is ``history[-1]``
+        and whose preceding forward inputs (up to MATCH_WINDOW) equal the history before it. With
+        a bound ``row`` only that row is searched. Several matches with different gates (rows or
+        positions with the same recent tokens) fail closed, as does no match.
+        """
+        import mlx.core as mx
+        if not history:
+            return None, "gate_unmatched"
+        last = int(history[-1])
+        ring = list(self.out_stash.get(tile_id, ()))
+        if row is not None:
+            # A bound row names a row of the newest forward only (older forwards ordered other lanes).
+            ring = ring[:1]
+        for entry in ring:
+            if entry["host"] is None:
+                mx.eval(entry["ids"], entry["gate"])
+                entry["host"] = (entry["ids"].tolist(), entry["gate"].tolist())
+            ids, gate = entry["host"]
+            if row is not None and row >= len(ids):
+                return None, "row_unbound"
+            rows = range(len(ids)) if row is None else (row,)
+            found = set()
+            for r in rows:
+                seq = ids[r]
+                for j, tok in enumerate(seq):
+                    if int(tok) != last:
+                        continue
+                    w = min(j, MATCH_WINDOW, len(history) - 1)
+                    if w and [int(x) for x in seq[j - w:j]] != [int(x) for x in history[-1 - w:-1]]:
+                        continue
+                    found.add(bool(gate[r][j]))
+            if len(found) == 1:
+                return found.pop(), None
+            if len(found) > 1:
+                return None, "gate_ambiguous"
+        return None, "gate_unmatched"
+
+    def new_processor_counters(self):
+        uid = next(self._proc_ids)
+        c = _calc_counters()
+        with self.lock:
+            self.proc_counters[uid] = c
+            while len(self.proc_counters) > 4096:
+                _, old = self.proc_counters.popitem(last=False)
+                _merge_calc(self.counters["calc"], old)
+        return uid, c
+
+    def calc_totals(self):
+        with self.lock:
+            total = json.loads(json.dumps(self.counters["calc"]))
+            for c in self.proc_counters.values():
+                _merge_calc(total, c)
+        return total
+
+    def request_receipt(self, uids):
+        """Settled calculator counters of one request's processors (host only)."""
+        total = _calc_counters()
+        with self.lock:
+            for uid in uids or ():
+                c = self.proc_counters.get(uid)
+                if c is not None:
+                    _merge_calc(total, c)
+        return total
 
     def on_mlp(self, layer, x, y):
         """Apply every tile that reads or writes at ``layer``; returns the (possibly changed) y."""
@@ -964,7 +1120,7 @@ class DetTileSet:
                     push = vec[:, None, :] * gate[..., -1:, None].astype(mx.float32) if gate is not None else vec[:, None, :]
                     pad = mx.zeros((y.shape[0], y.shape[1] - 1, y.shape[2]), dtype=mx.float32)
                     y = (y.astype(mx.float32) + mx.concatenate([pad, push], axis=1)).astype(y.dtype)
-        if layer == max(self.layers_used()):
+        if self.layers_used() and layer == max(self.layers_used()):
             with self.lock:
                 self.counters["forwards"] += 1
         return y
@@ -990,6 +1146,15 @@ class DetTileSet:
         return bool(g[0 if rows == 1 else row, -1].item())
 
     # --- receipts -----------------------------------------------------------------------------
+    def host_counters(self):
+        """Process counters without a device read (fact-table opens not yet folded are left out)."""
+        with self.lock:
+            c = json.loads(json.dumps({k: v for k, v in self.counters.items()
+                                       if k not in ("fact_open_rows_pending", "calc")}))
+        c["calc"] = self.calc_totals()
+        c["layer_output_forwards"] = self.out_forwards
+        return c
+
     def receipt(self):
         import mlx.core as mx
         with self.lock:
@@ -1001,15 +1166,43 @@ class DetTileSet:
                 total = mx.sum(mx.stack(pend))
                 self.counters["fact_open_rows"] += int(total.item())
                 self.counters["fact_open_rows_pending"] = []
-            c = json.loads(json.dumps({k: v for k, v in self.counters.items() if k != "fact_open_rows_pending"}))
+            c = json.loads(json.dumps({k: v for k, v in self.counters.items()
+                                       if k not in ("fact_open_rows_pending", "calc")}))
+        c["calc"] = self.calc_totals()
+        if self.output_read_layers():
+            c["layer_output_forwards"] = self.out_forwards
         return {"schema": RECEIPT_SCHEMA, **self.identity, "route": self.route,
                 "qualified": False, "qualification": "unqualified", "implemented": True, "selected": True,
                 # observed_used: a tile wrote (a calculator plan or an open fact row), not merely ran.
                 "observed_used": bool(c["calc"]["plans"] or c["fact_open_rows"]),
-                "observed_ran": c["forwards"] > 0, "counters_scope": "process_cumulative", "counters": c,
+                "observed_ran": c["forwards"] > 0 or c.get("layer_output_forwards", 0) > 0,
+                "counters_scope": "process_cumulative", "counters": c,
                 **({'speculative_protocol':'resident-calculator-exact-verify-v1',
                     'tree_verifier':'selected_path_rowwise',
                     'progressive_private_branches':False} if self.route=='external_draft' else {})}
+
+
+def _calc_counters():
+    return {"cue_seen": 0, "gate_open": 0, "gate_closed": 0, "parse_refused": {},
+            "plans": 0, "tokens_written": 0, "plan_aborted": 0, "plan_executions": {}}
+
+
+def _assign_in_place(d, values):
+    """Make ``d`` equal ``values`` without an empty moment (readers hold the same lock)."""
+    for k in [k for k in d if k not in values]:
+        del d[k]
+    d.update(values)
+
+
+def _merge_calc(into, c):
+    # list(): the generator adds keys to a processor's dict without the lock (a reader snapshots).
+    for k, v in list(c.items()):
+        if isinstance(v, dict):
+            d = into.setdefault(k, {})
+            for k2, v2 in list(v.items()):
+                d[k2] = d.get(k2, 0) + v2
+        else:
+            into[k] = into.get(k, 0) + v
 
 
 def make_det_mlp_class():
@@ -1131,10 +1324,75 @@ class CalculatorProcessor:
             from .amoeba_calc_trigger import GPUCueWindow
             self._gpu_cue_window = GPUCueWindow(self.tok, allow_symbolic=self.tile.parser == PARSER_V4,
                                               allow_counting=self.tile.spec.get('complete_literal_requests',False))
+        self._row_bound = False
+        self._start = 0
+        self.shadow = False        # a draft probe's disposable copy: counts nothing, never live
+        self.uid, self.counts = tileset.new_processor_counters()
+        tileset.live.add(self)
 
     def bind_row(self, row):
         self.row = int(row)
+        self._row_bound = True
         self._bound_forward = self.tiles.forward_ids.get(self.tile.id)
+
+    # --- speculative routes ---------------------------------------------------------------------
+    # The GPU cue window (trigger_prefilter) is device state this ledger does not rewind: load_manifest
+    # refuses it on position-matched (speculative-capable) tiles, the only ones verify rewinds.
+    _STATE = ("plan", "emitted", "_start", "_closing", "row", "_row_bound", "_bound_forward",
+              "_first_call", "_literal_request")
+
+    def _apply_pending_restore(self):
+        restored = self.__dict__.pop("_restore_counts", None)
+        if restored is not None:
+            # After a recovery restore: counters return to the snapshot (the rows after it are
+            # replayed and recounted), in place, under the tile set's lock.
+            with self.tiles.lock:
+                _assign_in_place(self.counts, restored)
+
+    def verify_ledger(self):
+        """Snapshot of what a verify row can change (``processor_probe.VerifyWindow``)."""
+        self._apply_pending_restore()
+        return ({k: copy.copy(getattr(self, k)) for k in self._STATE}, len(self.events),
+                json.loads(json.dumps(self.counts)))
+
+    def restore_verify_ledger(self, ledger):
+        state, n_events, counts = ledger
+        for k, v in state.items():
+            setattr(self, k, copy.copy(v))
+        del self.events[n_events:]
+        # In place (the tile set reads this dict by processor uid), under its lock.
+        with self.tiles.lock:
+            _assign_in_place(self.counts, json.loads(json.dumps(counts)))
+
+    def _clone(self, *, shadow):
+        new = object.__new__(type(self))
+        new.__dict__.update(self.__dict__)
+        for k in self._STATE:
+            setattr(new, k, copy.copy(getattr(self, k)))
+        new.events = list(self.events)
+        if shadow:
+            new.shadow = True
+            new.counts = _calc_counters()
+        return new
+
+    def probe(self, tokens, logits):
+        """Draft scoring through a disposable copy (``processor_probe`` protocol): it continues an
+        active plan (drafts propose the forced tokens) and starts one only where the stashed gate
+        matches its history. Nothing of it reaches this processor or the counters."""
+        return self._clone(shadow=True)(tokens, logits)
+
+    def __deepcopy__(self, memo):
+        # Recovery snapshots: the tile set, tokenizer and counter dict are shared, plan state is
+        # copied, and the copy carries its counters' values: when a restore installs the copy's
+        # state, the first call puts the counters back to them. A live copy keeps the reader on.
+        new = self._clone(shadow=self.shadow)
+        if not self.shadow:
+            # A copy of a snapshot keeps the snapshot's values, not the live dict's.
+            pending = self.__dict__.get("_restore_counts")
+            new._restore_counts = json.loads(json.dumps(pending if pending is not None else self.counts))
+            self.tiles.live.add(new)
+        memo[id(self)] = new
+        return new
 
     def _decode(self, ids):
         return self.tok.decode(list(ids))
@@ -1201,6 +1459,14 @@ class CalculatorProcessor:
         return cache[key]
 
     def __call__(self, tokens, logits):
+        # A row binding holds for this call only: a lane moved between generators (ordinary
+        # step, then self-MTP) must never search the row of an earlier batch. Taken before any
+        # early return, so a skipped call never leaves a stale binding for the next one.
+        bound_row = self.row if self._row_bound else None
+        self._row_bound = False
+        self._apply_pending_restore()
+        # Per-processor counters (settled through the verify ledger; summed by calc_totals).
+        c = self.counts
         if self._verbatim_copy:
             return logits
         import mlx.core as mx
@@ -1213,7 +1479,6 @@ class CalculatorProcessor:
             if bound is not None and eos is not None and (self.gate_override is None or self.gate_override('literal_request')):
                 from .amoeba_calc_requests import evaluate as request_answer
                 answer,info=request_answer(request,self.tile.arithmetic_backend)
-                c=self.tiles.counters['calc']
                 if answer is not None:
                     ids=tokens.tolist() if hasattr(tokens,'tolist') else list(tokens)
                     while ids and isinstance(ids[0],list):ids=[i for row in ids for i in row]
@@ -1236,17 +1501,15 @@ class CalculatorProcessor:
             if gate is not None and shape and 0 <= self.row < shape[0]:
                 trigger = self._gpu_cue_window.update(tokens, gate, self.row * shape[1] + shape[1] - 1)
                 if not self._first_call and self.plan is None and not self._closing:
-                    c = self.tiles.counters["calc"]
                     c["prefilter_checks"] = c.get("prefilter_checks", 0) + 1
                     if not bool(trigger.item()):
                         c["prefilter_skips"] = c.get("prefilter_skips", 0) + 1
                         return logits
         self._first_call = False
-        self.tiles.counters["calc"]["history_materializations"] = self.tiles.counters["calc"].get("history_materializations", 0) + 1
+        c["history_materializations"] = c.get("history_materializations", 0) + 1
         ids = tokens.tolist() if hasattr(tokens, "tolist") else list(tokens)
         while ids and isinstance(ids[0], list):
             ids = [i for row in ids for i in row]
-        c = self.tiles.counters["calc"]
         if self._closing:
             # After the result: a "." or "," may follow (end of sentence, list), but no digit may
             # extend the number on the next step either ("17" must not become "17.5").
@@ -1281,6 +1544,11 @@ class CalculatorProcessor:
         c["cue_seen"] += 1
         if self.gate_override is not None:
             opened = self.gate_override(text)
+        elif self.tile.read_point == "layer_output_capture":
+            opened, why = self.tiles.calc_gate_at(self.tile.id, ids, bound_row)
+            if opened is None:
+                c[why] = c.get(why, 0) + 1
+                return logits
         else:
             opened = self.tiles.calc_gate_row(self.tile.id, self.row, self._bound_forward)
             if opened is None:
@@ -1316,7 +1584,7 @@ class CalculatorProcessor:
         return self._continue(ids, logits)
 
     def _continue(self, ids, logits):
-        c = self.tiles.counters["calc"]
+        c = self.counts
         done = len(ids) - self._start
         if self.mode == "force":
             # Tokens emitted since the plan began must be the plan's prefix (they were forced).
@@ -1424,7 +1692,8 @@ def refuse_policy(manifest_path, policy, *, require_mtp=False, weight_streaming=
     return 'external_draft' if external else 'ordinary'
 
 
-def install_on_adapter(layers, manifest_path, declaration, *, source_fingerprint, host_tiles_sha256=None,route='ordinary'):
+def install_on_adapter(layers, manifest_path, declaration, *, source_fingerprint, host_tiles_sha256=None,
+                       route="ordinary"):
     """Install, after every load-time projection law; checks the host the tiles were built on.
 
     A manifest built on a tiled host records that tile set's manifest digest
@@ -1436,13 +1705,48 @@ def install_on_adapter(layers, manifest_path, declaration, *, source_fingerprint
     want = manifest.get("host_tiles_manifest_sha256")
     if want != host_tiles_sha256:
         raise ValueError(f"deterministic tiles were built on host tiles {want}, this route holds {host_tiles_sha256}")
-    return install(layers, manifest_path, declaration, source_fingerprint=source_fingerprint,route=route)
+    return install(layers, manifest_path, declaration, source_fingerprint=source_fingerprint, route=route)
+
+
+REQUEST_FIELD = "det_tiles"
+
+
+def request_toggles(tileset, request):
+    """``{tile id: on}`` for one request from its ``det_tiles`` field (default: every tile on).
+
+    ``det_tiles`` maps a tile id or a kind ("calculator") to a bool; a tile id wins over its kind.
+    Unknown names, non-bool values, or turning on a tile the server did not load fail closed.
+    """
+    field = (request or {}).get(REQUEST_FIELD)
+    if field is None:
+        return {} if tileset is None else {t.id: True for t in tileset.tiles}
+    if not isinstance(field, dict) or not all(isinstance(k, str) and type(v) is bool for k, v in field.items()):
+        raise ValueError(f"{REQUEST_FIELD} must map tile ids or kinds to true/false")
+    if tileset is None:
+        on = sorted(k for k, v in field.items() if v)
+        if on:
+            raise DetTileRefused(f"{REQUEST_FIELD}: {', '.join(on)} requested on, but this server loaded "
+                                 "no deterministic tiles")
+        return {}
+    ids, kinds = {t.id for t in tileset.tiles}, {t.kind for t in tileset.tiles}
+    unknown = sorted(set(field) - ids - kinds)
+    if unknown:
+        raise DetTileRefused(f"{REQUEST_FIELD}: unknown tile(s) {', '.join(unknown)}; loaded "
+                             f"{', '.join(sorted(ids))}")
+    return {t.id: field.get(t.id, field.get(t.kind, True)) for t in tileset.tiles}
 
 
 def processors_for(tileset, tokenizer, *, prompt_length=0, request=None):
-    """One calculator processor per calculator tile (fresh per request)."""
+    """One calculator processor per calculator tile the request leaves on (fresh per request).
+
+    With ``request``, its ``det_tiles`` field selects tiles, and the host processors' counter ids
+    are recorded in ``request["_mlx2_det_tile_uids"]`` for the request's receipt (resident device
+    processors count into the process totals at a receipt instead).
+    """
     if tileset is None:
+        request_toggles(None, request)
         return ()
+    toggles = request_toggles(tileset, request)
     tok = _calculator_tokenizer(tokenizer)
     from .amoeba_calc_requests import request_text_from_payload
     text = request_text_from_payload(request)
@@ -1450,9 +1754,60 @@ def processors_for(tileset, tokenizer, *, prompt_length=0, request=None):
     if tileset.route=='external_draft':
         from .amoeba_calc_speculative import SpeculativeResidentCalculatorProcessor
         ResidentCalculatorProcessor=SpeculativeResidentCalculatorProcessor
-    return tuple((ResidentCalculatorProcessor if t.parser==PARSER_V5 else CalculatorProcessor)(tileset, t.id, tok, prompt_length=prompt_length,
-                                     request_text=text)
-                 for t in tileset.tiles if t.kind == "calculator")
+    procs = tuple((ResidentCalculatorProcessor if t.parser==PARSER_V5 else CalculatorProcessor)(
+                      tileset, t.id, tok, prompt_length=prompt_length, request_text=text)
+                  for t in tileset.tiles if t.kind == "calculator" and toggles.get(t.id, True))
+    if request is not None:
+        request["_mlx2_det_tile_uids"] = (list(request.get("_mlx2_det_tile_uids") or [])
+                                          + [p.uid for p in procs if hasattr(p, "uid")])
+        request["_mlx2_det_tiles_on"] = {k: bool(v) for k, v in toggles.items()}
+        if any(not hasattr(p, "uid") for p in procs):
+            request["_mlx2_det_tile_resident"] = True
+    return procs
+
+
+def request_receipt(tileset, request):
+    """The per-request det-tile receipt: what was on and what the calculator did (host only)."""
+    if tileset is None:
+        return None
+    on = (request or {}).get("_mlx2_det_tiles_on")
+    return {"schema": RECEIPT_SCHEMA, "loaded": [t.id for t in tileset.tiles],
+            "requested": (request or {}).get(REQUEST_FIELD), "on": on,
+            "qualification": "unqualified",
+            # The loaded tile set joins the APCv2 namespace (numerics contract) for every request,
+            # tile on or off: no prefix crosses tile sets or the base model.
+            "apcv2_namespace": {"amoeba_det_tiles": tileset.identity["manifest_sha256"],
+                                "applies_to": "every request while the tile set is loaded"},
+            # Resident (device) processors have no per-request counters: they fold into the
+            # tile set's process totals at a receipt, so a per-request zero would be untrue.
+            **({"calculator": None,
+                "calculator_scope": "process_cumulative_only (resident device counters)"}
+               if (request or {}).get("_mlx2_det_tile_resident") else
+               {"calculator": tileset.request_receipt((request or {}).get("_mlx2_det_tile_uids"))})}
+
+
+def install_layer_output_reader(layers, tileset, capture):
+    """Hand each output-read layer's output and input ids to ``tileset.on_layer_output``.
+
+    The layer's class is swapped for a subclass whose ``__call__`` runs the original and then
+    stashes the gate: same object, parameters and attributes, so fused paths that inspect the
+    layer keep working. The layer's call signature must be ``(x, input_ids, ...)``. Paths that do
+    not call the layer (packed mixed forwards) stash nothing, and the processor then fails closed.
+    """
+    for l in tileset.output_read_layers():
+        layer = layers[l]
+        if getattr(layer, "amoeba_det_reader", False):
+            raise ValueError(f"deterministic tiles: layer {l} already has an output reader")
+        base = type(layer)
+
+        def __call__(self, x, input_ids, *args, _l=l, _base=base, **kwargs):
+            out = _base.__call__(self, x, input_ids, *args, **kwargs)
+            tileset.on_layer_output(_l, out, input_ids, capture)
+            return out
+
+        layer.__class__ = type(base.__name__, (base,), {"__call__": __call__, "amoeba_det_reader": True,
+                                                       "__module__": base.__module__})
+    return tileset
 
 
 def numerics_contract_with_det_tiles(contract, tileset):

@@ -124,7 +124,7 @@ def test_dense_binding_hook_preserves_complete_feed_forward(tmp_path,moe):
     after=layer._feed_forward(x);mx.eval(after)
     assert mx.array_equal(before,after).item()
     assert tiles.stash_shape['calculator']==(2,3)
-    assert tiles.counters['calc']['gate_open']==0
+    assert tiles.calc_totals()['gate_open']==0
     if moe:assert layer.experts is sparse
 
 

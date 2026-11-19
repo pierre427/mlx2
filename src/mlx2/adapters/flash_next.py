@@ -780,9 +780,25 @@ class FlashNextAdapter:
 
     def _init_flash_next(self, model_path: str, *, execution_policy=None):
         from .flash_next_policy import FlashNextPolicy
+        # Deterministic amoeba tiles (runtime/amoeba_det_tiles.py): opt-in, unqualified. Only
+        # position-matched calculators (read point layer_output_capture), so they serve on the
+        # ordinary and native-MTP routes alike; the tile set installs after every other installer.
+        self.amoeba_det_tiles = None
+        execution_policy = dict(execution_policy or {})
+        det_manifest = execution_policy.pop("amoeba_det_tiles", None)
         execution_policy, external_policy = split_native_mtp_external_policy(
             execution_policy
         )
+        if det_manifest is not None:
+            from ..runtime.amoeba_det_tiles import DetTileRefused
+
+            if type(det_manifest) is not str or not det_manifest:
+                raise ValueError("amoeba_det_tiles must name a deterministic tile manifest path")
+            if external_policy:
+                raise DetTileRefused("deterministic tiles do not serve the native-MTP AST/external route")
+            if execution_policy.get("mixed_prefill_decode"):
+                raise DetTileRefused("deterministic tiles refuse mixed_prefill_decode (packed rows "
+                                     "carry no per-lane gate)")
         self.policy = FlashNextPolicy.from_mapping(execution_policy)
         self._bind_draft_loop_prior()
         self.external_policy = {}
@@ -1072,9 +1088,41 @@ class FlashNextAdapter:
             )
             if external_policy:
                 self._bind_external_ast(path, external_policy)
+            if det_manifest is not None:
+                self._install_flash_next_det_tiles(det_manifest)
         except BaseException:
             self.close()
             raise
+
+    def _install_flash_next_det_tiles(self, manifest_path):
+        """Experimental, unqualified: a calculator reading a trunk layer's output (no MLP wrap).
+
+        The read layer's class is swapped for a subclass that stashes the probe gate after the
+        layer's own forward, through the trunk's capture projection (the learned HC mixer the
+        external drafters read); the layer's fused paths and every other layer are untouched.
+        """
+        import mlx.nn as nn
+
+        from ..runtime import amoeba_det_tiles as D
+
+        trunk = self.model.language_model.model
+        layers = list(trunk.layers)
+        tiles = D.install_on_adapter(
+            layers, manifest_path, {"mlp": "mlp", "activation_fn": nn.silu},
+            source_fingerprint=self.identity["fingerprint"], route="native_mtp")
+        if any(l >= len(layers) - 1 for l in tiles.output_read_layers()):
+            raise D.DetTileRefused("the last trunk layer runs a tail split on prompt chunks; read earlier")
+        D.install_layer_output_reader(layers, tiles, trunk._external_capture)
+        self.amoeba_det_tiles = tiles
+        self.identity = {**self.identity,
+                         "amoeba_det_tiles_manifest_sha256": tiles.identity["manifest_sha256"]}
+
+    def request_logits_processors(self, request, *, prompt_length):
+        """Calculator processors for the tiles this request leaves on (none without det tiles)."""
+        from ..runtime.amoeba_det_tiles import processors_for
+
+        return processors_for(getattr(self, "amoeba_det_tiles", None), self.tokenizer,
+                              prompt_length=prompt_length, request=request)
 
     def _bind_native_mtp_external(self, path, value):
         """Select the native-MTP AST route: the own head drafts, the external
@@ -1621,6 +1669,14 @@ class FlashNextAdapter:
         # neither the Flash-Next policy nor its Qwen4 expert blocks.
         if getattr(self, "policy", None) is None:
             return None
+        # Through the class: callers pass stand-ins for ``self`` (soft-reap contract tests).
+        contract = FlashNextAdapter._flash_next_numerics_contract(self)
+        # A loaded tile set joins the APCv2 namespace (the det-tile contract).
+        from ..runtime.amoeba_det_tiles import numerics_contract_with_det_tiles
+
+        return numerics_contract_with_det_tiles(contract, getattr(self, "amoeba_det_tiles", None))
+
+    def _flash_next_numerics_contract(self):
         modules = getattr(self, "_diagnostic_modules", None)
         if modules is None:
             modules = self._snapshot_diagnostic_modules(self.model)

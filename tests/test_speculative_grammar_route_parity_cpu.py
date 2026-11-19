@@ -196,9 +196,9 @@ def test_parity_check_has_teeth_against_unconstrained_verify_rows(monkeypatch, m
     reference = _serve(models, "ordinary", requests)
     original = hybrid_speculative._apply_logits_processors
 
-    def drop_constraint(processors, y, logits):
+    def drop_constraint(processors, y, logits, **kwargs):
         kept = [p for p in processors if type(p).__name__ != "StructuredOutputProcessor"]
-        return original(kept, y, logits)
+        return original(kept, y, logits, **kwargs)
 
     monkeypatch.setattr(hybrid_speculative, "_apply_logits_processors", drop_constraint)
     planted = _serve(models, "native_mtp", requests)
