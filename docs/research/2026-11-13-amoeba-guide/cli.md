@@ -106,14 +106,39 @@ that doesn't fit refuses. There is never a silent resident load over the cap.
       they need a sweep family of their own.
   - **MoE models too big for memory need a sweep family.** mlx2's loaders have no whole-layer expert streaming:
     `dense_layers` refuses routed experts, and `moe_experts` is an on-demand per-expert cache sized for decode,
-    which would re-read most experts on every capture batch. The plan refuses such a model rather than re-reading.
-    `rolling-parity --rolling-resident` checks the layer-major schedule on an MoE model that fits.
-  - A checkpoint whose adapter family is registered in `research/amoeba/sweep/family.py` (`deepseek_v41`,
-    `mimo_v2`, and later ones such as glm5_next) runs that family instead, with its own loader.
+    which would re-read most experts on every capture batch. The plan refuses such a model rather than re-reading,
+    unless a sweep family streams it. `rolling-parity --rolling-resident` checks the layer-major schedule on an
+    MoE model that fits.
+  - **Whole-layer streaming families** (2026-11-18, `research/amoeba/sweep/layer_swap.py`): `kimi_linear` and
+    `nemotron_h`. They are registered by config `model_type`.
+    - The model is the adapter's own module tree, built as the adapter builds it: same classes, quantization,
+      installers, default policy and process globals.
+    - Every decoder layer holds shape-true placeholders. The embeddings, final norm and head stay resident.
+    - `begin_layer` reads one layer's tensors, every routed expert included, once per chunk. They go through the
+      adapter's own `sanitize`, then a strict name and shape check, then the per-layer installers (the Super VL's
+      FP8 recovery and NVFP4 scale fold).
+    - `release_layer` puts the placeholders back and drops every array cache a module derived from the weights.
+    - The units are the carve host's, so a map compares with the resident capture.
+    - The gate's reference is the trunk's own text-major forward, with each layer loaded as the trunk calls it,
+      so it runs at full depth.
+    - `kimi_linear` covers every staged Kimi Linear layout plus the original 48B hub BF16 (256 experts), which
+      the adapter does not stage.
+    - `nemotron_h` covers the `Nemotron35SuperAdapter` artifacts (the Super VL NVFP4 export, text trunk; media
+      and MTP tensors never read) and `Nemotron35LightningAdapter`. Bolt and anything else refuse.
+    - Nemotron experts are SwitchMLP, which the carve's neuron units don't cover, so pass `--moe-units expert`.
+      The plan refuses `neuron` up front.
+    - The plan also refuses up front an artifact of another adapter that shares the `model_type` (Bolt,
+      Nemotron 3 Super). Each family module declares `ADAPTERS` and `MOE_UNITS`.
+    - The plan budgets the resident remainder, three whole layers and the state under 90% of the cap. It picks
+      K from what is left.
+  - Any other checkpoint whose adapter family, or else whose `model_type`, is registered in
+    `research/amoeba/sweep/family.py` (`deepseek_v41`, `mimo_v2`, `glm5_next`, `hy_v4_flash`) runs that family
+    instead, with its own loader. A family whose loader takes `moe_units` (`hy_v4_flash`) gets `--moe-units`; the
+    others map whole experts and their `meta.json` says so.
   - Either way the driver does the same:
     - each layer runs over every batch once, updating the corpus state, so each weight is read once;
-    - the next K layers' checkpoint bytes are read into the page cache (the host family exposes
-      `prefetch_ranges`), so disk reads overlap compute;
+    - the next K layers' checkpoint bytes are read into the page cache (the host family and the `glm5_next` and
+      `hy_v4_flash` families expose `prefetch_ranges`), so disk reads overlap compute;
     - no KV cache and no APCv2; the host family recomputes each layer's call arguments (mask, per-layer inputs
       such as PLE) from the token ids with the model's own trunk;
     - dense |act − mu| peaks are finished exactly after the pass, from per-text max and min plus the fit mean;
@@ -124,7 +149,9 @@ that doesn't fit refuses. There is never a silent resident load over the cap.
   (`carry memmap`), so the weights are still read once.
 - **What it chooses:** K, the layers read ahead, comes from free memory: what is left under 90% of the cap after
   the resident remainder, three streamed units and the state. `--window K` overrides it, and refuses if it doesn't
-  fit.
+  fit. A sweep family whose module declares `READ_AHEAD` (`hy_v4_flash`) gets the same read-ahead window, at most 8
+  layers; the other families keep 0. File-backed side tables read by row (Hy4-flash's Engram tables) are reported as `layer_bytes.side_tables` and
+  count neither as a streamed layer nor as the resident remainder.
 - **A map-only build:** a model that needs rolling capture runs the map stage only. Its units are clustered
   without a core, as in the maps campaign. Carve stages (`core`, `boxes`, `extract`) refuse, because the streamed
   backward pass is not built yet. A plan for such a model also refuses when:
@@ -132,10 +159,13 @@ that doesn't fit refuses. There is never a silent resident load over the cap.
   - its checkpoint has no `layers.<i>.` byte map;
   - the resident remainder plus three units doesn't fit.
 - **A fresh parity gate on every run:** before the pass, one batch of 3 texts, cropped to a common length, runs
-  through the schedule and through the family's ordinary `reference_logits`, over all layers (one weight read on
-  each side). The run refuses unless the
+  through the schedule and through the family's ordinary `reference_logits`, over all layers for the host family
+  (one weight read on each side) and over the first 2 layers for a sweep family, whose reference holds its layers
+  resident. The run refuses unless the
   logits are bitwise equal, or within rel 1e-3 with top-1 agreement 1.0 (the sweep `parity_check` exact
-  criteria). The result is written to `parity.json` and `meta.json`.
+  criteria). The result is written to `parity.json` and `meta.json`. `child_rolling --parity-only` runs only this
+  gate (any `--parity-layers`) and writes `parity-run.json`, for a parity window that should not read the whole
+  model.
 - **MoE map units are neurons** (`e*F+f`, as the carve's units, §3): the per-text peak of |w·h| over the routes
   that chose expert *e*, where h is the expert's intermediate activation. `--moe-units expert` maps whole experts
   (w·‖row‖). A neuron-unit map is large on disk (texts × E × F × 2 B per layer), so the map stage refuses before
@@ -146,6 +176,21 @@ that doesn't fit refuses. There is never a silent resident load over the cap.
   when every layer's responses are within one fp16 ulp of that layer's scale and the NLL is within 1e-4; bitwise
   equality is reported separately. On Qwen3-0.6B (CPU, resident carry with 2 chunks and memmap carry): responses
   max-abs 0, NLL 5e-7.
+  - When the plan streams the model through a whole-layer family (a Kimi Linear q8, Nemotron Lightning), the
+    rolling side runs that family (`--family` in the receipt).
+  - `--streamed-only` is for a model that does not fit (K2-V2 BF16, Kimi 48B BF16, Super VL). It skips the
+    resident side. It passes when the streamed run's own full-depth gate is bitwise equal (both sides run the
+    same streamed module tree, so anything less is a finding) and each layer was read once per chunk (measured).
+    Check streaming against a resident load on a sibling that fits first.
+  - `--swap-growth-gb N --swap-waiver TEXT` arm the swap guard, as on the run commands.
+  - Not yet run on real weights (2026-11-18). The CPU tests (`tests/test_amoeba_sweep_layer_swap_cpu.py`)
+    stream tiny checkpoints in each artifact's on-disk layout through the family's own loader. They compare
+    bitwise with the resident model that `KimiLinearAdapter`, `Nemotron35LightningAdapter` or
+    `Nemotron35SuperAdapter` loads itself. Only the pinned inspection and the tokenizer are answered by the tiny
+    artifact.
+  - The GPU parity jobs are listed in `scripts/amoeba_rolling_parity_window.sh`: `llama1b`, `k2-bf16`,
+    `kimi-q8`, `kimi-q8-mm`, `kimi-bf16`, `lightning`, `super-vl`. The streamed-only ones start only between
+    23:00 and 07:00.
 - **Metrics:** each layer of each chunk emits a `layer` event (load s, compute s, prefetch stall s, state bytes,
   bytes read ahead). The exporter shows `mlx2_amoeba_rolling_layer`, `_rolling_chunk`, `_rolling_chunks`,
   `_rolling_layer_load_seconds`, `_rolling_layer_compute_seconds`, `_rolling_layer_stall_seconds`,
@@ -153,6 +198,84 @@ that doesn't fit refuses. There is never a silent resident load over the cap.
   `_rolling_load_seconds_total`.
 - **Generation** can't run layer-major. On-policy continuations come from the normal serving route first and are
   then captured as fixed text; the carve stages need the model resident for this anyway.
+
+### Hy4-flash (`hy_v4_flash` family, 2026-11-18)
+
+`research/amoeba/sweep/hy_v4_flash.py` maps `~/Models/Hy4-flash` layer by layer (Pierre 2026-11-18: build
+support for the large models on disk). It runs the in-tree ordinary forward (`runtime/models/hy_v4_flash.py` on main
+after the Hy4-flash integration merged; adapter files untouched) and reads each layer's bytes, routed experts
+included, once per chunk. The four Engram tables (31.7 GB each) are never loaded: in the map pass each chunk's rows
+are read once in file order (`prepare_layer`). **Implemented and CPU-tested bitwise on a tiny checkpoint; not run on
+real weights.**
+
+- **Sizes (config of 2026-11-18):** about 309 GB of streamed layer bytes in bf16 (41 MoE layers of 7.57 GB, 7.25 GB
+  of it routed experts; layer 0 0.4 GB), 127 GB of Engram tables, about 445 GB in all with the vision tower and the
+  DFly2 head (never read). The download was still in progress on 2026-11-18 (38 of 148 shards, no index or
+  tokenizer yet); the family refuses until the adapter's `inspect_artifact` finds every indexed shard.
+- **Disk:** the model disk is USB. On 2026-11-18 at 18:00, with the Hy4 download and two corpus jobs on the same
+  disk, uncached sequential reads ran at 11.5–16 MB/s and random 192-byte reads at 65 IOPS (64 threads). At that rate
+  one map pass would read the weights in about 6 h and the Engram tables in about 3 h, so run it only once the disk
+  is quiet, and measure first (the command below). For each 100 MB/s of uncontended throughput, one weight read
+  takes about 52 min.
+- **Units:** layer 0 has 13,824 dense neurons. Each MoE layer has 512 × 1536 = 786,432 neuron units, so a neuron map
+  costs texts × 64.5 MB of disk (the quick profile's 4,017 texts: 259 GB). That is over 80% of the internal disk's
+  free space (206 GB on 2026-11-18), so the map stage refuses it there. Map with `--moe-units expert` first
+  (texts × 42 KB), or subsample (`--compute map_probes_per_node=2`, about 1,340 texts and 86 GB).
+- **State:** the carry is the four bf16 iHC streams, texts × 128 × 4 × 3072 × 2 B (12.6 GB for 4,017 texts). The
+  plan counts it twice for the layer-0 fit pass, so it picks `carry memmap`. Keep `--out` on internal NVMe: about 38
+  GB at peak, and about 530 GB written over the 42 layers.
+- **Memory:** a map holds one layer (7.6 GB) plus up to 4.8 GB of read buffer, the resident head (about 2.3 GB),
+  the batch and up to 8 GB of pre-read Engram rows (`engram_preread_gb`; larger sets go to a scratch file). The
+  footprint is about 16–22 GB, plus page cache for the read-ahead (the plan's K is about 5 layers under an 80 GB cap).
+
+**Parity on real weights (not run).** The whole model can't be held resident, so the reference is an ordinary
+`Model` of the first K layers, resident from the same bytes. K = 6 covers the dense layer 0, the first Engram layer
+(1), sliding layers 2–4 and indexed layers 0, 1 and 5. The reference holds about 38 GB of layers, for a peak of about
+46 GB. Each side reads the 6 layers (about 77 GB in all). Probe windows are at most 128 tokens, under the
+indexer's 2048-token threshold, so indexed attention is dense causal on real weights; the CPU tests also cover the
+indexer path. Every map run also gates on 2 layers.
+
+```bash
+# 0. from a clean snapshot of the commit to run
+cd ~/Desktop/mlx2 && R=$(git rev-parse --short=9 HEAD) && SNAP=~/amoeba-runs/snap/hy4-$R
+git worktree add -q --detach $SNAP $R && cd $SNAP
+PY=~/Desktop/mlx2/.venv/bin/python; M=~/Models/Hy4-flash
+# disk check (CPU only, no GPU): uncached sequential read of one expert shard
+$PY -c "import os,fcntl,time;f='$M/model-00005-of-00148.safetensors';fd=os.open(f,os.O_RDONLY);fcntl.fcntl(fd,48,1);b=bytearray(16<<20);t=time.time();n=sum(os.readv(fd,[b]) for _ in range(256));print(n/(time.time()-t)/1e6,'MB/s')"
+# 16-text parity corpus from the default probes (seeded, CPU)
+$PY -c "import json,random;L=open('$HOME/Library/Application Support/mlx2/research-artifacts/amoeba/topic-probes-e8c22f31a/corpus.jsonl').readlines();random.Random(0).shuffle(L);open('$HOME/amoeba-runs/hy4-parity16.jsonl','w').writelines(L[:16])"
+
+# 1. parity window (daytime is fine: about 46 GB peak; 77 GB of reads, minutes on a quiet disk, about 2 h at 11.5 MB/s)
+scripts/amoeba27b_window_q.sh hy4par ~/amoeba-runs/hy4-parity-$R -- \
+  $PY -m mlx2.experimental.amoeba.child_rolling --family hy_v4_flash --model $M \
+    --corpus ~/amoeba-runs/hy4-parity16.jsonl --out ~/amoeba-runs/hy4-parity-$R/cap --window 0 \
+    --parity-only --parity-texts 3 --parity-layers 6 --moe-units expert --memory-gb 64 --watchdog-gb 80 \
+    --swap-growth-gb 8 --swap-waiver "Pierre 2026-11-18 approved 8 GB growth for daytime windows"
+#    at night: --swap-growth-gb 2 and no waiver. Pass: parity.json ok and bitwise_equal on all 3 texts.
+
+# 2. map window (23:00-07:00, after the download and the other model-disk jobs finish): quick profile, expert units
+scripts/amoeba27b_window_q.sh hy4map ~/amoeba-runs/hy4-map-$R -- \
+  $PY -m mlx2.experimental.amoeba.cli build --model $M --out ~/amoeba-runs/hy4-map-$R/build --stages map \
+    --profile quick --moe-units expert --cap-gb 80
+#    night: the rolling child's own watchdog trips at 2 GB swap growth (build's --swap-growth-gb needs a waiver for any
+#    value, so it is left off). A daytime map instead adds --swap-growth-gb 8 --swap-waiver "Pierre 2026-11-18
+#    approved 8 GB growth for daytime windows"; the child's 2 GB trip still applies (only a direct child_rolling run
+#    takes --swap-growth-gb), so a daytime map is a parity-style child_rolling run or waits for the night.
+```
+
+Notes: a direct `child_rolling --family hy_v4_flash` run has no disk check (the `cli` map stage has one) and defaults
+to neuron units, so pass `--moe-units expert` or check the disk yourself. The family's resident reference refuses
+above `reference_gb` (48 GiB of layer bytes, about 7 layers), so `--parity-layers` 0 (all layers) refuses on real
+weights. The plan's read-ahead window applies to a sweep family only when its module declares `READ_AHEAD`
+(`hy_v4_flash`); the other families keep window 0.
+
+Estimates for the quick-profile map (4,017 texts, 128 tokens, expert units, one chunk):
+
+- **Reads:** 309 GB of weights and up to 127 GB of Engram tables. On a quiet disk at 400 MB/s, that is about 18
+  min.
+- **Compute:** about 21 GFLOP a token, about 1.1e16 FLOP in all, so roughly 10–30 min on the GPU.
+- **Memmap carry:** about 530 GB written to NVMe.
+- **Total:** about 1 h on a quiet disk. At the contended rate measured on 2026-11-18 it would be about 9–10 h.
 
 ### 27B parity evidence (2026-11-16)
 

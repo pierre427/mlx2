@@ -176,7 +176,9 @@ class HostFamily:
         target = self._blocks[l][1] if (l in self._blocks and self._held and self._held[0] == l) else self.h.layers[l]
         # the scope the trunk's own forward opens around its layers (e.g. the NAX MoE gather's phase), so the layer
         # runs the mechanisms its execution binding names, as in the ordinary forward (qwen35_capture, sweep L7-1)
-        scope = getattr(self.h.inner, "forward_scope", None)
+        # (a family names it as ``layer_scope`` when the trunk opens it from its model module, as Kimi and Nemotron-H
+        # open moe_nax_gather.forward_scope)
+        scope = getattr(self, "layer_scope", None) or getattr(self.h.inner, "forward_scope", None)
         from contextlib import nullcontext
         try:
             with (scope(carry["ids"], None) if callable(scope) else nullcontext()):

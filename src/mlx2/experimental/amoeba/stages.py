@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from . import paths
+from .plan import _host_unit_families
 from .runner import Background, free_port, run_child
 from .state import file_outputs, write_json
 
@@ -238,9 +239,10 @@ def run_map(b, ctx):
             run_child(_py("mlx2.experimental.amoeba.child_rolling") + common +
                       ["--family", fam, "--window", st.get("window") or 0, "--chunks", st.get("chunks") or 1,
                        "--carry", st.get("carry") or "resident",
-                       # host family: full depth (two extra weight reads); a sweep family's reference is a B1 whole-
-                       # model forward, so its gate checks the first 2 blocks (its own parity run covers the rest)
-                       "--parity-layers", 0 if fam == "host" else 2] + extra,
+                       # host family and the whole-layer streaming families: full depth (two extra weight reads);
+                       # another sweep family's reference is a B1 whole-model forward, so its gate checks the first 2
+                       # blocks (its own parity run covers the rest)
+                       "--parity-layers", 0 if fam == "host" or fam in _host_unit_families() else 2] + extra,
                       stage="map", progress=ctx.progress, log_path=b.log_path("map"),
                       what=f"map capture (rolling, {fam} family)")
         else:

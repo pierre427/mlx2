@@ -26,8 +26,12 @@ def artifact_name(path: Path) -> str:
 
 def _text_config(cfg: dict) -> dict:
     for k in ("text_config", "llm_config", "language_config"):
-        if isinstance(cfg.get(k), dict) and cfg[k].get("num_hidden_layers"):
-            return {**cfg, **cfg[k]}
+        sub = cfg.get(k)
+        if isinstance(sub, dict) and (sub.get("num_hidden_layers") or isinstance(sub.get("layers_block_type"), list)):
+            out = {**cfg, **sub}
+            if not out.get("num_hidden_layers"):         # hybrid trunks (Nemotron-H) count layers by block type
+                out["num_hidden_layers"] = len(sub["layers_block_type"])
+            return out
     return cfg
 
 
@@ -42,10 +46,29 @@ def _first(cfg, keys):
 def _moe_layers(cfg: dict, L: int, E: int | None) -> list[bool]:
     if not E:
         return [False] * L
+    types = cfg.get("layers_block_type")                  # hybrid trunks name each layer's block (Nemotron-H)
+    if isinstance(types, list) and len(types) == L:
+        return [t == "moe" for t in types]
+    pattern = cfg.get("hybrid_override_pattern")
+    if isinstance(pattern, (str, list)) and len(pattern) == L:
+        return [t == "E" for t in pattern]
     dense_first = int(cfg.get("first_k_dense_replace") or 0)
     only = set(cfg.get("mlp_only_layers") or [])
     step = int(cfg.get("decoder_sparse_step") or 1) or 1
     return [l >= dense_first and l not in only and (l + 1) % step == 0 for l in range(L)]
+
+
+def _dense_layer(cfg: dict, l: int, moe: list) -> bool:
+    """Layer l has a dense MLP: not MoE, and (hybrid trunks) not a Mamba or attention-only block."""
+    if moe[l]:
+        return False
+    types = cfg.get("layers_block_type")
+    if isinstance(types, list) and len(types) == len(moe):
+        return types[l] == "mlp"
+    pattern = cfg.get("hybrid_override_pattern")
+    if isinstance(pattern, (str, list)) and len(pattern) == len(moe):
+        return pattern[l] == "-"
+    return True
 
 
 def weight_bytes(path: Path) -> int:
@@ -78,12 +101,21 @@ def safetensors_index(path: Path) -> list:
     return out
 
 
+# file-backed side tables a layer reads by row, never as a weight (Hy4-flash Engram tables, 31.7 GB each): not part of
+# a streamed layer's bytes nor of the resident rest
+_SIDE_TABLE = re.compile(r"\.engram_layer\.multi_head_embedding\.")
+
+
 def layer_bytes(path: Path, L: int) -> dict:
-    """Bytes per decoder layer (keys ``...layers.<i>....``) and the rest (embeddings, head, norms, MTP)."""
+    """Bytes per decoder layer (keys ``...layers.<i>....``), the rest (embeddings, head, norms, MTP) and the
+    file-backed side tables read by row (``side_tables``)."""
     per = [0] * L
     experts = [0] * L
-    rest = 0
+    rest = side = 0
     for k, _, b, e in safetensors_index(path):
+        if _SIDE_TABLE.search(k):
+            side += e - b
+            continue
         m = None if _NOT_DECODER.search(k) else _LAYER_KEY.search(k)
         i = int(m.group(1)) if m else -1
         if 0 <= i < L and "mtp" not in k:
@@ -92,7 +124,7 @@ def layer_bytes(path: Path, L: int) -> dict:
                 experts[i] += e - b
         else:
             rest += e - b
-    return {"per_layer": per, "max_layer": max(per) if per else 0, "rest": rest,
+    return {"per_layer": per, "max_layer": max(per) if per else 0, "rest": rest, "side_tables": side,
             "experts_per_layer": experts, "max_layer_experts": max(experts) if experts else 0,
             "layered": bool(per) and all(x > 0 for x in per)}
 
@@ -133,14 +165,15 @@ def inspect_checkpoint(model: str | Path) -> dict:
         "adapter": getattr(getattr(res, "adapter_type", None), "__name__", None),
         "family": getattr(desc, "family", None) if res is not None else cfg.get("model_type"),
         "model_type": cfg.get("model_type"), "no_adapter": family_only,
+        "residual_streams": _first(cfg, ("hc_mult",)) or 1,      # hyper-connection streams the carry holds per token
         "layers": L, "hidden": d, "intermediate": F, "vocab": _first(cfg, ("vocab_size",)),
         "moe": {"experts": E, "expert_intermediate": Fe, "moe_layers": int(sum(moe)),
-                "top_k": _first(cfg, ("num_experts_per_tok", "moe_top_k", "top_k"))} if E else None,
+                "top_k": _first(cfg, ("num_experts_per_tok", "num_experts_per_token", "moe_top_k", "top_k"))} if E else None,
         "quantization": {"bits": q.get("bits"), "group_size": q.get("group_size"), "mode": q.get("mode")} if q else None,
         "weight_bytes": weight_bytes(path),
         "file_backed_ple": (path / "ple_rows.bin").exists(),   # an artifact feature, asserted at load when present
     }
-    dense_units = sum(F or 0 for l in range(L) if not moe[l])
+    dense_units = sum(F or 0 for l in range(L) if _dense_layer(cfg, l, moe))
     out["units"] = {"dense_neurons": dense_units,
                     "moe_expert_units": sum(E for l in range(L) if moe[l]) if E else 0,
                     "moe_neuron_units": sum(E * Fe for l in range(L) if moe[l]) if E else 0,
@@ -152,7 +185,9 @@ def inspect_checkpoint(model: str | Path) -> dict:
         from . import paths as _paths
         _paths.research_imports()
         from research.amoeba.sweep.family import FAMILIES
-        out["sweep_family"] = out["family"] if out["family"] in FAMILIES else None
+        # by the adapter family, else by the config model_type (hy_v4_flash: adapter family "hy-v4-flash";
+        # kimi_linear, nemotron_h: families that stream an adapter's own model)
+        out["sweep_family"] = next((f for f in (out["family"], out["model_type"]) if f in FAMILIES), None)
     except (ImportError, SystemExit):
         out["sweep_family"] = None
     try:

@@ -63,7 +63,85 @@ def _fit_carry(info):
     return FIT_CARRY if dense is None or dense > 0 else 1
 
 
-def rolling_plan(info: dict, cap: float, *, texts: int, seq: int, window: int | None) -> dict:
+def _host_unit_families():
+    try:
+        from research.amoeba.sweep.family import HOST_UNIT_FAMILIES
+        return HOST_UNIT_FAMILIES
+    except ImportError:
+        return frozenset()
+
+
+def _family_attr(family, name):
+    """A whole-layer family module's declaration (``MOE_UNITS``: the MoE unit kinds it maps; ``ADAPTERS``: the
+    adapter class names it builds, None = no adapter), or None when it declares none."""
+    try:
+        import importlib
+
+        from research.amoeba.sweep.family import FAMILIES
+        value = getattr(importlib.import_module(FAMILIES[family].split(":")[0]), name, None)
+        return tuple(value) if value else None
+    except (ImportError, KeyError):
+        return None
+
+
+def _family_read_ahead(family) -> bool:
+    """Whether a sweep family module declares ``READ_AHEAD = True`` (it exposes prefetch_ranges for the plan's K)."""
+    try:
+        import importlib
+
+        from research.amoeba.sweep.family import FAMILIES
+        return bool(getattr(importlib.import_module(FAMILIES[family].split(":")[0]), "READ_AHEAD", False))
+    except (ImportError, KeyError):
+        return False
+
+
+def _family_moe_units(family):
+    return _family_attr(family, "MOE_UNITS")
+
+
+def _layer_swap_plan(info, cap, family, lb, *, texts, seq, window, moe_units=None):
+    """A whole-layer streaming family (research/amoeba/sweep/layer_swap.py): resident remainder (embeddings, norm,
+    head) plus three whole layers (every expert: the layer bound, the next one's load, the transient of its expert
+    stacking or sanitize) plus the corpus state, under 90% of the cap; the read-ahead window from what is left, as
+    for the host family. The capture reads each layer once per chunk."""
+    if lb.get("error") or not lb.get("layered"):
+        return {"mode": "rolling", "fits": False, "family": family,
+                "refusal": f"no per-layer byte map for this checkpoint ({lb.get('error') or 'keys are not layers.<i>.'})"}
+    adapters = _family_attr(family, "ADAPTERS")
+    if adapters is not None and info.get("adapter") not in adapters:
+        return {"mode": "rolling", "fits": False, "family": family,
+                "refusal": f"the {family} family builds {', '.join(str(a) for a in adapters)} artifacts only; this "
+                           f"checkpoint loads through {info.get('adapter')} (registered by model_type, refused)"}
+    unit, rest = lb["max_layer"], lb["rest"]
+    hc = int(info.get("residual_streams") or 1)
+    state = texts * seq * (info["hidden"] or 0) * 2 * hc * _fit_carry(info)
+    usable = 0.9 * cap * GB - rest - 3 * unit - 2 * GB
+    out = {"mode": "rolling", "family": family, "stream_mode": "sweep_family", "texts": texts, "bs": 8,
+           "unit_gb": round(unit / GB, 3), "resident_gb": round(rest / GB, 2), "state_gb": round(state / GB, 2),
+           "loader": f"research/amoeba/sweep {family} family (whole-layer streaming of the adapter's model)",
+           "carve": "refused: the streamed backward pass is not built (capture only)"}
+    if usable < unit:
+        out.update(fits=False, refusal=f"resident {rest / GB:.1f} GB + 3 streamed layers of {unit / GB:.2f} GB leave "
+                                       f"no room under the {cap:.0f} GB cap")
+        return out
+    allowed = _family_moe_units(family)
+    if moe_units and allowed and moe_units not in allowed:
+        out.update(fits=False, refusal=f"the {family} family maps MoE {'/'.join(allowed)} units only (pass "
+                                       f"--moe-units {allowed[0]}), not {moe_units}")
+        return out
+    carry = "resident" if state <= 0.5 * usable else "memmap"
+    free = usable - (state if carry == "resident" else 0)
+    k_auto = int(max(1, min(8, free // max(unit, 1))))
+    k = int(window) if window else k_auto
+    out.update(fits=True, window=k, window_auto=k_auto, window_override=bool(window), chunks=1, carry=carry,
+               weight_reads=1, prefetch="page cache, the next K layers' byte ranges read ahead of the layer running")
+    if window and k > k_auto:
+        out.update(fits=False, refusal=f"--window {k} needs {k * unit / GB:.1f} GB of prefetch, over the "
+                                       f"{free / GB:.1f} GB left beside the state")
+    return out
+
+
+def rolling_plan(info: dict, cap: float, *, texts: int, seq: int, window: int | None, moe_units: str | None = None) -> dict:
     """Rolling layer-window capture (forward only) for a model whose resident load does not fit.
 
     Resident: embeddings, head, norms and (MoE) every non-expert tensor; streamed: one decoder layer (dense) or
@@ -72,12 +150,26 @@ def rolling_plan(info: dict, cap: float, *, texts: int, seq: int, window: int | 
     beside the window, the corpus is cut into the fewest chunks that fit (each chunk reads every weight once)."""
     lb = info.get("layer_bytes") or {}
     family = info.get("sweep_family")      # a model family of the maps session's: its own layer loader
+    if family and family in _host_unit_families():
+        return _layer_swap_plan(info, cap, family, lb, texts=texts, seq=seq, window=window, moe_units=moe_units)
     if family:
         hc = int(info.get("residual_streams") or 1)
         state = texts * seq * (info["hidden"] or 0) * 2 * hc * _fit_carry(info)
         usable = 0.9 * cap * GB - (lb.get("rest") or 0) - 3 * (lb.get("max_layer") or 0) - 2 * GB
         carry = "resident" if state <= 0.5 * max(usable, 0) else "memmap"
-        return {"mode": "rolling", "fits": True, "family": family, "window": 0, "chunks": 1, "carry": carry,
+        # read-ahead only for a family that declares READ_AHEAD (hy_v4_flash): as many whole layers as fit in the
+        # page cache beside the resident state, at most 8; the other families keep window 0 as before
+        unit = lb.get("max_layer") or 0
+        free = usable - (state if carry == "resident" else 0)
+        ahead = _family_read_ahead(family)
+        k_auto = int(max(0, min(8, free // unit))) if unit and ahead else 0
+        k = int(window) if window and ahead else k_auto
+        if ahead and window and k > k_auto:
+            return {"mode": "rolling", "fits": False, "family": family,
+                    "refusal": f"--window {k} needs {k * unit / GB:.1f} GB of read-ahead, over the "
+                               f"{max(free, 0) / GB:.1f} GB left beside the state"}
+        return {"mode": "rolling", "fits": True, "family": family, "window": k, "window_auto": k_auto,
+                "chunks": 1, "carry": carry,
                 "stream_mode": "sweep_family", "texts": texts, "state_gb": round(state / GB, 2),
                 "loader": f"research/amoeba/sweep {family} family (its own layer loader)",
                 "carve": "refused: the streamed backward pass is not built (capture only)"}
@@ -170,7 +262,7 @@ def make_plan(info: dict, cfg: dict, *, cap_gb: float | None = None, cap_reason:
         resident_fits = False
         notes.append(f"no mlx2 adapter: sweep family {info['no_adapter']['family']} only (map capture)")
     if stream == "rolling" or (stream == "auto" and not resident_fits):
-        rp = rolling_plan(info, cap, texts=texts or 46000, seq=seq, window=window)
+        rp = rolling_plan(info, cap, texts=texts or 46000, seq=seq, window=window, moe_units=moe_units)
         rp["chosen"] = "forced (--stream rolling)" if stream == "rolling" else \
             "automatic: the resident load does not fit under the cap"
         rp["resident_refusals"] = refusals

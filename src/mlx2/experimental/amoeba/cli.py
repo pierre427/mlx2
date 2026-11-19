@@ -178,12 +178,20 @@ def parse(argv):
     p.add_argument("--chunks", type=int, default=2, help="> 1 also exercises the corpus split")
     p.add_argument("--carry", choices=["resident", "memmap"], default="resident")
     p.add_argument("--rolling-resident", action="store_true",
-                   help="the rolling side loads resident: checks the layer-major schedule only (MoE models)")
+                   help="the rolling side loads resident: checks the layer-major schedule only (an MoE model no sweep "
+                        "family streams)")
+    p.add_argument("--streamed-only", action="store_true",
+                   help="a model that does not fit: run only the streamed capture and its full-depth gate (schedule vs "
+                        "the family's own streamed text-major forward); no resident side")
     p.add_argument("--probe-corpus", default=str(paths.DEFAULT_PROBE_CORPUS))
     p.add_argument("--moe-units", choices=["expert", "neuron"], default=None)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--gpu-window-owner", default="")
+    p.add_argument("--swap-growth-gb", type=float, default=0.0,
+                   help="stop when system swap grows more than this over the run's start (0 = no guard); needs "
+                        "--swap-waiver")
+    p.add_argument("--swap-waiver", default="", help="who approved the --swap-growth-gb allowance (recorded)")
     p = sub.add_parser("resume", help="continue a build: done stages are skipped, the rest run")
     p.add_argument("--out", required=True)
     p.add_argument("--stages", default="")
@@ -552,23 +560,39 @@ def cmd_rolling_parity(a) -> int:
     from .progress import Progress
     from .runner import run_child
     from .stages import read_jsonl, write_jsonl
+    from . import runner as _runner
+    from .plan import _host_unit_families
+    check_swap_args(a)
     commit = check_commit(a.allow_dirty)
     require_gpu_window(a.cpu, a.gpu_window_owner)
     info = inspect_checkpoint(a.model)
     cfg = K.resolve("quick", {}, {}, "")
-    reference_plan = make_plan(info, cfg, moe_units=a.moe_units, cpu=a.cpu, stream="resident", texts=a.texts)
-    bs = min(8, reference_plan["batches"]["capture"]["bs"])
-    if not bs or info.get("no_adapter"):
-        raise SystemExit(f"rolling parity requires a resident reference: {reference_plan['refusals']}")
     plan = make_plan(info, cfg, moe_units=a.moe_units, cpu=a.cpu, stream="rolling", window=a.window, texts=a.texts)
     st = plan["stream"]
-    if info["kind"] == "moe" and not a.rolling_resident:
-        raise SystemExit("rolling parity on an MoE model: streamed MoE capture is not available (no whole-layer expert "
-                         "streaming); pass --rolling-resident to check the layer-major schedule with resident weights")
+    fam = "host" if a.rolling_resident else (st.get("family") or "host")   # resident weights: the host family
+    if fam != "host" and fam not in _host_unit_families():
+        raise SystemExit(f"rolling parity: the {fam} sweep family runs its own parity (sweep capture --parity)")
+    if a.streamed_only:
+        # a model that does not fit: no resident side, only the streamed capture and its own full-depth gate (the
+        # layer-major schedule against the family's ordinary text-major forward, both streamed)
+        if a.rolling_resident:
+            raise SystemExit("--streamed-only and --rolling-resident exclude each other")
+        bs = st.get("bs") or 8
+    else:
+        reference_plan = make_plan(info, cfg, moe_units=a.moe_units, cpu=a.cpu, stream="resident", texts=a.texts)
+        bs = min(8, reference_plan["batches"]["capture"]["bs"])
+        if not bs or info.get("no_adapter"):
+            raise SystemExit(f"rolling parity requires a resident reference: {reference_plan['refusals']} (a model "
+                             "that does not fit: --streamed-only)")
+    if info["kind"] == "moe" and not a.rolling_resident and fam == "host":
+        raise SystemExit("rolling parity on an MoE model: no sweep family streams this model's whole layers (mlx2's "
+                         "loaders have no whole-layer expert streaming); pass --rolling-resident to check the "
+                         "layer-major schedule with resident weights")
     if a.rolling_resident:
-        st = {"fits": True, "window": 1, "stream_mode": "dense_layers", "ceiling_gb": 0.0}
-    if not st.get("fits") or st.get("family"):
-        raise SystemExit(f"rolling parity: {st.get('refusal') or 'a sweep family runs its own parity (sweep capture --parity)'}")
+        st, fam = {"fits": True, "window": 1, "stream_mode": "dense_layers", "ceiling_gb": 0.0}, "host"
+    if not st.get("fits"):
+        raise SystemExit(f"rolling parity: {st.get('refusal')}")
+    guard = _runner.arm_swap_guard(a.swap_growth_gb, a.swap_waiver)
     out = Path(a.out).expanduser().resolve()
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"{out} is not empty")
@@ -582,15 +606,18 @@ def cmd_rolling_parity(a) -> int:
               "--bs", bs, "--moe-units", plan["moe_units"], "--memory-gb", plan["mlx_memory_gb"],
               "--watchdog-gb", plan["watchdog_gb"]] + (["--cpu"] if a.cpu else [])
     t0 = time.time()
-    run_child([paths.python(), "-u", "-m", "mlx2.experimental.amoeba.child_capture", "--out", out / "resident"] + common,
-              stage="parity", progress=prog, log_path=out / "resident.log", what="resident capture")
+    if not a.streamed_only:
+        run_child([paths.python(), "-u", "-m", "mlx2.experimental.amoeba.child_capture", "--out", out / "resident"]
+                  + common, stage="parity", progress=prog, log_path=out / "resident.log", what="resident capture")
     t1 = time.time()
+    stream_args = (["--stream-mode", st["stream_mode"], "--ceiling-gb", st["ceiling_gb"]] if fam == "host" else [])
     run_child([paths.python(), "-u", "-m", "mlx2.experimental.amoeba.child_rolling", "--out", out / "rolling",
-               "--family", "host", "--window", st["window"], "--chunks", a.chunks, "--carry", a.carry,
-               "--stream-mode", st["stream_mode"], "--ceiling-gb", st["ceiling_gb"], "--parity-layers", 0] +
-              (["--resident"] if a.rolling_resident else []) + common,
-              stage="parity", progress=prog, log_path=out / "rolling.log", what="rolling capture (streamed)")
+               "--family", fam, "--window", st.get("window") or 0, "--chunks", a.chunks, "--carry", a.carry,
+               "--parity-layers", 0] + stream_args + (["--resident"] if a.rolling_resident else []) + common,
+              stage="parity", progress=prog, log_path=out / "rolling.log", what=f"rolling capture ({fam} family)")
     t2 = time.time()
+    if a.streamed_only:
+        return _streamed_only_result(a, out, info, commit, plan, st, fam, guard, t2 - t1)
     ra, rb = out / "resident", out / "rolling"
     ma, mb = json.loads((ra / "meta.json").read_text()), json.loads((rb / "meta.json").read_text())
     if ma["fingerprint"] != info["fingerprint"] or any(ma[k] != mb[k] for k in ("fingerprint", "sequences", "layers", "widths")):
@@ -658,9 +685,38 @@ def cmd_rolling_parity(a) -> int:
     reads_ok = a.rolling_resident or (mb.get("weight_reads_observed") or {}).get("once_per_chunk") is True
     res["exact"] = (res["over_tol_elements"] == 0 and res["mu_over_tol"] == 0 and res["nll_max_abs"] is not None
                     and res["nll_max_abs"] <= 1e-4 and mb["parity"]["ok"] and reads_ok)
+    res.update(family=fam, stream_receipt=(mb.get("load") or {}).get("stream_receipt"), swap_guard=guard)
     (out / "parity.json").write_text(json.dumps(res, indent=1))
     print(json.dumps({k: res[k] for k in ("checkpoint", "exact", "bitwise", "over_tol_elements", "resp_max_abs",
                                           "mu_rel_max", "nll_max_abs", "observed_reads", "seconds")}))
+    return 0 if res["exact"] else 3
+
+
+def _streamed_only_result(a, out, info, commit, plan, st, fam, guard, seconds) -> int:
+    """--streamed-only: the streamed capture's own receipt (no resident side). Passes when its full-depth gate (the
+    layer-major schedule against the family's ordinary text-major forward) passed and each layer was read once per
+    chunk (measured); the responses are not compared with anything."""
+    mb = json.loads((out / "rolling" / "meta.json").read_text())
+    if mb.get("fingerprint") != info["fingerprint"]:
+        raise SystemExit(f"rolling parity: the capture names {mb.get('fingerprint')}, the checkpoint is "
+                         f"{info['fingerprint']}")
+    reads = mb.get("weight_reads_observed") or {}
+    res = {"schema": "mlx2.amoeba-rolling-parity.v1", "mode": "streamed-only", "checkpoint": info["checkpoint"],
+           "fingerprint": info["fingerprint"], "mlx2_commit": commit, "family": fam, "texts": mb.get("sequences"),
+           "window": st.get("window"), "chunks": a.chunks, "moe_units": plan["moe_units"],
+           "schedule_parity": mb.get("parity"), "rolling": {k: v for k, v in mb["rolling"].items() if k != "per_layer"},
+           "stream_counters": mb.get("stream_counters"), "observed_reads": reads or None,
+           "stream_receipt": (mb.get("load") or {}).get("stream_receipt"), "swap_guard": guard,
+           "seconds": {"rolling": round(seconds, 1)}, "peak_gb": {"rolling": mb.get("mlx_peak_gb")},
+           "note": "no resident reference (the model does not fit): the gate is the streamed schedule against the "
+                   "family's own streamed text-major forward over every layer; compare streaming with a resident load "
+                   "on a sibling that fits (rolling-parity without --streamed-only)"}
+    # both sides run the same streamed module tree, so anything short of bitwise equality is a finding, not rounding
+    texts = (mb.get("parity") or {}).get("texts") or []
+    res["bitwise"] = bool(texts) and all(t.get("bitwise_equal") for t in texts)
+    res["exact"] = bool((mb.get("parity") or {}).get("ok")) and res["bitwise"] and reads.get("once_per_chunk") is True
+    (out / "parity.json").write_text(json.dumps(res, indent=1))
+    print(json.dumps({k: res[k] for k in ("checkpoint", "mode", "exact", "bitwise", "observed_reads", "seconds", "peak_gb")}))
     return 0 if res["exact"] else 3
 
 

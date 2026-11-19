@@ -594,6 +594,17 @@ def load_streamed_host(path: Path, *, stream_mode, ceiling_bytes, resident, moe_
     return host, stream
 
 
+def family_takes_moe_units(name) -> bool:
+    """Whether a registered sweep family's loader declares ``moe_units`` (the older families map whole experts only
+    and would refuse the keyword)."""
+    import importlib
+    import inspect
+    from research.amoeba.sweep.family import FAMILIES
+    module, fn = FAMILIES[name].split(":")
+    loader = getattr(importlib.import_module(module), fn)
+    return "moe_units" in inspect.signature(loader).parameters
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--family", default="host", help="a research/amoeba/sweep FAMILIES name")
@@ -616,17 +627,24 @@ def main(argv=None):
     ap.add_argument("--family-opt", action="append", default=[], metavar="KEY=VALUE",
                     help="passed to a sweep family's loader (e.g. expert_budget_gb=24)")
     ap.add_argument("--parity-layers", type=int, default=0, help="0 = all layers")
+    ap.add_argument("--parity-only", action="store_true",
+                    help="run the parity gate, write parity.json and parity-run.json, and stop (no map pass)")
     ap.add_argument("--moe-units", default="neuron", choices=["neuron", "expert"])
     ap.add_argument("--memory-gb", type=float, default=56)
     ap.add_argument("--watchdog-gb", type=float, default=80)
+    ap.add_argument("--swap-growth-gb", type=float, default=2.0,
+                    help="the watchdog's swap-growth trip (default 2); more needs --swap-waiver")
+    ap.add_argument("--swap-waiver", default="", help="who approved a --swap-growth-gb over 2 (recorded)")
     ap.add_argument("--cpu", action="store_true")
     a = ap.parse_args(argv)
+    if a.swap_growth_gb > 2.0 and not a.swap_waiver:
+        raise SystemExit("--swap-growth-gb over 2 needs --swap-waiver (who approved the allowance)")
     import amoeba_topics_lib as T
     from research.amoeba.carve import ops as O
-    from research.amoeba.sweep.family import load_family
+    from research.amoeba.sweep.family import HOST_UNIT_FAMILIES, load_family
     out = T.fresh_dir(a.out)
     log = T.make_log(out)
-    O.footprint_watchdog(a.watchdog_gb, log)
+    O.footprint_watchdog(a.watchdog_gb, log, swap_growth_gb=a.swap_growth_gb)
     O.setup_mlx(a.memory_gb, 2)
     import mlx.core as mx
     if a.cpu:
@@ -635,11 +653,17 @@ def main(argv=None):
     from .config import parse_overrides
     opts = ({"stream_mode": a.stream_mode, "ceiling_bytes": int(a.ceiling_gb * 2 ** 30), "resident": a.resident,
              "moe_units": a.moe_units, "log": log, "admission_gb": a.memory_gb} if a.family == "host"
+            else {"moe_units": a.moe_units, "log": log, **parse_overrides(a.family_opt)}
+            if a.family in HOST_UNIT_FAMILIES     # whole-layer streaming of the adapter's model, carve-host units
             else parse_overrides(a.family_opt))
+    if a.resident and a.family != "host":
+        raise SystemExit("--resident is for the host family (a sweep family loads its own way)")
     if a.family == "host":
         from research.amoeba.sweep.host_family import load as host_load
         fam = host_load(a.model, **opts)
     else:
+        if family_takes_moe_units(a.family):          # a family with neuron units (hy_v4_flash) gets --moe-units
+            opts.setdefault("moe_units", a.moe_units)
         fam = load_family(a.family, a.model, **opts)
     rec = {"schema": "mlx2.amoeba-topic-capture.v1", "writer": "mlx2.experimental.amoeba.child_rolling",
            "family": a.family, "args": vars(a), "mlx2_source_revision": T.git_rev(), "corpus_sha256": T.sha_file(a.corpus),
@@ -658,6 +682,13 @@ def main(argv=None):
     if not par["ok"]:
         T.write_json(out / "meta.failed.json", rec)
         raise SystemExit(f"rolling parity failed ({par['criteria']}): {par['texts']}")
+    if a.parity_only:                  # a parity window: the gate's receipt, no map pass (no full weight read)
+        rec.update({"checkpoint": fam.checkpoint, "fingerprint": fam.fingerprint, "parity_only": True,
+                    "stream_counters": fam.stream_counters() if hasattr(fam, "stream_counters") else None,
+                    "mlx_peak_gb": O.peak_gb(), "watch": dict(O.WATCH), "seconds": round(time.time() - t0, 1)})
+        T.write_json(out / "parity-run.json", rec)
+        log(f"parity only: ok on {len(par['texts'])} texts, {par['layers']} layers")
+        return
     ranges = {} if a.resident else (getattr(fam, "prefetch_ranges", None) or {})
     pre = Prefetcher(ranges) if ranges else None
     import shutil
@@ -670,9 +701,10 @@ def main(argv=None):
             pre.close()
         shutil.rmtree(out / ".rolling", ignore_errors=True)
         shutil.rmtree(out / ".carry", ignore_errors=True)
+        shutil.rmtree(out / ".prepare", ignore_errors=True)   # a family's scratch (hy_v4_flash Engram pre-reads)
     rec["stream_counters"] = fam.stream_counters() if hasattr(fam, "stream_counters") else None
     if pins0 is not None and rec["stream_counters"]:     # MEASURED weight reads of the capture pass (not parity)
-        streamed = len(getattr(fam, "_blocks", {}) or {})
+        streamed = getattr(fam, "streamed_layers", None) or len(getattr(fam, "_blocks", {}) or {})
         loads = rec["stream_counters"]["page_ins"] - pins0
         rec["weight_reads_observed"] = {"layer_loads": loads, "streamed_layers": streamed, "chunks": r["chunks"],
                                         "reads_per_layer": round(loads / max(1, streamed), 3),
@@ -686,7 +718,9 @@ def main(argv=None):
     lt = r["layers"]
     rec.update({"checkpoint": fam.checkpoint, "fingerprint": fam.fingerprint, "sequences": len(seqs),
                 "layers": fam.L, "neurons": max(fam.widths), "widths": [int(w) for w in fam.widths],
-                "unit_kinds": list(fam.kinds), "moe_units": a.moe_units if a.family == "host" else "expert",
+                "unit_kinds": list(fam.kinds),
+                "moe_units": (a.moe_units if a.family == "host" or a.family in HOST_UNIT_FAMILIES
+                              else getattr(fam, "moe_units", "expert")),
                 "rolling": {"window": a.window, "chunks": r["chunks"], "carry": a.carry, "weight_reads": r["chunks"],
                             "load_s": round(sum(x["load_s"] for x in lt), 2),
                             "compute_s": round(sum(x["compute_s"] for x in lt), 2),

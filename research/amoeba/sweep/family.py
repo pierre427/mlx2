@@ -3,11 +3,21 @@ from __future__ import annotations
 
 import importlib
 
+# Keyed by the adapter family a checkpoint resolves to, or by its config model_type (inspection.py tries both).
 FAMILIES = {
     "deepseek_v41": "research.amoeba.sweep.deepseek_v41:load",
     "glm5_next": "research.amoeba.sweep.glm5_next:load",
+    "hy_v4_flash": "research.amoeba.sweep.hy_v4_flash:load",
     "mimo_v2": "research.amoeba.sweep.mimo_v2:load",
+    # whole-layer streaming (layer_swap.py) of an mlx2 adapter's own model, carve-host units (MoE neurons for
+    # SwitchGLU experts), so a map compares with the resident capture (mlx2 amoeba rolling-parity --family)
+    "kimi_linear": "research.amoeba.sweep.kimi_linear:load",
+    "nemotron_h": "research.amoeba.sweep.nemotron_h:load",
 }
+
+# Families whose loader takes the carve-host unit options (moe_units, log) and whose reference_logits streams the
+# whole model text-major, so the per-run parity gate runs at full depth (one more weight read on each side).
+HOST_UNIT_FAMILIES = frozenset({"kimi_linear", "nemotron_h"})
 
 
 class SweepFamily:
