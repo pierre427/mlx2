@@ -41,11 +41,13 @@ def _npz_fixed(path, **arrays):
             z.writestr(zipfile.ZipInfo(f"{k}.npy", date_time=(2026, 1, 1, 0, 0, 0)), buf.getvalue())
 
 
-def _map(d, target, sel, fp="f" * 64):
-    d.mkdir(parents=True)
+def _map(d, target, sel, fp="f" * 64, every=None):
+    d.mkdir(parents=True, exist_ok=every is not None)
     S = len(LAYERS)
     arr = {}
     for s in range(S):
+        if every is not None:
+            arr[f"every_source_{s}"] = every[s]
         arr[f"target_{s}"] = target[s]
         arr[f"mean_target_{s}"] = np.where(target[s], 1.0, 0.0).astype(np.float32)
         arr[f"mean_baseline_{s}"] = np.where(sel[s], 0.1, 0.9).astype(np.float32)
@@ -217,3 +219,54 @@ def test_unassigned_alone_keeps_tiles_identical(tmp_path, flag):
     assert _run(tmp_path, "b", flag).returncode == 0
     za, zb = np.load(tmp_path / "a" / "tiles.npz"), np.load(tmp_path / "b" / "tiles.npz")
     assert za.files == zb.files and all(np.array_equal(za[k], zb[k]) for k in za.files)
+
+
+def _with_every_source(root, drop=None):
+    """Rewrite each box map with every_source arrays (= target), except False on drop[box] columns."""
+    S = len(LAYERS)
+    for b in BOXES:
+        z = np.load(root / "maps" / b / "map.npz")
+        target = np.stack([z[f"target_{s}"] for s in range(S)])
+        sel = np.stack([z[f"mean_baseline_{s}"] < 0.5 for s in range(S)])
+        every = target.copy()
+        for c in (drop or {}).get(b, ()):
+            every[:, c] = False
+        _map(root / "maps" / b, target, sel, every=every)
+
+
+def test_every_source_all_true_keeps_tiles(tmp_path):
+    _toy(tmp_path)
+    assert _run(tmp_path, "base").returncode == 0
+    _with_every_source(tmp_path)
+    r = _run(tmp_path, "ev", "--require-every-source")
+    assert r.returncode == 0, r.stderr
+    a, b = np.load(tmp_path / "base" / "tiles.npz"), np.load(tmp_path / "ev" / "tiles.npz")
+    assert set(a.files) == set(b.files) and all(np.array_equal(a[k], b[k]) for k in a.files)
+    p = json.loads((tmp_path / "ev" / "partition.json").read_text())
+    assert p["require_every_source"] is True and "every_source" in p["rule"]
+
+
+def test_every_source_drops_single_source_claims(tmp_path):
+    _toy(tmp_path)
+    _with_every_source(tmp_path, drop={"a": (9, 10, 11, 12), "b": (9, 10, 11, 12)})
+    r = _run(tmp_path, "ev", "--require-every-source")
+    assert r.returncode == 0, r.stderr
+    z = np.load(tmp_path / "ev" / "tiles.npz")
+    for c in (9, 10, 11, 12):                        # was {a,b,c} -> core; now only c claims it
+        assert z["box:c"][:, c].all() and not z["core"][:, c].any()
+    p = json.loads((tmp_path / "ev" / "partition.json").read_text())
+    assert p["boxes"]["a"]["selected_before_every_source"] - p["boxes"]["a"]["selected"] == 4 * len(LAYERS)
+
+
+def test_every_source_missing_arrays_refused(tmp_path):
+    _toy(tmp_path)
+    r = _run(tmp_path, "ev", "--require-every-source")
+    assert r.returncode != 0 and "every_source" in r.stderr
+
+
+def test_check_against_refuses_every_source_mismatch(tmp_path):
+    _toy(tmp_path)
+    assert _run(tmp_path, "base").returncode == 0
+    _with_every_source(tmp_path)
+    r = _run(tmp_path, "ev", "--require-every-source", "--check-against", "base")
+    assert r.returncode != 0 and "every_source" in r.stderr

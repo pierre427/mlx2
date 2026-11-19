@@ -28,9 +28,23 @@ Opt-in arms (--arms, default "boxes" = the battery above, unchanged; Pierre 2026
                per member box, served = core + every group tile containing it + the box + its pair tiles, on its held
                set and English (OUT/groups.jsonl). Verdicts: removal_beats_random = every member's net hurt minus the
                random hurt >= --group-min-hurt; served_+0.05 = every member and English <= --target.
+Served compositions (core_plus in the boxes arm, served in the groups arm): core + every family tile containing the
+box + the box + its pair tiles. Nested partitions (amoeba_fn_partition.py --nested, partition.json "nested") add the
+box's ancestors' box tiles (a sci.physics.quantum document is a sci.physics and a sci document) and, for a parent,
+its whole subtree (each descendant's box, family and pair tiles: a parent's held set is mostly its subtopics' docs),
+recorded per row as "ancestors" / "descendants"; the unclaimed arm's per-box rows use the same composition on its
+core. Unrelated sets are never in the box's lineage (an ancestor or descendant), whatever the partition. A held spec
+NAME=CORPUS?split=val reads that split instead of held (a box whose build put no rows in held). --english NAME names the English held set (default eng; the category
+partitions use "english", since eng is the engineering box there).
+
 A held spec NAME=gsm8k:PATH[@TOKENS] reads GSM8K rows (question + answer, every row: the test split is never used to
 carve). --held-note NAME=TEXT is printed with every row and table that uses NAME (e.g. a held split that is not a
 separate held build). --reference-battery OLD/battery.jsonl adds last run's core+box values beside the unclaimed arm.
+--joint-partition DIR (runs whatever --arms says; the joint-tile variant of --partition: amoeba_fn_partition.py --joint-floor, the same partition
+with joint:<a>+<b>+... tiles cut from the core; checked) adds the joint arm on its --joint-top (10) largest joint
+tiles: removal vs a random same-count removal on its members' held sets and English, and per member served = the
+variant's core + its family tiles + ancestors / subtree + box + pairs + every joint tile naming the member, one of
+its ancestors or one of its descendants (the joint gate is the OR of its members' gates; parent gates are always on) (OUT/joint.jsonl; skipped members recorded, not scored).
 
 Usage: amoeba_box_battery.py --model M --partition DIR --held cmn=C.jsonl --held eng=E.jsonl ... --out DIR
        [--arms boxes,unclaimed,groups] [--unclaimed U.npz] [--global-held gsm8k] [--held-note NAME=TEXT]
@@ -38,6 +52,7 @@ Usage: amoeba_box_battery.py --model M --partition DIR --held cmn=C.jsonl --held
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -49,6 +64,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 LANGS = {"cmn", "fra", "deu", "spa", "jpn", "rus", "arb", "hin", "swh", "vie", "eng"}
+LANG10 = LANGS - {"eng"}                                 # language boxes (English is the reference set, never a box)
 FAR_LANG = {"cmn": "fra", "jpn": "fra"}                  # default far language: cmn (Han-script boxes: French)
 FAR_SUBJ = ("life.cooking", "sci.astronomy")            # far subjects (the first that is not the box itself)
 
@@ -67,6 +83,34 @@ def random_like(mask, g):
     return rnd
 
 
+def lineage(a, b):
+    """a and b are the same box, or one is a dotted-name ancestor of the other."""
+    return a == b or a.startswith(b + ".") or b.startswith(a + ".")
+
+
+def ancestors_of(prep, b):
+    """The box's ancestors in a nested partition (else none)."""
+    return list(((prep.get("nested") or {}).get("ancestors") or {}).get(b, []))
+
+
+def descendants_of(prep, b):
+    """The box's descendants in a nested partition (else none)."""
+    return list(((prep.get("nested") or {}).get("descendants") or {}).get(b, []))
+
+
+def subtree_keep(get, keys, prep, b, base, groups=True):
+    """base + the ancestors' box tiles + for b and each descendant: its box, its pair tiles and (groups) every family
+    tile containing it. Without nesting: base + box b + b's pairs (+ b's family tiles)."""
+    keep = base
+    for x in ancestors_of(prep, b):
+        keep = keep | get(f"box:{x}")
+    for x in [b] + descendants_of(prep, b):
+        keep = keep | get(f"box:{x}")
+        for k in (group_keys_of(prep, x) if groups else []) + pair_keys(keys, x):
+            keep = keep | get(k)
+    return keep
+
+
 def pair_keys(keys, b):
     return [k for k in keys if k.startswith("pair:") and b in k[5:].split("__")]
 
@@ -78,11 +122,8 @@ def group_keys_of(prep, b):
 
 
 def served_keep(get, keys, prep, b, core):
-    """Core + every group tile containing b + box b + b's pair tiles."""
-    keep = core | get(f"box:{b}")
-    for k in group_keys_of(prep, b) + pair_keys(keys, b):
-        keep = keep | get(k)
-    return keep
+    """Core + every group tile containing b + box b + b's pair tiles (+ ancestors and subtree when nested)."""
+    return subtree_keep(get, keys, prep, b, core)
 
 
 def folded_core(get, keys):
@@ -101,7 +142,10 @@ def read_held_rows(path, kind, filt):
         rows = [json.loads(x) for x in Path(path).read_text().split("\n") if x.strip()]
         return [{"text": f"Question: {r['question']}\nAnswer: {r['answer']}"} for r in rows]
     rows = [json.loads(x) for x in Path(path).read_text().split("\n") if x.strip()]
-    rows = [r for r in rows if r.get("split") == "held"]
+    split = "held"
+    if filt.startswith("split="):                       # another split in place of held (?split=val)
+        split, filt = filt.partition("=")[2], ""
+    rows = [r for r in rows if r.get("split") == split]
     if filt:
         fk, _, fv = filt.partition("=")
         rows = [r for r in rows if str(r.get(fk)) == fv]
@@ -132,6 +176,11 @@ def main():
     ap.add_argument("--group-min-hurt", type=float, default=0.01)
     ap.add_argument("--held-note", action="append", default=[], help="NAME=TEXT")
     ap.add_argument("--reference-battery", default="")
+    ap.add_argument("--english", default="eng", help="the English held set's name (category partitions: english)")
+    ap.add_argument("--joint-partition", default="", help="the joint-tile variant partition (joint arm)")
+    ap.add_argument("--joint-top", type=int, default=10)
+    ap.add_argument("--skipped", action="append", default=[], help="NAME=REASON: a partition box left out of every "
+                    "arm (recorded in the meta and battery.md)")
     a = ap.parse_args()
     arms = [x for x in a.arms.split(",") if x]
     if not arms or any(x not in ARMS for x in arms):
@@ -154,6 +203,38 @@ def main():
     keys = [k for k in tz.files if k != "layers"]              # tiles are read lazily (review: ~435 pair masks of
     core_t = tz["core"]                                         # 15.7 MB each would sit beside the model)
     boxes = [b for b in (a.boxes.split(",") if a.boxes else sorted(k[4:] for k in keys if k.startswith("box:"))) if b]
+    skipped = dict(x.partition("=")[::2] for x in a.skipped)        # checked before the model loads
+    bad = [k for k in skipped if k in boxes]
+    if bad:
+        raise SystemExit(f"--skipped boxes still in --boxes: {bad}")
+    unknown = [k for k in skipped if f"box:{k}" not in keys]
+    if unknown:
+        raise SystemExit(f"--skipped boxes not in the partition: {unknown}")
+    jz = jprep = None
+    if a.joint_partition:                              # checked before the model loads
+        jd = Path(a.joint_partition)
+        jprep = json.loads((jd / "partition.json").read_text())
+        jz = np.load(jd / "tiles.npz")
+        jkeys = [k for k in jz.files if k != "layers"]
+        if jprep.get("fingerprint") != prep.get("fingerprint") or [int(x) for x in jz["layers"]] != layers:
+            raise SystemExit("--joint-partition: another model or layer list")
+        if not (jprep.get("joint") or {}).get("tiles"):
+            raise SystemExit("--joint-partition has no joint tiles")
+        if sorted(k for k in jkeys if not k.startswith("joint:")) != sorted(keys):
+            raise SystemExit("--joint-partition: its non-joint tiles differ from --partition's keys")
+        folded = jz["core"].copy()
+        for k in jkeys:
+            if k.startswith("joint:"):
+                folded |= jz[k]
+        if not np.array_equal(folded, tz["core"]):
+            raise SystemExit("--joint-partition: core + joint tiles != --partition's core")
+        if ({k: v.get("units") for k, v in (jprep.get("boxes") or {}).items()} !=
+                {k: v.get("units") for k, v in (prep.get("boxes") or {}).items()} or
+                jprep.get("pairs") != prep.get("pairs") or
+                {g: v.get("units") for g, v in ((jprep.get("groups") or {}).get("kept") or {}).items()} !=
+                {g: v.get("units") for g, v in ((prep.get("groups") or {}).get("kept") or {}).items()}):
+            raise SystemExit("--joint-partition: box, pair or family tile counts differ from --partition's")
+        del folded
     if "groups" in arms and not (prep.get("groups") or {}).get("kept"):
         raise SystemExit("--arms groups needs a partition with kept family tiles (amoeba_fn_partition.py --groups)")
     upath = Path(a.unclaimed) if a.unclaimed else pd / "unassigned.npz"
@@ -202,8 +283,11 @@ def main():
         held[name], htok[name] = {"held": seqs}, T
         log(f"held {name}: {len(seqs)} x {T} tokens")
     missing = [b for b in boxes if b not in held] + [x for x in a.global_held.split(",") if x and x not in held]
-    if missing or "eng" not in held:
-        raise SystemExit(f"held sets missing for {missing + ([] if 'eng' in held else ['eng'])}")
+    EN = a.english
+    if EN in boxes:
+        raise SystemExit(f"--english {EN} is also a box name: name the English held set differently")
+    if missing or EN not in held:
+        raise SystemExit(f"held sets missing for {missing + ([] if EN in held else [EN])}")
     clean = {}
 
     def score(keep_rows, names):
@@ -215,6 +299,10 @@ def main():
 
     allones = np.ones_like(core_t)
     settings = {"docs": a.docs, "seed": a.seed, "partition": str(pd), "held": sorted(a.held)}
+    if a.english != "eng":                                  # keys only off the defaults (golden rows unchanged)
+        settings["english"] = a.english
+    if prep.get("nested"):
+        settings["nested"] = True
     done = set()
     bj = out / "battery.jsonl"
     if bj.exists():                         # reuse only complete rows made with these settings
@@ -232,45 +320,56 @@ def main():
         po.write_text(json.dumps(score(allones, list(held)), indent=1))
     off = json.loads(po.read_text())
     log("path offset:", off)
-    langs = [h for h in held if h in LANGS and h != "eng"]
-    others = [h for h in held if h not in LANGS]
     for i, b in enumerate(boxes if "boxes" in arms else []):
         if b in done:
             continue
         t0 = time.time()
         box = tz[f"box:{b}"]
-        if b in LANGS:
+        if b in LANG10:
             far_other = next((s for s in FAR_SUBJ if s in held), None)
             far_same = FAR_LANG.get(b, "cmn")
         else:
             far_other = "cmn"
-            far_same = next((s for s in FAR_SUBJ if s in held and s != b), None)
-        unrelated = ["eng"] + [x for x in (far_other, far_same) if x and x in held and x != b]
+            far_same = next((s for s in FAR_SUBJ if s in held and not lineage(s, b)), None)
+        unrelated = [EN] + [x for x in (far_other, far_same) if x and x in held and not lineage(x, b)]
         without = score(~box, [b] + unrelated)
         rnd = random_like(box, np.random.default_rng(a.seed + 1000 + i))
-        random_ = score(~rnd, [b, "eng"])
-        keep = core_t | box
+        random_ = score(~rnd, [b, EN])
         pairs = [k for k in keys if k.startswith("pair:") and b in k[5:].split("__")]
-        for k in pairs:
-            keep = keep | tz[k]
-        core_plus = score(keep, [b, "eng"])
+        anc, desc, grp = ancestors_of(prep, b), descendants_of(prep, b), group_keys_of(prep, b)
+        keep = served_keep(lambda k: tz[k], keys, prep, b, core_t)
+        core_plus = score(keep, [b, EN])
         net = lambda d: {k: v - off.get(k, 0.0) for k, v in d.items()}      # noqa: E731  (path offset removed)
         nw, nr, nc = net(without), net(random_), net(core_plus)
         own, ro = nw[b], nr[b]
         verdict = {"exclusive": bool(own >= a.min_own and own >= a.own_x * max(ro, 1e-9)
                                      and all(nw[u] <= a.max_unrelated for u in unrelated)),
                    "served_+0.05": bool(nc[b] <= a.target), "on": "dCE net of the path offset"}
-        row = {"box": b, "units": int(box.sum()), "pairs": pairs, "unrelated": unrelated, "without": without,
+        row = {"box": b, "units": int(box.sum()), "pairs": pairs, **({"ancestors": anc} if anc else {}),
+               **({"served_composition": "core + family tiles containing the box + every ancestor box (parent tiles "
+                   "are always gated in for their subtiles) + the box + its pair tiles"
+                   + (" + its whole subtree (every descendant's box, pair and family tiles)" if desc else "")}
+                  if prep.get("nested") else {}),
+               **({"descendants": desc} if desc else {}), **({"groups": grp} if grp else {}),
+               "unrelated": unrelated, "without": without,
                "random": random_, "core_plus": core_plus, "path_offset": off, "verdict": verdict,
                "settings": settings, "wall_s": round(time.time() - t0, 1)}
         with bj.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
         log(f"{b}: units {row['units']:,}; without own {own:+.3f} " +
             " ".join(f"{u} {without[u]:+.3f}" for u in unrelated) +
-            f"; random own {ro:+.3f} eng {random_['eng']:+.3f}; core+box own {core_plus[b]:+.3f} eng "
-            f"{core_plus['eng']:+.3f}; {verdict}")
+            f"; random own {ro:+.3f} {EN} {random_[EN]:+.3f}; core+box own {core_plus[b]:+.3f} {EN} "
+            f"{core_plus[EN]:+.3f}; {verdict}")
     net = lambda d: {k: v - off.get(k, 0.0) for k, v in d.items()}          # noqa: E731
     get = lambda k: tz[k]                                                     # noqa: E731
+    boxes_rows = {}                                    # this run's boxes-arm rows (same settings): core_plus reuse
+    for x in bj.read_text().split("\n") if bj.exists() else []:
+        try:
+            r = json.loads(x)
+        except ValueError:
+            continue
+        if r.get("settings") == settings:
+            boxes_rows[r["box"]] = r
     asettings = {**settings, "target": a.target, "group_min_hurt": a.group_min_hurt, "global_held": a.global_held,
                  "unclaimed": str(upath)}
     mark = lambda k: f"{k}\u2020" if k in notes else k                       # noqa: E731  (a held-set note below)
@@ -301,12 +400,10 @@ def main():
         C0 = folded_core(get, keys)
         gl = [x for x in a.global_held.split(",") if x]
         jobs = [("global:full_minus_unclaimed", lambda: ~U, list(held)),
-                ("global:core", lambda: C0, ["eng"] + gl),
-                ("global:core_minus_unclaimed", lambda: C0 & ~U, ["eng"] + gl)]
+                ("global:core", lambda: C0, [EN] + gl),
+                ("global:core_minus_unclaimed", lambda: C0 & ~U, [EN] + gl)]
         for b in boxes:
-            jobs.append((f"box:{b}", lambda b=b: (C0 & ~U) | get(f"box:{b}") |
-                         np.logical_or.reduce([get(k) for k in pair_keys(keys, b)] or [np.zeros_like(U)]),
-                         [b, "eng"]))
+            jobs.append((f"box:{b}", lambda b=b: subtree_keep(get, keys, prep, b, C0 & ~U, groups=False), [b, EN]))
         for key, mk, sets in jobs:
             if key in got:
                 continue
@@ -338,7 +435,7 @@ def main():
             b = key[4:] if key.startswith("box:") else None
             rf = ref.get(b) if b else None
             extra_md.append(f"| {key} | {r['kept_units']:,} | " + ", ".join(f"{mark(k)} {v:+.3f}" for k, v in r["net"].items())
-                            + " | " + (f"{b} {rf[b]:+.3f}, eng {rf['eng']:+.3f}" if rf else "-")
+                            + " | " + (f"{b} {rf[b]:+.3f}, {EN} {rf[EN]:+.3f}" if rf and b in rf and EN in rf else "-")
                             + f" | {'yes' if r['served_+0.05'] else 'NO'} |")
     if "groups" in arms:
         gj = out / "groups.jsonl"
@@ -357,18 +454,20 @@ def main():
                     continue
                 t0 = time.time()
                 keep = served_keep(get, keys, prep, m, core)
-                d = score(keep, [m, "eng"])
+                bx = boxes_rows.get(m) if "boxes" in arms else None     # the boxes arm scored this same mask
+                d = dict(bx["core_plus"]) if bx else score(keep, [m, EN])
                 nd = net(d)
-                served[m] = put(gj, {"arm": "groups", "key": f"served:{m}", "sets": [m, "eng"], "dce": d, "net": nd,
+                served[m] = put(gj, {"arm": "groups", "key": f"served:{m}", "sets": [m, EN], "dce": d, "net": nd,
                                      "kept_units": int(keep.sum()), "groups": group_keys_of(prep, m),
-                                     "pairs": pair_keys(keys, m), "wall_s": round(time.time() - t0, 1)})
-                log(f"served {m}: {nd[m]:+.3f} eng {nd['eng']:+.3f} (groups {served[m]['groups']})")
+                                     "pairs": pair_keys(keys, m), "wall_s": round(time.time() - t0, 1),
+                                     **({"reused": "boxes arm core_plus (same mask)"} if bx else {})})
+                log(f"served {m}: {nd[m]:+.3f} {EN} {nd[EN]:+.3f} (groups {served[m]['groups']})")
             key = f"group:{gname}"
             if key in got:
                 continue
             t0 = time.time()
             G = tz[key]
-            sets = have + ["eng"]
+            sets = have + [EN]
             without = score(~G, sets)
             rnd = random_like(G, np.random.default_rng(a.seed + 5000 + gi))
             random_ = score(~rnd, sets)
@@ -376,15 +475,17 @@ def main():
             hurt = {m: nw[m] - nr[m] for m in have}
             verdict = {"removal_beats_random": bool(have and all(h >= a.group_min_hurt for h in hurt.values())),
                        "served_+0.05": bool(have and all(served[m]["net"][m] <= a.target and
-                                                         served[m]["net"]["eng"] <= a.target for m in have)),
-                       "members_without_held": [m for m in mem if m not in held], "on": "dCE net of the path offset"}
+                                                         served[m]["net"][EN] <= a.target for m in have)),
+                       "members_without_held": [m for m in mem if m not in held], "on": "dCE net of the path offset",
+                       **({"members_skipped": {m: skipped[m] for m in mem if m in skipped}}
+                          if any(m in skipped for m in mem) else {})}
             row = put(gj, {"arm": "groups", "key": key, "sets": sets, "members": mem, "units": int(G.sum()),
                            "parent": kept[gname].get("parent"), "without": without, "random": random_,
                            "hurt_minus_random": hurt, "served": {m: served[m]["net"] for m in have},
                            "verdict": verdict, "wall_s": round(time.time() - t0, 1)})
             got[key] = row
             log(f"{key}: units {row['units']:,}; " + " ".join(f"{m} {nw[m]:+.3f}/{nr[m]:+.3f}" for m in have)
-                + f" eng {nw['eng']:+.3f}/{nr['eng']:+.3f}; {verdict}")
+                + f" {EN} {nw[EN]:+.3f}/{nr[EN]:+.3f}; {verdict}")
         extra_md += ["\nFamily tiles: removal (group tile removed) vs a random same-count removal, and served = core "
                      "+ every group tile containing the member + its box + its pair tiles; held dCE net of the path "
                      "offset.\n",
@@ -394,9 +495,82 @@ def main():
             r = got[f"group:{gname}"]
             have = [m for m in r["members"] if m in held]
             nw, nr = net(r["without"]), net(r["random"])
-            extra_md.append(f"| {gname} | {r['units']:,} | " + ", ".join(f"{mark(m)} {nw[m]:+.3f} / {nr[m]:+.3f}" for m in have)
-                            + f" | {nw['eng']:+.3f} / {nr['eng']:+.3f} | "
-                            + ", ".join(f"{mark(m)} {r['served'][m][m]:+.3f} / {r['served'][m]['eng']:+.3f}" for m in have)
+            ns = len(r["verdict"].get("members_skipped") or {})
+            extra_md.append(f"| {gname}{f' ({ns} skipped)' if ns else ''} | {r['units']:,} | "
+                            + ", ".join(f"{mark(m)} {nw[m]:+.3f} / {nr[m]:+.3f}" for m in have)
+                            + f" | {nw[EN]:+.3f} / {nr[EN]:+.3f} | "
+                            + ", ".join(f"{mark(m)} {r['served'][m][m]:+.3f} / {r['served'][m][EN]:+.3f}" for m in have)
+                            + f" | {'yes' if r['verdict']['removal_beats_random'] else 'NO'} | "
+                              f"{'yes' if r['verdict']['served_+0.05'] else 'NO'} |")
+    if jz is not None:
+        jj = out / "joint.jsonl"
+        with open(Path(a.joint_partition) / "tiles.npz", "rb") as fh:       # chunked: no spike beside the model
+            jsha = hashlib.file_digest(fh, "sha256").hexdigest()[:12]
+        asettings = {**asettings, "joint_partition": a.joint_partition, "joint_floor": jprep["joint"].get("floor"),
+                     "joint_tiles_sha256_12": jsha, "joint_top": a.joint_top}  # resume only on the same variant
+        got = arm_rows(jj)
+        jget = lambda k: jz[k]                                             # noqa: E731
+        jt = jprep["joint"]["tiles"]
+        top = sorted(jt, key=lambda k: -jt[k]["units"])[:a.joint_top]
+        jkeys_all = [k for k in jz.files if k != "layers"]
+        jcore = jz["core"]
+        jserved = {k[7:]: r for k, r in got.items() if k.startswith("served:")}
+
+        def lineage_set(m):                            # the member, its ancestors (gates always on) and descendants
+            return {m} | set(ancestors_of(jprep, m)) | set(descendants_of(jprep, m))
+        for ji, name in enumerate(top):
+            mem = jt[name]["members"]
+            have = [m for m in mem if m in held and m not in skipped]
+            for m in have:
+                if m in jserved:
+                    continue
+                t0 = time.time()
+                keep = served_keep(jget, jkeys_all, jprep, m, jcore)
+                lin = lineage_set(m)                   # OR gates: open for m, its ancestors and its subtree
+                opened = [k for k in jkeys_all if k.startswith("joint:") and lin & set(k[6:].split("+"))]
+                for k in opened:
+                    keep = keep | jz[k]
+                d = score(keep, [m, EN])
+                jserved[m] = put(jj, {"arm": "joint", "key": f"served:{m}", "sets": [m, EN], "dce": d, "net": net(d),
+                                      "kept_units": int(keep.sum()), "joint_tiles_open": opened,
+                                      "wall_s": round(time.time() - t0, 1)})
+                log(f"joint served {m}: {jserved[m]['net'][m]:+.3f} {EN} {jserved[m]['net'][EN]:+.3f}")
+            key = f"joint:{name}"
+            if key in got:
+                continue
+            t0 = time.time()
+            J = jz[key]
+            sets = have + [EN]
+            without = score(~J, sets)
+            rnd = random_like(J, np.random.default_rng(a.seed + 9000 + ji))
+            random_ = score(~rnd, sets)
+            nw, nr = net(without), net(random_)
+            hurt = {m: nw[m] - nr[m] for m in have}
+            verdict = {"removal_beats_random": bool(have and all(h >= a.group_min_hurt for h in hurt.values())),
+                       "served_+0.05": bool(have and all(jserved[m]["net"][m] <= a.target and
+                                                         jserved[m]["net"][EN] <= a.target for m in have)),
+                       "members_without_held": [m for m in mem if m not in held],
+                       **({"members_skipped": {m: skipped[m] for m in mem if m in skipped}}
+                          if any(m in skipped for m in mem) else {}), "on": "dCE net of the path offset"}
+            got[key] = put(jj, {"arm": "joint", "key": key, "sets": sets, "members": mem, "units": int(J.sum()),
+                                "without": without, "random": random_, "hurt_minus_random": hurt,
+                                "served": {m: jserved[m]["net"] for m in have}, "verdict": verdict,
+                                "wall_s": round(time.time() - t0, 1)})
+            log(f"{key}: units {got[key]['units']:,}; {verdict}")
+        extra_md += [f"\nJoint tiles ({a.joint_partition}, floor {jprep['joint'].get('floor')}; the {len(top)} "
+                     "largest): removal vs a random same-count removal, and served = the variant's core + family "
+                     "tiles + ancestors / subtree + box + pairs + every joint tile naming the member, an ancestor or a "
+                     "descendant.\n",
+                     "| joint tile | units | members: without / random | served member / eng | beats random | "
+                     "+0.05 served |", "|---|---|---|---|---|---|"]
+        for name in top:
+            r = got[f"joint:{name}"]
+            have = [m for m in r["members"] if m in r["served"]]
+            nw, nr = net(r["without"]), net(r["random"])
+            ns = len(r["verdict"].get("members_skipped") or {})
+            extra_md.append(f"| {name}{f' ({ns} skipped)' if ns else ''} | {r['units']:,} | "
+                            + ", ".join(f"{mark(m)} {nw[m]:+.3f} / {nr[m]:+.3f}" for m in have) + " | "
+                            + ", ".join(f"{mark(m)} {r['served'][m][m]:+.3f} / {r['served'][m][EN]:+.3f}" for m in have)
                             + f" | {'yes' if r['verdict']['removal_beats_random'] else 'NO'} | "
                               f"{'yes' if r['verdict']['served_+0.05'] else 'NO'} |")
     if notes:
@@ -416,6 +590,10 @@ def main():
             "thresholds": {"min_own": a.min_own, "own_x": a.own_x, "max_unrelated": a.max_unrelated, "target": a.target},
             "watchdog": {"swap_growth_gb": a.swap_growth_gb, "waiver_note": a.waiver_note or None},
             "mlx_peak_gb": O.peak_gb()}
+    if skipped:
+        meta["skipped"] = skipped
+    if jz is not None:
+        meta.update(joint_partition=a.joint_partition, joint_top=a.joint_top, joint_floor=jprep["joint"].get("floor"))
     if arms != ["boxes"] or notes:
         meta.update(arms=arms, held_notes=notes, arm_thresholds={"target": a.target, "group_min_hurt":
                                                                   a.group_min_hurt},
@@ -427,12 +605,15 @@ def main():
     for r in rows:
         lines.append(f"| {r['box']} | {r['units']:,} | {r['without'][r['box']]:+.3f} | "
                      + ", ".join(f"{u} {r['without'][u]:+.3f}" for u in r["unrelated"])
-                     + f" | {r['random'][r['box']]:+.3f} / {r['random']['eng']:+.3f} | {r['core_plus'][r['box']]:+.3f} / "
-                       f"{r['core_plus']['eng']:+.3f} | {'yes' if r['verdict']['exclusive'] else 'NO'} | "
+                     + f" | {r['random'][r['box']]:+.3f} / {r['random'][EN]:+.3f} | {r['core_plus'][r['box']]:+.3f} / "
+                       f"{r['core_plus'][EN]:+.3f} | {'yes' if r['verdict']['exclusive'] else 'NO'} | "
                        f"{'yes' if r['verdict']['served_+0.05'] else 'NO'} |")
     if "boxes" not in arms:
         lines = lines[:1]
     lines += extra_md
+    if skipped:
+        lines += ["\nSkipped boxes (in the partition, left out of every arm):"] + \
+            [f"- {k}: {v}" for k, v in sorted(skipped.items())]
     (out / "battery.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 
