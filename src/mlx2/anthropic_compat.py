@@ -50,6 +50,174 @@ def _text(value, name, *, empty=True):
     return value
 
 
+# The Messages API's image media types.  Bytes are decoded and checked later,
+# by the multimodal adapter contract (``multimodal.resolve_media``), exactly as
+# a Chat ``image_url`` data URL is.
+ANTHROPIC_IMAGE_MEDIA_TYPES = frozenset(
+    {"image/jpeg", "image/png", "image/gif", "image/webp"}
+)
+# Anthropic's own PDF bounds: 32 MiB per request and 100 pages.
+ANTHROPIC_PDF_MAX_BYTES = 32 << 20
+ANTHROPIC_PDF_MAX_PAGES = 100
+
+
+def _source_kind_refused(kind, block_name):
+    # ``url`` would make the server fetch the network on the client's behalf,
+    # which the media contract refuses for Chat and Responses too; ``file``
+    # names an Anthropic Files id this server never issued.
+    raise ValueError(
+        f"{block_name} source type {kind!r} is unsupported: send base64 data"
+    )
+
+
+def _anthropic_image_part(block, counts=None):
+    """Translate a Messages image block to a Chat ``image_url`` part."""
+    _only(block, {"type", "source", "cache_control"}, "image block")
+    if "cache_control" in block:
+        _cache_control(block["cache_control"])
+    source = _object(block.get("source"), "image source")
+    kind = source.get("type")
+    if kind != "base64":
+        _source_kind_refused(kind, "image")
+    _only(source, {"type", "media_type", "data"}, "image source")
+    media_type = source.get("media_type")
+    if media_type not in ANTHROPIC_IMAGE_MEDIA_TYPES:
+        raise ValueError(
+            "image media_type must be image/jpeg, image/png, image/gif or image/webp"
+        )
+    data = _text(source.get("data"), "image data", empty=False)
+    # Counted at translation, so "received": a text route still refuses the
+    # request, and multimodal admission keeps its own counters.
+    _agent.count(counts, "anthropic_image_blocks_received")
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{media_type};base64,{data}"},
+    }
+
+
+def _pdf_text(data):
+    """Every page's text layer, or a refusal: never a partial document.
+
+    ``web_tools.pdf`` truncates and notes it for fetched pages; a client's
+    upload instead fails closed on anything it cannot serve whole: more than
+    the API's 100 pages, or a page that carries images but no text (a scan,
+    which needs OCR).  A page with neither is blank and loses nothing.
+    """
+    import base64
+
+    if len(data) > ((ANTHROPIC_PDF_MAX_BYTES + 2) // 3) * 4 + 8:
+        raise ValueError("document PDF exceeds the 32 MiB bound")
+    try:
+        payload = base64.b64decode(data, validate=True)
+    except (ValueError, TypeError) as error:
+        raise ValueError("document PDF data is not valid base64") from error
+    if not payload.startswith(b"%PDF"):
+        raise ValueError("document PDF data is not a PDF")
+    try:
+        import pymupdf
+    except ImportError as error:
+        raise ValueError("document PDFs need PyMuPDF, which is not installed") from error
+    try:
+        document = pymupdf.open(stream=payload, filetype="pdf")
+    except Exception as error:
+        raise ValueError(f"document PDF could not be opened: {type(error).__name__}") from error
+    try:
+        if document.page_count > ANTHROPIC_PDF_MAX_PAGES:
+            raise ValueError(
+                f"document PDF has {document.page_count} pages; at most "
+                f"{ANTHROPIC_PDF_MAX_PAGES} are supported"
+            )
+        pages = []
+        for index, page in enumerate(document):
+            text = page.get_text("text").strip()
+            if not text and page.get_images():
+                raise ValueError(
+                    f"document PDF page {index + 1} has no text layer (scanned); "
+                    "OCR is unavailable"
+                )
+            if text:
+                pages.append(f"## Page {index + 1}\n\n{text}")
+    except ValueError:
+        raise
+    except Exception as error:
+        raise ValueError(f"document PDF could not be read: {type(error).__name__}") from error
+    finally:
+        document.close()
+    if not pages:
+        raise ValueError("document PDF has no text")
+    return "\n\n".join(pages)
+
+
+def _anthropic_document_text(block, counts=None):
+    """Render a Messages document block as text the model reads.
+
+    Documents are served as their text: plain-text and content sources
+    exactly, PDFs through the text layer (``web_tools.pdf``; a scanned page
+    says so in the text).  The page images the hosted API also shows are not
+    rendered, and citations cannot be produced, so a request that enables
+    them is refused.
+    """
+    _only(
+        block,
+        {"type", "source", "title", "context", "citations", "cache_control"},
+        "document block",
+    )
+    if "cache_control" in block:
+        _cache_control(block["cache_control"])
+    citations = block.get("citations")
+    if citations is not None:
+        citations = _object(citations, "document citations")
+        _only(citations, {"enabled"}, "document citations")
+        if citations.get("enabled") is True:
+            raise ValueError("document citations are unsupported")
+        if citations.get("enabled") not in (None, False):
+            raise ValueError("document citations enabled must be boolean")
+    title = block.get("title")
+    if title is not None:
+        _text(title, "document title")
+    context = block.get("context")
+    if context is not None:
+        _text(context, "document context")
+    source = _object(block.get("source"), "document source")
+    kind = source.get("type")
+    if kind == "text":
+        _only(source, {"type", "media_type", "data"}, "document source")
+        if source.get("media_type", "text/plain") != "text/plain":
+            raise ValueError("text document media_type must be text/plain")
+        text = _text(source.get("data"), "document text")
+    elif kind == "content":
+        _only(source, {"type", "content"}, "document source")
+        content = source.get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            pieces = []
+            for part in content:
+                part = _object(part, "document content block")
+                _only(part, {"type", "text", "cache_control"}, "document content block")
+                if part.get("type") != "text":
+                    raise ValueError("document content supports text blocks only")
+                if "cache_control" in part:
+                    _cache_control(part["cache_control"])
+                pieces.append(_text(part.get("text"), "document content text"))
+            text = "".join(pieces)
+        else:
+            raise ValueError("document content must be text or a block list")
+    elif kind == "base64":
+        _only(source, {"type", "media_type", "data"}, "document source")
+        if source.get("media_type") != "application/pdf":
+            raise ValueError("base64 document media_type must be application/pdf")
+        text = _pdf_text(_text(source.get("data"), "document data", empty=False))
+    else:
+        _source_kind_refused(kind, "document")
+    _agent.count(counts, "anthropic_document_blocks_received")
+    header = "<document"
+    if title:
+        header += f" title={json.dumps(title, ensure_ascii=False)}"
+    body = f"{context}\n\n{text}" if context else text
+    return f"\n{header}>\n{body}\n</document>\n"
+
+
 def anthropic_request_model(body, *, agent_compat=None):
     """Validate the Messages request shape and return its required model id."""
     body = _object(body, "request")
@@ -380,7 +548,8 @@ def _anthropic_message(
                 _text(block.get("data"), "redacted thinking data")
                 rejections += 1
             elif kind in ("image", "document"):
-                raise ValueError("image and document content blocks are unsupported")
+                # The Messages API never puts media in an assistant turn.
+                raise ValueError("assistant image and document blocks are unsupported")
             else:
                 raise ValueError(f"unsupported assistant content block: {kind!r}")
         translated = {"role": "assistant", "content": "".join(text)}
@@ -391,21 +560,53 @@ def _anthropic_message(
         return [translated], rejections
 
     translated = []
+    # ``pending`` holds the user turn being built: text strings and Chat
+    # ``image_url`` parts, in client order.  An all-text turn stays a string.
     pending = []
+    # Images a tool returned.  Chat tool messages are text, so they follow
+    # the tool results as a user turn; holding them until the run of
+    # tool_result blocks ends keeps parallel results contiguous, which
+    # templates that group consecutive tool messages (and ones that require
+    # tool messages right after the calls) depend on.
+    tool_images = []
 
     def flush_text():
-        if pending:
+        if not pending:
+            return
+        if all(isinstance(piece, str) for piece in pending):
             translated.append({"role": "user", "content": "".join(pending)})
-            pending.clear()
+        else:
+            parts = []
+            for piece in pending:
+                if isinstance(piece, str):
+                    if parts and parts[-1]["type"] == "text":
+                        parts[-1] = {"type": "text", "text": parts[-1]["text"] + piece}
+                    elif piece:
+                        parts.append({"type": "text", "text": piece})
+                else:
+                    parts.append(piece)
+            translated.append({"role": "user", "content": parts})
+        pending.clear()
+
+    def release_tool_images():
+        if tool_images:
+            pending.extend(tool_images)
+            tool_images.clear()
 
     for block in content:
         block = _object(block, "user content block")
         kind = block.get("type")
+        if kind != "tool_result":
+            release_tool_images()
         if kind == "text":
             _only(block, {"type", "text", "cache_control"}, "text block")
             if "cache_control" in block:
                 _cache_control(block["cache_control"])
             pending.append(_text(block.get("text"), "text block text"))
+        elif kind == "image":
+            pending.append(_anthropic_image_part(block, counts))
+        elif kind == "document":
+            pending.append(_anthropic_document_text(block, counts))
         elif kind == "tool_result":
             _only(
                 block,
@@ -424,6 +625,7 @@ def _anthropic_message(
                 _cache_control(block["cache_control"])
             flush_text()
             result = block.get("content", "")
+            images = []
             if isinstance(result, list):
                 pieces = []
                 for part in result:
@@ -433,6 +635,12 @@ def _anthropic_message(
                         name = _text(part.get("tool_name"), "tool_reference tool_name", empty=False)
                         tool_changes.append(("tool_addition", name, None))
                         continue
+                    if part.get("type") == "image":
+                        images.append(_anthropic_image_part(part, counts))
+                        continue
+                    if part.get("type") == "document":
+                        pieces.append(_anthropic_document_text(part, counts))
+                        continue
                     _only(
                         part,
                         {"type", "text", "cache_control"},
@@ -441,10 +649,28 @@ def _anthropic_message(
                     if "cache_control" in part:
                         _cache_control(part["cache_control"])
                     if part.get("type") != "text":
-                        raise ValueError("tool_result only supports text blocks")
+                        raise ValueError(
+                            "tool_result supports text, image and document blocks"
+                        )
                     pieces.append(_text(part.get("text"), "tool_result text"))
                 result = "".join(pieces)
             result = _text(result, "tool_result content")
+            if images:
+                tool_use_id = _text(
+                    block.get("tool_use_id"), "tool_result tool_use_id", empty=False
+                )
+                if not result:
+                    # A tool that returned only an image (Claude Code's Read
+                    # of a screenshot) would otherwise leave an empty tool
+                    # turn with no pointer to the image after it.  Text the
+                    # tool did return is kept exactly; the label below ties
+                    # each held image back to its call.
+                    result = "[image result follows]"
+                for number, image in enumerate(images, 1):
+                    position = f" {number} of {len(images)}" if len(images) > 1 else ""
+                    tool_images.append(f"[image{position} from tool result {tool_use_id}]")
+                    tool_images.append(image)
+                _agent.count(counts, "anthropic_tool_result_images_received", len(images))
             if "is_error" in block and not isinstance(block["is_error"], bool):
                 raise ValueError("tool_result is_error must be boolean")
             translated.append(
@@ -458,10 +684,9 @@ def _anthropic_message(
                     "content": result,
                 }
             )
-        elif kind in ("image", "document"):
-            raise ValueError("image and document content blocks are unsupported")
         else:
             raise ValueError(f"unsupported user content block: {kind!r}")
+    release_tool_images()
     flush_text()
     return translated, 0
 

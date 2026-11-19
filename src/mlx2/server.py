@@ -4766,7 +4766,25 @@ def handler_for(
                 if anthropic_count_tokens:
                     # Count the request /v1/messages would serve: validation
                     # narrows a named choice's tools and canonicalizes their
-                    # schemas, exactly as /tokenize renders it.
+                    # schemas, exactly as /tokenize renders it.  Like
+                    # /tokenize it renders text only: an image's soft tokens
+                    # exist only after its encoder runs, so a media request
+                    # is refused rather than undercounted (a text route says
+                    # it has no encoder, as /v1/messages would).
+                    if any(
+                        isinstance(message.get("content"), list)
+                        for message in body.get("messages", ())
+                    ):
+                        if not (
+                            callable(getattr(engine, "supports_multimodal", None))
+                            and engine.supports_multimodal()
+                        ):
+                            raise CapabilityUnavailable(
+                                "the loaded adapter has no qualified image, video, or audio encoder"
+                            )
+                        raise ValueError(
+                            "count_tokens does not count image, video, or audio content"
+                        )
                     self.send_json(
                         200, {"input_tokens": int(engine.count_tokens(body))}
                     )

@@ -602,6 +602,21 @@ def fold_system_messages(messages, counts=None):
                     **result[-1],
                     "content": result[-1]["content"] + "\n\n" + content,
                 }
+            elif (
+                result
+                and result[-1].get("role") == "user"
+                and isinstance(result[-1].get("content"), list)
+            ):
+                # A user turn with media parts (an Anthropic image block):
+                # merging as a text part keeps roles alternating, which
+                # strict templates (Gemma, Mistral) require.
+                result[-1] = {
+                    **result[-1],
+                    "content": [
+                        *result[-1]["content"],
+                        {"type": "text", "text": "\n\n" + content},
+                    ],
+                }
             else:
                 result.append({"role": "user", "content": content})
             continue
