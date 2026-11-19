@@ -386,19 +386,100 @@ def _load_model(load, model_path, *, expected, config):
             minicpmo_module.LanguageModel = original_language_model
 
 
+def _batch_rotating_make_mask(
+    self, N: int, window_size: Optional[int] = None, return_array: bool = False
+):
+    """mlx-vlm 0.7.3 ``BatchRotatingKVCache.make_mask`` with the wrap fix.
+
+    The pinned method computes a multi-token update's trim from the rotated
+    write cursor ``_idx``, but ``_update_concat`` first restores temporal
+    order, which moves the cursor to the buffer width, and trims from there.
+    After the ring has wrapped, a padded row whose left padding is still in
+    the window therefore got a mask that was out of step by the missed trim.
+    mlx2's own class carries the same correction.  Everything else is the
+    pinned method verbatim, including its notion of "in place" (mlx-vlm sends
+    an S=1 update through concat while ``_lengths`` is set).
+    """
+    import mlx.core as mx
+
+    left_padding = self.left_padding
+    window_size = window_size or self.max_size
+    offset = min(self.max_size - 1, self._offset)
+    rinds = mx.arange(offset + N)
+    linds = mx.arange(offset, offset + N) if offset else rinds
+    linds = linds[:, None]
+    rinds = rinds[None]
+    mask = linds >= rinds
+    mask &= linds < rinds + window_size
+    in_place = N == 1 and self._lengths is None
+    idx = self._idx
+    if not in_place and self.rotated and self.keys is not None:
+        idx = self.keys.shape[2]
+    if (trim_size := idx - self.max_size + int(not in_place)) > 0:
+        left_padding = left_padding - trim_size
+
+    rotated = in_place and (self.rotated or self._idx >= self.max_size)
+    if rotated:
+        left_padding = left_padding - 1
+
+    mask = mask & (rinds >= mx.expand_dims(left_padding, (1, 2, 3)))
+
+    if rotated:
+        idx = self._idx
+        if idx >= self.max_size:
+            idx = 0
+        mask = mx.roll(mask, shift=idx + 1, axis=-1)
+
+    return mask
+
+
+_batch_rotating_make_mask._mlx2_wrap_fix = True
+
+
+def patch_mlx_vlm_batch_rotating_mask(cls=None) -> bool:
+    """Install the wrap-fixed ``make_mask`` on mlx-vlm's batch sliding cache.
+
+    Returns True when this call installed it.  Idempotent.  Refuses (raises)
+    if the class no longer has the attributes the fixed method reads, so a
+    re-pinned mlx-vlm cannot silently get a mask built for another layout.
+    """
+    if cls is None:
+        from mlx_vlm.models.cache import BatchRotatingKVCache as cls
+    if getattr(cls.make_mask, "_mlx2_wrap_fix", False):
+        return False
+    probe = cls(4, [0])
+    missing = [
+        name
+        for name in ("left_padding", "max_size", "_offset", "_idx", "rotated", "_lengths", "keys")
+        if not hasattr(probe, name)
+    ]
+    if missing:
+        raise RuntimeError(
+            f"mlx-vlm BatchRotatingKVCache layout changed (missing {missing}); "
+            "re-check its make_mask before serving Gemma 3n"
+        )
+    cls.make_mask = _batch_rotating_make_mask
+    return True
+
+
 def register_mlx_vlm_window_compaction():
     """Let prefill trim mlx-vlm's batch sliding cache back to its window.
 
     Gemma 3n keeps mlx-vlm's cache types, whose ``merge`` builds mlx-vlm's
     ``BatchRotatingKVCache``.  At the pinned revision it has mlx2's layout and
-    trims identically in ``_update_in_place``/``_update_concat``/``make_mask``
+    trims identically in ``_update_in_place``/``_update_concat``
     (tests/test_multimodal_window_compaction.py checks exactness), so the
-    same compaction applies.  Idempotent.
+    same compaction applies.  Its ``make_mask`` did not match after a wrap
+    (a multi-token update on a rotated ring with left padding still in the
+    window), so this also installs the corrected method
+    (``patch_mlx_vlm_batch_rotating_mask``;
+    tests/test_mlx_vlm_rotating_mask.py).  Idempotent.
     """
     from mlx_vlm.models.cache import BatchRotatingKVCache
 
     from ..runtime.models.cache import register_window_compactable_batch_cache
 
+    patch_mlx_vlm_batch_rotating_mask(BatchRotatingKVCache)
     register_window_compactable_batch_cache(BatchRotatingKVCache)
 
 
