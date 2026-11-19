@@ -3,6 +3,8 @@
 from contextvars import ContextVar
 import mlx.core as mx
 
+from .differentiable import routed as _routed
+
 PRECISE_DTYPES = (mx.float32, mx.bfloat16)
 _SOURCE = "\n    uint i = thread_position_in_grid.x;\n    T x = inp[i];\n    T y = 1 / (1 + metal::precise::exp(metal::abs(x)));\n    out[i] = (x < 0) ? y : 1 - y;\n"
 _kernel = None
@@ -40,4 +42,6 @@ _IN_PRECISE_SPAN = ContextVar("mlx_lm_in_precise_span", default=False)
 
 def gate_sigmoid(x: mx.array) -> mx.array:
     """``mx.sigmoid``, except inside a traced span where it would lose bits."""
-    return sigmoid(x) if _IN_PRECISE_SPAN.get() else mx.sigmoid(x)
+    if _IN_PRECISE_SPAN.get() and not _routed("precise_sigmoid"):
+        return sigmoid(x)
+    return mx.sigmoid(x)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+from . import differentiable as _differentiable
 from . import qwen4_fused_gdn as kernels
 from . import qwen4_fused_gdn_prefill as prefill_kernels
 from . import qwen4_fused_gdn_verify as verify_kernels
@@ -147,6 +148,10 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         return None
 
     def _try_fused_decode(self, qkv, z, b, a, mask, cache, *, account=True):
+        if _differentiable.routed("fused_gdn"):
+            # A gradient trace: the fused kernels have no VJP; run the ordinary
+            # recurrence (not a serving fallback, so no counter).
+            return None
         fallback = self._fallback if account else (lambda reason: None)
         if (self.fused_gdn_prefill_enabled and qkv.shape[1] >= PREFILL_MIN_ROWS
                 and not bool(getattr(cache, 'speculating', False))):

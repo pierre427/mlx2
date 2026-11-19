@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 import mlx.core as mx
 from mlx.utils import tree_map
+from .differentiable import routed as _routed
 
 _HADAMARD_BASES = (1, 12, 20, 28)
 
@@ -375,6 +376,8 @@ def scaled_dot_product_attention(
             out = out * _expand_kv_scale(value_scale, out.shape[1])
         return out
     else:
+        if _routed("sdpa"):  # gradient trace: the Metal attention kernels have no VJP
+            return fast_sdpa(queries, keys, values, scale=scale, mask=mask, sinks=sinks)
         if 2 <= queries.shape[2] <= 16:
             from .fp_verify_tensor import attention as fp_verify, use_kernel as use_fp_verify
             if use_fp_verify(queries, keys, values, mask, sinks):

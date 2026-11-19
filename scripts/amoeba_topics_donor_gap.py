@@ -9,8 +9,16 @@ score    one model, forward only: per held probe text, the NLL of the text's own
                     tokens no longer sit at the attention-sink position); only the text's tokens are scored
          Backends: mlx27b (amoeba27b_lib.Host), torch (HF, small models), mlx2 (any mlx2 adapter whose model
          returns logits when called; check it on the donor before trusting it).
+split    --split held (the default; the original screen) scores the corpus's held partition. --split fit scores
+         a slice of the FIT partition instead (review v4 §5.1: screening on held and then testing on held
+         reuses the test set): the source groups g with stable_seed(g) % N == K (--fit-slice K/N), minus every
+         text and group named by --exclude-manifest. score.json and screen_manifest.json record the slice's
+         probe ids and groups; pass screen_manifest.json to amoeba_bridge_lab.py --split-manifest and fitting
+         skips them, so the screen reads texts fitting never reads. Texts shorter than --min-tokens are dropped
+         (default 64 on --split fit, the bridge harness's --topic-tokens; 32 on held, the original screen).
 compare  host score vs donor score: per topic, gap = host - donor nats/byte (> 0: the donor is better), a
-         95% CI from a bootstrap over source groups, in both conditions. A topic is a donor candidate when
+         95% CI from a bootstrap over source groups, in both conditions, and each model's own nats/byte with
+         its group-bootstrap CI (host_nats_per_byte, donor_nats_per_byte). Refuses scores of different splits. A topic is a donor candidate when
          the CI's lower bound is above --margin in BOTH conditions (round-3 lesson: raw zero-shot gaps
          often vanish under a format control).
 GPU only inside an owned window. No weights change.
@@ -178,7 +186,8 @@ def score(args, log):
         be = T.make_backend(args.backend, args.model, log=log)
     rec["checkpoint"], rec["fingerprint"] = be.checkpoint, getattr(be, "fingerprint", None)
     tok = getattr(be, "tok", None) or be.host.tok
-    items = [it for it in T.load_items(args.corpus) if it["split"] == "held"]
+    items = select_split(T.load_items(args.corpus), args)
+    rec["split"] = split_record(items, args)
     if args.per_topic:                       # a fixed, seeded subset: up to N held texts per primary topic
         by = {}
         for it in sorted(items, key=lambda it: T.stable_seed(it["id"])):
@@ -213,7 +222,7 @@ def score(args, log):
                 ids = be.encode(t)
             else:
                 ids = be.encode(it["text"])[:args.seq_len]
-            if len(ids) < 32:
+            if len(ids) < min_tokens(args):
                 continue
             seqs.append((pre if cond == "prefix" else []) + ids)
             keep.append((it, ids))
@@ -250,6 +259,72 @@ def score(args, log):
     rec["texts"] = len(rows) // 2
     rec["wall_s"] = round(time.time() - t0, 1)
     T.write_json(out / "score.json", rec)
+    if args.split == "fit":
+        T.write_json(out / "screen_manifest.json", screen_manifest(rec, rows))
+
+
+def min_tokens(args):
+    return args.min_tokens if args.min_tokens is not None else (64 if args.split == "fit" else 32)
+
+
+def parse_slice(spec):
+    k, n = (int(x) for x in spec.split("/"))
+    if not (n >= 1 and 0 <= k < n):
+        raise SystemExit(f"--fit-slice {spec}: need K/N with 0 <= K < N")
+    return k, n
+
+
+def manifest_exclusions(paths):
+    """probe ids and source groups named anywhere in the given manifests: a bridge split manifest's selection
+    (train / val / test) and reserved final test, or another screen's slice"""
+    ids, groups = set(), set()
+    for p in [x for x in (paths or "").split(",") if x.strip()]:
+        m = json.loads(Path(p).read_text())
+        for k in ("train", "val", "test"):
+            ids |= set((m.get("selection") or {}).get(k, []))
+        for key in ("reserved_final_test", "screen_slice"):
+            ids |= set((m.get(key) or {}).get("probe_ids", []))
+            groups |= {str(g) for g in (m.get(key) or {}).get("groups", [])}
+    return ids, groups
+
+
+def select_split(items, args):
+    """the texts a score run may read: the held partition, or one group-hashed slice of the fit partition minus
+    every text and group the exclusion manifests name (their selected texts' groups included)"""
+    if args.split == "held":
+        if args.fit_slice or args.exclude_manifest:
+            raise SystemExit("--fit-slice / --exclude-manifest are for --split fit")
+        return [it for it in items if it["split"] == "held"]
+    k, n = parse_slice(args.fit_slice or "0/4")
+    ids, groups = manifest_exclusions(args.exclude_manifest)
+    groups |= {str(it.get("group")) for it in items if it["id"] in ids}
+    return [it for it in items if it["split"] == "fit" and T.stable_seed(str(it.get("group"))) % n == k
+            and it["id"] not in ids and str(it.get("group")) not in groups]
+
+
+def split_record(items, args):
+    return {"split": args.split, "fit_slice": (args.fit_slice or "0/4") if args.split == "fit" else None,
+            "exclude_manifest": args.exclude_manifest or None, "min_tokens": min_tokens(args),
+            "candidate_texts": len(items), "candidate_groups": len({str(it.get("group")) for it in items})}
+
+
+def screen_manifest(rec, rows):
+    ids = sorted({r["id"] for r in rows})
+    # the exclusion manifests' reserved final tests ride along, so a harness given only this manifest still
+    # never selects them (the harness takes one --split-manifest)
+    res_ids, res_groups = set(), set()
+    for p in [x for x in ((rec.get("split") or {}).get("exclude_manifest") or "").split(",") if x.strip()]:
+        r_ = json.loads(Path(p).read_text()).get("reserved_final_test") or {}
+        res_ids |= set(r_.get("probe_ids", []))
+        res_groups |= {str(g) for g in r_.get("groups", [])}
+    return {"schema": "mlx2.amoeba-donor-gap-screen-manifest.v1", "checkpoint": rec.get("checkpoint"),
+            "reserved_final_test": {"probe_ids": sorted(res_ids), "groups": sorted(res_groups),
+                                    "rule": "carried from the --exclude-manifest manifests"},
+            "corpus_sha256": rec["corpus_sha256"], "mlx2_source_revision": rec["mlx2_source_revision"],
+            "split": rec["split"],
+            "screen_slice": {"probe_ids": ids, "groups": sorted({str(r["group"]) for r in rows}),
+                             "rule": "fit-partition texts this screen scored; amoeba_bridge_lab.py --split-manifest "
+                                     "skips them and their groups, so fitting never reads them"}}
 
 
 def compare(args, log):
@@ -260,7 +335,12 @@ def compare(args, log):
     dm = json.loads((Path(args.donor) / "score.json").read_text())
     if hm["corpus_sha256"] != dm["corpus_sha256"]:
         raise SystemExit("host and donor were scored on different corpora")
-    per, allg = {}, {}
+    sp_ = lambda m: {k: v for k, v in (m.get("split") or {"split": "held"}).items()  # noqa: E731
+                     if k in ("split", "fit_slice", "exclude_manifest", "min_tokens")}
+    if sp_(hm).get("split", "held") != sp_(dm).get("split", "held") or (
+            sp_(hm).get("split") == "fit" and sp_(hm) != sp_(dm)):
+        raise SystemExit(f"host and donor were scored on different splits: {sp_(hm)} vs {sp_(dm)}")
+    per, allg, lvl = {}, {}, {}
     for r in h:
         o = d.get((r["id"], r["cond"]))
         if not o:
@@ -270,10 +350,12 @@ def compare(args, log):
             allg.setdefault(r["cond"], {}).setdefault(r["group"], []).append(r["nats"] / r["bytes"] - o["nats"] / o["bytes"])
         for t in {a for x in r["topics"] for a in tax.ancestors(x)}:
             per.setdefault((t, r["cond"]), []).append((r["group"], r["nats"] / r["bytes"] - o["nats"] / o["bytes"]))
+            lvl.setdefault((t, r["cond"]), []).append((r["group"], r["nats"] / r["bytes"], o["nats"] / o["bytes"]))
     # the whole-corpus gap per condition: a model-level offset (e.g. one model is hurt more by the neutral prefix),
     # which is the same for every topic; centred results ask whether a topic differs BEYOND that offset
     overall = {c: round(float(np.mean([np.mean(x) for x in g.values()])), 4) for c, g in allg.items()}
     rng = np.random.default_rng(0)
+    rng_lv = np.random.default_rng(1)
     res, untested, boot_of = {}, {}, {}
     for (t, cond), v in per.items():
         groups = {}
@@ -285,7 +367,18 @@ def compare(args, log):
             continue
         boots = np.array([rng.choice(gm, len(gm)).mean() for _ in range(args.boot)])
         boot_of[(t, cond)] = boots
-        res.setdefault(t, {})[cond] = {"gap_nats_per_byte": round(float(gm.mean()), 4), "groups": int(len(gm)),
+        lv = {}
+        for g, a_, b_ in lvl[(t, cond)]:
+            lv.setdefault(g, []).append((a_, b_))
+        hm_ = np.array([np.mean([x[0] for x in v]) for v in lv.values()])
+        dm_ = np.array([np.mean([x[1] for x in v]) for v in lv.values()])
+        pick_ = rng_lv.integers(0, len(hm_), (args.boot, len(hm_)))  # own stream: the gap CIs are unchanged
+        res.setdefault(t, {})[cond] = {"host_nats_per_byte": round(float(hm_.mean()), 4),
+                                       "host_ci95": [round(float(np.percentile(hm_[pick_].mean(1), q)), 4) for q in (2.5, 97.5)],
+                                       "donor_nats_per_byte": round(float(dm_.mean()), 4),
+                                       "donor_ci95": [round(float(np.percentile(dm_[pick_].mean(1), q)), 4) for q in (2.5, 97.5)],
+                                       "texts": int(len(v))}
+        res[t][cond] |= {"gap_nats_per_byte": round(float(gm.mean()), 4), "groups": int(len(gm)),
                                        "ci95": [round(float(np.percentile(boots, 2.5)), 4), round(float(np.percentile(boots, 97.5)), 4)],
                                        "p_boot": float((np.sum(boots <= args.margin) + 1) / (args.boot + 1))}
     # screen hits: CI95 lower bound above the margin in both conditions; candidates: hits that also survive a
@@ -325,6 +418,7 @@ def compare(args, log):
     donor_better = sorted([t for t in dk if all(res[t][c]["centred_ci95"][0] > args.margin for c in ("bare", "prefix"))], key=by)
     host_better = sorted([t for t in hk if all(res[t][c]["centred_ci95"][1] < -args.margin for c in ("bare", "prefix"))], key=by)
     rep = {"schema": "mlx2.amoeba-donor-gap.v1", "host": hm["checkpoint"], "donor": dm["checkpoint"],
+           "split": sp_(hm),
            "host_fingerprint": hm.get("fingerprint"), "donor_fingerprint": dm.get("fingerprint"),
            "corpus_sha256": hm["corpus_sha256"], "margin_nats_per_byte": args.margin, "mlx2_source_revision": T.git_rev(),
            "rule": "candidate = CI95 lower bound of (host - donor) nats/byte > margin in both bare and prefix conditions",
@@ -355,6 +449,16 @@ def main():
     ap.add_argument("--donor")
     ap.add_argument("--out", required=True)
     ap.add_argument("--seq-len", type=int, default=64)
+    ap.add_argument("--split", default="held", choices=["held", "fit"],
+                    help="score: the held partition (default), or a group-hashed slice of the fit partition that "
+                         "fitting never reads (see screen_manifest.json)")
+    ap.add_argument("--fit-slice", default="", help="--split fit: K/N, the source groups with stable hash %% N == K "
+                                                     "(default 0/4)")
+    ap.add_argument("--exclude-manifest", default="",
+                    help="--split fit: comma list of manifests (bridge split manifests, other screens' "
+                         "screen_manifest.json) whose texts and groups are left out")
+    ap.add_argument("--min-tokens", type=int, default=None,
+                    help="drop texts shorter than this (default 64 on --split fit, 32 on held)")
     ap.add_argument("--seq-chars", type=int, default=0, help="score each text's first N characters (cut at a space), "
                     "the same span for every tokenizer; 0 = the first --seq-len tokens (biased across tokenizers)")
     ap.add_argument("--offset-exclude-topic", default="", help="compare: the whole-corpus offset leaves out this "

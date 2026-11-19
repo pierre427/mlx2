@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 from .precise_ops import gate_sigmoid
+from . import differentiable as _differentiable
 from . import gdn_state as _gdn_state
 
 from .import_env import snapshot as _import_env_snapshot
@@ -637,7 +638,10 @@ def gated_delta_update(
         state = mx.zeros((B, Hv, Dv, Dk), dtype=state_dtype or mx.float32)
     else:
         _gdn_state.check_state(state, state_dtype)
-    if not use_kernel or mx.default_device() != mx.gpu or (not mx.metal.is_available()):
+    if (not use_kernel or _differentiable.routed("gated_delta") or mx.default_device() != mx.gpu
+            or (not mx.metal.is_available())):
+        # The ops reference: CPU, training mode, and gradient traces (a Metal
+        # kernel launch has no VJP; runtime/models/differentiable.py).
         return gated_delta_ops(q, k, v, g, beta, state, mask)
     if prefill_chunk_size:
         if type(prefill_chunk_size) is not int or prefill_chunk_size not in (8, 16, 32):
