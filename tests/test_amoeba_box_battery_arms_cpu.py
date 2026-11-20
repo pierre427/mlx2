@@ -209,3 +209,30 @@ def test_unclaimed_arm_refuses_foreign_mask(toy, monkeypatch):
     with pytest.raises(SystemExit, match="outside the core"):
         _battery(monkeypatch, toy, ROOT / "scripts/amoeba_box_battery.py", "x", "base", "--arms", "unclaimed",
                  "--unclaimed", "bad.npz")
+
+
+def test_meta_written_at_start_survives_a_crash(toy, monkeypatch):
+    """2026-11-19: a battery killed mid-run left battery/ empty; battery.meta.json (held specs, notes, skips) is now
+    written before the model loads and again once the held sets load, so scripts/amoeba_fn_interactions.py can read
+    it after a crash. The end-of-run write still replaces it."""
+    def boom(*a, **k):
+        raise RuntimeError("killed mid-run")
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(sys.modules["research.amoeba.carve.evals"], "english_cost", boom)
+    mod = _load(ROOT / "scripts/amoeba_box_battery.py")
+    held = [x for b in list(P.BOXES) + ["eng"] for x in ("--held", f"{b}=held/{b}.jsonl@8")]
+    monkeypatch.chdir(toy)
+    monkeypatch.setattr(sys, "argv", ["battery", "--model", "m", "--partition", "base", "--out", "crash", *held,
+                                      "--held", "gsm8k=gsm8k:held/gsm8k.jsonl@8", "--held-note", "a=toy note",
+                                      "--docs", "4"])
+    with pytest.raises(RuntimeError):
+        mod.main()
+    meta = json.loads((toy / "crash" / "battery.meta.json").read_text())
+    assert meta["status"] == "scoring" and meta["fingerprint"] == "f" * 64 and meta["docs"] == 4
+    assert set(meta["held"]) == set(P.BOXES) | {"eng", "gsm8k"}
+    assert meta["held"]["a"] == {"spec": "a=held/a.jsonl@8", "docs_loaded": 4}
+    assert meta["held_notes"]["a"] == "toy note" and meta["held_notes"]["gsm8k"].startswith("GSM8K test rows")
+    assert meta["skipped"] == {} and meta["partition"] == "base"
+    _battery(monkeypatch, toy, ROOT / "scripts/amoeba_box_battery.py", "crash", "base")    # resumed to the end
+    meta = json.loads((toy / "crash" / "battery.meta.json").read_text())
+    assert meta["status"] == "finished" and meta["checkpoint"] == "toy@ffffffff"

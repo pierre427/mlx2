@@ -26,6 +26,9 @@ if os.environ.get("MLX2_PREFLIGHT_CPU_ONLY") == "1":
     mx.set_default_device = _cpu_only_default_device
 
 os.environ.setdefault("MLX2_STRUCTURED_WORKERS", "0")
+# research/amoeba/carve/ops.footprint_watchdog would otherwise start a real 1 s memory watchdog inside pytest (tests
+# that run a carve driver's main): a machine-memory trigger would end the whole session with exit 3.
+os.environ.setdefault("MLX2_AMOEBA_WATCHDOG", "off")
 
 import pytest
 

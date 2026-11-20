@@ -836,7 +836,8 @@ def main(argv=None):
     from research.amoeba.carve import evals as E
     from research.amoeba.carve import ops as O
     from research.amoeba.carve.host import Host
-    O.footprint_watchdog(a.watchdog_gb, log, swap_growth_gb=a.swap_growth_gb)
+    O.footprint_watchdog(a.watchdog_gb, log, swap_growth_gb=a.swap_growth_gb,
+                         watcher=True)   # SIGKILL watcher: the same FN model as the battery (2026-11-19 panic)
     O.setup_mlx(a.memory_gb, 2)
     host = Host(a.model, log=log, moe_units="neuron")
     if host.fingerprint != prep["fingerprint"]:

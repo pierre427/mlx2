@@ -89,6 +89,45 @@ FAR_SUBJ = ("life.cooking", "sci.astronomy")            # far subjects (the firs
 ARMS = ("boxes", "unclaimed", "groups", "english")
 
 
+class Tiles:
+    """A partition's tiles.npz held sparsely: per tile its flat unit indices (int32), read one tile at a time and
+    never kept as dense masks (2026-11-19: a floor-50 joint partition has 13,557 tiles of one (48, 327680) bool mask
+    each, 213 GB dense). tz[key] builds a fresh dense mask (as np.load(...)[key] did); mask(*keys) builds the union in
+    one buffer. The file format is unchanged (any tiles.npz reads). Index memory is the partition's unit count x 4
+    bytes (~63 MB for FN's 15.7M units), whatever the tile count."""
+
+    def __init__(self, path):
+        with np.load(path) as z:
+            self.layers = [int(x) for x in z["layers"]]
+            self.keys = [k for k in z.files if k != "layers"]
+            self.files = ["layers"] + self.keys
+            self.shape, self.idx = None, {}
+            for k in self.keys:
+                m = z[k]
+                if self.shape is None:
+                    self.shape = m.shape
+                elif m.shape != self.shape:
+                    raise SystemExit(f"{path}: tile {k} has shape {m.shape}, not {self.shape}")
+                self.idx[k] = np.flatnonzero(m).astype(np.int32 if m.size < 2**31 else np.int64)
+                del m
+        self.size = int(np.prod(self.shape)) if self.shape else 0
+
+    def mask(self, *keys):
+        """The union of the named tiles as a fresh dense bool mask."""
+        m = np.zeros(self.size, bool)
+        for k in keys:
+            m[self.idx[k]] = True
+        return m.reshape(self.shape)
+
+    def __getitem__(self, key):
+        if key == "layers":
+            return np.array(self.layers)
+        return self.mask(key)
+
+    def units(self, key):
+        return int(self.idx[key].size)
+
+
 def random_like(mask, g):
     """The same per-layer counts drawn at random among the units outside `mask` (rng g)."""
     rnd = np.zeros_like(mask)
@@ -215,6 +254,13 @@ def main():
     ap.add_argument("--memory-gb", type=float, default=88)
     ap.add_argument("--watchdog-gb", type=float, default=92)
     ap.add_argument("--swap-growth-gb", type=float, default=2.0)
+    ap.add_argument("--watchdog-hard-gb", type=float, default=None,
+                    help="footprint at which the watcher process SIGKILLs the run (default --watchdog-gb + 6)")
+    ap.add_argument("--watchdog-every-s", type=float, default=1.0)
+    ap.add_argument("--min-avail-gb", type=float, default=15.0,
+                    help="stop when free + inactive + speculative + purgeable falls below this")
+    ap.add_argument("--compressor-growth-gb", type=float, default=12.0,
+                    help="stop when the memory compressor grows this much over its level at start")
     ap.add_argument("--waiver-note", default="")
     ap.add_argument("--arms", default="boxes", help="comma list of " + ", ".join(ARMS))
     ap.add_argument("--unclaimed", default="", help="unclaimed units npz (default PARTITION/unassigned.npz)")
@@ -244,10 +290,10 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     pd = Path(a.partition)
     prep = json.loads((pd / "partition.json").read_text())
-    tz = np.load(pd / "tiles.npz")
-    layers = [int(x) for x in tz["layers"]]
-    keys = [k for k in tz.files if k != "layers"]              # tiles are read lazily (review: ~435 pair masks of
-    core_t = tz["core"]                                         # 15.7 MB each would sit beside the model)
+    tz = Tiles(pd / "tiles.npz")                               # sparse: masks are built per composition
+    layers = tz.layers
+    keys = list(tz.keys)
+    core_t = tz["core"]
     boxes = [b for b in (a.boxes.split(",") if a.boxes else sorted(k[4:] for k in keys if k.startswith("box:"))) if b]
     EBOX, ECLOSED = english_box(prep)
     if EBOX and f"box:{EBOX}" not in keys:
@@ -270,19 +316,16 @@ def main():
     if a.joint_partition:                              # checked before the model loads
         jd = Path(a.joint_partition)
         jprep = json.loads((jd / "partition.json").read_text())
-        jz = np.load(jd / "tiles.npz")
-        jkeys = [k for k in jz.files if k != "layers"]
-        if jprep.get("fingerprint") != prep.get("fingerprint") or [int(x) for x in jz["layers"]] != layers:
+        jz = Tiles(jd / "tiles.npz")
+        jkeys = list(jz.keys)
+        if jprep.get("fingerprint") != prep.get("fingerprint") or jz.layers != layers:
             raise SystemExit("--joint-partition: another model or layer list")
         if not (jprep.get("joint") or {}).get("tiles"):
             raise SystemExit("--joint-partition has no joint tiles")
         if sorted(k for k in jkeys if not k.startswith("joint:")) != sorted(keys):
             raise SystemExit("--joint-partition: its non-joint tiles differ from --partition's keys")
-        folded = jz["core"].copy()
-        for k in jkeys:
-            if k.startswith("joint:"):
-                folded |= jz[k]
-        if not np.array_equal(folded, tz["core"]):
+        folded = jz.mask("core", *[k for k in jkeys if k.startswith("joint:")])
+        if not np.array_equal(folded, core_t):
             raise SystemExit("--joint-partition: core + joint tiles != --partition's core")
         if ({k: v.get("units") for k, v in (jprep.get("boxes") or {}).items()} !=
                 {k: v.get("units") for k, v in (prep.get("boxes") or {}).items()} or
@@ -303,7 +346,41 @@ def main():
         U = uz["unassigned"].astype(bool)
         if (U & ~folded_core(lambda k: tz[k], keys)).any():
             raise SystemExit("unclaimed units outside the core: not this partition's")
-    O.footprint_watchdog(a.watchdog_gb, log, swap_growth_gb=a.swap_growth_gb)
+    hspecs = {x.partition("=")[0]: x for x in a.held}
+
+    def write_meta(m):
+        tmp = out / "battery.meta.json.tmp"
+        tmp.write_text(json.dumps(m, indent=1))
+        tmp.replace(out / "battery.meta.json")
+
+    def start_meta(status, docs_loaded=None):
+        """battery.meta.json while the run is going (2026-11-19: a battery killed mid-run left battery/ empty, and the
+        interaction arm, scripts/amoeba_fn_interactions.py, reads its held sets, notes and skips from this file).
+        The end-of-run write replaces it with the full meta of what was scored."""
+        hn = dict(notes)
+        for k, x in hspecs.items():                     # the gsm8k default note, as the held loading adds it
+            if x.partition("=")[2].startswith("gsm8k:"):
+                hn.setdefault(k, "GSM8K test rows (question + answer) as held text; dCE, not accuracy")
+        m = {"status": status, "fingerprint": prep.get("fingerprint"), "partition": str(pd), "rule": prep.get("rule"),
+             "docs": a.docs, "held": {k: {"spec": x, "docs_loaded": (docs_loaded or {}).get(k)}
+                                      for k, x in hspecs.items()},
+             "held_notes": hn, "skipped": skipped, "arms": arms, "boxes": boxes,
+             "watchdog": {"limit_gb": a.watchdog_gb, "hard_gb": a.watchdog_hard_gb, "every_s": a.watchdog_every_s,
+                          "min_avail_gb": a.min_avail_gb, "compressor_growth_gb": a.compressor_growth_gb,
+                          "swap_growth_gb": a.swap_growth_gb, "waiver_note": a.waiver_note or None},
+             **({"joint_partition": a.joint_partition, "joint_top": a.joint_top} if a.joint_partition else {})}
+        write_meta(m)
+    mp = out / "battery.meta.json"
+    try:                                               # a resumed run: keep the last finished meta beside it
+        if json.loads(mp.read_text()).get("status", "finished") == "finished":
+            mp.replace(out / "battery.meta.prev.json")
+    except (OSError, ValueError):
+        pass
+    start_meta("started")
+    O.footprint_watchdog(a.watchdog_gb, log, swap_growth_gb=a.swap_growth_gb, every_s=a.watchdog_every_s,
+                         min_avail_gb=a.min_avail_gb, hard_gb=a.watchdog_hard_gb,
+                         compressor_growth_gb=a.compressor_growth_gb, receipt=out / "watchdog-stop.json",
+                         watcher=True)
     O.setup_mlx(a.memory_gb, 2)
     host = Host(a.model, log=log, moe_units="neuron")
     if host.fingerprint != prep["fingerprint"]:
@@ -338,6 +415,7 @@ def main():
             raise SystemExit(f"held {name}: no document of {T} tokens")
         held[name], htok[name] = {"held": seqs}, T
         log(f"held {name}: {len(seqs)} x {T} tokens")
+    start_meta("scoring", {k: len(v["held"]) for k, v in held.items()})
     missing = [b for b in boxes if b not in held] + [x for x in a.global_held.split(",") if x and x not in held]
     EN = a.english
     if EN in boxes:
@@ -629,7 +707,7 @@ def main():
         jget = lambda k: jz[k]                                             # noqa: E731
         jt = jprep["joint"]["tiles"]
         top = sorted(jt, key=lambda k: -jt[k]["units"])[:a.joint_top]
-        jkeys_all = [k for k in jz.files if k != "layers"]
+        jkeys_all = list(jz.keys)
         jcore = jz["core"]
         jserved = {k[7:]: r for k, r in got.items() if k.startswith("served:")}
 
@@ -648,8 +726,8 @@ def main():
                 if en_ and m not in closed_:           # English text: English's joint tiles are open too
                     lin.add(en_)
                 opened = [k for k in jkeys_all if k.startswith("joint:") and lin & set(k[6:].split("+"))]
-                for k in opened:
-                    keep = keep | jz[k]
+                if opened:                             # one union buffer, not one dense mask per opened tile
+                    keep = keep | jz.mask(*opened)
                 d = score(keep, [m, EN])
                 jserved[m] = put(jj, {"arm": "joint", "key": f"served:{m}", "sets": [m, EN], "dce": d, "net": net(d),
                                       "kept_units": int(keep.sum()), "joint_tiles_open": opened,
@@ -708,8 +786,11 @@ def main():
             "held": {k: {"spec": s, "docs_loaded": len(held[k]["held"])} for k, s in
                      ((x.partition("=")[0], x) for x in a.held)}, "path_offset": off,
             "thresholds": {"min_own": a.min_own, "own_x": a.own_x, "max_unrelated": a.max_unrelated, "target": a.target},
-            "watchdog": {"swap_growth_gb": a.swap_growth_gb, "waiver_note": a.waiver_note or None},
-            "mlx_peak_gb": O.peak_gb()}
+            "watchdog": {"swap_growth_gb": a.swap_growth_gb, "waiver_note": a.waiver_note or None,
+                         "limit_gb": a.watchdog_gb, "every_s": a.watchdog_every_s, "min_avail_gb": a.min_avail_gb,
+                         "compressor_growth_gb": a.compressor_growth_gb,
+                         **{k: v for k, v in getattr(O, "WATCH", {}).items() if k.startswith(("peak_", "observed_"))}},
+            "mlx_peak_gb": O.peak_gb(), "status": "finished"}
     if skipped:
         meta["skipped"] = skipped
     if EBOX:
@@ -722,7 +803,7 @@ def main():
         meta.update(arms=arms, held_notes=notes, arm_thresholds={"target": a.target, "group_min_hurt":
                                                                   a.group_min_hurt},
                     unclaimed=str(upath) if "unclaimed" in arms else None)
-    (out / "battery.meta.json").write_text(json.dumps(meta, indent=1))
+    write_meta(meta)
     lines = [f"Battery on {host.checkpoint}, partition {pd.name} ({prep.get('rule')}); held dCE, {a.docs} docs per set.\n",
              "| box | units | own without | unrelated without | random own / eng | core+box own / eng | exclusive | +0.05 served |",
              "|---|---|---|---|---|---|---|---|"]

@@ -2,7 +2,9 @@
 
 Ported unchanged from scripts/amoeba27b_lib.py at claude/amoeba-27b-80bc6a@37d75f144 (lines 45-203),
 so the memory rules (Pierre 2026-11-14: own footprint cap 80 GB; coordinator waiver terms) behave
-exactly as in the 27B windows. Only the import path of amoeba_memcheck changed.
+exactly as in the 27B windows. Only the import path of amoeba_memcheck changed. 2026-11-19 (FN battery panic):
+footprint_gb and footprint_watchdog read the kernel directly and the watchdog gained a watcher process
+(research/amoeba/carve/memwatch.py).
 """
 from __future__ import annotations
 
@@ -54,6 +56,15 @@ def make_log(out: Path):
 
 
 def footprint_gb(pid: int) -> float | None:
+    """The pid's physical footprint in GiB (compressed pages included; what top's MEM shows), read from the kernel
+    (proc_pid_rusage) without forking top; top is the fallback for a pid this user cannot read."""
+    try:
+        from . import memwatch
+        fp = memwatch.footprint_bytes(pid)
+        if fp is not None:
+            return fp[0] / memwatch.GIB
+    except Exception:
+        pass
     out = subprocess.run(["/usr/bin/top", "-l", "1", "-pid", str(pid), "-stats", "mem"],
                          capture_output=True, text=True).stdout.strip().splitlines()
     if not out:
@@ -90,44 +101,41 @@ def reset_swap_baseline():
     WATCH["swap_at_start_gb"] = round(_SWAP0[0], 2)
 
 
-def footprint_watchdog(limit_gb: float, log, every_s: float = 15.0, min_avail_gb: float = 15.0, swap_growth_gb: float = 2.0):
-    """Exit 3 if this process's physical footprint passes limit_gb, machine available memory falls
-    under min_avail_gb, swap grows more than swap_growth_gb above its level now, or memory pressure
-    goes critical (coordinator's waiver terms, 2026-11-14). Peak footprint is kept in WATCH."""
-    import amoeba_memcheck
+_WATCHER = [None]
+
+
+def footprint_watchdog(limit_gb: float, log, every_s: float = 1.0, min_avail_gb: float = 15.0,
+                       swap_growth_gb: float = 2.0, hard_gb: float | None = None, compressor_growth_gb: float = 12.0,
+                       receipt=None, watcher: bool = False):
+    """Stop this process (exit 3, with a JSON receipt at `receipt`) when its physical footprint passes limit_gb, free
+    + inactive + speculative + purgeable falls under min_avail_gb, the machine is starved (free pages under
+    kern.vm_page_free_min for 3 s), the memory compressor grew more than compressor_growth_gb over its level now
+    (or holds >= 20 % of physical memory after growing 4 GiB; hard at 30 %), swap grows more than swap_growth_gb, or pressure goes critical
+    (research/amoeba/carve/memwatch.py; 2026-11-19 panic). Polls every every_s (1 s) from the kernel, without
+    subprocesses. watcher=True also starts the watcher process, which SIGKILLs this process at the hard ceilings
+    (footprint hard_gb, default limit_gb + 6; starvation for 10 s) or when a soft
+    trigger is still true 5 s later, whatever this process's GIL or GPU queue is doing. Peak footprint and the
+    observed minima are kept in WATCH. MLX2_AMOEBA_WATCHDOG=off disables it (the CPU test suite)."""
+    from . import memwatch
     global _WATCHDOG_STARTED
+    if os.environ.get("MLX2_AMOEBA_WATCHDOG", "").lower() == "off":
+        return
     if _WATCHDOG_STARTED:                  # a batch of carves in one process: one watchdog for the process; each
         reset_swap_baseline()              # carve re-bases the swap-growth check (slow drift over a long batch)
+        if _WATCHER[0] is not None:
+            _WATCHER[0].rebase()
         return
     _WATCHDOG_STARTED = True
     reset_swap_baseline()
-    swap0 = _SWAP0[0]
-    WATCH.update(swap_at_start_gb=round(swap0, 2), peak_footprint_gb=0.0, limit_gb=limit_gb,
-                 min_avail_gb=min_avail_gb, swap_growth_gb=swap_growth_gb)
-
-    def run():
-        pid = os.getpid()
-        while True:
-            sw = swap_used_gb()
-            base = _SWAP0[0]                       # re-based per carve in a batch (reset_swap_baseline)
-            if sw > base + swap_growth_gb:
-                log(f"watchdog: swap {sw:.1f} GB grew more than {swap_growth_gb} GB over {base:.1f} GB, aborting")
-                os._exit(3)
-            if pressure_level() >= 4:
-                log("watchdog: memory pressure critical, aborting")
-                os._exit(3)
-            fp = footprint_gb(pid)
-            if fp is not None:
-                WATCH["peak_footprint_gb"] = max(WATCH["peak_footprint_gb"], round(fp, 1))
-            if fp is not None and fp > limit_gb:
-                log(f"footprint watchdog: {fp:.1f} GB > {limit_gb} GB, aborting")
-                os._exit(3)
-            av = amoeba_memcheck.snapshot_avail()
-            if av < min_avail_gb:
-                log(f"footprint watchdog: machine available {av:.1f} GB < {min_avail_gb} GB, aborting")
-                os._exit(3)
-            time.sleep(every_s)
-    threading.Thread(target=run, daemon=True).start()
+    r = memwatch.readings(os.getpid())
+    lim = memwatch.make_limits(limit_gb, min_avail_gb=min_avail_gb, swap_growth_gb=swap_growth_gb, hard_gb=hard_gb,
+                               compressor_growth_gb=compressor_growth_gb, swap0=r["swap_used_gib"],
+                               compressor0=r["compressor_gib"])
+    WATCH.update(swap_at_start_gb=round(r["swap_used_gib"], 2), peak_footprint_gb=0.0, limit_gb=limit_gb,
+                 min_avail_gb=min_avail_gb, swap_growth_gb=swap_growth_gb, hard_gb=lim["hard_gib"],
+                 compressor_at_start_gb=round(r["compressor_gib"], 2), compressor_growth_gb=compressor_growth_gb,
+                 every_s=every_s, watcher=bool(watcher))
+    _WATCHER[0] = memwatch.Watch(lim, log, every_s=every_s, receipt=receipt, watcher=watcher, stats=WATCH)
 
 
 ALLOWED_FOREIGN = {760}   # Pierre's MLX2 desktop app; named in the coordinator's waiver (2026-11-14)
