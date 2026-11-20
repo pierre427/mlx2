@@ -174,23 +174,29 @@ def _case(rng, E=2, F=256, d=128, T=6, bits=4):
     return g, u, dn, own, lb
 
 
+LAW_TOL = {"lane": (2e-4, 2e-5), "prefill": (2e-2, 1e-2)}     # prefill: weights rounded to bf16
+
+
+@pytest.mark.parametrize("law", ["lane", "prefill"])
 @pytest.mark.parametrize("bits", [4, 8])
-def test_packed_all_open_equals_unpacked_bitwise(bits):
+def test_packed_all_open_equals_unpacked_bitwise(bits, law):
     rng = np.random.default_rng(1)
     g, u, dn, own, lb = _case(rng, E=1, bits=bits)
     x = rng.standard_normal((5, 128)).astype(np.float32)
-    wt = dense_wt(5, 16)
+    wt = dense_wt(5, 16 if law == "lane" else 64)
     topen = np.ones((5, lb.tiles), np.uint8)
     ident = L.identity_layer(1, lb.width, group_size=64, chunk=32, tiles=lb.tiles)
-    a0, y0 = R.emulate(x, g, u, dn, ident, wt, topen)
-    a1, y1 = R.emulate(x, packed(g, lb), packed(u, lb), dn, lb, wt, topen)
+    a0, y0 = R.emulate(x, g, u, dn, ident, wt, topen, law=law)
+    a1, y1 = R.emulate(x, packed(g, lb), packed(u, lb), dn, lb, wt, topen, law=law)
     assert np.array_equal(a0, a1) and np.array_equal(y0, y1)
     ref = R.masked_reference(x, g, u, dn, own, topen)
-    assert np.allclose(y1, ref, rtol=2e-4, atol=2e-5 * np.abs(ref).max())
+    rt, at = LAW_TOL[law]
+    assert np.allclose(y1, ref, rtol=rt, atol=at * np.abs(ref).max())
 
 
+@pytest.mark.parametrize("law", ["lane", "prefill"])
 @pytest.mark.parametrize("per_row", [True, False])
-def test_skipped_equals_masked_and_never_reads_closed(per_row):
+def test_skipped_equals_masked_and_never_reads_closed(per_row, law):
     rng = np.random.default_rng(2)
     g, u, dn, own, lb = _case(rng)
     gp, up = packed(g, lb), packed(u, lb)
@@ -205,7 +211,7 @@ def test_skipped_equals_masked_and_never_reads_closed(per_row):
     # sorted routes: rows of one expert contiguous, work row r -> token rmap[r], output omap[r]
     order = np.argsort(experts, kind="stable")
     wt = np.array([[0, 3, 0, 0], [3, 3, 1, 0]])
-    kw = dict(rmap=order, omap=order, rows_out=rows, per_row=per_row)
+    kw = dict(rmap=order, omap=order, rows_out=rows, per_row=per_row, law=law)
     reads = R.Reads()
     a1, y1 = R.emulate(x, gp, up, dn, lb, wt, topen, skip=True, reads=reads, **kw)
     a0, y0 = R.emulate(x, gp, up, dn, lb, wt, topen, skip=False, **kw)
@@ -230,7 +236,8 @@ def test_skipped_equals_masked_and_never_reads_closed(per_row):
     # each work row equals its own masked reference (zeroed neurons), whatever its tile-mates are
     toks = order if per_row else np.zeros(rows, int)
     ref = R.masked_reference(x[order], g, u, dn, own, topen, experts=experts[order], tokens=toks)
-    assert np.allclose(y1[order], ref, rtol=2e-4, atol=2e-5 * np.abs(ref).max())
+    rt, at = LAW_TOL[law]
+    assert np.allclose(y1[order], ref, rtol=rt, atol=at * np.abs(ref).max())
 
 
 def test_expert_with_no_open_block_is_not_read():
@@ -427,6 +434,20 @@ def _compile_cases():
                 out.append(("gu", b, v, bits, dict(base, K=2560, F=640, SK=4, TMR=2, MR=8)))
                 out.append(("dn", b, v, bits, dict(base, N=2560, F=640, SK=2, TMR=2, MR=8, OUTMAP=1)))
     out.append(("gate", "simd", "dense", 4, dict(D=2560, NB=79, NTILES=416, NW=3, MODE=0, UNION=1)))
+    for b in K.BACKENDS:
+        for v in K.VARIANTS:
+            for bits in K.BITS:
+                base = dict(GS=64, NTILES=416, MS=1, SKIP=1, COUNT=1)
+                out.append(("gup", b, v, bits, dict(base, K=2560, F=640)))
+                out.append(("dnp", b, v, bits, dict(base, N=2560, F=640, OUTMAP=1)))
+    for b in K.BACKENDS:
+        for gs in (32, 128):
+            c = dict(GS=gs, NTILES=2, MS=0, SKIP=0, COUNT=0)
+            out.append(("dnp", b, "dense", 8, dict(c, N=5120, F=17408, OUTMAP=0)))
+            out.append(("gup", b, "rowmap", 4, dict(c, K=5120, F=17408)))
+    for mode in (0, 1):
+        out.append(("gbox", "simd", "dense", 4, dict(D=2560, NB=79, NW=3, MODE=mode, TT=K.GATE_TT)))
+    out.append(("gtile", "simd", "dense", 4, dict(NTILES=416, NW=3)))
     return out
 
 
@@ -551,9 +572,9 @@ def test_tile_gates_memset_only_for_the_union(fake):
     rng = np.random.default_rng(13)
     tables = O.GateTables.from_graph(g, rng.standard_normal((4, 64)), rng.standard_normal(4))
     h = mx.zeros((3, 64), mx.bfloat16)
-    topen, un = O.tile_gates(h, tables)
+    topen, un = O.tile_gates(h, tables, impl="fused")
     assert un is None and topen.shape == (3, tables.tiles)
-    _, un = O.tile_gates(h, tables, union=True)
+    _, un = O.tile_gates(h, tables, union=True, impl="fused")
     calls = fake[("gate", "simd", "dense")].calls
     assert calls[0]["init_value"] is None and calls[1]["init_value"] == 0 and un is not None
 
@@ -633,3 +654,178 @@ def test_output_width_must_be_a_multiple_of_four():
     bad = O.QW(q.weight[:, :62], q.scales[:, :62], q.biases[:, :62], 4, 64)
     with pytest.raises(O.BlockSparseUnsupported, match="multiple of 4"):
         bad.check()
+
+
+
+# ---------------------------------------------------------------------------
+# Prefill law (2026-11-19): law selection, plumbing, budget
+# ---------------------------------------------------------------------------
+
+
+def test_select_law_is_shape_only():
+    assert O.select_law("mpp", 1, 2560) == "lane"
+    assert O.select_law("mpp", 64, 2560) == "lane"           # verify widths keep the lane law
+    assert O.select_law("mpp", 65, 2560) == "prefill"
+    assert O.select_law("simd", 2048, 5120) == "prefill"
+    assert O.select_law("mpp", 2048, 2560, sorted_rows=False) == "lane"   # pair tiles: one row each
+    assert O.select_law("mpp", 2048, 96) == "lane"           # K not a multiple of the mpp K step
+    assert O.select_law("simd", 2048, 96) == "prefill"
+    assert O.select_law("mpp", 3, 2560, law="prefill") == "prefill"
+    with pytest.raises(O.BlockSparseUnsupported):
+        O.select_law("mpp", 2048, 96, law="prefill")       # pinned, cannot run: refused, not replaced
+    with pytest.raises(O.BlockSparseUnsupported):
+        O.select_law("mpp", 2048, 2560, law="nope")
+    # MoE: rows per expert (pairs / experts) must reach PREFILL_MIN_MEAN_ROWS
+    assert O.select_law("mpp", 2048, 2560, mean_rows=2048 * 10 / 512) == "prefill"
+    assert O.select_law("mpp", 128, 2560, mean_rows=128 * 10 / 512) == "lane"
+    assert O.select_law("mpp", 128, 2560, mean_rows=2.5, law="prefill") == "prefill"   # pinned
+
+
+@pytest.mark.parametrize("backend", ["mpp", "simd"])
+def test_dense_prefill_plumbing(fake, monkeypatch, backend):
+    monkeypatch.setattr(O, "backend", lambda name=None: backend)
+    rng = np.random.default_rng(31)
+    g, u, dn, own, lb = _case(rng, E=1, F=256, d=256)
+    gq, uq, dq = _mx_q(g), _mx_q(u), _mx_q(dn)
+    blocks = O.DeviceBlocks.from_layout(lb)
+    rows = 130
+    x = mx.zeros((rows, 256), mx.bfloat16)
+    y, _ = O.block_mlp(x, gq, uq, dq, blocks, mx.ones((rows, lb.tiles), mx.uint8))
+    assert y.shape == (rows, 256)
+    gu, dnk = fake[("gup", backend, "dense")].calls[0], fake[("dnp", backend, "dense")].calls[0]
+    for got, want in zip(gu["inputs"][1:10], [gq.weight, gq.scales, gq.biases, uq.weight, uq.scales, uq.biases,
+                                             blocks.perm, blocks.chunk_ptr, blocks.chunks]):
+        assert got is want                                  # weights read in place
+    assert dnk["inputs"][0] is fake[("gup", backend, "dense")].outputs[0]
+    assert gu["threadgroup"] == (128, 1, 1) and dnk["threadgroup"] == (128, 1, 1)
+    assert gu["grid"] == (lb.max_chunks * 128, 3, 1)       # 130 rows -> three 64-row work tiles
+    assert dnk["grid"] == ((256 // 64) * 128, 3, 1)
+    assert gu["init_value"] is None and dnk["init_value"] is None
+    wt = np.array(gu["inputs"][10]).reshape(-1, 4)
+    assert wt[:, 1].tolist() == [64, 64, 2]
+    tm = dict(gu["template"])
+    assert "SK" not in tm and "TMR" not in tm and "MR" not in tm
+    # 64 rows stays on the lane law
+    O.block_mlp(x[:64], gq, uq, dq, blocks, mx.ones((64, lb.tiles), mx.uint8))
+    assert fake[("gu", backend, "dense")].calls
+
+
+@pytest.mark.parametrize("backend", ["mpp", "simd"])
+def test_moe_prefill_plumbing(fake, monkeypatch, backend):
+    monkeypatch.setattr(O, "backend", lambda name=None: backend)
+    rng = np.random.default_rng(32)
+    g, u, dn, own, lb = _case(rng, E=4, F=128, d=128)
+    gq, uq, dq = _mx_q(g), _mx_q(u), _mx_q(dn)
+    blocks = O.DeviceBlocks.from_layout(lb)
+    T, k = 70, 2                                            # 140 pairs / 4 experts: 35 rows per expert
+    x = mx.zeros((T, 128), mx.bfloat16)
+    inds = mx.array(np.stack([rng.choice(4, k, replace=False) for _ in range(T)]).astype(np.int32))
+    y, _ = O.block_switch_glu(x, inds, gq, uq, dq, blocks, mx.ones((T, lb.tiles), mx.uint8))
+    assert y.shape == (T, k, 128)
+    gu, dnk = fake[("gup", backend, "rowmap")].calls[0], fake[("dnp", backend, "rowmap")].calls[0]
+    assert gu["inputs"][0].shape == (T, 128)                # x itself: rows staged through RMAP
+    assert dict(dnk["template"])["OUTMAP"] == 1
+    bound = -(-(T * k) // 64) + 4
+    assert gu["grid"][1] == bound and dnk["grid"][1] == bound
+    with pytest.raises(O.BlockSparseUnsupported):
+        O.block_switch_glu(x, inds, gq, uq, dq, blocks, mx.ones((T, lb.tiles), mx.uint8), sort=False,
+                           law="prefill")
+
+
+def test_prefill_threadgroup_memory_within_the_hardware_limit():
+    for backend in K.BACKENDS:
+        for variant in K.VARIANTS:
+            assert K.threadgroup_bytes("gup", backend, variant, sk=1, tmr=1, gs=64) <= 32 * 1024
+            for gs in K.GROUP_SIZES:
+                assert K.threadgroup_bytes("dnp", backend, variant, sk=1, tmr=1, gs=gs, groups=17408 // gs) <= 32 * 1024
+
+
+def test_prefill_sorted_worktiles_cover_every_pair_once():
+    rng = np.random.default_rng(33)
+    T, k, E = 300, 10, 64
+    inds = mx.array(np.stack([rng.choice(E, k, replace=False) for _ in range(T)]).astype(np.int32))
+    wt, rmap, omap, p, bound = O.sorted_worktiles(inds, E, K.PF_BM)
+    wt = np.array(wt).reshape(-1, 4)
+    assert wt[:, 1].max() <= 64 and wt[:, 1].sum() == T * k
+    flat = np.array(inds).reshape(-1)
+    om = np.array(omap)
+    for row0, n, e, _ in wt:
+        if n:
+            assert (flat[om[row0:row0 + n]] == e).all()
+
+
+# ---------------------------------------------------------------------------
+# Tile gates: split kernel plumbing and the host gate (2026-11-19)
+# ---------------------------------------------------------------------------
+
+
+def test_split_gate_plumbing(fake):
+    g = graph_small()
+    rng = np.random.default_rng(34)
+    tables = O.GateTables.from_graph(g, rng.standard_normal((4, 64)), rng.standard_normal(4))
+    h = mx.zeros((19, 64), mx.bfloat16)
+    O.tile_gates(h, tables, union=True)                        # auto, one word: fused
+    assert fake[("gate", "simd", "dense")].calls and ("gbox", "simd", "dense") not in fake
+    topen, un = O.tile_gates(h, tables, union=True, impl="split")
+    box, tile = fake[("gbox", "simd", "dense")].calls[0], fake[("gtile", "simd", "dense")].calls[0]
+    assert O.DEFAULT_GATE_IMPL == "auto"
+    assert O.gate_impl(1, 1) == "fused" and O.gate_impl(1, 4) == "split" and O.gate_impl(65, 4) == "fused"
+    assert O.gate_impl(2048, 13, "split") == "split"
+    assert box["grid"] == (256 * tables.words, -(-19 // K.GATE_TT), 1) and box["init_value"] is None
+    assert box["output_shapes"] == [(19, tables.words)]
+    assert tile["inputs"][0] is fake[("gbox", "simd", "dense")].outputs[0]
+    assert tile["inputs"][1] is tables.tile_bits and tile["inputs"][2] is tables.always
+    assert tile["grid"] == (19 * tables.tiles, 1, 1) and tile["init_value"] is None
+    assert un is not None and topen.shape == (19, tables.tiles)
+    with pytest.raises(O.BlockSparseUnsupported):
+        O.tile_gates(h, tables, box_open=mx.zeros((19, 3), mx.uint8))
+
+
+def _graph_many(rng, boxes=79, tiles=60):
+    names = [f"b{i}" for i in range(boxes)]
+    members = [()] + [tuple(sorted(rng.choice(boxes, rng.integers(1, 4), replace=False).tolist()))
+                      for _ in range(tiles - 1)]
+    parent = [-1] * boxes
+    for i in range(1, boxes, 7):
+        parent[i] = i - 1
+    return L.TileGraph(names, ["core"] + [f"t{i}" for i in range(1, tiles)], members, parent=parent)
+
+
+def test_box_words_bit_order():
+    raw = np.zeros((2, 70), bool)
+    raw[0, [0, 31, 32, 69]] = True
+    raw[1, 5] = True
+    w = O.box_words(raw, 3)
+    assert w.dtype == np.uint32 and w.shape == (2, 3)
+    assert w[0].tolist() == [1 | (1 << 31), 1, 1 << 5] and w[1].tolist() == [1 << 5, 0, 0]
+
+
+def test_host_gate_masks_equal_the_reference_law():
+    from mlx2.runtime.amoeba_blocks import nexttok as NT
+    rng = np.random.default_rng(35)
+    g = _graph_many(rng)
+    d = 96
+    pw = rng.standard_normal((len(g.boxes), d)).astype(np.float32)
+    pb = rng.standard_normal(len(g.boxes)).astype(np.float32)
+    tables = O.GateTables.from_graph(g, pw, pb)
+    prior = (rng.random((50, len(g.boxes))) < 0.05).astype(np.uint8)
+    host = O.HostGateTables.from_tables(tables, prior)
+    # router law: bit for bit
+    box = (rng.random((17, len(g.boxes))) < 0.1).astype(np.uint8)
+    t_ref, u_ref = NT.reference_tile_gates(mx.zeros((17, d), mx.bfloat16), tables, box_open=mx.array(box), union=True)
+    t_host, u_host = O.host_tile_gates(host, box_open=box, union=True)
+    assert np.array_equal(t_host, np.array(t_ref)) and np.array_equal(u_host, np.array(u_ref))
+    assert np.array_equal(t_host, g.tile_open(box.astype(bool)))
+    # token law: a row gather of the prior, then the same closure
+    toks = rng.integers(0, 50, size=9)
+    t_tok, _ = O.host_tile_gates(host, tokens=toks)
+    assert np.array_equal(t_tok, g.tile_open(prior[toks].astype(bool)))
+    # probe law: equal wherever no logit is within rounding of zero
+    h = rng.standard_normal((11, d)).astype(np.float32)
+    t_p, _ = O.host_tile_gates(host, h=h)
+    logit = h.astype(np.float64) @ pw.T.astype(np.float64) + pb
+    clear = (np.abs(logit) > 1e-3).all(1)
+    assert clear.sum() >= 5
+    assert np.array_equal(t_p[clear], g.tile_open(logit > 0)[clear])
+    with pytest.raises(O.BlockSparseUnsupported):
+        O.host_tile_gates(host, tokens=toks, box_open=box)

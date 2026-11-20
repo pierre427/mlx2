@@ -10,8 +10,13 @@ Per backend this host has (mpp needs M5 tensor units; simd runs everywhere, M5 i
   the counters are that proof);
 * short chunks (1, 7, 31 rows) on the MPP extent match the reference;
 * a row's output does not depend on the rows beside it (decode row == the same row in a batch);
-* MoE: sorted and unsorted routes agree bit for bit; an expert with no open block yields zeros;
-* tile gates: the kernel's open bits equal the numpy closure reference (and the union).
+* MoE (fewer than ops.PREFILL_MIN_ROWS tokens, one law): sorted and unsorted routes agree bit for
+  bit; an expert with no open block yields zeros;
+* tile gates: the kernel's open bits equal the numpy closure reference (and the union);
+  the split kernels give the fused kernel's masks bit for bit; the host gate's router/token law too;
+* prefill law (rows >= ops.PREFILL_MIN_ROWS): the same invariants (packed == unpacked, skip ==
+  masked, counters == predicted reads, reference tolerance, row independence from neighbours),
+  dense and sorted MoE, and its distance from the lane law.
 """
 
 import os
@@ -87,7 +92,7 @@ def test_dense_exactness_and_reads(backend, bits, rows):
     assert np.abs(got - ref).max() <= 0.02 * np.abs(ref).max() + 1e-3
     per = O.tile_rows(backend, rows, "dense")
     pred = L.predicted_reads(lb, np.array(O.dense_worktiles(rows, per)).reshape(-1, 4), topen_np, rmap=None,
-                             per_row=True, out_cols=O.down_cols(backend))
+                             per_row=True, out_cols=d, down_cols=O.down_cols(backend))
     assert O.counter_reads(c_sk) == pred
     # row invariance: each row alone gives its bits in the batch
     for r in (0, rows - 1):
@@ -148,7 +153,7 @@ def test_short_chunks_match_reference(backend):
         got = np.array(y.astype(mx.float32))
         assert np.abs(got - ref).max() <= 0.02 * np.abs(ref).max() + 1e-3
         pred = L.predicted_reads(lb, np.array(O.dense_worktiles(3, O.tile_rows(backend, 3, "dense"))).reshape(-1, 4),
-                                 topen_np, rmap=None, per_row=True, out_cols=O.down_cols(backend))
+                                 topen_np, rmap=None, per_row=True, out_cols=d, down_cols=O.down_cols(backend))
         assert O.counter_reads(c) == pred
 
 
@@ -182,7 +187,7 @@ def test_moe_sorted_unsorted_and_empty_expert(backend):
     got = np.array(ys.astype(mx.float32)).reshape(tokens * k, d)
     assert np.abs(got - ref).max() <= 0.02 * np.abs(ref).max() + 1e-3
     pred = L.predicted_reads(lb, np.array(O.pair_worktiles(inds)[0]).reshape(-1, 4), topen_np,
-                             rmap=np.arange(tokens * k) // k, per_row=True, out_cols=O.down_cols(backend))
+                             rmap=np.arange(tokens * k) // k, per_row=True, out_cols=d, down_cols=O.down_cols(backend))
     assert O.counter_reads(cu) == pred
 
 
@@ -242,3 +247,176 @@ def test_nexttok_verify_recompute_bitwise_equals_same_step(backend, moe):
             assert mx.array_equal(y, ref).item()
         else:
             assert mx.array_equal(y[mx.array(np.flatnonzero(r))], ref[mx.array(np.flatnonzero(r))]).item()
+
+
+
+# ---------------------------------------------------------------------------
+# Prefill law and split gates (2026-11-19)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", _backends())
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("rows", [65, 130])
+def test_dense_prefill_law_exactness_and_reads(backend, bits, rows):
+    rng = np.random.default_rng(100 + rows + bits)
+    F, d, T = 512, 256, 6
+    own, lb, g, u, dn = case(rng, 1, F, d, T, bits)
+    gp, up = O.pack_qweight(g, lb), O.pack_qweight(u, lb)
+    blocks = O.DeviceBlocks.from_layout(lb)
+    ident = O.DeviceBlocks.from_layout(L.identity_layer(1, F, group_size=64, chunk=32, tiles=T))
+    x = mx.array(rng.standard_normal((rows, d)).astype(np.float32)).astype(mx.bfloat16)
+    assert O.select_law(backend, rows, d) == "prefill"
+    ones = mx.ones((rows, T), mx.uint8)
+    y_id, _ = O.block_mlp(x, g, u, dn, ident, ones, backend_name=backend)
+    y_pk, _ = O.block_mlp(x, gp, up, dn, blocks, ones, backend_name=backend)
+    assert mx.array_equal(y_id, y_pk).item(), "packed all-open != unpacked (prefill law)"
+    topen_np = (rng.random((rows, T)) < 0.35).astype(np.uint8)
+    topen_np[:, 0] = 1
+    topen_np[:64, 1:] = 0                               # one work tile with only the core: groups skip
+    topen = mx.array(topen_np)
+    y_sk, c_sk = O.block_mlp(x, gp, up, dn, blocks, topen, count=True, backend_name=backend)
+    y_ms, _ = O.block_mlp(x, gp, up, dn, blocks, topen, skip=False, backend_name=backend)
+    assert mx.array_equal(y_sk, y_ms).item(), "skipped != masked (prefill law)"
+    ref = R.masked_reference(np.array(x.astype(mx.float32)), to_np(g), to_np(u), to_np(dn), own, topen_np)
+    got = np.array(y_sk.astype(mx.float32))
+    assert np.abs(got - ref).max() <= 0.02 * np.abs(ref).max() + 1e-3
+    pred = L.predicted_reads(lb, np.array(O.dense_worktiles(rows, 64)).reshape(-1, 4), topen_np, rmap=None,
+                             per_row=True, out_cols=d, down_cols=O.down_cols(backend, "prefill"))
+    assert O.counter_reads(c_sk) == pred
+    # a row's bits do not depend on its neighbours (same law, other batch)
+    perm = np.r_[rows - 1, np.arange(rows - 1)]
+    y_p, _ = O.block_mlp(x[mx.array(perm)], gp, up, dn, blocks, topen[mx.array(perm)], backend_name=backend)
+    assert mx.array_equal(y_p[0], y_sk[rows - 1]).item()
+    # the lane law on the same rows: different bits, same function
+    y_ln, _ = O.block_mlp(x, gp, up, dn, blocks, topen, backend_name=backend, law="lane")
+    lane = np.array(y_ln.astype(mx.float32))
+    assert np.abs(got - lane).max() <= 0.02 * np.abs(lane).max() + 1e-3
+
+
+@pytest.mark.parametrize("backend", _backends())
+def test_moe_prefill_law_sorted(backend):
+    rng = np.random.default_rng(120)
+    E, F, d, T, k = 6, 640, 256, 5, 3
+    own, lb, g, u, dn = case(rng, E, F, d, T, 4)
+    own[2] = rng.integers(1, T, size=F)
+    lb = L.plan_layer(own, tiles=T, group_size=64, chunk=32)
+    gp, up = O.pack_qweight(g, lb), O.pack_qweight(u, lb)
+    blocks = O.DeviceBlocks.from_layout(lb)
+    ident = O.DeviceBlocks.from_layout(L.identity_layer(E, F, group_size=64, chunk=32, tiles=T))
+    tokens = 90
+    x = mx.array(rng.standard_normal((tokens, d)).astype(np.float32)).astype(mx.bfloat16)
+    inds_np = np.stack([rng.choice(E, k, replace=False) for _ in range(tokens)]).astype(np.int32)
+    inds = mx.array(inds_np)
+    ones = mx.ones((tokens, T), mx.uint8)
+    yi, _ = O.block_switch_glu(x, inds, g, u, dn, ident, ones, backend_name=backend)
+    yp, _ = O.block_switch_glu(x, inds, gp, up, dn, blocks, ones, backend_name=backend)
+    assert mx.array_equal(yi, yp).item()
+    topen_np = (rng.random((tokens, T)) < 0.4).astype(np.uint8)
+    topen_np[:, 0] = 1
+    topen = mx.array(topen_np)
+    ys, cs = O.block_switch_glu(x, inds, gp, up, dn, blocks, topen, count=True, backend_name=backend)
+    ym, _ = O.block_switch_glu(x, inds, gp, up, dn, blocks, topen, skip=False, backend_name=backend)
+    assert mx.array_equal(ys, ym).item()
+    flat = inds_np.reshape(-1)
+    ref = R.masked_reference(np.repeat(np.array(x.astype(mx.float32)), k, 0), to_np(g), to_np(u), to_np(dn),
+                             own, topen_np, experts=flat, tokens=np.arange(tokens * k) // k)
+    got = np.array(ys.astype(mx.float32)).reshape(tokens * k, d)
+    assert np.abs(got - ref).max() <= 0.02 * np.abs(ref).max() + 1e-3
+    wt, rmap, _, _, _ = O.sorted_worktiles(inds, E, 64)
+    pred = L.predicted_reads(lb, np.array(wt).reshape(-1, 4), topen_np, rmap=np.array(rmap), per_row=True,
+                             out_cols=d, down_cols=O.down_cols(backend, "prefill"))
+    assert O.counter_reads(cs) == pred
+
+
+def _gate_graph(rng, boxes=79, tiles=60):
+    names = [f"b{i}" for i in range(boxes)]
+    members = [()] + [tuple(sorted(rng.choice(boxes, rng.integers(1, 4), replace=False).tolist()))
+                      for _ in range(tiles - 1)]
+    return L.TileGraph(names, ["core"] + [f"t{i}" for i in range(1, tiles)], members, parent=[-1] * boxes)
+
+
+@pytest.mark.parametrize("tokens", [1, 8, 9, 37])
+def test_split_gates_equal_fused_bitwise(tokens):
+    rng = np.random.default_rng(130 + tokens)
+    g = _gate_graph(rng)
+    d = 2560
+    nb = len(g.boxes)
+    tables = O.GateTables.from_graph(g, rng.standard_normal((nb, d)).astype(np.float32) / np.sqrt(d),
+                                     (rng.standard_normal(nb) * 0.01).astype(np.float32))
+    h = mx.array(rng.standard_normal((tokens, d)).astype(np.float32)).astype(mx.bfloat16)
+    f_t, f_u = O.tile_gates(h, tables, union=True, impl="fused")
+    s_t, s_u = O.tile_gates(h, tables, union=True, impl="split")
+    assert mx.array_equal(f_t, s_t).item() and mx.array_equal(f_u, s_u).item()
+    box = mx.array((rng.random((tokens, nb)) < 0.05).astype(np.uint8))
+    f2, _ = O.tile_gates(h, tables, box_open=box, impl="fused")
+    s2, _ = O.tile_gates(h, tables, box_open=box, impl="split")
+    assert mx.array_equal(f2, s2).item()
+    host = O.HostGateTables.from_tables(tables)
+    h2, _ = O.host_tile_gates(host, box_open=np.array(box))
+    assert np.array_equal(h2, np.array(f2))
+
+
+
+@pytest.mark.parametrize("backend", _backends())
+@pytest.mark.parametrize("moe", [False, True])
+def test_prefill_law_closed_blocks_are_not_read_poison(backend, moe):
+    """NaN in every closed down group's scales (and closed gate/up chunks' scales) never reaches the
+    output on the prefill law; the masked arm (which reads them) is the control."""
+    rng = np.random.default_rng(140 + moe)
+    E, F, d, T = (4, 512, 256, 4) if moe else (1, 512, 256, 4)
+    own, lb, g, u, dn = case(rng, E, F, d, T, 4, core=0.5)
+    gp, up = O.pack_qweight(g, lb), O.pack_qweight(u, lb)
+    blocks = O.DeviceBlocks.from_layout(lb)
+    tokens = 100 if moe else 70
+    topen_np = np.array([[1, 0, 1, 0]], np.uint8)
+    topen = mx.array(topen_np)
+    x = mx.array(rng.standard_normal((tokens, d)).astype(np.float32)).astype(mx.bfloat16)
+    inds = mx.array(np.stack([rng.choice(E, 2, replace=False) for _ in range(tokens)]).astype(np.int32))
+
+    def run(gq, uq, dq, skip=True):
+        if moe:
+            return O.block_switch_glu(x, inds, gq, uq, dq, blocks, topen, per_row=False, skip=skip, backend_name=backend,
+                                      law="prefill")[0]
+        return O.block_mlp(x, gq, uq, dq, blocks, topen, per_row=False, skip=skip, backend_name=backend)[0]
+    if not moe:
+        assert O.select_law(backend, tokens, d) == "prefill"
+    clean = run(gp, up, dn)
+    nan = mx.array(np.float32(np.nan)).astype(mx.bfloat16)
+    rows = np.zeros((E, F), bool)
+    for e in range(E):
+        for off, ln, t in lb.chunks[lb.chunk_ptr[e]:lb.chunk_ptr[e + 1]]:
+            if not topen_np[0, t]:
+                rows[e, off:off + ln] = True
+    rm = mx.array(rows)[:, :, None]
+    G = lb.groups
+    closed = np.array([[not any(topen_np[0, t] for t in lb.gsig[lb.gsig_ptr[e * G + i]:lb.gsig_ptr[e * G + i + 1]])
+                        for i in range(G)] for e in range(E)])
+    assert rows.any() and closed.any(), "the case must have closed blocks"
+    gm = mx.array(closed)[:, None, :]
+    gs_ = O.QW(gp.weight, mx.where(rm, nan, gp.scales), gp.biases, 4, 64)
+    us_ = O.QW(up.weight, mx.where(rm, nan, up.scales), up.biases, 4, 64)
+    ds_ = O.QW(dn.weight, mx.where(gm, nan, dn.scales), dn.biases, 4, 64)
+    assert mx.array_equal(clean, run(gs_, us_, ds_)).item()
+    assert np.isnan(np.array(run(gs_, us_, ds_, skip=False).astype(mx.float32))).any(), "control reads them"
+
+
+def test_simd_prefill_law_output_width_not_a_multiple_of_64():
+    """simd prefill (K steps of 32): d = 288, so down's last 64-column tile is partly past N."""
+    rng = np.random.default_rng(150)
+    F, d, T, rows = 256, 288, 4, 80
+    own, lb, g, u, dn = case(rng, 1, F, d, T, 4)
+    gp, up = O.pack_qweight(g, lb), O.pack_qweight(u, lb)
+    blocks = O.DeviceBlocks.from_layout(lb)
+    x = mx.array(rng.standard_normal((rows, d)).astype(np.float32)).astype(mx.bfloat16)
+    topen_np = (rng.random((rows, T)) < 0.4).astype(np.uint8)
+    topen_np[:, 0] = 1
+    y, c = O.block_mlp(x, gp, up, dn, blocks, mx.array(topen_np), count=True, backend_name="simd")
+    ym, _ = O.block_mlp(x, gp, up, dn, blocks, mx.array(topen_np), skip=False, backend_name="simd")
+    assert mx.array_equal(y, ym).item()
+    ref = R.masked_reference(np.array(x.astype(mx.float32)), to_np(g), to_np(u), to_np(dn), own, topen_np)
+    got = np.array(y.astype(mx.float32))
+    assert np.abs(got - ref).max() <= 0.02 * np.abs(ref).max() + 1e-3
+    pred = L.predicted_reads(lb, np.array(O.dense_worktiles(rows, 64)).reshape(-1, 4), topen_np, rmap=None,
+                             per_row=True, out_cols=d, down_cols=O.down_cols("simd", "prefill"))
+    assert O.counter_reads(c) == pred

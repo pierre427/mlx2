@@ -209,7 +209,8 @@ class NextTokenGate:
                  gate_fn: Callable = tile_gates, prefill_tables: GateTables | None = None):
         """``tables``: the next-token probe (fit to predict step t+1's same-step set from step t's final
         hidden state; the same-step probe itself also works when it reads a compatible state) and the tile
-        graph.  ``gate_fn`` is the gate law (default the fused kernel; :func:`reference_tile_gates` on CPU).
+        graph.  ``gate_fn`` is the gate law (default :func:`ops.tile_gates`, which picks the fused or split
+        kernel, the same masks; :func:`reference_tile_gates` on CPU).
         ``prefill_tables``: the same-step probe for :meth:`prefill`'s gate-layer prompt states (default
         ``tables``, which is right only when both probes read the same state)."""
         self.cfg = cfg or NextTokenConfig()

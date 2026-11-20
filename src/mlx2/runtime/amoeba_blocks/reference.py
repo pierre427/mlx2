@@ -123,13 +123,31 @@ def _group_term_rows(qrow, s, b, v, gs):
     return acc
 
 
+def bf16_round(v) -> np.ndarray:
+    """fp32 values rounded to bf16 (ties to even), kept as fp32 (finite inputs)."""
+    u = np.ascontiguousarray(np.asarray(v, np.float32)).view(np.uint32)
+    return ((u + np.uint32(0x7FFF) + ((u >> 16) & np.uint32(1))) & np.uint32(0xFFFF0000)).view(np.float32)
+
+
+def _deq_rows(q, s, b, gs):
+    """The prefill law's weight tile: s*q + b rounded once to fp32, as the kernel's fma (numpy
+    evaluates it in float64, where s*q is exact), then rounded to the activation dtype (bf16)."""
+    s64 = np.repeat(np.asarray(s, np.float32).astype(np.float64), gs, axis=-1)
+    b64 = np.repeat(np.asarray(b, np.float32).astype(np.float64), gs, axis=-1)
+    return bf16_round((s64 * q.astype(np.float64) + b64).astype(np.float32))
+
+
 def emulate(x, gate: QArrays, up: QArrays, down: QArrays, lb: LayerBlocks, worktiles, topen, *,
             rmap=None, omap=None, rows_out=None, per_row=True, skip=True, down_cols=32,
-            reads: Reads | None = None):
+            reads: Reads | None = None, law: str = "lane"):
     """fp32 emulation of gate/up+SwiGLU and down over the block tables (gate/up packed).
 
+    ``law``: ``lane`` (per-group ``acc = s*P + (b*xs + acc)``) or ``prefill`` (dequantized
+    weights rounded to bf16, fp32 products accumulated over the open groups in index order).
     Returns ``(a, y)``: ``a`` [R, F] the activation in original neuron order, ``y`` [rows_out, d].
     ``a`` entries no work tile covers stay NaN, so a test notices a missing write."""
+    if law not in ("lane", "prefill"):
+        raise ValueError("law: lane | prefill")
     x = np.asarray(x, np.float32)
     topen = np.asarray(topen, bool)
     worktiles = np.asarray(worktiles)
@@ -160,8 +178,14 @@ def emulate(x, gate: QArrays, up: QArrays, down: QArrays, lb: LayerBlocks, workt
                 p = off + j
                 if reads is not None:
                     reads.gate_up_rows.add((int(e), int(p)))
-                gv = _group_term_rows(qg[e, p], gate.scales[e, p], gate.biases[e, p], xin, gate.group_size)
-                uv = _group_term_rows(qu[e, p], up.scales[e, p], up.biases[e, p], xin, up.group_size)
+                if law == "prefill":
+                    gv = (xin @ _deq_rows(qg[e, p], gate.scales[e, p], gate.biases[e, p], gate.group_size)
+                          ).astype(np.float32)
+                    uv = (xin @ _deq_rows(qu[e, p], up.scales[e, p], up.biases[e, p], up.group_size)
+                          ).astype(np.float32)
+                else:
+                    gv = _group_term_rows(qg[e, p], gate.scales[e, p], gate.biases[e, p], xin, gate.group_size)
+                    uv = _group_term_rows(qu[e, p], up.scales[e, p], up.biases[e, p], xin, up.group_size)
                 val = silu_mul(gv, uv).astype(np.float32)
                 a[rows, dst[j]] = np.where(ro, val, np.float32(0.0))
         # down: original layout, groups in index order, a group read only when some owner is open
@@ -179,6 +203,10 @@ def emulate(x, gate: QArrays, up: QArrays, down: QArrays, lb: LayerBlocks, workt
                 reads.down_groups.add((int(e), g, u_i))
                 reads.down_group_tiles += tiles_down
             sl = slice(g * gs, (g + 1) * gs)
+            if law == "prefill":
+                wd = _deq_rows(qd[e][:, sl], down.scales[e][:, g:g + 1], down.biases[e][:, g:g + 1], gs)
+                acc = (acc + av[:, sl] @ wd.T).astype(np.float32)
+                continue
             P = (av[:, sl] @ qd[e][:, sl].T.astype(np.float32)).astype(np.float32)
             xs = av[:, sl].sum(axis=1, dtype=np.float32)
             acc = (down.scales[e][:, g].astype(np.float32) * P

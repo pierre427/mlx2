@@ -11,6 +11,11 @@ Four kernels per backend, plus one tile-gate kernel:
            groups only, in original group order.
 * ``gate`` box probes -> box open bits -> tile open bits (OR over a precomputed closure bit
            matrix), one threadgroup per token, optional union over tokens (atomic OR).
+* ``gup`` / ``dnp``  the prefill law (rows >= ops.PREFILL_MIN_ROWS): 64x64 threadgroup tiles with
+           the weight tile dequantized into threadgroup memory, fp32 multiply-accumulate (see
+           "Prefill law" below).
+* ``gbox`` / ``gtile``  the split tile gates: box words over many threadgroups, then tiles; the
+           ``gate`` kernel's masks bit for bit.
 
 Backends.  ``mpp`` is the M5 tensor-unit (NAX) path: MPP ``matmul2d`` over one weight group
 (``GS`` inputs) per op, with the TensorFold-derived fragment mapping and in-kernel group sums of
@@ -518,6 +523,402 @@ _GATE = r"""
   }
 """
 
+# ---------------------------------------------------------------------------
+# Prefill law (``gup`` / ``dnp``): dequantized tiles, 64-row x 64-column threadgroups
+# ---------------------------------------------------------------------------
+#
+# The lane law above is a small-M law: every 16-row fragment pays a per-group epilogue and the
+# group sums of its inputs, and a 32-column threadgroup re-reads the activations once per 32
+# outputs.  At prefill that made the mpp kernels 3-10x slower than stock MLX's NAX qmm.  The
+# prefill law is the stock shape: a threadgroup of 4 simdgroups owns a 64-row x 64-column tile;
+# per K step it dequantizes its weight tile once into threadgroup memory as
+# ``XT(fma(s, q, b))`` and accumulates ``x . w`` in fp32 (mpp: one MPP ``matmul2d``
+# multiply-accumulate over the tile; simd: 8x8 ``simdgroup_matrix`` fp32 MMAs).
+#
+# gate/up: one threadgroup per (chunk, 64-row work tile); its 64 columns are the chunk's 32 gate
+# rows and the same 32 up rows, so SwiGLU pairs them in the epilogue.  down: one threadgroup per
+# (64 output columns, work tile); K steps are whole original groups, visited in index order, and
+# a group with no open owner for any of the tile's rows is skipped (unread).
+#
+# Exactness within the law: a skipped down group has all-zero inputs, so its products are exact
+# zeros and the accumulator is unchanged (an exact zero's sign aside); a gate/up output column
+# depends only on its own weight row, whatever chunk or position it sits in; garbage in pad rows
+# or pad columns of a threadgroup tile reaches only outputs that are never written.  So packed ==
+# unpacked and skipped == masked bit for bit, as under the lane law.  The two laws differ from
+# each other (and mpp from simd): a call picks one by its row count only (ops.PREFILL_MIN_ROWS).
+
+PF_BM = 64                         # rows per prefill work tile
+PF_BN = 64                         # columns per prefill threadgroup (gate/up: 32 gate + 32 up)
+PF_THREADS = 128                   # 4 simdgroups
+PF_BK = 64                         # mpp gate/up K step (needs K % 64 == 0)
+PF_SIMD_BK = 32                    # simd K step (fp32 staging)
+LAW_PREFILL = {"mpp": "amoeba-blocks-mpp-prefill-deq-v1", "simd": "amoeba-blocks-simd-prefill-deq-v1"}
+
+# Dequantize CNT consecutive codes of one weight row (``SRC`` bytes, ``SROW`` its scale/bias row,
+# starting at input K0) into ``DST`` (threadgroup, element type DT) as DT(XT(fma(s, q, b))).
+_PF_DEQ = r"""
+    for (int v0 = 0; v0 < @@CNT@@; v0 += 8) {
+      const int k = @@K0@@ + v0;
+      const int g = k / GS;
+      const float s = @@S@@, b = @@B@@;
+      float q[8];
+      if (BITS == 4) {
+        const uint w = *(const device uint*)(@@SRC@@ + k / 2);
+        for (int v = 0; v < 8; v++) q[v] = float((w >> (4 * v)) & 15u);
+      } else {
+        const uint2 w = *(const device uint2*)(@@SRC@@ + k);
+        for (int v = 0; v < 4; v++) { q[v] = float((w.x >> (8 * v)) & 255u); q[4 + v] = float((w.y >> (8 * v)) & 255u); }
+      }
+      @@STORE8@@
+    }
+"""
+
+
+# One 8-value store per dequantized group of codes (16-byte aligned: rows are padded to 16-byte
+# multiples).  XT: one vec<XT, 8>; float staging: two float4.
+_STORE8 = {
+    "XT": "{ vec<XT, 8> o; for (int v = 0; v < 8; v++) o[v] = static_cast<XT>(fma(s, q[v], b));\n"
+          "        *(threadgroup vec<XT, 8>*)(@@DST@@ + v0) = o; }",
+    "float": "{ float4 o0, o1; for (int v = 0; v < 4; v++) { o0[v] = float(static_cast<XT>(fma(s, q[v], b)));"
+             " o1[v] = float(static_cast<XT>(fma(s, q[4 + v], b))); }\n"
+             "        *(threadgroup float4*)(@@DST@@ + v0) = o0; *(threadgroup float4*)(@@DST@@ + v0 + 4) = o1; }",
+}
+
+
+def _pf_deq(cnt: str, k0: str, s: str, b: str, src: str, dst: str, dt: str) -> str:
+    return _subst(_PF_DEQ, {"@@CNT@@": cnt, "@@K0@@": k0, "@@S@@": s, "@@B@@": b, "@@SRC@@": src,
+                            "@@STORE8@@": _STORE8[dt].replace("@@DST@@", dst)})
+
+
+# gate/up prologue values shared by both backends: the B row this thread loads (rows 0-31 gate,
+# 32-63 up, of the chunk), and the chunk geometry (from _PROLOGUE).
+_GUP_LOADER = r"""
+  constexpr int KG = K / GS;
+  constexpr int64_t ROW_BYTES = K * BITS / 8;
+  const int brow = int(tid) >> 1, bh = int(tid) & 1;
+  const int bn = brow & 31;
+  const bool bup = brow >= 32;
+  const bool bok = bn < len;
+  const int64_t wrow = (int64_t)e * F + off + (bok ? bn : 0);
+  const device uchar* wsrc = (const device uchar*)(bup ? WU : WG) + wrow * ROW_BYTES;
+"""
+
+# The SwiGLU epilogue from a [64 rows][64 cols] staging tile ST_ (cols 0-31 gate, 32-63 up).
+_GUP_EPILOGUE = r"""
+  for (int i = int(tid); i < nrows * len; i += PF_THREADS_) {
+    const int m = i / len, n = i - m * len;
+    float v = 0.0f;
+    if (((open >> m) & 1ul) != 0)
+      v = bs_silu_mul(float(static_cast<XT>(@@ST@@[m * 64 + n])), float(static_cast<XT>(@@ST@@[m * 64 + 32 + n])));
+    A[(int64_t)(row0 + m) * F + perm[n]] = static_cast<XT>(v);
+  }
+"""
+
+_GUP_MPP = r"""
+  constexpr int PF_THREADS_ = 128;
+@@PROLOGUE@@
+@@LOADER@@
+  constexpr int BK = 64;
+  constexpr int BKP = BK + 8;          // padded row (144 B): spreads the tile's rows over the banks
+  constexpr int NK = K / BK;
+  alignas(16) threadgroup XT wb[64 * BKP];   // [n][k]: rows 0-31 gate, 32-63 up; then the [m][n] result
+@@A_DECL@@
+  tensor<threadgroup XT, dextents<int32_t, 2>, tensor_inline> tB(wb, dextents<int32_t, 2>(BK, 64),
+                                                                 array<int32_t, 2>({1, BKP}));
+  constexpr auto desc = matmul2d_descriptor(64, 64, BK, false, true, false,
+                                            matmul2d_descriptor::mode::multiply_accumulate);
+  matmul2d<desc, execution_simdgroups<4>> op;
+  auto C = op.template get_destination_cooperative_tensor<decltype(a0), decltype(tB), float>();
+  for (uint16_t i = 0; i < C.get_capacity(); ++i) if (C.is_valid_element(i)) C[i] = 0.0f;
+  for (int kb = 0; kb < NK; kb++) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (bok) {
+@@DEQ@@
+    }
+@@A_STAGE@@
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+@@A_RUN@@
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint16_t i = 0; i < C.get_capacity(); ++i) {
+    if (!C.is_valid_element(i)) continue;
+    const auto idx = C.get_multidimensional_index(i);
+    wb[int(idx[1]) * 64 + int(idx[0])] = static_cast<XT>(C[i]);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+@@EPILOGUE@@
+"""
+
+_GUP_MPP_A = {
+    "dense": {
+        "@@A_DECL@@": "  tensor<device XT, dextents<int32_t, 2>, tensor_inline> tA(\n"
+                      "      (device XT*)X + (int64_t)row0 * K, dextents<int32_t, 2>(K, nrows));\n"
+                      "  auto a0 = tA.slice(0, 0);\n",
+        "@@A_STAGE@@": "",
+        "@@A_RUN@@": "    auto a = tA.slice(kb * BK, 0);\n    op.run(a, tB, C);\n",
+    },
+    # Routed rows are staged through RMAP in threadgroup memory (no gathered device copy); pad rows
+    # (nrows..63) keep stale values, which reach only rows that are never written.
+    "rowmap": {
+        "@@A_DECL@@": "  alignas(16) threadgroup XT xa[64 * BKP];\n"
+                      "  tensor<threadgroup XT, dextents<int32_t, 2>, tensor_inline> tA(xa, dextents<int32_t, 2>(BK, 64),\n"
+                      "                                                                 array<int32_t, 2>({1, BKP}));\n"
+                      "  auto a0 = tA;\n",
+        "@@A_STAGE@@": "    if (brow < nrows) {\n"
+                       "      const device XT* xp = (const device XT*)X + (int64_t)RMAP[row0 + brow] * K + kb * BK + bh * (BK / 2);\n"
+                       "      for (int i = 0; i < BK / 2; i += 8)\n"
+                       "        *(threadgroup vec<XT, 8>*)(xa + brow * BKP + bh * (BK / 2) + i) = *(const device vec<XT, 8>*)(xp + i);\n"
+                       "    }\n",
+        "@@A_RUN@@": "    op.run(tA, tB, C);\n",
+    },
+}
+
+# simd: fp32 staging (A and B, 32-wide K steps), 2x2 simdgroups of 32x32 (4x4 8x8 fragments).
+_PF_SIMD_MMA = r"""
+    {
+      const int sm = int(sg) >> 1, sn = int(sg) & 1;
+      for (int kk = 0; kk < 32; kk += 8) {
+        simdgroup_matrix<float, 8, 8> af[4], bf[4];
+        for (int i = 0; i < 4; i++) simdgroup_load(af[i], xs + (sm * 32 + i * 8) * SP + kk, SP);
+        for (int j = 0; j < 4; j++) simdgroup_load(bf[j], ws + (sn * 32 + j * 8) * SP + kk, SP, ulong2(0, 0), true);
+        for (int i = 0; i < 4; i++)
+          for (int j = 0; j < 4; j++) simdgroup_multiply_accumulate(acc[i][j], af[i], bf[j], acc[i][j]);
+      }
+    }
+"""
+
+_PF_SIMD_STORE = r"""
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  {
+    const int sm = int(sg) >> 1, sn = int(sg) & 1;
+    for (int i = 0; i < 4; i++)
+      for (int j = 0; j < 4; j++) simdgroup_store(acc[i][j], stage + (sm * 32 + i * 8) * 64 + sn * 32 + j * 8, 64);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+"""
+
+_PF_SIMD_DECL = r"""
+  const ushort sg = simdgroup_index_in_threadgroup;
+  constexpr int SP = 36;               // padded fp32 row of a 32-wide K step (144 B)
+  alignas(16) threadgroup float stage[2 * 64 * SP];   // A [64][SP] and B [64][SP] per K step, then [64][64]
+  threadgroup float* xs = stage;
+  threadgroup float* ws = stage + 64 * SP;
+  simdgroup_matrix<float, 8, 8> acc[4][4];
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++) acc[i][j] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+"""
+
+_GUP_SIMD = r"""
+  constexpr int PF_THREADS_ = 128;
+@@PROLOGUE@@
+@@LOADER@@
+  constexpr int NK = K / 32;
+@@DECL@@
+  for (int kb = 0; kb < NK; kb++) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (bok) {
+@@DEQ@@
+    }
+    if (brow < nrows) {
+      const device XT* xp = (const device XT*)X + (int64_t)(@@TOKM@@) * K + kb * 32 + bh * 16;
+      for (int i = 0; i < 16; i += 4)
+        *(threadgroup float4*)(xs + brow * SP + bh * 16 + i) = float4(float(xp[i]), float(xp[i + 1]), float(xp[i + 2]), float(xp[i + 3]));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+@@MMA@@
+  }
+@@STORE@@
+@@EPILOGUE@@
+"""
+
+# down, prefill law: shared head (work tile, group-open table, loader row).
+_DNP_HEAD = r"""
+  const uint tid = thread_index_in_threadgroup;
+  constexpr int G = F / GS;
+  constexpr int64_t ROW_BYTES = F * BITS / 8;
+  const int n0 = int(threadgroup_position_in_grid.x) * 64;
+  const int u = int(threadgroup_position_in_grid.y);
+  const int row0 = WTL[u * 4 + 0], nrows = WTL[u * 4 + 1], e = WTL[u * 4 + 2];
+  if (nrows <= 0) return;
+@@GROUP_OPEN@@
+  const int brow = int(tid) >> 1, bh = int(tid) & 1;
+  const bool bok = n0 + brow < N;
+  const int64_t wrow = (int64_t)e * N + (bok ? n0 + brow : 0);
+  const device uchar* wsrc = (const device uchar*)W + wrow * ROW_BYTES;
+  uint opened = 0;
+"""
+
+_DNP_COUNT = r"""
+  if (COUNT && tid == 0)
+    atomic_fetch_add_explicit((device atomic_uint*)CTR + 2, opened, memory_order_relaxed);
+"""
+
+_DNP_MPP = r"""
+@@HEAD@@
+  constexpr int GSP = GS + 8;          // padded row: spreads the tile's rows over the banks
+  alignas(16) threadgroup XT wb[64 * GSP];   // [n][k] of one original group
+  tensor<device XT, dextents<int32_t, 2>, tensor_inline> tA(
+      (device XT*)A + (int64_t)row0 * F, dextents<int32_t, 2>(F, nrows));
+  auto a0 = tA.slice(0, 0);
+  tensor<threadgroup XT, dextents<int32_t, 2>, tensor_inline> tB(wb, dextents<int32_t, 2>(GS, 64),
+                                                                 array<int32_t, 2>({1, GSP}));
+  constexpr auto desc = matmul2d_descriptor(64, 64, GS, false, true, false,
+                                            matmul2d_descriptor::mode::multiply_accumulate);
+  matmul2d<desc, execution_simdgroups<4>> op;
+  auto C = op.template get_destination_cooperative_tensor<decltype(a0), decltype(tB), float>();
+  for (uint16_t i = 0; i < C.get_capacity(); ++i) if (C.is_valid_element(i)) C[i] = 0.0f;
+  for (int g = 0; g < G; g++) {
+    if (!gopen[g]) continue;               // every input of the group is zero: skipped, unread
+    opened++;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (bok) {
+@@DEQ@@
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    auto a = tA.slice(g * GS, 0);
+    op.run(a, tB, C);
+  }
+@@COUNT@@
+  for (uint16_t i = 0; i < C.get_capacity(); ++i) {
+    if (!C.is_valid_element(i)) continue;
+    const auto idx = C.get_multidimensional_index(i);
+    const int m = int(idx[1]), n = n0 + int(idx[0]);
+    if (m < nrows && n < N) {
+      const int64_t dest = @@DEST@@;
+      Y[dest * N + n] = static_cast<XT>(C[i]);
+    }
+  }
+"""
+
+_DNP_SIMD = r"""
+@@HEAD@@
+@@DECL@@
+  for (int g = 0; g < G; g++) {
+    if (!gopen[g]) continue;               // every input of the group is zero: skipped, unread
+    opened++;
+    for (int kb = g * GS; kb < (g + 1) * GS; kb += 32) {
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (bok) {
+@@DEQ@@
+      }
+      if (brow < nrows) {
+        const device XT* ap = (const device XT*)A + (int64_t)(row0 + brow) * F + kb + bh * 16;
+        for (int i = 0; i < 16; i += 4)
+          *(threadgroup float4*)(xs + brow * SP + bh * 16 + i) = float4(float(ap[i]), float(ap[i + 1]), float(ap[i + 2]), float(ap[i + 3]));
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+@@MMA@@
+    }
+  }
+@@COUNT@@
+@@STORE@@
+  for (int i = int(tid); i < nrows * 64; i += 128) {
+    const int m = i / 64, n = n0 + (i - m * 64);
+    if (n < N) {
+      const int64_t dest = @@DEST@@;
+      Y[dest * N + n] = static_cast<XT>(stage[i]);
+    }
+  }
+"""
+
+
+def _prefill_source(kind: str, backend: str, variant: str, bits: int) -> str:
+    tok = "RMAP[row0 + m]" if variant == "rowmap" else "row0 + m"
+    if kind == "gup":
+        prologue = _subst(_PROLOGUE, {"@@TOK@@": tok, "@@THREADS@@": "128"})
+        s = "(bup ? float(SU[wrow * KG + g]) : float(SG[wrow * KG + g]))"
+        b = "(bup ? float(BU[wrow * KG + g]) : float(BG[wrow * KG + g]))"
+        if backend == "mpp":
+            deq = _pf_deq("BK / 2", "kb * BK + bh * (BK / 2)", s, b, "wsrc", "(wb + brow * BKP + bh * (BK / 2))", "XT")
+            return _subst(_GUP_MPP, {"@@PROLOGUE@@": prologue, "@@LOADER@@": _GUP_LOADER, "@@DEQ@@": deq,
+                                     **_GUP_MPP_A[variant],
+                                     "@@EPILOGUE@@": _GUP_EPILOGUE.replace("@@ST@@", "wb")})
+        deq = _pf_deq("16", "kb * 32 + bh * 16", s, b, "wsrc", "(ws + brow * SP + bh * 16)", "float")
+        return _subst(_GUP_SIMD, {"@@PROLOGUE@@": prologue, "@@LOADER@@": _GUP_LOADER, "@@DECL@@": _PF_SIMD_DECL,
+                                  "@@DEQ@@": deq, "@@MMA@@": _PF_SIMD_MMA, "@@STORE@@": _PF_SIMD_STORE,
+                                  "@@TOKM@@": "RMAP[row0 + brow]" if variant == "rowmap" else "row0 + brow",
+                                  "@@EPILOGUE@@": _GUP_EPILOGUE.replace("@@ST@@", "stage")})
+    if kind == "dnp":
+        gopen = _subst(_GROUP_OPEN, {"@@TOK@@": tok, "@@THREADS@@": "128"})
+        head = _subst(_DNP_HEAD, {"@@GROUP_OPEN@@": gopen})
+        dest = "OUTMAP ? (int64_t)OMAP[row0 + m] : (int64_t)(row0 + m)"
+        s, b = "float(S[wrow * G + g])", "float(B[wrow * G + g])"
+        if backend == "mpp":
+            deq = _pf_deq("GS / 2", "g * GS + bh * (GS / 2)", s, b, "wsrc", "(wb + brow * GSP + bh * (GS / 2))", "XT")
+            return _subst(_DNP_MPP, {"@@HEAD@@": head, "@@DEQ@@": deq, "@@COUNT@@": _DNP_COUNT, "@@DEST@@": dest})
+        deq = _pf_deq("16", "kb + bh * 16", s, b, "wsrc", "(ws + brow * SP + bh * 16)", "float")
+        return _subst(_DNP_SIMD, {"@@HEAD@@": head, "@@DECL@@": _PF_SIMD_DECL, "@@DEQ@@": deq, "@@MMA@@": _PF_SIMD_MMA,
+                                  "@@COUNT@@": _DNP_COUNT, "@@STORE@@": _PF_SIMD_STORE, "@@DEST@@": dest})
+    raise ValueError(f"unknown prefill kernel kind {kind!r}")
+
+
+# ---------------------------------------------------------------------------
+# Split tile gates: box bits over many threadgroups, then tiles (same masks as ``gate``)
+# ---------------------------------------------------------------------------
+#
+# The fused ``gate`` kernel runs one threadgroup per token, so a decode step's probe matvec
+# (boxes x d fp32) runs on one GPU core.  ``gbox`` gives each threadgroup one 32-box word for up
+# to GATE_TT tokens: each simdgroup takes 4 boxes, each box keeps one fp32 accumulator per token
+# with the fused kernel's exact sequence (lane-strided fma over d in index order, one simd_sum,
+# plus the bias), so every logit -- and every bit -- is the fused kernel's.  The word is written
+# by its one owner (no memset, no device atomics).  ``gtile`` then ORs each tile's closure bits
+# against the token's words, as the fused kernel does.
+
+GATE_TT = 8
+
+_GBOX = r"""
+  const uint tid = thread_index_in_threadgroup;
+  const ushort lane = thread_index_in_simdgroup;
+  const ushort sg = simdgroup_index_in_threadgroup;
+  const int w = int(threadgroup_position_in_grid.x);
+  const int T = MODE == 0 ? int(H_shape[0]) : int(BOX_shape[0]);
+  const int t0 = int(threadgroup_position_in_grid.y) * TT;
+  const int nt = min(TT, T - t0);
+  threadgroup atomic_uint word[TT];
+  if (tid < TT) atomic_store_explicit(&word[tid], 0u, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (MODE == 0) {
+    for (int j = 0; j < 4; j++) {
+      const int b = w * 32 + int(sg) * 4 + j;
+      if (b >= NB) break;
+      float acc[TT];
+      for (int t = 0; t < TT; t++) acc[t] = 0.0f;
+      for (int i = int(lane); i < D; i += 32) {
+        const float pw = PW[(int64_t)b * D + i];
+        for (int t = 0; t < TT; t++)
+          if (t < nt) acc[t] = fma(float(H[(int64_t)(t0 + t) * D + i]), pw, acc[t]);
+      }
+      for (int t = 0; t < TT; t++) {
+        if (t >= nt) break;
+        const float v = simd_sum(acc[t]) + PB[b];
+        if (lane == 0 && v > 0.0f)
+          atomic_fetch_or_explicit(&word[t], 1u << (b & 31), memory_order_relaxed);
+      }
+    }
+  } else {
+    for (int i = int(tid); i < nt * 32; i += 256) {
+      const int t = i >> 5, b = w * 32 + (i & 31);
+      if (b < NB && BOX[(int64_t)(t0 + t) * NB + b])
+        atomic_fetch_or_explicit(&word[t], 1u << (b & 31), memory_order_relaxed);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (int(tid) < nt) BW[(int64_t)(t0 + int(tid)) * NW + w] = atomic_load_explicit(&word[tid], memory_order_relaxed);
+"""
+
+_GTILE = r"""
+  const int i = int(thread_position_in_grid.x);       // the grid is exactly tokens x tiles threads
+  const int t = i / NTILES, k = i - t * NTILES;
+  bool o = ALW[k] != 0;
+  for (int w = 0; w < NW && !o; w++) o = (TBITS[k * NW + w] & BW[(int64_t)t * NW + w]) != 0u;
+  TOPEN[i] = o ? 1 : 0;
+"""
+
+GBOX_INPUTS = ("H", "PW", "PB", "BOX")
+GBOX_OUTPUTS = ("BW",)
+GTILE_INPUTS = ("BW", "TBITS", "ALW")
+GTILE_OUTPUTS = ("TOPEN",)
+
 # Buffer names (and their MLX dtypes, for the offline harness) per kernel.
 GU_INPUTS = ("X", "WG", "SG", "BG", "WU", "SU", "BU", "PERM", "CPTR", "CK", "WTL", "RMAP", "TOPEN")
 GU_OUTPUTS = ("A", "CTR")
@@ -525,6 +926,14 @@ DN_INPUTS = ("A", "W", "S", "B", "GPTR", "GSIG", "WTL", "RMAP", "OMAP", "TOPEN")
 DN_OUTPUTS = ("Y", "CTR")
 GATE_INPUTS = ("H", "PW", "PB", "BOX", "TBITS", "ALW")
 GATE_OUTPUTS = ("TOPEN", "UN")
+
+
+_MATMUL_KINDS = ("gu", "dn", "gup", "dnp")
+KIND_BUFFERS = {"gu": (GU_INPUTS, GU_OUTPUTS), "dn": (DN_INPUTS, DN_OUTPUTS), "gup": (GU_INPUTS, GU_OUTPUTS),
+                "dnp": (DN_INPUTS, DN_OUTPUTS), "gate": (GATE_INPUTS, GATE_OUTPUTS),
+                "gbox": (GBOX_INPUTS, GBOX_OUTPUTS), "gtile": (GTILE_INPUTS, GTILE_OUTPUTS)}
+# MLX passes ``<name>_shape`` (const constant int*) for an input the source names that way.
+_SHAPE_ARGS = {"gbox": ("H", "BOX")}
 
 
 def _subst(src: str, parts: dict[str, str]) -> str:
@@ -563,12 +972,18 @@ def source(kind: str, backend: str, variant: str, bits: int) -> str:
                                  "@@UNPACK_D@@": _unpack(bits, "wr[i]", "qd[i]")})
     if kind == "gate":
         return _GATE
+    if kind in ("gup", "dnp"):
+        return _prefill_source(kind, backend, variant, bits)
+    if kind == "gbox":
+        return _GBOX
+    if kind == "gtile":
+        return _GTILE
     raise ValueError(f"unknown kernel kind {kind!r}")
 
 
 def header(kind: str, backend: str, bits: int, xt: str, st: str) -> str:
     """Type aliases (and the MPP include for mpp matmuls) prepended to a kernel."""
-    head = (_MPP_HEADER if backend == "mpp" and kind in ("gu", "dn") else "") + _COMMON
+    head = (_MPP_HEADER if backend == "mpp" and kind in _MATMUL_KINDS else "") + _COMMON
     head += f"typedef {xt} XT;\ntypedef {st} ST;\nconstexpr constant int BITS = {bits};\n"
     if backend == "mpp" and kind in ("gu", "dn"):
         head += f"typedef {_NATIVE[bits]} WT;\ntypedef uchar WP;\n"
@@ -586,8 +1001,7 @@ def build(kind: str, backend: str, variant: str, bits: int, xt: str, st: str):
     """The ``mx.fast.metal_kernel`` object (compiled by MLX on first launch, on the GPU)."""
     import mlx.core as mx
 
-    inputs, outputs = {"gu": (GU_INPUTS, GU_OUTPUTS), "dn": (DN_INPUTS, DN_OUTPUTS),
-                       "gate": (GATE_INPUTS, GATE_OUTPUTS)}[kind]
+    inputs, outputs = KIND_BUFFERS[kind]
     return mx.fast.metal_kernel(
         name=kernel_name(kind, backend, variant, bits, xt, st),
         input_names=list(inputs), output_names=list(outputs),
@@ -607,6 +1021,11 @@ _MSL_TYPES = {"bf16": "bfloat16_t", "f16": "half", "f32": "float", "u32": "uint3
 def buffer_types(kind: str, xt: str, st: str) -> dict[str, str]:
     x = "bf16" if xt == "bfloat" else "f16"
     s = "bf16" if st == "bfloat" else "f16"
+    kind = {"gup": "gu", "dnp": "dn"}.get(kind, kind)
+    if kind == "gbox":
+        return {"H": x, "PW": "f32", "PB": "f32", "BOX": "u8", "BW": "u32"}
+    if kind == "gtile":
+        return {"BW": "u32", "TBITS": "u32", "ALW": "u8", "TOPEN": "u8"}
     if kind == "gu":
         return {"X": x, "WG": "u32", "SG": s, "BG": s, "WU": "u32", "SU": s, "BU": s, "PERM": "u16",
                 "CPTR": "i32", "CK": "i32", "WTL": "i32", "RMAP": "i32", "TOPEN": "u8", "A": x, "CTR": "u32"}
@@ -620,12 +1039,14 @@ def buffer_types(kind: str, xt: str, st: str) -> dict[str, str]:
 def compilation_source(kind: str, backend: str, variant: str, bits: int, consts: dict[str, int],
                        *, xt: str = "bfloat", st: str = "bfloat") -> str:
     """A complete .metal translation unit equivalent to what MLX builds (template ints as constants)."""
-    inputs, outputs = {"gu": (GU_INPUTS, GU_OUTPUTS), "dn": (DN_INPUTS, DN_OUTPUTS),
-                       "gate": (GATE_INPUTS, GATE_OUTPUTS)}[kind]
+    inputs, outputs = KIND_BUFFERS[kind]
     types = buffer_types(kind, xt, st)
     args = [f"const device {_MSL_TYPES[types[n]]}* {n} [[buffer({i})]]" for i, n in enumerate(inputs)]
     args += [f"device {_MSL_TYPES[types[n]]}* {n} [[buffer({len(inputs) + i})]]" for i, n in enumerate(outputs)]
+    nb = len(inputs) + len(outputs)
+    args += [f"const constant int* {n}_shape [[buffer({nb + i})]]" for i, n in enumerate(_SHAPE_ARGS.get(kind, ()))]
     args += ["uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]",
+             "uint3 thread_position_in_grid [[thread_position_in_grid]]",
              "uint thread_index_in_threadgroup [[thread_index_in_threadgroup]]",
              "uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]",
              "uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]"]
@@ -643,4 +1064,10 @@ def threadgroup_bytes(kind: str, backend: str, variant: str, *, sk: int, tmr: in
         return stage + max(sk - 1, 1) * 2 * 16 * 32 * 4
     if kind == "dn":
         return groups + (max(sk - 1, 1) * 16 * 32 * 4 if backend == "mpp" else 0)
+    if kind == "gup":
+        if backend == "mpp":
+            return PF_BM * (PF_BK + 8) * xbytes * (2 if variant == "rowmap" else 1)
+        return 2 * PF_BM * 36 * 4
+    if kind == "dnp":
+        return groups + (PF_BN * (gs + 8) * xbytes if backend == "mpp" else 2 * PF_BM * 36 * 4)
     return 0

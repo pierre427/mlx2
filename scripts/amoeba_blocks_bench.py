@@ -16,9 +16,17 @@ the best case for down skipping) and "scattered" (random neurons: gate/up skip a
 down groups almost never closed).  FN also runs the real partition (fn-boxes2) with the core only
 open and with core + its largest box open.
 
-Reported: median ms per layer-set forward, tokens/s, weight bytes read (device counters) and
-GB/s, and exactness: ours packed all-open == ours-ident (bitwise), ours-skip == ours-mask
-(bitwise), max |diff| vs stock (relative to the stock output's max).
+Reported: p10/p50/p90 ms per layer-set forward (randomized interleaved rounds, see "Timing"),
+tokens/s, weight bytes read (device counters) and GB/s, speed against the stock arm of the same
+group, and exactness: ours packed all-open == ours-ident (bitwise), ours-skip == ours-mask
+(bitwise), max |diff| vs stock (relative to the stock output's max), prefill law vs lane law.
+
+v2 (2026-11-19): every group interleaves its arms with its own stock and ours-ident references;
+stock fairness diagnostics (stock-2d: quantized_matmul on the loaded 2-D arrays, which stock-base
+reaches through [None][0] views; stock-nn: nn.QuantizedLinear;
+stock-gate-proj-only: one projection's qmv); prefill runs the prefill law (ours-ident@lane keeps
+the old law as a reference); tile gates time the fused, split and host implementations, one
+call per forward.
 
 Run inside one owned GPU window (see --print-window).  --dry-run plans and estimates on the CPU.
 --analyze reports the real FN partition's skippable fractions on the CPU (no GPU).
@@ -58,6 +66,7 @@ MODELS = {
 FN_PARTITION = (Path.home() / "Library/Application Support/mlx2/research-artifacts/amoeba"
                 / "fn-boxes2-dd1ef1d7d/partition")
 SHAPES = {"decode1": 1, "decode4": 4, "prefill2048": 2048}
+BOUNDARY_SHAPES = {"prefill128": 128, "prefill512": 512}     # baseline group only: the law switch point
 FN_TOPK = 10
 
 
@@ -151,6 +160,9 @@ def analyze(out=None):
 # ---------------------------------------------------------------------------
 
 
+RAW: dict = {}
+
+
 def load_layer(model: str, layer: int):
     import mlx.core as mx
     from mlx2.runtime.amoeba_blocks.ops import QW
@@ -174,6 +186,7 @@ def load_layer(model: str, layer: int):
             arrays.append(cache[shard][f"{key}.{part}"])
         w, s, b = arrays
         if w.ndim == 2:
+            RAW[(model, layer, proj)] = (w, s, b)       # the loaded 2-D buffers themselves (stock-2d arm)
             w, s, b = w[None], s[None], b[None]
         out[proj] = QW(w, s, b, bits, gs)
     mx.eval(*[a for q in out.values() for a in (q.weight, q.scales, q.biases)])
@@ -241,24 +254,69 @@ class MaskedSwitch:
 
 
 # ---------------------------------------------------------------------------
-# Timing
+# Timing (v2, 2026-11-19)
 # ---------------------------------------------------------------------------
+#
+# The first bench timed each arm once, 3 warm-ups then 20 back-to-back reps, in a fixed order.
+# A decode forward is ~0.5-2 ms, so an arm got ~40 ms of GPU work: a new kernel instantiation
+# (every new template: NTILES, F, ...) compiled inside the warm-ups with the GPU idle, and the
+# timed reps then ran on a GPU still ramping its clock.  Identical work came out 0.5 or 1.9 ms
+# depending on whether a compile preceded it.  Now every arm of a group is warmed for at least
+# --warm-ms (after its first, compiling call), then the group runs --rounds rounds in a fresh
+# random order per round, each arm --reps forwards per round, each forward bracketed by
+# mx.synchronize().  Arms of one group share the same clock and cache conditions, and every
+# group carries its own stock and ours-ident reference arms, so ratios are within-group.
 
 
-def timeit(fn, reps, warmup):
+def pct(ts, q):
+    ts = sorted(ts)
+    return ts[min(len(ts) - 1, int(q * len(ts)))]
+
+
+def measure(arms: dict, *, rounds: int, reps: int, warm_ms: float, seed: int, log=None) -> dict:
+    """arms: name -> fn (returns arrays to eval).  -> name -> {p10_ms, p50_ms, p90_ms, mean_ms, n,
+    round_p50_ms} (or {"error": ...} for an arm whose first call raised; the others still run)."""
+    import random
+
     import mlx.core as mx
-    for _ in range(warmup):
-        mx.eval(fn())
-    mx.synchronize()
-    ts = []
-    for _ in range(reps):
-        t0 = time.perf_counter()
-        mx.eval(fn())
-        mx.synchronize()
-        ts.append(time.perf_counter() - t0)
-    ts.sort()
-    return {"median_ms": 1e3 * statistics.median(ts), "p10_ms": 1e3 * ts[len(ts) // 10],
-            "p90_ms": 1e3 * ts[(9 * len(ts)) // 10]}
+    live, out = {}, {}
+    for name, fn in arms.items():
+        try:
+            mx.eval(fn())                    # compile + first run
+            mx.synchronize()
+            t_end = time.perf_counter() + warm_ms / 1e3
+            n = 0
+            while n < 2 or time.perf_counter() < t_end:
+                mx.eval(fn())
+                n += 1
+            mx.synchronize()
+            live[name] = fn
+        except Exception as exc:             # a failing arm must not cost the window
+            out[name] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
+            if log:
+                log(f"  arm {name} failed: {out[name]['error']}")
+    rng = random.Random(seed)
+    ts = {n: [] for n in live}
+    per_round = {n: [] for n in live}
+    for _ in range(rounds):
+        order = list(live)
+        rng.shuffle(order)
+        for name in order:
+            fn = live[name]
+            rt = []
+            for _ in range(reps):
+                mx.synchronize()
+                t0 = time.perf_counter()
+                mx.eval(fn())
+                mx.synchronize()
+                rt.append(time.perf_counter() - t0)
+            ts[name] += rt
+            per_round[name].append(1e3 * statistics.median(rt))
+    for name in live:
+        v = ts[name]
+        out[name] = {"p10_ms": 1e3 * pct(v, 0.1), "p50_ms": 1e3 * statistics.median(v), "p90_ms": 1e3 * pct(v, 0.9),
+                     "mean_ms": 1e3 * statistics.fmean(v), "n": len(v), "round_p50_ms": per_round[name]}
+    return out
 
 
 def maxrel(a, b):
@@ -268,15 +326,56 @@ def maxrel(a, b):
     return float(mx.max(mx.abs(a32 - b32)).item()) / den
 
 
+def seed_of(*parts) -> int:
+    """A reproducible round-order seed (hash() of a str changes per process)."""
+    import zlib
+    return zlib.crc32(repr(parts).encode()) & 0xFFFF
+
+
+def _ev(v):
+    import mlx.core as mx
+    mx.eval(v)
+    return v
+
+
+def guarded(fn) -> dict:
+    """Run a cell's post-timing checks; an exception becomes the cell's ``check_error`` instead of
+    ending the window."""
+    try:
+        return fn()
+    except Exception as exc:
+        return {"check_error": f"{type(exc).__name__}: {exc}"[:500]}
+
+
+def bitwise(xs, ys) -> bool:
+    import mlx.core as mx
+    return all(mx.array_equal(p, q).item() for p, q in zip(xs, ys))
+
+
 # ---------------------------------------------------------------------------
 # One model
 # ---------------------------------------------------------------------------
+
+
+def stock_nn(q):
+    """nn.QuantizedLinear modules over the same arrays (the serving path's module call)."""
+    import mlx.nn as nn
+
+    def lin(p):
+        m = nn.QuantizedLinear.__new__(nn.QuantizedLinear)
+        nn.Module.__init__(m)
+        m.weight, m.scales, m.biases = p.weight[0], p.scales[0], p.biases[0]
+        m.group_size, m.bits, m.mode = p.group_size, p.bits, "affine"
+        m.freeze()
+        return m
+    return {n: lin(q[n]) for n in ("gate_proj", "up_proj", "down_proj")}
 
 
 def run_model(model, a, log, cells):
     import mlx.core as mx
     from mlx2.runtime.amoeba_blocks import layout as L
     from mlx2.runtime.amoeba_blocks import ops as O
+    from mlx2.runtime.models.activations import swiglu
     decl = declaration(model)
     moe = decl["kind"] == "switch_glu"
     layers = [int(v) for v in (a.layers_fn if model == "fn" else a.layers_27b).split(",")]
@@ -287,15 +386,26 @@ def run_model(model, a, log, cells):
     E, F, d = g0.experts, g0.n, g0.k
     gs = weights[layers[0]]["down_proj"].group_size
     rng = np.random.default_rng(0)
-    xs = {s: mx.array(rng.standard_normal((n, d)).astype(np.float32)).astype(mx.bfloat16) for s, n in SHAPES.items()
-          if s in a.shapes.split(",")}
+    shapes = [s for s in SHAPES if s in a.shapes.split(",")]
+    bshapes = [s for s in BOUNDARY_SHAPES if s in a.boundary_shapes.split(",") and s not in shapes]
+    allshapes = {**SHAPES, **BOUNDARY_SHAPES}
+    xs = {s: mx.array(rng.standard_normal((allshapes[s], d)).astype(np.float32)).astype(mx.bfloat16)
+          for s in shapes + bshapes}
     inds = {}
     if moe:
         for s, x in xs.items():
             n = int(x.shape[0])
             inds[s] = mx.array(np.stack([rng.choice(E, FN_TOPK, replace=False) for _ in range(n)]).astype(np.int32))
     backends = list(a.active_backends)
+    ref_be = backends[0]
     stock = {l: (stock_switch(weights[l]) if moe else None) for l in layers}
+    # the loaded 2-D arrays (stock-base calls quantized_matmul on [0] views of their [1, N, K] views)
+    flat = {}
+    mods = {}
+    if not moe:
+        for l in layers:
+            flat[l] = {n: RAW[(model, l, n)] for n in decl["projections"]}
+            mods[l] = stock_nn(weights[l])
     mx.eval(*xs.values(), *inds.values())
 
     def stock_fn(s, masks=None):
@@ -309,11 +419,36 @@ def run_model(model, a, log, cells):
             return lambda: [stock_dense(x, weights[l])() for l in layers]
         return lambda: [stock_dense(x, weights[l])(masks[l]) for l in layers]
 
-    def ours_fn(s, packedw, blocks, topen, backend, skip=True, count=False):
+    def stock_2d(s):
+        x = xs[s]
+
+        def mm(v, p, bits, gsz):
+            return mx.quantized_matmul(v, p[0], p[1], p[2], transpose=True, group_size=gsz, bits=bits)
+
+        def f():
+            out = []
+            for l in layers:
+                q = weights[l]
+                fl = flat[l]
+                h = swiglu(mm(x, fl["gate_proj"], q["gate_proj"].bits, q["gate_proj"].group_size),
+                           mm(x, fl["up_proj"], q["up_proj"].bits, q["up_proj"].group_size))
+                out.append(mm(h, fl["down_proj"], q["down_proj"].bits, q["down_proj"].group_size))
+            return out
+        return f
+
+    def stock_mod(s):
+        x = xs[s]
+        return lambda: [mods[l]["down_proj"](swiglu(mods[l]["gate_proj"](x), mods[l]["up_proj"](x))) for l in layers]
+
+    def stock_gate_only(s):
+        x = xs[s]
+        return lambda: [mods[l]["gate_proj"](x) for l in layers]
+
+    def ours_fn(s, packedw, blocks, topen, backend, skip=True, count=False, law=None):
         x = xs[s]
         n = int(x.shape[0])
-        to = mx.broadcast_to(topen, (n, topen.shape[1])) if topen.shape[0] == 1 else topen
-        to = mx.contiguous(to)
+        to = mx.contiguous(mx.broadcast_to(topen, (n, topen.shape[1])) if topen.shape[0] == 1 else topen)
+        mx.eval(to)
 
         def f():
             outs = []
@@ -322,9 +457,10 @@ def run_model(model, a, log, cells):
                 dn = weights[l]["down_proj"]
                 if moe:
                     y, c = O.block_switch_glu(x, inds[s], g, u, dn, blocks[l], to, skip=skip, count=count,
-                                              backend_name=backend)
+                                              backend_name=backend, law=law)
                 else:
-                    y, c = O.block_mlp(x, g, u, dn, blocks[l], to, skip=skip, count=count, backend_name=backend)
+                    y, c = O.block_mlp(x, g, u, dn, blocks[l], to, skip=skip, count=count, backend_name=backend,
+                                       law=law)
                 outs.append((y, c))
             return outs
         return f
@@ -332,39 +468,106 @@ def run_model(model, a, log, cells):
     def ys(outs):
         return [y for y, _ in outs]
 
-    base_out = {}
-    for s in xs:
-        r = timeit(stock_fn(s), a.reps, a.warmup)
-        base_out[s] = stock_fn(s)()
-        mx.eval(base_out[s])
-        cells.append({"model": model, "arm": "stock-base", "shape": s, "backend": "stock", **r,
-                      "tokens_per_s": int(xs[s].shape[0]) / (r["median_ms"] / 1e3),
-                      "bytes_read_est": len(layers) * O.dense_bytes(*(weights[layers[0]][p] for p in decl["projections"]))
-                      if not moe else None})
-        log(f"{model} stock-base {s}: {r['median_ms']:.2f} ms")
-    # identity layout (law base, all open)
+    def law_of(s, be):
+        n = int(xs[s].shape[0])
+        return O.select_law(be, n, d, sorted_rows=(not moe) or n * FN_TOPK >= O.SORT_MIN_PAIRS,
+                            mean_rows=n * FN_TOPK / E if moe else None)
+
+    def plan(s):
+        pre = s.startswith("prefill")
+        return dict(rounds=a.rounds, reps=a.reps_prefill if pre else a.reps, warm_ms=a.warm_ms)
+
+    def emit(base, res, extra=None):
+        cell = {"model": model, "checkpoint": MODELS[model]["checkpoint"], **base, **res, **(extra or {})}
+        cells.append(cell)
+        if "p50_ms" in res:
+            log(f"{model} {base['arm']} {base.get('partition', '')} {base['shape']} {base.get('backend', '')} "
+                f"{base.get('law', '')}: "
+                f"p50 {res['p50_ms']:.3f} ms (p10 {res['p10_ms']:.3f}, p90 {res['p90_ms']:.3f})")
+        return cell
+
     ident = {l: O.DeviceBlocks.from_layout(L.identity_layer(E, F, group_size=gs, chunk=32, tiles=1)) for l in layers}
     unpacked = {l: (weights[l]["gate_proj"], weights[l]["up_proj"]) for l in layers}
     one = mx.ones((1, 1), mx.uint8)
-    ident_out = {}
-    for s in xs:
+    bytes_dense = len(layers) * O.dense_bytes(*(weights[layers[0]][p] for p in decl["projections"])) if not moe else None
+
+    # ---- group 1 per shape: stock baselines (fairness diagnostics) and ours-ident under both laws.
+    # Boundary shapes (--boundary-shapes, baseline only) place the lane/prefill switch point.
+    base_out, ident_out = {}, {}
+    for s in shapes + bshapes:
+        n = int(xs[s].shape[0])
+        pre = s.startswith("prefill")
+        arms = {"stock-base": stock_fn(s)}
+        if not moe:
+            arms["stock-2d"] = stock_2d(s)
+            arms["stock-nn"] = stock_mod(s)
+            if not pre:
+                arms["stock-gate-proj-only"] = stock_gate_only(s)
+        laws = {}
         for be in backends:
-            r = timeit(ours_fn(s, unpacked, ident, one, be), reps_for(a, be, s), a.warmup)
-            outs = ours_fn(s, unpacked, ident, one, be, count=True)()
-            mx.eval([y for y, _ in outs])
-            ident_out[(s, be)] = ys(ours_fn(s, unpacked, ident, one, be)())
-            mx.eval(ident_out[(s, be)])
-            reads = [O.counter_reads(c) for _, c in outs]
-            cells.append({"model": model, "arm": "ours-ident", "shape": s, "backend": be, **r,
-                          "tokens_per_s": int(xs[s].shape[0]) / (r["median_ms"] / 1e3), "reads": reads,
-                          "max_rel_vs_stock": max(maxrel(o, b) for o, b in zip(ident_out[(s, be)], base_out[s]))})
-            log(f"{model} ours-ident {s} {be}: {r['median_ms']:.2f} ms")
-    # partitions
+            auto = law_of(s, be)
+            arms[f"ours-ident/{be}"] = ours_fn(s, unpacked, ident, one, be)
+            laws[f"ours-ident/{be}"] = auto
+            other = "lane" if auto == "prefill" else "prefill"
+            # the other law, pinned: prefill shapes only, and never simd's lane law past 512 rows (its
+            # 8-row tiles re-read the weights ~n/8 times: 1.8 s per 27B forward at 2048 rows)
+            if pre and not a.no_lane_prefill and not (be == "simd" and other == "lane" and n > 512):
+                try:
+                    O.select_law(be, n, d, law=other, sorted_rows=(not moe) or n * FN_TOPK >= O.SORT_MIN_PAIRS)
+                    arms[f"ours-ident@{other}/{be}"] = ours_fn(s, unpacked, ident, one, be, law=other)
+                    laws[f"ours-ident@{other}/{be}"] = other
+                except O.BlockSparseUnsupported:
+                    pass
+        res = measure(arms, **plan(s), seed=seed_of(model, "baseline", s), log=log)
+        try:
+            base_out[s] = stock_fn(s)()
+            mx.eval(base_out[s])
+        except Exception as exc:
+            log(f"{model} {s}: stock reference failed: {exc}")
+            continue
+        outs_by_law = {}
+        for name, r in res.items():
+            arm, _, be = name.partition("/")
+            extra = {"tokens_per_s": n / (r["p50_ms"] / 1e3)} if "p50_ms" in r else {}
+            if arm.startswith("stock"):
+                if bytes_dense and "p50_ms" in r and arm != "stock-gate-proj-only":
+                    extra["gb_per_s_weights"] = bytes_dense / (r["p50_ms"] / 1e3) / 1e9
+                if arm not in ("stock-base", "stock-gate-proj-only") and "p50_ms" in r:
+                    extra.update(guarded(lambda: {"bitwise_equals_stock_base": bitwise(_ev(arms[name]()), base_out[s])}))
+                emit({"arm": arm, "shape": s, "backend": "stock", "group": "baseline"}, r, extra)
+                continue
+            law = laws[name]
+            if "p50_ms" in r:
+                def checks():
+                    outs = ours_fn(s, unpacked, ident, one, be, count=True, law=law)()
+                    mx.eval([y for y, _ in outs])
+                    yv = _ev(ys(arms[name]()))
+                    outs_by_law[(be, law)] = yv
+                    if law == laws[f"ours-ident/{be}"] and s in shapes:
+                        ident_out[(s, be)] = yv
+                    return {"reads": [O.counter_reads(c) for _, c in outs],
+                            "max_rel_vs_stock": max(maxrel(o, b) for o, b in zip(yv, base_out[s]))}
+                extra.update(guarded(checks))
+                st = res.get("stock-base", {}).get("p50_ms")
+                if st:
+                    extra["speed_vs_stock"] = st / r["p50_ms"]
+            emit({"arm": arm.split("@")[0], "law": law, "pinned": "@" in arm, "shape": s, "backend": be,
+                  "group": "baseline", "open_fraction": 1.0}, r, extra)
+        for be in backends:
+            if (be, "lane") in outs_by_law and (be, "prefill") in outs_by_law:
+                cells.append({"model": model, "arm": "law-diff", "shape": s, "backend": be,
+                              "max_rel_prefill_vs_lane": max(maxrel(p_, q_) for p_, q_ in
+                                                             zip(outs_by_law[(be, "prefill")], outs_by_law[(be, "lane")]))})
+
+    # ---- partitions
     parts = []
     for kind in ("aligned", "scattered"):
         for p in [float(v) for v in a.fractions.split(",")]:
             parts.append((f"{kind}@{p:g}", {l: synthetic_owner(rng, E, F, p, kind, gs) for l in layers}, 2,
                           np.array([[1, 0]], np.uint8), p))
+    if model == "fn" and not a.no_gates:
+        gate_cells(model, fn_real_partition(layers)[0], d, {k: v for k, v in xs.items() if k in shapes}, rng, a,
+                   log, cells, emit)
     if model == "fn" and not a.no_real:
         names, owners, top, _ = fn_real_partition(layers)
         nt = len(names)
@@ -376,17 +579,6 @@ def run_model(model, a, log, cells):
         for tag, to in (("real:all", alls), ("real:core", core_only), (f"real:core+{top}", plus)):
             frac = float(np.mean([to[0][owners[l]].mean() for l in layers]))
             parts.append((tag, owners, nt, to, frac))
-        # the fused tile-gate kernel on the real tile graph (random probes: cost, not decisions)
-        graph = L.graph_from_partition_names(names)
-        nb = len(graph.boxes)
-        tables = O.GateTables.from_graph(graph, rng.standard_normal((nb, d)).astype(np.float32) / np.sqrt(d),
-                                         np.zeros(nb, np.float32))
-        for s in xs:
-            r = timeit(lambda: [O.tile_gates(xs[s], tables, union=xs[s].shape[0] > 1)[0] for _ in layers],
-                       a.reps, a.warmup)
-            cells.append({"model": model, "arm": "tile-gates", "shape": s, "backend": "simd", "boxes": nb,
-                          "tiles": nt, **r})
-            log(f"{model} tile-gates {s}: {r['median_ms']:.3f} ms for {len(layers)} layers")
     for tag, owners, nt, topen_np, frac in parts:
         lbs = {l: L.plan_layer(owners[l], tiles=nt, group_size=gs, chunk=32) for l in layers}
         blocks = {l: O.DeviceBlocks.from_layout(lbs[l]) for l in layers}
@@ -394,49 +586,159 @@ def run_model(model, a, log, cells):
                    for l in layers}
         mx.eval([a_ for pw in packedw.values() for q in pw for a_ in (q.weight, q.scales, q.biases)])
         topen = mx.array(topen_np)
-        for s in xs:
+        for s in shapes:
             n = int(xs[s].shape[0])
-            if tag in ("scattered@0.4", "real:core"):     # one stock zero-but-compute arm per shape
+            arms = {"stock-base": stock_fn(s), f"ours-ident/{ref_be}": ours_fn(s, unpacked, ident, one, ref_be)}
+            masks = None
+            if tag in ("scattered@0.4", "real:core"):     # stock zero-but-compute arm
                 masks = {}
                 for l in layers:
                     m_ = mx.array(topen_np[0][owners[l]].astype(np.float32)).astype(mx.bfloat16)  # [E, F]
                     masks[l] = m_[inds[s]] if moe else m_[0]
-                r = timeit(stock_fn(s, masks), a.reps, a.warmup)
-                cells.append({"model": model, "arm": "stock-masked", "partition": tag, "shape": s, "backend": "stock",
-                              **r, "tokens_per_s": n / (r["median_ms"] / 1e3)})
-                log(f"{model} stock-masked {tag} {s}: {r['median_ms']:.2f} ms")
+                arms["stock-masked"] = stock_fn(s, masks)
             for be in backends:
-                r = timeit(ours_fn(s, packedw, blocks, topen, be), reps_for(a, be, s), a.warmup)
-                outs = ours_fn(s, packedw, blocks, topen, be, count=True)()
-                sk = ys(ours_fn(s, packedw, blocks, topen, be)())
-                ms = ys(ours_fn(s, packedw, blocks, topen, be, skip=False)())
-                mx.eval([y for y, _ in outs], sk, ms)
-                reads = [O.counter_reads(c) for _, c in outs]
-                q0 = weights[layers[0]]
-                byts = [L.bytes_from_reads(rd, d=d, bits=q0["gate_proj"].bits, group_size=q0["gate_proj"].group_size,
-                                           down_bits=q0["down_proj"].bits, down_group_size=gs,
-                                           down_cols=O.down_cols(be))["total_bytes"] for rd in reads]
-                cell = {"model": model, "arm": "ours-skip", "partition": tag, "open_fraction": frac, "shape": s,
-                        "backend": be, **r, "tokens_per_s": n / (r["median_ms"] / 1e3), "reads": reads,
-                        "bytes_read": int(sum(byts)), "gb_per_s": sum(byts) / (r["median_ms"] / 1e3) / 1e9,
-                        "skip_equals_masked_bitwise": all(mx.array_equal(p_, q_).item() for p_, q_ in zip(sk, ms))}
-                if tag in ("real:all", "scattered@0.4"):
-                    # a nontrivial packing with every tile open must give the unpacked layout's bits
-                    allopen = ys(ours_fn(s, packedw, blocks, mx.ones((1, nt), mx.uint8), be)())
-                    cell["packed_all_open_equals_ident_bitwise"] = all(
-                        mx.array_equal(p_, q_).item() for p_, q_ in zip(allopen, ident_out[(s, be)]))
-                if tag.endswith("@1") or tag == "real:all":
-                    cell["max_rel_vs_stock"] = max(maxrel(o, b) for o, b in zip(sk, base_out[s]))
+                arms[f"ours-skip/{be}"] = ours_fn(s, packedw, blocks, topen, be)
                 if not a.no_mask_arms:
-                    rm = timeit(ours_fn(s, packedw, blocks, topen, be, skip=False), reps_for(a, be, s), a.warmup)
-                    cell["ours_mask_median_ms"] = rm["median_ms"]
-                cells.append(cell)
-                log(f"{model} ours-skip {tag} {s} {be}: {r['median_ms']:.2f} ms, {sum(byts) / 1e6:.1f} MB, "
-                    f"skip==mask {cell['skip_equals_masked_bitwise']}")
+                    arms[f"ours-mask/{be}"] = ours_fn(s, packedw, blocks, topen, be, skip=False)
+            res = measure(arms, **plan(s), seed=seed_of(model, tag, s), log=log)
+            st = res.get("stock-base", {}).get("p50_ms")
+            idm = res.get(f"ours-ident/{ref_be}", {}).get("p50_ms")
+            for name in ("stock-base", "stock-masked", f"ours-ident/{ref_be}"):
+                if name in res:
+                    arm, _, be = name.partition("/")
+                    emit({"arm": arm, "partition": tag, "shape": s, "backend": be or "stock", "group": tag,
+                          "reference": True}, res[name])
+            for be in backends:
+                r = res.get(f"ours-skip/{be}", {})
+                cell = {"arm": "ours-skip", "partition": tag, "open_fraction": frac, "shape": s, "backend": be,
+                        "law": law_of(s, be), "group": tag}
+                extra = {}
+                if "p50_ms" in r:
+                    def checks():
+                        outs = ours_fn(s, packedw, blocks, topen, be, count=True)()
+                        sk = ys(ours_fn(s, packedw, blocks, topen, be)())
+                        ms = ys(ours_fn(s, packedw, blocks, topen, be, skip=False)())
+                        mx.eval([y for y, _ in outs], sk, ms)
+                        reads = [O.counter_reads(c) for _, c in outs]
+                        q0 = weights[layers[0]]
+                        byts = [L.bytes_from_reads(rd, d=d, bits=q0["gate_proj"].bits,
+                                                   group_size=q0["gate_proj"].group_size,
+                                                   down_bits=q0["down_proj"].bits, down_group_size=gs,
+                                                   down_cols=O.down_cols(be, law_of(s, be)))["total_bytes"]
+                                for rd in reads]
+                        extra = {"tokens_per_s": n / (r["p50_ms"] / 1e3), "reads": reads, "bytes_read": int(sum(byts)),
+                                 "gb_per_s": sum(byts) / (r["p50_ms"] / 1e3) / 1e9,
+                                 "skip_equals_masked_bitwise": bitwise(sk, ms)}
+                        if st:
+                            extra["speed_vs_stock"] = st / r["p50_ms"]
+                        if idm and be == ref_be:
+                            extra["speed_vs_ours_ident"] = idm / r["p50_ms"]
+                        if tag in ("real:all", "scattered@0.4", "aligned@1", "scattered@1") and (s, be) in ident_out:
+                            allopen = ys(ours_fn(s, packedw, blocks, mx.ones((1, nt), mx.uint8), be)())
+                            extra["packed_all_open_equals_ident_bitwise"] = bitwise(allopen, ident_out[(s, be)])
+                        if frac >= 0.999 or tag == "real:all":
+                            extra["max_rel_vs_stock"] = max(maxrel(o, b) for o, b in zip(sk, base_out[s]))
+                        rm = res.get(f"ours-mask/{be}", {})
+                        if "p50_ms" in rm:
+                            extra["ours_mask_p50_ms"] = rm["p50_ms"]
+                        return extra
+                    extra = guarded(checks)
+                emit(cell, r, extra)
         del packedw, blocks
         mx.clear_cache()
-    del weights
+    del weights, flat, mods
+    for key in [k for k in RAW if k[0] == model]:
+        del RAW[key]
     mx.clear_cache()
+
+
+def gate_cells(model, names, d, xs, rng, a, log, cells, emit):
+    """Tile gates on the real FN tile graph and a wide synthetic one (random probes and token prior:
+    cost, not decisions).
+
+    One gate call per token per forward gates every layer (tile ids are global), so each arm is
+    one call.  Arms: fused kernel, split kernels, the same two on the token law, host token law
+    (ids already on the host -> closure -> upload), host probe law (numpy; needs h on the host, a
+    sync in a real loop).  ``auto_impl`` records what the default picks for that shape."""
+    import mlx.core as mx
+    from mlx2.runtime.amoeba_blocks import layout as L
+    from mlx2.runtime.amoeba_blocks import ops as O
+    real = L.graph_from_partition_names(names)
+    # a wide synthetic graph (416 boxes = 13 words, the tile count of the real one): where split's
+    # one-threadgroup-per-word parallelism exists
+    wb = len(names)
+    wide = L.TileGraph([f"b{i}" for i in range(wb)], ["core"] + [f"t{i}" for i in range(1, len(names))],
+                       [()] + [(i - 1,) for i in range(1, len(names))], parent=[-1] * wb)
+    for gname, graph in (("real", real), ("wide", wide)):
+        gate_graph_cells(model, gname, graph, d, xs, rng, a, log, emit)
+
+
+def gate_graph_cells(model, gname, graph, d, xs, rng, a, log, emit):
+    import mlx.core as mx
+    from mlx2.runtime.amoeba_blocks import ops as O
+    nb = len(graph.boxes)
+    tables = O.GateTables.from_graph(graph, rng.standard_normal((nb, d)).astype(np.float32) / np.sqrt(d),
+                                     np.zeros(nb, np.float32))
+    vocab = 4096
+    prior = (rng.random((vocab, nb)) < 0.03).astype(np.uint8)
+    host = O.HostGateTables.from_tables(tables, prior)
+    prior_dev = mx.array(prior)
+    for s, x in xs.items():
+        t = int(x.shape[0])
+        un = t > 1
+        toks = rng.integers(0, vocab, size=t)
+        toks_dev = mx.array(toks.astype(np.int32))
+        h_host = np.array(x.astype(mx.float32))
+        box_dev = prior_dev[toks_dev]
+        mx.eval(box_dev)
+
+        # every arm returns (topen, union) and both are evaluated: equal work across arms
+        def host_token():
+            tp, uu = O.host_tile_gates(host, tokens=toks, union=un)
+            return [mx.array(tp)] + ([mx.array(uu)] if un else [])
+
+        def host_probe():
+            tp, uu = O.host_tile_gates(host, h=h_host, union=un)
+            return [mx.array(tp)] + ([mx.array(uu)] if un else [])
+
+        def gpu(impl, token):
+            def f():
+                tp, uu = O.tile_gates(x, tables, union=un, impl=impl,
+                                      box_open=prior_dev[toks_dev] if token else None)
+                return [tp] + ([uu] if un else [])
+            return f
+        arms = {"fused": gpu("fused", False), "split": gpu("split", False), "fused-token": gpu("fused", True),
+                "split-token": gpu("split", True), "host-token": host_token, "host-probe": host_probe}
+        res = measure(arms, rounds=a.rounds, reps=a.reps, warm_ms=a.warm_ms, seed=seed_of("gate", gname, s),
+                      log=log)
+        # host-side cost alone (no upload, no GPU): what a step-overlapped host gate costs
+        host_cpu = {}
+        for nm, kw in (("host-token", {"tokens": toks}), ("host-probe", {"h": h_host})):
+            ts = []
+            for _ in range(max(20, a.reps)):
+                t0 = time.perf_counter()
+                O.host_tile_gates(host, union=un, **kw)
+                ts.append(time.perf_counter() - t0)
+            host_cpu[nm] = 1e3 * statistics.median(ts)
+        f_t, f_u = O.tile_gates(x, tables, union=True, impl="fused")
+        s_t, s_u = O.tile_gates(x, tables, union=True, impl="split")
+        ft_t, _ = O.tile_gates(x, tables, box_open=box_dev, impl="fused")
+        st_t, _ = O.tile_gates(x, tables, box_open=box_dev, impl="split")
+        mx.eval(f_t, f_u, s_t, s_u, ft_t, st_t)
+        ht, _ = O.host_tile_gates(host, tokens=toks)
+        hp, _ = O.host_tile_gates(host, h=h_host)
+        checks = {"split_equals_fused_probe_bitwise": bool(mx.array_equal(f_t, s_t).item() and mx.array_equal(f_u, s_u).item()),
+                  "split_equals_fused_token_bitwise": bool(mx.array_equal(ft_t, st_t).item()),
+                  "host_token_equals_fused_bitwise": bool(np.array_equal(ht, np.array(ft_t))),
+                  "host_probe_rows_differing_from_fused": int((hp != np.array(f_t)).any(1).sum())}
+        for name, r in res.items():
+            extra = {"graph": gname, "boxes": nb, "words": tables.words, "tiles": tables.tiles,
+                     "auto_impl": O.gate_impl(t, tables.words), "calls_per_forward": 1, **checks}
+            if name in host_cpu:
+                extra["host_cpu_only_ms"] = host_cpu[name]
+            emit({"arm": f"tile-gates/{name}", "partition": gname, "shape": s,
+                  "backend": "host" if name.startswith("host") else "gpu", "group": "gates"}, r, extra)
+        log(f"{model} gates {gname} {s}: {checks}")
 
 
 # ---------------------------------------------------------------------------
@@ -483,31 +785,39 @@ def artifact_record(model: str) -> dict:
     return rec
 
 
-# Guessed seconds per 3-layer forward (no measurement yet): (model, backend, shape).  simd prefill
-# re-reads the weights once per 8-row work tile (27B: ~200 GB per forward), hence --slow-reps.
-_GUESS = {("fn", "decode1"): 0.004, ("fn", "decode4"): 0.008, ("fn", "prefill2048"): 0.08,
-          ("27b", "decode1"): 0.006, ("27b", "decode4"): 0.008, ("27b", "prefill2048"): 0.08}
-_SIMD_PREFILL = {"fn": 0.12, "27b": 0.6}
-
-
-def reps_for(a, backend: str, shape: str) -> int:
-    return min(a.reps, a.slow_reps) if backend == "simd" and shape.startswith("prefill") else a.reps
+# Guessed seconds per 3-layer forward (decode from the 2026-11-19 bench; prefill for the new law
+# assumes ~stock, simd ~4x): (model, shape).
+_GUESS = {("fn", "decode1"): 0.001, ("fn", "decode4"): 0.0015, ("fn", "prefill2048"): 0.04,
+          ("27b", "decode1"): 0.005, ("27b", "decode4"): 0.005, ("27b", "prefill2048"): 0.15}
+_SIMD_PREFILL = {"fn": 0.15, "27b": 0.6}
+_LANE_PREFILL = {"fn": 0.09, "27b": 0.85}
 
 
 def estimate(a) -> dict:
-    """Rough window length from per-forward guesses (cells x timed and checking forwards)."""
+    """Rough window length: per arm (warm-up + rounds x reps + ~4 checking forwards)."""
     fr = len(a.fractions.split(","))
+    bes = a.backends.split(",")
     total = 0.0
     for model in a.models.split(","):
         parts = 2 * fr + (0 if model != "fn" or a.no_real else 3)
         for s in a.shapes.split(","):
-            total += _GUESS[(model, s)] * (a.warmup + a.reps) * 3                 # stock base + 2 masked
-            for be in a.backends.split(","):
-                per = _SIMD_PREFILL[model] if be == "simd" and s.startswith("prefill") else _GUESS[(model, s)]
-                reps = reps_for(a, be, s)
-                forwards = a.warmup + reps + 5 + (0 if a.no_mask_arms else a.warmup + reps)
-                total += per * forwards * (1 + parts)
-        total += 120 + parts * 20                                                  # load + packing
+            pre = s.startswith("prefill")
+            reps = a.rounds * (a.reps_prefill if pre else a.reps)
+            g = _GUESS[(model, s)]
+            per = {be: (_SIMD_PREFILL[model] if be == "simd" and pre else g) for be in bes}
+            fw = lambda t: a.warm_ms / 1e3 + t * (reps + 5)                              # noqa: E731
+            base = fw(g) * (1 if model == "fn" else 3) + sum(fw(per[be]) for be in bes)
+            if pre and "mpp" in bes and not a.no_lane_prefill:
+                base += fw(_LANE_PREFILL[model])
+            part = fw(g) * 2 + sum(fw(per[be]) * (1 if a.no_mask_arms else 2) for be in bes)
+            total += base + parts * part
+        for s in a.boundary_shapes.split(","):
+            if s in BOUNDARY_SHAPES:
+                rows = BOUNDARY_SHAPES[s]
+                g = _GUESS[(model, "prefill2048")] * rows / 2048 + 0.002
+                total += (a.warm_ms / 1e3 + g * (a.rounds * a.reps_prefill + 5)) * (3 + 2 * len(bes) + 2)
+        total += 60 + parts * 10                                                           # load + packing
+    total += 60                                                                            # gate cells
     return {"estimated_minutes": round(total / 60, 1), "guess_s_per_forward": {f"{k[0]}/{k[1]}": v for k, v in
                                                                               _GUESS.items()},
             "guess_simd_prefill_s": _SIMD_PREFILL}
@@ -531,11 +841,16 @@ def main():
     ap.add_argument("--shapes", default=",".join(SHAPES))
     ap.add_argument("--backends", default="mpp,simd")
     ap.add_argument("--fractions", default="1.0,0.7,0.4,0.2")
-    ap.add_argument("--reps", type=int, default=20)
-    ap.add_argument("--warmup", type=int, default=3)
-    ap.add_argument("--slow-reps", type=int, default=5, help="reps for simd prefill cells")
+    ap.add_argument("--rounds", type=int, default=4, help="randomized-order rounds per group")
+    ap.add_argument("--reps", type=int, default=15, help="forwards per arm per round (decode)")
+    ap.add_argument("--reps-prefill", type=int, default=3, help="forwards per arm per round (prefill)")
+    ap.add_argument("--warm-ms", type=float, default=250, help="warm-up per arm after its first call")
+    ap.add_argument("--no-lane-prefill", action="store_true", help="skip the lane-law prefill reference arm")
     ap.add_argument("--no-mask-arms", action="store_true", help="do not time ours-mask@p (SKIP=0)")
     ap.add_argument("--no-real", action="store_true", help="skip the real FN partition arms")
+    ap.add_argument("--no-gates", action="store_true", help="skip the tile-gate cells (FN)")
+    ap.add_argument("--boundary-shapes", default=",".join(BOUNDARY_SHAPES),
+                    help="extra prefill sizes timed in the baseline group only, both laws pinned")
     ap.add_argument("--memory-gb", type=float, default=80)
     ap.add_argument("--watchdog-gb", type=float, default=80)
     ap.add_argument("--swap-growth-gb", type=float, default=2.0)
@@ -576,7 +891,7 @@ def main():
     import mlx.core as mx
     mx.set_default_device(mx.gpu)
     info = mx.device_info()
-    receipt = {"schema": "mlx2.amoeba-blocks-bench.v1", "mlx2_revision": git_rev(), "mlx": mx.__version__,
+    receipt = {"schema": "mlx2.amoeba-blocks-bench.v2", "mlx2_revision": git_rev(), "mlx": mx.__version__,
                "device": info.get("device_name"), "args": vars(a), "estimate": estimate(a),
                "checkpoints": {m: MODELS[m]["checkpoint"] for m in a.models.split(",")},
                "status": "unqualified research bench; no route selects these kernels",
