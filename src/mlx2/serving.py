@@ -1891,6 +1891,10 @@ def request_apc_scope(request):
     if amoeba_open is not None:
         # A restricted amoeba router open set: cached state is exact only under the same set.
         result = (result, "amoeba-router-open-set-v1", amoeba_open)
+    gate_mode = request.get("_mlx2_amoeba_gate_mode_scope")
+    if gate_mode is not None:
+        # amoeba_blocks next-token gating (approximate): cached state is exact only under the same mode.
+        result = (result, "amoeba-blocks-gate-mode-v1", gate_mode)
     expert_mask = request.get("_mlx2_expert_mask_fingerprint")
     if expert_mask is not None:
         result = (result, "native-expert-mask-v1", expert_mask,
@@ -4258,6 +4262,7 @@ class Job:
     # its per-request router record (shared with the tile set's row binding while bound).
     amoeba_open: object = None
     amoeba_open_record: dict | None = None
+    amoeba_gate_mode: str | None = None    # mlx2_amoeba_gate_mode (amoeba_blocks routes only; opt-in)
     lora_fingerprint: str | None = None
     lora_slot: int | None = None
     lora_residency: str | None = None
@@ -6558,6 +6563,17 @@ class ServingEngine(KernelReloadMixin):
             if "mlx2_overlay" in job.request or any(
                     key in job.request for key in ("weight_overlay", "layer_excision", "expert_mask")):
                 raise ValueError("amoeba tiles do not compose with weight-space overlays or surgery")
+        # Next-token gating (amoeba_blocks.nexttok, opt-in): only a route with block-sparse kernels has
+        # gates; any gate mode on another route fails closed (HTTP 409).
+        if job.request.get("mlx2_amoeba_gate_mode") is not None:
+            from .runtime.amoeba_blocks.nexttok import check_request_gate_mode
+            from .runtime.amoeba_blocks.nexttok import APPROXIMATE_MODES
+            job.amoeba_gate_mode = check_request_gate_mode(
+                getattr(getattr(self, "adapter", None), "amoeba_blocks", None),
+                job.request.get("mlx2_amoeba_gate_mode"))
+            if job.amoeba_gate_mode in APPROXIMATE_MODES:
+                # approximate gating computes other state than same-step: never shared with it in APCv2
+                job.request["_mlx2_amoeba_gate_mode_scope"] = job.amoeba_gate_mode
         det_tiles = getattr(getattr(self, "adapter", None), "amoeba_det_tiles", None)
         if det_tiles is not None or job.request.get("det_tiles") is not None:
             from .runtime.amoeba_det_tiles import request_toggles
@@ -8743,6 +8759,13 @@ class ServingEngine(KernelReloadMixin):
 
     def _weight_space_route_receipt(self, job, receipt):
         """Build the selected feature receipt before execution-epoch decoration."""
+        blocks = getattr(getattr(self, "adapter", None), "amoeba_blocks", None)
+        if blocks is not None:
+            from .runtime.amoeba_blocks.nexttok import receipt_fields
+            receipt = {**(receipt if isinstance(receipt, dict) else {"route": receipt}),
+                       "qualified": False, "qualification": "unqualified",
+                       **receipt_fields(getattr(job, "amoeba_gate_mode", None),
+                                        getattr(blocks, "gate_stats", lambda _job: None)(job))}
         det = getattr(getattr(self, "adapter", None), "amoeba_det_tiles", None)
         if getattr(getattr(self, "adapter", None), "amoeba_tiles", None) is not None:
             receipt = {**(receipt if isinstance(receipt, dict) else {"route": receipt}),

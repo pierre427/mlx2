@@ -919,6 +919,7 @@ def validate_request(
         "mlx2_overlay",
         "mlx2_amoeba_tiles",
         "mlx2_amoeba_open",
+        "mlx2_amoeba_gate_mode",
         "det_tiles",
     }
     # OpenAI clients serialize an unset field as an explicit null

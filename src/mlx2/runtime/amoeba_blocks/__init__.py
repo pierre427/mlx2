@@ -10,6 +10,8 @@ tiles saves nothing; these kernels skip them: a closed tile's gate/up rows and e
                     and down, and the fused tile-gate kernel; offline compilation for CPU checks.
 * :mod:`.ops`       MLX launchers, work tiles (dense, decode pairs, sorted prefill routes).
 * :mod:`.reference` float64 masked reference and the fp32 structural emulator (CPU tests).
+* :mod:`.nexttok`   opt-in next-token gate mode (step t+1's tiles decided at the end of step t), hysteresis,
+                    fail-open, prefill/speculative unions, prefetch hook, verify + recompute (exact).
 
 States: implemented; not qualified; not selected by any route; never observed-used in serving.
 See docs/research/2026-11-18-amoeba-block-sparse-kernels.md and provenance/amoeba-blocks.json.

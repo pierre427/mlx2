@@ -134,7 +134,8 @@ class Control:
         self.mean = None            # same layout, dense sites only (zero ablation when None)
         self.sink_layers = 0        # position 0 exact in layers < sink_layers
         self.dense_layers = ()      # layers that run whole at every position
-        self.boxes = []             # [{"name", "mask", "gate": (W [L,d], b [L]) | None, "hard": bool}]
+        self.boxes = []             # [{"name", "mask", "gate": (W [L,d], b [L]) | None, "hard": bool,
+                                    #   "token_gate": [B, T, 1] float | None (precomputed, wins over "gate")}]
         self.stats = None           # callback(layer, kind, payload) or None
         self.stats_fast = False     # with stats: return the captured rows' output, no second MoE call
         self.gate_log = None        # list to append (box, layer, g) or None
@@ -168,7 +169,9 @@ def _box_mask(mx, c, l, x):
     m = c.core[l]
     for box in c.boxes:
         bm = box["mask"][l]
-        if box.get("gate") is not None:
+        if box.get("token_gate") is not None:      # precomputed per-token open bits [B, T, 1] (next-token gating)
+            m = m + bm * box["token_gate"]
+        elif box.get("gate") is not None:
             W, b = box["gate"]
             g = mx.sigmoid((x.astype(mx.float32) @ W[l][:, None]) + b[l])      # B,T,1
             if box.get("hard"):
@@ -760,7 +763,9 @@ def _neuron_keep(mx, c, l, x, inds, E, F):
     K = _slot_rows(c.core[l], inds, E, F)
     for box in c.boxes:
         bk = _slot_rows(box["mask"][l], inds, E, F)
-        if box.get("gate") is not None:
+        if box.get("token_gate") is not None:      # precomputed per-token open bits [B, T, 1] (next-token gating)
+            K = K + bk * box["token_gate"][..., None]
+        elif box.get("gate") is not None:
             W, b = box["gate"]
             g = mx.sigmoid((x.astype(mx.float32) @ W[l][:, None]) + b[l])      # [..., 1]
             if box.get("hard"):

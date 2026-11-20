@@ -208,3 +208,37 @@ def test_tile_gates_kernel():
     box = mx.array(raw.astype(np.uint8))
     t2, _ = O.tile_gates(h, tables, box_open=box)
     assert np.array_equal(np.array(t2), ref)
+
+
+@pytest.mark.parametrize("backend", _backends())
+@pytest.mark.parametrize("moe", [False, True])
+def test_nexttok_verify_recompute_bitwise_equals_same_step(backend, moe):
+    """Next-token gating with verify: the predicted pass, the recompute of disagreeing rows and the merge
+    give the same-step output bit for bit with the same kernels (row invariance on Metal)."""
+    from mlx2.runtime.amoeba_blocks import nexttok as NT
+    rng = np.random.default_rng(21 + moe)
+    E, F, d, T = (6, 640, 256, 5) if moe else (1, 512, 256, 5)
+    own, lb, g, u, dn = case(rng, E, F, d, T, 4)
+    gp, up = O.pack_qweight(g, lb), O.pack_qweight(u, lb)
+    blocks = O.DeviceBlocks.from_layout(lb)
+    tokens = 12
+    x = mx.array(rng.standard_normal((tokens, d)).astype(np.float32)).astype(mx.bfloat16)
+    inds = mx.array(np.stack([rng.choice(E, 3, replace=False) for _ in range(tokens)]).astype(np.int32))
+    S = (rng.random((tokens, T)) < 0.4).astype(np.uint8)
+    S[:, 0] = 1
+    P = S.copy()
+    P[[1, 5, 9]] = 1 - P[[1, 5, 9]]
+    P[:, 0] = 1
+
+    def mlp(xx, t):
+        if moe:
+            return O.block_switch_glu(xx, inds, gp, up, dn, blocks, t, backend_name=backend)[0]
+        return O.block_mlp(xx, gp, up, dn, blocks, t, backend_name=backend)[0]
+    for exact in (True, False):
+        y, redo = NT.verified(mlp, x, mx.array(P), mx.array(S), exact=exact)
+        ref = mlp(x, mx.array(S))
+        r = np.array(redo)
+        if exact:
+            assert mx.array_equal(y, ref).item()
+        else:
+            assert mx.array_equal(y[mx.array(np.flatnonzero(r))], ref[mx.array(np.flatnonzero(r))]).item()

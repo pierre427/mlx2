@@ -73,6 +73,7 @@ _REQUEST_WEIGHT_PROGRAMS = (
     "mlx2_overlay",
     "mlx2_amoeba_tiles",
     "mlx2_amoeba_open",
+    "mlx2_amoeba_gate_mode",
     "prefill_handoff",
 )
 # APCv2 reuse restrictions that concern batch invariance only.  A width-1
