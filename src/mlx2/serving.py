@@ -76,6 +76,7 @@ SERVER_OWNED_EXECUTION_POLICY_KEYS = frozenset(
         "mtp_ordinary_handoff",
         "memory_preemption",
         "apc_junction_checkpoints",
+        "apc_tail_checkpoint",
         "apc_inflight_prefix_wait",
         "apc_retention_policy",
         "apc_rolling_checkpoints",
@@ -1098,6 +1099,39 @@ def apc_rolling_checkpoint_policy(value) -> dict:
             "APC rolling checkpoint interval_tokens must be 0 or an integer >= 16"
         )
     return {"interval_tokens": interval}
+
+
+def apc_tail_checkpoint_policy(value) -> dict:
+    """Validate the default-off APCv2 trimmed-tail checkpoint policy.
+
+    ``tokens`` places one exact hybrid boundary ``tokens`` below the prompt's
+    replay boundary (``P-1``), so an agent turn that rewrites the tail of the
+    previous turn's last message restores there instead of at the last
+    rolling checkpoint (up to ``interval_tokens`` back).  ``min_gain_tokens``
+    skips the capture when a shallower planned boundary already lies that
+    close.  ``tokens`` 0 (or ``null``) disables it.  Design references:
+    incoai/splash#784, jundot/omlx#5251.  Implemented, unqualified, off: no
+    agent-replay A/B has run (code-only slice 2026-11-19).
+    """
+    defaults = {"tokens": 0, "min_gain_tokens": 512}
+    if value is None:
+        return dict(defaults)
+    if not isinstance(value, dict):
+        raise ValueError("apc_tail_checkpoint must be an object")
+    unknown = set(value) - set(defaults)
+    if unknown:
+        raise ValueError(f"unknown APC tail checkpoint settings: {sorted(unknown)}")
+    policy = {**defaults, **value}
+    for key, minimum in (("tokens", 16), ("min_gain_tokens", 0)):
+        item = policy[key]
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0 or (
+            key == "tokens" and 0 < item < minimum
+        ):
+            raise ValueError(
+                f"APC tail checkpoint {key} must be "
+                + ("0 or an integer >= 16" if key == "tokens" else "an integer >= 0")
+            )
+    return {"tokens": policy["tokens"], "min_gain_tokens": policy["min_gain_tokens"]}
 
 
 def apc_inflight_prefix_policy(value) -> dict:
@@ -4535,6 +4569,9 @@ class ServingEngine(KernelReloadMixin):
         if type(junction_policy) is not bool:
             raise ValueError("apc_junction_checkpoints must be boolean")
         self.apc_junction_checkpoints = junction_policy
+        self.apc_tail_checkpoint_policy = apc_tail_checkpoint_policy(
+            (execution_policy or {}).get("apc_tail_checkpoint")
+        )
         self.apc_inflight_prefix_policy = apc_inflight_prefix_policy(
             (execution_policy or {}).get("apc_inflight_prefix_wait")
         )
@@ -11434,6 +11471,7 @@ class ServingEngine(KernelReloadMixin):
                 cold_prefill_cuts,
                 generation_prompt_boundary,
                 plan_interior_positions,
+                trimmed_tail_position,
             )
             from .runtime.state_boundaries import (
                 RETENTION_ROLE,
@@ -11626,6 +11664,8 @@ class ServingEngine(KernelReloadMixin):
             if self.apc_junction_checkpoints:
                 # Present only when enabled so default receipts stay identical.
                 settings["apc_junction_checkpoints"] = True
+            if self.apc_tail_checkpoint_policy["tokens"]:
+                settings["apc_tail_checkpoint"] = dict(self.apc_tail_checkpoint_policy)
             if self.apc_inflight_prefix_policy["enabled"]:
                 settings["apc_inflight_prefix_wait"] = dict(
                     self.apc_inflight_prefix_policy
@@ -11909,6 +11949,7 @@ class ServingEngine(KernelReloadMixin):
             state_checkpoints_selected = bool(
                 self.apc_interior_checkpoint_policy["count"]
                 or self.apc_junction_checkpoints
+                or self.apc_tail_checkpoint_policy["tokens"]
             )
             if self.apc_interior_route_supported and state_checkpoints_selected:
                 from .runtime.models.cache import make_prompt_cache
@@ -11935,6 +11976,8 @@ class ServingEngine(KernelReloadMixin):
                         if self.apc_interior_checkpoint_policy["count"]
                         else "junction"
                         if self.apc_junction_checkpoints
+                        else "tail"
+                        if self.apc_tail_checkpoint_policy["tokens"]
                         else "in-flight prefix"
                     )
                     + " checkpoints cannot capture on the selected "
@@ -14840,6 +14883,7 @@ class ServingEngine(KernelReloadMixin):
                                         adapter, job.request, tokens, cached_tokens=0,
                                     )
                                 ),
+                                tail_tokens=self.apc_tail_checkpoint_policy["tokens"],
                             )
                         partition_checkpoint_position = None
                         if self.apc_interior_route_supported:
@@ -14876,6 +14920,7 @@ class ServingEngine(KernelReloadMixin):
                                 )
                                 or self.apc_rolling_route == "hybrid"
                                 or self.apc_junction_checkpoints
+                                or self.apc_tail_checkpoint_policy["tokens"] > 0
                                 or turn_end_boundary is not None
                                 or media_checkpoint_position is not None
                                 or partition_checkpoint_position is not None
@@ -14942,6 +14987,55 @@ class ServingEngine(KernelReloadMixin):
                                 sorted((*checkpoint_candidates, turn_end_boundary))
                             )
                             count_add(self.counts, "apc_interior_positions_planned_generation_prompt", 1)
+                        tail_policy = self.apc_tail_checkpoint_policy
+                        if planning_target and tail_policy["tokens"]:
+                            # Exempt from the continuation skip, as the
+                            # generation-prompt boundary: an agent turn is a
+                            # deep-hit continuation, and it is the next agent
+                            # turn this serves.  Gain is measured against the
+                            # deepest state the next turn could otherwise use.
+                            rolling = (
+                                int(self.apc_rolling_checkpoint_policy["interval_tokens"])
+                                if self.apc_rolling_route == "hybrid"
+                                else 0
+                            )
+                            # A warm plan later keeps only cold-cut candidates
+                            # (APC-3) and the budget may drop more; measure
+                            # gain against states that survive alignment.
+                            shallower = [
+                                position
+                                for position in checkpoint_candidates
+                                if not (int(hit.cached_tokens) and job.prefill_cold_cuts)
+                                or position in job.prefill_cold_cuts
+                            ] + [int(hit.cached_tokens)]
+                            if rolling:
+                                shallower.append(((len(tokens) - 2) // rolling) * rolling)
+                            tail_boundary = trimmed_tail_position(
+                                len(tokens),
+                                tokens_before=tail_policy["tokens"],
+                                floor_tokens=max(
+                                    int(hit.cached_tokens),
+                                    int(job.request.get("_mlx2_media_token_end", 0) or 0),
+                                ),
+                                shallower=shallower,
+                                min_gain_tokens=tail_policy["min_gain_tokens"],
+                            )
+                            if tail_boundary is None:
+                                floor_only = trimmed_tail_position(
+                                    len(tokens),
+                                    tokens_before=tail_policy["tokens"],
+                                    floor_tokens=max(
+                                        int(hit.cached_tokens),
+                                        int(job.request.get("_mlx2_media_token_end", 0) or 0),
+                                    ),
+                                )
+                                count_add(self.counts, "apc_tail_checkpoints_skipped_"
+                                          + ("no_gain" if floor_only is not None else "below_floor"), 1)
+                            elif tail_boundary not in checkpoint_candidates:
+                                checkpoint_candidates = tuple(
+                                    sorted((*checkpoint_candidates, tail_boundary))
+                                )
+                                count_add(self.counts, "apc_interior_positions_planned_trimmed_tail", 1)
                         if (
                             planning_target
                             and media_checkpoint_position is not None

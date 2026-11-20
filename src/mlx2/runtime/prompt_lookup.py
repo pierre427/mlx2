@@ -36,6 +36,12 @@ class HybridStats:
         the rounds that drafted position k, ``sum(r for d, r if d >= k)``,
         not by all rounds: a round that drafted fewer than k tokens could not
         accept position k, and counting it reads deeper positions low.
+    ``verify_full_accept_rounds``
+        Rounds that drafted at least one position and accepted every one of
+        them (accepted == depth).  Mean commit length hides speedup stranded
+        at the draft ceiling (DBloom); a high fraction of full-block rounds,
+        ``verify_full_accept_fraction(...)``, says a deeper draft would pay.
+        Diagnostic only; nothing reads it to steer.
     """
 
     cycles: int = 0
@@ -52,6 +58,7 @@ class HybridStats:
     verify_span_hist: dict[int, int] = field(default_factory=dict)
     verify_accept_hist: dict[int, int] = field(default_factory=dict)
     verify_depth_hist: dict[int, int] = field(default_factory=dict)
+    verify_full_accept_rounds: int = 0
     latched: bool = False
     lookback_current: int = 0
     lookback_peak: int = 0
@@ -1084,3 +1091,9 @@ def verify_prompt_lookup(proposal, target_tokens):
             "bonus": accepted == len(proposal),
         },
     )
+
+
+def verify_full_accept_fraction(full_rounds, depth_hist) -> float:
+    """Full-block rounds over the rounds that drafted anything (0.0 if none)."""
+    drafted = sum(int(rounds) for depth, rounds in (depth_hist or {}).items() if int(depth) > 0)
+    return float(full_rounds) / drafted if drafted else 0.0

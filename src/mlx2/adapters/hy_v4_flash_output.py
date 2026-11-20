@@ -8,7 +8,7 @@ tags (batched or speculative decode, vllm#55550) parses the same as one tag
 per delta.
 
 Reasoning follows vLLM's ``HYV4ReasoningParser`` (PR 68296, read not copied):
-with ``reasoning_effort`` ``high`` or ``max`` the generation prompt ends with
+with ``reasoning_effort`` ``high`` the generation prompt ends with
 ``<think:S>`` open, so the output is ``reasoning</think:S>answer`` and
 everything before the first ``</think:S>`` is ``reasoning_content``.  Unlike
 vLLM, whose default follows the template (``high``), mlx2 renders
@@ -28,16 +28,17 @@ from ..runtime.tool_parsers.hy_v4 import (
     markers,
 )
 
-# The template's levels.  ``no_think`` is mlx2's default.
-TEMPLATE_EFFORTS = ("no_think", "high", "max")
+# The template's levels.  ``no_think`` is mlx2's default.  Upstream dropped
+# ``max`` in tencent/Hy4-flash@b2498eba (2026-11-19); that template raises on
+# it, so mlx2 refuses it before rendering rather than mapping it to ``high``.
+TEMPLATE_EFFORTS = ("no_think", "high")
 
 
 def reasoning_effort(request) -> str:
     """The template ``reasoning_effort`` a chat request renders with.
 
     ``no_think`` unless the request opts in: ``enable_thinking: true`` alone
-    selects ``high``; ``reasoning_effort`` ``high`` or ``max`` selects that
-    level.  An explicit ``enable_thinking: false`` wins over an effort level.
+    selects ``high``; ``reasoning_effort`` ``high`` selects it.  An explicit ``enable_thinking: false`` wins over an effort level.
     Other effort names have no template level and are refused, as is
     ``enable_thinking: true`` with effort ``none``.
     """
@@ -51,9 +52,12 @@ def reasoning_effort(request) -> str:
         if thinking:
             raise ValueError("Hy4-flash enable_thinking=true disagrees with reasoning_effort none")
         return "no_think"
-    if effort in ("high", "max"):
+    if effort == "high":
         return effort
-    raise ValueError("Hy4-flash reasoning_effort must be none (no_think, the default), high or max")
+    if effort == "max":
+        raise ValueError("Hy4-flash reasoning_effort max was removed upstream "
+                         "(tencent/Hy4-flash@b2498eba); use high")
+    raise ValueError("Hy4-flash reasoning_effort must be none (no_think, the default) or high")
 
 
 class FeatureCounters:

@@ -23,6 +23,7 @@ import numpy as np
 
 from .batch_admission import AdmissionState, LinearStateCost, StateBudget
 from .cohort_ownership import declared_cohort_key
+from .prompt_lookup import verify_full_accept_fraction
 from .greedy_scores import LazyLogprobs, greedy_scores, score_eval_targets
 from .greedy_scores import admitted as lean_greedy_admitted
 from .mixed_step import (
@@ -2915,6 +2916,9 @@ class MTPGenerationBatch:
             from .hybrid_speculative import self_mtp_numerical_schedule
             stats = dict(vars(lane.stats))
             stats["total_emitted"] = int(lane.stats.total_emitted)
+            stats["verify_full_accept_fraction"] = verify_full_accept_fraction(
+                stats.get("verify_full_accept_rounds", 0), stats.get("verify_depth_hist")
+            )
             stats["draft_acceptance"] = float(lane.stats.draft_accepted) / max(
                 int(lane.stats.draft_proposed), 1
             )
@@ -3024,6 +3028,9 @@ class MTPGenerationBatch:
             lane = package.detached.lane
             stats = dict(vars(lane.stats))
             stats["total_emitted"] = int(lane.stats.total_emitted)
+            stats["verify_full_accept_fraction"] = verify_full_accept_fraction(
+                stats.get("verify_full_accept_rounds", 0), stats.get("verify_depth_hist")
+            )
             stats["draft_acceptance"] = float(lane.stats.draft_accepted) / max(
                 int(lane.stats.draft_proposed), 1
             )
@@ -3935,6 +3942,9 @@ class MTPGenerationBatch:
                 if isinstance(stats.get(_hist), dict):
                     stats[_hist] = dict(stats[_hist])
             stats["total_emitted"] = int(lane.stats.total_emitted)
+            stats["verify_full_accept_fraction"] = verify_full_accept_fraction(
+                stats.get("verify_full_accept_rounds", 0), stats.get("verify_depth_hist")
+            )
             stats["draft_acceptance"] = float(lane.stats.draft_accepted) / max(
                 int(lane.stats.draft_proposed), 1
             )

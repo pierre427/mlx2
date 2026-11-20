@@ -229,3 +229,19 @@ def test_filters_without_temperature_are_refused(tmp_path):
     with pytest.raises(SystemExit):
         gsm.main(["--output", str(tmp_path / "o"), "--base-url", "http://x",
                   "--checkpoint", "M@sha256:" + "0" * 64, "--top-k", "20"])
+
+
+def test_full_accept_fraction_counts_rounds_that_hit_the_draft_ceiling():
+    receipts = [{"verify_accept_hist": {"4": 1, "1": 2, "0": 1},
+                 "verify_depth_hist": {"4": 2, "1": 2, "0": 0},
+                 "verify_full_accept_rounds": 3, "proposed": 10}]
+    got = gsm.acceptance_summary(receipts)
+    # Rounds drafting anything: 4; full: the 4-of-4 round and both 1-of-1.
+    assert got["full_accept_rounds"] == 3
+    assert got["full_accept_fraction"] == pytest.approx(3 / 4)
+    old = [{"verify_accept_hist": {"1": 1}, "verify_depth_hist": {"1": 1}}]
+    assert gsm.acceptance_summary(old + receipts)["full_accept_fraction"] is None
+    mtp = gsm.speculation_receipt({"mtp": {"stats": {
+        "verify_accept_hist": {"2": 1}, "verify_depth_hist": {"2": 1},
+        "verify_full_accept_rounds": 1, "draft_proposed": 2}}})
+    assert mtp["verify_full_accept_rounds"] == 1

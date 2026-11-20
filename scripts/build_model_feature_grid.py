@@ -102,6 +102,8 @@ FEATURES = (
     "qsa_batch_decode_sparse", "varlen_sparse_moe", "fp32_head_logits", "gdn_state_dtype_float16", "qsa_lazy_causal_mask", "qsa_stage1_direct_selector", "ple_read_policy_adaptive", "mtp_draft_vocab", "compact_moe_prefill", "qsa_prefetch_partials", "tensorfold_qmv_rows", "tensorfold_prefill", "gdn_core",
     "prefill_plan_exact_slices", "async_qsa_promotion", "apc_eviction_queued_protection",
     "ordinary_reference", "apc_v2", "apc_interior_checkpoints", "apc_junction_checkpoints",
+    # 2026-11-19 PR-landscape opt-ins: trimmed-tail checkpoint, full-accept receipt bin.
+    "apc_tail_checkpoint", "verify_full_accept_fraction",
     "apc_rolling_checkpoints", "apc_session_persistence", "tools",
     "vision_input", "video_input", "audio_input", "native_mtp",
     "mtp_ordinary_handoff", "adaptive_mtp_depth", "self_mtp_copy_draft", "speculation_request_opt_out",

@@ -338,7 +338,8 @@ def test_reasoning_is_opt_in_and_fails_closed_on_unknown_levels():
     chat = {"messages": [{"role": "user", "content": "x"}]}
     assert reasoning_effort(chat) == "no_think" and not thinking_enabled(chat)
     assert reasoning_effort({**chat, "enable_thinking": True}) == "high"
-    assert reasoning_effort({**chat, "enable_thinking": True, "reasoning_effort": "max"}) == "max"
+    with pytest.raises(ValueError, match="removed upstream"):
+        reasoning_effort({**chat, "enable_thinking": True, "reasoning_effort": "max"})
     assert reasoning_effort({**chat, "reasoning_effort": "high"}) == "high"
     assert reasoning_effort({**chat, "enable_thinking": False, "reasoning_effort": "high"}) == "no_think"
     assert reasoning_effort({**chat, "enable_thinking": False, "reasoning_effort": "none"}) == "no_think"
@@ -430,7 +431,7 @@ def test_reasoning_counters_feed_diagnostics():
     from mlx2.adapters.hy_v4_flash_output import FeatureCounters
 
     stats = FeatureCounters()
-    parser = output_parser({"messages": [], "reasoning_effort": "max", "enable_thinking": True},
+    parser = output_parser({"messages": [], "reasoning_effort": "high", "enable_thinking": True},
                            suffix=S, stats=stats)
     parser.push("hmm")
     parser.push(THINK_END + "ok", final=True)
@@ -477,7 +478,6 @@ ASSISTANT = f"<｜hy_start{S}｜>assistant<｜hy_middle{S}｜>"
     ({"enable_thinking": False}, "no_think", ASSISTANT + THINK + THINK_END),
     ({"enable_thinking": True}, "high", ASSISTANT + THINK),
     ({"reasoning_effort": "high", "enable_thinking": True}, "high", ASSISTANT + THINK),
-    ({"reasoning_effort": "max", "enable_thinking": True}, "max", ASSISTANT + THINK),
 ])
 def test_template_renders_the_selected_reasoning_level(extra, effort, tail):
     adapter = _template_adapter()

@@ -1045,6 +1045,7 @@ def test_accepted_stop_draft_is_counted_as_accepted(stop_index):
         assert lane.accepted == expected
         assert batch.scheduler_stats["accepted_proposals"] == expected
         assert lane.verify_accept_hist == {expected: 1}
+        assert lane.verify_full_accept_rounds == int(expected >= 3)
     finally:
         batch.close()
 

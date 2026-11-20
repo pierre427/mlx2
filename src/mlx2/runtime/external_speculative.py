@@ -24,6 +24,7 @@ import numpy as np
 from ..thinking_guard import stack_block_steer, verify_block_steer
 from . import round_phases
 from .cohort_ownership import declared_cohort_key
+from .prompt_lookup import verify_full_accept_fraction
 from .committed_recovery import CommittedRecoverySlot
 from .ast_private_state import PrivateHistory, freeze_receipt, snapshot_receipt
 from .cow_cache import (
@@ -854,6 +855,8 @@ class Lane:
     # longest root-to-leaf path).  The denominator for per-position
     # acceptance; ``verify_span_hist`` overstates it for trees.
     verify_depth_hist: dict = field(default_factory=dict)
+    # Rounds that accepted their whole drafted depth (DBloom diagnostic).
+    verify_full_accept_rounds: int = 0
     # Paired ``verified positions:accepted draft tokens`` histogram.  The two
     # marginal histograms above cannot prove that a particular short accept
     # occurred in a full tree round; this receipt makes planted and live
@@ -3240,6 +3243,11 @@ class ExternalDraftBatchGenerator:
             "verify_depth_hist": dict(getattr(lane, "verify_depth_hist", {})),
             "verify_accept_span_hist": dict(lane.verify_accept_span_hist),
         }
+        full = int(getattr(lane, "verify_full_accept_rounds", 0))
+        hists["verify_full_accept_rounds"] = full
+        hists["verify_full_accept_fraction"] = verify_full_accept_fraction(
+            full, hists["verify_depth_hist"]
+        )
         if getattr(lane, "trusted_pld_rounds", 0):
             return {
                 "verification": "mixed_exact_and_trusted_pld",
@@ -9558,6 +9566,8 @@ class ExternalDraftBatchGenerator:
                 lane.verify_depth_hist[depth] = (
                     lane.verify_depth_hist.get(depth, 0) + 1
                 )
+                if depth > 0 and round_accepted >= depth:
+                    lane.verify_full_accept_rounds += 1
                 pair = f"{count + 1}:{round_accepted}"
                 lane.verify_accept_span_hist[pair] = (
                     lane.verify_accept_span_hist.get(pair, 0) + 1

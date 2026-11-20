@@ -157,7 +157,7 @@ def descriptor_for(*, dfly_selected: bool = False, engram_table_format: str = "b
                              "bounded-rollback landings refused)"),
                   "tools": "hy_v4 <tool_call:S> parser, auto/none; forced tool_choice "
                            "(required/named) under the Hy4 call grammar; implemented, unqualified",
-                  "reasoning": "reasoning_effort no_think by default; high/max opt-in per request "
+                  "reasoning": "reasoning_effort no_think by default; high opt-in per request "
                                "(enable_thinking or reasoning_effort) to reasoning_content; "
                                "implemented, unqualified",
                   "grammar": "Hy4 forced-call grammar and generic structured output; "
@@ -675,11 +675,11 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 kwargs.setdefault(key, self.external_policy[key])
         return super().create_external_batch(**kwargs)
 
-    # Hy4's template takes ``reasoning_effort`` (no_think/high/max, default
-    # high).  mlx2 renders no_think unless the request opts in
+    # Hy4's template takes ``reasoning_effort`` (no_think/high, default high;
+    # ``max`` was removed upstream in tencent/Hy4-flash@b2498eba).  mlx2 renders no_think unless the request opts in
     # (``hy_v4_flash_output.reasoning_effort``): high mode can spend the whole
     # token budget reasoning (vllm#66454).
-    reasoning_effort_semantics = "template_levels_no_think_high_max"
+    reasoning_effort_semantics = "template_levels_no_think_high"
 
     def _template(self, request, *, tokenize):
         from ..output import callable_tools

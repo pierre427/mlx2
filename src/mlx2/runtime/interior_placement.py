@@ -291,6 +291,43 @@ def generation_prompt_boundary(
     return None
 
 
+def trimmed_tail_position(
+    prompt_tokens: int,
+    *,
+    tokens_before: int,
+    floor_tokens: int = 0,
+    shallower: Iterable[int] = (),
+    min_gain_tokens: int = 0,
+) -> Optional[int]:
+    """Exact boundary ``tokens_before`` tokens below the replay boundary.
+
+    Agent clients often rewrite the tail of the previous turn's last message
+    (a trimmed status block, tens of tokens) before they send the next turn,
+    so that turn diverges just below the previous prompt's ``P-1`` boundary.
+    A hybrid cache cannot cut back, so without a state near there the turn
+    restores from the last rolling checkpoint, up to an interval back.  This
+    places one boundary at ``P - 1 - tokens_before`` (relative to the prompt
+    end, like the generation-prompt boundary).  ``None`` unless it lies above
+    ``floor_tokens`` (cached prefix, media end) and at least
+    ``min_gain_tokens`` above every ``shallower`` planned boundary below it,
+    so a prompt that already has a state nearby pays for no extra snapshot.
+
+    Design references: incoai/splash#784 (tail checkpoint 256 tokens before
+    the replay boundary), jundot/omlx#5251 (minimum re-prefill gain).  Read,
+    not copied.
+    """
+    tokens_before = _check_int("tail tokens_before", tokens_before, 1)
+    min_gain_tokens = _check_int("tail min_gain_tokens", min_gain_tokens, 0)
+    position = int(prompt_tokens) - 1 - tokens_before
+    if position <= max(0, int(floor_tokens)):
+        return None
+    below = [int(point) for point in shallower if int(point) < position]
+    base = max([int(floor_tokens), *below])
+    if position - base < min_gain_tokens:
+        return None
+    return position
+
+
 def cold_prefill_cuts(
     tokens: Sequence[int],
     *,
@@ -299,12 +336,14 @@ def cold_prefill_cuts(
     generation_suffixes: Iterable[Sequence[int]] = (),
     media_floor: int = 0,
     media_position: Optional[int] = None,
+    tail_tokens: int = 0,
 ) -> Tuple[int, ...]:
     """Planned slice ends of a cold (uncached) prefill of ``tokens``.
 
     The serving plan with ``cached_tokens=0``: interior positions (re-planned
     above ``media_floor`` when any falls inside the media span), the
-    generation-prompt boundary and the adapter's media boundary.  No
+    generation-prompt boundary, the adapter's media boundary and, when the
+    opt-in trimmed-tail policy is on, its ``P - 1 - tail_tokens`` boundary.  No
     continuation skip and no headroom budget: those decide which positions
     are *captured*, never where a cold prefill is cut.  Junction boundaries
     depend on the lookup and rolling ones are absolute multiples, so neither
@@ -333,4 +372,12 @@ def cold_prefill_cuts(
         cuts.add(boundary)
     if media_position is not None:
         cuts.add(int(media_position))
+    if tail_tokens:
+        # Gain is a capture decision, never a cut decision (as the budget):
+        # cut at the tail whenever it is an interior position.
+        tail = trimmed_tail_position(
+            len(tokens), tokens_before=int(tail_tokens), floor_tokens=int(media_floor)
+        )
+        if tail is not None:
+            cuts.add(tail)
     return tuple(sorted(cuts))

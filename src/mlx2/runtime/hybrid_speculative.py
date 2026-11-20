@@ -93,6 +93,9 @@ class HybridStats(_PromptLookupStatsBase):
     """
 
     draft_cycles: int = 0
+    # Draft rows that skipped a passive logits processor
+    # (MLX2_MTP_DRAFT_SKIP_PASSIVE_PROCESSORS); 0 when the flag is off.
+    draft_passive_processor_skips: int = 0
     draft_proposed: int = 0
     draft_accepted: int = 0
     ragged_verify_rounds: int = 0
@@ -395,6 +398,34 @@ def _mtp_backbone(model, tokens, cache):
     return (hidden, hidden)
 
 
+# Opt-in (unqualified, no GPU A/B yet; omlx#4926 shape): MTP drafting skips
+# logits processors that report ``draft_passive()`` (an idle thinking-budget
+# guard).  Otherwise every drafted position probes the guard, whose history
+# sync reads the lazily drafted tokens back to the host (one device sync per
+# draft position), and the batch drafts through the full-vocab head.
+# Verification still applies every processor, so outputs stay exact; only
+# acceptance can move.
+DRAFT_PASSIVE_PROCESSORS_ENV = "MLX2_MTP_DRAFT_SKIP_PASSIVE_PROCESSORS"
+DRAFT_PASSIVE_STATS = {"skipped_draft_rows": 0, "skipped_full_vocab_steps": 0}
+
+
+def _draft_skip_passive_enabled() -> bool:
+    return os.environ.get(DRAFT_PASSIVE_PROCESSORS_ENV, "0").strip() == "1"
+
+
+def _draft_constrained(processors) -> bool:
+    """Whether a draft row must see these processors."""
+    if not processors:
+        return False
+    if not _draft_skip_passive_enabled():
+        return True
+    for processor in processors:
+        passive = getattr(processor, "draft_passive", None)
+        if passive is None or not passive():
+            return True
+    return False
+
+
 def _mtp_proposal_step(model, hidden, tokens, cache, lanes):
     """Use a full proposal head whenever any batched lane is constrained.
 
@@ -403,9 +434,12 @@ def _mtp_proposal_step(model, hidden, tokens, cache, lanes):
     admitted ids (the coverage gate).  Verification is full-width either way.
     """
     if any(lane.logits_processors for lane in lanes):
-        full_step = getattr(model, "mtp_step_full_vocab", None)
-        if full_step is not None:
-            return full_step(hidden, tokens, cache)
+        if any(_draft_constrained(lane.logits_processors) for lane in lanes):
+            full_step = getattr(model, "mtp_step_full_vocab", None)
+            if full_step is not None:
+                return full_step(hidden, tokens, cache)
+        elif getattr(model, "mtp_step_full_vocab", None) is not None:
+            DRAFT_PASSIVE_STATS["skipped_full_vocab_steps"] += 1
     if getattr(model, "mtp_draft_vocab_enabled", False) and not all(
         coverage_admits(
             lane.coverage_run, lane.coverage_member, lane.coverage_window, lane.cur
@@ -1019,6 +1053,12 @@ def _lane_mtp_draft_logprobs(
     distributions are conditioned on an identical constrained history.
     """
     if lane.logits_processors:
+        if not _draft_constrained(lane.logits_processors):
+            DRAFT_PASSIVE_STATS["skipped_draft_rows"] += 1
+            stats = getattr(lane, "stats", None)
+            if stats is not None and hasattr(stats, "draft_passive_processor_skips"):
+                stats.draft_passive_processor_skips += 1
+            return _lane_mtp_logprobs(lane, logits)
         processor_tokens = mx.concatenate(
             [lane.token_prefix, mx.array([lane.cur], mx.uint32)]
             + [mx.reshape(token, (1,)) for token in drafted]
@@ -3827,6 +3867,8 @@ def commit_batched_self_mtp(
             lane.stats.verify_accept_hist[consumed_accepted] = (
                 lane.stats.verify_accept_hist.get(consumed_accepted, 0) + 1
             )
+            if span > 1 and consumed_accepted >= span - 1:
+                lane.stats.verify_full_accept_rounds += 1
             if lane.copy_draft is not None:
                 # Index exactly what this round committed after the previous
                 # ``cur`` (already indexed): accepted proposal tokens, then

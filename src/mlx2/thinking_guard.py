@@ -549,6 +549,28 @@ class ThinkingGuard:
         )
         self._observe(tokens)
 
+    def draft_passive(self, margin=32):
+        """Whether provisional MTP draft rows may skip this guard.
+
+        True once reasoning has closed, or while the alarm has not tripped and
+        the soft budget (where the nudge also starts) is more than ``margin``
+        ids away: until then ``__call__`` passes logits through.  A run-on
+        alarm can still trip inside a draft window; the drafted row was then
+        proposed without the close bias, which costs acceptance only, since
+        verification applies the guard to every verify row and accepts
+        against the law the draft actually used.  Reads state left by the
+        guard's last call, which may be a rejected verify row: a rejected
+        drafted close can leave it reporting closed, and a trip the
+        correction token would cause is not seen yet.  Either case, and a
+        draft deeper than ``margin``, misses a bias on a draft row: acceptance
+        only, never output.
+        """
+        if self._close_at is not None:
+            return True
+        if self._tripped_at is not None:
+            return False
+        return self.soft is None or len(self._ids) + int(margin) < self.soft
+
     def dormant(self, tokens):
         """P5: True once reasoning has closed (logits pass through).
 

@@ -179,8 +179,15 @@ def acceptance_summary(receipts, max_position=16, draft_depth=None):
     in the arm lacks it, ``per_position`` keeps the old all-rounds
     denominator and says so.  ``per_position_per_round`` always holds the
     all-rounds figures, for comparison with older summaries.
+
+    ``full_accept_fraction``: rounds that accepted their whole drafted depth
+    over rounds that drafted anything (DBloom: mean acceptance length hides
+    speedup stranded at the draft ceiling).  ``None`` when any receipt with
+    rounds predates ``verify_full_accept_rounds`` (2026-11-19) or lacks a
+    depth histogram.
     """
     hist, depths, proposed, without, legacy = {}, {}, 0, 0, 0
+    full_rounds, full_missing = 0, 0
     for spec in receipts:
         rounds = _histogram((spec or {}).get("verify_accept_hist"))
         if not rounds:
@@ -196,6 +203,11 @@ def acceptance_summary(receipts, max_position=16, draft_depth=None):
             for depth, count in drafted.items():
                 depths[depth] = depths.get(depth, 0) + count
         proposed += int((spec or {}).get("proposed") or 0)
+        full = (spec or {}).get("verify_full_accept_rounds")
+        if full is None:
+            full_missing += 1
+        else:
+            full_rounds += int(full)
     total = sum(hist.values())
     if not total:
         return {"verify_rounds": 0, "requests_without_rounds": without}
@@ -234,6 +246,11 @@ def acceptance_summary(receipts, max_position=16, draft_depth=None):
             "per_position_denominator": denominator,
             "per_position_per_round": per_round,
             "drafted_at_position": ({f"p{k}": reached(k, depths) for k in span} if use_drafted else None),
+            "full_accept_rounds": None if full_missing else full_rounds,
+            "full_accept_fraction": (
+                full_rounds / reached(1, depths)
+                if use_drafted and not full_missing and reached(1, depths) else None
+            ),
             "accept_hist": {str(k): hist[k] for k in sorted(hist)},
             "depth_hist": {str(k): depths[k] for k in sorted(depths)} if use_drafted else None,
             "requests_without_depth_hist": legacy,
@@ -258,6 +275,7 @@ def speculation_receipt(extra):
     if isinstance(stats, dict) and stats.get("verify_accept_hist"):
         return {"source": "mtp.stats", "verify_accept_hist": stats["verify_accept_hist"],
                 "verify_depth_hist": stats.get("verify_depth_hist"),
+                "verify_full_accept_rounds": stats.get("verify_full_accept_rounds"),
                 "proposed": stats.get("draft_proposed")}
     return spec
 

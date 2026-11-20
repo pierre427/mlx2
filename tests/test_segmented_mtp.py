@@ -3625,6 +3625,8 @@ def test_self_mtp_verify_histograms_sum_to_the_round_count():
         == sum(pattern)
     )
     assert stats.draft_cycles == len(pattern)
+    # Full-block rounds (accepted == drafted depth 4): positions 2, 4 and 7.
+    assert stats.verify_full_accept_rounds == pattern.count(4) == 3
 
 
 def test_tau_truncated_from_one_deep_run_matches_a_measured_shallow_run():

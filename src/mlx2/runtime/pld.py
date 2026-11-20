@@ -47,6 +47,7 @@ from .prompt_lookup import (
     RecentCommittedSegmentStore,
     max_proposal_span,
     plan_proposal_around_verify_cliff,
+    verify_full_accept_fraction,
 )
 from .rotating_replay import (
     RotatingReplayError,
@@ -2217,6 +2218,8 @@ class PromptLookupBatchGenerator:
         lane.stats.verify_accept_hist[_round_accepted] = (
             lane.stats.verify_accept_hist.get(_round_accepted, 0) + 1
         )
+        if _round_depth > 0 and _round_accepted >= _round_depth:
+            lane.stats.verify_full_accept_rounds += 1
         probe_matched = int(
             bool(probing and delivered and probe_candidate and probe_candidate[0] == delivered[0][0])
         )
@@ -2371,6 +2374,10 @@ class PromptLookupBatchGenerator:
             "verify_span_hist": dict(lane.stats.verify_span_hist),
             "verify_accept_hist": dict(lane.stats.verify_accept_hist),
             "verify_depth_hist": dict(lane.stats.verify_depth_hist),
+            "verify_full_accept_rounds": lane.stats.verify_full_accept_rounds,
+            "verify_full_accept_fraction": verify_full_accept_fraction(
+                lane.stats.verify_full_accept_rounds, lane.stats.verify_depth_hist
+            ),
             "span_snap_cycles": lane.stats.span_snap_cycles,
             "span_extend_cycles": lane.stats.span_extend_cycles,
             "lookup_index": lane.proposer.index_receipt(),
