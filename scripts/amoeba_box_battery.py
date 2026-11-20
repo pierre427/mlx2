@@ -46,6 +46,23 @@ tiles: removal vs a random same-count removal on its members' held sets and Engl
 variant's core + its family tiles + ancestors / subtree + box + pairs + every joint tile naming the member, one of
 its ancestors or one of its descendants (the joint gate is the OR of its members' gates; parent gates are always on) (OUT/joint.jsonl; skipped members recorded, not scored).
 
+English box (a partition made with amoeba_fn_partition.py --english-box, partition.json "english_box"; Pierre
+2026-11-19): its gate is "the text is English", so every served composition (core_plus, the groups and joint arms'
+served, the unclaimed arm's per-box rows) adds the English box unless the box is in english_box.closed_for (the
+language boxes): an English-text box is served with it, a language box without it. The English box is no topic box:
+it is left out of the boxes arm (its own held set is --english) and tested by the english arm (required then):
+  without        the full model minus the English box, on --english, every closed_for box's held set and
+                 --global-held: removal must hurt English (net of the random removal, >= --group-min-hurt);
+  random         the same per-layer counts removed at random outside it, on the same sets;
+  core_open      the core + the English box (every other tile closed) on --english: <= --target (it serves English);
+  core_closed    the core alone on --english: closing the English box must hurt English (>= --min-own over core_open);
+  per closed_for box L: served_open = L's served composition + the English box, on L's held set; served_closed is
+                 L's boxes-arm core_plus (English closed, reused when the boxes arm ran): closing English on non-English
+                 text must cost little (served_closed - served_open <= --max-unrelated).
+Rows: OUT/english.jsonl; verdicts in battery.md. A detach partition (--detach-share, partition.json "detach") changes
+no arm: the boxes, groups and joint arms read the post-detach tiles, so a box that lost a claim it needed fails its
+served arm; boxes-arm rows carry the box's claims_detached.
+
 Usage: amoeba_box_battery.py --model M --partition DIR --held cmn=C.jsonl --held eng=E.jsonl ... --out DIR
        [--arms boxes,unclaimed,groups] [--unclaimed U.npz] [--global-held gsm8k] [--held-note NAME=TEXT]
 """
@@ -69,7 +86,7 @@ FAR_LANG = {"cmn": "fra", "jpn": "fra"}                  # default far language:
 FAR_SUBJ = ("life.cooking", "sci.astronomy")            # far subjects (the first that is not the box itself)
 
 
-ARMS = ("boxes", "unclaimed", "groups")
+ARMS = ("boxes", "unclaimed", "groups", "english")
 
 
 def random_like(mask, g):
@@ -98,10 +115,38 @@ def descendants_of(prep, b):
     return list(((prep.get("nested") or {}).get("descendants") or {}).get(b, []))
 
 
+def english_box(prep):
+    """(name, closed_for) of the partition's English box, or (None, [])."""
+    e = prep.get("english_box") or {}
+    return e.get("name"), list(e.get("closed_for") or [])
+
+
+_ETILES = {}
+
+
+def english_tiles(get, keys, prep):
+    """The English box, and with an English-shared partition (amoeba_fn_partition.py --english-shared) every pair and
+    family tile naming it (their gate is the OR of their members', English is open). Cached per partition."""
+    key = (id(prep), len(keys))
+    if key not in _ETILES:
+        en, _ = english_box(prep)
+        keep = get(f"box:{en}").copy()
+        if (prep.get("english_box") or {}).get("shared"):
+            for k in pair_keys(keys, en) + group_keys_of(prep, en):
+                keep |= get(k)
+        _ETILES.clear() if len(_ETILES) > 4 else None
+        _ETILES[key] = (prep, keep)                  # prep kept alive, so its id is not reused while cached
+    return _ETILES[key][1]
+
+
 def subtree_keep(get, keys, prep, b, base, groups=True):
     """base + the ancestors' box tiles + for b and each descendant: its box, its pair tiles and (groups) every family
-    tile containing it. Without nesting: base + box b + b's pairs (+ b's family tiles)."""
+    tile containing it. Without nesting: base + box b + b's pairs (+ b's family tiles). With an English box (gate:
+    the text is English): + the English box unless b is one of its closed_for boxes."""
     keep = base
+    en, closed = english_box(prep)
+    if en and b not in closed and b != en:
+        keep = keep | english_tiles(get, keys, prep)
     for x in ancestors_of(prep, b):
         keep = keep | get(f"box:{x}")
     for x in [b] + descendants_of(prep, b):
@@ -127,7 +172,8 @@ def served_keep(get, keys, prep, b, core):
 
 
 def folded_core(get, keys):
-    """The core with every group tile folded back in (= the partition's core without family tiles)."""
+    """The core with every group tile folded back in (= the partition's core without family tiles). An English box
+    stays out (subtree_keep opens it for English-text boxes)."""
     core = get("core").copy()
     for k in keys:
         if k.startswith("group:"):
@@ -203,6 +249,16 @@ def main():
     keys = [k for k in tz.files if k != "layers"]              # tiles are read lazily (review: ~435 pair masks of
     core_t = tz["core"]                                         # 15.7 MB each would sit beside the model)
     boxes = [b for b in (a.boxes.split(",") if a.boxes else sorted(k[4:] for k in keys if k.startswith("box:"))) if b]
+    EBOX, ECLOSED = english_box(prep)
+    if EBOX and f"box:{EBOX}" not in keys:
+        raise SystemExit(f"partition.json names English box {EBOX} but tiles.npz has no box:{EBOX}")
+    if EBOX and EBOX in boxes and "english" not in arms:
+        raise SystemExit(f"the partition has an English box ({EBOX}): add the english arm (--arms ...,english) or "
+                         "leave it out of --boxes")
+    if "english" in arms and not EBOX:
+        raise SystemExit("--arms english needs a partition with an English box (amoeba_fn_partition.py --english-box)")
+    run_english = bool(EBOX) and "english" in arms and (not a.boxes or EBOX in boxes)
+    boxes = [b for b in boxes if b != EBOX]                # the English box is the english arm's, not a topic box
     skipped = dict(x.partition("=")[::2] for x in a.skipped)        # checked before the model loads
     bad = [k for k in skipped if k in boxes]
     if bad:
@@ -351,6 +407,9 @@ def main():
                    + (" + its whole subtree (every descendant's box, pair and family tiles)" if desc else "")}
                   if prep.get("nested") else {}),
                **({"descendants": desc} if desc else {}), **({"groups": grp} if grp else {}),
+               **({"claims_detached": (prep["boxes"].get(b) or {}).get("claims_detached", 0)}
+                  if (prep.get("detach") or {}).get("share") else {}),
+               **({"english_box_open": b not in ECLOSED} if EBOX else {}),
                "unrelated": unrelated, "without": without,
                "random": random_, "core_plus": core_plus, "path_offset": off, "verdict": verdict,
                "settings": settings, "wall_s": round(time.time() - t0, 1)}
@@ -398,10 +457,11 @@ def main():
         uj = out / "unclaimed.jsonl"
         got = arm_rows(uj)
         C0 = folded_core(get, keys)
+        EOPEN = english_tiles(get, keys, prep) if EBOX else np.zeros_like(C0)    # English text: English box open
         gl = [x for x in a.global_held.split(",") if x]
         jobs = [("global:full_minus_unclaimed", lambda: ~U, list(held)),
-                ("global:core", lambda: C0, [EN] + gl),
-                ("global:core_minus_unclaimed", lambda: C0 & ~U, [EN] + gl)]
+                ("global:core", lambda: C0 | EOPEN, [EN] + gl),
+                ("global:core_minus_unclaimed", lambda: (C0 & ~U) | EOPEN, [EN] + gl)]
         for b in boxes:
             jobs.append((f"box:{b}", lambda b=b: subtree_keep(get, keys, prep, b, C0 & ~U, groups=False), [b, EN]))
         for key, mk, sets in jobs:
@@ -502,6 +562,63 @@ def main():
                             + ", ".join(f"{mark(m)} {r['served'][m][m]:+.3f} / {r['served'][m][EN]:+.3f}" for m in have)
                             + f" | {'yes' if r['verdict']['removal_beats_random'] else 'NO'} | "
                               f"{'yes' if r['verdict']['served_+0.05'] else 'NO'} |")
+    if run_english:
+        ej = out / "english.jsonl"
+        got = arm_rows(ej)
+        Ebox = english_tiles(get, keys, prep)            # the box (+ English-naming tiles when shared)
+        core = tz["core"]
+        langs = [x for x in ECLOSED if x in held and x not in skipped]
+        gl = [x for x in a.global_held.split(",") if x and x != EN]
+        wsets = [EN] + [x for x in langs + gl if x != EN]
+        jobs = [("without", lambda: ~Ebox, wsets),
+                ("random", lambda: ~random_like(Ebox, np.random.default_rng(a.seed + 7000)), wsets),
+                ("core_open", lambda: core | Ebox, [EN]),
+                ("core_closed", lambda: core, [EN])]
+        for L_ in langs:
+            jobs.append((f"served_open:{L_}", lambda L_=L_: served_keep(get, keys, prep, L_, core) | Ebox, [L_]))
+            if L_ not in boxes_rows:                      # English closed = L's boxes-arm core_plus mask
+                jobs.append((f"served_closed:{L_}", lambda L_=L_: served_keep(get, keys, prep, L_, core), [L_]))
+        for key, mk, sets in jobs:
+            if key in got:
+                continue
+            t0 = time.time()
+            keep = mk()
+            d = score(keep, sets)
+            got[key] = put(ej, {"arm": "english", "key": key, "sets": sets, "kept_units": int(keep.sum()),
+                                "english_box_units": int(Ebox.sum()), "dce": d, "net": net(d),
+                                "wall_s": round(time.time() - t0, 1)})
+            log(f"english {key}: kept {int(keep.sum()):,}; " + " ".join(f"{k} {v:+.3f}" for k, v in net(d).items()))
+
+        def closed_net(L_):
+            r = boxes_rows.get(L_)
+            return net(r["core_plus"])[L_] if r else got[f"served_closed:{L_}"]["net"][L_]
+        nw, nr = got["without"]["net"], got["random"]["net"]
+        co, cc = got["core_open"]["net"][EN], got["core_closed"]["net"][EN]
+        cost = {L_: closed_net(L_) - got[f"served_open:{L_}"]["net"][L_] for L_ in langs}
+        verdict = {"removal_beats_random": bool(nw[EN] - nr[EN] >= a.group_min_hurt),
+                   "served_+0.05": bool(co <= a.target),
+                   "closed_hurts_english": bool(cc - co >= a.min_own),
+                   "closed_costs_little_off_english": (bool(all(v <= a.max_unrelated for v in cost.values()))
+                                                       if cost else None),
+                   "on": "dCE net of the path offset"}
+        if (got.get("verdict") or {}).get("verdict") != verdict:      # a verdict row per change (resume-safe)
+            got["verdict"] = put(ej, {"arm": "english", "key": "verdict", "sets": [], "box": EBOX, "verdict": verdict,
+                                      "closing_cost_off_english": cost, "core_open": co, "core_closed": cc,
+                                      "removal_hurt_minus_random": nw[EN] - nr[EN], "closed_for": ECLOSED,
+                                      "languages_scored": langs})
+        extra_md += [f"\nEnglish box {EBOX} ({int(Ebox.sum()):,} units; gate: the text is English, closed for "
+                     f"{', '.join(ECLOSED) or 'none'}); held dCE net of the path offset.\n",
+                     "| row | value |", "|---|---|",
+                     f"| removed: {EN} / random | {nw[EN]:+.3f} / {nr[EN]:+.3f} |",
+                     "| removed: other sets | " + ", ".join(f"{mark(k)} {nw[k]:+.3f} / {nr[k]:+.3f}" for k in wsets
+                                                      if k != EN) + " |",
+                     f"| core + English box on {EN} (open) | {co:+.3f} |",
+                     f"| core alone on {EN} (closed) | {cc:+.3f} |",
+                     "| closing cost off English (served closed - open) | "
+                     + ", ".join(f"{mark(k)} {v:+.3f}" for k, v in cost.items()) + " |",
+                     "| verdict | " + ", ".join(f"{k} {'-' if v is None else 'yes' if v else 'NO'}"
+                                                for k, v in verdict.items() if k != "on")
+                     + " |"]
     if jz is not None:
         jj = out / "joint.jsonl"
         with open(Path(a.joint_partition) / "tiles.npz", "rb") as fh:       # chunked: no spike beside the model
@@ -527,6 +644,9 @@ def main():
                 t0 = time.time()
                 keep = served_keep(jget, jkeys_all, jprep, m, jcore)
                 lin = lineage_set(m)                   # OR gates: open for m, its ancestors and its subtree
+                en_, closed_ = english_box(jprep)
+                if en_ and m not in closed_:           # English text: English's joint tiles are open too
+                    lin.add(en_)
                 opened = [k for k in jkeys_all if k.startswith("joint:") and lin & set(k[6:].split("+"))]
                 for k in opened:
                     keep = keep | jz[k]
@@ -592,6 +712,10 @@ def main():
             "mlx_peak_gb": O.peak_gb()}
     if skipped:
         meta["skipped"] = skipped
+    if EBOX:
+        meta["english_box"] = {"name": EBOX, "closed_for": ECLOSED, "arm_run": run_english}
+    if (prep.get("detach") or {}).get("share"):
+        meta["detach_share"] = prep["detach"]["share"]
     if jz is not None:
         meta.update(joint_partition=a.joint_partition, joint_top=a.joint_top, joint_floor=jprep["joint"].get("floor"))
     if arms != ["boxes"] or notes:

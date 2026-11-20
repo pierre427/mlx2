@@ -70,6 +70,37 @@ OR of its members' gates (no classifier of its own). --joint-sweep 5000,10000,..
 units moved and the core share after; --joint-floor auto takes the swept floor with the largest core reduction per
 tile (units moved / tiles; ties -> the lower floor) and records why. partition.json "joint" lists every tile.
 
+Weak-claimant detach (opt-in, Pierre 2026-11-19: "If a box's claim on a neuron is tiny next to the other
+claimants', drop that claim before deciding pair, family or core"): with --detach-share s > 0, a box's claim on a
+unit is dropped when its drive there is below s x the strongest claimant's drive. Drive = the map's mean_target (the
+mean per-token contribution |h| * w on the box's own target corpus, recorded by the capture; the same quantity the
+selection's exclusivity test uses). Applied after --require-every-source and, with --nested, after the descendant
+absorption and before the lowest-common-ancestor roll-up, so pair, family, LCA, joint and core decisions all see the
+detached claim sets. The strongest claimant always keeps its claim, so a selected unit never becomes unclaimed; a
+detached box loses only tiles it would have shared (the unit goes to the remaining claimants' tile or the core), and
+the battery, run on this partition, measures any loss in that box's served arm. --detach-sweep 0.01,0.05,... records
+per threshold the claim-share distribution and the units by claim count (box / pair / 3+) outside T2 and the English
+map; partition.json "detach" records the counts per box.
+
+English box (opt-in, Pierre 2026-11-19: "English gets its own box on FN; the core holds what's left"): with
+--english-box NAME (taxonomy id lang.eng), the English-map units outside T2 leave the core for the tile box:NAME; the
+core is then T2 + 3+-claimed + unassigned (+ small pairs spilled). Topic boxes' claims do not change it: an English-
+map unit stays English's even where topic boxes select it (as it stayed core before; partition.json records how many),
+so a unit never moves out of a served path that held it. Its gate is "the text is English": open when serving every
+box except --english-closed-for (the language boxes, whose text is not English), which the battery reads from
+partition.json "english_box". NAME is not a claimant, so it takes part in no pair, family, LCA or joint rule.
+English-shared arm (opt-in, --english-shared with --english-box; Pierre 2026-11-19: "make sure to also try and build
+shared expert boxes with the english box"): English becomes a claimant like any box. A box claims its target units
+whether or not they pass the exclusivity ratio against English; where one fails it (English drives the unit at more
+than r x the box's drive), English claims the unit too. English also claims the English-map units outside T2 (no
+longer forced out of the shared rules). English's drive (for the detach) is the English baseline mean of the box maps
+where it shares, the English map's mean_target on its own units (the larger where both). Then the ordinary rules: a
+unit English alone claims is box:NAME, English + one box a pair tile, English + 2+ boxes whose other claimants lie
+inside one kept family the family tile group:<family>+NAME (the smallest such family; gate: the family's or English),
+a cross-family English set of >= 3 a joint tile at the joint floor, else the core. English is open for all English
+text, so an English-shared tile is closed only when serving a closed_for (language) box that it does not name;
+partition.json english_box.shared records the units per tile kind and that rule.
+
 Any number of boxes: claim masks are [L, n, W] uint64 words (box i = bit i % 64 of word i // 64), pair tiles are kept
 as unit positions and written one mask at a time, so 100 boxes and thousands of pair tiles fit in memory.
 
@@ -77,6 +108,7 @@ Usage: amoeba_fn_partition.py --box cmn=DIR --box fra=DIR ... --core-map DIR --t
        [--require-every-source]
        [--groups G.json] [--groups-auto [--auto-min-units N] [--auto-min-members 3]] [--group-min-units N]
        [--emit-unassigned] [--check-against PARTITION_DIR] [--no-tiles] [--nested]
+       [--detach-share S [--detach-sweep S1,S2,...]] [--english-box lang.eng --english-closed-for cmn,fra,...]
 """
 from __future__ import annotations
 
@@ -230,6 +262,78 @@ def check_against(ref, keys, get, unassigned, rep):
     return {"reference": str(ref), "equal_with_groups_folded": True, "tiles_checked": len(mine)}
 
 
+def claim_shares(sel, names, drive, outside):
+    """Per claim (box, unit) of the units claimed by >= 2 boxes inside `outside`: drive / the strongest claimant's.
+    drive: box -> (sorted flat positions of its original selection, drive there). Returns (max drive per unit, the
+    concatenated shares)."""
+    shape = next(iter(sel.values())).shape
+    mx = np.zeros(int(np.prod(shape)), np.float32)
+    cnt = np.zeros(mx.size, np.int16)
+    looked = {}
+    for nm in names:
+        p = np.flatnonzero(sel[nm])
+        pos, val = drive[nm]
+        i = np.searchsorted(pos, p)
+        if p.size and ((i >= pos.size).any() or (pos[np.minimum(i, pos.size - 1)] != p).any()):
+            raise SystemExit(f"detach: box {nm} claims a unit outside its own selection (internal error)")
+        v = val[i]
+        looked[nm] = (p, v)
+        mx[p] = np.maximum(mx[p], v)
+        cnt[p] += 1
+    multi = (cnt >= 2) & outside.ravel()
+    sh = [v[multi[p]] / np.maximum(mx[p][multi[p]], 1e-30) for p, v in looked.values()]
+    return mx, looked, cnt, (np.concatenate(sh) if sh else np.zeros(0, np.float32))
+
+
+def detach_weak(sel, names, drive, share, outside, sweep=()):
+    """Drop each claim whose drive is < share x the unit's strongest claimant's (Pierre 2026-11-19). Returns (new sel,
+    report). `outside`: [L, n] bool, the units the report counts (not T2 or the English map)."""
+    mx, looked, cnt, sh = claim_shares(sel, names, drive, outside)
+    out = outside.ravel()
+    qs = [0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9]
+    rep = {"rule": "a claim is dropped where the box's drive (map mean_target) < share x the strongest claimant's; "
+                   "applied before the pair, family, LCA, joint and core decisions",
+           "share": share, "drive": "mean_target (per-token mean contribution on the box's target corpus)",
+           "claims_on_multi_claimed_units": int(sh.size),
+           "share_of_strongest_quantiles": dict(zip(map(str, qs), np.quantile(sh, qs).round(4).tolist()))
+           if sh.size else {},
+           "claims_below": {str(t): int((sh < t).sum()) for t in sorted({0.01, 0.025, 0.05, 0.1, 0.2, share} - {0})}}
+
+    def counts(th):
+        c = np.zeros(mx.size, np.int16)
+        for p, v in looked.values():
+            c[p[v >= th * mx[p]]] += 1
+        return {"box": int(((c == 1) & out).sum()), "pair": int(((c == 2) & out).sum()),
+                "three_plus": int(((c >= 3) & out).sum()), "unclaimed": int(((c == 0) & out).sum())}
+    rep["claim_counts_outside_base"] = {str(t): counts(t) for t in sorted({0.0, share, *sweep})}
+    rep["claim_counts_note"] = "claims at the detach (with --nested: after the descendant absorption, before the LCA"\
+                               " roll-up)"
+    new, per = {}, {}
+    for nm in names:
+        p, v = looked[nm]
+        weak = v < share * mx[p]
+        if weak.any():
+            m = sel[nm].copy()                                  # never in place (nested code keeps views of maps)
+            m.ravel()[p[weak]] = False
+            new[nm] = m
+        else:
+            new[nm] = sel[nm]
+        per[nm] = {"claims_detached": int(weak.sum()), "claims_detached_outside_base": int((weak & out[p]).sum())}
+    rep["claims_detached"] = int(sum(x["claims_detached"] for x in per.values()))
+    rep["claims_detached_outside_base"] = int(sum(x["claims_detached_outside_base"] for x in per.values()))
+    rep["per_box"] = per
+    return new, rep
+
+
+def named_l(k, box, grep):
+    """Tile key k names box (a pair, joint or kept family tile)."""
+    if k.startswith("pair:"):
+        return box in k[5:].split("__")
+    if k.startswith("joint:"):
+        return box in k[6:].split("+")
+    return bool(grep) and box in grep["kept"].get(k[6:], {}).get("members", [])
+
+
 def save_npz(path, items, get):
     """np.savez_compressed, one array at a time (pair masks are built as they are written, never all at once)."""
     import zipfile
@@ -265,7 +369,33 @@ def main():
     ap.add_argument("--not-nested", default="", help="comma list: boxes kept out of their ancestors' subtrees")
     ap.add_argument("--joint-floor", default="", help="N or auto: 3+ claim sets with >= N units -> joint tiles")
     ap.add_argument("--joint-sweep", default="", help="comma list of floors to report (auto picks among them)")
+    ap.add_argument("--detach-share", type=float, default=0.0,
+                    help="drop a claim whose drive is < this x the strongest claimant's (0: off; Pierre 2026-11-19)")
+    ap.add_argument("--detach-sweep", default="", help="comma list of shares to report (with or without detaching)")
+    ap.add_argument("--english-box", default="", help="tile name (lang.eng): English-map units outside T2 leave the "
+                    "core for box:<name> (Pierre 2026-11-19)")
+    ap.add_argument("--english-shared", action="store_true", help="English is a claimant: shared English tiles "
+                    "(pair / family / joint) instead of exclusivity against English (Pierre 2026-11-19)")
+    ap.add_argument("--english-closed-for", default="", help="comma list: boxes whose text is not English (the "
+                    "English box's gate is closed when serving them; recorded for the battery)")
     a = ap.parse_args()
+    if not 0.0 <= a.detach_share < 1.0:
+        raise SystemExit("--detach-share: 0 (off) <= s < 1")
+    try:
+        dsweep = sorted({float(x) for x in a.detach_sweep.split(",") if x})
+    except ValueError:
+        raise SystemExit(f"--detach-sweep: a comma list of numbers, not {a.detach_sweep!r}") from None
+    if any(not 0.0 <= x < 1.0 for x in dsweep):
+        raise SystemExit("--detach-sweep: each share 0 <= s < 1")
+    detaching = a.detach_share > 0 or bool(dsweep)
+    if a.english_closed_for and not a.english_box:
+        raise SystemExit("--english-closed-for needs --english-box")
+    if a.english_shared and not a.english_box:
+        raise SystemExit("--english-shared needs --english-box")
+    if a.english_shared and a.groups_auto:
+        raise SystemExit("--english-shared with --groups-auto is not supported (auto families would absorb English)")
+    if a.english_box and a.english_box in a.english_closed_for.split(","):
+        raise SystemExit("--english-closed-for must not name the English box")
     grouping = bool(a.groups or a.groups_auto)
     if a.auto_min_members < 3:
         raise SystemExit("--auto-min-members must be >= 3 (two boxes are a pair tile)")
@@ -290,7 +420,9 @@ def main():
         if E * F != n:
             raise SystemExit(f"T2 width {t2.shape[1]} does not divide the site width {n}")
         t2 = np.repeat(t2, F, axis=1)
-    sel, info = {}, {}
+    sel, info, drive = {}, {}, {}
+    if a.english_shared:
+        en_sel, en_drive = np.zeros((L, n), bool), np.zeros((L, n), np.float32)
     for spec in a.box:
         name, _, d = spec.partition("=")
         rep, z, S2 = load_map(d)
@@ -306,12 +438,66 @@ def main():
             if any(f"every_source_{s}" not in z.files for s in range(S)):
                 raise SystemExit(f"{name}: map has no every_source arrays (--require-every-source)")
             sel[name] &= np.stack([z[f"every_source_{s}"] for s in range(S)])
+        if a.english_shared:                           # target units English drives too: shared with English
+            ne = tm & ~(mb <= a.ratio * mt)
+            if a.require_every_source:
+                ne &= np.stack([z[f"every_source_{s}"] for s in range(S)])
+            nonexcl = int(ne.sum())
+            sel[name] = sel[name] | ne
+            en_sel |= ne
+            np.maximum(en_drive, np.where(ne, mb, 0.0).astype(np.float32), out=en_drive)
+            del ne
+        if detaching:                                  # drive at the box's own selection (sorted flat positions)
+            p = np.flatnonzero(sel[name])
+            drive[name] = (p, mt.ravel()[p].astype(np.float32))
         info[name] = {"map": str(d), "target_units": int(tm.sum()), "selected": int(sel[name].sum()),
                       "baseline_corpus": rep["baseline"]["corpus"], "target_corpus": rep["target"]["corpus"],
                       "capture_rev": rep.get("capture_rev")}
         if a.require_every_source:
             info[name]["selected_before_every_source"] = before
+        if a.english_shared:
+            info[name]["shared_with_english"] = nonexcl
+    if a.english_box and (a.english_box in sel or a.english_box == "core"):
+        raise SystemExit(f"--english-box {a.english_box}: also a box name")
+    cm_core = core_map                                 # the English-map units the core (or English box) takes
+    if a.english_shared:                               # English is a claimant: its map units join the shared rules
+        own = core_map & ~t2
+        en_sel |= own
+        cmt = np.stack([cz[f"mean_target_{s}"] for s in range(S)]).astype(np.float32)
+        np.maximum(en_drive, np.where(own, cmt, 0.0), out=en_drive)
+        del cmt
+        sel[a.english_box] = en_sel
+        info[a.english_box] = {"map": a.core_map, "english_box": True, "english_map_units": int(own.sum()),
+                               "shared_units": int((en_sel & ~own).sum()), "selected": int(en_sel.sum()),
+                               "target_corpus": (crep.get("target") or {}).get("corpus")}
+        if detaching:
+            p = np.flatnonzero(en_sel)
+            drive[a.english_box] = (p, en_drive.ravel()[p])
+        cm_core = np.zeros_like(core_map)
+        del en_drive, own
     names = sorted(sel)
+    closed_for = [x for x in a.english_closed_for.split(",") if x]
+    if any(x not in names for x in closed_for):
+        raise SystemExit(f"--english-closed-for: unknown boxes {[x for x in closed_for if x not in names]}")
+    drep = None
+
+    def run_detach():
+        nonlocal sel, drep
+        if not detaching:
+            return
+        new, drep = detach_weak(sel, names, drive, a.detach_share, ~t2 & ~cm_core, dsweep)
+        if a.detach_share > 0:
+            sel = new
+            for nm in names:
+                info[nm]["selected_before_detach"] = info[nm]["selected"]
+                info[nm]["selected"] = int(sel[nm].sum())
+                info[nm]["claims_detached"] = drep["per_box"][nm]["claims_detached"]
+        else:
+            drep["share"] = None
+            drep["rule"] += " (sweep only: nothing detached)"
+            for x in drep["per_box"].values():
+                x["claims_detached"] = x["claims_detached_outside_base"] = 0
+            drep["claims_detached"] = drep["claims_detached_outside_base"] = 0
     nested = None
     if a.not_nested and not a.nested:
         raise SystemExit("--not-nested needs --nested")
@@ -341,6 +527,20 @@ def main():
             info[nm]["selected_before_nesting"] = int(orig[nm].sum())
             info[nm]["selected"] = int(sel[nm].sum())
             info[nm]["descendants"] = desc
+        if detaching:                                  # an absorbed claim keeps the ancestor's drive (review: a
+            for nm in names:                           # strong parent's unit must not be detached as the child's)
+                anc = nested["ancestors"].get(nm, [])
+                if not anc or nm not in drive:
+                    continue
+                pos, val = drive[nm]
+                val = val.copy()
+                for y in anc:
+                    yd = np.zeros(L * n, np.float32)
+                    yd[drive[y][0]] = drive[y][1]
+                    np.maximum(val, yd[pos], out=val)
+                    del yd
+                drive[nm] = (pos, val)
+        run_detach()                                   # after the descendant absorption, before the LCA roll-up
         # Pierre 2026-11-18 ("Give it to the parent"; "a would hold it ... parent tiles are always gated in for
         # their subtiles"): a unit whose remaining claimants (after the drop above) are >= 2 boxes all inside one box
         # P's subtree goes to P alone, selecting or not: the lowest common ancestor box (parents decided deepest
@@ -360,7 +560,7 @@ def main():
             info[P]["received_from_subtopics"] = got
             info[P]["received_lca_selected"] = int((m & orig[P]).sum())
             info[P]["received_lca_unselected"] = got - info[P]["received_lca_selected"]
-            info[P]["received_from_subtopics_outside_base"] = int((m & ~t2 & ~core_map).sum())   # not core anyway
+            info[P]["received_from_subtopics_outside_base"] = int((m & ~t2 & ~cm_core).sum())   # not core anyway
             if got:
                 for x in desc:
                     if (sel[x] & m).any():
@@ -373,10 +573,13 @@ def main():
                            "common ancestor box, selecting or not (Pierre 2026-11-18: give it to the parent; parent "
                            "tiles are always gated in for their subtiles)")
         del orig, total
+    else:
+        run_detach()
+    drive.clear()
     claims = np.zeros((L, n), np.int16)
     for nm in names:
         claims += sel[nm]
-    core = t2 | core_map | (claims >= 3)
+    core = t2 | cm_core | (claims >= 3)
     tiles = {"core": core.copy()}
     for nm in names:
         tiles[f"box:{nm}"] = sel[nm] & (claims == 1) & ~core
@@ -430,7 +633,7 @@ def main():
         cmask = np.zeros((L, n, (B + 63) // 64), np.uint64)                          # box i: bit i % 64 of word i // 64
         for nm in names:
             cmask[..., idx[nm] // 64] |= sel[nm].astype(np.uint64) << np.uint64(idx[nm] % 64)
-        three = (claims >= 3) & ~t2 & ~core_map
+        three = (claims >= 3) & ~t2 & ~cm_core
     if grouping:
         for x in declared:
             for y in declared:
@@ -453,11 +656,30 @@ def main():
         for g, m in assign.items():
             tiles[f"group:{g}"] = m
             tiles["core"] &= ~m
+        if a.english_shared and kept:                  # English + 2+ boxes of one kept family -> group:<family>+EN
+            EB = a.english_box
+            ebit = np.zeros(cmask.shape[-1], np.uint64)
+            ebit[idx[EB] // 64] |= np.uint64(1) << np.uint64(idx[EB] % 64)
+            has_en = ((cmask & ebit) != 0).any(-1)
+            for g in sorted(list(kept), key=lambda k: (len(kept[k]["members"]), k)):
+                gm = ebit.copy()
+                for mbr in kept[g]["members"]:
+                    gm[idx[mbr] // 64] |= np.uint64(1) << np.uint64(idx[mbr] % 64)
+                m = three & has_en & tiles["core"] & ((cmask & ~gm) == 0).all(-1)
+                if not m.any():
+                    continue
+                gk = f"{g}+{EB}"
+                tiles[f"group:{gk}"] = m
+                tiles["core"] &= ~m
+                assign[gk] = m
+                kept[gk] = {"members": sorted(kept[g]["members"] + [EB]), "units": int(m.sum()), "subgroups": [],
+                            "boxes": [], "pairs_inside": [], "parent": g, "english_of": g}
+            del has_en
         FFg = F or crep["per_site"][0].get("F") or 640
         for g in kept:
             kept[g].update(share=float(assign[g].mean()), expert_equivalents=round(kept[g]["units"] / FFg, 1),
                            whole_experts=int((assign[g].reshape(L, -1, FFg).sum(2) == FFg).sum()),
-                           source="declared" if g in declared else "auto")
+                           source="declared" if g in declared else "english" if kept[g].get("english_of") else "auto")
         for g in dropped:
             dropped[g]["source"] = "declared" if g in declared else "auto"
         gsum = int(sum(v["units"] for v in kept.values()))
@@ -527,6 +749,46 @@ def main():
                 "eligible_claim_sets": int(eligible.sum()), "eligible_units": int(cnts[eligible].sum())}
     if grouping or jointing:
         del cmask
+    erep = None
+    if a.english_box and not a.english_shared:         # Pierre 2026-11-19: English gets its own box on FN
+        em = core_map & ~t2
+        if (em & ~tiles["core"]).any():
+            raise SystemExit("english box: an English-map unit outside T2 is not in the core (internal error)")
+        ek = f"box:{a.english_box}"
+        tiles["core"] &= ~em
+        tiles[ek] = em
+        ec = int(em.sum())
+        erep = {"name": a.english_box, "tile": ek, "units": ec, "share": float(em.mean()),
+                "rule": "the English-map units outside T2 (English vs the 10-language mix, compare map --core-map) "
+                        "leave the core for this box; topic boxes' claims do not change that (as when it was core)",
+                "gate": "the text is English: open when serving every box except closed_for",
+                "closed_for": closed_for,
+                "claimed_by_topic_boxes": {"1": int((em & (claims == 1)).sum()), "2": int((em & (claims == 2)).sum()),
+                                           "3+": int((em & (claims >= 3)).sum())},
+                "map": a.core_map}
+    if a.english_shared:
+        EB = a.english_box
+        named = lambda k: EB in (k[5:].split("__") if k.startswith("pair:") else   # noqa: E731
+                                 k[6:].split("+") if k.startswith("joint:") else
+                                 (grep["kept"][k[6:]]["members"] if grep and k[6:] in grep["kept"] else []))
+        units = lambda k: int(len(pair_pos[k]) if k in pair_pos else len(joint_pos[k]) if k in joint_pos   # noqa: E731
+                              else tiles[k].sum())
+        ek = [k for k in list(pair_pos) + list(joint_pos) + [k for k in tiles if k.startswith("group:")] if named(k)]
+        by = {"box": int(tiles[f"box:{EB}"].sum()), "pair": 0, "family": 0, "joint": 0}
+        for k in ek:
+            by["pair" if k.startswith("pair:") else "joint" if k.startswith("joint:") else "family"] += units(k)
+        closed = {}
+        for L_ in closed_for:                       # serving a language box: English-naming tiles that stay closed
+            closed[L_] = by["box"] + sum(units(k) for k in ek if not named_l(k, L_, grep))
+        erep = {"name": EB, "tile": f"box:{EB}", "units": by["box"], "share": float(tiles[f"box:{EB}"].mean()),
+                "rule": "English is a claimant (--english-shared): its shared units go to pair / family / joint "
+                        "tiles like any box's", "gate": "the text is English: open when serving every box except "
+                        "closed_for", "closed_for": closed_for, "map": a.core_map,
+                "shared": {"tiles": len(ek), "units_by_kind": by, "units_naming_english": sum(by.values()),
+                           "closed_when": "an English-naming tile is open for all English text (its gate is the OR "
+                                          "of its members' and English is one); it is closed only while serving a "
+                                          "closed_for box it does not name",
+                           "units_closed_serving": closed, "tiles_list": sorted(ek)[:200]}}
     cover = np.zeros((L, n), np.int16)
     for v in tiles.values():
         cover += v
@@ -547,10 +809,10 @@ def main():
            "rule": f"exclusivity r={a.ratio}; core = T2 | English map | >=3 boxes | unassigned; 2 boxes -> pair tile; "
                    "1 box -> box", "units_total": tot, "ratio": a.ratio,
            "core": {"units": int(tiles["core"].sum()), "share": float(tiles["core"].mean()),
-                    "from_t2": int(t2.sum()), "from_english_map_outside_t2": int((core_map & ~t2).sum()),
-                    "from_3plus_boxes": int(((claims >= 3) & ~t2 & ~core_map).sum()),
+                    "from_t2": int(t2.sum()), "from_english_map_outside_t2": int((cm_core & ~t2).sum()),
+                    "from_3plus_boxes": int(((claims >= 3) & ~t2 & ~cm_core).sum()),
                     "unassigned": int(unassigned.sum()),
-                    "small_pairs_spilled": int(tiles["core"].sum() - (t2 | core_map | (claims >= 3)).sum()
+                    "small_pairs_spilled": int(tiles["core"].sum() - (t2 | cm_core | (claims >= 3)).sum()
                                                - unassigned.sum())},
            "boxes": {nm: {**info[nm], "units": int(tiles[f"box:{nm}"].sum()),
                           "share": float(tiles[f"box:{nm}"].mean()),
@@ -580,6 +842,24 @@ def main():
             rep["rule"] += f"; joint tiles: 3+ claim sets left in the core with >= {jrep['floor']} units"
         if "from_3plus_boxes_kept" in rep["core"]:
             rep["core"]["from_3plus_boxes_kept"] -= jrep["units_moved"]
+    if drep is not None:
+        rep["detach"] = drep
+        if a.detach_share > 0:
+            rep["rule"] += (f"; weak-claimant detach: a claim < {a.detach_share} x the strongest claimant's drive is "
+                            "dropped first")
+    if erep is not None and a.english_shared:
+        rep["english_box"] = erep
+        rep["rule"] += f"; English shared: {a.english_box} is a claimant (no exclusivity against English)"
+    elif erep is not None:
+        rep["english_box"] = erep
+        rep["boxes"][a.english_box] = {"map": a.core_map, "units": erep["units"], "share": erep["share"],
+                                       "english_box": True, "target_corpus": (crep.get("target") or {}).get("corpus"),
+                                       "baseline_corpus": (crep.get("baseline") or {}).get("corpus"),
+                                       "whole_experts": int((em.reshape(L, -1, FF).sum(2) == FF).sum())}
+        rep["core"]["to_english_box"] = erep["units"]
+        rep["core"]["from_english_map_outside_t2"] = 0                       # moved to the English box
+        rep["core"]["small_pairs_spilled"] += erep["units"]                    # the formula above counts them out
+        rep["rule"] = rep["rule"].replace("core = T2 | English map |", f"core = T2 | (English map -> box {a.english_box}) |")
     if nested is not None:
         rep["nested"] = nested
         rep["rule"] += "; nested: an ancestor's claim is dropped where a descendant box claims the unit"
