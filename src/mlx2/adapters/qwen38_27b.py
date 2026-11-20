@@ -1320,6 +1320,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # route (runtime/amoeba_tiles.py): down(silu(gate(x)) * up(x)).
     amoeba_mlp = {"mlp": "mlp", "projections": ("gate_proj", "up_proj", "down_proj"),
                   "activation": "silu"}
+    # The dense MLP for the experimental gated block-sparse aMoEba kernels (runtime/amoeba_blocks,
+    # opt-in research only; no route uses it): checkpoint names of gate/up/down.
+    amoeba_block_mlp = {"kind": "dense", "prefix": "model.language_model.layers.{layer}.mlp",
+                        "projections": ("gate_proj", "up_proj", "down_proj"), "activation": "silu"}
 
     def capture_teacher_windows(self, windows, sink, *, order="layer_major",
                                 activation_budget_bytes=512 << 20):

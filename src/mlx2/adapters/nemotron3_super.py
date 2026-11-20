@@ -231,6 +231,8 @@ def apply_short_exact_policy(model, policy) -> str:
 
 class Nemotron3SuperAdapter(FlashNextAdapter):
     descriptor = DESCRIPTOR
+    # Not a SwiGLU switch_mlp: no declaration for the experimental aMoEba block-sparse kernels.
+    amoeba_block_mlp = None
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
     # This adapter is not well tuned yet. Its exact B1 MTP verifier is slower

@@ -14,6 +14,9 @@ bb4b4a35863af562fc4ccb2586300d8f94b5d6de)
 
 Adapted in src/mlx2/runtime/lane/ (the row-invariant lane matmul's q4 group
 formulation, fragment mapping, scale/bias pairing and split-K reduction).
+The same group formulation and fragment mapping are reused, through
+src/mlx2/runtime/lane/matmul.py, by the mpp kernels of
+src/mlx2/runtime/amoeba_blocks/kernels.py (gated block-sparse MLP/MoE).
 TensorFold revision 71377a5373ed7b394f1b480ba2a6a3986b03af1c is also adapted in
 src/mlx2/runtime/drafters/dflash_tree.py (the DFlash2 best-first tree search).
 TensorFold revision 9cd52ab4daba68ddd09be89be8f23ad43175e821 is adapted in

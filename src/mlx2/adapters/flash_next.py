@@ -321,6 +321,11 @@ class FlashNextAdapter:
     # Named efforts select the template's levels (low/medium/xhigh); with
     # thinking on and no effort named, medium (see _DEFAULT_TEMPLATE_EFFORT).
     reasoning_effort_semantics = "template_levels_default_medium"
+    # Routed experts of every decoder layer, for the experimental gated block-sparse aMoEba kernels
+    # (runtime/amoeba_blocks, opt-in research only; no route uses it): checkpoint names of the
+    # SwitchGLU projections, down(silu(gate(x)) * up(x)) per expert.
+    amoeba_block_mlp = {"kind": "switch_glu", "prefix": "language_model.model.layers.{layer}.mlp.switch_mlp",
+                        "projections": ("gate_proj", "up_proj", "down_proj"), "activation": "silu"}
 
     def microscaling_supported(self):
         """Shared dense/grouped SC-MXFP4 route, opt-in and unqualified."""
