@@ -143,6 +143,7 @@ def test_thread_stops_cleanly_with_receipt(tmp_path):
         """)
     assert p.returncode == 3, (p.returncode, p.stdout, p.stderr)
     assert "not stopped" not in p.stdout and "memory watchdog: footprint" in p.stdout
+    assert p.stdout.strip().splitlines()[-1].endswith(M.STOP_MARKER)    # the bridge lab keys its receipt on it
     rec = json.loads(rc.read_text())
     assert rec["exit"] == 3 and rec["triggers"][0][0] == "soft"
 
@@ -201,3 +202,62 @@ def test_watcher_hard_kill_and_exit_with_target(tmp_path):
         time.sleep(0.1)
     else:
         pytest.fail("watcher outlived its target")
+
+
+# 2026-11-19 19:19 stop, then wiring (ops.wire_weights): the battery's ~70 GiB of weights wired, so the machine holds
+# ~86 GiB wired of 128 and only ~40 GiB is pageable. The triggers read only pageable room and absolute levels.
+WIRED_HEALTHY = dict(footprint_gib=79.1, avail_gib=34.0, free_pages=60000, free_min_pages=3500, page_free_wanted=0,
+                     compressor_gib=4.2, memsize_gib=128.0, swap_used_gib=0.02, pressure=1, wired_gib=86.0)
+
+
+def test_high_wired_memory_is_no_trigger_but_pressure_still_stops():
+    lim = M.make_limits(92, min_avail_gb=15, swap_growth_gb=8, compressor0=4.2, swap0=0.02)
+    st = {}
+    assert [M.check(dict(WIRED_HEALTHY), lim, st) for _ in range(20)] == [[]] * 20      # wired alone: no stop
+    assert M.check(dict(WIRED_HEALTHY), lim, {}, watcher=True) == []
+    # pressure on the ~40 GiB left: other processes compressed (+13 GiB), avail down, free pages starving
+    grown = dict(WIRED_HEALTHY, compressor_gib=17.5, avail_gib=20.0)
+    assert any("compressor grew" in m for _, m in M.check(grown, lim, {}))
+    starved = dict(WIRED_HEALTHY, free_pages=1200, avail_gib=16.0)
+    st = {}
+    kinds = [[k for k, _ in M.check(starved, lim, st)] for _ in range(10)]
+    assert kinds[2] == ["soft"] and kinds[9] == ["hard"]
+    st = {}
+    assert [[k for k, _ in M.check(starved, lim, st, watcher=True)] for _ in range(10)][9] == ["hard"]
+    low = dict(WIRED_HEALTHY, avail_gib=12.0)
+    assert any("free+inactive" in m for _, m in M.check(low, lim, {}))
+
+
+def test_live_reading_has_machine_wired():
+    r = M.readings(os.getpid())
+    vm = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True).stdout
+    wired = int(next(x for x in vm.splitlines() if x.startswith("Pages wired down")).split(":")[1].strip(" ."))
+    assert 0 < r["wired_gib"] < r["memsize_gib"] and abs(wired * GIB_PAGE - r["wired_gib"]) < 2.0
+
+
+def test_watch_tracks_wired_after_wiring_and_receipt_has_it(tmp_path):
+    rc = tmp_path / "stop.json"
+    p = _child(tmp_path, f"""
+        lim = M.make_limits(0.0, hard_gb=1e6, compressor_growth_gb=1e9, compressor_frac=1e9,
+                            hard_compressor_frac=1e9, starved_soft_s=10**9, starved_hard_s=10**9)
+        stats = {{"wired": {{"wired": True, "limit_gib": 80.0}}, "wired_at_wire_gb": 86.0}}
+        M.Watch(lim, lambda m: print(m, flush=True), every_s=0.2, receipt={str(rc)!r}, watcher=False, stats=stats)
+        time.sleep(20)
+        """)
+    assert p.returncode == 3, (p.returncode, p.stdout, p.stderr)
+    rec = json.loads(rc.read_text())
+    assert rec["wired"] == {"wired": True, "limit_gib": 80.0} and rec["observed_min_wired_gb"] > 0
+    assert rec["reading"]["wired_gib"] > 0
+
+
+def test_watch_logs_once_when_wired_drops(tmp_path):
+    p = _child(tmp_path, """
+        lim = M.make_limits(1e6, hard_gb=1e7, min_avail_gb=0, compressor_growth_gb=1e9, compressor_frac=1e9,
+                            hard_compressor_frac=1e9, starved_soft_s=10**9, starved_hard_s=10**9, swap_growth_gb=1e9)
+        stats = {"wired_at_wire_gb": 4000.0}          # far above anything real: the reading is a drop
+        M.Watch(lim, lambda m: print(m, flush=True), every_s=0.1, watcher=False, stats=stats)
+        time.sleep(1.0)
+        print("warned", stats.get("observed_wired_drop_at") is not None, flush=True)
+        """)
+    assert p.returncode == 0, (p.stdout, p.stderr)
+    assert p.stdout.count("may be pageable again") == 1 and "warned True" in p.stdout

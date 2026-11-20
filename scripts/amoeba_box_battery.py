@@ -237,6 +237,12 @@ def read_held_rows(path, kind, filt):
     return rows
 
 
+def _wired_arg(spec):
+    """--wired-gb: a bad value fails at parse time, before the model loads (ops.wired_arg, imported lazily)."""
+    from research.amoeba.carve.ops import wired_arg
+    return wired_arg(spec)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -259,6 +265,11 @@ def main():
     ap.add_argument("--watchdog-every-s", type=float, default=1.0)
     ap.add_argument("--min-avail-gb", type=float, default=15.0,
                     help="stop when free + inactive + speculative + purgeable falls below this")
+    ap.add_argument("--wired-gb", default=os.environ.get("AMOEBA_WIRED_GB", "").strip() or "auto", type=_wired_arg,
+                    help="wire the model weights after load (MLX set_wired_limit; research/amoeba/carve/ops.py "
+                         "wire_weights): auto = MLX active memory after load + 10 GiB (FN: ~80), a number of GiB, or "
+                         "0 = off; capped 8 GiB under min(iogpu.wired_limit_mb, the recommended working set) and at "
+                         "--memory-gb; env AMOEBA_WIRED_GB (2026-11-19 19:19: macOS compressed the battery's weights)")
     ap.add_argument("--compressor-growth-gb", type=float, default=12.0,
                     help="stop when the memory compressor grows this much over its level at start")
     ap.add_argument("--waiver-note", default="")
@@ -281,9 +292,10 @@ def main():
     for x in a.held_note:
         k, _, v = x.partition("=")
         notes[k] = v
+    from research.amoeba.carve import ops as O
+    O.prepare_wiring(a.wired_gb)                       # before any Metal call (MLX reads the refresh env then)
     from research.amoeba.carve import __main__ as D
     from research.amoeba.carve import evals as E
-    from research.amoeba.carve import ops as O
     from research.amoeba.carve.host import Host
     log = lambda *m: print(time.strftime("%H:%M:%S"), *m, flush=True)    # noqa: E731
     out = Path(a.out)
@@ -368,8 +380,10 @@ def main():
              "watchdog": {"limit_gb": a.watchdog_gb, "hard_gb": a.watchdog_hard_gb, "every_s": a.watchdog_every_s,
                           "min_avail_gb": a.min_avail_gb, "compressor_growth_gb": a.compressor_growth_gb,
                           "swap_growth_gb": a.swap_growth_gb, "waiver_note": a.waiver_note or None},
+             "wired": wired[0] or {"requested": a.wired_gb, "status": "not yet (wired after the model loads)"},
              **({"joint_partition": a.joint_partition, "joint_top": a.joint_top} if a.joint_partition else {})}
         write_meta(m)
+    wired = [None]
     mp = out / "battery.meta.json"
     try:                                               # a resumed run: keep the last finished meta beside it
         if json.loads(mp.read_text()).get("status", "finished") == "finished":
@@ -390,6 +404,7 @@ def main():
         if not tables or Path(os.environ.get("MLX_QWEN4_PLE_NVME", "")).expanduser().resolve() != \
                 Path(a.model).expanduser().resolve() / "ple_rows.bin":
             raise SystemExit("PLE offload is not active (FN rule: assert it)")
+    wired[0] = O.wire_weights(a.wired_gb, log, memory_gb=a.memory_gb)     # after load: Host evaluated the weights
     W = max(host.widths)
     if core_t.shape != (len(layers), W):
         raise SystemExit(f"tile shape {core_t.shape} != [moe layers, {W}]")
@@ -790,6 +805,7 @@ def main():
                          "limit_gb": a.watchdog_gb, "every_s": a.watchdog_every_s, "min_avail_gb": a.min_avail_gb,
                          "compressor_growth_gb": a.compressor_growth_gb,
                          **{k: v for k, v in getattr(O, "WATCH", {}).items() if k.startswith(("peak_", "observed_"))}},
+            "wired": wired[0],
             "mlx_peak_gb": O.peak_gb(), "status": "finished"}
     if skipped:
         meta["skipped"] = skipped

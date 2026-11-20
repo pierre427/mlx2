@@ -172,6 +172,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.append(str(ROOT))  # research.amoeba.carve (the memory watchdog); appended so it shadows nothing
 import amoeba_hub_align as ha  # noqa: E402
 import amoeba_paired_stats as PS  # noqa: E402
 
@@ -459,9 +460,12 @@ def main():
                     help="auto: float32 on --cpu, else the artifact as stored (a quantized host trains in place)")
     ap.add_argument("--mem-cap-gb", type=float, default=0)
     ap.add_argument("--watchdog-gb", type=float, default=0,
-                    help="footprint watchdog (amoeba27b_lib.footprint_watchdog): exit 3 when this process's physical "
-                         "footprint passes this many GB, machine available memory falls under --min-avail-gb, swap "
-                         "grows more than --swap-growth-gb, or memory pressure goes critical (0 = off)")
+                    help="memory watchdog (research/amoeba/carve/memwatch.py via ops.footprint_watchdog, with its "
+                         "SIGKILL watcher; receipt OUT/watchdog-stop.json): exit 3 when this process's physical "
+                         "footprint passes this many GB, free + inactive + purgeable falls under --min-avail-gb, free "
+                         "pages starve under kern.vm_page_free_min, the compressor grows 12 GB (or holds 20 %% of "
+                         "memory after growing), swap grows more than --swap-growth-gb, or pressure goes critical "
+                         "(0 = off). Was amoeba27b_lib.footprint_watchdog, which missed the 2026-11-19 panic")
     ap.add_argument("--min-avail-gb", type=float, default=15.0)
     ap.add_argument("--swap-growth-gb", type=float, default=2.0)
     ap.add_argument("--waiver-note", default="", help="required when --swap-growth-gb is above 2 (who approved it)")
@@ -560,9 +564,11 @@ def main():
             print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
             with open(out / "watchdog.log", "a") as f_:
                 f_.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
-            if "aborting" in msg:  # os._exit(3) follows: leave a failed receipt, and never let this path raise
+            if "aborting" in msg or STOP_MARKER_ in msg:  # os._exit(3) follows: leave a failed receipt, and never
+                # let this path raise (memwatch's thread logs its STOP_MARKER right before its exit). The watcher may
+                # SIGKILL first (hard trigger or a starved thread): then its receipt stands, read by the window.
                 try:  # (an exception here would end the watchdog thread and leave the process unwatched)
-                    if RECEIPT_LOCK.acquire(timeout=5):  # held until the exit: no later write replaces this one
+                    if RECEIPT_LOCK.acquire(timeout=2):  # held until the exit: no later write replaces this one
                         rec_ = dict(_STATE.get("receipt") or {}, status="failed (watchdog)", reason=msg,
                                     watchdog=dict(WATCH or {}), wall_s=round(time.time() - t0, 1))
                         tmp_ = out / "run.json.wd.tmp"
@@ -570,8 +576,11 @@ def main():
                         tmp_.replace(out / "run.json")
                 except BaseException:
                     pass
-        wd_.footprint_watchdog(args.watchdog_gb, wd_log, min_avail_gb=args.min_avail_gb, swap_growth_gb=sg_)
-        WATCH = wd_.WATCH
+        from research.amoeba.carve import ops as wo_
+        from research.amoeba.carve.memwatch import STOP_MARKER as STOP_MARKER_
+        wo_.footprint_watchdog(args.watchdog_gb, wd_log, min_avail_gb=args.min_avail_gb, swap_growth_gb=sg_,
+                               receipt=out / "watchdog-stop.json", watcher=True)
+        WATCH = wo_.WATCH
         WATCH["swap_growth_allowance_gb"] = round(sg_, 2)
     rng = np.random.default_rng(args.seed)
 

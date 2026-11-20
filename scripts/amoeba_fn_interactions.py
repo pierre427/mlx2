@@ -552,6 +552,12 @@ def map_vec(path, L):
             np.concatenate([z[f"mean_baseline_{s}"] for s in range(L)]).astype(np.float32))
 
 
+def _wired_arg(spec):
+    """--wired-gb: a bad value fails at parse time, before the model loads (ops.wired_arg, imported lazily)."""
+    from research.amoeba.carve.ops import wired_arg
+    return wired_arg(spec)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="")
@@ -591,6 +597,9 @@ def main(argv=None):
     ap.add_argument("--watchdog-gb", type=float, default=80)
     ap.add_argument("--swap-growth-gb", type=float, default=2.0)
     ap.add_argument("--waiver-note", default="")
+    ap.add_argument("--wired-gb", default=os.environ.get("AMOEBA_WIRED_GB", "").strip() or "auto", type=_wired_arg,
+                    help="wire the model weights after load (as scripts/amoeba_box_battery.py --wired-gb): auto = MLX "
+                         "active after load + 10 GiB, GiB, or 0 = off; capped at --memory-gb; env AMOEBA_WIRED_GB")
     a = ap.parse_args(argv)
     arms = [x for x in a.arms.split(",") if x]
     if not arms or any(x not in ARMS for x in arms):
@@ -832,9 +841,10 @@ def main(argv=None):
     if a.dry_run:
         return plan
     # ---- GPU
+    from research.amoeba.carve import ops as O
+    O.prepare_wiring(a.wired_gb)                       # before any Metal call (MLX reads the refresh env then)
     from research.amoeba.carve import __main__ as D
     from research.amoeba.carve import evals as E
-    from research.amoeba.carve import ops as O
     from research.amoeba.carve.host import Host
     O.footprint_watchdog(a.watchdog_gb, log, swap_growth_gb=a.swap_growth_gb,
                          watcher=True)   # SIGKILL watcher: the same FN model as the battery (2026-11-19 panic)
@@ -847,6 +857,7 @@ def main(argv=None):
         if not tables or Path(os.environ.get("MLX_QWEN4_PLE_NVME", "")).expanduser().resolve() != \
                 Path(a.model).expanduser().resolve() / "ple_rows.bin":
             raise SystemExit("PLE offload is not active (FN rule: assert it)")
+    wired = O.wire_weights(a.wired_gb, log, memory_gb=a.memory_gb)       # after load: Host evaluated the weights
     W = max(host.widths)
     if shape != (len(layers), W):
         raise SystemExit(f"tile shape {shape} != [moe layers, {W}]")
@@ -869,6 +880,7 @@ def main(argv=None):
             "evals": ev.n, "eval_s": round(ev.t_eval, 1), "sec_per_eval_measured": round(ev.t_eval / max(ev.n, 1), 2),
             "watchdog": {"limit_gb": a.watchdog_gb, "memory_gb": a.memory_gb, "swap_growth_gb": a.swap_growth_gb,
                          "waiver_note": a.waiver_note or None, **dict(getattr(O, "WATCH", {}))},
+            "wired": wired,
             "random_shortfall_units": SHORTFALL[0], "mlx_peak_gb": O.peak_gb(), **res}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     return meta

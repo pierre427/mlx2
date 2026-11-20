@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -197,6 +198,164 @@ def setup_mlx(memory_gb: float, cache_gb: float):
     import mlx.core as mx
     mx.set_memory_limit(int(memory_gb * 2**30))
     mx.set_cache_limit(int(cache_gb * 2**30))
+
+
+WIRED = {}
+WIRED_AUTO_WORKING_GB = 10.0     # auto: the weights MLX holds after load plus this much working set
+WIRED_CAP_MARGIN_GB = 8.0        # the limit stays this far under min(iogpu.wired_limit_mb, recommended working set)
+WIRED_REFRESH_MS = "1000"        # MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS while wiring (setdefault)
+
+
+def wired_default(default: str = "auto") -> str:
+    """The --wired-gb default: env AMOEBA_WIRED_GB, else `default`."""
+    return os.environ.get("AMOEBA_WIRED_GB", "").strip() or default
+
+
+def _wired_spec(spec) -> float | str | None:
+    """None (off), "auto", or GiB. Accepts 0 / off / no / none for off."""
+    s = str(spec if spec is not None else "off").strip().lower()
+    if s in ("", "0", "0.0", "off", "no", "none", "false"):
+        return None
+    if s == "auto":
+        return "auto"
+    v = float(s)
+    if not math.isfinite(v) or v < 0:
+        raise ValueError(f"--wired-gb {spec}: not a finite GiB >= 0, auto or off")
+    return v or None
+
+
+def wired_arg(spec: str) -> str:
+    """argparse type for --wired-gb: a bad value fails at parse time, before anything loads."""
+    import argparse
+    try:
+        _wired_spec(spec)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return spec
+
+
+def prepare_wiring(spec) -> dict:
+    """Call before the first MLX Metal call (setup_mlx): MLX reads MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS when it
+    builds its residency sets, at Metal device creation. While set, an MLX thread re-requests residency of every
+    non-empty set each interval, so a CPU-side gap between forward passes (mask building, held-set encoding) does
+    not let Metal drop the wired weights after ~2 s idle (runtime/residency_heartbeat.py). An existing value wins;
+    AMOEBA_RESIDENCY_REFRESH_MS overrides the default (0 = off)."""
+    if _wired_spec(spec) is None:
+        return {"refresh_ms": os.environ.get("MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS")}
+    want = os.environ.get("AMOEBA_RESIDENCY_REFRESH_MS", WIRED_REFRESH_MS)
+    if want and want != "0":
+        os.environ.setdefault("MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS", want)
+    WIRED["refresh_ms"] = os.environ.get("MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS")
+    WIRED["prepared"] = True       # a caller contract (prepare_wiring before setup_mlx), not checked against MLX
+    return {"refresh_ms": WIRED["refresh_ms"]}
+
+
+def plan_wired_limit(spec, active_gib: float, iogpu_mb: int, max_rec_gib: float | None,
+                     memory_gb: float | None = None) -> dict:
+    """Pure sizing of the wired limit (CPU-tested). want = active + WIRED_AUTO_WORKING_GB (auto) or spec GiB; capped
+    at min(iogpu.wired_limit_mb, the device's recommended working set) - WIRED_CAP_MARGIN_GB (MLX refuses a limit
+    above the recommended working set) and at memory_gb (MLX's own allocation limit: wiring above it buys nothing).
+    weights_fit is False when the limit is under what MLX holds now: MLX then wires allocations only up to the
+    limit, and the rest stays pageable (compressible)."""
+    s = _wired_spec(spec)
+    if s is None:
+        return {"wired": False, "reason": "off (--wired-gb 0)"}
+    if not max_rec_gib:
+        return {"wired": False, "reason": "no Metal recommended working-set size"}
+    caps = {"recommended_working_set_gib": float(max_rec_gib)}
+    if iogpu_mb and iogpu_mb > 0:
+        caps["iogpu_wired_limit_gib"] = iogpu_mb / 1024.0
+    hw = min(caps.values()) - WIRED_CAP_MARGIN_GB
+    want = float(active_gib) + WIRED_AUTO_WORKING_GB if s == "auto" else float(s)
+    limit = min(want, hw)
+    if memory_gb:
+        caps["memory_limit_gib"] = float(memory_gb)
+        limit = min(limit, float(memory_gb))
+    if limit <= 0:
+        return {"wired": False, "reason": f"cap {hw:.1f} GiB leaves nothing to wire", "caps": caps}
+    return {"wired": True, "spec": "auto" if s == "auto" else float(s), "want_gib": round(want, 2),
+            "limit_gib": round(limit, 2), "limit_bytes": int(limit * 2**30), "caps": caps,
+            "cap_margin_gib": WIRED_CAP_MARGIN_GB, "active_gib_at_wire": round(float(active_gib), 2),
+            "weights_fit": float(active_gib) <= limit, "capped": limit < want}
+
+
+def _machine_wired_gib() -> float:
+    from . import memwatch
+    return memwatch.vm_pages()["wire_count"] * memwatch._PAGE / 2**30
+
+
+def wire_weights(spec, log, memory_gb: float | None = None, settle_s: float = 60.0) -> dict:
+    """Wire what MLX holds now (call after the model loaded and its parameters were evaluated: Host does
+    mx.eval(model.parameters())) and keep it wired until exit. MLX 0.32.4 (metal/resident.cpp, allocator.cpp):
+    every Metal allocation is tracked; mx.set_wired_limit resizes the residency sets, and on growth adds every
+    tracked allocation that fits, in no particular order, then commits; later allocations join while under the
+    limit. The sets carry a standing requestResidency() and sit on every command queue, so the pages are wired
+    when the next command buffer runs: this commits one tiny eval, then watches the machine's wired page count
+    (host_statistics64 wire_count; the residency set is not in the process's ri_wired_size) rise by about what was
+    admitted (`verified`: >= 80 % of min(active, limit) within settle_s). The previous limit is restored at exit
+    (atexit; a watchdog os._exit or SIGKILL skips it, and the process's wired memory goes with the process).
+    Idempotent: a second call in one process returns the first receipt."""
+    if WIRED.get("receipt"):
+        return WIRED["receipt"]
+    import atexit
+    import mlx.core as mx
+    try:
+        available = mx.metal.is_available()
+    except Exception:  # noqa: BLE001 - a non-Metal build has nothing to wire
+        available = False
+    info = mx.device_info() if available else {}
+    from . import memwatch
+    iogpu_mb = memwatch._sysctl_int("iogpu.wired_limit_mb", 0)
+    max_rec = info.get("max_recommended_working_set_size")
+    active = mx.get_active_memory() / 2**30 if available else 0.0
+    rec = plan_wired_limit(spec, active, iogpu_mb, (max_rec / 2**30) if max_rec else None, memory_gb)
+    # the refresh thread exists only if the env was set before MLX made its Metal device: known when prepare_wiring
+    # ran first in this process (callers do it before setup_mlx); otherwise only the env as it is now is known
+    env_ms = os.environ.get("MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS")
+    rec.update(iogpu_wired_limit_mb=iogpu_mb, refresh_ms=WIRED.get("refresh_ms") if WIRED.get("prepared") else None,
+               refresh_env_now=env_ms, refresh_prepared_before_metal=bool(WIRED.get("prepared")),
+               mechanism="mlx set_wired_limit -> MTLResidencySet (runtime/weight_residency.py)")
+    if not rec["wired"]:
+        WIRED["receipt"] = rec
+        log(f"wiring: {rec['reason']}")
+        return rec
+    mx.synchronize()
+    # free MLX's buffer cache first: cached buffers are tracked allocations too, and the residency sets admit
+    # tracked allocations in no particular order when the limit grows, so a cache could take weights' room
+    mx.clear_cache()
+    w0 = _machine_wired_gib()
+    prev = mx.set_wired_limit(rec["limit_bytes"])
+    rec["previous_wired_limit_bytes"] = int(prev)
+
+    def restore():
+        try:
+            mx.synchronize()
+            mx.set_wired_limit(int(prev))
+        except Exception:  # noqa: BLE001 - at exit: nothing left to do about it
+            pass
+    atexit.register(restore)
+    expect = min(active, rec["limit_gib"])
+    t0 = time.time()
+    delta = 0.0
+    while True:
+        mx.eval(mx.zeros((1,)) + 1)                    # a command buffer on a queue holding the sets
+        mx.synchronize()
+        delta = _machine_wired_gib() - w0
+        if delta >= 0.8 * expect or time.time() - t0 >= settle_s:
+            break
+        time.sleep(1.0)
+    rec.update(machine_wired_gib_before=round(w0, 2), machine_wired_gib_after=round(w0 + delta, 2),
+               machine_wired_delta_gib=round(delta, 2), expected_delta_gib=round(expect, 2),
+               verified=bool(delta >= 0.8 * expect), settle_s=round(time.time() - t0, 1))
+    WIRED["receipt"] = rec
+    WATCH["wired"] = rec
+    WATCH["wired_at_wire_gb"] = round(w0 + delta, 1)
+    log(f"wiring: limit {rec['limit_gib']:.1f} GiB (want {rec['want_gib']:.1f}, caps "
+        f"{', '.join(f'{k} {v:.1f}' for k, v in rec['caps'].items())}, margin {WIRED_CAP_MARGIN_GB:.0f}); MLX active "
+        f"{active:.1f} GiB; machine wired {w0:.1f} -> {w0 + delta:.1f} GiB in {rec['settle_s']:.0f}s "
+        f"({'verified' if rec['verified'] else 'NOT verified: wired count did not rise by 80 % of the weights'})"
+        + ("" if rec["weights_fit"] else "; WARNING: limit under MLX active memory, part of the weights stay pageable"))
+    return rec
 
 
 def peak_gb() -> float:

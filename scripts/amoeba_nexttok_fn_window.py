@@ -533,8 +533,17 @@ def parser():
     ap.add_argument("--watchdog-gb", type=float, default=88)
     ap.add_argument("--swap-growth-gb", type=float, default=2.0)
     ap.add_argument("--waiver-note", default="")
+    ap.add_argument("--wired-gb", default=os.environ.get("AMOEBA_WIRED_GB", "").strip() or "auto", type=_wired_arg,
+                    help="wire the FN weights after load (research/amoeba/carve/ops.py wire_weights, as the box "
+                         "battery): auto = MLX active after load + 10 GiB, GiB, or 0 = off; capped at --memory-gb")
     ap.add_argument("--dry-run", action="store_true")
     return ap
+
+
+def _wired_arg(spec):
+    """--wired-gb: a bad value fails at parse time, before the model loads (ops.wired_arg, imported lazily)."""
+    from research.amoeba.carve.ops import wired_arg
+    return wired_arg(spec)
 
 
 def main():
@@ -559,8 +568,10 @@ def main():
         logf.write(line + "\n")
         logf.flush()
     from research.amoeba.carve import ops as CO
+    CO.prepare_wiring(a.wired_gb)                      # before any Metal call (MLX reads the refresh env then)
     from research.amoeba.carve.host import Host
-    CO.footprint_watchdog(a.watchdog_gb, log, swap_growth_gb=a.swap_growth_gb)
+    CO.footprint_watchdog(a.watchdog_gb, log, swap_growth_gb=a.swap_growth_gb, receipt=out / "watchdog-stop.json",
+                          watcher=True)                # memwatch + its SIGKILL watcher (2026-11-19 FN memory stops)
     CO.setup_mlx(a.memory_gb, 2)
     import mlx.core as mx
     receipt = {"schema": "mlx2.amoeba-nexttok-fn-window.v1", "mlx2_revision": git_rev(), "mlx": mx.__version__,
@@ -579,6 +590,7 @@ def main():
             if not tables or Path(os.environ.get("MLX_QWEN4_PLE_NVME", "")).expanduser().resolve() != \
                     Path(a.model).expanduser().resolve() / "ple_rows.bin":
                 raise SystemExit("PLE offload is not active (FN rule: assert it)")
+            receipt["wired"] = CO.wire_weights(a.wired_gb, log, memory_gb=a.memory_gb)   # Host evaluated the weights
             receipt["checkpoint"] = host.checkpoint
             receipt["partition"] = {"path": a.partition, "checkpoint": prep["checkpoint"], "rule": prep["rule"]}
             streams, A, B = part_q(a, host, log, receipt)
@@ -593,6 +605,7 @@ def main():
                 raise
     finally:
         receipt["seconds"] = round(time.time() - t0, 1)
+        receipt["watch"] = {k: v for k, v in CO.WATCH.items() if k != "wired"}
         tmp = out / "receipt.json.tmp"
         tmp.write_text(json.dumps(receipt, indent=1, default=str))
         os.replace(tmp, out / "receipt.json")

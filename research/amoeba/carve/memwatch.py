@@ -11,6 +11,16 @@ Readings come from the kernel directly (ctypes, no fork):
                   vm.page_free_wanted > 0;
   swap            sysctl vm.swapusage (xsw_usage), pressure: sysctl kern.memorystatus_vm_pressure_level.
 
+Wired weights (2026-11-19 19:19 stop: 79 GiB footprint, 46 GiB resident, the compressor +27 GiB in 3 min, i.e.
+macOS compressing the battery's own MLX buffers; ops.wire_weights now wires them). No trigger changes with wiring:
+wired pages are in neither free, inactive nor purgeable, so avail and the free-page count already measure only the
+pageable room that is left; footprint (phys_footprint) counts the weights wired or not; the compressor can then
+grow only from pageable memory (other processes, this process's unwired heap), and its growth / share and the
+starvation triggers stop the run as before. A wired 80 GiB on 128 GiB leaves ~40 GiB pageable, so pressure reaches
+starvation sooner and with less compressor growth; the triggers are absolute and stay valid. The machine's wired
+total is read (wired_gib) and, after wiring, its minimum kept (observed_min_wired_gb: a drop means Metal released
+the residency set), in WATCH and in the stop receipt.
+
 check() is the pure trigger logic (tested on CPU). Two layers act on it:
   the in-process thread   polls every `every_s` (1 s); a soft trigger on 2 consecutive samples, or any hard one,
                           writes a JSON receipt and os._exit(3);
@@ -77,6 +87,8 @@ def _host_port():
     return _HOST[1]
 _PAGE = resource.getpagesize()
 HOST_VM_INFO64 = 4
+STOP_MARKER = "stopping (exit 3)"   # the thread's last log line ends with it (callers key failed receipts on it)
+WIRED_DROP_WARN_GIB = 10.0     # one log line when machine wired falls this far under its level at wiring
 
 
 def footprint_bytes(pid: int) -> tuple[int, int] | None:
@@ -155,6 +167,9 @@ def readings(pid: int) -> dict:
             "page_free_wanted": _sysctl_int("vm.page_free_wanted", 0),
             "compressor_gib": v["compressor_page_count"] * _PAGE / GIB,
             "compressed_logical_gib": v["total_uncompressed_pages_in_compressor"] * _PAGE / GIB,
+            # machine-wide wired pages (the kernel's, other processes' and, once ops.wire_weights ran, this
+            # process's MLX residency sets): no trigger reads it; receipts and WATCH record it
+            "wired_gib": v["wire_count"] * _PAGE / GIB,
             "memsize_gib": memsize_gib(), "swap_used_gib": swap_used_gib(), "pressure": pressure_level()}
 
 
@@ -274,6 +289,18 @@ class Watch:
                                                             r["free_pages"])
                 self.stats["peak_compressor_gb"] = max(self.stats.get("peak_compressor_gb", 0.0),
                                                        round(r["compressor_gib"], 1))
+                w_at = self.stats.get("wired_at_wire_gb")
+                if w_at is not None:                                   # after ops.wire_weights: did it stay?
+                    self.stats["observed_min_wired_gb"] = round(min(self.stats.get("observed_min_wired_gb", 1e9),
+                                                                    r["wired_gib"]), 1)
+                    if r["wired_gib"] < w_at - WIRED_DROP_WARN_GIB and not self.stats.get("observed_wired_drop_at"):
+                        self.stats["observed_wired_drop_at"] = time.strftime("%H:%M:%S")
+                        try:
+                            self.log(f"memory watchdog: machine wired {r['wired_gib']:.1f} GiB, "
+                                     f"{w_at - r['wired_gib']:.1f} GiB under its {w_at:.1f} at wiring: the weights may "
+                                     "be pageable again (Metal released the residency set?)")
+                        except Exception:
+                            pass
                 hits = check(r, self.lim, state)
                 if state.get("starved"):
                     self.stats["observed_starved_samples"] = self.stats.get("observed_starved_samples", 0) + 1
@@ -293,9 +320,12 @@ class Watch:
                 write_receipt(self.receipt, {"stopped_by": "in-process watchdog thread", "exit": 3,
                                              "triggers": hits, "reading": r, "limits": self.lim,
                                              "peak_footprint_gb": self.stats.get("peak_footprint_gb"),
+                                             "wired": self.stats.get("wired"),
+                                             "observed_min_wired_gb": self.stats.get("observed_min_wired_gb"),
+                                             "observed_wired_drop_at": self.stats.get("observed_wired_drop_at"),
                                              "time": time.strftime("%Y-%m-%d %H:%M:%S")})
                 try:
-                    self.log(f"memory watchdog: {msg}; stopping (exit 3)")
+                    self.log(f"memory watchdog: {msg}; {STOP_MARKER}")
                 except Exception:
                     pass
                 os._exit(3)

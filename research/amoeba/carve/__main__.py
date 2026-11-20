@@ -120,6 +120,10 @@ def parse(argv=None):
     ap.add_argument("--export-dir", default="", help="where the dense masked checkpoint goes (default under ~/mlx-models)")
     ap.add_argument("--memory-gb", type=float, default=56)
     ap.add_argument("--cache-gb", type=float, default=4)
+    ap.add_argument("--wired-gb", default=os.environ.get("AMOEBA_CARVE_WIRED_GB", "").strip() or "0", type=O.wired_arg,
+                    help="wire the model weights after load (ops.wire_weights; as scripts/amoeba_box_battery.py): "
+                         "auto = MLX active after load + 10 GiB, GiB, or 0 = off (the default here: carves also "
+                         "run other models and hosts); env AMOEBA_CARVE_WIRED_GB (not the battery's AMOEBA_WIRED_GB)")
     ap.add_argument("--assert-ple-offload", action="store_true",
                     help="Flash-Next (qwen4): fail closed unless the adapter installed file-backed PLE from "
                          "<model>/ple_rows.bin (Pierre 2026-11-15: 'Use ple offload when loading qwen fn to save ram')")
@@ -256,6 +260,8 @@ def main(argv=None, host_factory=None):
     O.footprint_watchdog(args.watchdog_gb, log, swap_growth_gb=args.swap_growth_gb)
     if args.swap_growth_gb != 2.0:                # a waived guard is recorded with its reason
         rep["watchdog_waiver"] = {"swap_growth_gb": args.swap_growth_gb, "reason": args.swap_waiver_note}
+    if host_factory is None:                  # before any Metal call (MLX reads the refresh env then); a given
+        O.prepare_wiring("0" if args.cpu else args.wired_gb)     # host was loaded already: too late for the env
     O.setup_mlx(args.memory_gb, args.cache_gb)
     import mlx.core as mx
     if args.cpu:
@@ -271,6 +277,9 @@ def main(argv=None, host_factory=None):
     if getattr(host, "moe_units", "expert") != args.moe_units:
         raise SystemExit(f"host installed {getattr(host, 'moe_units', 'expert')} MoE units, --moe-units {args.moe_units}")
     host.grad_mode = args.grad_mode
+    wired = O.wire_weights("0" if args.cpu else args.wired_gb, log, memory_gb=args.memory_gb)  # Host evaluated them
+    if wired.get("wired"):
+        rep["wired"] = wired
     if args.assert_ple_offload:
         # Same check as scripts/probe_flash_next_packed_ast.py: the adapter path must have installed the
         # file-backed PLE tables (MLX_QWEN4_PLE_NVME set by configure_environment); never a bypassing load.

@@ -17,6 +17,7 @@ import test_amoeba_fn_partition_groups_cpu as P  # noqa: E402
 
 HOST_L = 6
 CALLS = []
+ORDER = []                     # load / wiring order (the weights are wired after the host loaded them)
 
 
 class FakeHost:
@@ -25,6 +26,7 @@ class FakeHost:
         self.widths = [P.N] * HOST_L
         self.fingerprint = "f" * 64
         self.checkpoint = "toy@ffffffff"
+        ORDER.append("host")
 
     def encode(self, text):
         return [ord(c) for c in text]
@@ -53,7 +55,14 @@ def _install_fakes(monkeypatch):
     E.english_cost = _english_cost
     O = types.ModuleType("research.amoeba.carve.ops")
     O.footprint_watchdog = lambda *a, **k: None
-    O.setup_mlx = lambda *a, **k: None
+    O.setup_mlx = lambda *a, **k: ORDER.append("setup_mlx")
+    O.prepare_wiring = lambda spec: ORDER.append(("prepare_wiring", spec)) or {}
+
+    def wire_weights(spec, log, memory_gb=None):
+        ORDER.append(("wire_weights", spec, memory_gb))
+        return {"wired": spec not in ("0", "off"), "spec": spec, "limit_gib": 1.0}
+    O.wire_weights = wire_weights
+    O.wired_arg = lambda spec: spec
     O.git_rev = lambda: "toyrev"
     O.peak_gb = lambda: 0.0
     H = types.ModuleType("research.amoeba.carve.host")
@@ -236,3 +245,18 @@ def test_meta_written_at_start_survives_a_crash(toy, monkeypatch):
     _battery(monkeypatch, toy, ROOT / "scripts/amoeba_box_battery.py", "crash", "base")    # resumed to the end
     meta = json.loads((toy / "crash" / "battery.meta.json").read_text())
     assert meta["status"] == "finished" and meta["checkpoint"] == "toy@ffffffff"
+
+
+def test_weights_wired_after_load_and_recorded(toy, monkeypatch):
+    """2026-11-19 19:19 stop (macOS compressed the battery's own weights): the battery sets the residency refresh up
+    before any Metal call, wires after the host loaded the model, and records the receipt in the meta."""
+    ORDER.clear()
+    monkeypatch.setenv("AMOEBA_WIRED_GB", "77")
+    _battery(monkeypatch, toy, ROOT / "scripts/amoeba_box_battery.py", "w", "base")
+    assert ORDER[:4] == [("prepare_wiring", "77"), "setup_mlx", "host", ("wire_weights", "77", 88.0)]
+    meta = json.loads((toy / "w" / "battery.meta.json").read_text())
+    assert meta["wired"] == {"wired": True, "spec": "77", "limit_gib": 1.0}
+    ORDER.clear()
+    _battery(monkeypatch, toy, ROOT / "scripts/amoeba_box_battery.py", "w0", "base", "--wired-gb", "0")
+    assert ("wire_weights", "0", 88.0) in ORDER
+    assert json.loads((toy / "w0" / "battery.meta.json").read_text())["wired"]["wired"] is False

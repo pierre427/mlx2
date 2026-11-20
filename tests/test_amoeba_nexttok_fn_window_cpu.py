@@ -169,3 +169,24 @@ def test_window_hysteresis_matches_the_runtime_gate():
         for s in range(prompt, T):
             gate.advance(tokens=mx.array([int(P[s, 0]) + 2 * int(P[s, 1])]))
             assert np.array(gate.current())[0, 1:].astype(bool).tolist() == want[s].tolist(), (N, s)
+
+
+def test_window_wires_and_runs_the_watcher(tmp_path, monkeypatch):
+    """2026-11-19 19:43 stop (footprint 90 GB > 88, 69.3 GB MLX active, weights unwired): --wired-gb (env
+    AMOEBA_WIRED_GB, default auto) is parsed and handed to ops.prepare_wiring, which is called before the watchdog
+    and setup_mlx (the first Metal call); the watchdog runs with its watcher and a stop receipt; a bad value fails at
+    parse time. (No part runs here, so wire_weights after the Host load is not reached: Part Q needs the model.)"""
+    from research.amoeba.carve import ops as CO
+    calls = []
+    monkeypatch.setattr(CO, "prepare_wiring", lambda spec: calls.append(("prepare", spec)) or {})
+    monkeypatch.setattr(CO, "footprint_watchdog", lambda *a, **k: calls.append(("watchdog", k.get("watcher"),
+                                                                                 Path(k["receipt"]).name)))
+    monkeypatch.setattr(CO, "setup_mlx", lambda *a, **k: calls.append(("setup",)))
+    monkeypatch.setenv("AMOEBA_WIRED_GB", "77")
+    assert W.parser().parse_args([]).wired_gb == "77"
+    with pytest.raises(SystemExit):
+        W.parser().parse_args(["--wired-gb", "nan"])
+    monkeypatch.setattr(sys, "argv", ["w", "--out", str(tmp_path / "o"), "--parts", ""])
+    assert W.main() == 0
+    assert calls == [("prepare", "77"), ("watchdog", True, "watchdog-stop.json"), ("setup",)]
+    assert "watch" in json.loads((tmp_path / "o" / "receipt.json").read_text())

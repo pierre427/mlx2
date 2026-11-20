@@ -276,3 +276,26 @@ def test_screen_manifest_carries_the_reserved_final_test(tmp_path):
     assert m["screen_slice"]["probe_ids"] == ["f1", "f2"] and m["screen_slice"]["groups"] == ["fg0"]
     ids, groups = L.split_exclusions(m)
     assert ids == {"f1", "f2", "h3"} and groups == {"fg0", "hg1"}
+
+
+def test_watchdog_is_memwatch_with_watcher(tmp_path, monkeypatch):
+    """The bridge lab's --watchdog-gb now runs research/amoeba/carve/memwatch.py (ops.footprint_watchdog) with its
+    SIGKILL watcher and a stop receipt, not amoeba27b_lib's copy that missed the 2026-11-19 panic; a memwatch stop
+    line (ending in memwatch.STOP_MARKER, asserted on the real thread in test_amoeba_memwatch_cpu.py) still leaves
+    a failed run.json."""
+    from research.amoeba.carve import ops as CO
+    seen = {}
+
+    def fake(limit, log, **k):
+        seen.update(limit=limit, **k)
+        from research.amoeba.carve.memwatch import STOP_MARKER
+        log(f"memory watchdog: footprint 99.0 GiB > 80.0 GiB; {STOP_MARKER}")   # memwatch's own stop line form
+        raise SystemExit(3)                     # stands in for os._exit(3)
+    monkeypatch.setattr(CO, "footprint_watchdog", fake)
+    out = tmp_path / "o"
+    monkeypatch.setattr(sys, "argv", ["bridge", "--out", str(out), "--watchdog-gb", "80", "--swap-growth-gb", "2"])
+    with pytest.raises(SystemExit):
+        L.main()
+    assert seen["limit"] == 80 and seen["watcher"] is True and seen["receipt"] == out / "watchdog-stop.json"
+    rec = json.loads((out / "run.json").read_text())
+    assert rec["status"] == "failed (watchdog)" and "stopping (exit 3)" in rec["reason"]
