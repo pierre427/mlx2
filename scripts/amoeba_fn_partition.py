@@ -372,6 +372,8 @@ def main():
     ap.add_argument("--detach-share", type=float, default=0.0,
                     help="drop a claim whose drive is < this x the strongest claimant's (0: off; Pierre 2026-11-19)")
     ap.add_argument("--detach-sweep", default="", help="comma list of shares to report (with or without detaching)")
+    ap.add_argument("--emit-detached", action="store_true", help="with --detach-share: write OUT/detached.npz (per "
+                    "box the flat [L, n] positions of its dropped claims; amoeba_fn_interactions.py --detached)")
     ap.add_argument("--english-box", default="", help="tile name (lang.eng): English-map units outside T2 leave the "
                     "core for box:<name> (Pierre 2026-11-19)")
     ap.add_argument("--english-shared", action="store_true", help="English is a claimant: shared English tiles "
@@ -388,6 +390,8 @@ def main():
     if any(not 0.0 <= x < 1.0 for x in dsweep):
         raise SystemExit("--detach-sweep: each share 0 <= s < 1")
     detaching = a.detach_share > 0 or bool(dsweep)
+    if a.emit_detached and not a.detach_share > 0:
+        raise SystemExit("--emit-detached needs --detach-share > 0")
     if a.english_closed_for and not a.english_box:
         raise SystemExit("--english-closed-for needs --english-box")
     if a.english_shared and not a.english_box:
@@ -480,12 +484,18 @@ def main():
     if any(x not in names for x in closed_for):
         raise SystemExit(f"--english-closed-for: unknown boxes {[x for x in closed_for if x not in names]}")
     drep = None
+    detached = {}                                      # --emit-detached: box -> flat positions of dropped claims
 
     def run_detach():
         nonlocal sel, drep
         if not detaching:
             return
         new, drep = detach_weak(sel, names, drive, a.detach_share, ~t2 & ~cm_core, dsweep)
+        if a.detach_share > 0 and a.emit_detached:
+            for nm in names:
+                if new[nm] is not sel[nm]:
+                    dropped = np.flatnonzero(sel[nm] & ~new[nm])
+                    detached[nm] = np.union1d(detached[nm], dropped) if nm in detached else dropped
         if a.detach_share > 0:
             sel = new
             for nm in names:
@@ -803,6 +813,8 @@ def main():
         save_npz(out / "tiles.npz", [("layers", np.array(layers))] + [(k, None) for k in keys], get)
     if a.emit_unassigned:
         np.savez_compressed(out / "unassigned.npz", layers=np.array(layers), unassigned=unassigned)
+    if a.emit_detached:
+        np.savez_compressed(out / "detached.npz", layers=np.array(layers), **detached)
     tot = L * n
     FF = F or crep["per_site"][0].get("F") or 640      # neurons per expert (T2 in expert units gives it directly)
     rep = {"schema": "mlx2.amoeba-fn-partition.v1", "checkpoint": crep["checkpoint"], "fingerprint": crep["fingerprint"],
