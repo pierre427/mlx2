@@ -477,3 +477,64 @@ def test_joint_tiles_and_battery_arm(nested_toy, monkeypatch):
                                       "--docs", "4", "--english", "english", "--joint-partition", "jt"])
     with pytest.raises(SystemExit, match="joint-partition"):
         mod.main()
+
+
+def test_held_purge(tmp_path):
+    _files(tmp_path / "fit", {"x": [{"split": "fit", "group": "old/1", "text": "same doc"},
+                                    {"split": "fit", "group": "g2", "text": "b"}]})
+    held = {"x": [{"split": "held", "group": "new/9", "text": "same doc"},       # regrouped: text leaks
+                  {"split": "held", "group": "new/9", "text": "sibling"},        # same new group: dropped too
+                  {"split": "val", "group": "g2", "text": "other"},              # group in fit: dropped
+                  {"split": "held", "group": "g3", "text": "clean"},
+                  {"split": "fit", "group": "new/9", "text": "fit rows are kept"},
+                  {"split": "held2", "group": "new/9", "text": "held2 kept"}],
+            "y": [{"split": "held", "group": "new/9", "text": "a sibling in another box"},   # dropped across boxes
+                  {"split": "held", "group": "g7", "text": "y clean"},
+                  {"split": "held", "group": "g2#defs", "text": "routed to definitions now"},  # g2 is fit: dropped
+                  {"split": "held", "group": "new/9#defs", "text": "suffixed sibling"}]}     # sibling of new/9
+    _files(tmp_path / "held", held)
+    U = ROOT / "scripts/amoeba_held_purge.py"
+    r = subprocess.run([sys.executable, str(U), "--fit-files", "fit", "--held-files", "held", "--out", "pur"],
+                       capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    got = [json.loads(x)["text"] for x in (tmp_path / "pur" / "x.jsonl").read_text().splitlines()]
+    assert got == ["clean", "fit rows are kept", "held2 kept"]
+    m = json.loads((tmp_path / "pur" / "manifest.json").read_text())
+    assert m["purge"]["boxes"]["x"] == {"rows_dropped": 3, "groups_dropped": 2,
+                                        "matched": {"text in fit": 1, "group in fit": 1}}
+    assert m["rows"]["x"] == {"held": 1, "fit": 1, "held2": 1}
+    assert [json.loads(x)["text"] for x in (tmp_path / "pur" / "y.jsonl").read_text().splitlines()] == ["y clean"]
+    assert m["purge"]["boxes"]["y"] == {"rows_dropped": 3, "groups_dropped": 2, "matched": {"group in fit": 1}}
+    C = ROOT / "scripts/amoeba_heldfit_check.py"
+    r = subprocess.run([sys.executable, str(C), "--fit-files", "fit", "--held-files", "pur", "--out", "c.json"],
+                       capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = subprocess.run([sys.executable, str(U), "--fit-files", "fit", "--held-files", "held", "--out", "pur"],
+                       capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode != 0 and "refusing existing" in r.stderr
+    r = subprocess.run([sys.executable, str(C), "--fit-files", "fit", "--held-files", "held", "--out", "raw.json"],
+                       capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode == 4                                          # the unpurged files leak
+    assert json.loads((tmp_path / "raw.json").read_text())["per_box"]["y"]["group_in_fit"] == 1   # g2#defs ~ g2
+
+
+def test_heldfit_groups_from_raw(tmp_path):
+    name = {0: "fit", 1: "fit", 2: "fit", 3: "fit", 4: "fit", 5: "val", 6: "held", 7: "held2"}
+    raw = []
+    for i in range(400):
+        g = f"web/{i}"
+        raw.append({"split": name[_split_of(g)], "group": g, "register": "web", "source": "websrc:1", "text": g})
+    held_side = [r for r in raw if r["split"] in ("held", "val")]
+    k = len(held_side) - int(400 / 16) + 3                           # H just under the raw floor G/16, over G'/16
+    gone = {r["group"] for r in held_side[:k]}
+    _files(tmp_path / "fit", {"z": [{"split": "fit", "group": "zz", "text": "zz"}]})
+    _files(tmp_path / "raw", {"x": raw})
+    _files(tmp_path / "pur", {"x": [r for r in raw if r["group"] not in gone]})
+    C = ROOT / "scripts/amoeba_heldfit_check.py"
+    run = lambda *x: subprocess.run([sys.executable, str(C), "--fit-files", "fit", "--held-files", "pur", "--out",  # noqa: E731
+                                     "c.json", "--min-split-expected", "1e9", *x], capture_output=True, text=True,
+                                    cwd=tmp_path)
+    assert run().returncode == 0, run().stdout                        # purged groups vanish from G too: unseen
+    r = run("--groups-from", "raw")
+    assert r.returncode == 3 and "x register=web" in r.stdout
+    assert json.loads((tmp_path / "c.json").read_text())["groups_from"] == "raw"

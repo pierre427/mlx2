@@ -19,7 +19,10 @@ skipped_boxes: per unbalanced box "skipped: held split unbalanced (<cells>)" (Pi
 note"; the caller drops those boxes from the battery). Exit 4 (leakage) takes precedence over 3 (skew); 2 is
 argparse's usage error.
 
-Usage: amoeba_heldfit_check.py --fit-files DIR --held-files DIR --out OUT.json [--splits held,val]
+--groups-from RAW_DIR takes each cell's group total G from those files (the held files before a purge,
+scripts/amoeba_held_purge.py, which removes whole groups) and the held-side counts from --held-files.
+
+Usage: amoeba_heldfit_check.py --fit-files DIR --held-files DIR --out OUT.json [--splits held,val] [--groups-from RAW]
        [--min-groups 24] [--min-share 0.25]
 """
 from __future__ import annotations
@@ -38,6 +41,12 @@ def rows(path):
                 yield json.loads(line)
 
 
+def norm_group(g):
+    """The record's group without a routing suffix (agent_sources: a conversation is g in the tool boxes and g#defs in
+    agent.tool_use.definitions, and the salted selection hash moves records between them across builds)."""
+    return None if g is None else str(g).split("#", 1)[0]
+
+
 def text_key(r):
     return r.get("sha256") or hashlib.sha256(r["text"].encode()).hexdigest()
 
@@ -51,6 +60,7 @@ def main():
     ap.add_argument("--min-groups", type=int, default=24)
     ap.add_argument("--min-share", type=float, default=0.25)
     ap.add_argument("--min-split-expected", type=float, default=10.0)
+    ap.add_argument("--groups-from", default="", help="raw held files: the group totals G (after a purge)")
     a = ap.parse_args()
     fd, hd = Path(a.fit_files), Path(a.held_files)
     fm, hm = (json.loads((d / "manifest.json").read_text()) for d in (fd, hd))
@@ -60,7 +70,7 @@ def main():
         n = 0
         for r in rows(fd / f"{b}.jsonl"):
             if r.get("split") == "fit":
-                fit_groups.add(r.get("group"))
+                fit_groups.add(norm_group(r.get("group")))
                 fit_texts.add(text_key(r))
                 n += 1
         fit_n[b] = n
@@ -83,13 +93,20 @@ def main():
             n += 1
             if r.get("group") is None:
                 raise SystemExit(f"{b}: held-side row {r.get('id')} has no group")
-            if r["group"] in fit_groups:
+            if norm_group(r["group"]) in fit_groups:          # g and g#defs are one conversation
                 g += 1
                 bad_groups.setdefault(b, []).append(r["group"])
             if text_key(r) in fit_texts:
                 t += 1
                 bad_texts.setdefault(b, []).append(r.get("id"))
         per_box[b] = {"held_side_rows": n, "group_in_fit": g, "text_in_fit": t}
+        if a.groups_from:                              # G from the raw files: a purged group still counts as expected
+            for c in cells.values():
+                c[0] = set()
+            for r in rows(Path(a.groups_from) / f"{b}.jsonl"):
+                for key in (("box", "*"), ("register", str(r.get("register"))),
+                            ("source", str(r.get("source") or "").split(":", 1)[0])):
+                    cells.setdefault(key, [set(), {}])[0].add(r.get("group"))
         balance[b] = {}
         for (kind, val), (allg, by) in sorted(cells.items()):
             G = len(allg)
@@ -116,6 +133,7 @@ def main():
            "held_splits": sorted(splits), "fit_rows": sum(fit_n.values()), "fit_groups": len(fit_groups),
            "disjoint": ok, "balanced": not skewed, "skewed": skewed,
            "skipped_boxes": {b: "skipped: held split unbalanced (" + "; ".join(c) + ")" for b, c in skip_cells.items()},
+           "groups_from": a.groups_from or None,
            "balance_rule": {"min_groups": a.min_groups, "min_share": a.min_share, "splits_per_8": len(splits),
                             "min_split_expected": a.min_split_expected},
            "per_box": per_box, "balance": balance,
