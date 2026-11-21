@@ -11,8 +11,10 @@ score    one model, forward only: per held probe text, the NLL of the text's own
          returns logits when called; check it on the donor before trusting it).
 split    --split held (the default; the original screen) scores the corpus's held partition. --split fit scores
          a slice of the FIT partition instead (review v4 §5.1: screening on held and then testing on held
-         reuses the test set): the source groups g with stable_seed(g) % N == K (--fit-slice K/N), minus every
-         text and group named by --exclude-manifest. score.json and screen_manifest.json record the slice's
+         reuses the test set): the source groups g with stable_seed("fit-slice:" + g) % N == K (--fit-slice
+         K/N; salted so the slice is independent of the corpus's own group-hash split and every K holds about
+         1/N of the fit groups), minus every text and group named by --exclude-manifest. An empty selection is
+         an error. score.json and screen_manifest.json record the slice's
          probe ids and groups; pass screen_manifest.json to amoeba_bridge_lab.py --split-manifest and fitting
          skips them, so the screen reads texts fitting never reads. Texts shorter than --min-tokens are dropped
          (default 64 on --split fit, the bridge harness's --topic-tokens; 32 on held, the original screen).
@@ -168,6 +170,12 @@ def token_nll(be, ids):
 def score(args, log):
     rec = {"schema": "mlx2.amoeba-donor-gap-score.v1", "args": vars(args), "mlx2_source_revision": T.git_rev(),
            "corpus_sha256": T.sha_file(args.corpus), "prefix": PREFIX}
+    # selected before any backend loads: an empty selection must fail here, not after a model load, and never
+    # publish an empty scores.jsonl with a score.json that looks like a finished screen
+    items = select_split(T.load_items(args.corpus), args)
+    rec["split"] = split_record(items, args)
+    if not items:
+        raise SystemExit(f"no texts selected: {rec['split']} (nothing to score)")
     if args.backend == "mlx27b" or args.backend == "mlx2":
         import amoeba27b_lib as A
         rec["memcheck"] = A.admit(args.need_gb, args.mem_policy or "strict", log)
@@ -186,8 +194,6 @@ def score(args, log):
         be = T.make_backend(args.backend, args.model, log=log)
     rec["checkpoint"], rec["fingerprint"] = be.checkpoint, getattr(be, "fingerprint", None)
     tok = getattr(be, "tok", None) or be.host.tok
-    items = select_split(T.load_items(args.corpus), args)
-    rec["split"] = split_record(items, args)
     if args.per_topic:                       # a fixed, seeded subset: up to N held texts per primary topic
         by = {}
         for it in sorted(items, key=lambda it: T.stable_seed(it["id"])):
@@ -205,8 +211,12 @@ def score(args, log):
         part = out / "scores.partial.jsonl"
         stream = open(part, "a")
         if args.resume and Path(args.resume).exists():
+            selected = {it["id"] for it in items}
             for l in open(args.resume):          # carried into this run's partial, so one file resumes it
                 r = json.loads(l)
+                if r["id"] not in selected:      # e.g. rows scored under another split or fit-slice law
+                    raise SystemExit(f"--resume {args.resume}: row {r['id']!r} is not in this run's selection "
+                                     f"({rec['split']}); resume only a partial of the same selection")
                 done.add((r["id"], r["cond"]))
                 rows.append(r)
                 stream.write(json.dumps(r) + "\n")
@@ -253,6 +263,8 @@ def score(args, log):
     if args.backend == "server":
         rec["server_waits"] = be.waits
         rec["server_status_end"] = {k: be._get("/v1/status").get(k) for k in ("state", "model")}
+    if not rows:                             # e.g. every selected text is shorter than --min-tokens
+        raise SystemExit(f"no texts scored: {rec['split']} (all {len(items)} selected texts were dropped)")
     with open(out / "scores.jsonl", "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
@@ -288,6 +300,17 @@ def manifest_exclusions(paths):
     return ids, groups
 
 
+# The fit slice's hash is salted. The topic-probe corpus splits by stable_seed(group) parity (category corpora by
+# the same hash mod 8), so the unsalted hash of a FIT group is not uniform mod N: under the first law ("v1",
+# stable_seed(group) % N) 0/4 held half of the fit partition and 1/4, 3/4 and 1/2 were empty. Outputs record the
+# law's name; a score.json without "fit_slice_law" was selected under v1.
+FIT_SLICE_LAW = "v2: stable_seed('fit-slice:' + group) % N == K"
+
+
+def fit_slice_of(group, n):
+    return T.stable_seed("fit-slice:" + str(group)) % n
+
+
 def select_split(items, args):
     """the texts a score run may read: the held partition, or one group-hashed slice of the fit partition minus
     every text and group the exclusion manifests name (their selected texts' groups included)"""
@@ -298,12 +321,13 @@ def select_split(items, args):
     k, n = parse_slice(args.fit_slice or "0/4")
     ids, groups = manifest_exclusions(args.exclude_manifest)
     groups |= {str(it.get("group")) for it in items if it["id"] in ids}
-    return [it for it in items if it["split"] == "fit" and T.stable_seed(str(it.get("group"))) % n == k
+    return [it for it in items if it["split"] == "fit" and fit_slice_of(it.get("group"), n) == k
             and it["id"] not in ids and str(it.get("group")) not in groups]
 
 
 def split_record(items, args):
     return {"split": args.split, "fit_slice": (args.fit_slice or "0/4") if args.split == "fit" else None,
+            "fit_slice_law": FIT_SLICE_LAW if args.split == "fit" else None,
             "exclude_manifest": args.exclude_manifest or None, "min_tokens": min_tokens(args),
             "candidate_texts": len(items), "candidate_groups": len({str(it.get("group")) for it in items})}
 
@@ -336,7 +360,7 @@ def compare(args, log):
     if hm["corpus_sha256"] != dm["corpus_sha256"]:
         raise SystemExit("host and donor were scored on different corpora")
     sp_ = lambda m: {k: v for k, v in (m.get("split") or {"split": "held"}).items()  # noqa: E731
-                     if k in ("split", "fit_slice", "exclude_manifest", "min_tokens")}
+                     if k in ("split", "fit_slice", "fit_slice_law", "exclude_manifest", "min_tokens")}
     if sp_(hm).get("split", "held") != sp_(dm).get("split", "held") or (
             sp_(hm).get("split") == "fit" and sp_(hm) != sp_(dm)):
         raise SystemExit(f"host and donor were scored on different splits: {sp_(hm)} vs {sp_(dm)}")
@@ -452,8 +476,8 @@ def main():
     ap.add_argument("--split", default="held", choices=["held", "fit"],
                     help="score: the held partition (default), or a group-hashed slice of the fit partition that "
                          "fitting never reads (see screen_manifest.json)")
-    ap.add_argument("--fit-slice", default="", help="--split fit: K/N, the source groups with stable hash %% N == K "
-                                                     "(default 0/4)")
+    ap.add_argument("--fit-slice", default="", help="--split fit: K/N, the source groups whose salted stable hash %% N == K, "
+                                                     "about 1/N of the fit groups (default 0/4)")
     ap.add_argument("--exclude-manifest", default="",
                     help="--split fit: comma list of manifests (bridge split manifests, other screens' "
                          "screen_manifest.json) whose texts and groups are left out")

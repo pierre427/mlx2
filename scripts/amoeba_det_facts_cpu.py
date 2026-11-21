@@ -186,6 +186,36 @@ def solve_value(runner, prompts, target_ids, W, *, target_lp=np.log(0.98), iters
     return np.array(v), hist
 
 
+def values_reuse_mismatch(rm, rsrc, *, src_fp, host_sha, read_layer, write_layer, entities, value_templates, iters):
+    """--values-from: what must match for an earlier table's value rows to be this run's. The rows are residual
+    deltas solved by gradient steps through one model (source fingerprint + host tiles), at one write layer, on
+    --value-templates wordings for --iters steps. Returns (mismatches {field: (recorded, current)}, unverified
+    [fields the earlier manifest does not record])."""
+    bad, unverified = {}, []
+
+    def cmp(field, old, new):
+        if old != new:
+            bad[field] = (old, new)
+
+    cmp("source.fingerprint", (rm.get("source") or {}).get("fingerprint"), src_fp)
+    cmp("host_tiles_manifest_sha256", rm.get("host_tiles_manifest_sha256"), host_sha)
+    cmp("write_layer", int(rm["tiles"][0]["write_layer"]), int(write_layer))
+    cmp("read_layer", int(rm["tiles"][0]["read_layer"]), int(read_layer))
+    if [r["entity"] for r in rsrc[:len(entities)]] != list(entities):
+        bad["row_order"] = ("the earlier table's entities", "this run's")
+    solver = rm.get("value_solver")
+    if solver:
+        cmp("value_templates", solver.get("value_templates"), value_templates)
+        cmp("iters", solver.get("iters"), iters)
+    else:  # manifests written before value_solver: iters is in each row's method text, the wordings count nowhere
+        methods = {r.get("method") for r in rsrc[:len(entities)]}
+        want = f"min-norm first-order step on log p(first answer token) x{iters}"
+        if methods != {want}:
+            bad["iters"] = (sorted(str(m) for m in methods), want)
+        unverified.append("value_templates")
+    return bad, unverified
+
+
 def tf_exact(runner, ts, rows, *, hook_override=None, slot=None):
     """Teacher-forced exact match of the whole answer; also whether the tile opened at the last
     prompt position. rows: (prompt, answer_with_leading_space)."""
@@ -347,11 +377,18 @@ def main():
         rm = D.load_manifest(args.values_from)
         rt = D.load_tensors(rm)
         rsrc = [json.loads(l) for l in (Path(rm["_dir"]) / "rows.jsonl").read_text().splitlines()]
-        if (int(rm["tiles"][0]["write_layer"]) != Wl or int(rm["tiles"][0]["read_layer"]) != L
-                or [r["entity"] for r in rsrc[:n_cap]] != [c for c, _ in table_c]):
-            raise SystemExit("--values-from: different read/write layer or row order")
+        bad, unverified = values_reuse_mismatch(
+            rm, rsrc, src_fp=src_fp, host_sha=host_sha, read_layer=L, write_layer=Wl,
+            entities=[c for c, _ in table_c], value_templates=args.value_templates, iters=args.iters)
+        if bad:
+            raise SystemExit("--values-from: the earlier table's rows are not this run's (recorded, current): "
+                             + "; ".join(f"{k} {v[0]!r} != {v[1]!r}" for k, v in bad.items()))
         reuse = (np.array(rt["capitals_table.values"].astype(mx.float32)), rsrc, str(rm["_digest"]))
         rep["values_from"] = {"manifest": args.values_from, "manifest_sha256": reuse[2]}
+        if unverified:
+            print(f"WARNING --values-from: the earlier manifest does not record {unverified}; reused rows are "
+                  "assumed to match this run's settings", flush=True)
+            rep["values_from"]["unverified"] = unverified
     for i, (c, k) in enumerate(table_c):
         if reuse is not None:
             V[i] = reuse[0][i]
@@ -431,7 +468,11 @@ def main():
                       "recogniser": kind,
                       "neurons": int(len(neurons)), "relation": "capital_of"}}
 
-    def save(name, Vx, Kx, nullx, rows):
+    solver = {"value_templates": args.value_templates, "iters": args.iters}
+    if reuse is not None and rep["values_from"].get("unverified"):
+        solver = {**solver, "unverified_reused": rep["values_from"]["unverified"]}
+
+    def save(name, Vx, Kx, nullx, rows, tile=tile):
         rec = ({"capitals_table.gate_rows": gate_rows, "capitals_table.up_rows": up_rows} if kind == "neurons"
                else {"capitals_table.dims": mx.array(neurons.astype(np.int32))})
         tens = {**rec,
@@ -440,11 +481,14 @@ def main():
                 "capitals_table.center": mx.array(cen.astype(np.float32))}
         return D.write_manifest(out / name, source={"artifact": donor.artifact, "fingerprint": src_fp},
                                 layers=donor.L, tiles=[tile], tensors=tens, rows_source=rows,
-                                extra={"mlx2_source_revision": rep["mlx2_source_revision"], "host_tiles_manifest_sha256": host_sha})
+                                extra={"mlx2_source_revision": rep["mlx2_source_revision"], "host_tiles_manifest_sha256": host_sha,
+                                       "value_solver": solver})
 
     man = save("table", V, K, nullv, rows_src)
     keep = [i for i, r in enumerate(rows_src) if r["entity"] not in delete]
-    man_del = save("table-rows-deleted", V[keep], K[keep], nullv[keep], [rows_src[i] for i in keep])
+    # its own row counts: the shared tile dict states the full table's
+    tile_del = {**tile, "table": {**tile["table"], "rows": len(keep), "value_rows": int((~nullv[keep]).sum())}}
+    man_del = save("table-rows-deleted", V[keep], K[keep], nullv[keep], [rows_src[i] for i in keep], tile=tile_del)
     perm = rng.permutation(n_cap)
     Vs = V.copy()
     Vs[:n_cap] = V[perm]

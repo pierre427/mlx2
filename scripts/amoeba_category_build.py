@@ -88,6 +88,17 @@ def random_window(d, width):
     return text[s:e].strip()
 
 
+def shares_guard_shingle(text, guard):
+    """True when the text shares a 13-word shingle with the guard set. Every word offset is checked: the guard
+    files hold every shingle of the eval texts, and a sampled offset (stride 4 until 2026-11-21) let a shared
+    run of 13 to 15 words through 3, 2 and 1 times in 4."""
+    if not guard:
+        return False
+    w = re.findall(r"\w+", text.lower())
+    return any(hashlib.blake2b(" ".join(w[k:k + 13]).encode(), digest_size=8).hexdigest() in guard
+               for k in range(max(1, len(w) - 12)))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cands", nargs="+", required=True)
@@ -129,9 +140,7 @@ def main():
         guard.update(x.strip() for x in open(gf) if x.strip())
 
     def contaminated(text):
-        w = re.findall(r"\w+", text.lower())
-        return any(hashlib.blake2b(" ".join(w[k:k + 13]).encode(), digest_size=8).hexdigest() in guard
-                   for k in range(0, max(1, len(w) - 12), 4))
+        return shares_guard_shingle(text, guard)
     ln = -1
     for p in a.cands:
         for line in open(p):

@@ -638,6 +638,8 @@ def main(argv=None, loader=None):
     receipt = {"schema": "mlx2.amoeba-donor-overlay.v1", "status": "running", "stage": "loading", "args": vars(a),
                "qualification": "unqualified research"}
     (out / "run.json").write_text(json.dumps(receipt, indent=1))
+    _STATE.clear()
+    _STATE.update(receipt=receipt, out=out)  # for run_guarded: a refusal before save() exists
     import threading
     LOCK = threading.Lock()
     WATCH = None
@@ -1619,15 +1621,31 @@ def LAB_norm(g):
     return str(g).split("#", 1)[0]
 
 
-if __name__ == "__main__":
+def run_guarded(argv=None, loader=None):
+    """main() with the exit handler: any abnormal exit, a sys.exit(<message>) refusal included, leaves run.json
+    at "failed" with the reason instead of "running" (as amoeba_bridge_lab does). A receipt some other path
+    already closed (failed, failed (watchdog), complete) is left as written."""
+    _STATE.clear()
     try:
-        sys.exit(main())
-    except SystemExit:
-        raise
+        return main(argv, loader)
     except BaseException as exc:
-        if "save" in _STATE:
+        out = _STATE.get("out")
+        try:
+            running = out is not None and json.loads((out / "run.json").read_text()).get("status") == "running"
+        except Exception:
+            running = False
+        if running and not (isinstance(exc, SystemExit) and exc.code in (0, None)):
+            why = (str(exc.code) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}")[:500]
             try:
-                _STATE["save"](status="failed", reason=f"{type(exc).__name__}: {exc}"[:500])
+                if "save" in _STATE:
+                    _STATE["save"](status="failed", reason=why)
+                else:  # refused before the full receipt and its saver exist
+                    (out / "run.json").write_text(json.dumps(dict(_STATE["receipt"], status="failed", reason=why),
+                                                             indent=1, default=str))
             except BaseException:
                 pass
         raise
+
+
+if __name__ == "__main__":
+    sys.exit(run_guarded())

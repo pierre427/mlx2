@@ -38,7 +38,6 @@ def test_window_prompts(tmp_path):
                         f"http://127.0.0.1:{srv.server_port}", "--checkpoint", "x@y", "--corpus", str(c), "--out", str(out),
                         "--window-tokens", "96", "--tokenizer", str(MODEL), "--strip-prefix", "0.2", "--samples", "3"],
                        capture_output=True, text=True, cwd=ROOT, env={"HF_HUB_OFFLINE": "1", "PATH": "/usr/bin:/bin"})
-    srv.shutdown()
     assert r.returncode == 0, r.stderr
     g = [json.loads(x) for x in (out / "gen.jsonl").read_text().splitlines()]
     assert len(g) == 20 and {x["mode"] for x in g} == {"greedy", "t0.7"}
@@ -51,10 +50,10 @@ def test_window_prompts(tmp_path):
     ends = {x["doc_id"]: x["prompt_end_token"] for x in g}
     assert len(set(ends.values())) > 1                       # offsets differ across documents (seeded)
     assert json.loads((out / "manifest.json").read_text())["window_tokens"] == 96
-    # resumable: a rerun over a partial file skips the rows it already has
+    # resumable: a rerun over a partial file skips the rows it already has (same server: the partial's recorded
+    # settings, base URL included, must match the rerun's)
     (out / "gen.jsonl").unlink()
-    srv2 = HTTPServer(("127.0.0.1", 0), Stub)
-    threading.Thread(target=srv2.serve_forever, daemon=True).start()
+    srv2 = srv
     r2 = subprocess.run([sys.executable, str(ROOT / "scripts/amoeba_onpolicy_gen.py"), "--base-url",
                          f"http://127.0.0.1:{srv2.server_port}", "--checkpoint", "x@y", "--corpus", str(c), "--out",
                          str(out), "--window-tokens", "96", "--tokenizer", str(MODEL), "--strip-prefix", "0.2",

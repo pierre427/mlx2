@@ -438,6 +438,24 @@ SOURCE_REV = {"flores": "openlanguagedata/flores_plus devtest (downloads/flores_
               "gen": "scripts/amoeba_topics_corpus.py", "lproj": "macOS on this host", "loctable": "macOS on this host"}
 _REV_CACHE = {}
 CODE_REV = {}                       # downloaded repo root -> github:<repo>@<commit>
+CTI_RADIO_REV = {}                  # "rev" -> the --cti-radio checkout's revision, set by the build
+UNKNOWN_REV = "unknown (not recorded at build)"
+
+
+def checkout_revision(root):
+    """git:<commit> of a local checkout (+dirty when it has uncommitted changes), or None when git cannot say"""
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=root, capture_output=True, text=True)
+        # the checkout's OWN repository: a plain directory inside some other repository has no revision
+        if top.returncode or Path(top.stdout.strip()).resolve() != Path(root).resolve():
+            return None
+        rev = subprocess.run(["git", "rev-parse", "--short=9", "HEAD"], cwd=root, capture_output=True, text=True)
+        if rev.returncode or not rev.stdout.strip():
+            return None
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout.strip()
+        return "git:" + rev.stdout.strip() + ("+dirty" if dirty else "")
+    except OSError:
+        return None
 
 
 def T_HASH(s):
@@ -449,9 +467,13 @@ def source_revision(source, corev2_rev=None, git_rev=None):
     if pre in SOURCE_REV:
         return SOURCE_REV[pre]
     if pre == "corev2":
-        return f"core corpus v2 {corev2_rev}"
+        return f"core corpus v2 {corev2_rev or UNKNOWN_REV}"
     if pre == "gitlog":
-        return f"mlx2 git log at {git_rev}"
+        return f"mlx2 git log at {git_rev or UNKNOWN_REV}"
+    if pre == "cti-radio":
+        # the source names a bare file name inside the --cti-radio checkout: never resolve it as a path (it
+        # would hash a same-named file of the working directory, e.g. mlx2's own README.md)
+        return f"cti-radio checkout {CTI_RADIO_REV.get('rev') or UNKNOWN_REV}"
     if pre == "wikipedia":
         return f"enwiki revision {source.rsplit('#', 1)[-1]}"
     if pre == "wikiforms":
@@ -702,7 +724,10 @@ def annotate(corpus_path):
             r = json.loads(line)
             row = {"id": r["id"], "sha256": r["sha256"], "split": r["split"], "topic": r["topics"][0],
                    "origin": r.get("origin") or origin_of(r["source"]), "source": r["source"], "license": r["license"],
-                   "source_revision": source_revision(r["source"]), "redistribute": redistribution(r["license"])}
+                   # the build's own record when the corpus row has one: recomputing here would read today's
+                   # files, and the corev2 / git-log revisions are known only to the build
+                   "source_revision": r.get("source_revision") or source_revision(r["source"]),
+                   "redistribute": redistribution(r["license"])}
             counts[row["redistribute"]] += 1
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     print(f"wrote {out}: {dict(counts)}")
@@ -1144,6 +1169,7 @@ def main():
             if safe_sec(text):
                 add(topics, text[:MAX_CHARS], src, group, lic, "dataset_label", group)
     if args.cti_radio:
+        CTI_RADIO_REV["rev"] = checkout_revision(args.cti_radio)
         for p in sorted(Path(args.cti_radio).rglob("*.md")):
             if any(x in p.parts for x in SKIP_DIRS):
                 continue

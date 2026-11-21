@@ -98,10 +98,12 @@ def chained_items(n=40, seed=515):
 
 def whole_number_present(text, exp):
     """The expected number appears as a whole number (not inside a longer one), commas stripped:
-    "36" passes on "3 times 12 is **36**", fails on "360" and on "36.5"."""
+    "36" passes on "3 times 12 is **36**", fails on "360" and on "36.5". A sign is part of the number: "-36"
+    (ASCII hyphen or U+2212) is not 36, while the subtraction echo "50-36" still shows 36."""
     t = text.replace(",", "")
     e = re.escape(exp.replace(",", ""))
-    return re.search(rf"(?<![\d.]){e}(?!\d|\.\d)", t) is not None
+    # a minus right before the number negates it unless a digit precedes the minus (an operator, "50-36")
+    return re.search(rf"(?<![\d.])(?<!(?<!\d)[-\u2212]){e}(?!\d|\.\d)", t) is not None
 
 
 def first_number(text):

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -99,7 +100,9 @@ def members(cat, cont=None):
 
 
 def crawl(roots, depth, cap):
-    seen, titles, frontier = set(), [], [(r, 0) for r in roots]
+    # titles: insertion-ordered and distinct, so the cap counts distinct articles (one that sits in several
+    # crawled categories no longer ends the crawl early)
+    seen, titles, frontier = set(), {}, [(r, 0) for r in roots]
     while frontier and len(titles) < cap:
         cat, d = frontier.pop(0)
         if cat in seen:
@@ -112,30 +115,82 @@ def crawl(roots, depth, cap):
                 if m["ns"] == 14 and d < depth:
                     frontier.append((m["title"].split(":", 1)[1], d + 1))
                 elif m["ns"] == 0:
-                    titles.append(m["title"])
+                    titles[m["title"]] = None
             cont = r.get("continue", {}).get("cmcontinue")
             time.sleep(PACE)
             if not cont or len(titles) >= cap:
                 break
-    return list(dict.fromkeys(titles))[:cap]
+    return list(titles)[:cap]
 
 
-def main():
+def node_settings(node, depth, per_node):
+    return {"depth": depth, "per_node": per_node, "roots": list(ROOTS[node])}
+
+
+def resume_conflicts(res, nodes_meta, depth, per_node):
+    """Finished nodes whose recorded crawl settings differ from this invocation's: {node: {field: (recorded,
+    current)}}. A finished node without a record (crawled before per-node records existed) is not a conflict;
+    main() keeps it with a warning."""
+    bad = {}
+    for node in res:
+        rec = nodes_meta.get(node)
+        if node not in ROOTS or not rec or rec.get("unrecorded"):
+            continue
+        cur = node_settings(node, depth, per_node)
+        diff = {k: (rec.get(k), v) for k, v in cur.items() if rec.get(k) != v}
+        if diff:
+            bad[node] = diff
+    return bad
+
+
+def write_atomic(path, text):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--depth", type=int, default=2)
     ap.add_argument("--per-node", type=int, default=12000)
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     out = Path(a.out)
+    mpath = out.with_suffix(".meta.json")
     res = json.loads(out.read_text()) if out.exists() else {}
+    old = json.loads(mpath.read_text()) if mpath.exists() else {}
+    nodes = dict(old.get("nodes") or {})
+    # A finished node is kept only under the settings it was crawled with: the meta file is the provenance of
+    # every title list, so a rerun with another depth / cap / root list must not relabel old lists.
+    if bad := resume_conflicts(res, nodes, a.depth, a.per_node):
+        raise SystemExit("refusing to resume: finished nodes were crawled with other settings (recorded, current): "
+                         + "; ".join(f"{n}: " + ", ".join(f"{k} {v[0]!r} != {v[1]!r}" for k, v in d.items())
+                                     for n, d in bad.items())
+                         + ". Rerun with the recorded settings or use another --out.")
+    for node in res:
+        if node in ROOTS and node not in nodes:
+            print(f"WARNING {node}: finished before per-node crawl records existed; its depth / per-node cap / "
+                  "roots are unverified", flush=True)
+            nodes[node] = {"unrecorded": True, "note": "crawled before per-node records; settings unverified",
+                           "legacy_meta": {k: old.get(k) for k in ("depth", "per_node", "fetched") if k in old}}
+
+    def meta():
+        return {"api": API, "fetched": time.strftime("%Y-%m-%d"), "depth": a.depth, "per_node": a.per_node,
+                "roots": ROOTS, "nodes": nodes,
+                "note": "top-level depth / per_node / roots / fetched describe the last invocation; nodes.<node> "
+                        "records what each title list was crawled with"}
+
     for node, roots in ROOTS.items():
         if node in res:
             continue
-        res[node] = crawl(roots, a.depth, a.per_node)
-        out.write_text(json.dumps(res))
+        titles = crawl(roots, a.depth, a.per_node)
+        res[node] = titles
+        nodes[node] = node_settings(node, a.depth, a.per_node) | {"fetched": time.strftime("%Y-%m-%d"),
+                                                                 "titles": len(titles)}
+        write_atomic(mpath, json.dumps(meta(), indent=1))  # record first: a list never lacks its settings
+        write_atomic(out, json.dumps(res))
         print(f"{node}: {len(res[node])} titles", flush=True)
-    meta = {"api": API, "fetched": time.strftime("%Y-%m-%d"), "depth": a.depth, "per_node": a.per_node, "roots": ROOTS}
-    out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1))
+    write_atomic(mpath, json.dumps(meta(), indent=1))
 
 
 if __name__ == "__main__":

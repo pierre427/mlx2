@@ -215,7 +215,7 @@ def test_gap_screen_fit_split_slice_and_exclusions(tmp_path):
         split, fit_slice, exclude_manifest, min_tokens = "fit", "1/3", str(ex), None
     got = G.select_split(items, A)
     assert got and all(it["split"] == "fit" for it in got)
-    assert all(T.stable_seed(it["group"]) % 3 == 1 for it in got)
+    assert all(G.fit_slice_of(it["group"], 3) == 1 for it in got)      # the salted slice hash (AMCO-1)
     assert all(it["group"] not in ("fg0", "fg5") for it in got)  # f0's whole group goes too
     assert G.min_tokens(A) == 64
     A.split, A.fit_slice, A.exclude_manifest = "held", "", ""

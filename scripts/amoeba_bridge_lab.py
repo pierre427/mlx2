@@ -187,6 +187,44 @@ import amoeba_paired_stats as PS  # noqa: E402
 
 CORE = "~/Library/Application Support/mlx2/research-artifacts/amoeba/core-corpus-v2-9b64b3791/corpus.jsonl"
 _STATE = {}  # main()'s receipt and its saver, for the watchdog thread and the exit handler
+
+
+def shuf_partner_prompt(items, it):
+    """Generation side of the shuffled-feature control: (donor prompt ids, partner item id). The partner is
+    another test item with the same prompt length. An item with none (a unique prompt length, or one test item)
+    falls back, as the teacher-forced side does, to its own prompt with the positions after the first shuffled;
+    the partner id is then None."""
+    P = it["ids"]
+    same = [x for x in items if x["split"] == "test" and x["id"] != it["id"] and len(x["ids"]) == len(P)]
+    if same:
+        x = same[(int(it["id"][-4:]) * 7919) % len(same)]
+        return x["ids"], x["id"]
+    g = np.random.default_rng(int(it["id"][-4:]))
+    return list(P[:1]) + [P[1 + int(i)] for i in g.permutation(max(0, len(P) - 1))], None
+
+
+def box_json_identity(bj, run_json, donor_ck, width):
+    """--measure --box-json: tie the box units to the loaded donor. box.json records donor_checkpoint and
+    donor_mlp_width since 2026-11-21; an older file is checked against the run.json beside it. Returns
+    (refusals, record): a non-empty refusals list names what differs; record goes into the measure receipt and
+    carries a warning when no donor identity is recorded anywhere."""
+    bad, rec = [], {"source": "box.json", "donor_checkpoint": bj.get("donor_checkpoint")}
+    if rec["donor_checkpoint"] is None:
+        rec = {"source": "run.json beside box.json", "donor_checkpoint": (run_json or {}).get("donor_checkpoint")}
+    if rec["donor_checkpoint"] is None:
+        rec = {"source": "unrecorded", "donor_checkpoint": None,
+               "warning": "box.json and its run.json name no donor checkpoint: the box units are not tied to the "
+                          "loaded donor"}
+    elif rec["donor_checkpoint"] != donor_ck:
+        bad.append(f"donor_checkpoint {rec['donor_checkpoint']!r} ({rec['source']}) != loaded {donor_ck!r}")
+    for l, w in width.items():
+        w0 = (bj.get("donor_mlp_width") or {}).get(str(l))
+        if w0 is not None and int(w0) != int(w):
+            bad.append(f"donor_mlp_width layer {l}: {w0} != loaded {w}")
+        ids = bj["box"][str(l)]
+        if ids and not (0 <= min(ids) and max(ids) < int(w)):
+            bad.append(f"box layer {l} has unit ids outside 0..{int(w) - 1}")
+    return bad, rec
 BASES = ("ridge_box", "ridge_shuf", "ridge_rand", "kgrad_box", "kgrad_shuf", "kgrad_rand", "bridge_box", "bridge_shuf", "bridge_rand", "bridge_noise",
          "bridge_host")
 
@@ -1023,6 +1061,13 @@ def main():
         run(Dn, eng[0]["ids"], st=st0, units={l: None for l in blayers})
         width = {l: int(st0["u"][l].shape[1]) for l in blayers}
         del st0
+        rj_path = bj_path.parent / "run.json"
+        bad_, box_identity = box_json_identity(bj, json.loads(rj_path.read_text()) if rj_path.exists() else None,
+                                               Dn["ck"], width)
+        if bad_:
+            sys.exit("--box-json is not a box of the loaded donor: " + "; ".join(bad_))
+        if box_identity.get("warning"):
+            print(f"WARNING --box-json {bj_path}: {box_identity['warning']}", flush=True)
         sets = {"box": bx}
         for k_ in range(args.rand_seeds):  # own generators: the draw depends only on --seed and k
             g_ = np.random.default_rng(args.seed + 1000 + k_)
@@ -1055,6 +1100,7 @@ def main():
         if any(m_ not in ("clip", "topk") for m_ in modes):
             sys.exit(f"unknown --teacher-modes {args.teacher_modes}")
         mrec = {"box_json": str(bj_path.resolve()), "box_json_sha256": hashlib.sha256(bj_path.read_bytes()).hexdigest(),
+                "box_identity": box_identity,
                 "box_layers": blayers, "units_per_layer": {str(l): int(len(bx[l])) for l in blayers},
                 "donor_mlp_width": {str(l): width[l] for l in blayers},
                 "random_sets": {n_: {str(l): S_[l].tolist() for l in blayers} for n_, S_ in sets.items() if n_ != "box"},
@@ -1341,7 +1387,9 @@ def main():
     if len(set(warp.values())) < len(warp):
         save_receipt(status="failed", reason=f"box layers {box_layers} collide under the warp {warp}")
         sys.exit(f"box layers {box_layers} map to the same host layer: {warp}")
-    box_info = {"box_layers": box_layers, "units_per_layer": {str(l): int(kb[l]) for l in box_layers},
+    box_info = {"donor_checkpoint": Dn["ck"], "host_checkpoint": H["ck"],  # read back by --measure --box-json
+                "donor_mlp_width": {str(l): int(len(md_t[l])) for l in box_layers},
+                "box_layers": box_layers, "units_per_layer": {str(l): int(kb[l]) for l in box_layers},
                 "box": {str(l): box[l].tolist() for l in box_layers}, "rand": {str(l): rand[l].tolist() for l in box_layers},
                 "topic_over_english": {str(l): float(md_t[l][box[l]].sum() / max(md_e[l][box[l]].sum(), 1e-12))
                                        for l in box_layers},
@@ -2543,9 +2591,9 @@ def main():
         need_h = (arm["route"] == "bridge" and arm["src"] == "host") or arm["route"] in ("path", "neuron")
         P = it["ids"]
         dprompt = P
-        if arm["route"] in ("bridge", "lens", "sink") and arm["src"] == "shuf":
-            same = [x for x in items if x["split"] == "test" and x["id"] != it["id"] and len(x["ids"]) == len(P)]
-            dprompt = same[(int(it["id"][-4:]) * 7919) % len(same)]["ids"]
+        shuf_ = arm["route"] in ("bridge", "lens", "sink") and arm["src"] == "shuf"
+        if shuf_:
+            dprompt, partner_ = shuf_partner_prompt(items, it)
         hc = H["model"].make_cache()
         dc = Dn["model"].make_cache() if need_d else None
         hc2 = H["model"].make_cache() if need_h else None  # the clean host copy the host-only bridge reads
@@ -2605,6 +2653,7 @@ def main():
         nr = np.concatenate([np.array(x) for x in st.get("nr", [])]) if st.get("nr") else np.zeros(0)
         return {"arm": name, "item": it["id"], "text": text, "stopped": stopped, "pred": parse(text, stopped),
                 "correct": parse(text, stopped) == it["answer"],
+                **({"shuf_partner": partner_} if shuf_ else {}),  # None: no same-length partner (fallback)
                 "norm_ratio": float(nr.mean()) if len(nr) else None,
                 "gate_mean": float(np.mean(st["gate"])) if st.get("gate") else None,
                 "clamped_frac": float((nr > args.norm_budget).mean()) if len(nr) and args.norm_budget > 0 else None}

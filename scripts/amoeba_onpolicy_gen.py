@@ -60,6 +60,11 @@ def main():
     ap.add_argument("--strip-prefix", type=float, default=0.0, help="as the carve loader: drop a shared template prefix")
     ap.add_argument("--window-seed", type=int, default=0)
     ap.add_argument("--code-cut", action="store_true", help="as the carve loader: code domains start at their first code")
+    ap.add_argument("--adopt-partial", action="store_true",
+                    help="resume a gen.partial.jsonl whose recorded settings (gen.identity.json) differ from this "
+                         "run's: the operator's statement that those rows are valid for this run. The manifest "
+                         "records what was adopted (a partial with no recorded settings is resumed and recorded "
+                         "the same way; the server address is recorded but never compared)")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)       # resumable: gen.partial.jsonl rows are kept and skipped (review 2026-11-16)
@@ -124,6 +129,15 @@ def main():
         for mode, temp, seed in modes:
             jobs.append((path, r, prompt, mode, temp, seed))
 
+    def stamp(job):
+        # the corpus row's own fields. Two corpus rows can yield the same prompt (one document in two files, a
+        # shared opening): their jobs share a resume key, so a reused partial row is re-stamped for its job
+        path, r = job[0], job[1]
+        s = {"domain": "gen:" + r.get("domain", "text"), "source": r.get("source", path), "corpus": Path(path).name}
+        if "split" in r:
+            s["split"] = r["split"]
+        return s
+
     def run(job):
         path, r, prompt, mode, temp, seed = job
         body = {"prompt": prompt, "max_tokens": a.max_tokens, "temperature": temp}
@@ -155,8 +169,7 @@ def main():
                "mode": mode, "temperature": temp, "seed": seed, "prompt_words": a.prompt_words,
                "corpus": Path(path).name, "completion_tokens": (d.get("usage") or {}).get("completion_tokens"),
                "seconds": round(time.time() - t0, 2)}
-        if "split" in r:
-            row["split"] = r["split"]
+        row.update(stamp(job))
         if "_doc_id" in r:                     # windowed prompt: the carve loader's loss mask and document split
             row.update({"prompt": prompt, "doc_id": r["_doc_id"], "prompt_end_token": r["_prompt_end_token"],
                         "window_tokens": a.window_tokens})
@@ -164,15 +177,51 @@ def main():
     t0 = time.time()
     part = out / "gen.partial.jsonl"
     rkey = lambda r: (r.get("prompt_key"), r["mode"], r.get("seed"))       # noqa: E731
-    done = {}
-    if part.exists():
+    done = {}                                # resume key -> the partial's rows (a list: duplicate prompts keep
+    if part.exists():                        # their multiplicity)
         for x in part.read_text().split("\n"):
             if x.strip():
                 try:
                     r = json.loads(x)
                 except json.JSONDecodeError:      # a row cut by a crash mid-write
                     continue
-                done[rkey(r)] = r
+                done.setdefault(rkey(r), []).append(r)
+    # The resume key is (prompt, mode, seed) only. What else decides a row's content is recorded beside the
+    # partial; a rerun with another checkpoint, server or sampling setting must not mix its rows with these
+    # under one manifest.
+    ident = {"checkpoint": a.checkpoint, "base_url": a.base_url.rstrip("/"), "max_tokens": a.max_tokens,
+             "temperature": a.temperature, "top_p": a.top_p, "seed0": a.seed0, "prompt_words": a.prompt_words,
+             "window_tokens": a.window_tokens, "window_seed": a.window_seed, "strip_prefix": a.strip_prefix,
+             "code_cut": a.code_cut,
+             "corpus_sha256": {Path(c).name: hashlib.sha256(Path(c).read_bytes()).hexdigest() for c in a.corpus}}
+    ident_path = out / "gen.identity.json"
+    adopted = None
+    if done:
+        try:
+            old = json.loads(ident_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            old = None
+        if old is None:
+            # A partial written before identities were recorded: resumed as before, and the manifest says so
+            # (the callers that resume such a partial cannot pass a flag).
+            diff = {"(all)": ["not recorded", "this run"]}
+        else:
+            adopted = old.pop("adopted", None)
+            # base_url is recorded but not compared: the local backend serves the same checkpoint on a fresh
+            # port at every invocation; the checkpoint is the model identity.
+            diff = {k: [old.get(k), ident[k]] for k in ident if k != "base_url" and old.get(k) != ident[k]}
+        if diff:
+            if old is not None and not a.adopt_partial:
+                raise SystemExit(
+                    f"refusing to resume {part}: its rows were generated under other settings than this run's "
+                    + "; ".join(f"{k}: recorded {v[0]!r}, now {v[1]!r}" for k, v in diff.items())
+                    + ". Use a new --out, move the partial aside, or pass --adopt-partial if these rows are valid "
+                      "for this run")
+            adopted = (adopted or []) + [diff]
+            print(f"resuming rows recorded under other or unrecorded settings: {diff}", flush=True)
+    ident_tmp = out / ".gen.identity.json.tmp"
+    ident_tmp.write_text(json.dumps({**ident, **({"adopted": adopted} if adopted else {})}, indent=1))
+    ident_tmp.replace(ident_path)
     import threading
     lock = threading.Lock()
     fails = {"n": 0, "streak": 0}           # a dead server: after 20 failures in a row, later jobs fail fast
@@ -180,9 +229,18 @@ def main():
     def jkey(job):
         _, r, prompt, mode, temp, seed = job
         return (hashlib.sha256(prompt.encode()).hexdigest()[:16], mode, seed)
-    keys = {jkey(j) for j in jobs}
-    done = {k: v for k, v in done.items() if k in keys}       # only rows of the current job set
-    todo = [j for j in jobs if jkey(j) not in done]
+    # only rows of the current job set, one partial row per job: jobs with the same key each take one, and the
+    # rest are requested, so a resumed run publishes the same row count as a clean one
+    kept, todo = [], []
+    for j in jobs:
+        have = done.get(jkey(j))
+        if have:
+            row = have.pop(0)
+            if "split" not in j[1]:
+                row.pop("split", None)
+            kept.append({**row, **stamp(j)})
+        else:
+            todo.append(j)
     print(f"jobs {len(jobs)}, already done {len(jobs) - len(todo)}", flush=True)
     with part.open("a") as fh:
         def run_keep(job):
@@ -194,9 +252,11 @@ def main():
             return row
         with ThreadPoolExecutor(max_workers=a.workers) as ex:
             new = [r for r in ex.map(run_keep, todo) if r is not None]
-    res = list(done.values()) + new
+    res = kept + new
     if fails["n"]:     # never write gen.jsonl with rows missing: exit nonzero, the next run resumes from the partial
         raise SystemExit(f"{fails['n']} requests failed; {len(res)}/{len(jobs)} rows in {part}; rerun to resume")
+    if len(res) != len(jobs):
+        raise SystemExit(f"{len(res)} rows for {len(jobs)} jobs in {out}: not publishing gen.jsonl")
     p = out / "gen.jsonl"
     pending = out / ".gen.jsonl.tmp"
     pending.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in res))
@@ -211,6 +271,7 @@ def main():
                      else f"seed0 + 1000*row + k (seed0={a.seed0})"), "rows": len(res), "completion_tokens": toks,
            "wall_s": round(time.time() - t0, 1), "tok_s_aggregate": round(toks / max(1e-9, time.time() - t0), 1),
            "sha256": hashlib.sha256(pending.read_bytes()).hexdigest(),
+           "resumed_rows": len(kept), **({"resume_adopted": adopted} if adopted else {}),
            "note": "teacher-force with KL(full || masked); held prompts keep split 'held' (bisect and evals only)"}
     manifest_tmp = out / ".manifest.json.tmp"
     manifest_tmp.write_text(json.dumps(man, indent=1))

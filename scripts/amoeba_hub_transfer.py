@@ -87,6 +87,19 @@ STATE = {}  # receipt written on any failure (see __main__)
 TEMPLATE = "Give the first 16 digits after the decimal point of {a}/{b}, as one digit string."
 
 
+TRACE_KEYS = ("task", "prompt_format", "max_tokens")
+
+
+def traces_mismatch(prev_args, cur_args):
+    """--donor-traces: the fields a stored donor trace depends on besides the items and the donor checkpoint.
+    A trace generated after another prompt format or cut at another token cap is not this run's donor trace.
+    Returns the differing fields as {field: (previous, current)}; a field the earlier run.json lacks differs."""
+    prev_args = prev_args or {}
+    return {k: (prev_args.get(k, "<missing>"), cur_args[k]) for k in TRACE_KEYS
+            if k not in prev_args or prev_args[k] != cur_args[k]}
+
+
+
 def items(n_items, n_test, seed):
     dens = [7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
     pool = [(a, b) for b in dens for a in (1, 2, 3, 5) if a < b]
@@ -326,6 +339,9 @@ def main():
         prun = json.loads((prev / "run.json").read_text())
         if prun.get("donor_checkpoint") != d_ck:
             sys.exit(f"--donor-traces donor {prun.get('donor_checkpoint')} != {d_ck}")
+        if bad := traces_mismatch(prun.get("args"), vars(args)):
+            sys.exit("--donor-traces were generated with other settings (previous, current): "
+                     + ", ".join(f"{k} {v[0]!r} != {v[1]!r}" for k, v in bad.items()))
         for l in (prev / "donor_traces.jsonl").read_text().split("\n"):
             if not l.strip():
                 continue
