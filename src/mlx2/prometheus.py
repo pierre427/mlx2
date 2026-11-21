@@ -518,6 +518,7 @@ _ENGINE_EVENTS = {
             "exact_decode_checkpoint_close",
             "weight_overlay_release",
             "ablation_overlay_release",
+            "amoeba_open_release",
             "layer_excision_release",
             "expert_mask_release",
         )
@@ -1591,8 +1592,81 @@ def _add_cache_capsules(builder: PrometheusBuilder, stats: Mapping[str, Any]) ->
         )
 
 
+_ENGRAM_LABEL_RE = re.compile(r"[a-z0-9_.\-]{1,48}")
+
+
+def _engram_label(value: Any) -> str:
+    """A bounded label value for a table format/storage name; anything else is ``other``."""
+    return value if isinstance(value, str) and _ENGRAM_LABEL_RE.fullmatch(value) else "other"
+
+
+def _add_engram(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:
+    """Engram (hashed n-gram embedding) table readers, from adapter diagnostics.
+
+    Any adapter whose diagnostics carry ``engram``: ``{layer: reader
+    diagnostics}`` (Hy4-flash ``EngramTableRows``, DeepSeek-V4.1
+    ``EngramRows``) gets these families; nothing here names a model.  Only
+    the counters both readers share are exported, plus the per-phase read
+    counts and the table format when a reader reports them.
+    """
+    tables = execution.get("engram")
+    if isinstance(tables, Mapping):
+        for layer, diag in sorted(tables.items(), key=lambda item: str(item[0])):
+            layer = str(layer)
+            if not isinstance(diag, Mapping) or not (layer.isdigit() and len(layer) <= 4):
+                continue
+            labels = {"layer": layer}
+
+            def count(key):
+                value = diag.get(key)
+                return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+            if count("lookups") is not None:
+                builder.counter("mlx2_engram_lookups_total",
+                                "Engram row lookups (one per layer and forward step).",
+                                count("lookups"), labels)
+            for key, kind in (("requested_rows", "requested"), ("unique_rows", "unique"),
+                              ("cache_hits", "cache_hit")):
+                if count(key) is not None:
+                    builder.counter("mlx2_engram_rows_total",
+                                    "Engram rows by kind: requested, unique per lookup, served from the row cache.",
+                                    count(key), {**labels, "kind": kind})
+            if count("bytes_read") is not None:
+                builder.counter("mlx2_engram_read_bytes_total",
+                                "Engram table bytes read from storage.", count("bytes_read"), labels)
+            for key, phase in (("prefill_reads", "prefill"), ("decode_reads", "decode")):
+                if count(key) is not None:
+                    builder.counter("mlx2_engram_reads_total",
+                                    "Engram storage read batches by phase (prefill- or decode-sized pool).",
+                                    count(key), {**labels, "phase": phase})
+            if count("table_bytes") is not None:
+                builder.gauge("mlx2_engram_table_bytes",
+                              "Engram table size on storage.", count("table_bytes"), labels)
+            if count("cache_rows") is not None:
+                builder.gauge("mlx2_engram_cache_rows_limit",
+                              "Configured bound of the decoded Engram row cache.", count("cache_rows"), labels)
+            builder.gauge("mlx2_engram_table_info",
+                          "Engram table reader (value is always one).", 1,
+                          {**labels, "format": _engram_label(diag.get("format", diag.get("storage"))),
+                           "approximate": str(bool(diag.get("approximate", False))).lower()})
+    selected = execution.get("engram_table_format")
+    if isinstance(selected, Mapping):
+        builder.gauge("mlx2_engram_table_format_info",
+                      "Selected Engram table format and its labels (value is always one).", 1,
+                      {"format": _engram_label(selected.get("format")),
+                       "approximate": str(bool(selected.get("approximate"))).lower(),
+                       "qualified": str(bool(selected.get("qualified"))).lower(),
+                       "default": str(bool(selected.get("default"))).lower()})
+    approximate = execution.get("approximate_state")
+    if isinstance(approximate, bool):
+        builder.gauge("mlx2_route_approximate_state",
+                      "Whether the loaded route serves declared-approximate state or weights.",
+                      int(approximate))
+
+
 def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:
     """Export only reviewed advanced-path fields from adapter diagnostics."""
+    _add_engram(builder, execution)
 
     route = execution.get("speculative_route")
     if isinstance(route, str):
