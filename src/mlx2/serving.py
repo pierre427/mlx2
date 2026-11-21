@@ -6627,7 +6627,9 @@ class ServingEngine(KernelReloadMixin):
 
             # A malformed field, an unknown tile, or "on" without a loaded tile set fails closed.
             toggles = request_toggles(det_tiles, job.request)
-        if det_tiles is not None and any(toggles.values()):
+        if det_tiles is not None:
+            # Checked even when every toggle is off: a loaded tile set still runs inside the
+            # shared forward (gate capture, fact-table writes) whatever one request asks.
             served = (self.snapshot.get("settings") or {}).get("route") or "ordinary"
             # The tile set names the routes it was admitted for (ordinary; native_mtp for
             # position-matched calculators; external_draft for resident calculators only).
@@ -8573,7 +8575,8 @@ class ServingEngine(KernelReloadMixin):
         task.prompt_ids = prompt_ids
         task.state.update({
             "adapter": adapter, "tokenizer": tokenizer, "model_revision": revision,
-            "kind": binding.kind, "chunk": chunk, "int8": int8, "fidelity": fidelity,
+            "kind": binding.kind, "tiles": binding.tiles,
+            "chunk": chunk, "int8": int8, "fidelity": fidelity,
             "memory": memory, "kv_cache": kv_cache, "started": time.monotonic(),
         })
         task.run = PromptScoringRun(binding.forward, binding.cache, prompt_ids,
@@ -8591,7 +8594,7 @@ class ServingEngine(KernelReloadMixin):
         receipt = scoring_receipt(
             task.run, state["kind"], chunk_tokens=state["chunk"], top_k=task.top_k,
             fidelity=state["fidelity"], int8=state["int8"],
-            seconds=time.monotonic() - state["started"],
+            seconds=time.monotonic() - state["started"], tiles=state.get("tiles"),
         )
         receipt["kv_cache"] = state["kv_cache"]
         receipt["memory"] = state["memory"]

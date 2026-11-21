@@ -202,6 +202,7 @@ class KimiK31LayerStream:
             return src
         os, shutil = self._os, __import__("shutil")
         dst = cache / f"layer_{i:02d}" / src.name
+        tmp = None
         try:
             if dst.exists():
                 os.utime(dst)
@@ -222,6 +223,13 @@ class KimiK31LayerStream:
             self.cache_stats["copies"] += 1
             return dst
         except OSError:
+            # A failed copy leaves a partial .tmp the LRU never sees (it tracks
+            # expert_*.safetensors only); remove it so it cannot hold cache space.
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
             self.cache_stats["fallbacks"] += 1
             return src
 

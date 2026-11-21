@@ -24,7 +24,9 @@ DESCRIPTOR = ModelDescriptor(
     family="maxwell",
     variant="v1-flash-ordinary",
     state_planes=frozenset({StatePlane.ATTENTION_KV, StatePlane.RNG, StatePlane.TRANSCRIPT}),
-    capabilities=frozenset({Capability.TEXT, Capability.STREAMING}),
+    # REASONING: the template opens <think> by default and the adapter honours
+    # enable_thinking both ways; without it serving refused only "true".
+    capabilities=frozenset({Capability.TEXT, Capability.STREAMING, Capability.REASONING}),
     cache_layout=CACHE_LAYOUT,
     metadata={
         "execution": "mlx2.adapters.maxwell_moe.MaxwellMoeAdapter",
@@ -251,6 +253,13 @@ class MaxwellMoeAdapter:
         kwargs = dict(request.get("chat_template_kwargs") or {})
         if set(kwargs) - {"enable_thinking"}:
             raise ValueError("Maxwell chat template accepts only enable_thinking")
+        # The server folds every public thinking control (enable_thinking, think,
+        # chat_template_kwargs.enable_thinking, reasoning_effort "none") into the
+        # top-level enable_thinking and removes chat_template_kwargs before the
+        # adapter sees the request.
+        flag = request.get("enable_thinking")
+        if type(flag) is bool:
+            kwargs["enable_thinking"] = flag
         return kwargs
 
     def _template(self, request, tokenize):

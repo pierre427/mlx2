@@ -215,6 +215,11 @@ def extract_prompt_scoring(body, *, chat):
     echo = body.get("echo")
     prompt_top = body.get("prompt_logprobs")
     if echo is None and prompt_top is None:
+        if "echo" in body or "prompt_logprobs" in body:
+            # An explicit null is an absent field; ``validate_request`` does not
+            # know these two names, so it would refuse the null as unknown.
+            body = {key: value for key, value in body.items()
+                    if key not in {"echo", "prompt_logprobs"}}
         return body, None
     if echo is not None:
         if chat:
@@ -227,7 +232,9 @@ def extract_prompt_scoring(body, *, chat):
     if not echo and prompt_top is None:
         # ``echo: false`` alone is the default behaviour; the rest of the body
         # (``max_tokens: 0`` included) is validated as an ordinary request.
-        return {key: value for key, value in body.items() if key != "echo"}, None
+        # A null ``prompt_logprobs`` beside it is absent too.
+        return {key: value for key, value in body.items()
+                if key not in {"echo", "prompt_logprobs"}}, None
     echo_top = None
     if echo:
         legacy = body.get("logprobs")
@@ -421,6 +428,47 @@ class PromptScoringBinding:
     forward: object  # (tokens [1, C], cache) -> logits [1, C, vocab]
     cache: object
     kind: str
+    tiles: dict | None = None  # amoeba tile state of the scoring forward, for the receipt
+
+
+def _without_det_tiles(forward, tileset):
+    """Run ``forward`` with the deterministic tile hooks switched off.
+
+    The hooks are Python calls made while the forward builds its graph
+    (``DetTileSet.on_mlp`` / ``on_layer_output``).  Left on, a scoring forward
+    would add fact-table and push deltas to the scored rows and overwrite the
+    gate stashes that live calculator lanes read.  ``enabled`` is the tile
+    set's own bypass; the worker runs scoring between scheduler steps, so no
+    lane forward is built while it is off.
+    """
+    def call(tokens, cache):
+        previous = tileset.enabled
+        tileset.enabled = False
+        try:
+            return forward(tokens, cache)
+        finally:
+            tileset.enabled = previous
+
+    return call
+
+
+def _bind_tiles(adapter, binding):
+    """Bypass deterministic tiles for scoring and say what the forward ran under."""
+    tiles = {}
+    det = getattr(adapter, "amoeba_det_tiles", None)
+    if det is not None:
+        if isinstance(getattr(det, "enabled", None), bool):
+            binding.forward = _without_det_tiles(binding.forward, det)
+            tiles["amoeba_det_tiles"] = "bypassed"
+        else:
+            tiles["amoeba_det_tiles"] = "active_in_scoring_forward"
+    # Core/box tiles and blocks have no per-forward switch: the loaded target
+    # is the tiled model, and the receipt says so instead of implying a base one.
+    for name in ("amoeba_tiles", "amoeba_blocks"):
+        if getattr(adapter, name, None) is not None:
+            tiles[name] = "active_in_scoring_forward"
+    binding.tiles = tiles or None
+    return binding
 
 
 def prompt_scoring_binding(adapter):
@@ -437,7 +485,7 @@ def prompt_scoring_binding(adapter):
     declared = getattr(adapter, "prompt_logprobs_binding", None)
     if callable(declared):
         forward, cache = declared()
-        return PromptScoringBinding(forward, cache, "adapter_binding")
+        return _bind_tiles(adapter, PromptScoringBinding(forward, cache, "adapter_binding"))
     model = getattr(adapter, "model", None)
     if model is None or not callable(model):
         refuse("the loaded adapter exposes no in-process target model", "no_target_model")
@@ -446,8 +494,8 @@ def prompt_scoring_binding(adapter):
 
     call = prefill_model_forward(model)
     kind = "prefill_forward" if call is not model else "model_call"
-    return PromptScoringBinding(lambda tokens, cache: call(tokens, cache=cache),
-                                make_prompt_cache(model), kind)
+    return _bind_tiles(adapter, PromptScoringBinding(
+        lambda tokens, cache: call(tokens, cache=cache), make_prompt_cache(model), kind))
 
 
 def _cache_entries(value, depth=0):
@@ -625,8 +673,10 @@ def score_prompt_tokens(forward, cache, tokens, *, top_k, chunk_tokens, mx):
     return run.scores
 
 
-def scoring_receipt(run, binding_kind, *, chunk_tokens, top_k, fidelity, int8, seconds):
+def scoring_receipt(run, binding_kind, *, chunk_tokens, top_k, fidelity, int8, seconds,
+                    tiles=None):
     return {
+        **({"amoeba_tiles": tiles} if tiles else {}),
         "schema": SCHEMA,
         "status": "completed",
         "implemented": True,
@@ -667,6 +717,7 @@ def run_prompt_scoring(adapter, tokens, *, top_k, chunk_tokens, mx=None):
     return run.scores, scoring_receipt(
         run, binding.kind, chunk_tokens=chunk_tokens, top_k=top_k,
         fidelity=None, int8={"active": False}, seconds=time.monotonic() - started,
+        tiles=binding.tiles,
     )
 
 

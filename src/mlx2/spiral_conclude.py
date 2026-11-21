@@ -16,6 +16,11 @@ Qwen3.8-27B-oQ4e-mtp@fb827b65 (200 GSM8K test problems, greedy, xhigh; mlx2 a02a
 accuracy, 515 -> 376 tokens per problem, caps 2 -> 0, and 0 broken runs out of 13 test and 5 train fires
 on runs that were correct without it. The server-side guard on the same problems scored 0.940 (it broke
 5 correct runs). This client policy applies when callers choose high reasoning effort.
+
+2026-11-21: the detector now counts a stated answer or hedge once however the stream is chunked.
+The A/B above ran with the earlier counting, which recorded one match again for every delta that
+extended it (a number streamed over three tokens was three candidates), so its fire points and the
+default thresholds were measured against inflated counts and have not been re-run.
 """
 
 from __future__ import annotations
@@ -69,6 +74,25 @@ class SpiralDetector:
     hedges: list = field(default_factory=list)       # token positions
     fired_at: int | None = None
     _scan: int = 0
+    _candidate_starts: list = field(default_factory=list)   # text offset of each candidate, ascending
+    _hedge_starts: list = field(default_factory=list)       # text offset of each hedge, ascending
+
+    def _rescan(self, pattern, start, starts, entries, entry):
+        """Rebuild the entries whose match starts at or after ``start`` from the current text.
+
+        A match is identified by where it starts, so one that grows as later deltas arrive (a
+        number streamed as "18" "," "400", "interpret" "ation") stays one entry with its first
+        token position, and one that the next delta turns into a non-match is dropped. The
+        counts for a text are then the same however it was chunked.
+        """
+        keep = len(starts)
+        while keep and starts[keep - 1] >= start:
+            keep -= 1
+        seen = dict(zip(starts[keep:], entries[keep:]))
+        del starts[keep:], entries[keep:]
+        for m in pattern.finditer(self.text, start):
+            starts.append(m.start())
+            entries.append(entry(m, seen.get(m.start())))
 
     def feed(self, delta: str, tokens: int) -> bool:
         """Append ``delta`` (reasoning text) with ``tokens`` = completion tokens so far; True once it fires."""
@@ -76,12 +100,10 @@ class SpiralDetector:
         self.tokens = tokens
         # Rescan only the tail (a match may straddle a delta boundary); keep 64 chars of overlap.
         start = max(0, self._scan - 64)
-        for m in CANDIDATE.finditer(self.text, start):
-            if m.end() > self._scan:
-                self.candidates.append((tokens, norm_number(m.group(1))))
-        for m in HEDGE.finditer(self.text, start):
-            if m.end() > self._scan:
-                self.hedges.append(tokens)
+        self._rescan(CANDIDATE, start, self._candidate_starts, self.candidates,
+                     lambda m, old: (tokens if old is None else old[0], norm_number(m.group(1))))
+        self._rescan(HEDGE, start, self._hedge_starts, self.hedges,
+                     lambda m, old: tokens if old is None else old)
         self._scan = len(self.text)
         if self.fired_at is None and self.should_fire():
             self.fired_at = tokens

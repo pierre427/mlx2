@@ -309,6 +309,12 @@ def median(values):
 
 # --------------------------------------------------------------- serving --
 
+# Sampled runs: question with GSM8K test index i is sent seed + i.  Receipts
+# without ``prompt.sampling.seed_law`` (before 2026-11-21) used seed + position
+# in that run, which equals this law only for --offset 0 runs without --indices.
+SEED_LAW = "seed_plus_test_index"
+
+
 def sampling_fields(sampling, index):
     """Request fields for one question: empty (greedy) or the sampled settings
     with a deterministic per-question seed, so two arms draw from the same
@@ -363,7 +369,8 @@ def stop_time(clock, now=None):
 def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None, sampling=None,
                   request_extra=None, chat_shots=None, instruction=CHAT_INSTRUCTION, deadline=None):
     """``sampling`` (optional) adds temperature/top_p/top_k and a per-question
-    seed (``seed + index``) to every request; ``None`` keeps greedy.
+    seed (``seed + test_index``, the law named ``SEED_LAW``) to every request;
+    ``None`` keeps greedy.
     ``request_extra`` (an arm's ``request`` object, e.g. ``enable_thinking`` /
     ``reasoning_effort``) is merged into every request body.
     ``chat_shots`` (chat only) are worked-example turns sent before each
@@ -380,7 +387,10 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
         if deadline is not None and time.time() >= deadline:
             break                               # no new question after --stop-at; the summary counts rows
         start = time.monotonic()
-        extra_fields = sampling_fields(sampling, index)
+        # Seed by the question's test index, not its position in this run, so an
+        # --indices / --offset rerun draws the same seed for the same question.
+        test_index = item.get("test_index")
+        extra_fields = sampling_fields(sampling, index if test_index is None else test_index)
         if chat:
             payload = {"model": model_name, "temperature": 0, **extra_fields, **request_extra, "stream": False, "max_tokens": max_tokens,
                        "messages": list(chat_shots or [])
@@ -505,7 +515,9 @@ def main(argv=None):
     parser.add_argument("--top-p", type=float)
     parser.add_argument("--top-k", type=int)
     parser.add_argument("--seed", type=int, default=0,
-                        help="sampled runs: question i uses seed + i")
+                        help="sampled runs: test question i uses seed + i whatever --offset/--indices "
+                             "selected it (receipt seed_law seed_plus_test_index; receipts "
+                             "without seed_law used seed + position in the run)")
     parser.add_argument("--draft-depth", type=int,
                         help="route draft depth: per_position then covers every depth (arms JSON may set draft_depth)")
     args = parser.parse_args(argv)
@@ -525,7 +537,7 @@ def main(argv=None):
         # Fields left unset take the server's resolved (vendor) defaults; each
         # row's receipt records the effective sampling the server used.
         sampling = {"temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k,
-                    "seed": args.seed, "unset_fields": "server defaults"}
+                    "seed": args.seed, "seed_law": SEED_LAW, "unset_fields": "server defaults"}
     elif args.top_p is not None or args.top_k is not None:
         parser.error("--top-p/--top-k need --temperature > 0")
     data_revision, files = dataset_files()
