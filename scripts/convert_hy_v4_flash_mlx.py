@@ -59,7 +59,10 @@ TRUNK_SUFFIXES = (
     "mlp.routed_expert_down_proj", "mlp.routed_expert_up_proj",
 )
 COPY_FILES = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
-              "generation_config.json", "special_tokens_map.json", "LICENSE", "README.md")
+              "generation_config.json", "special_tokens_map.json", "LICENSE", "README.md",
+              # The vision tower is kept, so its image-processor settings
+              # (mean/std, pixel bounds) must travel with it.
+              "processor_config.json", "preprocessor_config.json")
 
 
 def plan_bits(key: str, *, expert_bits: int, trunk_bits: int):

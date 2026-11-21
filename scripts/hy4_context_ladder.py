@@ -149,6 +149,37 @@ def build_prompt(tokenizer, cell: int, depth: float, code: str, offset: int):
     return text, tokens
 
 
+def checkpoint_label(name, status):
+    """``<artifact name>@<fingerprint>`` from ``/v1/status``.
+
+    The adapter's ``execution.checkpoint`` names the artifact; the top-level
+    ``artifact`` field is a route digest once a drafter is bound, so it is
+    only the fallback.
+    """
+    label = (status.get("execution") or {}).get("checkpoint")
+    if isinstance(label, str) and "@" in label:
+        return f"{name}@{label.split('@', 1)[1]}"
+    artifact = status.get("artifact")
+    fingerprint = artifact if isinstance(artifact, str) else find_key(artifact or {}, "fingerprint")
+    return f"{name}@{fingerprint}" if fingerprint else None
+
+
+def ladder_verdict(cells):
+    """Correctness failures of the finished cells.
+
+    An oracle failure, or a warm arm that restored nothing from APCv2, fails
+    the ladder.  A cold/warm token mismatch is only counted: it can be a
+    passing near tie and needs classification, not an automatic failure.
+    """
+    ran = [row for row in cells if "cold" in row and "warm" in row]
+    return {
+        "oracle_failures": [f"{row['cell']}:{arm}" for row in ran for arm in ("cold", "warm")
+                            if not row[arm].get("oracle_pass")],
+        "warm_misses": [row["cell"] for row in ran if not row["warm"].get("cached_tokens")],
+        "cold_warm_mismatches": [row["cell"] for row in ran if row.get("cold_warm_tokens_equal") is False],
+    }
+
+
 def stop_group(process) -> str:
     """Stop the server's process group; ``"stopped"`` or ``"still_running"``."""
     if process is None or process.poll() is not None:
@@ -252,9 +283,7 @@ def main(argv=None) -> int:
         report["load_seconds"] = round(time.monotonic() - t0, 1)
         status = get_json(base, "/v1/status")
         report["server_status_start"] = status
-        artifact = status.get("artifact")
-        fingerprint = artifact if isinstance(artifact, str) else find_key(artifact or {}, "fingerprint")
-        report["checkpoint"] = f"{model.name}@{fingerprint}" if fingerprint else None
+        report["checkpoint"] = checkpoint_label(model.name, status)
         save()
         offset = 0
         for i, cell in enumerate(cells):
@@ -316,6 +345,15 @@ def main(argv=None) -> int:
                 break
         else:
             report["status"] = "completed"
+        report["verdict"] = ladder_verdict(report["cells"])
+        # The fp8 latent-KV route declares no APCv2 and never publishes: a warm arm that restored nothing is
+        # its expected behaviour, not a miss.
+        apc = report["execution_policy"].get("latent_kv") != "fp8"
+        report["verdict"]["warm_restore_expected"] = apc
+        failed = [k for k in ("oracle_failures", "warm_misses") if report["verdict"][k] and (apc or k != "warm_misses")]
+        if failed and report["status"] == "completed":  # an early stop keeps its own reason
+            report["status"] = "failed: " + ", ".join(
+                f"{len(report['verdict'][k])} {k.replace('_', ' ')}" for k in failed)
     except Exception as error:
         report["status"] = "failed"
         report["error"] = f"{type(error).__name__}: {error}"

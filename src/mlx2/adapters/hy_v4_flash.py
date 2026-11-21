@@ -123,6 +123,11 @@ def latent_kv_receipt(fmt: str, *, observed_used: bool = False, layout: str | No
                                    if fp8 else "exact entries")}
 
 
+# Label of the image-processor source when a vision artifact ships neither
+# processor_config.json nor preprocessor_config.json.
+IMAGE_PROCESSOR_FALLBACK = "class defaults (artifact has no image-processor config)"
+
+
 def descriptor_for(*, dfly_selected: bool = False, engram_table_format: str = "bf16",
                    latent_kv: str = "native", vision: bool = False) -> ModelDescriptor:
     # Ordinary lanes batch (per-lane attention, joint projections/MoE/head).
@@ -1020,14 +1025,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         tower = self.model.vision_tower.args
         out = {"min_pixels": tower.min_image_size ** 2, "max_pixels": tower.max_image_size ** 2,
                "image_mean": tuple(OPENAI_CLIP_MEAN), "image_std": tuple(OPENAI_CLIP_STD)}
-        root = Path(self.identity["path"])
-        data = None
-        nested = root / "processor_config.json"
-        if nested.is_file():
-            data = json.loads(nested.read_text()).get("image_processor")
-        flat = root / "preprocessor_config.json"
-        if data is None and flat.is_file():
-            data = json.loads(flat.read_text())
+        data, _ = self._image_processor_config()
         if isinstance(data, dict):
             size = data.get("size") or {}
             out["min_pixels"] = int(data.get("min_pixels", size.get("shortest_edge", out["min_pixels"])))
@@ -1047,6 +1045,43 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # ``resample`` is not read: the reference processor resizes with
             # BICUBIC whatever the config says (hy_v4_flash_media).
         return out
+
+    def _image_processor_config(self):
+        """``(settings dict or None, source label)`` of the artifact's image processor."""
+        root = Path(self.identity["path"])
+        nested = root / "processor_config.json"
+        if nested.is_file():
+            data = json.loads(nested.read_text()).get("image_processor")
+            if data is not None:
+                return data, "processor_config.json"
+        flat = root / "preprocessor_config.json"
+        if flat.is_file():
+            return json.loads(flat.read_text()), "preprocessor_config.json"
+        return None, IMAGE_PROCESSOR_FALLBACK
+
+    def _image_processor_receipt(self):
+        # A vision artifact without a processor config still loads, but its
+        # images are normalized with the class defaults (CLIP mean/std), not
+        # the checkpoint's; status must say so (a converted or assembled
+        # artifact that lost the file otherwise looks healthy).
+        if not getattr(getattr(self, "model", None), "has_vision", False) or not getattr(self, "identity", None):
+            return None
+        cached = getattr(self, "_image_processor_receipt_cache", None)
+        if cached is not None:           # status snapshots call this about once a second: read the file once
+            return dict(cached)
+        try:
+            _, source = self._image_processor_config()
+        except (OSError, ValueError, AttributeError) as error:
+            return {"source": f"unreadable ({type(error).__name__})", "fallback": False}
+        self._image_processor_receipt_cache = {"source": source, "fallback": source == IMAGE_PROCESSOR_FALLBACK}
+        return dict(self._image_processor_receipt_cache)
+
+    def _checkpoint_label(self):
+        # Binding an external drafter replaces identity["fingerprint"] with a
+        # route digest and keeps the artifact's under "target_fingerprint";
+        # a checkpoint label names the artifact.
+        fingerprint = self.identity.get("target_fingerprint", self.identity["fingerprint"])
+        return f"{Path(self.identity['path']).name}@{fingerprint}"
 
     @property
     def image_pixel_bounds(self) -> tuple[int, int]:
@@ -1107,7 +1142,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             stats["verify_accept_hist"][i] += n
         for i, n in enumerate(receipt.get("verify_depth_hist") or ()):
             stats["verify_depth_hist"][i] += n
-        receipt["checkpoint"] = f"{Path(self.identity['path']).name}@{self.identity['fingerprint']}"
+        receipt["checkpoint"] = self._checkpoint_label()
         receipt["latent_kv_state"] = self._latent_kv_receipt()
         return tokens, receipt
 
@@ -1149,7 +1184,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "route": "external_draft" if draft is not None else "ordinary",
             "drafter": getattr(self, "drafter_kind", None),
             "qualification": "pending",
-            "checkpoint": f"{Path(self.identity['path']).name}@{self.identity['fingerprint']}"
+            "checkpoint": self._checkpoint_label()
             if getattr(self, "identity", None) else None,
             "continuous_batch": {"implemented": True, "qualified": False},
             "ast": {
@@ -1194,6 +1229,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "qualified": False,
                 "loaded": bool(getattr(getattr(self, "model", None), "has_vision", False)),
                 "modalities": ("image",),
+                "image_processor": self._image_processor_receipt(),
                 "video": "refused (not implemented)",
                 "routes": tuple(sorted(type(self).multimodal_routes)),
                 "plain_decode_routes": tuple(sorted(type(self).multimodal_plain_decode_routes)),

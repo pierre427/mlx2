@@ -488,7 +488,10 @@ def _hy_v3(path: Path, config: dict) -> AdapterResolution:
 def _hy_v4_flash(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".hy_v4_flash", __package__)
     artifact = module.inspect_artifact(path)
-    return AdapterResolution(module.HYV4FlashAdapter, module.descriptor_for(), artifact)
+    # The pre-load descriptor declares VISION when the artifact carries the
+    # tower: the desktop picks the runner's multimodal extra (Pillow) from it.
+    return AdapterResolution(module.HYV4FlashAdapter,
+                             module.descriptor_for(vision=bool(artifact.get("has_vision"))), artifact)
 
 
 def _gpt_oss(path: Path, config: dict) -> AdapterResolution:

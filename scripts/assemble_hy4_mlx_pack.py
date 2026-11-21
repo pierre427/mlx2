@@ -42,6 +42,9 @@ PREFIXES = {"model-dfly2.safetensors": "model.dfly_layers.", "model-vision.safet
 SKIP = {"config.json", "model.safetensors.index.json"}
 SKIP_SUFFIXES = (".py",)
 SKIP_DIRS = {".cache", "hy4_2bit"}
+# The vision tower comes from the original, so its image-processor settings
+# must too when the pack (a text-trunk pack) does not ship them.
+PROCESSOR_FILES = ("processor_config.json", "preprocessor_config.json")
 WIDTH = {"BF16": 2, "F16": 2, "F32": 4, "I32": 4, "U8": 1, "U32": 4, "F8_E4M3": 1}
 
 
@@ -149,6 +152,10 @@ def main(argv=None) -> int:
     orig_map = json.loads((original / "model.safetensors.index.json").read_text())["weight_map"]
     if any(k.startswith(tuple(PREFIXES.values())) for k in pack_map):
         raise SystemExit("pack already carries DFly2 or vision tensors")
+    for name in PROCESSOR_FILES:
+        if ((pack / name).is_file() and (original / name).is_file()
+                and json.loads((pack / name).read_text()) != json.loads((original / name).read_text())):
+            raise SystemExit(f"pack and original disagree on {name}")
     created = not out.exists()
     out.mkdir(parents=True, exist_ok=True)
     try:
@@ -178,6 +185,11 @@ def _assemble(pack, original, out, pack_cfg, pack_map, orig_map) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         os.link(path, target)
         linked.append(str(rel))
+    processor_from_original = []
+    for name in PROCESSOR_FILES:
+        if not (pack / name).is_file() and (original / name).is_file():
+            shutil.copy2(original / name, out / name)
+            processor_from_original.append(name)
     weight_map = dict(pack_map)
     added = {}
     for shard, prefix in PREFIXES.items():
@@ -201,6 +213,7 @@ def _assemble(pack, original, out, pack_cfg, pack_map, orig_map) -> int:
                      "revision": source_rev or "unrecorded (no huggingface_hub download metadata)"},
         "added_shards": added,
         "hardlinked_from_pack": linked,
+        "processor_config_from_original": processor_from_original,
         "note": "DFly2 and vision tower are the original's bf16 tensors, unquantized; the text trunk is the pack's",
     })
     (out / "config.json").write_text(json.dumps(config, indent=2) + "\n")

@@ -91,7 +91,7 @@ def main(argv=None):
     adapter = HYV4FlashAdapter(str(a.model), execution_policy=receipt["policy"])
     try:
         receipt["load_seconds"] = round(time.monotonic() - t0, 1)
-        receipt["checkpoint"] = f"{a.model.expanduser().resolve().name}@{adapter.identity['fingerprint']}"
+        receipt["checkpoint"] = f"{a.model.expanduser().resolve().name}@{adapter.identity.get('target_fingerprint', adapter.identity['fingerprint'])}"
         receipt["active_memory_gb_after_load"] = round(mx.get_active_memory() / 2**30, 2)
         configured = json.loads((a.model.expanduser() / "config.json").read_text())
         configured = (configured.get("text_config") or {}).get("eos_token_id", configured.get("eos_token_id"))

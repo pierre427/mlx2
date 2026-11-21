@@ -58,6 +58,20 @@ def get_json(base, path, timeout=10):
         return json.load(response)
 
 
+def checkpoint_label(name, status):
+    """``<artifact name>@<fingerprint>`` from ``/v1/status``.
+
+    The adapter's ``execution.checkpoint`` names the artifact; the top-level
+    ``artifact`` field is a route digest once a drafter is bound (the no-flag
+    default here), so it is only the fallback.
+    """
+    label = (status.get("execution") or {}).get("checkpoint")
+    if isinstance(label, str) and "@" in label:
+        return f"{name}@{label.split('@', 1)[1]}"
+    artifact = status.get("artifact")
+    return f"{name}@{artifact}" if isinstance(artifact, str) else None
+
+
 def chat(base, messages, *, seed, max_tokens, timeout=600):
     body = {"messages": messages, "max_tokens": max_tokens, "seed": seed, "stream": False}
     request = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
@@ -120,8 +134,7 @@ def main(argv=None) -> int:
             time.sleep(1)
         report["load_seconds"] = round(time.monotonic() - t0, 1)
         status = get_json(base, "/v1/status")
-        artifact = status.get("artifact")
-        report["checkpoint"] = f"{model.name}@{artifact}" if isinstance(artifact, str) else None
+        report["checkpoint"] = checkpoint_label(model.name, status)
         report["status_start"] = {k: status.get(k) for k in ("route_receipt", "settings", "capabilities",
                                                              "qualification", "media_route", "profile")}
         image = chat(base, [{"role": "user", "content": [
