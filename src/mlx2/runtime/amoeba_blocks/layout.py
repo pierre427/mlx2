@@ -288,8 +288,9 @@ class LayerBlocks:
                  np.asarray(arrays[f"{prefix}chunks"], np.int32),
                  np.asarray(arrays[f"{prefix}gsig_ptr"], np.int32),
                  np.asarray(arrays[f"{prefix}gsig"], np.int32), int(meta["tiles"]))
-        if meta.get("digest") and lb.digest() != meta["digest"]:
-            raise ValueError("block table digest does not match its manifest")
+        # Fail closed: a meta without a digest is refused, not loaded unchecked.
+        if lb.digest() != meta.get("digest"):
+            raise ValueError("block table digest is missing or does not match its manifest")
         return lb
 
 
@@ -472,4 +473,9 @@ def load_tables(out_dir):
     z = np.load(out / "blocks.npz")
     layers = {int(l): LayerBlocks.from_arrays(meta, z, prefix=f"L{int(l)}.")
               for l, meta in manifest["layers"].items()}
+    for l, lb in layers.items():
+        # The digest only proves the tables are the ones written; these index weight reads.
+        if lb.tiles != len(graph.tiles):
+            raise ValueError(f"layer {l}: block tables hold {lb.tiles} tiles, the graph {len(graph.tiles)}")
+        lb.validate()
     return layers, graph, manifest

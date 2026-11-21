@@ -51,6 +51,12 @@ cases = [
     ("2@1", None),
     ("3!!", None),
     (r"\FRAC{2}{3}+1", None),
+    # bare turns that read as ranges, dates or scores, and ambiguous forms (2026-11-21 sweep)
+    ("10-20", None),
+    ("2024-05", None),
+    ("50/50", None),
+    ("2^3!", None),
+    ("How many ss in Mississippi", None),
 ]
 rows = []
 for text, want in cases:
@@ -126,7 +132,9 @@ for model in models:
         processor = R.ResidentCalculatorProcessor(
             tiles, "calc", tok, prompt_length=1, request_text=question
         )
-        ids = [0]
+        # The one-token stand-in prompt ends in a newline, as the admitted chat templates do: a generated
+        # line that continues a prompt line is refused.
+        ids = [tok.encode("\n", add_special_tokens=False)[-1]]
         written = []
         identity = True
         if generated:

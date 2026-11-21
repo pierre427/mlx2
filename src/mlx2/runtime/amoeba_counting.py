@@ -19,8 +19,9 @@ _QUOTED=r'''(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')'''
 _TARGET=rf'(?:{_QUOTED}|[A-Za-z])'
 _SOURCE=rf'(?:{_QUOTED}|[A-Za-z]+)'
 _MODE=r'(?:\s+(?P<mode>case[- ]sensitive|case[- ]insensitive|ignore case))?'
+# A bare plural s is not read after an unquoted target s: "ss" may mean the pair (refused).
 _CHAR_PATTERNS=[
- rf"how many\s+(?:(?:letters?|characters?)\s+)?(?P<target>{_TARGET})(?:'?s)?\s+(?:(?:are there|are|occur|appear)\s+)?in\s+(?:the\s+(?:word|text|string)\s+)?(?P<source>{_SOURCE})",
+ rf"how many\s+(?:(?:letters?|characters?)\s+)?(?P<target>{_TARGET})(?:'s|(?<![sS])s)?\s+(?:(?:are there|are|occur|appear)\s+)?in\s+(?:the\s+(?:word|text|string)\s+)?(?P<source>{_SOURCE})",
  rf"count\s+(?:the\s+)?(?:occurrences\s+of\s+)?(?P<target>{_TARGET})\s+in\s+(?:the\s+(?:word|text|string)\s+)?(?P<source>{_SOURCE})",
  rf"how many times does\s+(?:the\s+letter\s+)?(?P<target>{_TARGET})\s+(?:occur|appear)\s+in\s+(?:the\s+(?:word|text|string)\s+)?(?P<source>{_SOURCE})",
 ]

@@ -1481,7 +1481,7 @@ class CalculatorProcessor:
         return self._vocab()["digit_starts"]
 
     def _result_boundary_ids(self):
-        ids = self._digit_start_ids()
+        ids = self._digit_start_ids() + self._vocab()["result_extensions"]
         if self.tile.parser == PARSER_V4:
             ids = ids + self._vocab()["arithmetic_extensions"]
         return ids
@@ -1497,6 +1497,10 @@ class CalculatorProcessor:
             ok = set("0123456789.-,$ ")
             vt = {}
             arithmetic_extensions = []
+            # Any token that would extend the number just written, whatever follows its first
+            # characters: "5)", "0%" (digit-led), ".5", ",000" (one-token fraction / group) and
+            # "%". A lone "." or "," stays allowed (end of sentence, list).
+            digit_starts, result_extensions = [], []
             for i in range(len(self.tok)):
                 try:
                     s = self.tok.decode([i])
@@ -1507,9 +1511,14 @@ class CalculatorProcessor:
                 prefix = s.lstrip(" \t")
                 if prefix.startswith(("+", "-", "*", "/", "^", "×", "÷", "−", r"\times", r"\cdot", r"\div")):
                     arithmetic_extensions.append(i)
+                if s[:1].isdigit():
+                    digit_starts.append(i)
+                elif s[:1] == "%" or (s[:1] in (".", ",") and s[1:2].isdigit()):
+                    result_extensions.append(i)
                 if s and set(s) <= ok:
                     vt[i] = s
-            cache[key] = {"text": vt, "arithmetic_extensions": arithmetic_extensions, "digit_starts": [i for i, t in vt.items() if t[:1].isdigit()],
+            cache[key] = {"text": vt, "arithmetic_extensions": arithmetic_extensions, "digit_starts": digit_starts,
+                          "result_extensions": result_extensions,
                           "point": [i for i, t in vt.items() if t in (".", ",")]}
         return cache[key]
 
@@ -1793,7 +1802,15 @@ def request_toggles(tileset, request):
     if unknown:
         raise DetTileRefused(f"{REQUEST_FIELD}: unknown tile(s) {', '.join(unknown)}; loaded "
                              f"{', '.join(sorted(ids))}")
-    return {t.id: field.get(t.id, field.get(t.kind, True)) for t in tileset.tiles}
+    toggles = {t.id: field.get(t.id, field.get(t.kind, True)) for t in tileset.tiles}
+    # Only a calculator has a per-request off switch (its processor is not built). Every other
+    # tile writes inside the shared forward (on_mlp), so "off" would still run: refuse it
+    # rather than receipt a tile as off while its delta is written.
+    fixed = sorted(t.id for t in tileset.tiles if t.kind != "calculator" and not toggles[t.id])
+    if fixed:
+        raise DetTileRefused(f"{REQUEST_FIELD}: {', '.join(fixed)} cannot be turned off per request "
+                             "(only calculator tiles can); load the server without the tile instead")
+    return toggles
 
 
 def processors_for(tileset, tokenizer, *, prompt_length=0, request=None):

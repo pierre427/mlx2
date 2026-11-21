@@ -81,6 +81,7 @@ def vocabulary_tables(tokenizer):
                                 b"*",
                                 b"/",
                                 b"^",
+                                b"%",  # "0.25" then "%" would read as another value
                                 b"\\times",
                                 b"\\cdot",
                                 b"\\div",
@@ -191,6 +192,13 @@ for(int t=nt-1;t>=meta[0];t--){
   if(c=='\n' && !column){boundary=true;break;}
   if(used>=4096)return;reversed[used++]=c;
  }if(boundary)break;
+}
+// Generated text that continues a line begun in the prompt is not a complete
+// line: refuse unless the prompt ends with a newline (or there is no prompt).
+if(!boundary&&!column&&meta[0]>0){
+ if(meta[0]>nt)return;
+ int id=int(tokens[meta[0]-1]);
+ if(id<0||id>=offsets_shape[0]||lengths[id]<1||pool[offsets[id]+lengths[id]-1]!='\n')return;
 }
 for(int i=0;i<used;i++)source[i]=reversed[used-1-i];length[0]=used;
 """,

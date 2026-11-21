@@ -131,6 +131,43 @@ RC_FN bool rc_ambiguous_date_or_phone(device const uchar *s, int a, int end) {
     return n == 2 && separators[0] == separators[1] && widths[0] <= 4 && widths[1] <= 2 &&
            widths[2] <= 4 && widths[2] > 0;
 }
+// A bare user turn (no instruction wrapper, no math delimiters) that joins two
+// numbers with an unspaced '-' or '/' outside brackets is a range, date, ratio,
+// score, phone or version far more often than arithmetic ("10-20", "2024-05",
+// "50/50", "1.2-3"); so is a spaced pair of years ("2019 - 2024"). The Python
+// request reference refuses every bare turn; refusing here leaves the model's
+// own answer in place. Runs on the normalized bytes, so U+2212 counts as '-'.
+RC_FN bool rc_bare_range(device const uchar *s, int len) {
+    int depth = 0;
+    CALC_NOUNROLL for (int i = 0; i < len; i++) {
+        int c = s[i];
+        if (c == '(' || c == '{')
+            depth++;
+        else if (c == ')' || c == '}')
+            depth--;
+        else if ((c == '-' || c == '/') && !depth && i > 0 && i + 1 < len &&
+                 (rc_digit(s[i - 1]) || s[i - 1] == '.') &&
+                 (rc_digit(s[i + 1]) || s[i + 1] == '.'))
+            return true;
+    }
+    int a = rc_skip(s, 0, len), years[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+        int digits = 0;
+        CALC_NOUNROLL while (a < len && rc_digit(s[a]) && digits < 5) {
+            years[k] = years[k] * 10 + s[a++] - '0';
+            digits++;
+        }
+        if (digits != 4 || years[k] < 1000 || years[k] > 2200)
+            return false;
+        a = rc_skip(s, a, len);
+        if (!k) {
+            if (a >= len || s[a++] != '-')
+                return false;
+            a = rc_skip(s, a, len);
+        }
+    }
+    return a == len;
+}
 RC_FN int rc_column(device const uchar *s, int begin, int end, device uchar *out) {
     const constant char *prefix = "\\begin{array}{r}";
     if (!rc_word(s, begin, end, prefix))
@@ -314,12 +351,14 @@ RC_FN int rc_count(device const uchar *s, int a, int end, device uchar *out) {
     a += how ? 9 : 6;
     a = rc_skip(s, a, end);
     int target = -1;
+    bool quoted = false;
     if (a < end && (s[a] == '\'' || s[a] == '"')) {
         int quote = s[a++];
         if (a + 1 >= end || s[a + 1] != quote)
             return -1;
         target = s[a];
         a += 2;
+        quoted = true;
     } else if (a < end)
         target = s[a++];
     else
@@ -328,7 +367,8 @@ RC_FN int rc_count(device const uchar *s, int a, int end, device uchar *out) {
         return -1;
     if (how && a + 1 < end && s[a] == '\'' && s[a + 1] == 's')
         a += 2;
-    else if (how && a < end && s[a] == 's')
+    // An unquoted "ss" may be the plural of s or the pair "ss": refused below.
+    else if (how && a < end && s[a] == 's' && (quoted || rc_lower(target) != 's'))
         a++;
     a = rc_skip(s, a, end);
     if (how && rc_word(s, a, end, "are "))
@@ -657,8 +697,11 @@ RC_FN void resident_parse(device const uchar *source, int length, int mode, devi
             return;
         len = rc_count(source, a, end, normalized);
         operation = len > 0;
-        if (!len)
+        if (!len) {
             len = rc_normalize(source, a, end, normalized);
+            if (mode == 0 && !explicit_math && len > 0 && rc_bare_range(normalized, len))
+                return;
+        }
     }
     if (len <= 0) {
         program[0] = len ? len : -1;
@@ -738,7 +781,14 @@ RC_FN void resident_parse(device const uchar *source, int length, int mode, devi
             int next = rc_skip(normalized, i, len);
             if (next < len && normalized[next] == '!')
                 return;
-            if (want || !rc_emit(program, n, 7, 0, 0, 0))
+            if (want)
+                return;
+            // "2^3!" is (2^3)! as typeset and 2^(3!) by binding. The reference
+            // refuses a factorial on an unbraced exponent; so does the device.
+            CALC_NOUNROLL for (int k = top - 1; k >= 0 && ops[k] != '(' && ops[k] != '{'; k--)
+                if (ops[k] == '^')
+                    return;
+            if (!rc_emit(program, n, 7, 0, 0, 0))
                 return;
             operation = true;
             continue;
