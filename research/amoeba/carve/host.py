@@ -420,6 +420,26 @@ class Host:
             raise RuntimeError(f"record: {len(recs)} layer calls for {self.L} layers")
         return recs, out
 
+    def record_layer_input(self, ids, layer):
+        """One forward through the model's own trunk (as ``record``) that keeps only layer ``layer``'s input.
+        Returns (h_in [B, T, width], inner_output). ``record`` keeps every layer's input alive until the caller
+        drops the records (L x [B, T, width]); a reader of one layer's states needs one."""
+        box = []
+        target = self.layers[layer]
+        base = type(target)
+
+        def call(self_, x, *a, _base=base, **k):
+            box.append(x)
+            return _base.__call__(self_, x, *a, **k)
+        target.__class__ = type(f"Tap{base.__name__}", (base,), {"__call__": call})
+        try:
+            out = self.inner(ids)
+        finally:
+            target.__class__ = base
+        if len(box) != 1:
+            raise RuntimeError(f"record_layer_input: layer {layer} called {len(box)} times")
+        return box[0], out
+
     def _final_norm_module(self):
         return _first_attr(self.inner, FINAL_NORM_ATTRS)
 

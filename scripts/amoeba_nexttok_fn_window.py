@@ -32,6 +32,14 @@ Part K (kernels, real FN layers --kernel-layers, packed with the real partition)
   streams Part Q produced; mpp (NAX) and simd; bitwise recompute == same-step per step.
   ms per step for the layer set and per token extrapolated to 48 layers (MLP only, not full decode).
 
+Memory (2026-11-20, after watchdog stops at 90 > 88 and 97.1 > 96 GiB): Part Q's own working set above the
+69.3 GiB model stays a few GiB (memory_estimate; the receipt keeps the estimate and a footprint / MLX reading per
+phase, also logged).  Captures tap layer v only and fill preallocated float16 arrays; the probes standardize
+their rows onto the device chunk by chunk (bitwise the whole-matrix fit, no float32/float64 host copies); the
+host gate masks are dropped once on the device; CE gathers the decode positions before the float32 cast (no
+[B, T, V] float32 logits); every phase ends with gc + mx.clear_cache().  Every reported number is bit for bit
+the previous code's (tests/test_amoeba_nexttok_fn_window_cpu.py).
+
 Usage (inside scripts/amoeba27b_window_q.sh): amoeba_nexttok_fn_window.py --out DIR [--swap-growth-gb 8
   --waiver-note "..."]; --dry-run prints the plan on the CPU.
 """
@@ -89,14 +97,78 @@ def docs(host, path, split, n, T, seed):
 # ---------------------------------------------------------------------------
 
 
+class Rows:
+    """Probe rows read in chunks, never materialised whole: the flat rows H[:, lo:hi].reshape(-1, d) of states
+    H [n, T, d] (float16 captures), ``docs`` documents at a time, as float32 -- the rows, in the order, that
+    ``H[:, lo:hi].reshape(-1, d).astype(np.float32)`` gives.  A 2-D array is read ``rows`` rows at a time."""
+
+    def __init__(self, H, lo=None, hi=None, docs=8, rows=None):
+        rows = rows or max(1, (64 << 20) // (4 * max(1, H.shape[-1])))    # 2-D: 64 MiB float32 chunks
+        self.H, self.lo, self.hi, self.docs, self.rows = H, lo, hi, max(1, int(docs)), max(1, int(rows))
+        if H.ndim == 3:
+            span = len(range(*slice(lo, hi).indices(H.shape[1])))
+            self.shape = (H.shape[0] * span, H.shape[2])
+        elif H.ndim == 2:
+            self.shape = H.shape
+        else:
+            raise ValueError("Rows: states must be [n, T, d] or [rows, d]")
+
+    def chunks(self):
+        if self.H.ndim == 2:
+            for i in range(0, self.shape[0], self.rows):
+                yield np.asarray(self.H[i:i + self.rows], dtype=np.float32)
+            return
+        for i in range(0, self.H.shape[0], self.docs):
+            c = self.H[i:i + self.docs, self.lo:self.hi]
+            yield c.reshape(-1, c.shape[-1]).astype(np.float32)
+
+
+def column_moments(src):
+    """(X.mean(0, dtype=float64), X.std(0, dtype=float64)) of the rows of ``src`` (Rows), bit for bit as numpy
+    computes them on the whole matrix, with one chunk in memory.  numpy reduces axis 0 of a C-contiguous matrix
+    row after row in order (no pairwise blocking on the outer axis), so continuing the reduction from the running
+    sum, chunk after chunk, adds the same terms in the same order; the variance pass repeats numpy's _var
+    (arr - mean in float64, squared in place, summed, / n).  CPU-tested against np.mean / np.std, including
+    widths past numpy's 8192-element buffer.  One column (d = 1) is a contiguous reduction, which numpy sums
+    pairwise: that matrix is one column, so it is read whole and handed to numpy."""
+    n, d = src.shape
+    if d < 2:
+        X = np.concatenate(list(src.chunks()))
+        return X.mean(0, dtype=np.float64), X.std(0, dtype=np.float64)
+    acc = np.zeros(d, np.float64)
+    for c in src.chunks():
+        acc = np.add.reduce(np.concatenate([acc[None], c], dtype=np.float64), axis=0)
+    mean = acc / n
+    acc2 = np.zeros(d, np.float64)
+    for c in src.chunks():
+        x = c - mean
+        np.multiply(x, x, out=x)
+        acc2 = np.add.reduce(np.concatenate([acc2[None], x]), axis=0)
+    return mean, np.sqrt(acc2 / n)
+
+
 def fit_logistic(X, Y, steps=400, lr=0.05, l2=1e-3):
-    """Multi-label logistic regression on standardized X (mlx, Adam); returns (W [B, d], b [B]) on raw X."""
+    """Multi-label logistic regression on standardized X (mlx, Adam); returns (W [B, d], b [B]) on raw X.
+
+    X: a [rows, d] array or ``Rows`` (chunked).  The standardized matrix exists once, on the device, filled chunk
+    by chunk (no float32 host copy of X, no float64 temporary of X, no host copy of the standardized X); its
+    values, the moments and so the fit are bit for bit those of the whole-matrix computation."""
     import mlx.core as mx
     import mlx.nn as nn
     import mlx.optimizers as optim
-    mu = X.mean(0, dtype=np.float64).astype(np.float32)
-    sd = (X.std(0, dtype=np.float64) + 1e-4).astype(np.float32)
-    Xs = mx.array((X - mu) / sd)
+    src = X if isinstance(X, Rows) else Rows(X)
+    mean, std = column_moments(src)
+    mu = mean.astype(np.float32)
+    sd = (std + 1e-4).astype(np.float32)
+    Xs = mx.zeros(src.shape, mx.float32)
+    mx.eval(Xs)
+    i = 0
+    for c in src.chunks():
+        Xs[i:i + len(c)] = mx.array((c - mu) / sd)       # in place (the slice update donates Xs's buffer)
+        mx.eval(Xs)
+        i += len(c)
+    if i != src.shape[0]:
+        raise RuntimeError(f"fit_logistic: {i} rows read, {src.shape[0]} expected")
     Yt = mx.array(Y.astype(np.float32))
     pos = np.clip(Y.mean(0), 1e-4, 1 - 1e-4)
     lin = nn.Linear(X.shape[1], Y.shape[1])
@@ -170,21 +242,106 @@ def stream_metrics(S, O, dom, nb, total, names, prompt, switch=8):
 # ---------------------------------------------------------------------------
 
 
-def capture(host, seqs, v, bs=8):
-    """Full-model states: layer v's residual input and the final (normed) hidden, float16 numpy [n, T, d]."""
+def capture(host, seqs, v, bs=8, first=None):
+    """Full-model states: layer v's residual input and the final (normed) hidden, float16 numpy [n, T, d].
+
+    Taps layer v's input only (Host.record_layer_input; Host.record would keep all L layer inputs of the batch
+    alive, 48 x [8, 256, 10240] bf16 = 1.9 GiB on FN) and writes each batch into preallocated float16 arrays
+    (no per-batch list and np.concatenate copy at the end)."""
     import mlx.core as mx
-    Hv, Hf = [], []
-    for i in range(0, len(seqs), bs):
+    n = len(seqs)
+    Hv = Hf = None
+    for i in range(0, n, bs):
         host.ctl.reset()
-        recs, out = host.record(mx.array(seqs[i:i + bs]))
-        hv = recs[v][0].astype(mx.float16)
+        x, out = host.record_layer_input(mx.array(seqs[i:i + bs]), v)
+        hv = x.astype(mx.float16)
         hf = (out[0] if isinstance(out, tuple) else out).astype(mx.float16)
         mx.eval(hv, hf)
-        Hv.append(np.array(hv))
-        Hf.append(np.array(hf))
-        del recs
+        del x, out
+        if Hv is None:
+            Hv = np.empty((n, *hv.shape[1:]), np.float16)
+            Hf = np.empty((n, *hf.shape[1:]), np.float16)
+        Hv[i:i + bs] = np.array(hv)
+        Hf[i:i + bs] = np.array(hf)
+        del hv, hf
+        if first is not None and i == 0:
+            first()
         mx.clear_cache()
-    return np.concatenate(Hv), np.concatenate(Hf)
+    return Hv, Hf
+
+
+GIB = 2 ** 30
+
+
+def memory_reading(tag, reset_peak=True):
+    """Process footprint / resident (kernel) and MLX active / cache / peak since the last reset, GiB, and the
+    watchdog's peak footprint so far (its 1 s poll sees the highs a phase-end reading, taken after the clear,
+    does not)."""
+    import mlx.core as mx
+    from research.amoeba.carve import memwatch
+    from research.amoeba.carve import ops as CO
+    fp = memwatch.footprint_bytes(os.getpid()) or (0, 0)
+    r = {"phase": tag, "footprint_gib": round(fp[0] / GIB, 2), "resident_gib": round(fp[1] / GIB, 2),
+         "mlx_active_gib": round(mx.get_active_memory() / GIB, 2), "mlx_cache_gib": round(mx.get_cache_memory() / GIB, 2),
+         "mlx_peak_gib": round(mx.get_peak_memory() / GIB, 2), "watchdog_peak_footprint_gb": CO.WATCH.get("peak_footprint_gb")}
+    if reset_peak:
+        mx.reset_peak_memory()
+    return r
+
+
+def first_batch_reader(tag, log, receipt):
+    """A callback for capture / masked_ce: one reading inside the first batch, after its eval and before the
+    buffer cache is cleared (the forward's own buffers are in MLX's peak and the footprint then)."""
+    def read():
+        r = memory_reading(f"{tag}, first batch before clear", reset_peak=False)
+        receipt.setdefault("memory", []).append(r)
+        log(f"mem {r['phase']}: footprint {r['footprint_gib']} GiB, MLX active {r['mlx_active_gib']} cache "
+            f"{r['mlx_cache_gib']} peak {r['mlx_peak_gib']}")
+    return read
+
+
+def phase_end(tag, log, receipt):
+    """Between phases: collect, drop MLX's buffer cache, log and keep a memory reading (the low point after the
+    clear; ``mlx_peak_gib`` and the watchdog's peak carry the highs)."""
+    import gc
+    import mlx.core as mx
+    gc.collect()
+    mx.clear_cache()
+    r = memory_reading(tag)
+    receipt.setdefault("memory", []).append(r)
+    log(f"mem {tag}: footprint {r['footprint_gib']} GiB (resident {r['resident_gib']}), MLX active "
+        f"{r['mlx_active_gib']} cache {r['mlx_cache_gib']} phase peak {r['mlx_peak_gib']}, watchdog peak "
+        f"{r['watchdog_peak_footprint_gb']}")
+    return r
+
+
+def memory_estimate(n_fit, n_held, T, prompt, dv, df, L, units, groups, vocab, capture_batch=8, ce_batch=8,
+                    fit_chunk_docs=8):
+    """Approximate script-owned bytes above the loaded model per Part Q phase, GiB: the host numpy and MLX arrays
+    the script itself makes.  Not a bound on the working set: it leaves out the model forward's own buffers (a
+    B x T forward is one lazy graph), MLX's buffer cache (up to setup_mlx's cache limit, 2 GiB here; between
+    phases it is cleared) and the process baseline.  Pure arithmetic, CPU-tested; the receipt's per-phase
+    readings are the measurement."""
+    f16, f32, f64 = 2, 4, 8
+    fit_states = n_fit * T * (dv + df) * f16
+    held_states = n_held * T * (dv + df) * f16
+    tap = capture_batch * T * (dv + df) * 3 * f16                     # bf16 tap + mx float16 + its numpy copy
+    chunk = fit_chunk_docs * T * dv * (f32 + f64 + f64)               # float32 chunk, its float64 copy, (c - mean)
+    rows = n_fit * (T - 1)
+    masks = (groups + 1) * L * units * f16                            # device masks (core + groups)
+    group_host = groups * L * units                                   # bool group masks while the device copy builds
+    # logits_at: [B, T, V] bf16 and its [B, T - prompt, V] gather; then the gather and its float32 cast
+    P_ = ce_batch * (T - prompt) * vocab
+    logits = max(ce_batch * T * vocab * f16 + P_ * f16, P_ * (f16 + f32))
+    out = {"fit_capture": fit_states + tap,
+           "probe_A_same_step": fit_states + chunk + rows * dv * f32,          # + the device standardized rows
+           "probe_B_next_token": n_fit * T * df * f16 + chunk + rows * df * f32,  # Hv is dropped before B
+           "held_capture": held_states + tap,
+           "gate_masks": masks + group_host,
+           "masked_ce": masks + logits}
+    out = {k: round(v / GIB, 2) for k, v in out.items()}
+    out["peak"] = max(out.values())
+    return out
 
 
 def device_masks(core, groups):
@@ -193,7 +350,19 @@ def device_masks(core, groups):
     return mx.array(core.astype(np.float16)), {k: mx.array(m.astype(np.float16)) for k, m in groups.items()}
 
 
-def masked_ce(host, seqs, masks, gates, prompt, dense_layers=(), bs=8):
+def logits_at(host, ids, pos):
+    """host.logits_at(ids, pos) bit for bit, gathering the positions before the float32 cast (the cast is
+    elementwise, so the order does not change a value): the [B, T, V] float32 logits never exist, only the
+    model-dtype [B, T, V] and the float32 [B, P, V] (FN, B 8: 0.95 + 1.66 GiB instead of 0.95 + 1.9 + 1.66).
+    A host whose full_logits is not the stock one (or with the fast head on) goes through host.logits_at."""
+    import mlx.core as mx
+    from research.amoeba.carve import host as H
+    if getattr(host, "fast_head", False) or getattr(type(host), "full_logits", None) is not H.Host.full_logits:
+        return host.logits_at(ids, pos)
+    return H._take(mx, host.lm(ids), pos).astype(mx.float32)
+
+
+def masked_ce(host, seqs, masks, gates, prompt, dense_layers=(), bs=8, first=None):
     """Mean CE per doc over decode targets t >= prompt under core + per-token gated groups.
 
     masks = device_masks(...) or None (the full model); gates {group: [n, T] bool} (open bits per input
@@ -211,13 +380,26 @@ def masked_ce(host, seqs, masks, gates, prompt, dense_layers=(), bs=8):
             c.boxes = [{"name": k, "mask": m, "token_gate": mx.array(gates[k][i:i + bs].astype(np.float16))[..., None]}
                        for k, m in masks[1].items()]
         T = ids.shape[1]
-        lg = host.logits_at(ids, list(range(prompt - 1, T - 1)))
+        lg = logits_at(host, ids, list(range(prompt - 1, T - 1)))
         ce = ce_rows(lg, ids[:, prompt:])
         mx.eval(ce)
+        del lg
         out.extend(np.array(ce).mean(1).tolist())
         c.reset()
+        if first is not None and i == 0:
+            first()
         mx.clear_cache()
     return out
+
+
+def _groups_of(tz, names):
+    """Tiles touching a chosen box -> their gate group (the tile's chosen members): box:b -> (b,), and a pair
+    with one chosen member opens with that box, one with two with either."""
+    pairs = {k: tuple(k[5:].split("__")) for k in tz.files if k.startswith("pair:")}
+    tiles = {f"box:{b}": (b,) for b in names}
+    tiles.update({k: tuple(sorted(m for m in mem if m in names)) for k, mem in pairs.items()
+                  if any(m in names for m in mem)})
+    return tiles
 
 
 def group_gates(arm, groups, names):
@@ -261,15 +443,26 @@ def part_q(a, host, log, receipt):
     t0 = time.time()
     fseqs = [s for k in fit for s in fit[k]]
     flab = np.array([[k == b for b in names] for k in fit for _ in fit[k]], bool)
-    Hv, Hf = capture(host, fseqs, v)
+    phase_end("docs", log, receipt)
+    Hv, Hf = capture(host, fseqs, v, a.capture_batch, first=first_batch_reader("fit capture", log, receipt))
     log(f"fit capture {Hv.shape} in {time.time() - t0:.0f}s")
-    Xv = Hv[:, 1:].reshape(-1, Hv.shape[-1]).astype(np.float32)          # position 0 is a sink: skipped
+    held_seqs = [s for k in held for s in held[k]]
+    plan = memory_estimate(len(fseqs), len(held_seqs) + len(sw), T, P, Hv.shape[-1], Hf.shape[-1], host.L,
+                           int(tz["core"].shape[1]), len(set(_groups_of(tz, names).values())),
+                           int(host.cfg.get("vocab_size") or 0), a.capture_batch, a.ce_batch, a.fit_chunk_docs)
+    receipt["memory_estimate_gib"] = plan
+    log(f"memory estimate (script-owned GiB above the model, per phase): {plan}")
+    phase_end("fit capture", log, receipt)
     Yt = np.repeat(flab, T - 1, axis=0)
-    Wa, ba, la = fit_logistic(Xv, Yt)
-    Xf = Hf[:, :-1].reshape(-1, Hf.shape[-1]).astype(np.float32)          # step t-1 state -> token t label
-    Wb, bb, lb_ = fit_logistic(Xf, np.repeat(flab, T - 1, axis=0))
+    # position 0 is a sink: skipped (Rows reads H[:, 1:] flat, chunked)
+    Wa, ba, la = fit_logistic(Rows(Hv, 1, None, a.fit_chunk_docs), Yt)
+    del Hv
+    phase_end("probe A", log, receipt)
+    # step t-1 state -> token t label
+    Wb, bb, lb_ = fit_logistic(Rows(Hf, None, -1, a.fit_chunk_docs), np.repeat(flab, T - 1, axis=0))
+    del Hf
     C = token_prior(np.array([s[1:] for s in fseqs]).reshape(-1), Yt.astype(np.float64))
-    del Hv, Hf, Xv, Xf
+    phase_end("probe B", log, receipt)
     probes = {"A_same_step": {"input": f"layer {v} residual input, token t", "fit_loss": la},
               "B_next_token": {"input": "final normed hidden, token t-1", "fit_loss": lb_},
               "C_token_prior": {"input": "input token t (sampled at step t-1)", "smoothing": "add-1 to marginal"},
@@ -277,23 +470,21 @@ def part_q(a, host, log, receipt):
               "fit_rows": int(len(Yt)), "fit_docs": {k: len(s) for k, s in fit.items()}}
     np.savez(Path(a.out) / "probes.npz", A_w=Wa, A_b=ba, B_w=Wb, B_b=bb, boxes=np.array(names))
     # held states and gate arms
-    hseqs = [s for k in held for s in held[k]] + sw
+    hseqs = held_seqs + sw
     hdom = [[k] * T for k in held for _ in held[k]] + swdom
-    Hv, Hf = capture(host, hseqs, v)
+    Hv, Hf = capture(host, hseqs, v, a.capture_batch)
     arms = [gate_arms(Hv[i].astype(np.float32), Hf[i].astype(np.float32), hseqs[i], (Wa, ba), (Wb, bb), C, P,
                       a.fail_open_p) for i in range(len(hseqs))]
     del Hv, Hf
+    phase_end("held capture + gate arms", log, receipt)
     oracle = [np.array([[d == b for b in names] for d in dm], bool) for dm in hdom]
     # tiles touching a chosen box, merged by their chosen members (a pair with one chosen member opens with
     # that box; one with two opens with either): <= boxes + boxes*(boxes-1)/2 gate groups
-    pairs = {k: tuple(k[5:].split("__")) for k in tz.files if k.startswith("pair:")}
-    tiles = {f"box:{b}": (b,) for b in names}
-    tiles.update({k: tuple(sorted(m for m in mem if m in names)) for k, mem in pairs.items()
-                  if any(m in names for m in mem)})
+    tiles = _groups_of(tz, names)
+    core = tz["core"].astype(bool)
     groups = {}
     for t, key in tiles.items():
-        groups[key] = groups.get(key, np.zeros(tz["core"].shape, bool)) | tz[t].astype(bool)
-    core = tz["core"].astype(bool)
+        groups[key] = groups.get(key, np.zeros(core.shape, bool)) | tz[t].astype(bool)
     total = int(core.size)
     nb = np.array([int(tz[f"box:{b}"].sum()) for b in names])
     log(f"gate groups {len(groups)} from {len(tiles)} tiles; box units {dict(zip(names, nb.tolist()))}")
@@ -314,6 +505,9 @@ def part_q(a, host, log, receipt):
         qarms[k] = k
     ce = {}
     dm = device_masks(core, groups)
+    groups = dict.fromkeys(groups)                     # the keys are all later steps read; drop the host masks
+    del core
+    phase_end("gate masks", log, receipt)
     for arm, key in qarms.items():
         if key is None:
             gates, masks = None, None
@@ -325,9 +519,13 @@ def part_q(a, host, log, receipt):
                 src = oracle if key == "oracle" else [x[key] for x in arms]
                 gg = [group_gates(s_, groups, names) for s_ in src]
                 gates = {k: np.stack([g[k] for g in gg]) for k in groups}
-        ce[arm] = masked_ce(host, hseqs, masks, gates, P, dense_layers=range(v) if key == "same" else ())
+        ce[arm] = masked_ce(host, hseqs, masks, gates, P, dense_layers=range(v) if key == "same" else (),
+                            bs=a.ce_batch,
+                            first=first_batch_reader(f"CE {arm}", log, receipt) if arm in ("full", "same") else None)
+        del gates
         log(f"CE {arm}: {np.mean(ce[arm]):.4f} ({time.time() - t0:.0f}s)")
-    del dm
+        phase_end(f"CE {arm}", log, receipt)
+    del dm, masks
     sets = {k: list(range(sum(len(held[j]) for j in topics[:i]), sum(len(held[j]) for j in topics[:i + 1])))
             for i, k in enumerate(topics)}
     sets["switch"] = list(range(len(hseqs) - len(sw), len(hseqs)))
@@ -515,6 +713,13 @@ def parser():
     ap.add_argument("--tokens", type=int, default=256)
     ap.add_argument("--prompt", type=int, default=32)
     ap.add_argument("--probe-layer", type=int, default=3)
+    ap.add_argument("--capture-batch", type=int, default=8,
+                    help="docs per state-capture forward (the forward's rounding can depend on the batch)")
+    ap.add_argument("--ce-batch", type=int, default=8,
+                    help="docs per masked-CE forward (the decode-position logits are [batch, T - prompt, V] "
+                         "float32); the forward's rounding can depend on the batch, so 8 keeps the numbers")
+    ap.add_argument("--fit-chunk-docs", type=int, default=8,
+                    help="docs per chunk when the probes' rows are standardized onto the device")
     ap.add_argument("--fail-open-p", type=float, default=0.2)
     ap.add_argument("--target", type=float, default=0.05)
     ap.add_argument("--quality-arms", default="lag/N0,lag/N4,lag/N16,lag/N64,hidden/N0,hidden/N16,"
