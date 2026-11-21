@@ -11,11 +11,18 @@ END = "<|end_message|>"
 TURN_END = "<|content_model_end_sampling|>"
 TOOL = "<|content_invoke_tool_json|>"
 MARKERS = (MESSAGE, TEXT, THINK, END, TURN_END, TOOL)
+# Inkling 2's response_template also opens content with these, and allows a
+# ``[^<]*`` name after ``<|message_model|>``.
+INKLING2_TEXT_MARKERS = ("<|content_tool_error|>", "<|content_invoke_tool_text|>")
 
 
 class InklingOutputParser:
-    def __init__(self, *, chat=False, stops=()):
+    def __init__(self, *, chat=False, stops=(), text_markers=(), header_names=False):
         self.chat = chat
+        self.text_markers = tuple(text_markers)
+        self.markers = MARKERS + self.text_markers
+        self.header_names = header_names
+        self.after_message = False  # a name may follow <|message_model|> only
         self.buffer = ""
         self.channel = "header" if chat else "content"
         self.stop_matcher = StopSequenceMatcher(stops)
@@ -37,15 +44,17 @@ class InklingOutputParser:
         self.buffer += text
         events = []
         while self.buffer:
-            matches = [(p, m) for m in MARKERS if (p := self.buffer.find(m)) >= 0]
+            matches = [(p, m) for m in self.markers if (p := self.buffer.find(m)) >= 0]
             if matches:
                 end, marker = min(matches)
             else:
-                end = len(self.buffer) if final else _safe_prefix(self.buffer, MARKERS)
+                end = len(self.buffer) if final else _safe_prefix(self.buffer, self.markers)
                 marker = None
             body, self.buffer = self.buffer[:end], self.buffer[end:]
             if self.channel == "header":
-                if body.strip():
+                if body.strip() and not (
+                    self.header_names and self.after_message and "<" not in body
+                ):
                     raise ValueError(
                         "unsupported Inkling generated message header (tool/media routing unavailable)"
                     )
@@ -64,6 +73,7 @@ class InklingOutputParser:
             if marker is None:
                 break
             self.buffer = self.buffer[len(marker) :]
+            self.after_message = marker == MESSAGE
             if marker == TURN_END:
                 visible, _ = self.stop_matcher.push("", final=True)
                 if visible:
@@ -77,7 +87,7 @@ class InklingOutputParser:
             else:
                 self.channel = (
                     "content"
-                    if marker == TEXT or not self.chat
+                    if marker == TEXT or marker in self.text_markers or not self.chat
                     else "reasoning_content"
                 )
         if final and not self.stopped:

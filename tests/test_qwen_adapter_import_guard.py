@@ -334,6 +334,7 @@ INLINE_PROFILE_MODULES = [
     ("deepseek_v41_omlx", "DeepSeekV41OmlxAdapter"),
     ("glm53_gguf", "Glm53GGUFAdapter"),
     ("inkling", "InklingAdapter"),
+    ("inkling2", "Inkling2Adapter"),
     ("maxwell_moe", "MaxwellMoeAdapter"),
 ]
 

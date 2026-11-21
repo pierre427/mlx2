@@ -451,6 +451,12 @@ def _inkling(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.InklingAdapter, module.DESCRIPTOR, artifact)
 
 
+def _inkling2(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".inkling2", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.Inkling2Adapter, module.DESCRIPTOR, artifact)
+
+
 def _mellum(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".mellum21", __package__)
     artifact = module.inspect_artifact(path)
@@ -638,6 +644,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "granite": _standard_decoder,
     "mellum": _mellum,
     "inkling": _inkling,
+    "inkling2_loop": _inkling2,
     "agnes": _agnes,
     "bailing_hybrid": _ling3,
     "hy_v3": _hy_v3,
