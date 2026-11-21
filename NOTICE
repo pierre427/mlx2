@@ -1293,7 +1293,7 @@ oMLX (https://github.com/jundot/omlx) PR #4808 and PR #3912 — Apache License
 GSM8K (https://huggingface.co/datasets/openai/gsm8k, revision
 740312add88f) — MIT License, Copyright (c) 2021 OpenAI.
 
-benchmarks/gsm8k/test.jsonl and train_few_shot.jsonl are converted unchanged
+benchmarks/gsm8k/test.jsonl, train.jsonl and train_few_shot.jsonl are converted unchanged
 from the dataset's parquet files (see benchmarks/gsm8k/SOURCE.json). The MIT
 permission notice and warranty disclaimer are as in the mxfp4-int8-m5 section
 above.

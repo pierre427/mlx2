@@ -312,3 +312,87 @@ def test_stop_at_is_the_next_occurrence_and_stops_new_questions():
 
     assert gsm.run_questions(Never(), "m", "", [{"question": "q", "answer": "#### 1"}], chat=True,
                              max_tokens=8, deadline=0.0) == []
+
+
+def test_model_mode_runs_every_arm_through_every_question(tmp_path, monkeypatch):
+    """Regression (2026-11-20): the per-arm readiness bound overwrote the
+    --stop-at deadline with a monotonic value, so every arm asked 0 questions
+    and the next arm was skipped as ``stop_at``."""
+    import sys as _sys
+    import types
+
+    train = [{"question": f"T{i}?", "answer": f"x\n#### {i}"} for i in range(5)]
+    test = [{"question": "How many?", "answer": "so\n#### 18"}, {"question": "And?", "answer": "#### 4"}]
+    monkeypatch.setattr(gsm, "dataset_files", lambda: ("rev", {"train": tmp_path / "a", "test": tmp_path / "b"}))
+    (tmp_path / "a").write_bytes(b"a")
+    (tmp_path / "b").write_bytes(b"b")
+    monkeypatch.setattr(gsm, "load_split", lambda path: train if path.name == "a" else test)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _send(self, document, text=False):
+            body = (document if text else json.dumps(document)).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain" if text else "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/metrics":
+                self._send("# none\n", text=True)
+            else:
+                self._send({"healthy": True, "route_receipt": {"route": "ordinary"}})
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            prompt = json.dumps(payload)
+            answer = "18" if "How many" in prompt else "4"
+            self._send({"choices": [{"message": {"content": f"so\n#### {answer}"}, "finish_reason": "stop"}],
+                        "usage": {"completion_tokens": 9, "prompt_tokens": 40},
+                        "mlx2": {"ttft_seconds": 0.001, "route": "ordinary"}})
+
+    stub = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+
+    class FakeServer:
+        pid = 999_999
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    ownership = types.ModuleType("qualification_gpu_ownership")
+    ownership.require_qualification_lease = lambda **kwargs: {"stub": True}
+    monkeypatch.setitem(_sys.modules, "qualification_gpu_ownership", ownership)
+    import mlx2.adapters.registry as registry
+
+    monkeypatch.setattr(registry, "inspect_model", lambda path: types.SimpleNamespace(
+        artifact_fingerprint="0" * 64, adapter_type=type("Stub", (), {})))
+    real_popen = gsm.subprocess.Popen
+    monkeypatch.setattr(gsm.subprocess, "Popen", lambda command, *a, **k: (
+        FakeServer() if "mlx2.server" in command else real_popen(command, *a, **k)))
+    monkeypatch.setattr(gsm.os, "killpg", lambda *a: None)
+    lock = tmp_path / "lock"
+    lock.mkdir()
+    (lock / "owner.json").write_text(json.dumps({"cpg_task": "t", "cpg_generation": 1}))
+    arms = tmp_path / "arms.json"
+    arms.write_text(json.dumps([{"name": "a", "tree": str(ROOT)}, {"name": "b", "tree": str(ROOT)}]))
+    model = tmp_path / "M"
+    model.mkdir()
+    out = tmp_path / "out"
+    try:
+        assert gsm.main(["--output", str(out), "--model", str(model), "--arms", str(arms),
+                         "--cpg-lock", str(lock), "--port", str(stub.server_port),
+                         "--num-questions", "2"]) == 0
+    finally:
+        stub.shutdown()
+    receipt = json.loads((out / "receipt.json").read_text())
+    assert [arm["name"] for arm in receipt["arms"]] == ["a", "b"]
+    for arm in receipt["arms"]:
+        assert "skipped" not in arm and arm["summary"]["questions"] == 2
+        assert arm["summary"]["accuracy"] == 1.0 and not arm["stopped_at_deadline"]

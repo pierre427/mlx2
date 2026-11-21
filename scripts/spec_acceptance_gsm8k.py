@@ -621,7 +621,10 @@ def main(argv=None):
                    "args": arm.get("args", []), "env": arm.get("env", {}), "request": arm.get("request", {}),
                    "command": command}
             try:
-                deadline = time.monotonic() + 900
+                # Readiness has its own monotonic bound: ``deadline`` is the
+                # --stop-at wall-clock epoch the question loop compares with
+                # time.time(), and overwriting it stopped every arm at once.
+                ready_by = time.monotonic() + 900
                 while True:
                     if server.poll() is not None:
                         raise RuntimeError("server exited before readiness")
@@ -631,7 +634,7 @@ def main(argv=None):
                             break
                     except (URLError, TimeoutError, ConnectionError, OSError):
                         pass
-                    if time.monotonic() > deadline:
+                    if time.monotonic() > ready_by:
                         raise RuntimeError("server readiness timed out")
                     time.sleep(.5)
                 row["startup_status"] = status
