@@ -31,7 +31,10 @@
     "tests/test_amoeba_calc_speculative_cpu.py",
     "docs/research/2026-11-17-calculator-speculative.md",
     "scripts/research/amoeba_calc_spec_prepare.py",
-    "docs/research/calculator-tile-explained-resident.pdf"
+    "docs/research/calculator-tile-explained-resident.pdf",
+    "scripts/research/calc_trigger_manifests.py",
+    "scripts/research/calc_trigger_analyze.py",
+    "docs/research/2026-11-20-calculator-marker-trigger.md"
   ],
   "mixed_files": [
     {
@@ -53,6 +56,7 @@
         "parse_expression_v2",
         "parse_expression_v3",
         "parse_expression_v4",
+        "parse_expression_marker",
         "calculator_answer",
         "ProbeGate",
         "CalculatorProcessor",

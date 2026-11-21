@@ -691,3 +691,94 @@ def test_v4_closes_arithmetic_rhs_without_forcing_newline(tmp_path):
         assert float(out[0,ord('m')])==0 and float(out[0,ord('\n')])==0
     out=p(mx.array([ord(c) for c in prompt+' 105\n']),mx.zeros((1,128)))
     assert float(out[0,ord('+')])==0
+
+
+# ---- calc-parse-marker-v1 --------------------------------------------------------------------
+MARKER = D.PARSER_MARKER
+
+
+@pytest.mark.parametrize("text,want", [
+    ("Natalia sold 48/2 = <<48/2=", "24"), ("<<0.2*50=", "10"), ("<<100*.2=", "20"),
+    ("<<(12-4)/2 =", "4"), ("<<2^10=", "1024"), ("<<3 x 4=", "12"), ("<<-3+2=", "-1"),
+    # Inside the marker the model has said it is arithmetic: no date, phone or range guard.
+    ("<<12/25=", "0.48"), ("<<2024-1999=", "25"),
+])
+def test_marker_answers_exactly(text, want):
+    got, info = D.calculator_answer(text, parser=MARKER)
+    assert got == want and info["syntax"] == D.MARKER_GATE
+
+
+@pytest.mark.parametrize("text,why", [
+    ("So 12 * 34 =", "no_expression"),          # a plain cue never fires in marker mode
+    ("What is 7 times 12?", "no_expression"),
+    ("<<48/2=24>> and 3 + 4 =", "no_expression"),  # the last marker is closed
+    ("<<3+\n4=", "no_expression"), ("<<x=3+4=", "marker_assignment"), ("<< =", "empty_marker"),
+    ("<<24=", "no_operation"), ("<<5%+3=", "marker_not_an_expression"),
+    ("<<10/3=", "non_terminating_quotient"), ("<<48/2", "no_expression"),
+])
+def test_marker_refusals(text, why):
+    got, info = D.calculator_answer(text, parser=MARKER)
+    assert got is None and info["refused"] == why
+
+
+def test_marker_agrees_with_every_parseable_gsm8k_train_annotation():
+    import re
+    from fractions import Fraction
+    from pathlib import Path
+    rows = (Path(__file__).resolve().parents[1] / "benchmarks/gsm8k/train.jsonl").read_text().split("\n")
+    n = answered = 0
+    for line in filter(None, rows):            # split on "\n" only: answers hold U+2028
+        for m in re.finditer(r"<<([^>]*)=([^>]*)>>", json.loads(line)["answer"]):
+            n += 1
+            got, _ = D.calculator_answer("<<" + m.group(1) + "=", parser=MARKER)
+            if got is not None:
+                answered += 1
+                assert Fraction(got) == Fraction(m.group(2).replace(",", "")), m.group(0)
+    assert n > 20000 and answered / n > 0.98
+
+
+def _marker_set(tmp_path, **tile):
+    path = _toy_set(tmp_path)
+    m = json.loads(path.read_text())
+    m["tiles"][0].update({"parser": MARKER, "gate": {"kind": D.MARKER_GATE}, **tile})
+    path.write_text(json.dumps(m))
+    return path
+
+
+def test_marker_manifest_rules_and_identity(tmp_path):
+    ident = D.tile_set_identity(D.load_manifest(_marker_set(tmp_path / "ok")))
+    assert ident["parser"] == MARKER and ident["tiles"][0]["gate"] == D.MARKER_GATE
+    for i, bad in enumerate(({"gate": {"bias": 0.0, "threshold": 0.5}}, {"trigger_prefilter": "gpu"},
+                             {"complete_literal_requests": True}, {"read_point": "layer_output_capture"})):
+        with pytest.raises(ValueError, match="marker calculator"):
+            D.load_manifest(_marker_set(tmp_path / f"bad{i}", **bad))
+
+
+@pytest.mark.parametrize("mode", ["force", "constrain"])
+def test_marker_opens_without_probe_and_closes_the_number(tmp_path, mode):
+    ts = D.build(_marker_set(tmp_path, write_mode=mode), _relu, source_fingerprint="fp0", layers_count=3)
+    assert next(t for t in ts.tiles if t.id == "calc").gate is None
+    ts.stash["calc"] = mx.array([[False]])                  # no probe: the stash only binds the row
+    ts.stash_shape["calc"], ts.forward_ids["calc"] = (1, 1), 7
+    p = D.CalculatorProcessor(ts, "calc", _Tok())
+    p.bind_row(0)
+    got = _drive(p, "She sold 48/2 = <<48/2=", 3)
+    assert got[:2] == "24" and not got[2].isdigit()
+    c = ts.calc_totals()
+    assert c["plans"] == 1 and c["marker_open"] == 1 and c["gate_closed"] == 0
+    q = D.CalculatorProcessor(ts, "calc", _Tok())
+    q.bind_row(0)
+    assert _drive(q, "So 12 * 34 =", 1) == "?"              # the plain cue stays the model's
+
+
+def test_marker_fails_closed_unbound_and_honours_control_override(tmp_path):
+    ts = D.build(_marker_set(tmp_path), _relu, source_fingerprint="fp0", layers_count=3)
+    assert _drive(D.CalculatorProcessor(ts, "calc", _Tok()), "<<6*7=", 1) == "?"   # no forward read
+    ts.stash["calc"] = mx.array([[False], [False]])
+    ts.stash_shape["calc"], ts.forward_ids["calc"] = (2, 1), 3
+    assert _drive(D.CalculatorProcessor(ts, "calc", _Tok()), "<<6*7=", 1) == "?"   # width 2, unbound
+    p = D.CalculatorProcessor(ts, "calc", _Tok(), gate_override=lambda _: False)
+    p.bind_row(1)
+    ts.forward_ids["calc"] = p._bound_forward = 3
+    assert _drive(p, "<<6*7=", 1) == "?"
+    assert ts.calc_totals()["gate_closed"] == 1 and ts.calc_totals().get("marker_open", 0) == 0

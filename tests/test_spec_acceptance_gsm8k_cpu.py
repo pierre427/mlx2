@@ -245,3 +245,70 @@ def test_full_accept_fraction_counts_rounds_that_hit_the_draft_ceiling():
         "verify_accept_hist": {"2": 1}, "verify_depth_hist": {"2": 1},
         "verify_full_accept_rounds": 1, "draft_proposed": 2}}})
     assert mtp["verify_full_accept_rounds"] == 1
+
+
+def test_annotated_format_keeps_markers_and_records_calculator_counters(tmp_path, monkeypatch):
+    train = [{"question": f"T{i}?", "answer": f"2*{i} = <<2*{i}={2 * i}>>{2 * i}\n#### {2 * i}"} for i in range(5)]
+    test = [{"question": "How many?", "answer": "so\n#### 18"}]
+    monkeypatch.setattr(gsm, "dataset_files", lambda: ("rev", {"train": tmp_path / "a", "test": tmp_path / "b"}))
+    (tmp_path / "a").write_bytes(b"a")
+    (tmp_path / "b").write_bytes(b"b")
+    monkeypatch.setattr(gsm, "load_split", lambda path: train if path.name == "a" else test)
+    seen = []
+    calc = {"plans": 1, "marker_open": 1, "tokens_written": 1}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _send(self, document):
+            body = json.dumps(document).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self._send({"healthy": True})
+
+        def do_POST(self):
+            seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self._send({"choices": [{"message": {"content": "9*2 = <<9*2=18>>18\n#### 18", "reasoning_content": "<<1+1="},
+                                     "finish_reason": "stop"}],
+                        "usage": {"completion_tokens": 9}, "mlx2": {"ttft_seconds": 0.001,
+                        "route": {"amoeba_det_tiles_request": {"calculator": calc}}}})
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        out = tmp_path / "out"
+        assert gsm.main(["--output", str(out), "--base-url", f"http://127.0.0.1:{server.server_port}",
+                         "--checkpoint", "M@sha256:" + "0" * 64, "--num-questions", "1",
+                         "--format", "chat-fewshot-annotated"]) == 0
+    finally:
+        server.shutdown()
+    messages = seen[0]["messages"]
+    assert messages[1]["content"] == "2*0 = <<2*0=0>>0\n#### 0"
+    assert all(m["content"].endswith(gsm.ANNOTATED_INSTRUCTION) for m in messages if m["role"] == "user")
+    receipt = json.loads((out / "receipt.json").read_text())
+    assert receipt["prompt"]["format"] == "chat-fewshot-annotated"
+    row = receipt["arms"][0]["rows"][0]
+    assert row["markers"] == 1 and row["reasoning_markers"] == 1 and row["det_tiles"] == calc
+
+
+def test_stop_at_is_the_next_occurrence_and_stops_new_questions():
+    import datetime as dt
+    base = dt.datetime(2026, 11, 20, 23, 30).timestamp()
+    assert gsm.stop_time("06:30", base) == dt.datetime(2026, 11, 21, 6, 30).timestamp()
+    assert gsm.stop_time("23:45", base) == dt.datetime(2026, 11, 20, 23, 45).timestamp()
+    assert gsm.stop_time(None) is None
+    late = dt.datetime(2026, 11, 21, 6, 45).timestamp()     # just after the stop: already passed
+    assert gsm.stop_time("06:30", late) == late
+    assert gsm.stop_time("06:30", dt.datetime(2026, 11, 20, 21, 45).timestamp()) == dt.datetime(2026, 11, 21, 6, 30).timestamp()
+
+    class Never:
+        def call(self, *a, **k):
+            raise AssertionError("no question may start after the deadline")
+
+    assert gsm.run_questions(Never(), "m", "", [{"question": "q", "answer": "#### 1"}], chat=True,
+                             max_tokens=8, deadline=0.0) == []

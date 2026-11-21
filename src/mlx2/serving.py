@@ -8810,7 +8810,11 @@ class ServingEngine(KernelReloadMixin):
                        "weight_space_operation": "amoeba_tiles",
                        "amoeba_tile_set": self.adapter.amoeba_tiles.identity["manifest_sha256"]}
             if det is not None:
+                from .runtime.amoeba_det_tiles import request_receipt as _det_request_receipt
+
                 receipt["amoeba_det_tiles"] = det.identity["tiles"]
+                # The per-request calculator counters on a tiled host too, as on the base model.
+                receipt["amoeba_det_tiles_request"] = _det_request_receipt(det, job.request)
             return receipt
         if det is not None:
             from .runtime.amoeba_det_tiles import request_receipt as _det_request_receipt

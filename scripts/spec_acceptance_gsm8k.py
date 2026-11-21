@@ -22,6 +22,9 @@ Prompt formats (``--format``):
   the model's own chat template.  Chat-trained models (e.g. Qwen3.8-27B) break
   on the raw completion format: they emit end-of-turn at once or misread the
   few-shot block, which voided several 2026-11-14/15 runs.
+* ``chat-fewshot-annotated``: ``chat-fewshot`` with the train solutions'
+  ``<<expression=result>>`` calculator annotations kept and every user turn
+  asking for them (for a calculator triggered by the model's own marker).
 * ``chat``: the test question alone as one chat message (zero-shot); this is
   what ``--chat`` selected before.
 * ``completion``: vLLM's ``tests/evals/gsm8k/gsm8k_eval.py`` completion mode,
@@ -133,14 +136,19 @@ def few_shot_prefix(train, shots):
 
 
 CHAT_INSTRUCTION = "\nGive the final numeric answer after ####."
+# chat-fewshot-annotated: the shots keep GSM8K's calculator annotations and every user turn asks for
+# them, so a calculator triggered by the model's own "<<expression=" marker can be measured.
+ANNOTATED_INSTRUCTION = ("\nWrite each calculation as <<expression=result>> followed by the result, as in "
+                         "the examples. Give the final numeric answer after ####.")
 
 
-def few_shot_turns(train, shots):
-    """The same worked examples as ``few_shot_prefix``, as chat turns."""
+def few_shot_turns(train, shots, annotated=False):
+    """The same worked examples as ``few_shot_prefix``, as chat turns (``annotated``: ``<<...>>`` kept)."""
     turns = []
     for item in train[:shots]:
-        turns.append({"role": "user", "content": item["question"] + CHAT_INSTRUCTION})
-        turns.append({"role": "assistant", "content": _ANNOTATION.sub("", item["answer"]).strip()})
+        turns.append({"role": "user", "content": item["question"] + (ANNOTATED_INSTRUCTION if annotated else CHAT_INSTRUCTION)})
+        turns.append({"role": "assistant", "content": (item["answer"] if annotated
+                                                       else _ANNOTATION.sub("", item["answer"])).strip()})
     return turns
 
 
@@ -330,8 +338,30 @@ class Client:
         return json.loads(body) if body.strip().startswith(b"{") else body.decode()
 
 
+STOP_AT_HORIZON_H = 16
+
+
+def stop_time(clock, now=None):
+    """Epoch seconds of the next local ``HH:MM`` after ``now`` (``None`` for no clock).
+
+    A clock more than ``STOP_AT_HORIZON_H`` hours ahead has just passed (a night job started at
+    06:45 with ``--stop-at 06:30``): the deadline is ``now``, so nothing starts, rather than
+    tomorrow's 06:30.
+    """
+    if not clock:
+        return None
+    import datetime as dt
+    start = time.time() if now is None else now
+    now = dt.datetime.fromtimestamp(start)
+    hour, minute = (int(x) for x in clock.split(":"))
+    at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if at <= now:
+        at += dt.timedelta(days=1)
+    return start if (at - now).total_seconds() > STOP_AT_HORIZON_H * 3600 else at.timestamp()
+
+
 def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None, sampling=None,
-                  request_extra=None, chat_shots=None):
+                  request_extra=None, chat_shots=None, instruction=CHAT_INSTRUCTION, deadline=None):
     """``sampling`` (optional) adds temperature/top_p/top_k and a per-question
     seed (``seed + index``) to every request; ``None`` keeps greedy.
     ``request_extra`` (an arm's ``request`` object, e.g. ``enable_thinking`` /
@@ -347,12 +377,14 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
         raise ValueError("arm request fields apply to --chat runs only")
     rows = []
     for index, item in enumerate(items):
+        if deadline is not None and time.time() >= deadline:
+            break                               # no new question after --stop-at; the summary counts rows
         start = time.monotonic()
         extra_fields = sampling_fields(sampling, index)
         if chat:
             payload = {"model": model_name, "temperature": 0, **extra_fields, **request_extra, "stream": False, "max_tokens": max_tokens,
                        "messages": list(chat_shots or [])
-                                   + [{"role": "user", "content": item["question"] + CHAT_INSTRUCTION}]}
+                                   + [{"role": "user", "content": item["question"] + instruction}]}
             result = client.call("/v1/chat/completions", payload)
             choice = result["choices"][0]
             text = choice["message"].get("content") or ""
@@ -379,7 +411,11 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
                "decode_tps": ((completion - 1) / (elapsed - ttft)
                               if ttft and completion > 1 and elapsed > ttft else None),
                "route": extra.get("route"), "speculation": speculation_receipt(extra), "text": text,
-               "reasoning_chars": len(reasoning)}
+               "reasoning_chars": len(reasoning),
+               # Calculator markers the model wrote, and the deterministic-tile counters of this request
+               # (null when the server loaded no deterministic tiles).
+               "markers": text.count("<<"), "reasoning_markers": reasoning.count("<<"),
+               "det_tiles": (find(result, "amoeba_det_tiles_request") or {}).get("calculator")}
         if sampling:
             row["effective_sampling"] = find(result, "effective_sampling")
             row["sampling_filter"] = find(result, "sampling_filter")
@@ -425,7 +461,8 @@ def write_atomic(path, document):
 
 def compact(row):
     keep = {k: row.get(k) for k in ("index", "test_index", "expected", "predicted", "correct", "finish_reason",
-                                     "completion_tokens", "decode_tps", "text")}
+                                     "completion_tokens", "decode_tps", "text", "markers", "reasoning_markers",
+                                     "det_tiles")}
     spec = row.get("speculation") or {}
     keep["accept_hist"] = spec.get("verify_accept_hist")
     keep["depth_hist"] = spec.get("verify_depth_hist")
@@ -453,12 +490,16 @@ def main(argv=None):
     parser.add_argument("--shots", type=int, default=5)
     parser.add_argument("--max-tokens", type=int, default=None,
                         help="default 2048 for the chat formats (512 cut off hard problems mid-working), 256 for completion")
-    parser.add_argument("--format", choices=("chat-fewshot", "chat", "completion"), default=None,
+    parser.add_argument("--format", choices=("chat-fewshot", "chat-fewshot-annotated", "chat", "completion"), default=None,
                         help="prompt format (default chat-fewshot); see the module docstring")
     parser.add_argument("--chat", action="store_true", help="alias for --format chat (zero-shot)")
     parser.add_argument("--request", type=json.loads, default=None,
                         help='base-url mode: JSON merged into every request, e.g. \'{"enable_thinking": false}\'')
     parser.add_argument("--max-context", type=int, default=8192)
+    parser.add_argument("--stop-at", metavar="HH:MM",
+                        help="ask no new question after this local time (next occurrence); arms not started are skipped")
+    parser.add_argument("--continue-on-arm-failure", action="store_true",
+                        help="--model mode: record a failed arm and go on to the next (exit 1 at the end)")
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="> 0 samples (sampled speculative acceptance); 0 keeps the greedy standard")
     parser.add_argument("--top-p", type=float)
@@ -478,6 +519,7 @@ def main(argv=None):
         raise RuntimeError("refusing nonempty evidence directory")
     args.output.mkdir(parents=True, exist_ok=True)
 
+    deadline = stop_time(args.stop_at)
     sampling = None
     if args.temperature > 0:
         # Fields left unset take the server's resolved (vendor) defaults; each
@@ -497,9 +539,12 @@ def main(argv=None):
     args.chat = fmt != "completion"
     if args.max_tokens is None:
         args.max_tokens = 2048 if args.chat else 256
-    chat_shots = few_shot_turns(train, args.shots) if fmt == "chat-fewshot" else None
+    chat_shots = (few_shot_turns(train, args.shots, annotated=fmt == "chat-fewshot-annotated")
+                  if fmt.startswith("chat-fewshot") else None)
+    instruction = ANNOTATED_INSTRUCTION if fmt == "chat-fewshot-annotated" else CHAT_INSTRUCTION
     prefix = "" if args.chat else few_shot_prefix(train, args.shots)
-    mode = {"chat-fewshot": f"chat {args.shots}-shot", "chat": "chat", "completion": f"completion {args.shots}-shot"}[fmt]
+    mode = {"chat-fewshot": f"chat {args.shots}-shot", "chat-fewshot-annotated": f"chat {args.shots}-shot, <<...>> kept",
+            "chat": "chat", "completion": f"completion {args.shots}-shot"}[fmt]
     receipt = {"schema": SCHEMA, "qualified": False,
                "kind": "GSM8K acceptance and accuracy, " + ("sampled" if sampling else "greedy")
                        + ", no thermal hold",
@@ -510,7 +555,8 @@ def main(argv=None):
                "prompt": {"mode": mode, "format": fmt,
                           "max_tokens": args.max_tokens, "stops": None if args.chat else STOPS,
                           "temperature": args.temperature, **({"sampling": sampling} if sampling else {})},
-               "driver_revision": revision(ROOT), "arms": []}
+               "driver_revision": revision(ROOT), "arms": [],
+               **({"stop_at": {"clock": args.stop_at, "epoch": deadline}} if deadline else {})}
     path = args.output / "receipt.json"
 
     def progress(name):
@@ -523,9 +569,9 @@ def main(argv=None):
         receipt["checkpoint"] = args.checkpoint
         client = Client(args.base_url)
         status = client.call("/v1/status", timeout=30)
-        rows = run_questions(client, args.checkpoint.split("@")[0], prefix, items, chat=args.chat, chat_shots=chat_shots,
+        rows = run_questions(client, args.checkpoint.split("@")[0], prefix, items, chat=args.chat, chat_shots=chat_shots, instruction=instruction,
                              max_tokens=args.max_tokens, log=progress("server"), sampling=sampling,
-                             request_extra=args.request)
+                             request_extra=args.request, deadline=deadline)
         arm = {"name": "server", "base_url": args.base_url, "startup_status_route": status.get("route_receipt"),
                "request": args.request or {},
                "summary": summarize(rows, args.draft_depth), "rows": [compact(r) for r in rows]}
@@ -552,6 +598,11 @@ def main(argv=None):
     client = Client(f"http://127.0.0.1:{args.port}", token_file.read_text())
     try:
         for arm in json.loads(args.arms.read_text()):
+            if deadline is not None and time.time() >= deadline:
+                receipt["arms"].append({"name": arm["name"], "passed": False, "skipped": f"--stop-at {args.stop_at}"})
+                write_atomic(path, receipt)
+                print(json.dumps({"arm": arm["name"], "skipped": "stop_at"}), flush=True)
+                continue
             out = args.output / arm["name"]
             out.mkdir()
             tree = Path(arm["tree"]).resolve()
@@ -584,20 +635,22 @@ def main(argv=None):
                         raise RuntimeError("server readiness timed out")
                     time.sleep(.5)
                 row["startup_status"] = status
-                rows = run_questions(client, args.model.name, prefix, items, chat=args.chat, chat_shots=chat_shots,
+                rows = run_questions(client, args.model.name, prefix, items, chat=args.chat, chat_shots=chat_shots, instruction=instruction,
                                      max_tokens=args.max_tokens, log=progress(arm["name"]), sampling=sampling,
-                                     request_extra=arm.get("request"))
+                                     request_extra=arm.get("request"), deadline=deadline)
                 time.sleep(1.5)
                 row["final_status"] = client.call("/v1/status")
                 (out / "metrics.prom").write_text(client.call("/metrics"))
                 (out / "rows.json").write_text(json.dumps(rows, indent=1, default=str) + "\n")
                 row["summary"] = summarize(rows, arm.get("draft_depth", args.draft_depth))
                 row["rows"] = [compact(r) for r in rows]
+                row["stopped_at_deadline"] = len(rows) < len(items)
                 row["passed"] = True
             except BaseException as error:
                 row["passed"] = False
                 row["error"] = repr(error)
-                raise
+                if not (args.continue_on_arm_failure and isinstance(error, Exception)):
+                    raise
             finally:
                 if server.poll() is None:
                     os.killpg(server.pid, signal.SIGTERM)
@@ -612,8 +665,11 @@ def main(argv=None):
                 receipt["swap_after"] = subprocess.check_output(["sysctl", "-n", "vm.swapusage"],
                                                                 text=True).strip()
                 write_atomic(path, receipt)
-            print(json.dumps({"arm": row["name"], **{k: v for k, v in row["summary"].items()
-                                                      if k != "routes"}}), flush=True)
+            if "summary" in row:
+                print(json.dumps({"arm": row["name"], **{k: v for k, v in row["summary"].items()
+                                                          if k != "routes"}}), flush=True)
+            else:
+                print(json.dumps({"arm": row["name"], "error": row.get("error")}), flush=True)
     finally:
         token_file.unlink(missing_ok=True)
     return 0 if all(arm["passed"] for arm in receipt["arms"]) else 1

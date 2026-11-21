@@ -80,7 +80,11 @@ PARSER_V2 = "calc-parse-v2"
 PARSER_V3 = "calc-parse-v3"
 PARSER_V4 = "calc-parse-v4"
 PARSER_V5 = "calc-parse-v5-resident"
-PARSERS = (PARSER_ID, PARSER_V2, PARSER_V3, PARSER_V4, PARSER_V5)
+# The model asks for a calculation by writing GSM8K's annotation ``<<expression=``; the marker is the
+# gate (no probe) and bounds the operands, so nothing is read from surrounding prose.
+PARSER_MARKER = "calc-parse-marker-v1"
+PARSERS = (PARSER_ID, PARSER_V2, PARSER_V3, PARSER_V4, PARSER_V5, PARSER_MARKER)
+MARKER_GATE = "explicit_marker"
 # Where a calculator's probe reads: the read layer's MLP input (wrapped MLP), or the read layer's
 # output hidden state through the trunk's capture projection (adapter-installed layer reader).
 READ_POINTS = ("mlp_input", "layer_output_capture")
@@ -689,6 +693,49 @@ def parse_expression_v4(text: str, truncated: bool = False, *, deferred=False):
             'parser':PARSER_V4, 'syntax':'latex_math'}, None
 
 
+# ---- calc-parse-marker-v1: the model's own request ----------------------------------------------
+_MARKER_MAX = 160
+_MARKER_BARE_POINT = re.compile(r"(?<![\d.])\.(\d)")
+
+
+def parse_expression_marker(text: str, truncated: bool = False, *, deferred=False):
+    """``(expr, None)`` when the text ends with an open ``<<expression=`` marker, else ``(None, reason)``.
+
+    The marker is the trigger and the operand boundary: the model wrote ``<<`` before the first
+    operand and ``=`` after the last, so v1-v4's prose guards (lead words, dates, ranges, phone
+    numbers, unspaced dashes) do not apply inside it. Only text after the last ``<<`` is read; a
+    closed marker (``>>``), a line break or a second ``=`` in it means there is no open request.
+    The expression is parsed whole with v2's grammar and evaluated exactly. ``truncated`` is
+    unused: an operand cut by the window cannot sit after an opener the window still holds.
+    """
+    if not text.endswith("="):
+        return None, "no_expression"
+    window = text[-(_MARKER_MAX + 3):]
+    start = window.rfind("<<")
+    if start < 0:
+        return None, "no_expression"
+    span = window[start + 2:-1]
+    if ">>" in span or "\n" in span or "\r" in span:
+        return None, "no_expression"
+    if "=" in span:
+        return None, "marker_assignment"       # "<<x=3+4=": not one expression
+    span = span.strip(" \t")
+    if not span:
+        return None, "empty_marker"
+    try:
+        # GSM8K writes percentages with a bare leading point ("100*.2"); inside a marker it is a decimal.
+        got = _v2_parse(_MARKER_BARE_POINT.sub(r"0.\1", span), deferred)
+    except _V2Refused as e:
+        return None, str(e)
+    if got is None:
+        return None, "marker_not_an_expression"
+    value, p = got
+    if not p.binary and not p.power:
+        return None, "no_operation"             # "<<24=": nothing to compute
+    return {"value": value, "op": "expr", "thousands": False, "currency": "", "needs_space": False,
+            "cue": "<<", "cued": True, "span": span, "parser": PARSER_MARKER, "syntax": MARKER_GATE}, None
+
+
 def calculator_answer(text: str, truncated: bool = False, parser: str = PARSER_ID, *, arithmetic_backend="cpu"):
     """``(answer_text_to_emit, info)``: the text the calculator writes after ``text``, or None.
 
@@ -703,7 +750,8 @@ def calculator_answer(text: str, truncated: bool = False, parser: str = PARSER_I
         expr, why = None, "v1"
     else:
         try:
-            expr, why = {PARSER_V2:parse_expression_v2, PARSER_V3:parse_expression_v3, PARSER_V4:parse_expression_v4}[parser](text, truncated, deferred=arithmetic_backend != "cpu")
+            expr, why = {PARSER_V2:parse_expression_v2, PARSER_V3:parse_expression_v3, PARSER_V4:parse_expression_v4,
+                         PARSER_MARKER:parse_expression_marker}[parser](text, truncated, deferred=arithmetic_backend != "cpu")
         except Exception:                      # noqa: BLE001 - a parser bug must refuse, never raise into decode
             return None, {"refused": "v2_internal_error"}
     if why == "v1":
@@ -772,6 +820,12 @@ def load_manifest(path) -> dict:
         if kind == "calculator" and t.get("parser") == PARSER_V5:
             if t.get('arithmetic_backend')!='gpu' or t.get('write_mode')!='force' or t.get('gate',{}).get('kind')!='validated_syntax':
                 raise ValueError('resident calculator requires GPU arithmetic, force writing and validated_syntax gate')
+        if kind == "calculator" and t.get("parser") == PARSER_MARKER:
+            # The marker is a host-text gate: no probe, no device cue window, no request grammar.
+            if (not isinstance(t.get("gate"), dict) or t["gate"].get("kind") != MARKER_GATE or t.get("read_point", "mlp_input") != "mlp_input"
+                    or t.get("trigger_prefilter", "off") != "off" or t.get("complete_literal_requests", False)):
+                raise ValueError("deterministic tiles: a marker calculator needs gate kind explicit_marker, "
+                                 "read_point mlp_input, no trigger_prefilter and no complete_literal_requests")
         if kind == "calculator" and t.get("arithmetic_backend", "cpu") not in ("cpu", "gpu", "gemm"):
             raise ValueError("deterministic tiles: unknown calculator arithmetic backend")
         if kind == "calculator" and t.get("trigger_prefilter", "off") not in ("off", "gpu"):
@@ -814,7 +868,8 @@ def tile_set_identity(manifest: dict) -> dict:
                        **({"complete_literal_requests":t["complete_literal_requests"]} if "complete_literal_requests" in t else {}),
                        **({"arithmetic_backend": t.get("arithmetic_backend", "gpu" if t.get("parser") in (PARSER_V3, PARSER_V4) else "cpu")}
                           if t.get("parser") in (PARSER_V3, PARSER_V4) or "arithmetic_backend" in t else {}),
-                       **({"parser": t["parser"]} if t.get("parser") in (PARSER_V2, PARSER_V3, PARSER_V4, PARSER_V5) else {}),
+                       **({"parser": t["parser"]} if t.get("parser") in (PARSER_V2, PARSER_V3, PARSER_V4, PARSER_V5, PARSER_MARKER) else {}),
+                       **({"gate": MARKER_GATE} if t.get("parser") == PARSER_MARKER else {}),
                        **({"parser_execution":"gpu", "gate":"complete_syntax_and_exact_result"} if t.get('parser')==PARSER_V5 else {}),
                        # mlp_input sets keep their original identity.
                        **({"read_point": t["read_point"]}
@@ -916,7 +971,7 @@ class _Tile:
         p = spec["id"] + "."
         if self.kind == "calculator":
             g = spec["gate"]
-            self.gate = None if self.parser==PARSER_V5 else ProbeGate(tensors[p + "probe_w"], g["bias"], g["threshold"])
+            self.gate = None if self.parser in (PARSER_V5, PARSER_MARKER) else ProbeGate(tensors[p + "probe_w"], g["bias"], g["threshold"])
             # push (research only): unit directions toward each digit token at the write layer
             self.push_dirs = tensors.get(p + "push_dirs")
             self.push_scale = float(spec.get("push_scale", 0.0))
@@ -1562,6 +1617,11 @@ class CalculatorProcessor:
             opened = True
             key = {"latex_column":"latex_column_open","literal_count":"literal_count_open"}.get(info.get('syntax'),'latex_math_open')
             c[key] = c.get(key, 0) + 1
+        # The model's own ``<<expression=`` is the gate (no probe). The row binding read above still
+        # fails closed, and a research/control override still decides.
+        if not opened and self.gate_override is None and self.tile.parser == PARSER_MARKER:
+            opened = True
+            c["marker_open"] = c.get("marker_open", 0) + 1
         if not opened:
             c["gate_closed"] += 1
             return logits
