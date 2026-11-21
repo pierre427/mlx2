@@ -78,9 +78,10 @@ def main():
                (r.get("bisect") or {}).get("zero", {}).get("0.05", {}).get("random_same_counts_held") or {}).get("mean_d_ce")
         v = {"experts": int(m.sum()), "export_held": held, "t2_alone_held": t2h, "random_same_count_held": rnd}
         why = []
-        if held is None or t2h is None or held > a.gap_frac * t2h:
+        # `not (x <= y)`: a NaN held d_CE (carve.json round-trips NaN) fails both gates
+        if held is None or t2h is None or not (held <= a.gap_frac * t2h):
             why.append(f"does not close >= {1 - a.gap_frac:.0%} of the T2 gap")
-        if held is None or rnd is None or held > a.gap_frac * rnd:
+        if held is None or rnd is None or not (held <= a.gap_frac * rnd):
             why.append(f"not <= {a.gap_frac} x random same-count")
         if m.sum() < a.min_experts:
             why.append(f"< {a.min_experts} experts")
@@ -150,6 +151,9 @@ def main():
                 changed = True
                 break
     bnames = sorted(merged)
+    if len(bnames) > 64:                          # the tile code is an int64 bit field: bit 64+ shifts to 0 silently
+        raise SystemExit(f"{len(bnames)} boxes after merging: this partition codes at most 64 (int64 bit field); "
+                         f"partition fewer boxes per run")
     code = np.zeros(t2.shape, np.int64)
     for i, n in enumerate(bnames):
         code |= merged[n]["mask"].astype(np.int64) << i

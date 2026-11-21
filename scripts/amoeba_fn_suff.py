@@ -64,12 +64,19 @@ MEAN_ARMS = ("core_alone_mean", "core_plus_mean", "without_mean", "random_mean")
 REP = "#rep"
 
 
-def reference_rows(bdir):
-    """The finished battery's rows in run order, with its settings (docs, seed)."""
+def reference_rows(bdir, held_specs=None):
+    """The finished battery's rows in run order, with its settings (docs, seed). A battery dir scored more than
+    once holds rows of several settings: the reference is the latest run's (the last row's settings, like the
+    battery's own resume and coreassign), restricted to rows on held_specs (battery.meta.json's held specs, the
+    documents this run scores) when given."""
     rows = P0.read_jsonl(Path(bdir) / "battery.jsonl")
+    if held_specs is not None:
+        want = sorted(held_specs)
+        rows = [r for r in rows if (r.get("settings") or {}).get("held") == want]
     if not rows:
-        raise SystemExit(f"{bdir}: no battery.jsonl rows")
-    s0 = rows[0].get("settings")
+        raise SystemExit(f"{bdir}: no battery.jsonl rows" + ("" if held_specs is None else
+                         " on the held specs of battery.meta.json"))
+    s0 = rows[-1].get("settings")
     rows = [r for r in rows if r.get("settings") == s0]
     seen, out = set(), []
     for r in rows:
@@ -202,7 +209,7 @@ def main(argv=None):
         raise SystemExit(f"--battery ran on {bmeta['partition']}, not {pd}")
     if bmeta.get("fingerprint") != prep.get("fingerprint"):
         raise SystemExit("--battery is of another model")
-    ref, rset = reference_rows(bdir)
+    ref, rset = reference_rows(bdir, [v["spec"] for v in bmeta["held"].values()])
     if rset.get("docs") != a.docs or rset.get("seed") != a.seed:
         raise SystemExit(f"--battery rows were made with docs {rset.get('docs')} seed {rset.get('seed')}")
     order = [r["box"] for r in ref]
@@ -413,10 +420,17 @@ def summarize(out, reference_battery=None, rules=ST.SUFF_RULES, n_boot=ST.N_BOOT
     EN = settings["english"]
     ref = {}
     if reference_battery and Path(reference_battery).exists():
+        # the same rows as reference_rows: on the held specs of battery.meta.json, the latest row of each box
+        try:
+            bm = json.loads((Path(reference_battery).parent / "battery.meta.json").read_text())
+            want = sorted(x["spec"] for x in bm["held"].values())
+        except (OSError, ValueError, KeyError, TypeError):
+            want = None
         for r in P0.read_jsonl(reference_battery):
-            if (r.get("settings") or {}).get("docs") == settings["docs"] and \
-                    (r.get("settings") or {}).get("seed") == settings["seed"]:
-                ref.setdefault(r["box"], r)
+            rs = r.get("settings") or {}
+            if rs.get("docs") == settings["docs"] and rs.get("seed") == settings["seed"] and \
+                    (want is None or rs.get("held") == want):
+                ref[r["box"]] = r
 
     def v(b, arm, s):
         r = rows.get((b, arm, s))

@@ -483,6 +483,14 @@ class GatePolicy:
         nonspace = sum(1 for ch in seg if not ch.isspace())
         if sc["letters"] < c.lid_min_letters or sc["letters"] < c.lid_letter_ratio * max(1, nonspace):
             return
+        if sc["greek"] >= 0.5 * sc["letters"]:
+            # Greek prose (a segment of >= lid_min_letters letters, most of them Greek: not maths symbols in Latin
+            # text) is a language outside English + the ten and no script rule covers it: fail open, like the
+            # other unlisted scripts
+            flags.append(f"unknown_script:greek={sc['greek']}")
+            return
+        if self.lid is None:
+            return
         if sc["latin"] < 0.5 * sc["letters"] and sc["han"] < c.script_min_chars:
             return                                     # non-Latin segments: the script rules decide (Han: LID too)
         probs = self.lid.probs(seg)
@@ -523,6 +531,10 @@ class GatePolicy:
         hk = sc["han"] + sc["kana"]
         if sc["kana"] >= c.script_min_chars:
             add("jpn", f"script:kana:{sc['kana']}")
+        elif sc["kana"] >= 1 and hk >= c.script_min_chars:
+            # any kana beside Han is Japanese: without this a short prompt (1-3 kana) is neither "kana" nor
+            # "Han-only" and opened nothing
+            add("jpn", f"script:kana_han:{sc['kana']}+{sc['han']}")
         if sc["han"] >= c.script_min_chars and sc["kana"] < c.han_only_kana_share * hk:
             add("cmn", f"script:han_only:{sc['han']}")
             add("jpn", f"script:han_only:{sc['han']}")
@@ -536,11 +548,10 @@ class GatePolicy:
             flags.append(f"unknown_script:hangul={sc['hangul']},other={sc['other']}")
         if not full:                                   # script-only check between full checks
             return opened, {"reasons": reasons, "flags": [], "script": sc}
-        if self.lid is not None:
-            segs = segments(text, c.segment_chars)
-            whole = " ".join(segs)
-            for seg in segs + ([whole] if len(segs) > 1 else []):
-                self._lid_segment(seg, add, reasons, flags)
+        segs = segments(text, c.segment_chars)         # without an LID the segment pass still flags Greek prose
+        whole = " ".join(segs)
+        for seg in segs + ([whole] if len(segs) > 1 else []):
+            self._lid_segment(seg, add, reasons, flags)
         if c.request_cue:
             for L, rx in _REQ.items():
                 if rx.search(request_text if request_text is not None else text):
@@ -769,7 +780,7 @@ def decide(rows, gate_pool, gen, kinds, rules=RULES, gate_sets=None):
         op = rows.get(("open", s))
         if op is None:
             missing.append(f"open:{s}")
-        elif abs(op["mean"]) > rules["sanity_open_vs_full_max"]:
+        elif not abs(op["mean"]) <= rules["sanity_open_vs_full_max"]:       # NaN fails the sanity gate too
             return {"verdict": "INVALID", "why": f"open arm differs from full on {s} by {op['mean']:+.4f}",
                     "checks": [], "label": rules["label"]}
     for s, kd in sorted(kinds.items()):

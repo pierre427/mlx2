@@ -328,11 +328,17 @@ def compare(reference, responses):
 
     def ids(d):
         return {vocab.setdefault(k, len(vocab)): v for k, v in d.items()}
-    counts = {"identical": 0, "near_tie_equivalent": 0, "unclassified": 0, "failed": 0}
+    counts = {"identical": 0, "near_tie_equivalent": 0, "unclassified": 0, "failed": 0, "no_evidence": 0}
     rows = []
     for (prompt, expect), a, b in zip(S.PROBES, reference, responses):
         ta, tb = S.tokens_of(a), S.tokens_of(b)
         sa, sb = [t for t, _ in ta], [t for t, _ in tb]
+        if S.no_evidence(ta, tb):                  # no logprob entries: nothing compared, never "identical"
+            counts["no_evidence"] += 1
+            rows.append({"prompt": prompt, "verdict": "no_evidence", "why": "no logprob entries in either response",
+                         "ref_text": a["choices"][0]["message"]["content"],
+                         "text": b["choices"][0]["message"]["content"]})
+            continue
         if sa == sb:
             counts["identical"] += 1
             continue
@@ -394,6 +400,19 @@ def main():
     A.write_json(out / "spec_check.json", summary)
     log(json.dumps({"layers": (summary.get("layers") or {}).get("required"),
                     "served": {k: v.get("verdict") for k, v in (summary.get("served") or {}).items()}}))
+    bad = failures(summary)
+    if bad:
+        sys.exit(f"spec check failed: {bad}")
+
+
+def failures(summary):
+    """What the receipt says failed: a false layers requirement, or a served arm whose verdict is not
+    reference / pass (fail, error, no_reference). Empty when the check passed."""
+    bad = [f"layers.{k}" for k, v in ((summary.get("layers") or {}).get("required") or {}).items()
+           if k != "advice" and not v]
+    bad += [f"served.{k}:{v.get('verdict')}" for k, v in (summary.get("served") or {}).items()
+            if v.get("verdict") not in ("reference", "pass")]
+    return bad
 
 
 if __name__ == "__main__":

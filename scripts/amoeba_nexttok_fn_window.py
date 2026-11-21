@@ -733,7 +733,7 @@ def parser():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--parts", default="q,k")
+    ap.add_argument("--parts", default="q,k", type=_parts_arg)
     ap.add_argument("--memory-gb", type=float, default=80)
     ap.add_argument("--watchdog-gb", type=float, default=88)
     ap.add_argument("--swap-growth-gb", type=float, default=2.0)
@@ -743,6 +743,18 @@ def parser():
                          "battery): auto = MLX active after load + 10 GiB, GiB, or 0 = off; capped at --memory-gb")
     ap.add_argument("--dry-run", action="store_true")
     return ap
+
+
+def _parts_arg(spec):
+    """--parts: q, k or q,k ("" = no part: wiring and watcher only). Part K reads Part Q's gate streams, so k
+    alone would run nothing and still end "done"; an unknown part is refused at parse time, before the window
+    work starts."""
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if set(parts) - {"q", "k"}:
+        raise argparse.ArgumentTypeError(f"--parts takes q and/or k, got {spec!r}")
+    if parts and "q" not in parts:
+        raise argparse.ArgumentTypeError("--parts k needs q (Part K reads Part Q's gate streams)")
+    return ",".join(parts)
 
 
 def _wired_arg(spec):

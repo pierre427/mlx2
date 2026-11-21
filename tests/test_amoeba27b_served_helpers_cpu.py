@@ -30,7 +30,8 @@ def test_near_tie_probe_classifies(monkeypatch):
     it = iter(arm)
     monkeypatch.setattr(sv, "post", lambda base, body: next(it))
     _, nt = sv.near_tie_probe("http://x", 2, ref)
-    assert nt["counts"] == {"identical": 1, "near_tie_equivalent": 1, "unclassified": 1, "failed": 1}
+    assert nt["counts"] == {"identical": 1, "near_tie_equivalent": 1, "unclassified": 1, "failed": 1,
+                            "no_evidence": 0}
 
 
 def test_perf_of():

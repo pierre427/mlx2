@@ -8,7 +8,8 @@ export point chosen on the box's val documents at --export-target (+0.03 until t
 held check once (Pierre: +0.05 on held is the target; a miss is reported as a miss, never re-cut against held).
 Per box: <out>/box-<name>/ (carve receipt), one row in <out>/boxes.md, and <out>/verdicts.jsonl
 ({box, experts, export_val, export_held, held_meets_0.05, val_held_gap, gate, wall_s}). Boxes already bisected are
-skipped (resumable); a box whose carve raises is recorded and the batch goes on.
+skipped (resumable); a box whose carve raises is recorded and the batch goes on, then the batch exits 1 (the stage's
+return code must not read as success when carves failed).
 
 Usage: amoeba_fn_boxbatch.py --model M --boxset DIR --t2 T2.npz --out DIR [--boxes a,b] [carve args after --]
 """
@@ -78,6 +79,7 @@ def main():
                          f"held text / greedy / t0.7 | random same-count (export size; {a.moe_units}-level) | gate | wall s |\n"
                          "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
     kinds = {b["box"]: b["kind"] for b in spec["boxes"]}
+    errors = []
     bflags = {b["box"]: [f for f in ("held_synthetic", "held_lab") if b.get(f)] for b in spec["boxes"]}
     for name in names:
         bd = bs / name
@@ -172,7 +174,12 @@ def main():
                      f"{f(rec.get('export_held'))} | {({'pass': '**pass**', 'uninformative': 'UNINFORMATIVE (≈ random)', 'miss': 'MISSES'}[rec['verdict']] if ec else rec.get('error', '—')[:60]) + (' ⚠ domain > 0.10: ' + ','.join(rec['domain_over_0.10']) if rec.get('domain_over_0.10') else '')} | "
                      f"{f(rec.get('val_held_gap'))} | {f(hs.get('box'))} / {f(gr.get('greedy'))} / {f(gr.get('t0.7'))} | "
                      f"{f(rec.get('random_same_count_held'))} | {rec['gate']} | {rec['wall_s']} |\n")
+        if "error" in rec:
+            errors.append(name)
         log_main(f"box {name} done in {rec['wall_s']} s: {json.dumps({k: rec.get(k) for k in ('kept_units', 'export_held', 'held_meets_0.05', 'error')})}")
+    if errors:
+        log_main(f"{len(errors)} box(es) failed: {', '.join(errors)} (see verdicts.jsonl)")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

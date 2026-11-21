@@ -487,10 +487,18 @@ def main():
             if r.get("settings") == settings:
                 done.add(r["box"])
     po = out / "path_offset.json"
-    if po.exists() and set(held) - set(json.loads(po.read_text())):     # a held set added on resume: rescore all
+    # The offset belongs to the documents it was scored on: keyed on the row settings (docs, seed, partition, held
+    # specs) in a sidecar (path_offset.json keeps its format). Other settings, or no sidecar: rescore, never reuse.
+    pos = out / "path_offset.settings.json"
+    try:
+        po_same = json.loads(pos.read_text()) == settings
+    except (OSError, ValueError):
+        po_same = False
+    if po.exists() and (not po_same or set(held) - set(json.loads(po.read_text()))):
         po.unlink()
     if not po.exists():
         po.write_text(json.dumps(score(allones, list(held), ("_all", "path_offset")), indent=1))
+        pos.write_text(json.dumps(settings, indent=1))
     off = json.loads(po.read_text())
     log("path offset:", off)
     for i, b in enumerate(boxes if "boxes" in arms else []):

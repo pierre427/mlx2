@@ -207,7 +207,9 @@ def suff_box(own, rules=SUFF_RULES, necessity_net=None, groups=None, strata=None
         rg[k]["size_matched"] = bool(f is None or f >= rules["min_fill"])
     rmax = max([rg[k]["mean"] for k in rg if rg[k]["size_matched"]] + [rules["rand_floor"]])
     useful = bool(sg["mean"] >= rules["min_gain"] and sg["ci95"][0] > 0 and sg["mean"] >= rules["rand_x"] * rmax)
-    served = "no" if cpm > rules["target"] else "vacuous" if cam <= rules["target"] else "yes"
+    # NaN-safe: a non-finite mean (a non-finite CE on any held document) is never "yes"
+    served = ("no" if not (cpm <= rules["target"]) or cam != cam else
+              "vacuous" if cam <= rules["target"] else "yes")
     nec_high = None if necessity_net is None else bool(necessity_net >= rules["necessity_high"])
     row = {"core_plus_own": cpm, "core_alone_own": cam, "suff_gain": sg, **rg,
            "recovery": (sg["mean"] / cam) if cam > 0 else None, "necessity_net": necessity_net,
@@ -266,14 +268,16 @@ PARETO_RULES = {
 def cf_at(fracs, ub, bar, flagged=None):
     """(CF, censored) from per-cell (fraction, upper bound) points; fraction 0 is implicit (0 cost)."""
     pts = sorted(zip([0.0] + list(fracs), [0.0] + list(ub), [False] + list(flagged or [False] * len(fracs))))
-    best, censored = 0.0, False
+    # censored only when every cell is under the bar (a flagged cell counts as above it): a curve that crossed the
+    # bar and came back under it at the last cell (a non-monotone upper bound) is not censored
+    best, censored = 0.0, all(u <= bar and not fl for _, u, fl in pts)
     for i, (f, u, fl) in enumerate(pts):
         ok = (u <= bar) and not fl
         if not ok:
             continue
         nxt = pts[i + 1] if i + 1 < len(pts) else None
         if nxt is None:
-            best, censored = f, True
+            best = f
             continue
         nf, nu, nfl = nxt
         if nu <= bar and not nfl:

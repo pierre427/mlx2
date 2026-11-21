@@ -32,7 +32,7 @@ MTP = dict(hidden_size=128, num_hidden_layers=3, num_attention_heads=4, num_key_
            sliding_window_size=4, block_size=8, markov_rank=16, markov_head_type="rnn_hidden",
            target_layer_ids=[5, 23, 41, 48])
 WIDTH = 4 * 128
-REAL = Path("~/mlx-models/Inkling-2-Mini")
+REAL = Path.home() / "mlx-models/Inkling-2-Mini"
 
 
 def greedy(logits):

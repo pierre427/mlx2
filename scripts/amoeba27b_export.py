@@ -356,6 +356,7 @@ def main():
                                   "partition": str(pdir), "router_topics": sorted({t for v in router.values() for t in v})}
         A.write_json(ev / "export.json", rep)
         # exactness on the saved files: core + every tile open (no mlx2_amoeba_open field) == the full model
+        import mlx.core as mx                      # main has no module-level mx (the helpers import it locally)
         ids = [[int(x) for x in np.random.default_rng(i).integers(100, 20000, 48)] for i in range(2)]
         base = A.Host(src, log=log, wrap=False)
         ref = np.array(base.logits_at(mx.array(ids)))

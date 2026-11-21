@@ -196,6 +196,40 @@ _PUBLIC_EXPORT_SKIP_TESTS = {
         "reads a private retained worker manifest",
     "test_qualify_serving_receipts.py::test_preflight_tree_binds_script_fixtures_and_provenance":
         "binds private provenance and fixture files into the preflight tree",
+    "test_sweep1121_amoeba_fn_a_cpu.py::test_amfn2_det_and_calc_window_inner_report_a_failed_phase":
+        "runs campaign shell scripts, which the exporter does not export",
+    "test_sweep1121_amoeba_fn_a_cpu.py::test_amfn2_t12eval_and_calib_report_failed_evals_and_carves":
+        "runs campaign shell scripts, which the exporter does not export",
+    "test_sweep1121_amoeba_fn_a_cpu.py::test_amfn2_part2_code_nightb_report_failed_carves_and_partitions":
+        "runs campaign shell scripts, which the exporter does not export",
+    "test_sweep1121_amoeba_fn_a_cpu.py::test_amfn2_nighta_reports_a_failed_atlas_and_mix":
+        "runs campaign shell scripts, which the exporter does not export",
+    "test_sweep1121_amoeba_fn_a_cpu.py::test_amfn2_calc_trigger_and_boxes_report_the_second_run":
+        "runs campaign shell scripts, which the exporter does not export",
+    "test_sweep1121_amoeba_fn_a_cpu.py::test_amfn2_day_runner_marks_only_rc0_done":
+        "runs campaign shell scripts, which the exporter does not export",
+    "test_sweep1121_amoeba_fn_a_cpu.py::test_amfn3_window_q_returns_the_job_code":
+        "runs campaign shell scripts, which the exporter does not export",
+    "test_sweep1121_amoeba_fn_a_cpu.py::test_amfn3_wrappers_never_exit_zero_over_the_job_code":
+        "runs campaign shell scripts, which the exporter does not export",
+    "test_sweep1121_amoeba_fn_a_cpu.py::test_amfn1_inner_script_has_no_night_cutoff_by_day":
+        "runs campaign shell scripts, which the exporter does not export",
+    "test_sweep1121_serving_spec_cpu.py::test_exporter_can_export_itself_without_the_calculator_bundle":
+        "needs scripts/public_export_withheld.txt, which the exporter never exports",
+    "test_sweep1121_serving_spec_cpu.py::test_exporter_still_refuses_licensed_code_without_the_bundle":
+        "needs scripts/public_export_withheld.txt, which the exporter never exports",
+    "test_sweep1121_serving_spec_cpu.py::test_exporter_refuses_a_non_utf8_payload_with_its_own_error":
+        "needs scripts/public_export_withheld.txt, which the exporter never exports",
+    "test_sweep1121_amoeba_fn_b_cpu.py::test_det_served_scores_false_fire_and_never_reports_unscored_as_zero_of_n":
+        "tests a campaign script that is not exported",
+    "test_sweep1121_amoeba_lab_cpu.py::test_box_from_refuses_other_unit_kind_depth_and_ids":
+        "tests a lab script that is not exported",
+    "test_amoeba_donor_overlay_cpu.py::test_end_to_end_arms_stage_tiny":
+        "reads a local research corpus",
+    "test_amoeba_donor_overlay_cpu.py::test_end_to_end_scale_stage_tiny":
+        "reads a local research corpus",
+    "test_amoeba_donor_overlay_cpu.py::test_donor_equal_to_host_gives_no_wins_and_zero_kl":
+        "reads a local research corpus",
 }
 
 

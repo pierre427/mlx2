@@ -545,7 +545,7 @@ def test_window_time_cap_still_writes_the_summary(tmp_path, toy_ops):
     r = LG.main(_argv(src, model, out, "--time-cap-min", "0"), host_factory=lambda log: h,
                 lid_factory=lambda: (MockLID(), lrec))
     s = json.loads((out / "summary.json").read_text())
-    assert r["status"] == "finished" and s["results"] == [] and s["not_run"]
+    assert r["status"] == LG.NO_CELLS and s["results"] == [] and s["not_run"]      # nothing scored: not "finished"
     assert s["verdict"]["missing"] and s["verdict"]["verdict"] != "pass" and any("time cap" in x for x in s["not_run"])
 
 

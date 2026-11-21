@@ -5,7 +5,9 @@ CPU only. Features: the mean of the prompt's input embeddings (the 27B's own emb
 available before prefill. One-vs-rest logistic probes per router topic:
 - the v4 bucket families (enriched atlas corpus cells -> family, via amoeba27b_buckets.FAMILIES);
 - the named task boxes (task prompts from amoeba27b_lib.build_tasks).
-Fit on a source-hashed fit half, threshold per topic on the held half at --min-recall. At serve time a request
+Fit on a source-hashed fit half, threshold per topic on the held half at --min-recall (the receipt's
+threshold_set_* numbers are measured on those same rows; cross_* are two-fold out-of-sample estimates of the same
+threshold rule inside the held half). At serve time a request
 opens every topic whose probe passes its threshold. If none passes, it opens every tile (the full model), so
 a router miss costs speed, never accuracy. Tiles open on the OR of their topics (partition.json).
 Also reports, for diagnosis only, which tiles each 20x20 sanity task would open (never used to fit or choose).
@@ -116,6 +118,35 @@ def half_of(src: str) -> int:
     return int(hashlib.sha256(src.encode()).hexdigest()[:8], 16) % 2
 
 
+def fold_of(src: str) -> int:
+    """A second source hash (independent of half_of's bits) that splits the held half in two."""
+    return int(hashlib.sha256(src.encode()).hexdigest()[8:16], 16) % 2
+
+
+def threshold_report(pos, neg, pos_fold, neg_fold, min_recall):
+    """(threshold, report) for one topic from its held-half scores. The threshold is the (1 - min_recall) quantile
+    of the positives, so recall on those rows is >= min_recall by construction: those numbers are named
+    threshold_set_* (in-sample). cross_recall / cross_fpr apply the same rule two-fold: the threshold from one
+    fold of the held rows, measured on the other fold, pooled over both directions (None without positives in
+    both folds); they estimate the rule out of sample, not the shipped threshold itself."""
+    pos, neg, pos_fold, neg_fold = (np.asarray(x) for x in (pos, neg, pos_fold, neg_fold))
+    thr = float(np.quantile(pos, 1 - min_recall)) if len(pos) else 0.0
+    rep = {"held_pos": int(len(pos)), "threshold_from": "held_positives" if len(pos) else "none (tau 0.0)",
+           "threshold_set_recall": float((pos >= thr).mean()) if len(pos) else None,
+           "threshold_set_fpr": float((neg >= thr).mean()) if len(neg) else None,
+           "cross_recall": None, "cross_fpr": None}
+    if all((pos_fold == f).any() for f in (0, 1)):
+        hit = n_pos = fire = n_neg = 0
+        for f in (0, 1):
+            t = float(np.quantile(pos[pos_fold == f], 1 - min_recall))
+            other_pos, other_neg = pos[pos_fold != f], neg[neg_fold != f]
+            hit, n_pos = hit + int((other_pos >= t).sum()), n_pos + len(other_pos)
+            fire, n_neg = fire + int((other_neg >= t).sum()), n_neg + len(other_neg)
+        rep["cross_recall"] = hit / n_pos
+        rep["cross_fpr"] = fire / n_neg if n_neg else None
+    return thr, rep
+
+
 def fit_probe(X, y, steps=400, lr=0.5, l2=1e-3):
     w, b = np.zeros(X.shape[1]), 0.0
     pw = (1 - y.mean()) / max(y.mean(), 1e-6)
@@ -167,16 +198,16 @@ def main():
     Z = (X - mu) / sd
     half = np.array([half_of(s) for _, _, s in rows])
     fit, held = np.where(half == 0)[0], np.where(half == 1)[0]
+    fold = np.array([fold_of(s) for _, _, s in rows])[held]
     W, B, tau, report = [], [], [], {}
     for t in topics:
         y = np.array([1.0 if t in ts else 0.0 for _, ts, _ in rows])
         w, b = fit_probe(Z[fit], y[fit])
         s = Z[held] @ w + b
-        pos, neg = s[y[held] > 0], s[y[held] == 0]
-        thr = float(np.quantile(pos, 1 - a.min_recall)) if len(pos) else 0.0
+        yp = y[held] > 0
+        # the shipped threshold is unchanged (all held positives); the report says which numbers are in-sample
+        thr, report[t] = threshold_report(s[yp], s[~yp], fold[yp], fold[~yp], a.min_recall)
         W.append(w); B.append(b); tau.append(thr)
-        report[t] = {"held_pos": int(len(pos)), "held_recall": float((pos >= thr).mean()) if len(pos) else None,
-                     "held_fpr": float((neg >= thr).mean()) if len(neg) else None}
     W, B, tau = np.stack(W), np.array(B), np.array(tau)
     part = json.loads((Path(a.partition) / "partition.json").read_text())
     fam_of_bucket = {}

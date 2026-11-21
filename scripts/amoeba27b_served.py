@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -102,7 +103,18 @@ def tokens_of(resp):
 def oracle(text, expect):
     if expect is None:
         return len(text.split()) >= 3 and not re.search(r"(.)\1{9,}", text)
-    return expect.lower() in text.lower().replace("-", "-")
+    return _ascii_dashes(expect.lower()) in _ascii_dashes(text.lower())
+
+
+def _ascii_dashes(text):
+    """Unicode dash punctuation (category Pd: U+2010..U+2015, U+FE58, U+FF0D, ...) and the minus sign U+2212 ->
+    ASCII hyphen (AGENTS.md identifier-oracle rule; models typeset codes). No other character changes."""
+    return "".join("-" if (unicodedata.category(ch) == "Pd" or ch == "\u2212") else ch for ch in text)
+
+
+def no_evidence(ta, tb):
+    """True when neither response carries a logprob token: nothing was compared, so the pair is not 'identical'."""
+    return not ta and not tb
 
 
 def near_tie_probe(base, width, ref):
@@ -124,10 +136,16 @@ def classify_pairs(ref, resps):
 
     def ids(d):
         return {vocab.setdefault(k, len(vocab)): v for k, v in d.items()}
-    rows = {"identical": 0, "near_tie_equivalent": 0, "unclassified": 0, "failed": 0}
+    rows = {"identical": 0, "near_tie_equivalent": 0, "unclassified": 0, "failed": 0, "no_evidence": 0}
     for (prompt, expect), a, b in zip(PROBES, ref, resps):
         ta, tb = tokens_of(a), tokens_of(b)
         sa, sb = [t for t, _ in ta], [t for t, _ in tb]
+        if no_evidence(ta, tb):
+            rows["no_evidence"] += 1
+            out.append({"prompt": prompt, "verdict": "no_evidence", "why": "no logprob entries in either response",
+                        "ref_text": a["choices"][0]["message"]["content"],
+                        "text": b["choices"][0]["message"]["content"]})
+            continue
         if sa == sb:
             rows["identical"] += 1
             continue
@@ -365,6 +383,25 @@ def main():
         A.write_json(out / "served.json", summary)
     log(json.dumps({k: {w: (v.get("graded_correct"), v.get("requests")) for w, v in a.get("widths", {}).items()}
                     for k, a in summary["arms"].items()}))
+    bad = failed_arms(summary)
+    if bad:
+        sys.exit(f"arms failed: {bad}")
+
+
+def failed_arms(summary):
+    """{arm: why} for arms that did not run to the end: an exception (server never healthy, ...), a server stopped
+    by the footprint cap, or a sanity pass that left no report. A low graded score is a result, not a failure."""
+    bad = {}
+    for name, rec in summary["arms"].items():
+        if rec.get("error"):
+            bad[name] = rec["error"]
+        elif rec.get("server_aborted_on_footprint"):
+            bad[name] = "server stopped on the footprint cap"
+        else:
+            lost = [w for w, row in rec.get("widths", {}).items() if row.get("rc") and "requests" not in row]
+            if lost:
+                bad[name] = f"sanity pass left no report at {lost}"
+    return bad
 
 
 def post_expect_error(base, body):

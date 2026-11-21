@@ -185,7 +185,7 @@ sys.path.append(str(ROOT))  # research.amoeba.carve (the memory watchdog); appen
 import amoeba_hub_align as ha  # noqa: E402
 import amoeba_paired_stats as PS  # noqa: E402
 
-CORE = "~/Library/Application Support/mlx2/research-artifacts/amoeba/core-corpus-v2-9b64b3791/corpus.jsonl"
+CORE = str(Path.home() / "Library/Application Support/mlx2/research-artifacts/amoeba/core-corpus-v2-9b64b3791/corpus.jsonl")
 _STATE = {}  # main()'s receipt and its saver, for the watchdog thread and the exit handler
 
 
@@ -421,7 +421,7 @@ def main():
     ap.add_argument("--task", default="add:3:3",
                     help="add:A:B, mul:A:B, addk:A:K (generation-scored arithmetic) or topic:<taxonomy id> (a "
                          "knowledge topic: train on its fit probe texts, score held texts teacher-forced)")
-    ap.add_argument("--probes", default="~/Library/Application Support/mlx2/research-artifacts/amoeba/topic-probes-9a1f35475/corpus.jsonl", help="topic task: probe corpus (v5.3)")
+    ap.add_argument("--probes", default=str(Path.home() / "Library/Application Support/mlx2/research-artifacts/amoeba/topic-probes-9a1f35475/corpus.jsonl"), help="topic task: probe corpus (v5.3)")
     ap.add_argument("--topic-tokens", type=int, default=64, help="topic task: tokens per text (texts shorter are dropped)")
     ap.add_argument("--bos", default="auto", choices=["auto", "off"],
                     help="topic and English texts: prepend the tokenizer's BOS when it has one (Gemma; Qwen has none)")

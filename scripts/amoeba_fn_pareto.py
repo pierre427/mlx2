@@ -463,6 +463,14 @@ def main(argv=None):
             return {"skipped": "no choice with CF > 0 on val"}
         f = ch["fraction"]
         o, sched, comp = ch["order"], ch["schedule"], ch["comp"]
+        if o not in orders and o in CAUSAL and (out / "attrib.npz").exists():
+            # resumed with --no-causal after an attempt that saved the attribution and scored causal cells: the val
+            # choice (from cells.jsonl) is a causal order this attempt did not build. Its mask is CPU-only.
+            z = np.load(out / "attrib.npz")
+            orders[o] = global_order(o, z["n0" if o == "O-causal0" else "fisher"], F,
+                                     a.seed + (8 if o == "O-causal0" else 9))
+        if o not in orders:
+            return {"skipped": f"the val choice {o} has no order in this attempt"}
         pl = None if sched == "base" else depth_fractions(sched, f, L)
         res = {"choice": ch}
         for role, oo, sch, cm in (("choice", o, sched, comp), ("O-fire", "O-fire", "base", "zero"),

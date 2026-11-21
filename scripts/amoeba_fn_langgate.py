@@ -727,6 +727,12 @@ def main(argv=None, host_factory=None, lid_factory=None):
         import signal
         signal.signal(signal.SIGTERM, _sigterm)         # SIGTERM runs finally (the summary), like an exception
     t_start = time.time()
+    if a.stop_new_at and not a.dry_run and clock_deadline(a.stop_new_at, t_start) <= t_start:
+        # the cutoff has already passed: every cell would be skipped after a full model load. Refuse before OUT
+        # is created (the inner script refuses a non-empty OUT on the retry) and yield (75).
+        print(f"langgate: --stop-new-at {a.stop_new_at} has just passed at {time.strftime('%H:%M:%S')}; not started",
+              flush=True)
+        raise SystemExit(75)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     log_fh = open(out / "langgate.log", "a")
@@ -952,7 +958,8 @@ def main(argv=None, host_factory=None, lid_factory=None):
                 for arm in phase:
                     run(arm, name)
             NW.phase_end("phase " + "+".join(phase), log, receipt)
-        receipt["status"] = "finished"
+        # a window in which no cell was scored (deadline reached during the load) measured nothing: not a success
+        receipt["status"] = "finished" if receipt["results"] else NO_CELLS
         return receipt
     except BaseException as e:                       # noqa: BLE001 - the summary is always written
         receipt["status"] = f"error: {type(e).__name__}: {e}"
@@ -964,14 +971,18 @@ def main(argv=None, host_factory=None, lid_factory=None):
             log_fh.close()
 
 
+NO_CELLS = "no cell scored (deadline reached before the first cell)"
+
+
 def clock_deadline(hhmm, now):
-    """Epoch of the next local HH:MM after now; one more than 16 h away means today's has just passed (a window
-    that started after the cutoff, e.g. 06:40 for 06:30): then now, so no cell starts."""
+    """Epoch of the next local HH:MM after now; one more than 23 h away means today's has just passed (a window
+    that started after the cutoff, e.g. 06:40 for 06:30): then now, so no cell starts. Anything earlier in the day
+    (a daytime start at 10:00) gets the next occurrence, tomorrow's."""
     h, m = (int(x) for x in hhmm.split(":"))
     lt = time.localtime(now)
     t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, m, 0, 0, 0, -1))
     t = t if t > now else t + 86400
-    return now if t - now > 16 * 3600 else t
+    return now if t - now > 23 * 3600 else t
 
 
 def gen_summary(gens):
@@ -1091,4 +1102,4 @@ def summary_md(r):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(3 if main().get("status") == NO_CELLS else 0)

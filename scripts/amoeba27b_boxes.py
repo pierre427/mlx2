@@ -45,6 +45,21 @@ REPORT = ["capitals", "capitals_fresh", "capitals_phrasing", "arithmetic", "fren
 WIDE = REPORT + ["multiplication", "logic_entail"]
 
 
+def spec_proxy(agree, k):
+    """(tokens, verify steps) of a draft-k chain over per-position drafter agreement: each step accepts up to k
+    agreeing drafts plus the verifier's own token, never past the end of the generated tokens (a last run that
+    reaches the end has no verifier token left to count)."""
+    steps, acc, i = 0, 0, 0
+    while i < len(agree):
+        run = 0
+        while run < k and i + run < len(agree) and agree[i + run]:
+            run += 1
+        acc += min(run + 1, len(agree) - i)
+        i += run + 1
+        steps += 1
+    return acc, steps
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -565,14 +580,7 @@ def main():
                 dl = host.logits_at(mx.array([seq]), list(range(len(p) - 1, len(seq) - 1)))[0].argmax(-1)
                 host.ctl.reset()
                 agree = (np.array(dl) == np.array(seq[len(p):])).tolist()
-                steps, acc, i = 0, 0, 0
-                while i < len(agree):
-                    run = 0
-                    while run < k and i + run < len(agree) and agree[i + run]:
-                        run += 1
-                    acc += run + 1                           # accepted drafts + the verifier's own token
-                    i += run + 1
-                    steps += 1
+                acc, steps = spec_proxy(agree, k)
                 per.setdefault(task.split("_")[0], []).append(acc / steps)
                 mx.clear_cache()
             rep["spec"][vname] = {t: float(np.mean(v)) for t, v in per.items()}

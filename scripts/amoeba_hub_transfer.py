@@ -136,7 +136,7 @@ def main():
     ap.add_argument("--moe-units", choices=pb.MOE_UNITS, default="expert",
                     help="donor MoE unit granularity; must match the box.json's moe_units (a neuron box is refused "
                          "unless neuron units are installed)")
-    ap.add_argument("--host", default="~/mlx-models/Qwen3.5-4B-MLX-4bit")
+    ap.add_argument("--host", default=str(Path.home() / "mlx-models/Qwen3.5-4B-MLX-4bit"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--items", type=int, default=50)
     ap.add_argument("--test", type=int, default=20)
@@ -151,8 +151,8 @@ def main():
     ap.add_argument("--english-arms", default="", help="arms for the English-cost KL (default: the test arms)")
     ap.add_argument("--quiet-k", type=int, default=256)
     ap.add_argument("--quiet-fit", type=int, default=48, help="ordinary-text fit texts for the quiet basis")
-    ap.add_argument("--quiet-corpus", default="~/Library/Application Support/mlx2/research-artifacts/"
-                    "amoeba/core-corpus-v2-9b64b3791/corpus.jsonl")
+    ap.add_argument("--quiet-corpus", default=str(Path.home() / "Library/Application Support/mlx2/research-artifacts/"
+                                "amoeba/core-corpus-v2-9b64b3791/corpus.jsonl"))
     ap.add_argument("--english-texts", type=int, default=0, help="held ordinary texts for the English-cost KL (0 = off)")
     ap.add_argument("--english-tokens", type=int, default=192)
     ap.add_argument("--test-limit", type=int, default=0, help="first N test items only (0 = all)")
