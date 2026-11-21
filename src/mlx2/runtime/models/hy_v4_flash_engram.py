@@ -37,6 +37,17 @@ the PLE pool workers.
   value is ``scale * q + bias`` in fp32, the law of ``deepseek_v41_engram.
   decode_affine4_rows`` (the model's cast to bf16 then rounds it once, as
   Metal ``mx.dequantize`` does).  Approximate and unqualified.
+* ``iq4_nl``: ggml IQ4_NL (GGUF tensor type 20), read from a GGUF file that
+  the config binds per Engram layer (``text_config.engram_gguf_tables``:
+  ``{layer_id: {"file", "tensor"}}``; the third-party Nace.AI pack's layout,
+  provenance ``hy-v4-flash.json``).  A row of ``dim`` values is ``dim / 32``
+  blocks of 18 bytes: one little-endian F16 scale ``d``, then 16 bytes of
+  4-bit codes, value ``j`` the low nibble of byte ``j`` and value ``j + 16``
+  its high nibble, each an index into the fixed 16-level codebook
+  ``IQ4NL_LEVELS``; a value is ``d * level`` in fp32 (ggml
+  ``dequantize_row_iq4_nl``).  The table carries no E4M3 round trip: the
+  ``transformers`` profile still applies it at runtime after the cast to
+  the activation dtype.  Approximate and unqualified.
 """
 
 from __future__ import annotations
@@ -67,14 +78,25 @@ _DTYPES = {"BF16": (2, "bf16"), "F32": (4, "<f4"), "F16": (2, "<f2"), "F8_E4M3":
 FORMAT_KEY = "mlx2_engram_format"
 FP8_ROW = "fp8_e4m3_row"
 AFFINE4 = "affine4_g32"
-TABLE_FORMATS = ("bf16", FP8_ROW, AFFINE4)
+IQ4NL = "iq4_nl"
+TABLE_FORMATS = ("bf16", FP8_ROW, AFFINE4, IQ4NL)
+# Formats scripts/convert_hy_v4_flash_mlx.py writes (safetensors shards);
+# ``iq4_nl`` is read from a GGUF file only.
+WRITABLE_FORMATS = ("bf16", FP8_ROW, AFFINE4)
 AFFINE4_GROUP = 32
+# ggml ``kvalues_iq4nl``: the fixed IQ4_NL codebook.
+IQ4NL_LEVELS = np.array([-127, -104, -83, -65, -49, -35, -22, -10,
+                         1, 13, 25, 38, 53, 69, 89, 113], dtype=np.float32)
+IQ4NL_BLOCK = 32
+IQ4NL_BLOCK_BYTES = 18
+GGUF_TYPE_IQ4_NL = 20
 # Declared exactness of each format, relative to reading the bf16 table.
 FORMAT_RELATION = {
     "bf16": "source",
     FP8_ROW: ("exact vs the transformers-profile E4M3 round trip in its declared dtype "
               "(CPU-verified; Metal parity unverified)"),
     AFFINE4: "approximate (affine 4-bit, group 32)",
+    IQ4NL: "approximate (ggml IQ4_NL, 32-value blocks; third-party GGUF table)",
 }
 _SCALE_BYTES = {"BF16": 2, "F32": 4, "F16": 2}
 
@@ -88,6 +110,10 @@ def packed_row_bytes(table_format: str, dim: int, scale_dtype: str) -> int:
         if dim % AFFINE4_GROUP:
             raise ValueError(f"affine4_g32 needs a row width divisible by {AFFINE4_GROUP}")
         return dim // 2 + 2 * width * (dim // AFFINE4_GROUP)
+    if table_format == IQ4NL:
+        if dim % IQ4NL_BLOCK:
+            raise ValueError(f"iq4_nl needs a row width divisible by {IQ4NL_BLOCK}")
+        return dim // IQ4NL_BLOCK * IQ4NL_BLOCK_BYTES
     raise ValueError(f"{table_format} is not a packed Engram format")
 
 
@@ -146,19 +172,156 @@ def decode_affine4_row(raw: np.ndarray, dim: int, scale_dtype: str) -> np.ndarra
     return values.astype(np.float32, copy=False)
 
 
+def decode_iq4nl_row(raw: np.ndarray, dim: int) -> np.ndarray:
+    """Packed ``iq4_nl`` rows ``uint8 [n, dim / 32 * 18]`` -> fp32 ``[n, dim]``.
+
+    ggml ``dequantize_row_iq4_nl``: per 32-value block an F16 scale ``d``,
+    then 16 code bytes; value ``j`` is ``d * LEVELS[b[j] & 15]`` and value
+    ``j + 16`` is ``d * LEVELS[b[j] >> 4]``.  The product of an F16 scale
+    and a 7-bit level is exact in fp32.  Nonfinite results are refused.
+    """
+    raw = np.asarray(raw, np.uint8)
+    if raw.ndim != 2 or raw.shape[1] != packed_row_bytes(IQ4NL, dim, "F16"):
+        raise ValueError("iq4_nl rows have the wrong width")
+    blocks = raw.reshape(raw.shape[0], dim // IQ4NL_BLOCK, IQ4NL_BLOCK_BYTES)
+    scales = np.ascontiguousarray(blocks[:, :, :2]).view("<f2").astype(np.float32)  # [n, b, 1]
+    codes = blocks[:, :, 2:]
+    codes = np.concatenate((codes & 15, codes >> 4), axis=-1)
+    with np.errstate(over="ignore", invalid="ignore"):
+        values = (IQ4NL_LEVELS[codes] * scales).reshape(raw.shape[0], dim)
+    if not np.isfinite(values).all():
+        raise ValueError("nonfinite decoded Engram row")
+    return values.astype(np.float32, copy=False)
+
+
+GGUF_MAGIC = b"GGUF"
+# GGUF metadata value types -> fixed byte width (8 string, 9 array: variable).
+_GGUF_SCALAR = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+
+def is_gguf(path) -> bool:
+    with open(path, "rb") as handle:
+        return handle.read(4) == GGUF_MAGIC
+
+
+def gguf_tensors(path) -> dict:
+    """``{name: (absolute data offset, ggml type, dims)}`` of a GGUF v2/v3 file.
+
+    Reads the header only.  ``dims`` is in GGUF order (``ne[0]`` first, the
+    innermost, contiguous dimension).  ``general.alignment`` sets the data
+    alignment (default 32).
+    """
+    with open(path, "rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+
+        def read(n):
+            data = handle.read(n)
+            if len(data) != n:
+                raise ValueError("truncated GGUF header")
+            return data
+
+        def u32():
+            return struct.unpack("<I", read(4))[0]
+
+        def u64():
+            return struct.unpack("<Q", read(8))[0]
+
+        def string():
+            n = u64()
+            if n > 1 << 16:
+                raise ValueError("implausible GGUF string")
+            return read(n).decode("utf-8")
+
+        def value(kind, depth=0):
+            if kind in _GGUF_SCALAR:
+                raw = read(_GGUF_SCALAR[kind])
+                return struct.unpack({1: "<B", 2: "<H", 4: "<I", 8: "<Q"}[len(raw)], raw)[0] \
+                    if kind in (0, 2, 4, 10) else raw
+            if kind == 8:
+                return string()
+            if kind == 9 and depth == 0:
+                inner, count = u32(), u64()
+                if count > 1 << 24:
+                    raise ValueError("implausible GGUF array")
+                return [value(inner, 1) for _ in range(count)]
+            raise ValueError(f"unsupported GGUF metadata type {kind}")
+
+        if read(4) != GGUF_MAGIC:
+            raise ValueError("not a GGUF file")
+        version = u32()
+        if version not in (2, 3):
+            raise ValueError(f"unsupported GGUF version {version}")
+        n_tensors, n_kv = u64(), u64()
+        if n_tensors > 1 << 16 or n_kv > 1 << 16:
+            raise ValueError("implausible GGUF header counts")
+        alignment = 32
+        for _ in range(n_kv):
+            key = string()
+            kind = u32()
+            got = value(kind)
+            if key == "general.alignment":
+                if kind != 4 or not got or got & (got - 1):
+                    raise ValueError("GGUF general.alignment must be a power-of-two u32")
+                alignment = got
+        infos = {}
+        for _ in range(n_tensors):
+            name = string()
+            ndim = u32()
+            if not 1 <= ndim <= 4:
+                raise ValueError("GGUF tensor rank out of range")
+            dims = tuple(u64() for _ in range(ndim))
+            kind, offset = u32(), u64()
+            if name in infos:
+                raise ValueError(f"duplicate GGUF tensor {name}")
+            infos[name] = (kind, dims, offset)
+        data0 = -(-handle.tell() // alignment) * alignment
+    out = {}
+    for name, (kind, dims, offset) in infos.items():
+        if offset % alignment:
+            raise ValueError(f"GGUF tensor {name} is misaligned")
+        if data0 + offset > size:
+            raise ValueError(f"GGUF tensor {name} starts past the end of the file")
+        out[name] = (data0 + offset, kind, dims)
+    return out
+
+
+def gguf_table_layout(path, name) -> dict:
+    """Layout of an IQ4_NL Engram table ``name`` in GGUF file ``path``."""
+    tensors = gguf_tensors(path)
+    entry = tensors.get(name)
+    if entry is None:
+        raise KeyError(f"{name} not in {path}")
+    start, kind, dims = entry
+    if kind != GGUF_TYPE_IQ4_NL:
+        raise ValueError(f"GGUF Engram table {name} has ggml type {kind}; only IQ4_NL (20) is implemented")
+    if len(dims) != 2:
+        raise ValueError("Engram table must be 2-D")
+    dim, rows = int(dims[0]), int(dims[1])
+    row_bytes = packed_row_bytes(IQ4NL, dim, "F16")
+    if start + rows * row_bytes > os.path.getsize(path):
+        raise ValueError(f"GGUF Engram table {name} runs past the end of the file")
+    ends = sorted(s for s, _, _ in tensors.values() if s > start)
+    if ends and start + rows * row_bytes > ends[0]:
+        raise ValueError(f"GGUF Engram table {name} overlaps the next tensor")
+    return {"format": IQ4NL, "start": start, "rows": rows, "dim": dim, "row_bytes": row_bytes,
+            "dtype": "IQ4_NL", "scale_dtype": "F16"}
+
+
 def table_layout(path, name) -> dict:
     """Declared layout of Engram table ``name`` in ``path`` (no data read).
 
     ``{"format", "start", "rows", "dim", "row_bytes", "dtype", "scale_dtype"}``;
     a table without format metadata is ``bf16`` (the checkpoint's own).
     """
+    if is_gguf(path):
+        return gguf_table_layout(path, name)
     header = safetensors_header(path)
     meta = header.get("__metadata__") or {}
     start, dtype, shape = safetensors_tensor(path, name)
     if len(shape) != 2:
         raise ValueError("Engram table must be 2-D")
     table_format = meta.get(FORMAT_KEY, "bf16")
-    if table_format not in TABLE_FORMATS:
+    if table_format not in WRITABLE_FORMATS:
         raise ValueError(f"unknown Engram table format {table_format!r}")
     if table_format == "bf16":
         if dtype in ("U8", "F8_E4M3"):
@@ -298,11 +461,13 @@ class EngramTableRows:
             return decode_fp8_row(np.frombuffer(raw, np.uint8).reshape(len(rows), -1), self.dim, self.scale_dtype)
         if self.format == AFFINE4:
             return decode_affine4_row(np.frombuffer(raw, np.uint8).reshape(len(rows), -1), self.dim, self.scale_dtype)
+        if self.format == IQ4NL:
+            return decode_iq4nl_row(np.frombuffer(raw, np.uint8).reshape(len(rows), -1), self.dim)
         return _decode(raw, self.dtype, len(rows), self.dim)
 
     @property
     def approximate(self) -> bool:
-        return self.format == AFFINE4
+        return self.format in (AFFINE4, IQ4NL)
 
     @property
     def fp8_round_trip_dtype(self):
@@ -407,8 +572,8 @@ def table_shards(weight_map: dict, formats: dict | None, table_format: str) -> d
     (format -> {tensor: shard}); an artifact without it carries only its
     checkpoint tables, which are ``bf16`` and listed in the weight map.
     """
-    if table_format not in TABLE_FORMATS:
-        raise ValueError(f"Engram table format must be one of {TABLE_FORMATS}")
+    if table_format not in WRITABLE_FORMATS:
+        raise ValueError(f"Engram table format must be one of {WRITABLE_FORMATS}")
     if formats is None:
         if table_format != "bf16":
             raise ValueError(f"artifact carries no {table_format} Engram tables (only bf16)")
@@ -419,17 +584,54 @@ def table_shards(weight_map: dict, formats: dict | None, table_format: str) -> d
     return formats[table_format]
 
 
-def open_engram_tables(root, weight_map: dict, layer_ids: dict, *, table_format="bf16",
-                       formats=None, **kwargs) -> dict:
-    """Decoder layer index -> ``EngramTableRows`` for every Engram layer."""
+def gguf_bindings(gguf_tables, layer_ids: dict) -> dict:
+    """Decoder layer index -> ``(file, tensor)`` from ``text_config.engram_gguf_tables``.
+
+    ``gguf_tables`` maps each config Engram layer id (decoder index + 1) to
+    ``{"file": <path inside the artifact>, "tensor": <GGUF tensor name>}``;
+    every Engram layer needs exactly one binding.
+    """
+    if not isinstance(gguf_tables, dict):
+        raise ValueError("engram_gguf_tables must map Engram layer ids to {file, tensor}")
+    by_id = {str(layer_id): index for index, layer_id in layer_ids.items()}
+    if set(gguf_tables) != set(by_id):
+        raise ValueError("engram_gguf_tables must bind exactly the Engram layers")
     out = {}
-    shards = table_shards(weight_map, formats, table_format)
-    try:
+    for key, binding in gguf_tables.items():
+        if (not isinstance(binding, dict) or set(binding) != {"file", "tensor"}
+                or not all(isinstance(binding[k], str) and binding[k] for k in ("file", "tensor"))):
+            raise ValueError(f"engram_gguf_tables[{key!r}] must be {{file, tensor}}")
+        name = binding["file"]
+        if Path(name).is_absolute() or ".." in Path(name).parts:
+            raise ValueError(f"Engram GGUF file must stay within the artifact: {name}")
+        out[by_id[key]] = (name, binding["tensor"])
+    return out
+
+
+def open_engram_tables(root, weight_map: dict, layer_ids: dict, *, table_format="bf16",
+                       formats=None, gguf_tables=None, **kwargs) -> dict:
+    """Decoder layer index -> ``EngramTableRows`` for every Engram layer.
+
+    ``iq4_nl`` tables come from the GGUF bindings ``gguf_tables``
+    (``text_config.engram_gguf_tables``); every other format from the
+    weight map or the converter's ``mlx2_engram_formats``.
+    """
+    out = {}
+    if table_format == IQ4NL:
+        if gguf_tables is None:
+            raise ValueError("artifact binds no iq4_nl Engram tables (no engram_gguf_tables)")
+        located = gguf_bindings(gguf_tables, layer_ids)
+    else:
+        shards = table_shards(weight_map, formats, table_format)
+        located = {}
         for index in layer_ids:
             name = f"model.layers.{index}.engram_layer.multi_head_embedding.embedding.weight"
-            shard = shards.get(name)
-            if shard is None:
+            if shards.get(name) is None:
                 raise ValueError(f"Engram table {name} ({table_format}) is not in the artifact")
+            located[index] = (shards[name], name)
+    try:
+        for index in layer_ids:
+            shard, name = located[index]
             out[index] = EngramTableRows(Path(root) / shard, name, table_format=table_format, **kwargs)
     except BaseException:
         for reader in out.values():

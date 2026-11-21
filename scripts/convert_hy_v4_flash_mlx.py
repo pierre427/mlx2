@@ -20,7 +20,7 @@ Layout written (``config.json`` gets ``mlx2_layout: hy_v4_flash-sanitized-v1``):
   ``fp8_e4m3_row`` (E4M3 codes + one row scale, exact vs the transformers
   round trip) and ``affine4_g32`` (MLX affine 4-bit, group 32, approximate)
   write ``engram-<i>.<format>.safetensors`` with the format declared in the
-  shard metadata (``hy_v4_flash_engram.TABLE_FORMATS``) and list it under
+  shard metadata (``hy_v4_flash_engram.WRITABLE_FORMATS``) and list it under
   ``config["mlx2_engram_formats"]``.  The weight map names the ``bf16``
   shard when it is written, else the first format's;
 * ``model.dfly_layers.*`` and the ``vit.*`` vision tower kept in the source
@@ -196,11 +196,11 @@ def table_shard_name(layer: str, table_format: str) -> str:
 
 
 def parse_formats(text) -> list:
-    from mlx2.runtime.models.hy_v4_flash_engram import TABLE_FORMATS
+    from mlx2.runtime.models.hy_v4_flash_engram import WRITABLE_FORMATS
 
     formats = [f.strip() for f in (text.split(",") if isinstance(text, str) else text) if f.strip()]
-    if not formats or len(set(formats)) != len(formats) or set(formats) - set(TABLE_FORMATS):
-        raise SystemExit(f"--engram-formats takes distinct entries of {TABLE_FORMATS}")
+    if not formats or len(set(formats)) != len(formats) or set(formats) - set(WRITABLE_FORMATS):
+        raise SystemExit(f"--engram-formats takes distinct entries of {WRITABLE_FORMATS}")
     return formats
 
 

@@ -749,6 +749,10 @@ MIT-licensed sources adapted in the Nemotron 3.5 and Muse work (2026-10)
   llama.cpp (https://github.com/ggml-org/llama.cpp), Copyright (c) 2023
   Georgi Gerganov; the tables are ggml's reference tables, Copyright (c)
   2023-2026 The ggml authors.
+- src/mlx2/runtime/models/hy_v4_flash_engram.py: the 16-entry IQ4_NL
+  codebook (ggml kvalues_iq4nl) and the IQ4_NL block layout (ggml type 20),
+  from the same llama.cpp sources; the GGUF v3 header reader and the table
+  reader around them are mlx2's own.
 - src/mlx2/runtime/models/muse_attn_window.py: transcription of MLX's vector
   scaled-dot-product-attention arithmetic (mlx/backend/metal/
   scaled_dot_product_attention.cpp and kernels/sdpa_vector.h, revision
@@ -1165,6 +1169,24 @@ reproduced in the mlx-vlm section earlier in this file):
   src/mlx2/adapters/muse_vision_config.py and
   src/mlx2/adapters/muse_glimmer_images.py. The text trunk, caches and server
   are mlx2's own.
+- Revision 111ac668078e017c9db1eb3936f4d7a6e0a88f89
+  (mlx_vlm/models/inkling2/language.py, config.py and inkling2.py): the
+  Inkling 2 looped text decoder and configuration, adapted in
+  src/mlx2/runtime/models/inkling2/language.py and config.py, with the
+  checkpoint name map and expert-format decoding restated in
+  src/mlx2/adapters/inkling2.py. The upstream language.py is Apache License
+  2.0, adapted for MLX from the HuggingFace Transformers Inkling2
+  implementation (https://github.com/huggingface/transformers, Apache
+  License 2.0); the mlx2 file keeps that header.
+- Same revision (mlx_vlm/speculative/drafters/inkling2_dspark/dspark.py and
+  config.py): the Inkling 2 bundled DSpark drafter (draft attention, MLP,
+  layer, Markov head and block drafting), ported in
+  src/mlx2/runtime/drafters/inkling2_dspark.py. The upstream dspark.py is
+  Apache License 2.0, adapted from vLLM's Inkling 2 DSpark implementation
+  (vllm/models/inkling2/dspark.py and ops/dspark.py, copyright contributors
+  to the vLLM project); the mlx2 file keeps that header. Strict artifact
+  inspection, loading, the external-draft backend and tests are mlx2's own.
+  The Apache License 2.0 text is this repository's LICENSE.
 
 ------------------------------------------------------------------------------
 mxfp4-int8-m5 (https://github.com/shinyoungkang1/mxfp4-int8-m5, revision

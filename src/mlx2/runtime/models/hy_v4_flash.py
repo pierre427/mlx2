@@ -211,14 +211,31 @@ class ModelArgs(BaseModelArgs):
 
 # ----------------------------------------------------------------- numerics --
 
-def _eps(dtype) -> float:
-    """``torch.nn.RMSNorm(eps=None)``: the machine epsilon of the input dtype."""
-    return float(np.finfo(np.float32).eps) if dtype == mx.float32 else {
-        mx.bfloat16: 2.0 ** -7, mx.float16: 2.0 ** -10}.get(dtype, float(np.finfo(np.float32).eps))
+TORCH_RMS_EPS = float(np.finfo(np.float32).eps)
 
 
 def rms_norm(x, weight, eps):
     return mx.fast.rms_norm(x, weight, eps)
+
+
+def torch_rms_norm(x, weight=None):
+    """``torch.nn.RMSNorm(dims)`` with ``eps=None``, as the Engram layers use it.
+
+    On bf16/fp16 input torch takes the epsilon of the fp32 opmath type
+    (``finfo(float32).eps``, not the input dtype's 2**-7 for bf16) and applies
+    the weight in fp32 before the one rounding to the input dtype (checked on
+    torch 2.8 and 2.14; Nace.AI's Hy4 port agrees).  ``mx.fast.rms_norm`` on
+    bf16 rounds before it scales, which is the model's own ``HYV4FlashRMSNorm``
+    order, so here the whole norm runs in fp32 and is rounded once.
+    ``weight`` may be ``[..., d]`` (stacked per-head gammas); None means 1.
+    """
+    dtype = x.dtype
+    xf = x.astype(mx.float32)
+    if weight is None or weight.ndim == 1:
+        w = None if weight is None else weight.astype(mx.float32)
+        return mx.fast.rms_norm(xf, w, TORCH_RMS_EPS).astype(dtype)
+    y = mx.fast.rms_norm(xf, None, TORCH_RMS_EPS) * weight.astype(mx.float32)
+    return y.astype(dtype)
 
 
 def inv_frequencies(base: float, dim: int) -> mx.array:
@@ -336,6 +353,69 @@ class Router(nn.Module):
         if self.norm:
             weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
         return indices, weights * self.scale
+
+
+class Q2ZeroSwitchLinear(nn.Module):
+    """Routed experts in the third-party ``q2_0`` mode (2-bit, no stored biases).
+
+    ``q2_0`` (Nace.AI Hy4-flash pack, provenance ``hy-v4-flash.json``) is MLX
+    affine 2-bit with ``biases = -scales``: a weight is ``scale * (q - 1)``,
+    ``q`` in 0..3, 16 codes per little-endian U32, low bits first.  MLX 0.32.4
+    has no ``q2_0`` mode, so the pack's F16 scales are widened to fp32 at load
+    (``q2_0_planes``) and the gather runs as ``gather_qmm(bits=2, affine)``
+    with fp32 input, scales and biases, the result cast back to the input
+    dtype (the pack's own execution).  Same call contract as
+    ``QuantizedSwitchLinear``.
+    """
+
+    mode = "affine"
+    source_mode = "q2_0"
+
+    def __init__(self, input_dims: int, output_dims: int, num_experts: int, group_size: int = 64):
+        super().__init__()
+        if input_dims % group_size or input_dims % 16:
+            raise ValueError("q2_0 experts need an input width divisible by the group size and 16")
+        self.weight = mx.zeros((num_experts, output_dims, input_dims // 16), dtype=mx.uint32)
+        self.scales = mx.zeros((num_experts, output_dims, input_dims // group_size), dtype=mx.float32)
+        self.biases = mx.zeros_like(self.scales)
+        self.group_size = group_size
+        self.bits = 2
+        self.freeze()
+
+    @property
+    def input_dims(self):
+        return self.scales.shape[2] * self.group_size
+
+    @property
+    def output_dims(self):
+        return self.weight.shape[1]
+
+    @property
+    def num_experts(self):
+        return self.weight.shape[0]
+
+    def __call__(self, x, indices, sorted_indices=False):
+        from .switch_layers import _quantized_gather_tail_policy
+
+        # Same sorted-gather workaround as QuantizedSwitchLinear: a sorted
+        # call whose width misses the sorted kernel's K tile runs unsorted.
+        policy = _quantized_gather_tail_policy("affine", int(x.shape[-1]), sorted_indices)
+        return mx.gather_qmm(
+            x.astype(mx.float32), self["weight"], self["scales"], self["biases"],
+            rhs_indices=indices, transpose=True, group_size=self.group_size, bits=2,
+            mode="affine", sorted_indices=sorted_indices and policy == "native").astype(x.dtype)
+
+
+def q2_0_planes(weights: dict, stem: str) -> None:
+    """In place: a ``q2_0`` module's U32 codes + F16 scales -> fp32 affine planes."""
+    if stem + ".biases" in weights:
+        raise ValueError(f"{stem}: q2_0 stores no biases (they are -scales)")
+    w, scales = weights.get(stem + ".weight"), weights.get(stem + ".scales")
+    if w is None or scales is None or w.dtype != mx.uint32 or w.shape[:-1] != scales.shape[:-1]:
+        raise ValueError(f"{stem}: q2_0 needs U32 codes and per-group scales")
+    scales = scales.astype(mx.float32)
+    weights[stem + ".scales"] = scales
+    weights[stem + ".biases"] = -scales
 
 
 class MoE(nn.Module):
@@ -792,16 +872,20 @@ class EngramLayer(nn.Module):
 
     * ``transformers`` (default, Pierre 2026-11-18): the transformers port.
       Rows take the per-vector E4M3 round trip when ``engram_fp8_embedding``
-      is set ("as Engram embeddings were trained to be read"); the per-head
-      lookup norms and the unified value norm are ``nn.RMSNorm(eps=None)`` in
-      the activation dtype, whose epsilon is 2**-7 for bf16, and the value
-      branch is combined in the activation dtype.
+      is set ("as Engram embeddings were trained to be read"), and the value
+      branch is combined in the activation dtype after the unified value norm
+      rounds.
     * ``vllm``: vLLM ``FlashEngram``.  A bf16 table is read without the
-      round trip (an FP8 table already carries it); the per-head and value
-      norms run in fp32 with the fp32 epsilon and the branch combines in fp32.
+      round trip (an FP8 table already carries it), and the value norm and
+      branch combine stay in fp32.
 
-    ``norm_key`` / ``norm_query`` take the activation dtype's epsilon in both.
-    Norm reductions accumulate in fp32 in both, as torch's ``rms_norm`` does.
+    The per-head lookup norms, ``norm_key`` and ``norm_query`` are
+    ``torch.nn.RMSNorm(eps=None)`` in both references: fp32 epsilon, weight
+    applied in fp32, one rounding (``torch_rms_norm``).  The unified value
+    norm is that op in ``transformers``; ``vllm`` keeps it unrounded in fp32
+    with the same epsilon.  Until 2026-11-20 the ``transformers`` profile, and
+    ``norm_key``/``norm_query`` in both, used the bf16 epsilon 2**-7 with
+    round-then-scale, a misreading of torch's documentation.
 
     Table formats (``bind_engram`` sets ``table_round_trip_dtype``): an
     ``fp8_e4m3_row`` table (converter ``--engram-formats``) already carries the
@@ -844,16 +928,13 @@ class EngramLayer(nn.Module):
         carried = self.table_round_trip_dtype is not None and self.table_round_trip_dtype == dtype
         if self.fp8 and transformers and not carried:
             x = fp8_round_trip(x)
-        head_eps = _eps(dtype) if transformers else float(np.finfo(np.float32).eps)
         gammas = mx.stack([norm.weight for norm in self.lookup_per_head_norms])
-        x = rms_norm(x.astype(mx.float32), mx.ones((self.head_dim,), mx.float32), head_eps).astype(dtype)
-        x = (x * gammas.astype(dtype)) if transformers else (x.astype(mx.float32) * gammas.astype(mx.float32)).astype(dtype)
+        x = torch_rms_norm(x, gammas)
         x = x.reshape(*x.shape[:-2], -1)
-        eps = _eps(dtype)
         gates = []
         for c in range(self.n):
-            key = rms_norm(self.key_projs[c](x), self.norm_key[c].weight, eps)
-            query = rms_norm(streams[..., c, :], self.norm_query[c].weight, eps)
+            key = torch_rms_norm(self.key_projs[c](x), self.norm_key[c].weight)
+            query = torch_rms_norm(streams[..., c, :], self.norm_query[c].weight)
             g = (key.astype(mx.float32) * query.astype(mx.float32)).sum(axis=-1) * self.hidden ** -0.5
             if transformers:
                 g = g.astype(dtype)
@@ -863,13 +944,12 @@ class EngramLayer(nn.Module):
         value = self.value_proj(x)
         scales = mx.stack(self.unified_per_hc_scales)  # [n, D]
         if transformers:
-            normed = rms_norm(value.astype(mx.float32), mx.ones((self.hidden,), mx.float32), eps).astype(dtype)
-            main = self.unified_pre_gamma.astype(dtype) * normed
+            main = self.unified_pre_gamma.astype(dtype) * torch_rms_norm(value)
             out = gate.astype(dtype) * main[..., None, :] + scales.astype(dtype) * main[..., None, :]
         else:
             value = value.astype(mx.float32)
             signal = (self.unified_pre_gamma.astype(mx.float32) * value
-                      * mx.rsqrt(mx.mean(mx.square(value), axis=-1, keepdims=True) + float(np.finfo(np.float32).eps)))
+                      * mx.rsqrt(mx.mean(mx.square(value), axis=-1, keepdims=True) + TORCH_RMS_EPS))
             out = (gate + scales.astype(mx.float32)) * signal[..., None, :]
         out = mx.where(mask[..., None, None], out, 0.0).astype(dtype)
         return streams + out
@@ -1586,7 +1666,7 @@ class Model(nn.Module):
             carried = getattr(reader, "fp8_round_trip_dtype", None)
             if carried is not None and not a.engram_fp8_embedding:
                 raise ValueError("an FP8 Engram table needs engram_fp8_embedding (it carries the round trip)")
-            activation = self.model.embed_tokens.weight.dtype
+            activation = embedding_dtype(self.model.embed_tokens)
             if carried is not None and carried != activation:
                 # The model would quantize the rows a second time: refuse
                 # rather than serve an unlabelled approximation.
@@ -1869,9 +1949,21 @@ class Model(nn.Module):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     def logits(self, hidden):
-        if self.args.enable_lm_head_fp32 and not hasattr(self.lm_head, "scales"):
-            return hidden.astype(mx.float32) @ self.lm_head.weight.astype(mx.float32).T
-        return self.lm_head(hidden).astype(mx.float32)
+        head = self.lm_head
+        if not self.args.enable_lm_head_fp32:
+            return head(hidden).astype(mx.float32)
+        if "scales" not in head:
+            return hidden.astype(mx.float32) @ head.weight.astype(mx.float32).T
+        # A quantized head keeps the fp32 contract: fp32 input, scales and
+        # biases (``sanitize`` stores them fp32 once), fp32 accumulation.
+        biases = head.get("biases")
+        out = mx.quantized_matmul(
+            hidden.astype(mx.float32), head["weight"], head["scales"].astype(mx.float32),
+            None if biases is None else biases.astype(mx.float32), transpose=True,
+            group_size=head.group_size, bits=head.bits, mode=head.mode)
+        if "bias" in head:
+            out = out + head["bias"].astype(mx.float32)
+        return out
 
     def __call__(self, inputs: mx.array, cache=None, *, pixel_values=None, image_grid_thw=None,
                  **_unused):
@@ -1902,6 +1994,11 @@ class Model(nn.Module):
                 continue
             if key.startswith("model.language_model."):
                 key = "model." + key[len("model.language_model."):]
+            # mlx-lm-style packs (e.g. the Nace.AI MLX pack) name the routed
+            # experts ``mlp.switch_mlp``; mlx2's module is ``mlp.experts``.
+            key = switch_mlp_name(key)
+            if ".self_attn.kv_b_proj." in key and not key.endswith("kv_b_proj.weight"):
+                raise ValueError(f"{key}: a quantized kv_b_proj cannot be folded into embed_q/unembed_out")
             if key.endswith("mlp.experts.gate_up_proj"):
                 inter = value.shape[1] // 2
                 stem = key[: -len("gate_up_proj")]
@@ -1921,8 +2018,18 @@ class Model(nn.Module):
                 key = key.replace("multi_head_embedding.embedding.weight", "multi_head_embedding_weight")
             out[key] = value
         for key in list(out):
-            if any(tag in key for tag in _FP32_KEYS):
-                out[key] = out[key].astype(mx.float32)
+            if not any(tag in key for tag in _FP32_KEYS):
+                continue
+            stem = key[: -len(".weight")] if key.endswith(".weight") else None
+            if stem is not None and stem + ".scales" in out:
+                # Packed codes stay as they are.  A quantized LM head under
+                # enable_lm_head_fp32 keeps fp32 scales/biases instead.
+                if stem == "lm_head" and a.enable_lm_head_fp32:
+                    for part in (".scales", ".biases"):
+                        if stem + part in out:
+                            out[stem + part] = out[stem + part].astype(mx.float32)
+                continue
+            out[key] = out[key].astype(mx.float32)
         return out
 
     @property
@@ -1941,6 +2048,16 @@ class Model(nn.Module):
 _FP32_KEYS = ("e_score_correction_bias", "hc_attn_layer.", "hc_mlp_layer.", "hc_head.",
               "learnable_sink_param", "key_value_projection", "key_gate_projection",
               "intra_group_ape", "mlp.gate.weight", "lm_head.weight")
+
+
+def switch_mlp_name(key: str) -> str:
+    """``...mlp.switch_mlp.<proj>...`` (mlx-lm naming) -> ``...mlp.experts.<proj>...``."""
+    return key.replace(".mlp.switch_mlp.", ".mlp.experts.") if ".mlp.switch_mlp." in key else key
+
+
+def embedding_dtype(embedding) -> mx.Dtype:
+    """Activation dtype an (optionally quantized) embedding returns."""
+    return embedding["scales"].dtype if "scales" in embedding else embedding.weight.dtype
 
 
 def fold_kv_b(stem: str, weight: mx.array, args: ModelArgs, kind: str) -> dict:

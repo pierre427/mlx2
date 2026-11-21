@@ -57,12 +57,14 @@ from .ordinary_artifact import inspect_indexed_artifact
 from .external_draft_policy import ExternalDraftAdapterMixin
 from .ordinary_text import OrdinaryTextAdapter, _template_history
 
-CACHE_LAYOUT = "hy-v4-flash-mla-latent-indexer-v1"
+# v2 (2026-11-20): the Engram norms became torch.nn.RMSNorm(eps=None) (fp32
+# epsilon, weight in fp32), so v1 entries were computed with other numerics.
+CACHE_LAYOUT = "hy-v4-flash-mla-latent-indexer-v2"
 # DFly2 routes record indexer selections in the target cache (Index Share);
 # their APCv2 entries carry that plane, so they live in their own namespace.
 DFLY_CACHE_LAYOUT = CACHE_LAYOUT + "+dfly2-index-share"
 # Distinct layout for the approximate fp8 latent rows (never the exact one).
-FP8_CACHE_LAYOUT = "hy-v4-flash-mla-latent-fp8-ds-mla-indexer-v1"
+FP8_CACHE_LAYOUT = "hy-v4-flash-mla-latent-fp8-ds-mla-indexer-v2"
 LATENT_KV_FORMATS = ("native", "fp8")
 # generation_config.json of tencent/Hy4-flash@d88c9dfd: do_sample, T 0.9,
 # top_p 1, top_k -1 (off).
@@ -164,7 +166,7 @@ def descriptor_for(*, dfly_selected: bool = False, engram_table_format: str = "b
                              "implemented, unqualified",
                   "engram_tables": "bf16 (default)" if engram_table_format == "bf16" else
                   f"{engram_table_format}; opt-in; unqualified"
-                  + ("; approximate" if engram_table_format == "affine4_g32" else ""),
+                  + ("; approximate" if engram_table_format in ("affine4_g32", "iq4_nl") else ""),
                   "latent_kv": ("fp8 (approximate state; selected; unqualified)" if fp8
                                 else "native (exact); fp8 implemented, not selected")},
     )
@@ -203,10 +205,13 @@ def inspect_artifact(model_path: str | Path) -> dict:
     if text.get("window_size") not in (None, [int(text["sliding_window"]) - 1, 0]):
         raise ValueError("Hy4-flash window_size disagrees with sliding_window")
     quant = config.get("quantization") or text.get("quantization")
-    if config.get("quantization_config") is not None:
+    # mlx-lm writes its MLX quantization twice (``quantization`` and
+    # ``quantization_config``); any other quantization_config is an
+    # FP8/compressed-tensors checkpoint.
+    if config.get("quantization_config") is not None and config.get("quantization_config") != quant:
         raise ValueError("Hy4-flash FP8/compressed-tensors checkpoints are not implemented")
-    if quant is not None and (not isinstance(quant, dict) or quant.get("mode", "affine") != "affine"):
-        raise ValueError("Hy4-flash admits bf16 or MLX affine-quantized artifacts only")
+    if quant is not None:
+        check_quantization(quant)
     weights = artifact["weight_map"]
     sanitized = config.get("mlx2_layout") == SANITIZED_LAYOUT
     if config.get("mlx2_layout") not in (None, SANITIZED_LAYOUT):
@@ -225,10 +230,19 @@ def inspect_artifact(model_path: str | Path) -> dict:
             required.add(p + "self_attn.compressed_indexer.query_projection.weight")
         if mlp_kinds[i] == "sparse":
             required |= {p + "mlp.gate.e_score_correction_bias", p + "mlp.combine_output_norm.weight"}
-            required.add(p + ("mlp.experts.gate_proj.weight" if sanitized else "mlp.experts.gate_up_proj"))
+            if sanitized:
+                required.add(p + "mlp.experts.gate_proj.weight")
+            elif p + "mlp.switch_mlp.gate_proj.weight" in weights:
+                # mlx-lm expert naming (unfused, ``switch_mlp``).
+                required |= {p + f"mlp.switch_mlp.{r}_proj.weight" for r in ("gate", "up", "down")}
+            else:
+                required.add(p + "mlp.experts.gate_up_proj")
+    gguf = text.get("engram_gguf_tables")
     for lid in text.get("engram_layer_ids") or []:
         p = f"model.layers.{int(lid) - 1}.engram_layer."
-        required |= {p + "lookup_table", p + "multi_head_embedding.embedding.weight", p + "value_proj.weight"}
+        required |= {p + "lookup_table", p + "value_proj.weight"}
+        if gguf is None:
+            required.add(p + "multi_head_embedding.embedding.weight")
     missing = sorted(required - weights.keys())
     if missing:
         raise ValueError(f"Hy4-flash tensors are incomplete: {missing[0]}")
@@ -237,6 +251,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
         f"model.dfly_layers.{i}.self_attn.kv_b_proj.weight" in weights for i in range(dfly_layers)
     ) and "model.dfly_layers.mtp_fusion.eh_proj.weight" in weights
     _fingerprint_engram_formats(artifact)
+    _fingerprint_engram_gguf(artifact)
     # ``has_mtp``: the embedded DFly2 head serves AST's native-head drafter.
     vision = config.get("vision_config")
     has_vision = False
@@ -251,8 +266,87 @@ def inspect_artifact(model_path: str | Path) -> dict:
             raise ValueError(f"Hy4-flash vision tensors are incomplete or unexpected: {missing[0]}")
         has_vision = bool(vit) and bool(expected)
     artifact.update(has_dfly=has_dfly, has_mtp=has_dfly, dfly_layers=dfly_layers,
-                    quantized=quant is not None, has_vision=has_vision)
+                    quantized=quant is not None, has_vision=has_vision,
+                    engram_table_formats=available_engram_formats(config))
     return artifact
+
+
+# Per-module quantization modes the loader runs: MLX affine, and the
+# third-party ``q2_0`` expert mode (affine 2-bit with biases = -scales,
+# ``hy_v4_flash.Q2ZeroSwitchLinear``) on routed expert banks only.
+Q2_ZERO = "q2_0"
+
+
+def check_quantization(quant) -> None:
+    """Fail closed on a quantization block the loader cannot run."""
+    if not isinstance(quant, dict) or quant.get("mode", "affine") != "affine":
+        raise ValueError("Hy4-flash admits bf16 or MLX affine-quantized artifacts only")
+    for name, entry in quant.items():
+        if not isinstance(entry, dict):
+            continue
+        mode = entry.get("mode", "affine")
+        if mode == Q2_ZERO:
+            if (not name.startswith("model.layers.") or entry.get("bits") != 2
+                    or not (".mlp.switch_mlp." in name or ".mlp.experts." in name)):
+                raise ValueError(f"Hy4-flash q2_0 is implemented for 2-bit routed experts only: {name}")
+        elif mode != "affine":
+            raise ValueError(f"Hy4-flash {name} quantization mode {mode!r} is not implemented")
+
+
+def module_quantization(quant: dict) -> dict:
+    """Per-module overrides under mlx2 module names (``switch_mlp`` -> ``experts``)."""
+    from ..runtime.models.hy_v4_flash import switch_mlp_name
+
+    return {switch_mlp_name(k): v for k, v in quant.items() if isinstance(v, dict)}
+
+
+def available_engram_formats(config: dict) -> list:
+    """Engram table formats this artifact carries (``engram_table_format`` choices)."""
+    text = config.get("text_config") or {}
+    formats = config.get("mlx2_engram_formats")
+    out = sorted(formats) if isinstance(formats, dict) else []
+    if not out and text.get("engram_gguf_tables") is None:
+        out = ["bf16"]
+    if text.get("engram_gguf_tables") is not None:
+        out.append("iq4_nl")
+    return out
+
+
+def _fingerprint_engram_gguf(artifact: dict) -> None:
+    """Check the ``engram_gguf_tables`` bindings and fold their files into the identity."""
+    import hashlib
+
+    from ..runtime.models.hy_v4_flash_engram import gguf_bindings, gguf_table_layout
+    from .artifact_paths import shard_within_artifact
+
+    config = artifact["config"]
+    text = text_config(config)
+    gguf = text.get("engram_gguf_tables")
+    if gguf is None:
+        return
+    if config.get("mlx2_engram_formats") is not None:
+        raise ValueError("Hy4-flash artifact declares both mlx2_engram_formats and engram_gguf_tables")
+    layer_ids = {int(lid) - 1: int(lid) for lid in text.get("engram_layer_ids") or []}
+    bindings = gguf_bindings(gguf, layer_ids)
+    root = Path(artifact["identity"]["path"])
+    known = {name for name, *_ in artifact["identity"]["files"]}
+    digest = hashlib.sha256(artifact["identity"]["fingerprint"].encode())
+    records = []
+    for index in sorted(bindings):
+        name, tensor = bindings[index]
+        if not shard_within_artifact(root, (root / name).resolve()) or not (root / name).is_file():
+            raise ValueError(f"missing or escaped Engram GGUF file: {name}")
+        gguf_table_layout(root / name, tensor)  # header-only: type, shape, extent
+        digest.update(json.dumps([index, name, tensor]).encode())
+        if name in known:
+            continue
+        known.add(name)
+        stat = (root / name).stat()
+        record = (name, stat.st_size, stat.st_mtime_ns)
+        records.append(record)
+        digest.update(json.dumps(record).encode())
+    artifact["identity"] = dict(artifact["identity"], fingerprint=digest.hexdigest(),
+                                files=list(artifact["identity"]["files"]) + records)
 
 
 def _fingerprint_engram_formats(artifact: dict) -> None:
@@ -269,7 +363,7 @@ def _fingerprint_engram_formats(artifact: dict) -> None:
     formats = artifact["config"].get("mlx2_engram_formats")
     if formats is None:
         return
-    if not isinstance(formats, dict) or set(formats) - set(ENGRAM_TABLE_FORMATS):
+    if not isinstance(formats, dict) or set(formats) - set(CONVERTER_ENGRAM_FORMATS):
         raise ValueError("Hy4-flash mlx2_engram_formats lists an unknown table format")
     root = Path(artifact["identity"]["path"])
     known = {name for name, *_ in artifact["identity"]["files"]}
@@ -299,8 +393,12 @@ def _fingerprint_engram_formats(artifact: dict) -> None:
 def engram_format_record(fmt: str, precision: str = "transformers") -> dict:
     """Status label of the selected Engram table format (never qualified)."""
     exact = {"bf16": "source", "fp8_e4m3_row": "exact vs the bf16 table (transformers profile, "
-             "CPU-verified; Metal parity unverified)", "affine4_g32": "approximate"}[fmt]
-    approximate = fmt == "affine4_g32"
+             "CPU-verified; Metal parity unverified)", "affine4_g32": "approximate",
+             "iq4_nl": "approximate (third-party IQ4_NL GGUF table; E4M3 round trip at runtime)"}[fmt]
+    approximate = fmt in ("affine4_g32", "iq4_nl")
+    if fmt == "iq4_nl" and precision == "vllm":
+        # The vllm profile reads rows without the E4M3 round trip.
+        exact = "approximate (third-party IQ4_NL GGUF table; vllm profile: no E4M3 round trip)"
     if fmt == "fp8_e4m3_row" and precision == "vllm":
         # vLLM reads a bf16 table without the round trip; an FP8 table
         # carries it, so this pairing is not the vllm profile's bf16 result.
@@ -355,11 +453,41 @@ def resident_bytes(root, weight_map: dict, skipped: set, keep_dfly: bool,
     return total
 
 
+def widened_bytes(root, weight_map: dict, quant, *, lm_head_fp32: bool) -> int:
+    """Bytes the load adds over the on-disk planes: q2_0 scales widened to fp32
+    plus their fp32 biases, and a quantized LM head's fp32 scales/biases."""
+    from ..runtime.models.hy_v4_flash_engram import safetensors_header
+
+    widen = {}  # tensor name -> bytes per element after the load
+    for name, entry in (quant or {}).items():
+        if isinstance(entry, dict) and entry.get("mode") == Q2_ZERO:
+            widen[name + ".scales"] = 8  # fp32 scales + fp32 biases
+    if lm_head_fp32 and "lm_head.scales" in weight_map:
+        widen["lm_head.scales"] = 4
+        widen["lm_head.biases"] = 4
+    extra, headers = 0, {}
+    for name, per in widen.items():
+        shard = weight_map.get(name)
+        if shard is None:
+            continue
+        header = headers.setdefault(shard, safetensors_header(Path(root) / shard))
+        entry = header.get(name)
+        if not isinstance(entry, dict):
+            continue
+        begin, end = entry["data_offsets"]
+        width = {"F16": 2, "BF16": 2, "F32": 4}.get(entry["dtype"], 4)
+        extra += max(0, (end - begin) // width * per - (end - begin))
+    return extra
+
+
 MODEL_KEYS = frozenset({"engram_cache_rows", "engram_precision", "engram_table_format",
                         "latent_kv", "vision"})
 # Engram table formats (hy_v4_flash_engram.TABLE_FORMATS); bf16 is the
 # default, the others are opt-in, unqualified, and need converter shards.
-ENGRAM_TABLE_FORMATS = ("bf16", "fp8_e4m3_row", "affine4_g32")
+# ``iq4_nl`` is read from GGUF files bound by text_config.engram_gguf_tables
+# (the third-party Nace.AI MLX pack), never written by the converter.
+ENGRAM_TABLE_FORMATS = ("bf16", "fp8_e4m3_row", "affine4_g32", "iq4_nl")
+CONVERTER_ENGRAM_FORMATS = ("bf16", "fp8_e4m3_row", "affine4_g32")
 AST_KEYS = frozenset({"draft_model", "num_draft", "ast_topology", "ast_tiles", "ast_tile_rows",
                       "ast_multilane_tile_rows", "ast_adaptive_rows", "batch_size_route",
                       "pairwise_selection", "cost_per_commit_handoff", "ast_graft_prompt_lookup",
@@ -466,6 +594,8 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
 
     files = sorted(set(artifact["weight_map"].values()))
     resident = resident_bytes(path, artifact["weight_map"], tables, keep_dfly, keep_vision)
+    resident += widened_bytes(path, artifact["weight_map"], config.get("quantization"),
+                              lm_head_fp32=args.enable_lm_head_fp32)
     if memory_budget is None:
         memory_budget = int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") * 0.8)
     if resident > memory_budget:
@@ -482,14 +612,20 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
     raw.clear()
     quant = config.get("quantization")
     if quant is not None:
+        check_quantization(quant)
+        overrides = module_quantization(quant)
+        q2_zero = {n: o for n, o in sorted(overrides.items()) if o.get("mode") == Q2_ZERO}
+
         def predicate(name, module):
-            override = quant.get(name)
+            override = overrides.get(name)
             if isinstance(override, dict):
-                return override
+                # q2_0 banks are installed below, not by nn.quantize.
+                return False if override.get("mode") == Q2_ZERO else override
             return hasattr(module, "to_quantized") and f"{name}.scales" in weights
 
         nn.quantize(model, group_size=quant["group_size"], bits=quant["bits"],
                     mode=quant.get("mode", "affine"), class_predicate=predicate)
+        install_q2_zero(model, weights, q2_zero)
     model.load_weights(list(weights.items()), strict=True)
     weights.clear()
     if keep_vision:
@@ -501,7 +637,8 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
     vit_raw.clear()
     readers = open_engram_tables(path, artifact["weight_map"], args.engram_layers,
                                  cache_rows=engram_cache_rows, table_format=engram_table_format,
-                                 formats=config.get("mlx2_engram_formats"))
+                                 formats=config.get("mlx2_engram_formats"),
+                                 gguf_tables=text_config(config).get("engram_gguf_tables"))
     try:
         model.bind_engram(readers)
         drafter = None
@@ -520,6 +657,32 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
             reader.close()
         raise
     return model, drafter, readers
+
+
+def install_q2_zero(model, weights: dict, banks: dict) -> None:
+    """Swap each ``q2_0`` expert bank (module name -> override) for
+    ``Q2ZeroSwitchLinear`` and widen its planes in ``weights``."""
+    from ..runtime.models.hy_v4_flash import Q2ZeroSwitchLinear, q2_0_planes
+
+    for stem, entry in banks.items():
+        group_size = entry.get("group_size", 64)
+        parent_name, _, leaf = stem.rpartition(".")
+        if not stem.startswith("model.layers.") or ".mlp.experts." not in stem + ".":
+            raise ValueError(f"q2_0 is implemented for routed expert banks only: {stem}")
+        parent = model
+        for part in parent_name.split("."):
+            parent = parent[int(part)] if part.isdigit() else getattr(parent, part)
+        old = getattr(parent, leaf)
+        if not hasattr(old, "num_experts") or "scales" in old:
+            raise ValueError(f"{stem} is not an unquantized expert bank")
+        group = int(group_size)
+        w, scales = weights.get(stem + ".weight"), weights.get(stem + ".scales")
+        if (w is None or scales is None or w.shape[-1] * 16 != old.input_dims
+                or scales.shape[-1] * group != old.input_dims):
+            raise ValueError(f"{stem}: q2_0 planes disagree with the bank geometry")
+        bank = Q2ZeroSwitchLinear(old.input_dims, old.output_dims, old.num_experts, group_size=group)
+        q2_0_planes(weights, stem)
+        setattr(parent, leaf, bank)
 
 
 class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
@@ -570,6 +733,9 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if self.dfly_selected and not artifact["has_dfly"]:
             raise ValueError("Hy4-flash artifact carries no DFly2 drafter")
         engram_format = policy.get("engram_table_format", "bf16")
+        if engram_format not in artifact["engram_table_formats"]:
+            raise ValueError(f"Hy4-flash artifact carries no {engram_format} Engram tables (it has "
+                             f"{artifact['engram_table_formats']}); select one with engram_table_format")
         self.latent_kv = policy.get("latent_kv", "native")
         self.descriptor = descriptor_for(dfly_selected=self.dfly_selected,
                                          engram_table_format=engram_format, latent_kv=self.latent_kv)

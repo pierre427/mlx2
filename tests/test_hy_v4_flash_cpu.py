@@ -819,49 +819,70 @@ def test_indexer_chunked_scoring_matches_unchunked(tiny, monkeypatch):
 def _engram_oracle(layer, streams, rows, precision):
     """float64 transcription of each reference's Engram precision choices."""
     f = lambda a: np.array(a.astype(mx.float32)).astype(np.float64)
-    bf16_eps, f32_eps = 2.0 ** -7, F32_EPS
+    # Every Engram norm is torch.nn.RMSNorm(eps=None): fp32 epsilon in both references.
+    eps = F32_EPS
     x = np.array(rows).astype(np.float64)
     if precision == "transformers":
         scale = np.maximum(np.abs(x).max(-1, keepdims=True), 1e-12) / 448
         x = e4m3_ref(x / scale) * scale
-    head_eps = bf16_eps if precision == "transformers" else f32_eps
     gam = np.stack([f(n.weight) for n in layer.lookup_per_head_norms])
-    x = rms(x, gam, head_eps).reshape(*x.shape[:-2], -1)
+    x = rms(x, gam, eps).reshape(*x.shape[:-2], -1)
     s = f(streams)
     D = s.shape[-1]
     gates = []
     for c in range(layer.n):
-        key = rms(x @ f(layer.key_projs[c].weight).T + f(layer.key_projs[c].bias), f(layer.norm_key[c].weight), bf16_eps)
-        q = rms(s[..., c, :], f(layer.norm_query[c].weight), bf16_eps)
+        key = rms(x @ f(layer.key_projs[c].weight).T + f(layer.key_projs[c].bias), f(layer.norm_key[c].weight), eps)
+        q = rms(s[..., c, :], f(layer.norm_query[c].weight), eps)
         g = (key * q).sum(-1) * D ** -0.5
         gates.append(sigmoid(np.sqrt(np.maximum(np.abs(g), 1e-6)) * np.sign(g)))
     gate = np.stack(gates, -1)[..., None]
     value = x @ f(layer.value_proj.weight).T + f(layer.value_proj.bias)
-    main = f(layer.unified_pre_gamma) * rms(value, None, bf16_eps if precision == "transformers" else f32_eps)
+    main = f(layer.unified_pre_gamma) * rms(value, None, eps)
     scales = np.stack([f(v) for v in layer.unified_per_hc_scales])
     return s + (gate + scales) * main[..., None, :]
 
 
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float32])
 @pytest.mark.parametrize("precision", ["transformers", "vllm"])
-def test_engram_precision_profiles_bf16(precision):
+def test_engram_precision_profiles_bf16(precision, dtype):
     config = tiny_config(engram_fp8_embedding=True)
     args = H.ModelArgs.from_hf_config(config)
     args.engram_precision = precision
     layer = H.EngramLayer(args, 2)
     rng = np.random.default_rng(7)
     from mlx.utils import tree_flatten, tree_unflatten
-    params = [(k, mx.array((rng.standard_normal(v.shape) * 0.3 + (1.0 if "norm" in k else 0.0)).astype(np.float32)).astype(mx.bfloat16))
+    params = [(k, mx.array((rng.standard_normal(v.shape) * 0.3 + (1.0 if "norm" in k else 0.0)).astype(np.float32)).astype(dtype))
               for k, v in tree_flatten(layer.parameters()) if v.dtype != mx.int32]
     layer.update(tree_unflatten(params))
-    streams = mx.array(rng.standard_normal((1, 5, 4, 32)).astype(np.float32)).astype(mx.bfloat16)
-    # Small rows: the bf16 epsilon (2**-7) is comparable to their mean square.
+    streams = mx.array(rng.standard_normal((1, 5, 4, 32)).astype(np.float32)).astype(dtype)
+    # Small rows, so an epsilon of 2**-7 instead of fp32's would show.
     rows = mx.array((rng.standard_normal((1, 5, 4, 4)) * 0.05).astype(np.float32))
     got = np.array(layer(streams, rows, mx.ones((1, 5), dtype=mx.bool_)).astype(mx.float32))
     ref = _engram_oracle(layer, streams, rows, precision)
     other = _engram_oracle(layer, streams, rows, "vllm" if precision == "transformers" else "transformers")
     err, err_other = np.abs(got - ref).max(), np.abs(got - other).max()
     assert err < 0.1, err
-    assert err < err_other / 3, (err, err_other)
+    if dtype == mx.float32:
+        # The profiles now differ only in the E4M3 round trip and the combine
+        # dtype; bf16 rounding noise is as large as that, fp32's is not.
+        assert err < err_other / 3, (err, err_other)
+
+
+def test_torch_rms_norm_matches_torch_eps_none_bf16():
+    """torch.nn.RMSNorm(eps=None) on bf16: fp32 epsilon, weight in fp32, one rounding."""
+    # All 1e-3 over 96 lanes: torch gives 0.9453 (fp32 eps); 2**-7 would give 0.0113.
+    x = mx.full((1, 96), 1e-3, dtype=mx.bfloat16)
+    assert abs(H.torch_rms_norm(x).astype(mx.float32)[0, 0].item() - 0.9453) < 2e-3
+    rng = np.random.default_rng(3)
+    x = mx.array(rng.standard_normal((64, 96)).astype(np.float32)).astype(mx.bfloat16)
+    w = mx.array((1 + 0.3 * rng.standard_normal(96)).astype(np.float32)).astype(mx.bfloat16)
+    xf = x.astype(mx.float32)
+    inv = mx.rsqrt(mx.mean(xf * xf, axis=-1, keepdims=True) + F32_EPS)
+    want = (xf * inv * w.astype(mx.float32)).astype(mx.bfloat16)
+    assert mx.array_equal(H.torch_rms_norm(x, w), want).item()
+    stacked = mx.broadcast_to(w, (4, 96))
+    got = H.torch_rms_norm(x.reshape(16, 4, 96), stacked).reshape(64, 96)
+    assert mx.array_equal(got, want).item()
 
 
 def test_engram_precision_default_is_transformers():
