@@ -56,7 +56,13 @@ def test_old_checks_miss_the_panic_new_ones_fire():
     assert st["starved"] == 0
     kinds = [[k for k, _ in M.check(r, lim, st)] for _ in range(10)]
     assert kinds[1] == [] and kinds[2] == ["soft"] and kinds[9] == ["hard"]
-    assert M.check(_panic_reading(**HEALTHY, page_free_wanted=5), lim, {"starved": 2})  # page waiters count too
+    # page waiters count only with a second sign (here the compressor grew 4.5 GiB over its level at start)
+    grew = M.make_limits(92, min_avail_gb=15, swap_growth_gb=8, **_off(starved_soft_s=3, starved_hard_s=10,
+                                                                        compressor0=-1.0))
+    assert M.check(_panic_reading(**HEALTHY, page_free_wanted=5), grew, {"starved": 2})
+    quiet = M.make_limits(92, min_avail_gb=15, swap_growth_gb=8, **_off(starved_soft_s=3, starved_hard_s=10,
+                                                                         compressor0=3.5))
+    assert M.check(_panic_reading(**HEALTHY, page_free_wanted=5), quiet, {"starved": 2}) == []
     # the compressor's share of memory (44 GiB of 128 = 35 %): hard at 30 %, soft at 20 %
     lim = M.make_limits(92, **_off(compressor_frac=0.20, hard_compressor_frac=0.30))
     hits = M.check(r, lim)
@@ -261,3 +267,66 @@ def test_watch_logs_once_when_wired_drops(tmp_path):
         """)
     assert p.returncode == 0, (p.stdout, p.stderr)
     assert p.stdout.count("may be pageable again") == 1 and "warned True" in p.stdout
+
+
+# 2026-11-20 17:49 false stop (~/amoeba-runs/p0-pareto3-3602649f3/out/watchdog-stop.json): the FN pareto window
+# loading held sets with the weights wired; 187 page waiters on 4 samples, nothing else wrong.
+FALSE_STOP = {"footprint_gib": 73.76245899498463, "resident_gib": 71.45159912109375, "avail_gib": 22.936386108398438,
+              "free_pages": 8435, "free_min_pages": 3500, "page_free_wanted": 187,
+              "compressor_gib": 5.2867584228515625, "compressed_logical_gib": 10.327056884765625,
+              "wired_gib": 77.3182373046875, "memsize_gib": 128.0, "swap_used_gib": 3.731689453125, "pressure": 1}
+
+
+def _false_stop_limits():
+    return M.make_limits(92, hard_gb=98, min_avail_gb=15, swap_growth_gb=8, swap0=3.72930908203125,
+                         compressor0=4.00482177734375)
+
+
+def test_page_waiters_alone_on_a_healthy_machine_do_not_stop():
+    lim = _false_stop_limits()
+    assert M.starvation(FALSE_STOP, lim) is None
+    st = {}
+    assert [M.check(dict(FALSE_STOP), lim, st) for _ in range(30)] == [[]] * 30
+    assert st["starved"] == 0
+    # the watcher process (same limits through JSON, no rebase) stays quiet too: no SIGKILL at 10 samples
+    st, since = {}, None
+    for i in range(30):
+        act, since, hits = M.watcher_step(dict(FALSE_STOP), lim, since, float(i), 5.0, st)
+        assert act is None and hits == []
+    # an old limits dict without the new keys (a watcher spawned by older code) takes the same defaults
+    old = {k: v for k, v in lim.items() if not k.startswith("waiters_")}
+    assert M.starvation(FALSE_STOP, old) is None
+
+
+def test_page_waiters_with_a_second_sign_still_stop():
+    lim = _false_stop_limits()
+    for sign in (dict(avail_gib=14.0), dict(compressor_gib=4.00482177734375 + 4.5), dict(pressure=2)):
+        r = dict(FALSE_STOP, **sign)
+        assert M.starvation(r, lim) and "187 page waiters" in M.starvation(r, lim)
+        st = {}
+        kinds = [[k for k, _ in M.check(r, lim, st, watcher=True)] for _ in range(10)]
+        assert kinds[1] == [] and kinds[2] == ["soft"] and kinds[9] == ["hard"]   # SIGKILL at 10 s
+    assert M.starvation(dict(FALSE_STOP, page_free_wanted=0, pressure=2), lim) is None   # no waiters: no sign needed
+
+
+def test_panic_readings_still_stop_hard():
+    r = _panic_reading()                              # 875 free pages, 0 waiters, avail 37.8 GiB (inactive counted)
+    lim = M.make_limits(92, min_avail_gb=15, swap_growth_gb=8, compressor0=3.5)
+    assert "free pages 875" in M.starvation(r, lim)
+    st = {}
+    kinds = [[k for k, _ in M.check(r, lim, st, watcher=True)] for _ in range(10)]
+    assert kinds[2] == ["soft"] and kinds[9] == ["hard"]
+    st, since, acts = {}, None, []
+    for i in range(10):
+        act, since, _ = M.watcher_step(r, lim, since, float(i), 1e9, st)   # grace off: the kill is the hard one
+        acts.append(act)
+    assert acts[:9] == [None] * 9 and acts[9] == "kill"
+
+
+def test_sustained_free_under_min_stops_even_when_all_else_looks_fine():
+    lim = _false_stop_limits()
+    r = dict(FALSE_STOP, free_pages=3000, page_free_wanted=0)    # avail 22.9, pressure 1, compressor +1.3, swap flat
+    st = {}
+    kinds = [[k for k, _ in M.check(r, lim, st)] for _ in range(10)]
+    assert kinds[1] == [] and kinds[2] == ["soft"] and kinds[9] == ["hard"]
+    assert "free pages 3000 < kern.vm_page_free_min 3500" in M.check(r, lim, st)[0][1]

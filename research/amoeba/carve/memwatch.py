@@ -8,7 +8,7 @@ Readings come from the kernel directly (ctypes, no fork):
   machine         host_statistics64(HOST_VM_INFO64): free, inactive, speculative, purgeable and compressor-occupied
                   pages; avail = free + inactive + speculative + purgeable (the earlier amoeba_memcheck figure);
                   starvation = free pages (speculative excluded) under kern.vm_page_free_min, or
-                  vm.page_free_wanted > 0;
+                  vm.page_free_wanted > 0 together with a second sign of real pressure (see starvation());
   swap            sysctl vm.swapusage (xsw_usage), pressure: sysctl kern.memorystatus_vm_pressure_level.
 
 Wired weights (2026-11-19 19:19 stop: 79 GiB footprint, 46 GiB resident, the compressor +27 GiB in 3 min, i.e.
@@ -175,19 +175,54 @@ def readings(pid: int) -> dict:
 
 def make_limits(limit_gb: float, min_avail_gb: float = 15.0, swap_growth_gb: float = 2.0, hard_gb: float | None = None,
                 compressor_growth_gb: float = 12.0, compressor_frac: float = 0.20, hard_compressor_frac: float = 0.30,
-                compressor_share_min_growth_gb: float = 4.0,
-                starved_soft_s: int = 3, starved_hard_s: int = 10, swap0: float = 0.0, compressor0: float = 0.0) -> dict:
+                compressor_share_min_growth_gb: float = 4.0, waiters_compressor_growth_gb: float = 4.0,
+                waiters_pressure: int = 2, starved_soft_s: int = 3, starved_hard_s: int = 10, swap0: float = 0.0, compressor0: float = 0.0) -> dict:
     """Soft limits stop the run cleanly (exit 3 + receipt); hard ones are the watcher's SIGKILL ceiling.
     compressor_frac / hard_compressor_frac are shares of physical memory (hw.memsize) held by the compressor, checked
     only once the compressor also grew compressor_share_min_growth_gb since start (stale compressed pages of idle
     processes stay compressed long after the pressure has passed);
-    starved_*_s are consecutive samples with free pages under kern.vm_page_free_min (or threads waiting for pages)."""
+    starved_*_s are consecutive samples with free pages under kern.vm_page_free_min, or with threads waiting for pages
+    plus a corroborating sign (waiters_compressor_growth_gb / waiters_pressure / min_avail_gb: see starvation())."""
     return {"limit_gib": float(limit_gb), "hard_gib": float(hard_gb if hard_gb is not None else limit_gb + 6.0),
             "min_avail_gib": float(min_avail_gb), "swap_growth_gib": float(swap_growth_gb),
             "compressor_growth_gib": float(compressor_growth_gb), "compressor_frac": float(compressor_frac),
             "hard_compressor_frac": float(hard_compressor_frac),
-            "compressor_share_min_growth_gib": float(compressor_share_min_growth_gb), "starved_soft_s": int(starved_soft_s),
+            "compressor_share_min_growth_gib": float(compressor_share_min_growth_gb),
+            "waiters_compressor_growth_gib": float(waiters_compressor_growth_gb), "waiters_pressure": int(waiters_pressure),
+            "starved_soft_s": int(starved_soft_s),
             "starved_hard_s": int(starved_hard_s), "swap0_gib": float(swap0), "compressor0_gib": float(compressor0)}
+
+
+def starvation(r: dict, lim: dict) -> str | None:
+    """Why reading r counts as a starved sample, or None.
+
+    free pages under kern.vm_page_free_min is starvation on its own (the 2026-11-19 17:26 panic: 875 free pages).
+    vm.page_free_wanted > 0 (threads waiting for a free page) is not: it is momentarily nonzero during big file reads
+    and wiring on a healthy machine (2026-11-20 17:49 false stop of the FN pareto window: 187 waiters with 8435 free
+    pages, avail 22.9 GiB, pressure normal, compressor +1.3 GiB, swap flat). Waiters count only with a second sign:
+    avail under min_avail_gib, the compressor grown more than waiters_compressor_growth_gib since start, or
+    kern.memorystatus_vm_pressure_level >= waiters_pressure (2 = warn). The growth threshold (4 GiB) is above the
+    +1.3 GiB of that healthy run and far below the panic's +27 GiB. No minimum waiter count: one reading of 187 is
+    all the data there is. The watcher has no rebase(): its compressor baseline is the one at spawn (before the model
+    loads), so its growth figure differs from the thread's after a rebase, in either direction. Known limit: the
+    starved count needs consecutive samples, so real starvation whose free pages bounce above free_min between
+    samples is bridged by waiters only while a second sign holds."""
+    if r["free_pages"] < r["free_min_pages"]:
+        return f"free pages {r['free_pages']} < kern.vm_page_free_min {r['free_min_pages']}"
+    w = r.get("page_free_wanted", 0) or 0
+    if w <= 0:
+        return None
+    signs = []
+    if r.get("avail_gib") is not None and r["avail_gib"] < lim["min_avail_gib"]:
+        signs.append(f"avail {r['avail_gib']:.1f} GiB < {lim['min_avail_gib']:.1f}")
+    grow = (r.get("compressor_gib") or 0.0) - lim.get("compressor0_gib", 0.0)
+    if grow > lim.get("waiters_compressor_growth_gib", 4.0):
+        signs.append(f"compressor +{grow:.1f} GiB since start")
+    if (r.get("pressure") or 0) >= lim.get("waiters_pressure", 2):
+        signs.append(f"pressure level {r.get('pressure')}")
+    if not signs:
+        return None
+    return f"{w} page waiters with {', '.join(signs)} (free pages {r['free_pages']})"
 
 
 def check(r: dict, lim: dict, state: dict | None = None, watcher: bool = False) -> list[tuple[str, str]]:
@@ -208,14 +243,12 @@ def check(r: dict, lim: dict, state: dict | None = None, watcher: bool = False) 
             out.append(("hard", f"footprint {fp:.1f} GiB >= hard ceiling {lim['hard_gib']:.1f} GiB"))
         elif fp > lim["limit_gib"]:
             out.append(("soft", f"footprint {fp:.1f} GiB > {lim['limit_gib']:.1f} GiB"))
-    starved = r["free_pages"] < r["free_min_pages"] or r.get("page_free_wanted", 0) > 0
-    st["starved"] = st.get("starved", 0) + 1 if starved else 0
+    why = starvation(r, lim)
+    st["starved"] = st.get("starved", 0) + 1 if why else 0
     if st["starved"] >= lim["starved_hard_s"]:
-        out.append(("hard", f"free pages {r['free_pages']} < kern.vm_page_free_min {r['free_min_pages']} (or page "
-                            f"waiters) for {st['starved']} samples"))
+        out.append(("hard", f"starved: {why} for {st['starved']} samples"))
     elif st["starved"] >= lim["starved_soft_s"]:
-        out.append(("soft", f"free pages {r['free_pages']} < kern.vm_page_free_min {r['free_min_pages']} (or page "
-                            f"waiters) for {st['starved']} samples"))
+        out.append(("soft", f"starved: {why} for {st['starved']} samples"))
     if watcher:
         return out
     ms = r.get("memsize_gib") or 0.0
