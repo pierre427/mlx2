@@ -839,6 +839,16 @@ class Lane:
     # Why this lane decodes on the ordinary target path (None: it does not,
     # or the reason is a recoverable draft fallback counted elsewhere).
     ordinary_reason: str | None = None
+    # A lane admitted to decode plain from its first token (``sampling
+    # config["plain_decode_reason"]``, e.g. a media request on a server whose
+    # adapter declares ``multimodal_plain_decode_routes``): it never drafts,
+    # and its receipt says so.  Its prefill still appends draft context
+    # (bounded by the drafter's window, e.g. DFly2's 64 rows) so the draft
+    # plane stays paired with the target boundary and the prompt's final
+    # hidden is not carried whole into its APCv2 sidecars.
+    plain_decode_reason: str | None = None
+    # Names of the media prefill inputs its prefill consumed.
+    media_prefill_inputs: tuple = ()
     external_rounds: int = 0
     proposed: int = 0
     accepted: int = 0
@@ -2722,7 +2732,18 @@ class ExternalDraftBatchGenerator:
                     )
                     and type(value) is int
                 }
-            if self._sampled_lane_needs_ordinary(lane):
+            plain = lane.sampling.pop("plain_decode_reason", None)
+            if plain is not None:
+                if type(plain) is not str or not plain:
+                    raise ValueError("plain_decode_reason must be a nonempty string")
+                # Admitted plain: a permanent ordinary lane from its first
+                # token (the one-way ordinary path every external lane
+                # already has), never a draft round.
+                lane.ordinary = True
+                lane.ordinary_reason = plain
+                lane.plain_decode_reason = plain
+                _bump(self.scheduler_stats, "external_plain_decode_lanes")
+            elif self._sampled_lane_needs_ordinary(lane):
                 # Point-mass continuation laws can only be verified greedily
                 # (progressive add_state refuses them under sampling): serve
                 # this request on the exact ordinary target path, labelled in
@@ -2965,6 +2986,7 @@ class ExternalDraftBatchGenerator:
                 forward = _declared_model_callback(self.model, 'media_prefill_body')
                 with _amoeba_rows(self, [lane]):
                     lane.tail = forward(self.mx.array([inputs]), lane.cache, self.layers, **lane.prefill_input)
+                lane.media_prefill_inputs = tuple(sorted(lane.prefill_input))
                 compact_prompt_cache_windows(lane.cache)
                 self.mx.eval(lane.tail, [c.state for c in lane.cache])
                 lane.prefill_input = None
@@ -14301,6 +14323,24 @@ class ExternalDraftBatchGenerator:
                 **(
                     {"ordinary_fallback_reason": lane.ordinary_reason}
                     if lane.ordinary_reason
+                    else {}
+                ),
+                **(
+                    {
+                        # Same lane keys as prompt lookup's plain lanes, so
+                        # serving's media_decode / speculation receipts read
+                        # what the lane actually ran.
+                        "speculation": ("disabled_for_media" if lane.media_prefill_inputs
+                                        or lane.plain_decode_reason == "media_request"
+                                        else "disabled"),
+                        "decode": "ordinary" if not lane.external_rounds else "speculative_then_ordinary",
+                        "plain_decode_reason": lane.plain_decode_reason,
+                        "media_prefill_inputs": list(lane.media_prefill_inputs),
+                        # Ordinary one-token rounds this lane ran (every
+                        # emitted token of a plain lane).
+                        "plain_only_rounds": int(lane.generated),
+                    }
+                    if lane.plain_decode_reason is not None
                     else {}
                 ),
                 "external_rounds": lane.external_rounds,

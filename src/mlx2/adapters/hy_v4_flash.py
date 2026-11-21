@@ -151,7 +151,8 @@ def descriptor_for(*, dfly_selected: bool = False, engram_table_format: str = "b
         metadata={"execution": "mlx2.adapters.hy_v4_flash.HYV4FlashAdapter",
                   "qualification": "pending",
                   "scope": "text+image (image implemented; unqualified)" if vision else "text-only",
-                  "vision": ("image: ordinary route, isolated B=1 media prefill; video refused"
+                  "vision": ("image: ordinary route, isolated B=1 media prefill; plain decode on "
+                             "external_draft (DFly2/AST); video refused"
                              if vision else "not loaded"),
                   "dfly2": "selected; unqualified" if dfly_selected else "implemented; not selected",
                   "apc_v2": ("not declared (fp8 latent rows are approximate)" if fp8 else
@@ -165,7 +166,7 @@ def descriptor_for(*, dfly_selected: bool = False, engram_table_format: str = "b
                   "grammar": "Hy4 forced-call grammar and generic structured output; "
                              "implemented, unqualified",
                   "engram_tables": "bf16 (default)" if engram_table_format == "bf16" else
-                  f"{engram_table_format}; opt-in; unqualified"
+                  f"{engram_table_format}; not the bf16 default; unqualified"
                   + ("; approximate" if engram_table_format in ("affine4_g32", "iq4_nl") else ""),
                   "latent_kv": ("fp8 (approximate state; selected; unqualified)" if fp8
                                 else "native (exact); fp8 implemented, not selected")},
@@ -298,6 +299,23 @@ def module_quantization(quant: dict) -> dict:
     from ..runtime.models.hy_v4_flash import switch_mlp_name
 
     return {switch_mlp_name(k): v for k, v in quant.items() if isinstance(v, dict)}
+
+
+def resolve_engram_table_format(policy: dict, available) -> tuple[str, str]:
+    """``(format, source)`` of the Engram table format a load uses.
+
+    An explicit ``engram_table_format`` wins (``"policy"``).  Otherwise the
+    default stays ``bf16`` (``"default"``) whenever the artifact carries it;
+    an artifact that carries exactly one other format (a third-party pack
+    with only IQ4_NL GGUF tables) uses that one (``"artifact_only_format"``)
+    instead of failing to load with the default.
+    """
+    if "engram_table_format" in policy:
+        return policy["engram_table_format"], "policy"
+    available = list(available)
+    if "bf16" not in available and len(available) == 1:
+        return available[0], "artifact_only_format"
+    return "bf16", "default"
 
 
 def available_engram_formats(config: dict) -> list:
@@ -698,9 +716,14 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     EXTERNAL_PROFILE = "hy-v4-flash-ast-b1-b4-v1"
     EXTERNAL_ROUTE_TAG = "hy4-flash-chain-packed-tree-v1"
     EXTERNAL_DEFAULT_NUM_DRAFT = 5
-    # Media prefill and decode run on the ordinary route only; the
-    # external-draft (AST/DFly2/prompt-lookup) routes refuse image requests.
+    # Media prefill and decode run natively on the ordinary route; on the
+    # external-draft route an image request decodes plain (below).
     multimodal_routes = frozenset({"ordinary"})
+    # Image requests on the external-draft route (DFly2 / AST / prompt
+    # lookup drafters) decode plain: an isolated media prefill, then the
+    # ordinary one-token step, in that engine's permanent ordinary lane
+    # (Pierre 2026-11-20: DFly2 by default and images on the same server).
+    multimodal_plain_decode_routes = frozenset({"external_draft"})
 
     def __init__(self, model_path: str, *, execution_policy=None, weight_streaming=None):
         from .process_globals import guarded_construction
@@ -732,7 +755,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.num_draft = int(external.get("num_draft", 5))
         if self.dfly_selected and not artifact["has_dfly"]:
             raise ValueError("Hy4-flash artifact carries no DFly2 drafter")
-        engram_format = policy.get("engram_table_format", "bf16")
+        engram_format, self.engram_table_format_source = resolve_engram_table_format(
+            policy, artifact["engram_table_formats"])
         if engram_format not in artifact["engram_table_formats"]:
             raise ValueError(f"Hy4-flash artifact carries no {engram_format} Engram tables (it has "
                              f"{artifact['engram_table_formats']}); select one with engram_table_format")
@@ -756,9 +780,9 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             path, artifact, keep_dfly=self.dfly_selected,
             engram_cache_rows=int(policy.get("engram_cache_rows", 1 << 16)),
             engram_precision=policy.get("engram_precision", "transformers"),
-            engram_table_format=policy.get("engram_table_format", "bf16"),
+            engram_table_format=engram_format,
             latent_kv=self.latent_kv, vision=policy.get("vision", True))
-        self.engram_table_format = policy.get("engram_table_format", "bf16")
+        self.engram_table_format = engram_format
         from ..runtime.models.hy_v4_flash_fp8kv import latent_fp8_stats
 
         self._fp8_baseline = latent_fp8_stats()["rows_packed"]
@@ -940,17 +964,18 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             return request
         if not self.model.has_vision:
             raise CapabilityUnavailable("this Hy4-flash artifact has no loaded vision tower")
-        if getattr(self, "draft_model", None) is not None:
-            raise CapabilityUnavailable("Hy4-flash image input runs on the ordinary route only")
         tower = self.model.vision_tower.args
-        min_pixels, max_pixels = self.image_pixel_bounds
+        proc = self.image_processor_settings
+        min_pixels, max_pixels = proc["min_pixels"], proc["max_pixels"]
         values = []
         for source in media:
             value = resolve_media(source, kind="image", file_loader=file_loader)
             values.append(value)
             patches, grid = preprocess_image(value.value, patch_size=tower.patch_size,
                                              merge_size=tower.spatial_merge_size,
-                                             min_pixels=min_pixels, max_pixels=max_pixels)
+                                             min_pixels=min_pixels, max_pixels=max_pixels,
+                                             image_mean=proc["image_mean"],
+                                             image_std=proc["image_std"])
             pixels.append(patches)
             grids.append(grid)
         prepared = {**request, "messages": typed}
@@ -967,7 +992,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
         policy = {"processor": PROCESSOR_REVISION, "patch_size": tower.patch_size,
                   "merge_size": tower.spatial_merge_size, "min_pixels": min_pixels,
-                  "max_pixels": max_pixels}
+                  "max_pixels": max_pixels, "image_mean": list(proc["image_mean"]),
+                  "image_std": list(proc["image_std"])}
         return {
             **prepared,
             "_mlx2_prompt_tokens": ids,
@@ -980,19 +1006,53 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         }
 
     @property
-    def image_pixel_bounds(self) -> tuple[int, int]:
-        """``(min_pixels, max_pixels)``: the artifact's preprocessor config, else
-        the vision config's ``min/max_image_size`` squared (the reference
-        processor's 512*512 / 2048*2048 defaults for tencent/Hy4-flash)."""
+    def image_processor_settings(self) -> dict:
+        """The artifact's image-processor settings, read as transformers does.
+
+        ``processor_config.json``'s nested ``"image_processor"`` dict wins
+        (tencent/Hy4-flash ships only this file: mean/std 0.5, ``min_pixels``
+        4096, ``max_pixels`` 2048*2048), else ``preprocessor_config.json``;
+        unset keys keep the processor class defaults (CLIP mean/std, the
+        vision config's ``min/max_image_size`` squared).
+        """
+        from .hy_v4_flash_media import OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
+
         tower = self.model.vision_tower.args
-        bounds = (tower.min_image_size ** 2, tower.max_image_size ** 2)
-        path = Path(self.identity["path"]) / "preprocessor_config.json"
-        if path.is_file():
-            data = json.loads(path.read_text())
+        out = {"min_pixels": tower.min_image_size ** 2, "max_pixels": tower.max_image_size ** 2,
+               "image_mean": tuple(OPENAI_CLIP_MEAN), "image_std": tuple(OPENAI_CLIP_STD)}
+        root = Path(self.identity["path"])
+        data = None
+        nested = root / "processor_config.json"
+        if nested.is_file():
+            data = json.loads(nested.read_text()).get("image_processor")
+        flat = root / "preprocessor_config.json"
+        if data is None and flat.is_file():
+            data = json.loads(flat.read_text())
+        if isinstance(data, dict):
             size = data.get("size") or {}
-            bounds = (int(data.get("min_pixels", size.get("shortest_edge", bounds[0]))),
-                      int(data.get("max_pixels", size.get("longest_edge", bounds[1]))))
-        return bounds
+            out["min_pixels"] = int(data.get("min_pixels", size.get("shortest_edge", out["min_pixels"])))
+            out["max_pixels"] = int(data.get("max_pixels", size.get("longest_edge", out["max_pixels"])))
+            for key in ("image_mean", "image_std"):
+                if data.get(key) is not None:
+                    value = tuple(float(v) for v in data[key])
+                    if len(value) != 3:
+                        raise ValueError(f"Hy4-flash image processor {key} must have 3 channels")
+                    out[key] = value
+            if data.get("do_normalize") is False or data.get("do_rescale") is False:
+                raise ValueError("Hy4-flash image processor without rescale/normalize is not implemented")
+            factor = data.get("rescale_factor")
+            if factor is not None and abs(float(factor) - 1 / 255) > 1e-9:
+                raise ValueError(f"Hy4-flash image processor rescale_factor {factor} is not implemented "
+                                 "(only 1/255)")
+            # ``resample`` is not read: the reference processor resizes with
+            # BICUBIC whatever the config says (hy_v4_flash_media).
+        return out
+
+    @property
+    def image_pixel_bounds(self) -> tuple[int, int]:
+        """``(min_pixels, max_pixels)`` of ``image_processor_settings``."""
+        proc = self.image_processor_settings
+        return proc["min_pixels"], proc["max_pixels"]
 
     def validate_prefill_inputs(self, request, remaining_tokens, prefill_input):
         """Refuse a media payload whose grids disagree with the prompt's image tokens."""
@@ -1136,6 +1196,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "modalities": ("image",),
                 "video": "refused (not implemented)",
                 "routes": tuple(sorted(type(self).multimodal_routes)),
+                "plain_decode_routes": tuple(sorted(type(self).multimodal_plain_decode_routes)),
                 "observed_used": bool(getattr(getattr(self, "model", None), "vision_stats",
                                               {}).get("prefills")),
                 "stats": dict(getattr(getattr(self, "model", None), "vision_stats", {})),
@@ -1148,6 +1209,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             return None
         precision = getattr(getattr(getattr(self, "model", None), "args", None), "engram_precision", "transformers")
         return {**engram_format_record(fmt, precision), "selected": True,
+                "selected_by": getattr(self, "engram_table_format_source", "policy"),
                 "observed_used": any(r.stats.get("lookups") for r in getattr(self, "engram_tables", {}).values())}
 
     def close(self):

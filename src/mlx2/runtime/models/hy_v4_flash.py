@@ -1948,6 +1948,24 @@ class Model(nn.Module):
     def prefill_body(self, inputs, cache, capture_layers):
         return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
+    def media_prefill_body(self, inputs, cache, capture_layers, *, pixel_values=None,
+                           image_grid_thw=None, **unknown):
+        """One isolated media prefill chunk on the external-draft engine.
+
+        The same ``hidden(pixel_values=, image_grid_thw=)`` forward the
+        ordinary route runs; the lane decodes plain (the adapter declares
+        ``multimodal_plain_decode_routes``), so only the final hidden is
+        returned, as ``prefill_body`` does.
+        """
+        if unknown:
+            raise ValueError(f"Hy4-flash media prefill does not take {sorted(unknown)}")
+        if pixel_values is None or image_grid_thw is None:
+            raise ValueError("Hy4-flash media prefill needs pixel_values and image_grid_thw")
+        layers = tuple(capture_layers)
+        if layers != (self.args.num_hidden_layers - 1,):
+            raise ValueError("Hy4-flash taps only the final post-norm hidden (last layer)")
+        return self.hidden(inputs, cache, pixel_values=pixel_values, image_grid_thw=image_grid_thw)
+
     def logits(self, hidden):
         head = self.lm_head
         if not self.args.enable_lm_head_fp32:

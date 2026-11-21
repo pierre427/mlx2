@@ -6397,9 +6397,19 @@ class ServingEngine(KernelReloadMixin):
             public_request["skip_writing_prefix_cache"] = True
         speculation_policy = None
         if public_request.get("speculation", "auto") == "off":
-            speculation_policy = speculation_request_policy(
-                (self.snapshot.get("settings") or {}).get("route")
-            )
+            route_name = (self.snapshot.get("settings") or {}).get("route")
+            speculation_policy = speculation_request_policy(route_name)
+            if (
+                speculation_policy["status"] == "refused"
+                and has_media
+                and media_route_policy(self.adapter, route_name)["media"] == "plain_decode"
+            ):
+                # The route has no generic opt-out, but this media request
+                # decodes plain on it anyway: the opt-out is what it gets.
+                speculation_policy = {
+                    "route": route_name, "requested": "off", "status": "plain_decode",
+                    "reason": MEDIA_PLAIN_DECODE_REASON,
+                }
             if speculation_policy["status"] == "refused":
                 from .api_resources import CapabilityUnavailable
 
@@ -15690,9 +15700,11 @@ class ServingEngine(KernelReloadMixin):
                             sampling_config["target_only_plain_fallback"] = True
                         if prompt_lookup and job.prompt_lookup_span is not None:
                             sampling_config["memory_max_draft"] = job.prompt_lookup_span
-                        if prompt_lookup and job.media_decode is not None:
+                        if (prompt_lookup or external_draft) and job.media_decode is not None:
                             # Cold or warm (media restored from APCv2), the
-                            # lane never speculates: plain decode for media.
+                            # lane never speculates: plain decode for media
+                            # (prompt lookup's plain-only lane; an external
+                            # lane admitted as a permanent ordinary lane).
                             sampling_config["plain_decode_reason"] = job.media_decode["reason"]
                         if (
                             job.speculation_request is not None

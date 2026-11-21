@@ -566,3 +566,33 @@ def test_operator_decision_row_overrides_a_measured_entry():
     assert not skipped and merged[0]["default"]["kind"] == "ordinary"
     assert "qualification/runs/m.json" in merged[0]["evidence"]["files"]
     assert merged[0]["evidence"]["measured_scores"] == {"default": 1}
+
+
+def test_hy4_assembled_pack_no_flag_start_selects_embedded_dfly2():
+    """Pierre 2026-11-20: the assembled Hy4-flash MLX pack serves its built-in
+    DFly2 drafter by default (--ast selects the embedded native head); an
+    explicit route flag keeps the operator's route."""
+    from mlx2.adapters.hy_v4_flash import HYV4FlashAdapter, descriptor_for
+    from mlx2.server import build_parser
+
+    checkpoint = "Hy4-flash-MLX-4.6bit-mlx2"
+    fingerprint = "f2a8fa8d2b7f22150ee5bd988c5acc1814d8494aa82ee01aff40a7efc13aad93"
+    resolution = AdapterResolution(HYV4FlashAdapter, descriptor_for(vision=True),
+                                   {"identity": {"fingerprint": fingerprint}, "has_mtp": True,
+                                    "has_dfly": True})
+    args = build_parser().parse_args(["--model", f"/m/{checkpoint}"])
+    record = apply_best_route_default(args, resolution)
+    assert record["checkpoint"] == f"{checkpoint}@sha256:{fingerprint}"
+    assert record["match"] == "checkpoint" and record["qualification"] == "unqualified"
+    assert args.ast is True and getattr(args, "ast_drafter", None) is None
+    from mlx2.server import apply_ast_invocation
+
+    policy = apply_ast_invocation(args, None, resolution)
+    policy = brd.finish_best_route_default(args, policy)
+    route = resolve_route_selection(args, policy, resolution)
+    assert route.route == "external_draft"
+    # The artifact's own head: the Hy4 adapter maps the model path to DFly2.
+    assert policy["draft_model"] in (f"/m/{checkpoint}", "mtp", "embedded_dfly")
+    explicit = build_parser().parse_args(["--model", f"/m/{checkpoint}", "--ordinary"])
+    assert apply_best_route_default(explicit, resolution).get("match") != "checkpoint"
+    assert explicit.ordinary is True and not explicit.ast

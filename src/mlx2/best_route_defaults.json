@@ -1068,6 +1068,25 @@
     "source_revision": "102aafd3bf2a74c0cf715d7bb146bcd0a1b6f079",
     "decision_row": true
    }
+  },
+  {
+   "checkpoint": "Hy4-flash-MLX-4.6bit-mlx2@sha256:f2a8fa8d2b7f22150ee5bd988c5acc1814d8494aa82ee01aff40a7efc13aad93",
+   "fingerprint": "f2a8fa8d2b7f22150ee5bd988c5acc1814d8494aa82ee01aff40a7efc13aad93",
+   "adapter": "HYV4FlashAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ast_auto",
+    "kind": "ast"
+   },
+   "reason": "decision row from another lane: Operator decision: Pierre 2026-11-20 asked for the built-in DFly2 drafter to be supported and used by default on this artifact (the Nace.AI Hy4-flash-MLX-4.6bit pack assembled with the original's bf16 DFly2 drafter and vision tower, scripts/assemble_hy4_mlx_pack.py). Route: ast. adapter=HYV4FlashAdapter. On this adapter --ast selects the embedded DFly2 native head (draft_model = the artifact path). GSM8K first 30, chat-fewshot, vendor sampling T 0.9 / top_p 1.0, seed 20261120, B1, at 5f66993a6: ordinary 29/30 30.5 tok/s median decode; DFly2 28/30 46.3 tok/s (1.52x), mean acceptance length 3.76",
+   "evidence": {
+    "files": [
+     "qualification/runs/hy4-dfly-gsm8k-20261120-5f66993a6/receipt.json",
+     "qualification/runs/hy4-vision-20261120-fa084827d/dfly-server/vision.json"
+    ],
+    "source_revision": "ec946f453b56bcd899f5771f5bceb621e28faa51",
+    "decision_row": true
+   }
   }
  ]
 }

@@ -8,7 +8,9 @@
 * Resampling is PIL BICUBIC: the reference processor resizes with BICUBIC
   whatever the config says, after the original HunyuanOCR implementation,
   which called ``PIL.Image.resize`` with its RGB default.
-* Rescale by 1/255, normalize with the OpenAI CLIP mean/std.
+* Rescale by 1/255, normalize with the artifact processor's ``image_mean`` /
+  ``image_std`` (tencent/Hy4-flash ``processor_config.json``: 0.5 / 0.5); the
+  OpenAI CLIP mean/std are only the processor class defaults.
 * ``patchify``: patches in row-major grid order, each flattened as
   ``(channel, row, col)``; ``grid_thw`` = ``(1, H/16, W/16)``.
 * Each image placeholder becomes ``(H/32) * (W/32 + 1)`` image tokens (one
@@ -21,7 +23,7 @@ import math
 
 import numpy as np
 
-PROCESSOR_REVISION = "transformers-c2ec8505-hy_v4_flash-image-v1-pil-bicubic"
+PROCESSOR_REVISION = "transformers-c2ec8505-hy_v4_flash-image-v2-pil-bicubic-config-norm"
 OPENAI_CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 OPENAI_CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 MIN_PIXELS = 512 * 512
@@ -53,16 +55,17 @@ def patchify(image: np.ndarray, patch: int) -> tuple[np.ndarray, int, int]:
     return patches.reshape(gh * gw, C * patch * patch), gh, gw
 
 
-def normalize(rgb: np.ndarray) -> np.ndarray:
+def normalize(rgb: np.ndarray, mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD) -> np.ndarray:
     """``uint8 [H, W, 3]`` -> normalized ``float32 [3, H, W]``."""
     x = rgb.astype(np.float32) * np.float32(1.0 / 255.0)
-    mean = np.asarray(OPENAI_CLIP_MEAN, np.float32)
-    std = np.asarray(OPENAI_CLIP_STD, np.float32)
+    mean = np.asarray(mean, np.float32)
+    std = np.asarray(std, np.float32)
     return ((x - mean) / std).transpose(2, 0, 1)
 
 
 def preprocess_image(image, *, patch_size: int = 16, merge_size: int = 2,
-                     min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS):
+                     min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS,
+                     image_mean=OPENAI_CLIP_MEAN, image_std=OPENAI_CLIP_STD):
     """A PIL RGB image -> ``(pixel_values float32 [n, 3*p*p], (1, gh, gw))``."""
     from PIL import Image
 
@@ -70,7 +73,7 @@ def preprocess_image(image, *, patch_size: int = 16, merge_size: int = 2,
     rh, rw = smart_resize(height, width, factor=patch_size * merge_size,
                           min_pixels=min_pixels, max_pixels=max_pixels)
     resized = image.convert("RGB").resize((rw, rh), resample=Image.BICUBIC)
-    pixels, gh, gw = patchify(normalize(np.asarray(resized)), patch_size)
+    pixels, gh, gw = patchify(normalize(np.asarray(resized), image_mean, image_std), patch_size)
     return np.ascontiguousarray(pixels, dtype=np.float32), (1, gh, gw)
 
 

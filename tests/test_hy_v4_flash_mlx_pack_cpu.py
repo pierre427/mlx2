@@ -471,3 +471,14 @@ def test_pack_receipts_label_iq4nl_approximate_and_namespace_it():
     with pytest.raises(ValueError, match="unknown table format"):
         A._fingerprint_engram_formats({"config": {"mlx2_engram_formats": {"iq4_nl": {}}},
                                        "identity": {"path": "/", "files": [], "fingerprint": ""}})
+
+
+def test_engram_format_resolution_keeps_bf16_and_picks_an_only_format():
+    from mlx2.adapters import hy_v4_flash as A
+
+    assert A.resolve_engram_table_format({}, ["bf16"]) == ("bf16", "default")
+    assert A.resolve_engram_table_format({}, ["bf16", "affine4_g32"]) == ("bf16", "default")
+    assert A.resolve_engram_table_format({}, ["iq4_nl"]) == ("iq4_nl", "artifact_only_format")
+    # Two non-bf16 formats: no guess; the default then fails closed at load.
+    assert A.resolve_engram_table_format({}, ["affine4_g32", "fp8_e4m3_row"]) == ("bf16", "default")
+    assert A.resolve_engram_table_format({"engram_table_format": "iq4_nl"}, ["iq4_nl"]) == ("iq4_nl", "policy")

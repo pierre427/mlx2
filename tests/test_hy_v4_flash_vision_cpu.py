@@ -633,6 +633,7 @@ def test_adapter_image_request_end_to_end(tmp_path, vtiny):
     try:
         assert Capability.VISION in adapter.descriptor.capabilities
         assert adapter.multimodal_routes == frozenset({"ordinary"})
+        assert adapter.multimodal_plain_decode_routes == frozenset({"external_draft"})
         text = {"messages": [{"role": "user", "content": "t7 t8"}]}
         assert adapter.prepare_multimodal_request(text) is text
         request = {"messages": [{"role": "user", "content": [
@@ -670,6 +671,42 @@ def test_adapter_image_request_end_to_end(tmp_path, vtiny):
         off.close()
 
 
+def test_adapter_reads_nested_processor_config(tmp_path, vtiny):
+    """tencent/Hy4-flash ships only ``processor_config.json`` with a nested
+    ``image_processor`` (mean/std 0.5, min_pixels 4096); transformers 5.x
+    reads it in preference to ``preprocessor_config.json``.  The reference
+    pixels below are an independent transcription of the processor's
+    rescale/normalize/patchify with those values."""
+    from PIL import Image
+
+    from mlx2.adapters import hy_v4_flash as A
+
+    config, W, VW, _ = vtiny
+    path = _vision_artifact(tmp_path, config, W, VW)
+    (path / "processor_config.json").write_text(json.dumps({"image_processor": {
+        "image_mean": [0.5, 0.5, 0.5], "image_std": [0.5, 0.5, 0.5], "min_pixels": 64,
+        "max_pixels": 4096, "size": {"shortest_edge": 64, "longest_edge": 4096},
+        "do_rescale": True, "do_normalize": True, "patch_size": 4, "merge_size": 2}}))
+    url = _png(56, 40, seed=5)
+    adapter = A.HYV4FlashAdapter(str(path))
+    try:
+        assert adapter.image_pixel_bounds == (64, 4096)
+        request = {"messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": url}}, {"type": "text", "text": "t9"}]}]}
+        prepared = adapter.prepare_multimodal_request(request)
+        inputs = prepared["_mlx2_prefill_inputs"]
+        # 40x56 within [64, 4096] at factor 8 -> no resize -> grid 10x14.
+        assert inputs["image_grid_thw"] == ((1, 10, 14),)
+        rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).convert("RGB"))
+        x = ((rgb.astype(np.float64) / 255.0 - 0.5) / 0.5).transpose(2, 0, 1)
+        ref = x.reshape(3, 5, 2, 4, 7, 2, 4).transpose(1, 2, 4, 5, 0, 3, 6).reshape(140, 48)
+        np.testing.assert_allclose(np.array(inputs["pixel_values"]), ref, rtol=0, atol=1e-6)
+        got = np.array(adapter.model(mx.array([prepared["_mlx2_prompt_tokens"]]), **inputs)[0])
+        assert np.isfinite(got).all()
+    finally:
+        adapter.close()
+
+
 def test_partial_vision_tower_refuses(tmp_path, vtiny):
     from mlx2.adapters import hy_v4_flash as A
 
@@ -680,10 +717,124 @@ def test_partial_vision_tower_refuses(tmp_path, vtiny):
         A.inspect_artifact(path)
 
 
-def test_media_refused_on_external_draft_route():
+def test_media_decodes_plain_on_external_draft_route():
     from mlx2.adapters.hy_v4_flash import HYV4FlashAdapter
     from mlx2.serving import media_route_policy
 
     adapter = object.__new__(HYV4FlashAdapter)
     assert media_route_policy(adapter, "ordinary")["media"] == "route_native"
-    assert media_route_policy(adapter, "external_draft")["media"] == "refused"
+    policy = media_route_policy(adapter, "external_draft")
+    assert policy["media"] == "plain_decode" and policy["speculation"] == "disabled_for_media"
+    assert policy["contract"] == "multimodal_plain_decode_routes"
+    # Routes the adapter does not declare still refuse.
+    assert media_route_policy(adapter, "native_mtp")["media"] == "refused"
+
+
+def _media_greedy(model, prompt, inputs, n):
+    """Ordinary-route reference: one media chunk of all but the last prompt
+    token, then one-token greedy steps (the serving rule)."""
+    cache = model.make_cache()
+    model(mx.array([prompt[:-1]]), cache, **inputs)
+    out = [int(mx.argmax(model(mx.array([[prompt[-1]]]), cache)[0, -1]).item())]
+    for _ in range(n - 1):
+        out.append(int(mx.argmax(model(mx.array([[out[-1]]]), cache)[0, -1]).item()))
+    return out
+
+
+def test_image_lane_on_the_dfly2_engine_equals_ordinary_beside_a_speculating_text_lane(tmp_path, vtiny):
+    """Pierre 2026-11-20: DFly2 by default and images on the same server.  An
+    image lane admitted plain on the external-draft engine equals the same
+    request on the ordinary route token for token, says so in its receipt,
+    feeds no draft context, and a text lane beside it still drafts."""
+    from mlx2.adapters import hy_v4_flash as A
+
+    from test_hy_v4_flash_cpu import LONG, _greedy
+
+    config, W, VW, _ = vtiny
+    path = _vision_artifact(tmp_path, config, W, VW)
+    adapter = A.HYV4FlashAdapter(str(path), execution_policy={"draft_model": "embedded_dfly"})
+    try:
+        model = adapter.model
+        prompt = image_prompt()
+        inputs = {"pixel_values": mx.array(pixels_for(GRIDS)), "image_grid_thw": tuple(GRIDS)}
+        n = 10
+        want_image = _media_greedy(model, prompt, inputs, n)
+        # A text prompt whose greedy continuation stays clear of the media
+        # token ids (90-96): the tiny random model can emit them.
+        plain = [t for t in LONG if t < 90]
+        for start in range(0, len(plain) - 14):
+            text = plain[start:start + 14]
+            try:
+                want_text = _greedy(model, text, n)
+                break
+            except ValueError:
+                continue
+        else:
+            raise AssertionError("no media-free text continuation in the fixture")
+        batch = adapter.create_external_batch(completion_batch_size=2, prefill_step_size=4)
+        uids = batch.insert([prompt, text], max_tokens=[n, n],
+                            sampling_configs=[{"sampling_temp": 0, "plain_decode_reason": "media_request"},
+                                              {"sampling_temp": 0}],
+                            prefill_inputs=[inputs, None])
+        out, receipts, sidecar = {u: [] for u in uids}, {}, None
+        for _ in range(400):
+            result = batch.next()
+            boundary = batch.boundaries.get(uids[0])
+            if sidecar is None and boundary is not None and boundary.get("cache_sidecar") is not None:
+                sidecar = boundary["cache_sidecar"]
+            for r in (result[1] if isinstance(result, tuple) else result):
+                out[r.uid].append(int(r.token))
+                receipts[r.uid] = getattr(r, "speculative_receipt", None)
+            if all(len(v) >= n for v in out.values()):
+                break
+        assert out[uids[0]][:n] == want_image
+        assert out[uids[1]][:n] == want_text
+        image = receipts[uids[0]]
+        assert image["ordinary_fallback"] and image["ordinary_fallback_reason"] == "media_request"
+        assert image["speculation"] == "disabled_for_media" and image["decode"] == "ordinary"
+        assert image["media_prefill_inputs"] == ["image_grid_thw", "pixel_values"]
+        assert image["external_rounds"] == 0 and image["proposed"] == 0
+        assert image["plain_only_rounds"] >= n - 1
+        # The image lane's prompt-end sidecar stays paired with the target
+        # boundary and carries at most the pending row, not the prompt's
+        # whole final hidden (the draft context was appended, bounded).
+        assert sidecar is not None
+        sidecar.validate(sidecar.binding, sidecar.covered_tokens)
+        assert sidecar.covered_tokens == len(prompt) - 1
+        assert int(sidecar.state[1].shape[1]) <= 1
+        stats = batch.scheduler_stats
+        assert stats["external_plain_decode_lanes"] == 1 and stats["external_media_prefill_rounds"] == 1
+        assert (receipts[uids[1]] or {}).get("proposed", 0) > 0  # the text lane drafted
+    finally:
+        adapter.close()
+
+
+def test_plain_decode_reason_must_be_a_string(tmp_path, vtiny):
+    from mlx2.adapters import hy_v4_flash as A
+
+    config, W, VW, _ = vtiny
+    adapter = A.HYV4FlashAdapter(str(_vision_artifact(tmp_path, config, W, VW)),
+                                 execution_policy={"draft_model": "embedded_dfly"})
+    try:
+        batch = adapter.create_external_batch(completion_batch_size=1, prefill_step_size=4)
+        with pytest.raises(ValueError, match="plain_decode_reason"):
+            batch.insert([[5, 7, 9, 11]], max_tokens=[2],
+                         sampling_configs=[{"sampling_temp": 0, "plain_decode_reason": ""}])
+    finally:
+        adapter.close()
+
+
+def test_processor_config_with_another_rescale_factor_fails_closed(tmp_path, vtiny):
+    from mlx2.adapters import hy_v4_flash as A
+
+    config, W, VW, _ = vtiny
+    path = _vision_artifact(tmp_path, config, W, VW)
+    (path / "processor_config.json").write_text(json.dumps({"image_processor": {
+        "image_mean": [0.5, 0.5, 0.5], "image_std": [0.5, 0.5, 0.5], "rescale_factor": 1 / 127.5}}))
+    adapter = A.HYV4FlashAdapter(str(path))
+    try:
+        with pytest.raises(ValueError, match="rescale_factor"):
+            adapter.image_processor_settings
+        assert adapter.diagnostics()["vision"]["plain_decode_routes"] == ("external_draft",)
+    finally:
+        adapter.close()
