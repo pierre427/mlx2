@@ -63,6 +63,12 @@ Rows: OUT/english.jsonl; verdicts in battery.md. A detach partition (--detach-sh
 no arm: the boxes, groups and joint arms read the post-detach tiles, so a box that lost a claim it needed fails its
 served arm; boxes-arm rows carry the box's claims_detached.
 
+Per-document rows (opt-in --perdoc; docs/research/2026-11-20-amoeba-next-experiments.md 7.1): every scored (row key,
+arm, held set) also appends its per-document CE sums, the unmasked model's and the scored-target counts to
+OUT/perdoc.jsonl, each held set's document ids, source groups and strata go to OUT/perdoc.docs.json, and the end of
+the run writes OUT/battery.perdoc.npz (per-document dCE). battery.jsonl and every other output are unchanged; paired
+SE and the source-group bootstrap: scripts/amoeba_battery_stats.py.
+
 Usage: amoeba_box_battery.py --model M --partition DIR --held cmn=C.jsonl --held eng=E.jsonl ... --out DIR
        [--arms boxes,unclaimed,groups] [--unclaimed U.npz] [--global-held gsm8k] [--held-note NAME=TEXT]
 """
@@ -282,6 +288,8 @@ def main():
     ap.add_argument("--english", default="eng", help="the English held set's name (category partitions: english)")
     ap.add_argument("--joint-partition", default="", help="the joint-tile variant partition (joint arm)")
     ap.add_argument("--joint-top", type=int, default=10)
+    ap.add_argument("--perdoc", action="store_true", help="also write per-document rows (OUT/perdoc.jsonl, "
+                    "perdoc.docs.json, battery.perdoc.npz; 7.1)")
     ap.add_argument("--skipped", action="append", default=[], help="NAME=REASON: a partition box left out of every "
                     "arm (recorded in the meta and battery.md)")
     a = ap.parse_args()
@@ -409,6 +417,11 @@ def main():
     if core_t.shape != (len(layers), W):
         raise SystemExit(f"tile shape {core_t.shape} != [moe layers, {W}]")
     held, htok = {}, {}
+    ST = None
+    if a.perdoc:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import amoeba_battery_stats as ST
+        docmeta = {}
     for spec in a.held:
         name, _, rest = spec.partition("=")
         rest, _, tok = rest.partition("@")
@@ -419,16 +432,19 @@ def main():
         if kind == "gsm8k":
             notes.setdefault(name, "GSM8K test rows (question + answer) as held text; dCE, not accuracy")
         np.random.default_rng(a.seed).shuffle(rows)
-        seqs = []
+        seqs, used = [], []
         for r in rows:
             t = host.encode(r["text"])
             if len(t) >= T:
                 seqs.append(t[:T])
+                used.append(r)
             if len(seqs) >= a.docs:
                 break
         if not seqs:
             raise SystemExit(f"held {name}: no document of {T} tokens")
         held[name], htok[name] = {"held": seqs}, T
+        if ST is not None:
+            docmeta[name] = ST.doc_meta(used, spec)
         log(f"held {name}: {len(seqs)} x {T} tokens")
     start_meta("scoring", {k: len(v["held"]) for k, v in held.items()})
     missing = [b for b in boxes if b not in held] + [x for x in a.global_held.split(",") if x and x not in held]
@@ -438,12 +454,20 @@ def main():
     if missing or EN not in held:
         raise SystemExit(f"held sets missing for {missing + ([] if EN in held else [EN])}")
     clean = {}
+    if ST is not None:
+        (out / "perdoc.docs.json").write_text(json.dumps(docmeta, indent=0))
 
-    def score(keep_rows, names):
+    def score(keep_rows, names, tag=None):
         m = np.ones((host.L, W), np.float32)
         m[layers] = keep_rows.astype(np.float32)
         cfg = E.configure(host, D.from_np(m, host), None, host.L)
-        r = E.english_cost(host, {k: held[k] for k in names}, clean, cfg, pooled=False)
+        if ST is None:
+            r = E.english_cost(host, {k: held[k] for k in names}, clean, cfg, pooled=False)
+        else:                                             # --perdoc: the same values, plus per-document rows
+            pdoc = {}
+            r = E.english_cost(host, {k: held[k] for k in names}, clean, cfg, pooled=False, perdoc=pdoc)
+            for k in names:
+                ST.append_perdoc(out / "perdoc.jsonl", tag[0], tag[1], k, pdoc[k])
         return {k: v for k, v in r.items() if k != "mean_d_ce"}
 
     allones = np.ones_like(core_t)
@@ -466,7 +490,7 @@ def main():
     if po.exists() and set(held) - set(json.loads(po.read_text())):     # a held set added on resume: rescore all
         po.unlink()
     if not po.exists():
-        po.write_text(json.dumps(score(allones, list(held)), indent=1))
+        po.write_text(json.dumps(score(allones, list(held), ("_all", "path_offset")), indent=1))
     off = json.loads(po.read_text())
     log("path offset:", off)
     for i, b in enumerate(boxes if "boxes" in arms else []):
@@ -481,13 +505,13 @@ def main():
             far_other = "cmn"
             far_same = next((s for s in FAR_SUBJ if s in held and not lineage(s, b)), None)
         unrelated = [EN] + [x for x in (far_other, far_same) if x and x in held and not lineage(x, b)]
-        without = score(~box, [b] + unrelated)
+        without = score(~box, [b] + unrelated, (b, "without"))
         rnd = random_like(box, np.random.default_rng(a.seed + 1000 + i))
-        random_ = score(~rnd, [b, EN])
+        random_ = score(~rnd, [b, EN], (b, "random"))
         pairs = [k for k in keys if k.startswith("pair:") and b in k[5:].split("__")]
         anc, desc, grp = ancestors_of(prep, b), descendants_of(prep, b), group_keys_of(prep, b)
         keep = served_keep(lambda k: tz[k], keys, prep, b, core_t)
-        core_plus = score(keep, [b, EN])
+        core_plus = score(keep, [b, EN], (b, "core_plus"))
         net = lambda d: {k: v - off.get(k, 0.0) for k, v in d.items()}      # noqa: E731  (path offset removed)
         nw, nr, nc = net(without), net(random_), net(core_plus)
         own, ro = nw[b], nr[b]
@@ -562,7 +586,7 @@ def main():
                 continue
             t0 = time.time()
             keep = mk()
-            d = score(keep, sets)
+            d = score(keep, sets, (key, "unclaimed"))
             nd = net(d)
             row = {"arm": "unclaimed", "key": key, "sets": sets, "kept_units": int(keep.sum()),
                    "unclaimed_units": int(U.sum()), "dce": d, "net": nd,
@@ -608,7 +632,7 @@ def main():
                 t0 = time.time()
                 keep = served_keep(get, keys, prep, m, core)
                 bx = boxes_rows.get(m) if "boxes" in arms else None     # the boxes arm scored this same mask
-                d = dict(bx["core_plus"]) if bx else score(keep, [m, EN])
+                d = dict(bx["core_plus"]) if bx else score(keep, [m, EN], (f"served:{m}", "groups"))
                 nd = net(d)
                 served[m] = put(gj, {"arm": "groups", "key": f"served:{m}", "sets": [m, EN], "dce": d, "net": nd,
                                      "kept_units": int(keep.sum()), "groups": group_keys_of(prep, m),
@@ -621,9 +645,9 @@ def main():
             t0 = time.time()
             G = tz[key]
             sets = have + [EN]
-            without = score(~G, sets)
+            without = score(~G, sets, (key, "without"))
             rnd = random_like(G, np.random.default_rng(a.seed + 5000 + gi))
-            random_ = score(~rnd, sets)
+            random_ = score(~rnd, sets, (key, "random"))
             nw, nr = net(without), net(random_)
             hurt = {m: nw[m] - nr[m] for m in have}
             verdict = {"removal_beats_random": bool(have and all(h >= a.group_min_hurt for h in hurt.values())),
@@ -676,7 +700,7 @@ def main():
                 continue
             t0 = time.time()
             keep = mk()
-            d = score(keep, sets)
+            d = score(keep, sets, (key, "english"))
             got[key] = put(ej, {"arm": "english", "key": key, "sets": sets, "kept_units": int(keep.sum()),
                                 "english_box_units": int(Ebox.sum()), "dce": d, "net": net(d),
                                 "wall_s": round(time.time() - t0, 1)})
@@ -743,7 +767,7 @@ def main():
                 opened = [k for k in jkeys_all if k.startswith("joint:") and lin & set(k[6:].split("+"))]
                 if opened:                             # one union buffer, not one dense mask per opened tile
                     keep = keep | jz.mask(*opened)
-                d = score(keep, [m, EN])
+                d = score(keep, [m, EN], (f"served:{m}", "joint"))
                 jserved[m] = put(jj, {"arm": "joint", "key": f"served:{m}", "sets": [m, EN], "dce": d, "net": net(d),
                                       "kept_units": int(keep.sum()), "joint_tiles_open": opened,
                                       "wall_s": round(time.time() - t0, 1)})
@@ -754,9 +778,9 @@ def main():
             t0 = time.time()
             J = jz[key]
             sets = have + [EN]
-            without = score(~J, sets)
+            without = score(~J, sets, (key, "without"))
             rnd = random_like(J, np.random.default_rng(a.seed + 9000 + ji))
-            random_ = score(~rnd, sets)
+            random_ = score(~rnd, sets, (key, "random"))
             nw, nr = net(without), net(random_)
             hurt = {m: nw[m] - nr[m] for m in have}
             verdict = {"removal_beats_random": bool(have and all(h >= a.group_min_hurt for h in hurt.values())),
@@ -819,6 +843,9 @@ def main():
         meta.update(arms=arms, held_notes=notes, arm_thresholds={"target": a.target, "group_min_hurt":
                                                                   a.group_min_hurt},
                     unclaimed=str(upath) if "unclaimed" in arms else None)
+    if ST is not None:
+        meta["perdoc"] = {"rows": ST.to_npz(out / "perdoc.jsonl", out / "battery.perdoc.npz"),
+                          "files": ["perdoc.jsonl", "perdoc.docs.json", "battery.perdoc.npz"]}
     write_meta(meta)
     lines = [f"Battery on {host.checkpoint}, partition {pd.name} ({prep.get('rule')}); held dCE, {a.docs} docs per set.\n",
              "| box | units | own without | unrelated without | random own / eng | core+box own / eng | exclusive | +0.05 served |",

@@ -142,6 +142,12 @@ class Control:
         self.box_out = None         # dict (box, layer) -> write, or None
         self.verify = None          # dict layer -> rel L2 of re-implemented vs block output (0.0 dense)
         self.replay = None          # {layer: (inds, w)}: MoE sites use these routes and weights (frozen routing)
+        # opt-in, neuron MoE sites only (docs/research/2026-11-20-amoeba-next-experiments.md 1.3 / 4.3); None = unchanged
+        self.moe_mean = None        # per layer [E*F] conditional mean of h: a closed slot gets mu instead of 0 (mean
+                                    # ablation = the servable per-expert bias sum_f mu W_down[:, f], down_proj is linear)
+        self.moe_thresh = None      # {layer: t}: per token, a routed slot's neuron with |h| < t is closed too (TEAL-style
+                                    # reference; position 0 stays exact in layers < sink_layers)
+        self.moe_open = None        # dict layer -> [open, total] mx scalars, accumulated when moe_thresh is set
         self.router_sg = getattr(self, "router_sg", False)   # set by Host.train_mode, survives reset
 
     def active(self, layer) -> bool:
@@ -712,9 +718,26 @@ def _sort_decision(sw, inds):
     return inds.size >= q3._sort_min(sw) or inv.active()
 
 
-def _switch_masked(mx, sw, x, inds, keep=None, want_hidden=False):
+def _slot_order(mx, v, inds, h, inv, do_sort, pad_value):
+    """A routed-slot-order row array [*inds.shape, F'] in the layout of h (the sort's order, tail pad rows)."""
+    F = v.shape[-1]
+    vv = v.reshape(-1, F)
+    if do_sort:
+        order = mx.argsort(inv)                       # inv = argsort(order), a permutation
+        vv = vv[order]
+        if h.shape[0] > vv.shape[0]:                  # _gather_sort's tail pad rows (sliced off later)
+            vv = mx.concatenate([vv, mx.full((h.shape[0] - vv.shape[0], F), pad_value, vv.dtype)], axis=0)
+        return vv[:, None, :]
+    return vv.reshape(*inds.shape, 1, F)
+
+
+def _switch_masked(mx, sw, x, inds, keep=None, want_hidden=False, fill=None, thresh=None, exact=None, open_acc=None):
     """The switch GLU in pieces: gate/up -> activation -> (* keep) -> down, through the module's own
     (quantized) switch projections. ``keep`` is [*inds.shape, F] in routed-slot order (or None).
+    Opt-in (None = unchanged): ``fill`` [*inds.shape, F] is the value a closed neuron takes instead of 0
+    (h -> keep * h + (1 - keep) * fill, the dense mean-ablation rule); ``thresh`` (float) also closes, per token,
+    every neuron with |h| < thresh, except at slots where ``exact`` [*inds.shape, 1] is 1; ``open_acc``
+    (list [open, total]) accumulates the open count of those thresholded slots.
     Returns (rows [..., k, D], activated hidden [..., k, F] before masking, or None)."""
     from mlx2.runtime.models import switch_layers as sl
     xe = mx.expand_dims(x, (-2, -3))
@@ -730,6 +753,7 @@ def _switch_masked(mx, sw, x, inds, keep=None, want_hidden=False):
     else:
         h = sw.activation(sw.up_proj(xe, idx, sorted_indices=do_sort), sw.gate_proj(xe, idx, sorted_indices=do_sort))
     h0 = h
+    kk = None
     if keep is not None:
         F = keep.shape[-1]
         kk = keep.reshape(-1, F)
@@ -741,7 +765,25 @@ def _switch_masked(mx, sw, x, inds, keep=None, want_hidden=False):
             kk = kk[:, None, :]
         else:
             kk = kk.reshape(*inds.shape, 1, F)
-        h = h * kk.astype(h.dtype)
+    if thresh is not None:                                # per-token |h| threshold (TEAL-style reference)
+        dyn = (mx.abs(h) >= thresh).astype(h.dtype)
+        if exact is not None:
+            ex = _slot_order(mx, exact.astype(h.dtype), inds, h, inv, do_sort, 1.0)
+            dyn = mx.maximum(dyn, ex)
+        if open_acc is not None:
+            ex_ = 0.0 if exact is None else ex
+            free = (1.0 - ex_) * mx.ones_like(dyn)
+            open_acc[0] = open_acc[0] + (dyn * free).astype(mx.float32).sum()
+            open_acc[1] = open_acc[1] + free.astype(mx.float32).sum()
+            mx.eval(open_acc)                             # a measurement path (no gradient): never hold h alive
+        kk = dyn if kk is None else kk.astype(h.dtype) * dyn
+    if kk is not None:
+        if fill is not None:
+            ff = _slot_order(mx, fill, inds, h, inv, do_sort, 0.0).astype(h.dtype)
+            kd = kk.astype(h.dtype)
+            h = h * kd + ff * (1 - kd)                    # an open neuron (kd = 1) keeps h exactly
+        else:
+            h = h * kk.astype(h.dtype)
     y = sw.down_proj(h, idx, sorted_indices=do_sort)
     hid = None
     if do_sort:
@@ -796,17 +838,32 @@ def _patch_moe_neuron(mx, site, ctl):
             all-open pass (keep None). Returns (x, inds, w, rows, shared, post, h)."""
             cap = {"k": self.top_k} if _kind == "qwen_next" else {}
 
-            def run_switch(sw, x_, i_, keep):
-                if keep is not None and i_.shape[-1] > keep.shape[-2]:     # folded shared row(s): always on
-                    pad = mx.ones((*keep.shape[:-2], i_.shape[-1] - keep.shape[-2], F), keep.dtype)
-                    keep = mx.concatenate([keep, pad], axis=-2)
-                return _switch_masked(mx, sw, x_, i_, keep, want)
+            def padded(v, i_, value):
+                if v is not None and i_.shape[-1] > v.shape[-2]:           # folded shared row(s): always on
+                    pad = mx.full((*v.shape[:-2], i_.shape[-1] - v.shape[-2], v.shape[-1]), value, v.dtype)
+                    v = mx.concatenate([v, pad], axis=-2)
+                return v
+
+            def run_switch(sw, x_, i_, keep, fill=None, thresh=None, exact=None, acc=None):
+                return _switch_masked(mx, sw, x_, i_, padded(keep, i_, 1.0), want, fill=padded(fill, i_, 0.0),
+                                      thresh=thresh, exact=padded(exact, i_, 1.0), open_acc=acc)
 
             def switch_fn(sw, x_):
                 def f(xx, ii):
                     routed = ii[..., : cap["k"]] if "k" in cap else ii        # the folded shared column is not a unit
-                    keep = _neuron_keep(mx, c, _l, x_, mx.stop_gradient(routed), E, F) if masked else None
-                    rows_, cap["h"] = run_switch(sw, xx, ii, keep)
+                    rr = mx.stop_gradient(routed)
+                    keep = _neuron_keep(mx, c, _l, x_, rr, E, F) if masked else None
+                    fill = thr = exact = acc = None
+                    if masked and c.moe_mean is not None and c.moe_mean[_l] is not None:
+                        fill = _slot_rows(c.moe_mean[_l], rr, E, F)
+                    if masked and c.moe_thresh is not None and _l in c.moe_thresh:
+                        thr = float(c.moe_thresh[_l])
+                        exact = mx.zeros((*rr.shape, 1), mx.float32)
+                        if _l < c.sink_layers and rr.ndim >= 3 and rr.shape[1] > 1:
+                            exact = mx.concatenate([mx.ones_like(exact[:, :1]), exact[:, 1:]], axis=1)
+                        if c.moe_open is not None:
+                            acc = c.moe_open.setdefault(_l, [mx.array(0.0), mx.array(0.0)])
+                    rows_, cap["h"] = run_switch(sw, xx, ii, keep, fill, thr, exact, acc)
                     return rows_
                 return f
 

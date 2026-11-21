@@ -9,19 +9,27 @@ from __future__ import annotations
 from .carving import ce_rows
 
 
-def text_ce(host, seqs, cfg_fn=None, bs=8):
+def text_ce(host, seqs, cfg_fn=None, bs=8, rows_out=None):
     """Mean CE over scored targets. Sequences are batched by length (a fixed held file mixes lengths); a sequence
-    with a loss mask (corpus.LOSS_FROM: on-policy rows) scores targets from its first scored index only."""
+    with a loss mask (corpus.LOSS_FROM: on-policy rows) scores targets from its first scored index only.
+
+    rows_out (opt-in, docs/research/2026-11-20-amoeba-next-experiments.md 7.1): a dict that receives "ce" and "n",
+    float64 / int arrays in the order of seqs: each sequence's CE sum over its scored targets and their count. The
+    pooled return value is computed exactly as without it (the same batch sums), so it is unchanged bit for bit."""
     import mlx.core as mx
     import numpy as np
     from .corpus import loss_from
     tot, n = 0.0, 0
     by_len = {}
-    for q in seqs:
-        by_len.setdefault(len(q), []).append(q)
+    for j, q in enumerate(seqs):
+        by_len.setdefault(len(q), []).append(j)
+    if rows_out is not None:
+        rows_out["ce"] = np.zeros(len(seqs), np.float64)
+        rows_out["n"] = np.zeros(len(seqs), np.int64)
     for _, group in sorted(by_len.items()):
         for i in range(0, len(group), bs):
-            rows = group[i:i + bs]
+            ii = group[i:i + bs]
+            rows = [seqs[j] for j in ii]
             ids = mx.array(rows)
             T = ids.shape[1]
             w = np.array([[1.0 if t >= max(2, loss_from(q)) else 0.0 for t in range(2, T)] for q in rows], np.float32)
@@ -29,26 +37,47 @@ def text_ce(host, seqs, cfg_fn=None, bs=8):
                 cfg_fn()
             lg = host.logits_at(ids, list(range(1, T - 1)))
             host.ctl.reset() if cfg_fn else None
-            ce = (ce_rows(lg, ids[:, 2:]) * mx.array(w)).sum()
-            mx.eval(ce)
+            cw = ce_rows(lg, ids[:, 2:]) * mx.array(w)
+            ce = cw.sum()
+            if rows_out is not None:
+                per = cw.sum(axis=1)
+                mx.eval(ce, per)
+                rows_out["ce"][ii] = np.array(per, dtype=np.float64)
+                rows_out["n"][ii] = w.sum(1).astype(np.int64)
+            else:
+                mx.eval(ce)
             tot += float(ce)
             n += int(w.sum())
             mx.clear_cache()
     return tot / max(1, n), n
 
 
-def english_cost(host, split, clean_cache, cfg_fn, part="held", domains=None, pooled=False):
+def english_cost(host, split, clean_cache, cfg_fn, part="held", domains=None, pooled=False, perdoc=None):
     """dCE per domain and their mean. pooled=True (FN boxes, coordinator 2026-11-16): the mean is weighted by each
     domain's sequence count (every held row counts once: probe windows, 1 greedy and 3 T=0.7 continuations per
-    prompt), and the counts are returned under "domain_rows"."""
+    prompt), and the counts are returned under "domain_rows".
+
+    perdoc (opt-in, a dict): also receives, per domain, {"ce", "clean_ce", "n"}: per-document CE sums of this arm
+    and of the clean model, and the scored-target counts (text_ce rows_out); the returned values are unchanged. The
+    clean per-document sums are cached in clean_cache under ("rows", domain)."""
     domains = list(domains or split)
     r = {}
     for dn in domains:
         if not split[dn].get(part):
             continue
+        if perdoc is not None and ("rows", dn) not in clean_cache:
+            cr = {}
+            c0 = text_ce(host, split[dn][part], rows_out=cr)[0]
+            clean_cache.setdefault(dn, c0)
+            clean_cache[("rows", dn)] = cr
         if dn not in clean_cache:
             clean_cache[dn] = text_ce(host, split[dn][part])[0]
-        r[dn] = text_ce(host, split[dn][part], cfg_fn)[0] - clean_cache[dn]
+        if perdoc is not None:
+            rr = {}
+            r[dn] = text_ce(host, split[dn][part], cfg_fn, rows_out=rr)[0] - clean_cache[dn]
+            perdoc[dn] = {"ce": rr["ce"], "clean_ce": clean_cache[("rows", dn)]["ce"], "n": rr["n"]}
+        else:
+            r[dn] = text_ce(host, split[dn][part], cfg_fn)[0] - clean_cache[dn]
     used = [d for d in domains if d in r]
     # nothing scored (every domain empty): None, never 0.0 (review 2026-11-16: an empty held set read as a pass)
     if pooled:

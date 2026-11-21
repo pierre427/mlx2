@@ -76,6 +76,66 @@ def capture(host, seqs, out_dir: Path, mean=None, seed=0, log=print, every=32):
     return {"vectors": J, "seq_len": len(seqs[0]), "seed": seed, "s": round(time.time() - t0, 1)}
 
 
+def accumulate(host, seqs, labels="ce", seed=0, log=print, every=16, budget_s=None, layers=None):
+    """Streaming attribution sums over sequences (docs/research/2026-11-20-amoeba-next-experiments.md 2.3 / 4.3):
+    no per-sequence vector is written (capture() writes ~63 MB per sequence at FN's 15.7M units).
+
+    For each sequence, g = d loss / d m at the full model (m = 1, drop rule for experts, mean None, position 0
+    exact), loss summed over the scored positions:
+      labels="ce"       loss = CE of the true next tokens at evals.text_ce's positions (targets 2..T-1);
+                        returns S1 = sum_seq g: closing unit u changes the CE sum by about -g_u, so the AtP zero-
+                        baseline attribution is N0_u = -S1_u / J (J sequences);
+      labels="sampled"  loss = -log p(y) with y ~ p_full sampled at positions 1..T-1 (seeded), as capture();
+                        returns S2 = sum_seq g^2, the empirical Fisher diagonal F_u = S2_u / J.
+    layers: the layer indices to keep (default every layer). budget_s: stop starting sequences after this many
+    seconds (the count done is returned). Returns {"sum": {l: float64 [n_l]}, "seqs": J, "labels", "s"}."""
+    import mlx.core as mx
+    from .carving import ce_rows
+    if labels not in ("ce", "sampled"):
+        raise ValueError(f"accumulate: labels must be ce or sampled, not {labels!r}")
+    keep = list(range(host.L)) if layers is None else list(layers)
+    S = {l: np.zeros(host.widths[l], np.float64) for l in keep}
+    key = mx.random.key(seed)
+    ones = host.ones()
+    t0 = time.time()
+    J = 0
+    for j, q in enumerate(seqs):
+        if budget_s is not None and time.time() - t0 > budget_s:
+            break
+        ids = mx.array([q])
+        T = ids.shape[1]
+        if labels == "ce":
+            pos = list(range(1, T - 1))
+
+            def hl(hid, ids=ids, pos=pos):
+                return ce_rows(host.head(hid[:, mx.array(pos)]), ids[:, 2:]).sum()
+        else:
+            pos = list(range(1, T))
+            host.ctl.reset()
+            lc = host.logits_at(ids, pos)
+            key, sub = mx.random.split(key)
+            y = mx.stop_gradient(mx.random.categorical(lc, key=sub))
+            mx.eval(y)
+
+            def hl(hid, y=y, pos=pos):
+                return -ce_rows(host.head(hid[:, mx.array(pos)]), y).sum()
+        host.train_mode(True)
+        try:
+            _, g = host.value_and_grad(ids, ones, hl)
+        finally:
+            host.train_mode(False)
+        g = g["core"] if isinstance(g, dict) else g
+        for l in keep:
+            v = np.asarray(g[l], dtype=np.float64)
+            S[l] += v if labels == "ce" else v * v
+        J += 1
+        del g
+        mx.clear_cache()
+        if j % every == 0:
+            log(f"  attribution {labels} {j + 1}/{len(seqs)} ({(time.time() - t0) / (j + 1):.2f} s/seq)")
+    return {"sum": S, "seqs": J, "labels": labels, "s": round(time.time() - t0, 1)}
+
+
 def load(out_dir: Path, L: int):
     return [np.load(out_dir / f"U_L{l:02d}.npy", mmap_mode="r") for l in range(L)]
 
