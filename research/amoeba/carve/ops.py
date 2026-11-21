@@ -116,7 +116,9 @@ def footprint_watchdog(limit_gb: float, log, every_s: float = 1.0, min_avail_gb:
     subprocesses. watcher=True also starts the watcher process, which SIGKILLs this process at the hard ceilings
     (footprint hard_gb, default limit_gb + 6; starvation for 10 s) or when a soft
     trigger is still true 5 s later, whatever this process's GIL or GPU queue is doing. Peak footprint and the
-    observed minima are kept in WATCH. MLX2_AMOEBA_WATCHDOG=off disables it (the CPU test suite)."""
+    observed minima are kept in WATCH. MLX2_AMOEBA_WATCHDOG=off disables it (the CPU test suite).
+    One watchdog per process: a later call re-bases the swap / compressor baselines and can only tighten the limits
+    (_tighten; every_s, receipt and watcher stay the first call's)."""
     from . import memwatch
     global _WATCHDOG_STARTED
     if os.environ.get("MLX2_AMOEBA_WATCHDOG", "").lower() == "off":
@@ -125,6 +127,8 @@ def footprint_watchdog(limit_gb: float, log, every_s: float = 1.0, min_avail_gb:
         reset_swap_baseline()              # carve re-bases the swap-growth check (slow drift over a long batch)
         if _WATCHER[0] is not None:
             _WATCHER[0].rebase()
+            _tighten(_WATCHER[0].lim, log, limit_gb=limit_gb, min_avail_gb=min_avail_gb,
+                     swap_growth_gb=swap_growth_gb, hard_gb=hard_gb, compressor_growth_gb=compressor_growth_gb)
         return
     _WATCHDOG_STARTED = True
     reset_swap_baseline()
@@ -137,6 +141,35 @@ def footprint_watchdog(limit_gb: float, log, every_s: float = 1.0, min_avail_gb:
                  compressor_at_start_gb=round(r["compressor_gib"], 2), compressor_growth_gb=compressor_growth_gb,
                  every_s=every_s, watcher=bool(watcher))
     _WATCHER[0] = memwatch.Watch(lim, log, every_s=every_s, receipt=receipt, watcher=watcher, stats=WATCH)
+
+
+def _tighten(lim, log, *, limit_gb, min_avail_gb, swap_growth_gb, hard_gb, compressor_growth_gb):
+    """A later footprint_watchdog call in a process whose watchdog already runs: a stricter request tightens the
+    live limits in place (the thread reads them every poll; the caps guard a shared machine), a looser one is not
+    applied and is recorded in WATCH["requested_ignored"]. WATCH keeps the limits in force. The watcher process
+    keeps the hard footprint ceiling it was spawned with (WATCH["watcher_hard_gb"] when that now differs)."""
+    hard = float(hard_gb if hard_gb is not None else limit_gb + 6.0)
+    ignored = {}
+    for wkey, lkey, want, stricter in (("limit_gb", "limit_gib", float(limit_gb), min),
+                                       ("hard_gb", "hard_gib", hard, min),
+                                       ("min_avail_gb", "min_avail_gib", float(min_avail_gb), max),
+                                       ("swap_growth_gb", "swap_growth_gib", float(swap_growth_gb), min),
+                                       ("compressor_growth_gb", "compressor_growth_gib", float(compressor_growth_gb), min)):
+        have = lim[lkey]
+        if stricter(have, want) != have:
+            if lkey == "hard_gib" and WATCH.get("watcher"):
+                WATCH.setdefault("watcher_hard_gb", have)
+            lim[lkey] = want
+            WATCH[wkey] = want
+        elif want != have and not (lkey == "hard_gib" and hard_gb is None):   # a derived default is no request
+            ignored[wkey] = {"requested": want, "in_force": have}
+    WATCH.pop("requested_ignored", None)
+    if ignored:
+        WATCH["requested_ignored"] = ignored
+        try:
+            log(f"memory watchdog: already running; looser limits not applied {ignored}")
+        except Exception:
+            pass
 
 
 ALLOWED_FOREIGN = {760}   # Pierre's MLX2 desktop app; named in the coordinator's waiver (2026-11-14)

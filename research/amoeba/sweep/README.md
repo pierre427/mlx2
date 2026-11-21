@@ -77,7 +77,9 @@ first K blocks when given) and writes `parity.json`.
 `resp_L<l>.npy` fp16 `[S, W]`, `items.json` (id, topics, split, n_tokens), `mu.npy` `[L, W]` f32
 (zero rows for non-dense layers), `meta.json` (`widths`, `layers`, `neurons` = W, `sequences`,
 `checkpoint`, `fingerprint`, `corpus_sha256`, `mlx2_source_revision`, `unit`, `unit_kinds`),
-`nll_full.npy` when the family has `final_logits`, `progress.json` and `receipt.json` (per-layer
+`nll_full.npy` when the family has `final_logits` (per-text mean NLL of targets 2..T-1, the resident
+capture's convention; `meta.json` then has `nll_full.convention`, and a capture without that key scored
+targets 1..T-1), `progress.json` and `receipt.json` (per-layer
 seconds, peak memory, swap at start and end). Tokenisation is
 `amoeba_topics_lib.tokenize_items(family.tok.encode, items, seq_len=64, min_len=48)`.
 

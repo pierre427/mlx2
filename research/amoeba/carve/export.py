@@ -16,6 +16,9 @@ A copy of the carve's source checkpoint in which every dropped unit contributes 
                               for gated switch GLUs. The router is untouched; an expert with every
                               neuron dropped still takes its slot, as in the research forward.
 
+A projection that carries its own ``.bias`` has that bias zeroed on the same unit axis as well as its weight
+(or scales and biases): a dropped unit contributes exactly nothing (``_zero_keys``).
+
 Only the files holding changed tensors are rewritten; every other file is hard-linked. Tensor keys
 are found by suffix in the source's own index (HF names: ``layers.{l}.mlp.up_proj``,
 ``...experts.{e}.w2`` / ``down_proj``, stacked ``switch_mlp.down_proj``), outside any vision or
@@ -57,6 +60,14 @@ def _match(keys, pattern):
     return [k for k in keys if rx.search(k) and not any(t in k for t in TOWERS)]
 
 
+def _zero_keys(ks):
+    """The tensors to zero for one projection: an affine-quantized one through its scales and biases (the packed
+    weight stays), an unquantized one through its weight; the Linear's own ``.bias`` in both cases (a dropped unit
+    must contribute exactly nothing, so a bias left in place, or a weight left because a bias matched, is a leak)."""
+    q = [k for k in ks if k.endswith((".scales", ".biases"))]
+    return (q + [k for k in ks if k.endswith(".bias")]) if q else ks
+
+
 def plan(host, core, src: Path):
     """[(key, axis, index_list)]: rows (axis 0) or experts (axis 0 of a stacked tensor) to zero,
     or whole per-expert tensors (index None)."""
@@ -78,13 +89,13 @@ def plan(host, core, src: Path):
             ks = _match(keys, rf"(^|\.)layers\.{l}\.[A-Za-z_]+\.up_proj\.(weight|scales|biases|bias)$")
             if not ks:
                 ks = _match(keys, rf"(^|\.)layers\.{l}\.[A-Za-z_]+\.w3\.(weight|scales|biases|bias)$")
-            ks = [k for k in ks if k.endswith((".scales", ".biases", ".bias"))] or ks      # quantized: zero scales+biases
+            ks = _zero_keys(ks)
             if not ks or len({k.rsplit(".", 1)[0] for k in ks}) != 1:
                 raise SystemExit(f"export: layer {l}: up projection keys ambiguous or missing: {ks[:4]}")
             edits += [(k, "rows", drop.tolist()) for k in ks]
         else:
             st = _match(keys, rf"(^|\.)layers\.{l}\.([A-Za-z_]+\.)*(switch_mlp|switch_glu|experts)\.down_proj\.(weight|scales|biases|bias)$")
-            st = [k for k in st if k.endswith((".scales", ".biases", ".bias"))] or st
+            st = _zero_keys(st)
             if st:
                 if len({k.rsplit(".", 1)[0] for k in st}) != 1:
                     raise SystemExit(f"export: layer {l}: stacked expert down keys ambiguous: {st[:4]}")
@@ -93,7 +104,7 @@ def plan(host, core, src: Path):
             per = []
             for e in drop.tolist():
                 ke = _match(keys, rf"(^|\.)layers\.{l}\.([A-Za-z_]+\.)*experts\.{e}\.(down_proj|w2)\.(weight|scales|biases|bias)$")
-                ke = [k for k in ke if k.endswith((".scales", ".biases", ".bias"))] or ke
+                ke = _zero_keys(ke)
                 if not ke:
                     raise SystemExit(f"export: layer {l} expert {e}: no down projection key")
                 per += [(k, "whole", None) for k in ke]
@@ -109,7 +120,7 @@ def _plan_neurons(keys, s, drop):
     base = rf"(^|\.)layers\.{l}\.([A-Za-z_]+\.)*(switch_mlp|switch_glu|experts)\."
     for proj, off in (("up_proj", 0), ("gate_up_proj", F)):
         st = _match(keys, base + rf"{proj}\.(weight|scales|biases|bias)$")
-        st = [k for k in st if k.endswith((".scales", ".biases", ".bias"))] or st
+        st = _zero_keys(st)
         if not st:
             continue
         if len({k.rsplit(".", 1)[0] for k in st}) != 1:
@@ -123,7 +134,7 @@ def _plan_neurons(keys, s, drop):
     edits = []
     for e in sorted(set(e_of.tolist())):
         ke = _match(keys, rf"(^|\.)layers\.{l}\.([A-Za-z_]+\.)*experts\.{e}\.(up_proj|w3)\.(weight|scales|biases|bias)$")
-        ke = [k for k in ke if k.endswith((".scales", ".biases", ".bias"))] or ke
+        ke = _zero_keys(ke)
         if not ke:
             raise SystemExit(f"export: layer {l} expert {e}: no up projection key (neuron units)")
         edits += [(k, "rows", f_of[e_of == e].tolist()) for k in ke]
@@ -162,7 +173,8 @@ def export_dense_core(host, src: Path, core, dst: Path, log=print, verify_ids=No
                 tensors[k] = mx.zeros_like(t)
             elif how == "rows2":                 # (expert, row) pairs of a stacked [E, rows, ...] tensor
                 pairs, Es, rows = idx
-                if t.ndim < 3 or t.shape[0] not in Es or t.shape[1] != rows:
+                # a stacked projection's own bias is [E, rows]; every other tensor is [E, rows, ...]
+                if t.ndim < (2 if k.endswith(".bias") else 3) or t.shape[0] not in Es or t.shape[1] != rows:
                     raise SystemExit(f"export: {k} has shape {tuple(t.shape)}, expected [E in {sorted(Es)}, {rows}, ...] "
                                      f"(experts, up rows); a transposed or differently stacked tensor is refused")
                 keep = np.ones(t.shape[:2], np.float32)
@@ -192,7 +204,9 @@ def export_dense_core(host, src: Path, core, dst: Path, log=print, verify_ids=No
             "kept_frac": float(np.mean(np.concatenate([np.asarray(core[l][:n]) for l, n in enumerate(host.widths)]))),
             "edits": len(edits), "rewritten_files": sorted(by_file),
             "zeroing": "dense: up rows; experts: down" + ("; MoE neurons (e, f): expert e's up row f"
-                                                         if any(s.units == "neuron" and s.is_moe for s in host.sites) else ""),
+                                                         if any(s.units == "neuron" and s.is_moe for s in host.sites) else "")
+                       + "; each through the weight (quantized: scales and biases) and the projection's own bias",
+            "edited_keys": sorted(k for k, _, _ in edits),
             "status": "research artifact, unqualified; verify with python -m research.amoeba.carve.export verify",
             "s": round(time.time() - t0, 1)}
     O.write_json(tmp / "amoeba_carve_provenance.json", prov)

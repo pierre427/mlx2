@@ -921,7 +921,9 @@ def neuron_sites(sites):
 
 
 def uniform_width(sites) -> int | None:
-    ns = {s.n for s in sites if s.kind is not None}
+    # a siteless layer (attention-only / Mamba: kind None, width 0) makes the layout ragged too: with N set,
+    # masks would be [L, N] with phantom units in those layers and every stack over per-layer rows would raise
+    ns = {s.n for s in sites}
     return ns.pop() if len(ns) == 1 else None
 
 

@@ -255,11 +255,15 @@ def main(argv=None, host_factory=None):
         out = O.fresh_dir(out)
         rep = {}
     log = O.make_log(out)
+    # the marker describes the last invocation only: a resumed run that dies must not keep an earlier one's
+    (out / "carve_complete.json").unlink(missing_ok=True)
     mem = (O.admit(args.need_gb, args.mem_policy, log) if not (args.smoke or args.no_admit) else
            {"policy": "smoke: not admitted" if args.smoke else "batch: model already loaded in this process"})
     O.footprint_watchdog(args.watchdog_gb, log, swap_growth_gb=args.swap_growth_gb)
     if args.swap_growth_gb != 2.0:                # a waived guard is recorded with its reason
-        rep["watchdog_waiver"] = {"swap_growth_gb": args.swap_growth_gb, "reason": args.swap_waiver_note}
+        # the limit in force: a watchdog started earlier in this process keeps its own when that is stricter
+        rep["watchdog_waiver"] = {"swap_growth_gb": O.WATCH.get("swap_growth_gb", args.swap_growth_gb),
+                                  "requested_swap_growth_gb": args.swap_growth_gb, "reason": args.swap_waiver_note}
     if host_factory is None:                  # before any Metal call (MLX reads the refresh env then); a given
         O.prepare_wiring("0" if args.cpu else args.wired_gb)     # host was loaded already: too late for the env
     O.setup_mlx(args.memory_gb, args.cache_gb)
@@ -291,7 +295,7 @@ def main(argv=None, host_factory=None):
             raise SystemExit(f"--assert-ple-offload: PLE offload is not active (tables={bool(tables)}, "
                              f"MLX_QWEN4_PLE_NVME={os.environ.get('MLX_QWEN4_PLE_NVME')!r}, expected {str(sidecar)!r})")
         rep["memory"] = {"ple_offload": True, "sidecar_bytes": sidecar.stat().st_size,
-                         "watchdog_gb": args.watchdog_gb, "memory_gb": args.memory_gb}
+                         "watchdog_gb": O.WATCH.get("limit_gb", args.watchdog_gb), "memory_gb": args.memory_gb}
         log(f"PLE offload active: {sidecar} ({sidecar.stat().st_size / 2**30:.1f} GiB on NVMe)")
     L = host.L
     done = set(rep.get("stages_done", []))
@@ -374,8 +378,11 @@ def main(argv=None, host_factory=None):
     fit = [q for dn in domains for q in split[dn]["fit"]]
     random.Random(args.seed).shuffle(fit)
     if C.SEQ_SRC:                                 # every sequence this run used and its exact source row (prompt set)
-        n_trained = (3 if sm else args.steps) * args.bs if {"rank", "fisher"} & set(stages) else 0
-        trained = {tuple(q) for q in (fit + fit)[:n_trained]} if fit else set()   # batches(step) walks fit in order
+        # rank: batches(step) walks fit in order (wrapping); fisher: its capture reads fit[:fisher_seqs]
+        n_rank = (3 if sm else args.steps) * args.bs if "rank" in stages else 0
+        n_fisher = min(4 if sm else args.fisher_seqs, len(fit)) if "fisher" in stages else 0
+        n_trained = max(n_rank, n_fisher)
+        trained = {tuple(q) for q in (fit + fit)[:n_trained]} if fit else set()
         use = {"held": "test", "val": "export_select", "mean": "mean_stats", "fit": "carve",
                "spare": "unused" if args.val_file else "export_select"}
         with open(out / "inputs.jsonl", "w") as fh:
@@ -389,6 +396,7 @@ def main(argv=None, host_factory=None):
                                          "sources": C.SEQ_SRC.get(tuple(q), [])}) + "\n")
         crec["inputs"] = {"file": "inputs.jsonl", "corpus": args.corpus, "held_file": args.held_file or None,
                           "val_file": args.val_file or None, "trained_sequences": n_trained,
+                          "trained_by": {"rank": n_rank, "fisher_capture": n_fisher},
                           "note": "rows: one per sequence (split, use: test / export_select / mean_stats / carve / "
                                   "unused, trained flag for fit, loss mask) with its source rows (file corpus/held/val, "
                                   "row key = probe_id, doc id or gen:<prompt_key>:<mode>:<seed>, token offset into the "
@@ -651,8 +659,14 @@ def main(argv=None, host_factory=None):
             flat = s[allowed]
             k = min(flat.size, max(1, int(round(frac * int(sum(host.widths))))))
             thr = np.sort(flat)[-k]
-            M = ((s >= thr) & allowed).astype(np.float32)
+            M = ((s >= thr) & allowed).astype(np.float32)     # units tied at the threshold are all kept
             return from_np(M, host)
+
+        def kept(M):
+            """(fraction of ALL units, count) a cut actually keeps: more than the requested fraction when the
+            ranking has a block of equal scores at the threshold (seeded --init-raw blocks, never-routed units)."""
+            n = int(as_np(M, host).sum())
+            return float(n / sum(host.widths)), n
 
         def bisect(score, target, mu, evalf, tag):
             lo, hi, evals = max(0.02, float(fx_np.mean())), 1.0, []
@@ -683,7 +697,9 @@ def main(argv=None, host_factory=None):
                 R = _random_like(M, fixed_or_zero, pool, host, g_seed + int(t * 1000))
                 rfrac, rev = bisect(rnd_score, t, mu, held_sub, f"{name} random ranking")
                 lh = held(M, mu)
-                r[str(t)] = {"learned_kept_frac": frac, "learned_held": lh, "learned_capitals_acc": capitals(M, mu),
+                kf, kn = kept(M)
+                r[str(t)] = {"learned_kept_frac": frac, "learned_kept_frac_actual": kf, "learned_kept_units": kn,
+                             "learned_held": lh, "learned_capitals_acc": capitals(M, mu),
                              "learned_meets_target_full": lh["mean_d_ce"] <= t,
                              "bisect_subsample": args.bisect_subsample, "bisect_tol": args.bisect_tol,
                              "learned_per_layer_kept": [float(x) for x in (as_np(M, host).sum(1) / np.array(host.widths))],
@@ -695,9 +711,12 @@ def main(argv=None, host_factory=None):
                 frac = float(fx_np.sum() / sum(host.widths)) + s
                 M = cut(score, frac)
                 R = _random_like(M, fixed_or_zero, pool, host, g_seed + int(s * 10000))
-                r[f"size+{s}"] = {"kept_frac": frac, "held": held(M, mu), "capitals_acc": capitals(M, mu),
+                kf, kn = kept(M)                 # kept_frac / frac stay the requested size; *_actual is the mask
+                r[f"size+{s}"] = {"kept_frac": frac, "kept_frac_actual": kf, "kept_units": kn,
+                                  "held": held(M, mu), "capitals_acc": capitals(M, mu),
                                   "random_same_counts_held": held(R, mu), "random_same_counts_capitals_acc": capitals(R, mu)}
-                O.save_npz(out / f"tier_{name}_size{s:g}.npz", core=as_np(M, host), Z=as_np(score, host), frac=np.array(frac))
+                O.save_npz(out / f"tier_{name}_size{s:g}.npz", core=as_np(M, host), Z=as_np(score, host), frac=np.array(frac),
+                           frac_actual=np.array(kf), kept_units=np.array(kn))
                 save()
             rep["bisect"][name] = r
             save()
@@ -709,8 +728,10 @@ def main(argv=None, host_factory=None):
                               fit_eval_sub, "export core on " + ("val documents" if crec.get("val_file") else
                                                                  "spare (fit-eval)"))
             M = cut(rankings[ex], frac)
-            O.save_npz(out / "export_core.npz", core=as_np(M, host), Z=as_np(rankings[ex], host), frac=np.array(frac))
-            rep["export_core"] = {"ranking": ex, "kept_frac": frac,
+            kf, kn = kept(M)
+            O.save_npz(out / "export_core.npz", core=as_np(M, host), Z=as_np(rankings[ex], host), frac=np.array(frac),
+                       frac_actual=np.array(kf), kept_units=np.array(kn))
+            rep["export_core"] = {"ranking": ex, "kept_frac": frac, "kept_frac_actual": kf, "kept_units": kn,
                                   "chosen_on": "val documents (--val-file)" if crec.get("val_file") else "spare (fit-eval) split",
                                   "bisect_subsample": args.bisect_subsample, "bisect_tol": args.bisect_tol, "evals": ev,
                                   "held": held(M), "spare": fit_eval(M), "capitals_acc": capitals(M),
@@ -724,7 +745,7 @@ def main(argv=None, host_factory=None):
             hv, sv = ec["held"]["mean_d_ce"], ec["spare"]["mean_d_ce"]
             ec["meets_export_target_full"] = sv is not None and sv <= args.export_target   # on the full val/spare set
             ec["held_meets_0.05"] = hv is not None and hv <= 0.05                          # Pierre's hard target
-            log(f"export core: kept {frac:.4f} held dCE {hv} ({'meets' if ec['held_meets_0.05'] else 'MISSES'} +0.05 on held)")
+            log(f"export core: kept {kf:.4f} ({kn} units; cut requested {frac:.4f}) held dCE {hv} ({'meets' if ec['held_meets_0.05'] else 'MISSES'} +0.05 on held)")
         done.add("bisect")
         save()
 
@@ -806,6 +827,14 @@ def main(argv=None, host_factory=None):
         done.add("export")
         save()
     save()
+    # Written last, after every stage of this invocation (held evaluations included) and the final receipt:
+    # export_core.npz exists before the bisect's held evaluations, so it does not say the carve finished.
+    marker = {"schema": "mlx2.amoeba-carve-complete.v1", "mlx2_source_revision": O.git_rev(),
+              "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "completed_unix": round(time.time(), 3),
+              "stages_run": stages, "stages_done": sorted(done), "checkpoint": host.checkpoint}
+    tmp = out / "carve_complete.json.tmp"
+    tmp.write_text(json.dumps(marker, indent=1))
+    tmp.replace(out / "carve_complete.json")      # os.replace: the marker is whole or absent
     log(f"done in {time.time() - t_start:.0f}s, MLX peak {O.peak_gb()} GB")
 
 
@@ -813,11 +842,16 @@ def _init_z(spec, abl, out, host, raw=False):
     import mlx.core as mx
     if not spec:
         return mx.full((host.L, host.N), 3.0) if host.N is not None else [mx.full((n,), 3.0) for n in host.widths]
+    key = ""
     if spec == "fisher":
         p = out / f"ranking_fisher_{abl}.npz"
     else:
-        p = Path(spec.split(":")[0])
-    Z = np.load(p)["Z"]
+        p, _, key = spec.partition(":")           # NPZ[:key], as --fixed / --pool (default key Z)
+        p = Path(p).expanduser()
+    z = np.load(p)
+    if (key or "Z") not in z.files:
+        raise SystemExit(f"--init-from {spec}: {p} has no array {(key or 'Z')!r} (it holds {z.files})")
+    Z = z[key or "Z"]
     if Z.shape != (host.L, max(host.widths)):
         raise SystemExit(f"--init-from {p}: Z shape {Z.shape} does not match this donor {(host.L, max(host.widths))}")
     if raw:                               # a seed: its relative scale is the point (mlx2 amoeba extract)

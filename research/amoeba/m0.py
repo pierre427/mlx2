@@ -93,15 +93,19 @@ class Mix:
 
     def __init__(self, tok, T=512, seed=0, world="donor_world.jsonl", max_rows=40000):
         self.T, self.rng = T, random.Random(seed)
-        self.streams = {}
+        self.streams, self.held = {}, {}
         for name in self.WEIGHTS:
             src = DATA / (world if name == "donor_world.jsonl" else name)
             rows = [json.loads(l)["text"] for l in src.read_text().splitlines()]
-            rows = rows[:-2000] if len(rows) > 6000 else rows
+            rows, held = (rows[:-2000], rows[-2000:]) if len(rows) > 6000 else (rows, [])
             ids = []
             for r in rows[:max_rows]:
                 ids += tok(r, add_special_tokens=False)["input_ids"] + [151643]
             self.streams[name] = np.array(ids, dtype=np.int32)
+            ids = []
+            for r in held[:max_rows]:             # the held-out rows: never in a training stream
+                ids += tok(r, add_special_tokens=False)["input_ids"] + [151643]
+            self.held[name] = np.array(ids, dtype=np.int32)
         self.names = list(self.WEIGHTS)
         self.p = np.array([self.WEIGHTS[n] for n in self.names])
 
@@ -112,6 +116,21 @@ class Mix:
             o = self.rng.randrange(0, len(s) - self.T - 1)
             out.append(s[o:o + self.T])
         return mx.array(np.stack(out))
+
+    def held_batch(self, B, seed=999):
+        """(windows from the held-out rows, source label). Files of <= 6000 rows have no held-out part and are
+        left out; when no file has one the windows come from the training streams and the label says so."""
+        rng = random.Random(seed)
+        names = [n for n in self.names if len(self.held[n]) > self.T + 1]
+        src, label = (self.held, "heldout rows of " + ",".join(names)) if names else \
+            (self.streams, "training streams (no file has a held-out part): not held out")
+        names = names or self.names
+        out = []
+        for n in rng.choices(names, weights=[self.WEIGHTS[n] for n in names], k=B):
+            s = src[n]
+            o = rng.randrange(0, len(s) - self.T - 1)
+            out.append(s[o:o + self.T])
+        return mx.array(np.stack(out)), label
 
     def sizes(self):
         return {n: int(len(s)) for n, s in self.streams.items()}
@@ -144,9 +163,8 @@ def train_transcoders(donor, mix, out: Path, *, F=8192, k=32, steps=2500, B=8, l
             hist.append(row)
             if log:
                 log(row)
-    # held-out FVU on mix windows not seen in order (fresh rng) and on the off-topic slice
-    ev = Mix.__new__(Mix); ev.__dict__.update(mix.__dict__); ev.rng = random.Random(999)
-    ids = ev.batch(8)
+    # held-out FVU on windows of the rows Mix kept out of the training streams
+    ids, held_source = mix.held_batch(8)
     _, caps, _ = donor.forward(ids, record=set(LAYERS), stop_after=max(LAYERS))
     held = {}
     for i in LAYERS:
@@ -156,7 +174,7 @@ def train_transcoders(donor, mix, out: Path, *, F=8192, k=32, steps=2500, B=8, l
                    "dead_frac_last500": float(mx.mean(fired[i] == 0))}
     meta = {"layers": LAYERS, "d": donor.d, "F": F, "k": k, "steps": steps, "batch_tokens": B * mix.T,
             "train_tokens": steps * B * mix.T, "lr": lr, "donor": donor.artifact, "mix": Mix.WEIGHTS,
-            "mix_stream_tokens": mix.sizes(), "heldout": held}
+            "mix_stream_tokens": mix.sizes(), "heldout": held, "heldout_source": held_source}
     T.save(tcs, out / "transcoders", meta)
     return meta, hist
 

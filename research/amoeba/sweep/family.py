@@ -40,6 +40,35 @@ class SweepFamily:
         pass
 
 
+def _loader(name):
+    try:
+        target = FAMILIES[name]
+    except KeyError:
+        raise SystemExit(f"unknown sweep family {name!r}; known: {sorted(FAMILIES)}") from None
+    module, fn = target.split(":")
+    mod = importlib.import_module(module)
+    return mod, getattr(mod, fn)
+
+
+def family_options(name, options):
+    """(options the family's loader declares, names it does not): the families do not share one option set
+    (``expert_budget_gb`` is DeepSeek's and GLM's), and a loader refuses a keyword it does not know. A loader that
+    forwards ``**options`` is read through the class its return annotation names."""
+    import inspect
+    if name not in FAMILIES:
+        return dict(options), set()                   # load_family names the unknown family
+    mod, loader = _loader(name)
+    sig = inspect.signature(loader)
+    names = {k for k, p in sig.parameters.items() if p.kind is not p.VAR_KEYWORD}
+    if any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
+        cls = sig.return_annotation
+        cls = getattr(mod, cls, None) if isinstance(cls, str) else cls
+        if not inspect.isclass(cls):
+            return dict(options), set()               # cannot tell: pass everything, the loader decides
+        names |= set(inspect.signature(cls.__init__).parameters)
+    return {k: v for k, v in options.items() if k in names}, {k for k in options if k not in names}
+
+
 def load_family(name, model_dir, **options):
     try:
         target = FAMILIES[name]

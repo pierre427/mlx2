@@ -147,6 +147,8 @@ def batch_of(items, grp, pad=0):
 def task_eval(host, items, idx, cfg_fn=None, clean=None, key=None):
     """Teacher-forced exact match of the whole answer, and mean KL vs clean (if clean cache given)."""
     import mlx.core as mx
+
+    from .carving import kl_rows
     correct, kl_tot, n_pos = 0, 0.0, 0
     for grp in groups_of(items, idx):
         ids, pos = batch_of(items, grp)

@@ -165,13 +165,31 @@ def batches_longest_first(seqs, rows_cap, max_texts):
             yield js[b:b + bs]
 
 
+NLL_CONVENTION = "targets 2..T-1"      # recorded in meta.json (nll_full); captures without the key scored 1..T-1
+
+
 def nll_rows(logits, ids):
+    """Per-text mean NLL of targets 2..T-1 from positions 1..T-2: the resident capture's convention
+    (carve.host.TopicsBackend.nll, child_rolling), so nll_full.npy compares across writers. Position 0's
+    prediction (the unconditioned first-token loss) is not scored."""
     import mlx.core as mx
-    lg = logits[:, :-1].astype(mx.float32)
-    tgt = ids[:, 1:]
+    lg = logits[:, 1:-1].astype(mx.float32)
+    tgt = ids[:, 2:]
     lse = mx.logsumexp(lg, axis=-1)
     pick = mx.take_along_axis(lg, tgt[..., None].astype(mx.int32), axis=-1)[..., 0]
     return (lse - pick).mean(1)
+
+
+def nll_meta(receipt: dict) -> dict:
+    """meta.json's ``nll_full`` entry, only when the receipt says a sweep at this convention saved nll_full.npy:
+    an older capture resumed after its last layer keeps its array and must not get the new label."""
+    conv = ((receipt or {}).get("nll_full") or {}).get("convention")
+    if not conv:
+        return {}
+    return {"nll_full": {"convention": conv,
+                         "note": "per-text mean NLL, as the resident capture (TopicsBackend.nll); a meta.json "
+                                 "without this key is from a capture that scored targets 1..T-1 (position 0's "
+                                 "prediction included): do not compare the two"}}
 
 
 # ----------------------------------------------------------------------------- driver
@@ -287,6 +305,8 @@ def sweep(fam, seqs, items_split, out: Path, state_dir: Path, *, log=print, resu
         mx.clear_cache()
         if nll is not None:
             np.save(out / "nll_full.npy", nll)
+            # on the receipt, where the array is written: meta.json gets the label only for numbers this code made
+            receipt["nll_full"] = {"convention": NLL_CONVENTION}
         cur = nxt.open() if not nxt.arrays else nxt
         sw_b = swapouts_bytes()
         rec = {"seconds": round(time.time() - t0, 1), "mlx_peak_gb": round(mx.get_peak_memory() / 2**30, 2),
@@ -388,11 +408,24 @@ def main(argv=None):
     receipt.setdefault("runs", []).append({"started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "pid": os.getpid(),
                                            "swapouts_start": swapouts_bytes(), "rev": T.git_rev()})
     t_load = time.time()
-    from research.amoeba.sweep.family import load_family
+    from research.amoeba.sweep.family import HOST_UNIT_FAMILIES, family_options, load_family
+    if args.family in HOST_UNIT_FAMILIES:
+        raise SystemExit(f"--family {args.family} needs the begin_layer driver: run it through "
+                         f"mlx2.experimental.amoeba.child_rolling (mlx2 amoeba), not this capture driver")
     opts = {"expert_budget_gb": args.expert_budget_gb}
     if args.ffn_texts or args.parity:
         opts["ffn_texts"] = args.ffn_texts or 1
+    opts, dropped = family_options(args.family, opts)      # only the options this family's loader declares
+    if dropped:
+        log(f"--family {args.family} does not take {sorted(dropped)}: not passed")
+    rec["family_options"] = {"passed": opts, "not_taken": sorted(dropped)}
     fam = load_family(args.family, args.model, **opts)
+    if hasattr(fam, "begin_layer"):                    # this driver never calls it (README: child_rolling extension)
+        close = getattr(fam, "close", None)
+        if close is not None:
+            close()
+        raise SystemExit(f"--family {args.family} defines begin_layer, which this capture driver never calls: run "
+                         f"it through mlx2.experimental.amoeba.child_rolling (mlx2 amoeba)")
     receipt["runs"][-1]["load_s"] = round(time.time() - t_load, 1)
     log(f"loaded {fam.checkpoint} in {receipt['runs'][-1]['load_s']}s: {fam.L} layers, widths {sorted(set(fam.widths))}")
     rec.update(checkpoint=fam.checkpoint, fingerprint=fam.fingerprint, policy=getattr(fam, "policy", None))
@@ -418,6 +451,7 @@ def main(argv=None):
         widths = [int(w) for w in fam.widths]
         rec.update(sequences=len(seqs), layers=fam.L, neurons=max(widths), widths=widths, unit_kinds=list(fam.kinds),
                    unit=getattr(fam, "unit", "per-text mean over positions >= 1 of the unit signal, fp16"))
+        rec.update(nll_meta(receipt))                  # a resumed capture whose last layer already wrote it
         if args.resume and (out / "meta.json").exists():
             old = json.loads((out / "meta.json").read_text())
             keys = ("corpus_sha256", "checkpoint", "fingerprint", "sequences")
@@ -441,6 +475,7 @@ def main(argv=None):
         complete = final is not None
         if complete:
             final.remove()
+        rec.update(nll_meta(receipt))
         rec["mu"] = {"source": "computed on the corpus fit split, per dense layer, before its resp pass",
                      "dense_layers": [l for l, k in enumerate(fam.kinds) if k == "dense"]}
         rec["capture_s"] = round(sum(v["seconds"] for v in receipt["layers"].values()), 1)
