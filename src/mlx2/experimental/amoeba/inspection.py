@@ -130,7 +130,10 @@ def layer_bytes(path: Path, L: int) -> dict:
 
 
 def inspect_checkpoint(model: str | Path) -> dict:
-    path = Path(model).expanduser()
+    # absolute against the invoking directory: the path is stored in build.json and handed to children that run
+    # from the repository root. Not resolve(): artifact_name reads the name of an unresolved symlink
+    import os
+    path = Path(os.path.abspath(Path(model).expanduser()))
     if not (path / "config.json").exists():
         raise SystemExit(f"{path}: no config.json (not a model directory)")
     cfg = _text_config(json.loads((path / "config.json").read_text()))

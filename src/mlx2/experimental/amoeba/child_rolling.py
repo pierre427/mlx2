@@ -605,6 +605,15 @@ def family_takes_moe_units(name) -> bool:
     return "moe_units" in inspect.signature(loader).parameters
 
 
+def observed_reads(loads: int, streamed: int, chunks: int) -> dict:
+    """The capture pass's measured weight reads. ``once_per_chunk`` holds only when layer loads were OBSERVED: a
+    counter that did not move, or no streamed layer, confirms nothing (0 <= 0 is not a measurement). At most one
+    load per streamed layer per chunk; fewer is fine (layer 0 stays resident, the parity pass may leave layers)."""
+    return {"layer_loads": loads, "streamed_layers": streamed, "chunks": chunks,
+            "reads_per_layer": round(loads / max(1, streamed), 3),
+            "once_per_chunk": bool(streamed > 0 and 0 < loads <= streamed * chunks)}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--family", default="host", help="a research/amoeba/sweep FAMILIES name")
@@ -706,9 +715,7 @@ def main(argv=None):
     if pins0 is not None and rec["stream_counters"]:     # MEASURED weight reads of the capture pass (not parity)
         streamed = getattr(fam, "streamed_layers", None) or len(getattr(fam, "_blocks", {}) or {})
         loads = rec["stream_counters"]["page_ins"] - pins0
-        rec["weight_reads_observed"] = {"layer_loads": loads, "streamed_layers": streamed, "chunks": r["chunks"],
-                                        "reads_per_layer": round(loads / max(1, streamed), 3),
-                                        "once_per_chunk": loads <= streamed * r["chunks"]}
+        rec["weight_reads_observed"] = observed_reads(loads, streamed, r["chunks"])
     np.save(out / "mu.npy", mu)
     if nll is not None:
         np.save(out / "nll_full.npy", nll)

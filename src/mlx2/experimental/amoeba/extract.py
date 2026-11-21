@@ -63,7 +63,7 @@ from .stages import (
     unit_clusters,
     write_jsonl,
 )
-from .state import digest, file_outputs, write_json
+from .state import digest, file_outputs, stage_commits, write_json
 
 EXTRACT_STAGES = ("gap", "core", "map", "box", "box_gate", "box_bundle")
 CACHE = paths.ARTIFACTS / "cache"
@@ -606,7 +606,8 @@ def run_box_bundle(b, ctx):
     if ver["verdict"] not in ("pass", "miss"):
         man = {"schema": "mlx2.amoeba-box-bundle.v1", "topic": b.rec["extract"]["topic"], "box": name,
                "verdict": ver["verdict"], "donor": {"checkpoint": b.checkpoint, "fingerprint": b.info["fingerprint"]},
-               "mlx2_commit": ctx.commit, "extract": b.rec["extract"], "donor_quality": ver,
+               "mlx2_commit": ctx.commit, "bundled_at_commit": ctx.commit, "stage_commits": stage_commits(b),
+               "extract": b.rec["extract"], "donor_quality": ver,
                "gap_screen": json.loads((b.out / "gap/gap.json").read_text()),
                "note": ("the carve kept no units beyond the core: no box to carry"
                         if ver["verdict"] == "covered" else
@@ -665,7 +666,10 @@ def run_box_bundle(b, ctx):
     man = {"schema": "mlx2.amoeba-box-bundle.v1", "topic": b.rec["extract"]["topic"], "box": name,
            "donor": {"checkpoint": b.checkpoint, "fingerprint": b.info["fingerprint"], "artifact": b.info["artifact"],
                      "adapter": b.info["adapter"], "kind": b.info["kind"], "moe_units": b.plan["moe_units"]},
-           "mlx2_commit": ctx.commit, "profile": b.cfg["profile"], "extract": b.rec["extract"],
+           # mlx2_commit: the commit this bundle was written at; the verdict, gate and gap screen it carries were
+           # made at their own stages' commits (stage_commits, from the stage receipts)
+           "mlx2_commit": ctx.commit, "bundled_at_commit": ctx.commit, "stage_commits": stage_commits(b),
+           "profile": b.cfg["profile"], "extract": b.rec["extract"],
            "core_source": _source(b, "core"), "map_source": _source(b, "map"),
            "status": ("quick profile: a pipeline check, never a box-quality claim" if b.cfg["profile"] != "full"
                       else "implemented (research box; unqualified)"),

@@ -18,6 +18,15 @@ class ChildFailed(SystemExit):
         super().__init__(f"{what} failed (rc={rc}); see {log}")
 
 
+class StageFailedContinue(Exception):
+    """A stage failed but the run goes on (an install route whose child crashed: the other routes and the report
+    still run). Its receipt says ``failed``, so status is truthful and a resume retries it."""
+
+    def __init__(self, error: str, outputs: dict | None = None, summary: dict | None = None):
+        self.error, self.outputs, self.summary = error, outputs, summary
+        super().__init__(error)
+
+
 class CleanStop(SystemExit):
     """A child stopped cleanly at --stop-at (exit 75): rerun `mlx2 amoeba resume`."""
 
@@ -91,6 +100,20 @@ def swap_over(now_gb: float | None = None) -> str | None:
     return None
 
 
+# cli.execute sets this to Build.note_child_group: children run in their own sessions (group id == pid), so the
+# build lock has to name them to stay held when the parent is killed while a child still runs
+CHILD_GROUP_HOOK = {"fn": None}
+
+
+def note_child_group(p: subprocess.Popen) -> None:
+    fn = CHILD_GROUP_HOOK["fn"]
+    if fn is not None:
+        try:
+            fn(p.pid)
+        except OSError:
+            pass
+
+
 def check_deadline(what: str) -> None:
     if DEADLINE["t"] is not None and time.time() >= DEADLINE["t"]:
         raise CleanStop(f"--stop-at reached before {what}; resume with `mlx2 amoeba resume`")
@@ -117,6 +140,7 @@ def run_child(cmd: list, *, stage: str, progress, log_path: Path, what: str = ""
         p = subprocess.Popen(cmd, cwd=str(cwd or paths.repo_root()), env=paths.child_env(env_extra),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
                              start_new_session=True)
+        note_child_group(p)
         progress.emit("child_start", stage=stage, what=what, pid=p.pid)
         done = threading.Event()
 
@@ -185,6 +209,7 @@ class Background:
         self.p = subprocess.Popen(cmd, cwd=str(paths.repo_root()), env=paths.child_env(env_extra),
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
                                   start_new_session=True)
+        note_child_group(self.p)
         self.ready = threading.Event()
         progress.emit("child_start", stage=stage, what="background", pid=self.p.pid)
 

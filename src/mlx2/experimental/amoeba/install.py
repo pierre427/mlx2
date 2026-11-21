@@ -38,7 +38,7 @@ import numpy as np
 from . import paths
 from .runner import run_child
 from .stages import _py
-from .state import file_outputs, write_json
+from .state import file_outputs, stage_commits, write_json
 
 ROUTES = ("side", "tile", "lora", "bridge")
 INSTALL_STAGES = ("pair", "topo") + tuple(f"route_{r}" for r in ROUTES) + ("report",)
@@ -202,7 +202,7 @@ def _route_runner(route):
             (d / "run").rename(dst)
         sp = d / "spec.json"
         write_json(sp, spec)
-        from .runner import ChildFailed, CleanStop
+        from .runner import ChildFailed, CleanStop, StageFailedContinue
         try:
             run_child(_py("mlx2.experimental.amoeba.child_install_route") + ["--spec", sp], stage=f"route_{route}",
                       progress=ctx.progress, log_path=b.log_path(f"route_{route}"), what=f"install route {route}")
@@ -211,7 +211,8 @@ def _route_runner(route):
         except ChildFailed as e:              # this route failed: recorded, the other routes and the report go on
             tail = b.log_path(f"route_{route}").read_text().splitlines()[-12:]
             write_json(d / "result.json", {"route": route, "failed": str(e), "log_tail": tail})
-            return file_outputs({"result": d / "result.json"}), {"failed": str(e)}
+            # not a ``done`` stage: the receipt says failed (a resume retries the route), the run continues
+            raise StageFailedContinue(str(e), file_outputs({"result": d / "result.json"}), {"failed": str(e)})
         r = json.loads((d / "run/result.json").read_text())
         (d / "result.json").unlink(missing_ok=True)  # supersede any earlier failure marker
         main = {"side": "side_box", "tile": "tile_box", "lora": "lora_box", "bridge": "bridge_box"}[route]
@@ -316,7 +317,9 @@ def run_report(b, ctx):
              for f in sorted(d.rglob("*")) if f.is_file()}
     man = {"schema": INSTALL_SCHEMA, "label": b.rec["label"], "topic": json.loads((d / "pair.json").read_text())["topic"],
            "donor": b.rec["donor_inspection"]["checkpoint"], "host": b.checkpoint, "bundle": x["bundle"],
-           "mlx2_commit": ctx.commit, "profile": b.cfg["profile"], "settings": x["settings"], "routes": x["routes"],
+           # mlx2_commit: the commit this report was written at; each route's verdict was made at its own stage's
+           "mlx2_commit": ctx.commit, "bundled_at_commit": ctx.commit, "stage_commits": stage_commits(b),
+           "profile": b.cfg["profile"], "settings": x["settings"], "routes": x["routes"],
            "verdicts": [{k: v.get(k) for k in ("route", "arm", "verdict", "gap_closed", "english_drift_test")}
                         for v in verdicts],
            "host_checkpoint": f"{b.info['artifact']}@{b.info['fingerprint']}",

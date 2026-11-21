@@ -25,7 +25,7 @@ from . import STAGES, config as K, paths
 from .inspection import inspect_checkpoint
 from .plan import format_plan, make_plan
 from .progress import MetricsServer, Progress
-from .runner import ChildFailed, CleanStop, require_gpu_window
+from .runner import ChildFailed, CleanStop, StageFailedContinue, require_gpu_window
 from .state import Build, now
 from .stages import RUNNERS, Ctx
 
@@ -357,10 +357,15 @@ def cmd_build(a) -> int:
     try:
         inputs = resolve_inputs(a, tmp)
         want_eff = kind == "extract" and (a.exclude_texts or a.extra_topic_corpus)
-        if want_eff:                              # refuse before the build exists, so no build runs without it
+        if want_eff:
+            # built before the build exists and recorded in its first build.json (at its final paths), so no build
+            # can run or resume without it: an interrupted creation leaves a record whose file check fails
             from .extract import build_effective_corpus
-            build_effective_corpus(Path(inputs["probe_corpus"]["path"]), tmp / "dry", a.exclude_texts,
-                                   a.extra_topic_corpus)
+            eff = build_effective_corpus(Path(inputs["probe_corpus"]["path"]), tmp / "dry", a.exclude_texts,
+                                         a.extra_topic_corpus)
+            for k in ("path", "accounting"):
+                eff[k] = str(out / Path(eff[k]).relative_to(tmp / "dry"))
+            inputs["probe_corpus_effective"] = eff
         gen_backend = a.gen_backend or ("local" if a.cpu else "server")
         device = "cpu" if a.cpu else "gpu"
         opts = {"cpu": a.cpu, "gen_backend": gen_backend, "gen_route": a.gen_route, "boxes": a.boxes,
@@ -398,10 +403,7 @@ def cmd_build(a) -> int:
             b.rec["inputs"]["probe_manifest"]["path"] = str(out / "inputs/probe-corpus-manifest.json")
             b.save()
         if want_eff:
-            from .extract import build_effective_corpus
-            b.rec["inputs"]["probe_corpus_effective"] = build_effective_corpus(
-                Path(inputs["probe_corpus"]["path"]), out, a.exclude_texts, a.extra_topic_corpus)
-            b.save()
+            shutil.copytree(tmp / "dry/inputs", out / "inputs", dirs_exist_ok=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return execute(b, stages, a, commit, redo=[])
@@ -432,6 +434,32 @@ def ctx_for(b, a, commit, progress) -> Ctx:
 
 
 def execute(b: Build, stages: list, a, commit: dict, redo: list) -> int:
+    """Run ``stages`` under the build directory's lock (one run per build: a second one refuses)."""
+    from . import runner as _runner
+    b.acquire_lock()
+    _runner.CHILD_GROUP_HOOK["fn"] = b.note_child_group      # the lock names every child's process group
+    try:
+        b.refuse_if_running_elsewhere()
+        return _execute(b, stages, a, commit, redo)
+    finally:
+        _runner.CHILD_GROUP_HOOK["fn"] = None
+        b.release_lock()
+
+
+def commit_notice(b: Build, commit: dict) -> str | None:
+    """The line a resume prints when earlier stages ran at another mlx2 commit (each receipt, and every manifest a
+    later stage writes, keeps the commit its own stage ran at)."""
+    from .state import stage_commits
+    other = {st: (c or {}).get("commit") for st, c in stage_commits(b).items()
+             if (c or {}).get("commit") != (commit or {}).get("commit")}
+    if not other:
+        return None
+    return (f"notice: this run is at mlx2 commit {(commit or {}).get('commit')}; earlier stages ran at "
+            + ", ".join(f"{st}@{c}" for st, c in other.items())
+            + " (receipts and manifests name each stage's own commit)")
+
+
+def _execute(b: Build, stages: list, a, commit: dict, redo: list) -> int:
     if (b.plan.get("stream") or {}).get("mode") == "rolling" and any(s != "map" for s in stages):
         raise SystemExit("rolling capture supports the map stage only; a carve needs a resident model")
     extract = b.rec.get("extract") or {}
@@ -439,6 +467,9 @@ def execute(b: Build, stages: list, a, commit: dict, redo: list) -> int:
     if "gap" in stages and not extract.get("skip_gap_screen") and (host_plan.get("stream") or {}).get("mode") == "rolling":
         raise SystemExit("the gap screen needs a resident host; this build planned rolling capture for it")
     progress = Progress(b.out / "events.jsonl", quiet=getattr(a, "quiet", False))
+    note = commit_notice(b, commit)
+    if note:
+        print(note, file=sys.stderr)
     srv = None
     if getattr(a, "metrics_port", 0):
         try:
@@ -478,6 +509,10 @@ def execute(b: Build, stages: list, a, commit: dict, redo: list) -> int:
             if redoing:
                 b.forget(st)
                 ctx.redo.add(st)
+            elif b.read_a_failure_since_retried(st):
+                # it read a failed attempt's result (the install report) and that stage has been retried since, in
+                # this run or an earlier one (the receipt records it): make it again
+                b.forget(st)
             if b.is_done(st):
                 progress.emit("stage_skip", stage=st)
                 continue
@@ -506,6 +541,13 @@ def execute(b: Build, stages: list, a, commit: dict, redo: list) -> int:
                 progress.emit("stage_end", stage=st, status="failed", wall_s=None, error="interrupted")
                 progress.newline()
                 return 130
+            except StageFailedContinue as e:       # truthful status; the stages after it still run
+                r2 = b.end({**r, "continue_past": True}, "failed", outputs=e.outputs, summary=e.summary,
+                           error=e.error)
+                progress.emit("stage_end", stage=st, status="failed", wall_s=r2["wall_s"], error=e.error[:400])
+                progress.newline()
+                print(f"stage {st} failed: {e.error}; continuing (a resume retries it)", file=sys.stderr)
+                continue
             except (ChildFailed, SystemExit, Exception) as e:
                 import traceback
                 err = f"{type(e).__name__}: {e}" + ("" if isinstance(e, SystemExit) else "\n" + traceback.format_exc())

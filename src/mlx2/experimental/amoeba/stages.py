@@ -19,7 +19,7 @@ import numpy as np
 from . import paths
 from .plan import _host_unit_families
 from .runner import Background, free_port, run_child
-from .state import file_outputs, write_json
+from .state import file_outputs, stage_commits, write_json
 
 
 def read_jsonl(p):
@@ -253,7 +253,11 @@ def run_map(b, ctx):
         raise SystemExit(f"map capture fingerprint {meta.get('fingerprint')} != build {b.info['fingerprint']}")
     units = int(sum(meta["widths"]))
     core_map = d / "core_units.npz"
-    with_core = (b.receipt("core") or {}).get("status") == "done"
+    # a map-only build (stage_options.map.without_core) has no core among its inputs, so its map never reads one:
+    # a core carved later in the same directory would otherwise shape the clusters without entering the map's
+    # input digest, and a re-carved core would be paired with the stale map unnoticed
+    without_core = ((b.rec.get("stage_options") or {}).get("map") or {}).get("without_core")
+    with_core = not without_core and (b.receipt("core") or {}).get("status") == "done"
     excl = map_core_mask(b, meta["widths"]) if with_core else \
         np.zeros((len(meta["widths"]), max(meta["widths"])), bool)
     np.savez_compressed(core_map, core=excl.astype(np.uint8))
@@ -331,6 +335,26 @@ def corecheck(b, ctx, d: Path, eng: Path) -> Path:
     return chk
 
 
+def carve_finished(run: Path) -> bool:
+    """Whether the core carve in ``run`` ran to its end. export_core.npz alone does not say so: the carve writes it
+    BEFORE the held evaluations of that mask. Finished = the carve's own end marker (carve_complete.json, written
+    last, naming ``bisect`` among its finished stages), or, for a
+    carve from before the marker existed, carve.json listing ``bisect`` in stages_done with its export_core record
+    (the carve's last save, after the held and same-count random evaluations)."""
+    if not (run / "export_core.npz").exists():
+        return False
+    try:                         # the marker of an earlier invocation that stopped before bisect proves nothing here
+        if "bisect" in (json.loads((run / "carve_complete.json").read_text()).get("stages_done") or []):
+            return True
+    except (OSError, ValueError):
+        pass
+    try:
+        rep = json.loads((run / "carve.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return "bisect" in (rep.get("stages_done") or []) and bool(rep.get("export_core"))
+
+
 def run_core(b, ctx):
     d = b.stage_dir("core")
     comp, data, plan = b.cfg["compute"], b.cfg["data"], b.plan
@@ -359,7 +383,7 @@ def run_core(b, ctx):
         argv += ["--cpu", "--no-admit"]
     if ctx.stop_at:
         argv += ["--stop-at", ctx.stop_at]
-    if not (run / "export_core.npz").exists():
+    if not carve_finished(run):
         if run.exists():
             argv.append("--resume")
         run_child(_py("research.amoeba.carve") + argv, stage="core", progress=ctx.progress,
@@ -367,6 +391,9 @@ def run_core(b, ctx):
     rep = json.loads((run / "carve.json").read_text())
     if rep.get("fingerprint") != b.info["fingerprint"]:
         raise SystemExit("core carve fingerprint does not match the build")
+    if not rep.get("export_core") or "bisect" not in (rep.get("stages_done") or []):
+        raise SystemExit("core carve ended without its export-core held evaluations (carve.json has no export_core "
+                         "record or no finished bisect stage): not a finished core")
     core = np.load(run / "export_core.npz")["core"] > 0
     np.savez_compressed(d / "core.npz", core=core.astype(np.uint8))
     chk = corecheck(b, ctx, d, eng)
@@ -847,6 +874,9 @@ def run_bundle(b, ctx):
     part = json.loads((b.out / "partition/partition.json").read_text())
     gates = json.loads((b.out / "gates/gates.json").read_text())["boxes"]
     reg = []
+    # a box verdict names the commit its carve ran at (the boxes receipt), not the commit of this bundling run
+    commits = stage_commits(b)
+    made_at = {"mlx2_commit": commits.get("boxes", ctx.commit), "bundled_at_commit": ctx.commit}
     for n, v in sorted(ver.items()):              # every box, step 6 (failed and covered boxes hold no tiles)
         if n not in part["boxes"]:
             reg.append({"schema": "mlx2.amoeba-box-registry.v1", "taxonomy_id": v.get("node"), "box": n,
@@ -854,7 +884,7 @@ def run_bundle(b, ctx):
                         "failure": v.get("failure"), "gate_cells": v.get("gate_cells"),
                         "unclaimed_units": "remainder tiles" if v["verdict"] == "failed" else None,
                         "core_alone_val": v.get("core_alone_val"), "checkpoint": b.checkpoint,
-                        "fingerprint": b.info["fingerprint"], "mlx2_commit": ctx.commit, "profile": b.cfg["profile"]})
+                        "fingerprint": b.info["fingerprint"], **made_at, "profile": b.cfg["profile"]})
             continue
         pb = part["boxes"][n]
         reg.append({"schema": "mlx2.amoeba-box-registry.v1", "taxonomy_id": pb["taxonomy_id"], "box": n,
@@ -866,7 +896,7 @@ def run_bundle(b, ctx):
                     "gate": {k: (gates.get(n) or {}).get(k) for k in ("status", "layer", "threshold", "held_false_open_rate",
                                                                        "held_miss_rate", "held_false_open_english")},
                     "cross_box_tiles": pb["cross_box_tiles"], "checkpoint": b.checkpoint,
-                    "fingerprint": b.info["fingerprint"], "mlx2_commit": ctx.commit, "profile": b.cfg["profile"]})
+                    "fingerprint": b.info["fingerprint"], **made_at, "profile": b.cfg["profile"]})
     write_jsonl(d / "registry.jsonl", reg)
     files = {}
     for f in sorted(d.rglob("*")):
@@ -876,7 +906,10 @@ def run_bundle(b, ctx):
         "implemented (research tile set; unqualified)"
     man = {"schema": "mlx2.amoeba-bundle.v1", "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
            "checkpoint": b.checkpoint, "fingerprint": b.info["fingerprint"], "artifact": b.info["artifact"],
-           "mlx2_commit": ctx.commit, "profile": b.cfg["profile"], "status": status,
+           # mlx2_commit: the commit this bundle was written at; the map, core, boxes, partition and gates it holds
+           # were made at their own stages' commits (stage_commits, from the stage receipts)
+           "mlx2_commit": ctx.commit, "bundled_at_commit": ctx.commit, "stage_commits": commits,
+           "profile": b.cfg["profile"], "status": status,
            "taxonomy": {**inp["taxonomy"], "file": "taxonomy/" + Path(inp["taxonomy"]["path"]).name},
            "probe_corpus": inp["probe_corpus"], "probe_manifest": inp["probe_manifest"],
            "map": {"file": "map/map.json", "sha256": files["map/map.json"]["sha256"],

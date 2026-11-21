@@ -102,6 +102,36 @@ def parse_overrides(items: list[str]) -> dict:
     return out
 
 
+_BOOL_WORDS = {"true": True, "yes": True, "on": True, "1": True, "false": False, "no": False, "off": False, "0": False}
+
+
+def coerce_override(key: str, value, default):
+    """An override in the type of the setting's default: a list from a comma list, a bool from yes/no/true/false/
+    on/off/1/0, a number refused when it is not one. An unchecked string would be iterated by character where a
+    list is read, and any non-empty string is true where a switch is read."""
+    if isinstance(default, bool):
+        v = _BOOL_WORDS.get(str(value).strip().lower())
+        if v is None or isinstance(value, float):
+            raise SystemExit(f"override {key}={value!r}: expected yes/no (true/false/on/off/1/0)")
+        return v
+    if isinstance(default, list):
+        if isinstance(value, (list, tuple)):
+            return [str(x) for x in value]
+        out = [x.strip() for x in str(value).split(",") if x.strip()]
+        if not out:
+            raise SystemExit(f"override {key}={value!r}: expected a comma-separated list")
+        return out
+    if isinstance(default, int):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SystemExit(f"override {key}={value!r}: expected an integer")
+        return value
+    if isinstance(default, float) or default is None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise SystemExit(f"override {key}={value!r}: expected a number")
+        return float(value)
+    return str(value)                                 # a string setting (core_targets: a comma list of numbers)
+
+
 def resolve(profile: str, compute_overrides: dict, data_overrides: dict, reason: str) -> dict:
     if profile not in PROFILES:
         raise SystemExit(f"unknown profile {profile!r} ({', '.join(PROFILES)})")
@@ -109,6 +139,7 @@ def resolve(profile: str, compute_overrides: dict, data_overrides: dict, reason:
     bad = set(compute_overrides) - set(comp)
     if bad:
         raise SystemExit(f"unknown compute settings {sorted(bad)}")
+    compute_overrides = {k: coerce_override(k, v, comp[k]) for k, v in compute_overrides.items()}
     comp.update(compute_overrides)
     data = dict(DATA_DEFAULTS)
     bad = set(data_overrides) - set(data)
@@ -117,6 +148,7 @@ def resolve(profile: str, compute_overrides: dict, data_overrides: dict, reason:
     if data_overrides and not reason:
         raise SystemExit("a data-rule change needs --override-reason (mapping-workflow s4: only as a better-data fix "
                          "for a box that missed its target)")
+    data_overrides = {k: coerce_override(k, v, data[k]) for k, v in data_overrides.items()}
     data.update(data_overrides)
     verdict = dict(VERDICT)
     if comp.get("val_target_nats") is not None:       # the measured val->held gap is known (next-round.json): +0.05 minus it
