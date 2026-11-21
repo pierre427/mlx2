@@ -113,7 +113,16 @@ Arms
                          the validation continuation positions only (the ones val KL scores)
     sink_conerand<tau>@<kind> its matched control: per token the same per-layer counts of RANDOM sinks, rescaled
                          per token per layer to |sink_cone write|: does the unit selection matter
-     Pareto (summary.pareto): every sink-family arm as (units per token, val KL, gain share vs sink_box, English
+    sink_neuron@<kind>   hand-made neuron (vgel.me 2026-11-20, adapted): the sink_const push at every sink layer
+                         times one host-only gate a(z) = silu(alpha z) z / silu(alpha), z = r . rms(h) at the first
+                         sink layer's input, r = difference of means (train topic continuations minus English retain)
+                         made orthogonal to the English mean, scaled to z = 1 at the topic mean (--neuron-alpha).
+                         Appended (no host unit overwritten); no donor at run time. Against sink_const: the same push,
+                         so a win is lower English drift at equal val KL. Receipt sinks.neuron: gate stats on
+                         validation topic vs English text
+    sink_neuronflat@<kind> the gate replaced by its train-topic mean at every position (same size, no selectivity)
+     Pareto (summary.pareto): every sink-family arm except the sink_neuron pair (one dense write per layer is
+     not a unit count; read it against sink_const) as (units per token, val KL, gain share vs sink_box, English
      drift, test score), and the pre-registered pick: the smallest path with >= --pareto-gain of sink_box's gain
      within the drift cap (controls excluded). Size never wins over quality: no qualifying arm = sink_box stays.
      Autoregressive split (Pierre 2026-11-18: "look at the backwards paths too, in an autoregressive sense"): a
@@ -442,6 +451,9 @@ def main():
     ap.add_argument("--cone-taus", default="0.5,0.8,0.95",
                     help="sink_cone<tau> arms: per-token dynamic cutoff keeping the smallest sink set with >= tau of "
                          "the full solve's Fisher energy ('' = none)")
+    ap.add_argument("--neuron-alpha", type=float, default=8.0,
+                    help="sink_neuron gate a(z) = silu(alpha z) z / silu(alpha); 1 = the vgel.me neuron (fires a "
+                         "little on anti-aligned input), larger = closer to relu(z) z")
     ap.add_argument("--pareto-gain", type=float, default=0.95,
                     help="Pareto pick: smallest path whose val-KL gain is >= this share of sink_box's (and drift <= cap)")
     ap.add_argument("--ar-seqs", type=int, default=8,
@@ -532,7 +544,8 @@ def main():
                                 "tile_kl_ok", "lora_kl_ok", "side", "side_gated", "bridge_box_ok", "bridge_rand_ok",
                                 "bridge_host_ok"}
                   | {f"lens_{s}" for s in ("box", "rand", "shuf", "rot")}
-                  | {f"sink_{s}" for s in ("box", "rand", "hrand", "shuf", "const", "path", "pathrand", "pathidle")}
+                  | {f"sink_{s}" for s in ("box", "rand", "hrand", "shuf", "const", "path", "pathrand", "pathidle",
+                                           "neuron", "neuronflat")}
                   | {f"sink_cone{t}" for t in taus_} | {f"sink_conerand{t}" for t in taus_})
         bad_ = [a.strip() for a in args.arms.split(",") if a.strip() and a.strip().split("@")[0] not in known_]
         if bad_:
@@ -1508,6 +1521,37 @@ def main():
             LENS_KINDS = [k for k in LENS_KINDS if any(a.endswith("@" + k) for a in wl_)]
     LENS, ROT, SINK = {}, {}, {}
     PATH = {}  # per lens kind: the joint sink system for per-token supported paths (sink_path arms)
+    NEURON = {}  # the hand-made gate neuron (sink_neuron arms): read layer, read vector, alpha, writes per kind
+
+    def neuron_gate(xn):
+        """a(z) = silu(alpha z) z / silu(alpha) on z = r . x (x: RMS-normalised rows [T, D]); a(0) = 0, a(1) = 1"""
+        z = xn @ NEURON["r"]
+        al = NEURON["alpha"]
+        silu_ = lambda v: v / (1.0 + np.exp(-v))  # noqa: E731
+        return silu_(al * z) * z / silu_(al)
+
+    NG_CACHE = {}
+
+    def host_gate(ids, cache=None):
+        """[T] gate from a CLEAN host pass at the input of the read layer (exact: no write sits below it)"""
+        key_ = tuple(ids) if cache is None else None
+        if key_ is not None and key_ in NG_CACHE:
+            return NG_CACHE[key_]
+        st = {}
+        run(H, ids, cache=cache, st=st, cap=(NEURON["L0"] - 1,))
+        h_ = np.array(st["h"][NEURON["L0"] - 1], dtype=np.float64)
+        g = neuron_gate(h_ / np.sqrt((h_ * h_).mean(-1, keepdims=True) + 1e-12))
+        if key_ is not None:
+            NG_CACHE[key_] = g
+        return g
+
+    def neuron_writes(arm, g):
+        """route neuron: the sink_const push at every sink layer times the gate (flat: its train-topic mean
+        everywhere, the same overall size with no selectivity)"""
+        T_ = len(g)
+        gm = (mx.full((T_, 1), NEURON["flat"]) if arm["src"] == "flat"
+              else mx.array(g.astype(np.float32))[:, None])
+        return zero_first({L: gm * v for L, v in NEURON["W"][arm["kind"]].items()}, T_)
 
     HSA_CACHE = {}
 
@@ -1946,6 +1990,55 @@ def main():
                                 for i, L in enumerate(SL)},
                 "open_mass_in_path": float(np.mean(np.take_along_axis(ha_cnt, hp, 1).sum(1) /
                                                    (ha_cnt.sum(1) + 1e-12)))}
+            # ---- hand-made neuron (vgel.me "making neurons by hand", 2026-11-20, adapted): sink_const gated by one
+            # host-only read. Read r from difference of means on the RMS-normalised input of the first sink layer
+            # L0 (topic = train continuation positions, off = English retain), orthogonal to the off mean and
+            # scaled so z = r.x is 0 at the off mean and 1 at the topic mean; gate a(z) = silu(alpha z) z /
+            # silu(alpha) (a(1) = 1; alpha = 1 is the post's silu(z) z with its negative-side bump, larger alpha
+            # shrinks the bump towards relu(z) z). Every write sits at layers >= L0, so a clean host pass gives
+            # the exact gate input at run time. Appended, never overwriting a host unit (carve is a partition).
+            L0_ = SL[0]
+            want_nr_ = (not want_arms) or any(a.split("@")[0] in ("sink_neuron", "sink_neuronflat") for a in want_arms)
+            nr_skip = (None if want_nr_ and retain and eng_val and tr and L0_ >= 1 else
+                       "not requested" if not want_nr_ else
+                       "first sink layer is 0 (no clean input to read)" if L0_ < 1 else "no train/retain/eng_val texts")
+
+            def xnorm_(ids):
+                st_ = {}
+                run(H, ids, st=st_, cap=(L0_ - 1,))
+                h_ = np.array(st_["h"][L0_ - 1], dtype=np.float64)
+                return h_ / np.sqrt((h_ * h_).mean(-1, keepdims=True) + 1e-12)
+            if nr_skip is not None:
+                sink_info["neuron"] = {"skipped": nr_skip}
+            else:
+                xtr_ = [xnorm_(q["ids"]) for q in tr]
+                on_ = np.concatenate([x_[q["pos"]] for x_, q in zip(xtr_, tr)]).mean(0)
+                off_ = np.concatenate([xnorm_(e["ids"])[1:] for e in retain]).mean(0)
+                d_ = on_ - off_
+                d_ = d_ - off_ * (d_ @ off_) / (off_ @ off_)
+                r_ = d_ / (d_ @ on_)
+                NEURON.update({"L0": L0_, "r": r_, "alpha": args.neuron_alpha,
+                               "W": {k_: {L: sum(mx.array(SINK_CONST_A[d])[None] @ LENS[("sink", k_, "sink", "box", d, L)]
+                                                 for d in box_layers) for L in SL} for k_ in LENS_KINDS}})
+                g_tr = np.concatenate([neuron_gate(x_)[q["pos"]] for x_, q in zip(xtr_, tr)])
+                del xtr_
+                NEURON["flat"] = float(g_tr.mean())
+
+                def gstats(g):
+                    return {"mean": round(float(g.mean()), 4), "median": round(float(np.median(g)), 4),
+                            "frac_gt_0.5": round(float((g > 0.5).mean()), 4), "min": round(float(g.min()), 4),
+                            "max": round(float(g.max()), 4), "n": int(g.size)}
+                g_va = np.concatenate([neuron_gate(xnorm_(q["ids"]))[q["pos"]] for q in (va or tr)])
+                g_en = np.concatenate([neuron_gate(xnorm_(e["ids"]))[1:] for e in eng_val])
+                sink_info["neuron"] = {
+                    "read_layer": L0_, "write_layers": SL, "alpha": args.neuron_alpha, "flat_gate": NEURON["flat"],
+                    "read_norm": float(np.linalg.norm(r_)), "z_off_mean": float(off_ @ r_), "z_on_mean": float(on_ @ r_),
+                    "write_norm": {k_: {str(L): float(mx.sqrt((v * v).sum()).item()) for L, v in NEURON["W"][k_].items()}
+                                   for k_ in LENS_KINDS},
+                    "gate_train_topic": gstats(g_tr), "gate_val_topic": gstats(g_va), "gate_eng_val": gstats(g_en),
+                    "params": int(r_.size + len(SL) * D_h)}  # one read vector, one write column per sink layer
+                print(f"neuron: read L{L0_}, gate val topic {sink_info['neuron']['gate_val_topic']}, English "
+                      f"{sink_info['neuron']['gate_eng_val']}", flush=True)
             receipt["sinks"] = sink_info | {"transport": sink_diag, "diagnostic_texts": "validation"}
             print(f"{time.strftime('%H:%M:%S')} sink transport ready: {json.dumps(sink_diag)}", flush=True)
             del Wdh, Hg, Hd, Dg, a_all, a_cnt, KDX, ha_cnt
@@ -2155,6 +2248,9 @@ def main():
                                                          "kind": kind}
                     arms[f"sink_conerand{tau_:g}@{kind}"] = {"route": "path", "src": "box", "mask": "conerand",
                                                              "tau": tau_, "kind": kind}
+            if NEURON:
+                arms[f"sink_neuron@{kind}"] = {"route": "neuron", "src": "gate", "kind": kind}
+                arms[f"sink_neuronflat@{kind}"] = {"route": "neuron", "src": "flat", "kind": kind}
     if args.side:
         arms[f"side_gated@a{a_:g}"] = {"route": "side", "alpha": a_, "tau": 0.0, "gated": True}
     if not use_host:
@@ -2212,6 +2308,8 @@ def main():
             return run(H, s["ids"], writes=writes_of(arm, mod, feats(arm, s), T, g_), st=st)
         if arm["route"] == "path":
             return run(H, s["ids"], writes=path_writes(arm, s["fb"], host_sink_acts(s["ids"])), st=st)
+        if arm["route"] == "neuron":
+            return run(H, s["ids"], writes=neuron_writes(arm, host_gate(s["ids"])), st=st)
         if arm["route"] == "sink":
             return run(H, s["ids"], writes=sink_writes(arm, s["fs"] if arm["src"] == "shuf" else s["fb"], s["fr"]),
                        st=st)
@@ -2442,7 +2540,7 @@ def main():
     # ------------------------------------------------------------------ generation on the test items
     def generate(name, arm, mod, it):
         need_d = arm["route"] == "side" or (arm["route"] in ("ridge", "bridge", "lens", "sink", "path") and arm["src"] not in ("noise", "host"))
-        need_h = (arm["route"] == "bridge" and arm["src"] == "host") or arm["route"] == "path"
+        need_h = (arm["route"] == "bridge" and arm["src"] == "host") or arm["route"] in ("path", "neuron")
         P = it["ids"]
         dprompt = P
         if arm["route"] in ("bridge", "lens", "sink") and arm["src"] == "shuf":
@@ -2470,6 +2568,8 @@ def main():
                 lp = run(H, ids_h, cache=hc, writes=lens_writes(arm, fb, fr), st=st)
             elif arm["route"] == "sink":
                 lp = run(H, ids_h, cache=hc, writes=sink_writes(arm, fb, fr), st=st)
+            elif arm["route"] == "neuron":  # the clean host copy (hc2) gives the gate input
+                lp = run(H, ids_h, cache=hc, writes=neuron_writes(arm, host_gate(ids_h, cache=hc2)), st=st)
             elif arm["route"] == "path":  # the clean host copy (hc2) says which sinks this token opens
                 lp = run(H, ids_h, cache=hc, writes=path_writes(arm, fb, host_sink_acts(ids_h, cache=hc2)), st=st)
             elif arm["route"] == "bridge":
@@ -2635,7 +2735,7 @@ def main():
         m_["positions"] = len(r_["self"])
         return m_
 
-    if args.ar_seqs > 0 and any(a.get("route") in ("lens", "sink", "path") for a in arms.values()):
+    if args.ar_seqs > 0 and any(a.get("route") in ("lens", "sink", "path", "neuron") for a in arms.values()):
         summary["donor_box_ar_split"] = receipt["donor_box_ar_split"] = ar_donor()
         print(f"donor box autoregressive split (KL at t when the box is removed): "
               f"{summary['donor_box_ar_split']}", flush=True)
@@ -2705,7 +2805,7 @@ def main():
                  "val_kl": kv, "val_kl_closed": (host_val_kl - kv) / host_val_kl if host_val_kl > 0 else None,
                  "eng_drift_test": drift_test(arm, mod) if name != "host" else 0.0, "eng_drift_val": dvv,
                  "trainable_params": nparams(mod) if mod is not None else 0, "wall_s": round(time.time() - ta, 1),
-                 "ar_split": (ar_host(arm, mod) if args.ar_seqs > 0 and arm.get("route") in ("lens", "sink", "path")
+                 "ar_split": (ar_host(arm, mod) if args.ar_seqs > 0 and arm.get("route") in ("lens", "sink", "path", "neuron")
                               else None),
                  "path_units_mean": (float(np.mean(PATH_SIZES)) if PATH_SIZES else
                                      (float(sum(len(v_) for v_ in SINK.values())) if arm.get("route") == "sink" else
@@ -2746,7 +2846,7 @@ def main():
             host_acc = acc
         kv, dvv = val_scores(arm, mod)
         kv_all = val_scores(dict(arm, ok=False), mod)[0] if arm.get("ok") else kv
-        ar_ = ar_host(arm, mod) if args.ar_seqs > 0 and arm.get("route") in ("lens", "sink", "path") else None
+        ar_ = ar_host(arm, mod) if args.ar_seqs > 0 and arm.get("route") in ("lens", "sink", "path", "neuron") else None
         base = host_val_kl_ok if arm.get("ok") else host_val_kl
         nrs = [r["norm_ratio"] for r in rs if r["norm_ratio"] is not None]
         cfs = [r["clamped_frac"] for r in rs if r["clamped_frac"] is not None]
