@@ -25,6 +25,10 @@ Prompt formats (``--format``):
 * ``chat-fewshot-annotated``: ``chat-fewshot`` with the train solutions'
   ``<<expression=result>>`` calculator annotations kept and every user turn
   asking for them (for a calculator triggered by the model's own marker).
+* ``chat-annotated``: zero-shot; the question in prose and one instruction that
+  describes the ``<<expression=result>>`` calculator format in words (one inline
+  syntax example, no worked shots), to see whether the model converts prose into
+  the marker format on its own (Pierre 2026-11-22).
 * ``chat``: the test question alone as one chat message (zero-shot); this is
   what ``--chat`` selected before.
 * ``completion``: vLLM's ``tests/evals/gsm8k/gsm8k_eval.py`` completion mode,
@@ -140,6 +144,12 @@ CHAT_INSTRUCTION = "\nGive the final numeric answer after ####."
 # them, so a calculator triggered by the model's own "<<expression=" marker can be measured.
 ANNOTATED_INSTRUCTION = ("\nWrite each calculation as <<expression=result>> followed by the result, as in "
                          "the examples. Give the final numeric answer after ####.")
+
+# chat-annotated: no worked examples; the format is described in words with one inline syntax example.
+PROSE_MARKER_INSTRUCTION = ("\nWork through the problem step by step in plain sentences. Whenever you do a "
+                            "calculation, write it as <<expression=result>>, with the arithmetic expression on "
+                            "the left of the = sign and its value on the right, for example <<3*4=12>>, then "
+                            "continue the sentence. Give the final numeric answer after ####.")
 
 
 def few_shot_turns(train, shots, annotated=False):
@@ -500,7 +510,7 @@ def main(argv=None):
     parser.add_argument("--shots", type=int, default=5)
     parser.add_argument("--max-tokens", type=int, default=None,
                         help="default 2048 for the chat formats (512 cut off hard problems mid-working), 256 for completion")
-    parser.add_argument("--format", choices=("chat-fewshot", "chat-fewshot-annotated", "chat", "completion"), default=None,
+    parser.add_argument("--format", choices=("chat-fewshot", "chat-fewshot-annotated", "chat-annotated", "chat", "completion"), default=None,
                         help="prompt format (default chat-fewshot); see the module docstring")
     parser.add_argument("--chat", action="store_true", help="alias for --format chat (zero-shot)")
     parser.add_argument("--request", type=json.loads, default=None,
@@ -553,9 +563,11 @@ def main(argv=None):
         args.max_tokens = 2048 if args.chat else 256
     chat_shots = (few_shot_turns(train, args.shots, annotated=fmt == "chat-fewshot-annotated")
                   if fmt.startswith("chat-fewshot") else None)
-    instruction = ANNOTATED_INSTRUCTION if fmt == "chat-fewshot-annotated" else CHAT_INSTRUCTION
+    instruction = {"chat-fewshot-annotated": ANNOTATED_INSTRUCTION,
+                   "chat-annotated": PROSE_MARKER_INSTRUCTION}.get(fmt, CHAT_INSTRUCTION)
     prefix = "" if args.chat else few_shot_prefix(train, args.shots)
     mode = {"chat-fewshot": f"chat {args.shots}-shot", "chat-fewshot-annotated": f"chat {args.shots}-shot, <<...>> kept",
+            "chat-annotated": "chat zero-shot, <<...>> format described in prose",
             "chat": "chat", "completion": f"completion {args.shots}-shot"}[fmt]
     receipt = {"schema": SCHEMA, "qualified": False,
                "kind": "GSM8K acceptance and accuracy, " + ("sampled" if sampling else "greedy")
