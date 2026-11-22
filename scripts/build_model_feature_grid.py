@@ -82,7 +82,7 @@ FEATURES = (
     "inkling2_loop_passes", "inkling2_row_invariant_controllers", "inkling2_flash_prefill",
     "inkling2_verify_splitk",
     "inkling2_dspark_prefill_reclaim", "inkling2_prefill_mask_mb", "inkling2_hard_no_thinking",
-    "inkling2_command_buffers_ops100_v1",
+    "inkling2_command_buffers_ops100_v1", "inkling2_composed_ordinary", "inkling2_composed_dspark",
     "inkling2_moe_fused", "inkling2_moe_weighted_sum", "inkling2_moe_nax_gather",
     "inkling2_fuse_controllers", "inkling2_fuse_residual", "inkling2_fuse_sconv",
     "inkling2_fuse_attention", "inkling2_fuse_sconv_kernel", "inkling2_fuse_residual_kernel",

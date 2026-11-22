@@ -309,8 +309,12 @@ def server(model_path, run_dir, port):
                 raise RuntimeError("server did not become healthy; see server.log")
             time.sleep(2)
 
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as r:
+            model_id = json.loads(r.read())["data"][0]["id"]
+        result["model_id"] = model_id
+
         def chat(content, max_tokens=160):
-            body = {"model": "inkling2", "messages": [{"role": "user", "content": content}],
+            body = {"model": model_id, "messages": [{"role": "user", "content": content}],
                     "temperature": 0, "max_tokens": max_tokens, "reasoning_effort": "none"}
             payload = _post(port, "/v1/chat/completions", body)
             message = payload["choices"][0]["message"]
@@ -322,8 +326,10 @@ def server(model_path, run_dir, port):
                     "cached_tokens": (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
                     "receipt": payload.get("mlx2")}
 
-        story = "Summarize the following notes in two sentences.\n\n" + " ".join(
-            f"Day {i + 1}. " + PASSAGE for i in range(12))
+        # Varied text, not a repeated passage (repeated inputs derail
+        # reasoning models): this repo's Inkling 2 doc.
+        story = ("Summarize the following document in two sentences.\n\n"
+                 + (ROOT / "docs/INKLING2-MINI.md").read_text()[:6000])
         _post(port, "/v1/admin/apc/clear", {"reason": "inkling2-smoke-cold"}, token)
         cold = chat(story)
         warm = chat(story)
