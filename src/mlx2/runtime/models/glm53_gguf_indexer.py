@@ -18,12 +18,21 @@ beside it and are reached only through explicit keywords:
                  pool blocks; ``topk_v1_kernel`` is the same law in one Metal
                  launch (``mlx2_glm53_select_expand_v1``), first-use gated
                  bitwise against the ops path. See provenance/glm53-sparse-dsa.json.
+``score``        the pool-score law after the q x pooled matmul (scale, ReLU,
+                 head weights, head sum): ``reference`` is today's op chain;
+                 ``fused_v1`` runs the scale/ReLU/weight in one compiled
+                 elementwise launch and the same ``sum(axis=2)``, so the same
+                 bits on every device by construction; ``kernel_v1`` runs all
+                 four in one Metal launch (``mlx2_glm53_pool_scores_rows_v1``)
+                 that reproduces MLX's head reduction, first-use gated bitwise
+                 and declined to ``fused_v1`` otherwise. Mined from
+                 ml-explore/mlx-lm#2046; see provenance/glm53-indexer-score-fusion.json.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import mlx.core as mx
 
@@ -42,17 +51,24 @@ SELECT_LAWS = ("argsort", "topk_v1", "topk_v1_kernel")
 POOL_LAWS = ("reference", "fixed_order")
 SELECT_KERNEL = "mlx2_glm53_select_expand_v1"
 SELECT_THREADS = 1024
+SCORE_LAWS = ("reference", "fused_v1", "kernel_v1")
+SCORE_KERNEL = "mlx2_glm53_pool_scores_rows_v1"
+SCORE_THREADS = 256
 
 _SCHEDULED = Counter()
-_GATE = {"select_kernel_error": None}
+_GATE = {"select_kernel_error": None, "score_kernel_error": None}
 
 
-def pooled_selection_reference(x, qr, cache, weights, prefix, *, topk=2048, pool=4, projected=None):
+def pooled_selection_reference(x, qr, cache, weights, prefix, *, topk=2048, pool=4, projected=None,
+                               score="reference"):
     """Return token IDs [B,L,topk+pool-1], or None when all keys fit.
 
     Query chunks bound score memory. Every query selects complete visible
     pools plus its own incomplete tail; no first-query selection broadcast.
+    ``score`` other than ``reference`` replaces the two score lines by
+    ``pool_scores(..., law=score)`` (the same expression, the same bits).
     """
+    _check_score(score)
     b, length, _ = x.shape
     if b != 1 or pool != 4:
         raise ValueError("GLM-5.3 packed indexer currently requires unpadded B1/kpool4")
@@ -97,10 +113,13 @@ def pooled_selection_reference(x, qr, cache, weights, prefix, *, topk=2048, pool
     for start in range(0, length, 128):
         stop = min(length, start + 128)
         pos = total - length + mx.arange(start, stop)
-        scores = mx.maximum(
-            q[:, start:stop] @ pooled[:, None].swapaxes(-1, -2) * hd**-0.5, 0
-        )
-        scores = (scores * score_weights[:, start:stop, :, None]).sum(axis=2)
+        if score == "reference":
+            scores = mx.maximum(
+                q[:, start:stop] @ pooled[:, None].swapaxes(-1, -2) * hd**-0.5, 0
+            )
+            scores = (scores * score_weights[:, start:stop, :, None]).sum(axis=2)
+        else:
+            scores = pool_scores(q[:, start:stop], score_weights[:, start:stop], pooled, law=score)
         visible = ends[None, None, :] <= pos[None, :, None]
         scores = mx.where(visible, scores, -1e30)
         selected = mx.argsort(-scores, axis=-1)[..., :count]
@@ -256,10 +275,42 @@ def audit_pools(pooled, raw_rows_fn, total, ape):
     return True
 
 
-def pool_scores(q, score_weights, pooled):
-    """q (B,L,32,128), weights (B,L,32) pre-scaled, pooled (B,P,128) -> (B,L,P)."""
-    scores = mx.maximum(q @ pooled[:, None].swapaxes(-1, -2) * DIM**-0.5, 0)
-    return (scores * score_weights[..., None]).sum(axis=2)
+def pool_scores(q, score_weights, pooled, *, law="reference"):
+    """q (B,L,32,128), weights (B,L,32) pre-scaled, pooled (B,P,128) -> (B,L,P).
+
+    Every law computes the same bits (module docstring, ``score``).
+    """
+    if law == "reference":
+        scores = mx.maximum(q @ pooled[:, None].swapaxes(-1, -2) * DIM**-0.5, 0)
+        return (scores * score_weights[..., None]).sum(axis=2)
+    _check_score(law)
+    mm = q @ pooled[:, None].swapaxes(-1, -2)
+    if law == "kernel_v1":
+        if score_kernel_admits(mm, score_weights) and score_kernel_ready():
+            return score_rows(mm, score_weights)
+        _SCHEDULED["score_kernel_declined"] += 1
+    _SCHEDULED["score_fused"] += 1
+    return _relu_weight(mm, score_weights[..., None]).sum(axis=2)
+
+
+@partial(mx.compile, shapeless=True)
+def _relu_weight(mm, weights):
+    # The reference's three elementwise ops, in its order, in one launch:
+    # (mm * DIM**-0.5), then Maximum(., 0), then * weights. No add, so no
+    # contraction can form; the head sum stays the reference's own reduce.
+    return mx.maximum(mm * DIM**-0.5, 0) * weights
+
+
+def _scores(q, score_weights, pooled, law):
+    # The default law keeps today's call (pool_scores(q, w, pooled)) exactly.
+    if law == "reference":
+        return pool_scores(q, score_weights, pooled)
+    return pool_scores(q, score_weights, pooled, law=law)
+
+
+def _check_score(law):
+    if law not in SCORE_LAWS:
+        raise ValueError(f"unknown GLM-5.3 indexer score law {law!r}")
 
 
 def visible_pools(positions, pools, start=0):
@@ -323,7 +374,7 @@ def expand_selection(pool_ids, pool_valid, positions):
     return mx.concatenate(parts, axis=-1).astype(mx.int32)
 
 
-def blocked_select(q, score_weights, pooled, positions, count, *, block=4096):
+def blocked_select(q, score_weights, pooled, positions, count, *, block=4096, score="reference"):
     """Running ``topk_v1`` over pool blocks: equals the global select exactly.
 
     Scores one block of ``block`` pools at a time, so the transient is bounded
@@ -341,7 +392,7 @@ def blocked_select(q, score_weights, pooled, positions, count, *, block=4096):
         if start:
             # One live score block: block b+1's scores wait on block b's reduction.
             keys = mx.depends(keys, best_scores)
-        scores = pool_scores(q, score_weights, keys)
+        scores = _scores(q, score_weights, keys, score)
         masked = _masked(scores, visible_pools(positions, stop - start, start)[None])
         scores = mx.concatenate((best_scores, masked.astype(mx.float32)), axis=-1)
         ids = mx.concatenate(
@@ -361,7 +412,7 @@ def blocked_select(q, score_weights, pooled, positions, count, *, block=4096):
 
 
 def select_from_rows(x, qr, weights, prefix, *, total, raw_rows_fn, pools, pool_law, select, block,
-                     projected=None):
+                     projected=None, score="reference"):
     """Selection over rows the caller has already appended; None when total <= TOPK.
 
     ``total`` is T after the append (Python int); ``raw_rows_fn(start, stop)``
@@ -374,6 +425,7 @@ def select_from_rows(x, qr, weights, prefix, *, total, raw_rows_fn, pools, pool_
     if pool_law != "fixed_order":
         raise ValueError("select_from_rows runs the fixed_order pooling law only")
     _check_select(select, block)
+    _check_score(score)
     total = int(total)
     if total <= TOPK:
         return None
@@ -406,9 +458,10 @@ def select_from_rows(x, qr, weights, prefix, *, total, raw_rows_fn, pools, pool_
             # One live chunk: chunk c+1's scores wait on chunk c's ids.
             qc = mx.depends(qc, results[-1])
         if blocked:
-            results.append(expand_selection(*blocked_select(qc, wc, pooled, pos, count, block=block), pos))
+            results.append(expand_selection(
+                *blocked_select(qc, wc, pooled, pos, count, block=block, score=score), pos))
             continue
-        scores = pool_scores(qc, wc, pooled)
+        scores = _scores(qc, wc, pooled, score)
         if kernel:
             results.append(select_expand(scores[0], pos, count)[None])
             continue
@@ -427,7 +480,7 @@ def _check_select(select, block):
 
 
 def pooled_selection(x, qr, cache, weights, prefix, *, topk=2048, pool=4, projected=None,
-                     pools=None, pool_law="reference", select="argsort", block=None):
+                     pools=None, pool_law="reference", select="argsort", block=None, score="reference"):
     """Return token IDs [B,L,topk+pool-1], or None when all keys fit.
 
     Default keywords call ``pooled_selection_reference`` (today's law, byte for
@@ -443,7 +496,7 @@ def pooled_selection(x, qr, cache, weights, prefix, *, topk=2048, pool=4, projec
                 "(no pool cache, argsort selection, global scores)"
             )
         return pooled_selection_reference(x, qr, cache, weights, prefix, topk=topk, pool=pool,
-                                          projected=projected)
+                                          projected=projected, score=score)
     b, length, _ = x.shape
     if b != 1 or pool != KPOOL or topk != TOPK:
         raise ValueError("GLM-5.3 packed indexer currently requires unpadded B1/kpool4/topk2048")
@@ -452,7 +505,7 @@ def pooled_selection(x, qr, cache, weights, prefix, *, topk=2048, pool=4, projec
     full, _ = cache.update_and_fetch(packed, mx.zeros((b, 1, length, 0), dtype=x.dtype))
     return select_from_rows(
         x, qr, weights, prefix, total=full.shape[2], raw_rows_fn=lambda a, z: full[0, 0, a:z],
-        pools=pools, pool_law=pool_law, select=select, block=block, projected=projected,
+        pools=pools, pool_law=pool_law, select=select, block=block, projected=projected, score=score,
     )
 
 
@@ -680,10 +733,188 @@ def select_kernel_ready():
         return False
 
 
+# ---------------------------------------------------------------------------
+# mlx2_glm53_pool_scores_rows_v1: scale, ReLU, head weights and head sum after
+# the q x pooled matmul, one launch per call (``score="kernel_v1"``).
+#
+# The prompt-rows analogue of glm53_mla_fused's decode ``score`` kernel. The
+# matmul stays MLX's. One simdgroup per (row, pool), lane h = head h, the
+# reference's IEEE operations in its order: mm * fp32(128**-0.5), MLX's
+# Maximum(., 0) (NaN in the first operand wins), * w, then the head sum as
+# MLX v0.32.4 ``col_reduce_looped`` (BM = BN = 32) forms it for a (1, L, 32, P)
+# reduction over axis 2: ``c + 0`` per lane, ``simd_sum`` across the 32 lanes.
+# That reduction order is MLX's choice, not a law this module controls, so
+# the kernel only serves after a first-use bitwise gate against the ops chain
+# at prompt shapes; a failed gate declines to ``fused_v1`` and is reported.
+# Contraction is off; there is no add before the reduction to contract.
+
+_SCORE_HEADER = """
+inline float glm53_score_max(float x, float y) {
+    if (metal::isnan(x)) {
+        return x;
+    }
+    return x > y ? x : y;
+}
+"""
+
+_SCORE_SOURCE = """
+#pragma clang fp contract(off)
+const uint p = threadgroup_position_in_grid.x * (TG / 32) + simdgroup_index_in_threadgroup;
+const uint row = threadgroup_position_in_grid.y;
+const uint h = thread_index_in_simdgroup;
+const uint P = uint(meta[0]);
+if (p >= P) {
+    return;
+}
+const float a = mm[(size_t(row) * 32 + h) * size_t(P) + p] * C_DIM;
+const float relu = glm53_score_max(a, 0.0f);
+const float c = relu * w[size_t(row) * 32 + h];
+const float v = c + 0.0f;
+const float s = simd_sum(v);
+if (h == 0) {
+    scores[size_t(row) * size_t(P) + p] = s;
+}
+"""
+
+
+def _hexf(value):
+    import numpy as np
+
+    return f"as_type<float>(0x{int(np.float32(value).view(np.uint32)):08X}u)"
+
+
+def score_kernel_spec():
+    """The kernel's construction arguments (inspectable without Metal)."""
+    return {
+        "name": SCORE_KERNEL,
+        "input_names": ["mm", "w", "meta"],
+        "output_names": ["scores"],
+        "header": _SCORE_HEADER,
+        "source": _SCORE_SOURCE.replace("C_DIM", _hexf(DIM**-0.5)),
+        "ensure_row_contiguous": True,
+        "template": [("TG", SCORE_THREADS)],
+        "threadgroup": (SCORE_THREADS, 1, 1),
+    }
+
+
+@lru_cache(maxsize=1)
+def _score_kernel():
+    spec = score_kernel_spec()
+    return mx.fast.metal_kernel(
+        name=spec["name"], input_names=spec["input_names"], output_names=spec["output_names"],
+        header=spec["header"], source=spec["source"], ensure_row_contiguous=spec["ensure_row_contiguous"],
+    )
+
+
+# Smallest pool count the kernel serves. The head sum over axis 2 is a
+# col_reduce_looped simd_sum only for a strided reduction of stride P >= 32:
+# at P == 1 MLX drops the singleton and row-reduces the 32 contiguous heads
+# (a serial fold), and at P < 32 its strided dispatch takes col_reduce_small
+# (a per-thread serial fold). Below this the kernel's order is not MLX's, so
+# those calls run fused_v1 (counted as declined). Blocked prompt selection
+# makes such a block whenever the pool count is 1..31 mod SELECT_BLOCK.
+SCORE_KERNEL_MIN_POOLS = 32
+
+
+def score_kernel_admits(mm, score_weights):
+    """The kernel's shape and dtype: B1 fp32 (1, L, 32, P >= 32) and (1, L, 32)."""
+    return (
+        _on_gpu() and mm.ndim == 4 and mm.shape[0] == 1 and mm.shape[2] == HEADS
+        and mm.shape[3] >= SCORE_KERNEL_MIN_POOLS
+        and mm.dtype == mx.float32 and score_weights.dtype == mx.float32
+        and tuple(score_weights.shape) == tuple(mm.shape[:3])
+    )
+
+
+def score_rows(mm, score_weights):
+    """Kernel: mm (1, L, 32, P) = q @ pooled^T, weights (1, L, 32) pre-scaled -> (1, L, P)."""
+    if not _on_gpu():
+        raise ValueError(f"{SCORE_KERNEL} requires the Metal GPU")
+    _, length, _, pools = mm.shape
+    groups = -(-pools // (SCORE_THREADS // 32))
+    spec = score_kernel_spec()
+    (scores,) = _score_kernel()(
+        inputs=[mm, score_weights, mx.array([pools], dtype=mx.int32)],
+        template=spec["template"], grid=(groups * SCORE_THREADS, length, 1), threadgroup=spec["threadgroup"],
+        output_shapes=[(1, length, pools)], output_dtypes=[mx.float32],
+    )
+    _SCHEDULED["score_kernel"] += 1
+    return scores
+
+
+def score_gate_cases(seed=5307):
+    """Synthetic (q, weights, pooled) for the score gate: prompt shapes (L up
+    to QUERY_CHUNK, P up to SELECT_BLOCK and past it, not multiples of 8),
+    negative pre-ReLU products, exact zeros, signed zeros, large and tiny
+    magnitudes, negative head weights, and a NaN and infinities."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    cases = []
+    for length, pools, scale in ((1, 511, 1.0), (3, 2048, 37.0), (17, 4103, 1e-3), (QUERY_CHUNK, 4096, 1.0),
+                                 (5, 32, 1.0), (QUERY_CHUNK, 33, 3.0)):
+        q = (rng.normal(size=(1, length, HEADS, DIM)) * scale).astype(np.float32)
+        pooled = rng.normal(size=(1, pools, DIM)).astype(np.float32)
+        pooled[0, :3] = 0.0
+        pooled[0, 3, :] = -0.0
+        w = rng.normal(size=(1, length, HEADS)).astype(np.float32) * np.float32(HEADS**-0.5)
+        cases.append((q, w, pooled))
+    q, w, pooled = (a.copy() for a in cases[0])
+    pooled[0, 5, 0] = np.nan
+    pooled[0, 6, 0] = np.inf
+    pooled[0, 7, 0] = -np.inf
+    pooled[0, 8, :4] = 3e38
+    cases.append((q, w, pooled))
+    return cases
+
+
+@lru_cache(maxsize=1)
+def score_kernel_self_check():
+    """First-use bitwise GPU gate: kernel scores == reference scores on ``score_gate_cases``."""
+    import numpy as np
+
+    def check(index, actual, expected):
+        mx.eval(actual, expected)
+        a, e = np.array(actual).view(np.uint32), np.array(expected).view(np.uint32)
+        if a.shape != e.shape or not np.array_equal(a, e):
+            diff = int(np.count_nonzero(a != e)) if a.shape == e.shape else -1
+            raise ValueError(f"{SCORE_KERNEL} bit gate failed (case {index}, {diff} words)")
+
+    for index, (q, w, pooled) in enumerate(score_gate_cases()):
+        q, w, pooled = mx.array(q), mx.array(w), mx.array(pooled)
+        check(index, score_rows(q @ pooled[:, None].swapaxes(-1, -2), w), pool_scores(q, w, pooled))
+    # Below SCORE_KERNEL_MIN_POOLS the law must decline (not launch) and still
+    # give the reference's bits: P = 1 (singleton dropped), 7 and 31.
+    rng = np.random.default_rng(5308)
+    for pools in (1, 7, 31):
+        q = mx.array(rng.normal(size=(1, 9, HEADS, DIM)).astype(np.float32))
+        w = mx.array((rng.normal(size=(1, 9, HEADS)) * HEADS**-0.5).astype(np.float32))
+        pooled = mx.array(rng.normal(size=(1, pools, DIM)).astype(np.float32))
+        if score_kernel_admits(q @ pooled[:, None].swapaxes(-1, -2), w):
+            raise ValueError(f"{SCORE_KERNEL} admitted P={pools} below its minimum")
+        check(f"P={pools}", _relu_weight(q @ pooled[:, None].swapaxes(-1, -2), w[..., None]).sum(axis=2),
+              pool_scores(q, w, pooled))
+    return True
+
+
+def score_kernel_ready():
+    """True when the kernel may serve: Metal GPU and the first-use gate passed."""
+    if not _on_gpu() or _GATE["score_kernel_error"] is not None:
+        return False
+    try:
+        return score_kernel_self_check()
+    except (RuntimeError, ValueError) as error:  # declined, counted, reported by route_status
+        _GATE["score_kernel_error"] = f"{type(error).__name__}: {error}"
+        return False
+
+
 def route_status():
     return {
-        "policies": {"pools": ["reference", "fixed_order"], "select": list(SELECT_LAWS)},
+        "policies": {"pools": ["reference", "fixed_order"], "select": list(SELECT_LAWS),
+                     "score": list(SCORE_LAWS)},
         "kernels": {SELECT_KERNEL: {"implemented": True, "qualified": False, "selected_by_default": True,
-                                    "gate_error": _GATE["select_kernel_error"]}},
+                                    "gate_error": _GATE["select_kernel_error"]},
+                    SCORE_KERNEL: {"implemented": True, "qualified": False, "selected_by_default": False,
+                                   "gate_error": _GATE["score_kernel_error"]}},
         "scheduled_calls": dict(_SCHEDULED),
     }

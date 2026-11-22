@@ -1371,3 +1371,48 @@ def test_f16_prompt_law_under_the_expanded_prompt_law_takes_the_selected_rows(fa
     assert model.calls["mla_prompt_expanded_rows"] == 8
     assert len(calls) == 1 and calls[0]["rows"] == 12 and calls[0]["half"] is True
     assert model.calls["sparse_attention_fused_f16_rows"] == 12 and model.calls["sparse_prefill_gathered_blocks"] == 0
+
+
+# ---- glm53_indexer_score (mlx-lm#2046 fusion): same bits as the reference ----
+
+
+@pytest.mark.parametrize("policy", [{}, SPARSE, dict(SPARSE, indexer_pools="incremental_v1_audit")])
+def test_indexer_score_laws_keep_mla_outputs_bitwise(policy):
+    weights = Weights()
+    ref = mla_model(weights, **policy)
+    models = {law: mla_model(weights, indexer_score=law, **policy) for law in ("fused_v1", "kernel_v1")}
+    caches = {law: committed(20, 2050) for law in ("reference", *models)}
+    for step, length in enumerate((1, 3, 1, 130)):
+        x = hidden(21 + step, length)
+        frontier = caches["reference"].caches[1].offset
+        want = ref._mla(x, caches["reference"], PREFIX, frontier=frontier)
+        for law, model in models.items():
+            got = model._mla(x, caches[law], PREFIX, frontier=frontier)
+            assert np.array_equal(bits(got), bits(want)), (law, step)
+    for law, model in models.items():
+        assert model.calls["indexer_score_fused"] > 0 and model.calls["indexer_score_kernel"] == 0
+        assert model.calls["indexer_score_kernel_declined"] == (
+            model.calls["indexer_score_fused"] if law == "kernel_v1" else 0)
+    assert ref.calls["indexer_score_fused"] == 0
+    with pytest.raises(ValueError, match="unsupported GLM-5.3 indexer score policy"):
+        mla_model(weights, indexer_score="head_fold")
+
+
+@pytest.mark.parametrize("metal_available", [False, True])
+def test_adapter_indexer_score_profile_and_metal_refusal(monkeypatch, metal_available):
+    from mlx2.adapters.glm53_gguf import Glm53GGUFAdapter
+
+    monkeypatch.setattr(mx.metal, "is_available", lambda: metal_available)
+    off = adapter_policy({})
+    fused = adapter_policy({"glm53_indexer_score": "fused_v1"})
+    assert off.kernel_policy["glm53_indexer_score"] == "reference" and "indexer_score" not in off.profile
+    assert ":indexer_score=fused_v1" in fused.profile
+    assert fused.profile.replace(":indexer_score=fused_v1", "") == off.profile
+    if metal_available:
+        kernel = adapter_policy({"glm53_indexer_score": "kernel_v1"})
+        assert kernel.profile.replace(":indexer_score=kernel_v1", "") == off.profile
+    else:
+        with pytest.raises(ValueError, match="kernel_v1 requires Metal"):
+            object.__new__(Glm53GGUFAdapter)._load("/nonexistent", {"glm53_indexer_score": "kernel_v1"})
+    with pytest.raises(ValueError, match="unsupported GLM-5.3 packed execution policy"):
+        object.__new__(Glm53GGUFAdapter)._load("/nonexistent", {"glm53_indexer_score": "head_fold"})

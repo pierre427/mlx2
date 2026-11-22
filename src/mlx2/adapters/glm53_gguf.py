@@ -407,6 +407,7 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "glm53_expert_prefill",
             "glm53_prompt_decoded",
             "glm53_mla_prompt",
+            "glm53_indexer_score",
             "glm53_row_kernel",
             "glm53_shared_fold",
             "glm53_kda_group",
@@ -491,6 +492,7 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             or policy.get("glm53_prompt_decoded", "reference")
             not in ("reference", "decoded_f32_v1", "decoded_f16_v1")
             or policy.get("glm53_mla_prompt", "reference") not in ("reference", "expanded_f16_v1")
+            or policy.get("glm53_indexer_score", "reference") not in ("reference", "fused_v1", "kernel_v1")
             or policy.get("glm53_row_kernel", "reference")
             not in ("reference", "kblock_rows", "kblock_exact")
             or policy.get("glm53_shared_fold", "off") not in ("off", "kblock")
@@ -544,6 +546,15 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # class of the nax_fp16 prompt tiles; selected (gathered) rows and
             # every decode row keep the absorbed fp32 law. Opt-in, unqualified.
             "glm53_mla_prompt": policy.get("glm53_mla_prompt", "reference"),
+            # Indexer pool scores after the q x pooled matmul (scale, ReLU,
+            # head weights, head sum; ml-explore/mlx-lm#2046's fusion):
+            # "fused_v1" runs the three elementwise ops in one compiled launch
+            # and the reference's own head-sum reduce, the same bits on every
+            # device by construction; "kernel_v1" (Metal) runs all four in one
+            # launch reproducing MLX's head reduction, first-use gated bitwise,
+            # declined to fused_v1 on a failed gate. Opt-in, unqualified, not
+            # yet measured on the GPU.
+            "glm53_indexer_score": policy.get("glm53_indexer_score", "reference"),
             # K-block row kernels (decode, verification, untiled rows): same
             # element values as the reference, FP32, a different sum order.
             "glm53_row_kernel": policy.get("glm53_row_kernel", "reference"),
@@ -712,6 +723,11 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         _check_tree_levers(self.kernel_policy)
         _check_kblock_levers(self.kernel_policy)
         _check_mla_fused(self.kernel_policy)
+        if self.kernel_policy["glm53_indexer_score"] == "kernel_v1":
+            import mlx.core as mx
+
+            if not mx.metal.is_available():
+                raise ValueError("glm53_indexer_score=kernel_v1 requires Metal; name fused_v1 instead")
         if (
             self.kernel_policy["glm53_draft_activation"] != "target"
             and drafter_kind != "dflash"
@@ -733,6 +749,7 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                           ("glm53_expert_prefill", "expert_prefill"),
                           ("glm53_prompt_decoded", "prompt_decoded"),
                           ("glm53_mla_prompt", "mla_prompt"),
+                          ("glm53_indexer_score", "indexer_score"),
                           ("glm53_row_kernel", "row_kernel"),
                           ("glm53_shared_fold", "shared_fold"),
                           ("glm53_kda_group", "kda_group"),
@@ -887,6 +904,7 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             f32_weights=self.kernel_policy["glm53_f32_weights"],
             kv_append=self.kernel_policy["glm53_kv_append"],
             mla_prompt=self.kernel_policy["glm53_mla_prompt"],
+            indexer_score=self.kernel_policy["glm53_indexer_score"],
             **{key.removeprefix("glm53_"): self.kernel_policy[key] for key in SPARSE_KEYS},
         )
         if self.kernel_policy["glm53_prompt_eval"] == "layer_v1":

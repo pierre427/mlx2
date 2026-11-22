@@ -1397,3 +1397,16 @@ GEMV, expert map and tile kernels) and transcribes its Python launch code
 with mlx2 changes (module-level mode flag, mlx2 admission, lazy kernel
 build, no vjp). The MIT permission notice reproduced above for MLX applies
 to this code. No Apple copyright header is added to mlx2 source files.
+
+------------------------------------------------------------------------------
+GLM-5.3 fused indexer scores — mlx-lm pull request #2046
+(https://github.com/ml-explore/mlx-lm/pull/2046, merge
+1bf8da05a1ef30a3eb2e8a634180be6557fd3ca0), MIT License, Copyright © 2023
+Apple Inc.
+
+The fused ReLU, per-head weighting and head sum of the DSA indexer in
+src/mlx2/runtime/models/glm53_gguf_indexer.py follows the mechanism of that
+pull request. No mlx-lm code is copied; the mlx2 kernel keeps MLX's own
+reduction order (read from MLX 0.32.4's reduce_col.h, not copied). The MIT
+permission notice reproduced above for MLX applies to the mechanism credited
+here. No Apple copyright header is added to mlx2 source files.

@@ -21,6 +21,7 @@ from . import glm53_sparse_attention as sparse_attention
 from .cache import CacheList, KVCache, _BaseCache, _cache_class_token, register_cache_class
 from .gated_delta import gated_delta_kernel, gated_delta_ops
 from .glm53_gguf_indexer import (
+    SCORE_LAWS,
     TOPK,
     Glm53PoolCache,
     audit_pools,
@@ -98,6 +99,9 @@ _INDEXER_COUNTERS = (
     ("select_kernel", "indexer_select_kernel"),
     ("select_kernel_declined", "indexer_select_kernel_declined"),
     ("select_blocked", "indexer_select_blocked"),
+    ("score_fused", "indexer_score_fused"),
+    ("score_kernel", "indexer_score_kernel"),
+    ("score_kernel_declined", "indexer_score_kernel_declined"),
 )
 SPARSE_COUNTERS = (
     "indexer_pool_recompute_full",
@@ -543,6 +547,7 @@ class Glm53GGUFModel:
         tree_rows_attention="per_row", tree_frontier="clone", router="reference",
         kda_small="reference", kv_append="reference", kda_fused="reference", hc_fused_policy="reference",
         mla_fused="reference", f32_weights="reference", mla_prompt="reference",
+        indexer_score="reference",
     ):
         if math_policy not in ("ordinary", "reference"):
             raise ValueError("unknown GLM-5.3 math policy")
@@ -562,6 +567,8 @@ class Glm53GGUFModel:
             raise ValueError(f"unsupported GLM-5.3 F32 weight policy {f32_weights!r}")
         if mla_prompt not in MLA_PROMPT_POLICIES:
             raise ValueError(f"unsupported GLM-5.3 MLA prompt policy {mla_prompt!r}")
+        if indexer_score not in SCORE_LAWS:
+            raise ValueError(f"unsupported GLM-5.3 indexer score policy {indexer_score!r}")
         sparse = {
             "indexer_pools": indexer_pools,
             "indexer_select": indexer_select,
@@ -591,6 +598,9 @@ class Glm53GGUFModel:
         self.mla_fused = mla_fused
         self.f32_weights = f32_weights
         self.mla_prompt = mla_prompt
+        # Pool-score law after the q x pooled matmul (glm53_gguf_indexer
+        # SCORE_LAWS, mlx-lm#2046's fusion): every value computes the same bits.
+        self.indexer_score = indexer_score
         self._prompt_expanded = False
         # Storage law of the MLA latent/raw planes: "reference" appends in
         # place, which under pipelined decode copies the whole plane every
@@ -1000,11 +1010,22 @@ class Glm53GGUFModel:
     def _mla_select_cache(self, x, qr, cache, prefix, projected, total):
         """Append the raw indexer rows to ``cache[1]`` once and select."""
         if self.indexer_pools == "recompute":
-            # Today's law, verbatim (pooled_selection_reference).
-            selected = pooled_selection(x, qr, cache[1], self.weights, prefix, projected=projected)
+            # Today's law, verbatim (pooled_selection_reference); the score
+            # lines alone follow glm53_indexer_score (same bits).
+            score = getattr(self, "indexer_score", "reference")
+            # Only the score gate: this law never runs the select kernel.
+            if score == "kernel_v1":
+                indexer.score_kernel_ready()
+            before = dict(indexer._SCHEDULED)
+            selected = pooled_selection(x, qr, cache[1], self.weights, prefix, projected=projected,
+                                        score=score)
             if selected is not None:
                 self.calls["indexer_pool_recompute_full"] += 1
                 self.calls["indexer_select_argsort"] += 1
+                after = indexer._SCHEDULED
+                for source, name in _INDEXER_COUNTERS:
+                    if source.startswith("score_"):
+                        self.calls[name] += after.get(source, 0) - before.get(source, 0)
         else:
             selected = self._mla_select_cache_pools(x, qr, cache, prefix, projected, total)
         # The two planes append separately; ids over a raw plane that is not
@@ -1026,6 +1047,7 @@ class Glm53GGUFModel:
         selected = pooled_selection(
             x, qr, cache[1], self.weights, prefix, projected=projected, pools=pools,
             pool_law="fixed_order", select=self.indexer_select, block=self._select_block(),
+            score=getattr(self, "indexer_score", "reference"),
         )
         self._count_selection(before, selected, pools)
         if selected is not None and self.indexer_pools == "incremental_v1_audit":
@@ -1044,7 +1066,7 @@ class Glm53GGUFModel:
         selected = select_from_rows(
             x, qr, self.weights, prefix, total=total, raw_rows_fn=frontier.raw_rows,
             pools=frontier.pools, pool_law="fixed_order", select=self.indexer_select,
-            block=None, projected=projected,
+            block=None, projected=projected, score=getattr(self, "indexer_score", "reference"),
         )
         self._count_selection(before, selected, frontier.pools)
         if selected is not None and self.indexer_pools == "incremental_v1_audit":
@@ -1072,6 +1094,8 @@ class Glm53GGUFModel:
         # synthetic launches are not this call's selection.
         if self.indexer_select == "topk_v1_kernel":
             indexer.select_kernel_ready()
+        if getattr(self, "indexer_score", "reference") == "kernel_v1":
+            indexer.score_kernel_ready()
         return dict(indexer._SCHEDULED)
 
     def _select_block(self):

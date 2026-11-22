@@ -577,6 +577,197 @@ def test_select_kernel_spec_builds_and_cpu_refuses_metal(monkeypatch):
     assert ix.route_status()["scheduled_calls"]["select_kernel_declined"] == before + 1
 
 
+# ---- pool-score laws (mlx-lm#2046 fusion): same bits as the reference --------
+
+
+def _score_operands(rng, length, pools, *, ties=True, odd=False):
+    """Non-repeated random operands; ``ties`` repeats whole pooled rows (tied
+    scores) and zeroes some (ReLU-zero products, signed zeros); about half of
+    the pre-ReLU products are negative; head weights take both signs."""
+    q = rng.normal(size=(1, length, 32, 128)).astype(np.float32)
+    pooled = rng.normal(size=(1, pools, 128)).astype(np.float32)
+    if ties and pools > 8:
+        pooled[0, 1::7] = pooled[0, 0]
+        pooled[0, 2] = 0.0
+        pooled[0, 3] = -0.0
+    w = (rng.normal(size=(1, length, 32)) * 32**-0.5).astype(np.float32)
+    if odd and pools > 8:
+        pooled[0, 4, 0] = np.nan
+        pooled[0, 5, 0] = np.inf
+        pooled[0, 6, 0] = -np.inf
+        pooled[0, 7, :3] = 3e38
+        q[0, 0, 0, :4] = 1e-38
+    return mx.array(q), mx.array(w), mx.array(pooled)
+
+
+def _numpy_scores(q, w, pooled):
+    """The reference law in numpy fp32, heads added left to right (the CPU
+    reduce's order): (mm * fp32(128**-0.5)) -> max(., 0) -> * w -> sum."""
+    mm = np.array(q @ pooled[:, None].swapaxes(-1, -2))  # MLX's matmul, its order
+    scale = np.float32(128**-0.5)
+    with np.errstate(invalid="ignore", over="ignore"):
+        a = mm * scale
+        relu = np.where(np.isnan(a), a, np.where(a > 0, a, np.float32(0)))
+        c = relu * np.array(w)[..., None]
+        total = np.float32(0) + c[:, :, 0]
+        for h in range(1, 32):
+            total = total + c[:, :, h]
+    return total.astype(np.float32)
+
+
+SCORE_SHAPES = [(1, 1), (1, 511), (3, 2048), (17, 4103), (128, 4096), (128, 513), (5, 9000)]
+
+
+@pytest.mark.parametrize("length,pools", SCORE_SHAPES)
+def test_fused_pool_scores_equal_reference_bitwise(length, pools):
+    rng = np.random.default_rng(5400 + length + pools)
+    for ties, odd in ((False, False), (True, False), (True, True)):
+        q, w, pooled = _score_operands(rng, length, pools, ties=ties, odd=odd)
+        ref = ix.pool_scores(q, w, pooled)
+        for law in ("fused_v1", "kernel_v1"):  # kernel_v1 declines to fused_v1 on the CPU
+            got = ix.pool_scores(q, w, pooled, law=law)
+            assert got.dtype == ref.dtype == mx.float32 and got.shape == ref.shape == (1, length, pools)
+            assert np.array_equal(_bits(got), _bits(ref)), (law, ties, odd)
+        # Independent oracle of the math and order: for a strided head reduce
+        # (P > 1) MLX's CPU sums heads left to right (mlx-lm#2046's order); at
+        # P = 1 the heads are contiguous and MLX takes a vectorized row reduce.
+        # On Metal the order is col_reduce_looped's simd_sum, which this CPU
+        # test cannot reach (the kernel's GPU gate does).
+        if pools > 1:
+            assert np.array_equal(np.asarray(_numpy_scores(q, w, pooled)).view(np.uint32), _bits(ref))
+
+
+def test_score_law_counters_and_unknown_law():
+    rng = np.random.default_rng(5410)
+    q, w, pooled = _score_operands(rng, 2, 600)
+    before = dict(ix._SCHEDULED)
+    ix.pool_scores(q, w, pooled, law="fused_v1")
+    ix.pool_scores(q, w, pooled, law="kernel_v1")
+    after = ix._SCHEDULED
+    assert after["score_fused"] - before.get("score_fused", 0) == 2
+    assert after["score_kernel_declined"] - before.get("score_kernel_declined", 0) == 1
+    assert after.get("score_kernel", 0) == before.get("score_kernel", 0)
+    with pytest.raises(ValueError, match="unknown GLM-5.3 indexer score law"):
+        ix.pool_scores(q, w, pooled, law="head_fold")
+    status = ix.route_status()
+    assert status["policies"]["score"] == ["reference", "fused_v1", "kernel_v1"]
+    assert status["kernels"][ix.SCORE_KERNEL]["selected_by_default"] is False
+
+
+@pytest.mark.parametrize("distinct", [5, 600])
+def test_blocked_chained_topk_under_fused_scores_equals_reference_global(distinct):
+    # Heavy ties (distinct=5): the chained running top-k must return the same
+    # indices, ties included, under every score law and block size.
+    rng = np.random.default_rng(5411)
+    pools, length = 600, 6
+    q, weights, pooled = _exact_operands(rng, pools, length, distinct)
+    positions = mx.array([2048, 2050, 2051, 2100, 2398, 2402], dtype=mx.int32)
+    scores = ix.pool_scores(q, weights, pooled)
+    expected = ix.select_pools(scores, ix.visible_pools(positions, pools)[None], 512, law="topk_v1")
+    for law in ix.SCORE_LAWS:
+        for block in (16, 100, 512, 4096):
+            got = ix.blocked_select(q, weights, pooled, positions, 512, block=block, score=law)
+            np.testing.assert_array_equal(np.array(got[0]), np.array(expected[0]))
+            np.testing.assert_array_equal(np.array(got[1]), np.array(expected[1]))
+
+
+def test_blocked_chained_topk_on_random_tied_operands_under_fused_scores():
+    rng = np.random.default_rng(5412)
+    q, w, pooled = _score_operands(rng, 3, 700, ties=True)
+    positions = mx.array([2047, 2300, 2803], dtype=mx.int32)
+    for block in (16, 333):
+        ref = ix.blocked_select(q, w, pooled, positions, 512, block=block)
+        got = ix.blocked_select(q, w, pooled, positions, 512, block=block, score="fused_v1")
+        np.testing.assert_array_equal(np.array(got[0]), np.array(ref[0]))
+        np.testing.assert_array_equal(np.array(got[1]), np.array(ref[1]))
+
+
+@pytest.mark.parametrize("law", ["fused_v1", "kernel_v1"])
+def test_selection_ids_under_fused_scores_equal_reference_every_pool_law(law):
+    """End to end: reference pooling + argsort, fixed-order + topk_v1 (global
+    and blocked prompt, chunks over QUERY_CHUNK) and incremental pools."""
+    w = Weights()
+    rng = np.random.default_rng(5413)
+    for length in (2049, 1, 130, 300):
+        x, qr = _inputs(rng, length)
+        for kw in ({}, {"pool_law": "fixed_order", "select": "topk_v1"},
+                   {"pool_law": "fixed_order", "select": "topk_v1", "block": 64},
+                   {"pool_law": "fixed_order", "select": "argsort"}):
+            ours, theirs = KVCache(), KVCache()
+            prior_x, prior_qr = _inputs(np.random.default_rng(5414), 2100)
+            ix.pooled_selection(prior_x, prior_qr, ours, w, "blk.3", **kw)
+            ix.pooled_selection(prior_x, prior_qr, theirs, w, "blk.3", **kw)
+            a = ix.pooled_selection(x, qr, ours, w, "blk.3", score=law, **kw)
+            b = ix.pooled_selection(x, qr, theirs, w, "blk.3", **kw)
+            np.testing.assert_array_equal(np.array(a), np.array(b))
+    pools_a, pools_b = ix.Glm53PoolCache(), ix.Glm53PoolCache()
+    kw = {"pool_law": "fixed_order", "select": "topk_v1"}
+    ca, cb = KVCache(), KVCache()
+    for length in (2400, 1, 3, 1):
+        x, qr = _inputs(rng, length)
+        a = ix.pooled_selection(x, qr, ca, w, "blk.3", pools=pools_a, score=law, **kw)
+        b = ix.pooled_selection(x, qr, cb, w, "blk.3", pools=pools_b, **kw)
+        np.testing.assert_array_equal(np.array(a), np.array(b))
+
+
+def test_default_reference_law_unchanged_and_score_keyword_reaches_it():
+    rng = np.random.default_rng(5415)
+    w = Weights()
+    ours, fused, theirs = KVCache(), KVCache(), KVCache()
+    for length in (2049, 1, 5, 130):
+        x, qr = _inputs(rng, length)
+        a = ix.pooled_selection(x, qr, ours, w, "blk.3")
+        f = ix.pooled_selection(x, qr, fused, w, "blk.3", score="fused_v1")
+        b = _today(x, qr, theirs, w, "blk.3")
+        np.testing.assert_array_equal(np.array(a), np.array(b))
+        np.testing.assert_array_equal(np.array(f), np.array(b))
+    with pytest.raises(ValueError, match="unknown GLM-5.3 indexer score law"):
+        ix.pooled_selection(x, qr, KVCache(), w, "blk.3", score="nope")
+
+
+def test_score_kernel_spec_builds_and_cpu_refuses_metal():
+    spec = ix.score_kernel_spec()
+    assert spec["name"] == ix.SCORE_KERNEL and "#pragma clang fp contract(off)" in spec["source"]
+    # fp32(128**-0.5) as an exact bit pattern, not a decimal literal.
+    assert f"0x{int(np.float32(128**-0.5).view(np.uint32)):08X}u" in spec["source"]
+    assert "simd_sum(v)" in spec["source"] and "c + 0.0f" in spec["source"]
+    q, w, pooled = _score_operands(np.random.default_rng(5416), 2, 40)
+    mm = q @ pooled[:, None].swapaxes(-1, -2)
+    assert not ix.score_kernel_admits(mm, w) and not ix.score_kernel_ready()
+    with pytest.raises(ValueError, match="requires the Metal GPU"):
+        ix.score_rows(mm, w)
+    assert len(ix.score_gate_cases()) == 7
+    assert min(c[2].shape[1] for c in ix.score_gate_cases()) == ix.SCORE_KERNEL_MIN_POOLS
+
+
+def test_score_kernel_admits_refuses_pools_below_the_col_reduce_looped_range(monkeypatch):
+    """P == 1 (MLX row-reduces the 32 contiguous heads) and P < 32 (MLX's
+    col_reduce_small) sum heads in another order than the kernel's simd_sum."""
+    monkeypatch.setattr(ix, "_on_gpu", lambda: True)  # shape rule only; nothing launches
+    rng = np.random.default_rng(5417)
+    for pools, admitted in ((1, False), (2, False), (7, False), (31, False), (32, True), (4097, True)):
+        q, w, pooled = _score_operands(rng, 3, pools, ties=False)
+        mm = q @ pooled[:, None].swapaxes(-1, -2)
+        assert ix.score_kernel_admits(mm, w) is admitted, pools
+    q, w, pooled = _score_operands(rng, 3, 64, ties=False)
+    mm = q @ pooled[:, None].swapaxes(-1, -2)
+    assert not ix.score_kernel_admits(mm.astype(mx.float16), w)
+    assert not ix.score_kernel_admits(mm, w[:, :2])
+
+
+def test_blocked_last_block_of_one_pool_under_kernel_law_equals_reference():
+    # pools = block + 1: the last block holds a single pool (prompts of
+    # 16,388-16,391 tokens at SELECT_BLOCK 4096); on CPU kernel_v1 declines.
+    rng = np.random.default_rng(5418)
+    q, w, pooled = _score_operands(rng, 4, 129, ties=True)
+    positions = mx.array([600, 601, 602, 603], dtype=mx.int32)
+    ref = ix.blocked_select(q, w, pooled, positions, 64, block=128)
+    for law in ("fused_v1", "kernel_v1"):
+        got = ix.blocked_select(q, w, pooled, positions, 64, block=128, score=law)
+        np.testing.assert_array_equal(np.array(got[0]), np.array(ref[0]))
+        np.testing.assert_array_equal(np.array(got[1]), np.array(ref[1]))
+
+
 # ---- Metal (MLX2_RUN_GPU_TESTS=1 only) ---------------------------------------
 
 metal = pytest.mark.skipif(not (GPU and mx.metal.is_available()),
@@ -597,5 +788,34 @@ def test_gpu_select_kernel_bitwise_and_pools_extend_bitwise():
         for total in (2049, 2050, 2052, 4096, 4399):
             pooled = cache.extend(lambda a, b: rows[a:b], total, ape)
             assert ix.audit_pools(pooled, lambda a, b: rows[a:b], total, ape)
+    finally:
+        mx.set_default_device(previous)
+
+
+@metal
+def test_gpu_score_laws_bitwise_against_reference():
+    """GPU only: fused_v1 by construction, kernel_v1 through its gate, at prompt shapes."""
+    previous = mx.default_device()
+    mx.set_default_device(mx.gpu)
+    try:
+        assert ix.score_kernel_self_check() and ix.score_kernel_ready()
+        rng = np.random.default_rng(5420)
+        for length, pools in ((1, 2048), (128, 4096), (64, 4103), (128, 513), (128, 32), (9, 33),
+                              (128, 1), (9, 7), (9, 31)):
+            q, w, pooled = _score_operands(rng, length, pools, ties=pools > 8)
+            ref = ix.pool_scores(q, w, pooled)
+            before = ix._SCHEDULED.get("score_kernel", 0)
+            for law in ("fused_v1", "kernel_v1"):
+                got = ix.pool_scores(q, w, pooled, law=law)
+                assert np.array_equal(_bits(got), _bits(ref)), (law, length, pools)
+            launched = pools >= ix.SCORE_KERNEL_MIN_POOLS
+            assert ix._SCHEDULED["score_kernel"] == before + int(launched), pools
+        # Blocked prompt selection whose last block is one pool (4097 = 4096 + 1).
+        q, w, pooled = _score_operands(rng, 128, 4097, ties=True)
+        positions = mx.arange(16388 - 128, 16388, dtype=mx.int32)
+        ref = ix.blocked_select(q, w, pooled, positions, 512, block=4096)
+        got = ix.blocked_select(q, w, pooled, positions, 512, block=4096, score="kernel_v1")
+        np.testing.assert_array_equal(np.array(got[0]), np.array(ref[0]))
+        np.testing.assert_array_equal(np.array(got[1]), np.array(ref[1]))
     finally:
         mx.set_default_device(previous)

@@ -39,7 +39,8 @@ COUNTERS = ("mla_prompt_expanded_rows", "mla_prompt_expanded_calls",
             "sparse_attention_fused_v2", "sparse_attention_fused_v2_rows", "sparse_attention_fused_v2_dense_rows",
             "sparse_prefill_fused_v2_blocks", "sparse_prefill_gathered_blocks", "sparse_prefill_dense_pieces",
             "sparse_attention_fused_f16", "sparse_attention_fused_f16_rows", "sparse_prefill_fused_f16_blocks",
-            "sparse_attention_gathered", "sparse_attention_mask", "mla_fused", "mla_fused_declined")
+            "sparse_attention_gathered", "sparse_attention_mask", "mla_fused", "mla_fused_declined",
+            "indexer_score_fused", "indexer_score_kernel", "indexer_score_kernel_declined")
 
 # Six task templates; each buries facts in varied filler and asks a question
 # whose answer a functional oracle checks (dash-normalized, case-sensitive).
@@ -126,6 +127,13 @@ WEIGHT_COUNTERS = ("decoded_f32_grouped", "decoded_f32_dense", "decoded_f16_grou
 
 
 def set_law(adapter, value):
+    if LAW_KEY == "indexer_score":
+        from mlx2.runtime.models.glm53_gguf import SCORE_LAWS
+
+        if value not in SCORE_LAWS:
+            raise ValueError(f"unknown glm53_indexer_score value {value!r}")
+        adapter.model.indexer_score = value
+        return
     if LAW_KEY == "mla_prompt":
         from mlx2.runtime.models.glm53_gguf import MLA_PROMPT_POLICIES
 
@@ -187,6 +195,18 @@ def engaged(row, law, tokens):
     """Each arm's prompt law engaged on exactly the rows its positions select."""
     from mlx2.runtime.models import glm53_sparse_attention as sa
 
+    if LAW_KEY == "indexer_score":
+        # Selecting MLA calls only exist past TOPK tokens; the kernel arm must
+        # never decline (a failed first-use gate is a failed arm, not a pass).
+        c = row["counters"]
+        selects = tokens > sa.TOPK
+        if law == "reference":
+            return c["indexer_score_fused"] == c["indexer_score_kernel"] == c["indexer_score_kernel_declined"] == 0
+        if law == "fused_v1":
+            return (c["indexer_score_fused"] > 0) == selects and c["indexer_score_kernel"] == 0
+        return ((c["indexer_score_kernel"] > 0) == selects and c["indexer_score_kernel_declined"] == 0
+                and c["indexer_score_fused"] == 0)
+
     if LAW_KEY == "mla_prompt":
         # Every prompt row below the loaded gathered threshold, over the 11
         # MLA layers; none on the reference.
@@ -244,8 +264,9 @@ def main():
     parser.add_argument("--contexts", default="8192,16384,32768")
     parser.add_argument("--reference", default=None, help="reference prompt law (default: the loaded policy's)")
     parser.add_argument("--candidate", default="gathered_v2_from_5120")
-    parser.add_argument("--law-key", choices=("sparse_prefill", "prompt_decoded", "mla_prompt"), default="sparse_prefill",
-                        help="which policy the arms switch: glm53_sparse_prefill, glm53_prompt_decoded or glm53_mla_prompt values")
+    parser.add_argument("--law-key", choices=("sparse_prefill", "prompt_decoded", "mla_prompt", "indexer_score"),
+                        default="sparse_prefill",
+                        help="which policy the arms switch: glm53_sparse_prefill, glm53_prompt_decoded, glm53_mla_prompt or glm53_indexer_score values")
     parser.add_argument("--templates", default=",".join(t["name"] for t in TEMPLATES))
     parser.add_argument("--offset-base", type=int, default=0, help="filler offset seed (distinct per job)")
     parser.add_argument("--control", default=None,
@@ -273,7 +294,8 @@ def main():
     adapter, policy = load(args.policy)
     reference = args.reference or {"sparse_prefill": adapter.model.sparse_prefill,
                                    "prompt_decoded": adapter.weights.prompt_decoded_policy,
-                                   "mla_prompt": adapter.model.mla_prompt}[LAW_KEY]
+                                   "mla_prompt": adapter.model.mla_prompt,
+                                   "indexer_score": adapter.model.indexer_score}[LAW_KEY]
     arms = [("reference", reference), ("candidate", args.candidate)]
     if args.control and args.command == "breadth":
         arms.append(("control", args.control))
