@@ -358,7 +358,8 @@ def test_policy_parsing():
          "moe_fused": True, "moe_weighted_sum": True,
          "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": None,
          "prefill_mask_mb": None, "loop_passes": None, "fuse_controllers": False, "fuse_residual": False, "fuse_sconv": False,
-         "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,}, {})
+         "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,
+         "moe_act_quant": False}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -379,7 +380,7 @@ def test_fused_projection_toggle_round_trip():
                                    "moe_nax_gather": False, "sink_slot": False,
                                    "fuse_controllers": False, "fuse_residual": False, "fuse_sconv": False,
                                    "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,
-                                   "verify_splitk": False}
+                                   "verify_splitk": False, "moe_act_quant": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])

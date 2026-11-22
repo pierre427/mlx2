@@ -7,8 +7,10 @@ The checkpoint is served as published: BF16 dense paths, FP32 attention
 residual queries/routing bias, NVFP4 routed experts (layers 0-19, ModelOpt
 ``amax / outer_scale_denominator`` per-expert global scale) and MXFP8 routed
 experts (layers 20-23).  Activations stay floating point (W4A16 / W8A16); the
-vendor runtime's activation quantization is not reproduced, so numerical
-parity with the reference runtime is not claimed.
+vendor runtime's activation quantization is not reproduced by default, so
+numerical parity with the reference runtime is not claimed.  The opt-in
+``inkling2_moe_act_quant`` fake-quantizes the expert activations to the
+checkpoint's declared contract as an accuracy experiment (not faster).
 """
 
 from __future__ import annotations
@@ -28,6 +30,9 @@ from .ordinary_text import OrdinaryTextAdapter
 REPOSITORY = "thinkingmachines/Inkling-2-Mini"
 CACHE_LAYOUT = "inkling2-kv-four-shortconv-v1"
 NUMERICS = "inkling2-native-w4a16-v1"
+# inkling2_moe_act_quant on: expert activations fake-quantized (W4A4 / W8A8
+# numerics with BF16 matmuls); a distinct APCv2 numerics identity.
+NUMERICS_W4A4_FAKE = "inkling2-native-w4a4-fake-v1"
 # generation_config.json of thinkingmachines/Inkling-2-Mini: do_sample, T 1.0.
 SAMPLING = VendorSampling.single(
     SamplingDefaults(temperature=1.0, top_p=1.0, source=GENERATION_CONFIG,
@@ -259,6 +264,18 @@ KERNEL_OPTIONS = {
     "inkling2_fuse_sconv_kernel": "fuse_sconv_kernel",
     # and one-launch one-row attention-residual mixes and loop messages.
     "inkling2_fuse_residual_kernel": "fuse_residual_kernel",
+    # W4A4 accuracy experiment (implemented 2026-11-21, default off, GPU A/B
+    # pending; scripts/research/inkling2_w4a4_ab.py). Fake-quantizes the
+    # routed experts' inputs as hf_quant_config.json's
+    # required_activation_quantization declares: NVFP4 four-over-six (MAE)
+    # per-token on layers 0-19, MXFP8 block-32 on layers 20-23, both the
+    # gate/up input and the SwiGLU output (runtime/models/inkling2/
+    # act_quant.py). The router and every non-expert tensor stay
+    # unquantized. NOT a speed path: Metal has no FP4 x FP4 units, so the
+    # matmuls are unchanged and the quantize-dequantize is extra work. It
+    # changes numerics: its source joins the APCv2 numerics contract and the
+    # operation becomes NUMERICS_W4A4_FAKE.
+    "inkling2_moe_act_quant": "moe_act_quant",
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.
@@ -595,8 +612,10 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             names += ("moe_nax_gather.py",)
         if policy.get("verify_splitk"):
             names += ("inkling2/splitk.py",)
+        if policy.get("moe_act_quant"):
+            names += ("inkling2/act_quant.py",)
         return {
-            "operation": NUMERICS,
+            "operation": NUMERICS_W4A4_FAKE if policy.get("moe_act_quant") else NUMERICS,
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
             "source_sha256": {
                 name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in names
@@ -745,7 +764,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "adapter_default_route": "ordinary",
             "ordinary_reference_preserved": True,
             "cache_layout": self.layout,
-            "numerics": NUMERICS,
+            "numerics": (NUMERICS_W4A4_FAKE if getattr(self, "kernel_policy", {}).get("moe_act_quant")
+                         else NUMERICS),
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
             "moe_nax_gather_auto": bool(getattr(self, "moe_nax_gather_auto", False)),
             "kernel_counters": (self.model.kernel_receipt() if getattr(self, "model", None) else None),

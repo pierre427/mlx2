@@ -36,6 +36,7 @@ from ..inkling.language import (
     banded_additive_mask,
 )
 from ..switch_layers import SwitchGLU
+from . import act_quant as _act_quant
 from . import fuse as _fuse
 from . import splitk
 from .config import TextConfig
@@ -795,7 +796,13 @@ class SoftcappedSwiGLU(nn.Module):
         self.up_cap = config.mlp_up_softcap
 
     def __call__(self, up, gate):
-        return _softcapped_swiglu(up, gate, self.gate_cap, self.up_cap)
+        out = _softcapped_swiglu(up, gate, self.gate_cap, self.up_cap)
+        fmt = self.__dict__.get("_act_quant")
+        if fmt:
+            # inkling2_moe_act_quant: the down projection's input (see act_quant).
+            _act_quant.count(self.__dict__["_act_quant_counts"], f"reference:{fmt}:w2")
+            out = _act_quant.apply(fmt, out)
+        return out
 
 
 class SparseMoE(nn.Module):
@@ -855,7 +862,35 @@ class SparseMoE(nn.Module):
         indices, weights = _route(
             x, _fp32(self, "gate_weight"), self.e_score_correction_bias, self.top_k, self.route_scale
         )
+        fmt = self.__dict__.get("_act_quant")
+        if fmt:
+            # inkling2_moe_act_quant: the router keeps the unquantized input;
+            # the expert gate/up gather reads the quantized one.
+            _act_quant.count(self.__dict__["act_quant_counts"], f"reference:{fmt}:w13")
+            x = _act_quant.apply(fmt, x)
         return _combine_routes(self.switch_mlp(x, indices), weights)
+
+    def act_quant_format(self):
+        """The experts' declared activation format; raises if they have none."""
+        fmt = _act_quant.expert_format(self.switch_mlp)
+        if fmt is None:
+            kinds = sorted({type(self.switch_mlp[n]).__name__
+                            for n in ("gate_proj", "up_proj", "down_proj")})
+            raise ValueError(
+                f"Inkling 2 inkling2_moe_act_quant needs NVFP4 or MXFP8 experts, not {kinds}")
+        return fmt
+
+    def set_act_quant(self, on):
+        """``inkling2_moe_act_quant``: fake-quantize the expert inputs to the
+        format the expert weights declare (``act_quant.expert_format``).
+        Returns the format, or None when off; raises for experts with no
+        declared activation format."""
+        fmt = self.act_quant_format() if on else None
+        counts = self.__dict__.setdefault("act_quant_counts", {})
+        object.__setattr__(self, "_act_quant", fmt)
+        object.__setattr__(self.switch_mlp.activation, "_act_quant", fmt)
+        object.__setattr__(self.switch_mlp.activation, "_act_quant_counts", counts)
+        return fmt
 
 
 class AttentionResidual(nn.Module):
@@ -1255,17 +1290,24 @@ class Model(nn.Module):
                           moe_fused=False, moe_weighted_sum=False, moe_nax_gather=False,
                           sink_slot=False, fuse_controllers=False, fuse_residual=False,
                           fuse_sconv=False, fuse_attention=False, fuse_sconv_kernel=False,
-                          fuse_residual_kernel=False, verify_splitk=False):
+                          fuse_residual_kernel=False, verify_splitk=False, moe_act_quant=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
         needs ``moe_fused``.  ``moe_nax_gather`` only opens the prefill
         phase scope; the NAX route mode is a process global the adapter
-        claims (``moe_nax_gather.set_mode``)."""
+        claims (``moe_nax_gather.set_mode``).  ``moe_act_quant`` fake-quantizes
+        the expert inputs (``act_quant``; an accuracy experiment, slower) and
+        refuses experts with no declared NVFP4/MXFP8 format."""
         if moe_weighted_sum and not moe_fused:
             raise ValueError("Inkling 2 moe_weighted_sum requires moe_fused")
         if fuse_sconv_kernel and not fuse_sconv:
             raise ValueError("Inkling 2 fuse_sconv_kernel requires fuse_sconv")
+        if moe_act_quant:
+            # Every layer's activation format before anything changes, so a
+            # refusal leaves the model as it was.
+            for layer in self.model.layers:
+                layer.mlp.act_quant_format()
         flags = {"fuse_controllers": fuse_controllers, "fuse_residual": fuse_residual,
                  "fuse_sconv": fuse_sconv, "fuse_attention": fuse_attention,
                  "fuse_sconv_kernel": fuse_sconv_kernel,
@@ -1285,6 +1327,8 @@ class Model(nn.Module):
         self.model.set_num_passes(
             self.config.loop_config.num_passes if loop_passes is None else loop_passes)
         object.__setattr__(self.model, "_moe_nax_scope", bool(moe_nax_gather))
+        formats = [layer.mlp.set_act_quant(moe_act_quant) for layer in self.model.layers]
+        object.__setattr__(self, "_act_quant_formats", formats)
         built = False
         for layer in self.model.layers:
             if moe_fused or layer.mlp.__dict__.get("_fast_fused"):
@@ -1314,7 +1358,7 @@ class Model(nn.Module):
              "moe_fused": bool(moe_fused), "moe_weighted_sum": bool(moe_weighted_sum),
              "moe_nax_gather": bool(moe_nax_gather), "sink_slot": bool(sink_slot),
              **{name: bool(value) for name, value in flags.items()},
-             "verify_splitk": bool(verify_splitk)},
+             "verify_splitk": bool(verify_splitk), "moe_act_quant": bool(moe_act_quant)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1351,6 +1395,15 @@ class Model(nn.Module):
             for key, value in module.__dict__.get("fuse_counts", {}).items():
                 fuse[key] = fuse.get(key, 0) + value
         out["fuse_counts"] = dict(sorted(fuse.items()))
+        act = {}
+        for layer in self.model.layers:
+            for key, value in layer.mlp.__dict__.get("act_quant_counts", {}).items():
+                act[key] = act.get(key, 0) + value
+        formats = self.__dict__.get("_act_quant_formats") or []
+        out["moe_act_quant"] = {
+            "calls": dict(sorted(act.items())),
+            "layers": {fmt: sum(1 for f in formats if f == fmt) for fmt in _act_quant.FORMATS},
+        }
         if getattr(self, "kernel_policy", {}).get("moe_nax_gather"):
             from .. import moe_nax_gather
 

@@ -44,6 +44,7 @@ import mlx.core as mx
 from mlx import nn
 
 from .. import invariant_prefill as _invariant
+from . import act_quant as _act_quant
 from .. import switch_grouped_experts as _grouped
 from ..switch_layers import (
     QuantizedSwitchLinear,
@@ -263,6 +264,12 @@ def fused_call(moe, experts, x, weighted_sum=False):
     indices, weights = route_compiled(
         x, _fp32(moe, "gate_weight"), moe.e_score_correction_bias, moe.top_k, moe.route_scale
     )
+    act_fmt = moe.__dict__.get("_act_quant")
+    if act_fmt:
+        # inkling2_moe_act_quant, as in the reference SparseMoE: the router
+        # read the unquantized x above; the gate/up gather reads this one.
+        _act_quant.count(moe.__dict__["act_quant_counts"], f"fused:{act_fmt}:w13")
+        x = _act_quant.apply(act_fmt, x)
     xe = mx.expand_dims(x, (-2, -3))
     token_length = int(indices.shape[-2]) if indices.ndim >= 2 else 1
     do_sort, counter = _switch_sort_decision(
@@ -280,6 +287,11 @@ def fused_call(moe, experts, x, weighted_sum=False):
         hidden = _gate_up_act(gate_up, act.gate_cap, act.up_cap)
     else:
         hidden = _scaled_gate_up_act(gate_up, scales[..., 0:1, None], act.gate_cap, act.up_cap)
+    if act_fmt:
+        # Per row of the down GEMM's input; row order (sorted or not) does
+        # not matter, so this equals the reference activation's quantization.
+        _act_quant.count(moe.__dict__["act_quant_counts"], f"fused:{act_fmt}:w2")
+        hidden = _act_quant.apply(act_fmt, hidden)
     y = experts.down(hidden, idx, sorted_indices=do_sort)
     note("fused")
     # Multi-token sorted calls only (prefill chunks, verify windows): a
