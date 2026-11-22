@@ -18,6 +18,19 @@ from functools import lru_cache
 import numpy as np
 
 from ..io_ownership import CloseAction, ReadPool, ReadTimeout, storage_owner
+from ..read_advise import ReadAdvisor
+
+# Opt-in read-ahead hint (omlx #5274 / #5464 analogue; runtime/read_advise.py):
+# each prefetch worker hints every span of its chunk (all planes of every row)
+# before its first pread, so the device sees the chunk's misses at once.  The
+# prefetch already covers a whole verify round per table, so the hint covers
+# the round.  Default OFF, unqualified: the tables are opened F_NOCACHE (they
+# must not displace resident weights) and whether a hinted page survives to
+# that read is unmeasured; the hint also measured slower beside a
+# multi-worker pool on PLE reads (recon 2026-11-13).  Decode/verify-sized
+# lookups only (at most ADVISE_MAX_ROWS missing rows).
+READ_ADVISE_ENV = "MLX_V41_ENGRAM_READ_ADVISE"
+ADVISE_MAX_ROWS = 512
 
 
 def file_stamp(st):
@@ -195,7 +208,10 @@ def decode_affine4_rows(codes, scales, biases, compact=False):
     return (values.view(np.uint32) >> 16).astype(np.uint16) if compact else values
 
 
-def _read_affine_chunk(fd, bases, rows, compact=False):
+def _read_affine_chunk(fd, bases, rows, compact=False, advisor=None):
+    if advisor is not None:
+        advisor.advise(fd, [(base + int(row)*size, size) for base, size in zip(bases, AFFINE4_ROW_PLANES)
+                            for row in rows], len(rows))
     planes = []
     for base, size in zip(bases, AFFINE4_ROW_PLANES):
         data = bytearray()
@@ -214,13 +230,18 @@ def _read_affine_chunk(fd, bases, rows, compact=False):
                                np.frombuffer(planes[2], "<u2").reshape(count, 8), compact)
 
 
-def _read_chunk(fd, base, rows, compact=False, scale_offset=None):
+def _row_spans(base, row, scale_offset):
+    return ((base + int(row)*264, 264),) if scale_offset is None else (
+        (base + int(row)*256, 256), (scale_offset + int(row)*8, 8))
+
+
+def _read_chunk(fd, base, rows, compact=False, scale_offset=None, advisor=None):
+    if advisor is not None:
+        advisor.advise(fd, [span for row in rows for span in _row_spans(base, row, scale_offset)], len(rows))
     result = []
     for row in rows:
         data = bytearray()
-        spans = ((base + int(row)*264, 264),) if scale_offset is None else (
-            (base + int(row)*256, 256), (scale_offset + int(row)*8, 8))
-        for offset, size in spans:
+        for offset, size in _row_spans(base, row, scale_offset):
             consumed = 0
             while consumed < size:
                 block = os.pread(fd, size-consumed, offset+consumed)
@@ -288,6 +309,7 @@ class EngramRows:
         if self.compact:
             engram_bf16_lut()
         self.workers, self.timeout = workers, timeout
+        self.advisor = ReadAdvisor(READ_ADVISE_ENV)
         self._lock = threading.RLock()
         self._cache, self._pending, self._carry = OrderedDict(), None, None
         self._closed = False
@@ -395,6 +417,9 @@ class EngramRows:
                 [row for row in unique if int(row) not in hits], np.int64
             )
             futures = []
+            # One chunk's spans: >1 means a hint can overlap its preads.
+            per_row = 3 if self.affine else 1 if self.scale_offset is None else 2
+            advise = self.advisor.enabled and 0 < len(missing) <= ADVISE_MAX_ROWS
             try:
                 for group in np.array_split(
                     missing, min(self.workers, max(1, len(missing)))
@@ -406,8 +431,10 @@ class EngramRows:
                                 self.pool.submit(
                                     _read_affine_chunk, self.fd,
                                     (self.offset, self.scale_offset, self.bias_offset), group, self.compact,
+                                    self.advisor if advise and len(group)*per_row > 1 else None,
                                 ) if self.affine else self.pool.submit(
-                                    _read_chunk, self.fd, self.offset, group, self.compact, self.scale_offset
+                                    _read_chunk, self.fd, self.offset, group, self.compact, self.scale_offset,
+                                    self.advisor if advise and len(group)*per_row > 1 else None,
                                 ),
                             )
                         )
@@ -527,6 +554,7 @@ class EngramRows:
                 "resume_reservation_bytes": self.resume_reservation_bytes(),
                 "read_failure": self.pool.failure,
                 "read_inflight": self.pool.counters()["weight_read_inflight"],
+                "read_advise": self.advisor.status(),
             }
 
     def resume_reservation_bytes(self):

@@ -4,7 +4,6 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import struct
-import sys
 import json
 import os
 import threading
@@ -17,6 +16,7 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+from .. import read_advise as _ra
 from .. import round_levers as _lv
 from ..io_ownership import (
     CloseAction,
@@ -44,36 +44,11 @@ READ_TIMEOUT_SECONDS = 60.0
 # omlx #5225 analogue): F_RDADVISE on Darwin, POSIX_FADV_WILLNEED elsewhere.
 # Unqualified, default off; see docs/experiments/recon-probes-20261113/.
 READ_ADVISE_ENV = "MLX_QWEN4_PLE_NVME_READ_ADVISE"
-_F_RDADVISE = 44  # <sys/fcntl.h>; struct radvisory { off_t ra_offset; int ra_count; }
-
-
-def _read_advise_backend() -> str | None:
-    if sys.platform == "darwin":
-        return "f_rdadvise"
-    if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_WILLNEED"):
-        return "posix_fadvise"
-    return None
-
-
-def _advise_rows(fd, backend: str, offsets, row_bytes: int) -> int:
-    """Hint every row before any read; a refused hint is not an error.
-
-    One syscall per row. Darwin's F_RDADVISEV (up to 64 ranges per call)
-    would batch these; not used yet.
-    """
-    import fcntl
-
-    advised = 0
-    for offset in offsets:
-        try:
-            if backend == "f_rdadvise":
-                fcntl.fcntl(fd, _F_RDADVISE, struct.pack("qi4x", offset, row_bytes))
-            else:
-                os.posix_fadvise(fd, offset, row_bytes, os.POSIX_FADV_WILLNEED)
-            advised += 1
-        except OSError:
-            pass
-    return advised
+# Shared helper (runtime/read_advise.py); the aliases keep this module's
+# names, which its tests patch.
+_F_RDADVISE = _ra.F_RDADVISE
+_read_advise_backend = _ra.read_advise_backend
+_advise_rows = _ra.advise_rows
 _FORK_RESOURCE_LOCK = threading.RLock()
 
 

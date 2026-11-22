@@ -1639,6 +1639,16 @@ def _add_engram(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> Non
                     builder.counter("mlx2_engram_reads_total",
                                     "Engram storage read batches by phase (prefill- or decode-sized pool).",
                                     count(key), {**labels, "phase": phase})
+            advise = diag.get("read_advise")
+            if isinstance(advise, Mapping) and advise.get("configured") is True:
+                # Opt-in read-ahead hint (runtime/read_advise.py); absent when off.
+                for key in ("calls", "rows_advised", "spans_accepted", "failures"):
+                    value = advise.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        builder.counter("mlx2_engram_read_advise_total",
+                                        "Engram read-ahead hints by kind: calls, rows advised, "
+                                        "spans accepted, spans refused.",
+                                        value, {**labels, "kind": key})
             if count("table_bytes") is not None:
                 builder.gauge("mlx2_engram_table_bytes",
                               "Engram table size on storage.", count("table_bytes"), labels)

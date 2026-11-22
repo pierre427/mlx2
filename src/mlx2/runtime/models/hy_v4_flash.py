@@ -1741,8 +1741,16 @@ class Model(nn.Module):
             if special is not None:
                 mask &= tokens != special
         out = {}
-        for index, hasher in self.engram_hashers.items():
-            rows = hasher.table_rows(ngrams)  # [B, L, heads]
+        table_rows = {index: hasher.table_rows(ngrams)  # [B, L, heads]
+                      for index, hasher in self.engram_hashers.items()}
+        # Opt-in read-ahead (hy_v4_flash_engram.READ_ADVISE_ENV, default
+        # off): hint every later layer's rows of this round before the first
+        # layer is read.  Rows are byte-identical either way.
+        for index in list(table_rows)[1:]:
+            reader = self.engram_rows[index]
+            if getattr(reader, "read_advise", False):
+                reader.advise(table_rows[index].reshape(-1))
+        for index, rows in table_rows.items():
             B, L, heads = rows.shape
             data = self.engram_rows[index].read(rows.reshape(-1)).reshape(B, L, heads, -1)
             out[index] = (data.astype(mx.float32), mx.array(mask))

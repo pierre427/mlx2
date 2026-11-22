@@ -65,12 +65,22 @@ import time
 from concurrent.futures import TimeoutError as FutureTimeout
 
 from ..io_ownership import CloseAction, ReadPool, ReadTimeout, call_io, storage_owner
+from ..read_advise import ReadAdvisor
 
 # PLE offload sizing (qwen4_ple_nvme): decode/prefill worker pools, deadline.
 DECODE_WORKERS = 16
 PREFILL_WORKERS = 64
 PREFILL_ROW_THRESHOLD = 512
 READ_TIMEOUT_SECONDS = 60.0
+# Opt-in read-ahead hint for a verify round's Engram rows (omlx #5274 /
+# #5464 analogue; runtime/read_advise.py).  ``Model.engram_inputs`` hashes
+# every Engram layer of the round first, then hints the rows of every layer
+# after the first one it reads, so those layers' SSD reads are already queued
+# while the first layer is read.  Default OFF, unqualified: on PLE reads the
+# same hint measured slower beside a multi-worker pool (recon 2026-11-13) and
+# no Hy4 A/B exists yet.  Decode/verify-sized lookups only (fewer than
+# PREFILL_ROW_THRESHOLD missing rows); prefill keeps its 64-worker pool.
+READ_ADVISE_ENV = "MLX_HY4_ENGRAM_READ_ADVISE"
 
 _DTYPES = {"BF16": (2, "bf16"), "F32": (4, "<f4"), "F16": (2, "<f2"), "F8_E4M3": (1, "e4m3"),
            "U8": (1, "u1")}
@@ -417,6 +427,7 @@ class EngramTableRows:
         self.cache_rows = int(cache_rows)
         self.stats = {"lookups": 0, "requested_rows": 0, "unique_rows": 0,
                       "cache_hits": 0, "bytes_read": 0, "prefill_reads": 0, "decode_reads": 0}
+        self.advisor = ReadAdvisor(READ_ADVISE_ENV)
         self._pool = ReadPool(max(self.decode_workers, self.prefill_workers), "hy4-engram",
                               timeout=self.timeout, owner=self.owner)
         # The descriptor is owned by a holder from the moment it exists, so a
@@ -504,6 +515,38 @@ class EngramTableRows:
             self.stats["prefill_reads" if prefill else "decode_reads"] += 1
         return out
 
+    @property
+    def read_advise(self) -> bool:
+        return self.advisor.enabled
+
+    def advise(self, rows: np.ndarray) -> int:
+        """Queue a read-ahead hint for the uncached ``rows`` of a later lookup.
+
+        Returns the number of rows hinted (0 when off, cached, empty or
+        prefill-sized).  The hint runs on this reader's pool (no filesystem
+        call on the model thread) and is not awaited; a refused or
+        unsubmittable hint changes nothing but the ``failures`` counter.
+        """
+        if not self.advisor.enabled:
+            return 0
+        unique = np.unique(np.asarray(rows, np.int64).reshape(-1))
+        if unique.size and (unique[0] < 0 or unique[-1] >= self.rows):
+            return 0  # the read itself reports the bad row
+        with self._lock:
+            if self._closed:
+                return 0
+            pool, fd = self._pool, self._fd
+            missing = [r for r in unique.tolist() if r not in self._cache]
+        if not missing or len(missing) >= PREFILL_ROW_THRESHOLD:
+            return 0
+        spans = [(self.start + r * self.row_bytes, self.row_bytes) for r in missing]
+        try:
+            pool.submit(self.advisor.advise, fd, spans, len(missing))
+        except Exception:
+            self.advisor.record_failure(len(spans))
+            return 0
+        return len(missing)
+
     def read_host(self, rows: np.ndarray) -> np.ndarray:
         rows = np.asarray(rows, np.int64).reshape(-1)
         if rows.size and (rows.min() < 0 or rows.max() >= self.rows):
@@ -548,7 +591,7 @@ class EngramTableRows:
                 "cache_rows": self.cache_rows, "offload": "ple_file_backed",
                 "decode_workers": self.decode_workers, "prefill_workers": self.prefill_workers,
                 "pool": self._pool.counters() if self._pool is not None else None,
-                "closed": self._closed, **self.stats}
+                "closed": self._closed, "read_advise": self.advisor.status(), **self.stats}
 
     def close(self):
         lock = getattr(self, "_lock", None)
