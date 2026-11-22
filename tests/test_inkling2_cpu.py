@@ -354,7 +354,8 @@ def test_policy_parsing():
 
     assert validate_policy(None) == (
         {"fused_projections": False, "head_kernel": False, "sink_sdpa": False,
-         "sink_slot": False, "flash_prefill": False, "moe_fused": True, "moe_weighted_sum": True,
+         "sink_slot": False, "flash_prefill": False, "verify_splitk": False,
+         "moe_fused": True, "moe_weighted_sum": True,
          "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": None,
          "prefill_mask_mb": None, "loop_passes": None, "fuse_controllers": False, "fuse_residual": False, "fuse_sconv": False,
          "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,}, {})
@@ -377,7 +378,8 @@ def test_fused_projection_toggle_round_trip():
                                    "moe_fused": False, "moe_weighted_sum": False,
                                    "moe_nax_gather": False, "sink_slot": False,
                                    "fuse_controllers": False, "fuse_residual": False, "fuse_sconv": False,
-                                   "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,}
+                                   "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,
+                                   "verify_splitk": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])
@@ -710,4 +712,131 @@ def test_sink_slot_after_trim_is_bitwise_reference():
     calls = model.kernel_receipt()["sink_slot_calls"]
     model.configure_kernels()
     assert calls > 0
+    assert mx.array_equal(got, base)
+
+
+# ----- inkling2_verify_splitk (GQA split-K short-block attention) -----
+
+
+def test_verify_splitk_policy_default_off_and_boolean():
+    from mlx2.adapters.inkling2 import KERNEL_OPTIONS, validate_policy
+
+    assert KERNEL_OPTIONS["inkling2_verify_splitk"] == "verify_splitk"
+    assert validate_policy(None)[0]["verify_splitk"] is False
+    assert validate_policy({"inkling2_verify_splitk": True})[0]["verify_splitk"] is True
+    for bad in (1, None, "true"):
+        with pytest.raises(TypeError):
+            validate_policy({"inkling2_verify_splitk": bad})
+    model = _tiny_model()
+    assert model.model.layers[0].self_attn.__dict__.get("_verify_splitk") is None
+    model.configure_kernels()
+    assert model.kernel_policy["verify_splitk"] is False
+    assert model.kernel_receipt()["verify_splitk_calls"] == 0
+
+
+def test_verify_splitk_declines_on_cpu_and_is_bitwise_reference():
+    """On the CPU every short block declines (counted as ``cpu``); prefill
+    chunks of 32+ rows decline as ``rows``; output is the reference, bitwise."""
+    model = _tiny_model()
+    tokens = mx.random.randint(0, 500, (1, 50))
+    plan = [(0, 33), (33, 41)] + [(i, i + 1) for i in range(41, 50)]
+    base = _run(model, tokens, plan)
+    model.configure_kernels(verify_splitk=True)
+    got = _run(model, tokens, plan)
+    receipt = model.kernel_receipt()
+    model.configure_kernels()
+    assert mx.array_equal(got, base)
+    assert receipt["verify_splitk_calls"] == 0
+    assert receipt["verify_splitk_declines"] == {"declined:rows": 48, "declined:cpu": 48 * 10}
+
+
+def test_verify_splitk_decline_reasons():
+    from mlx2.runtime.models.inkling2 import splitk
+
+    def arrays(length, dtype=mx.bfloat16, kdtype=None):
+        q = mx.zeros((1, 24, length, 128), dtype)
+        k = mx.zeros((1, 8, 64, 128), kdtype or dtype)
+        return q, k, k
+
+    geo = dict(n_heads=24, n_kv=8, head_dim=128)
+    assert splitk.decline_reason(*arrays(8), **geo, device=mx.cpu) == "cpu"
+    assert splitk.decline_reason(*arrays(8), **geo, device=mx.gpu) is None
+    assert splitk.decline_reason(*arrays(1), **geo, device=mx.gpu) is None
+    assert splitk.decline_reason(*arrays(31, mx.float32), **geo, device=mx.gpu) is None
+    assert splitk.decline_reason(*arrays(32), **geo, device=mx.gpu) == "rows"
+    assert splitk.decline_reason(*arrays(8, mx.float16), **geo, device=mx.gpu) == "dtype"
+    assert splitk.decline_reason(*arrays(8, kdtype=mx.float32), **geo, device=mx.gpu) == "dtype"
+    q, k, _ = arrays(8)
+    assert splitk.decline_reason(q, (k, k), k, **geo, device=mx.gpu) == "cache_format"
+    for bad in (dict(head_dim=48), dict(head_dim=256), dict(n_heads=20)):
+        assert splitk.decline_reason(*arrays(8), **{**geo, **bad}, device=mx.gpu) == "geometry"
+    # A cache type the kernel was not checked against declines before the kernel.
+    from mlx2.runtime.models.cache import QuantizedKVCache
+
+    attn = _tiny_model().model.layers[5].self_attn
+    assert attn._splitk_decline(QuantizedKVCache(), q, k, k) == "cache_type"
+
+
+def _engage_splitk_reference(monkeypatch):
+    """Make the split-K route engage on the CPU with the composed law in place
+    of the Metal kernel: checks the wiring (offset, padding, window, tau-scaled
+    q and bias rows, sinks) that the kernel receives."""
+    from mlx2.runtime.models.inkling2 import splitk
+
+    seen = []
+
+    def fake(q, k, v, rel, sinks, **kw):
+        seen.append((q.shape[2], kw["window"], kw["left_padding"] is not None))
+        return splitk.reference_attention(q, k, v, rel, sinks, **kw)
+
+    monkeypatch.setattr(splitk, "decline_reason", lambda *a, **kw: None)
+    monkeypatch.setattr(splitk, "gqa_splitk_attention", fake)
+    return seen
+
+
+@pytest.mark.parametrize("rows", [1, 2])
+def test_verify_splitk_wiring_matches_composed_path(monkeypatch, rows):
+    """Engaged for every block (prefill 9, verify 8, decode 1) with a wrapped
+    ring (window 8) and log scaling: the arguments passed reproduce the
+    composed path bitwise."""
+    model = _tiny_model()
+    tokens = mx.random.randint(0, 500, (rows, 30))
+    plan = [(0, 9), (9, 17)] + [(i, i + 1) for i in range(17, 30)]
+    base = _run(model, tokens, plan)
+    seen = _engage_splitk_reference(monkeypatch)
+    model.configure_kernels(verify_splitk=True)
+    got = _run(model, tokens, plan)
+    receipt = model.kernel_receipt()
+    model.configure_kernels()
+    assert receipt["verify_splitk_calls"] == 48 * len(plan) and receipt["verify_splitk_declines"] == {}
+    assert {w for _, w, _ in seen} == {0, 8}
+    assert mx.array_equal(got, base)
+
+
+@pytest.mark.parametrize("sliding", ["ring", "unbounded"])
+def test_verify_splitk_wiring_with_left_padding(monkeypatch, sliding):
+    """Batched caches with left padding (global BatchKVCache; sliding
+    BatchRotatingKVCache, or an unbounded BatchKVCache whose keys the model
+    crops to the window, shifting the padding): padding reaches the kernel."""
+    from mlx2.runtime.models.cache import BatchKVCache, BatchRotatingKVCache, KVCache
+
+    model = _tiny_model()
+    tokens = mx.random.randint(0, 500, (2, 24))
+    plan = [(0, 12), (12, 20)] + [(i, i + 1) for i in range(20, 24)]
+
+    def run():
+        cache = model.make_cache()
+        for i in range(0, len(cache), 2):
+            cache[i] = (BatchKVCache([0, 3])
+                        if type(cache[i]) is KVCache or sliding == "unbounded"
+                        else BatchRotatingKVCache(8, [0, 3]))
+        return mx.concatenate([model(tokens[:, a:b], cache=cache) for a, b in plan], axis=1)
+
+    base = run()
+    seen = _engage_splitk_reference(monkeypatch)
+    model.configure_kernels(verify_splitk=True)
+    got = run()
+    calls = model.kernel_receipt()["verify_splitk_calls"]
+    model.configure_kernels()
+    assert calls == 48 * len(plan) and all(padded for _, _, padded in seen)
     assert mx.array_equal(got, base)

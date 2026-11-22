@@ -196,6 +196,21 @@ KERNEL_OPTIONS = {
     # off; a faster version needs BF16 MMA with FP32 accumulation, K/V tiles
     # shared across the GQA group, and a profile first.
     "inkling2_flash_prefill": "flash_prefill",
+    # Short query blocks (1 <= L < 32: DSpark verify rows L = 8 and one-token
+    # decode) through a GQA-packed split-K flash-decoding kernel ported from
+    # jundot/omlx PR 5511 (runtime/models/inkling2/splitk.py, Apache-2.0):
+    # all G*L rows of a KV head share one K/V read, keys split across
+    # threadgroups and merged, bias/window/padding/sink in-kernel, no mask
+    # and no sink column. Replaces the dense-mask chunks (verify) and SDPA
+    # (decode; it takes precedence over inkling2_sink_sdpa). Any block of
+    # 1..31 rows engages, so short prefill chunks (tails, APCv2 warm
+    # suffixes, small DSpark prefill steps) do too: cold and warm runs of one
+    # prompt can then differ numerically. GPU, BF16 (FP32 for test models),
+    # KVCache/ring caches; declines are counted by reason. Near-exact (FP16
+    # tile staging, different reduction order). Its source is in the APCv2
+    # numerics contract when on.
+    # Implemented 2026-11-21, GPU tests and A/B pending.
+    "inkling2_verify_splitk": "verify_splitk",
     # Sparse MoE in fewer launches, bit-identical (implemented 2026-11-21,
     # runtime/models/inkling2/moe_fast.py). DEFAULT ON (Pierre 2026-11-21)
     # with the next two, after the GPU check on Inkling-2-Mini@440956c8 at
@@ -578,6 +593,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             names += ("qwen4_moe_weighted_sum.py",)
         if policy.get("moe_nax_gather"):
             names += ("moe_nax_gather.py",)
+        if policy.get("verify_splitk"):
+            names += ("inkling2/splitk.py",)
         return {
             "operation": NUMERICS,
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),

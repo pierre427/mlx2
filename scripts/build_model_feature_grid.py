@@ -80,6 +80,7 @@ FEATURES = (
     # Inkling 2 Mini (2026-11-21).
     "inkling2_fused_projections", "inkling2_head_kernel", "inkling2_sink_sdpa", "inkling2_sink_slot",
     "inkling2_loop_passes", "inkling2_row_invariant_controllers", "inkling2_flash_prefill",
+    "inkling2_verify_splitk",
     "inkling2_dspark_prefill_reclaim", "inkling2_prefill_mask_mb", "inkling2_hard_no_thinking",
     "inkling2_command_buffers_ops100_v1",
     "inkling2_moe_fused", "inkling2_moe_weighted_sum", "inkling2_moe_nax_gather",

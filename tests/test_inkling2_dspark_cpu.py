@@ -530,3 +530,75 @@ def test_engine_greedy_equals_ordinary_with_fuse_options(pair):
     finally:
         target.configure_kernels()
     assert got == expect
+
+
+def _dspark_greedy(target, draft, prompt):
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    batch = ExternalDraftBatchGenerator(
+        target, draft_model=Inkling2DSparkExternal(draft, num_draft=3),
+        binding="test", num_draft=3, prefill_step_size=16,
+    )
+    uid = batch.insert([prompt], max_tokens=[12], sampling_configs=[{"sampling_temp": 0}])[0]
+    got = []
+    for _ in range(300):
+        _, responses = batch.next()
+        got += [r.token for r in responses if r.uid == uid]
+        if not batch.lanes:
+            break
+    return got
+
+
+def _ordinary_greedy(target, prompt):
+    cache = target.make_cache()
+    tokens, expect = list(prompt), []
+    for step in range(12):
+        logits = target(mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache)
+        tokens.append(int(mx.argmax(logits[0, -1]).item()))
+        expect.append(tokens[-1])
+    return expect
+
+
+def test_engine_greedy_equals_ordinary_with_verify_splitk(pair):
+    """``inkling2_verify_splitk`` on the CPU: every verify and decode block
+    declines (counted), and DSpark greedy equals ordinary decode."""
+    target, draft, _ = pair
+    prompt = [int(t) for t in mx.random.randint(1, 400, (40,)).tolist()]
+    expect = _ordinary_greedy(target, prompt)
+    target.configure_kernels(verify_splitk=True)
+    try:
+        got = _dspark_greedy(target, draft, prompt)
+        receipt = target.kernel_receipt()
+        assert receipt["verify_splitk_calls"] == 0
+        assert receipt["verify_splitk_declines"].get("declined:cpu", 0) > 0
+    finally:
+        target.configure_kernels()
+    assert got == expect
+
+
+def test_engine_greedy_equals_ordinary_with_verify_splitk_engaged(pair, monkeypatch):
+    """The same with the route engaged on the CPU (the composed law stands in
+    for the Metal kernel): verify rows (L = 4) and ring rollback reach it with
+    the arguments the composed path uses, so greedy output is unchanged."""
+    from mlx2.runtime.models.inkling2 import splitk
+
+    target, draft, _ = pair
+    prompt = [int(t) for t in mx.random.randint(1, 400, (40,)).tolist()]
+    expect = _ordinary_greedy(target, prompt)
+    lengths = []
+
+    def fake(q, k, v, rel, sinks, **kw):
+        lengths.append(q.shape[2])
+        return splitk.reference_attention(q, k, v, rel, sinks, **kw)
+
+    monkeypatch.setattr(splitk, "decline_reason", lambda *a, **kw: None)
+    monkeypatch.setattr(splitk, "gqa_splitk_attention", fake)
+    target.configure_kernels(verify_splitk=True)
+    try:
+        got = _dspark_greedy(target, draft, prompt)
+        assert target.kernel_receipt()["verify_splitk_calls"] > 0
+    finally:
+        target.configure_kernels()
+    assert 4 in lengths
+    assert got == expect

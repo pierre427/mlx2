@@ -1399,6 +1399,20 @@ build, no vjp). The MIT permission notice reproduced above for MLX applies
 to this code. No Apple copyright header is added to mlx2 source files.
 
 ------------------------------------------------------------------------------
+Inkling 2 split-K short-block attention — jundot/omlx pull request #5511
+(https://github.com/jundot/omlx/pull/5511, head
+6f82cca242bff6f61b0d05ec3c099350fc0f59b5), Apache License 2.0
+
+src/mlx2/runtime/models/inkling2/splitk.py adapts omlx/patches/inkling2/
+kernels.py at that head (gqa_flash_decode_attention and the
+_GQA_DECODE_PART_SOURCE, _GQA_DIRECT_DECODE_PART_SOURCE and
+_GQA_DECODE_RED_SOURCE Metal sources). Modified by mlx2: FP8 E4M3 K/V paths
+removed; explicit query offset; left padding clamped to >= 0; a staging-type
+template (FP16 for BF16 inputs, FP32 for FP32 inputs); 16-byte K/V loads gated
+on BF16 and an aligned base pointer. The full Apache-2.0 text is this
+repository's LICENSE.
+
+------------------------------------------------------------------------------
 GLM-5.3 fused indexer scores — mlx-lm pull request #2046
 (https://github.com/ml-explore/mlx-lm/pull/2046, merge
 1bf8da05a1ef30a3eb2e8a634180be6557fd3ca0), MIT License, Copyright © 2023

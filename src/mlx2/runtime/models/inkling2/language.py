@@ -22,7 +22,13 @@ import math
 import mlx.core as mx
 from mlx import nn
 
-from ..cache import BatchRotatingKVCache, CacheList, KVCache, RotatingKVCache
+from ..cache import (
+    BatchKVCache,
+    BatchRotatingKVCache,
+    CacheList,
+    KVCache,
+    RotatingKVCache,
+)
 from ..inkling.cache import InklingConvolutionCache
 from ..inkling.language import (
     _cache_padding_mask,
@@ -31,6 +37,7 @@ from ..inkling.language import (
 )
 from ..switch_layers import SwitchGLU
 from . import fuse as _fuse
+from . import splitk
 from .config import TextConfig
 
 _MASK_BUDGET_BYTES = 64 << 20
@@ -579,6 +586,17 @@ class Attention(nn.Module):
         self.__dict__["sink_slot_calls"] = self.__dict__.get("sink_slot_calls", 0) + 1
         return kv.keys[..., : off + 1, :], kv.values[..., : off + 1, :]
 
+    # Caches whose fetched K/V the split-K kernel reads as the composed path
+    # does (chronological order, left padding, queries at the last L keys).
+    _SPLITK_CACHES = (KVCache, RotatingKVCache, BatchKVCache, BatchRotatingKVCache)
+
+    def _splitk_decline(self, kv, q, k, v):
+        """None when ``inkling2_verify_splitk`` engages, else the reason."""
+        if kv is not None and type(kv) not in self._SPLITK_CACHES:
+            return "cache_type"
+        return splitk.decline_reason(q, k, v, n_heads=self.n_heads, n_kv=self.n_kv,
+                                     head_dim=self.head_dim)
+
     def _fetch(self, kv, k, v):
         k, v = kv.update_and_fetch(k, v)
         # Learned relative logits index backward distance, so ring buffers
@@ -669,6 +687,18 @@ class Attention(nn.Module):
             q = (q.astype(mx.float32) * tau.transpose(0, 2, 1, 3)).astype(x.dtype)
             r = (r.astype(mx.float32) * tau).astype(x.dtype)
         rel_proj = self.rel_proj.astype(x.dtype)
+        if self.__dict__.get("_verify_splitk"):
+            reason = self._splitk_decline(kv, q, k, v)
+            counts = self.__dict__.setdefault("verify_splitk_counts", {})
+            key = "calls" if reason is None else "declined:" + reason
+            counts[key] = counts.get(key, 0) + 1
+            if reason is None:
+                # Reads the fetched K/V in place: no sink column, no mask.
+                out = splitk.gqa_splitk_attention(
+                    q, k, v, r @ rel_proj, sink, offset=offset, left_padding=left_padding,
+                    window=self.sliding, scale=self.scale,
+                )
+                return self._finish(out, gate, b, length, x.dtype)
         if (
             length == 1
             and b <= _SINK_SDPA_MAX_ROWS
@@ -1225,7 +1255,7 @@ class Model(nn.Module):
                           moe_fused=False, moe_weighted_sum=False, moe_nax_gather=False,
                           sink_slot=False, fuse_controllers=False, fuse_residual=False,
                           fuse_sconv=False, fuse_attention=False, fuse_sconv_kernel=False,
-                          fuse_residual_kernel=False):
+                          fuse_residual_kernel=False, verify_splitk=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1263,6 +1293,7 @@ class Model(nn.Module):
             object.__setattr__(layer.self_attn, "_sink_sdpa", bool(sink_sdpa))
             object.__setattr__(layer.self_attn, "_sink_slot_on", bool(sink_slot))
             object.__setattr__(layer.self_attn, "_flash_prefill", bool(flash_prefill))
+            object.__setattr__(layer.self_attn, "_verify_splitk", bool(verify_splitk))
             object.__setattr__(layer.self_attn, "_mask_budget_bytes",
                                None if prefill_mask_mb is None else int(prefill_mask_mb) << 20)
             if fused_projections:
@@ -1282,7 +1313,8 @@ class Model(nn.Module):
              "prefill_mask_mb": prefill_mask_mb, "flash_prefill": bool(flash_prefill),
              "moe_fused": bool(moe_fused), "moe_weighted_sum": bool(moe_weighted_sum),
              "moe_nax_gather": bool(moe_nax_gather), "sink_slot": bool(sink_slot),
-             **{name: bool(value) for name, value in flags.items()}},
+             **{name: bool(value) for name, value in flags.items()},
+             "verify_splitk": bool(verify_splitk)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1294,6 +1326,10 @@ class Model(nn.Module):
         flash = [layer.self_attn.__dict__.get("flash_prefill_calls", 0) for layer in self.model.layers]
         slot = [layer.self_attn.__dict__.get("sink_slot_calls", 0) for layer in self.model.layers]
         slot_fb = [layer.self_attn.__dict__.get("sink_slot_fallbacks", 0) for layer in self.model.layers]
+        splitk_counts = {}
+        for layer in self.model.layers:
+            for key, value in layer.self_attn.__dict__.get("verify_splitk_counts", {}).items():
+                splitk_counts[key] = splitk_counts.get(key, 0) + value
         moe = {}
         for layer in self.model.layers:
             for key, value in layer.mlp.__dict__.get("moe_fast_counts", {}).items():
@@ -1303,6 +1339,8 @@ class Model(nn.Module):
                "head_kernel_calls": self.__dict__.get("head_kernel_calls", 0),
                "sink_sdpa_calls": sum(sinks), "flash_prefill_calls": sum(flash),
                "sink_slot_calls": sum(slot), "sink_slot_fallbacks": sum(slot_fb),
+               "verify_splitk_calls": splitk_counts.pop("calls", 0),
+               "verify_splitk_declines": splitk_counts,
                "moe_fused_calls": moe.pop("fused", 0),
                "moe_weighted_sum_calls": moe.pop("weighted_sum", 0),
                "moe_fast_declines": moe,
