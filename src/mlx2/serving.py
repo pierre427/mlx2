@@ -1762,6 +1762,41 @@ def adapter_numerical_contract(adapter):
     return json.loads(json.dumps(contract, sort_keys=True, allow_nan=False))
 
 
+def prefill_step_namespace_term(adapter, prefill_step, *, autoscale):
+    """APCv2 namespace term for a prefill step other than the adapter's reference.
+
+    ``None`` (the namespace is unchanged) for an autoscaled engine, whose
+    step is chosen per prompt as before, and at the adapter's reference step:
+    ``prefill_step_reference()`` if declared (the step its persisted keys were
+    built at when an opt-in knob can move ``prefill_step_default``), else
+    ``prefill_step_default()``.  Any other executed step is bound, so states
+    persisted at one step are never replayed at another.
+    """
+    if autoscale:
+        return None
+    step = int(prefill_step)
+    reference = None
+    for name in ("prefill_step_reference", "prefill_step_default"):
+        accessor = getattr(adapter, name, None)
+        if callable(accessor):
+            reference = accessor()
+            break
+    if reference is not None and int(reference) == step:
+        return None
+    return {"schema": "mlx2.prefill-step.v1", "prefill_step": step}
+
+
+def bind_adapter_prefill_step(adapter, prefill_step):
+    """Tell an adapter that declares ``bind_prefill_step`` the resolved step.
+
+    Called before the host cache clamp, which costs ``cache_budget`` before
+    ``execution_config`` runs; adapters without the hook are unchanged.
+    """
+    bind = getattr(adapter, "bind_prefill_step", None)
+    if callable(bind):
+        bind(int(prefill_step))
+
+
 def apc_semantic_namespace(
     semantic,
     *,
@@ -1773,6 +1808,7 @@ def apc_semantic_namespace(
     microscaling_prefill_handle=None,
     weight_stream_manager=None,
     recurrent_state_codec=None,
+    prefill_step=None,
 ):
     """``semantic`` wrapped in every numerical law the process serves under.
 
@@ -1800,6 +1836,17 @@ def apc_semantic_namespace(
         semantic = (
             semantic,
             "adapter-execution-numerics-v1",
+            hashlib.sha256(payload.encode()).hexdigest(),
+        )
+
+    if prefill_step is not None:
+        # A non-reference prefill step changes reduction shapes, so its
+        # states are not bitwise those of the reference step (see
+        # ``prefill_step_namespace_term``); identity at the reference.
+        payload = json.dumps(prefill_step, sort_keys=True, separators=(",", ":"))
+        semantic = (
+            semantic,
+            "prefill-step-v1",
             hashlib.sha256(payload.encode()).hexdigest(),
         )
 
@@ -11525,6 +11572,8 @@ class ServingEngine(KernelReloadMixin):
             )
 
             exact_self_mtp_rows = declared_exact_self_mtp_rows(adapter)
+            # The clamp below costs cache_budget() before execution_config().
+            bind_adapter_prefill_step(adapter, self.prefill_step)
             if self.cache_bytes_source == "host_default" or vars(type(adapter)).get(
                 "apc_cache_headroom_guard", False
             ):
@@ -12390,6 +12439,9 @@ class ServingEngine(KernelReloadMixin):
                 microscaling_prefill_handle=self.microscaling_prefill_handle,
                 weight_stream_manager=self.expert_stream,
                 recurrent_state_codec=self.recurrent_state_codec_policy,
+                prefill_step=prefill_step_namespace_term(
+                    adapter, self.prefill_step, autoscale=self.prefill_step_autoscale
+                ),
             )
             if external_draft:
                 bind_namespace = getattr(adapter, "bind_external_serving_namespace", None)

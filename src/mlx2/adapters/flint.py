@@ -428,6 +428,48 @@ def kernel_defaults(environ=None) -> tuple[str, str]:
     return nax, routed
 
 
+PREFILL_STEP_ENV = "MLX2_FLINT_PREFILL_STEP"
+# Flint's prefill block.  512 stays the default: it is the measured, served
+# shape.  jundot/omlx#5431 (read 2026-11-21, not code copied) found that a
+# sparse MoE with 6 of 256 experts leaves about 12 rows per expert in each
+# gather_qmm at a 513-row chunk, and raising omlx's window-aligned block to
+# 2052 cut a cold 128K TTFT by 19% on an M5 Pro (output not compared).  The
+# opt-in env value lets the same A/B run here without changing the default.
+#
+# mlx2 does not align chunks to the 513-token window (omlx does so only
+# because its paged blocks are window-sized): sliding attention is masked
+# per row, so any chunk is mathematically exact (the chunked-vs-full forward
+# CPU test covers chunks wider than the window) and only reduction shapes
+# change.  APCv2 boundaries are absolute positions, never chunk-derived; a
+# slice is clamped to the next boundary.  Two step-dependent laws remain, and
+# a power of two that divides 4096 keeps both identical to 512: the default
+# rolling interval rounds 4096 up to a step multiple (2052 would move every
+# rolling boundary to multiples of 4104), and rotating-window restore
+# snapshots are taken at slice ends at least the 2048-token stride apart.
+# A step other than 512 is bound into the APCv2 namespace (memory and disk;
+# ``prefill_step_reference`` below, serving.prefill_step_namespace_term), so
+# states persisted at one step are never replayed at another; 512 keeps
+# today's keys.
+# Not tested on the GPU yet; unqualified.
+DEFAULT_PREFILL_STEP = 512
+MAX_PREFILL_STEP = 16384
+
+
+def prefill_step_choice(environ=None) -> int:
+    """Flint's prefill block: ``MLX2_FLINT_PREFILL_STEP`` if set, else 512."""
+    environ = os.environ if environ is None else environ
+    raw = environ.get(PREFILL_STEP_ENV, "").strip()
+    if not raw:
+        return DEFAULT_PREFILL_STEP
+    try:
+        step = int(raw, 10)
+    except ValueError:
+        raise ValueError(f"{PREFILL_STEP_ENV} must be an integer, not {raw!r}") from None
+    if not 1 <= step <= MAX_PREFILL_STEP:
+        raise ValueError(f"{PREFILL_STEP_ENV} must be in [1, {MAX_PREFILL_STEP}], not {step}")
+    return step
+
+
 class FlintAdapter(ExternalDraftAdapterMixin):
     default_route = "ordinary"
     # Best-route rule (Pierre 2026-10-21; geomean >= 1.05 over ordinary, no
@@ -463,7 +505,13 @@ class FlintAdapter(ExternalDraftAdapterMixin):
             raise ValueError("Flint has no native MTP route")
         return self.profile
 
+    def bind_prefill_step(self, prefill_step):
+        # The sliding-window cache bound depends on the executed chunk, which
+        # an operator ``--prefill-step`` may set above the adapter default.
+        self._prefill_step = int(prefill_step)
+
     def execution_config(self, *, max_lanes, prefill_step):
+        self.bind_prefill_step(prefill_step)
         if getattr(self, "fused_decode", "off") != "off" and max_lanes != 1:
             raise ValueError("Flint fused decode candidate requires max_lanes=1")
         if getattr(self, "draft_model", None) is not None:
@@ -480,7 +528,11 @@ class FlintAdapter(ExternalDraftAdapterMixin):
         }
 
     def prefill_step_default(self):
-        return 512
+        return prefill_step_choice()
+
+    def prefill_step_reference(self):
+        """The step today's APCv2 keys are built at (namespace unbound)."""
+        return DEFAULT_PREFILL_STEP
 
     def cache_budget(self, *, mtp):
         """Bound the actual full/sliding K/V, including APC restore windows."""
@@ -504,7 +556,7 @@ class FlintAdapter(ExternalDraftAdapterMixin):
             sliding_kv_heads=int(config["num_key_value_heads"]),
             sliding_head_dim=int(config["head_dim"]),
             sliding_window=int(config["sliding_window"]),
-            prefill_step=self.prefill_step_default(),
+            prefill_step=getattr(self, "_prefill_step", None) or self.prefill_step_default(),
             checkpoint_copies=copies,
             checkpoint_stride=stride,
             item_bytes=_kv_item_bytes(config),
