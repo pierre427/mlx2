@@ -67,8 +67,12 @@ Joint tiles (opt-in, Pierre 2026-11-18: "Yes, do the joint tile variant"): with 
 claim set of >= 3 boxes still in the core after nesting and family tiles (so with no common ancestor box, and not
 inside any declared group, kept or dropped) holding >= N units becomes its own tile joint:<a>+<b>+..., gated by the
 OR of its members' gates (no classifier of its own). --joint-sweep 5000,10000,... records, per floor, the tiles, the
-units moved and the core share after; --joint-floor auto takes the swept floor with the largest core reduction per
-tile (units moved / tiles; ties -> the lower floor) and records why. partition.json "joint" lists every tile.
+units moved and the core share after. --joint-floor auto (rule coverage-v2, Pierre 2026-11-21) takes the highest swept
+floor that still moves >= --joint-coverage (0.8) of the units the lowest swept floor moves: the fewest joint tiles that
+take most of what jointing can take out of the core; --joint-max-tiles N then steps up to the lowest floor above it
+with <= N tiles. It records why. (Until 2026-11-21 auto took the largest core reduction per tile, which is monotone
+in the floor and so always chose the highest floor with a tile; a partition.json whose joint has a "floor_choice"
+and no "floor_rule" was chosen that way.) partition.json "joint" lists every tile.
 
 Weak-claimant detach (opt-in, Pierre 2026-11-19: "If a box's claim on a neuron is tiny next to the other
 claimants', drop that claim before deciding pair, family or core"): with --detach-share s > 0, a box's claim on a
@@ -345,6 +349,43 @@ def save_npz(path, items, get):
     tmp.replace(path)
 
 
+def choose_joint_floor(sweep, coverage=0.8, max_tiles=0):
+    """--joint-floor auto, rule coverage-v2: (floor, why, rule record).
+
+    ``sweep`` maps a floor (str) to {"tiles", "units_moved", ...}. A claim set that passes a floor passes every
+    lower one, so units moved and tiles only fall as the floor rises, and any units-per-tile measure only rises:
+    it cannot choose. The rule states the trade instead: the highest floor (fewest tiles) that still moves at least
+    ``coverage`` of the units the lowest swept floor moves; with ``max_tiles``, the lowest floor at or above it
+    with at least one tile and no more tiles than that. No floor fits the cap: refused, never a silent overshoot
+    and never a floor that writes no tile."""
+    from fractions import Fraction
+    floors = sorted(sweep, key=int)
+    ref = sweep[floors[0]]["units_moved"]
+    share = {f: (sweep[f]["units_moved"] / ref if ref else 0.0) for f in floors}
+    rule = {"name": "coverage-v2", "coverage": coverage, "max_tiles": max_tiles or None,
+            "reference_floor": int(floors[0]), "reference_units": int(ref),
+            "share_of_reference": {f: round(share[f], 6) for f in floors}}
+    if not ref:
+        return int(floors[0]), (f"auto (coverage-v2): no eligible claim set reaches the lowest swept floor "
+                                f"{floors[0]}; no joint tile"), rule
+    need = Fraction(str(coverage)) * ref               # units are integers: the threshold is exact
+    best = max((f for f in floors if sweep[f]["units_moved"] >= need), key=int)
+    why = (f"auto (coverage-v2): floor {best} is the highest of {floors} that still moves >= {coverage:g} of the "
+           f"units floor {floors[0]} moves ({sweep[best]['units_moved']} of {ref}, {share[best]:.3f}; "
+           f"{sweep[best]['tiles']} tiles)")
+    if max_tiles and sweep[best]["tiles"] > max_tiles:
+        fit = [f for f in floors if int(f) > int(best) and 0 < sweep[f]["tiles"] <= max_tiles]
+        if not fit:
+            raise SystemExit(f"--joint-max-tiles {max_tiles}: no swept floor from {best} up has between 1 and "
+                             f"{max_tiles} tiles ({ {f: sweep[f]['tiles'] for f in floors if int(f) >= int(best)} }); "
+                             "sweep other floors or raise the cap")
+        capped = min(fit, key=int)
+        why += (f"; capped to floor {capped} by --joint-max-tiles {max_tiles} ({sweep[capped]['tiles']} tiles, "
+                f"{share[capped]:.3f} of the reference units)")
+        best = capped
+    return int(best), why, rule
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--box", action="append", required=True, help="NAME=compare dir")
@@ -369,6 +410,11 @@ def main():
     ap.add_argument("--not-nested", default="", help="comma list: boxes kept out of their ancestors' subtrees")
     ap.add_argument("--joint-floor", default="", help="N or auto: 3+ claim sets with >= N units -> joint tiles")
     ap.add_argument("--joint-sweep", default="", help="comma list of floors to report (auto picks among them)")
+    ap.add_argument("--joint-coverage", type=float, default=None,
+                    help="auto: take the highest swept floor moving >= this share of the lowest swept floor's units "
+                         "(default 0.8)")
+    ap.add_argument("--joint-max-tiles", type=int, default=0,
+                    help="auto: at most this many joint tiles (0: no cap); steps up to the next floor that fits")
     ap.add_argument("--detach-share", type=float, default=0.0,
                     help="drop a claim whose drive is < this x the strongest claimant's (0: off; Pierre 2026-11-19)")
     ap.add_argument("--detach-sweep", default="", help="comma list of shares to report (with or without detaching)")
@@ -638,6 +684,14 @@ def main():
     jointing = bool(a.joint_floor or a.joint_sweep)
     if a.joint_floor == "auto" and not a.joint_sweep:
         raise SystemExit("--joint-floor auto needs --joint-sweep")
+    if a.joint_floor != "auto" and (a.joint_coverage is not None or a.joint_max_tiles):
+        raise SystemExit("--joint-coverage / --joint-max-tiles choose the floor: only with --joint-floor auto")
+    if a.joint_coverage is None:
+        a.joint_coverage = 0.8
+    if not 0 < a.joint_coverage <= 1:
+        raise SystemExit(f"--joint-coverage: a share in (0, 1], not {a.joint_coverage}")
+    if a.joint_max_tiles < 0:
+        raise SystemExit(f"--joint-max-tiles: a positive count (0: no cap), not {a.joint_max_tiles}")
     declared = load_groups(a.groups, names) if a.groups else {}
     if grouping or jointing:
         cmask = np.zeros((L, n, (B + 63) // 64), np.uint64)                          # box i: bit i % 64 of word i // 64
@@ -728,12 +782,9 @@ def main():
             k, moved = int(ok_.sum()), int(cnts[ok_].sum())
             sweep[str(f)] = {"tiles": k, "units_moved": moved, "core_share_after": (core_units - moved) / tot,
                              "core_share_points_per_tile": round(100 * moved / tot / k, 4) if k else 0.0}
-        why = None
+        why = rule = None
         if a.joint_floor == "auto":
-            best = max(sweep, key=lambda f: (sweep[f]["units_moved"] / max(sweep[f]["tiles"], 1), -int(f)))
-            floor = int(best)
-            why = (f"auto: floor {best} has the largest core reduction per tile among {list(sweep)} "
-                   f"({sweep[best]['core_share_points_per_tile']} core-share points per tile)")
+            floor, why, rule = choose_joint_floor(sweep, a.joint_coverage, a.joint_max_tiles)
         else:
             try:
                 floor = int(a.joint_floor) if a.joint_floor else None
@@ -753,7 +804,7 @@ def main():
                         ("no common ancestor box, " if nested is not None else "") +
                         "not inside any declared or kept group) with >= floor units -> joint:<members>; gate = OR of "
                         "the members' gates" + ("" if floor is not None else " (sweep only: no tiles written)"),
-                "floor": floor, "floor_choice": why, "sweep": sweep,
+                "floor": floor, "floor_choice": why, **({"floor_rule": rule} if rule else {}), "sweep": sweep,
                 "core_units_before": core_units, "units_moved": int(sum(v["units"] for v in jt.values())),
                 "tiles": dict(sorted(jt.items(), key=lambda x: -x[1]["units"])),
                 "eligible_claim_sets": int(eligible.sum()), "eligible_units": int(cnts[eligible].sum())}

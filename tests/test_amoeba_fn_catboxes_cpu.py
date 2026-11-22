@@ -444,6 +444,14 @@ def test_joint_tiles_and_battery_arm(nested_toy, monkeypatch):
     z = np.load(root / "jt" / "tiles.npz")
     name = "life.cooking.x+life.travel+sci.astronomy"
     assert p["joint"]["floor"] == 3 and "auto" in p["joint"]["floor_choice"] and name in p["joint"]["tiles"]
+    assert p["joint"]["floor_rule"]["name"] == "coverage-v2" and p["joint"]["floor_rule"]["coverage"] == 0.8
+    assert "floor_rule" not in j                                      # a fixed or absent floor records no rule
+    assert _part(root, NEST, "jbad", "--nested", "--joint-sweep", "3,4", "--joint-floor", "3",
+                 "--joint-max-tiles", "2").returncode != 0            # the cap belongs to auto
+    assert _part(root, NEST, "jbad1", "--nested", "--joint-sweep", "3,4", "--joint-floor", "3",
+                 "--joint-coverage", "0.9").returncode != 0           # so does the coverage
+    assert _part(root, NEST, "jbad2", "--nested", "--joint-sweep", "3,4", "--joint-floor", "auto",
+                 "--joint-coverage", "0").returncode != 0
     assert _cols(z[f"joint:{name}"]) == [4] and not z["core"][:, 4].any()
     assert _cols(z["joint:life.games+life.travel+sci.astronomy"]) == [13]   # no family declared here
     assert (sum(z[k].astype(int) for k in z.files if k != "layers") == 1).all()
