@@ -356,7 +356,8 @@ def test_policy_parsing():
         {"fused_projections": False, "head_kernel": False, "sink_sdpa": False,
          "sink_slot": False, "flash_prefill": False, "moe_fused": True, "moe_weighted_sum": True,
          "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": None,
-         "prefill_mask_mb": None, "loop_passes": None}, {})
+         "prefill_mask_mb": None, "loop_passes": None, "fuse_controllers": False, "fuse_residual": False, "fuse_sconv": False,
+         "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -374,7 +375,9 @@ def test_fused_projection_toggle_round_trip():
                                    "sink_sdpa": False, "loop_passes": None,
                                    "prefill_mask_mb": None, "flash_prefill": False,
                                    "moe_fused": False, "moe_weighted_sum": False,
-                                   "moe_nax_gather": False, "sink_slot": False}
+                                   "moe_nax_gather": False, "sink_slot": False,
+                                   "fuse_controllers": False, "fuse_residual": False, "fuse_sconv": False,
+                                   "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,}
 
 
 @pytest.mark.parametrize("rows", [1, 2])

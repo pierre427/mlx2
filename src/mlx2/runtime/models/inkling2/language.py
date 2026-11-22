@@ -30,6 +30,7 @@ from ..inkling.language import (
     banded_additive_mask,
 )
 from ..switch_layers import SwitchGLU
+from . import fuse as _fuse
 from .config import TextConfig
 
 _MASK_BUDGET_BYTES = 64 << 20
@@ -353,10 +354,26 @@ def flash_relative_attention(q, k, v, rel, sinks, *, offset, left_padding, windo
     )[0]
 
 
+def _banded_mask_reference(_attn, *args, **kwargs):
+    return banded_additive_mask(*args, **kwargs)
+
+
 def _speculative_record(cache, index, state, inputs, mask):
     """Keep (pre-state, fp32 masked inputs, mask) for the v1 rollback record."""
     if cache is not None and getattr(cache, "speculating", False):
         cache._inkling_inputs[index] = (state, inputs, mask)
+
+
+def _sconv_kernel_call(conv, x, cache, mask, tail, extra):
+    from . import fuse_kernels
+
+    return fuse_kernels.sconv(conv, x, cache, mask, tail, extra)
+
+
+def _residual_kernel_call(module, blocks, partial):
+    from . import fuse_kernels
+
+    return fuse_kernels.residual(module, blocks, partial)
 
 
 class ShortConvolution(nn.Module):
@@ -368,7 +385,18 @@ class ShortConvolution(nn.Module):
         self.conv_idx = conv_idx
         self.conv = nn.Conv1d(channels, channels, kernel_size, groups=channels, bias=False)
 
-    def __call__(self, x, cache=None, mask=None):
+    def __call__(self, x, cache=None, mask=None, tail="plain", extra=()):
+        """``tail`` names the fused epilogue (``inkling2_fuse_sconv`` only):
+        ``plain`` returns the convolution; the decoder's residual forms
+        (``attn_residual``, ``attn_boundary``, ``mlp_residual``) also do its
+        FP32 round trip and residual add, with ``extra`` their operands."""
+        fused = _fuse.on(self, "fuse_sconv")
+        if tail != "plain" and not fused:
+            raise ValueError("fused short-convolution tails need inkling2_fuse_sconv")
+        if fused and _fuse.on(self, "fuse_sconv_kernel"):
+            out = _sconv_kernel_call(self, x, cache, mask, tail, extra)
+            if out is not None:
+                return out
         k = self.kernel_size
         xf = x.astype(mx.float32)
         inputs = xf if mask is None else mx.where(mask[..., None], xf, 0)
@@ -378,8 +406,16 @@ class ShortConvolution(nn.Module):
         context = mx.concatenate([state, inputs], axis=1)
         if cache is not None:
             _speculative_record(cache, self.conv_idx, cache[self.conv_idx], inputs, mask)
-            cache[self.conv_idx] = _next_conv_state(state, inputs, mask)
+            if fused and mask is None and k > 1:
+                # ``_next_conv_state`` without a mask is concat(state,
+                # inputs)[:, -(k-1):]: the same values as this view.
+                cache[self.conv_idx] = context[:, -(k - 1):]
+            else:
+                cache[self.conv_idx] = _next_conv_state(state, inputs, mask)
         out = mx.conv1d(context, _fp32(self.conv, "weight"), groups=x.shape[-1])
+        if fused:
+            _fuse.count(self, "sconv_" + tail)
+            return _fuse.sconv_tail(tail, out, xf, k, x, *extra)
         return ((out + xf) / math.sqrt(k + 1)).astype(x.dtype)
 
 
@@ -403,14 +439,22 @@ class DynamicShortConvolution(nn.Module):
         if state is None:
             state = mx.zeros((b, k - 1, x.shape[-1]), mx.float32)
         context = mx.concatenate([state, inputs], axis=1)
+        fused = _fuse.on(self, "fuse_sconv")
         if cache is not None:
             _speculative_record(cache, self.conv_idx, cache[self.conv_idx], inputs, mask)
-            cache[self.conv_idx] = _next_conv_state(state, inputs, mask)
+            if fused and mask is None and k > 1:
+                cache[self.conv_idx] = context[:, -(k - 1):]
+            else:
+                cache[self.conv_idx] = _next_conv_state(state, inputs, mask)
         dynamic = (
             self.weight_proj(dynamic_input)
             .astype(mx.float32)
             .reshape(b, length, self.num_heads, 1, k)
         )
+        if fused:
+            _fuse.count(self, "dynamic_sconv")
+            return _fuse.dynamic_conv(context, xf, _fp32(self, "static_weight").T, dynamic,
+                                      k, length, self.num_heads, x)
         weights = _fp32(self, "static_weight").T.reshape(self.num_heads, -1, k) + dynamic
         out = mx.zeros_like(xf).reshape(b, length, self.num_heads, -1)
         for lag in range(k):
@@ -566,7 +610,12 @@ class Attention(nn.Module):
         )
         k = l2_clip(k.reshape(b, length, self.n_kv, self.head_dim), cfg.qk_l2_clip_threshold)
         v = v.reshape(b, length, self.n_kv, self.head_dim)
-        if cfg.use_value_norm_no_gamma:
+        fa = _fuse.on(self, "fuse_attention")
+        if cfg.use_value_norm_no_gamma and fa and v.dtype == x.dtype:
+            # No gain: the norm accumulates in FP32 and rounds once to the
+            # input dtype, so the FP32 round trip is the identity on its result.
+            v = mx.fast.rms_norm(v, None, cfg.rms_norm_eps)
+        elif cfg.use_value_norm_no_gamma:
             v = mx.fast.rms_norm(v.astype(mx.float32), None, cfg.rms_norm_eps).astype(x.dtype)
         r = l2_clip(
             r.reshape(b, length, self.n_heads, cfg.d_rel),
@@ -574,20 +623,40 @@ class Attention(nn.Module):
             self.rel_scale,
         )
         q, k, v = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
-        if kv is not None:
+        ring, ring_start = None, 0
+        if (
+            fa
+            and type(kv) is RotatingKVCache
+            and not self.__dict__.get("_sink_sdpa")
+            and not self.__dict__.get("_flash_prefill")
+        ):
+            # The chronological read and the zero sink row become one
+            # concatenation below (the reference makes two full copies).
+            kv.update_and_fetch(k, v)
+            ring, width = kv, kv.keys.shape[2]
+            size = width if (kv._idx == width or kv._idx < kv.offset) else kv._idx
+            k = v = None
+        elif kv is not None:
             k, v = self._fetch(kv, k, v)
-        size = k.shape[2]
+        if ring is None:
+            size = k.shape[2]
         left_padding = getattr(kv, "left_padding", None)
         if self.sliding and size > length + self.sliding - 1:
             # No query reaches keys older than its window: drop them before
             # the dense relative mask and SDPA (they would be masked anyway).
             start = size - length - (self.sliding - 1)
-            k, v = k[:, :, start:], v[:, :, start:]
-            size = k.shape[2]
+            if ring is None:
+                k, v = k[:, :, start:], v[:, :, start:]
+            ring_start = start
+            size = size - start
             if left_padding is not None:
                 left_padding = mx.maximum(left_padding - start, 0)
         offset = size - length
-        if self.log_floor is not None:
+        if self.log_floor is not None and fa and q.dtype == r.dtype == x.dtype:
+            # (The fused chain returns q/r in their own dtype; the reference
+            # casts to x.dtype, so it engages only when those agree.)
+            q, r = _fuse.log_tau(self, q, r, length, offset, left_padding, x.dtype)
+        elif self.log_floor is not None:
             # Global layers only (no slicing): absolute, padding-relative
             # positions, one tau row per batch row when padded.
             positions = (mx.arange(length) + offset + 1).astype(mx.float32)[None, :]
@@ -609,8 +678,8 @@ class Attention(nn.Module):
             # MLX's ``sinks`` (shape [H]) takes it directly, one SDPA per
             # row; no K/V concatenation.  Same softmax; only the reduction
             # order differs (the sink term is added separately).
-            mask = banded_additive_mask(
-                r, rel_proj, offset, size, self.sliding, self.rel_extent,
+            mask = (_fuse.banded_mask if fa else _banded_mask_reference)(
+                self, r, rel_proj, offset, size, self.sliding, self.rel_extent,
                 left_padding=left_padding,
             )
             self.__dict__["sink_sdpa_calls"] = self.__dict__.get("sink_sdpa_calls", 0) + 1
@@ -639,11 +708,17 @@ class Attention(nn.Module):
             return self._finish(out, gate, b, length, x.dtype)
         # A query-dependent sink is a zero K/V with its own logit.
         sinks = sink.transpose(0, 2, 1)[..., None]
-        slot = self._sink_slot(kv, b, size) if self.__dict__.get("_sink_slot_on") else None
-        if slot is not None:
+        slot = (self._sink_slot(kv, b, size)
+                if ring is None and self.__dict__.get("_sink_slot_on") else None)
+        if ring is not None:
+            _fuse.count(self, "ring_sink_concat")
+            zero = _fuse.zeros(self, (b, self.n_kv, 1, self.head_dim), ring.keys.dtype)
+            k, v = _fuse.ring_with_sink(ring, ring_start, zero)
+        elif slot is not None:
             k, v = slot
         else:
-            zeros = mx.zeros((b, self.n_kv, 1, self.head_dim), k.dtype)
+            zeros = (_fuse.zeros(self, (b, self.n_kv, 1, self.head_dim), k.dtype) if fa
+                     else mx.zeros((b, self.n_kv, 1, self.head_dim), k.dtype))
             k = mx.concatenate([k, zeros], axis=2)
             v = mx.concatenate([v, zeros], axis=2)
         budget = self.__dict__.get("_mask_budget_bytes") or _MASK_BUDGET_BYTES
@@ -655,7 +730,8 @@ class Attention(nn.Module):
         outputs = []
         for begin in range(0, length, rows):
             end = min(length, begin + rows)
-            mask = banded_additive_mask(
+            mask = (_fuse.banded_mask if fa else _banded_mask_reference)(
+                self,
                 r[:, begin:end],
                 rel_proj,
                 offset + begin,
@@ -675,6 +751,9 @@ class Attention(nn.Module):
 
     def _finish(self, out, gate, b, length, dtype):
         out = out.transpose(0, 2, 1, 3).reshape(b, length, -1)
+        if _fuse.on(self, "fuse_attention"):
+            _fuse.count(self, "gate_finish")
+            return self.o_proj(_fuse.gate_finish(out, gate, _fuse.dtype_ref(dtype)))
         out = (out.astype(mx.float32) * mx.sigmoid(gate.astype(mx.float32))).astype(dtype)
         return self.o_proj(out)
 
@@ -758,6 +837,15 @@ class AttentionResidual(nn.Module):
         self.normalize_values = config.attn_res_normalize_values
 
     def __call__(self, blocks, partial):
+        if _fuse.on(self, "fuse_residual_kernel"):
+            out = _residual_kernel_call(self, blocks, partial)
+            if out is not None:
+                return out
+        if _fuse.on(self, "fuse_residual"):
+            # The reference stack promotes every BF16 block to FP32 on every
+            # mix; the FP32 copies are made once per forward (same values).
+            _fuse.count(self, "residual_mix")
+            blocks = [_fuse.fp32_block(self, b) for b in blocks]
         return _attention_residual(
             mx.stack([*blocks, partial], axis=-2), self.query, self.normalize_values
         )
@@ -851,15 +939,42 @@ class DecoderLayer(nn.Module):
             if self.attention_input is not None
             else x[..., None, :]
         )
+        fused_ctrl = _fuse.on(self, "fuse_controllers")
+        one_row = x.shape[0] * x.shape[1] == 1
+        message_norms = None
         if self.is_sliding and messages is None:
             attn = self.self_attn(
                 self.input_layernorm(mixed[..., 0, :]).astype(x.dtype),
                 cache=cache,
                 conv_mask=mask,
             )
+        elif fused_ctrl and one_row:
+            # B1 decode: the three controllers and the three input norms as
+            # batched chains (see fuse.py for why only one-row calls).
+            eps = self.post_attention_layernorm.eps
+            if messages is not None:
+                message_norms = mx.fast.rms_norm(messages, None, eps)
+                blended = _fuse.qkv_controllers(self, mixed, messages, message_norms)
+            else:
+                blended = mixed
+            normed = _fuse.scale_cast(mx.fast.rms_norm(blended, None, eps),
+                                      _fuse.norm_stack(self), x)
+            _fuse.count(self, "input_norms_batched")
+            attn = self.self_attn(*(normed[..., i, :] for i in range(3)),
+                                  cache=cache, conv_mask=mask)
         else:
             parts = [mixed[..., min(i, mixed.shape[-2] - 1), :] for i in range(3)]
-            if messages is not None:
+            if messages is not None and fused_ctrl:
+                # Local layers feed one x to all three controllers: norm it once.
+                shared = (mx.fast.rms_norm(parts[0], None, self.controllers["attn"].eps)
+                          if self.is_sliding else None)
+                parts = [
+                    _fuse.one_controller(self.controllers[name], part, messages[..., i, :],
+                                         x_norm=shared)
+                    for i, (name, part) in enumerate(zip(("attn", "k", "v"), parts))
+                ]
+                _fuse.count(self, "controllers_unbatched")
+            elif messages is not None:
                 parts = [
                     self.controllers[name](part, messages[..., i, :])
                     for i, (name, part) in enumerate(zip(("attn", "k", "v"), parts))
@@ -871,16 +986,32 @@ class DecoderLayer(nn.Module):
             )
             parts = [norm(part).astype(x.dtype) for norm, part in zip(norms, parts)]
             attn = self.self_attn(*parts, cache=cache, conv_mask=mask)
-        residual = self.attn_sconv(attn, conv, mask).astype(mx.float32)
-        if self.is_block_boundary:
-            blocks.append(x)
+        fused_sconv = _fuse.on(self, "fuse_sconv")
+        if fused_sconv:
+            if self.is_block_boundary:
+                residual = self.attn_sconv(attn, conv, mask, tail="attn_boundary")
+                blocks.append(x)
+            else:
+                residual = self.attn_sconv(attn, conv, mask, tail="attn_residual", extra=(x,))
         else:
-            residual = residual + x.astype(mx.float32)
+            residual = self.attn_sconv(attn, conv, mask).astype(mx.float32)
+            if self.is_block_boundary:
+                blocks.append(x)
+            else:
+                residual = residual + x.astype(mx.float32)
         hidden = self.mlp_input(blocks, residual)[..., 0, :]
-        if messages is not None:
+        if messages is not None and fused_ctrl:
+            hidden = _fuse.one_controller(
+                self.controllers["mlp"], hidden, messages[..., 3, :],
+                message_norm=None if message_norms is None else message_norms[..., 3, :])
+        elif messages is not None:
             hidden = self.controllers["mlp"](hidden, messages[..., 3, :])
         hidden = self.mlp(self.post_attention_layernorm(hidden).astype(x.dtype))
-        out = (residual + self.mlp_sconv(hidden, conv, mask).astype(mx.float32)).astype(x.dtype)
+        if fused_sconv:
+            out = self.mlp_sconv(hidden, conv, mask, tail="mlp_residual", extra=(residual, x))
+        else:
+            out = (residual + self.mlp_sconv(hidden, conv, mask).astype(mx.float32)).astype(
+                x.dtype)
         if conv is not None:
             if speculating:
                 _record_conv_rollback(
@@ -945,6 +1076,16 @@ class TextModel(nn.Module):
         return self._forward(inputs, cache, input_embeddings, capture)
 
     def _forward(self, inputs, cache=None, input_embeddings=None, capture=None):
+        holder = self.__dict__.get("_fuse_holder")
+        if holder is None:
+            return self._forward_body(inputs, cache, input_embeddings, capture)
+        holder["memo"] = {}
+        try:
+            return self._forward_body(inputs, cache, input_embeddings, capture)
+        finally:
+            holder["memo"] = None
+
+    def _forward_body(self, inputs, cache=None, input_embeddings=None, capture=None):
         x = self.embed(inputs) if input_embeddings is None else input_embeddings
         visits = len(self.layer_indices)
         if cache is None:
@@ -958,6 +1099,7 @@ class TextModel(nn.Module):
         blocks = []
         bank = None
         prelude = prelude_blocks = None
+        kernel_messages = _fuse.on(self, "fuse_residual_kernel") and mx.default_device() == mx.gpu
         loop = self.loop
         for visit, index in enumerate(self.layer_indices):
             if loop is not None and index == loop.core_start:
@@ -967,14 +1109,30 @@ class TextModel(nn.Module):
                     # The first block appended in the core is the prelude
                     # partial; completed core blocks and the last partial
                     # supply the next pass's messages.
-                    states = mx.stack([*blocks[len(prelude_blocks) + 1 :], x], axis=-2)
-                    bank = mx.fast.rms_norm(states.astype(mx.float32), None, 1e-6)
+                    bank_states = [*blocks[len(prelude_blocks) + 1 :], x]
+                    if not (kernel_messages and x.shape[0] * x.shape[1] == 1):
+                        states = mx.stack(bank_states, axis=-2)
+                        bank = mx.fast.rms_norm(states.astype(mx.float32), None, 1e-6)
+                    else:
+                        bank = bank_states
                     x, blocks = prelude, list(prelude_blocks)
             messages = None
             if bank is not None and index < loop.core_end:
                 query = self.message_queries[index - loop.core_start]
-                scores = (query @ bank.swapaxes(-1, -2)) * x.shape[-1] ** -0.5
-                messages = mx.softmax(scores, axis=-1) @ bank
+                if isinstance(bank, list):
+                    # inkling2_fuse_residual_kernel: the same normed softmax
+                    # mix as the residuals, one launch (near-exact).
+                    from . import fuse_kernels
+
+                    messages = fuse_kernels.softmax_mix(self, bank, query)
+                    if messages is None:
+                        states = mx.stack(bank, axis=-2)
+                        bank = mx.fast.rms_norm(states.astype(mx.float32), None, 1e-6)
+                    else:
+                        _fuse.count(self, "message_kernel")
+                if not isinstance(bank, list) and messages is None:
+                    scores = (query @ bank.swapaxes(-1, -2)) * x.shape[-1] ** -0.5
+                    messages = mx.softmax(scores, axis=-1) @ bank
             if capture is not None and visit in capture:
                 capture[visit] = x
             x = self.layers[index](x, blocks, caches[visit], messages)
@@ -1065,7 +1223,9 @@ class Model(nn.Module):
     def configure_kernels(self, *, fused_projections=False, head_kernel=False, sink_sdpa=False,
                           loop_passes=None, prefill_mask_mb=None, flash_prefill=False,
                           moe_fused=False, moe_weighted_sum=False, moe_nax_gather=False,
-                          sink_slot=False):
+                          sink_slot=False, fuse_controllers=False, fuse_residual=False,
+                          fuse_sconv=False, fuse_attention=False, fuse_sconv_kernel=False,
+                          fuse_residual_kernel=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1074,6 +1234,24 @@ class Model(nn.Module):
         claims (``moe_nax_gather.set_mode``)."""
         if moe_weighted_sum and not moe_fused:
             raise ValueError("Inkling 2 moe_weighted_sum requires moe_fused")
+        if fuse_sconv_kernel and not fuse_sconv:
+            raise ValueError("Inkling 2 fuse_sconv_kernel requires fuse_sconv")
+        flags = {"fuse_controllers": fuse_controllers, "fuse_residual": fuse_residual,
+                 "fuse_sconv": fuse_sconv, "fuse_attention": fuse_attention,
+                 "fuse_sconv_kernel": fuse_sconv_kernel,
+                 "fuse_residual_kernel": fuse_residual_kernel}
+        enabled = frozenset(name for name, value in flags.items() if value)
+        holder = self.model.__dict__.get("_fuse_holder") or {"memo": None}
+        object.__setattr__(self.model, "_fuse_holder", holder if enabled else None)
+        modules = [self.model, self.model.final_input]
+        for layer in self.model.layers:
+            modules += [layer, layer.self_attn, layer.attn_sconv, layer.mlp_sconv, layer.mlp_input,
+                        layer.self_attn.k_sconv, layer.self_attn.v_sconv]
+            if layer.attention_input is not None:
+                modules.append(layer.attention_input)
+        for module in modules:
+            object.__setattr__(module, "_fuse", enabled)
+            object.__setattr__(module, "_fuse_holder", holder if enabled else None)
         self.model.set_num_passes(
             self.config.loop_config.num_passes if loop_passes is None else loop_passes)
         object.__setattr__(self.model, "_moe_nax_scope", bool(moe_nax_gather))
@@ -1103,7 +1281,8 @@ class Model(nn.Module):
              "sink_sdpa": bool(sink_sdpa), "loop_passes": loop_passes,
              "prefill_mask_mb": prefill_mask_mb, "flash_prefill": bool(flash_prefill),
              "moe_fused": bool(moe_fused), "moe_weighted_sum": bool(moe_weighted_sum),
-             "moe_nax_gather": bool(moe_nax_gather), "sink_slot": bool(sink_slot)},
+             "moe_nax_gather": bool(moe_nax_gather), "sink_slot": bool(sink_slot),
+             **{name: bool(value) for name, value in flags.items()}},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1129,6 +1308,11 @@ class Model(nn.Module):
                "moe_fast_declines": moe,
                "moe_fused_layers": sum(1 for b in built if b is not None and b[0] is not None),
                "moe_fused_refusals": sorted({b[1] for b in built if b is not None and b[1]})}
+        fuse = {}
+        for module in self.model.modules():
+            for key, value in module.__dict__.get("fuse_counts", {}).items():
+                fuse[key] = fuse.get(key, 0) + value
+        out["fuse_counts"] = dict(sorted(fuse.items()))
         if getattr(self, "kernel_policy", {}).get("moe_nax_gather"):
             from .. import moe_nax_gather
 

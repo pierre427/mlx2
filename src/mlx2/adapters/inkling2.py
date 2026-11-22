@@ -219,6 +219,31 @@ KERNEL_OPTIONS = {
     # Unset = auto (default): on for an M5 NAX host, off elsewhere; an
     # explicit true on a non-M5 host still fails closed.
     "inkling2_moe_nax_gather": "moe_nax_gather",
+    # Launch-count fusions (runtime/models/inkling2/fuse.py; implemented
+    # 2026-11-22, default off, GPU A/B pending). Decode is dispatch-bound
+    # (33 ms per token at 1K against a ~12 ms weight floor), so these cut
+    # kernels without changing the arithmetic. The first four are intended
+    # bit-identical (CPU tiny model bitwise: prefill, decode, B1/B2, ring
+    # wrap, FP32 and BF16).
+    # q/k/v loop-message controllers and input norms as batched chains
+    # (B1 decode), shared norms and compiled blends otherwise.
+    "inkling2_fuse_controllers": "fuse_controllers",
+    # Attention-residual mixes read once-per-forward FP32 copies of the
+    # BF16 blocks instead of promoting every block on every mix.
+    "inkling2_fuse_residual": "fuse_residual",
+    # Short conv: next state as a view of the context (no second concat),
+    # epilogue plus the decoder's residual round trip as one compiled kernel,
+    # the dynamic conv's lag loop compiled.
+    "inkling2_fuse_sconv": "fuse_sconv",
+    # Relative-bias mask indices once per forward, ring read plus zero sink
+    # row as one concat, tau skipped below the floor (exactly 1) and
+    # compiled above, compiled output gate, direct BF16 value norm.
+    "inkling2_fuse_attention": "fuse_attention",
+    # Near-exact GPU kernels, kept separate (own summation order):
+    # one-launch static short conv (<= 8 rows, needs inkling2_fuse_sconv)
+    "inkling2_fuse_sconv_kernel": "fuse_sconv_kernel",
+    # and one-launch one-row attention-residual mixes and loop messages.
+    "inkling2_fuse_residual_kernel": "fuse_residual_kernel",
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.
@@ -300,6 +325,8 @@ def validate_policy(value):
     if passes is not None and (type(passes) is not int or not 1 <= passes <= 8):
         raise TypeError(f"Inkling 2 {LOOP_PASSES_OPTION} must be an integer 1..8")
     kernels["loop_passes"] = passes
+    if kernels["fuse_sconv_kernel"] and not kernels["fuse_sconv"]:
+        raise ValueError("Inkling 2 inkling2_fuse_sconv_kernel requires inkling2_fuse_sconv")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_moe_weighted_sum requires inkling2_moe_fused")
     return kernels, value
