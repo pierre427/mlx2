@@ -111,9 +111,15 @@ KNOB_NAMES = {"inkling2_hard_no_thinking": "hard_no_thinking", "inkling2_sink_sd
 COMPOSED = {"inkling2_sink_sdpa": True, "inkling2_sink_slot": True,
             "inkling2_fuse_controllers": True, "inkling2_fuse_residual": True,
             "inkling2_fuse_sconv": True, "inkling2_fuse_attention": True}
+# The reference arm pins the reference path: the composed set became the
+# adapter default on 2026-11-22 (Pierre), so an empty policy is no longer the
+# reference.
+REFERENCE_POLICY = {key: False for key in COMPOSED} | {"inkling2_verify_splitk": False}
 PHASES = (
-    {"name": "ordinary_b1", "route": "ordinary", "width": 1, "reference": None, "policy": {},
-     "cells": "full"},
+    {"name": "ordinary_b1", "route": "ordinary", "width": 1, "reference": None,
+     "policy": dict(REFERENCE_POLICY), "cells": "full"},
+    {"name": "default_b1", "route": "ordinary", "width": 1, "reference": "ordinary_b1", "policy": {},
+     "cells": "full", "counter": "verify_splitk_calls"},
     {"name": "dspark_b1", "route": "dspark", "width": 1, "reference": "ordinary_b1",
      "policy": DSPARK_POLICY, "cells": "full"},
     {"name": "ordinary_b4", "route": "ordinary", "width": 4, "reference": "ordinary_b1", "policy": {},
@@ -157,6 +163,11 @@ PHASES = (
      "policy": {**DSPARK_POLICY, **COMPOSED, "inkling2_verify_splitk": True}, "cells": "full",
      "counter": "verify_splitk_calls", "status_flag": "prefill_reclaim"},
 )
+# Every arm except default_b1 starts from the reference path: the adapter
+# defaults changed on 2026-11-22, and the historical arms mean "reference plus
+# these knobs".
+PHASES = tuple(p if p["name"] == "default_b1" or p.get("refusal")
+               else {**p, "policy": {**REFERENCE_POLICY, **p["policy"]}} for p in PHASES)
 QUESTION = ("\n\nQuestion: What is the access code for the north archive vault? Give the code "
             "on the first line, then summarize the reference material above in about 120 words.")
 INTRO = "Read the reference material below, then answer the question at the end.\n\n"
@@ -735,7 +746,8 @@ def run_phase(a, phase, model, cell_plan, out, report, save, references, clock):
            "execution_policy": _policy(phase) or None,
            "label": ("ordinary decode" if phase["route"] == "ordinary" else
                      "DSpark external-draft chain (closest supported to AST; implemented, opt-in, unqualified)")
-           + ("; opt-in knob arm (unqualified)" if set(_policy(phase)) & set(KNOB_NAMES) else ""),
+           + ("; opt-in knob arm (unqualified)"
+              if any(v not in (False, None) for k, v in _policy(phase).items() if k in KNOB_NAMES) else ""),
            "cells": [], "status": "running", "swap_used_mb_start": H.swap_used_mb()}
     report["phases"].append(rec)
     command = server_command(a, phase, model, token_file, policy_file, max_context)

@@ -83,9 +83,10 @@ def test_aggregate_and_cold_warm_rules():
 
 def test_server_command_routes_and_lane_width():
     a = type("A", (), {"server_python": Path("py"), "port": 8396})()
-    ordinary = L.server_command(a, L.PHASES[0], Path("m"), Path("t"), Path("p"), 5000)
-    dspark = L.server_command(a, L.PHASES[3], Path("m"), Path("t"), Path("p"), 5000)
-    sink = L.server_command(a, L.PHASES[5], Path("m"), Path("t"), Path("p"), 5000)
+    by = {p["name"]: p for p in L.PHASES}
+    ordinary = L.server_command(a, by["ordinary_b1"], Path("m"), Path("t"), Path("p"), 5000)
+    dspark = L.server_command(a, by["dspark_b4_refusal"], Path("m"), Path("t"), Path("p"), 5000)
+    sink = L.server_command(a, by["sink_sdpa_b1"], Path("m"), Path("t"), Path("p"), 5000)
     assert "--ordinary" in sink and sink[sink.index("--execution-policy") + 1] == "p"
     assert "--ordinary" in ordinary and "--external-draft" not in ordinary
     assert dspark[dspark.index("--max-lanes") + 1] == "4" and "--external-draft" in dspark
@@ -120,7 +121,20 @@ STUB = textwrap.dedent('''\
         print("ValueError: Inkling 2 DSpark serving is B1 only: start with --max-lanes 1", file=sys.stderr)
         raise SystemExit(1)
     hard = policy.get("inkling2_hard_no_thinking", False)
-    sink = policy.get("inkling2_sink_sdpa", False)
+    # Adapter defaults since 2026-11-22: the composed set and split-K are on
+    # unless the policy says otherwise.
+    defaults = {{"inkling2_sink_sdpa": True, "inkling2_sink_slot": True, "inkling2_verify_splitk": True,
+                "inkling2_fuse_controllers": True, "inkling2_fuse_residual": True,
+                "inkling2_fuse_sconv": True, "inkling2_fuse_attention": True}}
+    names = {{"inkling2_hard_no_thinking": "hard_no_thinking", "inkling2_sink_sdpa": "sink_sdpa",
+             "inkling2_prefill_mask_mb": "prefill_mask_mb", "inkling2_sink_slot": "sink_slot",
+             "inkling2_fuse_controllers": "fuse_controllers", "inkling2_fuse_residual": "fuse_residual",
+             "inkling2_fuse_sconv": "fuse_sconv", "inkling2_fuse_attention": "fuse_attention",
+             "inkling2_verify_splitk": "verify_splitk"}}
+    effective = {{**defaults, **policy}}
+    kernel_policy = {{names[k]: effective.get(k, False if k != "inkling2_prefill_mask_mb" else None)
+                     for k in names}}
+    sink = kernel_policy["sink_sdpa"]
     seen, calls = set(), [0]
 
     class H(BaseHTTPRequestHandler):
@@ -136,9 +150,12 @@ STUB = textwrap.dedent('''\
             if self.path == "/health":
                 return self._json({{"status": "ok"}})
             return self._json({{"execution": {{"checkpoint": "Inkling-2-Mini@stubfp",
-                                              "kernel_policy": {{"sink_sdpa": sink, "hard_no_thinking": hard,
-                                                                "prefill_mask_mb": policy.get("inkling2_prefill_mask_mb")}},
-                                              "kernel_counters": {{"sink_sdpa_calls": calls[0] if sink else 0}}}},
+                                              "kernel_policy": kernel_policy,
+                                              "kernel_counters": {{
+                                                  "sink_sdpa_calls": calls[0] if sink and not kernel_policy["verify_splitk"] else 0,
+                                                  "sink_slot_calls": calls[0] if kernel_policy["sink_slot"] and not kernel_policy["verify_splitk"] else 0,
+                                                  "verify_splitk_calls": calls[0] if kernel_policy["verify_splitk"] else 0}},
+                                              "dspark": {{"prefill_reclaim": spec}}}},
                                "metal_peak_bytes": 2**31, "process_physical_footprint_bytes": 2**32}})
 
         def do_POST(self):
@@ -278,8 +295,14 @@ def test_end_to_end_against_a_stub_server(tmp_path, monkeypatch):
     assert all(e["max_tokens"] <= 3 for c in b4["cells"] for lane in c["evidence"] for e in lane)
     assert b4["verdict"]["batched_cold_warm_divergences"] == {"near_tie_equivalent": len(flips)}
     counts = {c["arm"]: c["counts"] for c in report["comparisons"]}
-    assert counts == {"dspark_b1": {"identical": 2}, "ordinary_b4": {"near_tie_equivalent": 2},
-                      "sink_sdpa_b1": {"high_margin_divergence": 1}, "mask512_b1": {"identical": 1}}
+    expected = {"dspark_b1": {"identical": 2}, "ordinary_b4": {"near_tie_equivalent": 2},
+                "sink_sdpa_b1": {"high_margin_divergence": 1}, "mask512_b1": {"identical": 1},
+                "dspark_reclaim_b1": {"identical": 2}}
+    assert {k: counts[k] for k in expected} == expected
+    # Every armed phase is compared; the stub flips position 2 whenever sink
+    # SDPA is effective (it is part of the new defaults, so default_b1 too).
+    assert set(counts) == {p["name"] for p in L.PHASES if p.get("reference")}
+    assert counts["default_b1"] == {"high_margin_divergence": 2}
     sink_row = next(c for c in report["comparisons"] if c["arm"] == "sink_sdpa_b1")["rows"][0]
     assert sink_row["first_divergence"] == 2 and sink_row["ref_window"] and sink_row["arm_window"]
     assert rc == 0, report["status"]

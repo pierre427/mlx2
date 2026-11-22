@@ -392,7 +392,7 @@ def main(argv=None):
     sys.path.insert(0, str(ROOT / "src"))
     import mlx.core as mx
 
-    from mlx2.adapters.inkling2 import Inkling2Adapter
+    from mlx2.adapters.inkling2 import REFERENCE_POLICY, Inkling2Adapter
 
     receipt = {"script": "scripts/smoke_inkling2.py", "mlx2": git_commit(), "mlx_version": mx.__version__,
                "swap_used_mb_before": swap_used_mb(), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -405,7 +405,7 @@ def main(argv=None):
         receipt["metal_tests"] = {"returncode": metal.returncode, "tail": metal.stdout[-1500:]}
         print("metal tests rc", metal.returncode, flush=True)
         t0 = time.monotonic()
-        adapter = Inkling2Adapter(str(a.model))
+        adapter = Inkling2Adapter(str(a.model), execution_policy=dict(REFERENCE_POLICY))
         try:
             receipt["load_seconds"] = round(time.monotonic() - t0, 1)
             receipt["checkpoint"] = adapter.checkpoint

@@ -72,7 +72,7 @@ def main():
     adapter = Inkling2Adapter(str(model_dir))
     try:
         model = adapter.model
-        base = {**model.kernel_policy, "sink_slot": False, "sink_sdpa": False}
+        base = {**model.kernel_policy, "sink_slot": False, "sink_sdpa": False, "verify_splitk": False}
         receipt["checkpoint"] = adapter.checkpoint
         receipt["base_kernel_policy"] = base
         corpus = corpus_tokens(adapter.tokenizer, max(contexts))

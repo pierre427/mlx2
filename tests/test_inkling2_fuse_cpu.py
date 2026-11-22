@@ -188,11 +188,16 @@ def test_kernel_options_decline_on_cpu_and_stay_exact():
 def test_policy_names_and_dependency():
     from mlx2.adapters.inkling2 import KERNEL_OPTIONS, validate_policy
 
-    for name in EXACT + ("fuse_sconv_kernel", "fuse_residual_kernel"):
+    # The four exact options are default on since 2026-11-22 (Pierre); the
+    # two near-exact kernels stay off.
+    for name in EXACT:
+        assert KERNEL_OPTIONS["inkling2_" + name] == name
+        assert validate_policy(None)[0][name] is True
+    for name in ("fuse_sconv_kernel", "fuse_residual_kernel"):
         assert KERNEL_OPTIONS["inkling2_" + name] == name
         assert validate_policy(None)[0][name] is False
     with pytest.raises(ValueError, match="fuse_sconv_kernel requires"):
-        validate_policy({"inkling2_fuse_sconv_kernel": True})
+        validate_policy({"inkling2_fuse_sconv": False, "inkling2_fuse_sconv_kernel": True})
     with pytest.raises(ValueError, match="requires fuse_sconv"):
         _tiny_model().configure_kernels(fuse_sconv_kernel=True)
 

@@ -244,12 +244,12 @@ def main(argv=None):
     sys.path.insert(0, str(ROOT / "src"))
     import mlx.core as mx
 
-    from mlx2.adapters.inkling2 import Inkling2Adapter
+    from mlx2.adapters.inkling2 import REFERENCE_POLICY, Inkling2Adapter
 
     receipt = {"script": "scripts/research/inkling2_pass_probe.py", "mlx2": git_commit(),
                "mlx_version": mx.__version__, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                "kind": "interpretability probe (not qualification, not performance)"}
-    adapter = Inkling2Adapter(str(a.model))
+    adapter = Inkling2Adapter(str(a.model), execution_policy=dict(REFERENCE_POLICY))
     try:
         receipt["checkpoint"] = adapter.checkpoint
         receipt["route_receipt"] = adapter.diagnostics()

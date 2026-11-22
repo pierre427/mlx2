@@ -353,12 +353,12 @@ def test_policy_parsing():
     from mlx2.adapters.inkling2 import validate_policy
 
     assert validate_policy(None) == (
-        {"fused_projections": False, "head_kernel": False, "sink_sdpa": False,
-         "sink_slot": False, "flash_prefill": False, "verify_splitk": False,
+        {"fused_projections": False, "head_kernel": False, "sink_sdpa": True,
+         "sink_slot": True, "flash_prefill": False, "verify_splitk": True,
          "moe_fused": True, "moe_weighted_sum": True,
          "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": None,
-         "prefill_mask_mb": None, "loop_passes": None, "fuse_controllers": False, "fuse_residual": False, "fuse_sconv": False,
-         "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,
+         "prefill_mask_mb": None, "loop_passes": None, "fuse_controllers": True, "fuse_residual": True, "fuse_sconv": True,
+         "fuse_attention": True, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,
          "moe_act_quant": False}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
@@ -719,12 +719,13 @@ def test_sink_slot_after_trim_is_bitwise_reference():
 # ----- inkling2_verify_splitk (GQA split-K short-block attention) -----
 
 
-def test_verify_splitk_policy_default_off_and_boolean():
+def test_verify_splitk_policy_default_on_and_boolean():
     from mlx2.adapters.inkling2 import KERNEL_OPTIONS, validate_policy
 
     assert KERNEL_OPTIONS["inkling2_verify_splitk"] == "verify_splitk"
-    assert validate_policy(None)[0]["verify_splitk"] is False
-    assert validate_policy({"inkling2_verify_splitk": True})[0]["verify_splitk"] is True
+    # Default on since 2026-11-22 (Pierre, "full set"); false opts out.
+    assert validate_policy(None)[0]["verify_splitk"] is True
+    assert validate_policy({"inkling2_verify_splitk": False})[0]["verify_splitk"] is False
     for bad in (1, None, "true"):
         with pytest.raises(TypeError):
             validate_policy({"inkling2_verify_splitk": bad})

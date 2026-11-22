@@ -279,7 +279,26 @@ KERNEL_OPTIONS = {
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.
-KERNEL_DEFAULTS = {"moe_fused": True, "moe_weighted_sum": None, "moe_nax_gather": None}
+#
+# The composed set is DEFAULT ON (Pierre 2026-11-22, "full set"): sink SDPA
+# (one-token decode), sink slot (multi-row calls), the four exact launch-count
+# fusions and split-K short-block attention. Basis, Inkling-2-Mini@440956c8:
+# ladder 028602cc6 (composed + split-K) decode +5% to +76% (ordinary) and
+# +23% to +92% (DSpark) at 1K-128K against reference ordinary_b1, oracle
+# 24/24, cold/warm exact, 12/12 splits near_tie_equivalent; fusions bitwise
+# on Metal and on the checkpoint. Sink SDPA and split-K are near-exact (their
+# reduction order differs), so the default route is near-tie, not bitwise,
+# equal to the reference; set any of them false to get the reference back.
+# The two near-exact fusion kernels (fuse_sconv_kernel, fuse_residual_kernel)
+# and W4A4 (moe_act_quant) stay off.
+KERNEL_DEFAULTS = {"moe_fused": True, "moe_weighted_sum": None, "moe_nax_gather": None,
+                   "sink_sdpa": True, "sink_slot": True, "verify_splitk": True,
+                   "fuse_controllers": True, "fuse_residual": True, "fuse_sconv": True,
+                   "fuse_attention": True}
+# The policy that selects the reference path for every switch the defaults
+# turn on (comparison scripts and the ladder's reference arm start from it).
+REFERENCE_POLICY = {key: False for key, name in KERNEL_OPTIONS.items()
+                    if KERNEL_DEFAULTS.get(name) is True and not name.startswith("moe_")}
 # Varloop (Pierre 2026-11-21): run the middle
 # block N times instead of the trained 3. The checkpoint has is_varloop
 # false, so every N != 3 is out of distribution; it is a research knob, not a
@@ -612,6 +631,11 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             names += ("moe_nax_gather.py",)
         if policy.get("verify_splitk"):
             names += ("inkling2/splitk.py",)
+        if any(policy.get(k) for k in ("fuse_controllers", "fuse_residual", "fuse_sconv",
+                                       "fuse_attention")):
+            names += ("inkling2/fuse.py",)
+        if policy.get("fuse_sconv_kernel") or policy.get("fuse_residual_kernel"):
+            names += ("inkling2/fuse_kernels.py",)
         if policy.get("moe_act_quant"):
             names += ("inkling2/act_quant.py",)
         return {

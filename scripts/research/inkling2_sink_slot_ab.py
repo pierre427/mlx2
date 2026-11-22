@@ -98,7 +98,7 @@ def main():
     sys.path.insert(0, str(ROOT / "src"))
     import mlx.core as mx
 
-    from mlx2.adapters.inkling2 import Inkling2Adapter
+    from mlx2.adapters.inkling2 import REFERENCE_POLICY, Inkling2Adapter
 
     head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True,
                           text=True).stdout.strip()
@@ -113,7 +113,7 @@ def main():
         tmp.write_text(json.dumps(receipt, indent=1, default=str))
         os.replace(tmp, out)
 
-    adapter = Inkling2Adapter(str(model_dir))  # current defaults (MoE fast paths on)
+    adapter = Inkling2Adapter(str(model_dir), execution_policy=dict(REFERENCE_POLICY))  # reference path (MoE fast paths on)
     try:
         model = adapter.model
         receipt["checkpoint"] = adapter.checkpoint
