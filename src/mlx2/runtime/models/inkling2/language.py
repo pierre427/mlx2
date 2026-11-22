@@ -412,7 +412,8 @@ class Attention(nn.Module):
         zeros = mx.zeros((b, self.n_kv, 1, self.head_dim), k.dtype)
         k = mx.concatenate([k, zeros], axis=2)
         v = mx.concatenate([v, zeros], axis=2)
-        rows = max(1, _MASK_BUDGET_BYTES // max(1, b * self.n_heads * (size + 1) * 4))
+        budget = self.__dict__.get("_mask_budget_bytes") or _MASK_BUDGET_BYTES
+        rows = max(1, budget // max(1, b * self.n_heads * (size + 1) * 4))
         outputs = []
         for begin in range(0, length, rows):
             end = min(length, begin + rows)
@@ -771,7 +772,7 @@ class Model(nn.Module):
         return self._project_logits(self.model.norm(select_checkpoint_rows(pre_norm)))
 
     def configure_kernels(self, *, fused_projections=False, head_kernel=False, sink_sdpa=False,
-                          loop_passes=None):
+                          loop_passes=None, prefill_mask_mb=None):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count."""
@@ -779,6 +780,8 @@ class Model(nn.Module):
             self.config.loop_config.num_passes if loop_passes is None else loop_passes)
         for layer in self.model.layers:
             object.__setattr__(layer.self_attn, "_sink_sdpa", bool(sink_sdpa))
+            object.__setattr__(layer.self_attn, "_mask_budget_bytes",
+                               None if prefill_mask_mb is None else int(prefill_mask_mb) << 20)
             if fused_projections:
                 layer.self_attn.fuse_projections()
             elif getattr(layer.self_attn, "_fused_bounds", None) is not None:
@@ -788,7 +791,8 @@ class Model(nn.Module):
             self,
             "kernel_policy",
             {"fused_projections": bool(fused_projections), "head_kernel": bool(head_kernel),
-             "sink_sdpa": bool(sink_sdpa), "loop_passes": loop_passes},
+             "sink_sdpa": bool(sink_sdpa), "loop_passes": loop_passes,
+             "prefill_mask_mb": prefill_mask_mb},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.

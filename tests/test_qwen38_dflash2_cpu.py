@@ -333,7 +333,15 @@ def test_hybrid_rows_refuse_unsupported_topologies():
     assert not is_hybrid_rows([[RotatingKVCache(max_size=4)]])
     mixed = list(cache)
     mixed[3] = RotatingKVCache(max_size=4)
-    assert not is_hybrid_rows([mixed])
+    # Rings beside recurrent state are hybrid at B1 (ring record/replay
+    # rollback, 2026-11-21), and batched rows over rings still fail closed.
+    assert is_hybrid_rows([mixed], allow_rings=True)
+    assert not is_hybrid_rows([mixed])  # prompt lookup: unchanged
+    other = list(target.make_cache())
+    other[3] = RotatingKVCache(max_size=4)
+    from mlx2.runtime.hybrid_verify_rows import HybridVerifyUnsupported
+    with pytest.raises(HybridVerifyUnsupported, match="rotating KV"):
+        HybridVerifyRows([mixed, other])
     with pytest.raises(ValueError, match="independent"):
         HybridVerifyRows([cache, cache])
     transaction = HybridVerifyRows([cache]).begin([2])

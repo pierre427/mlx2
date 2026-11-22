@@ -14,6 +14,13 @@ the same models (``build_segmented_batch_cache_group``).  Selection is by
 cache topology: a lane whose caches are only plain/rotating KV keeps the
 ``SegmentedKVRows`` owner.
 
+A sliding-window ``RotatingKVCache`` beside recurrent state (Inkling's
+local layers) is handled B1 only, with the ring's own exact record-and-replay
+rollback: it speculates for every round, plain rounds included, so ``trim``
+restores the pre-forward window and re-appends the accepted prefix even once
+the ring has wrapped.  Batched (B>1) verify over rings fails closed: the
+segmented batch views have no ring layout.
+
 Per round: every recurrent row starts a fresh rollback epoch, the verify
 forward records one replay per recurrent layer, commit trims each row to its
 consumed prefix and stops speculation (dropping the records and the
@@ -37,14 +44,28 @@ class HybridVerifyUnsupported(TypeError):
     """The lane caches do not declare the required exact transaction contract."""
 
 
-def _supported_kv(cache):
+def _supported_kv(cache, *, allow_rings=True):
     contract = cache_operations(
         cache, capability="hybrid verify KV rollback", required=False
     )
+    if contract is None or contract.rollback != "kv_trim":
+        return False
+    if contract.family == "rotating_kv":
+        # Only rings that own an exact record/replay rollback (wrapped rings
+        # cannot be offset-trimmed).
+        return allow_rings and _rotating(cache)
+    return contract.family in {"kv", "indexed_kv"}
+
+
+def _rotating(cache):
+    """A sliding-window ring: trimmable after wrap only while speculating."""
+    contract = cache_operations(
+        cache, capability="hybrid verify ring rollback", required=False
+    )
     return (
         contract is not None
-        and contract.rollback == "kv_trim"
-        and contract.family in {"kv", "indexed_kv"}
+        and contract.family == "rotating_kv"
+        and callable(getattr(cache, "start_speculation", None))
     )
 
 
@@ -55,22 +76,32 @@ def _recurrent(cache):
     return contract is not None and contract.rollback == "recurrent_record_trim"
 
 
-def is_hybrid_rows(rows) -> bool:
-    """True for supported rows needing recurrent or declared KV transactions."""
+def is_hybrid_rows(rows, *, allow_rings=False) -> bool:
+    """True for supported rows needing recurrent or declared KV transactions.
+
+    ``allow_rings`` admits sliding-window rings, and only beside recurrent
+    state (B1; see the module note). It is opt-in per caller: the external
+    draft route passes it; prompt lookup does not, so its ring+recurrent
+    lanes keep their per-lane rounds."""
     rows = [list(row) for row in rows]
     if not rows or not rows[0]:
         return False
     specialized = False
+    rings = recurrent = False
     for row in rows:
         for cache in row:
             if _recurrent(cache):
-                specialized = True
-            elif not _supported_kv(cache):
+                specialized = recurrent = True
+            elif not _supported_kv(cache, allow_rings=allow_rings):
                 return False
+            elif _rotating(cache):
+                rings = True
             elif cache_operations(
                 cache, capability="hybrid verify topology"
             ).family == "indexed_kv":
                 specialized = True
+    if rings and not recurrent:
+        return False  # pure KV + rings keep the segmented owner
     return specialized
 
 
@@ -146,7 +177,14 @@ class HybridVerifyRows:
                     "hybrid verify needs ArraysCache, plain KVCache, or explicitly "
                     f"declared exact KV transaction layers; rows={details!r}"
                 )
+            if len(rows) > 1 and any(_rotating(cache) for cache in layer):
+                raise HybridVerifyUnsupported(
+                    "batched hybrid verify over rotating KV is not implemented "
+                    "(segmented batch views have no ring layout); B1 only"
+                )
             for cache in layer:
+                if _rotating(cache) and cache.speculating:
+                    raise ValueError("rotating row already has a speculation owner")
                 if _recurrent(cache):
                     if cache.batch_size != 1 and not cache.empty():
                         raise ValueError(
@@ -163,6 +201,7 @@ class HybridVerifyRows:
         # rollback contract is fixed for its lifetime, and a kept owner opens
         # one transaction per round, so classify once.
         self._recurrent_rows = [[_recurrent(cache) for cache in row] for row in rows]
+        self._rotating = [cache for row in rows for cache in row if _rotating(cache)]
         self._note = note
         self._active = None
         # Per-layer batched views, kept across this owner's rounds while
@@ -212,6 +251,8 @@ class HybridVerifyRows:
         return group
 
     def begin(self, lengths, *, plain_single_token=False):
+        if any(cache.speculating for cache in self._rotating):
+            raise RuntimeError("rotating row already has a speculation owner")
         """Lease the rows to one verify forward of ``lengths`` tokens per row.
 
         ``plain_single_token`` lets a round whose every row is one token skip
@@ -260,6 +301,14 @@ class HybridVerifyTransaction:
         # Rows of a plain round rewound and dropped before commit.
         self._released = set()
         try:
+            # Rings record every round (plain too): after wrap only the
+            # recorded window makes a trim or abort exact.
+            rotating = getattr(owner, "_rotating", None)
+            if rotating is None:
+                rotating = [c for row in rows for c in row if _rotating(c)]
+            for cache in rotating:
+                cache.start_speculation()
+                self._started.append(cache)
             if not self.plain:
                 for cache, *_state in self._recurrent_base:
                     cache.start_speculation()

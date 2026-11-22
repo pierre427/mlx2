@@ -2456,7 +2456,7 @@ class ExternalDraftBatchGenerator:
         from .hybrid_verify_rows import HybridVerifyRows, is_hybrid_rows
         from .segmented_rotating_kv import SegmentedKVRows
 
-        if is_hybrid_rows(rows):
+        if is_hybrid_rows(rows, allow_rings=True):
             if not getattr(self.model, "supports_speculative_rollback", False):
                 raise ValueError("target has recurrent state but declares no speculative rollback")
             _bump(self.scheduler_stats, "external_hybrid_transactions")
@@ -2467,7 +2467,7 @@ class ExternalDraftBatchGenerator:
     def _is_hybrid(rows):
         from .hybrid_verify_rows import is_hybrid_rows
 
-        return is_hybrid_rows(rows)
+        return is_hybrid_rows(rows, allow_rings=True)
 
     def _empty_hidden(self):
         # A drafter whose feature is not a concatenation of hidden-size layer

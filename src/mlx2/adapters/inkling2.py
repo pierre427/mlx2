@@ -183,6 +183,21 @@ KERNEL_OPTIONS = {
 # false, so every N != 3 is out of distribution; it is a research knob, not a
 # serving option. Incompatible with DSpark (its taps assume 48 visits).
 LOOP_PASSES_OPTION = "inkling2_loop_passes"
+# Hard no-thinking (Pierre 2026-11-21): with
+# this policy on, a request that turns thinking off (enable_thinking false,
+# reasoning_effort "none", or thinking_budget 0) gets the assistant header and
+# text marker appended to the prompt, so the model starts in the text channel
+# instead of at the header where it may open <|content_thinking|>. Default
+# off: without it "none" stays the template's soft hint.
+HARD_NO_THINKING_OPTION = "inkling2_hard_no_thinking"
+TEXT_PREFILL = ("<|message_model|>", "<|content_text|>")
+# Prefill mask budget (MiB; default 64). Long-context prefill builds the
+# relative-bias mask in row chunks of this many bytes and runs one SDPA per
+# chunk over the whole K/V: at 128K a 64 MiB budget is ~5 query rows per call,
+# so a 512-token chunk re-reads K/V ~100 times per global visit. A larger
+# budget trades transient memory for fewer passes; rows per call change, so
+# SDPA kernel choice may too (near-exact). Opt-in pending an A/B.
+PREFILL_MASK_OPTION = "inkling2_prefill_mask_mb"
 
 
 def validate_policy(value):
@@ -198,6 +213,14 @@ def validate_policy(value):
         if type(flag) is not bool:
             raise TypeError(f"Inkling 2 {key} must be a boolean")
         kernels[name] = flag
+    hard = value.pop(HARD_NO_THINKING_OPTION, False)
+    if type(hard) is not bool:
+        raise TypeError(f"Inkling 2 {HARD_NO_THINKING_OPTION} must be a boolean")
+    kernels["hard_no_thinking"] = hard
+    mask_mb = value.pop(PREFILL_MASK_OPTION, None)
+    if mask_mb is not None and (type(mask_mb) is not int or not 16 <= mask_mb <= 4096):
+        raise TypeError(f"Inkling 2 {PREFILL_MASK_OPTION} must be an integer 16..4096")
+    kernels["prefill_mask_mb"] = mask_mb
     passes = value.pop(LOOP_PASSES_OPTION, None)
     if passes is not None and (type(passes) is not int or not 1 <= passes <= 8):
         raise TypeError(f"Inkling 2 {LOOP_PASSES_OPTION} must be an integer 1..8")
@@ -381,6 +404,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
         path = Path(self.identity["path"])
         self.model, self.expert_receipt = load_model(path, artifact)
+        self.hard_no_thinking = self.kernel_policy.pop("hard_no_thinking")
         self.model.configure_kernels(**self.kernel_policy)
         self.layout = self.model.apc_v2_layout
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
@@ -427,6 +451,10 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
     def execution_config(self, *, max_lanes, prefill_step):
         if getattr(self, "draft_model", None) is not None:
+            if max_lanes != 1:
+                # Verify over sliding-window rings beside recurrent state is
+                # B1 only (HybridVerifyRows); fail at startup, not mid-round.
+                raise ValueError("Inkling 2 DSpark serving is B1 only: start with --max-lanes 1")
             return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
         return {
             "persistent": True,
@@ -480,14 +508,38 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 raise ValueError("Inkling 2 native text adapter does not accept media")
         return messages
 
+    def _text_prefill(self, request):
+        """Whether this request starts generation inside the text channel."""
+        if not getattr(self, "hard_no_thinking", False) or "messages" not in request:
+            return False
+        return (request.get("enable_thinking") is False
+                or self._reasoning_effort(request) == "none")
+
+    def thinking_control(self, request):
+        """Per-request receipt: how thinking was (not) suppressed."""
+        effort = self._reasoning_effort(request) if "messages" in request else None
+        return {
+            "mode": "hard_text_prefill" if self._text_prefill(request) else "template_effort",
+            "reasoning_effort": effort,
+            "policy_hard_no_thinking": bool(getattr(self, "hard_no_thinking", False)),
+        }
+
     def _render(self, request, tokenize):
         kwargs = {}
         effort = self._reasoning_effort(request)
         if effort is not None:
             kwargs["reasoning_effort"] = effort
-        return self.tokenizer.apply_chat_template(
+        rendered = self.tokenizer.apply_chat_template(
             self._messages(request), tokenize=tokenize, add_generation_prompt=True, **kwargs
         )
+        if not self._text_prefill(request):
+            return rendered
+        if not tokenize:
+            return rendered + "".join(TEXT_PREFILL)
+        ids = [self.tokenizer.convert_tokens_to_ids(marker) for marker in TEXT_PREFILL]
+        if any(not isinstance(i, int) or i < 0 for i in ids):
+            raise ValueError("Inkling 2 tokenizer lacks the text-channel markers")
+        return list(rendered) + ids
 
     def prompt_tokens(self, request):
         if "messages" not in request:
@@ -506,12 +558,15 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     def output_parser(self, request):
         from .inkling_output import INKLING2_TEXT_MARKERS, InklingOutputParser
 
-        return InklingOutputParser(
+        parser = InklingOutputParser(
             chat="messages" in request,
             stops=request.get("stop", ()),
             text_markers=INKLING2_TEXT_MARKERS,
             header_names=True,
         )
+        if self._text_prefill(request):
+            parser.channel = "content"  # the prompt already opened the text channel
+        return parser
 
     def tool_constraint(self, request):
         return None
@@ -529,6 +584,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
             "kernel_counters": (self.model.kernel_receipt() if getattr(self, "model", None) else None),
             "loop": (self.model.loop_receipt() if getattr(self, "model", None) else None),
+            "hard_no_thinking": bool(getattr(self, "hard_no_thinking", False)),
             "experts": getattr(self, "expert_receipt", None),
             "target_forward_observed": bool(getattr(getattr(self, "model", None), "completed_forwards", 0)),
             "dspark": {

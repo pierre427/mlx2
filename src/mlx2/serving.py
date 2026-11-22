@@ -17216,6 +17216,13 @@ class ServingEngine(KernelReloadMixin):
                                             if wants_logprobs(job.request) else None
                                         ),
                                         "thinking": thinking_enabled(adapter, job.request),
+                                        # Adapter-declared thinking suppression
+                                        # (Inkling 2 hard_text_prefill), if any.
+                                        "thinking_control": (
+                                            adapter.thinking_control(job.request)
+                                            if callable(getattr(adapter, "thinking_control", None))
+                                            else None
+                                        ),
                                         "thinking_budget": job.request.get("thinking_budget"),
                                         "thinking_budget_mode": job.request.get(
                                             "thinking_budget_mode", "state_aware"

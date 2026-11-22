@@ -370,3 +370,34 @@ def test_external_backend_matches_draft_block_per_lane(pair):
     from mlx2.runtime.external_speculative import DraftUnavailable
     with pytest.raises(DraftUnavailable):
         backend.draft_distributions([1], mx.zeros((1, 0, WIDTH)), backend.batch_caches([fresh]), 2, None, [0])
+
+
+@pytest.mark.parametrize("num_draft", [1, 3, 7])
+def test_engine_greedy_equals_ordinary_through_hybrid_ring_owner(pair, num_draft):
+    """The serving path that failed with 503 on Inkling-2-Mini@440956c8:
+    ExternalDraftBatchGenerator over rotating KV + recurrent conv + KV lanes.
+    Greedy output must equal ordinary decode with the rings wrapped."""
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = pair
+    prompt = [int(t) for t in mx.random.randint(1, 400, (40,)).tolist()]
+    cache = target.make_cache()
+    tokens, expect = list(prompt), []
+    for step in range(14):
+        logits = target(mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache)
+        tokens.append(int(mx.argmax(logits[0, -1]).item()))
+        expect.append(tokens[-1])
+    batch = ExternalDraftBatchGenerator(
+        target, draft_model=Inkling2DSparkExternal(draft, num_draft=num_draft),
+        binding="test", num_draft=num_draft, prefill_step_size=16,
+    )
+    uid = batch.insert([prompt], max_tokens=[14], sampling_configs=[{"sampling_temp": 0}])[0]
+    got = []
+    for _ in range(400):
+        _, responses = batch.next()
+        got += [r.token for r in responses if r.uid == uid]
+        if not batch.lanes:
+            break
+    assert got == expect
+    assert batch.scheduler_stats["external_hybrid_transactions"] > 0

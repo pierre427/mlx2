@@ -354,7 +354,7 @@ def test_policy_parsing():
 
     assert validate_policy(None) == (
         {"fused_projections": False, "head_kernel": False, "sink_sdpa": False,
-         "loop_passes": None}, {})
+         "hard_no_thinking": False, "prefill_mask_mb": None, "loop_passes": None}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -369,7 +369,8 @@ def test_fused_projection_toggle_round_trip():
         model.configure_kernels(fused_projections=flag)
         assert mx.abs(model(tokens) - base).max().item() < 1e-5
     assert model.kernel_policy == {"fused_projections": False, "head_kernel": False,
-                                   "sink_sdpa": False, "loop_passes": None}
+                                   "sink_sdpa": False, "loop_passes": None,
+                                   "prefill_mask_mb": None}
 
 
 @pytest.mark.parametrize("rows", [1, 2])
@@ -547,3 +548,54 @@ def test_varloop_changes_visits_and_stays_self_consistent(passes):
     for bad in (0, 9, True, 2.0):
         with pytest.raises(TypeError):
             validate_policy({"inkling2_loop_passes": bad})
+
+
+def test_hard_no_thinking_prefills_text_channel_only_when_asked():
+    from mlx2.adapters.inkling2 import Inkling2Adapter, validate_policy
+
+    class Tok:
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt, **kw):
+            text = f"<prompt effort={kw.get('reasoning_effort')}>"
+            return [7, 8, 9] if tokenize else text
+
+        def convert_tokens_to_ids(self, token):
+            return {"<|message_model|>": 200001, "<|content_text|>": 200004}[token]
+
+    adapter = object.__new__(Inkling2Adapter)
+    adapter.tokenizer = Tok()
+    off = {"messages": [{"role": "user", "content": "hi"}], "enable_thinking": False}
+    on = {"messages": [{"role": "user", "content": "hi"}]}
+    adapter.hard_no_thinking = False
+    assert adapter.prompt_tokens(off) == [7, 8, 9]  # soft hint only (default)
+    assert adapter.thinking_control(off)["mode"] == "template_effort"
+    adapter.hard_no_thinking = True
+    assert adapter.prompt_tokens(off) == [7, 8, 9, 200001, 200004]
+    assert adapter.render_prompt(off).endswith("<|message_model|><|content_text|>")
+    assert adapter.prompt_tokens({**on, "reasoning_effort": "none"})[-2:] == [200001, 200004]
+    assert adapter.prompt_tokens({**on, "thinking_budget": 0})[-2:] == [200001, 200004]
+    assert adapter.prompt_tokens(on) == [7, 8, 9]  # thinking requested: untouched
+    assert adapter.thinking_control(off) == {"mode": "hard_text_prefill",
+                                             "reasoning_effort": "none",
+                                             "policy_hard_no_thinking": True}
+    parser = adapter.output_parser(off)
+    events = parser.push("Paris<|content_model_end_sampling|>")
+    assert events == [{"content": "Paris"}]
+    assert validate_policy({"inkling2_hard_no_thinking": True})[0]["hard_no_thinking"] is True
+    with pytest.raises(TypeError):
+        validate_policy({"inkling2_hard_no_thinking": 1})
+
+
+def test_prefill_mask_budget_changes_row_chunks_not_results():
+    model = _tiny_model()
+    tokens = mx.random.randint(0, 500, (1, 30))
+    base = _run(model, tokens, [(0, 30)])
+    import mlx2.runtime.models.inkling2.language as lang
+    old = lang._MASK_BUDGET_BYTES
+    try:
+        lang._MASK_BUDGET_BYTES = 4096  # force many row chunks on the reference path
+        chunked = _run(model, tokens, [(0, 30)])
+    finally:
+        lang._MASK_BUDGET_BYTES = old
+    model.configure_kernels(prefill_mask_mb=64)
+    assert mx.abs(chunked - base).max().item() < 1e-5
+    assert mx.abs(_run(model, tokens, [(0, 30)]) - base).max().item() < 1e-5
