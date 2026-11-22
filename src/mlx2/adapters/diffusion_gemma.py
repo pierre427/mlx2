@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .diffusion_trac import SAMPLER as TRAC_SAMPLER
+from .diffusion_trac import TRACPersistenceConfig
+
 SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
 SOURCE_ROOT = Path.home() / "Desktop/mlx-uag/worktrees/agnes-vlm-support"
 SOURCE_PATHS = ("mlx_vlm/models/diffusion_gemma", "mlx_vlm/generate/diffusion.py",
@@ -154,6 +157,10 @@ class DiffusionText:
     temperature: float = 1.0
     seed: int | None = 0
     full_canvas: bool = True
+    sampler: str = "entropy-bound"
+    # Receipt of the opt-in, unqualified TRAC early-commit sampler; None for
+    # the mlx-vlm samplers.
+    trac: dict | None = None
 
 
 class DiffusionGemmaAdapter:
@@ -181,7 +188,8 @@ class DiffusionGemmaAdapter:
                       max_denoising_steps: int = 48,
                       sampler: str = "entropy-bound",
                       temperature: float = 1.0, seed: int | None = 0,
-                      full_canvas: bool = True) -> DiffusionText:
+                      full_canvas: bool = True,
+                      trac_config: TRACPersistenceConfig | None = None) -> DiffusionText:
         """Denoise one response.
 
         The defaults are the reference law (HF DiffusionGemmaGenerationMixin):
@@ -190,6 +198,20 @@ class DiffusionGemmaAdapter:
         truncated afterwards.  ``temperature=0`` selects mlx-vlm's argmax
         denoiser, a separate non-reference variant; ``full_canvas=False``
         lets mlx-vlm shrink the last canvas below 256 tokens.
+
+        ``sampler="trac-persistence"`` (opt-in, NOT qualified, never a
+        default) runs mlx-vlm's confidence-threshold loop with TRAC early
+        commits (arXiv 2611.25643): a still-unrevealed position whose top-1
+        token persisted across ``trac_config.stable_steps`` consecutive step
+        transitions, with top-1 probability >= ``low_threshold`` (paper 0.5)
+        and top-8 JSD <= 0.04, commits before reaching the confidence
+        threshold.  The paper measured it only on Chinese-English machine
+        translation with LLaDA-8B; on DiffusionGemma neither its forward
+        savings nor its quality are established.  It is a lossy schedule
+        change: outputs differ from the confidence-threshold sampler.  Each
+        step adds a host copy of the top-8 rows and a Python JSD loop, so
+        fewer forwards need not mean less time; an A/B must measure wall
+        time, not only forwards.  See ``diffusion_trac``.
         """
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("DiffusionGemma prompt must be nonempty")
@@ -199,8 +221,14 @@ class DiffusionGemmaAdapter:
             raise ValueError("DiffusionGemma max_tokens must be 1..2048")
         if type(max_denoising_steps) is not int or not 1 <= max_denoising_steps <= 48:
             raise ValueError("DiffusionGemma denoising steps must be 1..48")
-        if sampler not in {"entropy-bound", "confidence-threshold"}:
+        if sampler not in {"entropy-bound", "confidence-threshold", TRAC_SAMPLER}:
             raise ValueError("unsupported DiffusionGemma sampler")
+        if trac_config is not None and sampler != TRAC_SAMPLER:
+            raise ValueError("trac_config applies only to the trac-persistence sampler")
+        if sampler == TRAC_SAMPLER:
+            trac_config = trac_config or TRACPersistenceConfig()
+            if not isinstance(trac_config, TRACPersistenceConfig):
+                raise ValueError("trac_config must be a TRACPersistenceConfig")
         if (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
                 or not 0 <= temperature <= 2):
             raise ValueError("DiffusionGemma temperature must be 0..2")
@@ -220,20 +248,29 @@ class DiffusionGemmaAdapter:
                                         num_images=int(image is not None),
                                         video=[str(video)] if video is not None else None,
                                         fps=1.0)
-        result = generate(model, processor, formatted,
-                          image=str(image) if image is not None else None,
-                          video=str(video) if video is not None else None,
-                          verbose=False, max_tokens=max_tokens,
-                          max_denoising_steps=max_denoising_steps,
-                          diffusion_sampler=sampler,
-                          temperature=float(temperature),
-                          diffusion_full_canvas=full_canvas,
-                          **({} if seed is None else {"seed": seed}))
+        call = dict(image=str(image) if image is not None else None,
+                    video=str(video) if video is not None else None,
+                    verbose=False, max_tokens=max_tokens,
+                    max_denoising_steps=max_denoising_steps,
+                    diffusion_sampler=sampler,
+                    temperature=float(temperature),
+                    diffusion_full_canvas=full_canvas,
+                    **({} if seed is None else {"seed": seed}))
+        receipt = None
+        if sampler == TRAC_SAMPLER:
+            call["diffusion_sampler"] = "confidence-threshold"
+            from .diffusion_trac import persistence_hook
+            with persistence_hook(trac_config) as counters:
+                result = generate(model, processor, formatted, **call)
+            receipt = {**trac_config.as_dict(), **counters,
+                       "base_sampler": "confidence-threshold"}
+        else:
+            result = generate(model, processor, formatted, **call)
         return DiffusionText(result.text, self.artifact["fingerprint"],
                              result.finish_reason, result.diffusion_canvas_tokens,
                              result.diffusion_denoising_steps,
                              temperature=float(temperature), seed=seed,
-                             full_canvas=full_canvas)
+                             full_canvas=full_canvas, sampler=sampler, trac=receipt)
 
     def close(self):
         self._backend = None
