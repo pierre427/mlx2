@@ -178,6 +178,11 @@ KERNEL_OPTIONS = {
     # partition differs (S vs S+1 keys).
     "inkling2_sink_sdpa": "sink_sdpa",
 }
+# Varloop (Pierre 2026-11-21): run the middle
+# block N times instead of the trained 3. The checkpoint has is_varloop
+# false, so every N != 3 is out of distribution; it is a research knob, not a
+# serving option. Incompatible with DSpark (its taps assume 48 visits).
+LOOP_PASSES_OPTION = "inkling2_loop_passes"
 
 
 def validate_policy(value):
@@ -193,6 +198,10 @@ def validate_policy(value):
         if type(flag) is not bool:
             raise TypeError(f"Inkling 2 {key} must be a boolean")
         kernels[name] = flag
+    passes = value.pop(LOOP_PASSES_OPTION, None)
+    if passes is not None and (type(passes) is not int or not 1 <= passes <= 8):
+        raise TypeError(f"Inkling 2 {LOOP_PASSES_OPTION} must be an integer 1..8")
+    kernels["loop_passes"] = passes
     return kernels, value
 
 
@@ -338,6 +347,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise ValueError("Inkling 2 declares no weight streaming mode")
         self.kernel_policy, external = validate_policy(execution_policy)
         self._parse_external_policy(external, family="Inkling 2")
+        if external and self.kernel_policy["loop_passes"] not in (None, _LOOP["num_passes"]):
+            raise ValueError("Inkling 2 DSpark taps assume the trained loop count")
         if external and external.get("draft_model") not in DSPARK_DRAFT_NAMES:
             raise ValueError(f"Inkling 2 draft_model must be one of {sorted(DSPARK_DRAFT_NAMES)}")
         artifact = inspect_artifact(model_path)
@@ -371,6 +382,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         path = Path(self.identity["path"])
         self.model, self.expert_receipt = load_model(path, artifact)
         self.model.configure_kernels(**self.kernel_policy)
+        self.layout = self.model.apc_v2_layout
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
         # <|end_message|> separates thought/text messages; only end-sampling ends the turn.
@@ -516,6 +528,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "numerics": NUMERICS,
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
             "kernel_counters": (self.model.kernel_receipt() if getattr(self, "model", None) else None),
+            "loop": (self.model.loop_receipt() if getattr(self, "model", None) else None),
             "experts": getattr(self, "expert_receipt", None),
             "target_forward_observed": bool(getattr(getattr(self, "model", None), "completed_forwards", 0)),
             "dspark": {

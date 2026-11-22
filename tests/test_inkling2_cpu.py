@@ -353,7 +353,8 @@ def test_policy_parsing():
     from mlx2.adapters.inkling2 import validate_policy
 
     assert validate_policy(None) == (
-        {"fused_projections": False, "head_kernel": False, "sink_sdpa": False}, {})
+        {"fused_projections": False, "head_kernel": False, "sink_sdpa": False,
+         "loop_passes": None}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -368,7 +369,7 @@ def test_fused_projection_toggle_round_trip():
         model.configure_kernels(fused_projections=flag)
         assert mx.abs(model(tokens) - base).max().item() < 1e-5
     assert model.kernel_policy == {"fused_projections": False, "head_kernel": False,
-                                   "sink_sdpa": False}
+                                   "sink_sdpa": False, "loop_passes": None}
 
 
 @pytest.mark.parametrize("rows", [1, 2])
@@ -516,3 +517,33 @@ def test_pass_probe_records_every_visit_and_restores_hooks():
     # Controllers run on passes 2-3 only, four per core layer visit.
     assert set(result["controllers"]["6"]) == {
         f"pass{p}.{n}" for p in (2, 3) for n in ("attn", "k", "v", "mlp")}
+
+
+@pytest.mark.parametrize("passes", [1, 2, 4])
+def test_varloop_changes_visits_and_stays_self_consistent(passes):
+    from mlx2.adapters.inkling2 import validate_policy
+
+    model = _tiny_model()
+    tokens = mx.random.randint(0, 500, (1, 21))
+    base = _run(model, tokens, [(0, 21)])
+    assert model.apc_v2_layout == "inkling2-kv-four-shortconv-v1"
+    assert model.loop_receipt()["out_of_distribution"] is False
+    model.configure_kernels(loop_passes=passes)
+    assert len(model.model.layer_indices) == 12 + 12 * passes
+    assert len(model.make_cache()) == 2 * (12 + 12 * passes)
+    assert model.apc_v2_layout.endswith(f"-passes{passes}")
+    assert model.loop_receipt() == {"passes": passes, "trained_passes": 3,
+                                    "visits": 12 + 12 * passes, "out_of_distribution": True}
+    varied = _run(model, tokens, [(0, 21)])
+    assert not mx.allclose(varied, base)  # the loop count really changed
+    decode = _run(model, tokens, [(0, 16)] + [(i, i + 1) for i in range(16, 21)])
+    chunks = _run(model, tokens, [(0, 7), (7, 14), (14, 21)])
+    assert mx.abs(decode - varied).max().item() < 1e-4
+    assert mx.abs(chunks - varied).max().item() < 1e-4
+    model.configure_kernels()
+    assert mx.array_equal(_run(model, tokens, [(0, 21)]), base)
+    assert model.apc_v2_layout == "inkling2-kv-four-shortconv-v1"
+    assert validate_policy({"inkling2_loop_passes": passes})[0]["loop_passes"] == passes
+    for bad in (0, 9, True, 2.0):
+        with pytest.raises(TypeError):
+            validate_policy({"inkling2_loop_passes": bad})

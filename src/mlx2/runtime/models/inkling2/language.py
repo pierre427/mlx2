@@ -33,6 +33,7 @@ from ..switch_layers import SwitchGLU
 from .config import TextConfig
 
 _MASK_BUDGET_BYTES = 64 << 20
+MAX_LOOP_PASSES = 8  # varloop ceiling (trained count is 3)
 _SINK_SDPA_MAX_ROWS = 8  # per-row SDPA calls for one-token decode
 
 
@@ -620,6 +621,7 @@ class TextModel(nn.Module):
         self.layers = [DecoderLayer(config, i) for i in range(config.num_hidden_layers)]
         self.layer_indices = config.layer_indices
         self.loop = config.loop_config
+        self.num_passes = self.loop.num_passes if self.loop is not None else 1
         if self.loop is not None:
             self.message_queries = mx.zeros(
                 (self.loop.core_end - self.loop.core_start, 4, config.hidden_size)
@@ -629,6 +631,26 @@ class TextModel(nn.Module):
 
     def embed(self, inputs):
         return self.embed_norm(self.embed_tokens(inputs))
+
+    def set_num_passes(self, passes):
+        """Run the middle block ``passes`` times (varloop, opt-in).
+
+        The checkpoint was trained at ``loop_config.num_passes`` with
+        ``is_varloop: false``, so any other count is out of distribution.
+        Caches are per visit, so a cache built for one count does not fit
+        another (``make_cache`` and the APCv2 layout follow the count)."""
+        loop = self.loop
+        if loop is None:
+            raise ValueError("Inkling 2 has no loop to vary")
+        if type(passes) is not int or not 1 <= passes <= MAX_LOOP_PASSES:
+            raise ValueError(f"Inkling 2 loop passes must be an integer 1..{MAX_LOOP_PASSES}")
+        indices = tuple(range(self.config.num_hidden_layers))
+        self.layer_indices = (
+            indices[: loop.core_start]
+            + indices[loop.core_start : loop.core_end] * passes
+            + indices[loop.core_end :]
+        )
+        self.num_passes = passes
 
     def __call__(self, inputs, cache=None, input_embeddings=None, capture=None):
         x = self.embed(inputs) if input_embeddings is None else input_embeddings
@@ -668,7 +690,7 @@ class TextModel(nn.Module):
 
 
 class Model(nn.Module):
-    apc_v2_layout = "inkling2-kv-four-shortconv-v1"
+    BASE_LAYOUT = "inkling2-kv-four-shortconv-v1"
     supports_speculative_rollback = True
 
     def __init__(self, config: TextConfig):
@@ -684,6 +706,18 @@ class Model(nn.Module):
     @property
     def layers(self):
         return self.model.layers
+
+    @property
+    def apc_v2_layout(self):
+        # A different loop count has a different visit/plane topology.
+        passes, trained = self.model.num_passes, self.config.loop_config.num_passes
+        return self.BASE_LAYOUT if passes == trained else f"{self.BASE_LAYOUT}-passes{passes}"
+
+    def loop_receipt(self):
+        trained = self.config.loop_config.num_passes
+        return {"passes": self.model.num_passes, "trained_passes": trained,
+                "visits": len(self.model.layer_indices),
+                "out_of_distribution": self.model.num_passes != trained}
 
     def _project_logits(self, h):
         # hf_quant_config: BF16 unembedding with fwd_output_dtype float32.
@@ -736,8 +770,13 @@ class Model(nn.Module):
             return None
         return self._project_logits(self.model.norm(select_checkpoint_rows(pre_norm)))
 
-    def configure_kernels(self, *, fused_projections=False, head_kernel=False, sink_sdpa=False):
-        """Adapter-owned opt-in execution switches (all default off)."""
+    def configure_kernels(self, *, fused_projections=False, head_kernel=False, sink_sdpa=False,
+                          loop_passes=None):
+        """Adapter-owned opt-in execution switches (all default off).
+
+        ``loop_passes`` None keeps the trained count."""
+        self.model.set_num_passes(
+            self.config.loop_config.num_passes if loop_passes is None else loop_passes)
         for layer in self.model.layers:
             object.__setattr__(layer.self_attn, "_sink_sdpa", bool(sink_sdpa))
             if fused_projections:
@@ -749,7 +788,7 @@ class Model(nn.Module):
             self,
             "kernel_policy",
             {"fused_projections": bool(fused_projections), "head_kernel": bool(head_kernel),
-             "sink_sdpa": bool(sink_sdpa)},
+             "sink_sdpa": bool(sink_sdpa), "loop_passes": loop_passes},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
