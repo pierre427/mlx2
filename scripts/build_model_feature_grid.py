@@ -113,7 +113,7 @@ FEATURES = (
     "decode_first", "prefill_scheduling", "mixed_prefill_decode",
     "varlen_paged_attention", "row_exact_verify", "tensorfold_tree15",
     "ast_ubtree_b15", "gemma3n_kv_shared_row_pruning", "multi_lora_fp32_delta",
-    "fused_gdn", "fused_gdn_batch_verify", "moe_rhs_pad",
+    "fused_gdn", "fused_gdn_batch_verify", "fused_gdn_compact_replay", "moe_rhs_pad",
     "pla_chunk32_prefill", "hc_prefill_fusion", "tensorfold_gdn_decode_block",
     "lfm_moe_decode", "ple_windowed_gather",
     "moe_nax_gather", "moe_routed_decode", "moe_topk_fold", "moe_grouped_rows",

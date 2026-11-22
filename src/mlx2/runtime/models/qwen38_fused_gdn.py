@@ -360,7 +360,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                 )
             except Exception as exc:
                 return fallback(
-                    f'compact replay state contract refused: {type(exc).__name__}'
+                    f'compact replay state contract refused: {type(exc).__name__}: {exc}'
                 )
         probe = (
             verify_kernels.probe_qwen4_fused_gdn_replay_verify
@@ -410,7 +410,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                     )
                 except Exception as exc:
                     return fallback(
-                        f'compact replay plan refused: {type(exc).__name__}'
+                        f'compact replay plan refused: {type(exc).__name__}: {exc}'
                     )
 
                 def rollback(m, plan=replay_plan):

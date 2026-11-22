@@ -145,12 +145,41 @@ class Qwen38StatePlaneOperations:
     def authorize_compact_gdn_replay(
         self, cache: Any, gdn_contract: FusedGdnContract, steps: int
     ) -> CompactGdnReplayAuthorization:
-        """Validate state ownership before replacing snapshots with a tape."""
+        """Validate state ownership before replacing snapshots with a tape.
+
+        Two owners are admitted: the exact ``ArraysCache`` row, and the
+        one-row ``SegmentedBatchArraysCache`` compute view the served
+        segmented self-MTP route hands every GDN layer (even for one lane).
+        The view's ``record_rollback`` forwards the plan's closure and the
+        checkpoint pair, sliced to row 0, to its row, and its trim rewinds
+        that row and re-joins, which is the same exact record/trim the
+        snapshot rollback uses through the view.  A multi-row view is
+        refused: the fused multi-row verify is the batched snapshot kernel,
+        and the reconstruction kernel this plan binds is single-row.
+        """
+        from ..segmented_batch_cache import SegmentedBatchArraysCache
         from .cache import ArraysCache
 
-        if type(cache) is not ArraysCache:
+        if type(cache) is SegmentedBatchArraysCache:
+            rows = list(cache.rows)
+            if len(rows) != 1:
+                raise StatePlaneOperationRefused(
+                    "compact Qwen3.8 replay on a segmented view requires exactly "
+                    f"one row; got {len(rows)} (multi-row verify keeps snapshots)"
+                )
+            row = rows[0]
+            # The row must be the exact ArraysCache class (not a subclass or a
+            # nested view) so its record/trim are the plain path's; the
+            # provider contract check below then applies to the view as a whole.
+            if type(row) is not ArraysCache or len(row.cache) != 2:
+                raise StatePlaneOperationRefused(
+                    "segmented compact replay requires an exact two-plane "
+                    "ArraysCache row"
+                )
+        elif type(cache) is not ArraysCache:
             raise StatePlaneOperationRefused(
-                "compact Qwen3.8 replay requires its exact ArraysCache owner"
+                "compact Qwen3.8 replay requires its exact ArraysCache owner "
+                f"or a one-row segmented view; got {type(cache).__name__}"
             )
         state_contract = self.contract(cache)
         if (

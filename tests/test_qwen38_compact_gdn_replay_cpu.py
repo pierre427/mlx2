@@ -162,3 +162,38 @@ def test_qwen35_compact_source_is_derived_from_typed_profile():
     assert "T av = a[t * HV + hv] + dt_bias[hv];" in kernels._QWEN35_REPLAY_SOURCE
     assert "replay_corrections" in kernels._QWEN35_REPLAY_SOURCE
     assert "state_snapshots" not in kernels._QWEN35_REPLAY_SOURCE
+
+
+def test_served_segmented_self_mtp_view_is_admitted_for_one_row_only():
+    """The 2026-11-21 GPU probe found every served compact verify refused.
+
+    The Qwen3.8-27B profile pins ``MLX_LM_SEGMENTED_SELF_MTP=1``, so the
+    native-MTP route hands GDN layers a ``SegmentedBatchArraysCache`` view
+    even for one lane, and the provider used to require the exact
+    ``ArraysCache`` owner.  A one-row view is now admitted with the same
+    accounting as its row; a multi-row view is refused with its reason.
+    Exactness through the view: tests/test_qwen38_compact_replay_segmented_cpu.py.
+    """
+    from mlx2.runtime.models.qwen4_exp import Qwen4ArraysCache
+    from mlx2.runtime.segmented_batch_cache import SegmentedBatchArraysCache
+    from mlx2.runtime.state_plane_operations import StatePlaneOperationRefused
+
+    view = SegmentedBatchArraysCache([_owned_cache()])
+    assert isinstance(view, ArraysCache) and isinstance(view, Qwen4ArraysCache)
+    assert view.speculating
+    contract = QWEN38_STATE_PLANE_OPERATIONS.contract(view)
+    assert contract.layout == "qwen38-gdn-arrays-v1" and contract.fidelity == "exact"
+    on_view = QWEN38_STATE_PLANE_OPERATIONS.authorize_compact_gdn_replay(
+        view, QWEN38_GDN_CONTRACT, 4
+    )
+    on_row = QWEN38_STATE_PLANE_OPERATIONS.authorize_compact_gdn_replay(
+        _owned_cache(), QWEN38_GDN_CONTRACT, 4
+    )
+    assert on_view == on_row and on_view.tape_bytes > 0
+
+    wide = SegmentedBatchArraysCache([_owned_cache(), _owned_cache()])
+    with pytest.raises(StatePlaneOperationRefused, match="exactly one row; got 2"):
+        QWEN38_STATE_PLANE_OPERATIONS.authorize_compact_gdn_replay(
+            wide, QWEN38_GDN_CONTRACT, 4
+        )
+
