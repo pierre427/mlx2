@@ -401,3 +401,63 @@ def test_engine_greedy_equals_ordinary_through_hybrid_ring_owner(pair, num_draft
             break
     assert got == expect
     assert batch.scheduler_stats["external_hybrid_transactions"] > 0
+
+
+def test_engine_prefill_reclaim_is_exact(pair):
+    """``inkling2_dspark_prefill_reclaim`` turns on the engine's per-chunk
+    mx.clear_cache(); the allocator clear must not change a token."""
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = pair
+    prompt = [int(t) for t in mx.random.randint(1, 400, (50,)).tolist()]
+    runs = []
+    for reclaim in (False, True):
+        batch = ExternalDraftBatchGenerator(
+            target, draft_model=Inkling2DSparkExternal(draft, num_draft=3), binding="test",
+            num_draft=3, prefill_step_size=16, prefill_allocator_reclaim=reclaim,
+        )
+        uid = batch.insert([prompt], max_tokens=[10], sampling_configs=[{"sampling_temp": 0}])[0]
+        got = []
+        for _ in range(300):
+            _, responses = batch.next()
+            got += [r.token for r in responses if r.uid == uid]
+            if not batch.lanes:
+                break
+        runs.append((got, dict(batch.scheduler_stats)))
+    assert runs[0][0] == runs[1][0] and len(runs[0][0]) == 10
+    assert "external_prefill_allocator_reclaims" not in runs[0][1]
+    assert runs[1][1]["external_prefill_allocator_reclaims"] == runs[1][1]["prefill_rounds"] >= 3
+
+
+def test_engine_greedy_equals_ordinary_with_default_moe_fast_path(pair):
+    """The MoE fast path is default on (Pierre 2026-11-21): DSpark verify rows
+    through the fused MoE must still give ordinary greedy output."""
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = pair
+    prompt = [int(t) for t in mx.random.randint(1, 400, (40,)).tolist()]
+    cache = target.make_cache()
+    tokens, expect = list(prompt), []
+    for step in range(12):
+        logits = target(mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache)
+        tokens.append(int(mx.argmax(logits[0, -1]).item()))
+        expect.append(tokens[-1])
+    target.configure_kernels(moe_fused=True, moe_weighted_sum=True)
+    try:
+        batch = ExternalDraftBatchGenerator(
+            target, draft_model=Inkling2DSparkExternal(draft, num_draft=3),
+            binding="test", num_draft=3, prefill_step_size=16,
+        )
+        uid = batch.insert([prompt], max_tokens=[12], sampling_configs=[{"sampling_temp": 0}])[0]
+        got = []
+        for _ in range(300):
+            _, responses = batch.next()
+            got += [r.token for r in responses if r.uid == uid]
+            if not batch.lanes:
+                break
+        assert target.kernel_receipt()["moe_fused_calls"] > 0
+    finally:
+        target.configure_kernels()
+    assert got == expect

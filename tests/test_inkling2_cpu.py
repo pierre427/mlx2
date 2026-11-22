@@ -354,8 +354,9 @@ def test_policy_parsing():
 
     assert validate_policy(None) == (
         {"fused_projections": False, "head_kernel": False, "sink_sdpa": False,
-         "flash_prefill": False, "hard_no_thinking": False, "prefill_mask_mb": None,
-         "loop_passes": None}, {})
+         "flash_prefill": False, "moe_fused": True, "moe_weighted_sum": True,
+         "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": False,
+         "prefill_mask_mb": None, "loop_passes": None}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -371,7 +372,9 @@ def test_fused_projection_toggle_round_trip():
         assert mx.abs(model(tokens) - base).max().item() < 1e-5
     assert model.kernel_policy == {"fused_projections": False, "head_kernel": False,
                                    "sink_sdpa": False, "loop_passes": None,
-                                   "prefill_mask_mb": None, "flash_prefill": False}
+                                   "prefill_mask_mb": None, "flash_prefill": False,
+                                   "moe_fused": False, "moe_weighted_sum": False,
+                                   "moe_nax_gather": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])
@@ -629,3 +632,24 @@ def test_flash_prefill_is_gpu_only_and_leaves_cpu_path_unchanged():
     model.configure_kernels(flash_prefill=True)
     assert mx.array_equal(_run(model, tokens, [(0, 12)]), base)
     assert model.kernel_receipt()["flash_prefill_calls"] == 0
+
+
+def test_dspark_prefill_reclaim_policy(monkeypatch):
+    """Opt-in, boolean, DSpark-only; it reaches the external generator."""
+    from mlx2.adapters import external_draft_policy
+    from mlx2.adapters.inkling2 import Inkling2Adapter, validate_policy
+
+    assert validate_policy({"inkling2_dspark_prefill_reclaim": True})[0]["dspark_prefill_reclaim"] is True
+    with pytest.raises(TypeError):
+        validate_policy({"inkling2_dspark_prefill_reclaim": 1})
+    with pytest.raises(ValueError, match="requires the DSpark route"):
+        Inkling2Adapter("/nonexistent", execution_policy={"inkling2_dspark_prefill_reclaim": True})
+    seen = []
+    monkeypatch.setattr(external_draft_policy.ExternalDraftAdapterMixin, "create_external_batch",
+                        lambda self, **kw: seen.append(kw) or "batch")
+    adapter = object.__new__(Inkling2Adapter)
+    adapter.dspark_prefill_reclaim = False
+    assert adapter.create_external_batch() == "batch" and seen[-1] == {}
+    adapter.dspark_prefill_reclaim = True
+    adapter.create_external_batch()
+    assert seen[-1] == {"prefill_allocator_reclaim": True}

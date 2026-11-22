@@ -669,7 +669,46 @@ class SparseMoE(nn.Module):
             activation=SoftcappedSwiGLU(config),
         )
 
+    def set_fast_path(self, fused=False, weighted_sum=False):
+        """Opt-in ``moe_fast`` routes (default off; see that module).
+
+        The stacked gate/up table is built on the first enable and kept; the
+        reference modules read row views of it, so turning the option off
+        only stops the fused dispatch."""
+        object.__setattr__(self, "_fast_fused", bool(fused))
+        object.__setattr__(self, "_fast_weighted_sum", bool(fused and weighted_sum))
+        if fused:
+            self._fast_experts()
+
+    def _fast_experts(self):
+        """``(experts, refusal)``, rebuilt when any source array is replaced
+        (a refused build is retried then too).  Turning the fused route off
+        leaves the row views in place: the reference gathers read them in
+        place, but the NAX kernels copy a strided view, so NAX with the
+        fused route off after it was on costs a per-call copy."""
+        from . import moe_fast
+
+        key = moe_fast.source_key(self.switch_mlp)
+        held = self.__dict__.get("_fast_built")
+        if held is None or not moe_fast.same_source(self.__dict__.get("_fast_key", ()), key):
+            held = moe_fast.build(self.switch_mlp)
+            object.__setattr__(self, "_fast_built", held)
+            # The build rewrote the gate/up arrays (row views); key on those.
+            object.__setattr__(self, "_fast_key", moe_fast.source_key(self.switch_mlp))
+        return held
+
     def __call__(self, x):
+        if self.__dict__.get("_fast_fused"):
+            from . import moe_fast
+
+            experts, reason = self._fast_experts()
+            reason = reason or moe_fast.decline_reason()
+            if reason is None:
+                return moe_fast.fused_call(
+                    self, experts, x, weighted_sum=self.__dict__.get("_fast_weighted_sum", False)
+                )
+            counts = self.__dict__.setdefault("moe_fast_counts", {})
+            counts["declined:" + reason] = counts.get("declined:" + reason, 0) + 1
         indices, weights = _route(
             x, _fp32(self, "gate_weight"), self.e_score_correction_bias, self.top_k, self.route_scale
         )
@@ -858,6 +897,20 @@ class TextModel(nn.Module):
         self.num_passes = passes
 
     def __call__(self, inputs, cache=None, input_embeddings=None, capture=None):
+        if self.__dict__.get("_moe_nax_scope"):
+            # inkling2_moe_nax_gather (opt-in): the NAX sorted expert gather is
+            # prefill-only and the trunk decides the phase once (decode,
+            # speculating caches and verify windows are not prefill).  The
+            # route mode itself is the process global the adapter claims.
+            from .. import moe_nax_gather
+
+            with moe_nax_gather.forward_scope(
+                inputs if inputs is not None else input_embeddings, cache
+            ):
+                return self._forward(inputs, cache, input_embeddings, capture)
+        return self._forward(inputs, cache, input_embeddings, capture)
+
+    def _forward(self, inputs, cache=None, input_embeddings=None, capture=None):
         x = self.embed(inputs) if input_embeddings is None else input_embeddings
         visits = len(self.layer_indices)
         if cache is None:
@@ -976,13 +1029,24 @@ class Model(nn.Module):
         return self._project_logits(self.model.norm(select_checkpoint_rows(pre_norm)))
 
     def configure_kernels(self, *, fused_projections=False, head_kernel=False, sink_sdpa=False,
-                          loop_passes=None, prefill_mask_mb=None, flash_prefill=False):
+                          loop_passes=None, prefill_mask_mb=None, flash_prefill=False,
+                          moe_fused=False, moe_weighted_sum=False, moe_nax_gather=False):
         """Adapter-owned opt-in execution switches (all default off).
 
-        ``loop_passes`` None keeps the trained count."""
+        ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
+        needs ``moe_fused``.  ``moe_nax_gather`` only opens the prefill
+        phase scope; the NAX route mode is a process global the adapter
+        claims (``moe_nax_gather.set_mode``)."""
+        if moe_weighted_sum and not moe_fused:
+            raise ValueError("Inkling 2 moe_weighted_sum requires moe_fused")
         self.model.set_num_passes(
             self.config.loop_config.num_passes if loop_passes is None else loop_passes)
+        object.__setattr__(self.model, "_moe_nax_scope", bool(moe_nax_gather))
+        built = False
         for layer in self.model.layers:
+            if moe_fused or layer.mlp.__dict__.get("_fast_fused"):
+                built |= moe_fused and "_fast_built" not in layer.mlp.__dict__
+                layer.mlp.set_fast_path(moe_fused, moe_weighted_sum)
             object.__setattr__(layer.self_attn, "_sink_sdpa", bool(sink_sdpa))
             object.__setattr__(layer.self_attn, "_flash_prefill", bool(flash_prefill))
             object.__setattr__(layer.self_attn, "_mask_budget_bytes",
@@ -992,12 +1056,18 @@ class Model(nn.Module):
             elif getattr(layer.self_attn, "_fused_bounds", None) is not None:
                 # The row views stay; only the stacked dispatch is turned off.
                 object.__setattr__(layer.self_attn, "_fused_bounds", None)
+        if built:
+            # The replaced gate/up buffers would otherwise stay in MLX's
+            # buffer cache (about 10 GB on the Mini), too large for reuse.
+            mx.clear_cache()
         object.__setattr__(
             self,
             "kernel_policy",
             {"fused_projections": bool(fused_projections), "head_kernel": bool(head_kernel),
              "sink_sdpa": bool(sink_sdpa), "loop_passes": loop_passes,
-             "prefill_mask_mb": prefill_mask_mb, "flash_prefill": bool(flash_prefill)},
+             "prefill_mask_mb": prefill_mask_mb, "flash_prefill": bool(flash_prefill),
+             "moe_fused": bool(moe_fused), "moe_weighted_sum": bool(moe_weighted_sum),
+             "moe_nax_gather": bool(moe_nax_gather)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1007,9 +1077,27 @@ class Model(nn.Module):
         calls = [getattr(layer.self_attn, "fused_calls", 0) for layer in self.model.layers]
         sinks = [layer.self_attn.__dict__.get("sink_sdpa_calls", 0) for layer in self.model.layers]
         flash = [layer.self_attn.__dict__.get("flash_prefill_calls", 0) for layer in self.model.layers]
-        return {"fused_projection_calls": sum(calls),
-                "head_kernel_calls": self.__dict__.get("head_kernel_calls", 0),
-                "sink_sdpa_calls": sum(sinks), "flash_prefill_calls": sum(flash)}
+        moe = {}
+        for layer in self.model.layers:
+            for key, value in layer.mlp.__dict__.get("moe_fast_counts", {}).items():
+                moe[key] = moe.get(key, 0) + value
+        built = [layer.mlp.__dict__.get("_fast_built") for layer in self.model.layers]
+        out = {"fused_projection_calls": sum(calls),
+               "head_kernel_calls": self.__dict__.get("head_kernel_calls", 0),
+               "sink_sdpa_calls": sum(sinks), "flash_prefill_calls": sum(flash),
+               "moe_fused_calls": moe.pop("fused", 0),
+               "moe_weighted_sum_calls": moe.pop("weighted_sum", 0),
+               "moe_fast_declines": moe,
+               "moe_fused_layers": sum(1 for b in built if b is not None and b[0] is not None),
+               "moe_fused_refusals": sorted({b[1] for b in built if b is not None and b[1]})}
+        if getattr(self, "kernel_policy", {}).get("moe_nax_gather"):
+            from .. import moe_nax_gather
+
+            status = moe_nax_gather.status()
+            out["moe_nax_gather"] = {key: status[key] for key in (
+                "mode", "nax_host", "device_name", "calls", "calls_by_format", "fallbacks",
+                "not_candidates", "not_prefill")}
+        return out
 
     # ----- external-draft feature taps (DSpark) -----
 

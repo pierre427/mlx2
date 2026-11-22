@@ -188,7 +188,33 @@ KERNEL_OPTIONS = {
     # off; a faster version needs BF16 MMA with FP32 accumulation, K/V tiles
     # shared across the GQA group, and a profile first.
     "inkling2_flash_prefill": "flash_prefill",
+    # Sparse MoE in fewer launches, bit-identical (implemented 2026-11-21,
+    # runtime/models/inkling2/moe_fast.py). DEFAULT ON (Pierre 2026-11-21)
+    # with the next two, after the GPU check on Inkling-2-Mini@440956c8 at
+    # eed5a8160: 4096-token prefill logits bitwise equal, greedy 4/4 and
+    # decode tokens equal, prefill +28% at 4K and +23% at 16K: compiled
+    # routing, one gather over a stacked [gate; up] table (the gate/up
+    # modules become row views of it, so memory does not grow), the shared
+    # NVFP4 w13 scale and the softcapped SwiGLU in one kernel, and the down
+    # scale with the weighted combine. Decode and prefill.
+    "inkling2_moe_fused": "moe_fused",
+    # Multi-token sorted calls (prefill chunks, verify windows), GPU, needs
+    # inkling2_moe_fused (default on; unset, it follows inkling2_moe_fused): the weighted
+    # combine reads the sorted down rows through inv_order
+    # (qwen4_moe_weighted_sum, MLX column-reduce order replayed), so the
+    # unsorted [T, K, D] copy and the FP32 product are never written.
+    "inkling2_moe_weighted_sum": "moe_weighted_sum",
+    # Prefill only, M5 only: NVFP4 sorted expert gathers through the
+    # segmented NAX kernel (moe_nax_gather, canary-proven bit-identical to
+    # the stock sorted kernel). The mode is a process global, claimed at
+    # load; MXFP8 layers 20-23 have no NAX loader and keep the stock kernel.
+    # Unset = auto (default): on for an M5 NAX host, off elsewhere; an
+    # explicit true on a non-M5 host still fails closed.
+    "inkling2_moe_nax_gather": "moe_nax_gather",
 }
+# Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
+# False). None for the NAX gather means "auto", resolved at load.
+KERNEL_DEFAULTS = {"moe_fused": True, "moe_weighted_sum": None, "moe_nax_gather": None}
 # Varloop (Pierre 2026-11-21): run the middle
 # block N times instead of the trained 3. The checkpoint has is_varloop
 # false, so every N != 3 is out of distribution; it is a research knob, not a
@@ -209,6 +235,17 @@ TEXT_PREFILL = ("<|message_model|>", "<|content_text|>")
 # budget trades transient memory for fewer passes; rows per call change, so
 # SDPA kernel choice may too (near-exact). Opt-in pending an A/B.
 PREFILL_MASK_OPTION = "inkling2_prefill_mask_mb"
+# DSpark prefill allocator reclaim. Ordinary prefill ends every chunk with
+# mx.clear_cache() (MLX2_PREFILL_CLEAR_CACHE=always); the external-draft
+# engine does so only with its default-off prefill_allocator_reclaim. Each
+# Inkling prefill chunk needs buffers of a new size (the key count grows), so
+# without the clear the MLX pool grows with context: on the real checkpoint
+# at 512-token chunks it held 41.5 GiB at 27K keys (target only and with the
+# drafter alike) against 0 GiB with the clear, at the same ~20 GiB active
+# (qualification/runs/inkling2-gpu-20261121/9f49b58b9-pool). The DSpark B1
+# ladder at 32K was stopped by the memory watchdog at an 84.6 GiB footprint.
+# The clear is exact (allocator only). Opt-in until Pierre decides the default.
+PREFILL_RECLAIM_OPTION = "inkling2_dspark_prefill_reclaim"
 
 
 def validate_policy(value):
@@ -220,14 +257,25 @@ def validate_policy(value):
     value = dict(value)
     kernels = {}
     for key, name in KERNEL_OPTIONS.items():
-        flag = value.pop(key, False)
+        # The default applies only when the key is absent; a present value
+        # (null included) must be a boolean.
+        if key not in value:
+            kernels[name] = KERNEL_DEFAULTS.get(name, False)
+            continue
+        flag = value.pop(key)
         if type(flag) is not bool:
             raise TypeError(f"Inkling 2 {key} must be a boolean")
         kernels[name] = flag
+    if kernels["moe_weighted_sum"] is None:
+        kernels["moe_weighted_sum"] = kernels["moe_fused"]
     hard = value.pop(HARD_NO_THINKING_OPTION, False)
     if type(hard) is not bool:
         raise TypeError(f"Inkling 2 {HARD_NO_THINKING_OPTION} must be a boolean")
     kernels["hard_no_thinking"] = hard
+    reclaim = value.pop(PREFILL_RECLAIM_OPTION, False)
+    if type(reclaim) is not bool:
+        raise TypeError(f"Inkling 2 {PREFILL_RECLAIM_OPTION} must be a boolean")
+    kernels["dspark_prefill_reclaim"] = reclaim
     mask_mb = value.pop(PREFILL_MASK_OPTION, None)
     if mask_mb is not None and type(mask_mb) is not int:
         raise TypeError(f"Inkling 2 {PREFILL_MASK_OPTION} must be an integer")
@@ -238,6 +286,8 @@ def validate_policy(value):
     if passes is not None and (type(passes) is not int or not 1 <= passes <= 8):
         raise TypeError(f"Inkling 2 {LOOP_PASSES_OPTION} must be an integer 1..8")
     kernels["loop_passes"] = passes
+    if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
+        raise ValueError("Inkling 2 inkling2_moe_weighted_sum requires inkling2_moe_fused")
     return kernels, value
 
 
@@ -385,6 +435,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self._parse_external_policy(external, family="Inkling 2")
         if external and self.kernel_policy["loop_passes"] not in (None, _LOOP["num_passes"]):
             raise ValueError("Inkling 2 DSpark taps assume the trained loop count")
+        if self.kernel_policy["dspark_prefill_reclaim"] and not external:
+            raise ValueError(f"Inkling 2 {PREFILL_RECLAIM_OPTION} requires the DSpark route")
         if external and external.get("draft_model") not in DSPARK_DRAFT_NAMES:
             raise ValueError(f"Inkling 2 draft_model must be one of {sorted(DSPARK_DRAFT_NAMES)}")
         artifact = inspect_artifact(model_path)
@@ -405,6 +457,28 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             require_process_numerics,
         )
 
+        self.moe_nax_gather_auto = self.kernel_policy["moe_nax_gather"] is None
+        if self.moe_nax_gather_auto:
+            from ..runtime.models import moe_nax_gather
+
+            self.kernel_policy["moe_nax_gather"] = moe_nax_gather.nax_host()
+        if self.kernel_policy["moe_nax_gather"]:
+            from ..runtime.models import moe_nax_gather
+
+            from .process_globals import claim_moe
+
+            if not moe_nax_gather.nax_host():
+                raise ValueError("Inkling 2 inkling2_moe_nax_gather requires an M5 NAX device")
+            # Prefill-only and bit-identical to the stock sorted kernel; the
+            # pad floor stays the default.
+            claim_moe(self, "Inkling 2 adapter", "gather")
+        else:
+            from .process_globals import claim_stock_moe
+
+            # The sorted gathers read the NAX mode and pad policy globals;
+            # hold the stock selections so another live adapter cannot
+            # change them underneath (as Kimi Linear does).
+            claim_stock_moe(self, "Inkling 2 adapter")
         require_process_numerics("Inkling 2 native profile")
         self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
         clear_inherited_profile(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_"))
@@ -418,6 +492,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         path = Path(self.identity["path"])
         self.model, self.expert_receipt = load_model(path, artifact)
         self.hard_no_thinking = self.kernel_policy.pop("hard_no_thinking")
+        self.dspark_prefill_reclaim = self.kernel_policy.pop("dspark_prefill_reclaim")
         self.model.configure_kernels(**self.kernel_policy)
         self.layout = self.model.apc_v2_layout
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
@@ -453,6 +528,13 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         root = Path(__file__).parents[1] / "runtime/models"
         names = ("inkling2/language.py", "inkling2/config.py", "inkling/cache.py",
                  "inkling/language.py", "switch_layers.py", "../nvfp4_linear.py")
+        policy = getattr(self, "kernel_policy", {})
+        if policy.get("moe_fused"):
+            names += ("inkling2/moe_fast.py",)
+        if policy.get("moe_weighted_sum"):
+            names += ("qwen4_moe_weighted_sum.py",)
+        if policy.get("moe_nax_gather"):
+            names += ("moe_nax_gather.py",)
         return {
             "operation": NUMERICS,
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
@@ -478,6 +560,11 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "segment_aware_live_tip": False,
             "segment_aware_cohort_size": max_lanes,
         }
+
+    def create_external_batch(self, **kwargs):
+        if getattr(self, "dspark_prefill_reclaim", False):
+            kwargs.setdefault("prefill_allocator_reclaim", True)
+        return super().create_external_batch(**kwargs)
 
     @staticmethod
     def prefill_step_default():
@@ -600,6 +687,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "cache_layout": self.layout,
             "numerics": NUMERICS,
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
+            "moe_nax_gather_auto": bool(getattr(self, "moe_nax_gather_auto", False)),
             "kernel_counters": (self.model.kernel_receipt() if getattr(self, "model", None) else None),
             "loop": (self.model.loop_receipt() if getattr(self, "model", None) else None),
             "hard_no_thinking": bool(getattr(self, "hard_no_thinking", False)),
@@ -612,6 +700,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "weights_present": bool(getattr(self, "has_mtp", False)),
                 "num_draft": self._external_num_draft() if getattr(self, "draft_model", None) is not None else None,
                 "stats": _drafter_stats(getattr(self, "draft_model", None)),
+                "prefill_reclaim": bool(getattr(self, "dspark_prefill_reclaim", False)),
             },
             "media": "weights present; native text route refuses media",
         }

@@ -190,6 +190,8 @@ def test_pairing_drafter_keeps_its_last_chunk_pending():
 
 
 def test_no_serving_or_adapter_code_selects_the_candidate():
+    """Only an explicit opt-in may select it: Inkling 2's
+    ``inkling2_dspark_prefill_reclaim`` policy key (default off)."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "src" / "mlx2"
@@ -197,4 +199,4 @@ def test_no_serving_or_adapter_code_selects_the_candidate():
         str(path.relative_to(root)) for path in root.rglob("*.py")
         if "prefill_allocator_reclaim" in path.read_text()
     )
-    assert users == ["runtime/external_speculative.py"]
+    assert users == ["adapters/inkling2.py", "runtime/external_speculative.py"]
