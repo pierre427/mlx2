@@ -167,6 +167,192 @@ def head_gemv(x, weight):
     return out.reshape(*lead, n)
 
 
+# ----- flash prefill with the relative bias in-kernel (opt-in) -----
+#
+# Original mlx2 kernel (2026-11-21). The design follows the other Inkling 2
+# stacks (mlx-lm PR 2086 ``relative_attention``, as vendored by Rapid-MLX and
+# mlx-serve; omlx ``flash_banded_attention``; ollama): one online-softmax pass
+# over key tiles per query tile, the per-query bias row read in-kernel, and the
+# sink logit as the softmax's starting term (its value is zero). Unlike those
+# kernels, Q, K, V, scores and probabilities stay FP32 (no half staging).
+#
+# score(i, j) = scale * q_i . k_j + bias_i[d]  for d = OFF + i - j < E, else +0
+# masked when d < 0, j < left_pad, or (WINDOW > 0 and d >= WINDOW).
+_FLASH_BQ = 32  # query rows per threadgroup: 8 per simdgroup
+_FLASH_TG = 128
+_FLASH_SOURCE = r"""
+    constexpr int BK = 16;
+    constexpr int LDK = BK + 4;
+    constexpr int LDV = D + 4;
+    const int L = sizes[0];
+    const int S = sizes[1];
+    const int OFF = sizes[2];
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const uint lane = thread_index_in_simdgroup;
+    const int b = threadgroup_position_in_grid.z;
+    const int h = threadgroup_position_in_grid.y;
+    const int hk = h / (HQ / HKV);
+    const int q0 = threadgroup_position_in_grid.x * BQ;
+    const int pad = left_pad[b];
+    const float sc = scale[0];
+
+    // 8x8 fragment layout: this lane holds row fm, columns fn and fn + 1.
+    const short fm = ((lane / 4) & 4) + (lane / 2) % 4;
+    const short fn = ((lane / 4) & 2) * 2 + (lane % 2) * 2;
+    const int row = q0 + int(sg) * 8 + fm;
+    const bool row_ok = row < L;
+    const int diag = OFF + row;
+
+    threadgroup float Ks[D * LDK];
+    threadgroup float Vs[BK * LDV];
+
+    simdgroup_float8x8 qf[D / 8];
+    for (int db = 0; db < D / 8; ++db) {
+        float a = 0.0f, c = 0.0f;
+        if (row_ok) {
+            const device T* qp = q + b * q_strides[0] + h * q_strides[1] + row * q_strides[2];
+            a = float(qp[(db * 8 + fn) * q_strides[3]]);
+            c = float(qp[(db * 8 + fn + 1) * q_strides[3]]);
+        }
+        qf[db].thread_elements()[0] = a;
+        qf[db].thread_elements()[1] = c;
+    }
+    simdgroup_float8x8 acc[D / 8];
+    for (int db = 0; db < D / 8; ++db) {
+        acc[db] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    }
+    // The sink is a zero-value key with logit sink: start the softmax there.
+    float m = row_ok ? float(sinks[(b * L + row) * HQ + h]) : 0.0f;
+    float l = 1.0f;
+    const device T* bias = rel + (size_t(b * L + (row_ok ? row : 0)) * HQ + h) * E;
+
+    const int first_diag = OFF + q0;
+    const int last_diag = OFF + min(q0 + BQ, L) - 1;
+    int first_key = WINDOW > 0 ? max(0, first_diag - WINDOW + 1) : 0;
+    first_key = max(first_key, pad);
+    const device T* kh = k + b * k_strides[0] + hk * k_strides[1];
+    const device T* vh = v + b * v_strides[0] + hk * v_strides[1];
+
+    for (int k0 = first_key / BK * BK; k0 <= last_diag; k0 += BK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int e = tid; e < BK * D; e += TG) {
+            const int r = e / D;
+            const int col = e % D;
+            const int key = k0 + r;
+            float kv = 0.0f, vv = 0.0f;
+            if (key < S) {
+                kv = float(kh[key * k_strides[2] + col * k_strides[3]]);
+                vv = float(vh[key * v_strides[2] + col * v_strides[3]]);
+            }
+            Ks[col * LDK + r] = kv;
+            Vs[r * LDV + col] = vv;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (q0 + int(sg) * 8 >= L) {
+            continue;
+        }
+        simdgroup_float8x8 s8[BK / 8];
+        for (int kb = 0; kb < BK / 8; ++kb) {
+            s8[kb] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+            for (int db = 0; db < D / 8; ++db) {
+                simdgroup_float8x8 kf;
+                simdgroup_load(kf, Ks + db * 8 * LDK + kb * 8, LDK);
+                simdgroup_multiply_accumulate(s8[kb], qf[db], kf, s8[kb]);
+            }
+        }
+        float tile_max = -INFINITY;
+        for (int kb = 0; kb < BK / 8; ++kb) {
+            for (int e = 0; e < 2; ++e) {
+                const int key = k0 + kb * 8 + fn + e;
+                const int d = diag - key;
+                const bool vis = row_ok && key < S && d >= 0 && key >= pad
+                    && (WINDOW == 0 || d < WINDOW);
+                float x = -INFINITY;
+                if (vis) {
+                    x = s8[kb].thread_elements()[e] * sc;
+                    if (d < E) {
+                        x += float(bias[d]);
+                    }
+                }
+                s8[kb].thread_elements()[e] = x;
+                tile_max = max(tile_max, x);
+            }
+        }
+        // The four lanes of a fragment row differ in lane bits 0 and 3.
+        tile_max = max(tile_max, simd_shuffle_xor(tile_max, 1));
+        tile_max = max(tile_max, simd_shuffle_xor(tile_max, 8));
+        const float m_new = max(m, tile_max);
+        const float factor = metal::exp(m - m_new);
+        float tile_sum = 0.0f;
+        simdgroup_float8x8 p8[BK / 8];
+        for (int kb = 0; kb < BK / 8; ++kb) {
+            for (int e = 0; e < 2; ++e) {
+                const float p = metal::exp(s8[kb].thread_elements()[e] - m_new);
+                p8[kb].thread_elements()[e] = p;
+                tile_sum += p;
+            }
+        }
+        tile_sum += simd_shuffle_xor(tile_sum, 1);
+        tile_sum += simd_shuffle_xor(tile_sum, 8);
+        l = l * factor + tile_sum;
+        m = m_new;
+        for (int db = 0; db < D / 8; ++db) {
+            acc[db].thread_elements()[0] *= factor;
+            acc[db].thread_elements()[1] *= factor;
+            for (int kb = 0; kb < BK / 8; ++kb) {
+                simdgroup_float8x8 vf;
+                simdgroup_load(vf, Vs + kb * 8 * LDV + db * 8, LDV);
+                simdgroup_multiply_accumulate(acc[db], p8[kb], vf, acc[db]);
+            }
+        }
+    }
+    if (row_ok) {
+        device T* op = out + ((size_t(b) * HQ + h) * L + row) * D;
+        for (int db = 0; db < D / 8; ++db) {
+            op[db * 8 + fn] = T(acc[db].thread_elements()[0] / l);
+            op[db * 8 + fn + 1] = T(acc[db].thread_elements()[1] / l);
+        }
+    }
+"""
+_flash_kernel = None
+
+
+def flash_relative_attention(q, k, v, rel, sinks, *, offset, left_padding, window, scale):
+    """Prefill attention with Inkling's relative bias, window and sink.
+
+    q: [B, H, L, D]; k, v: [B, Hk, S, D] (any strides); rel: [B, L, H, E], the
+    per-query bias at distances below E; sinks: [B, L, H]; queries sit at key
+    positions ``offset + i``. Returns [B, H, L, D] in q's dtype. GPU only;
+    opt-in (``inkling2_flash_prefill``); unqualified.
+    """
+    global _flash_kernel
+    if _flash_kernel is None:
+        _flash_kernel = mx.fast.metal_kernel(
+            name="inkling2_flash_relative_attention",
+            input_names=["q", "k", "v", "rel", "sinks", "left_pad", "sizes", "scale"],
+            output_names=["out"],
+            source=_FLASH_SOURCE,
+            ensure_row_contiguous=False,
+        )
+    b, hq, length, dim = q.shape
+    hkv, size = k.shape[1], k.shape[2]
+    pad = (mx.zeros((b,), mx.int32) if left_padding is None
+           else mx.maximum(left_padding, 0).astype(mx.int32))
+    return _flash_kernel(
+        inputs=[q, k, v, mx.contiguous(rel), mx.contiguous(sinks), pad,
+                mx.array([length, size, int(offset)], dtype=mx.int32),
+                mx.array([float(scale)], dtype=mx.float32)],
+        template=[("T", q.dtype), ("D", dim), ("HQ", hq), ("HKV", hkv),
+                  ("E", rel.shape[-1]), ("WINDOW", int(window)),
+                  ("BQ", _FLASH_BQ), ("TG", _FLASH_TG)],
+        grid=((length + _FLASH_BQ - 1) // _FLASH_BQ * _FLASH_TG, hq, b),
+        threadgroup=(_FLASH_TG, 1, 1),
+        output_shapes=[(b, hq, length, dim)],
+        output_dtypes=[q.dtype],
+    )[0]
+
+
 def _speculative_record(cache, index, state, inputs, mask):
     """Keep (pre-state, fp32 masked inputs, mask) for the v1 rollback record."""
     if cache is not None and getattr(cache, "speculating", False):
@@ -407,13 +593,31 @@ class Attention(nn.Module):
             ]
             out = outs[0] if b == 1 else mx.concatenate(outs, axis=0)
             return self._finish(out, gate, b, length, x.dtype)
+        if (
+            length > 1
+            and self.__dict__.get("_flash_prefill")
+            and mx.default_device() == mx.gpu
+            and self.head_dim % 8 == 0
+            and self.head_dim <= 128  # threadgroup tiles sized for D <= 128 (18.7 KB)
+            and (self.n_heads % self.n_kv) == 0
+        ):
+            self.__dict__["flash_prefill_calls"] = self.__dict__.get("flash_prefill_calls", 0) + 1
+            out = flash_relative_attention(
+                q, k, v, r @ rel_proj, sink, offset=offset, left_padding=left_padding,
+                window=self.sliding, scale=self.scale,
+            )
+            return self._finish(out, gate, b, length, x.dtype)
         # A query-dependent sink is a zero K/V with its own logit.
         sinks = sink.transpose(0, 2, 1)[..., None]
         zeros = mx.zeros((b, self.n_kv, 1, self.head_dim), k.dtype)
         k = mx.concatenate([k, zeros], axis=2)
         v = mx.concatenate([v, zeros], axis=2)
         budget = self.__dict__.get("_mask_budget_bytes") or _MASK_BUDGET_BYTES
+        # Budget counts 4 bytes per mask element; the transient peak of one
+        # chunk (int32 gather index, gathered bias, where/concat copies) is a
+        # few times that.
         rows = max(1, budget // max(1, b * self.n_heads * (size + 1) * 4))
+        self.__dict__["mask_rows_last"] = rows
         outputs = []
         for begin in range(0, length, rows):
             end = min(length, begin + rows)
@@ -772,7 +976,7 @@ class Model(nn.Module):
         return self._project_logits(self.model.norm(select_checkpoint_rows(pre_norm)))
 
     def configure_kernels(self, *, fused_projections=False, head_kernel=False, sink_sdpa=False,
-                          loop_passes=None, prefill_mask_mb=None):
+                          loop_passes=None, prefill_mask_mb=None, flash_prefill=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count."""
@@ -780,6 +984,7 @@ class Model(nn.Module):
             self.config.loop_config.num_passes if loop_passes is None else loop_passes)
         for layer in self.model.layers:
             object.__setattr__(layer.self_attn, "_sink_sdpa", bool(sink_sdpa))
+            object.__setattr__(layer.self_attn, "_flash_prefill", bool(flash_prefill))
             object.__setattr__(layer.self_attn, "_mask_budget_bytes",
                                None if prefill_mask_mb is None else int(prefill_mask_mb) << 20)
             if fused_projections:
@@ -792,7 +997,7 @@ class Model(nn.Module):
             "kernel_policy",
             {"fused_projections": bool(fused_projections), "head_kernel": bool(head_kernel),
              "sink_sdpa": bool(sink_sdpa), "loop_passes": loop_passes,
-             "prefill_mask_mb": prefill_mask_mb},
+             "prefill_mask_mb": prefill_mask_mb, "flash_prefill": bool(flash_prefill)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -801,9 +1006,10 @@ class Model(nn.Module):
     def kernel_receipt(self):
         calls = [getattr(layer.self_attn, "fused_calls", 0) for layer in self.model.layers]
         sinks = [layer.self_attn.__dict__.get("sink_sdpa_calls", 0) for layer in self.model.layers]
+        flash = [layer.self_attn.__dict__.get("flash_prefill_calls", 0) for layer in self.model.layers]
         return {"fused_projection_calls": sum(calls),
                 "head_kernel_calls": self.__dict__.get("head_kernel_calls", 0),
-                "sink_sdpa_calls": sum(sinks)}
+                "sink_sdpa_calls": sum(sinks), "flash_prefill_calls": sum(flash)}
 
     # ----- external-draft feature taps (DSpark) -----
 

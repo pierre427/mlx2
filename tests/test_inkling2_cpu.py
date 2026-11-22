@@ -354,7 +354,8 @@ def test_policy_parsing():
 
     assert validate_policy(None) == (
         {"fused_projections": False, "head_kernel": False, "sink_sdpa": False,
-         "hard_no_thinking": False, "prefill_mask_mb": None, "loop_passes": None}, {})
+         "flash_prefill": False, "hard_no_thinking": False, "prefill_mask_mb": None,
+         "loop_passes": None}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -370,7 +371,7 @@ def test_fused_projection_toggle_round_trip():
         assert mx.abs(model(tokens) - base).max().item() < 1e-5
     assert model.kernel_policy == {"fused_projections": False, "head_kernel": False,
                                    "sink_sdpa": False, "loop_passes": None,
-                                   "prefill_mask_mb": None}
+                                   "prefill_mask_mb": None, "flash_prefill": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])
@@ -574,6 +575,9 @@ def test_hard_no_thinking_prefills_text_channel_only_when_asked():
     assert adapter.prompt_tokens({**on, "reasoning_effort": "none"})[-2:] == [200001, 200004]
     assert adapter.prompt_tokens({**on, "thinking_budget": 0})[-2:] == [200001, 200004]
     assert adapter.prompt_tokens(on) == [7, 8, 9]  # thinking requested: untouched
+    with pytest.raises(ValueError, match="conflicts"):
+        adapter.prompt_tokens({**off, "reasoning_effort": "high"})
+    assert adapter.thinking_control({"prompt": "x"})["mode"] == "raw_prompt"
     assert adapter.thinking_control(off) == {"mode": "hard_text_prefill",
                                              "reasoning_effort": "none",
                                              "policy_hard_no_thinking": True}
@@ -596,6 +600,32 @@ def test_prefill_mask_budget_changes_row_chunks_not_results():
         chunked = _run(model, tokens, [(0, 30)])
     finally:
         lang._MASK_BUDGET_BYTES = old
-    model.configure_kernels(prefill_mask_mb=64)
+    model.configure_kernels(prefill_mask_mb=16)
+    out = _run(model, tokens, [(0, 30)])
+    rows_16 = model.model.layers[5].self_attn.mask_rows_last
+    model.configure_kernels()
+    _run(model, tokens, [(0, 30)])
+    assert model.model.layers[5].self_attn.mask_rows_last == 4 * rows_16  # 64 vs 16 MiB
     assert mx.abs(chunked - base).max().item() < 1e-5
-    assert mx.abs(_run(model, tokens, [(0, 30)]) - base).max().item() < 1e-5
+    assert mx.abs(out - base).max().item() < 1e-5
+    from mlx2.adapters.inkling2 import validate_policy
+    assert validate_policy({"inkling2_prefill_mask_mb": 512})[0]["prefill_mask_mb"] == 512
+    with pytest.raises(ValueError):
+        validate_policy({"inkling2_prefill_mask_mb": 4096})
+    with pytest.raises(TypeError):
+        validate_policy({"inkling2_prefill_mask_mb": "512"})
+    # The option reaches the row count: 16 MiB vs 64 MiB at a long key span.
+    attn = model.model.layers[5].self_attn
+    model.configure_kernels(prefill_mask_mb=16)
+    assert attn._mask_budget_bytes == 16 << 20
+    model.configure_kernels()
+    assert attn._mask_budget_bytes is None
+
+
+def test_flash_prefill_is_gpu_only_and_leaves_cpu_path_unchanged():
+    model = _tiny_model()
+    tokens = mx.random.randint(0, 500, (1, 12))
+    base = _run(model, tokens, [(0, 12)])
+    model.configure_kernels(flash_prefill=True)
+    assert mx.array_equal(_run(model, tokens, [(0, 12)]), base)
+    assert model.kernel_receipt()["flash_prefill_calls"] == 0

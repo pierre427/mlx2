@@ -177,6 +177,17 @@ KERNEL_OPTIONS = {
     # the same; implemented 2026-11-21, A/B pending). GPU reduction
     # partition differs (S vs S+1 keys).
     "inkling2_sink_sdpa": "sink_sdpa",
+    # Prefill/verify attention (rows > 1) through one FP32 flash kernel with
+    # the relative bias, window and sink in-kernel, replacing the dense bias
+    # mask chunks (implemented 2026-11-21, GPU-only; decode keeps SDPA).
+    # Tried 2026-11-21 on Inkling-2-Mini@440956c8 (86aa3db9e): correct (Metal
+    # parity; 4096-token argmax 3983/4096; first 32 of 113 splits near ties, 81 unclassified) but
+    # NOT faster. Prefill ABAB tok/s off vs flash: 4K 1260 vs 1026, 16K 998 vs
+    # 770, 64K 405 vs 389. FP32 simdgroup MMA plus per-query-head K/V tile
+    # loads (no GQA sharing) cost more than the dense-mask chunks save. Left
+    # off; a faster version needs BF16 MMA with FP32 accumulation, K/V tiles
+    # shared across the GQA group, and a profile first.
+    "inkling2_flash_prefill": "flash_prefill",
 }
 # Varloop (Pierre 2026-11-21): run the middle
 # block N times instead of the trained 3. The checkpoint has is_varloop
@@ -218,8 +229,10 @@ def validate_policy(value):
         raise TypeError(f"Inkling 2 {HARD_NO_THINKING_OPTION} must be a boolean")
     kernels["hard_no_thinking"] = hard
     mask_mb = value.pop(PREFILL_MASK_OPTION, None)
-    if mask_mb is not None and (type(mask_mb) is not int or not 16 <= mask_mb <= 4096):
-        raise TypeError(f"Inkling 2 {PREFILL_MASK_OPTION} must be an integer 16..4096")
+    if mask_mb is not None and type(mask_mb) is not int:
+        raise TypeError(f"Inkling 2 {PREFILL_MASK_OPTION} must be an integer")
+    if mask_mb is not None and not 16 <= mask_mb <= 1024:
+        raise ValueError(f"Inkling 2 {PREFILL_MASK_OPTION} must be 16..1024")
     kernels["prefill_mask_mb"] = mask_mb
     passes = value.pop(LOOP_PASSES_OPTION, None)
     if passes is not None and (type(passes) is not int or not 1 <= passes <= 8):
@@ -487,6 +500,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             return "none"
         if effort is None:
             return "none" if request.get("enable_thinking") is False else None
+        if request.get("enable_thinking") is False and effort != "none":
+            raise ValueError("Inkling 2 enable_thinking false conflicts with reasoning_effort")
         return effort
 
     @staticmethod
@@ -517,7 +532,10 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
     def thinking_control(self, request):
         """Per-request receipt: how thinking was (not) suppressed."""
-        effort = self._reasoning_effort(request) if "messages" in request else None
+        if "messages" not in request:
+            return {"mode": "raw_prompt", "reasoning_effort": None,
+                    "policy_hard_no_thinking": bool(getattr(self, "hard_no_thinking", False))}
+        effort = self._reasoning_effort(request)
         return {
             "mode": "hard_text_prefill" if self._text_prefill(request) else "template_effort",
             "reasoning_effort": effort,
