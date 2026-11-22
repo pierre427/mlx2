@@ -354,8 +354,8 @@ def test_policy_parsing():
 
     assert validate_policy(None) == (
         {"fused_projections": False, "head_kernel": False, "sink_sdpa": False,
-         "flash_prefill": False, "moe_fused": True, "moe_weighted_sum": True,
-         "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": False,
+         "sink_slot": False, "flash_prefill": False, "moe_fused": True, "moe_weighted_sum": True,
+         "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": None,
          "prefill_mask_mb": None, "loop_passes": None}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
@@ -374,7 +374,7 @@ def test_fused_projection_toggle_round_trip():
                                    "sink_sdpa": False, "loop_passes": None,
                                    "prefill_mask_mb": None, "flash_prefill": False,
                                    "moe_fused": False, "moe_weighted_sum": False,
-                                   "moe_nax_gather": False}
+                                   "moe_nax_gather": False, "sink_slot": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])
@@ -640,8 +640,12 @@ def test_dspark_prefill_reclaim_policy(monkeypatch):
     from mlx2.adapters.inkling2 import Inkling2Adapter, validate_policy
 
     assert validate_policy({"inkling2_dspark_prefill_reclaim": True})[0]["dspark_prefill_reclaim"] is True
-    with pytest.raises(TypeError):
-        validate_policy({"inkling2_dspark_prefill_reclaim": 1})
+    # Unset resolves at load: on for the DSpark route, off otherwise.
+    assert validate_policy(None)[0]["dspark_prefill_reclaim"] is None
+    assert validate_policy({"inkling2_dspark_prefill_reclaim": False})[0]["dspark_prefill_reclaim"] is False
+    for bad in (1, None):
+        with pytest.raises(TypeError):
+            validate_policy({"inkling2_dspark_prefill_reclaim": bad})
     with pytest.raises(ValueError, match="requires the DSpark route"):
         Inkling2Adapter("/nonexistent", execution_policy={"inkling2_dspark_prefill_reclaim": True})
     seen = []
@@ -653,3 +657,54 @@ def test_dspark_prefill_reclaim_policy(monkeypatch):
     adapter.dspark_prefill_reclaim = True
     adapter.create_external_batch()
     assert seen[-1] == {"prefill_allocator_reclaim": True}
+
+
+@pytest.mark.parametrize("rows", [1, 2])
+def test_sink_slot_is_bitwise_reference(rows):
+    """``inkling2_sink_slot``: the zero sink row is written into the KV
+    buffer's spare capacity and read as a view instead of concatenated. It
+    must be bit-identical to the concat path. The run crosses the 256-token
+    growth boundary (where the buffer is full and the slot falls back)."""
+    model = _tiny_model()
+    tokens = mx.random.randint(0, 500, (rows, 262))
+    plan = [(0, 200), (200, 256)] + [(i, i + 1) for i in range(256, 262)]
+    base = _run(model, tokens, plan)
+    model.configure_kernels(sink_slot=True)
+    got = _run(model, tokens, plan)
+    receipt = model.kernel_receipt()
+    assert mx.array_equal(got, base)
+    assert receipt["sink_slot_calls"] > 0
+    # The 256-key fill leaves no spare slot: those global calls fall back.
+    assert receipt["sink_slot_fallbacks"] > 0
+    model.configure_kernels()
+    assert mx.array_equal(_run(model, tokens, plan), base)
+
+
+def test_sink_slot_after_trim_is_bitwise_reference():
+    """A trimmed KVCache (speculative rollback) leaves stale keys past offset;
+    the slot overwrites the one it reads, so results stay bit-identical."""
+    from mlx2.runtime.models.cache import KVCache
+
+    model = _tiny_model()
+    tokens = mx.random.randint(0, 500, (1, 30))
+
+    def run():
+        cache = model.make_cache()
+        outs = [model(tokens[:, :20], cache=cache)]
+        outs.append(model(tokens[:, 20:25], cache=cache))
+        for plane in cache:
+            if type(plane) is KVCache:
+                plane.trim(3)
+        # One replayed token: its slot (offset 23) still holds a stale key
+        # from before the trim, which the slot must overwrite with zeros.
+        outs.append(model(tokens[:, 22:23], cache=cache))
+        outs.append(model(tokens[:, 23:30], cache=cache))
+        return mx.concatenate(outs, axis=1)
+
+    base = run()
+    model.configure_kernels(sink_slot=True)
+    got = run()
+    calls = model.kernel_receipt()["sink_slot_calls"]
+    model.configure_kernels()
+    assert calls > 0
+    assert mx.array_equal(got, base)

@@ -461,3 +461,36 @@ def test_engine_greedy_equals_ordinary_with_default_moe_fast_path(pair):
     finally:
         target.configure_kernels()
     assert got == expect
+
+
+def test_engine_greedy_equals_ordinary_with_sink_slot(pair):
+    """``inkling2_sink_slot`` under DSpark verify rows and ring rollback:
+    greedy output must equal ordinary decode."""
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = pair
+    prompt = [int(t) for t in mx.random.randint(1, 400, (40,)).tolist()]
+    cache = target.make_cache()
+    tokens, expect = list(prompt), []
+    for step in range(12):
+        logits = target(mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache)
+        tokens.append(int(mx.argmax(logits[0, -1]).item()))
+        expect.append(tokens[-1])
+    target.configure_kernels(sink_slot=True)
+    try:
+        batch = ExternalDraftBatchGenerator(
+            target, draft_model=Inkling2DSparkExternal(draft, num_draft=3),
+            binding="test", num_draft=3, prefill_step_size=16,
+        )
+        uid = batch.insert([prompt], max_tokens=[12], sampling_configs=[{"sampling_temp": 0}])[0]
+        got = []
+        for _ in range(300):
+            _, responses = batch.next()
+            got += [r.token for r in responses if r.uid == uid]
+            if not batch.lanes:
+                break
+        assert target.kernel_receipt()["sink_slot_calls"] > 0
+    finally:
+        target.configure_kernels()
+    assert got == expect

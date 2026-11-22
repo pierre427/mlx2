@@ -177,6 +177,14 @@ KERNEL_OPTIONS = {
     # the same; implemented 2026-11-21, A/B pending). GPU reduction
     # partition differs (S vs S+1 keys).
     "inkling2_sink_sdpa": "sink_sdpa",
+    # Zero sink K/V row written into the KV cache's spare capacity past
+    # offset and read as a view, instead of concatenated onto K/V (a full
+    # K/V copy per visit; 2.1 GB per decode token over the 8 global visits
+    # at 64K, and the likely source of the freed-buffer pool growth past 32K
+    # in ladder 8e8e3f5b1). Bit-identical by construction (same values, same
+    # order); plain KVCache only, anything else falls back. Covers prefill,
+    # decode and DSpark verify rows. Implemented 2026-11-21, GPU A/B pending.
+    "inkling2_sink_slot": "sink_slot",
     # Prefill/verify attention (rows > 1) through one FP32 flash kernel with
     # the relative bias, window and sink in-kernel, replacing the dense bias
     # mask chunks (implemented 2026-11-21, GPU-only; decode keeps SDPA).
@@ -244,7 +252,11 @@ PREFILL_MASK_OPTION = "inkling2_prefill_mask_mb"
 # drafter alike) against 0 GiB with the clear, at the same ~20 GiB active
 # (qualification/runs/inkling2-gpu-20261121/9f49b58b9-pool). The DSpark B1
 # ladder at 32K was stopped by the memory watchdog at an 84.6 GiB footprint.
-# The clear is exact (allocator only). Opt-in until Pierre decides the default.
+# The clear is exact (allocator only). DEFAULT ON for the DSpark route (Pierre
+# 2026-11-21, "default if it passes"): ladder 8e8e3f5b1 on Inkling-2-Mini
+# @440956c8 ran DSpark B1 1K-128K with no memwatch stop (footprint 29.7 GB at
+# 32K, 35.0 at 64K, 46.0 at 128K), oracle 12/12, all 6 splits from ordinary
+# near_tie_equivalent. Unset = on with DSpark, off otherwise; false opts out.
 PREFILL_RECLAIM_OPTION = "inkling2_dspark_prefill_reclaim"
 
 
@@ -272,9 +284,11 @@ def validate_policy(value):
     if type(hard) is not bool:
         raise TypeError(f"Inkling 2 {HARD_NO_THINKING_OPTION} must be a boolean")
     kernels["hard_no_thinking"] = hard
-    reclaim = value.pop(PREFILL_RECLAIM_OPTION, False)
-    if type(reclaim) is not bool:
-        raise TypeError(f"Inkling 2 {PREFILL_RECLAIM_OPTION} must be a boolean")
+    reclaim = None  # unset: resolved at load (on with DSpark)
+    if PREFILL_RECLAIM_OPTION in value:
+        reclaim = value.pop(PREFILL_RECLAIM_OPTION)
+        if type(reclaim) is not bool:
+            raise TypeError(f"Inkling 2 {PREFILL_RECLAIM_OPTION} must be a boolean")
     kernels["dspark_prefill_reclaim"] = reclaim
     mask_mb = value.pop(PREFILL_MASK_OPTION, None)
     if mask_mb is not None and type(mask_mb) is not int:
@@ -437,6 +451,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise ValueError("Inkling 2 DSpark taps assume the trained loop count")
         if self.kernel_policy["dspark_prefill_reclaim"] and not external:
             raise ValueError(f"Inkling 2 {PREFILL_RECLAIM_OPTION} requires the DSpark route")
+        if self.kernel_policy["dspark_prefill_reclaim"] is None:
+            self.kernel_policy["dspark_prefill_reclaim"] = bool(external)
         if external and external.get("draft_model") not in DSPARK_DRAFT_NAMES:
             raise ValueError(f"Inkling 2 draft_model must be one of {sorted(DSPARK_DRAFT_NAMES)}")
         artifact = inspect_artifact(model_path)

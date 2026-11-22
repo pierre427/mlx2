@@ -78,9 +78,10 @@ FEATURES = (
     "ling_kda_fusion_components", "ling_split_mla_components",
     "inkling_fused_ops", "inkling_q2_down_combine", "inkling_inline_relative_attention",
     # Inkling 2 Mini (2026-11-21).
-    "inkling2_fused_projections", "inkling2_head_kernel", "inkling2_sink_sdpa",
+    "inkling2_fused_projections", "inkling2_head_kernel", "inkling2_sink_sdpa", "inkling2_sink_slot",
     "inkling2_loop_passes", "inkling2_row_invariant_controllers", "inkling2_flash_prefill",
     "inkling2_dspark_prefill_reclaim", "inkling2_prefill_mask_mb", "inkling2_hard_no_thinking",
+    "inkling2_command_buffers_ops100_v1",
     "inkling2_moe_fused", "inkling2_moe_weighted_sum", "inkling2_moe_nax_gather",
     "mtp_tree_pipeline",
     "integer_exact_microscaling", "exl3_upstream_weight_format", "exl3_execution_rows", "exl3_execution_fused", "exl3_execution_fused_nax", "exl3_execution_fused_w8a8", "exl3_execution_nax", "exl3_execution_nax_fused", "exl3_resident_dense",

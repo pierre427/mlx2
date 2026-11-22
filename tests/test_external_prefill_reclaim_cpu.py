@@ -191,7 +191,7 @@ def test_pairing_drafter_keeps_its_last_chunk_pending():
 
 def test_no_serving_or_adapter_code_selects_the_candidate():
     """Only an explicit opt-in may select it: Inkling 2's
-    ``inkling2_dspark_prefill_reclaim`` policy key (default off)."""
+    ``inkling2_dspark_prefill_reclaim`` policy key (default on for the DSpark route since 2026-11-21)."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "src" / "mlx2"

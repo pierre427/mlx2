@@ -505,6 +505,36 @@ class Attention(nn.Module):
         q, r, g, s = (y[..., slice(*bounds[n])] for n in ("q_proj", "r_proj", "gate_proj", "sink_proj"))
         return q, r, g, s, k, v
 
+    def _sink_slot(self, kv, b, size):
+        """K/V plus the zero sink column without copying K/V
+        (``inkling2_sink_slot``).
+
+        The sink is a zero K/V row with its own logit. The reference
+        concatenates that row onto the fetched K/V, which copies the whole
+        K/V on every visit (about 268 MB per global visit at 64K). A plain
+        ``KVCache`` buffer already has capacity past ``offset`` (256-token
+        growth), so the zero row is written into that slot and the attention
+        reads the view ``[:offset + 1]``: the same values in the same order,
+        so it is bit-identical. The slot lies past the committed fill level,
+        which the next append overwrites and trim/rollback never read, so
+        cache state is unchanged. Any other cache, a full buffer, or a
+        window-cropped fetch falls back to the concatenation."""
+        if (
+            type(kv) is not KVCache
+            or kv.keys is None
+            or kv.keys.shape[0] != b
+            or kv.offset != size
+            or kv.keys.shape[2] <= kv.offset
+        ):
+            self.__dict__["sink_slot_fallbacks"] = self.__dict__.get("sink_slot_fallbacks", 0) + 1
+            return None
+        off = kv.offset
+        for name in ("keys", "values"):
+            buf = getattr(kv, name)
+            buf[..., off : off + 1, :] = mx.zeros((*buf.shape[:2], 1, buf.shape[3]), buf.dtype)
+        self.__dict__["sink_slot_calls"] = self.__dict__.get("sink_slot_calls", 0) + 1
+        return kv.keys[..., : off + 1, :], kv.values[..., : off + 1, :]
+
     def _fetch(self, kv, k, v):
         k, v = kv.update_and_fetch(k, v)
         # Learned relative logits index backward distance, so ring buffers
@@ -609,9 +639,13 @@ class Attention(nn.Module):
             return self._finish(out, gate, b, length, x.dtype)
         # A query-dependent sink is a zero K/V with its own logit.
         sinks = sink.transpose(0, 2, 1)[..., None]
-        zeros = mx.zeros((b, self.n_kv, 1, self.head_dim), k.dtype)
-        k = mx.concatenate([k, zeros], axis=2)
-        v = mx.concatenate([v, zeros], axis=2)
+        slot = self._sink_slot(kv, b, size) if self.__dict__.get("_sink_slot_on") else None
+        if slot is not None:
+            k, v = slot
+        else:
+            zeros = mx.zeros((b, self.n_kv, 1, self.head_dim), k.dtype)
+            k = mx.concatenate([k, zeros], axis=2)
+            v = mx.concatenate([v, zeros], axis=2)
         budget = self.__dict__.get("_mask_budget_bytes") or _MASK_BUDGET_BYTES
         # Budget counts 4 bytes per mask element; the transient peak of one
         # chunk (int32 gather index, gathered bias, where/concat copies) is a
@@ -1030,7 +1064,8 @@ class Model(nn.Module):
 
     def configure_kernels(self, *, fused_projections=False, head_kernel=False, sink_sdpa=False,
                           loop_passes=None, prefill_mask_mb=None, flash_prefill=False,
-                          moe_fused=False, moe_weighted_sum=False, moe_nax_gather=False):
+                          moe_fused=False, moe_weighted_sum=False, moe_nax_gather=False,
+                          sink_slot=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1048,6 +1083,7 @@ class Model(nn.Module):
                 built |= moe_fused and "_fast_built" not in layer.mlp.__dict__
                 layer.mlp.set_fast_path(moe_fused, moe_weighted_sum)
             object.__setattr__(layer.self_attn, "_sink_sdpa", bool(sink_sdpa))
+            object.__setattr__(layer.self_attn, "_sink_slot_on", bool(sink_slot))
             object.__setattr__(layer.self_attn, "_flash_prefill", bool(flash_prefill))
             object.__setattr__(layer.self_attn, "_mask_budget_bytes",
                                None if prefill_mask_mb is None else int(prefill_mask_mb) << 20)
@@ -1067,7 +1103,7 @@ class Model(nn.Module):
              "sink_sdpa": bool(sink_sdpa), "loop_passes": loop_passes,
              "prefill_mask_mb": prefill_mask_mb, "flash_prefill": bool(flash_prefill),
              "moe_fused": bool(moe_fused), "moe_weighted_sum": bool(moe_weighted_sum),
-             "moe_nax_gather": bool(moe_nax_gather)},
+             "moe_nax_gather": bool(moe_nax_gather), "sink_slot": bool(sink_slot)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1077,6 +1113,8 @@ class Model(nn.Module):
         calls = [getattr(layer.self_attn, "fused_calls", 0) for layer in self.model.layers]
         sinks = [layer.self_attn.__dict__.get("sink_sdpa_calls", 0) for layer in self.model.layers]
         flash = [layer.self_attn.__dict__.get("flash_prefill_calls", 0) for layer in self.model.layers]
+        slot = [layer.self_attn.__dict__.get("sink_slot_calls", 0) for layer in self.model.layers]
+        slot_fb = [layer.self_attn.__dict__.get("sink_slot_fallbacks", 0) for layer in self.model.layers]
         moe = {}
         for layer in self.model.layers:
             for key, value in layer.mlp.__dict__.get("moe_fast_counts", {}).items():
@@ -1085,6 +1123,7 @@ class Model(nn.Module):
         out = {"fused_projection_calls": sum(calls),
                "head_kernel_calls": self.__dict__.get("head_kernel_calls", 0),
                "sink_sdpa_calls": sum(sinks), "flash_prefill_calls": sum(flash),
+               "sink_slot_calls": sum(slot), "sink_slot_fallbacks": sum(slot_fb),
                "moe_fused_calls": moe.pop("fused", 0),
                "moe_weighted_sum_calls": moe.pop("weighted_sum", 0),
                "moe_fast_declines": moe,
