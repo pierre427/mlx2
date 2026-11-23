@@ -72,6 +72,18 @@ def _run(model, tokens, plan):
 
 
 PLAN = [(0, 20), (20, 27)] + [(i, i + 1) for i in range(27, 40)]
+# Same tokens, different prefill chunking: identical math, different BF16
+# rounding order. Its gap against PLAN measures how far BF16 rounding alone
+# moves this random-weight model, so a BF16 option gap is judged against it;
+# kernel correctness is the FP32 arm's job (1e-3 bounds).
+CHAOS_PLAN = [(0, 9), (9, 27)] + [(i, i + 1) for i in range(27, 40)]
+
+
+def _bf16_bound(model, tokens, base, floor):
+    """max(floor, 3 x chaos control), as the kv_q8 controls (b713b1aef)."""
+    control = mx.abs(_run(model, tokens, CHAOS_PLAN).astype(mx.float32)
+                     - base.astype(mx.float32)).max().item()
+    return max(floor, 3.0 * control), control
 
 
 @pytest.mark.parametrize("geometry", ["tiny", "wide"])
@@ -230,6 +242,7 @@ def test_kernel_options_model_level(bf16):
     model.configure_kernels(moe_fused=True, moe_weighted_sum=True)
     tokens = mx.random.randint(0, 500, (1, 40), key=mx.random.key(7))
     base = _run(model, tokens, PLAN)
+    bound, control = _bf16_bound(model, tokens, base, 0.5) if bf16 else (1e-3, None)
     model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **ALL,
                             fuse_sconv_kernel=True, fuse_residual_kernel=True)
     got = _run(model, tokens, PLAN)
@@ -240,10 +253,11 @@ def test_kernel_options_model_level(bf16):
         "max_abs_logit": gap, "argmax_agreement": agree,
         "sconv_kernel": counts.get("sconv_kernel", 0),
         "residual_kernel": counts.get("residual_kernel", 0),
-        "message_kernel": counts.get("message_kernel", 0)}
+        "message_kernel": counts.get("message_kernel", 0),
+        "bf16_chaos_control": control, "bound": bound}
     assert counts.get("sconv_kernel", 0) > 0 and counts.get("residual_kernel", 0) > 0
     assert counts.get("message_kernel", 0) > 0
-    assert gap < (0.5 if bf16 else 1e-3)
+    assert gap < bound
 
 
 def test_gpu_graph_launch_counts():
@@ -395,6 +409,7 @@ def test_new_kernel_options_model_level(option, bf16):
     model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **DEFAULTS)
     tokens = mx.random.randint(0, 500, (1, 40), key=mx.random.key(7))
     base = _run(model, tokens, PLAN)
+    bound, control = _bf16_bound(model, tokens, base, 1.0) if bf16 else (1e-3, None)
     model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **DEFAULTS, **{option: True})
     got = _run(model, tokens, PLAN)
     receipt = model.kernel_receipt()
@@ -402,8 +417,9 @@ def test_new_kernel_options_model_level(option, bf16):
     result["counts"] = {k: v for k, v in receipt["fuse_counts"].items()
                         if k in ("dconv_kernel", "message_mix_kernel")}
     result["compiled_moe_calls"] = receipt["compiled_moe_calls"]
+    result.update(bf16_chaos_control=control, bound=bound)
     RESULTS[f"new_model/{option}/{'bf16' if bf16 else 'fp32'}"] = result
-    assert result["max_abs"] < (1.0 if bf16 else 1e-3), result
+    assert result["max_abs"] < bound, result
 
 
 @pytest.mark.parametrize("bf16", [False, True])
