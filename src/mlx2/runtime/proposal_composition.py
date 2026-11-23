@@ -64,6 +64,22 @@ class ProposalCompositionPolicy:
     # eighth otherwise-trusted selection is target-audited.  Zero may be kept
     # in an inactive policy for compatibility, but cannot enable trusted PLD.
     trusted_pld_audit_interval: int = 8
+    # Opt-in long copies (recon 2026-11-22; omlx #5528 copies up to 15).
+    # 0: a copy is at most the round's proposal length, which never exceeds
+    # the backend's own depth (the historical behaviour).  N > 0: the wrapper
+    # declares maximum_proposal_length max(backend depth, N), so an engine
+    # num_draft above the backend's trained block lets prompt-lookup copies
+    # run to N while the backend is still asked for at most its own depth.
+    prompt_lookup_max_span: int = 0
+    # "score" (default): committed score, then span, then source order.
+    # "expected_tokens": score x usable span first, so a long copy can win
+    # over a near-perfect but shorter backend chain; ties fall back to the
+    # default order.  Cold copy keys start at the 0.5 prior either way.
+    ranking: str = "score"
+
+    # Fields added after route identities were in use: emitted by as_dict
+    # only when set, so existing policies keep their APCv2 route identity.
+    _IDENTITY_OPTIONAL = {"prompt_lookup_max_span": 0, "ranking": "score"}
 
     @classmethod
     def from_value(cls, value):
@@ -130,10 +146,21 @@ class ProposalCompositionPolicy:
                 raise ValueError(f"proposal_composition {name} is invalid")
         if policy.trusted_pld and policy.trusted_pld_audit_interval < 1:
             raise ValueError("trusted PLD requires a positive audit interval")
+        if type(policy.prompt_lookup_max_span) is not int or not 0 <= policy.prompt_lookup_max_span <= 64:
+            raise ValueError("proposal_composition prompt_lookup_max_span must be an integer in 0..64")
+        if policy.prompt_lookup_max_span and not policy.prompt_lookup:
+            raise ValueError("prompt_lookup_max_span requires prompt_lookup")
+        if policy.ranking not in ("score", "expected_tokens"):
+            raise ValueError("proposal_composition ranking must be score or expected_tokens")
         return policy
 
     def as_dict(self):
-        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+        return {
+            name: getattr(self, name)
+            for name in self.__dataclass_fields__
+            if name not in self._IDENTITY_OPTIONAL
+            or getattr(self, name) != self._IDENTITY_OPTIONAL[name]
+        }
 
 
 class ComposedDraftModel:
@@ -164,6 +191,17 @@ class ComposedDraftModel:
     # only when every row selected the external source (a copied or MTP
     # span would replace the backend chain the early verify was built on).
     verify_prebuild = None
+
+    @property
+    def backend_proposal_length(self):
+        from .draft_capabilities import maximum_proposal_length
+
+        return maximum_proposal_length(self.backend)
+
+    @property
+    def maximum_proposal_length(self):
+        """Engine depth this wrapper can serve (``draft_capabilities``)."""
+        return max(self.backend_proposal_length, self.policy.prompt_lookup_max_span)
 
     @property
     def supports_verify_prebuild(self):
@@ -245,11 +283,25 @@ class ComposedDraftModel:
     def _select_candidate(self, candidates, external_span, score_state=None):
         """Rank by committed score, usable span, then stable source order."""
         score_state = {} if score_state is None else score_state
+
+        def span(item):
+            return len(item[1]) if item[1] is not None else external_span
+
+        if self.policy.ranking == "expected_tokens":
+            return min(
+                candidates,
+                key=lambda item: (
+                    -self._proposal_score(item[2], score_state) * span(item),
+                    -self._proposal_score(item[2], score_state),
+                    -span(item),
+                    self._SOURCE_ORDER[item[0]],
+                ),
+            )
         return min(
             candidates,
             key=lambda item: (
                 -self._proposal_score(item[2], score_state),
-                -(len(item[1]) if item[1] is not None else external_span),
+                -span(item),
                 self._SOURCE_ORDER[item[0]],
             ),
         )
@@ -556,6 +608,13 @@ class ComposedDraftModel:
         ):
             raise ValueError("proposal composition requires executor-owned source ranges per row")
         histories = [list(history) for history in processor_histories]
+        # The round's depth may exceed the backend's own only through
+        # prompt_lookup_max_span (maximum_proposal_length).  The backend and
+        # native MTP are asked for at most the backend depth; copies for the
+        # full round depth.
+        if proposal_length > self.backend_proposal_length and not self.policy.prompt_lookup_max_span:
+            raise ValueError("proposal length exceeds the composed backend's depth")
+        backend_length = min(proposal_length, self.backend_proposal_length)
         if any(ranges is not None and any(item.end > len(history) + 1 for item in ranges)
                for history, ranges in zip(histories, proposal_source_ranges)):
             raise ValueError("prompt-copy source range exceeds committed history")
@@ -615,7 +674,7 @@ class ComposedDraftModel:
                 and 0 < len(history) <= self.policy.mtp_max_history
             ):
                 mtp = list(
-                    self.native_mtp_source(history, int(anchor), proposal_length)
+                    self.native_mtp_source(history, int(anchor), backend_length)
                 )
                 if not mtp:
                     raise ValueError("native MTP source returned an empty proposal")
@@ -649,7 +708,7 @@ class ComposedDraftModel:
             selected = (
                 calibration
                 if calibration is not None
-                else self._select_candidate(row, proposal_length, score_state)
+                else self._select_candidate(row, backend_length, score_state)
                 if row
                 else ("external", None, "external")
             )
@@ -667,7 +726,7 @@ class ComposedDraftModel:
                 anchors,
                 hidden,
                 cache,
-                proposal_length,
+                backend_length,
                 rngs,
                 temperatures,
                 logits_processors=logits_processors,

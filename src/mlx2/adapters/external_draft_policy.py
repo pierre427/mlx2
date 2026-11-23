@@ -551,9 +551,15 @@ class ExternalDraftAdapterMixin:
             )
         return bool(self.external_policy)
 
+    def _num_draft_ceiling(self, record):
+        """Largest admissible ``num_draft`` (block size minus one).  A family
+        whose explicit, opt-in proposal composition can copy past the draft
+        block (Inkling 2 ``prompt_lookup_max_span``) may raise it."""
+        return record["args"].block_size - 1
+
     def _check_num_draft(self, record):
         count = self.external_policy.get("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
-        if type(count) is not int or not 1 <= count < record["args"].block_size:
+        if type(count) is not int or not 1 <= count <= self._num_draft_ceiling(record):
             raise ValueError(
                 "num_draft must be a positive integer below the draft block size"
             )

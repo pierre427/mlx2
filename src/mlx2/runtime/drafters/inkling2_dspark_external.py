@@ -105,7 +105,10 @@ class Inkling2DSparkExternal:
         c = drafter.config
         self.config = SimpleNamespace(
             block_size=num_draft + 1,
-            vocab_size=int(c.vocab_size),
+            # The target's logits and the drafter's are cut to the unpadded
+            # vocabulary, so proposal laws (incl. composed prompt-lookup
+            # copies, sized from this field) must use that width too.
+            vocab_size=int(c.unpadded_vocab_size or c.vocab_size),
             hidden_size=int(c.hidden_size),
             target_layer_ids=tuple(c.target_layer_ids),
             feature_width=int(c.feature_width),
@@ -221,10 +224,18 @@ class Inkling2DSparkExternal:
         return row, [PointMassLaw(t) for t in row]
 
 
-def load_external_drafter(record, target_model, *, num_draft, options=None):
+def load_external_drafter(record, target_model, *, num_draft, options=None,
+                          cap_to_block=False):
+    """``cap_to_block`` (default off): an engine depth above the trained block
+    is allowed only for a composition with ``prompt_lookup_max_span``; the
+    backend then drafts at most ``block_size - 1`` and the composition wrapper
+    declares the longer engine depth.  Without it, a depth above the block
+    still fails closed."""
     from ...adapters.inkling2_dspark import load_drafter
 
     drafter = load_drafter(record, target_model).configure_options(**(options or {}))
+    if cap_to_block:
+        num_draft = min(int(num_draft), drafter.config.block_size - 1)
     return Inkling2DSparkExternal(drafter, num_draft=num_draft)
 
 

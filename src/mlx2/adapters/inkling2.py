@@ -865,11 +865,27 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 record,
                 lambda rec, model: load_external_drafter(
                     rec["dspark"], model, num_draft=self._external_num_draft(),
-                    options=self.dspark_options),
+                    options=self.dspark_options,
+                    cap_to_block=self._composition_long_copies()),
                 self.descriptor,
             )
             if cost_depth is not None:
                 self.dspark_cost_depth = self._dspark_cost_policy(cost_depth)
+
+    def _num_draft_ceiling(self, record):
+        """Block size minus one, or the composition's copy span when an explicit
+        ``prompt_lookup_max_span`` is set (the drafter backend stays capped to
+        its block; only prompt-lookup copies use the longer rounds)."""
+        ceiling = super()._num_draft_ceiling(record)
+        if self._composition_long_copies():
+            span = int(self.external_policy["proposal_composition"]["prompt_lookup_max_span"])
+            ceiling = max(ceiling, span)
+        return ceiling
+
+    def _composition_long_copies(self):
+        """An explicit composition with ``prompt_lookup_max_span`` (opt-in)."""
+        value = (getattr(self, "external_policy", None) or {}).get("proposal_composition")
+        return isinstance(value, dict) and int(value.get("prompt_lookup_max_span", 0) or 0) > 0
 
     @property
     def checkpoint(self):

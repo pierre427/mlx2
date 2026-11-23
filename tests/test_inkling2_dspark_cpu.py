@@ -661,3 +661,110 @@ def test_engine_interior_checkpoint_resumes_like_the_cold_prompt(pair, boundary)
     finally:
         resumed.close()
         cold.close()
+
+
+def test_backend_vocab_is_the_unpadded_logit_width(pair):
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+
+    target, draft, _ = pair
+    backend = Inkling2DSparkExternal(draft, num_draft=3)
+    assert backend.config.vocab_size == TEXT["unpadded_vocab_size"] < TEXT["vocab_size"]
+    logits = target(mx.array([[1, 2, 3]]), cache=target.make_cache())
+    assert logits.shape[-1] == backend.config.vocab_size
+
+
+def test_engine_greedy_equals_ordinary_with_prompt_lookup_composition(pair):
+    """Inkling-2-Mini@440956c8 DSpark copy arm (recon1122, b466c8955) died with
+    'Vocabulary mismatch': composed copies were dense laws at the padded 512
+    width against 500-wide target logits.  Composition on must equal ordinary."""
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.proposal_composition import ComposedDraftModel
+
+    target, draft, _ = pair
+    mx.random.seed(11)
+    phrase = [int(t) for t in mx.random.randint(1, 400, (12,)).tolist()]
+    filler = [int(t) for t in mx.random.randint(1, 400, (9,)).tolist()]
+    prompt = phrase + filler + phrase + filler[:4] + phrase[:6]
+    cache = target.make_cache()
+    tokens, expect = list(prompt), []
+    for step in range(16):
+        logits = target(mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache)
+        tokens.append(int(mx.argmax(logits[0, -1]).item()))
+        expect.append(tokens[-1])
+    composed = ComposedDraftModel(Inkling2DSparkExternal(draft, num_draft=3),
+                                  {"ngram_min": 1, "ngram_max": 3, "min_context_match": 1})
+    batch = ExternalDraftBatchGenerator(target, draft_model=composed, binding="test",
+                                        num_draft=3, prefill_step_size=16)
+    uid = batch.insert([prompt], max_tokens=[16], sampling_configs=[{"sampling_temp": 0}])[0]
+    got = []
+    for _ in range(400):
+        _, responses = batch.next()
+        got += [r.token for r in responses if r.uid == uid]
+        if not batch.lanes:
+            break
+    assert got == expect
+    assert composed.composition_stats["prompt_lookup"] > 0
+
+
+def test_composition_long_copies_engine_greedy_equals_ordinary(pair):
+    """prompt_lookup_max_span (recon 2026-11-22): an engine depth of 8 over a
+    3-token DSpark backend; copies may run to 8, the backend is never asked
+    for more than 3, and greedy output still equals ordinary decode."""
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.proposal_composition import ComposedDraftModel
+
+    target, draft, _ = pair
+    mx.random.seed(11)
+    phrase = [int(t) for t in mx.random.randint(1, 400, (12,)).tolist()]
+    filler = [int(t) for t in mx.random.randint(1, 400, (9,)).tolist()]
+    prompt = phrase + filler + phrase + filler[:4] + phrase[:6]
+    cache = target.make_cache()
+    tokens, expect = list(prompt), []
+    for step in range(20):
+        logits = target(mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache)
+        tokens.append(int(mx.argmax(logits[0, -1]).item()))
+        expect.append(tokens[-1])
+    backend = Inkling2DSparkExternal(draft, num_draft=3)
+    asked, copies = [], []
+    original = backend.draft_distributions
+
+    def spy(anchors, hidden, cache, proposal_length, *args, **kwargs):
+        asked.append(int(proposal_length))
+        return original(anchors, hidden, cache, proposal_length, *args, **kwargs)
+
+    backend.draft_distributions = spy
+    composed = ComposedDraftModel(backend, {
+        "ngram_min": 1, "ngram_max": 3, "min_context_match": 1, "lookback": 4096,
+        "prompt_lookup_max_span": 8, "ranking": "expected_tokens"})
+    assert composed.maximum_proposal_length == 8
+    wrapped = composed.draft_distributions
+
+    def record(*args, **kwargs):
+        out = wrapped(*args, **kwargs)
+        copies.extend(len(row) for row, src in zip(out[0], composed.last_proposal_sources)
+                      if src == "prompt_lookup")
+        return out
+
+    composed.draft_distributions = record
+    batch = ExternalDraftBatchGenerator(target, draft_model=composed, binding="test",
+                                        num_draft=8, prefill_step_size=16)
+    uid = batch.insert([prompt], max_tokens=[20], sampling_configs=[{"sampling_temp": 0}])[0]
+    got = []
+    for _ in range(400):
+        _, responses = batch.next()
+        got += [r.token for r in responses if r.uid == uid]
+        if not batch.lanes:
+            break
+    assert got == expect
+    assert asked and max(asked) <= 3
+    assert copies and max(copies) > 3
+
+
+def test_long_copies_need_explicit_cap_to_block(pair):
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+
+    _, draft, _ = pair
+    with pytest.raises(ValueError):
+        Inkling2DSparkExternal(draft, num_draft=draft.config.block_size)
