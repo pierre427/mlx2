@@ -911,6 +911,9 @@ class APCv2(PrefixIndex):
         # Sidecar hits served from an ancestor a deeper sidecar-less entry
         # hid from the trie candidates (``require_sidecar``).
         "sidecar_ancestor_hits",
+        # Pressure evictions passed over because the entry is a copy-on-write
+        # boundary still aliasing its running lane's cache (frees nothing).
+        "pressure_live_alias_skips",
     )
     # Transient restore errors keep the snapshot for a retry this many times
     # before the entry is dropped as unusable.
@@ -923,6 +926,13 @@ class APCv2(PrefixIndex):
     _background_spill = False
     _background_spill_max_bytes = 0
     _spill_jobs = ()
+    # Optional ``() -> set[(key, tokens)]`` of boundaries a running lane has
+    # not written past (``set_live_alias_provider``).
+    _live_alias_provider = None
+    # Last entry drops with their cause and caller (``recent_drops`` in
+    # stats); host bookkeeping on the drop path only.
+    _RECENT_DROPS = 16
+    _recent_drops = ()
     _spill_writer = None
     _disk_owner = None
     _restore_pool = None
@@ -2233,6 +2243,33 @@ class APCv2(PrefixIndex):
         elif role == self._RETENTION_JUNCTION:
             self._apc_stats["junction_hits"] += 1
 
+    def _note_drop_locked(self, tokens, entry, reason) -> None:
+        """Keep the last drops: which entry, why, and who asked (diagnostic)."""
+        import sys
+
+        callers = []
+        frame = sys._getframe(2)
+        while frame is not None and len(callers) < 4:
+            name = frame.f_code.co_name
+            module = frame.f_globals.get("__name__", "")
+            if module != __name__ or not callers:
+                callers.append(f"{module.rsplit('.', 1)[-1]}:{name}")
+            frame = frame.f_back
+        now = self._now()
+        record = {
+            "reason": str(reason),
+            "tokens": len(tokens),
+            "sidecar": getattr(entry, "sidecar", None) is not None,
+            "role": getattr(entry, "_apc_retention_role", None),
+            "cow": isinstance(entry.prompt_cache, COWFrozenPromptCache),
+            "nbytes": int(getattr(entry, "nbytes", 0) or 0),
+            "age_seconds": round(now - float(getattr(entry, "_apc_inserted_at", now)), 3),
+            "callers": callers,
+        }
+        self._recent_drops = (*self._recent_drops, record)[-self._RECENT_DROPS:]
+        if os.environ.get("MLX2_APC_DROP_TRACE") == "1":
+            log.info("APCv2 drop: %s", record)
+
     def _record_entry_eviction_locked(self, entry) -> None:
         now = self._now()
         inserted = float(getattr(entry, "_apc_inserted_at", now))
@@ -2761,6 +2798,7 @@ class APCv2(PrefixIndex):
             return  # already gone (pop raises before changing the trie)
         if current is None:
             return
+        self._note_drop_locked(tokens, current, reason)
         # Pressure eviction skips disk-pinned entries and a session delete
         # pops its pin first, so a drop that still carries a live disk pin
         # loses a parked session (a failed restore, prefetch or suspend
@@ -6595,6 +6633,7 @@ class APCv2(PrefixIndex):
                 name: histogram.snapshot()
                 for name, histogram in self._reuse_histograms.items()
             }
+            stats["recent_drops"] = [dict(item) for item in self._recent_drops]
             return stats
 
     def close(
@@ -6755,16 +6794,51 @@ class APCv2(PrefixIndex):
         with self._apc_lock:
             return int(self._n_bytes)
 
+    def set_live_alias_provider(self, provider) -> None:
+        """Install ``provider() -> set[(key, tokens)]`` (serving's running lanes).
+
+        Pressure eviction and ``unleased_resident_nbytes`` then treat a
+        copy-on-write entry in that set as not reclaimable.
+        """
+        self._live_alias_provider = provider
+
+    def _live_aliases_locked(self, explicit=None):
+        if explicit is not None:
+            return explicit
+        provider = self._live_alias_provider
+        if provider is None:
+            return ()
+        try:
+            return provider() or ()
+        except Exception as error:  # noqa: BLE001 - a broken probe protects nothing
+            # A cross-thread read that raced the scheduler (an HTTP thread's
+            # evictable estimate) protects nothing this once; debug only.
+            if not getattr(self, "_live_alias_failure_logged", False):
+                self._live_alias_failure_logged = True
+                log.debug("APCv2 live-alias provider failed: %r", error)
+            return ()
+
+    @staticmethod
+    def _is_live_alias(key, tokens, entry, aliases) -> bool:
+        return bool(
+            aliases
+            and isinstance(entry.prompt_cache, COWFrozenPromptCache)
+            and (key, tuple(tokens)) in aliases
+        )
+
     def unleased_resident_nbytes(self) -> int:
         """Resident bytes that pressure eviction could actually reclaim.
 
         A shared snapshot's first holder is charged for it, but evicting
         that holder only moves the charge while any other holder stays
         resident; the snapshot counts only when every holder is evictable.
+        A live alias (see ``evict_oldest_unleased``) is not reclaimable.
         """
         with self._apc_lock:
+            aliases = self._live_aliases_locked()
             candidates = [
                 record[4] for record in self._pressure_candidates_locked()
+                if not self._is_live_alias(record[2], record[3], record[4], aliases)
             ]
             evictable = {id(entry) for entry in candidates}
             total = 0
@@ -6780,7 +6854,7 @@ class APCv2(PrefixIndex):
                         total -= record[0]
             return max(0, total)
 
-    def evict_oldest_unleased(self, protect=None) -> bool:
+    def evict_oldest_unleased(self, protect=None, live_aliases=None) -> bool:
         """Reclaim one resident checkpoint without invalidating active branches.
 
         A configured disk tier keeps the checkpoint as a disk-only placeholder
@@ -6789,12 +6863,23 @@ class APCv2(PrefixIndex):
         to destructive resident eviction so memory pressure can make progress.
         ``protect(key, tokens)`` true keeps that entry resident: admission
         passes the prefixes queued requests are about to look up.
+        ``live_aliases`` (default: the installed provider's set) holds the
+        ``(key, tokens)`` boundaries whose running
+        lane has not written since publication: a copy-on-write entry among
+        them shares that lane's buffers, so dropping it would release no
+        memory and only lose the checkpoint (a draft route's sidecar at that
+        depth with it).  Such an entry is skipped and counted
+        (``pressure_live_alias_skips``); a copied entry is not.
         """
         with self._apc_lock:
             self._ensure_metadata_available()
+            live_aliases = self._live_aliases_locked(live_aliases)
             records = self._pressure_candidates_locked()
             for _rank, _last_access, key, tokens, entry in records:
                 if protect is not None and protect(key, tokens):
+                    continue
+                if self._is_live_alias(key, tokens, entry, live_aliases):
+                    self._apc_stats["pressure_live_alias_skips"] += 1
                     continue
                 if self._idle_disk_dir is not None and self._spill_entry_locked(
                     key, tokens, entry, reason="pressure"
@@ -6807,7 +6892,10 @@ class APCv2(PrefixIndex):
                 if self._entry_disk_pinned_locked(key, tokens, entry):
                     continue
                 self._note_retention_eviction_locked(entry)
-                self._drop_entry_locked(key, tokens, entry)
+                self._drop_entry_locked(
+                    key, tokens, entry,
+                    reason=f"pressure (live aliases {len(live_aliases or ())})",
+                )
                 return True
         return False
 

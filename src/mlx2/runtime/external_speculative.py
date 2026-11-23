@@ -14793,6 +14793,12 @@ class ExternalDraftBatchGenerator:
             draft_bytes = sum(int(getattr(c,"nbytes",0)) for c in lane.draft_cache)
             # A multi-lane slab merges (copies) every lane's cache into a
             # padded batch, so only a serial slice gets the in-place charge.
+            # A decode round's 4x charge also covers the one full copy the
+            # lane's first write makes while APCv2 keeps its just-published
+            # copy-on-write boundary (serving ``live_boundary_aliases``
+            # protects it from eviction until then); the Hy4 budget's
+            # ``append_only_growth_copy`` is that same copy on the controller's
+            # request-level estimate, not an extra one here.
             cache_required = (
                 _prefill_target_reservation(lane.cache)
                 if prefill and len(lanes) == 1
@@ -15672,6 +15678,29 @@ class ExternalDraftBatchGenerator:
             _bump(self.scheduler_stats, "external_allocator_reclaims")
 
     def pop_prompt_boundary(self, uid): return self.boundaries.pop(uid, None)
+
+    def lane_cache_tokens(self, uid):
+        """Positions committed into ``uid``'s target cache, or None if unknown.
+
+        Serving compares this with a published prompt boundary's length: while
+        equal, the lane has not written since the copy-on-write freeze, so the
+        APCv2 entry still shares the lane's buffers and evicting it frees
+        nothing.  None (no protection) for an unknown lane or while a
+        dispatched-but-unread or prelaunched round may already have written.
+        """
+        # Called from HTTP threads (admission's evictable-bytes estimate)
+        # while the scheduler mutates these: read snapshots only.
+        lane = self.lanes.get(uid)
+        if lane is None:
+            return None
+        inflight = getattr(self, "_parked_inflight", None)
+        if inflight is not None and any(item.uid == uid for item in tuple(inflight.lanes)):
+            return None
+        for key in tuple(getattr(self, "_prelaunched", None) or ()):
+            members = key[1:] if isinstance(key, tuple) and key[:1] == ("cohort",) else (key,)
+            if uid in members:
+                return None
+        return len(lane.history)  # one atomic read of a list
 
     def _record_prefill_slice(self, lane, executed, planned, reason=None):
         """Note one executed target prefill slice against the idle plan.

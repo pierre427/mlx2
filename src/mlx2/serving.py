@@ -3425,6 +3425,43 @@ def prepare_elastic_execution(headroom, controller, rows, *, draft_depth=0, work
         raise Overloaded("elastic execution memory does not fit after measured expert reclamation")
 
 
+def live_boundary_aliases(jobs, batch):
+    """Prompt boundaries that running lanes have not written past.
+
+    A committed prompt boundary is frozen copy-on-write from the lane's live
+    cache: until the lane appends again both hold the same buffers, so a
+    pressure eviction of it releases no memory and only destroys the one
+    entry carrying the request's draft state at the prompt depth.  Hy4-flash
+    128K DFly2 (2026-11-21): the cold request's decode admission evicted its
+    own boundary within a second of publishing it, and the warm re-send
+    found only the finish tip, whose sidecar is state at the tip's end
+    (``external_draft_sidecar_missing``).
+
+    Keyed on the lane's written position, not on emitted tokens: the first
+    token can be sampled (and counted) before its row is written.  Only a
+    generator that reports ``lane_cache_tokens(uid)`` protects anything; a
+    lane whose position is unknown or past the boundary protects nothing.
+    """
+    observe = getattr(batch, "lane_cache_tokens", None)
+    if not callable(observe):
+        return set()
+    aliases = set()
+    for job in jobs:
+        boundary = getattr(job, "apc_live_boundary", None)
+        cancelled = getattr(job, "cancelled", None)
+        uid = getattr(job, "uid", None)
+        if (
+            boundary is None
+            or uid is None
+            or (cancelled is not None and cancelled.is_set())
+        ):
+            continue
+        key, tokens = boundary
+        if observe(uid) == len(tokens):
+            aliases.add((key, tuple(tokens)))
+    return aliases
+
+
 def queued_prefix_protector(jobs, key_for):
     """``protect(key, tokens)`` for APCv2 entries a waiting job will hit.
 
@@ -4254,6 +4291,13 @@ class Job:
     prefill_handoff_receipt: dict | None = None
     # Input lookup provenance, not this request's later cache publication.
     cache_retention_role: str | None = None
+    # Why this request's APCv2 lookup served nothing (``APCLookup.miss_reason``).
+    apcv2_miss_reason: str | None = None
+    # ``(key, tokens)`` of the committed prompt boundary this request
+    # published.  Until the lane writes again the copy-on-write entry aliases
+    # the live cache, so evicting it frees nothing (see
+    # ``APCv2.evict_oldest_unleased(live_aliases=...)``).
+    apc_live_boundary: tuple | None = None
     completion_tokens: int = 0
     reasoning_tokens: int = 0
     cache_branch: object = None
@@ -12975,6 +13019,16 @@ class ServingEngine(KernelReloadMixin):
                 ast_memo_debug=os.environ.get("MLX2_AST_MEMO_DEBUG", "0") == "1",
             )
             self.apc = apc
+            # Pressure eviction and its evictable-bytes estimate pass over a
+            # COW boundary its running lane has not written past (frees
+            # nothing).  ``batch`` is read at call time: it is built below.
+            set_live_aliases = getattr(apc, "set_live_alias_provider", None)
+            if callable(set_live_aliases):
+                set_live_aliases(
+                    # A snapshot: HTTP threads read this while the
+                    # scheduler thread mutates ``active``.
+                    lambda: live_boundary_aliases(tuple(active.values()), batch)
+                )
             # The AST memo is an opt-in APCv2 child; a cache without the
             # method (test doubles, caches built without the child) has
             # no handle, which every AST consumer below already tolerates.
@@ -13353,6 +13407,8 @@ class ServingEngine(KernelReloadMixin):
                         job.tenant_id, request_apc_lookup_scope(job.request)
                     ),
                 )
+                # Live COW boundaries are passed over through the provider
+                # installed on ``apc`` (``live_boundary_aliases``).
                 if protect is None:
                     evicted = apc.evict_oldest_unleased()
                 else:
@@ -13373,6 +13429,23 @@ class ServingEngine(KernelReloadMixin):
                 if evicted:
                     count_add(self.counts, "memory_pressure_evictions", 1)
                     self._permit_allocator_reclaim_after_eviction()
+                    # Attribution: a running lane whose published boundary it
+                    # had already written past (so the entry was a copy, and
+                    # evictable by design) versus one still aliasing it.
+                    observe = getattr(batch, "lane_cache_tokens", None)
+                    if callable(observe):
+                        for job in tuple(active.values()):
+                            boundary = getattr(job, "apc_live_boundary", None)
+                            if boundary is None or job.uid is None:
+                                continue
+                            position = observe(job.uid)
+                            count_add(
+                                self.counts,
+                                "memory_pressure_evictions_beside_unwritten_boundary"
+                                if position == len(boundary[1])
+                                else "memory_pressure_evictions_beside_written_boundary",
+                                1,
+                            )
                 return evicted
 
             def route_usable_hit(hit, tokens):
@@ -14024,6 +14097,10 @@ class ServingEngine(KernelReloadMixin):
                         slice_schedule_owner=boundary_job,
                         session_tag=session_tag_for(boundary_job),
                     )
+                    if stored and boundary_job is not None:
+                        boundary_job.apc_live_boundary = (
+                            key, tuple(boundary["tokens"])
+                        )
                     if boundary.get("pre_transform_exact", False):
                         count_add(self.counts, "spomin_exact_boundary_stores"
                             if stored
@@ -15598,6 +15675,9 @@ class ServingEngine(KernelReloadMixin):
                                 count_add(self.counts, "apc_warm_slices_unaligned", 1)
                             job.cache_retention_role = getattr(
                                 hit, "retention_role", None
+                            )
+                            job.apcv2_miss_reason = (
+                                None if cached else getattr(hit, "miss_reason", None)
                             )
                             if (
                                 job.cache_retention_role == "interior_checkpoint"
@@ -17344,6 +17424,7 @@ class ServingEngine(KernelReloadMixin):
                                         else {}
                                     ),
                                     "cache_checkpoint_role": job.cache_retention_role,
+                                    "apcv2_miss_reason": job.apcv2_miss_reason,
                                     "stop_sequence": getattr(
                                         job.output_parser, "stop_sequence", None
                                     ),

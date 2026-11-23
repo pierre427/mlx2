@@ -204,6 +204,7 @@ def main(argv=None) -> int:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--execution-policy", type=Path, required=True)
+    parser.add_argument("--cache-dir", help="APCv2 disk tier directory for the server (default: --no-cache-dir)")
     parser.add_argument("--server-arg", action="append", default=[],
                         help="extra mlx2.server argument (repeatable), e.g. --server-arg=--prefill-step --server-arg=1024")
     parser.add_argument("--route", choices=("ordinary", "ast"), default="ordinary",
@@ -268,7 +269,8 @@ def main(argv=None) -> int:
                    "--max-lanes", "1", "--max-inflight", "1",
                    "--max-context", str(max(cells) + 4096),
                    "--execution-policy", str(a.execution_policy.expanduser().resolve()),
-                   "--admin-token-file", str(token_file), "--no-cache-dir", *a.server_arg]
+                   "--admin-token-file", str(token_file), *(["--cache-dir", str(Path(a.cache_dir).expanduser().resolve())] if a.cache_dir else ["--no-cache-dir"]),
+                   *a.server_arg]
         if a.prefill_step is not None:
             command += ["--prefill-step", str(a.prefill_step)]
         report["server_command"] = command
