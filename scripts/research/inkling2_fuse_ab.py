@@ -66,6 +66,8 @@ def option_name(name):
     sys.path.insert(0, str(ROOT / "src"))
     from mlx2.adapters.inkling2 import KERNEL_OPTIONS
 
+    if name.startswith("io:"):  # module switches, checked by Toggle
+        return name
     name = KERNEL_OPTIONS.get(name, name)
     if name not in KERNEL_OPTIONS.values():
         raise SystemExit(f"unknown Inkling 2 kernel option {name!r}")
