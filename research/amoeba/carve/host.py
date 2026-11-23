@@ -263,6 +263,8 @@ def _first_attr(obj, names):
 
 EMBED_NAMES = ("embed_tokens", "wte", "tok_embeddings", "embeddings")      # embeddings: Nemotron-H backbone
 NORM_NAMES = ("norm", "final_layernorm", "ln_f", "norm_f")
+# a hyper-connection head that reduces the residual streams before the final norm (Hy4-flash ``hc_head``)
+STREAM_HEAD_ATTRS = ("hc_head",)
 
 
 def find_inner(model):
@@ -306,6 +308,16 @@ class Host:
         name = checkpoint or (self.path.name if self.path else type(model).__name__)
         self.checkpoint = f"{name}@{self.fingerprint.split(':')[-1][:8]}"
         self.lm, self.inner = find_inner(model)
+        # the trunk forward: the inner module when it is callable, else the logits module's own ``hidden``
+        # (a trunk whose forward lives on the outer model, e.g. Hy4-flash: Engram rows and per-layer caches)
+        self._trunk = self.inner if callable(self.inner) else getattr(self.lm, "hidden", None)
+        if not callable(self._trunk):
+            raise SystemExit("carve host: the inner model is not callable and the model has no hidden(ids)")
+        # layers that take the model's own per-layer caches (``make_cache``): a replay gets a fresh cache, as the
+        # recorded one-chunk forward started from one (the recorded cache was advanced by that forward)
+        mk = getattr(self.lm, "make_cache", None)
+        self._make_cache = mk if callable(mk) and not callable(self.inner) else None
+        self._cache_types = tuple({type(c_) for c_ in mk()}) if self._make_cache is not None else ()
         self.layers = list(self.inner.layers)
         self.L = len(self.layers)
         self.moe_units = moe_units
@@ -373,7 +385,15 @@ class Host:
         return self.lm(ids).astype(mx.float32)
 
     def hidden(self, ids):
-        return self.inner(ids)
+        return self._trunk(ids)
+
+    def layer_args(self, l, a, k):
+        """Recorded layer-call arguments for a replay of layer l: the model's own caches replaced by fresh ones."""
+        if not self._cache_types:
+            return a, k
+        fresh = self._make_cache()[l]
+        sub = (lambda v: fresh if isinstance(v, self._cache_types) else v)
+        return tuple(sub(v) for v in a), {kk: sub(v) for kk, v in k.items()}
 
     def logits_at(self, ids, pos=None):
         """Float32 logits [B, P, V] at positions pos (list, same per row; or [B, P] int array)."""
@@ -412,7 +432,7 @@ class Host:
             layer.__class__ = type(f"Rec{base.__name__}", (base,), {"__call__": call})
             patched.append((layer, base))
         try:
-            out = self.inner(ids)
+            out = self._trunk(ids)
         finally:
             for layer, base in patched:
                 layer.__class__ = base
@@ -433,7 +453,7 @@ class Host:
             return _base.__call__(self_, x, *a, **k)
         target.__class__ = type(f"Tap{base.__name__}", (base,), {"__call__": call})
         try:
-            out = self.inner(ids)
+            out = self._trunk(ids)
         finally:
             target.__class__ = base
         if len(box) != 1:
@@ -443,16 +463,23 @@ class Host:
     def _final_norm_module(self):
         return _first_attr(self.inner, FINAL_NORM_ATTRS)
 
+    def _stream_head(self):
+        return _first_attr(self.inner, STREAM_HEAD_ATTRS)
+
     def final_norm(self, h):
-        return self._final_norm_module()(h)
+        sh = self._stream_head()
+        return self._final_norm_module()(sh(h) if sh is not None else h)
 
     def _tail_modules(self):
-        """What the head vjp backpropagates through: the final norm and the head's own modules."""
-        return [self._final_norm_module(), getattr(self.lm, "lm_head", None) if not self.tied else self._embed()]
+        """What the head vjp backpropagates through: the stream head, the final norm and the head's own modules."""
+        mods = [self._final_norm_module(), getattr(self.lm, "lm_head", None) if not self.tied else self._embed()]
+        sh = self._stream_head()
+        return ([sh] if sh is not None else []) + mods
 
     def replay_hidden(self, recs, upto=None):
         h = recs[0][0]
         for l, (_, a, k) in enumerate(recs[:upto]):
+            a, k = self.layer_args(l, a, k)
             h = _hid(self.layers[l](h, *a, **k))
         return h
 
@@ -548,7 +575,8 @@ class Host:
             reads_e = set(reads_e) | set(reads_te)
             # ---- reference arm: each unit alone, in reference mode
             units = [(str(l), layer_roots[l], recs[l][0], outs[l],
-                      lambda x=x, a=a, k=k, l=l: _hid(self.layers[l](x, *a, **k)))
+                      lambda x=x, a=a, k=k, l=l: _hid(self.layers[l](x, *self.layer_args(l, a, k)[0],
+                                                                      **self.layer_args(l, a, k)[1])))
                      for l, (x, a, k) in enumerate(recs)]
             units.append(("head", tail_roots, None, head_e, lambda x=outs[-1]: self.head(self.final_norm(x))))
             for i, (name, roots, x, e, run) in enumerate(units):
@@ -647,7 +675,7 @@ class Host:
         routes = {}
 
         def cap(l, kind, p):
-            if kind in ("qwen_next", "gemma4_experts") and "inds" in p:
+            if kind in U.REPLAY_KINDS and "inds" in p:
                 routes[l] = (mx.stop_gradient(p["inds"]), mx.stop_gradient(p["w"]))
 
         def before(l):
@@ -671,7 +699,8 @@ class Host:
                 apply(l, dict(zip(keys, vals)))
                 if l in routes:
                     self.ctl.replay = {l: routes[l]}
-                return _hid(self.layers[l](x, *a, **k))
+                a_, k_ = self.layer_args(l, a, k)
+                return _hid(self.layers[l](x, *a_, **k_))
             with self._ref([self.layers[l]]):           # only layer l leaves the fused path
                 _, cots = mx.vjp(fl, [hs[l], *[trainables[kk][l] for kk in keys]], [gh])
                 self.ctl.reset()
@@ -884,7 +913,7 @@ class Host:
             import mlx.core as mx
             replay = {l: (mx.stop_gradient(i), mx.stop_gradient(w)) for l, (i, w) in self._last_route_w.items()}
             moe_kinds = {s_.kind for s_ in self.sites if s_.is_moe}
-            frozen = bool(replay) and moe_kinds <= {"qwen_next", "gemma4_experts"}
+            frozen = bool(replay) and moe_kinds <= set(U.REPLAY_KINDS)
             # the function the layer-wise tape differentiates: the fused trunk, the final norm + head on
             # their reference path (``_layerwise``), routing ids frozen at m (frozen mode). The FD forwards
             # use the same tail, so the same-function check compares like with like; the all-fused loss

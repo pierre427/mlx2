@@ -443,8 +443,9 @@ def _topic_seed(b, topic: str, shape) -> tuple[np.ndarray | None, dict]:
         return None, {"seed": f"none: no map ({_map_skip(b) or 'no labels'})", "clusters": []}
     labels = json.loads(lp.read_text())
     hit = []
+    from .cli import topic_matches
     for c in labels["clusters"]:
-        if any(t == topic or t.startswith(topic + ".") for t in fit_tags(c)):
+        if any(topic_matches(topic, t) for t in fit_tags(c)):
             hit.append(int(c["id"].split("C")[-1]))
     if not hit:
         return None, {"seed": "none: no map cluster carries the topic", "clusters": []}

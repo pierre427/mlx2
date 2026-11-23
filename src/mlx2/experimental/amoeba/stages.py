@@ -194,7 +194,8 @@ def _check_capture_disk(b, corpus: Path, d: Path) -> None:
     it would not fit in 80% of the free disk."""
     n = sum(1 for _ in Path(corpus).open("rb"))
     u = b.info["units"]
-    moe_u = u["moe_neuron_units"] if b.plan["moe_units"] == "neuron" else u["moe_expert_units"]
+    moe_u = (u["moe_neuron_units"] // 64 if b.plan["moe_units"] == "block64" else
+             u["moe_neuron_units"] if b.plan["moe_units"] == "neuron" else u["moe_expert_units"])
     rolling = (b.plan.get("stream") or {}).get("mode") == "rolling"
     # fp16 responses for every unit; rolling dense units also keep a float32 max and min per text until the finish
     need = n * (u["dense_neurons"] * (2 + (8 if rolling else 0)) + moe_u * 2)
@@ -375,6 +376,12 @@ def run_core(b, ctx):
             data["window_seed"], "--strip-prefix", data["strip_prefix"], "--keep-prompt", data["keep_prompt"],
             "--need-gb", plan["need_gb"], "--train-peak-cap-gb", plan["watchdog_gb"] - 2,
             "--moe-units", plan["moe_units"], "--cache-gb", 2] + list(b.cfg["grad_gate"]) + _mem_args(b, "core")
+    # The core carve admits itself (no --no-admit): its own waiver must carry the plan's approved cap,
+    # or the carve's default footprint watchdog (80 GB) aborts a run the plan admitted (e.g. Hy4-flash,
+    # 86 GB of weights, --cap-gb 104, 2026-11-21).
+    # The free floor is the plan's (--min-free-gb, default 15): Hy4-flash resident at 95 GiB wired
+    # leaves ~15 GiB free and its bisect tripped the fixed 15 GiB floor (2026-11-21).
+    argv += ["--mem-policy", f"auto:waived:60:{plan['watchdog_gb']}:{plan.get('min_free_gb', 15):g}"]
     if data["code_cut"]:
         argv.append("--code-cut")
     if plan.get("assert_ple_offload"):

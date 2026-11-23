@@ -72,8 +72,8 @@ def main():
     by = defaultdict(list)
     for r in rows:
         t0 = r["topics"][0]
-        if a.topic:
-            if t0 == a.topic or t0.startswith(a.topic + "."):
+        if a.topic:                      # one id, or several joined by '+' (one box from all of them)
+            if any(t0 == n or t0.startswith(n + ".") for n in a.topic.split("+") if n):
                 by[a.topic].append(r)
             continue
         by[box_of(t0)].append(r)

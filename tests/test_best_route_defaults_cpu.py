@@ -619,11 +619,13 @@ def _hy4_args(tmp_path, policy):
 
 
 HY4_NEUTRAL = {"engram_table_format", "engram_precision", "engram_cache_rows", "engram_hash",
-               "vision", "moe_fused_gate_up"}
+               "vision", "moe_fused_gate_up", "amoeba_det_tiles"}
 
 
 @pytest.mark.parametrize("policy", [
     {"engram_table_format": "iq4_nl"},
+    # --det-tile merges this key: the calculator keeps the DFly2 default.
+    {"engram_table_format": "iq4_nl", "amoeba_det_tiles": "/m/tiles/calculator/manifest.json"},
     {"engram_hash": "device", "engram_precision": "vllm", "engram_cache_rows": 4096,
      "vision": False, "moe_fused_gate_up": True},
     {},
@@ -652,7 +654,7 @@ def test_hy4_neutral_keys_parse_identically_on_ordinary_and_dfly2():
     assert set(HYV4FlashAdapter.route_neutral_policy_keys) == HY4_NEUTRAL
     neutral = {"engram_table_format": "iq4_nl", "engram_precision": "vllm",
                "engram_cache_rows": 4096, "engram_hash": "device", "vision": False,
-               "moe_fused_gate_up": True}
+               "moe_fused_gate_up": True, "amoeba_det_tiles": "/m/tiles/calculator/manifest.json"}
     ordinary, external, kind = _parse_policy(dict(neutral), "/m/Hy4")
     assert ordinary == neutral and not external and kind is None
     dfly, external, kind = _parse_policy({**neutral, "draft_model": "embedded_dfly"}, "/m/Hy4")

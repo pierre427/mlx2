@@ -37,6 +37,12 @@ so interior/rolling checkpoints stay inert (docs/hy4-flash/apcv2.md).
   are never published to APCv2: with fp8 selected the descriptor declares no
   prefix reuse and no approximate APC operation.  Notes:
   docs/hy4-flash/fp8-latent-kv.md.
+* Deterministic calculator tile (opt-in, ``{"amoeba_det_tiles": MANIFEST}``
+  or ``server --det-tile``; runtime/amoeba_det_tiles.py, experimental and
+  unqualified): probe-gated calculators reading ``layer_output_capture``
+  only, on the ordinary and the external-draft (DFly2, prompt lookup) routes.
+  The probe reads the f32 mean of the four hyper-connection streams after
+  its read layer (``det_tile_capture``; docs/hy4-flash/det-calculator.md).
 """
 
 from __future__ import annotations
@@ -99,7 +105,8 @@ _TEXT_EXPECTED = {
 def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
                     engram_precision: str = "transformers",
                     tensorfold_rows: str | None = None, moe_fused_gate_up: bool = False,
-                    moe_nax: str = "off", moe_top_k: int | None = None) -> str:
+                    moe_nax: str = "off", moe_top_k: int | None = None,
+                    amoeba_mask: str | None = None) -> str:
     """The APCv2 namespace: every knob that changes numerics changes it.
 
     A packed Engram table or the non-default Engram precision profile gives
@@ -127,7 +134,52 @@ def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
     if moe_top_k is not None:
         # Fewer routed experts per token: other numerics, other cache rows.
         layout = f"{layout}+moe-top{int(moe_top_k)}"
+    if amoeba_mask is not None:
+        # A route-wide aMoEba neuron mask (``amoeba_mask``) is a different
+        # model: its cache rows are exact under that bundle only.
+        layout = f"{layout}+{amoeba_mask}"
     return layout
+
+
+AMOEBA_MASK_MODES = ("zero", "pageout")
+
+
+def amoeba_mask_spec(value) -> dict:
+    """``amoeba_mask``: a bundle path (mode ``zero``), or ``{"bundle": PATH, "mode": "zero" | "pageout",
+    "block": 64}``. ``zero`` keeps the closed neurons resident as exact zero rows (the oracle and fallback);
+    ``pageout`` also removes every fully closed 64-neuron block of a routed expert from memory
+    (``runtime/amoeba_pageout.py``; equal to ``zero`` to float32 reassociation)."""
+    if isinstance(value, str) and value:
+        return {"bundle": value, "mode": "zero", "block": None}
+    if not isinstance(value, dict) or set(value) - {"bundle", "mode", "block"}:
+        raise ValueError("Hy4-flash amoeba_mask must be a bundle path or {\"bundle\", \"mode\", \"block\"}")
+    bundle, mode = value.get("bundle"), value.get("mode", "zero")
+    if not isinstance(bundle, str) or not bundle:
+        raise ValueError("Hy4-flash amoeba_mask.bundle must be the path of an aMoEba neuron-mask bundle")
+    if mode not in AMOEBA_MASK_MODES:
+        raise ValueError(f"Hy4-flash amoeba_mask.mode must be one of {AMOEBA_MASK_MODES}")
+    block = value.get("block", 64 if mode == "pageout" else None)
+    if mode == "zero" and value.get("block") is not None:
+        raise ValueError("Hy4-flash amoeba_mask.block applies to mode pageout only")
+    if mode == "pageout" and (type(block) is not int or block <= 0):
+        raise ValueError("Hy4-flash amoeba_mask.block must be a positive integer")
+    return {"bundle": bundle, "mode": mode, "block": block}
+
+
+def amoeba_mask_sites(args):
+    """The carve's unit sites (``runtime/amoeba_neuron_mask.MaskSite``): layer
+    0's dense MLP (unit f) and each routed-expert bank (unit e * F + f).
+    Shared experts, attention and the router are never units."""
+    from ..runtime.amoeba_neuron_mask import MaskSite
+
+    sites = []
+    for i, kind in enumerate(args.mlp_layer_types):
+        if kind == "sparse":
+            sites.append(MaskSite(i, f"model.layers.{i}.mlp.experts", int(args.n_routed_experts),
+                                  int(args.moe_intermediate_size)))
+        else:
+            sites.append(MaskSite(i, f"model.layers.{i}.mlp", None, int(args.intermediate_size)))
+    return sites
 
 
 def latent_kv_receipt(fmt: str, *, observed_used: bool = False, layout: str | None = None) -> dict:
@@ -530,7 +582,39 @@ def widened_bytes(root, weight_map: dict, quant, *, lm_head_fp32: bool) -> int:
 
 MODEL_KEYS = frozenset({"engram_cache_rows", "engram_hash", "engram_precision",
                         "engram_table_format", "latent_kv", "vision",
-                        "moe_fused_gate_up", "moe_nax", "moe_top_k"})
+                        "moe_fused_gate_up", "moe_nax", "moe_top_k", "amoeba_det_tiles",
+                        "amoeba_mask"})
+# ``amoeba_det_tiles`` (opt-in, experimental, unqualified): a deterministic
+# tile manifest of probe-gated calculators (amoeba_det_tiles
+# admit_position_matched).  The probe reads ``det_tile_capture`` of its read
+# layer's output: the f32 mean of the hc_mult residual streams.  The mean is
+# linear and parameter-free, so it needs no learned or input-dependent
+# collapse (the next layer's hc_pre and the head's HyperHead weigh the
+# streams per token), it reads every layer the same way, and a probe
+# direction on it is one any positive collapse of the streams also sees.
+# The residual-ablation port captures the same summary.  Per-stream or
+# concatenated probes would need 4x the probe width and were not tried.
+DET_TILE_CAPTURE = "hc-stream-mean-f32-v1"
+# Execution-policy values that change the trunk's hidden states: a tile set
+# fitted under one (``fit_execution_policy`` in its manifest, required) refuses
+# another.  ``moe_fused_gate_up`` and ``moe_nax`` are bit-identical to the
+# split route (measured, above) and stay out.  ``ast_tensorfold_rows`` runs
+# other verify-forward kernels whose effect on the probe was not measured: the
+# adapter refuses it with det tiles.
+DET_TILE_NUMERICS_KEYS = ("engram_table_format", "engram_precision", "latent_kv", "moe_top_k")
+# Target forwards one verify round can run: with the serial executor one per
+# chain, at most one chain per tile row (32) for each of four lanes, plus plain
+# anchors.  An evicted forward's rows fail closed (``gate_unmatched``).
+DET_TILE_STASH_FORWARDS = 4 * 32 + 8
+
+
+def det_tile_capture(streams):
+    """``[B, L, hc_mult, D]`` layer output -> ``[B, L, D]`` f32 stream mean (the probe input)."""
+    import mlx.core as mx
+
+    if streams.ndim != 4:
+        raise ValueError("Hy4-flash det-tile capture needs a [B, L, streams, D] layer output")
+    return mx.mean(streams.astype(mx.float32), axis=-2)
 # Where the Engram n-grams are hashed.  ``host``: NumPy after a host copy of
 # the token ids.  ``device``: MLX ops on the generation stream for forwards of
 # at most ROLLBACK tokens, read back once with the token ids after the
@@ -699,6 +783,12 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
     top_k = policy.get("moe_top_k")
     if top_k is not None and (type(top_k) is not int or top_k < 1):
         raise ValueError("Hy4-flash moe_top_k must be a positive integer (default: the checkpoint's)")
+    det = policy.get("amoeba_det_tiles")
+    if det is not None and (type(det) is not str or not det):
+        raise ValueError("amoeba_det_tiles must name a deterministic tile manifest path")
+    mask = policy.get("amoeba_mask")
+    if mask is not None:
+        amoeba_mask_spec(mask)              # validates: a bundle path, or {"bundle", "mode", "block"}
     model = {k: v for k, v in policy.items() if k in MODEL_KEYS}
     external = {k: v for k, v in policy.items() if k in AST_KEYS}
     if external and model.get("moe_nax", "off") != "off":
@@ -845,8 +935,12 @@ def resolve_engram_hash(model) -> str:
 def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, memory_budget=None,
                engram_precision="transformers", engram_table_format="bf16", latent_kv="native",
                vision=True, engram_hash=ENGRAM_HASH_DEFAULT, moe_fused_gate_up=False,
-               dfly_quantization=None):
+               dfly_quantization=None, amoeba_mask=None):
     """``(model, drafter or None, engram readers)`` for an inspected artifact.
+
+    ``amoeba_mask`` (a loaded ``NeuronMaskBundle``) closes its units in the
+    sanitized weights before quantization, the q2_0 install and gate/up
+    fusion, so every later step carries the exact zero rows.
 
     Engram tables stay on disk; the DFly2 layers are read only with
     ``keep_dfly``; the ``vit.*`` tower is read and attached (checkpoint dtype, never
@@ -905,6 +999,8 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
     vit_raw = {k: raw.pop(k) for k in list(raw) if k.startswith("vit.")}
     weights = model.sanitize(raw)
     raw.clear()
+    if amoeba_mask is not None:
+        amoeba_mask.apply(weights, amoeba_mask_sites(args), artifact["identity"]["fingerprint"])
     quant = config.get("quantization")
     if quant is not None:
         check_quantization(quant)
@@ -993,6 +1089,15 @@ def install_q2_zero(model, weights: dict, banks: dict) -> None:
 
 class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     descriptor = descriptor_for()
+
+    @staticmethod
+    def amoeba_mask_sites_for(model_path):
+        """``(identity, sites)`` from the artifact's inspection (no weights read)."""
+        from ..runtime.models.hy_v4_flash import ModelArgs
+
+        artifact = inspect_artifact(model_path)
+        return artifact["identity"], amoeba_mask_sites(ModelArgs.from_hf_config(artifact["config"]))
+
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
     profile = "hy-v4-flash-ordinary"
@@ -1007,10 +1112,16 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # draft_model.  Left out: ``moe_nax`` (refused with a draft_model),
     # ``latent_kv`` (fp8 changes the cache layout and drops prefix reuse, a
     # shape the default was not measured on) and every AST key.
+    # ``amoeba_det_tiles`` is route-neutral: the same tile set installs on
+    # both routes (``_install_det_tiles``), so ``--det-tile`` keeps DFly2.
     route_neutral_policy_keys = frozenset({
         "engram_table_format", "engram_precision", "engram_cache_rows", "engram_hash",
-        "vision", "moe_fused_gate_up",
+        "vision", "moe_fused_gate_up", "amoeba_det_tiles",
     })
+    # Deterministic tiles: position-matched calculators on both routes
+    # (runtime/amoeba_det_tiles MATCHED_EXTERNAL_ROUTES); the model's
+    # ``layer_output_readers`` hand every target forward to the tile set.
+    amoeba_det_tile_routes = frozenset({"ordinary", "external_draft"})
     prompt_lookup_default = False
     EXTERNAL_PROFILE = "hy-v4-flash-ast-b1-b4-v1"
     EXTERNAL_ROUTE_TAG = "hy4-flash-chain-packed-tree-v1"
@@ -1107,6 +1218,20 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise ValueError(f"Hy4-flash artifact carries no {engram_format} Engram tables (it has "
                              f"{artifact['engram_table_formats']}); select one with engram_table_format")
         self.latent_kv = policy.get("latent_kv", "native")
+        self.amoeba_det_tiles = None
+        self._det_manifest = None
+        if policy.get("amoeba_det_tiles") is not None:
+            if external.get("ast_tensorfold_rows"):
+                from ..runtime.amoeba_det_tiles import DetTileRefused
+
+                raise DetTileRefused("deterministic tiles refuse ast_tensorfold_rows (verify kernels "
+                                     "the calculator probe was not fitted or checked on)")
+            # Before any weight loads: tile kinds, checkpoint, layer count, fit numerics.
+            self._det_manifest = policy["amoeba_det_tiles"], self._admit_det_tiles(
+                policy["amoeba_det_tiles"], artifact,
+                {"engram_table_format": engram_format,
+                 "engram_precision": policy.get("engram_precision", "transformers"),
+                 "latent_kv": self.latent_kv, "moe_top_k": policy.get("moe_top_k")})
         self.descriptor = descriptor_for(dfly_selected=self.dfly_selected,
                                          engram_table_format=engram_format, latent_kv=self.latent_kv)
         if self.latent_kv == "fp8":
@@ -1128,11 +1253,31 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             if switch_grouped_experts.MODE != "off":
                 raise ValueError("Hy4-flash moe_fused_gate_up needs MLX2_MOE_GROUPED_EXPERTS off "
                                  "(the grouped kernels read split gate/up tables)")
+        self.amoeba_mask = None
+        self.amoeba_mask_mode = None
+        if policy.get("amoeba_mask") is not None:
+            from ..runtime.amoeba_neuron_mask import NeuronMaskBundle
+            from ..runtime.models.hy_v4_flash import ModelArgs
+
+            # Refuses (ValueError) a bundle of another checkpoint or geometry
+            # before any weight is read.
+            spec = amoeba_mask_spec(policy["amoeba_mask"])
+            self.amoeba_mask_mode = spec
+            if spec["mode"] == "pageout" and (self.moe_fused_gate_up or self.moe_nax != "off"):
+                raise ValueError("Hy4-flash amoeba_mask pageout runs on the split SwitchGLU banks: not with "
+                                 "moe_fused_gate_up or moe_nax")
+            self.amoeba_mask = NeuronMaskBundle.load(spec["bundle"])
+            self.amoeba_mask.check(artifact["identity"]["fingerprint"],
+                                   amoeba_mask_sites(ModelArgs.from_hf_config(artifact["config"])))
         self.layout = numerics_layout(self.layout, engram_table_format=engram_format,
                                       engram_precision=policy.get("engram_precision", "transformers"),
                                       tensorfold_rows=rows_backend,
                                       moe_fused_gate_up=self.moe_fused_gate_up, moe_nax=self.moe_nax,
-                                      moe_top_k=policy.get("moe_top_k"))
+                                      moe_top_k=policy.get("moe_top_k"),
+                                      amoeba_mask=None if self.amoeba_mask is None
+                                      else self.amoeba_mask.numerics_tag() + (
+                                          "" if self.amoeba_mask_mode["mode"] == "zero" else
+                                          f"+pageout-b{self.amoeba_mask_mode['block']}-sequential-v2"))
         self.environment = configure_environment()
         from .process_globals import claim_moe, claim_stock_moe
 
@@ -1157,7 +1302,21 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             latent_kv=self.latent_kv, vision=policy.get("vision", True),
             engram_hash=policy.get("engram_hash", ENGRAM_HASH_DEFAULT),
             moe_fused_gate_up=self.moe_fused_gate_up,
-            dfly_quantization=external.get("draft_quantization"))
+            dfly_quantization=external.get("draft_quantization"),
+            amoeba_mask=self.amoeba_mask)
+        self._trunk_forwards_at_load = self.model.trunk_stats["forwards"]
+        self.amoeba_pageout = None
+        if self.amoeba_mask is not None and self.amoeba_mask_mode["mode"] == "pageout":
+            import mlx.core as mx
+
+            from ..runtime.amoeba_pageout import page_out
+            from ..runtime.models.hy_v4_flash import MoE
+
+            banks = {i: (layer.mlp, "experts") for i, layer in enumerate(self.model.model.layers)
+                     if isinstance(layer.mlp, MoE)}
+            self.amoeba_pageout = page_out(self.amoeba_mask, banks, amoeba_mask_sites(self.model.args),
+                                           block=self.amoeba_mask_mode["block"])
+            mx.clear_cache()
         self.model.moe_nax_prefill = self.moe_nax != "off"
         self.moe_top_k = set_moe_top_k(self.model, policy.get("moe_top_k"))
         self.engram_table_format = engram_format
@@ -1205,6 +1364,95 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 # Prompt-lookup copies join the DFly2 tile (copy path first
                 # when a specific n-gram matched).
                 graft_prompt_lookup_drafter(self, prompt_lookup=False)
+        if self._det_manifest is not None:
+            self._install_det_tiles(*self._det_manifest,
+                                    route="ordinary" if kind is None else "external_draft")
+
+    # -- deterministic tiles (experimental, unqualified) --------------------
+    @staticmethod
+    def _admit_det_tiles(manifest_path, artifact, numerics):
+        from ..runtime import amoeba_det_tiles as D
+
+        manifest = D.admit_position_matched(
+            manifest_path, source_fingerprint=artifact["identity"]["fingerprint"],
+            layers_count=int(text_config(artifact["config"])["num_hidden_layers"]))
+        # Both are required: a manifest that does not say what its probe read, or under which
+        # trunk numerics, cannot be checked against this route and fails closed.
+        capture = manifest.get("capture")
+        if capture != DET_TILE_CAPTURE:
+            raise D.DetTileRefused(f"Hy4-flash calculator probes read {DET_TILE_CAPTURE}, "
+                                   f"this manifest was fitted on {capture!r}")
+        fit = manifest.get("fit_execution_policy")
+        if not isinstance(fit, dict) or set(DET_TILE_NUMERICS_KEYS) - set(fit):
+            raise D.DetTileRefused("calculator manifest needs fit_execution_policy with "
+                                   f"{', '.join(DET_TILE_NUMERICS_KEYS)}")
+        for key in DET_TILE_NUMERICS_KEYS:
+            if fit[key] != numerics[key]:
+                raise D.DetTileRefused(
+                    f"calculator probe was fitted with {key}={fit[key]!r}; this adapter runs "
+                    f"{numerics[key]!r} (different hidden states)")
+        return manifest
+
+    def _install_det_tiles(self, manifest_path, manifest, *, route):
+        """Read layers' outputs reach the tile set through ``Model.layer_output_readers``.
+
+        Every text forward through ``Model.hidden`` (ordinary prefill and
+        decode, the external engine's prefill bodies, chain-packed verify
+        waves and plain anchors) calls the reader, which stashes the gate
+        with the forward's ids (padding -1) and each row's committed token
+        tail, only while a calculator processor is live.
+        """
+        import mlx.core as mx
+        import numpy as np
+
+        from ..runtime import amoeba_det_tiles as D
+
+        if route not in type(self).amoeba_det_tile_routes:
+            raise D.DetTileRefused(f"Hy4-flash deterministic tiles do not serve the {route} route")
+        # The artifact's own fingerprint: on a drafter route ``identity``
+        # carries the target+drafter digest (its ``target_fingerprint`` is this one).
+        tiles = D.build(manifest_path, None,
+                        source_fingerprint=self.identity.get("target_fingerprint", self.identity["fingerprint"]),
+                        layers_count=len(self.model.model.layers), route=route)
+        if tiles.identity["manifest_sha256"] != manifest["_digest"]:
+            raise ValueError("Hy4-flash calculator manifest changed during model loading")
+        tiles.stash_forwards = DET_TILE_STASH_FORWARDS
+
+        def read(layer, streams, ids, prefix):
+            if not tiles.enabled or not len(tiles.live):
+                return
+            tiles.on_layer_output(layer, streams, mx.array(ids.astype(np.int32)), det_tile_capture,
+                                  prefix_ids=prefix)
+
+        readers = self.model.layer_output_readers
+        for layer in tiles.output_read_layers():
+            if layer in readers:
+                raise ValueError(f"Hy4-flash layer {layer} already has an output reader")
+            readers[layer] = read
+        self.amoeba_det_tiles = tiles
+        self.identity = {**self.identity,
+                         "amoeba_det_tiles_manifest_sha256": tiles.identity["manifest_sha256"]}
+
+    def request_logits_processors(self, request, *, prompt_length):
+        """Calculator processors for the tiles this request leaves on (none without det tiles)."""
+        from ..runtime.amoeba_det_tiles import processors_for
+
+        return processors_for(getattr(self, "amoeba_det_tiles", None), self.tokenizer,
+                              prompt_length=prompt_length, request=request)
+
+    def execution_numerics_contract(self):
+        """The loaded tile set joins the APCv2 namespace (None without det tiles)."""
+        from ..runtime.amoeba_det_tiles import numerics_contract_with_det_tiles
+
+        return numerics_contract_with_det_tiles(None, getattr(self, "amoeba_det_tiles", None))
+
+    def _det_tiles_receipt(self):
+        tiles = getattr(self, "amoeba_det_tiles", None)
+        if tiles is None:
+            return {"implemented": True, "qualified": False, "selected": False, "observed_used": False}
+        return {**tiles.receipt(), "capture": DET_TILE_CAPTURE,
+                "fit_execution_policy": tiles.manifest.get("fit_execution_policy"),
+                "served_routes": list(tiles.served_routes)}
 
     def _bind_drafter(self, kind):
         from .qwen38_27b import _prompt_lookup_record
@@ -1686,9 +1934,11 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "observed_used": bool(stats_.get("reasoning_emitted")),
                 "requests": stats_.get("reasoning_requests", 0),
             },
+            "amoeba_det_tiles": self._det_tiles_receipt(),
             "moe_fused_gate_up": self._moe_fused_receipt(),
             "moe_nax_gather": self._moe_nax_receipt(),
             "moe_top_k": getattr(self, "moe_top_k", None),
+            "amoeba_mask": self._amoeba_mask_receipt(),
             "engram": {i: r.diagnostics() for i, r in getattr(self, "engram_tables", {}).items()},
             "engram_precision": getattr(getattr(getattr(self, "model", None), "args", None),
                                         "engram_precision", None),
@@ -1736,6 +1986,38 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "modes": ENGRAM_HASH_MODES, "default": ENGRAM_HASH_DEFAULT, "implemented": True,
                 "exact": True, "qualified": False, "selected": mode == "device",
                 "observed_used": bool(stats.get("device_forwards")), "stats": stats}
+    def _amoeba_mask_receipt(self):
+        bundle = getattr(self, "amoeba_mask", None)
+        if bundle is None:
+            return {"implemented": True, "qualified": False, "selected": False, "observed_used": False}
+        model = getattr(self, "model", None)
+        forwards = (model.trunk_stats["forwards"] - getattr(self, "_trunk_forwards_at_load", 0)
+                    if model is not None else 0)
+        record = bundle.describe()
+        mode = (getattr(self, "amoeba_mask_mode", None) or {}).get("mode", "zero")
+        po = getattr(self, "amoeba_pageout", None)
+        if po is not None:
+            from ..runtime.amoeba_pageout import PagedSwitchGLU
+
+            banks = [layer.mlp.experts for layer in model.model.layers
+                     if isinstance(getattr(layer.mlp, "experts", None), PagedSwitchGLU)]
+            calls = sum(b._pageout_calls[0] for b in banks)
+            record["pageout"] = {**po, "paged_bank_calls": calls,
+                                 "paged_bank_passes": sum(b._pageout_passes[0] for b in banks),
+                                 "resident_gib_freed": po["resident_bytes_freed"] / 2 ** 30,
+                                 "exactness": "resident neurons bit-identical to the zero mask; routed rows equal "
+                                              "it to float32 reassociation (law " + po["law"] + ")"}
+        return {
+            "implemented": True, "qualified": False, "selected": True, "mode": mode,
+            # Used once a trunk forward ran with at least one closed unit.
+            "observed_used": forwards > 0 and bool(record.get("closed_units")),
+            "trunk_forwards": forwards, **record,
+            "exactness": "closed units' gate/up rows are exact zeros; every other weight byte is unchanged",
+            "speculative": ("allowed: drafts are verified by the masked target, so output equals masked "
+                            "ordinary decode; DFly2 was trained on the unmasked model, so acceptance may drop"),
+            "apcv2_namespace": bundle.numerics_tag(),
+        }
+
     def _moe_fused_receipt(self):
         model = getattr(self, "model", None)
         if model is None or not hasattr(model, "moe_gate_up_status"):

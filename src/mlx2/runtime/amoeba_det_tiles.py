@@ -49,7 +49,11 @@ speculative verify row j reads position j's gate. No match, or candidates that d
 closed. The processor publishes a verify ledger (rows past the accept point are rewound) and a pure
 draft probe (it continues an active plan, so drafts propose the forced tokens, and may start one
 only where the gate matches the probe's history). Per-request counters are settled through the
-ledger. Fact-table writes change the arithmetic, so the tile
+ledger. The same position-matched calculators serve on an external-draft route when the adapter
+installs them for it (``MATCHED_EXTERNAL_ROUTES``; it passes every target forward to
+``on_layer_output``, with each row's committed tokens before the forward when it has them): the
+engine runs the lane's processors on each verify row, so a forced token is the target's choice at
+that row and a draft that differs is rejected there. Fact-table writes change the arithmetic, so the tile
 set's identity joins the execution-numerics contract (APCv2 namespace).
 
 Nothing here names a model: the adapter supplies the MLP attribute and activation.
@@ -94,6 +98,11 @@ MATCH_WINDOW = 8
 STASH_FORWARDS = 4
 # Speculative routes a position-matched calculator may serve on (the adapter must also declare it).
 SPECULATIVE_ROUTES = ("native_mtp",)
+# External-draft engines (an external or embedded drafter, target verify through the lane's logits
+# processors and ``processor_probe.VerifyWindow``) may also serve position-matched calculators, but
+# only when an adapter installs the tile set for that route: it must hand every target forward's
+# layer output, token ids and (optionally) each row's tokens before the forward to on_layer_output.
+MATCHED_EXTERNAL_ROUTES = ("external_draft",)
 # Tokens of context the calculator decodes to find an expression.
 CONTEXT_TOKENS = 48
 
@@ -994,15 +1003,22 @@ class DetTileSet:
         self.manifest = manifest
         self.identity = tile_set_identity(manifest)
         resident_external = route == "external_draft" and resident_external_manifest(manifest)
-        if route not in SPECULATIVE_ROUTES + ("ordinary",) and not resident_external:
-            raise DetTileRefused(f"deterministic tiles run on the ordinary route only, not {route!r}")
-        self.route = route
         self.tiles = [_Tile(s, tensors, activation) for s in manifest["tiles"]]
         # Position-matched calculators only: every gate they read is matched to its history.
         matched = all(t.kind == "calculator" and t.read_point == "layer_output_capture" for t in self.tiles)
+        matched_external = route in MATCHED_EXTERNAL_ROUTES and matched and not resident_external
+        if route not in SPECULATIVE_ROUTES + ("ordinary",) and not resident_external and not matched_external:
+            raise DetTileRefused(f"deterministic tiles run on the ordinary route only, not {route!r}")
+        self.route = route
+        self.resident_external = resident_external
         if resident_external:
             # The resident external-draft verifier is admitted for exactly that route.
             self.served_routes = ("external_draft",)
+        elif matched_external:
+            # Position-matched gates on the external-draft engine: the lane's processors run on every
+            # verify row (VerifyWindow settles their ledger at the accept point), so a forced token
+            # is the target's own choice there and no draft is accepted over it.
+            self.served_routes = ("ordinary", route)
         else:
             self.served_routes = ("ordinary",) + (SPECULATIVE_ROUTES if matched else ())
         if route not in self.served_routes:
@@ -1027,9 +1043,12 @@ class DetTileSet:
         self.proc_counters = collections.OrderedDict()
         self._proc_ids = itertools.count(1)
         self.live = __import__("weakref").WeakSet()   # live (non-probe) calculator processors
-        # layer_output_capture reads: tile id -> recent forwards {ids, gate, host}
+        # layer_output_capture reads: tile id -> recent forwards {ids, gate, host, prefix}
         self.out_stash = {}
         self.out_forwards = 0
+        # Forwards kept per tile; an adapter whose verify round runs several target forwards (one per
+        # lane or chain) may raise it before serving.
+        self.stash_forwards = STASH_FORWARDS
 
     def check_route(self, route):
         """Fail closed unless the serving route is one this tile set was admitted for."""
@@ -1047,12 +1066,16 @@ class DetTileSet:
         """Layers whose output an adapter must hand to :meth:`on_layer_output`."""
         return sorted({t.read_layer for t in self.tiles if t.read_point == "layer_output_capture"})
 
-    def on_layer_output(self, layer, hidden, input_ids, capture):
+    def on_layer_output(self, layer, hidden, input_ids, capture, prefix_ids=None):
         """Stash calculator gates over every position of a trunk forward (layer_output_capture).
 
         Nothing is computed while no calculator processor is live (every request has it off), so
         such forwards run the host's arithmetic and nothing else. ``capture`` maps the layer output
         to the probe's input space. A forward without token ids (embeddings input) stashes nothing.
+        A negative id marks a position holding no token of its row (padding): it never matches,
+        and a match window stops before it. ``prefix_ids`` (optional, one host list per row) are
+        each row's committed tokens just before the forward, so a row's first positions are matched
+        on their real history too instead of on their token alone.
         """
         if not self.enabled or not len(self.live) or input_ids is None:
             return
@@ -1069,8 +1092,13 @@ class DetTileSet:
                 mx.async_eval(gate)
             except ValueError:
                 pass            # inside a graph transformation (research grads): leave it lazy
-            ring = self.out_stash.setdefault(t.id, collections.deque(maxlen=STASH_FORWARDS))
-            ring.appendleft({"ids": input_ids, "gate": gate, "host": None})
+            ring = self.out_stash.get(t.id)
+            if ring is None or ring.maxlen != self.stash_forwards:
+                ring = self.out_stash[t.id] = collections.deque(ring or (), maxlen=self.stash_forwards)
+            prefix = None
+            if prefix_ids is not None and len(prefix_ids) == int(input_ids.shape[0]):
+                prefix = [[int(x) for x in r][-MATCH_WINDOW:] for r in prefix_ids]
+            ring.appendleft({"ids": input_ids, "gate": gate, "host": None, "prefix": prefix})
             self.out_forwards += 1
 
     def calc_gate_at(self, tile_id, history, row=None):
@@ -1094,19 +1122,26 @@ class DetTileSet:
                 mx.eval(entry["ids"], entry["gate"])
                 entry["host"] = (entry["ids"].tolist(), entry["gate"].tolist())
             ids, gate = entry["host"]
+            prefix = entry.get("prefix")
             if row is not None and row >= len(ids):
                 return None, "row_unbound"
             rows = range(len(ids)) if row is None else (row,)
             found = set()
             for r in rows:
-                seq = ids[r]
-                for j, tok in enumerate(seq):
-                    if int(tok) != last:
+                lead = [] if prefix is None else prefix[r]
+                seq = lead + [int(x) for x in ids[r]]
+                for jj in range(len(lead), len(seq)):
+                    if seq[jj] != last or seq[jj] < 0:
                         continue
-                    w = min(j, MATCH_WINDOW, len(history) - 1)
-                    if w and [int(x) for x in seq[j - w:j]] != [int(x) for x in history[-1 - w:-1]]:
+                    w = min(jj, MATCH_WINDOW, len(history) - 1)
+                    # The window stops before a position with no token (padding).
+                    k = jj
+                    while k > jj - w and seq[k - 1] >= 0:
+                        k -= 1
+                    w = jj - k
+                    if w and seq[jj - w:jj] != [int(x) for x in history[-1 - w:-1]]:
                         continue
-                    found.add(bool(gate[r][j]))
+                    found.add(bool(gate[r][jj - len(lead)]))
             if len(found) == 1:
                 return found.pop(), None
             if len(found) > 1:
@@ -1234,7 +1269,12 @@ class DetTileSet:
                 "counters_scope": "process_cumulative", "counters": c,
                 **({'speculative_protocol':'resident-calculator-exact-verify-v1',
                     'tree_verifier':'selected_path_rowwise',
-                    'progressive_private_branches':False} if self.route=='external_draft' else {})}
+                    'progressive_private_branches':False} if self.resident_external else {}),
+                **({"speculative_protocol": "position-matched-calculator-verify-ledger-v1",
+                    "verify": "lane processors on every verify row, ledger settled at the accept point",
+                    "draft_probe": "isolated copy, for drafters that take processors",
+                    "progressive_private_branches": False}
+                   if self.route in MATCHED_EXTERNAL_ROUTES and not self.resident_external else {})}
 
 
 def _calc_counters():
@@ -1759,6 +1799,32 @@ def refuse_policy(manifest_path, policy, *, require_mtp=False, weight_streaming=
         if policy.get(key):
             raise DetTileRefused(f"deterministic tiles refused with {key}: the ordinary route only")
     return 'external_draft' if external else 'ordinary'
+
+
+def admit_position_matched(manifest_path, *, source_fingerprint, layers_count):
+    """Load-time admission for an adapter that serves only position-matched calculators.
+
+    Every tile must be a probe-gated calculator (``read_point`` ``layer_output_capture``, a serving
+    write mode) built on this checkpoint and layer count; anything else (fact tables, MLP-input
+    reads, the resident or marker parsers) fails closed before weights load. Returns the manifest.
+    """
+    if type(manifest_path) is not str or not manifest_path:
+        raise ValueError("amoeba_det_tiles must name a deterministic tile manifest path")
+    manifest = load_manifest(manifest_path)
+    for t in manifest["tiles"]:
+        if (t.get("kind") != "calculator" or t.get("read_point", "mlp_input") != "layer_output_capture"
+                or t.get("parser", PARSER_ID) in (PARSER_V5, PARSER_MARKER)
+                or t.get("write_mode") not in SERVING_WRITE_MODES["calculator"]):
+            raise DetTileRefused(f"tile {t.get('id')}: this adapter serves only probe-gated calculators "
+                                 "reading layer_output_capture (force or constrain)")
+    if manifest["source"]["fingerprint"] != source_fingerprint:
+        raise DetTileRefused("deterministic tile manifest belongs to another checkpoint")
+    if int(manifest["layers"]) != int(layers_count):
+        raise DetTileRefused(f"deterministic tile manifest has {manifest['layers']} layers, "
+                             f"the model has {layers_count}")
+    if manifest.get("host_tiles_manifest_sha256") is not None:
+        raise DetTileRefused("deterministic tiles built on a neural-tiled host; this route holds none")
+    return manifest
 
 
 def install_on_adapter(layers, manifest_path, declaration, *, source_fingerprint, host_tiles_sha256=None,

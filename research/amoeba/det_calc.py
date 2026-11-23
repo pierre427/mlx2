@@ -135,6 +135,48 @@ def capture(donor, seqs, layers):
     return {l: np.concatenate(v, 0) for l, v in feats.items()}
 
 
+def capture_to_disk(donor, seqs, layers, out_dir, *, log=None, every=200):
+    """``capture`` that streams each sequence's features into one ``.npy`` memmap per layer.
+
+    Resident feature memory is one sequence's captures (``[T, d]`` per layer), whatever the number
+    of forwards; the file is preallocated from the sequence lengths and filled in order. Returns
+    ``{layer: read-only np.memmap [N, d] float32}``, row-for-row what ``capture`` returns.
+    Refuses an existing file (each split gets its own directory).
+    """
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    total = sum(len(ids) for ids in seqs)
+    files, maps, offset = {}, {}, 0
+    try:
+        for i, ids in enumerate(seqs):
+            _, caps, _ = donor.forward(mx.array([ids]), record=set(layers), stop_after=max(layers))
+            for l in layers:
+                row = np.asarray(caps[l][0][0].astype(mx.float32))
+                if l not in maps:
+                    files[l] = out_dir / f"layer{l:03d}.npy"
+                    if files[l].exists():
+                        raise FileExistsError(f"refusing to overwrite {files[l]}")
+                    maps[l] = np.lib.format.open_memmap(files[l], mode="w+", dtype=np.float32,
+                                                        shape=(total, row.shape[-1]))
+                maps[l][offset:offset + len(ids)] = row
+            del caps
+            offset += len(ids)
+            if (i + 1) % every == 0:
+                for m in maps.values():
+                    m.flush()
+                if log:
+                    log(f"  captured {i + 1}/{len(seqs)} sequences to {out_dir}")
+    finally:
+        for m in maps.values():
+            m.flush()
+        maps.clear()
+    if offset != total:
+        raise RuntimeError("feature capture ended early")
+    return {l: np.load(files[l], mmap_mode="r") for l in layers}
+
+
 def train_probe(X, y, *, steps=400, lr=5e-3, l2=1e-3, seed=0):
     """Logistic regression (balanced classes); returns (w, b) as float32 numpy, in the raw x space."""
     import mlx.optimizers as optim

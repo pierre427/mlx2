@@ -179,7 +179,7 @@ def parse(argv=None):
                          "mode for the whole gradient computation (the old behaviour)")
     ap.add_argument("--layer-ref-tol", type=float, default=2e-2,
                     help="per-layer relative L2 between a layer's eval (fused) and reference outputs (bf16 noise)")
-    ap.add_argument("--moe-units", default="expert", choices=["expert", "neuron"],
+    ap.add_argument("--moe-units", default="expert", choices=["expert", "neuron", "block64"],
                     help="MoE unit granularity: whole routed experts (default) or (expert, intermediate neuron) "
                          "pairs, E*F units per MoE layer (units.py)")
     ap.add_argument("--cpu", action="store_true")
@@ -259,7 +259,11 @@ def main(argv=None, host_factory=None):
     (out / "carve_complete.json").unlink(missing_ok=True)
     mem = (O.admit(args.need_gb, args.mem_policy, log) if not (args.smoke or args.no_admit) else
            {"policy": "smoke: not admitted" if args.smoke else "batch: model already loaded in this process"})
-    O.footprint_watchdog(args.watchdog_gb, log, swap_growth_gb=args.swap_growth_gb)
+    # A waiver's last field (waived:<swap>:<cap>:<avail>) is the available floor: the run-time watchdog
+    # uses it too, not only admission (a resident Hy4 bisect at a 6 GiB waiver tripped the 15 GiB default).
+    _pol = args.mem_policy.split("auto:", 1)[-1]
+    _min_avail = float(_pol.split(":")[3]) if _pol.startswith("waived:") and len(_pol.split(":")) >= 4 else 15.0
+    O.footprint_watchdog(args.watchdog_gb, log, swap_growth_gb=args.swap_growth_gb, min_avail_gb=_min_avail)
     if args.swap_growth_gb != 2.0:                # a waived guard is recorded with its reason
         # the limit in force: a watchdog started earlier in this process keeps its own when that is stricter
         rep["watchdog_waiver"] = {"swap_growth_gb": O.WATCH.get("swap_growth_gb", args.swap_growth_gb),

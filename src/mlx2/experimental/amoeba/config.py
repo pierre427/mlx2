@@ -65,6 +65,7 @@ PROFILES = {
         "cluster_box_docs": 64, "cluster_box_held": 24,
         "gate_tokens_per_window": 32, "gate_windows_per_box": 64, "gate_negatives": 512,
         "val_target_nats": None,
+        "box_fractions": "",     # extract --box-fractions: extra box cuts (fractions of all units), for the removal check
     },
     "quick": {
         "map_bs": 8, "map_probes_per_node": 6, "ve_per_layer": 16,
@@ -77,6 +78,7 @@ PROFILES = {
         "cluster_box_docs": 24, "cluster_box_held": 8,
         "gate_tokens_per_window": 16, "gate_windows_per_box": 24, "gate_negatives": 96,
         "val_target_nats": None,
+        "box_fractions": "",
     },
 }
 

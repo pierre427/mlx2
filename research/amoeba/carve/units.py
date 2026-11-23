@@ -29,6 +29,11 @@ One site per decoder layer, found in the layer's FFN slot (``experts``, ``mlp``,
                             + ungated shared_expert (no scale, no shared gate); Flint
             router_experts  router(x) fp32 -> top_k logits -> softmax over the k -> experts;
                             gpt-oss, GraniteMoE
+            hy_latent       gate(x) -> (ids, weights) [fp32 sigmoid + correction bias, top-k,
+                            normalised, scaled]; routed_expert_down_proj(x) -> experts (SwitchGLU on
+                            the latent, clamped SwiGLU) -> weighted sum -> routed_expert_up_proj;
+                            combine_output_norm(routed + shared_experts(x)); Hy4-flash. Replay
+                            freezes the ids and recomputes the weights at them (as qwen_next).
           Shared experts and parallel dense MLPs always run. Masking is the drop rule: a dropped
           expert's routed weight is multiplied by 0 after selection (no renormalisation, the slot
           is not refilled), so a zeroed-expert checkpoint reproduces it exactly. Selection ids
@@ -115,7 +120,10 @@ class Site:
     units: str = "expert"       # MoE sites: "expert" (unit e) | "neuron" (unit e * F + f); dense sites keep the
                                 # default, unused (their units are always down_proj input neurons)
     E: int = 0                  # neuron MoE sites: routed experts
-    F: int = 0                  # neuron MoE sites: intermediate neurons per expert
+    F: int = 0                  # neuron MoE sites: units per expert (neurons, or neuron blocks when B > 1)
+    B: int = 1                  # block64 units: neurons per unit (a unit is a block of B consecutive neurons of one
+                                # expert, unit id e * F + b covering neurons b*B .. b*B+B-1; mask rows are repeated
+                                # B times inside the switch), else 1
 
     @property
     def is_moe(self) -> bool:
@@ -196,6 +204,11 @@ def _first_position(mx, c, l, exact, used):
     return used
 
 
+# MoE kinds whose routing can be frozen (Control.replay): gemma4_experts freezes ids and weights; qwen_next and
+# hy_latent freeze the ids and recompute the (differentiable) weights at them
+REPLAY_KINDS = ("qwen_next", "gemma4_experts", "hy_latent")
+
+
 def _replayed(c, l, kind):
     """The routing recorded for layer l when the Control replays it, else None: (inds, w) for Gemma4
     experts (the router runs outside the site, stop-gradiented in training mode, so ids and weights are
@@ -203,10 +216,10 @@ def _replayed(c, l, kind):
     they are recomputed at the replayed ids)."""
     if c.replay is None or l not in c.replay:
         return None
-    if kind not in ("qwen_next", "gemma4_experts"):
+    if kind not in REPLAY_KINDS:
         raise NotImplementedError(f"routing replay is not implemented for {kind} sites")
     inds, w = c.replay[l]
-    return inds if kind == "qwen_next" else (inds, w)
+    return inds if kind in ("qwen_next", "hy_latent") else (inds, w)
 
 
 def _gather_scores(mx, probs, inds, norm):
@@ -279,6 +292,36 @@ def _router_experts_rows(mx, self, x, switch=None):
     return inds, w, (switch or self.experts)(x, inds), 0
 
 
+def _hy_route(mx, self, x, router_sg=False, force=None):
+    """The block router's law, op for op (``Router.__call__``): fp32 sigmoid scores, top-k of scores + correction
+    bias, the scores gathered at the ids, normalised when the router normalises, times its scale. Re-implemented
+    (bit-identical, ``Control.verify`` checks it) so that the ids are stop-gradiented before the gather (MLX
+    refuses a VJP through gather indices). With replayed ids (``force``) the weights are recomputed there."""
+    g = self.gate
+    # router_sg is not applied: the ids are stop-gradiented here, so the weights stay differentiable in x, as the
+    # frozen-routing finite differences (weights recomputed at the replayed ids) measure them (qwen_next likewise)
+    scores = mx.sigmoid(x.astype(mx.float32) @ g.weight.astype(mx.float32).T)
+    if force is None:
+        choice = scores + g.e_score_correction_bias.astype(mx.float32)
+        k = g.top_k
+        ids = mx.stop_gradient(mx.argpartition(-choice, kth=k - 1, axis=-1)[..., :k].astype(mx.int32))
+    else:
+        ids = mx.stop_gradient(force)
+    w = mx.take_along_axis(scores, ids, axis=-1)
+    if g.norm:
+        w = w / (w.sum(axis=-1, keepdims=True) + 1e-20)
+    return ids, w * g.scale
+
+
+def _hy_latent_rows(mx, self, x, router_sg=False, switch=None, force=None):
+    """ids, weights (fp32, as the block's), routed rows on the latent, shared rows, the latent up projection."""
+    ids, w = _hy_route(mx, self, x, router_sg, force)
+    down = getattr(self, "routed_expert_down_proj", None)
+    xl = down(x) if down is not None else x
+    rows = (switch or self.experts)(xl, ids)
+    return ids, w, rows, self.shared_experts(x), getattr(self, "routed_expert_up_proj", None)
+
+
 def _top_k(m):
     k = getattr(m, "top_k", None) or getattr(m, "num_experts_per_tok", None)
     return int(k) if k else None
@@ -311,6 +354,9 @@ def classify(module):
     if (_has(module, "gate", "switch_mlp", "top_k", "shared_expert") and not hasattr(module, "shared_expert_gate")
             and not hasattr(module, "scale") and not hasattr(module, "norm_topk_prob")):
         return "sigmoid_shared"
+    if (_has(module, "gate", "experts", "shared_experts", "combine_output_norm")
+            and _has(module.gate, "weight", "e_score_correction_bias", "top_k", "scale")):
+        return "hy_latent"        # Hy4-flash latent MoE (sigmoid router + correction bias, latent experts)
     if (_has(module, "router", "experts") and not hasattr(module, "gate") and _top_k(module)
             and _has(module.experts, "down_proj") and not shared):
         return "router_experts"
@@ -361,7 +407,8 @@ def _params(m):
 
 
 def _switch(m, kind):
-    return m.switch_glu if kind == "gemma4_experts" else m.experts if kind == "router_experts" else m.switch_mlp
+    return (m.switch_glu if kind == "gemma4_experts" else m.experts if kind in ("router_experts", "hy_latent")
+            else m.switch_mlp)
 
 
 def _n_experts(m, sw):
@@ -385,7 +432,12 @@ def _router_width(m, kind):
     return None
 
 
-MOE_UNITS = ("expert", "neuron")
+MOE_UNITS = ("expert", "neuron", "block64")
+# block64: a unit is 64 consecutive intermediate neurons of one routed expert, aligned to the quantized down
+# projection's input groups, so a carved box can be paged out of memory exactly (runtime/amoeba_pageout.py); the
+# carve is the neuron-unit carve with every mask row repeated 64 times inside the switch (cones, the joint
+# straight-through mask and the drop rule are unchanged)
+UNIT_BLOCK = {"block64": 64}
 
 NEURON_PROVENANCE = {
     "source": "scripts/probe_amoeba_unit_box.py@16a1bbe88 (mlx2, private; with scripts/amoeba_cwe_donor.py@16a1bbe88)",
@@ -474,15 +526,19 @@ def install(layers, ctl_factory=Control, moe_units="expert"):
             rw = _router_width(m, kind)
             if rw is not None and rw != n:
                 raise SystemExit(f"units: layer {li} {kind} router scores {rw} experts, the block has {n}")
-            if moe_units == "neuron":
+            if moe_units in ("neuron", "block64"):
                 where = f"layer {li} ({kind}, {type(m).__name__})"
                 F, per_expert = _switch_layout(sw, where)
+                B = UNIT_BLOCK.get(moe_units, 1)
+                if F % B:
+                    raise SystemExit(f"units: {where}: --moe-units {moe_units} needs F={F} divisible by {B}")
                 swE = int(sw.down_proj.weight.shape[0])
                 if swE < int(n):
                     raise SystemExit(f"units: {where}: switch holds {swE} experts < {n} routed")
                 if getattr(m, "sharding_group", None) is not None:
                     raise SystemExit(f"units: {where}: a sharded MoE block is not carved in neuron units")
-                sites.append(Site(li, kind, int(n) * F, per_expert // F, m, None, "neuron", int(n), F))
+                sites.append(Site(li, kind, int(n) * (F // B), per_expert // F * B, m, None, "neuron", int(n),
+                                  F // B, B))
                 continue
             sites.append(Site(li, kind, int(n), _params(sw), m, None))
     ctl = ctl_factory(sites)
@@ -572,6 +628,8 @@ def _route(mx, self, kind, a, router_sg, switch=None, force=None):
         inds = mx.stop_gradient(inds)
         return x, inds, w.astype(mx.float32), (switch or self.switch_glu)(x, inds), 0, None
     (x,) = a
+    if kind == "hy_latent":
+        return (x, *_hy_latent_rows(mx, self, x, router_sg, switch, force))
     if kind == "qwen_next":
         # the stock block's own routing helpers (fused routers in eval, the composed routing in
         # training / reference mode) and its own combine tail, in expert and neuron mode alike, so
@@ -594,6 +652,8 @@ def _combine(mx, self, kind, rows, w, shared, post, dtype):
     y = (rows.astype(mx.float32) * w[..., None]).sum(axis=-2).astype(dtype)
     if post is not None:
         y = post(y)
+    if kind == "hy_latent":                # the stock tail: a norm after routed + shared (Hy4-flash)
+        return self.combine_output_norm(y + shared)
     return y + shared
 
 
@@ -800,11 +860,21 @@ def _slot_rows(v, inds, E, F):
     return v.reshape(E, F)[inds]
 
 
-def _neuron_keep(mx, c, l, x, inds, E, F):
-    """core + sum of (gated) boxes, per routed slot: [*inds.shape, F] (tokens x k x F at most)."""
-    K = _slot_rows(c.core[l], inds, E, F)
+def _unit_rows(v, inds, E, F, B):
+    """_slot_rows for the unit layout; block units (B > 1) repeat each unit's value over its B neurons:
+    [*inds.shape, F*B]."""
+    r = _slot_rows(v, inds, E, F)
+    if B > 1:
+        import mlx.core as mx
+        r = mx.repeat(r, B, axis=-1)
+    return r
+
+
+def _neuron_keep(mx, c, l, x, inds, E, F, B=1):
+    """core + sum of (gated) boxes, per routed slot: [*inds.shape, F*B] (tokens x k x neurons at most)."""
+    K = _unit_rows(c.core[l], inds, E, F, B)
     for box in c.boxes:
-        bk = _slot_rows(box["mask"][l], inds, E, F)
+        bk = _unit_rows(box["mask"][l], inds, E, F, B)
         if box.get("token_gate") is not None:      # precomputed per-token open bits [B, T, 1] (next-token gating)
             K = K + bk * box["token_gate"][..., None]
         elif box.get("gate") is not None:
@@ -821,7 +891,7 @@ def _neuron_keep(mx, c, l, x, inds, E, F):
 
 
 def _patch_moe_neuron(mx, site, ctl):
-    l, kind, E, F = site.layer, site.kind, site.E, site.F
+    l, kind, E, F, B = site.layer, site.kind, site.E, site.F, site.B
 
     def call(self, *a, _l=l, _kind=kind):
         c = ctl
@@ -852,8 +922,11 @@ def _patch_moe_neuron(mx, site, ctl):
                 def f(xx, ii):
                     routed = ii[..., : cap["k"]] if "k" in cap else ii        # the folded shared column is not a unit
                     rr = mx.stop_gradient(routed)
-                    keep = _neuron_keep(mx, c, _l, x_, rr, E, F) if masked else None
+                    keep = _neuron_keep(mx, c, _l, x_, rr, E, F, B) if masked else None
                     fill = thr = exact = acc = None
+                    if B > 1 and masked and (c.moe_mean is not None or c.moe_thresh is not None):
+                        raise NotImplementedError("units: block units take the drop rule only (no moe_mean / "
+                                                  "moe_thresh)")
                     if masked and c.moe_mean is not None and c.moe_mean[_l] is not None:
                         fill = _slot_rows(c.moe_mean[_l], rr, E, F)
                     if masked and c.moe_thresh is not None and _l in c.moe_thresh:
@@ -884,16 +957,23 @@ def _patch_moe_neuron(mx, site, ctl):
             res = route(active)
         x, inds, w, rows, shared, post, h = res
         if want:
-            c.stats(_l, _kind, {"inds": inds, "w": w, "rows": rows, "x": x, "F": F,
-                                "h": None if h is None else h[..., : inds.shape[-1], :]})
+            hh = None if h is None else h[..., : inds.shape[-1], :]
+            if hh is not None and B > 1:          # block units: the block mean of h (reported statistics only)
+                hh = hh.reshape(*hh.shape[:-1], F, B).mean(axis=-1)
+            c.stats(_l, _kind, {"inds": inds, "w": w, "rows": rows, "x": x, "F": F, "B": B, "h": hh})
         if active and c.box_out is not None:
-            if post is not None:
+            if post is not None and _kind != "hy_latent":
                 raise NotImplementedError(f"units: layer {_l} ({_kind}): neuron box writes of a latent block")
             sw_mod = _switch(self, _kind)
+            down = getattr(self, "routed_expert_down_proj", None) if _kind == "hy_latent" else None
+            xs = down(x) if down is not None else x
             for box in c.boxes:
-                bk = _slot_rows(box["mask"][_l], inds, E, F)
-                rb, _ = _switch_masked(mx, sw_mod, x, inds, bk, False)
-                c.box_out[(box.get("name"), _l)] = (rb.astype(mx.float32) * w.astype(mx.float32)[..., None]).sum(axis=-2)
+                bk = _unit_rows(box["mask"][_l], inds, E, F, B)
+                rb, _ = _switch_masked(mx, sw_mod, xs, inds, bk, False)
+                bw = (rb.astype(mx.float32) * w.astype(mx.float32)[..., None]).sum(axis=-2)
+                # a latent block's write lives in the residual space after its up projection (before the
+                # block's output norm, which is not linear: the write is the box's routed contribution)
+                c.box_out[(box.get("name"), _l)] = bw if post is None else post(bw.astype(x.dtype))
         if not active and base_out is not None:
             return base_out                 # verify already ran the stock block: its output, no extra call
         if not active and not getattr(c, "stats_fast", False):
@@ -911,7 +991,8 @@ def site_summary(sites) -> list[dict]:
     for s in sites:
         r = {"layer": s.layer, "kind": s.kind, "units": s.n, "params_per_unit": s.params_per_unit}
         if s.units == "neuron" and s.is_moe:
-            r.update(moe_units="neuron", E=s.E, F=s.F, unit_id="expert * F + neuron")
+            r.update(moe_units="neuron" if s.B == 1 else f"block{s.B}", E=s.E, F=s.F,
+                     unit_id="expert * F + neuron" if s.B == 1 else f"expert * F + block ({s.B} neurons)")
         out.append(r)
     return out
 

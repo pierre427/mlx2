@@ -104,14 +104,49 @@ def pressure_level() -> int:
 WATCH = {}
 
 
-def footprint_watchdog(limit_gb: float, log, every_s: float = 15.0, min_avail_gb: float = 15.0, swap_growth_gb: float = 2.0):
+AVAILABLE_COUNTERS = ("vm_stat", "serving")
+
+
+def available_gb(counter: str = "vm_stat") -> float:
+    """Machine available memory in GB by one named counter.
+
+    ``vm_stat``: free + inactive + speculative + purgeable pages (amoeba_memcheck.snapshot_avail),
+    the historical watchdog counter; it leaves out active file-backed pages (page cache of the
+    model files just read), which the kernel drops without writing anything. ``serving``: the
+    serving admission's estimate (mlx2.runtime.os_memory host_memory_snapshot().available_bytes,
+    Splash's hw.memsize minus non-reclaimable pages: file-backed and purgeable count as free).
+    """
+    if counter == "vm_stat":
+        import amoeba_memcheck
+        return amoeba_memcheck.snapshot_avail()
+    if counter == "serving":
+        from mlx2.runtime.os_memory import host_memory_snapshot
+        snap = host_memory_snapshot()
+        if snap is None:
+            raise RuntimeError("serving memory counter unavailable on this host")
+        return snap.available_bytes / 1e9
+    raise ValueError(f"available counter must be one of {AVAILABLE_COUNTERS}")
+
+
+def footprint_watchdog(limit_gb: float, log, every_s: float = 15.0, min_avail_gb: float = 15.0, swap_growth_gb: float = 2.0,
+                       counter: str = "vm_stat"):
     """Exit 3 if this process's physical footprint passes limit_gb, machine available memory falls
     under min_avail_gb, swap grows more than swap_growth_gb above its level now, or memory pressure
-    goes critical (coordinator's waiver terms, 2026-11-14). Peak footprint is kept in WATCH."""
-    import amoeba_memcheck
+    goes critical (coordinator's waiver terms, 2026-11-14). Peak footprint is kept in WATCH.
+    ``counter`` names the available-memory measurement (``available_gb``); recorded in WATCH."""
+    if counter not in AVAILABLE_COUNTERS:
+        raise ValueError(f"available counter must be one of {AVAILABLE_COUNTERS}")
     swap0 = swap_used_gb()
     WATCH.update(swap_at_start_gb=round(swap0, 2), peak_footprint_gb=0.0, limit_gb=limit_gb,
-                 min_avail_gb=min_avail_gb, swap_growth_gb=swap_growth_gb)
+                 min_avail_gb=min_avail_gb, swap_growth_gb=swap_growth_gb, available_counter=counter,
+                 available_at_start_gb=round(available_gb(counter), 1))
+    # Both readings at start: vm_stat counts anonymous inactive pages (compress/swap to reclaim) and
+    # misses active file cache; the serving estimate does the opposite, so they can disagree.
+    for name in AVAILABLE_COUNTERS:
+        try:
+            WATCH[f"available_at_start_{name}_gb"] = round(available_gb(name), 1)
+        except RuntimeError:
+            WATCH[f"available_at_start_{name}_gb"] = None
 
     def run():
         pid = os.getpid()
@@ -129,9 +164,10 @@ def footprint_watchdog(limit_gb: float, log, every_s: float = 15.0, min_avail_gb
             if fp is not None and fp > limit_gb:
                 log(f"footprint watchdog: {fp:.1f} GB > {limit_gb} GB, aborting")
                 os._exit(3)
-            av = amoeba_memcheck.snapshot_avail()
+            av = available_gb(counter)
+            WATCH["min_available_seen_gb"] = round(min(WATCH.get("min_available_seen_gb", av), av), 1)
             if av < min_avail_gb:
-                log(f"footprint watchdog: machine available {av:.1f} GB < {min_avail_gb} GB, aborting")
+                log(f"footprint watchdog: machine available ({counter}) {av:.1f} GB < {min_avail_gb} GB, aborting")
                 os._exit(3)
             time.sleep(every_s)
     threading.Thread(target=run, daemon=True).start()

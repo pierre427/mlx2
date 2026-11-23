@@ -175,7 +175,18 @@ def main():
     ap.add_argument("--english-n", type=int, default=None, help="smoke: English sequences per domain and split")
     ap.add_argument("--parser", default="calc-parse-v1", choices=("calc-parse-v1", "calc-parse-v2"))
     ap.add_argument("--arms", default="host,force,constrain,push@0.5,push@1,push@2,random_force,shuffled_force")
-    ap.add_argument("--backend", choices=("donor", "27b", "fn"), default="donor")
+    ap.add_argument("--backend", choices=("donor", "27b", "fn", "hy4"), default="donor",
+                    help="hy4: Hy4-flash through its adapter (ordinary route, stream-mean layer outputs)")
+    ap.add_argument("--execution-policy", type=json.loads, default=None,
+                    help='hy4: adapter policy (default {"engram_table_format": "iq4_nl"}, the served base)')
+    ap.add_argument("--footprint-limit-gb", type=float, default=104.0,
+                    help="hy4: abort when this process's footprint exceeds this (Hy4 loaded and wired is ~104-106 GB)")
+    ap.add_argument("--min-available-gb", type=float, default=15.0,
+                    help="hy4: watchdog floor on machine available memory (default 15)")
+    ap.add_argument("--available-counter", choices=("vm_stat", "serving"), default="vm_stat",
+                    help="hy4: available-memory counter for the floor: serving = the serving admission's "
+                         "estimate (file-backed and purgeable pages reclaimable), vm_stat = free+inactive+"
+                         "speculative+purgeable (the historical watchdog)")
     ap.add_argument("--read-point", default="mlp_input", choices=D.READ_POINTS,
                     help="manifest read point; the fn backend captures layer outputs (layer_output_capture)")
     ap.add_argument("--skip-generation", action="store_true",
@@ -198,6 +209,19 @@ def main():
         mx.set_default_device(mx.gpu if args.device == "gpu" else mx.cpu)
         donor = BackendFN(path=args.model)
         src_fp, host_sha = donor.source_fingerprint, None
+    elif args.backend == "hy4":
+        if args.read_point != "layer_output_capture" or not args.skip_generation:
+            raise SystemExit("--backend hy4 needs --read-point layer_output_capture --skip-generation")
+        from research.amoeba.det_backend_hy4 import BackendHy4
+        mx.set_default_device(mx.gpu if args.device == "gpu" else mx.cpu)
+        donor = BackendHy4(path=args.model, policy=args.execution_policy, wire=args.device == "gpu",
+                           min_available_gb=args.min_available_gb, available_counter=args.available_counter,
+                           footprint_limit_gb=args.footprint_limit_gb)
+        src_fp, host_sha = donor.source_fingerprint, None
+        # The positive templates' chat string: the host's own template (no_think), not Qwen's.
+        if donor.chat_format is None:
+            raise SystemExit(f"{donor.path} renders no chat template")
+        C.CHAT = donor.chat_format
     elif args.backend == "27b":
         from research.amoeba.det_backend27 import Backend27
         mx.set_default_device(mx.gpu if args.device == "gpu" else mx.cpu)
@@ -217,8 +241,10 @@ def main():
            if isinstance(i, int) and i >= 0}
     layers = [int(x) for x in args.layers.split(",")]
     rep = {"schema": "mlx2.amoeba-det-calc-cpu.v1", "checkpoint": donor.artifact, "mlx2_source_revision": git_rev(),
-           "device": args.device if args.backend in ("27b", "fn") else "cpu",
-           "dtype": "host-native" if args.backend in ("27b", "fn") else "float32", "qualification": "unqualified", "args": vars(args)}
+           "device": args.device if args.backend in ("27b", "fn", "hy4") else "cpu",
+           "dtype": "host-native" if args.backend in ("27b", "fn", "hy4") else "float32", "qualification": "unqualified", "args": vars(args)}
+    if getattr(donor, "receipt", None):
+        rep["host"] = donor.receipt
 
     # ---- data -----------------------------------------------------------------------------
     def build(split, seed):
@@ -236,8 +262,22 @@ def main():
         return seqs, labs, kinds
 
     data = {s: build(s, seed) for s, seed in (("train", 1), ("val", 2), ("test", 3))}
-    feats = {s: C.capture(donor, data[s][0], layers) for s in data}
-    lab = {s: np.array([x for l in data[s][1] for x in l]) for s in data}
+    # Features stream to <out>/features/<split>/layerNNN.npy as they are captured (resident feature
+    # memory is one sequence's), and every later step reads the read-only memmaps.
+    feats = {s: C.capture_to_disk(donor, data[s][0], layers, out / "features" / s,
+                                  log=lambda m: print(m, flush=True)) for s in data}
+    rep["features"] = {"storage": "npy memmap per split and layer, float32", "dir": str(out / "features")}
+    if args.backend == "hy4":
+        rep["memory_watch"] = {"min_available_gb": args.min_available_gb, "footprint_limit_gb": args.footprint_limit_gb,
+                               "available_counter": args.available_counter,
+                               # live watchdog record (peak footprint, lowest available seen)
+                               "watch": getattr(donor, "watchdog", None)}
+    if args.skip_generation and callable(getattr(donor, "close", None)):
+        # The fit, controls and manifest read only the features: free the model before them.
+        donor.close()
+        rep["model_unloaded_before_fit"] = True
+        print(f"model unloaded, MLX active {mx.get_active_memory() / 1e9:.1f} GB", flush=True)
+    lab ={s: np.array([x for l in data[s][1] for x in l]) for s in data}
     kind_pos = {s: np.array([k for k, l in zip(data[s][2], data[s][1]) for _ in l]) for s in data}
     rep["data"] = {s: {"sequences": len(data[s][0]), "positions": int(lab[s].size), "positives": int((lab[s] == 1).sum())}
                    for s in data}
@@ -342,7 +382,12 @@ def main():
               **({"read_point": args.read_point} if args.read_point != "mlp_input" else {})}]
     man = D.write_manifest(out / "tiles-force", source={"artifact": donor.artifact, "fingerprint": src_fp},
                            layers=donor.L, tiles=tiles, tensors={"calculator.probe_w": mx.array(w)},
-                           extra={"mlx2_source_revision": rep["mlx2_source_revision"], "host_tiles_manifest_sha256": host_sha})
+                           extra={"mlx2_source_revision": rep["mlx2_source_revision"], "host_tiles_manifest_sha256": host_sha,
+                                  # Backends that declare their capture and fit numerics (hy4): the adapter
+                                  # refuses the tile under another capture or other trunk numerics.
+                                  **({"capture": donor.capture} if getattr(donor, "capture", None) else {}),
+                                  **({"fit_execution_policy": donor.fit_execution_policy}
+                                     if getattr(donor, "fit_execution_policy", None) else {})})
     rep["manifest"] = str(man)
     if args.probe_only:
         rep["wall_s"] = time.time() - t0

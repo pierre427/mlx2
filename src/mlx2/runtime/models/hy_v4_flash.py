@@ -355,7 +355,8 @@ class Router(nn.Module):
         scores = mx.sigmoid(logits)
         choice = scores + self.e_score_correction_bias.astype(mx.float32)
         k = self.top_k
-        indices = mx.argpartition(-choice, kth=k - 1, axis=-1)[..., :k].astype(mx.int32)
+        # Discrete ids carry no gradient (value-neutral; the weights stay differentiable).
+        indices = mx.stop_gradient(mx.argpartition(-choice, kth=k - 1, axis=-1)[..., :k].astype(mx.int32))
         weights = mx.take_along_axis(scores, indices, axis=-1)
         if self.norm:
             weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
@@ -596,7 +597,9 @@ class CompressedIndexer(nn.Module):
         offsets = mx.arange(self.ratio, dtype=mx.int32)
         tokens = groups[..., None] * self.ratio + offsets
         tokens = mx.where(groups[..., None] >= 0, tokens, -1)
-        return tokens.reshape(B, L, -1).astype(mx.int32)
+        # Discrete selection: no gradient flows through the picked ids (value-neutral; MLX refuses a VJP
+        # through gather indices, which the aMoEba carve's layer-wise backward would otherwise hit).
+        return mx.stop_gradient(tokens.reshape(B, L, -1).astype(mx.int32))
 
 
 class Attention(nn.Module):
@@ -817,6 +820,16 @@ class HyperHead(nn.Module):
         kernel = _hc_head_kernel(float(self.eps), float(self.hc_eps))
         return kernel(streams, self.hc_head_fn.astype(mx.float32), self.hc_head_base.astype(mx.float32),
                       self.hc_head_scale.astype(mx.float32))
+
+
+def _dispatch(x):
+    """Hand the graph built so far to the device (``async_eval``: a scheduling hint, same numerics). Inside a
+    graph transformation (``vjp``/``grad``, e.g. the aMoEba carve's whole-graph gradient) MLX refuses
+    ``async_eval``; the hint is then skipped."""
+    try:
+        mx.async_eval(x)
+    except ValueError:
+        pass
 
 
 def hc_merge(post, branch, residual):
@@ -1665,6 +1678,9 @@ class Model(nn.Module):
         self.engram_hash = "host"
         self._device_hasher = None
         self.engram_hash_stats = {"host_forwards": 0, "device_forwards": 0, "device_rows": 0}
+        # Trunk forwards (every route reaches ``_layers_from``): observed_used
+        # evidence for load-time weight policies such as ``amoeba_mask``.
+        self.trunk_stats = {"forwards": 0}
         # Opt-in (adapter policy ``moe_nax``), default off: open
         # ``moe_nax_gather.forward_scope`` around every trunk forward, so the
         # NAX sorted gather (when its process mode is on) may serve prefill
@@ -1674,6 +1690,16 @@ class Model(nn.Module):
         # (``fuse_routed_gate_up``); None when it was not selected.
         # A plain attribute, not a module child (it holds no parameters).
         object.__setattr__(self, "moe_gate_up_fusion", None)
+        # Layer-output readers (opt-in; empty by default, so forwards are
+        # unchanged): ``{layer: fn(layer, streams, ids, prefix)}`` called
+        # after that decoder layer of every text forward through ``hidden``.
+        # ``streams`` is the layer's ``[B, L, hc_mult, D]`` output (lazy),
+        # ``ids`` the forward's host ``int64 [B, L]`` token ids with positions
+        # outside a row's span (batch padding) set to -1, and ``prefix`` each
+        # row's committed token ids before the forward (the Engram token tail;
+        # ``None`` without Engram layers).  Readers must not change ``streams``.
+        # Media prefill chunks call no reader.  Plain attribute, not a child.
+        object.__setattr__(self, "layer_output_readers", {})
 
     # -- engram ----------------------------------------------------------
     def bind_engram(self, rows_by_layer: Dict[int, Any]):
@@ -2012,9 +2038,11 @@ class Model(nn.Module):
         if a.image_token_id is not None and np.any(tokens == a.image_token_id):
             raise ValueError("Hy4-flash image tokens need their pixel_values (media prefill)")
         batched = hasattr(cache[0], "rows")
+        if batched and tokens.shape[0] != len(cache[0].rows):
+            raise ValueError("Hy4-flash batch cache rows disagree with the input batch")
+        # Before the Engram plan, which moves the token tails past this chunk.
+        reading = self._reader_inputs(tokens, cache, batched) if self.layer_output_readers else None
         if batched:
-            if tokens.shape[0] != len(cache[0].rows):
-                raise ValueError("Hy4-flash batch cache rows disagree with the input batch")
             engram = self._batched_engram_plan(tokens, cache[0].layout(tokens.shape[1]), cache)
         else:
             engram = self._engram_plan(tokens, cache[0].offset, cache)
@@ -2022,26 +2050,61 @@ class Model(nn.Module):
             self.engram_hash_stats["host_forwards"] += 1
         h = self.model.embed_tokens(inputs)
         streams = mx.broadcast_to(h[:, :, None, :], (*h.shape[:2], a.hc_mult, h.shape[-1]))
-        return self._layers_from(streams, cache, engram, 0, tokens.shape[1], batched)
+        return self._layers_from(streams, cache, engram, 0, tokens.shape[1], batched, reading)
 
-    def _layers_from(self, streams, cache, engram, begin: int, L: int, batched: bool):
+    def _reader_inputs(self, tokens: np.ndarray, cache, batched: bool):
+        """``(ids, prefix)`` for the layer-output readers of one forward.
+
+        ``ids``: the host token ids with every position outside its row's
+        span (batch padding) set to -1.  ``prefix``: each row's committed
+        tokens before the chunk, from the first Engram layer's token tail
+        (read before this forward's plan moves it), or None.
+        """
+        ids = tokens.astype(np.int64, copy=True)
+        L = tokens.shape[1]
+        if batched:
+            keep = np.zeros(ids.shape, dtype=bool)
+            for b, (start, count) in enumerate(cache[0].layout(L)):
+                keep[b, start:start + count] = True
+            ids[~keep] = -1
+        prefix = None
+        if self.args.engram_layers:
+            first = min(self.args.engram_layers)
+            if batched:
+                prefix = [list(r.token_tail[0]) if r.token_tail else [] for r in cache[first].rows]
+            else:
+                tail = cache[first].token_tail
+                prefix = ([list(row) for row in tail] if tail and len(tail) == ids.shape[0]
+                          else [[] for _ in range(ids.shape[0])])
+        return ids, prefix
+
+    def _read_layer_output(self, i, streams, reading):
+        reader = self.layer_output_readers.get(i)
+        if reader is not None and reading is not None:
+            reader(i, streams, *reading)
+
+    def _layers_from(self, streams, cache, engram, begin: int, L: int, batched: bool, reading=None):
         """Run decoder layers ``begin..`` and the head; dispatch at Engram boundaries.
 
         The rows of every Engram layer were submitted before the first one
         ran.  After the first Engram layer, and before each later one waits
         for its rows, the layers built so far are handed to the GPU
         (``async_eval``: same graph, same numerics), so the device works
-        while Python builds the next segment.
+        while Python builds the next segment.  ``reading`` feeds the
+        ``layer_output_readers`` (``_reader_inputs``).
         """
         first_engram = min(engram) if engram else None
+        self.trunk_stats["forwards"] += 1
         for i in range(begin, len(self.model.layers)):
             layer = self.model.layers[i]
             resolve = engram.get(i)
             if resolve is not None and i != first_engram:
-                mx.async_eval(streams)
+                _dispatch(streams)
             streams = layer(streams, cache[i], resolve() if resolve is not None else None)
+            if self.layer_output_readers:
+                self._read_layer_output(i, streams, reading)
             if i == first_engram and len(self.model.layers) - i > 1:
-                mx.async_eval(streams)
+                _dispatch(streams)
         if batched:
             for c in cache:
                 c.advance(L)
@@ -2120,13 +2183,16 @@ class Model(nn.Module):
         mx.async_eval(combined)
         prefix = [c for i in range(first) for c in (cache[i].rows if batched else [cache[i]])]
         saved = [(c, dict(c.__dict__), dict(c.selections)) for c in prefix]
+        early = []  # (layer, streams) of read layers before the host ids exist
         try:
             h = self.model.embed_tokens(inputs)
             streams = mx.broadcast_to(h[:, :, None, :], (*h.shape[:2], a.hc_mult, h.shape[-1]))
             for i in range(first):
                 streams = self.model.layers[i](streams, cache[i], None)
+                if i in self.layer_output_readers:
+                    early.append((i, streams))
             if first:
-                mx.async_eval(streams)
+                _dispatch(streams)
             host = np.array(combined)  # the forward's one host wait
             flat = host[: rows.size].reshape(rows.shape).astype(np.int64)
             tokens = host[rows.size:].reshape(B, L).astype(np.int64)
@@ -2134,6 +2200,8 @@ class Model(nn.Module):
                 raise ValueError("Hy4-flash video input is not implemented")
             if a.image_token_id is not None and np.any(tokens == a.image_token_id):
                 raise ValueError("Hy4-flash image tokens need their pixel_values (media prefill)")
+            # Before the Engram plan, which moves the token tails past this chunk.
+            reading = self._reader_inputs(tokens, cache, batched) if self.layer_output_readers else None
             order = sorted(self.engram_hashers)
             hashed, offset = [], 0
             for lo, hi, _, count, _ in lanes:
@@ -2154,7 +2222,9 @@ class Model(nn.Module):
         stats = self.engram_hash_stats
         stats["device_forwards"] += 1
         stats["device_rows"] += int(ngrams.shape[0])
-        return self._layers_from(streams, cache, engram, first, L, batched)
+        for i, early_streams in early:
+            self._read_layer_output(i, early_streams, reading)
+        return self._layers_from(streams, cache, engram, first, L, batched, reading)
 
     # -- speculative / AST target contract --------------------------------
     # Taps are the post-norm final hidden (DFly2's target feature); only the

@@ -58,7 +58,10 @@ def _common_plan_args(p):
     p.add_argument("--cpu", action="store_true", help="run every model stage on the CPU")
     p.add_argument("--cap-gb", type=float, default=None, help="per-process memory cap (default 80 GB)")
     p.add_argument("--cap-reason", default="", help="who approved a cap over 80 GB")
-    p.add_argument("--moe-units", choices=["expert", "neuron"], default=None,
+    p.add_argument("--min-free-gb", type=float, default=15.0,
+                   help="core carve's free+inactive floor in GiB (default 15); a resident model near the "
+                        "cap needs less, e.g. Hy4-flash at 104 GB")
+    p.add_argument("--moe-units", choices=["expert", "neuron", "block64"], default=None,
                    help="MoE unit granularity (default: neuron, the workflow's choice for MoE models)")
     p.add_argument("--compute", action="append", default=[], metavar="KEY=VALUE", help="override a compute setting")
     p.add_argument("--stream", choices=["auto", "rolling", "resident"], default="auto",
@@ -141,7 +144,11 @@ def parse(argv):
     p.add_argument("--ignore-gpu-queue", default="", metavar="REASON")
     p = sub.add_parser("extract", help="one topic's box from a donor, as a portable box bundle (s11.1)")
     p.add_argument("--model", required=True, help="the donor")
-    p.add_argument("--topic", required=True, help="a taxonomy.v1.json node id (e.g. sci.biology, sci.physics, prog.python, "
+    p.add_argument("--box-fractions", default="", metavar="F1,F2,...",
+                   help="also cut the box at these fractions of ALL units (beyond the core), e.g. 0.05,0.10,0.15; each "
+                        "cut is saved for the removal check (child_removal), which picks the export size")
+    p.add_argument("--topic", required=True, help="a taxonomy.v1.json node id, or several joined by '+' for one box "
+                   "carved from all of them (lang.cmn+lang.jpn+lang.hin) (e.g. sci.biology, sci.physics, prog.python, "
                    "prog.rust, lang.fra); unknown ids refuse")
     p.add_argument("--out", required=True)
     p.add_argument("--against", default="", help="the host the donor must beat on the topic (the donor-gap screen)")
@@ -184,7 +191,7 @@ def parse(argv):
                    help="a model that does not fit: run only the streamed capture and its full-depth gate (schedule vs "
                         "the family's own streamed text-major forward); no resident side")
     p.add_argument("--probe-corpus", default=str(paths.DEFAULT_PROBE_CORPUS))
-    p.add_argument("--moe-units", choices=["expert", "neuron"], default=None)
+    p.add_argument("--moe-units", choices=["expert", "neuron", "block64"], default=None)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--gpu-window-owner", default="")
@@ -274,8 +281,26 @@ def _same_tokenizer(m1, m2):
     return paths.sha256_file(f1) == paths.sha256_file(f2)
 
 
+def topic_nodes(topic: str) -> list[str]:
+    """``--topic a+b+c``: one box carved from several taxonomy nodes together (each with every node below it)."""
+    nodes = [t.strip() for t in str(topic).split("+") if t.strip()]
+    if not nodes or len(set(nodes)) != len(nodes):
+        raise SystemExit(f"--topic {topic!r}: expected one node id or distinct ids joined by '+'")
+    return nodes
+
+
+def topic_matches(topic: str, t: str) -> bool:
+    """Whether probe topic ``t`` is at or below any node of ``topic`` (one id or ids joined by '+')."""
+    return any(t == n or t.startswith(n + ".") for n in topic_nodes(topic))
+
+
 def check_topic(topic: str, taxonomy: Path) -> None:
-    """--topic must be a node of the taxonomy (ids are permanent; a deprecated node names its replacement)."""
+    """--topic must be a node of the taxonomy (ids are permanent; a deprecated node names its replacement); several
+    nodes joined by '+' are each checked."""
+    if "+" in topic:
+        for t in topic_nodes(topic):
+            check_topic(t, taxonomy)
+        return
     nodes = json.loads(Path(taxonomy).read_text()).get("nodes", [])
     by = {n.get("id"): n for n in nodes}
     if topic in by:
@@ -301,6 +326,13 @@ def cmd_build(a) -> int:
                              "(research/amoeba/carve/units.py has MLP and MoE sites only); not built")
         if not a.against and not a.skip_gap_screen:
             raise SystemExit("extract needs --against HOST for the donor-gap screen, or --skip-gap-screen REASON")
+        if "+" in a.topic and not a.skip_gap_screen:
+            raise SystemExit("a multi-topic box (--topic a+b) has no donor-gap screen: pass --skip-gap-screen REASON")
+        if a.box_fractions:
+            fr = [float(x) for x in a.box_fractions.split(",") if x.strip()]
+            if not fr or any(not 0 < x < 1 for x in fr) or fr != sorted(set(fr)):
+                raise SystemExit("--box-fractions: ascending distinct fractions of ALL units in (0, 1)")
+            a.compute = list(a.compute) + [f"box_fractions={','.join(f'{x:g}' for x in fr)}"]
         from .extract import EXTRACT_STAGES
         a.stages = "gap" if a.gap_only else ",".join(EXTRACT_STAGES)
         a.boxes, a.max_boxes, a.max_cluster_boxes = "", 0, 0
@@ -322,6 +354,7 @@ def cmd_build(a) -> int:
     cfg = K.resolve(a.profile, K.parse_overrides(a.compute), K.parse_overrides(a.data_override), a.override_reason)
     plan = make_plan(info, cfg, cap_gb=a.cap_gb, cap_reason=a.cap_reason, moe_units=a.moe_units, cpu=a.cpu,
                      stream=a.stream, window=a.window, texts=map_texts(a.probe_corpus, cfg))
+    plan["min_free_gb"] = round(float(a.min_free_gb), 1)
     print(format_plan(info, plan), file=sys.stderr)
     if not plan["fits"]:
         return 2
@@ -466,6 +499,9 @@ def _execute(b: Build, stages: list, a, commit: dict, redo: list) -> int:
     host_plan = (extract.get("against") or {}).get("plan") or {}
     if "gap" in stages and not extract.get("skip_gap_screen") and (host_plan.get("stream") or {}).get("mode") == "rolling":
         raise SystemExit("the gap screen needs a resident host; this build planned rolling capture for it")
+    # Every child's footprint watchdog uses the plan's free floor (--min-free-gb, default 15).
+    if b.plan.get("min_free_gb") is not None:
+        os.environ["AMOEBA_MIN_FREE_GB"] = f"{float(b.plan['min_free_gb']):g}"
     progress = Progress(b.out / "events.jsonl", quiet=getattr(a, "quiet", False))
     note = commit_notice(b, commit)
     if note:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 
@@ -67,7 +68,15 @@ def load_host(a):
     import mlx.core as mx
     if a.cpu:
         mx.set_default_device(mx.cpu)
-    return Host(a.model, log=lambda *m: print(time.strftime("%H:%M:%S"), *m, flush=True), moe_units=a.moe_units)
+    log = lambda *m: print(time.strftime("%H:%M:%S"), *m, flush=True)  # noqa: E731
+    host = Host(a.model, log=log, moe_units=a.moe_units)
+    # Wire the evaluated weights like the core carve does (env AMOEBA_CARVE_WIRED_GB, default off): an unwired
+    # resident model near the cap is compressed under pressure (Hy4-flash corecheck: compressor +23 GiB in
+    # 12 s right after the carve process exited, 2026-11-21).
+    spec = os.environ.get("AMOEBA_CARVE_WIRED_GB", "").strip() or "0"
+    if not a.cpu and spec != "0":
+        O.wire_weights(O.wired_arg(spec), lambda m: log(m), memory_gb=a.memory_gb)
+    return host
 
 
 # ------------------------------------------------------------------ corecheck
@@ -196,8 +205,9 @@ def gates(a):
         rows = {}
         if name == "__other__":           # off-topic probes (targeted extraction: one box, no other boxes)
             ex = a.exclude_topic
+            exs = [n for n in ex.split("+") if n] if ex else []        # one id, or several joined by '+'
             pr = [r for r in read_jsonl(a.negative_probes) if r.get("origin") != "synthetic" and not
-                  (ex and (r["topics"][0] == ex or r["topics"][0].startswith(ex + ".")))]
+                  any(r["topics"][0] == n or r["topics"][0].startswith(n + ".") for n in exs)]
             rows = {"fit": pick([r for r in pr if r["split"] == "fit"], a.negatives, a.seed),
                     "held": pick([r for r in pr if r["split"] == "held"], a.negatives, a.seed)}
         elif name == "__english__":

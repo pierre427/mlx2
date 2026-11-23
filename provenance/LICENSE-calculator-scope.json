@@ -34,7 +34,10 @@
     "docs/research/calculator-tile-explained-resident.pdf",
     "scripts/research/calc_trigger_manifests.py",
     "scripts/research/calc_trigger_analyze.py",
-    "docs/research/2026-11-20-calculator-marker-trigger.md"
+    "docs/research/2026-11-20-calculator-marker-trigger.md",
+    "docs/hy4-flash/det-calculator.md",
+    "research/amoeba/det_backend_hy4.py",
+    "tests/test_hy_v4_flash_det_tiles_cpu.py"
   ],
   "mixed_files": [
     {
@@ -61,7 +64,11 @@
         "ProbeGate",
         "CalculatorProcessor",
         "processors_for",
-        "resident_external_manifest"
+        "resident_external_manifest",
+        "MATCHED_EXTERNAL_ROUTES",
+        "admit_position_matched",
+        "on_layer_output",
+        "calc_gate_at"
       ],
       "covered_fragments": "Calculator grammar/constants and calculator-specific branches in manifest validation, tile construction, gate capture, receipts and cache identity.",
       "excluded": "FactTable and fact-table behavior; generic tile installation, file hashing, generic manifest I/O and shared runtime infrastructure remain under their existing licenses."
@@ -75,6 +82,21 @@
       ],
       "covered_fragments": "Calculator admission, installation and calculator identity branches in _Gemma4Adapter.__init__.",
       "excluded": "Existing model loading, tensor math, media, cache, sampling and generic adapter infrastructure retain their existing licenses."
+    },
+    {
+      "path": "src/mlx2/adapters/hy_v4_flash.py",
+      "covered_symbols": [
+        "DET_TILE_CAPTURE",
+        "DET_TILE_NUMERICS_KEYS",
+        "DET_TILE_STASH_FORWARDS",
+        "det_tile_capture",
+        "HYV4FlashAdapter._admit_det_tiles",
+        "HYV4FlashAdapter._install_det_tiles",
+        "HYV4FlashAdapter.request_logits_processors",
+        "HYV4FlashAdapter._det_tiles_receipt"
+      ],
+      "covered_fragments": "Calculator admission, installation, receipt and calculator identity branches (amoeba_det_tiles) in HYV4FlashAdapter.__init__ and execution_numerics_contract.",
+      "excluded": "Existing model loading, tensor math, Engram, DFly2, media, cache, sampling and generic adapter infrastructure retain their existing licenses."
     }
   ],
   "exclusions": [

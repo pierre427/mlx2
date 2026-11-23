@@ -370,3 +370,51 @@ def test_commit_refuses_a_non_ancestry_path_before_any_lane_commits(tiny):
     with pytest.raises(ValueError, match="root path"):
         transaction.commit(accepted_lengths=[1, 1, 3])  # range(3) is not a root path in a bush
     _assert_same(before, _snapshot(caches))
+
+
+# ------------------------------------------------------- aMoEba overlays (amoeba_mask) on AST / DFly2
+
+def _mask_bundle(root, out, frac=0.4, seed=0):
+    from mlx2.adapters.hy_v4_flash import HYV4FlashAdapter
+    from mlx2.runtime import amoeba_neuron_mask as M
+
+    identity, sites = HYV4FlashAdapter.amoeba_mask_sites_for(root)
+    rng = np.random.default_rng(seed)
+    closed = {}
+    for s in sites:
+        if s.experts is None:
+            continue
+        # whole 8-neuron blocks (paged under pageout) plus scattered single neurons (zeroed, resident)
+        nb = s.experts * (s.width // 8)
+        blocks = rng.choice(nb, size=int(frac * nb), replace=False)
+        closed[s.layer] = np.concatenate([np.arange(b * 8, b * 8 + 8) for b in blocks] + [rng.choice(s.units, 5)])
+    return M.write_bundle(out, checkpoint="tiny", fingerprint=identity["fingerprint"], sites=sites, closed=closed,
+                          boxes_off=["lang.cmn", "lang.jpn", "lang.hin"], source={"note": "AST overlay test"})
+
+
+@pytest.mark.parametrize("mode", ["zero", "pageout"])
+@pytest.mark.parametrize("drafter", ["embedded_dfly", "prompt_lookup"])
+def test_ast_and_dfly2_commit_masked_ordinary_decode_under_an_overlay(tmp_path, tiny, drafter, mode):
+    """With the box gated off (zero mask) or paged out, AST/DFly2 commit exactly the masked model's own ordinary
+    greedy decode (the drafter predicts the unmasked model; every draft is verified by the masked target)."""
+    from mlx2.adapters import hy_v4_flash as A
+
+    config, W, base, _ = tiny
+    (tmp_path / "art").mkdir()
+    root = _tiny_artifact(tmp_path / "art", config, W)
+    bundle = _mask_bundle(root, tmp_path / "mask")
+    spec = str(bundle) if mode == "zero" else {"bundle": str(bundle), "mode": "pageout", "block": 8}
+    adapter = A.HYV4FlashAdapter(str(root), execution_policy={"draft_model": drafter, "num_draft": 3,
+                                                              "amoeba_mask": spec})
+    try:
+        _run(adapter, 2)                    # each lane == _greedy(adapter.model, ...): the masked ordinary decode
+        assert any(_greedy(adapter.model, p, 12) != _greedy(base, p, 12) for p in PROMPTS[:2])   # the box matters
+        r = adapter.diagnostics()["amoeba_mask"]
+        assert r["selected"] and r["observed_used"] and r["mode"] == mode
+        if mode == "pageout":
+            po = r["pageout"]
+            assert po["resident_bytes_freed"] > 0 and po["paged_bank_calls"] > 0
+            assert "pageout-b8" in adapter.layout
+        assert adapter.diagnostics()["ast"]["selected"]
+    finally:
+        adapter.close()

@@ -18,6 +18,11 @@ Sets (``--sets``):
 
 Reports accuracy per arm with paired-bootstrap CIs of the difference, fire rates, false fires, drift,
 tok/s and TTFT. Receipts name the checkpoint (``<dir>@<fingerprint8>``) and the mlx2 commit.
+
+Other models (``--model``; default Flash-Next): ``--execution-policy FILE`` is passed to both servers,
+``--tasks`` keeps a subset of the arithmetic tasks (same items per task as the full set), and
+``--limit-gb`` is the server footprint kill limit. Hy4-flash keeps its DFly2 default route with a
+route-neutral policy (``{"engram_table_format": "iq4_nl"}``) plus ``--det-tile``.
 """
 from __future__ import annotations
 
@@ -40,6 +45,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 MODEL = Path.home() / "mlx-models/Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP"
 ARITH_TASKS = ("add:4:4", "addk:3:4", "mul:3:2", "mul:4:2", "mul:3:3")
+SELECTED_TASKS = ARITH_TASKS
+EXECUTION_POLICY = None     # --execution-policy FILE, passed to every server
 
 PROSE = ["Write three sentences about a lighthouse keeper.", "Explain in two sentences what a compiler does.",
          "Describe a rainy morning in a small harbour town.", "Give two tips for keeping houseplants alive.",
@@ -137,6 +144,8 @@ def make_items(spec, n, seed):
 def arith_items(n, seed=4511):
     items = []
     for k, spec in enumerate(ARITH_TASKS):
+        if spec not in SELECTED_TASKS:
+            continue                       # the seed stays the task's index in the full set
         for it in make_items(spec, n, seed + k):
             items.append({"task": spec, "prompt": it["prompt"], "expect": str(it["answer"])})
     return items
@@ -318,6 +327,8 @@ class Server:
         self.base = f"http://127.0.0.1:{port}"
         cmd = [sys.executable, "-m", "mlx2.server", "--model", str(MODEL), "--host", "127.0.0.1", "--port", str(port),
                "--max-context", "131072", "--max-lanes", "4", "--max-inflight", "8", "--agent-compat", "on"]
+        if EXECUTION_POLICY:
+            cmd += ["--execution-policy", str(EXECUTION_POLICY)]
         if det_manifest:
             cmd += ["--det-tile", f"calculator={det_manifest}"]
         self.cmd = cmd
@@ -386,7 +397,17 @@ def main():
     ap.add_argument("--n", type=int, default=100, help="items per arithmetic task")
     ap.add_argument("--gsm-indices", default="0-199")
     ap.add_argument("--width", type=int, default=4)
+    ap.add_argument("--model", type=Path, default=None, help="model directory (default Flash-Next)")
+    ap.add_argument("--execution-policy", type=Path, default=None, help="policy JSON passed to every server")
+    ap.add_argument("--tasks", default=",".join(ARITH_TASKS), help="arithmetic tasks to keep (comma list)")
+    ap.add_argument("--limit-gb", type=float, default=88.0, help="server footprint kill limit")
     args = ap.parse_args()
+    global MODEL, SELECTED_TASKS, EXECUTION_POLICY
+    MODEL = (args.model or MODEL).expanduser()
+    SELECTED_TASKS = tuple(t for t in args.tasks.split(",") if t)
+    if not SELECTED_TASKS or set(SELECTED_TASKS) - set(ARITH_TASKS):
+        sys.exit(f"--tasks must name tasks of {ARITH_TASKS}")
+    EXECUTION_POLICY = args.execution_policy
     if not 8391 <= args.port <= 8395:
         sys.exit("development servers use ports 8391-8395")
     out = Path(args.out)
@@ -398,7 +419,7 @@ def main():
     gsm = gsm_items(range(int(a), int(b) + 1))
     arith = arith_items(args.n)
     nomath = [{"task": "nomath:" + k, "prompt": t, "max_tokens": 96} for k, t in nomath_items()]
-    tsub = [it for k in ARITH_TASKS for it in [x for x in arith if x["task"] == k][:8]] + gsm[:20]
+    tsub = [it for k in SELECTED_TASKS for it in [x for x in arith if x["task"] == k][:8]] + gsm[:20]
     rev = subprocess.check_output(["git", "rev-parse", "--short=9", "HEAD"], cwd=ROOT, text=True).strip()
     dirty = subprocess.check_output(["git", "status", "--porcelain", "--", "src", "scripts"], cwd=ROOT, text=True)
     from mlx2.runtime.amoeba_det_tiles import load_manifest
@@ -420,9 +441,9 @@ def main():
                "tile": man["tiles"][0], "args": vars(args), "sets": {}}
 
     def save():
-        (out / "summary.json").write_text(json.dumps(summary, indent=1))
+        (out / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
 
-    srv = Server(out / "det-server", args.port, args.manifest, log)
+    srv = Server(out / "det-server", args.port, args.manifest, log, limit_gb=args.limit_gb)
     summary["det_server"] = {"cmd": srv.cmd, "footprint": srv.peak}
     rows = {}
     try:
@@ -437,7 +458,7 @@ def main():
                 rows[name] = run_pairs(srv.base, arith, args.width, log)
             elif name == "gsm8k":
                 rows[name] = run_pairs(srv.base, gsm, args.width, log)
-            (out / f"rows-{name}.json").write_text(json.dumps(rows[name], indent=1))
+            (out / f"rows-{name}.json").write_text(json.dumps(rows[name], indent=1, default=str))
             s = summarize_scored(rows[name]) if name in ("arith", "gsm8k", "timing") else {}
             if name == "nomath":
                 by = pair_up(rows[name])
@@ -464,13 +485,13 @@ def main():
         save()
     if "plain" in sets:
         log("set plain (no --det-tile): off must equal it")
-        plain = Server(out / "plain-server", args.port, None, log)
+        plain = Server(out / "plain-server", args.port, None, log, limit_gb=args.limit_gb)
         try:
             items = nomath + tsub[:40]
             prow = run_pairs(plain.base, items, 1, log, arms=(None,))
             for r in prow:
                 r["arm"] = "plain"
-            (out / "rows-plain.json").write_text(json.dumps(prow, indent=1))
+            (out / "rows-plain.json").write_text(json.dumps(prow, indent=1, default=str))
             offs = {(r["task"], r["prompt"]): r for name in ("nomath", "timing")
                     for r in rows.get(name, []) if r["arm"] == "off"}
             same, diff, missing = 0, [], 0

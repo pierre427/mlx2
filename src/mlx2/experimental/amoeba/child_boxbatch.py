@@ -57,6 +57,8 @@ def carve_argv(spec: dict, bd: Path, d: Path) -> list[str]:
         argv.append("--resume")
     if spec.get("stop_at") is not None:
         argv += ["--stop-at", str(spec["stop_at"])]
+    if c.get("box_fractions"):            # extra box cuts at fractions of ALL units beyond the core (tier_*_size*.npz)
+        argv += ["--size-targets", str(c["box_fractions"])]
     return argv + list(spec.get("extra_carve_args") or [])
 
 

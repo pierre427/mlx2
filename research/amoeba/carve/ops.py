@@ -105,7 +105,7 @@ def reset_swap_baseline():
 _WATCHER = [None]
 
 
-def footprint_watchdog(limit_gb: float, log, every_s: float = 1.0, min_avail_gb: float = 15.0,
+def footprint_watchdog(limit_gb: float, log, every_s: float = 1.0, min_avail_gb: float | None = None,
                        swap_growth_gb: float = 2.0, hard_gb: float | None = None, compressor_growth_gb: float = 12.0,
                        receipt=None, watcher: bool = False):
     """Stop this process (exit 3, with a JSON receipt at `receipt`) when its physical footprint passes limit_gb, free
@@ -123,6 +123,8 @@ def footprint_watchdog(limit_gb: float, log, every_s: float = 1.0, min_avail_gb:
     global _WATCHDOG_STARTED
     if os.environ.get("MLX2_AMOEBA_WATCHDOG", "").lower() == "off":
         return
+    if min_avail_gb is None:
+        min_avail_gb = float(os.environ.get("AMOEBA_MIN_FREE_GB", "").strip() or 15.0)
     if _WATCHDOG_STARTED:                  # a batch of carves in one process: one watchdog for the process; each
         reset_swap_baseline()              # carve re-bases the swap-growth check (slow drift over a long batch)
         if _WATCHER[0] is not None:

@@ -92,12 +92,15 @@ def main(argv=None):
             dn = dense_weight(_proj(m, "down_proj", where))[:, units]
             layout = "dense: gate/up [k, d], down [d, k]"
         else:
-            sw = s.module.switch_glu if s.kind == "gemma4_experts" else s.module.switch_mlp
+            from research.amoeba.carve import units as U
+            sw = U._switch(s.module, s.kind)
             gp, up, dp = (_proj(sw, n, where) for n in ("gate_proj", "up_proj", "down_proj"))
             g, u, dn = [], [], []
             if s.units == "neuron":
                 for e in sorted(set((units // s.F).tolist())):
                     f = units[units // s.F == e] - e * s.F
+                    if getattr(s, "B", 1) > 1:          # block units: unit b of expert e is neurons b*B .. b*B+B-1
+                        f = (f[:, None] * s.B + np.arange(s.B)[None]).ravel()
                     g.append(dense_weight(gp, f, expert=e))
                     u.append(dense_weight(up, f, expert=e))
                     dn.append(dense_weight(dp, expert=e)[:, f])

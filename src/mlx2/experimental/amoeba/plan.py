@@ -26,6 +26,8 @@ def physical_gb() -> float:
 
 def _units(info: dict, moe_units: str) -> int:
     u = info["units"]
+    if moe_units == "block64":
+        return u["dense_neurons"] + u["moe_neuron_units"] // 64
     return u["dense_neurons"] + (u["moe_neuron_units"] if moe_units == "neuron" else u["moe_expert_units"])
 
 
