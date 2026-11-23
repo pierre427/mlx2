@@ -392,3 +392,193 @@ def sparse_prefill_attend(q, kv, recalled, sinks, scale: float, rank: int, *, st
     if kv.shape != (B, T, D) or recalled.shape != (B, L, K):
         raise ValueError("Hy4-flash sparse prefill: q / kv / recalled shapes disagree")
     return _launch(q, kv, recalled, sinks, scale, rank, start, first)
+
+# --------------------------------------------------- fp8 latent rows (H3) --
+# ``latent_kv: fp8`` caches hold packed rows (``hy_v4_flash_fp8kv``: E4M3
+# latent codes, one pow2 fp32 scale per 128-lane tile, bf16 RoPE tail).  The
+# kernel above needs 16-bit rows, so the model used to unpack every cached
+# row of the chunk (``latent_rows``) before a forward that reads only the
+# recalled ones.  This variant stages the recalled rows straight from the
+# packed bytes and dequantizes them while staging; everything after the
+# stage is the kernel above unchanged.  The staged values are bitwise the
+# unpacked ones: ``float(code) * scale`` is exact in fp32 (3 mantissa bits
+# times a power of two) and exact in the 16-bit staging type for bf16 (same
+# exponent range); fp16 is clamped to its finite range first, like
+# ``unpack_rows``; the tail is read as bf16 bits.  So the output is bitwise
+# the unpack-then-kernel route's (the dispatch probe checks this on random
+# rows per instantiation).
+KERNEL_NAME_FP8 = "mlx2_hy4_sparse_prefill_attention_fp8_v1"
+# Research switch (A/B only, not a policy key): False makes every fp8 forward
+# decline the variant (``fp8_in_kernel_off``) and unpack first, the old route.
+FP8_IN_KERNEL = True
+
+_FETCH_NATIVE = r"""                if (row >= 0) pre[j] = ((const device uint4*)(kvb + (size_t)row * D))[c % ROW4]; \
+"""
+_FETCH_FP8 = r"""                if (row >= 0) { \
+                    const device uchar* rb_ = kvb8 + (size_t)row * PB; \
+                    const int lane0_ = (c % ROW4) * 8; \
+                    if (lane0_ < R) { \
+                        const device uint* cw_ = (const device uint*)(rb_ + lane0_); \
+                        pre[j] = uint4(cw_[0], cw_[1], ((const device uint*)(rb_ + R))[lane0_ / FP8_TILE], 0u); \
+                    } else { \
+                        pre[j] = ((const device uint4*)(rb_ + R + 4 * (R / FP8_TILE)))[(lane0_ - R) / 8]; \
+                    } \
+                } \
+"""
+_STORE_NATIVE = r"""            if (c < KT * ROW4) kraw[(c / ROW4) * ROWP4 + c % ROW4] = pre[j];
+"""
+_STORE_FP8 = r"""            if (c < KT * ROW4) {
+                threadgroup InT* dst_ = ktw + (c / ROW4) * DP + (c % ROW4) * 8;
+                const int lane0_ = (c % ROW4) * 8;
+                if (lane0_ < R) {
+                    const float sc_ = as_type<float>(pre[j].z);
+                    #pragma clang loop unroll(full)
+                    for (int e = 0; e < 8; ++e) {
+                        const uint b_ = ((e < 4 ? pre[j].x : pre[j].y) >> (8 * (e % 4))) & 0xFFu;
+                        dst_[e] = InT(MLX2_FP8_CLAMP(mlx2_e4m3(b_) * sc_));
+                    }
+                } else {
+                    #pragma clang loop unroll(full)
+                    for (int e = 0; e < 8; ++e) {
+                        const uint w_ = e < 2 ? pre[j].x : (e < 4 ? pre[j].y : (e < 6 ? pre[j].z : pre[j].w));
+                        const uint h_ = (w_ >> (16 * (e % 2))) & 0xFFFFu;
+                        dst_[e] = InT(MLX2_FP8_CLAMP(as_type<float>(h_ << 16)));
+                    }
+                }
+            }
+"""
+_HEADER_FP8 = r"""
+static inline float mlx2_e4m3(uint b) {
+    // E4M3 (bias 7, no infinities, 0x7f / 0xff NaN): exact in fp32.
+    const uint e = (b >> 3) & 0xFu;
+    const uint m = b & 0x7u;
+    // Normal codes built from bits (exponent bias 7 -> 127), so no libm call is involved.
+    float v = e == 0u ? float(m) * 0.001953125f : as_type<float>(((e + 120u) << 23) | (m << 20));
+    if (e == 15u && m == 7u) v = NAN;
+    return (b & 0x80u) ? -v : v;
+}
+// IS_F16 is a kernel template parameter: expanded inside the kernel body.
+#define MLX2_FP8_CLAMP(x) (IS_F16 ? metal::clamp((x), -65504.0f, 65504.0f) : (x))
+"""
+
+
+def _fp8_source() -> str:
+    src = _SOURCE
+    for old, new in ((_FETCH_NATIVE, _FETCH_FP8), (_STORE_NATIVE, _STORE_FP8)):
+        if src.count(old) != 1:
+            raise RuntimeError("Hy4 sparse prefill fp8 variant: kernel source anchor moved")
+        src = src.replace(old, new)
+    marker = "    threadgroup const InT* ktile = (threadgroup const InT*)kraw;\n"
+    if src.count(marker) != 1:
+        raise RuntimeError("Hy4 sparse prefill fp8 variant: kernel source anchor moved")
+    src = src.replace(marker, marker + "    threadgroup InT* ktw = (threadgroup InT*)kraw;\n")
+    marker = "    const device InT* kvb = kv + (size_t)b * T * D;\n"
+    if src.count(marker) != 1:
+        raise RuntimeError("Hy4 sparse prefill fp8 variant: kernel source anchor moved")
+    return src.replace(marker, "    const device uchar* kvb8 = kv + (size_t)b * T * PB;\n")
+
+
+@lru_cache(maxsize=None)
+def _kernel_fp8():
+    return mx.fast.metal_kernel(
+        name=KERNEL_NAME_FP8,
+        input_names=["q", "kv", "recalled", "sinks", "scale_arr", "params"],
+        output_names=["out"],
+        source=_fp8_source(),
+        header=_HEADER_FP8,
+        ensure_row_contiguous=True,
+    )
+
+
+def fp8_row_geometry(rank: int, head_dim: int) -> tuple[int, int]:
+    """``(packed row bytes, tile lanes)`` of an fp8 row with ``head_dim - rank`` bf16 tail lanes."""
+    from .hy_v4_flash_fp8kv import row_bytes, tile_width
+
+    return row_bytes(rank, head_dim - rank), tile_width(rank)
+
+
+def fp8_unsupported_reason(num_heads: int, head_dim: int, rank: int, dtype, *, row_bytes: int,
+                           rows: int = 1, lanes: int = 1, first: int = 0) -> str | None:
+    """Why the fp8 variant cannot run this forward (None: it can); a counted fallback otherwise."""
+    if not FP8_IN_KERNEL:
+        return "fp8_in_kernel_off"
+    reason = unsupported_reason(num_heads, head_dim, rank, dtype, rows=rows, lanes=lanes, first=first)
+    if reason is not None:
+        return reason
+    pb, tile = fp8_row_geometry(rank, head_dim)
+    if row_bytes != pb:
+        return f"fp8_row_bytes_{row_bytes}"
+    # 16-byte tail reads and 4-byte code / scale reads must be aligned.
+    if tile != 128 or pb % 16 or (rank + 4 * (rank // tile)) % 16:
+        return "fp8_row_alignment"
+    return fp8_dispatch_probe(num_heads, head_dim, rank, dtype)
+
+
+_FP8_PROBES: dict = {}
+
+
+def fp8_dispatch_probe(num_heads: int, head_dim: int, rank: int, dtype) -> str | None:
+    """Build and run the fp8 variant once on random packed rows; it must equal
+    ``unpack_rows`` + the native kernel bit for bit (cached per instantiation)."""
+    key = (num_heads, head_dim, rank, str(dtype))
+    if key in _FP8_PROBES:
+        return _FP8_PROBES[key]
+    from . import hy_v4_flash_fp8kv as F8
+    from .hy_v4_flash_fp8kv import pack_rows, unpack_rows
+
+    counters = dict(F8._COUNTERS)  # the probe's rows are not served rows
+    try:
+        k = mx.random.key(20261122)
+        k1, k2 = mx.random.split(k)
+        rows = 3 * KEY_TILE
+        q = (mx.random.normal((1, num_heads, 2, head_dim), key=k1) * 0.1).astype(dtype)
+        kv = mx.random.normal((1, rows, head_dim), key=k2) * 4.0
+        packed = pack_rows(kv, rank)
+        ids = mx.concatenate([mx.arange(rows, dtype=mx.int32), mx.array([-1, 5], dtype=mx.int32)])
+        ids = mx.broadcast_to(ids[None, None], (1, 2, rows + 2))
+        sinks = mx.zeros((num_heads,))
+        got = _launch_fp8(q, packed, ids, sinks, 0.1, rank, rows, 0)
+        want = _launch(q, unpack_rows(packed, rank, dtype), ids, sinks, 0.1, rank, rows, 0)
+        mx.eval(got, want)
+        reason = None if bool(mx.array_equal(got, want).item()) else "fp8_dispatch_probe_not_bitwise"
+    except ValueError as err:
+        if "transform" in str(err).lower():
+            return "dispatch_probe_deferred"
+        reason = f"fp8_dispatch_probe_{type(err).__name__}"
+    except Exception as err:  # noqa: BLE001 - pipeline build / dispatch failures
+        reason = f"fp8_dispatch_probe_{type(err).__name__}"
+    finally:
+        F8._COUNTERS.update(counters)
+    _FP8_PROBES[key] = reason
+    return reason
+
+
+def _launch_fp8(q, packed, recalled, sinks, scale, rank, start, first):
+    B, H, L, D = q.shape
+    T, PB = packed.shape[1], packed.shape[2]
+    K = recalled.shape[-1]
+    params = mx.array([L, T, K, int(start), int(first)], dtype=mx.int32)
+    return _kernel_fp8()(
+        inputs=[q, packed, recalled.astype(mx.int32),
+                sinks.astype(q.dtype).astype(mx.float32), mx.array([scale], dtype=mx.float32), params],
+        template=[("InT", q.dtype), ("OutT", q.dtype), ("H", H), ("D", D), ("R", rank), ("PB", PB),
+                  ("FP8_TILE", 128), ("IS_F16", q.dtype == mx.float16)],
+        grid=(THREADS, L, B),
+        threadgroup=(THREADS, 1, 1),
+        output_shapes=[(B, H, L, rank)],
+        output_dtypes=[q.dtype],
+    )[0]
+
+
+def sparse_prefill_attend_fp8(q, packed, recalled, sinks, scale: float, rank: int, *, start: int,
+                              first: int = 0):
+    """``sparse_prefill_attend`` over packed fp8 latent rows ``[B, T, row_bytes]`` uint8."""
+    B, H, L, D = q.shape
+    if packed.dtype != mx.uint8 or packed.ndim != 3 or packed.shape[0] != B:
+        raise ValueError("Hy4-flash fp8 sparse prefill: packed rows must be uint8 [B, T, row_bytes]")
+    reason = fp8_unsupported_reason(H, D, rank, q.dtype, row_bytes=int(packed.shape[2]), rows=L, lanes=B)
+    if reason is not None:
+        raise ValueError(f"Hy4-flash fp8 sparse prefill kernel cannot run this geometry: {reason}")
+    if recalled.shape != (B, L, recalled.shape[-1]):
+        raise ValueError("Hy4-flash sparse prefill: q / recalled shapes disagree")
+    return _launch_fp8(q, packed, recalled, sinks, scale, rank, start, first)

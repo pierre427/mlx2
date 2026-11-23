@@ -59,11 +59,15 @@ from .hy_v4_flash_fp8kv import ROW_REVISION as FP8_ROW_REVISION
 from .hy_v4_flash_fp8kv import pack_rows as fp8_pack_rows
 from .hy_v4_flash_fp8kv import row_bytes as fp8_row_bytes
 from .hy_v4_flash_fp8kv import unpack_rows as fp8_unpack_rows
+from . import hy_v4_flash_union_prefill as _union_prefill
 from .hy_v4_flash_sparse_prefill import sparse_prefill_attend
+from .hy_v4_flash_sparse_prefill import fp8_unsupported_reason as _sparse_fp8_reason
+from .hy_v4_flash_sparse_prefill import sparse_prefill_attend_fp8 as _sparse_prefill_attend_fp8
 from .hy_v4_flash_sparse_prefill import unsupported_reason as sparse_unsupported_reason
 from .hy_v4_flash_vision import (chunk_positions, find_spans, mrope_planes, slot_positions,
                                  span_end)
 from . import hy_v4_flash_fusions as _fusions
+from . import hy_v4_flash_resident as _resident
 from . import moe_nax_gather as _moe_nax
 from . import switch_read_once as _read_once
 from .switch_layers import SwitchGLU
@@ -366,7 +370,9 @@ class Router(nn.Module):
         self.e_score_correction_bias = mx.zeros((args.n_routed_experts,), dtype=mx.float32)
 
     def __call__(self, x):
-        logits = x.astype(mx.float32) @ self.weight.astype(mx.float32).T
+        # fp32 weight: the reference expression; a BF16-resident weight (opt-in
+        # ``resident_bf16``, H5) is widened at use (hy_v4_flash_resident).
+        logits = _resident.f32_matmul(x, self.weight, kernel=getattr(self, "resident_gemv", False))
         scores = mx.sigmoid(logits)
         choice = scores + self.e_score_correction_bias.astype(mx.float32)
         k = self.top_k
@@ -727,9 +733,28 @@ class CompressedIndexer(nn.Module):
         pooled = rms_norm(pooled, self.key_norm.weight.astype(mx.float32), self.eps).astype(token_keys.dtype)
         # Group j's phase is that of its first token, position j * ratio
         # (``positions`` [3, g] of those tokens when vision spans exist).
+        # Opt-in ``resident_bf16`` indexer_keys (H5): bf16 activations give
+        # bf16-exact keys, cached bf16 instead of as an fp32 copy.
+        key_dtype = mx.bfloat16 if (getattr(self, "lowp_keys", False) and token_keys.dtype == mx.bfloat16) \
+            else mx.float32
+        if key_dtype != mx.float32:
+            self.lowp_key_groups = getattr(self, "lowp_key_groups", 0) + g
         if positions is not None:
-            return self._rope_tail(pooled, positions).astype(mx.float32)
-        return self._rope_tail(pooled, first_group, scale=float(self.ratio)).astype(mx.float32)
+            return self._rope_tail(pooled, positions).astype(key_dtype)
+        return self._rope_tail(pooled, first_group, scale=float(self.ratio)).astype(key_dtype)
+
+    def _fused_logits(self, q, group_keys, w, own):
+        """Negated masked logits of the opt-in ``indexer_fused_scores`` kernel (v1, or the H6 simd layout)."""
+        if getattr(self, "fused_scores_variant", "v1") == "simd":
+            reason = _fusions.indexer_simd_unsupported_reason(self.num_heads, self.head_dim)
+            if reason is None:
+                self.fused_score_simd_calls = getattr(self, "fused_score_simd_calls", 0) + 1
+                return _fusions.indexer_logits_simd(q, group_keys, w, own, negate=True)
+            declines = getattr(self, "fused_score_simd_declines", None)
+            if declines is None:
+                declines = self.fused_score_simd_declines = {}
+            declines[reason] = declines.get(reason, 0) + 1
+        return _fusions.indexer_logits_metal(q, group_keys, w, own, negate=True)
 
     def select(self, hidden, q_resid, start: int, group_keys, where=None):
         """Recalled token slots ``[B, L, group_topk*ratio]`` int32, -1 unused.
@@ -765,7 +790,7 @@ class CompressedIndexer(nn.Module):
                 # The kernel writes the negated masked logits (negation is
                 # exact, so argpartition sees the reference's operand order);
                 # a pick is valid iff it lies before the own group.
-                neg = _fusions.indexer_logits_metal(q[:, :, a:b], group_keys, w[:, a:b], own, negate=True)
+                neg = self._fused_logits(q[:, :, a:b], group_keys, w[:, a:b], own)
                 if k > 0:
                     picked = mx.argpartition(neg, kth=k - 1, axis=-1)[..., :k].astype(mx.int32)
                     picked = mx.where(picked < own[None, :, None], picked, -1)
@@ -837,6 +862,15 @@ class Attention(nn.Module):
         self.sparse_prefill_attention = False
         self.sparse_prefill_forwards = 0  # indexed forwards that took the kernel (receipts)
         self.sparse_prefill_declines = {}  # reason -> forwards that fell back to dense
+        # fp8 latent rows (H3): forwards whose packed rows the kernel dequantized
+        # itself, and why others unpacked first (the native kernel still ran).
+        self.sparse_prefill_fp8_forwards = 0
+        self.sparse_prefill_fp8_declines = {}
+        # Opt-in H4 union prefill (``sparse_prefill_union_rows``): query rows
+        # per union sub-chunk, 0 = off.  Plain attributes, not parameters.
+        self.sparse_prefill_union_rows = 0
+        self.sparse_prefill_union_forwards = 0
+        self.sparse_prefill_union_declines = {}
         if indexer:
             self.compressed_indexer = CompressedIndexer(args)
 
@@ -1017,8 +1051,23 @@ class Attention(nn.Module):
         if L <= GATHER_MAX_QUERY:
             return gathered_indexed_attend(q, kv, recalled, sinks, self.scale, r,
                                            rows=lambda g: cache.latent_rows(g, keys.dtype))
-        kv = cache.latent_rows(kv, keys.dtype)
-        if self.sparse_prefill_attention and int(kv.shape[1]) < SPARSE_PREFILL_MIN_KEYS:
+        union = self.sparse_prefill_union_rows
+        if union:
+            # Opt-in H4 union route (``hy_v4_flash_union_prefill``): sub-chunks of
+            # ``union`` queries attend the union of their recalled rows, read
+            # once.  Numerically equivalent to the dense path; GPU A/B pending.
+            reason = ("short_context" if int(kv.shape[1]) < SPARSE_PREFILL_MIN_KEYS
+                      else _union_prefill.unsupported_reason(lanes=q.shape[0], first=first))
+            if reason is None:
+                self.sparse_prefill_union_forwards += 1
+                return _union_prefill.union_indexed_attend(
+                    q, kv, recalled, sinks, self.scale, r, qpos, union, attend=mla_attend,
+                    rows=lambda g: cache.latent_rows(g, keys.dtype),
+                    bounded=BOUNDED_SCORE_BLOCKS, budget=SCORE_BUDGET)
+            self.sparse_prefill_union_declines[reason] = self.sparse_prefill_union_declines.get(reason, 0) + 1
+        packed = kv
+        kv = None if getattr(cache, "approximate", False) else cache.latent_rows(packed, keys.dtype)
+        if self.sparse_prefill_attention and int(packed.shape[1]) < SPARSE_PREFILL_MIN_KEYS:
             # Short history: the 2048 recalled keys are most of the keys, so the
             # fused dense SDPA does the same work faster (2026-11-22 bisect:
             # ~1K-token GSM8K prompts were slower with the kernel).
@@ -1033,12 +1082,31 @@ class Attention(nn.Module):
             # would dedup a repeat, the kernel would count it twice.
             reason = sparse_unsupported_reason(q.shape[1], q.shape[-1], r, q.dtype,
                                                rows=L, lanes=q.shape[0], first=first)
+            if reason is None and kv is None:
+                # H3 (fp8 rows): stage the recalled packed rows and dequantize
+                # them in the kernel instead of unpacking all T rows first.
+                # Bitwise the unpack-then-kernel route (pow2 scales; the
+                # variant's dispatch probe checks it), so it replaces that
+                # route inside the opt-in fp8 format.  GPU A/B pending.
+                fp8_reason = _sparse_fp8_reason(q.shape[1], q.shape[-1], r, q.dtype, row_bytes=int(packed.shape[-1]),
+                                                rows=L, lanes=q.shape[0], first=first)
+                if fp8_reason is None:
+                    self.sparse_prefill_forwards += 1
+                    self.sparse_prefill_fp8_forwards += 1
+                    return _sparse_prefill_attend_fp8(q, packed, recalled, sinks, self.scale, r,
+                                                      start=start, first=first)
+                # Counted apart: the native kernel below still serves this forward.
+                self.sparse_prefill_fp8_declines[fp8_reason] = self.sparse_prefill_fp8_declines.get(fp8_reason, 0) + 1
+            if kv is None:
+                kv = cache.latent_rows(packed, keys.dtype)
             if reason is None:
                 # Opt-in: each query reads only its recalled rows (one Metal kernel).
                 self.sparse_prefill_forwards += 1
                 return sparse_prefill_attend(q, kv, recalled, sinks, self.scale, r,
                                              start=start, first=first)
             self.sparse_prefill_declines[reason] = self.sparse_prefill_declines.get(reason, 0) + 1
+        if kv is None:
+            kv = cache.latent_rows(packed, keys.dtype)
         return dense_indexed_attend(q, kv, recalled, sinks, self.scale, r, qpos, kpos)
 
 
@@ -2207,6 +2275,15 @@ class Model(nn.Module):
         return {"selected": any(m.expert_read_once for m in moes), "layer_calls": calls,
                 "declined_layer_calls": declines, "observed_used": calls > 0}
 
+    def set_sparse_prefill_union_rows(self, rows: int) -> None:
+        """Opt-in H4 union prefill on every indexed layer (``rows`` queries per
+        union sub-chunk; 0 restores the default routes)."""
+        if type(rows) is not int or rows < 0:
+            raise ValueError("sparse_prefill_union_rows must be 0 (off) or a positive row count")
+        for layer in self.model.layers:
+            if layer.self_attn.kind == INDEXED:
+                layer.self_attn.sparse_prefill_union_rows = rows
+
     def set_sparse_prefill_attention(self, on: bool) -> None:
         """Opt-in sparse prefill kernel on every indexed layer (False: the
         dense masked reference, the default)."""
@@ -2820,7 +2897,7 @@ class Model(nn.Module):
         if not self.args.enable_lm_head_fp32:
             return head(hidden).astype(mx.float32)
         if "scales" not in head:
-            return hidden.astype(mx.float32) @ head.weight.astype(mx.float32).T
+            return _resident.f32_matmul(hidden, head.weight, kernel=getattr(self, "resident_gemv", False))
         # A quantized head keeps the fp32 contract: fp32 input, scales and
         # biases (``sanitize`` stores them fp32 once), fp32 accumulation.
         biases = head.get("biases")

@@ -73,6 +73,8 @@ DFLY_CACHE_LAYOUT = CACHE_LAYOUT + "+dfly2-index-share"
 # Distinct layout for the approximate fp8 latent rows (never the exact one).
 FP8_CACHE_LAYOUT = "hy-v4-flash-mla-latent-fp8-ds-mla-indexer-v2"
 LATENT_KV_FORMATS = ("native", "fp8")
+# ``resident_bf16`` parts (runtime/models/hy_v4_flash_resident.PARTS).
+RESIDENT_BF16_PARTS = ("router", "head", "indexer_keys", "q2_scales")
 # generation_config.json of tencent/Hy4-flash@d88c9dfd: do_sample, T 0.9,
 # top_p 1, top_k -1 (off).
 SAMPLING = VendorSampling.single(
@@ -103,13 +105,26 @@ _TEXT_EXPECTED = {
 # a model with ``affine4_g32`` tables writes are exact for that model, so
 # they publish to APCv2 in their own namespace (like any quantized artifact).
 # fp8 latent rows are approximate *cache state* and are never published.
+def resident_bf16_parts(value) -> tuple:
+    """``resident_bf16`` policy value -> its parts in canonical order (() = off)."""
+    if value is False or value is None:
+        return ()
+    if value is True:
+        return RESIDENT_BF16_PARTS
+    if (isinstance(value, (list, tuple)) and value and all(isinstance(v, str) for v in value)
+            and set(value) <= set(RESIDENT_BF16_PARTS)):
+        return tuple(p for p in RESIDENT_BF16_PARTS if p in value)
+    raise ValueError(f"Hy4-flash resident_bf16 must be a boolean or a non-empty list of {RESIDENT_BF16_PARTS}")
+
+
 def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
                     engram_precision: str = "transformers",
                     tensorfold_rows: str | None = None, moe_fused_gate_up: bool = False,
                     moe_nax: str = "off", moe_top_k: int | None = None,
                     moe_expert_read_once: bool = False,
                     amoeba_mask: str | None = None, sliding_attention_blocks: int = 0,
-                    sparse_prefill_attention: bool = False,
+                    sparse_prefill_attention: bool = False, sparse_prefill_union_rows: int = 0,
+                    resident_bf16=False,
                     fusions: dict | None = None, verify_phase_align: bool = False) -> str:
     """The APCv2 namespace: every knob that changes numerics changes it.
 
@@ -161,6 +176,16 @@ def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
         # masked path (same keys, fp32 reductions in another order), not
         # bit-identical: its prefill rows keep their own entries.
         layout = f"{layout}+sparse-prefill-v1"
+    if sparse_prefill_union_rows:
+        # H4 union prefill: numerically equivalent to the dense path (other
+        # reduction lengths, set by the sub-chunk size), so each size keeps
+        # its own entries.
+        layout = f"{layout}+union-prefill{int(sparse_prefill_union_rows)}-v1"
+    parts = resident_bf16_parts(resident_bf16)
+    if parts:
+        # H5 BF16-resident planes: exact values, but the GPU GEMV rows sum in
+        # another order, so their entries keep their own namespace.
+        layout = f"{layout}+resident-bf16-{'-'.join(p.replace('_', '') for p in parts)}-v1"
     # Opt-in small-op fusions (hy_v4_flash_fusions).  The seam kernel and the
     # Engram torch rounding change numerics; the fused GEMMs and indexer
     # logits are bitwise / selection-identical on the measured shapes only.
@@ -645,7 +670,8 @@ MODEL_KEYS = frozenset({"engram_cache_rows", "engram_hash", "engram_precision",
                         "sliding_attention_blocks", "prefill_step_cap", "sparse_prefill_attention",
                         "prefill_head_trim", "prefill_tail_skip", "moe_sorted_weighted_sum",
                         "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj",
-                        "indexer_fused_scores", "engram_gate_rounding"})
+                        "indexer_fused_scores", "engram_gate_rounding",
+                        "sparse_prefill_union_rows", "resident_bf16"})
 # ``amoeba_det_tiles`` (experimental, unqualified; default on only for the
 # checkpoints in DET_TILE_DEFAULT_MANIFESTS, opt-out ``false``): a deterministic
 # tile manifest of probe-gated calculators (amoeba_det_tiles
@@ -666,14 +692,16 @@ DET_TILE_CAPTURE = "hc-stream-mean-f32-v1"
 # adapter refuses it with det tiles.
 DET_TILE_NUMERICS_KEYS = ("engram_table_format", "engram_precision", "latent_kv", "moe_top_k",
                           "hc_seam_fused", "engram_gate_rounding", "engram_fused_proj",
-                          "indexer_fused_scores", "moe_expert_read_once")
+                          "indexer_fused_scores", "moe_expert_read_once", "sparse_prefill_union_rows",
+                          "resident_bf16")
 # Fit keys added after manifests already shipped (the f2a8 calculator tile):
 # a manifest that omits one was fitted on its default, so it is read as that.
 # Every other DET_TILE_NUMERICS_KEYS entry is required.  ``mla_fused_input_proj``
 # is not here: it is bitwise by construction (load-time self-checked bound).
 DET_TILE_NUMERICS_DEFAULTS = {"hc_seam_fused": False, "engram_gate_rounding": "fp32",
                               "engram_fused_proj": False, "indexer_fused_scores": False,
-                              "moe_expert_read_once": False}
+                              "moe_expert_read_once": False, "sparse_prefill_union_rows": 0,
+                              "resident_bf16": False}
 # Target forwards one verify round can run: with the serial executor one per
 # chain, at most one chain per tile row (32) for each of four lanes, plus plain
 # anchors.  An evicted forward's rows fail closed (``gate_unmatched``).
@@ -1010,9 +1038,14 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
         raise ValueError("Hy4-flash moe_expert_read_once must be a boolean (default false)")
     if policy.get("moe_nax", "off") not in MOE_NAX_MODES:
         raise ValueError("Hy4-flash moe_nax must be 'off' (default) or 'gather'")
-    for key in ("hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores"):
+    for key in ("hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj"):
         if type(policy.get(key, False)) is not bool:
             raise ValueError(f"Hy4-flash {key} must be a boolean (default false)")
+    # ``indexer_fused_scores``: true is the v1 kernel; "simd" (H6, 2026-11-22
+    # audit) stages coalesced key tiles and scores 8 query rows per key read
+    # with simdgroup MMA (near-exact: fp32 reassociation; GPU A/B pending).
+    if type(policy.get("indexer_fused_scores", False)) is not bool and policy.get("indexer_fused_scores") != "simd":
+        raise ValueError("Hy4-flash indexer_fused_scores must be a boolean or \"simd\" (default false)")
     if policy.get("engram_gate_rounding", "fp32") not in ("fp32", "torch"):
         raise ValueError("Hy4-flash engram_gate_rounding must be 'fp32' (default) or 'torch'")
     band = policy.get("sliding_attention_blocks", SLIDING_ATTENTION_BLOCKS_DEFAULT)
@@ -1021,6 +1054,21 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
                          f"query-block row count (default {SLIDING_ATTENTION_BLOCKS_DEFAULT})")
     if type(policy.get("sparse_prefill_attention", SPARSE_PREFILL_ATTENTION_DEFAULT)) is not bool:
         raise ValueError("Hy4-flash sparse_prefill_attention must be a boolean (default true)")
+    # H4 (2026-11-22 audit): opt-in union prefill for indexed layers, query rows
+    # per union sub-chunk (Maxwell's union route; 64 is Maxwell's size).  The
+    # per-row kernel reads each row's 2048 recalled rows on its own (~4.8 GB per
+    # layer per 2048-row chunk); neighbours share most of them.  Numerically
+    # equivalent to the dense path; GPU A/B pending.  0 = off (default).
+    union_rows = policy.get("sparse_prefill_union_rows", 0)
+    if type(union_rows) is not int or union_rows < 0:
+        raise ValueError("Hy4-flash sparse_prefill_union_rows must be 0 (off, default) or a positive "
+                         "query-row count per union sub-chunk")
+    # H5 (2026-11-22 audit): opt-in, keep the fp32-stored planes whose values
+    # are 16-bit-exact (router, LM head, indexer group keys, q2_0 scales) 16-bit
+    # resident and widen them at use.  Router decode reads ~258 MB/step fp32 vs
+    # 129 MB bf16 on Hy4-flash.  Values exact; GPU GEMV sums in another order.
+    # GPU A/B pending.  Default false.
+    resident_bf16_parts(policy.get("resident_bf16", False))
     for key, default in PREFILL_EXACT_DEFAULTS.items():
         if type(policy.get(key, default)) is not bool:
             raise ValueError(f"Hy4-flash {key} must be a boolean (default {str(default).lower()})")
@@ -1204,7 +1252,7 @@ def resolve_engram_hash(model) -> str:
 def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, memory_budget=None,
                engram_precision="transformers", engram_table_format="bf16", latent_kv="native",
                vision=True, engram_hash=ENGRAM_HASH_DEFAULT, moe_fused_gate_up=False,
-               dfly_quantization=None, amoeba_mask=None, fusions=None):
+               dfly_quantization=None, amoeba_mask=None, fusions=None, resident_bf16=False):
     """``(model, drafter or None, engram readers)`` for an inspected artifact.
 
     ``amoeba_mask`` (a loaded ``NeuronMaskBundle``) closes its units in the
@@ -1318,6 +1366,11 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
                 engram_inputs=fusions.get("engram_fused_proj", False),
                 indexer_scores=fusions.get("indexer_fused_scores", False),
                 engram_gate_rounding=fusions.get("engram_gate_rounding", "fp32"))
+        if resident_bf16_parts(resident_bf16):
+            from ..runtime.models import hy_v4_flash_resident
+
+            # After the strict load and the fusions: planes are narrowed in place.
+            hy_v4_flash_resident.install(model, resident_bf16_parts(resident_bf16))
         drafter = None
         if keep_dfly:
             intermediate, correction = HY4FlashDFly.geometry(dfly_raw)
@@ -1397,7 +1450,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     route_neutral_policy_keys = frozenset({
         "engram_table_format", "engram_precision", "engram_cache_rows", "engram_hash",
         "vision", "moe_fused_gate_up", "amoeba_det_tiles", "prefill_step_cap", "sliding_attention_blocks",
-        "sparse_prefill_attention", "moe_expert_read_once",
+        "sparse_prefill_attention", "moe_expert_read_once", "sparse_prefill_union_rows", "resident_bf16",
         "prefill_head_trim", "prefill_tail_skip", "moe_sorted_weighted_sum",
         # Opt-in small-op fusions: the same install on both routes.
         "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
@@ -1589,6 +1642,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                           f"+pageout-b{self.amoeba_mask_mode['block']}-sequential-v2"),
                                       sliding_attention_blocks=policy.get("sliding_attention_blocks", 0),
                                       sparse_prefill_attention=policy.get("sparse_prefill_attention", SPARSE_PREFILL_ATTENTION_DEFAULT),
+                                      sparse_prefill_union_rows=policy.get("sparse_prefill_union_rows", 0),
+                                      resident_bf16=policy.get("resident_bf16", False),
                                       fusions=fusion_policy(policy),
                                       verify_phase_align=bool(external.get("verify_phase_align")))
         self.environment = configure_environment()
@@ -1616,7 +1671,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             engram_hash=policy.get("engram_hash", ENGRAM_HASH_DEFAULT),
             moe_fused_gate_up=self.moe_fused_gate_up,
             dfly_quantization=external.get("draft_quantization"),
-            amoeba_mask=self.amoeba_mask, fusions=fusion_policy(policy))
+            amoeba_mask=self.amoeba_mask, fusions=fusion_policy(policy),
+            resident_bf16=policy.get("resident_bf16", False))
         self._trunk_forwards_at_load = self.model.trunk_stats["forwards"]
         self.amoeba_pageout = None
         if self.amoeba_mask is not None and self.amoeba_mask_mode["mode"] == "pageout":
@@ -1638,6 +1694,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.sparse_prefill_attention = bool(policy.get("sparse_prefill_attention",
                                                         SPARSE_PREFILL_ATTENTION_DEFAULT))
         self.model.set_sparse_prefill_attention(self.sparse_prefill_attention)
+        self.sparse_prefill_union_rows = int(policy.get("sparse_prefill_union_rows", 0))
+        self.model.set_sparse_prefill_union_rows(self.sparse_prefill_union_rows)
         self.model.set_moe_expert_read_once(self.moe_expert_read_once)
         self.prefill_exact = {key: bool(policy.get(key, default))
                               for key, default in PREFILL_EXACT_DEFAULTS.items()}
@@ -2289,19 +2347,40 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         """Route-receipt block of the opt-in sparse prefill kernel."""
         selected = bool(getattr(self, "sparse_prefill_attention", False))
         model = getattr(self, "model", None)
-        forwards, declines = 0, {}
+        forwards, declines, fp8_forwards, fp8_declines = 0, {}, 0, {}
+        union_forwards, union_declines = 0, {}
         if model is not None:
             for layer in model.model.layers:
                 attn = layer.self_attn
                 forwards += getattr(attn, "sparse_prefill_forwards", 0)
                 for reason, n in getattr(attn, "sparse_prefill_declines", {}).items():
                     declines[reason] = declines.get(reason, 0) + n
+                fp8_forwards += getattr(attn, "sparse_prefill_fp8_forwards", 0)
+                union_forwards += getattr(attn, "sparse_prefill_union_forwards", 0)
+                for reason, n in getattr(attn, "sparse_prefill_union_declines", {}).items():
+                    union_declines[reason] = union_declines.get(reason, 0) + n
+                for reason, n in getattr(attn, "sparse_prefill_fp8_declines", {}).items():
+                    fp8_declines[reason] = fp8_declines.get(reason, 0) + n
         return {"implemented": True, "qualified": False, "selected": selected, "default": False,
                 "relation": "numerically_equivalent" if selected else "default",
                 "applies_to": "indexed-layer chunks of more than GATHER_MAX_QUERY (64) rows",
                 "kernel": "mlx2_hy4_sparse_prefill_attention_v1",
                 "opt_in": '{"sparse_prefill_attention": true}',
                 "sparse_layer_forwards": forwards, "declined_layer_forwards": declines,
+                # latent_kv fp8 only: forwards whose packed rows the kernel
+                # dequantized itself (bitwise the unpack-first route).
+                "fp8_in_kernel_layer_forwards": fp8_forwards,
+                "fp8_in_kernel_declined_layer_forwards": fp8_declines,
+                # Opt-in H4 union prefill (sparse_prefill_union_rows); it runs
+                # before the kernel, so its forwards are not kernel forwards.
+                "union": {"implemented": True, "qualified": False,
+                          "selected": bool(getattr(self, "sparse_prefill_union_rows", 0)),
+                          "rows": int(getattr(self, "sparse_prefill_union_rows", 0)),
+                          "relation": "numerically_equivalent",
+                          "opt_in": '{"sparse_prefill_union_rows": 64}',
+                          "union_layer_forwards": union_forwards,
+                          "declined_layer_forwards": union_declines,
+                          "observed_used": union_forwards > 0},
                 "observed_used": forwards > 0}
 
     def _prefill_exact_receipt(self):
@@ -2444,6 +2523,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "amoeba_det_tiles": self._det_tiles_receipt(),
             "moe_fused_gate_up": self._moe_fused_receipt(),
             "fusions": self._fusions_receipt(),
+            "resident_bf16": self._resident_bf16_receipt(),
             "moe_nax_gather": self._moe_nax_receipt(),
             "moe_top_k": getattr(self, "moe_top_k", None),
             "amoeba_mask": self._amoeba_mask_receipt(),
@@ -2530,6 +2610,15 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                             "ordinary decode; DFly2 was trained on the unmasked model, so acceptance may drop"),
             "apcv2_namespace": bundle.numerics_tag(),
         }
+
+    def _resident_bf16_receipt(self):
+        """Opt-in BF16-resident fp32 planes (hy_v4_flash_resident, audit H5)."""
+        model = getattr(self, "model", None)
+        if model is None or not hasattr(model, "model"):
+            return None
+        from ..runtime.models import hy_v4_flash_resident
+
+        return hy_v4_flash_resident.status(model)
 
     def _fusions_receipt(self):
         """Opt-in small-op fusions (hy_v4_flash_fusions): each key's route record."""

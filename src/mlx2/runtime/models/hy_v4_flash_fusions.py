@@ -43,7 +43,7 @@ Four independent fusions, each behind its own execution-policy key
     One GEMM for the four per-stream key projections plus the value
     projection, the four ``norm_key`` / ``norm_query`` norms stacked into one
     norm each, and the gate math on ``[B, L, n]`` at once.
-``indexer_fused_scores`` (bool)
+``indexer_fused_scores`` (bool, or ``"simd"``: the H6 layout variant below)
     ``CompressedIndexer.select``: a Metal kernel computes the masked logits
     ``sum_h w_h * relu(q_h . k_g)`` directly (the fp32 ``[B, heads, rows, G]``
     score block is never written; the logits block is ``heads`` times
@@ -664,6 +664,173 @@ def indexer_logits_metal(q, gk, w, own, negate: bool = False):
         output_shapes=[(B, L, G)], output_dtypes=[mx.float32])[0]
 
 
+# ``indexer_fused_scores: "simd"`` (H6, 2026-11-22 audit): the kernel above
+# gives each lane its own key row (lanes read 512 B apart, uncoalesced) and
+# re-reads every key once per 2 query rows.  This variant stages a tile of
+# KT keys in threadgroup memory with coalesced reads, splits the head dim
+# across the 32 lanes of each simdgroup as 8x8 MMA fragments (the fragment
+# coordinate law of MLX steel ``BaseMMAFrag::get_coord``, MIT; the same law
+# as ``hy_v4_flash_sparse_prefill``), and scores RB query rows x all heads
+# (M = RB * HEADS rows) against each staged key, so one key read serves RB
+# rows.  Scores are fp32 MMA products (another reassociation than the
+# reference GEMM or the v1 lane-order dot); relu, the head weight and the
+# head sum (in head order) follow, as in v1.  Keys may be fp32 or bf16
+# (``resident_bf16`` indexer keys): they are widened while staging, so a bf16
+# plane needs no fp32 copy.  GPU A/B pending.
+_INDEXER_SIMD_SRC = """
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const uint lane = thread_index_in_simdgroup;
+    const uint b = threadgroup_position_in_grid.z;
+    const int L = int(w_shape[1]);
+    const int G = int(gk_shape[1]);
+    const int l0 = int(threadgroup_position_in_grid.y) * RB;
+    const int g_begin = int(threadgroup_position_in_grid.x) * KCH;
+
+    const short qid = short(lane / 4);
+    const short fm = (qid & 4) + short((lane / 2) % 4);
+    const short fn = (qid & 2) * 2 + short(lane % 2) * 2;
+
+    constexpr int M = RB * HEADS;
+    constexpr int MB = M / 8;
+    constexpr int BPS = MB / 8;      // 8-row blocks per simdgroup (8 simdgroups)
+    constexpr int DS = DIM / 8;
+    constexpr int KP = DIM + 4;      // padded staged key row (bank spread)
+
+    threadgroup float kt[KT * KP];
+    threadgroup float sbuf[M * KT];
+
+    simdgroup_float8x8 qf[BPS][DS];
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < BPS; ++i) {
+        const int m = (int(sg) + 8 * i) * 8 + fm;
+        const int rr = m / HEADS;
+        const int h = m % HEADS;
+        const int l = l0 + rr;
+        #pragma clang loop unroll(full)
+        for (int s = 0; s < DS; ++s) {
+            float a0 = 0.0f, a1 = 0.0f;
+            if (l < L) {
+                const device float* qr = q + ((size_t(b) * HEADS + h) * L + l) * DIM + s * 8 + fn;
+                a0 = qr[0];
+                a1 = qr[1];
+            }
+            qf[i][s].thread_elements()[0] = a0;
+            qf[i][s].thread_elements()[1] = a1;
+        }
+    }
+
+    for (int g0 = g_begin; g0 < min(G, g_begin + KCH); g0 += KT) {
+        for (int e = int(tid); e < KT * DIM; e += 256) {
+            const int k = e / DIM;
+            const int d = e % DIM;
+            const int g = g0 + k;
+            kt[k * KP + d] = g < G ? float(gk[(size_t(b) * G + g) * DIM + d]) : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        #pragma clang loop unroll(full)
+        for (int i = 0; i < BPS; ++i) {
+            const int mb = int(sg) + 8 * i;
+            const int m = mb * 8 + fm;
+            const int rr = m / HEADS;
+            const int h = m % HEADS;
+            const int l = l0 + rr;
+            const float wv = l < L ? w[(size_t(b) * L + l) * HEADS + h] : 0.0f;
+            #pragma clang loop unroll(full)
+            for (int kb = 0; kb < KT / 8; ++kb) {
+                simdgroup_float8x8 acc = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+                const threadgroup float* kr = kt + (kb * 8 + fn) * KP + fm;
+                #pragma clang loop unroll(full)
+                for (int s = 0; s < DS; ++s) {
+                    simdgroup_float8x8 kf;
+                    kf.thread_elements()[0] = kr[s * 8];
+                    kf.thread_elements()[1] = kr[s * 8 + KP];
+                    simdgroup_multiply_accumulate(acc, qf[i][s], kf, acc);
+                }
+                threadgroup float* dst = sbuf + m * KT + kb * 8 + fn;
+                dst[0] = wv * metal::max(acc.thread_elements()[0], 0.0f);
+                dst[1] = wv * metal::max(acc.thread_elements()[1], 0.0f);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int o = int(tid); o < RB * KT; o += 256) {
+            const int rr = o / KT;
+            const int kk = o % KT;
+            const int l = l0 + rr;
+            const int g = g0 + kk;
+            if (l < L && g < G) {
+                float out;
+                if (g < own[l]) {
+                    out = 0.0f;
+                    for (int h = 0; h < HEADS; ++h) out += sbuf[(rr * HEADS + h) * KT + kk];
+                } else {
+                    out = -INFINITY;
+                }
+                logits[(size_t(b) * L + l) * G + g] = NEG ? -out : out;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+"""
+
+IDX_SIMD_KT = 16
+IDX_SIMD_KCH = 256
+IDX_SIMD_THREADS = 256
+INDEXER_VARIANTS = ("v1", "simd")
+
+
+def indexer_simd_rows(heads: int) -> int:
+    """Query rows per threadgroup: the smallest count >= 8 filling whole 64-row MMA blocks."""
+    from math import gcd
+
+    base = 64 // gcd(64, int(heads))
+    return base * -(-8 // base)
+
+
+def indexer_simd_unsupported_reason(heads: int, dim: int) -> Optional[str]:
+    """Why the simd variant cannot score this geometry (the caller then runs v1)."""
+    if dim % 8:
+        return f"head_dim_{dim}"
+    rb = indexer_simd_rows(heads)
+    bps = rb * heads // 64
+    if bps * (dim // 8) * 2 > 128:
+        return f"registers_{heads}x{dim}"  # q fragments per lane
+    tg = 4 * (IDX_SIMD_KT * (dim + 4) + rb * heads * IDX_SIMD_KT)
+    if tg > 32 * 1024:
+        return f"threadgroup_memory_{tg}"
+    return None
+
+
+@lru_cache(maxsize=None)
+def _indexer_simd_kernel():
+    return mx.fast.metal_kernel(name="hy4_indexer_logits_simd_v1", input_names=["q", "gk", "w", "own"],
+                                output_names=["logits"], source=_INDEXER_SIMD_SRC)
+
+
+def indexer_logits_simd(q, gk, w, own, negate: bool = False):
+    """Same contract as ``indexer_logits_metal``; ``gk`` may be fp32 or bf16."""
+    B, Hh, L, d = q.shape
+    G = int(gk.shape[1])
+    reason = indexer_simd_unsupported_reason(int(Hh), int(d))
+    if reason is not None or int(gk.shape[-1]) != d:
+        raise ValueError(f"indexer_fused_scores simd cannot score this geometry: {reason or 'key width'}")
+    if gk.dtype not in (mx.float32, mx.bfloat16):
+        gk = gk.astype(mx.float32)
+    rb = indexer_simd_rows(int(Hh))
+    return _indexer_simd_kernel()(
+        inputs=[q.astype(mx.float32), gk, w.astype(mx.float32), own.astype(mx.int32)],
+        template=[("HEADS", int(Hh)), ("DIM", int(d)), ("RB", rb), ("KT", IDX_SIMD_KT),
+                  ("KCH", IDX_SIMD_KCH), ("NEG", bool(negate))],
+        grid=(-(-G // IDX_SIMD_KCH) * IDX_SIMD_THREADS, -(-L // rb), B),
+        threadgroup=(IDX_SIMD_THREADS, 1, 1),
+        output_shapes=[(B, L, G)], output_dtypes=[mx.float32])[0]
+
+
+def indexer_scores_variant(value) -> str:
+    """``indexer_fused_scores`` policy value -> kernel variant (``True`` is v1)."""
+    return "simd" if value == "simd" else "v1"
+
+
 def indexer_logits_reference(q, gk, w, own):
     """The unfused math, as ``CompressedIndexer.select`` writes it (CPU fallback)."""
     scores = nn.relu(q @ gk[:, None].swapaxes(-1, -2))
@@ -683,7 +850,8 @@ def install(model, *, hc_seam: bool = False, mla_inputs: bool = False, engram_in
     if engram_gate_rounding not in ENGRAM_GATE_ROUNDINGS:
         raise ValueError(f"engram_gate_rounding must be one of {ENGRAM_GATE_ROUNDINGS}")
     record: Dict = {"hc_seam_fused": bool(hc_seam), "mla_fused_input_proj": {}, "engram_fused_proj": {},
-                    "indexer_fused_scores": bool(indexer_scores), "engram_gate_rounding": engram_gate_rounding}
+                    "indexer_fused_scores": indexer_scores if indexer_scores == "simd" else bool(indexer_scores),
+                    "engram_gate_rounding": engram_gate_rounding}
     for index, layer in enumerate(model.model.layers):
         if hc_seam:
             layer.hc_seam = HCSeam()
@@ -692,6 +860,7 @@ def install(model, *, hc_seam: bool = False, mla_inputs: bool = False, engram_in
             record["mla_fused_input_proj"][index] = reason or "fused"
         if "compressed_indexer" in layer.self_attn:
             layer.self_attn.compressed_indexer.fused_scores = bool(indexer_scores)
+            layer.self_attn.compressed_indexer.fused_scores_variant = indexer_scores_variant(indexer_scores)
         if "engram_layer" in layer:
             eng = layer.engram_layer
             eng.gate_rounding = engram_gate_rounding
@@ -774,6 +943,7 @@ def set_active(model, *, hc_seam: bool = False, mla_inputs: bool = False, engram
             fused.set_max_rows(fused.calibrated_rows if mla_inputs else 0)
         if "compressed_indexer" in layer.self_attn:
             layer.self_attn.compressed_indexer.fused_scores = bool(indexer_scores)
+            layer.self_attn.compressed_indexer.fused_scores_variant = indexer_scores_variant(indexer_scores)
         if "engram_layer" in layer:
             eng = layer.engram_layer
             eng.gate_rounding = engram_gate_rounding
@@ -781,12 +951,13 @@ def set_active(model, *, hc_seam: bool = False, mla_inputs: bool = False, engram
             if isinstance(proj, FusedLinear):
                 eng.fused = bool(engram_inputs)
                 proj.set_max_rows(proj.calibrated_rows if engram_inputs else 0)
+    scores = indexer_scores if indexer_scores == "simd" else bool(indexer_scores)
     active = {"hc_seam_fused": bool(hc_seam), "mla_fused_input_proj": bool(mla_inputs),
-              "engram_fused_proj": bool(engram_inputs), "indexer_fused_scores": bool(indexer_scores),
+              "engram_fused_proj": bool(engram_inputs), "indexer_fused_scores": scores,
               "engram_gate_rounding": engram_gate_rounding}
     record["active"] = active
     record["hc_seam_fused"] = bool(hc_seam)
-    record["indexer_fused_scores"] = bool(indexer_scores)
+    record["indexer_fused_scores"] = scores
     record["engram_gate_rounding"] = engram_gate_rounding
     return active
 
@@ -803,6 +974,11 @@ def status(model) -> Dict:
            if "engram_layer" in layer and isinstance(getattr(layer.engram_layer, "fused_proj", None), FusedLinear)]
     ix = [layer.self_attn.compressed_indexer for layer in layers if "compressed_indexer" in layer.self_attn]
     ix_calls = sum(getattr(i, "fused_score_calls", 0) for i in ix)
+    ix_simd = sum(getattr(i, "fused_score_simd_calls", 0) for i in ix)
+    ix_simd_declines: Dict[str, int] = {}
+    for i in ix:
+        for reason, n in getattr(i, "fused_score_simd_declines", {}).items():
+            ix_simd_declines[reason] = ix_simd_declines.get(reason, 0) + n
     rounding = record.get("engram_gate_rounding", "fp32")
     eng_layers = [layer.engram_layer for layer in layers if "engram_layer" in layer]
     return {
@@ -835,6 +1011,8 @@ def status(model) -> Dict:
         "indexer_fused_scores": {
             "implemented": True, "qualified": False, "selected": bool(record.get("indexer_fused_scores")),
             "fused_score_calls": ix_calls, "observed_used": ix_calls > 0,
+            "variant": indexer_scores_variant(record.get("indexer_fused_scores")),
+            "simd_calls": ix_simd, "simd_declines": ix_simd_declines,
             "exactness": ("logits differ from the reference by fp32 dot reassociation; top-k is the same "
                           "argpartition, so selections differ only at near-ties of the k-th logit"),
         },

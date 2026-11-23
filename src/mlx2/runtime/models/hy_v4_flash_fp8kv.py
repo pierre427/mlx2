@@ -36,7 +36,12 @@ FP8_MAX = 448.0
 # amax floor: an all-zero tile gets scale 2**-108 and codes 0.
 _AMAX_FLOOR = 1e-30
 
-_COUNTERS = {"pack_calls": 0, "rows_packed": 0, "unpack_calls": 0, "rows_unpacked": 0}
+# H3 research switch (A/B only, not a policy key): False restores the fp32
+# unpack route for bf16 rows (bitwise the same values; scripts/ab_hy4_nonbitwise.py).
+BF16_DIRECT = True
+
+_COUNTERS = {"pack_calls": 0, "rows_packed": 0, "unpack_calls": 0, "rows_unpacked": 0,
+             "bf16_direct_unpacks": 0}
 
 
 def latent_fp8_stats(*, reset: bool = False) -> dict:
@@ -91,6 +96,19 @@ def unpack_rows(packed: mx.array, rank: int, dtype) -> mx.array:
     end = rank + 4 * tiles
     scales = mx.view(mx.contiguous(packed[..., rank:end]), mx.float32)
     tail = mx.view(mx.contiguous(packed[..., end:]), mx.bfloat16)
+    if dtype == mx.bfloat16 and BF16_DIRECT:
+        # H3 (2026-11-22): bf16 rows skip the fp32 temporaries (a 128K-row
+        # prefill unpack wrote ~302 MB fp32 + 151 MB bf16 per layer).  Bitwise
+        # the fp32 route: an E4M3 code has 3 mantissa bits and the scale is a
+        # power of two inside fp32's (= bf16's) exponent range, so the code,
+        # the scale and their product are exact in bf16, and the tail already
+        # is bf16.  tests/test_hy4_nonbitwise_cpu.py checks every code value.
+        latent = mx.from_fp8(packed[..., :rank], dtype=mx.bfloat16).reshape(*lead, tiles, width)
+        latent = (latent * scales.astype(mx.bfloat16)[..., None]).reshape(*lead, rank)
+        _COUNTERS["unpack_calls"] += 1
+        _COUNTERS["rows_unpacked"] += int(_prod(lead))
+        _COUNTERS["bf16_direct_unpacks"] += 1
+        return mx.concatenate([latent, tail], axis=-1)
     latent = mx.from_fp8(packed[..., :rank], dtype=mx.float32).reshape(*lead, tiles, width)
     latent = (latent * scales[..., None]).reshape(*lead, rank)
     rows = mx.concatenate([latent, tail.astype(mx.float32)], axis=-1)

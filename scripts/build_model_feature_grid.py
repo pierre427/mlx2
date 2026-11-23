@@ -68,6 +68,8 @@ FEATURES = (
     # Hy4-flash opt-in small-op fusions (2026-11-21, hy_v4_flash_fusions).
     "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
     "engram_gate_rounding",
+    # Hy4-flash opt-in audit repairs (2026-11-22): union prefill, BF16-resident fp32 planes.
+    "sparse_prefill_union_rows", "resident_bf16",
     # Hy4-flash opt-in one-forward verify of multi-wave AST cohorts (2026-11-21).
     "verify_phase_align", "ready_drain", "ast_multilane_tile_rows",
     # Hy4-flash exact prefill defaults (2026-11-21; prefill_tail_skip is listed below).
