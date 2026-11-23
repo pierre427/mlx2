@@ -50,6 +50,10 @@ from spec_acceptance_gsm8k import (  # noqa: E402
     Client, find, revision, speculation_receipt, write_atomic,
 )
 
+from mlx2.adapters.external_draft_policy import (  # noqa: E402
+    DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION as DEFAULT_COMPOSITION,
+)
+
 SCHEMA = "mlx2.inkling2-copy-draft-window.v1"
 DSPARK = {"draft_model": "embedded_dspark", "num_draft": 7}
 ARMS = [
@@ -60,6 +64,16 @@ ARMS = [
     {"name": "dspark_nocopy", "policy": {**DSPARK, "proposal_composition": False},
      "draft_depth": 7},
     {"name": "dspark_copy", "policy": dict(DSPARK), "draft_depth": 7},
+    # Opt-in long copies (2026-11-22, after dspark_copy showed composition
+    # inert: lookback 256 never reaches prompt sources and the 0.5 score
+    # prior never beats DSpark's ~0.998).  _lb attributes the lookback and
+    # ranking alone; _long adds 15-token copies over the 7-token DSpark block.
+    {"name": "dspark_copy_lb", "draft_depth": 7, "policy": {**DSPARK, "proposal_composition": {
+        **DEFAULT_COMPOSITION, "lookback": 4096, "ranking": "expected_tokens"}}},
+    {"name": "dspark_copy_long", "draft_depth": 15, "policy": {
+        **DSPARK, "num_draft": 15, "proposal_composition": {
+            **DEFAULT_COMPOSITION, "lookback": 4096, "ranking": "expected_tokens",
+            "prompt_lookup_max_span": 15}}},
 ]
 REWRITES = [
     ("src/mlx2/runtime/models/inkling2/config.py", "LoopConfig", "PassLoopConfig"),
