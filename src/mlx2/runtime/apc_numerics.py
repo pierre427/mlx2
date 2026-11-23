@@ -71,11 +71,14 @@ CANDIDATE_ENV = {
     "MLX2_NEMOTRON_ATTN_STAGED": "flag",
     # Maxwell-V1-Flash levers (models/maxwell_moe.py): each changes the
     # arithmetic or the key set behind the K/V later layers write.  The head
-    # lever (MLX2_MAXWELL_HEAD) only touches logits and stays unbound.
+    # lever (MLX2_MAXWELL_HEAD, default bf16) only touches logits and stays
+    # unbound.
     "MLX2_MAXWELL_COMPILE": "default_on",
     "MLX2_MAXWELL_MHC_KERNEL": "flag",
     "MLX2_MAXWELL_MHC_KERNEL_MAX_ROWS": "default=16",
     "MLX2_MAXWELL_FUSED_QKV": "flag",
+    # bf16 indexer-key plane (cached state dtype) with kernel block scores.
+    "MLX2_MAXWELL_INDEX_KERNEL": "flag",
     "MLX2_MAXWELL_SPARSE_PREFILL": "default=union",
     "MLX2_MAXWELL_SPARSE_GATHER_ROWS": "default=16",
     "MLX2_MAXWELL_UNION_QUERY_CHUNK": "default=64",

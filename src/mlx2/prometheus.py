@@ -1686,6 +1686,7 @@ def _add_engram(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> Non
 _MAXWELL_ROUTES = (("dense", "dense_calls"), ("gather", "sparse_gather_calls"),
                    ("union", "sparse_union_calls"), ("masked", "sparse_masked_calls"))
 _MAXWELL_LEVERS = {"compile": {"True", "False"}, "mhc_kernel": {"True", "False"},
+                   "index_kernel": {"True", "False"},
                    "head": {"fp32", "bf16"}, "fused_qkv": {"True", "False"},
                    "sparse_prefill": {"union", "masked"}}
 
@@ -1716,6 +1717,9 @@ def _add_maxwell(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> No
         builder.counter("mlx2_maxwell_kernel_calls_total",
                         "Opt-in Maxwell Metal kernel calls by path (kernel or fail-closed fallback).",
                         count(key), {"path": path})
+    builder.counter("mlx2_maxwell_index_kernel_calls_total",
+                    "Indexer block-score calls served by the fused bf16-plane kernel.",
+                    count("index_kernel_calls"))
     builder.counter("mlx2_maxwell_head_kernel_calls_total",
                     "Vocabulary-head calls served by the bf16-weight fp32-math GEMV kernel.",
                     count("head_kernel_calls"))

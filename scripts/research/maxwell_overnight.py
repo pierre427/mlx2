@@ -50,6 +50,8 @@ ARMS = {
     "fused_qkv": {"MLX2_MAXWELL_FUSED_QKV": "1"},
     "all_levers": {"MLX2_MAXWELL_MHC_KERNEL": "1", "MLX2_MAXWELL_HEAD": "bf16", "MLX2_MAXWELL_FUSED_QKV": "1"},
     "masked_prefill": {"MLX2_MAXWELL_SPARSE_PREFILL": "masked"},
+    "index_kernel": {"MLX2_MAXWELL_INDEX_KERNEL": "1"},
+    "head_fp32": {"MLX2_MAXWELL_HEAD": "fp32"},
 }
 ARM_CELLS = {"masked_prefill": ("long",)}
 SHORT_PROMPTS = [

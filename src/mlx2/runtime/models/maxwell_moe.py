@@ -79,7 +79,13 @@ COMPILE_SPANS = os.environ.get("MLX2_MAXWELL_COMPILE", "1") != "0"
 # Opt-in execution levers (unqualified; summation order differs from the
 # compiled graph, arithmetic class unchanged -- see maxwell_moe_metal):
 #   MLX2_MAXWELL_MHC_KERNEL=1  fused Metal mHC pre/post kernels
-#   MLX2_MAXWELL_HEAD=bf16     bf16-resident head read by an fp32-math GEMV
+#   MLX2_MAXWELL_HEAD=fp32     fp32-resident head (the default is bf16-resident,
+#                              read by an fp32-math GEMV: same products, half the
+#                              bytes; token-exact 7/7 cells on the bf16 checkpoint,
+#                              qualification/runs/maxwell-full-t7-20261122-r2/head_bf16;
+#                              default since 2026-11-22, Pierre)
+#   MLX2_MAXWELL_INDEX_KERNEL=1 bf16 indexer-key plane scored by a fused block-max
+#                              kernel for decode/verify rows (no fp32 plane)
 #   MLX2_MAXWELL_FUSED_QKV=1   one projection for q, k, v and the indexer key
 MHC_KERNEL = os.environ.get("MLX2_MAXWELL_MHC_KERNEL", "0") == "1"
 # The fused mHC kernel runs one threadgroup per token with a serial Sinkhorn,
@@ -87,7 +93,8 @@ MHC_KERNEL = os.environ.get("MLX2_MAXWELL_MHC_KERNEL", "0") == "1"
 # 240 s, qualification/runs/maxwell-full-t7-20261122-r2/mhc_kernel); it is used
 # for at most this many rows (decode and verify).
 MHC_KERNEL_MAX_ROWS = int(os.environ.get("MLX2_MAXWELL_MHC_KERNEL_MAX_ROWS", "16"))
-HEAD_MODE = os.environ.get("MLX2_MAXWELL_HEAD", "fp32")
+HEAD_MODE = os.environ.get("MLX2_MAXWELL_HEAD", "bf16")
+INDEX_KERNEL = os.environ.get("MLX2_MAXWELL_INDEX_KERNEL", "0") == "1"
 FUSED_QKV = os.environ.get("MLX2_MAXWELL_FUSED_QKV", "0") == "1"
 if HEAD_MODE not in ("fp32", "bf16"):
     raise ValueError("MLX2_MAXWELL_HEAD must be fp32 or bf16")
@@ -95,7 +102,7 @@ if HEAD_MODE not in ("fp32", "bf16"):
 STATS = {"dense_calls": 0, "sparse_gather_calls": 0, "sparse_masked_calls": 0,
          "sparse_union_calls": 0, "union_blocks": 0, "union_subchunks": 0,
          "sparse_rows": 0, "mtp_steps": 0, "kernel_calls": 0, "kernel_fallbacks": 0,
-         "last_kernel_fallback": None, "head_kernel_calls": 0}
+         "last_kernel_fallback": None, "head_kernel_calls": 0, "index_kernel_calls": 0}
 _KERNEL_OK: set = set()
 _KERNEL_DISABLED: set = set()
 
@@ -128,7 +135,7 @@ def _kernel_call(key, fn, *args, **kwargs):
 
 def maxwell_stats(reset: bool = False) -> dict:
     out = dict(STATS, levers={"compile": COMPILE_SPANS, "mhc_kernel": MHC_KERNEL, "head": HEAD_MODE,
-                              "fused_qkv": FUSED_QKV, "gather_rows": SPARSE_GATHER_ROWS,
+                              "fused_qkv": FUSED_QKV, "index_kernel": INDEX_KERNEL, "gather_rows": SPARSE_GATHER_ROWS,
                               "sparse_prefill": SPARSE_PREFILL})
     if reset:
         for k in STATS:
@@ -421,9 +428,13 @@ class Attention(nn.Module):
         if self.sparse:
             if cache is not None and index_cache is None:
                 raise ValueError("Maxwell sparse attention needs its indexer-key cache plane")
-            # fp32 plane: the reference scores ``index_key.float()``; a 1-wide
-            # value slice keeps the plane an ordinary KVCache without a copy.
-            ik = self.rope(ik, offset=offset).astype(mx.float32)
+            # The reference scores ``index_key.float()`` of the bf16 key.  Default:
+            # store that fp32 widening.  INDEX_KERNEL: store the bf16 key (half the
+            # bytes) and widen inside the scoring kernel.  A 1-wide value slice
+            # keeps the plane an ordinary KVCache without a copy.
+            ik = self.rope(ik, offset=offset)
+            if not INDEX_KERNEL:
+                ik = ik.astype(mx.float32)
             if index_cache is not None:
                 ik, _ = index_cache.update_and_fetch(ik, ik[..., :1])
         if cache is not None:
@@ -484,29 +495,28 @@ class Attention(nn.Module):
         groups = iq.shape[1]
         remote = None
         if hi_block > self.n_prefix:
-            keys = ik[:, :, : hi_block * bs]                                 # [1, 1, hi, d] fp32 plane
-            if keys.dtype != mx.float32:
-                keys = keys.astype(mx.float32)
+            keys = ik[:, :, : hi_block * bs]                                 # [1, 1, hi, d] key plane
             nb = hi_block
-            blk = mx.arange(nb)
-            picks = []
-            # Bound the fp32 token-score temporary to ~256 MB at long context.
-            step = max(1, min(INDEX_QUERY_CHUNK, (1 << 26) // max(1, groups * hi_block * bs)))
-            for s0 in range(0, t, step):
-                s1 = min(t, s0 + step)
-                scores = (iq[:, :, s0:s1].astype(mx.float32) @ mx.swapaxes(keys, -1, -2)) * self.indexer.scale
-                scores = scores.reshape(1, groups, s1 - s0, nb, bs).max(axis=-1)
-                eligible = (blk[None, :] >= self.n_prefix) & (blk[None, :] < local_start[s0:s1, None])
-                scores = mx.where(eligible[None, None], scores, -mx.inf)
-                kk = min(self.n_remote, nb)
-                idx = mx.argpartition(-scores, kth=kk - 1, axis=-1)[..., :kk].astype(mx.int32)
-                val = mx.take_along_axis(scores, idx, axis=-1)
-                idx = mx.where(mx.isfinite(val), idx, -1)
-                picks.append(idx)
-            remote = mx.concatenate(picks, axis=2) if len(picks) > 1 else picks[0]
-            if remote.shape[-1] < self.n_remote:
-                remote = mx.concatenate(
-                    [remote, mx.full((*remote.shape[:-1], self.n_remote - remote.shape[-1]), -1, remote.dtype)], -1)
+            if keys.dtype == mx.bfloat16 and _on_gpu() and bs == 128 and t <= 16:
+                from .maxwell_moe_metal import index_block_scores
+
+                scores = _kernel_call(("index_scores", t, groups), index_block_scores,
+                                      iq[0].astype(mx.float32), keys[0, 0], nb, bs, self.indexer.scale)
+                if scores is not None:
+                    STATS["index_kernel_calls"] += 1
+                    remote = self._pick(scores[None], local_start, nb)
+            if remote is None:
+                if keys.dtype != mx.float32:
+                    keys = keys.astype(mx.float32)
+                picks = []
+                # Bound the fp32 token-score temporary to ~256 MB at long context.
+                step = max(1, min(INDEX_QUERY_CHUNK, (1 << 26) // max(1, groups * hi_block * bs)))
+                for s0 in range(0, t, step):
+                    s1 = min(t, s0 + step)
+                    scores = (iq[:, :, s0:s1].astype(mx.float32) @ mx.swapaxes(keys, -1, -2)) * self.indexer.scale
+                    scores = scores.reshape(1, groups, s1 - s0, nb, bs).max(axis=-1)
+                    picks.append(self._pick(scores, local_start[s0:s1], nb))
+                remote = mx.concatenate(picks, axis=2) if len(picks) > 1 else picks[0]
         if remote is None:
             remote = mx.full((1, groups, t, self.n_remote), -1, mx.int32)
         remote = remote.astype(mx.int32)
@@ -516,6 +526,19 @@ class Attention(nn.Module):
         local = mx.where(local >= self.n_prefix, local, -1)
         fixed = lambda a: mx.broadcast_to(a.astype(mx.int32)[None, None], (1, groups, t, a.shape[-1]))
         return mx.concatenate([fixed(prefix), remote, fixed(local)], axis=-1)
+
+    def _pick(self, scores, local_start, nb):
+        """Top remote blocks from block scores ``[1, G, t, nb]``: eligible blocks only, -1 pads."""
+        blk = mx.arange(nb)
+        eligible = (blk[None, :] >= self.n_prefix) & (blk[None, :] < local_start[:, None])
+        scores = mx.where(eligible[None, None], scores, -mx.inf)
+        kk = min(self.n_remote, nb)
+        idx = mx.argpartition(-scores, kth=kk - 1, axis=-1)[..., :kk].astype(mx.int32)
+        val = mx.take_along_axis(scores, idx, axis=-1)
+        idx = mx.where(mx.isfinite(val), idx, -1)
+        if kk < self.n_remote:
+            idx = mx.concatenate([idx, mx.full((*idx.shape[:-1], self.n_remote - kk), -1, mx.int32)], -1)
+        return idx
 
     def _sparse_row(self, q, k, v, iq, ik):
         """One unpadded row: queries are the last ``t`` of ``length`` positions."""

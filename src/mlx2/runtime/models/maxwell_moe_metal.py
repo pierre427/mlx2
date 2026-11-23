@@ -213,7 +213,7 @@ def mhc_post(out, residual, h_post, h_res):
     return result.reshape(b, t, _HC * hidden)
 
 
-HEAD_MAX_ROWS = 8
+HEAD_MAX_ROWS = 32                 # covers batched decode lanes and MTP verify rows
 
 
 def head_gemv(h, w):
@@ -224,7 +224,7 @@ def head_gemv(h, w):
         rows *= size
     v = w.shape[0]
     if w.dtype != mx.bfloat16 or k % 8 or rows > HEAD_MAX_ROWS:
-        raise ValueError("Maxwell head kernel expects bf16 weights, K % 8 == 0 and <= 8 rows")
+        raise ValueError(f"Maxwell head kernel expects bf16 weights, K % 8 == 0 and <= {HEAD_MAX_ROWS} rows")
     per = _THREADS // 32
     (logits,) = _kernel("head_gemv", ["h", "w"], ["logits"], _HEAD_SOURCE)(
         inputs=[mx.contiguous(h.reshape(rows, k).astype(mx.float32)), w],
@@ -233,3 +233,57 @@ def head_gemv(h, w):
         output_shapes=[(rows, v)], output_dtypes=[mx.float32],
     )
     return logits.reshape(*lead, v)
+
+
+# Indexer block scores: one threadgroup per 128-key block, one thread per key.
+# Each thread widens its bf16 key exactly to fp32 and dots it with every
+# (query, group) row held in threadgroup memory; the block score is the max
+# over the block's keys (simd then threadgroup reduction), times the scale --
+# the reference's ``max(einsum(q.float(), k.float())) * scale`` without an
+# fp32 copy of the plane or a [G, T, L] token-score tensor.
+_INDEX_SOURCE = """
+    const uint blk = threadgroup_position_in_grid.x;
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint lane = tid & 31u;
+    const uint sg = tid >> 5;
+    constexpr uint NSG = BS / 32;
+    threadgroup float qs[R * D];
+    for (uint i = tid; i < R * D; i += BS) { qs[i] = q[i]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const device bfloat16_t* key = k + (blk * BS + tid) * D;
+    float acc[R];
+    for (uint r = 0; r < R; ++r) { acc[r] = 0.0f; }
+    for (uint d = 0; d < D; ++d) {
+        const float kd = float(key[d]);
+        for (uint r = 0; r < R; ++r) { acc[r] += qs[r * D + d] * kd; }
+    }
+    threadgroup float red[NSG * R];
+    for (uint r = 0; r < R; ++r) {
+        const float m = simd_max(acc[r]);
+        if (lane == 0) { red[sg * R + r] = m; }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < R) {
+        float m = red[tid];
+        for (uint s = 1; s < NSG; ++s) { m = metal::max(m, red[s * R + tid]); }
+        scores[tid * NB + blk] = m * scale[0];
+    }
+"""
+
+INDEX_MAX_ROWS = 16        # query rows x groups held in threadgroup memory per call (x4 groups)
+
+
+def index_block_scores(q, keys, nb, block, scale):
+    """Block-max indexer scores ``[G, T, nb]`` fp32 for fp32 queries ``q`` [G, T, D] and
+    a bf16 key plane ``keys`` [>= nb * block, D] (blocks 0..nb-1)."""
+    groups, rows, dim = q.shape
+    if keys.dtype != mx.bfloat16 or block != 128 or rows > INDEX_MAX_ROWS or keys.shape[0] < nb * block:
+        raise ValueError("Maxwell index kernel expects bf16 keys, 128-key blocks and <= 16 query rows")
+    flat = mx.contiguous(q.astype(mx.float32).transpose(1, 0, 2).reshape(rows * groups, dim))
+    (scores,) = _kernel("index_scores", ["q", "k", "scale"], ["scores"], _INDEX_SOURCE)(
+        inputs=[flat, mx.contiguous(keys[: nb * block]), mx.array([scale], dtype=mx.float32)],
+        template=[("R", rows * groups), ("D", dim), ("BS", block), ("NB", nb)],
+        grid=(nb * block, 1, 1), threadgroup=(block, 1, 1),
+        output_shapes=[(rows * groups, nb)], output_dtypes=[mx.float32],
+    )
+    return scores.reshape(rows, groups, nb).transpose(1, 0, 2)
