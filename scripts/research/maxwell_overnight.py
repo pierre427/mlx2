@@ -222,7 +222,8 @@ def direct(args):
         receipt["cells"]["short"] = rows
     if "long" in cells:
         rows = []
-        for n, target in enumerate(NEEDLE_CONTEXTS):
+        contexts = tuple(int(c) for c in args.contexts.split(",")) if args.contexts else NEEDLE_CONTEXTS
+        for n, target in enumerate(contexts):
             request, code = needle_prompt(adapter.tokenizer, target, seed=20261122 + n)
             M.maxwell_stats(reset=True)
             row = greedy(adapter, request, 24, probe_steps=32)
@@ -546,6 +547,7 @@ def main():
     d.add_argument("--model", type=Path, default=MODEL)
     d.add_argument("--cells", default="short,long")
     d.add_argument("--short-tokens", type=int, default=96)
+    d.add_argument("--contexts", help="comma-separated needle prompt lengths (default 3000,6000,16000,32000)")
     args = parser.parse_args()
     if args.cmd == "window":
         return window(args)
