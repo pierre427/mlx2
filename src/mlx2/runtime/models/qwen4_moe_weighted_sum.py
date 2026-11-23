@@ -103,8 +103,14 @@ def admit_moe_weighted_sum(
     indices: Any,
     do_sort: bool,
     training: bool,
+    supported_top_k: tuple = SUPPORTED_TOP_K,
 ) -> WeightedSumAdmission:
-    """Structural admission; never evaluates an array."""
+    """Structural admission; never evaluates an array.
+
+    ``supported_top_k``: the routed-expert counts the caller verified bit for
+    bit on Metal (Flash-Next/Qwen 8 and 10 by default; Hy4-flash passes its
+    own 16, tests/test_hy_v4_flash_prefill_exact_metal.py).
+    """
     if training:
         return WeightedSumAdmission(False, "training")
     if not do_sort or inv_order is None:
@@ -112,7 +118,7 @@ def admit_moe_weighted_sum(
     if scores is None:
         return WeightedSumAdmission(False, "no scores")
     top_k = int(indices.shape[-1])
-    if top_k not in SUPPORTED_TOP_K:
+    if top_k not in tuple(supported_top_k):
         return WeightedSumAdmission(False, f"top_k {top_k}")
     routed = int(indices.size)
     if routed < MIN_ROUTED_ROWS:

@@ -356,3 +356,10 @@ def test_fp8_latent_cache_engages_and_matches_dense():
     indexed = sum(1 for l in model.model.layers if l.self_attn.kind == M.INDEXED)
     assert _counts(model) == (2 * indexed, {})
     assert np.abs(sparse - ref).mean() <= RATIO_GATE * np.abs(dense - ref).mean()
+
+
+@pytest.fixture(autouse=True)
+def _engage_on_short_histories(monkeypatch):
+    """These tiny models never reach the served 4096-key floor; test the kernel itself."""
+    from mlx2.runtime.models import hy_v4_flash as M
+    monkeypatch.setattr(M, "SPARSE_PREFILL_MIN_KEYS", 0)

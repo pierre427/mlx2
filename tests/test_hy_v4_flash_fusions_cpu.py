@@ -196,7 +196,7 @@ def test_adapter_policy_keys_parse_and_namespace():
         A._parse_policy({"mla_fused_input_proj": True, "draft_model": "embedded_dfly",
                          "ast_tensorfold_rows": True})
     base = A.numerics_layout("L", fusions=A.fusion_policy({}))
-    assert base == "L+mla-fused-in-v1"   # served default on (Pierre 2026-11-21)
+    assert base == "L"   # every fusion opt-in (MLA input fusion reverted 2026-11-22: slower on the real model)
     tagged = A.numerics_layout("L", fusions=A.fusion_policy({k: True for k in keys - {"engram_gate_rounding"}}))
     assert tagged == "L+engram-fused-proj-v1+hc-seam-v1+indexer-fused-v1+mla-fused-in-v1"
     import importlib.util

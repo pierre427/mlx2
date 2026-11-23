@@ -81,6 +81,9 @@ ROLLBACK = 64
 # Query rows above this use one shared key set with a mask instead of
 # gathering each row's recalled tokens.
 GATHER_MAX_QUERY = 64
+# Sparse prefill engages only once the history holds at least this many keys
+# (micro-bench: 1.2-3.9x at 8K, 5-12x at 32K; short prompts favour dense SDPA).
+SPARSE_PREFILL_MIN_KEYS = 4096
 # Bound on [rows, heads, keys] fp32 scores per attention chunk.
 SCORE_BUDGET = 1 << 27
 # Evaluate each score block before building the next, so a chunked attention
@@ -92,6 +95,13 @@ BOUNDED_SCORE_BLOCKS = True
 # A media prefill arrives as one chunk of the whole prompt; its layers run in
 # slices of this many tokens so the per-chunk masks stay bounded.
 MEDIA_PREFILL_STEP = 2048
+# Routed-expert counts at which ``qwen4_moe_weighted_sum`` was verified bit for
+# bit against the eager combine on Metal for this model's shapes (fp32 router
+# weights, bf16 latent rows; tests/test_hy_v4_flash_prefill_exact_metal.py).
+# Hy4-flash routes 16; ``moe_top_k`` overrides fall back to the eager tail.
+SORTED_SUM_TOP_K = (16,)
+# ``prefill_tail_skip`` FAMILY_DEFAULTS key (default on, Pierre 2026-11-21).
+TAIL_SKIP_FAMILY = "hy_v4_flash"
 
 
 def _normalize_layer_type(value: str) -> str:
@@ -453,6 +463,54 @@ class MoE(nn.Module):
         self.expert_read_once = False
         self.read_once_calls = 0
         self.read_once_declines = {}
+        # Sorted-order weighted sum (``moe_sorted_weighted_sum``, default on,
+        # Pierre 2026-11-21): on a sorted Metal gather the routed rows are
+        # combined in sorted order by ``qwen4_moe_weighted_sum`` (bit-identical
+        # to the eager unsort + product + sum; tests/
+        # test_hy_v4_flash_prefill_exact_metal.py), so the unsorted [T, K, D]
+        # copy and the fp32 product are never written.  Every other call (CPU,
+        # unsorted decode, read-once, a wrapped bank, an unverified top-k)
+        # runs the eager tail; counted per reason.
+        self.sorted_weighted_sum = True
+        self.sorted_sum_calls = 0
+        self.sorted_sum_declines = {}
+
+    def _decline_sorted_sum(self, reason):
+        self.sorted_sum_declines[reason] = self.sorted_sum_declines.get(reason, 0) + 1
+
+    def _sorted_combine(self, routed_in, indices, weights):
+        """The combined routed latent ``[..., latent]`` (fp32), or None (eager tail)."""
+        from . import qwen4_moe_weighted_sum as _ws
+        from .switch_layers import GateUpFusedSwitchGLU, _scatter_unsort
+
+        if int(indices.size) < _ws.MIN_ROUTED_ROWS:
+            # Decode and short verify forwards: the kernel never admits them;
+            # no host probe and no counter on the hot path.
+            return None
+        if type(self.experts) not in (SwitchGLU, GateUpFusedSwitchGLU):
+            self._decline_sorted_sum("experts_type")
+            return None
+        if not _ws.runtime_supported():
+            self._decline_sorted_sum("not_metal")
+            return None
+        if int(indices.shape[-1]) not in SORTED_SUM_TOP_K:
+            self._decline_sorted_sum("top_k_unsupported")
+            return None
+        out = self.experts(routed_in, indices, keep_sorted=True)
+        if not isinstance(out, tuple):
+            self._decline_sorted_sum("unsorted_gather")
+            return out, False
+        rows, inv_order = out
+        admission = _ws.admit_moe_weighted_sum(
+            x_sorted=rows, inv_order=inv_order, scores=weights, indices=indices, do_sort=True,
+            training=self.training, supported_top_k=SORTED_SUM_TOP_K)
+        if not admission.accepted:
+            # Stable key: the reason's leading words, without shapes or counts.
+            self._decline_sorted_sum("admission_" + "_".join(admission.reason.split()[:2]))
+            # Exactly the unsort SwitchGLU would have run.
+            return _scatter_unsort(rows, inv_order, indices.shape).squeeze(-2), False
+        self.sorted_sum_calls += 1
+        return _ws.moe_weighted_sum(rows, inv_order, weights), True
 
     def __call__(self, x):
         indices, weights = self.gate(x)
@@ -467,9 +525,18 @@ class MoE(nn.Module):
             else:
                 _read_once._refuse(reason)
                 self.read_once_declines[reason] = self.read_once_declines.get(reason, 0) + 1
-        if y is None:
-            y = self.experts(routed_in, indices)
-        y = (y * weights[..., None]).sum(axis=-2).astype(x.dtype)
+        combined = None
+        if y is None and self.sorted_weighted_sum:
+            got = self._sorted_combine(routed_in, indices, weights)
+            if got is not None:
+                y, summed = got
+                if summed:
+                    combined = y.astype(x.dtype)
+        if combined is None:
+            if y is None:
+                y = self.experts(routed_in, indices)
+            combined = (y * weights[..., None]).sum(axis=-2).astype(x.dtype)
+        y = combined
         up = getattr(self, "routed_expert_up_proj", None)
         if up is not None:
             y = up(y)
@@ -780,18 +847,81 @@ class Attention(nn.Module):
 
     def project(self, x, offset):
         """``q [B, H, L, r+p]``, ``q_resid``, and this step's key rows ``[B, L, r+p]``."""
+        q, q_resid = self.project_query(x, offset)
+        return q, q_resid, self.project_keys(x, offset)
+
+    def project_query(self, x, offset):
+        """``q [B, H, L, r+p]`` and ``q_resid`` (``q_a_proj`` leads: the fused input GEMM's order)."""
         B, L, _ = x.shape
         H = self.num_heads
         q_resid = self.q_a_layernorm(self.q_a_proj(x))
         q = self.q_b_proj(q_resid).reshape(B, L, H, self.qk_nope + self.qk_rope).transpose(0, 2, 1, 3)
         q_lat = self.embed_q(q[..., : self.qk_nope])  # [B, H, L, r]
         q_pe = self.rope(q[..., self.qk_nope:], offset)
+        return mx.concatenate([q_lat, q_pe.astype(q_lat.dtype)], axis=-1), q_resid
+
+    def project_keys(self, x, offset):
+        """This step's latent ‖ RoPE key rows ``[B, L, r+p]`` (the cached state)."""
         kv = self.kv_a_proj_with_mqa(x)
         latent = self.kv_a_layernorm(kv[..., : self.kv_lora_rank])
         k_pe = self.rope(kv[:, None, :, self.kv_lora_rank:], offset)[:, 0]
-        q = mx.concatenate([q_lat, q_pe.astype(q_lat.dtype)], axis=-1)
-        keys = mx.concatenate([latent, k_pe.astype(latent.dtype)], axis=-1)
-        return q, q_resid, keys
+        return mx.concatenate([latent, k_pe.astype(latent.dtype)], axis=-1)
+
+    # -- prompt-chunk tail (prefill_tail_skip tier 2) ----------------------
+    def tail_row(self, x, cache):
+        """The last row's block output ``[B, 1, D]``; every state write over all rows.
+
+        Indexed layers only, and only for a chunk whose every lane is full
+        (the checkpoint-row claim guarantees it): key rows, indexer token
+        keys and pooled group keys are computed and appended over every row
+        by the same ops as ``_attend`` (``project_keys``, the token-key
+        projection and ``append_index_keys``), so the cache is bitwise the
+        full forward's.  The query, the indexer selection, attention and the
+        output projection run on the last row, whose output is the only one
+        anything reads (``Model._tail_refusal`` keeps the full chunk for
+        every other reader).
+        """
+        last = x[:, -1:]
+        rows = getattr(cache, "rows", None)
+        if rows is None:
+            return self.finish(last, self._attend_tail(x, last, cache))
+        L = x.shape[1]
+        outs = []
+        fused = self.get("fused_input_proj") if "fused_input_proj" in self else None
+        if fused is not None:
+            fused.bypass = True
+        try:
+            for i, (row, (start, count)) in enumerate(zip(rows, cache.layout(L))):
+                if start != 0 or count != L:
+                    raise RuntimeError("Hy4-flash tail row needs every lane full (claim invariant)")
+                outs.append(self._attend_tail(x[i : i + 1], last[i : i + 1], row))
+        finally:
+            if fused is not None:
+                fused.bypass = False
+                fused.release()
+        return self.finish(last, mx.concatenate(outs, axis=0))
+
+    def _attend_tail(self, x, last, cache):
+        if self.kind != INDEXED or cache.mrope_spans or cache.record:
+            raise RuntimeError("Hy4-flash tail row: indexed, text-only, unrecorded caches only")
+        L = x.shape[1]
+        start = cache.offset
+        qpos = start + L - 1
+        q, q_resid = self.project_query(last, qpos)
+        keys = self.project_keys(x, start)
+        kv, first = cache.append(keys)
+        sinks = self.learnable_sink_param
+        r = self.kv_lora_rank
+        indexer = self.compressed_indexer
+        token_keys = indexer.token_key_norm(indexer.token_key_projection(x))
+        group_keys = cache.append_index_keys(token_keys, indexer)
+        if start + L <= self.candidate_topk:
+            # The last row sees every key (indexed caches keep all from 0).
+            return mla_attend(q, cache.latent_rows(kv, keys.dtype)[:, None], None, sinks, self.scale, r)
+        recalled = indexer.select(last, q_resid, qpos, group_keys)  # [B, 1, K]
+        recalled = mx.where(recalled <= qpos, recalled, -1)
+        return gathered_indexed_attend(q, kv, recalled, sinks, self.scale, r,
+                                       rows=lambda g: cache.latent_rows(g, keys.dtype))
 
     def finish(self, x, latent_out):
         """``latent_out [B, H, L, r]`` -> block output."""
@@ -888,7 +1018,12 @@ class Attention(nn.Module):
             return gathered_indexed_attend(q, kv, recalled, sinks, self.scale, r,
                                            rows=lambda g: cache.latent_rows(g, keys.dtype))
         kv = cache.latent_rows(kv, keys.dtype)
-        if self.sparse_prefill_attention:
+        if self.sparse_prefill_attention and int(kv.shape[1]) < SPARSE_PREFILL_MIN_KEYS:
+            # Short history: the 2048 recalled keys are most of the keys, so the
+            # fused dense SDPA does the same work faster (2026-11-22 bisect:
+            # ~1K-token GSM8K prompts were slower with the kernel).
+            self.sparse_prefill_declines["short_context"] = self.sparse_prefill_declines.get("short_context", 0) + 1
+        elif self.sparse_prefill_attention:
             # The kernel reads id i at kv[i - first]; the dense and gather
             # references index kv with the id itself, so they agree only at
             # first == 0 (every indexed cache: only sliding caches advance
@@ -1939,6 +2074,32 @@ class DecoderLayer(nn.Module):
         x = self.mlp(self.post_attention_layernorm(x))
         return hc_merge(post, x, streams)
 
+    def tail_row(self, streams, cache, engram=None):
+        """``__call__`` for the last row only, after every state write over all rows.
+
+        Engram, the attention-side iHC boundary and the input norm run over
+        every row (the attention input feeds the cached keys); attention
+        returns the last row (``Attention.tail_row``); the merge, the MLP-side
+        boundary, the MLP/MoE and the final merge run on that row.  All of
+        them are row-wise, so the row is the full forward's up to the
+        attention's own row-count rounding.
+        """
+        if engram is not None and "engram_layer" in self:
+            streams = self.engram_layer(streams, *engram)
+        seam = getattr(self, "hc_seam", None)
+        if seam is not None:
+            post, x = seam.pre(self.hc_attn_layer, self.input_layernorm, streams)
+            x = self.self_attn.tail_row(x, cache)
+            streams, post, x = seam.merge_pre(self.hc_mlp_layer, self.post_attention_layernorm,
+                                              post[:, -1:], x, streams[:, -1:])
+            return hc_merge(post, self.mlp(x), streams)
+        post, x = self.hc_attn_layer(streams)
+        x = self.self_attn.tail_row(self.input_layernorm(x), cache)
+        streams = hc_merge(post[:, -1:], x, streams[:, -1:])
+        post, x = self.hc_mlp_layer(streams)
+        x = self.mlp(self.post_attention_layernorm(x))
+        return hc_merge(post, x, streams)
+
 
 class HY4FlashModel(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -1990,6 +2151,19 @@ class Model(nn.Module):
         # ``None`` without Engram layers).  Readers must not change ``streams``.
         # Media prefill chunks call no reader.  Plain attribute, not a child.
         object.__setattr__(self, "layer_output_readers", {})
+        # Prompt-chunk head trim (adapter policy ``prefill_head_trim``, default
+        # on, Pierre 2026-11-21): inside a checkpoint-row request only each
+        # lane's checkpoint row goes through the fp32 head, padded to the
+        # smallest row count whose kernel is bitwise the full chunk's
+        # (``calibrate_head_rows``).  Plain attributes, not parameters.
+        self.prefill_head_trim = True
+        # Prompt-chunk last-layer tail (policy ``prefill_tail_skip``, default
+        # on; prefill_tail_skip tier 2, family ``hy_v4_flash``).
+        self.prefill_tail_skip = True
+        self.prefill_exact_stats = {"head_trim_forwards": 0, "head_rows_skipped": 0,
+                                    "head_trim_declines": {}, "tail_forwards": 0,
+                                    "tail_rows_skipped": 0}
+        object.__setattr__(self, "_head_row_floors", {})
 
     @property
     def sliding_attention_min_block(self) -> int:
@@ -2357,7 +2531,8 @@ class Model(nn.Module):
                 c.advance(L)
         return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=1)
 
-    def hidden(self, inputs: mx.array, cache=None, *, pixel_values=None, image_grid_thw=None):
+    def hidden(self, inputs: mx.array, cache=None, *, pixel_values=None, image_grid_thw=None,
+               tail_row: bool = False):
         """Post-norm final hidden ``[B, L, D]`` (DFly2's target feature).
 
         ``pixel_values`` ``[patches, C*p*p]`` with ``image_grid_thw`` (one
@@ -2369,16 +2544,20 @@ class Model(nn.Module):
         if self.moe_nax_prefill:
             # A no-op while the NAX mode is off or an outer forward decided.
             with _moe_nax.forward_scope(inputs, cache):
-                return self._hidden_route(inputs, cache, pixel_values, image_grid_thw)
-        return self._hidden_route(inputs, cache, pixel_values, image_grid_thw)
+                return self._hidden_route(inputs, cache, pixel_values, image_grid_thw, tail_row)
+        return self._hidden_route(inputs, cache, pixel_values, image_grid_thw, tail_row)
 
-    def _hidden_route(self, inputs, cache, pixel_values, image_grid_thw):
+    def _hidden_route(self, inputs, cache, pixel_values, image_grid_thw, tail_row=False):
+        # ``tail_row`` (prompt-chunk tail, ``__call__`` only): the last layer
+        # returns each lane's last row after writing its state over all rows.
+        if tail_row and pixel_values is not None:
+            raise ValueError("Hy4-flash tail row is text-only")
         if (self.engram_hash == "device" and pixel_values is None and self.engram_hashers
                 and inputs.ndim == 2 and inputs.shape[1] <= ROLLBACK):
-            return self._hidden_device_hash(inputs, cache)
-        return self._hidden(inputs, cache, pixel_values, image_grid_thw)
+            return self._hidden_device_hash(inputs, cache, tail_row)
+        return self._hidden(inputs, cache, pixel_values, image_grid_thw, tail_row)
 
-    def _hidden(self, inputs, cache, pixel_values, image_grid_thw):
+    def _hidden(self, inputs, cache, pixel_values, image_grid_thw, tail_row=False):
         a = self.args
         # Host n-gram hashing needs the token ids: this waits for whatever
         # produced ``inputs`` (at decode, the previous step's sampler).
@@ -2403,7 +2582,8 @@ class Model(nn.Module):
             self.engram_hash_stats["host_forwards"] += 1
         h = self.model.embed_tokens(inputs)
         streams = mx.broadcast_to(h[:, :, None, :], (*h.shape[:2], a.hc_mult, h.shape[-1]))
-        return self._layers_from(streams, cache, engram, 0, tokens.shape[1], batched, reading)
+        return self._layers_from(streams, cache, engram, 0, tokens.shape[1], batched, reading,
+                                 tail_row=tail_row)
 
     def _reader_inputs(self, tokens: np.ndarray, cache, batched: bool):
         """``(ids, prefix)`` for the layer-output readers of one forward.
@@ -2438,7 +2618,8 @@ class Model(nn.Module):
         if reader is not None and reading is not None:
             reader(i, streams, *reading)
 
-    def _layers_from(self, streams, cache, engram, begin: int, L: int, batched: bool, reading=None):
+    def _layers_from(self, streams, cache, engram, begin: int, L: int, batched: bool, reading=None,
+                     *, tail_row: bool = False):
         """Run decoder layers ``begin..`` and the head; dispatch at Engram boundaries.
 
         The rows of every Engram layer were submitted before the first one
@@ -2450,12 +2631,14 @@ class Model(nn.Module):
         """
         first_engram = min(engram) if engram else None
         self.trunk_stats["forwards"] += 1
+        last = len(self.model.layers) - 1
         for i in range(begin, len(self.model.layers)):
             layer = self.model.layers[i]
             resolve = engram.get(i)
             if resolve is not None and i != first_engram:
                 _dispatch(streams)
-            streams = layer(streams, cache[i], resolve() if resolve is not None else None)
+            run = layer.tail_row if tail_row and i == last else layer
+            streams = run(streams, cache[i], resolve() if resolve is not None else None)
             if self.layer_output_readers:
                 self._read_layer_output(i, streams, reading)
             if i == first_engram and len(self.model.layers) - i > 1:
@@ -2495,7 +2678,7 @@ class Model(nn.Module):
         out = mx.where(mx.array(index >= 0)[None], gathered.reshape(r, L, n), a.engram_pad_id)
         return out.reshape(r * L, n)
 
-    def _hidden_device_hash(self, inputs: mx.array, cache):
+    def _hidden_device_hash(self, inputs: mx.array, cache, tail_row: bool = False):
         """Text forward (``L <= ROLLBACK``) with the n-grams hashed on device.
 
         Order: the n-gram rows of every lane and Engram layer are computed
@@ -2579,7 +2762,8 @@ class Model(nn.Module):
         stats["device_rows"] += int(ngrams.shape[0])
         for i, early_streams in early:
             self._read_layer_output(i, early_streams, reading)
-        return self._layers_from(streams, cache, engram, first, L, batched, reading)
+        return self._layers_from(streams, cache, engram, first, L, batched, reading,
+                                 tail_row=tail_row)
 
     # -- speculative / AST target contract --------------------------------
     # Taps are the post-norm final hidden (DFly2's target feature); only the
@@ -2653,8 +2837,231 @@ class Model(nn.Module):
         for key in ("pixel_values_videos", "video_grid_thw"):
             if _unused.get(key) is not None:
                 raise ValueError("Hy4-flash video input is not implemented")
-        return self.logits(self.hidden(inputs, cache, pixel_values=pixel_values,
-                                       image_grid_thw=image_grid_thw))
+        if pixel_values is None and self._claim_tail(inputs, cache):
+            from ..prefill_tail_skip import STATS as _TAIL_STATS
+
+            _TAIL_STATS["hy_v4_flash_tail_split"] += 1
+            stats = self.prefill_exact_stats
+            stats["tail_forwards"] += 1
+            stats["tail_rows_skipped"] += int(inputs.shape[0]) * (int(inputs.shape[1]) - 1)
+            return self.logits(self.hidden(inputs, cache, tail_row=True))
+        return self._prompt_head(self.hidden(inputs, cache, pixel_values=pixel_values,
+                                             image_grid_thw=image_grid_thw))
+
+    # -- prompt-chunk head trim and tail (exact defaults) -------------------
+    # Candidate row counts for the head floor, smallest first; references are
+    # one 256-row lane and two 160-row lanes (above every kernel switch
+    # measured: Metal q8 matrix kernel from 33-65 rows, Accelerate sgemm from
+    # 2-32 rows on the tiny head).
+    HEAD_ROW_CANDIDATES = (1, 2, 4, 8, 16, 32, 48, 64, 96, 128)
+    HEAD_ROW_REFERENCES = ((1, 256), (2, 160))
+
+    def head_row_floor(self) -> int:
+        """Rows the trimmed head pads to on this device (0: never trim); memoized."""
+        key = (str(mx.default_device()), "scales" in self.lm_head, bool(self.args.enable_lm_head_fp32))
+        floor = self._head_row_floors.get(key)
+        if floor is None:
+            floor = self._head_row_floors[key] = self.calibrate_head_rows()
+        return floor
+
+    def calibrate_head_rows(self) -> int:
+        """Smallest candidate row count at which ``logits`` of rows padded with zeros
+        is bitwise ``logits`` of the same rows inside a full chunk, on this device.
+
+        The head's kernel (MLX vector vs matrix GEMM, Accelerate's sgemm
+        blocking) depends on the row count, so one row through the head is
+        not bitwise the same row of a 2048-row chunk.  At and above the
+        returned floor the kernels computed each row the same way.  Random
+        rows at the real widths, two reference shapes, three rows each
+        (first, middle, last); evidence, not proof, like
+        ``FusedLinear.self_check``.  0 when no candidate matches (the head
+        then always runs full).
+        """
+        D = self.args.hidden_size
+        dtype = embedding_dtype(self.model.embed_tokens)
+        refs = []
+        for seed, shape in enumerate(self.HEAD_ROW_REFERENCES):
+            x = mx.random.normal((*shape, D), key=mx.random.key(7919 + seed)).astype(dtype)
+            flat = x.reshape(-1, D)
+            n = flat.shape[0]
+            picks = [0, n // 2, n - 1]
+            refs.append((flat, picks, self.logits(x).reshape(n, -1)))
+        for rows in self.HEAD_ROW_CANDIDATES:
+            same = True
+            for flat, picks, ref in refs:
+                k = min(rows, len(picks))
+                chosen = mx.array(picks[:k], dtype=mx.int32)
+                padded = mx.concatenate([flat[chosen], mx.zeros((rows - k, D), dtype=flat.dtype)])
+                out = self.logits(padded[None])[0, :k]
+                if not mx.array_equal(out, ref[chosen]).item():
+                    same = False
+                    break
+            if same:
+                return rows
+        return 0
+
+    def _decline_head_trim(self, reason):
+        d = self.prefill_exact_stats["head_trim_declines"]
+        d[reason] = d.get(reason, 0) + 1
+
+    def _prompt_head(self, hidden):
+        """The vocabulary head of a forward; checkpoint rows only inside a prompt request.
+
+        Outside a checkpoint-row request (decode, verify, scoring, taps) and
+        whenever trimming is off or cannot be bitwise, every row runs.
+        Inside one, each lane's checkpoint row is gathered, padded with zero
+        rows to ``max(head_row_floor(), lanes)`` and projected; the result
+        is ``[B, 1, V]``, bitwise the full head's rows (calibrated floor).
+        """
+        from ..prefill_checkpoint_rows import open_checkpoint_rows, select_checkpoint_rows
+
+        from ..prefill_tail_skip import tail_skip_mode
+
+        if not self.prefill_head_trim or hidden.ndim != 3 or hidden.shape[1] <= 1:
+            return self.logits(hidden)
+        if tail_skip_mode(TAIL_SKIP_FAMILY) == "0":
+            # MLX2_PREFILL_TAIL_SKIP=0 turns off the head trim too, as on the
+            # other families, so an env-only A/B compares against every row.
+            return self.logits(hidden)
+        B, L, D = hidden.shape
+        if open_checkpoint_rows(B, L) is None:
+            return self.logits(hidden)
+        floor = self.head_row_floor()
+        if floor == 0:
+            self._decline_head_trim("no_bitwise_floor")
+            return self.logits(hidden)
+        rows = max(floor, B)
+        if B * L <= rows:
+            self._decline_head_trim("chunk_within_floor")
+            return self.logits(hidden)
+        kept = select_checkpoint_rows(hidden).reshape(B, D)
+        if rows > B:
+            kept = mx.concatenate([kept, mx.zeros((rows - B, D), dtype=kept.dtype)])
+        stats = self.prefill_exact_stats
+        stats["head_trim_forwards"] += 1
+        stats["head_rows_skipped"] += B * L - rows
+        return self.logits(kept[None])[0, :B].reshape(B, 1, -1)
+
+    _TAIL_MODULES = None
+
+    @classmethod
+    def _tail_module_types(cls):
+        """Module classes the last layer may hold for the tail split (stock and fused)."""
+        if cls._TAIL_MODULES is None:
+            from .switch_layers import (GateUpFusedSwitchGLU, QuantizedSwitchLinear, SwitchGLU,
+                                        SwitchLinear)
+
+            cls._TAIL_MODULES = frozenset({
+                DecoderLayer, Attention, CompressedIndexer, MoE, MLP, Router, HyperConnection, HCPre,
+                MultiLinear, ClampedSwiGLU, Q2ZeroSwitchLinear, EngramLayer, nn.Linear,
+                nn.QuantizedLinear, nn.RMSNorm, SwitchGLU, GateUpFusedSwitchGLU, SwitchLinear,
+                QuantizedSwitchLinear, _fusions.FusedLinear, _fusions.SegmentLinear})
+        return cls._TAIL_MODULES
+
+    def _tail_refusal(self, inputs, cache):
+        """Why this prompt chunk keeps the full last layer, or None."""
+        from ..prefill_tail_skip import structural_refusal
+
+        layers = self.model.layers
+        last = len(layers) - 1
+        if cache is None or len(cache) != len(layers):
+            return "hy_v4_flash_cache_layout"
+        layer = layers[last]
+        if layer.self_attn.kind != INDEXED:
+            return "hy_v4_flash_last_layer_sliding"
+        allowed = self._tail_module_types()
+        if any(type(m) not in allowed for _, m in layer.named_modules()):
+            # Capture hooks, TensorFold rows and any other wrapper.
+            return "hy_v4_flash_wrapped_last_layer"
+        reason = structural_refusal(inputs, cache, trunk=self.model, trunk_class=HY4FlashModel)
+        if reason is not None:
+            return reason
+        if last in self.layer_output_readers:
+            # A calculator tile / aMoEba capture reads every row of the last layer.
+            return "hy_v4_flash_last_layer_reader"
+        if any(getattr(self, name, None) is not None for name in (
+                "_mlx2_weight_overlays", "_mlx2_layer_excision", "_mlx2_expert_masks",
+                "_mlx2_ablation_overlays", "_mlx2_amoeba_rows")):
+            return "hy_v4_flash_weight_overlay"
+        entry = cache[last]
+        lanes = getattr(entry, "rows", None) or [entry]
+        if any(type(c) not in LAYER_CACHE_TYPES for c in lanes):
+            return "hy_v4_flash_cache_type"
+        if any(c.record for c in lanes):
+            # DFly2 Index Share reads the last ROLLBACK rows' selections.
+            return "hy_v4_flash_index_share_record"
+        if any(c.mrope_spans for c in lanes):
+            return "hy_v4_flash_mrope_spans"
+        if hasattr(entry, "layout"):
+            L = int(inputs.shape[1])
+            if any(span != (0, L) for span in entry.layout(L)):
+                # Left padding (or any lane not covering the whole chunk):
+                # Attention.tail_row needs every lane full.
+                return "hy_v4_flash_lane_layout"
+        fused = layer.self_attn.get("fused_input_proj") if "fused_input_proj" in layer.self_attn else None
+        if (fused is not None and not hasattr(entry, "rows")
+                and int(inputs.shape[0]) * int(inputs.shape[1]) <= fused.max_rows):
+            # The full forward takes its key rows from the one fused input
+            # GEMM here; the tail's split key projection is only self-checked
+            # equal to it, so a chunk this short keeps the reference.
+            return "hy_v4_flash_fused_input_rows"
+        return None
+
+    def _claim_tail(self, inputs, cache) -> bool:
+        """Claim the open checkpoint-row request for the last-layer tail split.
+
+        Only this plain prompt call reaches it: taps (``forward_with_taps``),
+        ``prefill_body``, media prefill and verify forwards call ``hidden``
+        directly or open no request, so every reader of all rows keeps the
+        full forward.  ``MLX2_PREFILL_TAIL_SKIP=0`` or policy
+        ``prefill_tail_skip: false`` turns it off.
+        """
+        from ..prefill_checkpoint_rows import final_row_checkpoint_open
+        from ..prefill_tail_skip import claim_adapter_tail, tail_skip_mode
+
+        if (not self.prefill_tail_skip or getattr(inputs, "ndim", 0) != 2 or inputs.shape[1] <= 1
+                or tail_skip_mode(TAIL_SKIP_FAMILY) != "1"):
+            return False
+        if not final_row_checkpoint_open(inputs.shape[0], inputs.shape[1]):
+            # No claimable request (decode, verify, scoring, ragged lanes):
+            # skip the refusal walk on the hot path.
+            return False
+        return claim_adapter_tail(inputs, kind="tail", refuse=self._tail_refusal(inputs, cache),
+                                  family=TAIL_SKIP_FAMILY)
+
+    def prefill_exact_status(self) -> dict:
+        """Counters of the head trim, the tail split and the sorted MoE combine."""
+        moes = [layer.mlp for layer in self.model.layers if isinstance(layer.mlp, MoE)]
+        declines = {}
+        for m in moes:
+            for reason, n in m.sorted_sum_declines.items():
+                declines[reason] = declines.get(reason, 0) + n
+        stats = self.prefill_exact_stats
+        return {
+            "head_trim": {"selected": bool(self.prefill_head_trim),
+                          "row_floor": {f"{k[0]}|quantized={k[1]}|fp32={k[2]}": v
+                                        for k, v in self._head_row_floors.items()},
+                          "forwards": stats["head_trim_forwards"],
+                          "rows_skipped": stats["head_rows_skipped"],
+                          "declined": dict(stats["head_trim_declines"]),
+                          "observed_used": stats["head_trim_forwards"] > 0},
+            "tail_skip": {"selected": bool(self.prefill_tail_skip),
+                          "forwards": stats["tail_forwards"],
+                          "rows_skipped": stats["tail_rows_skipped"],
+                          "observed_used": stats["tail_forwards"] > 0},
+            "sorted_weighted_sum": {"selected": any(m.sorted_weighted_sum for m in moes),
+                                    "layer_calls": sum(m.sorted_sum_calls for m in moes),
+                                    "declined_layer_calls": declines,
+                                    "observed_used": any(m.sorted_sum_calls for m in moes)},
+        }
+
+    def set_moe_sorted_weighted_sum(self, on: bool) -> None:
+        """Sorted-order MoE combine on every MoE layer (False: the eager tail)."""
+        if type(on) is not bool:
+            raise ValueError("moe_sorted_weighted_sum must be a boolean")
+        for layer in self.model.layers:
+            if isinstance(layer.mlp, MoE):
+                layer.mlp.sorted_weighted_sum = on
 
     @property
     def layers(self):

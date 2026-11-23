@@ -146,7 +146,7 @@ def test_no_policy_applies_every_default(artifact, tiny_default):
         assert adapter.sliding_attention_blocks == 512
         assert adapter.model.sliding_attention_blocks == 512
         # APCv2: the band's own namespace, and the tile set joins the numerics contract.
-        assert adapter.layout.endswith(BAND + "+sparse-prefill-v1+mla-fused-in-v1") and adapter.descriptor.cache_layout == adapter.layout
+        assert adapter.layout.endswith(BAND + "+sparse-prefill-v1") and adapter.descriptor.cache_layout == adapter.layout
         contract = adapter.execution_numerics_contract()
         assert contract["amoeba_det_tiles"]["manifest_sha256"] == adapter.amoeba_det_tiles.identity[
             "manifest_sha256"]
@@ -210,7 +210,7 @@ def test_each_opt_out(artifact, tiny_default):
         assert det["default_manifest"] == A.default_det_tile_manifest(TARGET)
         band = d["sliding_attention_blocks"]
         assert band["rows"] == 0 and band["defaulted"] is False and band["source"] == "policy"
-        assert not adapter.layout.endswith(BAND + "+sparse-prefill-v1+mla-fused-in-v1") and BAND not in adapter.layout
+        assert not adapter.layout.endswith(BAND + "+sparse-prefill-v1") and BAND not in adapter.layout
         cap = d["prefill_step_cap"]
         assert cap["cap"] is None and cap["defaulted"] is False and cap["source"] == "policy_opt_out"
         assert adapter.prefill_step_autoscale_cap() is None
@@ -225,7 +225,7 @@ def test_explicit_values_are_not_defaulted(artifact, tiny_default):
         d = _diag(adapter)
         assert d["sliding_attention_blocks"]["rows"] == 1024
         assert d["sliding_attention_blocks"]["defaulted"] is False
-        assert adapter.layout.endswith("+swa-band1024-v1+sparse-prefill-v1+mla-fused-in-v1")
+        assert adapter.layout.endswith("+swa-band1024-v1+sparse-prefill-v1")
         assert d["prefill_step_cap"] == {**d["prefill_step_cap"], "cap": 4096, "defaulted": False}
         assert d["amoeba_det_tiles"]["defaulted"] is True  # untouched key keeps its default
     finally:

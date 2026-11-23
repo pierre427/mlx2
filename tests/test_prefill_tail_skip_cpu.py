@@ -353,7 +353,8 @@ def test_gemma4_tail_left_padded_batch(monkeypatch, extra, mode):
                                       np.array(model(step, cache=tail_cache)))
 
 
-DEFAULT_ON = ("gemma4", "nemotron_h", "gpt_oss", "qwen38_27b", "flint", "mellum", "laguna")
+DEFAULT_ON = ("gemma4", "nemotron_h", "gpt_oss", "qwen38_27b", "flint", "mellum", "laguna",
+              "hy_v4_flash")
 
 
 def test_family_defaults_on_for_measured_families_only(monkeypatch):

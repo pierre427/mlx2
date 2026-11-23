@@ -42,7 +42,8 @@ prefills do not, so on those routes the switch is inert (counters stay 0).
 Mode values: ``0`` off; ``1`` every tier the adapter supports; ``head`` the
 head trim only (for A/B attribution).  Unset means off, except for families in
 ``FAMILY_DEFAULTS`` (Gemma 4 since 2026-11-07; Nemotron-H, gpt-oss,
-Qwen3.8-27B, flint, Mellum and Laguna since 2026-11-08; Pierre).  Spellings
+Qwen3.8-27B, flint, Mellum and Laguna since 2026-11-08; Hy4-flash since
+2026-11-21; Pierre).  Spellings
 (trimmed, case-insensitive): ``0``/``off``/``false``/``no`` mean ``0`` and
 ``1``/``on``/``true``/``yes`` mean ``1``.  Any other value (``2``, the empty
 string, ...) resolves to ``0``, the unskipped reference path, on every family,
@@ -80,6 +81,11 @@ STATS: Counter = Counter()
 #   the adapter module, so untested checkpoints of the same module (Nemotron
 #   Bolt/Super, gpt-oss-120b, Laguna S) inherit it; gpt_oss_puzzle has its own
 #   unbenched call site and stays off.
+#   hy_v4_flash: default 1 (Pierre, 2026-11-21, approved as a default when
+#   exact): the indexed last layer writes K/V, indexer token keys and pooled
+#   group keys over every row, bitwise the full forward's (CPU tests,
+#   tests/test_hy_v4_flash_prefill_exact_cpu.py); unbenched on the GPU.
+#   Adapter policy ``prefill_tail_skip: false`` also turns it off.
 FAMILY_DEFAULTS = {
     "gemma4": "1",
     "nemotron_h": "1",
@@ -88,6 +94,7 @@ FAMILY_DEFAULTS = {
     "flint": "1",
     "mellum": "1",
     "laguna": "1",
+    "hy_v4_flash": "1",
 }
 
 

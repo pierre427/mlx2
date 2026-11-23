@@ -69,7 +69,9 @@ FEATURES = (
     "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
     "engram_gate_rounding",
     # Hy4-flash opt-in one-forward verify of multi-wave AST cohorts (2026-11-21).
-    "verify_phase_align", "ready_drain",
+    "verify_phase_align", "ready_drain", "ast_multilane_tile_rows",
+    # Hy4-flash exact prefill defaults (2026-11-21; prefill_tail_skip is listed below).
+    "prefill_head_trim", "moe_sorted_weighted_sum",
     # Morning follow-up probes (2026-11-06): opt-in research options.
     "batch_rows_attention", "prefill_tail_row", "prefill_tail_skip",
     # Nemotron 3.5 Super VL NVFP4 export (2026-11-10): checkpoint defaults.

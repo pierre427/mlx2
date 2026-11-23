@@ -187,7 +187,10 @@ FUSION_TAGS = {"hc_seam_fused": "hc-seam-v1", "mla_fused_input_proj": "mla-fused
 # A/B (qualification/runs/hy4-ab-sparsefus-20261121-02201e21a-*), so it is on
 # unless the policy says false.  The other fusions change the layer-12 numerics
 # the default calculator tile reads and stay off until its validation passes.
-FUSION_SERVED_DEFAULTS = {**FUSION_DEFAULTS, "mla_fused_input_proj": True}
+# 2026-11-22 bisect on the real checkpoint (single rep): the fused MLA input
+# GEMM decoded ~6% slower than split projections at B=1 and B=2, so it is
+# back to opt-in; the served defaults equal the reference values again.
+FUSION_SERVED_DEFAULTS = dict(FUSION_DEFAULTS)
 
 
 def fusion_policy(policy: dict) -> dict:
@@ -640,6 +643,7 @@ MODEL_KEYS = frozenset({"engram_cache_rows", "engram_hash", "engram_precision",
                         "moe_expert_read_once",
                         "amoeba_mask",
                         "sliding_attention_blocks", "prefill_step_cap", "sparse_prefill_attention",
+                        "prefill_head_trim", "prefill_tail_skip", "moe_sorted_weighted_sum",
                         "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj",
                         "indexer_fused_scores", "engram_gate_rounding"})
 # ``amoeba_det_tiles`` (experimental, unqualified; default on only for the
@@ -924,6 +928,22 @@ DFLY_DRAFT_QUANTIZATION_DEFAULT = {"bits": 8, "group_size": 64}
 # 85 -> 60 s with the fusions, needle 4/4), false restores the dense masked path.
 READY_DRAIN_DEFAULT = "all"
 SPARSE_PREFILL_ATTENTION_DEFAULT = True
+# Exact prefill defaults (Pierre 2026-11-21, approved as defaults when exact;
+# unqualified, GPU A/B pending; CPU exactness tests in
+# tests/test_hy_v4_flash_prefill_exact_cpu.py, Metal in
+# tests/test_hy_v4_flash_prefill_exact_metal.py; docs/hy4-flash/prefill-exact.md):
+# ``prefill_head_trim``: a prompt chunk projects only each lane's checkpoint row
+#   through the fp32 head (padded to the calibrated bitwise row floor); false
+#   projects every row.
+# ``prefill_tail_skip``: the indexed last layer writes its state over every
+#   row and computes the rest for the last row (prefill_tail_skip tier 2);
+#   false (or MLX2_PREFILL_TAIL_SKIP=0) keeps the full last layer.
+# ``moe_sorted_weighted_sum``: sorted Metal gathers combine the routed rows in
+#   sorted order (qwen4_moe_weighted_sum, bitwise the eager combine at top-16);
+#   false keeps the eager unsort + product + sum.
+# None of them changes a cached row, so none takes an APCv2 namespace tag.
+PREFILL_EXACT_DEFAULTS = {"prefill_head_trim": True, "prefill_tail_skip": True,
+                          "moe_sorted_weighted_sum": True}
 # ``draft_quantization`` (the shared drafter key, adapters/dflash2
 # validate_runtime_quantization: {"bits": 4|8, "group_size": 32|64|128}):
 # load-time MLX affine quantization of the embedded DFly2 head's nn.Linear
@@ -1001,6 +1021,9 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
                          f"query-block row count (default {SLIDING_ATTENTION_BLOCKS_DEFAULT})")
     if type(policy.get("sparse_prefill_attention", SPARSE_PREFILL_ATTENTION_DEFAULT)) is not bool:
         raise ValueError("Hy4-flash sparse_prefill_attention must be a boolean (default true)")
+    for key, default in PREFILL_EXACT_DEFAULTS.items():
+        if type(policy.get(key, default)) is not bool:
+            raise ValueError(f"Hy4-flash {key} must be a boolean (default {str(default).lower()})")
     cap = policy.get("prefill_step_cap")
     if cap is not None and (type(cap) is not int or cap < 0):
         raise ValueError("Hy4-flash prefill_step_cap must be a positive integer, or 0 for no cap "
@@ -1375,6 +1398,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         "engram_table_format", "engram_precision", "engram_cache_rows", "engram_hash",
         "vision", "moe_fused_gate_up", "amoeba_det_tiles", "prefill_step_cap", "sliding_attention_blocks",
         "sparse_prefill_attention", "moe_expert_read_once",
+        "prefill_head_trim", "prefill_tail_skip", "moe_sorted_weighted_sum",
         # Opt-in small-op fusions: the same install on both routes.
         "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
         "engram_gate_rounding",
@@ -1610,6 +1634,14 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                                         SPARSE_PREFILL_ATTENTION_DEFAULT))
         self.model.set_sparse_prefill_attention(self.sparse_prefill_attention)
         self.model.set_moe_expert_read_once(self.moe_expert_read_once)
+        self.prefill_exact = {key: bool(policy.get(key, default))
+                              for key, default in PREFILL_EXACT_DEFAULTS.items()}
+        self.model.prefill_head_trim = self.prefill_exact["prefill_head_trim"]
+        self.model.prefill_tail_skip = self.prefill_exact["prefill_tail_skip"]
+        self.model.set_moe_sorted_weighted_sum(self.prefill_exact["moe_sorted_weighted_sum"])
+        if self.model.prefill_head_trim:
+            # Measure the bitwise head row floor once, on the serving device.
+            self.model.head_row_floor()
         self.engram_table_format = engram_format
         if rows_backend is not None:
             from ..runtime.tensorfold_rows import install as install_rows
@@ -2267,6 +2299,42 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "sparse_layer_forwards": forwards, "declined_layer_forwards": declines,
                 "observed_used": forwards > 0}
 
+    def _prefill_exact_receipt(self):
+        """Route-receipt block of the exact prefill defaults (head trim, tail, sorted combine)."""
+        from ..runtime.prefill_tail_skip import tail_skip_status
+
+        model = getattr(self, "model", None)
+        chosen = getattr(self, "prefill_exact", None) or dict(PREFILL_EXACT_DEFAULTS)
+        status = model.prefill_exact_status() if model is not None and hasattr(
+            model, "prefill_exact_status") else {}
+        tail = tail_skip_status()
+        blocks = {}
+        for key, name, relation, applies in (
+                ("prefill_head_trim", "head_trim",
+                 "checkpoint rows bitwise vs the full head (calibrated row floor); prompt-chunk logits "
+                 "are only finiteness-checked, not consumed on the default path (the first token "
+                 "comes from the held-back prompt token's decode step)",
+                 "ordinary prompt chunks inside a checkpoint-row request"),
+                ("prefill_tail_skip", "tail_skip",
+                 "cache state bitwise; checkpoint-row logits within rounding (layer 41 and the head "
+                 "run on B rows, no floor padding), finiteness-checked only, not consumed",
+                 "ordinary prompt chunks whose every lane is full (claimed checkpoint row)"),
+                ("moe_sorted_weighted_sum", "sorted_weighted_sum", "bitwise (Metal, top-16)",
+                 "sorted routed-expert gathers on Metal (prefill and wide verify)")):
+            block = dict(status.get(name, {}))
+            block.update({"implemented": True, "qualified": False,
+                          "selected": bool(chosen.get(key)) and bool(block.get("selected", True)),
+                          "default": PREFILL_EXACT_DEFAULTS[key], "relation": relation,
+                          "applies_to": applies, "opt_out": f'{{"{key}": false}}',
+                          "observed_used": bool(block.get("observed_used"))})
+            blocks[key] = block
+        blocks["prefill_head_trim"]["env_off"] = "MLX2_PREFILL_TAIL_SKIP=0 also turns it off"
+        blocks["prefill_tail_skip"]["env"] = {
+            "configured": tail["configured"],
+            "effective_mode": tail["effective_modes"].get("hy_v4_flash"),
+            "declines": {k: v for k, v in tail["counts"].items() if k.startswith("declined_hy_v4_flash")}}
+        return blocks
+
     def _moe_read_once_receipt(self):
         """Route-receipt block of the opt-in read-once small-row expert kernels."""
         from ..runtime.models import switch_read_once
@@ -2378,6 +2446,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "prefill_step_cap": self._prefill_step_cap_receipt(),
             "sparse_prefill_attention": self._sparse_prefill_receipt(),
             "moe_expert_read_once": self._moe_read_once_receipt(),
+            "prefill_exact": self._prefill_exact_receipt(),
             "engram": {i: r.diagnostics() for i, r in getattr(self, "engram_tables", {}).items()},
             "engram_precision": getattr(getattr(getattr(self, "model", None), "args", None),
                                         "engram_precision", None),

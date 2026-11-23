@@ -152,9 +152,9 @@ def test_every_numerics_knob_changes_the_apc_namespace_and_layouts_agree(tmp_pat
         assert adapter.diagnostics()["latent_kv"]["cache_layout"] == layout
         if suffix is None:
             # Band attention 512 is the Hy4 default (2026-11-21): its own namespace.
-            assert layout == A.CACHE_LAYOUT + "+swa-band512-v1+sparse-prefill-v1+mla-fused-in-v1"
+            assert layout == A.CACHE_LAYOUT + "+swa-band512-v1+sparse-prefill-v1"
         else:
-            assert layout != A.CACHE_LAYOUT + "+swa-band512-v1+sparse-prefill-v1+mla-fused-in-v1" and suffix in layout
+            assert layout != A.CACHE_LAYOUT + "+swa-band512-v1+sparse-prefill-v1" and suffix in layout
     finally:
         adapter.close()
 

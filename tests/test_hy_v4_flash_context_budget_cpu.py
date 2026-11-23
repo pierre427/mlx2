@@ -250,8 +250,16 @@ def test_real_artifact_layer_layout_from_its_config():
     assert b.ring_bytes(131072) == 30 * _rows(575 + 1024) * 1152
     # The served chain route at 128K, --prefill-step 1024 (doc section 6).
     assert b.project(131072) / GIB == pytest.approx(2.367, abs=0.002)
-    assert b.decode_transient_bytes(131072) / GIB == pytest.approx(2.334, abs=0.002)
-    assert b.prefill_transient_bytes(131048, 1024) / GIB == pytest.approx(4.601, abs=0.002)
+    # Since 2026-11-21 the fp32 head is charged: every verify row (8 x 123,904
+    # x 4 B, +0.004 GiB) and, with the head trim off, every prompt row
+    # (1024 rows, +0.473 GiB); with the trim on, the head row floor only.
+    assert b.decode_transient_bytes(131072) / GIB == pytest.approx(2.338, abs=0.002)
+    assert b.prefill_transient_bytes(131048, 1024) / GIB == pytest.approx(5.074, abs=0.002)
+    trimmed = HY4FlashCacheBudget.from_args(a, item_bytes=2, record_layers=len(cfg["dfly_target_index_layer"]),
+                                            prefill_rows=1024, verify_rows=8, prefill_head_rows=64)
+    assert trimmed.prefill_transient_parts(131048, 1024)["head_logits"] == 64 * (120832 + 3072) * 4
+    assert trimmed.prefill_transient_bytes(131048, 1024) / GIB == pytest.approx(4.631, abs=0.002)
+    assert trimmed.decode_transient_bytes(131072) == b.decode_transient_bytes(131072)
 
 
 def test_route_shape_follows_the_policy():
@@ -390,8 +398,10 @@ def test_q2_expert_layers_are_costed_per_format(tiny):
 def test_cold_media_prompt_is_charged_per_slice():
     from mlx2.serving import prefill_transient_gib
 
+    # The served head trim (prefill_head_trim, default on) projects the media
+    # chunk's checkpoint row at the head row floor; 64 bounds the floors measured.
     b = HY4FlashCacheBudget.from_args(_real_args(), item_bytes=2, record_layers=5, prefill_rows=1024,
-                                      verify_rows=8)
+                                      verify_rows=8, prefill_head_rows=64)
     for n in (16384, 131072):
         media = prefill_transient_gib(b, context_tokens=n, uncached_tokens=n, prefill_step=1024,
                                       single_chunk=True)

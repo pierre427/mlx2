@@ -532,7 +532,16 @@ class SwitchGLU(nn.Module):
     def sort_status(self) -> dict:
         return {"policy": self._sort_policy, "counts": dict(self._sort_counts)}
 
-    def __call__(self, x, indices) -> mx.array:
+    def __call__(self, x, indices, *, keep_sorted: bool = False) -> mx.array:
+        """Expert outputs ``[..., K, D]`` in route order.
+
+        ``keep_sorted=True`` (a caller that reduces the sorted rows itself,
+        e.g. ``qwen4_moe_weighted_sum``): when the gather ran sorted, return
+        ``(rows [N(+pad), 1, D] in sorted order, inv_order)`` instead of the
+        unsorted output; ``_scatter_unsort(rows, inv_order, indices.shape)
+        .squeeze(-2)`` is then exactly the default return.  An unsorted or
+        grouped route returns the plain output as usual.
+        """
         # Research path, default off (MLX2_MOE_GROUPED_EXPERTS): grouped-expert
         # q4 kernels for small batches (mlx-lm #2044); None declines.
         if _grouped.MODE != "off" and not _invariant.active():
@@ -557,6 +566,8 @@ class SwitchGLU(nn.Module):
         x_up = self.up_proj(x, idx, sorted_indices=do_sort)
         x_gate = self.gate_proj(x, idx, sorted_indices=do_sort)
         x = self.down_proj(self.activation(x_up, x_gate), idx, sorted_indices=do_sort)
+        if do_sort and keep_sorted:
+            return x, inv_order
         if do_sort:
             x = _scatter_unsort(x, inv_order, indices.shape)
         return x.squeeze(-2)
@@ -692,7 +703,8 @@ class GateUpFusedSwitchGLU(nn.Module):
     def fused_status(self) -> dict:
         return {"fused_calls": self._fused_calls, **self.sort_status()}
 
-    def __call__(self, x, indices) -> mx.array:
+    def __call__(self, x, indices, *, keep_sorted: bool = False) -> mx.array:
+        """As ``SwitchGLU.__call__`` (including ``keep_sorted``)."""
         x = mx.expand_dims(x, (-2, -3))
         token_length = int(indices.shape[-2]) if indices.ndim >= 2 else 1
         do_sort, counter = _switch_sort_decision(
@@ -716,6 +728,8 @@ class GateUpFusedSwitchGLU(nn.Module):
             idx,
             sorted_indices=do_sort,
         )
+        if do_sort and keep_sorted:
+            return x, inv_order
         if do_sort:
             x = _scatter_unsort(x, inv_order, indices.shape)
         return x.squeeze(-2)

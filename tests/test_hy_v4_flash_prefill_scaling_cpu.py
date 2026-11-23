@@ -315,9 +315,12 @@ def test_sparse_prefill_policy_key_namespace_and_receipt():
     assert receipt["observed_used"] is False and receipt["qualified"] is False
 
 
-def test_sparse_prefill_on_cpu_declines_to_the_bit_identical_dense_path(tiny_pair):
+def test_sparse_prefill_on_cpu_declines_to_the_bit_identical_dense_path(tiny_pair, monkeypatch):
     # The kernel is Metal-only: on the CPU every > 64-row indexed chunk takes
-    # the dense reference and counts a decline; outputs are unchanged.
+    # the dense reference and counts a decline; outputs are unchanged.  The
+    # served 4096-key floor would decline these tiny histories first.
+    from mlx2.runtime.models import hy_v4_flash as M
+    monkeypatch.setattr(M, "SPARSE_PREFILL_MIN_KEYS", 0)
     base, _ = tiny_pair
     a, _ = _run(base, [(0, 120), (120, 200)], LONG[200:204])
     base.set_sparse_prefill_attention(True)
@@ -373,3 +376,9 @@ def test_engram_plan_prefetches_its_rows_as_required(tiny_pair):
     finally:
         base.engram_rows = saved
     assert calls and all(kw == {"required": True} for kw in calls)
+
+
+def test_sparse_prefill_short_history_declines_as_short_context(tiny_pair):
+    """Below SPARSE_PREFILL_MIN_KEYS the dense fused path runs and the decline is counted."""
+    from mlx2.runtime.models import hy_v4_flash as M
+    assert M.SPARSE_PREFILL_MIN_KEYS == 4096

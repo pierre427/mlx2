@@ -126,6 +126,21 @@ their desired row may have been pruned. Outside a request, return the final row.
     return hidden[:, -1:]
 
 
+def open_checkpoint_rows(batch: int, width: int):
+    """Each lane's checkpoint row of the open, unapplied request; claims nothing.
+
+    None unless a request is open, has not been applied, and covers
+    ``batch`` lanes of ``width`` rows.  For a model that decides how to
+    narrow its head input (Hy4-flash pads the kept rows to a kernel-class
+    floor) before calling ``select_checkpoint_rows``.
+    """
+    request = _REQUEST.get()
+    if (request is None or request.applied or len(request.rows) != int(batch)
+            or request.width != int(width)):
+        return None
+    return request.rows
+
+
 def final_row_checkpoint_open(batch: int, width: int) -> bool:
     """``claim_final_row_checkpoint`` would succeed; claims nothing."""
     request = _REQUEST.get()
@@ -164,6 +179,7 @@ def claim_final_row_checkpoint(batch: int, width: int) -> bool:
 __all__ = [
     "claim_final_row_checkpoint",
     "final_row_checkpoint_open",
+    "open_checkpoint_rows",
     "prefill_checkpoint_rows",
     "select_checkpoint_rows",
     "select_checkpoint_rows_from_final_suffix",

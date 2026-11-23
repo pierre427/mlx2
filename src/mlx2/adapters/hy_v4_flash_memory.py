@@ -41,7 +41,12 @@ prefill chunk's working set: recall masks, the score blocks the attention and
 indexer chunk to ``SCORE_BUDGET`` (one block live with
 ``BOUNDED_SCORE_BLOCKS``; all of them without), projections of the widest
 attention layer, routed-expert gathers (fp32 around each gather on ``q2_0``
-layers) and the hyper-connection streams, summed as if live at once.  The
+layers), the hyper-connection streams and the fp32 vocabulary head's input
+and logits, summed as if live at once.  The head rows of a prompt chunk are
+the checkpoint rows padded to the head row floor (``prefill_head_trim``,
+default on); a verify forward reads every row's logits.  Before 2026-11-21 the
+head was not charged at all, although the prompt path then ran it over the
+whole chunk (about 1 GB of fp32 logits per 2048 rows).  The
 append-only copy a chunk's growth makes is charged once, by
 ``decode_transient_bytes``, on every path that charges a prefill.
 """
@@ -129,6 +134,11 @@ class HY4FlashCacheBudget:
     # Unmeasured on Hy4-flash: the controller's calibrated k=2 figure, which
     # it already charged this adapter before it declared a budget.
     transient_gib_per_lane: float = 1.76
+    # Vocabulary width of the fp32 head (0: head not charged).
+    vocab_size: int = 0
+    # Rows a prompt chunk projects through the head (the bitwise head row
+    # floor of ``prefill_head_trim``); None: every row (trim off).
+    prefill_head_rows: int | None = None
 
     @classmethod
     def from_model(cls, model, *, prefill_rows: int = 8192, verify_rows: int = 1,
@@ -143,14 +153,19 @@ class HY4FlashCacheBudget:
         item = model.model.embed_tokens(mx.array([[0]], dtype=mx.int32)).dtype.size
         q2 = any(isinstance(module, Q2ZeroSwitchLinear) for _, module in model.named_modules())
         formats = ("affine", "q2_0") if q2 else ("affine",)
+        head_rows = None
+        if getattr(model, "prefill_head_trim", False):
+            head_rows = int(model.head_row_floor()) or None
         return cls.from_args(model.args, item_bytes=item,
                              record_layers=len(getattr(model, "record_layers", ()) or ()),
                              prefill_rows=prefill_rows, verify_rows=verify_rows,
-                             child_chains=child_chains, expert_formats=formats)
+                             child_chains=child_chains, expert_formats=formats,
+                             prefill_head_rows=head_rows)
 
     @classmethod
     def from_args(cls, a, *, item_bytes: int, record_layers: int, prefill_rows: int = 8192,
-                  verify_rows: int = 1, child_chains: int = 0, expert_formats=("affine",)):
+                  verify_rows: int = 1, child_chains: int = 0, expert_formats=("affine",),
+                  prefill_head_rows: int | None = None):
         """Geometry of ``ModelArgs`` with ``item_bytes`` activations."""
         from ..runtime.models import hy_v4_flash as H
         from ..runtime.models.hy_v4_flash_fp8kv import native_row_bytes, row_bytes
@@ -205,6 +220,8 @@ class HY4FlashCacheBudget:
             child_chains=child_chains,
             expert_bytes_per_row=expert_bytes,
             media_prefill_rows=H.MEDIA_PREFILL_STEP,
+            vocab_size=int(a.vocab_size),
+            prefill_head_rows=prefill_head_rows,
         )
 
     @staticmethod
@@ -253,7 +270,8 @@ class HY4FlashCacheBudget:
         if n == 0:
             return {}
         grown = n + self.verify_rows
-        working = self.prefill_transient_parts(grown, self.verify_rows)
+        # A verify forward reads every row's logits.
+        working = self.prefill_transient_parts(grown, self.verify_rows, head_rows=self.verify_rows)
         return {
             "append_only_growth_copy": self.append_only_bytes(grown),
             "child_chain_copies": self.child_chains * (
@@ -276,10 +294,20 @@ class HY4FlashCacheBudget:
 
         return min(self.score_budget, elements) if H.BOUNDED_SCORE_BLOCKS else elements
 
-    def prefill_transient_parts(self, context_tokens: int, chunk_rows: int) -> dict:
+    def prefill_transient_parts(self, context_tokens: int, chunk_rows: int, *,
+                                head_rows: int | None = None, lanes: int = 1) -> dict:
+        """``lanes``: lanes sharing the forward (head rows only; every other
+        part stays per lane).  The trimmed head pads the kept rows to
+        ``max(floor, lanes)`` rows in total, so a batch wider than the floor
+        is charged its own row count; untrimmed, every row of every lane."""
         n, L = self._count(context_tokens), self._count(chunk_rows)
         if L == 0:
             return {}
+        if type(lanes) is not int or lanes < 1:
+            raise ValueError("Hy4-flash lanes must be a positive integer")
+        if head_rows is None:
+            head_rows = (min(L * lanes, max(self.prefill_head_rows, lanes)) if self.prefill_head_rows
+                         else L * lanes)
         D, s = self.hidden_size, self.hc_mult
         a = self.item_bytes
         K = self.candidate_topk
@@ -316,10 +344,12 @@ class HY4FlashCacheBudget:
             "projections": projections,
             "routed_experts": max(experts, dense),
             "streams": streams,
+            # fp32 head input and logits of the rows the head projects.
+            "head_logits": head_rows * (self.vocab_size + D) * 4 if self.vocab_size else 0,
         }
 
-    def prefill_transient_bytes(self, context_tokens: int, chunk_rows: int) -> int:
-        return sum(self.prefill_transient_parts(context_tokens, chunk_rows).values())
+    def prefill_transient_bytes(self, context_tokens: int, chunk_rows: int, *, lanes: int = 1) -> int:
+        return sum(self.prefill_transient_parts(context_tokens, chunk_rows, lanes=lanes).values())
 
     def media_prefill_transient_bytes(self, context_tokens: int, uncached_tokens: int) -> int:
         """A cold media prefill: one ``uncached_tokens`` chunk run in slices.
@@ -360,14 +390,16 @@ class HY4FlashCacheBudget:
 
     def as_dict(self):
         return dict(
-            schema="hy4-flash-cache-budget-v2",
+            schema="hy4-flash-cache-budget-v3",
             **asdict(self),
             bound=("retained: exact 256-row capacity of the indexed append-only planes, "
                    "sliding rings at the widest prefill chunk, pinned Index Share recalls"),
             transient_basis=("decode: append-only growth copy + one copy per tree child chain "
                              "+ verify working set (context-dependent); prefill: shape bound of "
                              "one chunk (recall masks, SCORE_BUDGET blocks, projections, expert "
-                             "gathers per layer format, streams), not a Metal measurement; "
+                             "gathers per layer format, streams, fp32 head rows: the "
+                             "checkpoint rows at the head row floor on a prompt chunk, every "
+                             "row on verify), not a Metal measurement; "
                              "flat 1.76 GiB/lane controller calibration on top, unmeasured"),
         )
 
