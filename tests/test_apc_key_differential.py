@@ -273,7 +273,8 @@ def test_default_environment_keeps_existing_namespaces():
     """All-default switches add no wrapper, so persisted default blocks keep
     their identity; explicit defaults count as default."""
     assert execution_numerics_identity({}) is None
-    defaults = {name: ("1" if kind == "default_on" else "masked" if kind == "tree_law" else "0")
+    defaults = {name: ("1" if kind == "default_on" else "masked" if kind == "tree_law"
+                       else kind.removeprefix("default=") if kind.startswith("default=") else "0")
                 for name, kind in CANDIDATE_ENV.items()}
     assert execution_numerics_identity(defaults) is None
     assert execution_numerics_identity({"MLX_GDN_CORE": "off", "MLX_ENABLE_TF32": ""}) is None

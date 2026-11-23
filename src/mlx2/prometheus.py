@@ -1683,9 +1683,58 @@ def _add_engram(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> Non
                       int(approximate))
 
 
+_MAXWELL_ROUTES = (("dense", "dense_calls"), ("gather", "sparse_gather_calls"),
+                   ("union", "sparse_union_calls"), ("masked", "sparse_masked_calls"))
+_MAXWELL_LEVERS = {"compile": {"True", "False"}, "mhc_kernel": {"True", "False"},
+                   "head": {"fp32", "bf16"}, "fused_qkv": {"True", "False"},
+                   "sparse_prefill": {"union", "masked"}}
+
+
+def _add_maxwell(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:
+    """Maxwell-V1-Flash Block Sparse GQA / MTP / kernel counters (``maxwell_attention``)."""
+    stats = execution.get("maxwell_attention")
+    if not isinstance(stats, Mapping):
+        return
+
+    def count(key):
+        value = stats.get(key)
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else 0
+
+    for route, key in _MAXWELL_ROUTES:
+        builder.counter("mlx2_maxwell_attention_calls_total",
+                        "Maxwell attention layer calls by route (dense SDPA <= 4096 tokens, sparse "
+                        "gather for decode/verify rows, sparse union or masked for long chunks).",
+                        count(key), {"route": route})
+    builder.counter("mlx2_maxwell_sparse_rows_total",
+                    "Query rows that attended through the Block Sparse GQA route.", count("sparse_rows"))
+    builder.counter("mlx2_maxwell_union_blocks_total",
+                    "128-token key blocks gathered by the sparse union route.", count("union_blocks"))
+    builder.counter("mlx2_maxwell_union_subchunks_total",
+                    "Query sub-chunks evaluated by the sparse union route.", count("union_subchunks"))
+    builder.counter("mlx2_maxwell_mtp_steps_total", "Native MTP draft-layer steps.", count("mtp_steps"))
+    for path, key in (("kernel", "kernel_calls"), ("fallback", "kernel_fallbacks")):
+        builder.counter("mlx2_maxwell_kernel_calls_total",
+                        "Opt-in Maxwell Metal kernel calls by path (kernel or fail-closed fallback).",
+                        count(key), {"path": path})
+    builder.counter("mlx2_maxwell_head_kernel_calls_total",
+                    "Vocabulary-head calls served by the bf16-weight fp32-math GEMV kernel.",
+                    count("head_kernel_calls"))
+    levers = stats.get("levers")
+    if isinstance(levers, Mapping):
+        for lever, allowed in _MAXWELL_LEVERS.items():
+            value = str(levers.get(lever))
+            builder.gauge("mlx2_maxwell_lever_info", "Maxwell execution lever in effect (value is always one).",
+                          1, {"lever": lever, "value": value if value in allowed else "other"})
+        rows = levers.get("gather_rows")
+        if isinstance(rows, int) and not isinstance(rows, bool):
+            builder.gauge("mlx2_maxwell_sparse_gather_rows",
+                          "Largest query chunk that gathers routed blocks.", rows)
+
+
 def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:
     """Export only reviewed advanced-path fields from adapter diagnostics."""
     _add_engram(builder, execution)
+    _add_maxwell(builder, execution)
 
     route = execution.get("speculative_route")
     if isinstance(route, str):

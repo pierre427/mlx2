@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MLX reference implementation of Maxwell-V1-Flash (``maxwell_moe``).
+"""MLX implementation of Maxwell-V1-Flash (``maxwell_moe``).
 
 The model-specific numerical law lives here (see ``provenance/maxwell-moe.json``;
 the source of truth is the checkpoint's own ``modeling_maxwell_moe.py``):
@@ -10,35 +10,130 @@ the source of truth is the checkpoint's own ``modeling_maxwell_moe.py``):
   an RMS-scaled fp32 projection of all streams, collapses the streams with
   ``h_pre``, runs the sub-block and writes ``h_post * out + h_res^T @ streams``.
   A learned ``hc_head`` contracts the streams before the final RMSNorm.
-* Attention: GQA with per-head QK RMSNorm and RoPE (base 2e7).  The checkpoint
-  routes every layer through Block Sparse GQA: fixed prefix blocks + local
-  blocks + 16 indexer-selected remote blocks of 128 tokens.  Whenever the
-  context is at most ``(prefix + local + remote) * block`` = 4,096 tokens the
-  route covers every causal block, so it equals dense causal attention
-  exactly; this module implements that regime and fails closed beyond it.
-  The indexer weights are loaded (strict closure) but not evaluated.
+* Attention: GQA with per-head QK RMSNorm and RoPE (base 2e7).  Every trunk
+  layer uses Block Sparse GQA: for each query and KV group the route is the
+  fixed prefix blocks (the first 1,024 tokens), the local blocks (the current
+  block and the 7 before it) and the 16 remote blocks of 128 tokens that score
+  highest under a per-group indexer (block score = max token score of a
+  4-head x 128 indexer query against one shared, post-RoPE indexer key).
+  Contexts of at most ``(prefix + local + remote) * block`` = 4,096 tokens are
+  covered completely, so there the route is dense causal attention and runs
+  through the fused SDPA kernel.  Beyond that the route is evaluated exactly:
+  decode and verify rows gather the 32 routed blocks per group; long prefill
+  chunks attend the union of their routed blocks (or, opt-in, a
+  block-membership mask).  Indexer keys are cached for every token, in fp32
+  (the reference's ``.float()`` of the bf16 key), as a parallel KV plane per
+  layer, so a context can cross 4,096 tokens at any point.
 * MoE (layers not in ``mlp_only_layers``): fp32 sigmoid scores, top-k chosen on
   ``scores + expert_bias`` (fp32), weights are the chosen *unbiased* scores
   renormalised to sum to one, plus an ungated shared expert.
 * Logits: an fp32 head over the post-norm hidden state.
+* Native MTP (one layer): ``enorm(embed(next token))`` and ``hnorm`` of each
+  trunk residual stream are projected and summed into a 4-stream input for one
+  dense-attention mHC MoE layer; its own ``hc_head`` and final norm feed the
+  shared fp32 head.  At draft depth 1 this is the reference; deeper drafts
+  feed the layer its own multi-stream output (an extrapolation: the
+  checkpoint trains one MTP layer and never chains it), so only depth 1 is
+  the trained law and verification keeps every depth exact.
 
-The native MTP layer is not implemented (its weights are dropped at load).
+Bit-preserving implementation choices (same arithmetic, fewer kernels): the
+fp32 weights the reference casts on every call (router, mHC mappings, lm_head)
+are stored fp32 once at load, the mHC and RMSNorm spans run as compiled
+graphs, and the head only sees the checkpoint rows the engine will read.
 """
 
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 
 import mlx.core as mx
 from mlx import nn
 
+from ..prefill_checkpoint_rows import select_checkpoint_rows
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
-from .cache import KVCache
+from .cache import BatchKVCache, KVCache
 from .switch_layers import SwitchGLU
 
 HC_EPS = 1e-6
+CACHE_LAYOUT = "maxwell-mhc-bsgqa-kv-indexer-planes-v1"
+
+# Rows at or below this query count gather the routed blocks; longer chunks
+# use the block-membership mask over the whole key range.
+SPARSE_GATHER_ROWS = int(os.environ.get("MLX2_MAXWELL_SPARSE_GATHER_ROWS", "16"))
+# Query rows scored against the indexer keys per chunk (bounds the fp32
+# token-score temporary at long context; the reference uses 64).
+INDEX_QUERY_CHUNK = int(os.environ.get("MLX2_MAXWELL_INDEX_QUERY_CHUNK", "64"))
+# Long-chunk sparse route: "union" gathers, per 64-query sub-chunk, the union
+# of the blocks any of its queries routes to (exact; attention cost follows
+# the route, not the context); "masked" attends the whole key range through a
+# block-membership mask (exact; dense cost).
+SPARSE_PREFILL = os.environ.get("MLX2_MAXWELL_SPARSE_PREFILL", "union")
+UNION_QUERY_CHUNK = int(os.environ.get("MLX2_MAXWELL_UNION_QUERY_CHUNK", "64"))
+if SPARSE_PREFILL not in ("union", "masked"):
+    raise ValueError("MLX2_MAXWELL_SPARSE_PREFILL must be union or masked")
+# Compiled mHC / norm spans (bit-identical to the eager graph).
+COMPILE_SPANS = os.environ.get("MLX2_MAXWELL_COMPILE", "1") != "0"
+# Opt-in execution levers (unqualified; summation order differs from the
+# compiled graph, arithmetic class unchanged -- see maxwell_moe_metal):
+#   MLX2_MAXWELL_MHC_KERNEL=1  fused Metal mHC pre/post kernels
+#   MLX2_MAXWELL_HEAD=bf16     bf16-resident head read by an fp32-math GEMV
+#   MLX2_MAXWELL_FUSED_QKV=1   one projection for q, k, v and the indexer key
+MHC_KERNEL = os.environ.get("MLX2_MAXWELL_MHC_KERNEL", "0") == "1"
+# The fused mHC kernel runs one threadgroup per token with a serial Sinkhorn,
+# which loses to the compiled span on long prefill chunks (32K TTFT 108 s ->
+# 240 s, qualification/runs/maxwell-full-t7-20261122-r2/mhc_kernel); it is used
+# for at most this many rows (decode and verify).
+MHC_KERNEL_MAX_ROWS = int(os.environ.get("MLX2_MAXWELL_MHC_KERNEL_MAX_ROWS", "16"))
+HEAD_MODE = os.environ.get("MLX2_MAXWELL_HEAD", "fp32")
+FUSED_QKV = os.environ.get("MLX2_MAXWELL_FUSED_QKV", "0") == "1"
+if HEAD_MODE not in ("fp32", "bf16"):
+    raise ValueError("MLX2_MAXWELL_HEAD must be fp32 or bf16")
+
+STATS = {"dense_calls": 0, "sparse_gather_calls": 0, "sparse_masked_calls": 0,
+         "sparse_union_calls": 0, "union_blocks": 0, "union_subchunks": 0,
+         "sparse_rows": 0, "mtp_steps": 0, "kernel_calls": 0, "kernel_fallbacks": 0,
+         "last_kernel_fallback": None, "head_kernel_calls": 0}
+_KERNEL_OK: set = set()
+_KERNEL_DISABLED: set = set()
+
+
+def _on_gpu() -> bool:
+    return mx.default_device() == mx.gpu
+
+
+def _kernel_call(key, fn, *args, **kwargs):
+    """Run an opt-in Metal kernel, or return None to fall back.
+
+    A specialization's first use is evaluated inside the guard (kernel output
+    is lazy, so a build/dispatch failure would otherwise surface later); a
+    failure disables that kernel family for the process."""
+    if key[0] in _KERNEL_DISABLED:
+        return None
+    try:
+        out = fn(*args, **kwargs)
+        if key not in _KERNEL_OK:
+            mx.eval(out)
+            _KERNEL_OK.add(key)
+    except Exception as exc:  # fail closed to the compiled graph
+        _KERNEL_DISABLED.add(key[0])
+        STATS["kernel_fallbacks"] += 1
+        STATS["last_kernel_fallback"] = f"{key[0]}: {type(exc).__name__}: {exc}"
+        return None
+    STATS["kernel_calls"] += 1
+    return out
+
+
+def maxwell_stats(reset: bool = False) -> dict:
+    out = dict(STATS, levers={"compile": COMPILE_SPANS, "mhc_kernel": MHC_KERNEL, "head": HEAD_MODE,
+                              "fused_qkv": FUSED_QKV, "gather_rows": SPARSE_GATHER_ROWS,
+                              "sparse_prefill": SPARSE_PREFILL})
+    if reset:
+        for k in STATS:
+            STATS[k] = None if k == "last_kernel_fallback" else 0
+    return out
 
 
 @dataclass
@@ -75,6 +170,8 @@ class ModelArgs(BaseModelArgs):
     use_shared_expert_gate: bool = False
     hidden_act: str = "silu"
     rope_scaling: dict | None = None
+    mtp_num_layers: int = 0
+    pad_token_id: int = 3
 
     def __post_init__(self):
         if self.model_type != "maxwell_moe":
@@ -88,6 +185,16 @@ class ModelArgs(BaseModelArgs):
             raise ValueError("Maxwell requires silu and unscaled RoPE")
         if self.tie_word_embeddings:
             raise ValueError("Maxwell has an untied lm_head")
+        if self.mtp_num_layers not in (0, 1):
+            raise ValueError("Maxwell supports zero or one MTP layer")
+        b = self.block_sparse_gqa_block_size
+        if (self.block_sparse_gqa_prefix_window_size % b
+                or self.block_sparse_gqa_local_window_size % b):
+            raise ValueError("Maxwell prefix/local windows must be whole blocks")
+        if self.block_sparse_gqa_indexer_n_heads != self.num_key_value_heads:
+            raise ValueError("Maxwell indexer groups must equal the KV heads")
+        if self.block_sparse_gqa_indexer_head_dim != self.attention_head_size:
+            raise ValueError("Maxwell indexer reuses the main RoPE; head dims must agree")
 
     @property
     def dense_context_limit(self) -> int:
@@ -98,11 +205,81 @@ class ModelArgs(BaseModelArgs):
                 + self.block_sparse_gqa_num_remote_blocks) * b
 
 
-def rms_norm(x, weight, eps):
-    """HF Maxwell RMSNorm: fp32 normalise, fp32 weight multiply, one rounding."""
+# --------------------------------------------------------------------------
+# compiled spans
+# --------------------------------------------------------------------------
+
+_COMPILED: dict = {}
+
+
+def _compiled(key, builder):
+    if not COMPILE_SPANS:
+        return builder()
+    fn = _COMPILED.get(key)
+    if fn is None:
+        fn = _COMPILED[key] = mx.compile(builder())
+    return fn
+
+
+def _rms_norm_body(x, weight, eps):
     xf = x.astype(mx.float32)
     xf = xf * mx.rsqrt(mx.mean(xf * xf, axis=-1, keepdims=True) + eps)
     return (weight.astype(mx.float32) * xf).astype(x.dtype)
+
+
+def rms_norm(x, weight, eps):
+    """HF Maxwell RMSNorm: fp32 normalise, fp32 weight multiply, one rounding."""
+    return _compiled(("rms", float(eps)), lambda: lambda a, w: _rms_norm_body(a, w, eps))(x, weight)
+
+
+def _hc_pre_body(x, w, alpha_pre, alpha_post, alpha_res, bias, *, n, iters):
+    """mHC mappings + stream collapse.  Returns (aggregated, h_post, h_res)."""
+    b, t, nc = x.shape
+    c = nc // n
+    xf = x.astype(mx.float32)
+    norm = mx.sqrt(mx.sum(xf * xf, axis=-1, keepdims=True))
+    r = 1.0 / (norm / math.sqrt(nc) + HC_EPS)
+    proj = xf @ w.astype(mx.float32).T
+    alpha = mx.concatenate([
+        mx.broadcast_to(alpha_pre, (n,)), mx.broadcast_to(alpha_post, (n,)),
+        mx.broadcast_to(alpha_res, (n * n,)),
+    ]).astype(mx.float32)
+    h = r * proj * alpha + bias.astype(mx.float32)
+    h_pre = (mx.sigmoid(h[..., :n]) + HC_EPS).astype(x.dtype)
+    h_post = (mx.sigmoid(h[..., n:2 * n]) * 2).astype(x.dtype)
+    m = mx.softmax(h[..., 2 * n:].reshape(b, t, n, n), axis=-1)
+    m = m + HC_EPS
+    m = m / (mx.sum(m, axis=-2, keepdims=True) + HC_EPS)
+    for _ in range(iters - 1):
+        m = m / (mx.sum(m, axis=-1, keepdims=True) + HC_EPS)
+        m = m / (mx.sum(m, axis=-2, keepdims=True) + HC_EPS)
+    s = x.reshape(b, t, n, c).astype(mx.float32)
+    agg = (s * h_pre.astype(mx.float32)[..., None]).sum(axis=2).astype(x.dtype)
+    return agg, h_post, m.astype(x.dtype)
+
+
+def _hc_post_body(out, residual, h_post, h_res, *, n):
+    b, t, c = out.shape
+    res = residual.reshape(b, t, n, c).astype(mx.float32)
+    mixed = mx.swapaxes(h_res.astype(mx.float32), -1, -2) @ res
+    expanded = h_post.astype(mx.float32)[..., None] * out.astype(mx.float32)[:, :, None, :]
+    return (expanded + mixed).astype(residual.dtype).reshape(b, t, n * c)
+
+
+def _hc_head_body(x, fn, base, scale, *, n):
+    b, t, nc = x.shape
+    c = nc // n
+    xf = x.astype(mx.float32)
+    rs = mx.rsqrt(mx.mean(xf * xf, axis=-1, keepdims=True) + HC_EPS)
+    mixes = (xf @ fn.astype(mx.float32).T) * rs
+    w = mx.sigmoid(mixes * scale.astype(mx.float32) + base.astype(mx.float32)) + HC_EPS
+    s = x.reshape(b, t, n, c).astype(mx.float32)
+    return (s * w[..., None]).sum(axis=2).astype(x.dtype)
+
+
+# --------------------------------------------------------------------------
+# modules
+# --------------------------------------------------------------------------
 
 
 class RMSNorm(nn.Module):
@@ -129,19 +306,46 @@ class MLP(nn.Module):
 
 
 class Indexer(nn.Module):
-    """Block Sparse GQA index branch; loaded, not evaluated in the dense regime."""
+    """Block Sparse GQA index branch: per-group queries, one shared key."""
 
     def __init__(self, args: ModelArgs):
         super().__init__()
-        g, d = args.block_sparse_gqa_indexer_n_heads, args.block_sparse_gqa_indexer_head_dim
+        self.groups = g = args.block_sparse_gqa_indexer_n_heads
+        self.head_dim = d = args.block_sparse_gqa_indexer_head_dim
+        self.scale = d ** -0.5
         self.linear_q_proj = nn.Linear(args.hidden_size, g * d, bias=False)
         self.linear_k_proj = nn.Linear(args.hidden_size, d, bias=False)
         self.q_layernorm = RMSNorm(d, args.rms_norm_eps)
         self.k_layernorm = RMSNorm(d, args.rms_norm_eps)
 
+    def queries(self, x):
+        b, t, _ = x.shape
+        q = self.linear_q_proj(x).reshape(b, t, self.groups, self.head_dim)
+        return self.q_layernorm(q).transpose(0, 2, 1, 3)
+
+
+def _row_padding(cache, width, dense_limit):
+    """Exact per-row (left, right) padding when this forward can leave the dense regime.
+
+    ``None`` for an unpadded plain ``KVCache`` or a forward that stays dense.
+    One host read per forward (the trunk's first plane; every plane shares the
+    layout).  Right padding is the current chunk's pending tail (``prepare``
+    sets it, ``finalize`` rolls it into left padding)."""
+    if type(cache) is not BatchKVCache:
+        return None              # unpadded, or refused by the attention when sparse
+    if cache._idx + width <= dense_limit:
+        return None
+    left = [int(v) for v in cache.left_padding.tolist()]
+    right = [0] * len(left)
+    pending = getattr(cache, "_right_padding", None)
+    if pending is not None:
+        host = getattr(cache, "_host_right_padding", None)
+        right = list(host[1]) if host is not None and host[0] is pending else [int(v) for v in pending.tolist()]
+    return list(zip(left, right))
+
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, *, sparse: bool = True):
         super().__init__()
         self.n_heads = args.num_attention_heads
         self.n_kv_heads = args.num_key_value_heads
@@ -154,33 +358,253 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(self.n_heads * self.head_dim, d, bias=False)
         self.q_layernorm = RMSNorm(self.head_dim, args.rms_norm_eps)
         self.k_layernorm = RMSNorm(self.head_dim, args.rms_norm_eps)
-        self.indexer = Indexer(args)
         self.rope = nn.RoPE(self.head_dim, traditional=False, base=args.rope_theta)
+        if sparse:
+            self.indexer = Indexer(args)
+        self.sparse = sparse
+        self.block = args.block_sparse_gqa_block_size
+        self.n_prefix = args.block_sparse_gqa_prefix_window_size // self.block
+        self.n_local = args.block_sparse_gqa_local_window_size // self.block
+        self.n_remote = args.block_sparse_gqa_num_remote_blocks
+        self.dense_limit = args.dense_context_limit
 
-    def __call__(self, x, mask=None, cache=None):
+    def fuse_projections(self):
+        """Replace q/k/v (+ indexer key) with one projection (same per-column dot products)."""
+        if "qkv_proj" in self:
+            return
+        projections = [self.q_proj, self.k_proj, self.v_proj]
+        if self.sparse:
+            projections.append(self.indexer.linear_k_proj)
+        if any(type(proj) is not nn.Linear for proj in projections):
+            return  # A packed projection has its own scales and cannot join the dense table.
+        parts = [proj.weight for proj in projections]
+        weight = mx.concatenate(parts, axis=0)
+        self.qkv_proj = nn.Linear(weight.shape[1], weight.shape[0], bias=False)
+        self.qkv_proj.weight = weight
+        self._split = [p.shape[0] for p in parts]
+        for name in ("q_proj", "k_proj", "v_proj"):
+            delattr(self, name)
+        if self.sparse:
+            delattr(self.indexer, "linear_k_proj")
+
+    def _project(self, x):
         b, t, _ = x.shape
-        q = self.q_layernorm(self.q_proj(x).reshape(b, t, self.n_heads, self.head_dim))
-        k = self.k_layernorm(self.k_proj(x).reshape(b, t, self.n_kv_heads, self.head_dim))
-        v = self.v_proj(x).reshape(b, t, self.n_kv_heads, self.head_dim)
+        if "qkv_proj" in self:
+            y = self.qkv_proj(x)
+            cuts, acc = [], 0
+            for size in self._split[:-1]:
+                acc += size
+                cuts.append(acc)
+            parts = mx.split(y, cuts, axis=-1)
+            q, k, v = parts[:3]
+            ik = parts[3] if self.sparse else None
+        else:
+            q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+            ik = self.indexer.linear_k_proj(x) if self.sparse else None
+        if ik is not None:
+            ik = self.indexer.k_layernorm(ik.reshape(b, t, 1, self.indexer.head_dim)).transpose(0, 2, 1, 3)
+        return q, k, v, ik
+
+    def __call__(self, x, mask=None, cache=None, index_cache=None, padding=None):
+        b, t, _ = x.shape
+        q, k, v, ik = self._project(x)
+        q = self.q_layernorm(q.reshape(b, t, self.n_heads, self.head_dim))
+        k = self.k_layernorm(k.reshape(b, t, self.n_kv_heads, self.head_dim))
+        v = v.reshape(b, t, self.n_kv_heads, self.head_dim)
         q, k, v = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
         offset = cache.offset if cache is not None else 0
+        if isinstance(offset, mx.array):
+            # BatchKVCache advances its offset array in place on update; the
+            # indexer queries are rotated after the update, so hold a copy.
+            offset = offset + 0
         q, k = self.rope(q, offset=offset), self.rope(k, offset=offset)
+        if self.sparse:
+            if cache is not None and index_cache is None:
+                raise ValueError("Maxwell sparse attention needs its indexer-key cache plane")
+            # fp32 plane: the reference scores ``index_key.float()``; a 1-wide
+            # value slice keeps the plane an ordinary KVCache without a copy.
+            ik = self.rope(ik, offset=offset).astype(mx.float32)
+            if index_cache is not None:
+                ik, _ = index_cache.update_and_fetch(ik, ik[..., :1])
         if cache is not None:
             k, v = cache.update_and_fetch(k, v)
-        y = scaled_dot_product_attention(q, k, v, cache=cache, scale=self.scale, mask=mask)
+            if self.sparse and ik.shape[2] != k.shape[2]:
+                raise RuntimeError(f"Maxwell trunk KV ({k.shape[2]}) and indexer plane ({ik.shape[2]}) "
+                                   "lengths diverged")
+        if not self.sparse or k.shape[2] <= self.dense_limit:
+            STATS["dense_calls"] += 1
+            y = scaled_dot_product_attention(q, k, v, cache=cache, scale=self.scale, mask=mask)
+        else:
+            if cache is not None and type(cache) not in (KVCache, BatchKVCache):
+                raise ValueError(
+                    "Maxwell Block Sparse GQA beyond the dense regime supports KVCache and "
+                    f"BatchKVCache only, not {type(cache).__name__}")
+            if b > 1 and padding is None and type(cache) is BatchKVCache:
+                raise ValueError("Maxwell sparse batch attention needs the row padding")
+            iq = self.rope(self.indexer.queries(x), offset=offset)
+            y = self._sparse(q, k, v, iq, ik, padding)
         return self.o_proj(y.transpose(0, 2, 1, 3).reshape(b, t, -1))
+
+    # ------------------------------------------------------------ sparse route
+
+    def _sparse(self, q, k, v, iq, ik, padding):
+        if q.shape[0] == 1 and not (padding and any(padding[0])):
+            return self._sparse_row(q, k, v, iq, ik)
+        if padding is None:
+            padding = [(0, 0)] * q.shape[0]
+        if len(padding) != q.shape[0]:
+            raise ValueError("Maxwell sparse batch padding does not match the batch")
+        rows = []
+        t, width = q.shape[2], k.shape[2]
+        heads, dim = q.shape[1], v.shape[3]
+        for r, (left, right) in enumerate(padding):
+            if left < 0 or right < 0 or right > t or left + right > width:
+                raise ValueError(f"Maxwell sparse row {r} padding ({left}, {right}) is outside the cache")
+            length, end = width - left - right, t - right                   # real keys; real queries end
+            valid = min(end, length)
+            parts = []
+            if end - valid > 0:
+                parts.append(mx.zeros((1, heads, end - valid, dim), v.dtype))
+            if valid > 0:
+                parts.append(self._sparse_row(q[r:r + 1, :, end - valid:end], k[r:r + 1, :, left:width - right],
+                                              v[r:r + 1, :, left:width - right], iq[r:r + 1, :, end - valid:end],
+                                              ik[r:r + 1, :, left:width - right]))
+            if right:
+                parts.append(mx.zeros((1, heads, right, dim), v.dtype))
+            rows.append(parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=2))
+        return mx.concatenate(rows, axis=0)
+
+    def _route(self, iq, ik, length, t):
+        """Per-group routed block ids ``[1, G, t, prefix + remote + local]`` (-1 = none)."""
+        bs = self.block
+        first = length - t
+        cb = mx.arange(first, length) // bs                                  # [t]
+        local_start = mx.maximum(cb - self.n_local + 1, 0)                   # [t] block ids
+        hi_block = max((length - 1) // bs - self.n_local + 1, 0)             # host: largest local start
+        groups = iq.shape[1]
+        remote = None
+        if hi_block > self.n_prefix:
+            keys = ik[:, :, : hi_block * bs]                                 # [1, 1, hi, d] fp32 plane
+            if keys.dtype != mx.float32:
+                keys = keys.astype(mx.float32)
+            nb = hi_block
+            blk = mx.arange(nb)
+            picks = []
+            # Bound the fp32 token-score temporary to ~256 MB at long context.
+            step = max(1, min(INDEX_QUERY_CHUNK, (1 << 26) // max(1, groups * hi_block * bs)))
+            for s0 in range(0, t, step):
+                s1 = min(t, s0 + step)
+                scores = (iq[:, :, s0:s1].astype(mx.float32) @ mx.swapaxes(keys, -1, -2)) * self.indexer.scale
+                scores = scores.reshape(1, groups, s1 - s0, nb, bs).max(axis=-1)
+                eligible = (blk[None, :] >= self.n_prefix) & (blk[None, :] < local_start[s0:s1, None])
+                scores = mx.where(eligible[None, None], scores, -mx.inf)
+                kk = min(self.n_remote, nb)
+                idx = mx.argpartition(-scores, kth=kk - 1, axis=-1)[..., :kk].astype(mx.int32)
+                val = mx.take_along_axis(scores, idx, axis=-1)
+                idx = mx.where(mx.isfinite(val), idx, -1)
+                picks.append(idx)
+            remote = mx.concatenate(picks, axis=2) if len(picks) > 1 else picks[0]
+            if remote.shape[-1] < self.n_remote:
+                remote = mx.concatenate(
+                    [remote, mx.full((*remote.shape[:-1], self.n_remote - remote.shape[-1]), -1, remote.dtype)], -1)
+        if remote is None:
+            remote = mx.full((1, groups, t, self.n_remote), -1, mx.int32)
+        remote = remote.astype(mx.int32)
+        prefix = mx.arange(self.n_prefix)[None, :]
+        prefix = mx.where(prefix <= cb[:, None], prefix, -1)
+        local = cb[:, None] + mx.arange(1 - self.n_local, 1)[None, :]
+        local = mx.where(local >= self.n_prefix, local, -1)
+        fixed = lambda a: mx.broadcast_to(a.astype(mx.int32)[None, None], (1, groups, t, a.shape[-1]))
+        return mx.concatenate([fixed(prefix), remote, fixed(local)], axis=-1)
+
+    def _sparse_row(self, q, k, v, iq, ik):
+        """One unpadded row: queries are the last ``t`` of ``length`` positions."""
+        t, length = q.shape[2], k.shape[2]
+        if length <= self.dense_limit:
+            STATS["dense_calls"] += 1
+            return scaled_dot_product_attention(q, k, v, cache=None, scale=self.scale,
+                                                mask="causal" if t > 1 else None)
+        STATS["sparse_rows"] += t
+        route = self._route(iq, ik, length, t)                               # [1, G, t, R]
+        groups, heads = k.shape[1], q.shape[1]
+        per = heads // groups
+        bs = self.block
+        qpos = mx.arange(length - t, length)
+        if t <= SPARSE_GATHER_ROWS:
+            STATS["sparse_gather_calls"] += 1
+            tok = route[..., None] * bs + mx.arange(bs)                       # [1, G, t, R, bs]
+            span = tok.shape[3] * bs
+            tok = tok.reshape(1, groups, t, span)
+            valid = (mx.repeat(route, bs, axis=-1) >= 0) & (tok <= qpos[None, None, :, None])
+            tok = mx.clip(tok, 0, length - 1).reshape(groups, t * span, 1)
+            kg = mx.take_along_axis(k[0], tok, axis=1).reshape(groups * t, 1, span, -1)
+            vg = mx.take_along_axis(v[0], tok, axis=1).reshape(groups * t, 1, span, -1)
+            qq = q[0].reshape(groups, per, t, -1).transpose(0, 2, 1, 3).reshape(groups * t, per, 1, -1)
+            mask = valid.reshape(groups * t, 1, 1, span)
+            y = mx.fast.scaled_dot_product_attention(qq, kg, vg, scale=self.scale, mask=mask)
+            return y.reshape(groups, t, per, -1).transpose(0, 2, 1, 3).reshape(1, heads, t, -1)
+        nb = (length + bs - 1) // bs
+        slot = mx.where(route >= 0, route, nb)                               # [1, G, t, R]
+        member = mx.zeros((1, groups, t, nb + 1), dtype=mx.bool_)
+        member = mx.put_along_axis(member, slot, mx.array(True), axis=-1)[..., :nb]
+        if SPARSE_PREFILL == "union":
+            return self._sparse_union(q, k, v, member, qpos, length)
+        STATS["sparse_masked_calls"] += 1
+        causal = mx.arange(length)[None, :] <= qpos[:, None]                 # [t, L]
+        outs = []
+        for g in range(groups):
+            mask = mx.repeat(member[:, g:g + 1], bs, axis=-1)[..., :length] & causal[None, None]
+            outs.append(mx.fast.scaled_dot_product_attention(
+                q[:, g * per:(g + 1) * per], k[:, g:g + 1], v[:, g:g + 1], scale=self.scale, mask=mask))
+        return mx.concatenate(outs, axis=1)
+
+    def _sparse_union(self, q, k, v, member, qpos, length):
+        """Exact block-sparse attention over each sub-chunk's union of routed blocks."""
+        STATS["sparse_union_calls"] += 1
+        groups, heads, t = k.shape[1], q.shape[1], q.shape[2]
+        per, bs, nb = heads // groups, self.block, member.shape[-1]
+        step = max(1, UNION_QUERY_CHUNK)
+        starts = list(range(0, t, step))
+        pad = len(starts) * step - t
+        m = member[0]                                                        # [G, t, nb]
+        if pad:
+            m = mx.concatenate([m, mx.zeros((groups, pad, nb), dtype=mx.bool_)], axis=1)
+        union = m.reshape(groups, len(starts), step, nb).any(axis=(0, 2))    # [S, nb]
+        counts = union.sum(axis=-1).tolist()                                 # one host read per layer chunk
+        ids = mx.arange(nb)
+        order = mx.argsort(mx.where(union, ids, nb + ids), axis=-1)          # members first, ascending
+        offsets = mx.arange(bs)
+        outs = []
+        for s_i, s0 in enumerate(starts):
+            s1 = min(t, s0 + step)
+            u = int(counts[s_i])
+            STATS["union_subchunks"] += 1
+            STATS["union_blocks"] += u
+            blocks = order[s_i, :u]                                          # [U]
+            tok = (blocks[:, None] * bs + offsets[None, :]).reshape(-1)      # [U * bs]
+            inside = tok < length
+            tok_c = mx.minimum(tok, length - 1)
+            kg = mx.take(k, tok_c, axis=2)                                   # [1, G, U*bs, D]
+            vg = mx.take(v, tok_c, axis=2)
+            sel = mx.take(member[0, :, s0:s1], blocks, axis=-1)              # [G, c, U]
+            sel = mx.repeat(sel, bs, axis=-1)                                # [G, c, U*bs]
+            ok = sel & inside[None, None, :] & (tok[None, None, :] <= qpos[s0:s1][None, :, None])
+            mask = mx.broadcast_to(ok[:, None], (groups, per, s1 - s0, ok.shape[-1]))
+            mask = mask.reshape(1, heads, s1 - s0, ok.shape[-1])
+            outs.append(mx.fast.scaled_dot_product_attention(
+                q[:, :, s0:s1], kg, vg, scale=self.scale, mask=mask))
+        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
 
 class Router(nn.Module):
     """fp32 sigmoid scores; top-k on scores + expert_bias; renormalised unbiased weights.
 
-    Returns ``(ids, weights)`` using the Laguna router contract.
-    """
+    Returns ``(ids, weights)`` using the Laguna router contract.  The weight is stored fp32 at load."""
 
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.top_k = args.num_experts_per_tok
-        self.weight = mx.zeros((args.num_experts, args.hidden_size))
+        self.weight = mx.zeros((args.num_experts, args.hidden_size), dtype=mx.float32)
         self.expert_bias = mx.zeros((args.num_experts,), dtype=mx.float32)
 
     def __call__(self, x):
@@ -217,50 +641,53 @@ class HyperConnection(nn.Module):
         self.hidden_size = args.hidden_size
         self.iterations = args.mhc_sinkhorn_iterations
         self.mapping_proj = nn.Linear(n * args.hidden_size, n * n + 2 * n, bias=False)
+        self.mapping_proj.weight = self.mapping_proj.weight.astype(mx.float32)
         self.alpha_pre = mx.zeros((1,))
         self.alpha_post = mx.zeros((1,))
         self.alpha_res = mx.zeros((1,))
         self.bias = mx.zeros((n * n + 2 * n,))
 
-    def mappings(self, x):
-        b, t, nc = x.shape
+    def pre(self, x):
+        """(collapsed sub-block input, h_post, h_res)."""
+        n, iters = self.n, self.iterations
+        if (MHC_KERNEL and _on_gpu() and n == 4 and x.shape[0] * x.shape[1] <= MHC_KERNEL_MAX_ROWS
+                and x.dtype in (mx.bfloat16, mx.float16, mx.float32)):
+            from .maxwell_moe_metal import mhc_pre, pack_params
+
+            parts = (self.alpha_pre, self.alpha_post, self.alpha_res, self.bias)
+            cached = getattr(self, "_packed", None)
+            # Keyed on the parameter arrays themselves (an id() would outlive a
+            # freed array whose address is reused).
+            if cached is None or any(a is not b for a, b in zip(cached[0], parts)):
+                cached = (parts, pack_params(*parts, HC_EPS))
+                object.__setattr__(self, "_packed", cached)
+            params = cached[1]
+            out = _kernel_call(("mhc_pre", x.shape[-1], x.dtype, iters), mhc_pre,
+                               x, self.mapping_proj.weight.astype(mx.float32), params, iters=iters)
+            if out is not None:
+                return out
+        fn = _compiled(("hc_pre", n, iters),
+                       lambda: lambda *a: _hc_pre_body(*a, n=n, iters=iters))
+        return fn(x, self.mapping_proj.weight, self.alpha_pre, self.alpha_post, self.alpha_res, self.bias)
+
+    def post(self, out, residual, h_post, h_res):
         n = self.n
-        xf = x.astype(mx.float32)
-        norm = mx.sqrt(mx.sum(xf * xf, axis=-1, keepdims=True))
-        r = 1.0 / (norm / math.sqrt(nc) + HC_EPS)
-        proj = xf @ self.mapping_proj.weight.astype(mx.float32).T
-        alpha = mx.concatenate([
-            mx.broadcast_to(self.alpha_pre, (n,)), mx.broadcast_to(self.alpha_post, (n,)),
-            mx.broadcast_to(self.alpha_res, (n * n,)),
-        ]).astype(mx.float32)
-        h = r * proj * alpha + self.bias.astype(mx.float32)
-        h_pre = (mx.sigmoid(h[..., :n]) + HC_EPS).astype(x.dtype)
-        h_post = (mx.sigmoid(h[..., n:2 * n]) * 2).astype(x.dtype)
-        m = mx.softmax(h[..., 2 * n:].reshape(b, t, n, n), axis=-1)
-        m = m + HC_EPS
-        m = m / (mx.sum(m, axis=-2, keepdims=True) + HC_EPS)
-        for _ in range(self.iterations - 1):
-            m = m / (mx.sum(m, axis=-1, keepdims=True) + HC_EPS)
-            m = m / (mx.sum(m, axis=-2, keepdims=True) + HC_EPS)
-        return h_pre, h_post, m.astype(x.dtype)
+        if (MHC_KERNEL and _on_gpu() and n == 4 and out.shape[0] * out.shape[1] <= MHC_KERNEL_MAX_ROWS
+                and residual.dtype in (mx.bfloat16, mx.float16, mx.float32)):
+            from .maxwell_moe_metal import mhc_post
 
-    def aggregate(self, x, h_pre):
-        b, t, _ = x.shape
-        s = x.reshape(b, t, self.n, self.hidden_size).astype(mx.float32)
-        return (s * h_pre.astype(mx.float32)[..., None]).sum(axis=2).astype(x.dtype)
-
-    def expand_and_mix(self, out, residual, h_post, h_res):
-        b, t, c = out.shape
-        res = residual.reshape(b, t, self.n, c).astype(mx.float32)
-        mixed = mx.swapaxes(h_res.astype(mx.float32), -1, -2) @ res
-        expanded = h_post.astype(mx.float32)[..., None] * out.astype(mx.float32)[:, :, None, :]
-        return (expanded + mixed).astype(residual.dtype).reshape(b, t, self.n * c)
+            fused = _kernel_call(("mhc_post", residual.shape[-1], residual.dtype), mhc_post,
+                                 out, residual, h_post, h_res)
+            if fused is not None:
+                return fused
+        return _compiled(("hc_post", n), lambda: lambda *a: _hc_post_body(*a, n=n))(
+            out, residual, h_post, h_res)
 
 
 class Layer(nn.Module):
-    def __init__(self, args: ModelArgs, index: int):
+    def __init__(self, args: ModelArgs, index: int, *, sparse: bool = True):
         super().__init__()
-        self.self_attn = Attention(args)
+        self.self_attn = Attention(args, sparse=sparse)
         self.mlp = (MLP(args.hidden_size, args.intermediate_size)
                     if index in set(args.mlp_only_layers) else SparseMoE(args))
         self.input_layernorm = RMSNorm(args.hidden_size, args.rms_norm_eps)
@@ -268,15 +695,15 @@ class Layer(nn.Module):
         self.self_attn_hyper_connection = HyperConnection(args)
         self.mlp_hyper_connection = HyperConnection(args)
 
-    def __call__(self, x, mask=None, cache=None):
+    def __call__(self, x, mask=None, cache=None, index_cache=None, padding=None):
         hc = self.self_attn_hyper_connection
-        h_pre, h_post, h_res = hc.mappings(x)
-        a = self.self_attn(self.input_layernorm(hc.aggregate(x, h_pre)), mask, cache)
-        x = hc.expand_and_mix(a, x, h_post, h_res)
+        a, h_post, h_res = hc.pre(x)
+        a = self.self_attn(self.input_layernorm(a), mask, cache, index_cache, padding)
+        x = hc.post(a, x, h_post, h_res)
         hc = self.mlp_hyper_connection
-        h_pre, h_post, h_res = hc.mappings(x)
-        m = self.mlp(self.post_attention_layernorm(hc.aggregate(x, h_pre)))
-        return hc.expand_and_mix(m, x, h_post, h_res)
+        m, h_post, h_res = hc.pre(x)
+        m = self.mlp(self.post_attention_layernorm(m))
+        return hc.post(m, x, h_post, h_res)
 
 
 class FinalNorm(nn.Module):
@@ -290,19 +717,14 @@ class FinalNorm(nn.Module):
         n, c = args.num_residual_streams, args.hidden_size
         self.n, self.hidden_size, self.eps = n, c, args.rms_norm_eps
         self.weight = mx.ones((c,))
-        self.hc_head_fn = mx.zeros((n, n * c))
+        self.hc_head_fn = mx.zeros((n, n * c), dtype=mx.float32)
         self.hc_head_base = mx.zeros((n,))
         self.hc_head_scale = mx.ones((1,))
 
     def contract(self, x):
-        b, t, _ = x.shape
-        xf = x.astype(mx.float32)
-        rs = mx.rsqrt(mx.mean(xf * xf, axis=-1, keepdims=True) + HC_EPS)
-        mixes = (xf @ self.hc_head_fn.astype(mx.float32).T) * rs
-        w = mx.sigmoid(mixes * self.hc_head_scale.astype(mx.float32)
-                       + self.hc_head_base.astype(mx.float32)) + HC_EPS
-        s = x.reshape(b, t, self.n, self.hidden_size).astype(mx.float32)
-        return (s * w[..., None]).sum(axis=2).astype(x.dtype)
+        n = self.n
+        return _compiled(("hc_head", n), lambda: lambda *a: _hc_head_body(*a, n=n))(
+            x, self.hc_head_fn, self.hc_head_base, self.hc_head_scale)
 
     def __call__(self, x):
         return rms_norm(self.contract(x), self.weight, self.eps)
@@ -322,39 +744,104 @@ class Decoder(nn.Module):
         n = self.args.num_residual_streams
         return mx.broadcast_to(h[:, :, None, :], (b, t, n, c)).reshape(b, t, n * c)
 
-    def __call__(self, inputs, cache=None, capture=None):
+    def __call__(self, inputs, cache=None, capture=None, return_streams=False):
+        n = len(self.layers)
         if cache is None:
-            cache = [None] * len(self.layers)
-        offset = cache[0].offset if cache[0] is not None else 0
-        limit = self.args.dense_context_limit
-        if offset + inputs.shape[1] > limit:
-            raise ValueError(
-                f"Maxwell Block Sparse GQA is implemented only in its dense regime "
-                f"(context <= {limit} tokens); refusing {offset + inputs.shape[1]}")
+            cache = [None] * (2 * n)
+        if len(cache) != 2 * n:
+            raise ValueError(f"Maxwell cache must hold {n} trunk and {n} indexer planes, got {len(cache)}")
+        main, index = cache[:n], cache[n:]
+        first = main[0]
+        # Padded width bounds every row's real length (batch offsets are device arrays).
+        reach = first.offset if type(first) is KVCache else getattr(first, "_idx", 0) if first is not None else 0
+        if int(reach) + inputs.shape[1] > self.args.max_position_embeddings:
+            raise ValueError(f"Maxwell context exceeds {self.args.max_position_embeddings} positions")
         h = self.expand(inputs)
-        mask = create_attention_mask(h, cache[0])
-        for i, (layer, c) in enumerate(zip(self.layers, cache, strict=True)):
-            h = layer(h, mask, c)
+        mask = create_attention_mask(h, main[0])
+        padding = _row_padding(main[0], inputs.shape[1], self.args.dense_context_limit)
+        for i, (layer, c, ic) in enumerate(zip(self.layers, main, index, strict=True)):
+            h = layer(h, mask, c, ic, padding)
             if capture is not None and i in capture:
                 capture[i] = h          # multi-stream residual after block i
-        return self.norm(h)
+        out = self.norm(h)
+        return (out, h) if return_streams else out
+
+
+class MTP(nn.Module):
+    """Native MTP layer (``mtp_layers.0`` in the checkpoint)."""
+
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        c = args.hidden_size
+        self.n = args.num_residual_streams
+        self.enorm = RMSNorm(c, args.rms_norm_eps)
+        self.hnorm = RMSNorm(c, args.rms_norm_eps)
+        self.e_proj = nn.Linear(c, c, bias=False)
+        self.h_proj = nn.Linear(c, c, bias=False)
+        # The MTP decoder layer uses plain (dense) attention, no indexer.
+        self.layer = Layer(args, args.num_hidden_layers, sparse=False)
+        self.norm = FinalNorm(args)
+
+    def __call__(self, streams, embeddings, cache):
+        b, s, nc = streams.shape
+        c = nc // self.n
+        e = self.e_proj(self.enorm(embeddings))
+        h = self.h_proj(self.hnorm(streams.reshape(b, s, self.n, c)))
+        x = (e[:, :, None, :] + h).reshape(b, s, nc)
+        mask = create_attention_mask(x, cache)
+        return self.layer(x, mask, cache)
 
 
 class Model(nn.Module):
+    apc_v2_layout = CACHE_LAYOUT
+    supports_speculative_rollback = True
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
         self.model_type = args.model_type
         self.model = Decoder(args)
         self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
+        self.head_mode = HEAD_MODE
+        self.lm_head.weight = self.lm_head.weight.astype(mx.float32 if HEAD_MODE == "fp32" else mx.bfloat16)
+        if args.mtp_num_layers:
+            self.mtp = MTP(args)
         self.completed_forwards = 0
+
+    @property
+    def has_mtp(self) -> bool:
+        return "mtp" in self
 
     def logits_from_hidden(self, h):
         """The reference head: fp32 linear over the post-norm hidden state."""
-        return h.astype(mx.float32) @ self.lm_head.weight.astype(mx.float32).T
+        if isinstance(self.lm_head, nn.QuantizedLinear):
+            # Quantized artifact: dequantized weights, fp32 activations and logits.
+            return self.lm_head(h.astype(mx.float32)).astype(mx.float32)
+        w = self.lm_head.weight
+        if w.dtype == mx.bfloat16 and _on_gpu():
+            from .maxwell_moe_metal import HEAD_MAX_ROWS, head_gemv
+
+            rows = 1
+            for size in h.shape[:-1]:
+                rows *= size
+            if rows <= HEAD_MAX_ROWS:
+                out = _kernel_call(("head_gemv", rows, h.shape[-1]), head_gemv, h, w)
+                if out is not None:
+                    STATS["head_kernel_calls"] += 1
+                    return out
+        return h.astype(mx.float32) @ w.astype(mx.float32).T
+
+    def fuse_projections(self):
+        """Opt-in (``MLX2_MAXWELL_FUSED_QKV``): one input projection per attention."""
+        for layer in self.model.layers:
+            layer.self_attn.fuse_projections()
+        if self.has_mtp:
+            self.mtp.layer.self_attn.fuse_projections()
+
+    logits = logits_from_hidden
 
     def __call__(self, inputs, cache=None):
-        out = self.logits_from_hidden(self.model(inputs, cache))
+        out = self.logits_from_hidden(select_checkpoint_rows(self.model(inputs, cache)))
         self.completed_forwards += 1
         return out
 
@@ -363,53 +850,195 @@ class Model(nn.Module):
         return self.model.layers
 
     def make_cache(self, max_kv_size=None):
-        return [KVCache() for _ in self.model.layers]
+        """Trunk KV planes for every layer, then one indexer-key plane per layer.
 
-    def sanitize(self, weights, *, eager=False):
-        """Checkpoint names -> this module tree; per-expert tensors -> SwitchGLU tables.
+        The indexer plane stores the post-RoPE fp32 indexer key as the K of a
+        one-head ``KVCache`` (its V is a 1-wide slice of it) so every generic
+        cache operation (trim, batch merge/extract, APCv2 capture) treats it as
+        ordinary KV."""
+        n = len(self.model.layers)
+        return [KVCache() for _ in range(2 * n)]
 
-        Drops the native MTP layer (not implemented)."""
+    # ------------------------------------------------------------ native MTP
+
+    def mtp_backbone(self, inputs, cache=None):
+        """(post-norm hidden for the head, final multi-stream residual = MTP seed)."""
+        hidden, streams = self.model(inputs, cache, return_streams=True)
+        self.completed_forwards += 1
+        return hidden, streams
+
+    def make_mtp_cache(self):
+        if not self.has_mtp:
+            raise RuntimeError("Maxwell MTP head is not loaded")
+        return [KVCache()]
+
+    def mtp_step(self, hidden, tokens, mtp_cache):
+        """Advance the MTP pair stream.
+
+        ``hidden`` is the multi-stream residual at positions p.. (the trunk's
+        final streams, or a previous step's MTP streams when chaining) and
+        ``tokens`` the tokens at p+1..  The private cache offset counts pairs,
+        a uniform shift of absolute positions that cancels inside the layer's
+        own attention.  Returns (fp32 logits, MTP multi-stream output)."""
+        if not self.has_mtp:
+            raise RuntimeError("Maxwell MTP head is not loaded")
+        if not isinstance(mtp_cache, list) or len(mtp_cache) != 1:
+            raise ValueError("Maxwell MTP requires one private cache")
+        STATS["mtp_steps"] += 1
+        embeddings = self.model.embed_tokens(tokens)
+        # The activation dtype (a quantized embedding's weight is uint32).
+        streams = self.mtp(hidden.astype(embeddings.dtype), embeddings, mtp_cache[0])
+        return self.logits_from_hidden(self.mtp.norm(streams)), streams
+
+    # ------------------------------------------------------------ weights
+
+    def _pack_moe(self, weights, src, dst, layer, *, dense, eager):
         a = self.args
         proj = {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}
-        for name in [k for k in weights if k.startswith("mtp_layers.")]:
-            weights.pop(name)
-        for suffix in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
-            key = f"model.hc_head.{suffix}"
+        parts = ("weight", "scales", "biases")          # affine-quantized artifacts carry all three
+        if dense:
+            for w, p in proj.items():
+                for part in parts:
+                    if f"{src}.{w}.{part}" in weights:
+                        weights[f"{dst}.{p}.{part}"] = weights.pop(f"{src}.{w}.{part}")
+            return
+        for key, new in ((f"{src}.gate.weight", f"{dst}.gate.weight"),
+                         (f"{src}.expert_bias", f"{dst}.gate.expert_bias")):
             if key in weights:
-                weights[f"model.norm.{suffix}"] = weights.pop(key)
-        for layer in range(a.num_hidden_layers):
-            src = f"model.layers.{layer}.block_sparse_moe"
-            dst = f"model.layers.{layer}.mlp"
-            if layer in set(a.mlp_only_layers):
-                for w, p in proj.items():
-                    if f"{src}.{w}.weight" in weights:
-                        weights[f"{dst}.{p}.weight"] = weights.pop(f"{src}.{w}.weight")
-                continue
-            for key, new in ((f"{src}.gate.weight", f"{dst}.gate.weight"),
-                             (f"{src}.expert_bias", f"{dst}.gate.expert_bias")):
+                # fp32 resident: the router runs in fp32, and the expert bias'
+                # per-expert spread is below one bf16 step
+                weights[new] = weights.pop(key).astype(mx.float32)
+        for w, p in proj.items():
+            for part in parts:
+                key = f"{src}.shared_expert.{w}.{part}"
                 if key in weights:
-                    weights[new] = weights.pop(key)
-            bias = f"{dst}.gate.expert_bias"
-            if bias in weights:
-                # stored fp32; its per-expert spread is below one bf16 step
-                weights[bias] = weights[bias].astype(mx.float32)
-            for w, p in proj.items():
-                key = f"{src}.shared_expert.{w}.weight"
-                if key in weights:
-                    weights[f"{dst}.shared_expert.{p}.weight"] = weights.pop(key)
-            packed = []
-            for w, p in proj.items():
-                names = [f"{src}.experts.{e}.{w}.weight" for e in range(a.num_experts)]
+                    weights[f"{dst}.shared_expert.{p}.{part}"] = weights.pop(key)
+        packed = []
+        for w, p in proj.items():
+            for part in parts:
+                names = [f"{src}.experts.{e}.{w}.{part}" for e in range(a.num_experts)]
                 present = [n in weights for n in names]
                 if not any(present):
                     continue
                 if not all(present):
                     raise ValueError(f"Maxwell layer {layer} has an incomplete {w} expert table")
-                parts = [weights.pop(n) for n in names]
-                value = mx.stack(parts)
-                weights[f"{dst}.switch_mlp.{p}.weight"] = value
+                value = mx.stack([weights.pop(n) for n in names])
+                weights[f"{dst}.switch_mlp.{p}.{part}"] = value
                 packed.append(value)
-            if eager and packed:
-                mx.eval(packed)
-                mx.clear_cache()
+        if eager and packed:
+            mx.eval(packed)
+            mx.clear_cache()
+
+    def sanitize(self, weights, *, eager=False):
+        """Checkpoint names -> this module tree; per-expert tensors -> SwitchGLU tables.
+
+        Keeps the native MTP layer when the model was built with one and drops
+        it otherwise.  Stores the weights the reference casts to fp32 on every
+        call (router, mHC mappings, hc_head, lm_head) as fp32."""
+        a = self.args
+        mtp = [k for k in weights if k.startswith("mtp_layers.")]
+        if not a.mtp_num_layers:
+            for name in mtp:
+                weights.pop(name)
+        else:
+            if any(not k.startswith("mtp_layers.0.") for k in mtp):
+                raise ValueError("Maxwell checkpoint carries more than one MTP layer")
+            if not mtp:
+                raise ValueError("Maxwell MTP model requires mtp_layers.0 tensors")
+            for name in mtp:
+                rest = name.removeprefix("mtp_layers.0.")
+                if rest.startswith("decoder_layer."):
+                    rest = "layer." + rest.removeprefix("decoder_layer.")
+                elif rest.startswith("hc_head."):
+                    rest = "norm." + rest.removeprefix("hc_head.")
+                elif rest == "final_layernorm.weight":
+                    rest = "norm.weight"
+                weights[f"mtp.{rest}"] = weights.pop(name)
+            src = "mtp.layer.block_sparse_moe"
+            if any(k.startswith(src + ".") for k in weights):
+                self._pack_moe(weights, src, "mtp.layer.mlp", "mtp", dense=False, eager=eager)
+        for suffix in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
+            key = f"model.hc_head.{suffix}"
+            if key in weights:
+                weights[f"model.norm.{suffix}"] = weights.pop(key)
+        for layer in range(a.num_hidden_layers):
+            self._pack_moe(weights, f"model.layers.{layer}.block_sparse_moe", f"model.layers.{layer}.mlp",
+                           layer, dense=layer in set(a.mlp_only_layers), eager=eager)
+        for name in [n for n in weights if n.endswith(("mapping_proj.scales", "norm.hc_head_fn.scales"))]:
+            raise ValueError(f"Maxwell mHC weights must stay unquantized (fp32 law): {name}")
+        for name in list(weights):
+            if (name.endswith("hyper_connection.mapping_proj.weight") or name.endswith("norm.hc_head_fn")
+                    or (name == "lm_head.weight" and self.head_mode == "fp32"
+                        and "lm_head.scales" not in weights)):
+                weights[name] = weights[name].astype(mx.float32)
         return weights
+
+    # ------------------------------------------------------------ quantized artifacts
+
+    def hf_module_names(self, path: str) -> list[str]:
+        """Checkpoint (HF) module names behind one of this model's module paths."""
+        if path.startswith("mtp."):
+            rest = path.removeprefix("mtp.")
+            if rest.startswith("layer."):
+                return self._hf_layer_names(rest.removeprefix("layer."), "mtp_layers.0.decoder_layer.", None)
+            if rest == "norm":
+                return ["mtp_layers.0.hc_head"]
+            return [f"mtp_layers.0.{rest}"]
+        if path.startswith("model.layers."):
+            index = int(path.split(".")[2])
+            prefix = f"model.layers.{index}."
+            return self._hf_layer_names(path.removeprefix(prefix), prefix, index)
+        return [path]
+
+    def _hf_layer_names(self, rest, prefix, index):
+        a = self.args
+        proj = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
+        dense = index is not None and index in set(a.mlp_only_layers)
+        if rest.startswith("mlp."):
+            leaf = rest.removeprefix("mlp.")
+            moe = prefix + "block_sparse_moe."
+            if leaf in proj and dense:
+                return [moe + proj[leaf]]
+            if leaf.startswith("shared_expert."):
+                return [moe + "shared_expert." + proj[leaf.removeprefix("shared_expert.")]]
+            if leaf.startswith("switch_mlp."):
+                w = proj[leaf.removeprefix("switch_mlp.")]
+                return [f"{moe}experts.{e}.{w}" for e in range(a.num_experts)]
+            if leaf == "gate":
+                return [moe + "gate"]
+        return [prefix + rest]
+
+    def apply_quantization(self, quantization: dict, quantized_names):
+        """Quantize modules the artifact stores quantized (oQ/mlx-lm per-module config).
+
+        ``quantization`` has default ``bits``/``group_size``/``mode`` and
+        per-module overrides keyed by checkpoint module name; ``weights`` names
+        ``quantized_names`` the checkpoint modules stored quantized (those with
+        ``<name>.scales``).  Every
+        checkpoint module behind one of this model's modules must agree (the
+        256 experts of a layer pack into one table)."""
+        default = {k: quantization[k] for k in ("bits", "group_size") if k in quantization}
+        default.setdefault("mode", quantization.get("mode", "affine"))
+        stored = frozenset(quantized_names)
+
+        def spec(path, module):
+            if not hasattr(module, "to_quantized"):
+                return False
+            names = self.hf_module_names(path)
+            hits = [n in stored for n in names]
+            if not any(hits):
+                return False
+            if not all(hits):
+                raise ValueError(f"Maxwell {path}: only part of its checkpoint modules are quantized")
+            specs = []
+            for n in names:
+                override = quantization.get(n)
+                specs.append({**default, **override} if isinstance(override, dict) else dict(default))
+            keys = {(s["bits"], s["group_size"], s.get("mode", "affine")) for s in specs}
+            if len(keys) != 1:
+                raise ValueError(f"Maxwell {path}: checkpoint modules disagree on quantization {sorted(keys)}")
+            bits, group, mode = keys.pop()
+            return {"bits": bits, "group_size": group, "mode": mode}
+
+        nn.quantize(self, class_predicate=spec)
+        self.quantized = True

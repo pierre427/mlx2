@@ -73,10 +73,10 @@ def _reference(tmp_path):
     return torch, cfg_mod, mod
 
 
-def _torch_tiny(tmp_path, seed=0):
+def _torch_tiny(tmp_path, seed=0, mtp=0):
     torch, cfg_mod, mod = _reference(tmp_path)
     kw = {k: v for k, v in TINY.items() if k != "model_type"}
-    cfg = cfg_mod.MaxwellMoeConfig(**kw, mtp_num_layers=0, pad_token_id=3, use_cache=False)
+    cfg = cfg_mod.MaxwellMoeConfig(**kw, mtp_num_layers=mtp, pad_token_id=3, use_cache=False)
     cfg._attn_implementation = "eager"
     torch.manual_seed(seed)
     ref = mod.MaxwellMoeForCausalLM(cfg).float().eval()
@@ -94,8 +94,8 @@ def _torch_tiny(tmp_path, seed=0):
     return torch, ref
 
 
-def _mlx_from_torch(ref):
-    model = Model(ModelArgs.from_dict(TINY))
+def _mlx_from_torch(ref, mtp=0):
+    model = Model(ModelArgs.from_dict({**TINY, "mtp_num_layers": mtp}))
     weights = {k: mx.array(v.detach().float().numpy()) for k, v in ref.state_dict().items()}
     weights = model.sanitize(weights)
     model.load_weights(list(weights.items()), strict=True)
@@ -162,16 +162,152 @@ def test_cached_decode_matches_full_forward(tmp_path):
     np.testing.assert_allclose(np.array(mx.stack(steps, 1)), np.array(full[:, 9:]), rtol=1e-4, atol=1e-4)
 
 
-def test_context_beyond_the_dense_regime_is_refused():
-    model = Model(ModelArgs.from_dict(TINY))
-    assert model.args.dense_context_limit == 24
-    model(mx.array([[5] * 24]))
-    with pytest.raises(ValueError, match="dense regime"):
-        model(mx.array([[5] * 25]))
+def test_dense_limit():
+    assert Model(ModelArgs.from_dict(TINY)).args.dense_context_limit == 24
     assert ModelArgs.from_dict({**TINY, "block_sparse_gqa_block_size": 128,
                                 "block_sparse_gqa_prefix_window_size": 1024,
                                 "block_sparse_gqa_local_window_size": 1024,
                                 "block_sparse_gqa_num_remote_blocks": 16}).dense_context_limit == 4096
+
+
+LONG = 61                      # 16 blocks of 4: prefix 2 + local 2 + remote 2 leaves real choices
+
+
+def _long_ids(seed, rows=2, length=LONG):
+    return np.random.default_rng(seed).integers(4, TINY["vocab_size"], size=(rows, length))
+
+
+def test_sparse_route_matches_torch_reference_beyond_the_dense_regime(tmp_path):
+    from mlx2.runtime.models import maxwell_moe as M
+
+    torch, ref = _torch_tiny(tmp_path, seed=4)
+    model = _mlx_from_torch(ref)
+    ids = _long_ids(6)
+    with torch.no_grad():
+        t_logits = ref(torch.tensor(ids), use_cache=False).logits.numpy()
+    for prefill, chunk in (("union", 4), ("masked", 64)):
+        M.SPARSE_PREFILL, M.UNION_QUERY_CHUNK = prefill, chunk
+        try:
+            M.maxwell_stats(reset=True)
+            m_logits = np.array(model(mx.array(ids)))
+            stats = M.maxwell_stats()
+        finally:
+            M.SPARSE_PREFILL, M.UNION_QUERY_CHUNK = "union", 64
+        assert stats[f"sparse_{prefill}_calls"] > 0       # one 61-row chunk: the long-chunk route
+        np.testing.assert_allclose(m_logits, t_logits, rtol=2e-4, atol=2e-4)
+        if prefill == "union":                            # 4-query sub-chunks gather fewer than all 16 blocks
+            assert stats["union_blocks"] < 16 * stats["union_subchunks"]
+    # The sparse route must differ from dense causal attention here, or the test proves nothing.
+    old = M.Attention.__call__.__globals__["STATS"]
+    dense = Model(ModelArgs.from_dict({**TINY, "block_sparse_gqa_num_remote_blocks": 64}))
+    weights = {k: mx.array(v.detach().float().numpy()) for k, v in ref.state_dict().items()}
+    dense.load_weights(list(dense.sanitize(weights).items()), strict=True)
+    assert float(np.abs(np.array(dense(mx.array(ids))) - t_logits).max()) > 1e-3
+    assert old is M.STATS
+
+
+@pytest.mark.parametrize("gather_rows,prefill,chunk", [(16, "union", 64), (0, "union", 3), (0, "masked", 64)])
+def test_sparse_cached_decode_matches_full_forward(tmp_path, gather_rows, prefill, chunk, monkeypatch):
+    from mlx2.runtime.models import maxwell_moe as M
+
+    monkeypatch.setattr(M, "SPARSE_GATHER_ROWS", gather_rows)
+    monkeypatch.setattr(M, "SPARSE_PREFILL", prefill)
+    monkeypatch.setattr(M, "UNION_QUERY_CHUNK", chunk)
+    _torch, ref = _torch_tiny(tmp_path, seed=2)
+    model = _mlx_from_torch(ref)
+    ids = mx.array(_long_ids(3, rows=1))
+    full = model(ids)
+    cache = model.make_cache()
+    steps = [model(ids[:, :10], cache)[:, -1]]
+    t = 10
+    widths = iter((1, 3, 1, 9, 1, 2, 20))       # mixed widths cross the limit, then single steps
+    while t < LONG:
+        width = min(next(widths, 1), LONG - t)
+        out = model(ids[:, t:t + width], cache)
+        steps.extend(out[:, i] for i in range(width))
+        t += width
+    np.testing.assert_allclose(np.array(mx.stack(steps, 1)), np.array(full[:, 9:]), rtol=1e-4, atol=1e-4)
+
+
+def test_batched_left_padded_sparse_decode_matches_rows(tmp_path):
+    from mlx2.runtime.models.cache import BatchKVCache
+
+    _torch, ref = _torch_tiny(tmp_path, seed=7)
+    model = _mlx_from_torch(ref)
+    a, b = _long_ids(8, rows=1, length=45)[0], _long_ids(9, rows=1, length=58)[0]
+    singles = []
+    for row in (a, b):
+        cache = model.make_cache()
+        model(mx.array(row[None, :-1]), cache)
+        singles.append(np.array(model(mx.array(row[None, -1:]), cache)[0, -1]))
+    pad = [len(b) - len(a), 0]
+    padded = np.stack([np.concatenate([np.full(pad[0], 3), a]), b])
+    cache = [BatchKVCache(pad) for _ in model.make_cache()]
+    model(mx.array(padded[:, :-1]), cache)
+    out = np.array(model(mx.array(padded[:, -1:]), cache)[:, -1])
+    np.testing.assert_allclose(out, np.stack(singles), rtol=1e-4, atol=1e-4)
+
+
+def test_batched_right_padded_sparse_prefill_matches_rows(tmp_path):
+    """The engine's ragged chunk: prepare(right_padding) -> forward -> finalize, past the dense limit."""
+    from mlx2.runtime.models.cache import BatchKVCache
+
+    _torch, ref = _torch_tiny(tmp_path, seed=15)
+    model = _mlx_from_torch(ref)
+    a, b = _long_ids(16, rows=1, length=40)[0], _long_ids(17, rows=1, length=58)[0]
+    singles = []
+    for row in (a, b):
+        cache = model.make_cache()
+        first = np.array(model(mx.array(row[None]), cache)[0, -1])
+        nxt = np.array(model(mx.array([[5]]), cache)[0, -1])
+        singles.append((first, nxt))
+    rp = [len(b) - len(a), 0]
+    padded = np.stack([np.concatenate([a, np.full(rp[0], 3)]), b])
+    cache = [BatchKVCache([0, 0]) for _ in model.make_cache()]
+    for c in cache:
+        c.prepare(right_padding=rp)
+    out = np.array(model(mx.array(padded), cache))
+    for c in cache:
+        c.finalize()
+    np.testing.assert_allclose(out[0, len(a) - 1], singles[0][0], rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(out[1, -1], singles[1][0], rtol=1e-4, atol=1e-4)
+    step = np.array(model(mx.array([[5], [5]]), cache)[:, -1])
+    np.testing.assert_allclose(step, np.stack([s[1] for s in singles]), rtol=1e-4, atol=1e-4)
+
+
+def test_sparse_padding_guards(tmp_path):
+    from mlx2.runtime.models.cache import BatchKVCache
+
+    model = _tiny_random(3)
+    attn = model.layers[1].self_attn
+    q = mx.zeros((2, 4, 1, 8))
+    k = mx.zeros((2, 2, 30, 8))
+    with pytest.raises(ValueError, match="outside the cache"):
+        attn._sparse(q, k, k, mx.zeros((2, 2, 1, 8)), mx.zeros((2, 1, 30, 8)), [(0, 0), (-1, 0)])
+    cache = model.make_cache()
+    model(mx.array([[5] * 30]), cache)
+    cache[len(model.layers) + 1].trim(1)                     # break layer 1's plane pairing
+    with pytest.raises(RuntimeError, match="diverged"):
+        model(mx.array([[6]]), cache)
+
+
+def test_native_mtp_matches_torch_reference(tmp_path):
+    torch, ref = _torch_tiny(tmp_path, seed=11, mtp=1)
+    model = _mlx_from_torch(ref, mtp=1)
+    ids = _long_ids(12, rows=1, length=30)
+    with torch.no_grad():
+        out = ref(torch.tensor(ids), use_cache=False, output_mtp_logits=True)
+    t_mtp = out.mtp_logits.numpy()
+    hidden, streams = model.mtp_backbone(mx.array(ids))
+    np.testing.assert_allclose(np.array(model.logits(hidden)), out.logits.numpy(), rtol=2e-4, atol=2e-4)
+    # all teacher-forced pairs at once, then incrementally through the private cache
+    full, _ = model.mtp_step(streams[:, :-1], mx.array(ids[:, 1:]), model.make_mtp_cache())
+    np.testing.assert_allclose(np.array(full), t_mtp[:, :-1], rtol=2e-4, atol=2e-4)
+    cache = model.make_mtp_cache()
+    parts = [model.mtp_step(streams[:, :12], mx.array(ids[:, 1:13]), cache)[0]]
+    for p in range(12, 29):
+        parts.append(model.mtp_step(streams[:, p:p + 1], mx.array(ids[:, p + 1:p + 2]), cache)[0])
+    np.testing.assert_allclose(np.array(mx.concatenate(parts, 1)), t_mtp[:, :-1], rtol=2e-4, atol=2e-4)
 
 
 def test_sanitize_drops_mtp_and_packs_experts():
@@ -189,7 +325,7 @@ def test_sanitize_drops_mtp_and_packs_experts():
         return w
 
     out = model.sanitize(weights())
-    assert not any(k.startswith("mtp_layers.") for k in out)
+    assert not any(k.startswith(("mtp_layers.", "mtp.")) for k in out)
     assert "model.norm.hc_head_fn" in out and "model.layers.0.mlp.gate_proj.weight" in out
     assert out["model.layers.1.mlp.switch_mlp.down_proj.weight"].shape == (8, 2, 2)
     assert out["model.layers.1.mlp.gate.expert_bias"].dtype == mx.float32
@@ -231,13 +367,13 @@ def _tiny_random(seed=0):
 # ---------------------------------------------------------------- artifact gate / registry
 
 
-def _artifact(tmp_path, *, appledouble=True, missing=None):
+def _artifact(tmp_path, *, appledouble=True, missing=None, mtp=False):
     tmp_path.mkdir(parents=True, exist_ok=True)
     cfg = dict(A._EXPECTED)
     cfg.update({"block_sparse_gqa_layer_freq": [1] * 45, "mlp_only_layers": [0, 1, 2],
                 "mtp_num_layers": 1, "attention_dropout": 0.0, "rope_scaling": None})
     (tmp_path / "config.json").write_text(json.dumps(cfg))
-    names = sorted(A.required_tensors(cfg))
+    names = sorted(A.required_tensors(cfg) | (A.mtp_tensors(cfg) if mtp else set()))
     names = [n for n in names if n != missing]
     weight_map = {n: f"model-{1 + i % 2:05d}.safetensors" for i, n in enumerate(names)}
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
@@ -277,3 +413,303 @@ def test_real_checkpoint_passes_the_gate():
     art = A.inspect_artifact(CHECKPOINT)
     assert len(art["identity"]["files"]) == 35
     assert set(art["weight_map"].values()) == {name for name, _, _ in art["identity"]["files"]}
+
+
+def test_registry_descriptor_follows_the_mtp_tensors(tmp_path):
+    from mlx2.adapters.registry import inspect_model
+    from mlx2.contracts import Capability
+
+    plain = inspect_model(_artifact(tmp_path / "plain"))
+    assert Capability.MTP not in plain.descriptor.capabilities and plain.artifact["has_mtp"] is False
+    full = inspect_model(_artifact(tmp_path / "mtp", mtp=True))
+    assert Capability.MTP in full.descriptor.capabilities and full.artifact["has_mtp"] is True
+    assert full.default_route == "ordinary"                   # MTP stays opt-in until qualified
+    for cap in (Capability.APC_V2, Capability.TOOLS, Capability.PROMPT_LOOKUP):
+        assert cap in full.descriptor.capabilities
+    with pytest.raises(ValueError, match="MTP tensor set"):
+        A.inspect_artifact(_artifact(tmp_path / "bad", mtp=True,
+                                     missing="mtp_layers.0.decoder_layer.block_sparse_moe.experts.4.w1.weight"))
+
+
+def test_cache_budget_counts_indexer_planes():
+    from mlx2.adapters.maxwell_memory import MaxwellCacheBudget
+
+    cfg = dict(A._EXPECTED, mtp_num_layers=1)
+    plain, mtp = MaxwellCacheBudget.from_config(cfg, mtp=False), MaxwellCacheBudget.from_config(cfg, mtp=True)
+    cap = 4096 + 256
+    assert plain.project(4096) == 45 * cap * (2 * 4 * 128 + 128 + 1) * 4 + cap * 16 + 90 * 4096
+    assert mtp.project(4096) - plain.project(4096) == cap * 2 * 4 * 128 * 4 + 4096
+
+
+def test_sanitize_keeps_and_maps_the_mtp_layer(tmp_path):
+    _torch, ref = _torch_tiny(tmp_path, seed=1, mtp=1)
+    model = _mlx_from_torch(ref, mtp=1)
+    assert model.has_mtp and model.mtp.layer.mlp.switch_mlp.down_proj.weight.shape[0] == TINY["num_experts"]
+    assert model.mtp.layer.mlp.gate.weight.dtype == mx.float32
+    assert model.lm_head.weight.dtype == mx.float32
+    assert not hasattr(model.mtp.layer.self_attn, "indexer")
+
+
+def test_fused_projections_and_bf16_head_fallback_match(tmp_path, monkeypatch):
+    from mlx2.runtime.models import maxwell_moe as M
+
+    _torch, ref = _torch_tiny(tmp_path, seed=13, mtp=1)
+    model = _mlx_from_torch(ref, mtp=1)
+    ids = mx.array(_long_ids(14, rows=1, length=40))
+    base = np.array(model(ids))
+    hidden, streams = model.mtp_backbone(ids)
+    base_mtp = np.array(model.mtp_step(streams[:, :-1], ids[:, 1:], model.make_mtp_cache())[0])
+    model.fuse_projections()
+    assert "qkv_proj" in model.layers[0].self_attn and "q_proj" not in model.layers[0].self_attn
+    np.testing.assert_allclose(np.array(model(ids)), base, rtol=1e-5, atol=1e-5)
+    hidden, streams = model.mtp_backbone(ids)
+    np.testing.assert_allclose(np.array(model.mtp_step(streams[:, :-1], ids[:, 1:], model.make_mtp_cache())[0]),
+                               base_mtp, rtol=1e-5, atol=1e-5)
+    monkeypatch.setattr(M, "HEAD_MODE", "bf16")
+    bf = Model(ModelArgs.from_dict({**TINY, "mtp_num_layers": 1}))
+    assert bf.lm_head.weight.dtype == mx.bfloat16
+    weights = {k: mx.array(v.detach().float().numpy()) for k, v in ref.state_dict().items()}
+    weights["lm_head.weight"] = weights["lm_head.weight"].astype(mx.bfloat16)
+    bf.load_weights(list(bf.sanitize(weights).items()), strict=True)
+    assert bf.lm_head.weight.dtype == mx.bfloat16
+    # CPU: the kernel is GPU-only, so the fallback is the exact fp32 law over the bf16 table
+    h = model.model(ids)
+    want = np.array(h.astype(mx.float32) @ bf.lm_head.weight.astype(mx.float32).T)
+    np.testing.assert_array_equal(np.array(bf.logits_from_hidden(h)), want)
+
+
+def test_kernel_failure_falls_back_and_disables(monkeypatch):
+    from mlx2.runtime.models import maxwell_moe as M
+
+    monkeypatch.setattr(M, "_KERNEL_DISABLED", set())
+    monkeypatch.setattr(M, "_KERNEL_OK", set())
+
+    def broken(*_a, **_k):
+        raise RuntimeError("no metal here")
+
+    assert M._kernel_call(("probe", 1), broken) is None
+    assert "probe" in M._KERNEL_DISABLED and M.STATS["last_kernel_fallback"].startswith("probe")
+    assert M._kernel_call(("probe", 2), lambda: mx.zeros(1)) is None      # family stays off
+
+
+def test_prometheus_exports_maxwell_counters():
+    from mlx2.prometheus import PrometheusBuilder, _add_execution
+    from mlx2.runtime.models import maxwell_moe as M
+
+    stats = M.maxwell_stats()
+    stats.update(dense_calls=3, sparse_gather_calls=5, sparse_union_calls=2, union_blocks=40, mtp_steps=7)
+    builder = PrometheusBuilder()
+    _add_execution(builder, {"maxwell_attention": stats})
+    text = builder.render()
+    assert 'mlx2_maxwell_attention_calls_total{route="gather"} 5' in text
+    assert 'mlx2_maxwell_attention_calls_total{route="union"} 2' in text
+    assert "mlx2_maxwell_mtp_steps_total 7" in text
+    assert 'mlx2_maxwell_lever_info{lever="sparse_prefill",value="union"} 1' in text
+    builder = PrometheusBuilder()
+    _add_execution(builder, {"maxwell_attention": {"dense_calls": "x", "levers": {"head": "evil\nlabel"}}})
+    text = builder.render()
+    assert 'mlx2_maxwell_attention_calls_total{route="dense"} 0' in text
+    assert 'lever="head",value="other"' in text
+
+
+def _keep_full_precision(name):
+    """The converter's full-precision set: router, mHC, hc_head, MTP fusion projections."""
+    return (name.endswith(".gate") or "hyper_connection" in name or "hc_head" in name
+            or name.endswith(("mtp_layers.0.e_proj", "mtp_layers.0.h_proj")))
+
+
+def test_quantized_artifact_loads_and_matches_dequantized_weights(tmp_path, monkeypatch):
+    for key, value in (("moe_intermediate_size", 32), ("intermediate_size", 64),
+                       ("shared_expert_intermediate_size", 32)):
+        monkeypatch.setitem(TINY, key, value)            # every projection input is a 32-wide group
+    _torch, ref = _torch_tiny(tmp_path, seed=19, mtp=1)
+    raw = {k: mx.array(v.detach().float().numpy()) for k, v in ref.state_dict().items()}
+    quantized, dequantized, names = {}, {}, set()
+    for key, value in raw.items():
+        base = key.removesuffix(".weight")
+        if (key.endswith(".weight") and value.ndim == 2 and value.shape[-1] % 32 == 0
+                and "norm" not in key and not _keep_full_precision(base)):
+            w, s, b = mx.quantize(value, group_size=32, bits=8)
+            quantized.update({f"{base}.weight": w, f"{base}.scales": s, f"{base}.biases": b})
+            dequantized[key] = mx.dequantize(w, s, b, group_size=32, bits=8)
+            names.add(base)
+        else:
+            quantized[key] = value
+            dequantized[key] = value
+    assert "model.layers.1.block_sparse_moe.experts.3.w2" in names and "lm_head" in names
+    assert "model.embed_tokens" in names and "mtp_layers.0.decoder_layer.self_attn.q_proj" in names
+    cfg = {**TINY, "mtp_num_layers": 1}
+    q = Model(ModelArgs.from_dict(cfg))
+    q.apply_quantization({"bits": 8, "group_size": 32, "mode": "affine"}, names)
+    q.load_weights(list(q.sanitize(dict(quantized)).items()), strict=True)
+    assert type(q.layers[1].mlp.switch_mlp.down_proj).__name__ == "QuantizedSwitchLinear"
+    assert type(q.lm_head).__name__ == "QuantizedLinear" and type(q.model.embed_tokens).__name__ == "QuantizedEmbedding"
+    assert type(q.layers[0].self_attn_hyper_connection.mapping_proj).__name__ == "Linear"
+    d = Model(ModelArgs.from_dict(cfg))
+    d.load_weights(list(d.sanitize(dict(dequantized)).items()), strict=True)
+    ids = mx.array(_long_ids(20, rows=1, length=40))
+    np.testing.assert_allclose(np.array(q(ids)), np.array(d(ids)), rtol=2e-3, atol=2e-3)
+    hq, sq = q.mtp_backbone(ids)
+    hd, sd = d.mtp_backbone(ids)
+    np.testing.assert_allclose(np.array(q.mtp_step(sq[:, :-1], ids[:, 1:], q.make_mtp_cache())[0]),
+                               np.array(d.mtp_step(sd[:, :-1], ids[:, 1:], d.make_mtp_cache())[0]),
+                               rtol=2e-3, atol=2e-3)
+    bad = Model(ModelArgs.from_dict(cfg))
+    with pytest.raises(ValueError, match="only part"):
+        bad.apply_quantization({"bits": 8, "group_size": 32}, names - {"model.layers.2.block_sparse_moe.experts.5.w1"})
+    w, s, b = mx.quantize(raw["model.layers.0.self_attn_hyper_connection.mapping_proj.weight"], group_size=32, bits=8)
+    leak = dict(quantized, **{"model.layers.0.self_attn_hyper_connection.mapping_proj.scales": s})
+    with pytest.raises(ValueError, match="unquantized"):
+        Model(ModelArgs.from_dict(cfg)).sanitize(leak)
+
+
+def _quantized_artifact(tmp_path, *, bias_dtype="F32", config_quant=True):
+    import struct
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cfg = dict(A._EXPECTED)
+    cfg.update({"block_sparse_gqa_layer_freq": [1] * 45, "mlp_only_layers": [0, 1, 2],
+                "mtp_num_layers": 1, "attention_dropout": 0.0, "rope_scaling": None})
+    if config_quant:
+        cfg["quantization"] = cfg["quantization_config"] = {"group_size": 64, "bits": 8, "mode": "affine"}
+    names = sorted(A.required_tensors(cfg) | A.mtp_tensors(cfg))
+    quantized = [n.removesuffix(".weight") for n in names
+                 if n.endswith(".weight") and ("self_attn.q_proj" in n or ".experts." in n)]
+    weight_map = {n: "model-00001.safetensors" for n in names}
+    weight_map.update({f"{q}.{part}": "model-00001.safetensors" for q in quantized for part in ("scales", "biases")})
+    biases = sorted(n for n in names if n.endswith("expert_bias"))
+    for n in biases:
+        weight_map[n] = "model-00002.safetensors"
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+    (tmp_path / "model-00001.safetensors").write_bytes(b"x")
+    header = {n: {"dtype": bias_dtype, "shape": [256], "data_offsets": [0, 0]} for n in biases}
+    raw = json.dumps(header).encode()
+    (tmp_path / "model-00002.safetensors").write_bytes(struct.pack("<Q", len(raw)) + raw)
+    for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
+        (tmp_path / name).write_text("{}")
+    return tmp_path
+
+
+def test_artifact_gate_admits_quantized_with_fp32_expert_bias(tmp_path):
+    art = A.inspect_artifact(_quantized_artifact(tmp_path / "ok"))
+    assert art["storage_format"] == "affine-quantized" and art["has_mtp"]
+    assert "model.layers.5.block_sparse_moe.experts.7.w2" in art["quantized_names"]
+    with pytest.raises(ValueError, match="F32"):
+        A.inspect_artifact(_quantized_artifact(tmp_path / "bf16bias", bias_dtype="BF16"))
+    with pytest.raises(ValueError, match="without a quantization config"):
+        A.inspect_artifact(_quantized_artifact(tmp_path / "noconf", config_quant=False))
+
+
+def test_oq_calibration_walk_covers_every_quantized_module(tmp_path):
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+
+    from mlx2.conversion import maxwell_oq as W
+
+    _torch, ref = _torch_tiny(tmp_path, seed=23, mtp=1)
+    art_dir = tmp_path / "art"
+    art_dir.mkdir()
+    state = {k: mx.array(v.detach().float().numpy()) for k, v in ref.state_dict().items()}
+    # fp32 source on CPU (MLX's CPU gather_mm is fp32-only); the GPU walk reads BF16.
+    mx.save_safetensors(str(art_dir / "model-00001.safetensors"), state)
+    st = (art_dir / "model-00001.safetensors").stat()
+    artifact = {"identity": {"path": str(art_dir), "files": [("model-00001.safetensors", st.st_size, st.st_mtime_ns)]},
+                "weight_map": {k: "model-00001.safetensors" for k in state}}
+
+    @dataclass
+    class Entry:
+        in_sum2: np.ndarray
+        counts: np.ndarray
+
+    draw = np.random.default_rng(24).integers(4, TINY["vocab_size"], size=(6, 20))
+    sens = np.random.default_rng(25).integers(4, TINY["vocab_size"], size=(6, 12))
+    oq = SimpleNamespace(OQImatrixEntry=Entry, _OQE_CALIB_DATASET="fake",
+                         _load_builtin_calibration=lambda tok, ds, n, length: (sens if ds == "code_multilingual"
+                                                                               else draw)[:n, :length])
+    cfg = {**TINY, "mtp_num_layers": 1}
+    entries, meta = W.stream_calibrate(W.Reader(artifact), cfg, None, oq, num_samples=6, seq_length=20,
+                                       sensitivity_length=12, sensitivity_group_size=32, micro_batch_size=4)
+    scores = meta["sensitivity_map"]
+    assert sorted(scores) == list(range(TINY["num_hidden_layers"]))
+    assert all(0 < v < 1e-2 for v in scores.values())                  # 8-bit QDQ: small, nonzero
+    assert set(entries) == W.expected_entries(cfg) and meta["entry_count"] == len(entries)
+    k = TINY["num_experts_per_tok"]
+    for layer in range(1, TINY["num_hidden_layers"]):
+        total = sum(int(entries[f"model.layers.{layer}.block_sparse_moe.experts.{e}.w1"].counts[0])
+                    for e in range(TINY["num_experts"]))
+        assert total == 6 * 20 * k
+    q, kk = (entries[f"model.layers.1.self_attn.indexer.linear_{x}_proj"] for x in "qk")
+    np.testing.assert_array_equal(q.in_sum2, kk.in_sum2)
+    model = Model(ModelArgs.from_dict(cfg))
+    model.load_weights(list(model.sanitize({k: v for k, v in state.items()}).items()), strict=True)
+    hidden = model.model(mx.array(draw)).astype(mx.float32)
+    want = np.asarray(mx.sum(hidden * hidden, axis=(0, 1)))
+    np.testing.assert_allclose(entries["lm_head"].in_sum2, want, rtol=2e-2)
+    assert not any(W.keep_full_precision(n) for n in entries)
+    assert W.keep_full_precision("model.layers.4.mlp_hyper_connection.mapping_proj.weight")
+    assert W.keep_full_precision("model.layers.4.block_sparse_moe.gate.weight")
+    assert W.keep_full_precision("mtp_layers.0.e_proj") and W.keep_full_precision("model.hc_head.hc_head_fn")
+
+
+def test_overnight_replay_requires_a_hit_oracle_and_exact_token_ids(monkeypatch):
+    from scripts.research import maxwell_overnight as window
+
+    monkeypatch.setattr(window, "needle_prompt", lambda *a, **kw: ({"messages": []}, "Z-71"))
+    def run(cached, texts, tokens):
+        answers = iter(zip(cached, texts, tokens))
+        class Server:
+            def call(self, path, payload):
+                assert payload["logprobs"] is True
+                hits, text, ids = next(answers)
+                return {"usage": {"prompt_tokens_details": {"cached_tokens": hits}},
+                        "choices": [{"message": {"content": text}, "logprobs": {
+                            "content": [{"id": token} for token in ids]}}]}
+        return window.apc_replay(Server(), None, "fixture")["passed"]
+
+    assert run([0, 32], ["Z-71"] * 2, [[7], [7]])
+    assert not run([0, 0], ["Z-71"] * 2, [[7], [7]])
+    assert not run([0, 32], ["Z-71"] * 2, [[7], [8]])
+    assert not run([0, 32], ["Z-71"] * 2, [[], []])
+    assert not run([0, 32], ["wrong"] * 2, [[7], [7]])
+
+
+def test_fused_qkv_declines_partially_quantized_projections():
+    model = Model(ModelArgs.from_dict(TINY))
+    attn = model.layers[0].self_attn
+    attn.k_proj = attn.k_proj.to_quantized(group_size=32, bits=4)
+    attn.fuse_projections()
+    assert "qkv_proj" not in attn and "scales" in attn.k_proj
+
+
+def test_quantization_override_inherits_defaults_and_validates_group_size():
+    from mlx2.adapters.maxwell_moe import _quantization
+    q = {"bits": 4, "group_size": 64, "lm_head": {"group_size": 32}}
+    assert _quantization({"quantization": q}) == q
+    q["lm_head"] = {"bits": 4, "group_size": 0}
+    with pytest.raises(ValueError, match="lm_head"):
+        _quantization({"quantization": q})
+
+
+def test_window_deadline_records_incomplete_without_starting_model(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from scripts.research import maxwell_overnight as window
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    import spec_acceptance_gsm8k as gsm
+    monkeypatch.setattr(gsm, "stop_time", lambda clock: 0)
+    from mlx2.adapters import registry
+    monkeypatch.setattr(registry, "inspect_model", lambda p: SimpleNamespace(artifact_fingerprint=p.name))
+    monkeypatch.setattr(window, "revision", lambda: {"mlx2_commit": "test-revision", "dirty": False})
+    args = SimpleNamespace(out=tmp_path, model=tmp_path / "missing", reference_model=None, gsm8k=50,
+                           stop_at="06:45", resume=False)
+    assert window.window(args) == 1
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert set(summary["incomplete_units"]) == {"smoke", *window.ARMS, *("serve_" + a[0] for a in window.SERVER_ARMS)}
+    (tmp_path / "smoke").mkdir()
+    (tmp_path / "smoke/done.json").write_text('{"returncode": 17}')
+    args.resume = True
+    assert window.window(args) == 1
+    assert json.loads((tmp_path / "summary.json").read_text())["units"]["smoke"]["returncode"] == 17
+    args.reference_model = tmp_path / "different"
+    with pytest.raises(SystemExit, match="cannot resume"):
+        window.window(args)

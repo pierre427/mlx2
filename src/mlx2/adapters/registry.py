@@ -521,7 +521,9 @@ def _flint(path: Path, config: dict) -> AdapterResolution:
 def _maxwell_moe(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".maxwell_moe", __package__)
     artifact = module.inspect_artifact(path)
-    return AdapterResolution(module.MaxwellMoeAdapter, module.DESCRIPTOR, artifact)
+    return AdapterResolution(
+        module.MaxwellMoeAdapter, module.descriptor_for(has_mtp=artifact["has_mtp"]), artifact
+    )
 
 
 def _glm53_gguf(path: Path, config: dict) -> AdapterResolution:

@@ -33,8 +33,9 @@ TAG = "execution-numerics-v1"
 
 # Environment switches that select a KV-producing law outside the qualified
 # exact default.  "flag": on unless empty/0/false/off/no; "int": bound when
-# nonzero; "default_on": a default-on switch, bound when it is not "1".  Each
-# entry says why.
+# nonzero; "default_on": a default-on switch, bound when it is not "1";
+# "default=<v>": bound (by value) whenever it is not ``<v>``.  Each entry says
+# why.
 CANDIDATE_ENV = {
     # Reduced-precision fp32 matmuls (process_env pins "0"; explicit wins).
     **{name: "flag" for name in PROCESS_NUMERICS},
@@ -68,6 +69,17 @@ CANDIDATE_ENV = {
     # recurrent state and for the attention output feeding later layers' K/V.
     "MLX2_NEMOTRON_SSD_MMA": "flag",
     "MLX2_NEMOTRON_ATTN_STAGED": "flag",
+    # Maxwell-V1-Flash levers (models/maxwell_moe.py): each changes the
+    # arithmetic or the key set behind the K/V later layers write.  The head
+    # lever (MLX2_MAXWELL_HEAD) only touches logits and stays unbound.
+    "MLX2_MAXWELL_COMPILE": "default_on",
+    "MLX2_MAXWELL_MHC_KERNEL": "flag",
+    "MLX2_MAXWELL_MHC_KERNEL_MAX_ROWS": "default=16",
+    "MLX2_MAXWELL_FUSED_QKV": "flag",
+    "MLX2_MAXWELL_SPARSE_PREFILL": "default=union",
+    "MLX2_MAXWELL_SPARSE_GATHER_ROWS": "default=16",
+    "MLX2_MAXWELL_UNION_QUERY_CHUNK": "default=64",
+    "MLX2_MAXWELL_INDEX_QUERY_CHUNK": "default=64",
     # Qwen3.8 TensorFold tree-verify law (lane_multi.TREE_LAWS): its rows
     # write KV/GDN state, so a state made under one law is never served as
     # another's.  Bound by law id whenever it is not the legacy masked law.
@@ -224,6 +236,8 @@ def _bound_value(kind: str, raw: str):
         # masked is the legacy namespace; adapters running the tree forward
         # also bind the effective law (qwen38_tensorfold.tree_law_numerics).
         return None if value == "masked" else TREE_LAWS[value]
+    if kind.startswith("default="):
+        return None if value == kind.removeprefix("default=") else value
     if kind == "default_on":
         # Bound only when switched off (the module reads exactly "1" as on).
         return None if value == "1" else "0"
