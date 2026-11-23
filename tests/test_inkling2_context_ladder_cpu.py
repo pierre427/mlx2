@@ -321,3 +321,86 @@ def test_dry_run_reports_commands_and_estimate(tmp_path, monkeypatch):
     assert rc == 0 and report["status"] == "dry_run"
     assert set(report["dry_run"]) == {p["name"] for p in L.PHASES}
     assert report["budget"]["estimate"]["total_s"] > 0
+
+
+def _reusable():
+    from mlx2.adapters.inkling2 import validate_policy
+    target, name = "Inkling-2-Mini@stubfp", "ordinary_b1"
+    kp, _ = validate_policy(L.REFERENCE_POLICY)
+    kp.pop("hard_no_thinking")
+    kp.pop("dspark_prefill_reclaim")
+    kp["moe_nax_gather"] = True
+    exec_status = {"checkpoint": target, "route": "ordinary", "kernel_policy": kp,
+                   "hard_no_thinking": False, "moe_nax_gather_auto": True, "dspark": {"selected": False}}
+    settings = {"schema": L.SCHEMA, "seed": 2, "sampling": "greedy (temperature 0)", "max_tokens": 8,
+                "reasoning_effort": "none", "evidence_top_logprobs": 5}
+    info = {"lane": 0, "prompt_sha256": "xyz", "code": "ABC-12345-0F", "prompt_tokens_estimate": 256}
+    result = {"token_ids": [4], "text": info["code"], "route": "ordinary", "thinking_mode": "template_effort"}
+    cell = {"cell": 256, "lanes": [dict(info)], "cold": [dict(result, cached_tokens=0)],
+            "warm": [dict(result, cached_tokens=256)], "evidence": [[{"token_ids": [4], "windows": [{"4": -0.2}]}]]}
+    ref = {"name": name, "status": "completed", "checkpoint": target, "width": 1, "route": "ordinary",
+           "server_status_start": {"execution": exec_status, "max_lanes": 1}, "cells": [cell]}
+    return ({**settings, "checkpoints": {name: target}, "phases": [ref]}, {**settings, "target_checkpoint": target},
+            name, [{"cell": 256, "lanes": [info]}, {"cell": 2048, "lanes": []}], {256})
+
+
+def test_reuse_binds_checkpoint_settings_and_planned_cell_subset():
+    args = _reusable()
+    assert L.reusable_reference(*args)["cells"][0]["evidence"][0][0]["windows"] == [{4: -0.2}]
+    for k, value in (("target_checkpoint", "Inkling-2-Mini@other"), ("max_tokens", 4), ("seed", 3),
+                     ("reasoning_effort", "high")):
+        args = _reusable()
+        args[1][k] = value
+        with pytest.raises(SystemExit, match="differs"):
+            L.reusable_reference(*args)
+
+
+@pytest.mark.parametrize("change", ["policy", "requested", "prompt", "cold", "warm", "evidence", "lanes", "width", "replay", "route", "oracle"])
+def test_reuse_refuses_misbound_rows(change):
+    args = _reusable()
+    ref = args[0]["phases"][0]
+    cell = ref["cells"][0]
+    if change == "policy":
+        ref["server_status_start"]["execution"]["kernel_policy"]["moe_act_quant"] = True
+    elif change == "requested":
+        ref["execution_policy"] = {"inkling2_sink_sdpa": True}
+    elif change == "prompt":
+        cell["lanes"][0]["prompt_sha256"] = "wrong"
+    elif change == "width":
+        ref["width"] = 4
+    elif change == "replay":
+        cell["warm"][0]["token_ids"] = [5]
+    elif change == "route":
+        cell["warm"][0]["route"] = "other"
+    elif change == "oracle":
+        cell["cold"][0]["text"] = "wrong"
+    else:
+        cell[change] = []
+    with pytest.raises(SystemExit, match="reference-ladder"):
+        L.reusable_reference(*args)
+
+
+def test_invalid_windows_cannot_prove_high_margin():
+    code = "ABC-12345-0F"
+    a, b = _ev([1], [{1: 0.0, 2: -3.0}]), _ev([2], [{2: float("nan"), 3: -0.1}])
+    assert L.classify(a, b, a, b, code)["verdict"] == "unclassified"
+    assert L.classify(a, dict(a, text="no code"), a, a, code)["verdict"] == "failed"
+
+
+def test_unrelated_ast_failure_refuses_the_ladder(tmp_path, monkeypatch):
+    import subprocess
+    original_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, "", "import failed")
+                        if "--ast" in cmd else original_run(cmd, **kw))
+    rc, report, _ = _run(tmp_path, monkeypatch, "--dry-run")
+    assert rc == 1 and report["status"] == "failed: AST refusal probe"
+    assert report["ast_probe"]["message"] == "import failed"
+
+
+def test_absent_reference_cell_is_counted():
+    args = _reusable()
+    ref = args[0]["phases"][0]
+    arm = dict(ref, name="default_b1")
+    result = L.compare_phases(dict(ref, cells=[]), arm)
+    assert result["counts"] == {"no_evidence": 1}
+    assert result["rows"][0]["lane"] == 0

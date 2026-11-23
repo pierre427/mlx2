@@ -269,3 +269,183 @@ def test_gpu_graph_launch_counts():
                                          fuse_residual_kernel=True)
     RESULTS["gpu_graph_kernels_wide_bf16"] = counts
     assert counts["all_with_kernels"] < counts["all_exact"] < counts["reference"]
+
+
+# ----- 2026-11-22 options from omlx#5538 / Rapid-MLX (reimplemented) -----
+
+DEFAULTS = {**ALL, "fuse_sconv_kernel": True}  # the shipped fusion defaults
+
+
+def _gap(got, base):
+    diff = mx.abs(got.astype(mx.float32) - base.astype(mx.float32))
+    return {"bitwise": bool(mx.array_equal(got, base)), "max_abs": float(diff.max().item()),
+            "argmax_agreement": float((mx.argmax(got, -1) == mx.argmax(base, -1)).mean().item())}
+
+
+@pytest.mark.parametrize("geometry", ["tiny", "wide"])
+@pytest.mark.parametrize("bf16", [False, True])
+@pytest.mark.parametrize("rows", [1, 2])
+@pytest.mark.parametrize("option", ["fuse_norm_fp32", "fuse_shared_tau", "head_softcap_compiled"])
+def test_exact_options_2_bitwise_on_gpu(option, rows, bf16, geometry):
+    """Intended bit-identical options on top of the shipped defaults."""
+    model = _model(geometry, bf16)
+    model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **DEFAULTS)
+    tokens = mx.random.randint(0, 500, (rows, 40), key=mx.random.key(rows))
+    base = _run(model, tokens, PLAN)
+    model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **DEFAULTS, **{option: True})
+    got = _run(model, tokens, PLAN)
+    receipt = model.kernel_receipt()
+    result = _gap(got, base)
+    result["counts"] = {k: v for k, v in receipt["fuse_counts"].items()
+                        if k in ("norm_fp32", "tau_shared_hits", "tau_skipped")}
+    result["head_softcap_compiled_calls"] = model.__dict__.get("head_softcap_compiled_calls", 0)
+    RESULTS[f"exact2/{option}/{geometry}/{'bf16' if bf16 else 'fp32'}/B{rows}"] = result
+    assert result["bitwise"], result
+
+
+@pytest.mark.parametrize("kind", ["affine4", "mxfp8", "nvfp4"])
+def test_gather_lhs_bitwise_on_gpu(kind):
+    from mlx2.runtime.models import gather_lhs
+    from mlx2.runtime.models.switch_layers import QuantizedSwitchLinear
+    from mlx2.runtime.nvfp4_linear import ScaledNVFP4SwitchLinear
+
+    mx.random.seed(5)
+    w = mx.random.normal((8, 128, 256)) * 0.1
+    if kind == "nvfp4":
+        switch = ScaledNVFP4SwitchLinear(256, 128, 8)
+        q = mx.quantize(w, group_size=16, bits=4, mode="nvfp4")
+        switch.weight, switch.scales = q[0], q[1]
+        switch.weight_scale_2 = mx.random.uniform(0.5, 2.0, (8,))
+    else:
+        mode, bits, group = ("affine", 4, 64) if kind == "affine4" else ("mxfp8", 8, 32)
+        switch = QuantizedSwitchLinear(256, 128, 8, bias=False, group_size=group, bits=bits,
+                                       mode=mode)
+        q = mx.quantize(w, group_size=group, bits=bits, mode=mode)
+        switch.weight, switch.scales = q[0], q[1]
+        if len(q) > 2 and q[2] is not None:
+            switch.biases = q[2]
+    same = True
+    for shape in ((1, 1, 8), (2, 1, 8), (1, 8, 8)):
+        x = mx.random.normal((*shape[:-1], 1, 1, 256)).astype(mx.bfloat16)
+        idx = mx.random.randint(0, 8, shape).astype(mx.uint32)
+        gather_lhs.set_enabled(switch, False)
+        ref = switch(x, idx)
+        gather_lhs.set_enabled(switch, True)
+        got = switch(x, idx)
+        mx.eval(ref, got)
+        same &= bool(mx.array_equal(got, ref))
+    RESULTS[f"gather_lhs/{kind}"] = {"bitwise": same}
+    assert same
+
+
+@pytest.mark.parametrize("fma", [0, 1])
+@pytest.mark.parametrize("bf16", [False, True])
+def test_dconv_kernel_vs_compiled_reference(bf16, fma):
+    """The one-launch dynamic conv against ``fuse._dynamic_conv`` (module
+    level, 1 and 8 rows, with and without state), recording which FMA
+    setting is bitwise; the model-level gap is in the next test."""
+    from mlx2.runtime.models.inkling.cache import InklingConvolutionCache
+    from mlx2.runtime.models.inkling2 import fuse_kernels as K
+
+    model = _model("wide", bf16)
+    model.configure_kernels(fuse_sconv=True)
+    layer = next(l for l in model.model.layers if not l.is_sliding)
+    conv = layer.self_attn.k_sconv
+    dtype = mx.bfloat16 if bf16 else mx.float32
+    channels = conv.static_weight.shape[1]
+    K.DCONV_FMA = fma
+    worst, bitwise = 0.0, True
+    try:
+        for rows in (1, 2):
+            for length in (1, 8):
+                x = mx.random.normal((rows, length, channels)).astype(dtype)
+                dyn_in = mx.random.normal((rows, length, model.config.hidden_size)).astype(dtype)
+                for with_state in (False, True):
+                    outs = []
+                    for kernel in (False, True):
+                        names = {"fuse_sconv"} | ({"fuse_dconv_kernel"} if kernel else set())
+                        object.__setattr__(conv, "_fuse", frozenset(names))
+                        cache = InklingConvolutionCache()
+                        if with_state:
+                            cache[conv.conv_idx] = mx.random.normal((rows, 3, channels),
+                                                                    key=mx.random.key(1))
+                        out = conv(x, dyn_in, cache, None)
+                        mx.eval(out, cache[conv.conv_idx])
+                        outs.append((out, cache[conv.conv_idx]))
+                    (a, sa), (b, sb) = outs
+                    assert mx.array_equal(sa, sb)
+                    d = mx.abs(a.astype(mx.float32) - b.astype(mx.float32)).max().item()
+                    bitwise &= d == 0
+                    worst = max(worst, d)
+    finally:
+        K.DCONV_FMA = 0
+    assert conv.fuse_counts.get("dconv_kernel", 0) > 0
+    RESULTS[f"dconv_kernel/{'bf16' if bf16 else 'fp32'}/fma{fma}"] = {"bitwise": bitwise,
+                                                                      "max_abs": worst}
+    assert worst <= (0.05 if bf16 else 1e-4)
+
+
+@pytest.mark.parametrize("bf16", [False, True])
+@pytest.mark.parametrize("option", ["fuse_dconv_kernel", "fuse_message_kernel",
+                                    "compile_decode_blocks", "fuse_gather_lhs"])
+def test_new_kernel_options_model_level(option, bf16):
+    """Each new near-exact option (and the gather cache) on the shipped
+    defaults: logit gap and greedy agreement, recorded."""
+    model = _model("wide", bf16)
+    model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **DEFAULTS)
+    tokens = mx.random.randint(0, 500, (1, 40), key=mx.random.key(7))
+    base = _run(model, tokens, PLAN)
+    model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **DEFAULTS, **{option: True})
+    got = _run(model, tokens, PLAN)
+    receipt = model.kernel_receipt()
+    result = _gap(got, base)
+    result["counts"] = {k: v for k, v in receipt["fuse_counts"].items()
+                        if k in ("dconv_kernel", "message_mix_kernel")}
+    result["compiled_moe_calls"] = receipt["compiled_moe_calls"]
+    RESULTS[f"new_model/{option}/{'bf16' if bf16 else 'fp32'}"] = result
+    assert result["max_abs"] < (1.0 if bf16 else 1e-3), result
+
+
+@pytest.mark.parametrize("bf16", [False, True])
+def test_safe_math_residual_kernel_gap(bf16):
+    """``fuse_kernels.SAFE_MATH`` (fp math_mode safe, contract off) against
+    the default build for the residual kernel's model-level gap."""
+    from mlx2.runtime.models.inkling2 import fuse_kernels as K
+
+    out = {}
+    for safe in (False, True):
+        K.SAFE_MATH = safe
+        try:
+            model = _model("wide", bf16)
+            model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **DEFAULTS)
+            tokens = mx.random.randint(0, 500, (1, 40), key=mx.random.key(7))
+            base = _run(model, tokens, PLAN)
+            model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **DEFAULTS,
+                                    fuse_residual_kernel=True)
+            out["safe" if safe else "default"] = _gap(_run(model, tokens, PLAN), base)
+        finally:
+            K.SAFE_MATH = False
+    RESULTS[f"safe_math_residual/{'bf16' if bf16 else 'fp32'}"] = out
+
+
+def test_gpu_graph_launch_counts_new_options():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "research"))
+    import inkling2_launch_count as lc
+
+    def kernels(**options):
+        model = _model("wide", True)
+        model.configure_kernels(moe_fused=True, moe_weighted_sum=True, **DEFAULTS, **options)
+        out, cache = lc.decode_step(model, device="gpu", prefill_gpu=True)
+        return lc.count_graph(out, *lc.cache_arrays(cache))["kernels"]
+
+    counts = {"defaults": kernels()}
+    for name in ("fuse_norm_fp32", "fuse_shared_tau", "fuse_dconv_kernel",
+                 "fuse_message_kernel", "head_softcap_compiled", "fuse_gather_lhs"):
+        counts[name] = kernels(**{name: True})
+    counts["all_new"] = kernels(fuse_norm_fp32=True, fuse_shared_tau=True,
+                                fuse_dconv_kernel=True, fuse_message_kernel=True,
+                                head_softcap_compiled=True, fuse_gather_lhs=True)
+    RESULTS["gpu_graph_kernels_new_options"] = counts

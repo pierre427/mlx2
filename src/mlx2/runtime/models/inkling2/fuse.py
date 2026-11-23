@@ -59,7 +59,13 @@ import mlx.core as mx
 
 EXACT = ("fuse_controllers", "fuse_residual", "fuse_sconv", "fuse_attention")
 NEAR_EXACT = ("fuse_sconv_kernel", "fuse_residual_kernel")
-OPTIONS = EXACT + NEAR_EXACT
+# Added 2026-11-22 from omlx#5538 / Rapid-MLX #5918-#5919 (reimplemented):
+# intended bit-identical (cached gather lhs indices, FP32 RMSNorm weight
+# copies, one log-tau per forward) and near-exact kernels (dynamic conv,
+# loop-message mix). All default off pending the GPU A/B.
+EXACT_2 = ("fuse_gather_lhs", "fuse_norm_fp32", "fuse_shared_tau")
+NEAR_EXACT_2 = ("fuse_dconv_kernel", "fuse_message_kernel")
+OPTIONS = EXACT + NEAR_EXACT + EXACT_2 + NEAR_EXACT_2
 NONE = frozenset()
 
 
@@ -174,12 +180,28 @@ def log_tau(attn, q, r, length, offset, left_padding, dtype):
         # left padding, which raises positions, so padded calls compute.)
         count(attn, "tau_skipped")
         return q, r
-    ar = _arange(attn, length)
-    positions = (ar + offset + 1).astype(mx.float32)[None, :]
-    if left_padding is not None:
-        positions = positions - left_padding[:, None].astype(mx.float32)
-    pre = _tau_pre(positions, attn.log_floor)
-    q2, r2 = _tau_apply(mx.log(pre), cfg.log_scaling_alpha, q.astype(dtype), r.astype(dtype))
+    logp = None
+    shared = on(attn, "fuse_shared_tau")
+    if shared:
+        # Every global visit of one forward holds the same positions, so one
+        # log(max(pos / floor, 1)) serves them all (omlx#5538); the values
+        # are those each visit would compute.
+        memo = forward_memo(attn)
+        key = ("tau", int(length), int(offset), float(attn.log_floor),
+               None if left_padding is None else id(left_padding))
+        held = memo.get(key)
+        if held is not None and held[0] is left_padding:
+            logp = held[1]
+            count(attn, "tau_shared_hits")
+    if logp is None:
+        ar = _arange(attn, length)
+        positions = (ar + offset + 1).astype(mx.float32)[None, :]
+        if left_padding is not None:
+            positions = positions - left_padding[:, None].astype(mx.float32)
+        logp = mx.log(_tau_pre(positions, attn.log_floor))
+        if shared and forward_memo(attn) is not None:
+            forward_memo(attn)[key] = (left_padding, logp)
+    q2, r2 = _tau_apply(logp, cfg.log_scaling_alpha, q.astype(dtype), r.astype(dtype))
     return q2, r2
 
 
@@ -350,6 +372,23 @@ def controller_stack(layer):
     return down, forget, gain
 
 
+def rms(module, norm, x):
+    """``norm(x)`` for an ``nn.RMSNorm``; with ``fuse_norm_fp32`` an FP32
+    input reads a cached FP32 copy of the weight, so ``fast.rms_norm`` does
+    not cast the BF16 weight on every call (omlx#5538). Same values, so the
+    same result."""
+    if on(module, "fuse_norm_fp32") and x.dtype == mx.float32 and norm.weight.dtype != mx.float32:
+        held = norm.__dict__.get("_fuse_fp32_weight")
+        if held is None or held[0] is not norm.weight:
+            copy = norm.weight.astype(mx.float32)
+            mx.eval(copy)
+            held = (norm.weight, copy)
+            object.__setattr__(norm, "_fuse_fp32_weight", held)
+        count(module, "norm_fp32")
+        return mx.fast.rms_norm(x, held[1], norm.eps)
+    return norm(x)
+
+
 def norm_stack(layer):
     """The three input-norm weights as one ``[3, D]`` array (local layers
     repeat their one norm)."""
@@ -396,21 +435,41 @@ def qkv_controllers(layer, mixed, messages, message_norms):
     pair = mx.concatenate([nx, message_norms[..., :3, :]], axis=-1).astype(down.dtype)
     pair = pair.reshape(3, 1, 2 * width)
     hidden = (pair @ down.swapaxes(-1, -2)).astype(mx.float32)
+    count(layer, "controllers_batched")
+    if on(layer, "fuse_message_kernel"):
+        from . import fuse_kernels
+
+        out = fuse_kernels.message_mix(
+            layer, hidden.reshape(3, -1), forget, gain,
+            mixed.reshape(mixed.shape[-2], width), messages[..., :3, :].reshape(3, width))
+        if out is not None:
+            return out.reshape(1, 1, 3, width)
     f = mx.tanh(hidden @ forget.swapaxes(-1, -2)).reshape(1, 1, 3, width)
     g = mx.tanh(hidden @ gain.swapaxes(-1, -2)).reshape(1, 1, 3, width)
-    count(layer, "controllers_batched")
     return blend(f, g, mixed, messages[..., :3, :])
 
 
-def one_controller(ctrl, x, message, x_norm=None, message_norm=None):
+def one_controller(ctrl, x, message, x_norm=None, message_norm=None, owner=None):
     """Reference ``MessageController`` with optional precomputed norms and
-    the blend compiled."""
+    the blend compiled; ``owner`` (the decoder layer) carries the fuse set
+    for ``fuse_message_kernel`` on one-row calls."""
     from .language import _fp32
 
     nx = mx.fast.rms_norm(x, None, ctrl.eps) if x_norm is None else x_norm
     nm = mx.fast.rms_norm(message, None, ctrl.eps) if message_norm is None else message_norm
     pair = mx.concatenate([nx, nm], axis=-1)
     hidden = (pair.astype(ctrl.down_weight.dtype) @ ctrl.down_weight.T).astype(mx.float32)
+    width = x.shape[-1]
+    if (owner is not None and on(owner, "fuse_message_kernel") and x.size == width
+            and message.size == width and x.dtype == mx.float32):
+        from . import fuse_kernels
+
+        out = fuse_kernels.message_mix(
+            owner, hidden.reshape(1, -1), _fp32(ctrl, "forget_weight")[None],
+            _fp32(ctrl, "gain_weight")[None], x.reshape(1, width),
+            message.astype(mx.float32).reshape(1, width))
+        if out is not None:
+            return out.reshape(x.shape)
     forget = mx.tanh(hidden @ _fp32(ctrl, "forget_weight").T)
     gain = mx.tanh(hidden @ _fp32(ctrl, "gain_weight").T)
     return blend(forget, gain, x, message)

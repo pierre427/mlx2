@@ -513,3 +513,22 @@ def test_thinking_close_token_is_one_token_for_deferred_grammars():
     assert declared == {CALLS, CALL, THINK_END}
     adapter.tool_suffix = ":other"
     assert adapter.thinking_close_token_ids() is None
+
+
+@pytest.mark.parametrize("separate_finish", [False, True])
+def test_eos_immediately_after_call_opener_obeys_marker_policy(separate_finish):
+    def finish(parser, reason):
+        text = CALLS + CALL
+        if separate_finish:
+            assert parser.push(text) == []
+            text = ""
+        return parser.finish(text, reason)
+
+    request = {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS}
+    with pytest.raises(ValueError, match="incomplete tool call"):
+        finish(output_parser(request, suffix=S), "stop")
+    tolerant = output_parser({**request, "_tolerant_tool_markers": True}, suffix=S)
+    assert finish(tolerant, "stop") == [{"content": CALL}]
+    required = output_parser({**request, "tool_choice": "required"}, suffix=S)
+    assert finish(required, "length") == []
+    assert required.truncated_tool_call == {"function": None, "cause": "max_tokens"}

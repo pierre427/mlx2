@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import itertools
 import json
 import math
@@ -343,6 +344,8 @@ def classify(ref, arm, ref_evidence, arm_evidence, code):
         return {"verdict": "no_evidence", "why": "no token ids in either response"}
     k = first_divergence(a, b)
     if k is None:
+        if not (scored(ref, code) and scored(arm, code)):
+            return {"verdict": "failed", "why": "functional oracle failed on an identical continuation"}
         return {"verdict": "identical", "tokens": len(a)}
     row = {"first_divergence": k, "ref_token": a[k] if k < len(a) else None,
            "arm_token": b[k] if k < len(b) else None,
@@ -363,6 +366,11 @@ def classify(ref, arm, ref_evidence, arm_evidence, code):
     if not (windows["ref"] and windows["arm"]):
         return {**row, "verdict": "unclassified",
                 "why": "evidence window missing or its ids differ from the timed ids through the divergence"}
+    for selected, window in ((a[k], windows["ref"]), (b[k], windows["arm"])):
+        if (selected not in window or len(window) < 2
+                or not all(type(t) is int and type(v) in (int, float) and math.isfinite(v) for t, v in window.items())
+                or max(window.values()) - window[selected] > 1e-6):
+            return {**row, "verdict": "unclassified", "why": "invalid greedy logprob window"}
     if near_tie_equivalent(a[k], windows["ref"], b[k], windows["arm"], ceiling=CEILING):
         return {**row, "verdict": "near_tie_equivalent", "why": None}
     if _proves_far(windows["ref"], b[k]) or _proves_far(windows["arm"], a[k]):
@@ -378,11 +386,19 @@ def compare_phases(reference, arm):
     ref_cells = {c["cell"]: c for c in reference.get("cells", ()) if c.get("cold")}
     for cell in arm.get("cells", ()):
         ref = ref_cells.get(cell["cell"])
-        if not cell.get("cold") or ref is None:
+        if not cell.get("cold"):  # cells explicitly skipped in the measured phase have a separate receipt
             continue
-        for lane, (r, s) in enumerate(zip(ref["cold"], cell["cold"])):
-            row = classify(r, s, (ref.get("evidence") or [[]] * 8)[lane],
-                           (cell.get("evidence") or [[]] * 8)[lane], cell["lanes"][lane]["code"])
+        for lane in range(min(reference["width"], arm["width"])):
+            if (not ref or lane >= len(ref["cold"]) or lane >= len(cell["cold"])
+                    or lane >= len(cell["lanes"]) or lane >= len(ref["lanes"])):
+                row = {"verdict": "no_evidence", "why": "missing comparison cell or lane"}
+            elif ref["lanes"][lane]["prompt_sha256"] != cell["lanes"][lane]["prompt_sha256"]:
+                row = {"verdict": "unclassified", "why": "comparison prompt differs"}
+            else:
+                ref_ev, arm_ev = ref.get("evidence") or [], cell.get("evidence") or []
+                row = classify(ref["cold"][lane], cell["cold"][lane],
+                               ref_ev[lane] if lane < len(ref_ev) else None,
+                               arm_ev[lane] if lane < len(arm_ev) else None, cell["lanes"][lane]["code"])
             row.update(cell=cell["cell"], lane=lane)
             counts[row["verdict"]] = counts.get(row["verdict"], 0) + 1
             rows.append(row)
@@ -448,7 +464,8 @@ def phase_verdict(phase):
     spec_missing = ([c["cell"] for c in ran if not all((r.get("acceptance") or {}).get("verify_rounds")
                                                        for r in c["cold"])]
                     if phase["route"] == "dspark" else [])
-    route_wrong = [c["cell"] for c in ran if any(r.get("route") != phase["expected_route"] for r in c["cold"])]
+    route_wrong = [c["cell"] for c in ran if any(r.get("route") != phase["expected_route"]
+                                                  for mode in ("cold", "warm") for r in c[mode])]
     mode_wrong = [f"{c['cell']}:{arm}:{i}" for c in ran for arm in ("cold", "warm")
                   for i, r in enumerate(c[arm]) if r.get("thinking_mode") != phase["expected_thinking_mode"]]
     knob_unengaged = [c["cell"] for c in ran if c.get("knob_engaged") is False]
@@ -493,7 +510,8 @@ def ast_probe(a, model, out):
     except subprocess.TimeoutExpired:
         return {"command": cmd, "verdict": "BUG: --ast did not fail closed within 120 s"}
     tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
-    refused = proc.returncode != 0 and time.monotonic() - t0 < 60
+    refusal = "--native-mtp requested, but inkling2 artifact has no implemented native MTP route"
+    refused = proc.returncode == 2 and refusal in tail[0]
     (out / "ast-probe.log").write_text(proc.stdout + proc.stderr)
     return {"command": cmd, "returncode": proc.returncode, "seconds": round(time.monotonic() - t0, 2),
             "message": tail[0], "verdict": "fails_closed" if refused else "BUG: --ast did not fail closed"}
@@ -782,6 +800,14 @@ def run_phase(a, phase, model, cell_plan, out, report, save, references, clock):
         status = H.get_json(base, "/v1/status")
         rec["server_status_start"] = status
         rec["checkpoint"] = H.checkpoint_label(model.name, status)
+        ref = references.get(phase["reference"])
+        if ref and "target_checkpoint" in report:
+            if rec["checkpoint"] != report["target_checkpoint"]:
+                raise ValueError("loaded target differs from the reused reference checkpoint")
+            ref_policy = ref["server_status_start"]["execution"]["kernel_policy"]
+            live_policy = (status.get("execution") or {}).get("kernel_policy") or {}
+            if live_policy.get("moe_nax_gather") != ref_policy["moe_nax_gather"]:
+                raise ValueError("automatic NAX setting differs from the reused reference")
         save()
         ref_cells = {c["cell"]: c for c in (references.get(phase["reference"]) or {}).get("cells", ()) if c.get("cold")}
         for plan in cells:
@@ -900,6 +926,87 @@ def _int_window_keys(obj):
     return obj
 
 
+def reusable_reference(prior, current, name, plan, cells_needed):
+    """Bind persisted ordinary-reference rows to the requested target, settings and prompts."""
+    from mlx2.adapters.inkling2 import KERNEL_OPTIONS, validate_policy
+
+    def refuse(reason):
+        raise SystemExit(f"--reference-ladder {name}: {reason}")
+
+    for field in ("schema", "sampling", "seed", "max_tokens", "reasoning_effort", "evidence_top_logprobs"):
+        if field not in prior or prior[field] != current[field]:
+            refuse(f"{field} differs")
+    refs = [p for p in prior.get("phases", ()) if p.get("name") == name]
+    if len(refs) != 1 or refs[0].get("status") != "completed":
+        refuse("requires one completed reference phase")
+    ref = refs[0]
+    spec = next(p for p in PHASES if p["name"] == name)
+    width = spec["width"]
+    checkpoint = current["target_checkpoint"]
+    if ref.get("checkpoint") != checkpoint or prior.get("checkpoints", {}).get(name) != checkpoint:
+        refuse("target checkpoint differs or is missing")
+    status = ref.get("server_status_start") or {}
+    execution = status.get("execution") or {}
+    if (ref.get("route") != "ordinary" or ref.get("width") != width or status.get("max_lanes") != width
+            or execution.get("checkpoint") != checkpoint or execution.get("route") != "ordinary"):
+        refuse("observed checkpoint, route or width differs")
+    expected, _ = validate_policy(_policy(spec))
+    requested = ref.get("execution_policy") or {}
+    declared, external = validate_policy({**_policy(spec), **requested})
+    if external or declared != expected:
+        refuse("requested execution policy differs")
+    actual = dict(execution.get("kernel_policy") or {})
+    expected.pop("hard_no_thinking")
+    expected.pop("dspark_prefill_reclaim")
+    if execution.get("hard_no_thinking") is not False or (execution.get("dspark") or {}).get("selected") is not False:
+        refuse("thinking or drafter selection differs")
+    # The auto NAX option resolves at model load; preserve and compare its resolved
+    # value to the measured arm below. Explicit selection is a different policy.
+    if expected["moe_nax_gather"] is None:
+        if execution.get("moe_nax_gather_auto") is not True or type(actual.get("moe_nax_gather")) is not bool:
+            refuse("missing automatic NAX policy receipt")
+        expected["moe_nax_gather"] = actual["moe_nax_gather"]
+    # For a historical reference, an option that did not exist at that revision
+    # was necessarily off. A missing receipt for an implemented option is unknown.
+    missing = expected.keys() - actual.keys()
+    if missing:
+        source = prior.get("source") or {}
+        rev = source.get("commit", "")
+        if source.get("tracked_dirty") is not False or not re.fullmatch(r"[0-9a-f]{40}", rev):
+            refuse("cannot identify the policy of an incomplete historical receipt")
+        try:
+            old_adapter = H.git("show", f"{rev}:src/mlx2/adapters/inkling2.py")
+        except subprocess.CalledProcessError:
+            refuse("historical adapter revision unavailable")
+        for option, field in KERNEL_OPTIONS.items():
+            if field in missing and expected[field] is False and option not in old_adapter:
+                actual[field] = False
+    if actual != expected:
+        refuse("effective kernel policy differs or is incomplete")
+
+    cells = ref.get("cells", ())
+    prior_cells = {c["cell"]: c for c in cells}
+    if len(prior_cells) != len(cells):
+        refuse("duplicate reference cells")
+    for row in plan:
+        if row["cell"] not in cells_needed:
+            continue
+        old = prior_cells.get(row["cell"]) or {}
+        if any(len(old.get(k) or ()) != width for k in ("lanes", "cold", "warm", "evidence")):
+            refuse(f"cell {row['cell']} has incomplete lane data")
+        for lane, info in enumerate(old["lanes"]):
+            planned = row["lanes"][lane]
+            if any(info.get(k) != planned[k] for k in ("lane", "prompt_sha256", "code", "prompt_tokens_estimate")):
+                refuse(f"cell {row['cell']} lane {lane} prompts differ")
+            cold, warm = old["cold"][lane], old["warm"][lane]
+            if (not cold.get("token_ids") or cold["token_ids"] != warm.get("token_ids")
+                    or not all(r.get("route") == "ordinary" and r.get("thinking_mode") == "template_effort"
+                               and scored(r, planned["code"]) for r in (cold, warm))
+                    or cold.get("cached_tokens") != 0 or not warm.get("cached_tokens")):
+                refuse(f"cell {row['cell']} lane {lane} lacks a valid cold/warm ordinary reference")
+    return _int_window_keys(ref)
+
+
 def _terminate(signum, frame):
     # SIGTERM unwinds like an exception so every phase's ``finally`` stops its
     # server process group (a bare SIGTERM left a loopback server running).
@@ -1000,8 +1107,33 @@ def main(argv=None) -> int:
         tmp.write_text(json.dumps(report, indent=2, default=str) + "\n")
         os.replace(tmp, out / "ladder.json")
 
+    by_name = {}
+    try:
+        if a.reference_ladder:
+            prior = json.loads(a.reference_ladder.expanduser().read_text())
+            wanted = {p["reference"] for p in phases if p.get("reference")} - {p["name"] for p in phases}
+            if wanted:
+                from mlx2.adapters.inkling2 import inspect_artifact
+                target = inspect_artifact(model)["identity"]["fingerprint"]
+                report["target_checkpoint"] = f"{model.name}@{target}"
+            for name in sorted(wanted):
+                cells_needed = {cell for p in phases if p.get("reference") == name for cell in phase_cells(p, a)}
+                by_name[name] = reusable_reference(prior, report, name, plan, cells_needed)
+            report["reference_ladder"] = {"path": str(a.reference_ladder), "phases": sorted(wanted),
+                                          "source": prior.get("source"), "checkpoints": prior.get("checkpoints"),
+                                          "campaign_root": os.environ.get("MLX2_CAMPAIGN_ROOT")}
+            save()
+    except (SystemExit, ValueError, OSError, KeyError, TypeError) as error:
+        report["status"] = "failed: reference ladder"
+        report["error"] = str(error)
+        save()
+        return 1
     report["ast_probe"] = ast_probe(a, model, out)
     print(f"[ast_probe] {report['ast_probe']['verdict']}: {report['ast_probe'].get('message')}", flush=True)
+    if report["ast_probe"]["verdict"] != "fails_closed":
+        report["status"] = "failed: AST refusal probe"
+        save()
+        return 1
     if a.dry_run:
         report["dry_run"] = {}
         for p in phases:
@@ -1017,26 +1149,7 @@ def main(argv=None) -> int:
                           "phase_s": {k: v["phase_s"] for k, v in estimate["phases"].items()}}))
         return 0
     save()
-    by_name, clock = {}, Clock()
-    if a.reference_ladder:
-        prior = json.loads(Path(a.reference_ladder).expanduser().read_text())
-        wanted = {p["reference"] for p in phases if p.get("reference")} - {p["name"] for p in phases}
-        for name in sorted(wanted):
-            ref = next((p for p in prior.get("phases", ()) if p["name"] == name), None)
-            if ref is None or ref.get("status") != "completed":
-                raise SystemExit(f"--reference-ladder has no completed {name} phase")
-            ref_cells = {c["cell"]: c for c in ref.get("cells", ())}
-            for row in plan:
-                old = ref_cells.get(row["cell"])
-                if old is None or [l["prompt_sha256"] for l in old["lanes"]] != \
-                        [l["prompt_sha256"] for l in row["lanes"]][:len(old["lanes"])]:
-                    raise SystemExit(f"--reference-ladder {name} cell {row['cell']}: prompts differ "
-                                     "(pin MLX2_CAMPAIGN_ROOT to that run's snapshot)")
-            by_name[name] = _int_window_keys(ref)
-        report["reference_ladder"] = {"path": str(a.reference_ladder), "phases": sorted(wanted),
-                                      "source": prior.get("source"), "checkpoints": prior.get("checkpoints"),
-                                      "campaign_root": os.environ.get("MLX2_CAMPAIGN_ROOT")}
-        save()
+    clock = Clock()
     try:
         for phase in phases:
             if phase.get("refusal"):
@@ -1047,8 +1160,7 @@ def main(argv=None) -> int:
                                  for p in phases if p.get("reference") in by_name and p["name"] in by_name]
         checkpoints = {p["name"]: p.get("checkpoint") for p in report["phases"] if p.get("checkpoint")}
         report["checkpoints"] = checkpoints
-        report["checkpoint_note"] = ("a DSpark phase's adapter checkpoint is the route-bound (target + drafter) "
-                                     "identity; the target checkpoint is the ordinary phases' label")
+        report["checkpoint_note"] = "phase checkpoints identify the target; route and drafter identities are in server status"
         bad = [p["name"] for p in report["phases"]
                if p["status"] != "completed" or (p.get("kind") == "fail_closed_check" and p.get("verdict") != "fails_closed")]
         report["status"] = "completed" if not bad else "partial: " + ", ".join(bad)

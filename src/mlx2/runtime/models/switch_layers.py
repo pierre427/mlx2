@@ -414,11 +414,16 @@ class QuantizedSwitchLinear(nn.Module):
             if nax is not None:
                 x = nax
             else:
+                from . import gather_lhs
+
+                # Never with a padded tail: pad is only for sorted calls.
+                lhs = None if pad else gather_lhs.maybe(self, x, rhs, sorted_indices)
                 x = mx.gather_qmm(
                     x,
                     self["weight"],
                     self["scales"],
                     self.get("biases"),
+                    lhs_indices=lhs,
                     rhs_indices=rhs,
                     transpose=True,
                     group_size=self.group_size,

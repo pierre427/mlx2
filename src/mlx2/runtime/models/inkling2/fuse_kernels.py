@@ -122,6 +122,18 @@ def sconv(conv, x, cache, mask, tail, extra):
 
 _RES_TG = 256
 _res_kernels = {}
+# Rounding-point experiment (2026-11-22, the lesson from omlx#5538 and
+# Rapid-MLX #5918): compile the residual, dynamic-conv and message-mix
+# kernels with ``#pragma METAL fp math_mode(safe)`` and ``fp contract(off)``
+# so no product is fused into an add the reference rounds separately. A
+# module switch for the Metal tests (tests/test_inkling2_fuse_metal.py)
+# to measure; not an execution-policy option.
+SAFE_MATH = False
+_SAFE_HEADER = "#pragma METAL fp math_mode(safe)\n#pragma METAL fp contract(off)\n"
+
+
+def _header():
+    return _SAFE_HEADER if SAFE_MATH else ""
 
 
 def _residual_source(n):
@@ -198,13 +210,14 @@ def softmax_mix(module, states, query):
     n = len(states)
     if n > 16 or any(s.size != width for s in states):
         return _decline(module, "layout")
-    kernel = _res_kernels.get(n)
+    kernel = _res_kernels.get((n, SAFE_MATH))
     if kernel is None:
-        kernel = _res_kernels[n] = mx.fast.metal_kernel(
-            name=f"inkling2_fuse_residual_{n}",
+        kernel = _res_kernels[(n, SAFE_MATH)] = mx.fast.metal_kernel(
+            name=f"inkling2_fuse_residual_{n}{'_safe' if SAFE_MATH else ''}",
             input_names=[f"b{i}" for i in range(n - 1)] + ["p", "q", "scale"],
             output_names=["out"],
             source=_residual_source(n),
+            header=_header(),
         )
     q = query.reshape(-1, width)
     nq = q.shape[0]
@@ -231,4 +244,155 @@ def residual(module, blocks, partial):
     out = softmax_mix(module, [*blocks, partial], module.query)
     if out is not None:
         _fuse.count(module, "residual_kernel")
+    return out
+
+
+# ----- dynamic short conv (global-layer k/v), one launch ------------------
+#
+# ``inkling2_fuse_dconv_kernel`` (original mlx2 code, 2026-11-22; the idea of
+# a one-launch dynamic conv is from omlx#5538 and Rapid-MLX #5918, both
+# reimplemented here against mlx2's own reference, ``fuse._dynamic_conv``).
+# Per-token taps ``static_t[c, lag] + dyn[b, t, head, lag]``, summed lag 0
+# (current token) first from 0, then ``(out + x) / sqrt(2K + 1)`` rounded to
+# the activation dtype, and the next state, in one launch instead of the
+# context concat, the compiled lag loop and the state slice. ``FMA`` selects
+# a fused multiply-add per lag (1) or a separate multiply and add (0): which
+# one matches the compiled reference bit for bit is a Metal-test question
+# (tests/test_inkling2_fuse_metal.py), so both are kept.
+_DCONV_SOURCE = r"""
+    uint c = thread_position_in_grid.x;
+    uint b = thread_position_in_grid.y;
+    if (c >= C) return;
+    const float inv = inv_arr[0];
+    const uint head = c / (C / H);
+    float st[4];
+    for (int lag = 0; lag < 4; ++lag) st[lag] = static_t[c * 4 + lag];
+    float ctx[3 + L];
+    for (int j = 0; j < 3; ++j) ctx[j] = HAS_STATE ? state[(b * 3 + j) * C + c] : 0.0f;
+    for (int i = 0; i < L; ++i) ctx[3 + i] = float(x[(b * L + i) * C + c]);
+    for (int i = 0; i < L; ++i) {
+        const size_t drow = ((size_t)(b * L + i) * H + head) * 4;
+        float out = 0.0f;
+        for (int lag = 0; lag < 4; ++lag) {
+            const float w = st[lag] + dyn[drow + lag];
+            const float v = ctx[3 - lag + i];
+            if (FMA) {
+                out = metal::fma(v, w, out);
+            } else {
+                const float term = v * w;
+                out = out + term;
+            }
+        }
+        const float xf = ctx[3 + i];
+        out_y[(b * L + i) * C + c] = T((out + xf) / inv);
+    }
+    for (int j = 0; j < 3; ++j) nstate[(b * 3 + j) * C + c] = ctx[L + j];
+"""
+_dconv_kernels = {}
+DCONV_FMA = 0
+
+
+def dconv(conv, x, dynamic, cache, mask):
+    """One-launch ``DynamicShortConvolution`` (decode and verify rows), or
+    ``None`` to run the exact path. ``dynamic``: [B, L, H, 1, K] FP32."""
+    from .language import _fp32, _speculative_record
+
+    if mx.default_device() != mx.gpu:
+        return _decline(conv, "not_gpu")
+    if mask is not None:
+        return _decline(conv, "mask")
+    if conv.kernel_size != 4 or cache is None:
+        return _decline(conv, "layout")
+    b, length, channels = x.shape
+    if length > _SCONV_ROWS:
+        return _decline(conv, "rows")
+    state = cache[conv.conv_idx]
+    if state is not None and (state.shape != (b, 3, channels) or state.dtype != mx.float32):
+        return _decline(conv, "state")
+    if getattr(cache, "speculating", False):
+        _speculative_record(cache, conv.conv_idx, state, x.astype(mx.float32), mask)
+    kernel = _dconv_kernels.get(SAFE_MATH)
+    if kernel is None:
+        kernel = _dconv_kernels[SAFE_MATH] = mx.fast.metal_kernel(
+            name=f"inkling2_fuse_dconv{'_safe' if SAFE_MATH else ''}",
+            input_names=["x", "state", "static_t", "dyn", "inv_arr"],
+            output_names=["out_y", "nstate"],
+            source=_DCONV_SOURCE,
+            header=_header(),
+        )
+    static_t = _fp32(conv, "static_weight").T  # [C, K]
+    out, nstate = kernel(
+        inputs=[x, state if state is not None else mx.zeros((1,), mx.float32),
+                mx.contiguous(static_t), dynamic.reshape(b, length, conv.num_heads * 4),
+                mx.array([math.sqrt(9)], mx.float32)],
+        template=[("T", x.dtype), ("C", channels), ("L", length), ("H", conv.num_heads),
+                  ("HAS_STATE", state is not None), ("FMA", int(DCONV_FMA))],
+        grid=(channels, b, 1),
+        threadgroup=(min(256, channels), 1, 1),
+        output_shapes=[(b, length, channels), (b, 3, channels)],
+        output_dtypes=[x.dtype, mx.float32],
+    )
+    cache[conv.conv_idx] = nstate
+    _fuse.count(conv, "dconv_kernel")
+    return out
+
+
+# ----- loop-message mix (forget/gain GEMVs, tanh, blend), one launch ------
+#
+# ``inkling2_fuse_message_kernel`` (original mlx2 code, 2026-11-22; the
+# mechanism is from Rapid-MLX #5919 ``message_mix_decode``, reimplemented):
+# for one-row controller calls, ``f = tanh(h . forget[c])``,
+# ``g = tanh(h . gain[c])`` over the gate rank and ``(1 - f) x + g m`` in one
+# launch instead of two GEMVs, two tanh and the compiled blend. The rank-64
+# dot products are summed in index order (the GEMVs' order is their own), so
+# this is near-exact.
+_MIX_SOURCE = r"""
+    uint c = thread_position_in_grid.x;
+    uint n = thread_position_in_grid.y;
+    if (c >= W) return;
+    const device float* hrow = hidden + n * R;
+    const device float* frow = forget + ((size_t)n * W + c) * R;
+    const device float* grow = gain + ((size_t)n * W + c) * R;
+    float fs = 0.0f;
+    float gs = 0.0f;
+    for (int r = 0; r < R; ++r) {
+        fs += hrow[r] * frow[r];
+        gs += hrow[r] * grow[r];
+    }
+    const float f = metal::precise::tanh(fs);
+    const float g = metal::precise::tanh(gs);
+    const float xv = x[(NX == 1 ? 0 : n) * W + c];
+    const float mv = message[n * W + c];
+    out[n * W + c] = (1.0f - f) * xv + g * mv;
+"""
+_mix_kernels = {}
+
+
+def message_mix(module, hidden, forget, gain, x, message):
+    """``hidden`` [N, R], ``forget``/``gain`` [N, W, R], ``x`` [NX, W] (NX 1
+    or N), ``message`` [N, W], all FP32 -> [N, W] FP32; or ``None``."""
+    if mx.default_device() != mx.gpu:
+        return _decline(module, "message_not_gpu")
+    if any(a.dtype != mx.float32 for a in (hidden, forget, gain, x, message)):
+        return _decline(module, "message_dtype")
+    n, rank = hidden.shape
+    width = forget.shape[1]
+    kernel = _mix_kernels.get(SAFE_MATH)
+    if kernel is None:
+        kernel = _mix_kernels[SAFE_MATH] = mx.fast.metal_kernel(
+            name=f"inkling2_fuse_message_mix{'_safe' if SAFE_MATH else ''}",
+            input_names=["hidden", "forget", "gain", "x", "message"],
+            output_names=["out"],
+            source=_MIX_SOURCE,
+            header=_header(),
+        )
+    (out,) = kernel(
+        inputs=[hidden, forget, gain, x, message],
+        template=[("W", width), ("R", rank), ("NX", int(x.shape[0]))],
+        grid=(width, n, 1),
+        threadgroup=(min(256, width), 1, 1),
+        output_shapes=[(n, width)],
+        output_dtypes=[mx.float32],
+    )
+    _fuse.count(module, "message_mix_kernel")
     return out

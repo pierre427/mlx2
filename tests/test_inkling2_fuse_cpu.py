@@ -224,3 +224,111 @@ def test_launch_count_drops():
     each = {name: kernels(**{name: True}) for name in EXACT}
     assert all(value < base for value in each.values()), each
     assert kernels(**ALL) < 0.75 * base
+
+
+# ----- 2026-11-22 options from omlx#5538 / Rapid-MLX (reimplemented) -----
+
+EXACT_2 = ("fuse_norm_fp32", "fuse_shared_tau")
+
+
+@pytest.mark.parametrize("bf16", [False, True])
+@pytest.mark.parametrize("rows", [1, 2])
+@pytest.mark.parametrize("option", [*EXACT_2, "all2"])
+def test_exact_options_2_are_bitwise_defaults(option, rows, bf16):
+    """FP32 norm weights and one shared log-tau on top of the four exact
+    options: bit-identical to the four alone (log floor 4: tau computed on
+    every global call, so the shared tau engages)."""
+    model = _model(bf16=bf16)
+    tokens = mx.random.randint(0, 500, (rows, 40))
+    model.configure_kernels(**ALL)
+    base = _run(model, tokens, PLAN)
+    extra = {name: True for name in EXACT_2} if option == "all2" else {option: True}
+    model.configure_kernels(**ALL, **extra)
+    got = _run(model, tokens, PLAN)
+    counts = model.kernel_receipt()["fuse_counts"]
+    model.configure_kernels()
+    assert mx.array_equal(got, base)
+    if option in ("fuse_norm_fp32", "all2") and bf16:
+        assert counts.get("norm_fp32", 0) > 0
+    if option in ("fuse_shared_tau", "all2"):
+        assert counts.get("tau_shared_hits", 0) > 0
+
+
+@pytest.mark.parametrize("bits,mode", [(4, "affine"), (8, "affine")])
+def test_gather_lhs_cache_is_bitwise(bits, mode):
+    """Cached lhs indices (``fuse_gather_lhs``) equal gather_qmm's default."""
+    from mlx2.runtime.models import gather_lhs
+    from mlx2.runtime.models.switch_layers import QuantizedSwitchLinear
+
+    mx.random.seed(3)
+    switch = QuantizedSwitchLinear(64, 32, 8, bias=False, group_size=32, bits=bits, mode=mode)
+    w = mx.random.normal((8, 32, 64))
+    q = mx.quantize(w, group_size=32, bits=bits, mode=mode)
+    switch.weight, switch.scales = q[0], q[1]
+    if len(q) > 2:
+        switch.biases = q[2]
+    for shape in ((1, 1, 2), (2, 1, 2), (1, 3, 2), (4, 2)):
+        x = mx.random.normal((*shape[:-1], 1, 1, 64))
+        idx = mx.random.randint(0, 8, shape).astype(mx.uint32)
+        gather_lhs.set_enabled(switch, False)
+        ref = switch(x, idx)
+        gather_lhs.set_enabled(switch, True)
+        got = switch(x, idx)
+        assert mx.array_equal(got, ref), shape
+    assert switch.__dict__["_lhs_cache_counts"]["hits"] == 4
+    gather_lhs.set_enabled(switch, True)
+    sorted_out = switch(mx.random.normal((4, 1, 64)), mx.array([0, 1, 1, 5], mx.uint32),
+                        sorted_indices=True)
+    assert sorted_out.shape[0] == 4
+    assert switch.__dict__["_lhs_cache_counts"]["hits"] == 4  # sorted calls never use it
+
+
+def test_new_gpu_options_decline_or_stay_off_on_cpu():
+    """The near-exact kernels, the compiled MoE block and the compiled head
+    softcap are GPU only: on the CPU the exact path runs, bit-identically."""
+    model = _model()
+    tokens = mx.random.randint(0, 500, (1, 40))
+    model.configure_kernels(**ALL)
+    base = _run(model, tokens, PLAN)
+    model.configure_kernels(**ALL, fuse_dconv_kernel=True, fuse_message_kernel=True,
+                            head_softcap_compiled=True)
+    got = _run(model, tokens, PLAN)
+    counts = model.kernel_receipt()["fuse_counts"]
+    model.configure_kernels()
+    assert mx.array_equal(got, base)
+    assert counts.get("kernel_declined:not_gpu", 0) > 0
+    assert counts.get("kernel_declined:message_not_gpu", 0) > 0
+    assert "dconv_kernel" not in counts and "message_mix_kernel" not in counts
+    with pytest.raises(ValueError, match="fuse_dconv_kernel requires"):
+        model.configure_kernels(fuse_dconv_kernel=True)
+    with pytest.raises(ValueError, match="fuse_message_kernel requires"):
+        model.configure_kernels(fuse_message_kernel=True)
+
+
+def test_compiled_moe_uses_live_router_weights_and_counts_calls():
+    from mlx2.runtime.models.inkling2 import moe_fast
+
+    model = _model()
+    model.configure_kernels(moe_fused=True)
+    moe = model.model.layers[0].mlp
+    experts, refusal = moe._fast_experts()
+    assert refusal is None
+    row = mx.random.normal((1, 1, model.config.hidden_size), key=mx.random.key(13))
+    for _ in range(2):
+        got = moe._compiled_moe(experts, False, row)
+        expected = moe_fast.fused_call(moe, experts, row)
+        assert mx.allclose(got, expected)
+        moe.gate_weight = -moe.gate_weight
+    receipt = model.kernel_receipt()
+    assert receipt["compiled_moe_calls"] == 2
+    assert receipt["moe_fused_calls"] == 4
+    assert receipt["moe_fast_declines"] == {}
+
+
+def test_shared_tau_engages_with_attention_fusion_off():
+    model = _model(floor=4)
+    tokens = mx.random.randint(0, 500, (1, 12), key=mx.random.key(14))
+    baseline = model(tokens)
+    model.configure_kernels(fuse_shared_tau=True)
+    assert mx.array_equal(model(tokens), baseline)
+    assert model.kernel_receipt()["fuse_counts"]["tau_shared_hits"] > 0

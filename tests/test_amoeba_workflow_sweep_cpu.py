@@ -202,3 +202,26 @@ def test_failed_extraction_prevents_stage_completion(tmp_path, monkeypatch):
     monkeypatch.setattr(X, '_topic_seed', lambda *a: (None, {'clusters': []}))
     with pytest.raises(SystemExit, match='failed.*topic'):
         X.run_box(b, _ctx(events=tmp_path / 'events'))
+
+
+@pytest.mark.parametrize("rel", ["weights/box_weights.npz", "weights/L3.npz"])
+def test_resume_checks_weight_files_indexed_by_box_manifest(tmp_path, rel):
+    from mlx2.experimental.amoeba.state import write_json
+
+    b = _build(tmp_path)
+    b.rec["kind"] = "extract"
+    rev = {"commit": "test", "dirty": False}
+    for stage in ("gap", "core", "map", "box", "box_gate"):
+        b.end(b.begin(stage, rev), "done", outputs={})
+    bundle = b.stage_dir("box_bundle")
+    member = bundle / rel
+    member.parent.mkdir()
+    member.write_bytes(b"original")
+    manifest = bundle / "manifest.json"
+    output = file_outputs({rel: member})[rel]
+    write_json(manifest, {"files": {rel: {"bytes": output["bytes"], "sha256": output["sha256"]}}})
+    b.end(b.begin("box_bundle", rev), "done", outputs=file_outputs({"manifest": manifest}))
+    assert b.is_done("box_bundle")
+    member.write_bytes(b"changed!")
+    with pytest.raises(SystemExit, match="redo box_bundle"):
+        b.is_done("box_bundle")

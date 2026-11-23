@@ -266,6 +266,24 @@ KERNEL_OPTIONS = {
     "inkling2_fuse_sconv_kernel": "fuse_sconv_kernel",
     # and one-launch one-row attention-residual mixes and loop messages.
     "inkling2_fuse_residual_kernel": "fuse_residual_kernel",
+    # Added 2026-11-22 from omlx#5538 and Rapid-MLX #5918-#5920
+    # (reimplemented; default off, GPU A/B pending). Intended bit-identical:
+    # cached lhs indices for unsorted expert gathers (no arange per call),
+    "inkling2_fuse_gather_lhs": "fuse_gather_lhs",
+    # FP32 copies of RMSNorm weights for FP32 inputs (no per-call weight cast),
+    "inkling2_fuse_norm_fp32": "fuse_norm_fp32",
+    # one log-tau per forward for the global visits (above the 8K floor).
+    "inkling2_fuse_shared_tau": "fuse_shared_tau",
+    # Near-exact Metal kernels (own summation order): the global-layer dynamic
+    # k/v conv in one launch (needs inkling2_fuse_sconv),
+    "inkling2_fuse_dconv_kernel": "fuse_dconv_kernel",
+    # the loop-message forget/gain GEMVs + tanh + blend in one launch for
+    # one-row calls (needs inkling2_fuse_controllers),
+    "inkling2_fuse_message_kernel": "fuse_message_kernel",
+    # the one-token fused MoE forward compiled per shape (needs moe_fused),
+    "inkling2_compile_decode_blocks": "compile_decode_blocks",
+    # and the logit softcap compiled into one kernel on the GPU.
+    "inkling2_head_softcap_compiled": "head_softcap_compiled",
     # W4A4 accuracy experiment (implemented 2026-11-21, default off, GPU A/B
     # pending; scripts/research/inkling2_w4a4_ab.py). Fake-quantizes the
     # routed experts' inputs as hf_quant_config.json's
@@ -397,6 +415,12 @@ def validate_policy(value):
         kernels["fuse_sconv_kernel"] = False  # the default follows fuse_sconv
     if kernels["fuse_sconv_kernel"] and not kernels["fuse_sconv"]:
         raise ValueError("Inkling 2 inkling2_fuse_sconv_kernel requires inkling2_fuse_sconv")
+    if kernels["fuse_dconv_kernel"] and not kernels["fuse_sconv"]:
+        raise ValueError("Inkling 2 inkling2_fuse_dconv_kernel requires inkling2_fuse_sconv")
+    if kernels["fuse_message_kernel"] and not kernels["fuse_controllers"]:
+        raise ValueError("Inkling 2 inkling2_fuse_message_kernel requires inkling2_fuse_controllers")
+    if kernels["compile_decode_blocks"] and not kernels["moe_fused"]:
+        raise ValueError("Inkling 2 inkling2_compile_decode_blocks requires inkling2_moe_fused")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_moe_weighted_sum requires inkling2_moe_fused")
     return kernels, value
@@ -648,7 +672,34 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
     @property
     def checkpoint(self):
-        return f"{Path(self.identity['path']).name}@{self.identity['fingerprint']}"
+        fingerprint = self.identity.get("target_fingerprint", self.identity["fingerprint"])
+        return f"{Path(self.identity['path']).name}@{fingerprint}"
+
+    def bind_prefill_step(self, prefill_step):
+        self._prefill_step = int(prefill_step)
+
+    def cache_budget(self, *, mtp):
+        """Per-lane cache bound (adapters/inkling2_memory.py) for lane admission
+        and the APCv2 checkpoint planners (rolling, junction, interior).
+
+        Added 2026-11-22 so the DSpark route can capture shared-prefix
+        boundaries: without a projection admission plans no hybrid checkpoint
+        (junctions were planned and dropped on 39/40 GSM8K prompts,
+        qualification/runs/inkling2-gpu-20261122/3c69f31b2-dsjunc). It also
+        replaces the generic unmeasured lane envelope on both routes and turns
+        on the route-default rolling prefill checkpoints."""
+        from .inkling2_memory import Inkling2CacheBudget
+
+        if mtp:
+            raise ValueError("Inkling 2 has no native MTP route")
+        draft = None
+        if getattr(self, "draft_model", None) is not None:
+            draft = self.config["mtp_config"]
+        return Inkling2CacheBudget.from_config(
+            self.model.config, visits=self.model.model.layer_indices, draft=draft,
+            prefill_rows=getattr(self, "_prefill_step", self.prefill_step_default()),
+            num_draft=self._external_num_draft() if draft is not None else 0,
+        )
 
     def execution_numerics_contract(self):
         root = Path(__file__).parents[1] / "runtime/models"
@@ -664,10 +715,13 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if policy.get("verify_splitk"):
             names += ("inkling2/splitk.py",)
         if any(policy.get(k) for k in ("fuse_controllers", "fuse_residual", "fuse_sconv",
-                                       "fuse_attention")):
+                                       "fuse_attention", "fuse_norm_fp32", "fuse_shared_tau")):
             names += ("inkling2/fuse.py",)
-        if policy.get("fuse_sconv_kernel") or policy.get("fuse_residual_kernel"):
+        if any(policy.get(k) for k in ("fuse_sconv_kernel", "fuse_residual_kernel",
+                                       "fuse_dconv_kernel", "fuse_message_kernel")):
             names += ("inkling2/fuse_kernels.py",)
+        if policy.get("fuse_gather_lhs"):
+            names += ("gather_lhs.py",)
         if policy.get("moe_act_quant"):
             names += ("inkling2/act_quant.py",)
         return {
@@ -680,6 +734,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         }
 
     def execution_config(self, *, max_lanes, prefill_step):
+        self.bind_prefill_step(prefill_step)
         if getattr(self, "draft_model", None) is not None:
             if max_lanes != 1:
                 # Verify over sliding-window rings beside recurrent state is

@@ -251,7 +251,7 @@ def _weighted_sum_admitted(y, inv_order, weights, indices, do_sort):
     return None if admission.accepted else admission.reason
 
 
-def fused_call(moe, experts, x, weighted_sum=False):
+def fused_call(moe, experts, x, weighted_sum=False, *, compiled_decode=False):
     """``moe(x)`` through the stacked experts; counters live on ``moe``."""
     switch = moe.switch_mlp
     counts = moe.__dict__.setdefault("moe_fast_counts", {})
@@ -293,7 +293,8 @@ def fused_call(moe, experts, x, weighted_sum=False):
         _act_quant.count(moe.__dict__["act_quant_counts"], f"fused:{act_fmt}:w2")
         hidden = _act_quant.apply(act_fmt, hidden)
     y = experts.down(hidden, idx, sorted_indices=do_sort)
-    note("fused")
+    if not compiled_decode:
+        note("fused")
     # Multi-token sorted calls only (prefill chunks, verify windows): a
     # one-token batch at any width keeps the reference combine.
     if do_sort and weighted_sum and token_length > 1:

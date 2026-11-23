@@ -434,7 +434,9 @@ class OutputParser:
         self.buffer += text
         final = final or stop_hit
         events = []
-        while self.buffer:
+        # A chunk (or the entire output) can end exactly at the tool opener.
+        # The final push still has to resolve that empty, unfinished call.
+        while self.buffer or (final and self.channel == "tool"):
             if self._drop_separator:
                 stripped = self.buffer.lstrip(self.think_close_separator)
                 self._consume_buffer(len(self.buffer) - len(stripped))
@@ -627,10 +629,6 @@ class OutputParser:
                     self._emit(events, self.buffer[:end])
                 self._consume_buffer(end)
                 break
-        if final and (stop_hit or self._length_finish) and self.channel == "tool":
-            # The stop landed right after the opener: a call was in progress
-            # with nothing buffered yet, so the tool branch never ran.
-            self._record_cut_call(self.buffer, stop_hit=stop_hit)
         if final:
             self._pending_space = ""
         return events

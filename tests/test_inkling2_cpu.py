@@ -52,6 +52,17 @@ def _run(model, tokens, plan):
     return mx.concatenate([model(tokens[:, a:b], cache=cache) for a, b in plan], axis=1)
 
 
+def test_checkpoint_labels_the_target_on_ordinary_and_dspark_routes():
+    from mlx2.adapters.inkling2 import Inkling2Adapter
+
+    adapter = Inkling2Adapter.__new__(Inkling2Adapter)
+    adapter.identity = {"path": "/models/target", "fingerprint": "artifact"}
+    expected = adapter.checkpoint
+    assert expected == "target@artifact"
+    adapter.identity.update(target_fingerprint="artifact", fingerprint="bound-route")
+    assert adapter.checkpoint == expected
+
+
 def test_loop_visits_and_cache_planes():
     config = TextConfig.from_dict(TINY)
     assert config.layer_indices == (
@@ -359,6 +370,9 @@ def test_policy_parsing():
          "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": None,
          "prefill_mask_mb": None, "loop_passes": None, "fuse_controllers": True, "fuse_residual": True, "fuse_sconv": True,
          "fuse_attention": True, "fuse_sconv_kernel": True, "fuse_residual_kernel": False,
+         "fuse_gather_lhs": False, "fuse_norm_fp32": False, "fuse_shared_tau": False,
+         "fuse_dconv_kernel": False, "fuse_message_kernel": False,
+         "compile_decode_blocks": False, "head_softcap_compiled": False,
          "moe_act_quant": False}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
@@ -380,7 +394,10 @@ def test_fused_projection_toggle_round_trip():
                                    "moe_nax_gather": False, "sink_slot": False,
                                    "fuse_controllers": False, "fuse_residual": False, "fuse_sconv": False,
                                    "fuse_attention": False, "fuse_sconv_kernel": False, "fuse_residual_kernel": False,
-                                   "verify_splitk": False, "moe_act_quant": False}
+                                   "verify_splitk": False, "moe_act_quant": False,
+                                   "fuse_gather_lhs": False, "fuse_norm_fp32": False, "fuse_shared_tau": False,
+                                   "fuse_dconv_kernel": False, "fuse_message_kernel": False,
+                                   "compile_decode_blocks": False, "head_softcap_compiled": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])

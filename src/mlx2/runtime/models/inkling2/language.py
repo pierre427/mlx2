@@ -139,6 +139,21 @@ _HEAD_SOURCE = r"""
     }
 """
 _head_kernel = None
+_COMPILED_HEAD_ROWS = 32
+_SOFTCAP_SCALARS = {}
+
+
+@mx.compile
+def _softcap_compiled(logits, cap):
+    return mx.tanh(logits / cap) * cap
+
+
+def _softcap_scalar(cap):
+    held = _SOFTCAP_SCALARS.get(cap)
+    if held is None:
+        held = _SOFTCAP_SCALARS[cap] = mx.array(cap, mx.float32)
+        mx.eval(held)
+    return held
 
 
 def head_gemv(x, weight):
@@ -441,13 +456,22 @@ class DynamicShortConvolution(nn.Module):
     def __call__(self, x, dynamic_input, cache=None, mask=None):
         b, length, _ = x.shape
         k = self.kernel_size
+        fused = _fuse.on(self, "fuse_sconv")
+        kernel_out = None
+        if fused and _fuse.on(self, "fuse_dconv_kernel"):
+            from . import fuse_kernels
+
+            dynamic = (self.weight_proj(dynamic_input).astype(mx.float32)
+                       .reshape(b, length, self.num_heads, 1, k))
+            kernel_out = fuse_kernels.dconv(self, x, dynamic, cache, mask)
+            if kernel_out is not None:
+                return kernel_out
         xf = x.astype(mx.float32)
         inputs = xf if mask is None else mx.where(mask[..., None], xf, 0)
         state = cache[self.conv_idx] if cache is not None else None
         if state is None:
             state = mx.zeros((b, k - 1, x.shape[-1]), mx.float32)
         context = mx.concatenate([state, inputs], axis=1)
-        fused = _fuse.on(self, "fuse_sconv")
         if cache is not None:
             _speculative_record(cache, self.conv_idx, cache[self.conv_idx], inputs, mask)
             if fused and mask is None and k > 1:
@@ -671,7 +695,8 @@ class Attention(nn.Module):
             if left_padding is not None:
                 left_padding = mx.maximum(left_padding - start, 0)
         offset = size - length
-        if self.log_floor is not None and fa and q.dtype == r.dtype == x.dtype:
+        if (self.log_floor is not None and (fa or _fuse.on(self, "fuse_shared_tau"))
+                and q.dtype == r.dtype == x.dtype):
             # (The fused chain returns q/r in their own dtype; the reference
             # casts to x.dtype, so it engages only when those agree.)
             q, r = _fuse.log_tau(self, q, r, length, offset, left_padding, x.dtype)
@@ -830,6 +855,36 @@ class SparseMoE(nn.Module):
         if fused:
             self._fast_experts()
 
+    def _compiled_moe(self, experts, weighted, x):
+        """``inkling2_compile_decode_blocks``: the one-token fused MoE forward
+        (router, gate/up gather, activation, down gather, combine) as one
+        compiled graph per shape (``shapeless=False``; Rapid-MLX #5920,
+        reimplemented). The weights are the compile's implicit inputs, so a
+        replaced table retraces. Python-side counters inside the block run
+        at trace time only; ``compiled_moe_calls`` counts calls."""
+        from .. import gather_lhs
+        from . import moe_fast
+
+        key = (id(experts), bool(weighted), gather_lhs.enabled(experts.gate_up))
+        held = self.__dict__.get("_compiled_moe_fn")
+        if held is None or held[0] != key:
+            # MLX substitutes tracers in these containers. parameters() builds
+            # separate dictionaries; tracing the modules would still see the
+            # original arrays, which MLX rejects as uncaptured inputs.
+            fn = mx.compile(
+                lambda row: moe_fast.fused_call(
+                    self, experts, row, weighted_sum=weighted, compiled_decode=True
+                ),
+                inputs=[self, vars(experts)], shapeless=False,
+            )
+            held = (key, fn)
+            object.__setattr__(self, "_compiled_moe_fn", held)
+        result = held[1](x)
+        counts = self.__dict__.setdefault("moe_fast_counts", {})
+        counts["compiled_moe_calls"] = counts.get("compiled_moe_calls", 0) + 1
+        counts["fused"] = counts.get("fused", 0) + 1
+        return result
+
     def _fast_experts(self):
         """``(experts, refusal)``, rebuilt when any source array is replaced
         (a refused build is retried then too).  Turning the fused route off
@@ -854,9 +909,12 @@ class SparseMoE(nn.Module):
             experts, reason = self._fast_experts()
             reason = reason or moe_fast.decline_reason()
             if reason is None:
-                return moe_fast.fused_call(
-                    self, experts, x, weighted_sum=self.__dict__.get("_fast_weighted_sum", False)
-                )
+                weighted = self.__dict__.get("_fast_weighted_sum", False)
+                if (self.__dict__.get("_compile_decode_blocks") and x.size == x.shape[-1]
+                        and mx.default_device() == mx.gpu
+                        and not self.__dict__.get("_act_quant")):
+                    return self._compiled_moe(experts, weighted, x)
+                return moe_fast.fused_call(self, experts, x, weighted_sum=weighted)
             counts = self.__dict__.setdefault("moe_fast_counts", {})
             counts["declined:" + reason] = counts.get("declined:" + reason, 0) + 1
         indices, weights = _route(
@@ -914,6 +972,21 @@ class AttentionResidual(nn.Module):
         return _attention_residual(
             mx.stack([*blocks, partial], axis=-2), self.query, self.normalize_values
         )
+
+
+def _expert_switches(moe):
+    """The routed-expert gather modules of one MoE: the reference projections
+    and, when built, the fused stacked table and its down twin."""
+    found = []
+    switch = getattr(moe, "switch_mlp", None)
+    if switch is not None:
+        for name in ("gate_proj", "up_proj", "down_proj"):
+            if name in switch:
+                found.append(switch[name])
+    held = moe.__dict__.get("_fast_built")
+    if held is not None and held[0] is not None:
+        found += [held[0].gate_up, held[0].down]
+    return found
 
 
 class MessageController(nn.Module):
@@ -1009,7 +1082,7 @@ class DecoderLayer(nn.Module):
         message_norms = None
         if self.is_sliding and messages is None:
             attn = self.self_attn(
-                self.input_layernorm(mixed[..., 0, :]).astype(x.dtype),
+                _fuse.rms(self, self.input_layernorm, mixed[..., 0, :]).astype(x.dtype),
                 cache=cache,
                 conv_mask=mask,
             )
@@ -1035,7 +1108,7 @@ class DecoderLayer(nn.Module):
                           if self.is_sliding else None)
                 parts = [
                     _fuse.one_controller(self.controllers[name], part, messages[..., i, :],
-                                         x_norm=shared)
+                                         x_norm=shared, owner=self)
                     for i, (name, part) in enumerate(zip(("attn", "k", "v"), parts))
                 ]
                 _fuse.count(self, "controllers_unbatched")
@@ -1049,7 +1122,7 @@ class DecoderLayer(nn.Module):
                 if self.is_sliding
                 else (self.q_input_layernorm, self.k_input_layernorm, self.v_input_layernorm)
             )
-            parts = [norm(part).astype(x.dtype) for norm, part in zip(norms, parts)]
+            parts = [_fuse.rms(self, norm, part).astype(x.dtype) for norm, part in zip(norms, parts)]
             attn = self.self_attn(*parts, cache=cache, conv_mask=mask)
         fused_sconv = _fuse.on(self, "fuse_sconv")
         if fused_sconv:
@@ -1068,10 +1141,11 @@ class DecoderLayer(nn.Module):
         if messages is not None and fused_ctrl:
             hidden = _fuse.one_controller(
                 self.controllers["mlp"], hidden, messages[..., 3, :],
-                message_norm=None if message_norms is None else message_norms[..., 3, :])
+                message_norm=None if message_norms is None else message_norms[..., 3, :],
+                owner=self)
         elif messages is not None:
             hidden = self.controllers["mlp"](hidden, messages[..., 3, :])
-        hidden = self.mlp(self.post_attention_layernorm(hidden).astype(x.dtype))
+        hidden = self.mlp(_fuse.rms(self, self.post_attention_layernorm, hidden).astype(x.dtype))
         if fused_sconv:
             out = self.mlp_sconv(hidden, conv, mask, tail="mlp_residual", extra=(residual, x))
         else:
@@ -1261,7 +1335,18 @@ class Model(nn.Module):
             logits = h @ cached[1].T
         cap = self.config.final_logit_softcapping
         if cap:
-            logits = mx.tanh(logits / cap) * cap
+            rows = logits.size // logits.shape[-1]
+            if (self.__dict__.get("_head_softcap_compiled") and rows <= _COMPILED_HEAD_ROWS
+                    and mx.default_device() == mx.gpu):
+                # inkling2_head_softcap_compiled: the divide, tanh and multiply
+                # as one kernel (omlx#5538 compiles its logit tail). CPU tanh
+                # differs under compile, so GPU only; bitwise is a Metal-test
+                # question.
+                self.__dict__["head_softcap_compiled_calls"] = (
+                    self.__dict__.get("head_softcap_compiled_calls", 0) + 1)
+                logits = _softcap_compiled(logits, _softcap_scalar(cap))
+            else:
+                logits = mx.tanh(logits / cap) * cap
         return logits[..., :vocab]
 
     def __call__(
@@ -1283,14 +1368,18 @@ class Model(nn.Module):
         pre_norm = self.model(inputs, cache, inputs_embeds)
         if skip_logits:
             return None
-        return self._project_logits(self.model.norm(select_checkpoint_rows(pre_norm)))
+        return self._project_logits(
+            _fuse.rms(self.model, self.model.norm, select_checkpoint_rows(pre_norm)))
 
     def configure_kernels(self, *, fused_projections=False, head_kernel=False, sink_sdpa=False,
                           loop_passes=None, prefill_mask_mb=None, flash_prefill=False,
                           moe_fused=False, moe_weighted_sum=False, moe_nax_gather=False,
                           sink_slot=False, fuse_controllers=False, fuse_residual=False,
                           fuse_sconv=False, fuse_attention=False, fuse_sconv_kernel=False,
-                          fuse_residual_kernel=False, verify_splitk=False, moe_act_quant=False):
+                          fuse_residual_kernel=False, verify_splitk=False, moe_act_quant=False,
+                          fuse_gather_lhs=False, fuse_norm_fp32=False, fuse_shared_tau=False,
+                          fuse_dconv_kernel=False, fuse_message_kernel=False,
+                          compile_decode_blocks=False, head_softcap_compiled=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1303,6 +1392,12 @@ class Model(nn.Module):
             raise ValueError("Inkling 2 moe_weighted_sum requires moe_fused")
         if fuse_sconv_kernel and not fuse_sconv:
             raise ValueError("Inkling 2 fuse_sconv_kernel requires fuse_sconv")
+        if fuse_dconv_kernel and not fuse_sconv:
+            raise ValueError("Inkling 2 fuse_dconv_kernel requires fuse_sconv")
+        if compile_decode_blocks and not moe_fused:
+            raise ValueError("Inkling 2 compile_decode_blocks requires moe_fused")
+        if fuse_message_kernel and not fuse_controllers:
+            raise ValueError("Inkling 2 fuse_message_kernel requires fuse_controllers")
         if moe_act_quant:
             # Every layer's activation format before anything changes, so a
             # refusal leaves the model as it was.
@@ -1311,7 +1406,10 @@ class Model(nn.Module):
         flags = {"fuse_controllers": fuse_controllers, "fuse_residual": fuse_residual,
                  "fuse_sconv": fuse_sconv, "fuse_attention": fuse_attention,
                  "fuse_sconv_kernel": fuse_sconv_kernel,
-                 "fuse_residual_kernel": fuse_residual_kernel}
+                 "fuse_residual_kernel": fuse_residual_kernel,
+                 "fuse_gather_lhs": fuse_gather_lhs, "fuse_norm_fp32": fuse_norm_fp32,
+                 "fuse_shared_tau": fuse_shared_tau, "fuse_dconv_kernel": fuse_dconv_kernel,
+                 "fuse_message_kernel": fuse_message_kernel}
         enabled = frozenset(name for name, value in flags.items() if value)
         holder = self.model.__dict__.get("_fuse_holder") or {"memo": None}
         object.__setattr__(self.model, "_fuse_holder", holder if enabled else None)
@@ -1345,6 +1443,18 @@ class Model(nn.Module):
             elif getattr(layer.self_attn, "_fused_bounds", None) is not None:
                 # The row views stay; only the stacked dispatch is turned off.
                 object.__setattr__(layer.self_attn, "_fused_bounds", None)
+        from .. import gather_lhs as _gather_lhs
+
+        for layer in self.model.layers:
+            for module in _expert_switches(layer.mlp):
+                _gather_lhs.set_enabled(module, fuse_gather_lhs)
+        object.__setattr__(self, "_compile_decode_blocks", bool(compile_decode_blocks))
+        for layer in self.model.layers:
+            # The compiled block is kept across toggles (A/B scripts switch
+            # per block); it is keyed on the fused build and the weights are
+            # its implicit inputs.
+            object.__setattr__(layer.mlp, "_compile_decode_blocks", bool(compile_decode_blocks))
+        object.__setattr__(self, "_head_softcap_compiled", bool(head_softcap_compiled))
         if built:
             # The replaced gate/up buffers would otherwise stay in MLX's
             # buffer cache (about 10 GB on the Mini), too large for reuse.
@@ -1358,7 +1468,9 @@ class Model(nn.Module):
              "moe_fused": bool(moe_fused), "moe_weighted_sum": bool(moe_weighted_sum),
              "moe_nax_gather": bool(moe_nax_gather), "sink_slot": bool(sink_slot),
              **{name: bool(value) for name, value in flags.items()},
-             "verify_splitk": bool(verify_splitk), "moe_act_quant": bool(moe_act_quant)},
+             "verify_splitk": bool(verify_splitk), "moe_act_quant": bool(moe_act_quant),
+             "compile_decode_blocks": bool(compile_decode_blocks),
+             "head_softcap_compiled": bool(head_softcap_compiled)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1387,6 +1499,7 @@ class Model(nn.Module):
                "verify_splitk_declines": splitk_counts,
                "moe_fused_calls": moe.pop("fused", 0),
                "moe_weighted_sum_calls": moe.pop("weighted_sum", 0),
+               "compiled_moe_calls": moe.pop("compiled_moe_calls", 0),
                "moe_fast_declines": moe,
                "moe_fused_layers": sum(1 for b in built if b is not None and b[0] is not None),
                "moe_fused_refusals": sorted({b[1] for b in built if b is not None and b[1]})}
@@ -1435,7 +1548,7 @@ class Model(nn.Module):
         from ...prefill_checkpoint_rows import select_checkpoint_rows
 
         visits = self._check_taps(capture_layers)
-        normed = self.model.norm(pre)
+        normed = _fuse.rms(self.model, self.model.norm, pre)
         dtype = self.model.embed_norm.weight.dtype
         features = mx.concatenate(
             [normed.astype(dtype) if i == visits else taps[i] for i in capture_layers], axis=-1

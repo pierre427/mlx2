@@ -335,15 +335,23 @@ class Build:
         if r.get("status") != "done":
             return False
         from .paths import sha256_file
-        for name, output in (r.get("outputs") or {}).items():
-            if not isinstance(output, dict) or "path" not in output:
-                continue
-            p = Path(output["path"])
+        def check_output(name, p, output):
             valid = p.is_dir() if output.get("dir") else (
                 p.is_file() and p.stat().st_size == output.get("bytes")
                 and sha256_file(p) == output.get("sha256"))
             if not valid:
                 raise SystemExit(f"stage {stage}: output {name} ({p}) missing or changed; rerun with --redo {stage}")
+
+        for name, output in (r.get("outputs") or {}).items():
+            if not isinstance(output, dict) or "path" not in output:
+                continue
+            p = Path(output["path"])
+            check_output(name, p, output)
+            if stage == "box_bundle" and name == "manifest":
+                # The receipt binds the index. The index binds the carried files,
+                # including legacy single-file and current sharded weight packs.
+                for rel, member in json.loads(p.read_text()).get("files", {}).items():
+                    check_output(rel, p.parent / rel, member)
         return True
 
     def begin(self, stage: str, commit: dict) -> dict:

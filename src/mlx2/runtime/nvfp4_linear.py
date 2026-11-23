@@ -212,8 +212,12 @@ class ScaledNVFP4SwitchLinear(nn.Module):
             if nax.MODE != "off" and nax.admit_phase():
                 y = nax.try_gather(x, self, indices)
         if y is None:
+            from .models import gather_lhs
+
             y = mx.gather_qmm(
-                x, self["weight"], self["scales"], None, rhs_indices=indices,
+                x, self["weight"], self["scales"], None,
+                lhs_indices=gather_lhs.maybe(self, x, indices, sorted_indices),
+                rhs_indices=indices,
                 transpose=True, group_size=GROUP_SIZE, bits=BITS, mode="nvfp4",
                 sorted_indices=sorted_indices,
             )
