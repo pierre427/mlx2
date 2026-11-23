@@ -186,6 +186,8 @@ _PUBLIC_EXPORT_SKIP_MODULES = {
         "tests the current benchmark_results ladder script; the export carries an older frozen copy",
 }
 _PUBLIC_EXPORT_SKIP_TESTS = {
+    "test_ens_a0_cpu.py::test_m3_owner_stops_nested_work_before_releasing_lock":
+        "drives research/ens/m3.py, the lab's M3-lane helper, which the export does not carry",
     "test_residual_ablation_hy4_flash_cpu.py::test_runner_renders_through_the_adapter_and_batches_on_hy4":
         "needs the current residual-ablation runner; the public tree keeps an older copy",
     "test_qualification_matrix.py::test_canonical_manifests_name_real_services_selected_arms_and_new_arms":
