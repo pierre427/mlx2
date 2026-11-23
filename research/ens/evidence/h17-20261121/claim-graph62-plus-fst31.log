@@ -1,0 +1,82 @@
+{
+ "slot": {
+  "read": "slot",
+  "recall_target": 0.95,
+  "pair": {
+   "n": 255,
+   "families": [
+    "graph.6-2.h1",
+    "graph.6-2.h2"
+   ],
+   "oracle": 0.8392157554626465,
+   "self_claim": 0.6627451181411743,
+   "bypass": 0.41960787773132324,
+   "claim_acc": 0.5058823823928833,
+   "abstain": 0.003921568859368563,
+   "per_family": {
+    "graph.6-2.h1": 0.703125,
+    "graph.6-2.h2": 0.6220472455024719
+   },
+   "abstain_on_foreign_structures": 1.0
+  },
+  "add_tile": {
+   "n": 508,
+   "families": [
+    "graph.6-2.h1",
+    "graph.6-2.h2",
+    "fst.3-1.h1"
+   ],
+   "oracle": 0.8897637724876404,
+   "self_claim": 0.7716535329818726,
+   "bypass": 0.4881889820098877,
+   "claim_acc": 0.6870078444480896,
+   "abstain": 0.06692913174629211,
+   "per_family": {
+    "graph.6-2.h1": 0.703125,
+    "graph.6-2.h2": 0.6220472455024719,
+    "fst.3-1.h1": 0.8814229369163513
+   },
+   "abstain_on_foreign_structures": 1.0
+  }
+ },
+ "key_control": {
+  "read": "key",
+  "recall_target": 0.95,
+  "pair": {
+   "n": 255,
+   "families": [
+    "graph.6-2.h1",
+    "graph.6-2.h2"
+   ],
+   "oracle": 0.8392157554626465,
+   "self_claim": 0.7921569347381592,
+   "bypass": 0.41960787773132324,
+   "claim_acc": 0.9137255549430847,
+   "abstain": 0.0,
+   "per_family": {
+    "graph.6-2.h1": 0.90625,
+    "graph.6-2.h2": 0.6771653294563293
+   },
+   "abstain_on_foreign_structures": 0.0
+  },
+  "add_tile": {
+   "n": 508,
+   "families": [
+    "graph.6-2.h1",
+    "graph.6-2.h2",
+    "fst.3-1.h1"
+   ],
+   "oracle": 0.8897637724876404,
+   "self_claim": 0.6673228144645691,
+   "bypass": 0.4881889820098877,
+   "claim_acc": 0.45078739523887634,
+   "abstain": 0.0,
+   "per_family": {
+    "graph.6-2.h1": 0.703125,
+    "graph.6-2.h2": 0.7559055089950562,
+    "fst.3-1.h1": 0.6047430634498596
+   },
+   "abstain_on_foreign_structures": 0.0
+  }
+ }
+}

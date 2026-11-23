@@ -1,0 +1,1738 @@
+{
+ "args": {
+  "accept": "loss",
+  "balloon_cap": 4.0,
+  "balloon_until": 0.3,
+  "batch": 64,
+  "block_thresh": 0.25,
+  "bus_width": 16,
+  "d": 32,
+  "ema": 0.98,
+  "eval_every": 2,
+  "ffn": 0,
+  "fresh_opt": false,
+  "grow_ffn_mult": 2.0,
+  "heads": 2,
+  "layers": 3,
+  "lr": 0.001,
+  "margin": 0.002,
+  "max_params": 12000000,
+  "min_ffn": 32,
+  "min_layers": 2,
+  "mode": "earned",
+  "no_grow": false,
+  "out": "/private/tmp/claude-501/-Users-user--claude-spares-spare-D4A4tx/124a866a-8d7f-4e98-b436-d74179e7bdaf/scratchpad/growL3/earnloss-s1",
+  "p_ordinary": 0.25,
+  "prune_frac": 0.1,
+  "prune_grace": 2,
+  "seed": 1,
+  "site": "early",
+  "stall": 0.03,
+  "start_op": "",
+  "steps": 24000,
+  "tau": 0.5,
+  "trial_budget": 0.2,
+  "trial_steps": 320,
+  "unit_thresh": 0.25,
+  "warmup": 800,
+  "window": 1200
+ },
+ "arm": "c6",
+ "checkpoint": "ens-a0-core-c6grow-early-w16-d32-L3-f128-h2-s1@fe2c4c71b36d",
+ "config": {
+  "adapter_hidden": 256,
+  "bus_width": 16,
+  "d": 32,
+  "ffn": 128,
+  "heads": 2,
+  "layers": 3,
+  "lora_rank": 0,
+  "lora_site": "",
+  "norm_eps": 1e-05,
+  "reader_init_scale": 1.0,
+  "reader_kind": "linear",
+  "seq_len": 32,
+  "sites": [
+   [
+    "ingress",
+    -1
+   ],
+   [
+    "early",
+    1
+   ],
+   [
+    "middle",
+    3
+   ],
+   [
+    "late",
+    5
+   ]
+  ],
+  "tau": 0.5,
+  "vocab": 128
+ },
+ "device": "Device(cpu, 0)",
+ "families": {
+  "families": [
+   {
+    "cls": "PERM",
+    "digest": "3e92d3e83e688e237651cc9386aa5c4dc20698d8b58fb969abe9a679e4a727bc",
+    "fid": "perm.4",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     4
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PERM",
+    "digest": "3b5492972768ec3aaa1c91b733dcafacd5d43f95f1074250fd4212e139ff8c91",
+    "fid": "perm.5",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     5
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PERM",
+    "digest": "7ba38690050300495c8c570e3237bace864b769c3cf61f86804882c5d2b14de7",
+    "fid": "perm.6",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     6
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "c5a4cc37d1ecd8b426cb14daa43239f58731609f35ee71b1f56518cbb6e5bd91",
+    "fid": "program.ADD",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "ADD"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "502d45e04011bb955aa268f881b6a4fb923369e47a0af09f968536dfadeafc6c",
+    "fid": "program.MUL",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "MUL"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "cca53f32bc4ffab9a19a4e6665e06bca4a7723400394fa2caa61fb385c53ff5f",
+    "fid": "program.XOR",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "XOR"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "c7a702128e380bb5cdca964629c8a7570b6cf7fe23ed98609652b54d08f42f8a",
+    "fid": "program.ADD.MUL",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "ADD",
+      "MUL"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "ae916a3d4d02bb27ff521aeea455ca62dfdd5701840c1b86832c2f19a1d253b4",
+    "fid": "program.MUL.ADD",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "MUL",
+      "ADD"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "f43f280c44f53f0cb46ae0a26be973a7e7045f13d9ab5d2fca5ee50a8b4d18dc",
+    "fid": "program.ADD.XOR",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "ADD",
+      "XOR"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "e60c274075325662d7673eb83fde61ab556447c787972d75a2f1186723807548",
+    "fid": "program.XOR.MUL",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "XOR",
+      "MUL"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "7e90b6be671bc0fbb3ab4d794fed3a98c0bf1ce45e86cba8c5c52c91745c9aea",
+    "fid": "graph.4-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     4,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "c1928f3b97e62d707c37d22b0d311fcf66b5e21f5bcc4a6e14fb0c495d0817cc",
+    "fid": "graph.6-1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     6,
+     1
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "9076ff44e8d707c7081a49903a076ffd492295fa7b73140fff48c7948d1c725d",
+    "fid": "graph.6-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     6,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "5fd202e2856dc6fd28fb40fb48ad085c8acb0ee5eab3cfd3ed164eb1eea11fa2",
+    "fid": "graph.8-1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     8,
+     1
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "FST",
+    "digest": "0d1d42aee957163d3e175566434bd47087fb8e9bfcb03f2484e8e077d2043118",
+    "fid": "fst.2-1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     2,
+     1
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "FST",
+    "digest": "941ac865b8c6aca39b0aa1fbb5c178d721611d9f5f8d7944800783042c875d3f",
+    "fid": "fst.2-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     2,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "FST",
+    "digest": "7e1c9877020da2aa11e734c802975c635bae1174bade7d0e22dcc3dc47199707",
+    "fid": "fst.3-1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     3,
+     1
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "1b3604c3328cbda6bf4ba13c780db0d012a17c6567de86bf1689ef84c1043958",
+    "fid": "program.ADD.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 2,
+    "knobs": [
+     [
+      "ADD"
+     ]
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "dev"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "f5defe4d6fa0a12edcbb857f8127251b280b8f7cfc65a55d41552c88b490b68f",
+    "fid": "graph.6-2.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     6,
+     2
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "dev"
+   },
+   {
+    "cls": "FST",
+    "digest": "1ea2e0ee5c9f8d7d683618cbc0e9fcd46f54ee67069d40a52d801d506f9d42e1",
+    "fid": "fst.3-1.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     3,
+     1
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "dev"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "5ee0c56f54c25e7c3493c9da68f4cd24980cb70653db48643551dc6ef7e626de",
+    "fid": "graph.4-2.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     4,
+     2
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "dev"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "0ac3d099db816bfb8ba14a1252c4af9a06ce173e17d4d253042e4eca89960ea9",
+    "fid": "program.MUL.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 2,
+    "knobs": [
+     [
+      "MUL"
+     ]
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "confirm"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "e33f0d175c7d8d66dcc5b2a9c4c6e6f26aa6ba096271e7e6e41ad93c5f6bbff5",
+    "fid": "program.XOR.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 2,
+    "knobs": [
+     [
+      "XOR"
+     ]
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "2a175422f346ebbb1032fdde2741680c29af649701d1d6efd9f4e369ddf6997b",
+    "fid": "graph.6-1.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     6,
+     1
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "4e1d42616b3e73b0874c9fee306a1664eeb2e5415c8aa8d4aa2b610a58df3adf",
+    "fid": "graph.8-1.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     8,
+     1
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "22741356c7a7e050d65fa0a7805a880063f000895d01a0134950007371c4f9b2",
+    "fid": "graph.6-2.h2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     6,
+     2
+    ],
+    "law": "h2",
+    "law_version": "ens.a0.families.v2",
+    "split": "route_dev"
+   },
+   {
+    "cls": "FST",
+    "digest": "cd9aff927614e4435d53fed117addb0cee5b8fc53dcbe72fb0aee3588d6036f8",
+    "fid": "fst.3-1.h2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     3,
+     1
+    ],
+    "law": "h2",
+    "law_version": "ens.a0.families.v2",
+    "split": "route_dev"
+   },
+   {
+    "cls": "PERM",
+    "digest": "1391f857490190a91cc7386c8270f3f65d512fd9d09efef6383978a964f7b3be",
+    "fid": "perm.8",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     8
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_dev"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "e6ae8b94d872e846e79b438ebc59d575c323fa0955a42a0c148bcec3bfd17c0e",
+    "fid": "program.XOR.ADD",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     [
+      "XOR",
+      "ADD"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_dev"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "089998720bd89e7fde9fe2dfdf093ca1d60cedefd79627b28ba420bd87aab034",
+    "fid": "graph.8-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     8,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_dev"
+   },
+   {
+    "cls": "FST",
+    "digest": "ba70265f28fa2a12525d3fbab472074a47ff303def7f206c8856eeefd684ee39",
+    "fid": "fst.3-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     3,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_dev"
+   },
+   {
+    "cls": "PERM",
+    "digest": "96bb4695835b824b30d5e2287a9846303d94a29ae41fa9aa715585c326997ac0",
+    "fid": "perm.10",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     10
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "1199d133ec441c8305d609ba38dc8fdf707e0e9624e38b013e5758150ed6a9a8",
+    "fid": "program.XOR.ADD.MUL",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     [
+      "XOR",
+      "ADD",
+      "MUL"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "8403d1b0392aa9506dce495f95b5638c997bdfdf440652f2fc70a2b4d0444274",
+    "fid": "graph.8-3",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     8,
+     3
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "136a91d41e88cbf0bc9f3cc15413a8db048910bdfaeffa0a7ed8b11ec08c8d90",
+    "fid": "graph.10-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     10,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "FST",
+    "digest": "4422841f0263e50eda258cd9c8b2ccb51b871306d6a5d5afbf69a30a8deec1b5",
+    "fid": "fst.3-3",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     3,
+     3
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "FST",
+    "digest": "d38d2eed75c8a1ae9e3d10f7154f9aedd52ee8835f2636edbed1c80ac56eb033",
+    "fid": "fst.4-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     4,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   }
+  ],
+  "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+  "schema": "ens.a0.families.v0"
+ },
+ "flops_rule": "6*params*tokens per step, all arms",
+ "growth_events": [
+  {
+   "accept_rule": "loss",
+   "accepted": false,
+   "best": "widen_ffn",
+   "gain_over_control": 0.00048,
+   "params_after": 62692,
+   "pre_trial_sel": 2.09186,
+   "rel_improvement": 0.01142,
+   "step": 7200,
+   "trial_params": {
+    "control": 62692,
+    "insert_block@2": 79140,
+    "widen_d+1head": 103252,
+    "widen_ffn": 81124
+   },
+   "trial_val": {
+    "control": 2.03928,
+    "insert_block@2": 2.0401,
+    "widen_d+1head": 2.04444,
+    "widen_ffn": 2.0388
+   }
+  },
+  {
+   "accept_rule": "loss",
+   "accepted": false,
+   "best": "widen_ffn",
+   "gain_over_control": -0.00049,
+   "params_after": 62692,
+   "pre_trial_sel": 1.91638,
+   "rel_improvement": 0.01912,
+   "step": 9920,
+   "trial_params": {
+    "control": 62692,
+    "insert_block@2": 79140,
+    "widen_d+1head": 103252,
+    "widen_ffn": 81124
+   },
+   "trial_val": {
+    "control": 1.91935,
+    "insert_block@2": 1.92227,
+    "widen_d+1head": 1.92545,
+    "widen_ffn": 1.91984
+   }
+  },
+  {
+   "accept_rule": "loss",
+   "accepted": false,
+   "best": "widen_ffn",
+   "gain_over_control": 0.00011,
+   "params_after": 62692,
+   "pre_trial_sel": 1.87352,
+   "rel_improvement": 0.02237,
+   "step": 11440,
+   "trial_params": {
+    "control": 62692,
+    "insert_block@2": 79140,
+    "widen_d+1head": 103252,
+    "widen_ffn": 81124
+   },
+   "trial_val": {
+    "control": 1.86159,
+    "insert_block@2": 1.86471,
+    "widen_d+1head": 1.86285,
+    "widen_ffn": 1.86148
+   }
+  },
+  {
+   "accept_rule": "loss",
+   "accepted": false,
+   "best": "widen_ffn",
+   "gain_over_control": -4e-05,
+   "params_after": 62692,
+   "pre_trial_sel": 1.76569,
+   "rel_improvement": 0.0212,
+   "step": 14160,
+   "trial_params": {
+    "control": 62692,
+    "insert_block@2": 79140,
+    "widen_d+1head": 103252,
+    "widen_ffn": 81124
+   },
+   "trial_val": {
+    "control": 1.77473,
+    "insert_block@2": 1.78041,
+    "widen_d+1head": 1.7759,
+    "widen_ffn": 1.77477
+   }
+  },
+  {
+   "accept_rule": "loss",
+   "accepted": false,
+   "best": "widen_ffn",
+   "gain_over_control": -6e-05,
+   "params_after": 62692,
+   "pre_trial_sel": 1.75414,
+   "rel_improvement": 0.00654,
+   "step": 15680,
+   "trial_params": {
+    "control": 62692,
+    "insert_block@2": 79140,
+    "widen_d+1head": 103252,
+    "widen_ffn": 81124
+   },
+   "trial_val": {
+    "control": 1.73306,
+    "insert_block@2": 1.73447,
+    "widen_d+1head": 1.73625,
+    "widen_ffn": 1.73312
+   }
+  }
+ ],
+ "host": "<host>",
+ "log": [
+  {
+   "elapsed_s": 27.7,
+   "params": 62692,
+   "sel_loss": 2.46474,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 1200,
+   "train_flops": 924431155200,
+   "val_loss": 2.384,
+   "window": 1
+  },
+  {
+   "acc_bus": 0.3203,
+   "acc_ordinary": 0.3105,
+   "elapsed_s": 55.7,
+   "families": {
+    "fst.2-1": {
+     "native": 0.98,
+     "ord": 0.9
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 0.47,
+     "ord": 0.495
+    },
+    "graph.4-2": {
+     "native": 0.73,
+     "ord": 0.605
+    },
+    "graph.6-1": {
+     "native": 0.39,
+     "ord": 0.4
+    },
+    "graph.6-2": {
+     "native": 0.415,
+     "ord": 0.39
+    },
+    "graph.8-1": {
+     "native": 0.335,
+     "ord": 0.325
+    },
+    "perm.4": {
+     "native": 0.235,
+     "ord": 0.265
+    },
+    "perm.5": {
+     "native": 0.19,
+     "ord": 0.185
+    },
+    "perm.6": {
+     "native": 0.14,
+     "ord": 0.145
+    },
+    "program.ADD": {
+     "native": 0.055,
+     "ord": 0.06
+    },
+    "program.ADD.MUL": {
+     "native": 0.01,
+     "ord": 0.01
+    },
+    "program.ADD.XOR": {
+     "native": 0.01,
+     "ord": 0.015
+    },
+    "program.MUL": {
+     "native": 0.115,
+     "ord": 0.12
+    },
+    "program.MUL.ADD": {
+     "native": 0.02,
+     "ord": 0.01
+    },
+    "program.XOR": {
+     "native": 0.06,
+     "ord": 0.05
+    },
+    "program.XOR.MUL": {
+     "native": 0.01,
+     "ord": 0.025
+    }
+   },
+   "params": 62692,
+   "sel_loss": 2.33855,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 2400,
+   "train_flops": 1848862310400,
+   "val_loss": 2.24248,
+   "window": 2
+  },
+  {
+   "elapsed_s": 84.8,
+   "params": 62692,
+   "sel_loss": 2.26245,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 3600,
+   "train_flops": 2773293465600,
+   "val_loss": 2.15748,
+   "window": 3
+  },
+  {
+   "acc_bus": 0.3633,
+   "acc_ordinary": 0.3398,
+   "elapsed_s": 112.0,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 0.775,
+     "ord": 0.8
+    },
+    "graph.4-2": {
+     "native": 0.76,
+     "ord": 0.67
+    },
+    "graph.6-1": {
+     "native": 0.375,
+     "ord": 0.485
+    },
+    "graph.6-2": {
+     "native": 0.46,
+     "ord": 0.45
+    },
+    "graph.8-1": {
+     "native": 0.305,
+     "ord": 0.365
+    },
+    "perm.4": {
+     "native": 0.33,
+     "ord": 0.315
+    },
+    "perm.5": {
+     "native": 0.245,
+     "ord": 0.245
+    },
+    "perm.6": {
+     "native": 0.195,
+     "ord": 0.19
+    },
+    "program.ADD": {
+     "native": 0.065,
+     "ord": 0.1
+    },
+    "program.ADD.MUL": {
+     "native": 0.015,
+     "ord": 0.015
+    },
+    "program.ADD.XOR": {
+     "native": 0.025,
+     "ord": 0.03
+    },
+    "program.MUL": {
+     "native": 0.355,
+     "ord": 0.295
+    },
+    "program.MUL.ADD": {
+     "native": 0.015,
+     "ord": 0.015
+    },
+    "program.XOR": {
+     "native": 0.06,
+     "ord": 0.045
+    },
+    "program.XOR.MUL": {
+     "native": 0.025,
+     "ord": 0.025
+    }
+   },
+   "params": 62692,
+   "sel_loss": 2.19229,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 4800,
+   "train_flops": 3697724620800,
+   "val_loss": 2.06285,
+   "window": 4
+  },
+  {
+   "elapsed_s": 140.7,
+   "params": 62692,
+   "sel_loss": 2.11603,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 6000,
+   "train_flops": 4622155776000,
+   "val_loss": 1.9845,
+   "window": 5
+  },
+  {
+   "acc_bus": 0.4023,
+   "acc_ordinary": 0.4395,
+   "elapsed_s": 168.6,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 0.975,
+     "ord": 0.94
+    },
+    "fst.3-1": {
+     "native": 0.99,
+     "ord": 0.985
+    },
+    "graph.4-2": {
+     "native": 0.79,
+     "ord": 0.85
+    },
+    "graph.6-1": {
+     "native": 0.46,
+     "ord": 0.78
+    },
+    "graph.6-2": {
+     "native": 0.49,
+     "ord": 0.525
+    },
+    "graph.8-1": {
+     "native": 0.335,
+     "ord": 0.66
+    },
+    "perm.4": {
+     "native": 0.405,
+     "ord": 0.41
+    },
+    "perm.5": {
+     "native": 0.255,
+     "ord": 0.22
+    },
+    "perm.6": {
+     "native": 0.2,
+     "ord": 0.19
+    },
+    "program.ADD": {
+     "native": 0.155,
+     "ord": 0.185
+    },
+    "program.ADD.MUL": {
+     "native": 0.01,
+     "ord": 0.005
+    },
+    "program.ADD.XOR": {
+     "native": 0.015,
+     "ord": 0.025
+    },
+    "program.MUL": {
+     "native": 0.725,
+     "ord": 0.635
+    },
+    "program.MUL.ADD": {
+     "native": 0.02,
+     "ord": 0.01
+    },
+    "program.XOR": {
+     "native": 0.11,
+     "ord": 0.1
+    },
+    "program.XOR.MUL": {
+     "native": 0.02,
+     "ord": 0.025
+    }
+   },
+   "params": 62692,
+   "sel_loss": 2.09186,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 7200,
+   "train_flops": 5546586931200,
+   "val_loss": 1.90849,
+   "window": 6
+  },
+  {
+   "elapsed_s": 233.3,
+   "params": 62692,
+   "sel_loss": 1.95375,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 8720,
+   "train_flops": 7753720135680,
+   "val_loss": 1.83599,
+   "window": 7
+  },
+  {
+   "acc_bus": 0.4434,
+   "acc_ordinary": 0.5078,
+   "elapsed_s": 261.2,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 0.845,
+     "ord": 0.98
+    },
+    "graph.6-1": {
+     "native": 0.59,
+     "ord": 0.995
+    },
+    "graph.6-2": {
+     "native": 0.5,
+     "ord": 0.695
+    },
+    "graph.8-1": {
+     "native": 0.435,
+     "ord": 0.965
+    },
+    "perm.4": {
+     "native": 0.42,
+     "ord": 0.48
+    },
+    "perm.5": {
+     "native": 0.24,
+     "ord": 0.28
+    },
+    "perm.6": {
+     "native": 0.17,
+     "ord": 0.175
+    },
+    "program.ADD": {
+     "native": 0.125,
+     "ord": 0.2
+    },
+    "program.ADD.MUL": {
+     "native": 0.03,
+     "ord": 0.025
+    },
+    "program.ADD.XOR": {
+     "native": 0.03,
+     "ord": 0.05
+    },
+    "program.MUL": {
+     "native": 0.93,
+     "ord": 0.935
+    },
+    "program.MUL.ADD": {
+     "native": 0.01,
+     "ord": 0.01
+    },
+    "program.XOR": {
+     "native": 0.12,
+     "ord": 0.13
+    },
+    "program.XOR.MUL": {
+     "native": 0.02,
+     "ord": 0.025
+    }
+   },
+   "params": 62692,
+   "sel_loss": 1.91638,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 9920,
+   "train_flops": 8678151290880,
+   "val_loss": 1.78775,
+   "window": 8
+  },
+  {
+   "elapsed_s": 322.3,
+   "params": 62692,
+   "sel_loss": 1.87352,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 11440,
+   "train_flops": 10885284495360,
+   "val_loss": 1.74461,
+   "window": 9
+  },
+  {
+   "acc_bus": 0.4805,
+   "acc_ordinary": 0.5605,
+   "elapsed_s": 381.9,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 0.92,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 0.73,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 0.605,
+     "ord": 0.815
+    },
+    "graph.8-1": {
+     "native": 0.505,
+     "ord": 0.995
+    },
+    "perm.4": {
+     "native": 0.44,
+     "ord": 0.495
+    },
+    "perm.5": {
+     "native": 0.3,
+     "ord": 0.315
+    },
+    "perm.6": {
+     "native": 0.18,
+     "ord": 0.135
+    },
+    "program.ADD": {
+     "native": 0.2,
+     "ord": 0.315
+    },
+    "program.ADD.MUL": {
+     "native": 0.02,
+     "ord": 0.015
+    },
+    "program.ADD.XOR": {
+     "native": 0.04,
+     "ord": 0.05
+    },
+    "program.MUL": {
+     "native": 0.99,
+     "ord": 0.985
+    },
+    "program.MUL.ADD": {
+     "native": 0.0,
+     "ord": 0.01
+    },
+    "program.XOR": {
+     "native": 0.175,
+     "ord": 0.22
+    },
+    "program.XOR.MUL": {
+     "native": 0.025,
+     "ord": 0.04
+    }
+   },
+   "params": 62692,
+   "sel_loss": 1.80392,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 12960,
+   "train_flops": 13092417699840,
+   "val_loss": 1.7096,
+   "window": 10
+  },
+  {
+   "elapsed_s": 411.9,
+   "params": 62692,
+   "sel_loss": 1.76569,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 14160,
+   "train_flops": 14016848855040,
+   "val_loss": 1.65048,
+   "window": 11
+  },
+  {
+   "acc_bus": 0.4941,
+   "acc_ordinary": 0.5488,
+   "elapsed_s": 474.4,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 0.975,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 0.79,
+     "ord": 0.995
+    },
+    "graph.6-2": {
+     "native": 0.65,
+     "ord": 0.9
+    },
+    "graph.8-1": {
+     "native": 0.545,
+     "ord": 0.995
+    },
+    "perm.4": {
+     "native": 0.45,
+     "ord": 0.475
+    },
+    "perm.5": {
+     "native": 0.32,
+     "ord": 0.32
+    },
+    "perm.6": {
+     "native": 0.145,
+     "ord": 0.16
+    },
+    "program.ADD": {
+     "native": 0.245,
+     "ord": 0.325
+    },
+    "program.ADD.MUL": {
+     "native": 0.02,
+     "ord": 0.005
+    },
+    "program.ADD.XOR": {
+     "native": 0.03,
+     "ord": 0.035
+    },
+    "program.MUL": {
+     "native": 0.995,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.035,
+     "ord": 0.025
+    },
+    "program.XOR": {
+     "native": 0.255,
+     "ord": 0.24
+    },
+    "program.XOR.MUL": {
+     "native": 0.02,
+     "ord": 0.02
+    }
+   },
+   "params": 62692,
+   "sel_loss": 1.75414,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 15680,
+   "train_flops": 16223982059520,
+   "val_loss": 1.61962,
+   "window": 12
+  },
+  {
+   "elapsed_s": 537.9,
+   "params": 62692,
+   "sel_loss": 1.69888,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 17200,
+   "train_flops": 18431115264000,
+   "val_loss": 1.58608,
+   "window": 13
+  },
+  {
+   "acc_bus": 0.5234,
+   "acc_ordinary": 0.5781,
+   "elapsed_s": 566.3,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 0.99,
+     "ord": 0.995
+    },
+    "graph.6-1": {
+     "native": 0.79,
+     "ord": 0.995
+    },
+    "graph.6-2": {
+     "native": 0.655,
+     "ord": 0.945
+    },
+    "graph.8-1": {
+     "native": 0.63,
+     "ord": 0.995
+    },
+    "perm.4": {
+     "native": 0.49,
+     "ord": 0.475
+    },
+    "perm.5": {
+     "native": 0.3,
+     "ord": 0.335
+    },
+    "perm.6": {
+     "native": 0.19,
+     "ord": 0.185
+    },
+    "program.ADD": {
+     "native": 0.32,
+     "ord": 0.435
+    },
+    "program.ADD.MUL": {
+     "native": 0.025,
+     "ord": 0.015
+    },
+    "program.ADD.XOR": {
+     "native": 0.035,
+     "ord": 0.03
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.02,
+     "ord": 0.035
+    },
+    "program.XOR": {
+     "native": 0.31,
+     "ord": 0.36
+    },
+    "program.XOR.MUL": {
+     "native": 0.02,
+     "ord": 0.02
+    }
+   },
+   "params": 62692,
+   "sel_loss": 1.67597,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 18400,
+   "train_flops": 19355546419200,
+   "val_loss": 1.55129,
+   "window": 14
+  },
+  {
+   "elapsed_s": 596.7,
+   "params": 62692,
+   "sel_loss": 1.66182,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 19600,
+   "train_flops": 20279977574400,
+   "val_loss": 1.54237,
+   "window": 15
+  },
+  {
+   "acc_bus": 0.5273,
+   "acc_ordinary": 0.5703,
+   "elapsed_s": 624.6,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 0.995,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 0.82,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 0.68,
+     "ord": 0.945
+    },
+    "graph.8-1": {
+     "native": 0.62,
+     "ord": 1.0
+    },
+    "perm.4": {
+     "native": 0.495,
+     "ord": 0.53
+    },
+    "perm.5": {
+     "native": 0.285,
+     "ord": 0.335
+    },
+    "perm.6": {
+     "native": 0.11,
+     "ord": 0.13
+    },
+    "program.ADD": {
+     "native": 0.38,
+     "ord": 0.435
+    },
+    "program.ADD.MUL": {
+     "native": 0.015,
+     "ord": 0.025
+    },
+    "program.ADD.XOR": {
+     "native": 0.045,
+     "ord": 0.04
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.02,
+     "ord": 0.02
+    },
+    "program.XOR": {
+     "native": 0.38,
+     "ord": 0.445
+    },
+    "program.XOR.MUL": {
+     "native": 0.015,
+     "ord": 0.01
+    }
+   },
+   "params": 62692,
+   "sel_loss": 1.64563,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 20800,
+   "train_flops": 21204408729600,
+   "val_loss": 1.51706,
+   "window": 16
+  },
+  {
+   "elapsed_s": 653.8,
+   "params": 62692,
+   "sel_loss": 1.63166,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 22000,
+   "train_flops": 22128839884800,
+   "val_loss": 1.51191,
+   "window": 17
+  },
+  {
+   "acc_bus": 0.5195,
+   "acc_ordinary": 0.584,
+   "elapsed_s": 682.8,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 0.995,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 0.825,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 0.705,
+     "ord": 0.955
+    },
+    "graph.8-1": {
+     "native": 0.65,
+     "ord": 0.995
+    },
+    "perm.4": {
+     "native": 0.485,
+     "ord": 0.555
+    },
+    "perm.5": {
+     "native": 0.29,
+     "ord": 0.345
+    },
+    "perm.6": {
+     "native": 0.135,
+     "ord": 0.105
+    },
+    "program.ADD": {
+     "native": 0.415,
+     "ord": 0.465
+    },
+    "program.ADD.MUL": {
+     "native": 0.025,
+     "ord": 0.015
+    },
+    "program.ADD.XOR": {
+     "native": 0.05,
+     "ord": 0.04
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.025,
+     "ord": 0.02
+    },
+    "program.XOR": {
+     "native": 0.41,
+     "ord": 0.465
+    },
+    "program.XOR.MUL": {
+     "native": 0.03,
+     "ord": 0.015
+    }
+   },
+   "params": 62692,
+   "sel_loss": 1.63022,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 23200,
+   "train_flops": 23053271040000,
+   "val_loss": 1.50025,
+   "window": 18
+  },
+  {
+   "acc_bus": 0.5273,
+   "acc_ordinary": 0.5918,
+   "elapsed_s": 701.7,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 0.995,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 0.83,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 0.705,
+     "ord": 0.965
+    },
+    "graph.8-1": {
+     "native": 0.65,
+     "ord": 0.995
+    },
+    "perm.4": {
+     "native": 0.51,
+     "ord": 0.55
+    },
+    "perm.5": {
+     "native": 0.34,
+     "ord": 0.37
+    },
+    "perm.6": {
+     "native": 0.165,
+     "ord": 0.14
+    },
+    "program.ADD": {
+     "native": 0.42,
+     "ord": 0.49
+    },
+    "program.ADD.MUL": {
+     "native": 0.02,
+     "ord": 0.025
+    },
+    "program.ADD.XOR": {
+     "native": 0.04,
+     "ord": 0.03
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.025,
+     "ord": 0.03
+    },
+    "program.XOR": {
+     "native": 0.445,
+     "ord": 0.475
+    },
+    "program.XOR.MUL": {
+     "native": 0.025,
+     "ord": 0.015
+    }
+   },
+   "params": 62692,
+   "sel_loss": 1.62423,
+   "shape": [
+    3,
+    32,
+    128,
+    2
+   ],
+   "step": 24000,
+   "train_flops": 23669558476800,
+   "val_loss": 1.49188,
+   "window": 19
+  }
+ ],
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "params": 62692,
+ "research_ens_dirty": true,
+ "schema": "ens.a0.grow_receipt.v0",
+ "seed": 1,
+ "site": "early",
+ "source_revision": "8508f4cb2d72cb695ee8905623917e7ed29c5ef5",
+ "start_config": {
+  "adapter_hidden": 256,
+  "bus_width": 16,
+  "d": 32,
+  "ffn": 128,
+  "heads": 2,
+  "layers": 3,
+  "lora_rank": 0,
+  "lora_site": "",
+  "norm_eps": 1e-05,
+  "reader_init_scale": 1.0,
+  "reader_kind": "linear",
+  "seq_len": 32,
+  "sites": [
+   [
+    "ingress",
+    -1
+   ],
+   [
+    "early",
+    1
+   ],
+   [
+    "middle",
+    3
+   ],
+   [
+    "late",
+    5
+   ]
+  ],
+  "tau": 0.5,
+  "vocab": 128
+ },
+ "time_utc": "2026-11-23T05:38:16Z",
+ "train_flops": 23669558476800,
+ "trial_budget_steps": 4800,
+ "trial_steps_used": 4800
+}

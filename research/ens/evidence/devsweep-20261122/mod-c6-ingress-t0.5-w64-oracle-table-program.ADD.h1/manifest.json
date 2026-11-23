@@ -1,0 +1,57 @@
+{
+ "address": "ens://0/a0.local/program.ADD.h1.probe@0.1.0",
+ "artifacts": [
+  {
+   "bytes": 4196,
+   "name": "module.safetensors",
+   "sha256": "3b65c67adf81a9e1d85b813f0330aced0e3923908641c72ff4dc1e8e11926780"
+  }
+ ],
+ "composition": {
+  "bound": "final_l2.v1",
+  "tau_milli": 500,
+  "writers": "exclusive.v1"
+ },
+ "core_artifact": "ens-a0-core-c6-ingress-w64-s0@7a289f8b5c0d",
+ "execution_abi_major": 0,
+ "implementation_digest": "c9a071ae020fdaad15f635a35ebc9df7deabbf4b5b9e32215546ce2f88246e8d",
+ "law": "stateless.residual.v1",
+ "limits": {
+  "max_batch": 256,
+  "max_positions": 32,
+  "max_workspace_bytes": 1048576
+ },
+ "neural_abi_major": 0,
+ "ports": [
+  {
+   "axes": [
+    "B",
+    "D"
+   ],
+   "direction": "consume",
+   "dtype": "float32",
+   "encoding": "z.index.v0",
+   "site": "oracle.z",
+   "type": "latent.bus.v1",
+   "width": 64
+  },
+  {
+   "axes": [
+    "B",
+    "D"
+   ],
+   "direction": "produce",
+   "dtype": "float32",
+   "encoding": "codebook.sha256:9ffaac5c858269b029e819d4cc2f2223afb096b4c85e712e1aa5e9129f429684",
+   "site": "ingress.residual.field",
+   "type": "latent.bus.v1",
+   "width": 64
+  }
+ ],
+ "schema": "ens.module.v0",
+ "state": {
+  "clock": "none",
+  "kind": "stateless",
+  "rollback": "none"
+ }
+}

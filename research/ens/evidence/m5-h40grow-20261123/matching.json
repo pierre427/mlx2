@@ -1,0 +1,15 @@
+{
+ "rule": "steps = grow_train_flops / (6 * params * batch 64 * seq 32)",
+ "grow_train_flops": 152394778902528,
+ "seed": 0,
+ "fixed-GGGA": {
+  "params": 307593,
+  "steps": 40319,
+  "flops": 152393836548096
+ },
+ "fixed-GGGAGGGA": {
+  "params": 586449,
+  "steps": 21147,
+  "flops": 152391315492864
+ }
+}

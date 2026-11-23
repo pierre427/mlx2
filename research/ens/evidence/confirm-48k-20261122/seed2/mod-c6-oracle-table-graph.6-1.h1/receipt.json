@@ -1,0 +1,95 @@
+{
+ "assistance": "none",
+ "budget": {
+  "batch": 64,
+  "lr": 0.001,
+  "train_pool": 4096,
+  "train_pool_distinct": 4096,
+  "updates": 2000
+ },
+ "contract_digest": "ee0c9837720ed3e391a829106f8f5f59c93c5bede5c33efeb1fd3090182e16cd",
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s2@34363950075e",
+ "device": "Device(gpu, 0)",
+ "family": {
+  "cls": "GRAPH",
+  "fid": "graph.6-1.h1",
+  "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+  "held_div": 8,
+  "knobs": [
+   6,
+   1
+  ],
+  "law": "h1",
+  "law_version": "ens.a0.families.v2",
+  "split": "confirm"
+ },
+ "family_digest": "2a175422f346ebbb1032fdde2741680c29af649701d1d6efd9f4e369ddf6997b",
+ "hidden": 256,
+ "host": "lab-m3",
+ "kind": "oracle-table",
+ "log": [
+  {
+   "elapsed_s": 4.9,
+   "loss": 8e-05,
+   "step": 200
+  },
+  {
+   "elapsed_s": 9.9,
+   "loss": 6e-05,
+   "step": 400
+  },
+  {
+   "elapsed_s": 14.8,
+   "loss": 0.0,
+   "step": 600
+  },
+  {
+   "elapsed_s": 19.7,
+   "loss": 0.0,
+   "step": 800
+  },
+  {
+   "elapsed_s": 24.6,
+   "loss": 0.00075,
+   "step": 1000
+  },
+  {
+   "elapsed_s": 29.5,
+   "loss": 1e-05,
+   "step": 1200
+  },
+  {
+   "elapsed_s": 34.5,
+   "loss": 0.00028,
+   "step": 1400
+  },
+  {
+   "elapsed_s": 39.4,
+   "loss": 3e-05,
+   "step": 1600
+  },
+  {
+   "elapsed_s": 44.3,
+   "loss": 2e-05,
+   "step": 1800
+  },
+  {
+   "elapsed_s": 49.3,
+   "loss": 0.00019,
+   "step": 2000
+  }
+ ],
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "package_digest": "22eda5372f9b39b69a7dd4e1e319b0c5f43e9027a21f0dec20eed84fa489fe5b",
+ "recipe": "ens.a0.probe.oracle_table.v1",
+ "research_ens_dirty": false,
+ "schema": "ens.a0.contrib_receipt.v0",
+ "seed": 2,
+ "site": "early",
+ "snap_codebook": false,
+ "source_branch": "ens-a0",
+ "source_revision": "85fd941a28745b5c293bbb127606172297c1433b",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-23T08:22:24Z"
+}

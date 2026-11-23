@@ -1,0 +1,116 @@
+{
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s0@c25654a60499",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": "H8",
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "modules": [
+  {
+   "address": "ens://0/a0.local/fst.3-1.h1@0.1.0",
+   "package_digest": "b54df6456756d72df013def25fafde2aad1dbebf2c25e629a78381c3443bf335"
+  },
+  {
+   "address": "ens://0/a0.local/fst.3-1.h2@0.1.0",
+   "package_digest": "98316b4771aa2712d36b391ed824d4b75a7e8ed29670b7861fd8f01bfc3d0615"
+  }
+ ],
+ "research_ens_dirty": false,
+ "results": {
+  "address": {
+   "all": 0.943469762802124,
+   "disagree_rows": 0.9090909361839294,
+   "fst.3-1.h1": 0.9163346886634827,
+   "fst.3-1.h2": 0.9694656729698181
+  },
+  "average": {
+   "all": 0.719298243522644,
+   "disagree_rows": 0.41558441519737244,
+   "fst.3-1.h1": 0.8645418286323547,
+   "fst.3-1.h2": 0.580152690410614
+  },
+  "families": [
+   "fst.3-1.h1",
+   "fst.3-1.h2"
+  ],
+  "key_split": [
+   [
+    0,
+    1,
+    2,
+    5,
+    6,
+    8,
+    10,
+    12
+   ],
+   [
+    3,
+    4,
+    7,
+    9,
+    11,
+    13,
+    14,
+    15
+   ]
+  ],
+  "n": 513,
+  "n_disagree": 231,
+  "oracle": {
+   "all": 0.943469762802124,
+   "disagree_rows": 0.9090909361839294,
+   "fst.3-1.h1": 0.9163346886634827,
+   "fst.3-1.h2": 0.9694656729698181
+  },
+  "position_only": {
+   "all": 0.8557505011558533,
+   "disagree_rows": 0.7142857313156128,
+   "fst.3-1.h1": 0.737051784992218,
+   "fst.3-1.h2": 0.9694656729698181,
+   "route_acc": 0.5107212662696838
+  },
+  "random": {
+   "all": 0.7680311799049377,
+   "disagree_rows": 0.5194805264472961,
+   "fst.3-1.h1": 0.8207171559333801,
+   "fst.3-1.h2": 0.7175572514533997
+  },
+  "router_e2e": {
+   "all": 0.8557505011558533,
+   "disagree_rows": 0.7142857313156128,
+   "fst.3-1.h1": 0.737051784992218,
+   "fst.3-1.h2": 0.9694656729698181,
+   "last_train_loss": 1.7008627653121948,
+   "mean_max_weight": 1.0,
+   "route_acc": 0.5107212662696838,
+   "soft_mix": {
+    "all": 0.8557505011558533,
+    "disagree_rows": 0.7142857313156128,
+    "fst.3-1.h1": 0.737051784992218,
+    "fst.3-1.h2": 0.9694656729698181
+   }
+  },
+  "router_sup": {
+   "all": 0.9122806787490845,
+   "disagree_rows": 0.8398268222808838,
+   "fst.3-1.h1": 0.8804780840873718,
+   "fst.3-1.h2": 0.9427480697631836,
+   "last_train_loss": 0.34394410252571106,
+   "route_acc": 0.7680311799049377
+  },
+  "same_layout": true,
+  "wrong": {
+   "all": 0.5633528232574463,
+   "disagree_rows": 0.06493506580591202,
+   "fst.3-1.h1": 0.737051784992218,
+   "fst.3-1.h2": 0.39694657921791077
+  }
+ },
+ "schema": "ens.a0.route_receipt.v0",
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "0877256a5650a61e496d9c686d068efd1935c9c2",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T00:31:29Z"
+}

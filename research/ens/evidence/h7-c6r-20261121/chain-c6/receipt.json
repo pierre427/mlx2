@@ -1,0 +1,330 @@
+{
+ "arm": "c6",
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s0@c25654a60499",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": "H7",
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "research_ens_dirty": false,
+ "results": [
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.30078125,
+   "chain_soft": 1.0,
+   "cls": "GRAPH",
+   "collision_recovery": 0.0,
+   "k": 2,
+   "m": 6,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": true,
+   "single_call_oracle": 0.98828125,
+   "soft_msg_rms": [
+    0.9997912049293518,
+    0.9997841715812683
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0
+   ]
+  },
+  {
+   "all_steps_correct": 0.890625,
+   "chain_hard": 0.896484375,
+   "chain_hard_shuffled": 0.251953125,
+   "chain_soft": 0.888671875,
+   "cls": "GRAPH",
+   "collision_recovery": 0.005859375,
+   "k": 2,
+   "m": 8,
+   "n": 512,
+   "product_of_clean_steps": 0.8862419128417969,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.306640625,
+   "soft_msg_rms": [
+    0.9404119849205017,
+    0.9440438151359558
+   ],
+   "step_acc_clean_input": [
+    0.943359375,
+    0.939453125
+   ],
+   "step_acc_hard": [
+    0.943359375,
+    0.94140625
+   ],
+   "step_acc_hard_shuffled": [
+    0.943359375,
+    0.927734375
+   ],
+   "step_acc_soft": [
+    0.943359375,
+    0.91796875
+   ]
+  },
+  {
+   "all_steps_correct": 0.83203125,
+   "chain_hard": 0.849609375,
+   "chain_hard_shuffled": 0.314453125,
+   "chain_soft": 0.83203125,
+   "cls": "GRAPH",
+   "collision_recovery": 0.017578125,
+   "k": 3,
+   "m": 8,
+   "n": 512,
+   "product_of_clean_steps": 0.8256912231445312,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.37890625,
+   "soft_msg_rms": [
+    0.9393845796585083,
+    0.9436681270599365,
+    0.9510430097579956
+   ],
+   "step_acc_clean_input": [
+    0.939453125,
+    0.9375,
+    0.9375
+   ],
+   "step_acc_hard": [
+    0.939453125,
+    0.939453125,
+    0.927734375
+   ],
+   "step_acc_hard_shuffled": [
+    0.939453125,
+    0.94921875,
+    0.935546875
+   ],
+   "step_acc_soft": [
+    0.939453125,
+    0.91796875,
+    0.908203125
+   ]
+  },
+  {
+   "all_steps_correct": 0.80859375,
+   "chain_hard": 0.83203125,
+   "chain_hard_shuffled": 0.3515625,
+   "chain_soft": 0.806640625,
+   "cls": "GRAPH",
+   "collision_recovery": 0.0234375,
+   "k": 4,
+   "m": 8,
+   "n": 512,
+   "product_of_clean_steps": 0.7821455178054748,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.369140625,
+   "soft_msg_rms": [
+    0.9399335384368896,
+    0.9443866610527039,
+    0.9507802128791809,
+    0.9500613212585449
+   ],
+   "step_acc_clean_input": [
+    0.939453125,
+    0.939453125,
+    0.935546875,
+    0.947265625
+   ],
+   "step_acc_hard": [
+    0.939453125,
+    0.94140625,
+    0.92578125,
+    0.93359375
+   ],
+   "step_acc_hard_shuffled": [
+    0.939453125,
+    0.94140625,
+    0.962890625,
+    0.935546875
+   ],
+   "step_acc_soft": [
+    0.939453125,
+    0.919921875,
+    0.91015625,
+    0.91796875
+   ]
+  },
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.515625,
+   "chain_soft": 1.0,
+   "cls": "FST",
+   "collision_recovery": 0.0,
+   "k": 2,
+   "m": 3,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.423828125,
+   "soft_msg_rms": [
+    0.9997365474700928,
+    0.9998320937156677
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0
+   ]
+  },
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.478515625,
+   "chain_soft": 1.0,
+   "cls": "FST",
+   "collision_recovery": 0.0,
+   "k": 3,
+   "m": 3,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.44140625,
+   "soft_msg_rms": [
+    0.9996651411056519,
+    0.9999253153800964,
+    0.9997110962867737
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.47265625,
+   "chain_soft": 1.0,
+   "cls": "FST",
+   "collision_recovery": 0.0,
+   "k": 4,
+   "m": 3,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.349609375,
+   "soft_msg_rms": [
+    0.9997643232345581,
+    0.9998757243156433,
+    0.999944269657135,
+    0.999722957611084
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.484375,
+   "chain_soft": 1.0,
+   "cls": "FST",
+   "collision_recovery": 0.0,
+   "k": 4,
+   "m": 2,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.4921875,
+   "soft_msg_rms": [
+    0.9999986886978149,
+    0.9999986886978149,
+    0.9999986886978149,
+    0.9999986886978149
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ]
+  }
+ ],
+ "schema": "ens.a0.chain_receipt.v0",
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "5f66bbc3e5a829b6c798df3981e69d4cf9ff9a7d",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T00:01:11Z"
+}

@@ -1,0 +1,9 @@
+balloon seed 0 flops 30923056742400 final d32 h2 L4 f206 big_steps 24264
+balloon seed 1 flops 30673915084800 final d32 h2 L4 f202 big_steps 24068
+balloon seed 2 flops 29922243379200 final d32 h2 L4 f191 big_steps 23478
+earnloss seed 0 flops 39180372541440 final d48 h3 L3 f192 big_steps 30743
+earnloss seed 1 flops 23669558476800 final d32 h2 L3 f128 big_steps 18572
+earnloss seed 2 flops 30649551421440 final d32 h2 L5 f128 big_steps 24049
+earnflop seed 0 flops 23669558476800 final d32 h2 L3 f128 big_steps 18572
+earnflop seed 1 flops 23669558476800 final d32 h2 L3 f128 big_steps 18572
+earnflop seed 2 flops 23669558476800 final d32 h2 L3 f128 big_steps 18572

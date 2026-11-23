@@ -1,0 +1,7 @@
+{
+ "batch_bitwise": true,
+ "core_checkpoint": "ens-a0-core-c6a-early-w64-s0@0971c1951bb1",
+ "detach_reattach_bitwise": true,
+ "pass": true,
+ "width1_bitwise": true
+}

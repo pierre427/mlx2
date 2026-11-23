@@ -1,0 +1,27 @@
+in-context recall on held ops: 0.0156 | occlusion attribution finds the true fact: 0.2278
+{'arm': 'backward-attributed', 'space': 'anchored', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.048, 'answer_used': 0.048, 'n_used': 126, 'retrieval_unused': 0.069, 'answer_unused': 0.069, 'n_unused': 130}
+{'arm': 'backward-attributed', 'space': 'anchored+learned', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.04, 'answer_used': 0.04, 'n_used': 126, 'retrieval_unused': 0.054, 'answer_unused': 0.054, 'n_unused': 130}
+{'arm': 'backward-attributed', 'space': 'endpoint', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.079, 'answer_used': 0.079, 'n_used': 126, 'retrieval_unused': 0.085, 'answer_unused': 0.085, 'n_unused': 130}
+{'arm': 'backward-attributed', 'space': 'endpoint+learned', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.071, 'answer_used': 0.071, 'n_used': 126, 'retrieval_unused': 0.046, 'answer_unused': 0.046, 'n_unused': 130}
+{'arm': 'backward-attributed', 'space': 'orth', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.056, 'answer_used': 0.056, 'n_used': 126, 'retrieval_unused': 0.069, 'answer_unused': 0.069, 'n_unused': 130}
+{'arm': 'backward-attributed', 'space': 'orth+learned', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.095, 'answer_used': 0.095, 'n_used': 126, 'retrieval_unused': 0.038, 'answer_unused': 0.038, 'n_unused': 130}
+{'arm': 'backward-attributed', 'space': 'raw', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.056, 'answer_used': 0.056, 'n_used': 126, 'retrieval_unused': 0.077, 'answer_unused': 0.077, 'n_unused': 130}
+{'arm': 'backward-attributed', 'space': 'raw+learned', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.063, 'answer_used': 0.063, 'n_used': 126, 'retrieval_unused': 0.062, 'answer_unused': 0.062, 'n_unused': 130}
+{'arm': 'backward-oracle', 'space': 'anchored', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.103, 'answer_used': 0.103, 'n_used': 126, 'retrieval_unused': 0.0, 'answer_unused': 0.0, 'n_unused': 130}
+{'arm': 'backward-oracle', 'space': 'anchored+learned', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.119, 'answer_used': 0.119, 'n_used': 126, 'retrieval_unused': 0.0, 'answer_unused': 0.0, 'n_unused': 130}
+{'arm': 'backward-oracle', 'space': 'endpoint', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.111, 'answer_used': 0.111, 'n_used': 126, 'retrieval_unused': 0.0, 'answer_unused': 0.0, 'n_unused': 130}
+{'arm': 'backward-oracle', 'space': 'endpoint+learned', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.111, 'answer_used': 0.111, 'n_used': 126, 'retrieval_unused': 0.0, 'answer_unused': 0.0, 'n_unused': 130}
+{'arm': 'backward-oracle', 'space': 'orth', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.103, 'answer_used': 0.103, 'n_used': 126, 'retrieval_unused': 0.0, 'answer_unused': 0.0, 'n_unused': 130}
+{'arm': 'backward-oracle', 'space': 'orth+learned', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.135, 'answer_used': 0.135, 'n_used': 126, 'retrieval_unused': 0.0, 'answer_unused': 0.0, 'n_unused': 130}
+{'arm': 'backward-oracle', 'space': 'raw', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.103, 'answer_used': 0.103, 'n_used': 126, 'retrieval_unused': 0.0, 'answer_unused': 0.0, 'n_unused': 130}
+{'arm': 'backward-oracle', 'space': 'raw+learned', 'k': 1, 'store_mean': 7.9, 'retrieval_used': 0.151, 'answer_used': 0.151, 'n_used': 126, 'retrieval_unused': 0.0, 'answer_unused': 0.0, 'n_unused': 130}
+{'arm': 'knn', 'space': 'anchored', 'k': 1, 'store_mean': 16.0, 'retrieval_used': 0.175, 'answer_used': 0.175, 'n_used': 126, 'retrieval_unused': 0.277, 'answer_unused': 0.277, 'n_unused': 130}
+{'arm': 'knn', 'space': 'anchored+learned', 'k': 1, 'store_mean': 16.0, 'retrieval_used': 0.317, 'answer_used': 0.317, 'n_used': 126, 'retrieval_unused': 0.4, 'answer_unused': 0.4, 'n_unused': 130}
+{'arm': 'knn', 'space': 'endpoint', 'k': 1, 'store_mean': 16.0, 'retrieval_used': 0.175, 'answer_used': 0.175, 'n_used': 126, 'retrieval_unused': 0.231, 'answer_unused': 0.231, 'n_unused': 130}
+{'arm': 'knn', 'space': 'endpoint+learned', 'k': 1, 'store_mean': 16.0, 'retrieval_used': 0.222, 'answer_used': 0.222, 'n_used': 126, 'retrieval_unused': 0.308, 'answer_unused': 0.308, 'n_unused': 130}
+{'arm': 'knn', 'space': 'orth', 'k': 1, 'store_mean': 16.0, 'retrieval_used': 0.19, 'answer_used': 0.19, 'n_used': 126, 'retrieval_unused': 0.285, 'answer_unused': 0.285, 'n_unused': 130}
+{'arm': 'knn', 'space': 'orth+learned', 'k': 1, 'store_mean': 16.0, 'retrieval_used': 0.476, 'answer_used': 0.476, 'n_used': 126, 'retrieval_unused': 0.515, 'answer_unused': 0.515, 'n_unused': 130}
+{'arm': 'knn', 'space': 'raw', 'k': 1, 'store_mean': 16.0, 'retrieval_used': 0.175, 'answer_used': 0.175, 'n_used': 126, 'retrieval_unused': 0.277, 'answer_unused': 0.277, 'n_unused': 130}
+{'arm': 'knn', 'space': 'raw+learned', 'k': 1, 'store_mean': 16.0, 'retrieval_used': 0.357, 'answer_used': 0.357, 'n_used': 126, 'retrieval_unused': 0.392, 'answer_unused': 0.392, 'n_unused': 130}
+{'arm': 'none', 'space': '-', 'k': 1, 'store_mean': 0.0, 'retrieval_used': 0.0, 'answer_used': 0.024, 'n_used': 126, 'retrieval_unused': 0.0, 'answer_unused': 0.046, 'n_unused': 130}
+{'arm': 'symbolic', 'space': '-', 'k': 1, 'store_mean': 16.0, 'retrieval_used': 1.0, 'answer_used': 1.0, 'n_used': 126, 'retrieval_unused': 1.0, 'answer_unused': 1.0, 'n_unused': 130}

@@ -1,0 +1,64 @@
+{
+ "families": [
+  "fst.3-1.h1",
+  "fst.3-1.h2"
+ ],
+ "n_feat": 1024,
+ "ari": -0.00022910557184750734,
+ "ari_go_only": -0.00011848512753466678,
+ "ari_go_key_centred": 0.0010465155185125426,
+ "ari_state_no_gradient": -0.00041707746507071975,
+ "cluster_sizes": [
+  528,
+  496
+ ],
+ "child_rows": [
+  6642,
+  1550
+ ],
+ "child_fallback": [
+  false,
+  false
+ ],
+ "parent": {
+  "all": 0.7138671875,
+  "fst.3-1.h1": 0.724609375,
+  "fst.3-1.h2": 0.703125
+ },
+ "split": {
+  "all": 0.75390625,
+  "fst.3-1.h1": 0.794921875,
+  "fst.3-1.h2": 0.712890625
+ },
+ "child_for_family": [
+  0,
+  0
+ ],
+ "split_oracle_route": {
+  "all": 0.701171875,
+  "fst.3-1.h1": 0.73828125,
+  "fst.3-1.h2": 0.6640625
+ },
+ "separate_steps": 9000,
+ "separate_oracle": {
+  "all": 0.94921875,
+  "fst.3-1.h1": 0.95703125,
+  "fst.3-1.h2": 0.94140625
+ },
+ "random_split_ari_vs_family": -0.00010791998995398272,
+ "random_child_rows": [
+  5480,
+  2712
+ ],
+ "random_split": {
+  "all": 0.6962890625,
+  "fst.3-1.h1": 0.71875,
+  "fst.3-1.h2": 0.673828125
+ },
+ "kill": {
+  "ari_le_0.2": true,
+  "split_below_separate_by_0.05": true,
+  "random_as_good": false,
+  "gradients_add_nothing_over_state": true
+ }
+}

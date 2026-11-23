@@ -1,0 +1,2 @@
+{"cls": "FST", "m": 3, "k": 2, "arm": "raw-alone-attn2", "variant": "alone", "n_train": 5337, "n_held": 663, "held_acc": 0.4374057352542877, "train_acc": 0.3815988004207611, "single_call_oracle": 0.39517346024513245, "last_loss": 1.0862538814544678, "train_s": 115.8}
+{"cls": "FST", "m": 3, "k": 2, "arm": "raw-alone-attn4", "variant": "alone", "n_train": 5337, "n_held": 663, "held_acc": 0.37556561827659607, "train_acc": 0.4072398245334625, "single_call_oracle": 0.39517346024513245, "last_loss": 1.0920131206512451, "train_s": 142.2}

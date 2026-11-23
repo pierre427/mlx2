@@ -1,0 +1,3 @@
+seed 0 flops 2639020032000 final L3 f131 params 63556 final_eq_steps 3379
+seed 1 flops 2660253696000 final L3 f135 params 64708 final_eq_steps 3346
+seed 2 flops 2659192012800 final L3 f137 params 65284 final_eq_steps 3315

@@ -1,0 +1,25 @@
+{'step': 1000, 'pattern': 'GGGA', 'params': 307593, 'train_flops': 3779702784000, 'val_loss': 2.47873, 'acc_bus': 0.29296875, 'acc_ordinary': 0.3115234375, 'elapsed_s': 16.3}
+{'step': 2000, 'pattern': 'GGGA', 'params': 307593, 'train_flops': 7559405568000, 'val_loss': 2.23169, 'acc_bus': 0.3525390625, 'acc_ordinary': 0.34375, 'elapsed_s': 33.3}
+{'step': 3000, 'pattern': 'GGGA', 'params': 307593, 'train_flops': 11339108352000, 'val_loss': 1.90863, 'acc_bus': 0.3994140625, 'acc_ordinary': 0.39453125, 'elapsed_s': 50.0}
+{'step': 4000, 'pattern': 'GGGA', 'params': 307593, 'train_flops': 15118811136000, 'val_loss': 1.70216, 'acc_bus': 0.484375, 'acc_ordinary': 0.4658203125, 'elapsed_s': 66.6}
+{'step': 5000, 'pattern': 'GGGA', 'params': 307593, 'train_flops': 18898513920000, 'val_loss': 1.52238, 'acc_bus': 0.541015625, 'acc_ordinary': 0.548828125, 'elapsed_s': 83.7}
+growth {'step': 6000, 'op': 'append_group:GGGA', 'pattern': 'GGGAGGGA', 'params_after': 586449}
+{'step': 6000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 22681643286528, 'val_loss': 1.36391, 'acc_bus': 0.5673828125, 'acc_ordinary': 0.609375, 'elapsed_s': 100.1}
+{'step': 7000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 29887928598528, 'val_loss': 1.32252, 'acc_bus': 0.6025390625, 'acc_ordinary': 0.603515625, 'elapsed_s': 129.7}
+{'step': 8000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 37094213910528, 'val_loss': 1.20164, 'acc_bus': 0.6298828125, 'acc_ordinary': 0.666015625, 'elapsed_s': 159.2}
+{'step': 9000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 44300499222528, 'val_loss': 1.14035, 'acc_bus': 0.666015625, 'acc_ordinary': 0.673828125, 'elapsed_s': 188.8}
+{'step': 10000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 51506784534528, 'val_loss': 1.1081, 'acc_bus': 0.6689453125, 'acc_ordinary': 0.705078125, 'elapsed_s': 218.5}
+{'step': 11000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 58713069846528, 'val_loss': 1.01158, 'acc_bus': 0.6865234375, 'acc_ordinary': 0.7119140625, 'elapsed_s': 247.9}
+{'step': 12000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 65919355158528, 'val_loss': 0.95046, 'acc_bus': 0.71484375, 'acc_ordinary': 0.728515625, 'elapsed_s': 277.6}
+{'step': 13000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 73125640470528, 'val_loss': 0.9393, 'acc_bus': 0.72265625, 'acc_ordinary': 0.759765625, 'elapsed_s': 307.3}
+{'step': 14000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 80331925782528, 'val_loss': 0.89144, 'acc_bus': 0.7578125, 'acc_ordinary': 0.767578125, 'elapsed_s': 336.8}
+{'step': 15000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 87538211094528, 'val_loss': 0.85056, 'acc_bus': 0.7568359375, 'acc_ordinary': 0.76953125, 'elapsed_s': 366.4}
+{'step': 16000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 94744496406528, 'val_loss': 0.8187, 'acc_bus': 0.76953125, 'acc_ordinary': 0.771484375, 'elapsed_s': 395.7}
+{'step': 17000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 101950781718528, 'val_loss': 0.7693, 'acc_bus': 0.7734375, 'acc_ordinary': 0.7900390625, 'elapsed_s': 423.5}
+{'step': 18000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 109157067030528, 'val_loss': 0.75157, 'acc_bus': 0.7841796875, 'acc_ordinary': 0.7900390625, 'elapsed_s': 447.5}
+{'step': 19000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 116363352342528, 'val_loss': 0.71536, 'acc_bus': 0.78515625, 'acc_ordinary': 0.80078125, 'elapsed_s': 472.0}
+{'step': 20000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 123569637654528, 'val_loss': 0.69166, 'acc_bus': 0.783203125, 'acc_ordinary': 0.8037109375, 'elapsed_s': 501.7}
+{'step': 21000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 130775922966528, 'val_loss': 0.68858, 'acc_bus': 0.78515625, 'acc_ordinary': 0.8115234375, 'elapsed_s': 531.3}
+{'step': 22000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 137982208278528, 'val_loss': 0.67177, 'acc_bus': 0.7978515625, 'acc_ordinary': 0.8095703125, 'elapsed_s': 561.1}
+{'step': 23000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 145188493590528, 'val_loss': 0.66454, 'acc_bus': 0.787109375, 'acc_ordinary': 0.8115234375, 'elapsed_s': 590.8}
+{'step': 24000, 'pattern': 'GGGAGGGA', 'params': 586449, 'train_flops': 152394778902528, 'val_loss': 0.6495, 'acc_bus': 0.8076171875, 'acc_ordinary': 0.8134765625, 'elapsed_s': 620.5}

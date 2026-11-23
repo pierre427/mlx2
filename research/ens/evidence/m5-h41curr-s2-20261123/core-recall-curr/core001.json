@@ -1,0 +1,7 @@
+{
+ "batch_bitwise": true,
+ "core_checkpoint": "ens-h41-core-c6recall-early-w64-d128-L4-s2@fd38d501e410",
+ "detach_reattach_bitwise": true,
+ "pass": true,
+ "width1_bitwise": true
+}

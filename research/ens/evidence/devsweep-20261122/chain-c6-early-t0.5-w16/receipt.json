@@ -1,0 +1,330 @@
+{
+ "arm": "c6",
+ "core_checkpoint": "ens-a0-core-c6-early-w16-s0@506b25b87484",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": "H7",
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "research_ens_dirty": false,
+ "results": [
+  {
+   "all_steps_correct": 0.794921875,
+   "chain_hard": 0.865234375,
+   "chain_hard_shuffled": 0.314453125,
+   "chain_soft": 0.857421875,
+   "cls": "GRAPH",
+   "collision_recovery": 0.0703125,
+   "k": 2,
+   "m": 6,
+   "n": 512,
+   "product_of_clean_steps": 0.76507568359375,
+   "single_call_in_training": true,
+   "single_call_oracle": 0.814453125,
+   "soft_msg_rms": [
+    0.9080783128738403,
+    0.9300221800804138
+   ],
+   "step_acc_clean_input": [
+    0.8515625,
+    0.8984375
+   ],
+   "step_acc_hard": [
+    0.8515625,
+    0.875
+   ],
+   "step_acc_hard_shuffled": [
+    0.8515625,
+    0.873046875
+   ],
+   "step_acc_soft": [
+    0.8515625,
+    0.876953125
+   ]
+  },
+  {
+   "all_steps_correct": 0.65234375,
+   "chain_hard": 0.69140625,
+   "chain_hard_shuffled": 0.232421875,
+   "chain_soft": 0.658203125,
+   "cls": "GRAPH",
+   "collision_recovery": 0.0390625,
+   "k": 2,
+   "m": 8,
+   "n": 512,
+   "product_of_clean_steps": 0.6427001953125,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.248046875,
+   "soft_msg_rms": [
+    0.8550320267677307,
+    0.8269282579421997
+   ],
+   "step_acc_clean_input": [
+    0.8125,
+    0.791015625
+   ],
+   "step_acc_hard": [
+    0.8125,
+    0.798828125
+   ],
+   "step_acc_hard_shuffled": [
+    0.8125,
+    0.8203125
+   ],
+   "step_acc_soft": [
+    0.8125,
+    0.720703125
+   ]
+  },
+  {
+   "all_steps_correct": 0.556640625,
+   "chain_hard": 0.626953125,
+   "chain_hard_shuffled": 0.32421875,
+   "chain_soft": 0.57421875,
+   "cls": "GRAPH",
+   "collision_recovery": 0.0703125,
+   "k": 3,
+   "m": 8,
+   "n": 512,
+   "product_of_clean_steps": 0.5184834748506546,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.349609375,
+   "soft_msg_rms": [
+    0.8565174341201782,
+    0.8275195956230164,
+    0.8264731764793396
+   ],
+   "step_acc_clean_input": [
+    0.80859375,
+    0.794921875,
+    0.806640625
+   ],
+   "step_acc_hard": [
+    0.80859375,
+    0.798828125,
+    0.78125
+   ],
+   "step_acc_hard_shuffled": [
+    0.80859375,
+    0.81640625,
+    0.8359375
+   ],
+   "step_acc_soft": [
+    0.80859375,
+    0.724609375,
+    0.71875
+   ]
+  },
+  {
+   "all_steps_correct": 0.515625,
+   "chain_hard": 0.59765625,
+   "chain_hard_shuffled": 0.328125,
+   "chain_soft": 0.546875,
+   "cls": "GRAPH",
+   "collision_recovery": 0.08203125,
+   "k": 4,
+   "m": 8,
+   "n": 512,
+   "product_of_clean_steps": 0.44145447223854717,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.326171875,
+   "soft_msg_rms": [
+    0.8539456129074097,
+    0.8257661461830139,
+    0.8239579796791077,
+    0.8240336179733276
+   ],
+   "step_acc_clean_input": [
+    0.802734375,
+    0.794921875,
+    0.810546875,
+    0.853515625
+   ],
+   "step_acc_hard": [
+    0.802734375,
+    0.80078125,
+    0.78515625,
+    0.791015625
+   ],
+   "step_acc_hard_shuffled": [
+    0.802734375,
+    0.822265625,
+    0.79296875,
+    0.80078125
+   ],
+   "step_acc_soft": [
+    0.802734375,
+    0.724609375,
+    0.716796875,
+    0.73046875
+   ]
+  },
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.515625,
+   "chain_soft": 1.0,
+   "cls": "FST",
+   "collision_recovery": 0.0,
+   "k": 2,
+   "m": 3,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.388671875,
+   "soft_msg_rms": [
+    0.9997811913490295,
+    0.9997740387916565
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0
+   ]
+  },
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.478515625,
+   "chain_soft": 1.0,
+   "cls": "FST",
+   "collision_recovery": 0.0,
+   "k": 3,
+   "m": 3,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.498046875,
+   "soft_msg_rms": [
+    0.9998640418052673,
+    0.9998518228530884,
+    0.9997442364692688
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.47265625,
+   "chain_soft": 1.0,
+   "cls": "FST",
+   "collision_recovery": 0.0,
+   "k": 4,
+   "m": 3,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.416015625,
+   "soft_msg_rms": [
+    0.9998353719711304,
+    0.9998897314071655,
+    0.9998384714126587,
+    0.9998708367347717
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ]
+  },
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.484375,
+   "chain_soft": 1.0,
+   "cls": "FST",
+   "collision_recovery": 0.0,
+   "k": 4,
+   "m": 2,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.62890625,
+   "soft_msg_rms": [
+    0.9999788999557495,
+    0.9999787211418152,
+    0.999977171421051,
+    0.9999799132347107
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ]
+  }
+ ],
+ "schema": "ens.a0.chain_receipt.v0",
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "74b857bb0b9105cc4f8f0475b9f28acfff6775bc",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T07:22:09Z"
+}

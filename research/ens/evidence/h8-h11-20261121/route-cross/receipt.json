@@ -1,0 +1,95 @@
+{
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s0@c25654a60499",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": "H8",
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "modules": [
+  {
+   "address": "ens://0/a0.local/graph.4-2.h1@0.1.0",
+   "package_digest": "60791c31355e98187e2fdcca24cbf6ebc7a9a0d9908e42f9c9a97cdcbfc43820"
+  },
+  {
+   "address": "ens://0/a0.local/fst.3-1.h1@0.1.0",
+   "package_digest": "b54df6456756d72df013def25fafde2aad1dbebf2c25e629a78381c3443bf335"
+  }
+ ],
+ "research_ens_dirty": false,
+ "results": {
+  "address": {
+   "all": 0.8842212557792664,
+   "disagree_rows": 0.8439716100692749,
+   "fst.3-1.h1": 0.953125,
+   "graph.4-2.h1": 0.8081896305084229
+  },
+  "average": {
+   "all": 0.7028688192367554,
+   "disagree_rows": 0.4373522400856018,
+   "fst.3-1.h1": 0.77734375,
+   "graph.4-2.h1": 0.6206896305084229
+  },
+  "families": [
+   "graph.4-2.h1",
+   "fst.3-1.h1"
+  ],
+  "key_split": null,
+  "n": 976,
+  "n_disagree": 423,
+  "oracle": {
+   "all": 0.8842212557792664,
+   "disagree_rows": 0.8439716100692749,
+   "fst.3-1.h1": 0.953125,
+   "graph.4-2.h1": 0.8081896305084229
+  },
+  "position_only": {
+   "all": 0.8842212557792664,
+   "disagree_rows": 0.8439716100692749,
+   "fst.3-1.h1": 0.953125,
+   "graph.4-2.h1": 0.8081896305084229,
+   "route_acc": 0.9999999403953552
+  },
+  "random": {
+   "all": 0.7336065173149109,
+   "disagree_rows": 0.4964539110660553,
+   "fst.3-1.h1": 0.783203125,
+   "graph.4-2.h1": 0.6788793206214905
+  },
+  "router_e2e": {
+   "all": 0.8842212557792664,
+   "disagree_rows": 0.8439716100692749,
+   "fst.3-1.h1": 0.953125,
+   "graph.4-2.h1": 0.8081896305084229,
+   "last_train_loss": 0.7238326072692871,
+   "mean_max_weight": 0.9999999403953552,
+   "route_acc": 0.9999999403953552,
+   "soft_mix": {
+    "all": 0.8842212557792664,
+    "disagree_rows": 0.8439716100692749,
+    "fst.3-1.h1": 0.953125,
+    "graph.4-2.h1": 0.8081896305084229
+   }
+  },
+  "router_sup": {
+   "all": 0.8842212557792664,
+   "disagree_rows": 0.8439716100692749,
+   "fst.3-1.h1": 0.953125,
+   "graph.4-2.h1": 0.8081896305084229,
+   "last_train_loss": 0.0,
+   "route_acc": 0.9999999403953552
+  },
+  "same_layout": false,
+  "wrong": {
+   "all": 0.5584015846252441,
+   "disagree_rows": 0.09219858050346375,
+   "fst.3-1.h1": 0.591796875,
+   "graph.4-2.h1": 0.5215517282485962
+  }
+ },
+ "schema": "ens.a0.route_receipt.v0",
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "0877256a5650a61e496d9c686d068efd1935c9c2",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T00:27:53Z"
+}

@@ -1,0 +1,48 @@
+{'step': 250, 'loss': 2.84806, 'elapsed_s': 19.3, 'recall_acc': 0.017578125}
+{'step': 500, 'loss': 2.3543, 'elapsed_s': 38.7, 'recall_acc': 0.04296875}
+{'step': 750, 'loss': 3.86634, 'elapsed_s': 57.7, 'recall_acc': 0.05078125}
+{'step': 1000, 'loss': 2.38574, 'elapsed_s': 77.2, 'recall_acc': 0.046875, 'acc_ordinary': 0.2617, 'acc_bus': 0.2715}
+{'step': 1250, 'loss': 2.2581, 'elapsed_s': 97.0, 'recall_acc': 0.05078125}
+{'step': 1500, 'loss': 2.01401, 'elapsed_s': 123.3, 'recall_acc': 0.0390625}
+{'step': 1750, 'loss': 3.63142, 'elapsed_s': 151.6, 'recall_acc': 0.04296875}
+{'step': 2000, 'loss': 2.3414, 'elapsed_s': 181.1, 'recall_acc': 0.03515625, 'acc_ordinary': 0.3555, 'acc_bus': 0.3613}
+{'step': 2250, 'loss': 2.20604, 'elapsed_s': 211.9, 'recall_acc': 0.072265625}
+{'step': 2500, 'loss': 2.05619, 'elapsed_s': 242.3, 'recall_acc': 0.046875}
+{'step': 2750, 'loss': 3.70294, 'elapsed_s': 274.9, 'recall_acc': 0.044921875}
+{'step': 3000, 'loss': 2.2314, 'elapsed_s': 306.6, 'recall_acc': 0.0546875, 'acc_ordinary': 0.3418, 'acc_bus': 0.3672}
+{'step': 3250, 'loss': 1.91122, 'elapsed_s': 339.3, 'recall_acc': 0.044921875}
+{'step': 3500, 'loss': 2.07193, 'elapsed_s': 372.2, 'recall_acc': 0.052734375}
+{'step': 3750, 'loss': 2.13817, 'elapsed_s': 414.0, 'recall_acc': 0.0625}
+{'step': 4000, 'loss': 3.50756, 'elapsed_s': 460.4, 'recall_acc': 0.0546875, 'acc_ordinary': 0.3789, 'acc_bus': 0.4004}
+{'step': 4250, 'loss': 3.58911, 'elapsed_s': 490.6, 'recall_acc': 0.0546875}
+{'step': 4500, 'loss': 1.74999, 'elapsed_s': 526.3, 'recall_acc': 0.052734375}
+{'step': 4750, 'loss': 3.70925, 'elapsed_s': 549.4, 'recall_acc': 0.0703125}
+{'step': 5000, 'loss': 3.50433, 'elapsed_s': 569.2, 'recall_acc': 0.080078125, 'acc_ordinary': 0.4121, 'acc_bus': 0.4219}
+{'step': 5250, 'loss': 1.72846, 'elapsed_s': 590.1, 'recall_acc': 0.0625}
+{'step': 5500, 'loss': 1.73424, 'elapsed_s': 621.7, 'recall_acc': 0.072265625}
+{'step': 5750, 'loss': 3.51982, 'elapsed_s': 660.1, 'recall_acc': 0.068359375}
+{'step': 6000, 'loss': 1.542, 'elapsed_s': 733.3, 'recall_acc': 0.06640625, 'acc_ordinary': 0.4531, 'acc_bus': 0.4688}
+{'step': 6250, 'loss': 1.7139, 'elapsed_s': 784.2, 'recall_acc': 0.076171875}
+{'step': 6500, 'loss': 1.49317, 'elapsed_s': 813.1, 'recall_acc': 0.068359375}
+{'step': 6750, 'loss': 1.62683, 'elapsed_s': 847.3, 'recall_acc': 0.080078125}
+{'step': 7000, 'loss': 3.38921, 'elapsed_s': 881.3, 'recall_acc': 0.076171875, 'acc_ordinary': 0.457, 'acc_bus': 0.4473}
+{'step': 7250, 'loss': 1.57504, 'elapsed_s': 911.0, 'recall_acc': 0.076171875}
+{'step': 7500, 'loss': 1.34641, 'elapsed_s': 941.4, 'recall_acc': 0.08203125}
+{'step': 7750, 'loss': 1.40094, 'elapsed_s': 971.2, 'recall_acc': 0.08984375}
+{'step': 8000, 'loss': 1.18887, 'elapsed_s': 1001.4, 'recall_acc': 0.087890625, 'acc_ordinary': 0.4922, 'acc_bus': 0.4785}
+{'step': 8250, 'loss': 3.41424, 'elapsed_s': 1031.1, 'recall_acc': 0.08203125}
+{'step': 8500, 'loss': 1.42717, 'elapsed_s': 1059.7, 'recall_acc': 0.091796875}
+{'step': 8750, 'loss': 1.35403, 'elapsed_s': 1078.7, 'recall_acc': 0.09765625}
+{'step': 9000, 'loss': 1.34616, 'elapsed_s': 1097.6, 'recall_acc': 0.087890625, 'acc_ordinary': 0.5293, 'acc_bus': 0.5215}
+{'step': 9250, 'loss': 3.21174, 'elapsed_s': 1116.8, 'recall_acc': 0.08984375}
+{'step': 9500, 'loss': 1.36188, 'elapsed_s': 1135.7, 'recall_acc': 0.095703125}
+{'step': 9750, 'loss': 1.3063, 'elapsed_s': 1154.8, 'recall_acc': 0.091796875}
+{'step': 10000, 'loss': 3.30971, 'elapsed_s': 1173.8, 'recall_acc': 0.091796875, 'acc_ordinary': 0.5469, 'acc_bus': 0.5488}
+{'step': 10250, 'loss': 1.04745, 'elapsed_s': 1193.0, 'recall_acc': 0.087890625}
+{'step': 10500, 'loss': 1.23292, 'elapsed_s': 1211.9, 'recall_acc': 0.095703125}
+{'step': 10750, 'loss': 3.32451, 'elapsed_s': 1230.6, 'recall_acc': 0.091796875}
+{'step': 11000, 'loss': 1.2928, 'elapsed_s': 1250.2, 'recall_acc': 0.10546875, 'acc_ordinary': 0.5566, 'acc_bus': 0.5645}
+{'step': 11250, 'loss': 3.33886, 'elapsed_s': 1273.9, 'recall_acc': 0.09765625}
+{'step': 11500, 'loss': 3.2438, 'elapsed_s': 1317.9, 'recall_acc': 0.091796875}
+{'step': 11750, 'loss': 1.24167, 'elapsed_s': 1392.9, 'recall_acc': 0.08984375}
+{'step': 12000, 'loss': 1.21072, 'elapsed_s': 1461.6, 'recall_acc': 0.099609375, 'acc_ordinary': 0.5625, 'acc_bus': 0.5605}

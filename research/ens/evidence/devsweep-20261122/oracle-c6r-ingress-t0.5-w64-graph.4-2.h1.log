@@ -1,0 +1,13 @@
+{
+ "n": 464,
+ "n_pairs": 464,
+ "site": "ingress",
+ "n_ops": 29,
+ "majority": 0.27586206896551724,
+ "zblind": 0.5344827586206896,
+ "oracle_codebook": 0.41163793206214905,
+ "oracle_codebook_swap": 0.4051724076271057,
+ "oracle_codebook_both": 0.11637931317090988,
+ "ceiling_ok": false,
+ "ordinary_suite": 0.64892578125
+}

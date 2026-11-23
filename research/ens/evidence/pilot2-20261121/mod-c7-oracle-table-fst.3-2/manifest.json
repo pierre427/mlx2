@@ -1,0 +1,57 @@
+{
+ "address": "ens://0/a0.local/fst.3-2.probe@0.1.0",
+ "artifacts": [
+  {
+   "bytes": 866,
+   "name": "module.safetensors",
+   "sha256": "acae623ee310705640aa4c6eb70fda09f02bba72137db2ff5525a835ce96832d"
+  }
+ ],
+ "composition": {
+  "bound": "final_l2.v1",
+  "tau_milli": 500,
+  "writers": "exclusive.v1"
+ },
+ "core_artifact": "ens-a0-core-c7-early-w64-s0@e6f36f425f96",
+ "execution_abi_major": 0,
+ "implementation_digest": "d9099126626641bba8e033c05c31c55f4752a054545d61150df9f8684da4ce61",
+ "law": "stateless.residual.v1",
+ "limits": {
+  "max_batch": 256,
+  "max_positions": 32,
+  "max_workspace_bytes": 1048576
+ },
+ "neural_abi_major": 0,
+ "ports": [
+  {
+   "axes": [
+    "B",
+    "D"
+   ],
+   "direction": "consume",
+   "dtype": "float32",
+   "encoding": "z.index.v0",
+   "site": "oracle.z",
+   "type": "latent.bus.v1",
+   "width": 64
+  },
+  {
+   "axes": [
+    "B",
+    "D"
+   ],
+   "direction": "produce",
+   "dtype": "float32",
+   "encoding": "codebook.sha256:9ffaac5c858269b029e819d4cc2f2223afb096b4c85e712e1aa5e9129f429684",
+   "site": "early.residual.field",
+   "type": "latent.bus.v1",
+   "width": 64
+  }
+ ],
+ "schema": "ens.module.v0",
+ "state": {
+  "clock": "none",
+  "kind": "stateless",
+  "rollback": "none"
+ }
+}

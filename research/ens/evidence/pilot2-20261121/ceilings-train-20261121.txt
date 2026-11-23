@@ -1,0 +1,6 @@
+# Oracle ceilings on every training family, pilot-2 cores, 512 sample_row rows (seed 5), M3, 2026-11-21.
+# Extension (dev/confirm) structures were chosen where both arms reach >= 0.9.
+c6 perm.4=0.982 perm.5=0.418 perm.6=0.369 program.ADD=1.000 program.MUL=1.000 program.XOR=1.000 program.ADD.MUL=0.123 program.MUL.ADD=0.061 program.ADD.XOR=0.053 program.XOR.MUL=0.107 graph.4-2=1.000 graph.6-1=1.000 graph.6-2=0.996 graph.8-1=0.943 fst.2-1=1.000 fst.2-2=1.000 fst.3-1=1.000
+c7 perm.4=0.617 perm.5=0.211 perm.6=0.189 program.ADD=1.000 program.MUL=1.000 program.XOR=1.000 program.ADD.MUL=0.031 program.MUL.ADD=0.057 program.ADD.XOR=0.193 program.XOR.MUL=0.021 graph.4-2=1.000 graph.6-1=1.000 graph.6-2=1.000 graph.8-1=1.000 fst.2-1=1.000 fst.2-2=1.000 fst.3-1=1.000
+# c7 typed-vs-neutral residual gap at the field row, |h_typed - h_neutral| / |h_neutral|, 512 train rows:
+# ingress median 1.053 p90 1.154; block0 0.963/1.344; block1 0.990/1.847; block2 0.942/1.861; block3 0.976/1.978; block5 1.218/3.163

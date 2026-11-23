@@ -1,0 +1,27 @@
+diff --git a/research/ens/grow_train.py b/research/ens/grow_train.py
+index 6078693ca..db6144d7a 100644
+--- a/research/ens/grow_train.py
++++ b/research/ens/grow_train.py
+@@ -197,6 +197,13 @@ def train(args) -> dict:
+     cfg = CoreConfig(d=args.d, heads=args.heads, layers=args.layers, ffn=args.ffn or 4 * args.d, bus_width=args.bus_width,
+                      tau=args.tau)
+     core = Core(cfg)
++    if args.start_op:
++        # diagnostic (2026-11-23): apply a growth operator before any training. Against a fixed core of the grown
++        # shape and the same steps, this isolates the cost of how grown parameters start (identity block with zero
++        # output projections, zero down columns, ...) from the cost of the steps spent at the smaller size.
++        op = {"insert_block": lambda c: G.insert_block(c, c.cfg.layers // 2 + 1),
++              "widen_ffn": lambda c: G.widen_ffn(c, int(c.cfg.ffn * 1.5)), "widen_d": lambda c: G.widen_d(c, 1)}
++        core = op[args.start_op](core)
+     site = args.site
+     M = C.codebook(cfg.bus_width)
+     fams = F.split("train")
+@@ -309,6 +316,8 @@ def main(argv=None):
+     p.add_argument("--trial-budget", type=float, default=0.10)
+     p.add_argument("--margin", type=float, default=0.005)
+     p.add_argument("--max-params", type=int, default=12_000_000)
++    p.add_argument("--start-op", default="", choices=("", "insert_block", "widen_ffn", "widen_d"),
++                   help="diagnostic: apply this growth operator at step 0")
+     p.add_argument("--mode", default="earned", choices=("earned", "balloon"),
+                    help="earned: trial-gated growth on stalls; balloon: H42, scheduled growth early plus "
+                         "sliding-window importance pruning throughout")

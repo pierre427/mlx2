@@ -1,0 +1,57 @@
+{
+ "address": "ens://0/a0.local/graph.6-2.h1@0.1.0",
+ "artifacts": [
+  {
+   "bytes": 395977,
+   "name": "module.safetensors",
+   "sha256": "dac25200fa4480e0f82d40abae8c147806fae719b043b0beb0b00514f15d4d2d"
+  }
+ ],
+ "composition": {
+  "bound": "final_l2.v1",
+  "tau_milli": 1500,
+  "writers": "exclusive.v1"
+ },
+ "core_artifact": "ens-a0-core-c6r-ingress-w64-s0@07788e8ec4c6",
+ "execution_abi_major": 0,
+ "implementation_digest": "30a83dec19919e347cfbf8f42bb2512f828b5388d8ee4a835911ea1e5812819c",
+ "law": "stateless.residual.v1",
+ "limits": {
+  "max_batch": 256,
+  "max_positions": 32,
+  "max_workspace_bytes": 1048576
+ },
+ "neural_abi_major": 0,
+ "ports": [
+  {
+   "axes": [
+    "B",
+    "D"
+   ],
+   "direction": "consume",
+   "dtype": "float32",
+   "encoding": "tap.linear.v0",
+   "site": "ingress.tap.query",
+   "type": "latent.bus.v1",
+   "width": 64
+  },
+  {
+   "axes": [
+    "B",
+    "D"
+   ],
+   "direction": "produce",
+   "dtype": "float32",
+   "encoding": "codebook.sha256:9ffaac5c858269b029e819d4cc2f2223afb096b4c85e712e1aa5e9129f429684",
+   "site": "ingress.residual.field",
+   "type": "latent.bus.v1",
+   "width": 64
+  }
+ ],
+ "schema": "ens.module.v0",
+ "state": {
+  "clock": "none",
+  "kind": "stateless",
+  "rollback": "none"
+ }
+}

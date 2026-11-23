@@ -1,0 +1,64 @@
+{
+ "families": [
+  "graph.6-2.h1",
+  "graph.6-2.h2"
+ ],
+ "n_feat": 1024,
+ "ari": -0.0009125975745186356,
+ "ari_go_only": -0.0009427651102379997,
+ "ari_go_key_centred": -0.0009366454249771271,
+ "ari_state_no_gradient": -0.0006503267332097807,
+ "cluster_sizes": [
+  548,
+  476
+ ],
+ "child_rows": [
+  4168,
+  4024
+ ],
+ "child_fallback": [
+  false,
+  false
+ ],
+ "parent": {
+  "all": 0.5166015625,
+  "graph.6-2.h1": 0.513671875,
+  "graph.6-2.h2": 0.51953125
+ },
+ "split": {
+  "all": 0.5634765625,
+  "graph.6-2.h1": 0.59375,
+  "graph.6-2.h2": 0.533203125
+ },
+ "child_for_family": [
+  0,
+  0
+ ],
+ "split_oracle_route": {
+  "all": 0.58984375,
+  "graph.6-2.h1": 0.62890625,
+  "graph.6-2.h2": 0.55078125
+ },
+ "separate_steps": 9000,
+ "separate_oracle": {
+  "all": 0.8525390625,
+  "graph.6-2.h1": 0.927734375,
+  "graph.6-2.h2": 0.77734375
+ },
+ "random_split_ari_vs_family": -8.452964045147204e-05,
+ "random_child_rows": [
+  5341,
+  2851
+ ],
+ "random_split": {
+  "all": 0.546875,
+  "graph.6-2.h1": 0.556640625,
+  "graph.6-2.h2": 0.537109375
+ },
+ "kill": {
+  "ari_le_0.2": true,
+  "split_below_separate_by_0.05": true,
+  "random_as_good": true,
+  "gradients_add_nothing_over_state": true
+ }
+}

@@ -1,0 +1,18 @@
+{
+ "agent_id": "job-ens-h41-curr-8f57c5886-22725",
+ "complete_worker": {
+  "already_terminal": false,
+  "completed_late": false,
+  "finished_at": 1795410140,
+  "status": "cancelled",
+  "worker_id": "bc5b2684015040038aba991b6445f604",
+  "workflow_status": null
+ },
+ "register_worker": {
+  "agent_id": "job-ens-h41-curr-8f57c5886-22725",
+  "registered_by": "job-ens-h41-curr-8f57c5886-22725",
+  "worker_id": "bc5b2684015040038aba991b6445f604",
+  "workflow_id": "304719ca1b8341c89e160e848856a4a0"
+ },
+ "updated_at": "2026-11-23T05:02:20+00:00"
+}

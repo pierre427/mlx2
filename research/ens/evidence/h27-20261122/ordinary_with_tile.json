@@ -1,0 +1,9 @@
+{
+ "bypass": 0.64892578125,
+ "checkpoint": "ens-a0-core-c6l-early-w64-s0@5a6c400c7586",
+ "research_ens_dirty": false,
+ "source_branch": "ens-a0",
+ "source_revision": "25698e138a49ad5c62016298ba56eb0873dac020",
+ "source_via": "m3-sync-stamp",
+ "tile_admitted_zero_message": 0.65234375
+}

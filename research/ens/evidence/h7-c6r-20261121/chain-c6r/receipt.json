@@ -1,0 +1,330 @@
+{
+ "arm": "c6r",
+ "core_checkpoint": "ens-a0-core-c6r-ingress-w64-s0@07788e8ec4c6",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": "H7",
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "research_ens_dirty": false,
+ "results": [
+  {
+   "all_steps_correct": 0.916015625,
+   "chain_hard": 0.923828125,
+   "chain_hard_shuffled": 0.306640625,
+   "chain_soft": 0.923828125,
+   "cls": "GRAPH",
+   "collision_recovery": 0.0078125,
+   "k": 2,
+   "m": 6,
+   "n": 512,
+   "product_of_clean_steps": 0.9139938354492188,
+   "single_call_in_training": true,
+   "single_call_oracle": 0.9140625,
+   "soft_msg_rms": [
+    0.9935473799705505,
+    0.9954659342765808
+   ],
+   "step_acc_clean_input": [
+    0.94921875,
+    0.962890625
+   ],
+   "step_acc_hard": [
+    0.94921875,
+    0.951171875
+   ],
+   "step_acc_hard_shuffled": [
+    0.94921875,
+    0.943359375
+   ],
+   "step_acc_soft": [
+    0.94921875,
+    0.951171875
+   ]
+  },
+  {
+   "all_steps_correct": 0.646484375,
+   "chain_hard": 0.677734375,
+   "chain_hard_shuffled": 0.2265625,
+   "chain_soft": 0.67578125,
+   "cls": "GRAPH",
+   "collision_recovery": 0.03125,
+   "k": 2,
+   "m": 8,
+   "n": 512,
+   "product_of_clean_steps": 0.63934326171875,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.25,
+   "soft_msg_rms": [
+    0.9661663770675659,
+    0.9599913358688354
+   ],
+   "step_acc_clean_input": [
+    0.818359375,
+    0.78125
+   ],
+   "step_acc_hard": [
+    0.818359375,
+    0.78515625
+   ],
+   "step_acc_hard_shuffled": [
+    0.818359375,
+    0.787109375
+   ],
+   "step_acc_soft": [
+    0.818359375,
+    0.77734375
+   ]
+  },
+  {
+   "all_steps_correct": 0.52734375,
+   "chain_hard": 0.61328125,
+   "chain_hard_shuffled": 0.26953125,
+   "chain_soft": 0.615234375,
+   "cls": "GRAPH",
+   "collision_recovery": 0.0859375,
+   "k": 3,
+   "m": 8,
+   "n": 512,
+   "product_of_clean_steps": 0.5082564800977707,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.3671875,
+   "soft_msg_rms": [
+    0.9662351012229919,
+    0.9603518843650818,
+    0.9580172300338745
+   ],
+   "step_acc_clean_input": [
+    0.814453125,
+    0.779296875,
+    0.80078125
+   ],
+   "step_acc_hard": [
+    0.814453125,
+    0.78515625,
+    0.759765625
+   ],
+   "step_acc_hard_shuffled": [
+    0.814453125,
+    0.78125,
+    0.828125
+   ],
+   "step_acc_soft": [
+    0.814453125,
+    0.77734375,
+    0.759765625
+   ]
+  },
+  {
+   "all_steps_correct": 0.458984375,
+   "chain_hard": 0.552734375,
+   "chain_hard_shuffled": 0.33984375,
+   "chain_soft": 0.552734375,
+   "cls": "GRAPH",
+   "collision_recovery": 0.09375,
+   "k": 4,
+   "m": 8,
+   "n": 512,
+   "product_of_clean_steps": 0.3971052489214344,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.322265625,
+   "soft_msg_rms": [
+    0.9656149744987488,
+    0.9598511457443237,
+    0.955292284488678,
+    0.9531369209289551
+   ],
+   "step_acc_clean_input": [
+    0.810546875,
+    0.775390625,
+    0.787109375,
+    0.802734375
+   ],
+   "step_acc_hard": [
+    0.810546875,
+    0.779296875,
+    0.75,
+    0.7734375
+   ],
+   "step_acc_hard_shuffled": [
+    0.810546875,
+    0.75390625,
+    0.802734375,
+    0.767578125
+   ],
+   "step_acc_soft": [
+    0.810546875,
+    0.771484375,
+    0.75,
+    0.76953125
+   ]
+  },
+  {
+   "all_steps_correct": 0.9609375,
+   "chain_hard": 0.962890625,
+   "chain_hard_shuffled": 0.515625,
+   "chain_soft": 0.9609375,
+   "cls": "FST",
+   "collision_recovery": 0.001953125,
+   "k": 2,
+   "m": 3,
+   "n": 512,
+   "product_of_clean_steps": 0.9593963623046875,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.361328125,
+   "soft_msg_rms": [
+    0.9919832348823547,
+    0.993197500705719
+   ],
+   "step_acc_clean_input": [
+    0.982421875,
+    0.9765625
+   ],
+   "step_acc_hard": [
+    0.982421875,
+    0.9765625
+   ],
+   "step_acc_hard_shuffled": [
+    0.982421875,
+    0.982421875
+   ],
+   "step_acc_soft": [
+    0.982421875,
+    0.974609375
+   ]
+  },
+  {
+   "all_steps_correct": 0.955078125,
+   "chain_hard": 0.96875,
+   "chain_hard_shuffled": 0.470703125,
+   "chain_soft": 0.9609375,
+   "cls": "FST",
+   "collision_recovery": 0.013671875,
+   "k": 3,
+   "m": 3,
+   "n": 512,
+   "product_of_clean_steps": 0.946287140250206,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.443359375,
+   "soft_msg_rms": [
+    0.9927659630775452,
+    0.991798460483551,
+    0.9926531314849854
+   ],
+   "step_acc_clean_input": [
+    0.978515625,
+    0.98046875,
+    0.986328125
+   ],
+   "step_acc_hard": [
+    0.978515625,
+    0.978515625,
+    0.98046875
+   ],
+   "step_acc_hard_shuffled": [
+    0.978515625,
+    0.982421875,
+    0.978515625
+   ],
+   "step_acc_soft": [
+    0.978515625,
+    0.98046875,
+    0.982421875
+   ]
+  },
+  {
+   "all_steps_correct": 0.951171875,
+   "chain_hard": 0.9609375,
+   "chain_hard_shuffled": 0.46484375,
+   "chain_soft": 0.958984375,
+   "cls": "FST",
+   "collision_recovery": 0.009765625,
+   "k": 4,
+   "m": 3,
+   "n": 512,
+   "product_of_clean_steps": 0.937023964652326,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.353515625,
+   "soft_msg_rms": [
+    0.9914844036102295,
+    0.9921649098396301,
+    0.9941748380661011,
+    0.9897668361663818
+   ],
+   "step_acc_clean_input": [
+    0.978515625,
+    0.986328125,
+    0.9921875,
+    0.978515625
+   ],
+   "step_acc_hard": [
+    0.978515625,
+    0.98046875,
+    0.982421875,
+    0.9765625
+   ],
+   "step_acc_hard_shuffled": [
+    0.978515625,
+    0.982421875,
+    0.978515625,
+    0.974609375
+   ],
+   "step_acc_soft": [
+    0.978515625,
+    0.982421875,
+    0.984375,
+    0.974609375
+   ]
+  },
+  {
+   "all_steps_correct": 1.0,
+   "chain_hard": 1.0,
+   "chain_hard_shuffled": 0.484375,
+   "chain_soft": 1.0,
+   "cls": "FST",
+   "collision_recovery": 0.0,
+   "k": 4,
+   "m": 2,
+   "n": 512,
+   "product_of_clean_steps": 1.0,
+   "single_call_in_training": false,
+   "single_call_oracle": 0.47265625,
+   "soft_msg_rms": [
+    0.9999923706054688,
+    0.9999921321868896,
+    0.9999923706054688,
+    0.9999922513961792
+   ],
+   "step_acc_clean_input": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_hard_shuffled": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "step_acc_soft": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ]
+  }
+ ],
+ "schema": "ens.a0.chain_receipt.v0",
+ "site": "ingress",
+ "source_branch": "ens-a0",
+ "source_revision": "5f66bbc3e5a829b6c798df3981e69d4cf9ff9a7d",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T00:01:19Z"
+}

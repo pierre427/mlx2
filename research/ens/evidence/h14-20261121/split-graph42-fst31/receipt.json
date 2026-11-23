@@ -1,0 +1,56 @@
+{
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s0@c25654a60499",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": "H14",
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "research_ens_dirty": false,
+ "results": {
+  "ari": 0.006082639723457878,
+  "child_for_family": [
+   0,
+   0
+  ],
+  "cluster_sizes": [
+   527,
+   497
+  ],
+  "families": [
+   "graph.4-2.h1",
+   "fst.3-1.h1"
+  ],
+  "n_feat": 1024,
+  "parent": {
+   "all": 0.8186475038528442,
+   "fst.3-1.h1": 0.859375,
+   "graph.4-2.h1": 0.7737069129943848
+  },
+  "random_split": {
+   "all": 0.8217212557792664,
+   "fst.3-1.h1": 0.873046875,
+   "graph.4-2.h1": 0.7650862336158752
+  },
+  "separate_oracle": {
+   "all": 0.9334015846252441,
+   "fst.3-1.h1": 0.958984375,
+   "graph.4-2.h1": 0.9051724076271057
+  },
+  "split": {
+   "all": 0.8780736923217773,
+   "fst.3-1.h1": 0.9296875,
+   "graph.4-2.h1": 0.8211206793785095
+  },
+  "split_oracle_route": {
+   "all": 0.8473359942436218,
+   "fst.3-1.h1": 0.89453125,
+   "graph.4-2.h1": 0.795258641242981
+  }
+ },
+ "schema": "ens.a0.split_receipt.v0",
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "f5d203eb936818442b1935f85da5fbe2e1573b9e",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T02:55:13Z"
+}

@@ -1,0 +1,20 @@
+{
+ "n": 512,
+ "n_pairs": 512,
+ "site": "early",
+ "n_ops": 512,
+ "majority": 0.140625,
+ "zblind": 0.313720703125,
+ "on": 0.234375,
+ "bypass": 0.234375,
+ "random": 0.234375,
+ "wrong": 0.234375,
+ "swap": 0.212890625,
+ "both": 0.0,
+ "untrained_port": 0.234375,
+ "msg_rms": 1.0,
+ "oracle_typed": 0.998046875,
+ "ceiling_ok": null,
+ "half": "full",
+ "ordinary_suite": 0.80078125
+}

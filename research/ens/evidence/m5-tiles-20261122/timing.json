@@ -1,0 +1,22 @@
+{
+ "commit": "731531a31f041e7970d1769ff0b8b0133ce99f1e",
+ "origin_main": "28572e2b8d8398558c16946bd241395fa809a964",
+ "device": "Device(gpu, 0)",
+ "host": "<host>",
+ "tiles": {
+  "tiles": 4,
+  "steps": 2000,
+  "batch": 64,
+  "sequential_s": 75.79,
+  "batched_s": 55.18,
+  "speedup": 1.37,
+  "peak_mem_gb": 2.972
+ },
+ "parity_max_abs_diff": {
+  "program.ADD.h1": 0.008342660963535309,
+  "graph.6-2.h1": 0.005755145102739334,
+  "fst.3-1.h1": 0.00046728551387786865,
+  "graph.4-2.h1": 0.00022856146097183228
+ },
+ "parity_pass": false
+}

@@ -1,0 +1,43 @@
+{
+ "agent_id": "job-ens-h41-curr-8f57c5886-23114",
+ "child_pid": 23122,
+ "command": [
+  "~/Desktop/CPG-Radio/.venv/bin/python",
+  "scripts/run_with_gpu_locks.py",
+  "--session",
+  "ens-m5-20261122",
+  "--label",
+  "ens-h41-curr-8f57c5886",
+  "--cpg-owner-lock",
+  "/tmp/ens-h41-curr-8f57c5886-cpg.lock",
+  "--cpg-task",
+  "beff4e634ddb46978a84a1aed315f785",
+  "--receipt",
+  "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h41curr-20261123/gpu-receipt.json",
+  "--",
+  "env",
+  "PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0",
+  "HF_HUB_OFFLINE=1",
+  "zsh",
+  "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h41curr-20261123/slot.sh"
+ ],
+ "ended_at": "2026-11-23T05:18:19+00:00",
+ "label": "ens-h41-curr-8f57c5886",
+ "out": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h41curr-20261123/cpg.log",
+ "pid": 23114,
+ "radio": {
+  "error": null,
+  "heartbeat_failures": 0,
+  "heartbeats": 14,
+  "lease_generation": 6465,
+  "lease_task": "beff4e634ddb46978a84a1aed315f785",
+  "lock_dir": "/tmp/ens-h41-curr-8f57c5886-cpg.lock",
+  "status": "closed:completed"
+ },
+ "rc": 0,
+ "refusal": null,
+ "session_id": "213b33b20d094ad4867525c37b8b81ca",
+ "signal": null,
+ "started_at": "2026-11-23T05:03:14+00:00",
+ "worker_id": "04334bf5a4cc4ed3a11fe438f238fae9"
+}

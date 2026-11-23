@@ -1,0 +1,48 @@
+{'step': 1000, 'loss': 2.64091, 'batch_kind': 'c6', 'elapsed_s': 21.7, 'recall_acc': 0.021484375}
+{'step': 2000, 'loss': 2.68575, 'batch_kind': 'c6', 'elapsed_s': 42.8, 'recall_acc': 0.02734375}
+{'step': 3000, 'loss': 2.82286, 'batch_kind': 'c6', 'elapsed_s': 64.1, 'recall_acc': 0.021484375}
+{'step': 4000, 'loss': 4.14246, 'batch_kind': 'recall', 'elapsed_s': 85.4, 'recall_acc': 0.029296875, 'acc_ordinary': 0.2207, 'acc_bus': 0.2129}
+{'step': 5000, 'loss': 4.1293, 'batch_kind': 'recall', 'elapsed_s': 106.6, 'recall_acc': 0.017578125}
+{'step': 6000, 'loss': 2.39036, 'batch_kind': 'c6', 'elapsed_s': 127.8, 'recall_acc': 0.015625}
+{'step': 7000, 'loss': 4.14517, 'batch_kind': 'recall', 'elapsed_s': 149.2, 'recall_acc': 0.017578125}
+{'step': 8000, 'loss': 2.15264, 'batch_kind': 'c6', 'elapsed_s': 170.4, 'recall_acc': 0.025390625, 'acc_ordinary': 0.2676, 'acc_bus': 0.2715}
+{'step': 9000, 'loss': 2.4085, 'batch_kind': 'c6', 'elapsed_s': 191.7, 'recall_acc': 0.021484375}
+{'step': 10000, 'loss': 4.11462, 'batch_kind': 'recall', 'elapsed_s': 212.8, 'recall_acc': 0.0234375}
+{'step': 11000, 'loss': 2.38486, 'batch_kind': 'c6', 'elapsed_s': 233.0, 'recall_acc': 0.021484375}
+{'step': 12000, 'loss': 2.20763, 'batch_kind': 'c6', 'elapsed_s': 253.4, 'recall_acc': 0.02734375, 'acc_ordinary': 0.2539, 'acc_bus': 0.2539}
+{'step': 13000, 'loss': 4.15864, 'batch_kind': 'recall', 'elapsed_s': 272.9, 'recall_acc': 0.021484375}
+{'step': 14000, 'loss': 2.66194, 'batch_kind': 'c6', 'elapsed_s': 292.4, 'recall_acc': 0.0234375}
+{'step': 15000, 'loss': 4.1098, 'batch_kind': 'recall', 'elapsed_s': 311.9, 'recall_acc': 0.013671875}
+{'step': 16000, 'loss': 2.24607, 'batch_kind': 'c6', 'elapsed_s': 331.5, 'recall_acc': 0.021484375, 'acc_ordinary': 0.3008, 'acc_bus': 0.2969}
+{'step': 17000, 'loss': 4.14238, 'batch_kind': 'recall', 'elapsed_s': 351.1, 'recall_acc': 0.021484375}
+{'step': 18000, 'loss': 4.12384, 'batch_kind': 'recall', 'elapsed_s': 370.8, 'recall_acc': 0.02734375}
+{'step': 19000, 'loss': 4.09817, 'batch_kind': 'recall', 'elapsed_s': 390.3, 'recall_acc': 0.03125}
+{'step': 20000, 'loss': 1.99892, 'batch_kind': 'c6', 'elapsed_s': 408.9, 'recall_acc': 0.0234375, 'acc_ordinary': 0.2715, 'acc_bus': 0.3066}
+{'step': 21000, 'loss': 1.92156, 'batch_kind': 'c6', 'elapsed_s': 426.8, 'recall_acc': 0.029296875}
+{'step': 22000, 'loss': 1.94739, 'batch_kind': 'c6', 'elapsed_s': 445.0, 'recall_acc': 0.03125}
+{'step': 23000, 'loss': 1.88517, 'batch_kind': 'c6', 'elapsed_s': 463.1, 'recall_acc': 0.0546875}
+{'step': 24000, 'loss': 2.00615, 'batch_kind': 'c6', 'elapsed_s': 481.2, 'recall_acc': 0.0546875, 'acc_ordinary': 0.332, 'acc_bus': 0.3457}
+{'step': 25000, 'loss': 1.97989, 'batch_kind': 'c6', 'elapsed_s': 499.3, 'recall_acc': 0.048828125}
+{'step': 26000, 'loss': 3.62948, 'batch_kind': 'recall', 'elapsed_s': 517.6, 'recall_acc': 0.046875}
+{'step': 27000, 'loss': 1.8859, 'batch_kind': 'c6', 'elapsed_s': 538.2, 'recall_acc': 0.056640625}
+{'step': 28000, 'loss': 1.69403, 'batch_kind': 'c6', 'elapsed_s': 558.9, 'recall_acc': 0.064453125, 'acc_ordinary': 0.3477, 'acc_bus': 0.3848}
+{'step': 29000, 'loss': 1.75288, 'batch_kind': 'c6', 'elapsed_s': 579.6, 'recall_acc': 0.0546875}
+{'step': 30000, 'loss': 3.70562, 'batch_kind': 'recall', 'elapsed_s': 600.3, 'recall_acc': 0.052734375}
+{'step': 31000, 'loss': 1.72988, 'batch_kind': 'c6', 'elapsed_s': 620.9, 'recall_acc': 0.0546875}
+{'step': 32000, 'loss': 3.55647, 'batch_kind': 'recall', 'elapsed_s': 641.7, 'recall_acc': 0.05859375, 'acc_ordinary': 0.4043, 'acc_bus': 0.4199}
+{'step': 33000, 'loss': 3.54314, 'batch_kind': 'recall', 'elapsed_s': 662.5, 'recall_acc': 0.04296875}
+{'step': 34000, 'loss': 3.51555, 'batch_kind': 'recall', 'elapsed_s': 683.2, 'recall_acc': 0.0625}
+{'step': 35000, 'loss': 1.49465, 'batch_kind': 'c6', 'elapsed_s': 704.0, 'recall_acc': 0.056640625}
+{'step': 36000, 'loss': 1.39916, 'batch_kind': 'c6', 'elapsed_s': 724.7, 'recall_acc': 0.05078125, 'acc_ordinary': 0.4531, 'acc_bus': 0.4824}
+{'step': 37000, 'loss': 1.51008, 'batch_kind': 'c6', 'elapsed_s': 745.5, 'recall_acc': 0.056640625}
+{'step': 38000, 'loss': 1.48807, 'batch_kind': 'c6', 'elapsed_s': 766.2, 'recall_acc': 0.052734375}
+{'step': 39000, 'loss': 1.45568, 'batch_kind': 'c6', 'elapsed_s': 787.0, 'recall_acc': 0.05078125}
+{'step': 40000, 'loss': 3.52521, 'batch_kind': 'recall', 'elapsed_s': 807.7, 'recall_acc': 0.046875, 'acc_ordinary': 0.4941, 'acc_bus': 0.5078}
+{'step': 41000, 'loss': 1.48673, 'batch_kind': 'c6', 'elapsed_s': 828.6, 'recall_acc': 0.064453125}
+{'step': 42000, 'loss': 3.47543, 'batch_kind': 'recall', 'elapsed_s': 849.3, 'recall_acc': 0.05859375}
+{'step': 43000, 'loss': 3.51763, 'batch_kind': 'recall', 'elapsed_s': 870.1, 'recall_acc': 0.046875}
+{'step': 44000, 'loss': 1.43052, 'batch_kind': 'c6', 'elapsed_s': 891.0, 'recall_acc': 0.052734375, 'acc_ordinary': 0.5137, 'acc_bus': 0.5098}
+{'step': 45000, 'loss': 1.32591, 'batch_kind': 'c6', 'elapsed_s': 911.8, 'recall_acc': 0.056640625}
+{'step': 46000, 'loss': 1.31832, 'batch_kind': 'c6', 'elapsed_s': 932.6, 'recall_acc': 0.048828125}
+{'step': 47000, 'loss': 1.23472, 'batch_kind': 'c6', 'elapsed_s': 953.4, 'recall_acc': 0.0625}
+{'step': 48000, 'loss': 3.53947, 'batch_kind': 'recall', 'elapsed_s': 974.2, 'recall_acc': 0.0703125, 'acc_ordinary': 0.5176, 'acc_bus': 0.5195}

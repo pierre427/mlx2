@@ -1,0 +1,79 @@
+{
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s0@c25654a60499",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": "H14",
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "research_ens_dirty": false,
+ "results": {
+  "ari": -0.0009125975745186356,
+  "ari_go_key_centred": -0.0009366454249771271,
+  "ari_go_only": -0.0009427651102379997,
+  "ari_state_no_gradient": -0.0006503267332097807,
+  "child_fallback": [
+   false,
+   false
+  ],
+  "child_for_family": [
+   0,
+   0
+  ],
+  "child_rows": [
+   4168,
+   4024
+  ],
+  "cluster_sizes": [
+   548,
+   476
+  ],
+  "families": [
+   "graph.6-2.h1",
+   "graph.6-2.h2"
+  ],
+  "kill": {
+   "ari_le_0.2": true,
+   "gradients_add_nothing_over_state": true,
+   "random_as_good": true,
+   "split_below_separate_by_0.05": true
+  },
+  "n_feat": 1024,
+  "parent": {
+   "all": 0.5166015625,
+   "graph.6-2.h1": 0.513671875,
+   "graph.6-2.h2": 0.51953125
+  },
+  "random_child_rows": [
+   5341,
+   2851
+  ],
+  "random_split": {
+   "all": 0.546875,
+   "graph.6-2.h1": 0.556640625,
+   "graph.6-2.h2": 0.537109375
+  },
+  "random_split_ari_vs_family": -8.452964045147204e-05,
+  "separate_oracle": {
+   "all": 0.8525390625,
+   "graph.6-2.h1": 0.927734375,
+   "graph.6-2.h2": 0.77734375
+  },
+  "separate_steps": 9000,
+  "split": {
+   "all": 0.5634765625,
+   "graph.6-2.h1": 0.59375,
+   "graph.6-2.h2": 0.533203125
+  },
+  "split_oracle_route": {
+   "all": 0.58984375,
+   "graph.6-2.h1": 0.62890625,
+   "graph.6-2.h2": 0.55078125
+  }
+ },
+ "schema": "ens.a0.split_receipt.v0",
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "421474b5cb0d3e3467bc740ef510fad47155fcfd",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T03:22:11Z"
+}

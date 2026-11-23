@@ -1,0 +1,24 @@
+{'step': 500, 'loss': 2.218487024307251, 'elapsed_s': 79.1, 'peak_mem_gb': 3.314}
+{'step': 1000, 'loss': 2.179602861404419, 'elapsed_s': 159.2, 'peak_mem_gb': 3.314}
+{'step': 1500, 'loss': 1.9921810626983643, 'elapsed_s': 239.2, 'peak_mem_gb': 3.314}
+{'step': 2000, 'loss': 2.095309257507324, 'elapsed_s': 312.7, 'peak_mem_gb': 3.314}
+{'step': 2500, 'loss': 2.0807557106018066, 'elapsed_s': 386.3, 'peak_mem_gb': 3.314, 'acc_ordinary': 0.3691, 'acc_bus': 0.373}
+{'step': 3000, 'loss': 1.7504761219024658, 'elapsed_s': 460.0, 'peak_mem_gb': 3.314}
+{'step': 3500, 'loss': 1.699411153793335, 'elapsed_s': 533.6, 'peak_mem_gb': 3.314}
+{'step': 4000, 'loss': 1.6838933229446411, 'elapsed_s': 607.2, 'peak_mem_gb': 3.314}
+{'step': 4500, 'loss': 1.6136975288391113, 'elapsed_s': 680.8, 'peak_mem_gb': 3.314}
+{'step': 5000, 'loss': 1.3562376499176025, 'elapsed_s': 754.5, 'peak_mem_gb': 3.314, 'acc_ordinary': 0.4434, 'acc_bus': 0.4609}
+{'step': 5500, 'loss': 1.5541753768920898, 'elapsed_s': 828.2, 'peak_mem_gb': 3.314}
+{'step': 6000, 'loss': 1.4222500324249268, 'elapsed_s': 901.8, 'peak_mem_gb': 3.314}
+{'step': 6500, 'loss': 1.1590282917022705, 'elapsed_s': 975.5, 'peak_mem_gb': 3.314}
+{'step': 7000, 'loss': 1.2051588296890259, 'elapsed_s': 1049.1, 'peak_mem_gb': 3.314}
+{'step': 7500, 'loss': 1.1756870746612549, 'elapsed_s': 1122.7, 'peak_mem_gb': 3.314, 'acc_ordinary': 0.5566, 'acc_bus': 0.5469}
+{'step': 8000, 'loss': 1.2272889614105225, 'elapsed_s': 1196.5, 'peak_mem_gb': 3.314}
+{'step': 8500, 'loss': 1.1527761220932007, 'elapsed_s': 1270.1, 'peak_mem_gb': 3.314}
+{'step': 9000, 'loss': 1.1063553094863892, 'elapsed_s': 1343.6, 'peak_mem_gb': 3.314}
+{'step': 9500, 'loss': 1.0050073862075806, 'elapsed_s': 1417.2, 'peak_mem_gb': 3.314}
+{'step': 10000, 'loss': 1.0979433059692383, 'elapsed_s': 1490.8, 'peak_mem_gb': 3.314, 'acc_ordinary': 0.6016, 'acc_bus': 0.6016}
+{'step': 10500, 'loss': 1.0644396543502808, 'elapsed_s': 1564.5, 'peak_mem_gb': 3.314}
+{'step': 11000, 'loss': 1.0356745719909668, 'elapsed_s': 1638.1, 'peak_mem_gb': 3.314}
+{'step': 11500, 'loss': 0.9300767183303833, 'elapsed_s': 1711.7, 'peak_mem_gb': 3.314}
+{'step': 12000, 'loss': 1.061095952987671, 'elapsed_s': 1785.2, 'peak_mem_gb': 3.314, 'acc_ordinary': 0.6152, 'acc_bus': 0.6152}

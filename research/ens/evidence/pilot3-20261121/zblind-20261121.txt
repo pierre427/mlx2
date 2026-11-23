@@ -1,0 +1,10 @@
+{
+ "source_revision": "c647d0ce0d07e7a9d946c476fd8b9f935c0742b8",
+ "branch": "ens-a0",
+ "tree_sha256": "c2da18c4de62f6ba189d681ff43e0678e0e38807c127ec251641f34ee49ed69b",
+ "synced_utc": "2026-11-21T22:21:17Z"
+}
+program.ADD.h1 digest 76bab1157b07 n 127 n_ops 8 zblind 0.062
+graph.6-2.h1 digest 549663617678 n 512 n_ops 495 zblind 0.521
+fst.3-1.h1 digest 192e091df9f0 n 512 n_ops 155 zblind 0.6
+graph.4-2.h1 digest c2b499c72489 n 463 n_ops 29 zblind 0.536

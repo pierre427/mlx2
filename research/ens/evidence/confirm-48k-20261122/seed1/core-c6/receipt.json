@@ -1,0 +1,3037 @@
+{
+ "args": {
+  "adapter_hidden": 256,
+  "adapter_kind": "mlp",
+  "arm": "c6",
+  "batch": 256,
+  "bus_width": 64,
+  "d": 256,
+  "family_eval": true,
+  "from_core": null,
+  "heads": 4,
+  "layers": 6,
+  "log_every": 400,
+  "lora_rank": 8,
+  "lr": 0.001,
+  "matryoshka": 0.0,
+  "out": "evidence/h29a-20261122/core-c6-48k",
+  "p_ordinary": 0.25,
+  "reader_init": 1.0,
+  "seed": 1,
+  "site": "early",
+  "steps": 48000,
+  "tau": 0.5,
+  "warmup": 500
+ },
+ "arm": "c6",
+ "base_tau": null,
+ "checkpoint": "ens-a0-core-c6-early-w64-s1@0ece332602d3",
+ "codebook_sha256": "9ffaac5c858269b029e819d4cc2f2223afb096b4c85e712e1aa5e9129f429684",
+ "config": {
+  "adapter_hidden": 256,
+  "bus_width": 64,
+  "d": 256,
+  "ffn": 1024,
+  "heads": 4,
+  "layers": 6,
+  "lora_rank": 0,
+  "lora_site": "",
+  "reader_init_scale": 1.0,
+  "reader_kind": "linear",
+  "seq_len": 32,
+  "sites": [
+   [
+    "ingress",
+    -1
+   ],
+   [
+    "early",
+    1
+   ],
+   [
+    "middle",
+    3
+   ],
+   [
+    "late",
+    5
+   ]
+  ],
+  "tau": 0.5,
+  "vocab": 128
+ },
+ "device": "Device(gpu, 0)",
+ "families": {
+  "families": [
+   {
+    "cls": "PERM",
+    "digest": "3e92d3e83e688e237651cc9386aa5c4dc20698d8b58fb969abe9a679e4a727bc",
+    "fid": "perm.4",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     4
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PERM",
+    "digest": "3b5492972768ec3aaa1c91b733dcafacd5d43f95f1074250fd4212e139ff8c91",
+    "fid": "perm.5",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     5
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PERM",
+    "digest": "7ba38690050300495c8c570e3237bace864b769c3cf61f86804882c5d2b14de7",
+    "fid": "perm.6",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     6
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "c5a4cc37d1ecd8b426cb14daa43239f58731609f35ee71b1f56518cbb6e5bd91",
+    "fid": "program.ADD",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "ADD"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "502d45e04011bb955aa268f881b6a4fb923369e47a0af09f968536dfadeafc6c",
+    "fid": "program.MUL",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "MUL"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "cca53f32bc4ffab9a19a4e6665e06bca4a7723400394fa2caa61fb385c53ff5f",
+    "fid": "program.XOR",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "XOR"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "c7a702128e380bb5cdca964629c8a7570b6cf7fe23ed98609652b54d08f42f8a",
+    "fid": "program.ADD.MUL",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "ADD",
+      "MUL"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "ae916a3d4d02bb27ff521aeea455ca62dfdd5701840c1b86832c2f19a1d253b4",
+    "fid": "program.MUL.ADD",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "MUL",
+      "ADD"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "f43f280c44f53f0cb46ae0a26be973a7e7045f13d9ab5d2fca5ee50a8b4d18dc",
+    "fid": "program.ADD.XOR",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "ADD",
+      "XOR"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "e60c274075325662d7673eb83fde61ab556447c787972d75a2f1186723807548",
+    "fid": "program.XOR.MUL",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     [
+      "XOR",
+      "MUL"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "7e90b6be671bc0fbb3ab4d794fed3a98c0bf1ce45e86cba8c5c52c91745c9aea",
+    "fid": "graph.4-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     4,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "c1928f3b97e62d707c37d22b0d311fcf66b5e21f5bcc4a6e14fb0c495d0817cc",
+    "fid": "graph.6-1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     6,
+     1
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "9076ff44e8d707c7081a49903a076ffd492295fa7b73140fff48c7948d1c725d",
+    "fid": "graph.6-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     6,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "5fd202e2856dc6fd28fb40fb48ad085c8acb0ee5eab3cfd3ed164eb1eea11fa2",
+    "fid": "graph.8-1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     8,
+     1
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "FST",
+    "digest": "0d1d42aee957163d3e175566434bd47087fb8e9bfcb03f2484e8e077d2043118",
+    "fid": "fst.2-1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     2,
+     1
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "FST",
+    "digest": "941ac865b8c6aca39b0aa1fbb5c178d721611d9f5f8d7944800783042c875d3f",
+    "fid": "fst.2-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     2,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "FST",
+    "digest": "7e1c9877020da2aa11e734c802975c635bae1174bade7d0e22dcc3dc47199707",
+    "fid": "fst.3-1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "knobs": [
+     3,
+     1
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "train"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "1b3604c3328cbda6bf4ba13c780db0d012a17c6567de86bf1689ef84c1043958",
+    "fid": "program.ADD.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 2,
+    "knobs": [
+     [
+      "ADD"
+     ]
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "dev"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "f5defe4d6fa0a12edcbb857f8127251b280b8f7cfc65a55d41552c88b490b68f",
+    "fid": "graph.6-2.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     6,
+     2
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "dev"
+   },
+   {
+    "cls": "FST",
+    "digest": "1ea2e0ee5c9f8d7d683618cbc0e9fcd46f54ee67069d40a52d801d506f9d42e1",
+    "fid": "fst.3-1.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     3,
+     1
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "dev"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "5ee0c56f54c25e7c3493c9da68f4cd24980cb70653db48643551dc6ef7e626de",
+    "fid": "graph.4-2.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     4,
+     2
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "dev"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "0ac3d099db816bfb8ba14a1252c4af9a06ce173e17d4d253042e4eca89960ea9",
+    "fid": "program.MUL.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 2,
+    "knobs": [
+     [
+      "MUL"
+     ]
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "confirm"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "e33f0d175c7d8d66dcc5b2a9c4c6e6f26aa6ba096271e7e6e41ad93c5f6bbff5",
+    "fid": "program.XOR.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 2,
+    "knobs": [
+     [
+      "XOR"
+     ]
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "2a175422f346ebbb1032fdde2741680c29af649701d1d6efd9f4e369ddf6997b",
+    "fid": "graph.6-1.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     6,
+     1
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "4e1d42616b3e73b0874c9fee306a1664eeb2e5415c8aa8d4aa2b610a58df3adf",
+    "fid": "graph.8-1.h1",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     8,
+     1
+    ],
+    "law": "h1",
+    "law_version": "ens.a0.families.v2",
+    "split": "confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "22741356c7a7e050d65fa0a7805a880063f000895d01a0134950007371c4f9b2",
+    "fid": "graph.6-2.h2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     6,
+     2
+    ],
+    "law": "h2",
+    "law_version": "ens.a0.families.v2",
+    "split": "route_dev"
+   },
+   {
+    "cls": "FST",
+    "digest": "cd9aff927614e4435d53fed117addb0cee5b8fc53dcbe72fb0aee3588d6036f8",
+    "fid": "fst.3-1.h2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     3,
+     1
+    ],
+    "law": "h2",
+    "law_version": "ens.a0.families.v2",
+    "split": "route_dev"
+   },
+   {
+    "cls": "PERM",
+    "digest": "1391f857490190a91cc7386c8270f3f65d512fd9d09efef6383978a964f7b3be",
+    "fid": "perm.8",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     8
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_dev"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "e6ae8b94d872e846e79b438ebc59d575c323fa0955a42a0c148bcec3bfd17c0e",
+    "fid": "program.XOR.ADD",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     [
+      "XOR",
+      "ADD"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_dev"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "089998720bd89e7fde9fe2dfdf093ca1d60cedefd79627b28ba420bd87aab034",
+    "fid": "graph.8-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     8,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_dev"
+   },
+   {
+    "cls": "FST",
+    "digest": "ba70265f28fa2a12525d3fbab472074a47ff303def7f206c8856eeefd684ee39",
+    "fid": "fst.3-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     3,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_dev"
+   },
+   {
+    "cls": "PERM",
+    "digest": "96bb4695835b824b30d5e2287a9846303d94a29ae41fa9aa715585c326997ac0",
+    "fid": "perm.10",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     10
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "PROGRAM",
+    "digest": "1199d133ec441c8305d609ba38dc8fdf707e0e9624e38b013e5758150ed6a9a8",
+    "fid": "program.XOR.ADD.MUL",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     [
+      "XOR",
+      "ADD",
+      "MUL"
+     ]
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "8403d1b0392aa9506dce495f95b5638c997bdfdf440652f2fc70a2b4d0444274",
+    "fid": "graph.8-3",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     8,
+     3
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "GRAPH",
+    "digest": "136a91d41e88cbf0bc9f3cc15413a8db048910bdfaeffa0a7ed8b11ec08c8d90",
+    "fid": "graph.10-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     10,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "FST",
+    "digest": "4422841f0263e50eda258cd9c8b2ccb51b871306d6a5d5afbf69a30a8deec1b5",
+    "fid": "fst.3-3",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     3,
+     3
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   },
+   {
+    "cls": "FST",
+    "digest": "d38d2eed75c8a1ae9e3d10f7154f9aedd52ee8835f2636edbed1c80ac56eb033",
+    "fid": "fst.4-2",
+    "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+    "held_div": 8,
+    "knobs": [
+     4,
+     2
+    ],
+    "law_version": "ens.a0.families.v2",
+    "split": "gen_confirm"
+   }
+  ],
+  "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+  "schema": "ens.a0.families.v0"
+ },
+ "first_update_grads": {
+  "backbone.blocks.0": 4.582936,
+  "backbone.blocks.1": 3.901254,
+  "backbone.blocks.2": 3.448277,
+  "backbone.blocks.3": 2.781828,
+  "backbone.blocks.4": 2.284357,
+  "backbone.blocks.5": 2.202475,
+  "backbone.embed.weight": 1.828353,
+  "backbone.head.weight": 3.967436,
+  "backbone.norm.weight": 0.144033,
+  "backbone.pos.weight": 1.923571,
+  "ports.early.gate": 0.0,
+  "ports.early.reader": 0.017615
+ },
+ "from_core": null,
+ "host": "lab-m3",
+ "log": [
+  {
+   "elapsed_s": 58.6,
+   "loss": 2.2307233810424805,
+   "peak_mem_gb": 3.314,
+   "step": 400
+  },
+  {
+   "elapsed_s": 117.2,
+   "loss": 2.227745532989502,
+   "peak_mem_gb": 3.314,
+   "step": 800
+  },
+  {
+   "elapsed_s": 175.7,
+   "loss": 2.0095794200897217,
+   "peak_mem_gb": 3.314,
+   "step": 1200
+  },
+  {
+   "elapsed_s": 234.4,
+   "loss": 2.019413471221924,
+   "peak_mem_gb": 3.314,
+   "step": 1600
+  },
+  {
+   "acc_bus": 0.3418,
+   "acc_ordinary": 0.3164,
+   "elapsed_s": 293.0,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 0.8,
+     "ord": 0.825
+    },
+    "fst.3-1": {
+     "native": 0.625,
+     "ord": 0.615
+    },
+    "graph.4-2": {
+     "native": 0.605,
+     "ord": 0.435
+    },
+    "graph.6-1": {
+     "native": 0.275,
+     "ord": 0.285
+    },
+    "graph.6-2": {
+     "native": 0.405,
+     "ord": 0.405
+    },
+    "graph.8-1": {
+     "native": 0.225,
+     "ord": 0.205
+    },
+    "perm.4": {
+     "native": 0.225,
+     "ord": 0.225
+    },
+    "perm.5": {
+     "native": 0.245,
+     "ord": 0.235
+    },
+    "perm.6": {
+     "native": 0.18,
+     "ord": 0.18
+    },
+    "program.ADD": {
+     "native": 0.13,
+     "ord": 0.14
+    },
+    "program.ADD.MUL": {
+     "native": 0.03,
+     "ord": 0.025
+    },
+    "program.ADD.XOR": {
+     "native": 0.01,
+     "ord": 0.015
+    },
+    "program.MUL": {
+     "native": 0.695,
+     "ord": 0.62
+    },
+    "program.MUL.ADD": {
+     "native": 0.03,
+     "ord": 0.025
+    },
+    "program.XOR": {
+     "native": 0.195,
+     "ord": 0.185
+    },
+    "program.XOR.MUL": {
+     "native": 0.03,
+     "ord": 0.035
+    }
+   },
+   "loss": 1.8896969556808472,
+   "peak_mem_gb": 3.314,
+   "step": 2000
+  },
+  {
+   "elapsed_s": 353.0,
+   "loss": 1.8319717645645142,
+   "peak_mem_gb": 3.314,
+   "step": 2400
+  },
+  {
+   "elapsed_s": 411.7,
+   "loss": 1.6117327213287354,
+   "peak_mem_gb": 3.314,
+   "step": 2800
+  },
+  {
+   "elapsed_s": 470.4,
+   "loss": 1.5957744121551514,
+   "peak_mem_gb": 3.314,
+   "step": 3200
+  },
+  {
+   "elapsed_s": 529.2,
+   "loss": 1.59767484664917,
+   "peak_mem_gb": 3.314,
+   "step": 3600
+  },
+  {
+   "acc_bus": 0.4258,
+   "acc_ordinary": 0.4121,
+   "elapsed_s": 588.1,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 0.9,
+     "ord": 0.915
+    },
+    "fst.3-1": {
+     "native": 0.755,
+     "ord": 0.78
+    },
+    "graph.4-2": {
+     "native": 0.615,
+     "ord": 0.49
+    },
+    "graph.6-1": {
+     "native": 0.37,
+     "ord": 0.38
+    },
+    "graph.6-2": {
+     "native": 0.345,
+     "ord": 0.31
+    },
+    "graph.8-1": {
+     "native": 0.24,
+     "ord": 0.215
+    },
+    "perm.4": {
+     "native": 0.25,
+     "ord": 0.24
+    },
+    "perm.5": {
+     "native": 0.2,
+     "ord": 0.185
+    },
+    "perm.6": {
+     "native": 0.12,
+     "ord": 0.145
+    },
+    "program.ADD": {
+     "native": 0.66,
+     "ord": 0.705
+    },
+    "program.ADD.MUL": {
+     "native": 0.035,
+     "ord": 0.04
+    },
+    "program.ADD.XOR": {
+     "native": 0.01,
+     "ord": 0.015
+    },
+    "program.MUL": {
+     "native": 0.97,
+     "ord": 0.945
+    },
+    "program.MUL.ADD": {
+     "native": 0.085,
+     "ord": 0.075
+    },
+    "program.XOR": {
+     "native": 0.685,
+     "ord": 0.67
+    },
+    "program.XOR.MUL": {
+     "native": 0.03,
+     "ord": 0.035
+    }
+   },
+   "loss": 1.6050523519515991,
+   "peak_mem_gb": 3.314,
+   "step": 4000
+  },
+  {
+   "elapsed_s": 648.3,
+   "loss": 1.5139576196670532,
+   "peak_mem_gb": 3.314,
+   "step": 4400
+  },
+  {
+   "elapsed_s": 707.2,
+   "loss": 1.4836547374725342,
+   "peak_mem_gb": 3.314,
+   "step": 4800
+  },
+  {
+   "elapsed_s": 766.1,
+   "loss": 1.304443120956421,
+   "peak_mem_gb": 3.314,
+   "step": 5200
+  },
+  {
+   "elapsed_s": 825.2,
+   "loss": 1.4582457542419434,
+   "peak_mem_gb": 3.314,
+   "step": 5600
+  },
+  {
+   "acc_bus": 0.4922,
+   "acc_ordinary": 0.4805,
+   "elapsed_s": 884.1,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 0.985,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 0.66,
+     "ord": 0.68
+    },
+    "graph.4-2": {
+     "native": 0.775,
+     "ord": 0.63
+    },
+    "graph.6-1": {
+     "native": 0.44,
+     "ord": 0.43
+    },
+    "graph.6-2": {
+     "native": 0.435,
+     "ord": 0.385
+    },
+    "graph.8-1": {
+     "native": 0.29,
+     "ord": 0.265
+    },
+    "perm.4": {
+     "native": 0.24,
+     "ord": 0.255
+    },
+    "perm.5": {
+     "native": 0.26,
+     "ord": 0.255
+    },
+    "perm.6": {
+     "native": 0.205,
+     "ord": 0.2
+    },
+    "program.ADD": {
+     "native": 0.97,
+     "ord": 0.96
+    },
+    "program.ADD.MUL": {
+     "native": 0.07,
+     "ord": 0.07
+    },
+    "program.ADD.XOR": {
+     "native": 0.015,
+     "ord": 0.015
+    },
+    "program.MUL": {
+     "native": 0.985,
+     "ord": 0.985
+    },
+    "program.MUL.ADD": {
+     "native": 0.115,
+     "ord": 0.115
+    },
+    "program.XOR": {
+     "native": 0.975,
+     "ord": 0.98
+    },
+    "program.XOR.MUL": {
+     "native": 0.09,
+     "ord": 0.09
+    }
+   },
+   "loss": 1.4483060836791992,
+   "peak_mem_gb": 3.314,
+   "step": 6000
+  },
+  {
+   "elapsed_s": 944.3,
+   "loss": 1.2639434337615967,
+   "peak_mem_gb": 3.314,
+   "step": 6400
+  },
+  {
+   "elapsed_s": 1003.2,
+   "loss": 1.1612446308135986,
+   "peak_mem_gb": 3.314,
+   "step": 6800
+  },
+  {
+   "elapsed_s": 1062.0,
+   "loss": 1.1550390720367432,
+   "peak_mem_gb": 3.314,
+   "step": 7200
+  },
+  {
+   "elapsed_s": 1121.0,
+   "loss": 1.3339958190917969,
+   "peak_mem_gb": 3.314,
+   "step": 7600
+  },
+  {
+   "acc_bus": 0.5391,
+   "acc_ordinary": 0.5312,
+   "elapsed_s": 1179.9,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 0.88,
+     "ord": 0.845
+    },
+    "graph.4-2": {
+     "native": 0.965,
+     "ord": 0.94
+    },
+    "graph.6-1": {
+     "native": 0.73,
+     "ord": 0.765
+    },
+    "graph.6-2": {
+     "native": 0.5,
+     "ord": 0.51
+    },
+    "graph.8-1": {
+     "native": 0.49,
+     "ord": 0.485
+    },
+    "perm.4": {
+     "native": 0.23,
+     "ord": 0.28
+    },
+    "perm.5": {
+     "native": 0.165,
+     "ord": 0.175
+    },
+    "perm.6": {
+     "native": 0.155,
+     "ord": 0.175
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.09,
+     "ord": 0.07
+    },
+    "program.ADD.XOR": {
+     "native": 0.055,
+     "ord": 0.03
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.105,
+     "ord": 0.11
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.125,
+     "ord": 0.115
+    }
+   },
+   "loss": 1.149186372756958,
+   "peak_mem_gb": 3.314,
+   "step": 8000
+  },
+  {
+   "elapsed_s": 1240.1,
+   "loss": 1.0862897634506226,
+   "peak_mem_gb": 3.314,
+   "step": 8400
+  },
+  {
+   "elapsed_s": 1298.9,
+   "loss": 1.1060428619384766,
+   "peak_mem_gb": 3.314,
+   "step": 8800
+  },
+  {
+   "elapsed_s": 1357.8,
+   "loss": 1.0008306503295898,
+   "peak_mem_gb": 3.314,
+   "step": 9200
+  },
+  {
+   "elapsed_s": 1416.7,
+   "loss": 1.1289538145065308,
+   "peak_mem_gb": 3.314,
+   "step": 9600
+  },
+  {
+   "acc_bus": 0.5918,
+   "acc_ordinary": 0.5859,
+   "elapsed_s": 1475.6,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 0.935,
+     "ord": 0.93
+    },
+    "graph.4-2": {
+     "native": 0.995,
+     "ord": 0.97
+    },
+    "graph.6-1": {
+     "native": 0.86,
+     "ord": 0.83
+    },
+    "graph.6-2": {
+     "native": 0.665,
+     "ord": 0.67
+    },
+    "graph.8-1": {
+     "native": 0.59,
+     "ord": 0.61
+    },
+    "perm.4": {
+     "native": 0.385,
+     "ord": 0.4
+    },
+    "perm.5": {
+     "native": 0.215,
+     "ord": 0.18
+    },
+    "perm.6": {
+     "native": 0.125,
+     "ord": 0.125
+    },
+    "program.ADD": {
+     "native": 0.995,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.125,
+     "ord": 0.115
+    },
+    "program.ADD.XOR": {
+     "native": 0.035,
+     "ord": 0.02
+    },
+    "program.MUL": {
+     "native": 0.975,
+     "ord": 0.97
+    },
+    "program.MUL.ADD": {
+     "native": 0.105,
+     "ord": 0.11
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "program.XOR.MUL": {
+     "native": 0.135,
+     "ord": 0.135
+    }
+   },
+   "loss": 1.180930495262146,
+   "peak_mem_gb": 3.314,
+   "step": 10000
+  },
+  {
+   "elapsed_s": 1535.7,
+   "loss": 1.0419292449951172,
+   "peak_mem_gb": 3.314,
+   "step": 10400
+  },
+  {
+   "elapsed_s": 1594.6,
+   "loss": 1.0018454790115356,
+   "peak_mem_gb": 3.314,
+   "step": 10800
+  },
+  {
+   "elapsed_s": 1653.4,
+   "loss": 0.9399003982543945,
+   "peak_mem_gb": 3.314,
+   "step": 11200
+  },
+  {
+   "elapsed_s": 1712.3,
+   "loss": 0.9825649857521057,
+   "peak_mem_gb": 3.314,
+   "step": 11600
+  },
+  {
+   "acc_bus": 0.6484,
+   "acc_ordinary": 0.6543,
+   "elapsed_s": 1771.1,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 0.98,
+     "ord": 0.97
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "graph.6-1": {
+     "native": 0.955,
+     "ord": 0.92
+    },
+    "graph.6-2": {
+     "native": 0.725,
+     "ord": 0.715
+    },
+    "graph.8-1": {
+     "native": 0.695,
+     "ord": 0.67
+    },
+    "perm.4": {
+     "native": 0.53,
+     "ord": 0.52
+    },
+    "perm.5": {
+     "native": 0.415,
+     "ord": 0.395
+    },
+    "perm.6": {
+     "native": 0.195,
+     "ord": 0.185
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 0.985
+    },
+    "program.ADD.MUL": {
+     "native": 0.205,
+     "ord": 0.19
+    },
+    "program.ADD.XOR": {
+     "native": 0.045,
+     "ord": 0.065
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.115,
+     "ord": 0.115
+    },
+    "program.XOR": {
+     "native": 0.995,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.23,
+     "ord": 0.205
+    }
+   },
+   "loss": 1.0155341625213623,
+   "peak_mem_gb": 3.314,
+   "step": 12000
+  },
+  {
+   "elapsed_s": 1831.3,
+   "loss": 0.8817099332809448,
+   "peak_mem_gb": 3.314,
+   "step": 12400
+  },
+  {
+   "elapsed_s": 1890.2,
+   "loss": 0.7472145557403564,
+   "peak_mem_gb": 3.314,
+   "step": 12800
+  },
+  {
+   "elapsed_s": 1949.2,
+   "loss": 0.7065612077713013,
+   "peak_mem_gb": 3.314,
+   "step": 13200
+  },
+  {
+   "elapsed_s": 2008.1,
+   "loss": 0.7472960948944092,
+   "peak_mem_gb": 3.314,
+   "step": 13600
+  },
+  {
+   "acc_bus": 0.6797,
+   "acc_ordinary": 0.6797,
+   "elapsed_s": 2066.9,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 0.985,
+     "ord": 0.97
+    },
+    "graph.4-2": {
+     "native": 0.995,
+     "ord": 0.99
+    },
+    "graph.6-1": {
+     "native": 0.96,
+     "ord": 0.96
+    },
+    "graph.6-2": {
+     "native": 0.865,
+     "ord": 0.875
+    },
+    "graph.8-1": {
+     "native": 0.835,
+     "ord": 0.79
+    },
+    "perm.4": {
+     "native": 0.64,
+     "ord": 0.625
+    },
+    "perm.5": {
+     "native": 0.405,
+     "ord": 0.395
+    },
+    "perm.6": {
+     "native": 0.275,
+     "ord": 0.28
+    },
+    "program.ADD": {
+     "native": 0.995,
+     "ord": 0.985
+    },
+    "program.ADD.MUL": {
+     "native": 0.365,
+     "ord": 0.365
+    },
+    "program.ADD.XOR": {
+     "native": 0.065,
+     "ord": 0.065
+    },
+    "program.MUL": {
+     "native": 0.995,
+     "ord": 0.995
+    },
+    "program.MUL.ADD": {
+     "native": 0.16,
+     "ord": 0.17
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.355,
+     "ord": 0.36
+    }
+   },
+   "loss": 0.7709122896194458,
+   "peak_mem_gb": 3.314,
+   "step": 14000
+  },
+  {
+   "elapsed_s": 2127.2,
+   "loss": 0.6972084045410156,
+   "peak_mem_gb": 3.314,
+   "step": 14400
+  },
+  {
+   "elapsed_s": 2186.1,
+   "loss": 0.8058271408081055,
+   "peak_mem_gb": 3.314,
+   "step": 14800
+  },
+  {
+   "elapsed_s": 2245.0,
+   "loss": 0.8000057935714722,
+   "peak_mem_gb": 3.314,
+   "step": 15200
+  },
+  {
+   "elapsed_s": 2303.9,
+   "loss": 0.7730701565742493,
+   "peak_mem_gb": 3.314,
+   "step": 15600
+  },
+  {
+   "acc_bus": 0.7598,
+   "acc_ordinary": 0.752,
+   "elapsed_s": 2362.8,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 0.995,
+     "ord": 0.99
+    },
+    "graph.6-1": {
+     "native": 0.995,
+     "ord": 0.99
+    },
+    "graph.6-2": {
+     "native": 0.94,
+     "ord": 0.91
+    },
+    "graph.8-1": {
+     "native": 0.83,
+     "ord": 0.82
+    },
+    "perm.4": {
+     "native": 0.81,
+     "ord": 0.79
+    },
+    "perm.5": {
+     "native": 0.51,
+     "ord": 0.495
+    },
+    "perm.6": {
+     "native": 0.39,
+     "ord": 0.365
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.595,
+     "ord": 0.555
+    },
+    "program.ADD.XOR": {
+     "native": 0.05,
+     "ord": 0.045
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.245,
+     "ord": 0.24
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "program.XOR.MUL": {
+     "native": 0.565,
+     "ord": 0.55
+    }
+   },
+   "loss": 0.5140081644058228,
+   "peak_mem_gb": 3.314,
+   "step": 16000
+  },
+  {
+   "elapsed_s": 2423.0,
+   "loss": 0.597734808921814,
+   "peak_mem_gb": 3.314,
+   "step": 16400
+  },
+  {
+   "elapsed_s": 2481.9,
+   "loss": 0.6014272570610046,
+   "peak_mem_gb": 3.314,
+   "step": 16800
+  },
+  {
+   "elapsed_s": 2540.8,
+   "loss": 0.563732922077179,
+   "peak_mem_gb": 3.314,
+   "step": 17200
+  },
+  {
+   "elapsed_s": 2599.7,
+   "loss": 0.4008394181728363,
+   "peak_mem_gb": 3.314,
+   "step": 17600
+  },
+  {
+   "acc_bus": 0.8164,
+   "acc_ordinary": 0.8125,
+   "elapsed_s": 2658.6,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 0.84,
+     "ord": 0.84
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 0.99,
+     "ord": 0.995
+    },
+    "graph.6-2": {
+     "native": 0.95,
+     "ord": 0.935
+    },
+    "graph.8-1": {
+     "native": 0.845,
+     "ord": 0.845
+    },
+    "perm.4": {
+     "native": 0.99,
+     "ord": 0.99
+    },
+    "perm.5": {
+     "native": 0.78,
+     "ord": 0.76
+    },
+    "perm.6": {
+     "native": 0.625,
+     "ord": 0.615
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.7,
+     "ord": 0.71
+    },
+    "program.ADD.XOR": {
+     "native": 0.13,
+     "ord": 0.115
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.415,
+     "ord": 0.4
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.755,
+     "ord": 0.745
+    }
+   },
+   "loss": 0.4033042788505554,
+   "peak_mem_gb": 3.314,
+   "step": 18000
+  },
+  {
+   "elapsed_s": 2718.9,
+   "loss": 0.43864351511001587,
+   "peak_mem_gb": 3.314,
+   "step": 18400
+  },
+  {
+   "elapsed_s": 2777.7,
+   "loss": 0.3894398510456085,
+   "peak_mem_gb": 3.314,
+   "step": 18800
+  },
+  {
+   "elapsed_s": 2836.6,
+   "loss": 0.30286622047424316,
+   "peak_mem_gb": 3.314,
+   "step": 19200
+  },
+  {
+   "elapsed_s": 2895.4,
+   "loss": 0.2902424931526184,
+   "peak_mem_gb": 3.314,
+   "step": 19600
+  },
+  {
+   "acc_bus": 0.8496,
+   "acc_ordinary": 0.8457,
+   "elapsed_s": 2954.3,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 0.99
+    },
+    "graph.6-2": {
+     "native": 0.985,
+     "ord": 0.975
+    },
+    "graph.8-1": {
+     "native": 0.88,
+     "ord": 0.89
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 0.865,
+     "ord": 0.865
+    },
+    "perm.6": {
+     "native": 0.69,
+     "ord": 0.71
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.79,
+     "ord": 0.785
+    },
+    "program.ADD.XOR": {
+     "native": 0.23,
+     "ord": 0.235
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.415,
+     "ord": 0.43
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.785,
+     "ord": 0.795
+    }
+   },
+   "loss": 0.39578893780708313,
+   "peak_mem_gb": 3.314,
+   "step": 20000
+  },
+  {
+   "elapsed_s": 3014.6,
+   "loss": 0.2714541554450989,
+   "peak_mem_gb": 3.314,
+   "step": 20400
+  },
+  {
+   "elapsed_s": 3073.4,
+   "loss": 0.30366790294647217,
+   "peak_mem_gb": 3.314,
+   "step": 20800
+  },
+  {
+   "elapsed_s": 3132.3,
+   "loss": 0.21788659691810608,
+   "peak_mem_gb": 3.314,
+   "step": 21200
+  },
+  {
+   "elapsed_s": 3191.1,
+   "loss": 0.22380203008651733,
+   "peak_mem_gb": 3.314,
+   "step": 21600
+  },
+  {
+   "acc_bus": 0.8633,
+   "acc_ordinary": 0.8633,
+   "elapsed_s": 3249.9,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 0.99,
+     "ord": 0.98
+    },
+    "graph.8-1": {
+     "native": 0.925,
+     "ord": 0.925
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 0.85,
+     "ord": 0.86
+    },
+    "perm.6": {
+     "native": 0.66,
+     "ord": 0.675
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.755,
+     "ord": 0.765
+    },
+    "program.ADD.XOR": {
+     "native": 0.34,
+     "ord": 0.34
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "program.MUL.ADD": {
+     "native": 0.47,
+     "ord": 0.465
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.77,
+     "ord": 0.785
+    }
+   },
+   "loss": 0.2693864107131958,
+   "peak_mem_gb": 3.314,
+   "step": 22000
+  },
+  {
+   "elapsed_s": 3310.1,
+   "loss": 0.18157276511192322,
+   "peak_mem_gb": 3.314,
+   "step": 22400
+  },
+  {
+   "elapsed_s": 3369.0,
+   "loss": 0.2297012209892273,
+   "peak_mem_gb": 3.314,
+   "step": 22800
+  },
+  {
+   "elapsed_s": 3427.9,
+   "loss": 0.2162429392337799,
+   "peak_mem_gb": 3.314,
+   "step": 23200
+  },
+  {
+   "elapsed_s": 3486.8,
+   "loss": 0.2083553969860077,
+   "peak_mem_gb": 3.314,
+   "step": 23600
+  },
+  {
+   "acc_bus": 0.8613,
+   "acc_ordinary": 0.8633,
+   "elapsed_s": 3545.7,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 0.99,
+     "ord": 0.985
+    },
+    "graph.8-1": {
+     "native": 0.945,
+     "ord": 0.94
+    },
+    "perm.4": {
+     "native": 0.995,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 0.91,
+     "ord": 0.905
+    },
+    "perm.6": {
+     "native": 0.715,
+     "ord": 0.725
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.765,
+     "ord": 0.765
+    },
+    "program.ADD.XOR": {
+     "native": 0.515,
+     "ord": 0.49
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "program.MUL.ADD": {
+     "native": 0.585,
+     "ord": 0.57
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.82,
+     "ord": 0.825
+    }
+   },
+   "loss": 0.20420965552330017,
+   "peak_mem_gb": 3.314,
+   "step": 24000
+  },
+  {
+   "elapsed_s": 3605.9,
+   "loss": 0.2115284502506256,
+   "peak_mem_gb": 3.314,
+   "step": 24400
+  },
+  {
+   "elapsed_s": 3664.8,
+   "loss": 0.19355222582817078,
+   "peak_mem_gb": 3.314,
+   "step": 24800
+  },
+  {
+   "elapsed_s": 3723.6,
+   "loss": 0.20640969276428223,
+   "peak_mem_gb": 3.314,
+   "step": 25200
+  },
+  {
+   "elapsed_s": 3782.6,
+   "loss": 0.15628020465373993,
+   "peak_mem_gb": 3.314,
+   "step": 25600
+  },
+  {
+   "acc_bus": 0.9219,
+   "acc_ordinary": 0.9121,
+   "elapsed_s": 3841.5,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "graph.6-2": {
+     "native": 0.995,
+     "ord": 0.995
+    },
+    "graph.8-1": {
+     "native": 0.98,
+     "ord": 0.985
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 0.955,
+     "ord": 0.965
+    },
+    "perm.6": {
+     "native": 0.765,
+     "ord": 0.785
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.83,
+     "ord": 0.82
+    },
+    "program.ADD.XOR": {
+     "native": 0.72,
+     "ord": 0.69
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.61,
+     "ord": 0.595
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.835,
+     "ord": 0.835
+    }
+   },
+   "loss": 0.13621626794338226,
+   "peak_mem_gb": 3.314,
+   "step": 26000
+  },
+  {
+   "elapsed_s": 3901.7,
+   "loss": 0.2164505124092102,
+   "peak_mem_gb": 3.314,
+   "step": 26400
+  },
+  {
+   "elapsed_s": 3960.6,
+   "loss": 0.17011725902557373,
+   "peak_mem_gb": 3.314,
+   "step": 26800
+  },
+  {
+   "elapsed_s": 4019.5,
+   "loss": 0.1259680688381195,
+   "peak_mem_gb": 3.314,
+   "step": 27200
+  },
+  {
+   "elapsed_s": 4078.4,
+   "loss": 0.048522718250751495,
+   "peak_mem_gb": 3.314,
+   "step": 27600
+  },
+  {
+   "acc_bus": 0.9453,
+   "acc_ordinary": 0.9473,
+   "elapsed_s": 4137.3,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.8-1": {
+     "native": 0.99,
+     "ord": 0.985
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 0.99,
+     "ord": 0.99
+    },
+    "perm.6": {
+     "native": 0.835,
+     "ord": 0.815
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.85,
+     "ord": 0.845
+    },
+    "program.ADD.XOR": {
+     "native": 0.945,
+     "ord": 0.965
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.58,
+     "ord": 0.58
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.89,
+     "ord": 0.88
+    }
+   },
+   "loss": 0.12210623919963837,
+   "peak_mem_gb": 3.314,
+   "step": 28000
+  },
+  {
+   "elapsed_s": 4197.5,
+   "loss": 0.14998099207878113,
+   "peak_mem_gb": 3.314,
+   "step": 28400
+  },
+  {
+   "elapsed_s": 4256.3,
+   "loss": 0.10141848027706146,
+   "peak_mem_gb": 3.314,
+   "step": 28800
+  },
+  {
+   "elapsed_s": 4315.1,
+   "loss": 0.08534222841262817,
+   "peak_mem_gb": 3.314,
+   "step": 29200
+  },
+  {
+   "elapsed_s": 4374.0,
+   "loss": 0.07702230662107468,
+   "peak_mem_gb": 3.314,
+   "step": 29600
+  },
+  {
+   "acc_bus": 0.959,
+   "acc_ordinary": 0.957,
+   "elapsed_s": 4433.0,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 0.98,
+     "ord": 0.985
+    },
+    "graph.8-1": {
+     "native": 0.995,
+     "ord": 0.995
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 0.99,
+     "ord": 0.985
+    },
+    "perm.6": {
+     "native": 0.835,
+     "ord": 0.815
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.94,
+     "ord": 0.935
+    },
+    "program.ADD.XOR": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.635,
+     "ord": 0.655
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.935,
+     "ord": 0.93
+    }
+   },
+   "loss": 0.07704700529575348,
+   "peak_mem_gb": 3.314,
+   "step": 30000
+  },
+  {
+   "elapsed_s": 4493.2,
+   "loss": 0.10026136040687561,
+   "peak_mem_gb": 3.314,
+   "step": 30400
+  },
+  {
+   "elapsed_s": 4552.0,
+   "loss": 0.0664215162396431,
+   "peak_mem_gb": 3.314,
+   "step": 30800
+  },
+  {
+   "elapsed_s": 4610.9,
+   "loss": 0.06663601845502853,
+   "peak_mem_gb": 3.314,
+   "step": 31200
+  },
+  {
+   "elapsed_s": 4669.8,
+   "loss": 0.05978897586464882,
+   "peak_mem_gb": 3.314,
+   "step": 31600
+  },
+  {
+   "acc_bus": 0.9629,
+   "acc_ordinary": 0.9629,
+   "elapsed_s": 4728.7,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "graph.8-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 0.995,
+     "ord": 0.995
+    },
+    "perm.6": {
+     "native": 0.805,
+     "ord": 0.8
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 0.985,
+     "ord": 0.985
+    },
+    "program.ADD.XOR": {
+     "native": 0.99,
+     "ord": 0.975
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.715,
+     "ord": 0.695
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 0.99,
+     "ord": 0.985
+    }
+   },
+   "loss": 0.07309114933013916,
+   "peak_mem_gb": 3.314,
+   "step": 32000
+  },
+  {
+   "elapsed_s": 4788.9,
+   "loss": 0.05413319543004036,
+   "peak_mem_gb": 3.314,
+   "step": 32400
+  },
+  {
+   "elapsed_s": 4847.8,
+   "loss": 0.08151005208492279,
+   "peak_mem_gb": 3.314,
+   "step": 32800
+  },
+  {
+   "elapsed_s": 4906.6,
+   "loss": 0.05009450018405914,
+   "peak_mem_gb": 3.314,
+   "step": 33200
+  },
+  {
+   "elapsed_s": 4965.5,
+   "loss": 0.039092689752578735,
+   "peak_mem_gb": 3.314,
+   "step": 33600
+  },
+  {
+   "acc_bus": 0.9785,
+   "acc_ordinary": 0.9785,
+   "elapsed_s": 5024.3,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.8-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.6": {
+     "native": 0.825,
+     "ord": 0.835
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.76,
+     "ord": 0.745
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    }
+   },
+   "loss": 0.057470664381980896,
+   "peak_mem_gb": 3.314,
+   "step": 34000
+  },
+  {
+   "elapsed_s": 5084.5,
+   "loss": 0.030897334218025208,
+   "peak_mem_gb": 3.314,
+   "step": 34400
+  },
+  {
+   "elapsed_s": 5143.4,
+   "loss": 0.05097570642828941,
+   "peak_mem_gb": 3.314,
+   "step": 34800
+  },
+  {
+   "elapsed_s": 5202.2,
+   "loss": 0.049444958567619324,
+   "peak_mem_gb": 3.314,
+   "step": 35200
+  },
+  {
+   "elapsed_s": 5261.1,
+   "loss": 0.03126383572816849,
+   "peak_mem_gb": 3.314,
+   "step": 35600
+  },
+  {
+   "acc_bus": 0.9844,
+   "acc_ordinary": 0.9844,
+   "elapsed_s": 5320.0,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.8-1": {
+     "native": 1.0,
+     "ord": 0.995
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.6": {
+     "native": 0.81,
+     "ord": 0.81
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.XOR": {
+     "native": 0.995,
+     "ord": 0.995
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.8,
+     "ord": 0.78
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    }
+   },
+   "loss": 0.044330496340990067,
+   "peak_mem_gb": 3.314,
+   "step": 36000
+  },
+  {
+   "elapsed_s": 5380.2,
+   "loss": 0.037788230925798416,
+   "peak_mem_gb": 3.314,
+   "step": 36400
+  },
+  {
+   "elapsed_s": 5439.0,
+   "loss": 0.03801329806447029,
+   "peak_mem_gb": 3.314,
+   "step": 36800
+  },
+  {
+   "elapsed_s": 5497.9,
+   "loss": 0.04635556787252426,
+   "peak_mem_gb": 3.314,
+   "step": 37200
+  },
+  {
+   "elapsed_s": 5556.7,
+   "loss": 0.04339338093996048,
+   "peak_mem_gb": 3.314,
+   "step": 37600
+  },
+  {
+   "acc_bus": 0.9824,
+   "acc_ordinary": 0.9824,
+   "elapsed_s": 5615.5,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.8-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.6": {
+     "native": 0.85,
+     "ord": 0.84
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.845,
+     "ord": 0.835
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    }
+   },
+   "loss": 0.037124618887901306,
+   "peak_mem_gb": 3.314,
+   "step": 38000
+  },
+  {
+   "elapsed_s": 5675.7,
+   "loss": 0.020706167444586754,
+   "peak_mem_gb": 3.314,
+   "step": 38400
+  },
+  {
+   "elapsed_s": 5734.6,
+   "loss": 0.038536496460437775,
+   "peak_mem_gb": 3.314,
+   "step": 38800
+  },
+  {
+   "elapsed_s": 5793.5,
+   "loss": 0.03961586207151413,
+   "peak_mem_gb": 3.314,
+   "step": 39200
+  },
+  {
+   "elapsed_s": 5852.4,
+   "loss": 0.036877892911434174,
+   "peak_mem_gb": 3.314,
+   "step": 39600
+  },
+  {
+   "acc_bus": 0.9902,
+   "acc_ordinary": 0.9902,
+   "elapsed_s": 5911.3,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.8-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.6": {
+     "native": 0.835,
+     "ord": 0.82
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.855,
+     "ord": 0.845
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    }
+   },
+   "loss": 0.030141539871692657,
+   "peak_mem_gb": 3.314,
+   "step": 40000
+  },
+  {
+   "elapsed_s": 5971.5,
+   "loss": 0.028129056096076965,
+   "peak_mem_gb": 3.314,
+   "step": 40400
+  },
+  {
+   "elapsed_s": 6030.3,
+   "loss": 0.017990613356232643,
+   "peak_mem_gb": 3.314,
+   "step": 40800
+  },
+  {
+   "elapsed_s": 6089.2,
+   "loss": 0.04812471941113472,
+   "peak_mem_gb": 3.314,
+   "step": 41200
+  },
+  {
+   "elapsed_s": 6148.1,
+   "loss": 0.020725281909108162,
+   "peak_mem_gb": 3.314,
+   "step": 41600
+  },
+  {
+   "acc_bus": 0.9863,
+   "acc_ordinary": 0.9883,
+   "elapsed_s": 6207.0,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.8-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.6": {
+     "native": 0.89,
+     "ord": 0.87
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.9,
+     "ord": 0.9
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    }
+   },
+   "loss": 0.03641247749328613,
+   "peak_mem_gb": 3.314,
+   "step": 42000
+  },
+  {
+   "elapsed_s": 6267.2,
+   "loss": 0.02874740958213806,
+   "peak_mem_gb": 3.314,
+   "step": 42400
+  },
+  {
+   "elapsed_s": 6326.1,
+   "loss": 0.04713832959532738,
+   "peak_mem_gb": 3.314,
+   "step": 42800
+  },
+  {
+   "elapsed_s": 6385.0,
+   "loss": 0.03275419399142265,
+   "peak_mem_gb": 3.314,
+   "step": 43200
+  },
+  {
+   "elapsed_s": 6443.9,
+   "loss": 0.02270319126546383,
+   "peak_mem_gb": 3.314,
+   "step": 43600
+  },
+  {
+   "acc_bus": 0.9883,
+   "acc_ordinary": 0.9883,
+   "elapsed_s": 6502.8,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.8-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.6": {
+     "native": 0.835,
+     "ord": 0.825
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.93,
+     "ord": 0.915
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    }
+   },
+   "loss": 0.027157150208950043,
+   "peak_mem_gb": 3.314,
+   "step": 44000
+  },
+  {
+   "elapsed_s": 6563.0,
+   "loss": 0.03359051048755646,
+   "peak_mem_gb": 3.314,
+   "step": 44400
+  },
+  {
+   "elapsed_s": 6621.9,
+   "loss": 0.023463493213057518,
+   "peak_mem_gb": 3.314,
+   "step": 44800
+  },
+  {
+   "elapsed_s": 6680.7,
+   "loss": 0.02861734852194786,
+   "peak_mem_gb": 3.314,
+   "step": 45200
+  },
+  {
+   "elapsed_s": 6739.6,
+   "loss": 0.02119751274585724,
+   "peak_mem_gb": 3.314,
+   "step": 45600
+  },
+  {
+   "acc_bus": 0.9863,
+   "acc_ordinary": 0.9883,
+   "elapsed_s": 6798.5,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.8-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.6": {
+     "native": 0.835,
+     "ord": 0.85
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.92,
+     "ord": 0.925
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    }
+   },
+   "loss": 0.03278333693742752,
+   "peak_mem_gb": 3.314,
+   "step": 46000
+  },
+  {
+   "elapsed_s": 6858.7,
+   "loss": 0.020317714661359787,
+   "peak_mem_gb": 3.314,
+   "step": 46400
+  },
+  {
+   "elapsed_s": 6917.5,
+   "loss": 0.04324360564351082,
+   "peak_mem_gb": 3.314,
+   "step": 46800
+  },
+  {
+   "elapsed_s": 6976.4,
+   "loss": 0.018117958679795265,
+   "peak_mem_gb": 3.314,
+   "step": 47200
+  },
+  {
+   "elapsed_s": 7035.3,
+   "loss": 0.03203863278031349,
+   "peak_mem_gb": 3.314,
+   "step": 47600
+  },
+  {
+   "acc_bus": 0.9922,
+   "acc_ordinary": 0.9961,
+   "elapsed_s": 7094.1,
+   "families": {
+    "fst.2-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.2-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "fst.3-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.4-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.6-2": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "graph.8-1": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.4": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.5": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "perm.6": {
+     "native": 0.845,
+     "ord": 0.825
+    },
+    "program.ADD": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.ADD.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.MUL.ADD": {
+     "native": 0.96,
+     "ord": 0.945
+    },
+    "program.XOR": {
+     "native": 1.0,
+     "ord": 1.0
+    },
+    "program.XOR.MUL": {
+     "native": 1.0,
+     "ord": 1.0
+    }
+   },
+   "loss": 0.005066426936537027,
+   "peak_mem_gb": 3.314,
+   "step": 48000
+  }
+ ],
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "params": 6499588,
+ "research_ens_dirty": false,
+ "schema": "ens.a0.core_receipt.v0",
+ "seed": 1,
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "80a2efe7e8c243751690a9899cc118aec30f2052",
+ "source_via": "m3-sync-stamp",
+ "steps_per_s": 6.76,
+ "time_utc": "2026-11-22T20:39:58Z",
+ "trainable_params": 6384897
+}

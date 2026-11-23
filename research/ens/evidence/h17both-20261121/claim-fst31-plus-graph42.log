@@ -1,0 +1,42 @@
+{
+ "both": {
+  "read": "both",
+  "recall_target": 0.95,
+  "pair": {
+   "n": 251,
+   "families": [
+    "fst.3-1.h1",
+    "fst.3-1.h2"
+   ],
+   "oracle": 0.9282869100570679,
+   "self_claim": 0.9203187227249146,
+   "bypass": 0.613545835018158,
+   "claim_acc": 0.9641434550285339,
+   "abstain": 0.03585657477378845,
+   "per_family": {
+    "fst.3-1.h1": 0.8828125,
+    "fst.3-1.h2": 0.9593495726585388
+   },
+   "abstain_on_foreign_structures": 1.0
+  },
+  "add_tile": {
+   "n": 523,
+   "families": [
+    "fst.3-1.h1",
+    "fst.3-1.h2",
+    "graph.4-2.h1"
+   ],
+   "oracle": 0.8546845316886902,
+   "self_claim": 0.8374760746955872,
+   "bypass": 0.533460795879364,
+   "claim_acc": 0.9196940660476685,
+   "abstain": 0.08030592650175095,
+   "per_family": {
+    "fst.3-1.h1": 0.8828125,
+    "fst.3-1.h2": 0.9593495726585388,
+    "graph.4-2.h1": 0.7610294222831726
+   },
+   "abstain_on_foreign_structures": 1.0
+  }
+ }
+}

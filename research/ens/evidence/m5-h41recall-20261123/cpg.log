@@ -1,0 +1,55 @@
+[cpg_job 2026-11-23T04:32:52+00:00 pid=3925] label=ens-h41-recall-630f6e109 agent_id=job-ens-h41-recall-630f6e109-3925 command=~/Desktop/CPG-Radio/.venv/bin/python scripts/run_with_gpu_locks.py --session ens-m5-20261122 --label ens-h41-recall-630f6e109 --cpg-owner-lock /tmp/ens-h41-recall-630f6e109-cpg.lock --cpg-task beff4e634ddb46978a84a1aed315f785 --receipt ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h41recall-20261123/gpu-receipt.json -- env PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0 HF_HUB_OFFLINE=1 zsh ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h41recall-20261123/slot.sh
+[cpg_job 2026-11-23T04:32:53+00:00 pid=3925] registered worker 1fc34ab5691044b782c8cfedb90c9cd5 as job-ens-h41-recall-630f6e109-3925 in session 213b33b20d094ad4867525c37b8b81ca
+[cpg_job 2026-11-23T04:32:53+00:00 pid=3925] claimed GPU lease task beff4e634ddb46978a84a1aed315f785 generation 6459
+[cpg_job 2026-11-23T04:32:53+00:00 pid=3925] took /tmp/ens-h41-recall-630f6e109-cpg.lock
+[cpg_job 2026-11-23T04:32:53+00:00 pid=3925] child pid 3932 started
+[cpg_job 2026-11-23T04:34:08+00:00 pid=3925] WARNING heartbeat failed (1): worker_heartbeat: TimeoutError: 
+Error parsing SSE message
+Traceback (most recent call last):
+  File "~/Desktop/mlx2-wt-ens-a0/scripts/run_with_gpu_locks.py", line 487, in main
+    rc = child.wait(timeout=10)
+         ^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py", line 1264, in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py", line 2045, in _wait
+    raise TimeoutExpired(self.args, timeout)
+subprocess.TimeoutExpired: Command '['env', 'PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0', 'HF_HUB_OFFLINE=1', 'zsh', '~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h41recall-20261123/slot.sh']' timed out after 10 seconds
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/mcp/client/streamable_http.py", line 229, in _handle_sse_event
+    await read_stream_writer.send(session_message)
+  File "~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/anyio/streams/memory.py", line 249, in send
+    self.send_nowait(item)
+  File "~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/anyio/streams/memory.py", line 218, in send_nowait
+    raise ClosedResourceError
+anyio.ClosedResourceError
+Error parsing SSE message
+Traceback (most recent call last):
+  File "~/Desktop/mlx2-wt-ens-a0/scripts/run_with_gpu_locks.py", line 487, in main
+    rc = child.wait(timeout=10)
+         ^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py", line 1264, in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py", line 2045, in _wait
+    raise TimeoutExpired(self.args, timeout)
+subprocess.TimeoutExpired: Command '['env', 'PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0', 'HF_HUB_OFFLINE=1', 'zsh', '~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h41recall-20261123/slot.sh']' timed out after 10 seconds
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/mcp/client/streamable_http.py", line 229, in _handle_sse_event
+    await read_stream_writer.send(session_message)
+  File "~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/anyio/streams/memory.py", line 249, in send
+    self.send_nowait(item)
+  File "~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/anyio/streams/memory.py", line 218, in send_nowait
+    raise ClosedResourceError
+anyio.ClosedResourceError
+[cpg_job 2026-11-23T04:57:23+00:00 pid=3925] child exited rc=0
+[cpg_job 2026-11-23T04:57:23+00:00 pid=3925] worker 1fc34ab5691044b782c8cfedb90c9cd5 closed completed
+[cpg_job 2026-11-23T04:57:23+00:00 pid=3925] released GPU lease
+[cpg_job 2026-11-23T04:57:23+00:00 pid=3925] released /tmp/ens-h41-recall-630f6e109-cpg.lock
+[cpg_job 2026-11-23T04:57:23+00:00 pid=3925] wrote ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h41recall-20261123/cpg.log.done

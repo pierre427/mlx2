@@ -1,0 +1,12 @@
+{'step': 500, 'loss': 2.4346165657043457, 'elapsed_s': 50.3, 'peak_mem_gb': 3.054}
+{'step': 1000, 'loss': 2.13102388381958, 'elapsed_s': 100.3, 'peak_mem_gb': 3.054}
+{'step': 1500, 'loss': 1.9126354455947876, 'elapsed_s': 150.4, 'peak_mem_gb': 3.054}
+{'step': 2000, 'loss': 1.6259076595306396, 'elapsed_s': 200.5, 'peak_mem_gb': 3.054}
+{'step': 2500, 'loss': 1.8494491577148438, 'elapsed_s': 250.7, 'peak_mem_gb': 3.054, 'acc_ordinary': 0.6191, 'acc_bus': 0.5566}
+{'step': 3000, 'loss': 1.5695127248764038, 'elapsed_s': 301.0, 'peak_mem_gb': 3.054}
+{'step': 3500, 'loss': 1.7003188133239746, 'elapsed_s': 351.2, 'peak_mem_gb': 3.054}
+{'step': 4000, 'loss': 1.5459997653961182, 'elapsed_s': 401.4, 'peak_mem_gb': 3.054}
+{'step': 4500, 'loss': 1.760377049446106, 'elapsed_s': 451.7, 'peak_mem_gb': 3.054}
+{'step': 5000, 'loss': 1.4708760976791382, 'elapsed_s': 501.9, 'peak_mem_gb': 3.054, 'acc_ordinary': 0.6191, 'acc_bus': 0.5566}
+{'step': 5500, 'loss': 1.8572003841400146, 'elapsed_s': 552.4, 'peak_mem_gb': 3.054}
+{'step': 6000, 'loss': 2.012439489364624, 'elapsed_s': 602.8, 'peak_mem_gb': 3.054, 'acc_ordinary': 0.6191, 'acc_bus': 0.5566}

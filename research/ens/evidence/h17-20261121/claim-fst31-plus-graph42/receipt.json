@@ -1,0 +1,102 @@
+{
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s0@c25654a60499",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": "H17",
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "modules": [
+  "evidence/screens-20261121/mod-c6-mlp-s6000-lr1e-3-fst.3-1.h1",
+  "evidence/h8-h11-20261121/mod-c6-mlp-fst.3-1.h2",
+  "evidence/screens-20261121/mod-c6-mlp-s6000-lr1e-3-graph.4-2.h1"
+ ],
+ "research_ens_dirty": false,
+ "results": {
+  "key_control": {
+   "add_tile": {
+    "abstain": 0.0,
+    "abstain_on_foreign_structures": 0.0,
+    "bypass": 0.533460795879364,
+    "claim_acc": 0.4799235165119171,
+    "families": [
+     "fst.3-1.h1",
+     "fst.3-1.h2",
+     "graph.4-2.h1"
+    ],
+    "n": 523,
+    "oracle": 0.8546845316886902,
+    "per_family": {
+     "fst.3-1.h1": 0.75,
+     "fst.3-1.h2": 0.6666666865348816,
+     "graph.4-2.h1": 0.5551470518112183
+    },
+    "self_claim": 0.629063069820404
+   },
+   "pair": {
+    "abstain": 0.0,
+    "abstain_on_foreign_structures": 0.0,
+    "bypass": 0.613545835018158,
+    "claim_acc": 1.0,
+    "families": [
+     "fst.3-1.h1",
+     "fst.3-1.h2"
+    ],
+    "n": 251,
+    "oracle": 0.9282869100570679,
+    "per_family": {
+     "fst.3-1.h1": 0.890625,
+     "fst.3-1.h2": 0.9674796462059021
+    },
+    "self_claim": 0.9282869100570679
+   },
+   "read": "key",
+   "recall_target": 0.95
+  },
+  "slot": {
+   "add_tile": {
+    "abstain": 0.10516252368688583,
+    "abstain_on_foreign_structures": 1.0,
+    "bypass": 0.533460795879364,
+    "claim_acc": 0.7858508825302124,
+    "families": [
+     "fst.3-1.h1",
+     "fst.3-1.h2",
+     "graph.4-2.h1"
+    ],
+    "n": 523,
+    "oracle": 0.8546845316886902,
+    "per_family": {
+     "fst.3-1.h1": 0.875,
+     "fst.3-1.h2": 0.8211382031440735,
+     "graph.4-2.h1": 0.7242646813392639
+    },
+    "self_claim": 0.7839388251304626
+   },
+   "pair": {
+    "abstain": 0.023904383182525635,
+    "abstain_on_foreign_structures": 1.0,
+    "bypass": 0.613545835018158,
+    "claim_acc": 0.7490040063858032,
+    "families": [
+     "fst.3-1.h1",
+     "fst.3-1.h2"
+    ],
+    "n": 251,
+    "oracle": 0.9282869100570679,
+    "per_family": {
+     "fst.3-1.h1": 0.875,
+     "fst.3-1.h2": 0.8211382031440735
+    },
+    "self_claim": 0.8486056327819824
+   },
+   "read": "slot",
+   "recall_target": 0.95
+  }
+ },
+ "schema": "ens.a0.claim_receipt.v0",
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "c6a24ca6d17ba017572374f1a2de50d02915d17b",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T01:11:00Z"
+}

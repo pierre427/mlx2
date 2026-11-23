@@ -1,0 +1,102 @@
+{
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s0@c25654a60499",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": "H17",
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "modules": [
+  "evidence/screens-20261121/mod-c6-mlp-s6000-lr1e-3-program.ADD.h1",
+  "evidence/screens-20261121/mod-c6-mlp-s6000-lr1e-3-graph.4-2.h1",
+  "evidence/screens-20261121/mod-c6-mlp-s6000-lr1e-3-fst.3-1.h1"
+ ],
+ "research_ens_dirty": false,
+ "results": {
+  "key_control": {
+   "add_tile": {
+    "abstain": 0.0,
+    "abstain_on_foreign_structures": 0.0,
+    "bypass": 0.4029196798801422,
+    "claim_acc": 0.33576640486717224,
+    "families": [
+     "program.ADD.h1",
+     "graph.4-2.h1",
+     "fst.3-1.h1"
+    ],
+    "n": 685,
+    "oracle": 0.8788321018218994,
+    "per_family": {
+     "fst.3-1.h1": 0.7944663763046265,
+     "graph.4-2.h1": 0.49264705181121826,
+     "program.ADD.h1": 0.3125
+    },
+    "self_claim": 0.5620437860488892
+   },
+   "pair": {
+    "abstain": 0.0,
+    "abstain_on_foreign_structures": 0.0,
+    "bypass": 0.3125,
+    "claim_acc": 0.4513888955116272,
+    "families": [
+     "program.ADD.h1",
+     "graph.4-2.h1"
+    ],
+    "n": 432,
+    "oracle": 0.8425925970077515,
+    "per_family": {
+     "graph.4-2.h1": 0.49264705181121826,
+     "program.ADD.h1": 0.71875
+    },
+    "self_claim": 0.5763888955116272
+   },
+   "read": "key",
+   "recall_target": 0.95
+  },
+  "slot": {
+   "add_tile": {
+    "abstain": 0.08175182342529297,
+    "abstain_on_foreign_structures": 1.0,
+    "bypass": 0.4029196798801422,
+    "claim_acc": 0.9182481169700623,
+    "families": [
+     "program.ADD.h1",
+     "graph.4-2.h1",
+     "fst.3-1.h1"
+    ],
+    "n": 685,
+    "oracle": 0.8788321018218994,
+    "per_family": {
+     "fst.3-1.h1": 0.8814229369163513,
+     "graph.4-2.h1": 0.7536764740943909,
+     "program.ADD.h1": 0.9375
+    },
+    "self_claim": 0.8437955975532532
+   },
+   "pair": {
+    "abstain": 0.05324074253439903,
+    "abstain_on_foreign_structures": 1.0,
+    "bypass": 0.3125,
+    "claim_acc": 0.9467592835426331,
+    "families": [
+     "program.ADD.h1",
+     "graph.4-2.h1"
+    ],
+    "n": 432,
+    "oracle": 0.8425925970077515,
+    "per_family": {
+     "graph.4-2.h1": 0.7536764740943909,
+     "program.ADD.h1": 0.9375
+    },
+    "self_claim": 0.8217592835426331
+   },
+   "read": "slot",
+   "recall_target": 0.95
+  }
+ },
+ "schema": "ens.a0.claim_receipt.v0",
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "c6a24ca6d17ba017572374f1a2de50d02915d17b",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T01:11:57Z"
+}

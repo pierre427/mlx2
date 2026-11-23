@@ -1,0 +1,3 @@
+seed 0 flops 2785923563520 big_steps 2795 small_steps 4903
+seed 1 flops 3287486300160 big_steps 3298 small_steps 5785
+seed 2 flops 7797180334080 big_steps 7822 small_steps 13721

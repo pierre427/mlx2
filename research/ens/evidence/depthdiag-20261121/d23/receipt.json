@@ -1,0 +1,48 @@
+{
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s0@c25654a60499",
+ "device": "Device(gpu, 0)",
+ "host": "lab-m3",
+ "hypothesis": [
+  "H19b",
+  "H21a"
+ ],
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "research_ens_dirty": false,
+ "results": [
+  {
+   "arm": "raw-alone-attn2",
+   "cls": "FST",
+   "held_acc": 0.4374057352542877,
+   "k": 2,
+   "last_loss": 1.0862538814544678,
+   "m": 3,
+   "n_held": 663,
+   "n_train": 5337,
+   "single_call_oracle": 0.39517346024513245,
+   "train_acc": 0.3815988004207611,
+   "train_s": 115.8,
+   "variant": "alone"
+  },
+  {
+   "arm": "raw-alone-attn4",
+   "cls": "FST",
+   "held_acc": 0.37556561827659607,
+   "k": 2,
+   "last_loss": 1.0920131206512451,
+   "m": 3,
+   "n_held": 663,
+   "n_train": 5337,
+   "single_call_oracle": 0.39517346024513245,
+   "train_acc": 0.4072398245334625,
+   "train_s": 142.2,
+   "variant": "alone"
+  }
+ ],
+ "schema": "ens.a0.depth_receipt.v0",
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "e7891df45d16b128b5f8dd6f46fd4415ef334c25",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-22T02:37:27Z"
+}

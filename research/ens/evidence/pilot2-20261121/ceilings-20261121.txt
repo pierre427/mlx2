@@ -1,0 +1,25 @@
+# Oracle ceilings per family, pilot-2 cores, run on the M3 after the pilot
+# (inline evaluate() over 512 sample_row rows for train families, the held pool for dev families).
+# source b5eca3e13 ; cores ens-a0-core-c6-early-w64-s0@c25654a60499, ens-a0-core-c7-early-w64-s0@e6f36f425f96
+c6 perm.5 train answers 5 {'oracle_codebook': 0.418}
+c6 perm.6 train answers 6 {'oracle_codebook': 0.369}
+c6 fst.2-2 train answers 2 {'oracle_codebook': 1.0}
+c6 fst.3-1 train answers 3 {'oracle_codebook': 1.0}
+c6 graph.6-2 train answers 6 {'oracle_codebook': 0.996}
+c6 program.ADD train answers 64 {'oracle_codebook': 1.0}
+c6 program.ADD.MUL train answers 64 {'oracle_codebook': 0.123}
+c6 perm.8 dev answers 8 {'oracle_codebook': 0.172}
+c6 fst.3-2 dev answers 3 {'oracle_codebook': 0.398}
+c6 graph.8-2 dev answers 8 {'oracle_codebook': 0.281}
+c6 program.XOR.ADD dev answers 64 {'oracle_codebook': 0.021}
+c7 perm.5 train answers 5 {'oracle_typed': 0.211}
+c7 perm.6 train answers 6 {'oracle_typed': 0.189}
+c7 fst.2-2 train answers 2 {'oracle_typed': 1.0}
+c7 fst.3-1 train answers 3 {'oracle_typed': 1.0}
+c7 graph.6-2 train answers 6 {'oracle_typed': 1.0}
+c7 program.ADD train answers 64 {'oracle_typed': 1.0}
+c7 program.ADD.MUL train answers 64 {'oracle_typed': 0.031}
+c7 perm.8 dev answers 8 {'oracle_typed': 0.127}
+c7 fst.3-2 dev answers 3 {'oracle_typed': 0.379}
+c7 graph.8-2 dev answers 8 {'oracle_typed': 0.211}
+c7 program.XOR.ADD dev answers 64 {'oracle_typed': 0.018}

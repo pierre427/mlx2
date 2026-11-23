@@ -1,0 +1,21 @@
+{
+ "n": 464,
+ "n_pairs": 464,
+ "site": "ingress",
+ "n_ops": 29,
+ "majority": 0.27586206896551724,
+ "zblind": 0.5344827586206896,
+ "on": 0.4482758641242981,
+ "bypass": 0.4698275923728943,
+ "random": 0.45258620381355286,
+ "wrong": 0.4568965435028076,
+ "swap": 0.33836206793785095,
+ "both": 0.0021551724057644606,
+ "untrained_port": 0.4698275923728943,
+ "msg_rms": 1.0,
+ "oracle_codebook": 1.0,
+ "oracle_codebook_swap": 1.0,
+ "oracle_codebook_both": 1.0,
+ "ceiling_ok": true,
+ "ordinary_suite": 0.71533203125
+}

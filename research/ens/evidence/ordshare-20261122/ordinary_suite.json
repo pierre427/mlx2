@@ -1,0 +1,8 @@
+{
+ "checkpoint": "ens-a0-core-c6-early-w64-s0@61b12fc5053a",
+ "ordinary_suite": 0.673828125,
+ "research_ens_dirty": false,
+ "source_branch": "ens-a0",
+ "source_revision": "e35c6deae9aa9da034e2fc8a06085bc27f76119f",
+ "source_via": "m3-sync-stamp"
+}

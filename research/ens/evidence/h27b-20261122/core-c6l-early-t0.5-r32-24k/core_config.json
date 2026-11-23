@@ -1,0 +1,33 @@
+{
+ "adapter_hidden": 256,
+ "bus_width": 64,
+ "d": 256,
+ "ffn": 1024,
+ "heads": 4,
+ "layers": 6,
+ "lora_rank": 32,
+ "lora_site": "early",
+ "reader_init_scale": 1.0,
+ "reader_kind": "linear",
+ "seq_len": 32,
+ "sites": [
+  [
+   "ingress",
+   -1
+  ],
+  [
+   "early",
+   1
+  ],
+  [
+   "middle",
+   3
+  ],
+  [
+   "late",
+   5
+  ]
+ ],
+ "tau": 0.5,
+ "vocab": 128
+}

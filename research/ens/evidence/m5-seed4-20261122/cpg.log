@@ -1,0 +1,10 @@
+[cpg_job 2026-11-23T00:13:51+00:00 pid=10008] label=ens-a0-seed4-731531a31 agent_id=job-ens-a0-seed4-731531a31-10008 command=~/Desktop/CPG-Radio/.venv/bin/python scripts/run_with_gpu_locks.py --session ens-m5-20261122 --label ens-a0-seed4-731531a31 --cpg-owner-lock /tmp/ens-a0-seed4-731531a31-cpg.lock --cpg-task beff4e634ddb46978a84a1aed315f785 --receipt ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-seed4-20261122/gpu-receipt.json -- env PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0 HF_HUB_OFFLINE=1 zsh ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-seed4-20261122/slot.sh
+[cpg_job 2026-11-23T00:13:51+00:00 pid=10008] registered worker e4697a2b12f84ca4903c08efa6542e5a as job-ens-a0-seed4-731531a31-10008 in session 213b33b20d094ad4867525c37b8b81ca
+[cpg_job 2026-11-23T00:13:51+00:00 pid=10008] claimed GPU lease task beff4e634ddb46978a84a1aed315f785 generation 6381
+[cpg_job 2026-11-23T00:13:51+00:00 pid=10008] took /tmp/ens-a0-seed4-731531a31-cpg.lock
+[cpg_job 2026-11-23T00:13:51+00:00 pid=10008] child pid 10011 started
+[cpg_job 2026-11-23T01:20:00+00:00 pid=10008] child exited rc=0
+[cpg_job 2026-11-23T01:20:00+00:00 pid=10008] worker e4697a2b12f84ca4903c08efa6542e5a closed completed
+[cpg_job 2026-11-23T01:20:00+00:00 pid=10008] released GPU lease
+[cpg_job 2026-11-23T01:20:00+00:00 pid=10008] released /tmp/ens-a0-seed4-731531a31-cpg.lock
+[cpg_job 2026-11-23T01:20:00+00:00 pid=10008] wrote ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-seed4-20261122/cpg.log.done

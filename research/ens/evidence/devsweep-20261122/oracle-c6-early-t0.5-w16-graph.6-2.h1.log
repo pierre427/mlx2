@@ -1,0 +1,13 @@
+{
+ "n": 512,
+ "n_pairs": 512,
+ "site": "early",
+ "n_ops": 497,
+ "majority": 0.216796875,
+ "zblind": 0.49951171875,
+ "oracle_codebook": 0.8359375,
+ "oracle_codebook_swap": 0.783203125,
+ "oracle_codebook_both": 0.669921875,
+ "ceiling_ok": false,
+ "ordinary_suite": 0.73193359375
+}

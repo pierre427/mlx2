@@ -1,0 +1,39 @@
+{
+ "host": {
+  "device": "Device(gpu, 0)",
+  "host": "lab-m3",
+  "machine": "arm64",
+  "mlx": "0.32.4",
+  "time_utc": "2026-11-22T12:34:17Z"
+ },
+ "seed0/c6": {
+  "checkpoint": "ens-a0-core-c6-early-w64-s0@de4d62cee582",
+  "ordinary_suite": 0.6875
+ },
+ "seed0/c7": {
+  "checkpoint": "ens-a0-core-c7-early-w64-s0@03d9a3e445d8",
+  "ordinary_suite": 0.7744140625
+ },
+ "seed1/c6": {
+  "checkpoint": "ens-a0-core-c6-early-w64-s1@271bb4c5595d",
+  "ordinary_suite": 0.65234375
+ },
+ "seed1/c7": {
+  "checkpoint": "ens-a0-core-c7-early-w64-s1@1b0e9618584c",
+  "ordinary_suite": 0.814453125
+ },
+ "seed2/c6": {
+  "checkpoint": "ens-a0-core-c6-early-w64-s2@6796385e5665",
+  "ordinary_suite": 0.6953125
+ },
+ "seed2/c7": {
+  "checkpoint": "ens-a0-core-c7-early-w64-s2@073c6de0f823",
+  "ordinary_suite": 0.673828125
+ },
+ "source": {
+  "research_ens_dirty": false,
+  "source_branch": "ens-a0",
+  "source_revision": "e35c6deae9aa9da034e2fc8a06085bc27f76119f",
+  "source_via": "m3-sync-stamp"
+ }
+}
