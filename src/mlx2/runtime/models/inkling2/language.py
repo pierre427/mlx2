@@ -468,6 +468,12 @@ def _prefill_attention():
     return prefill_attention
 
 
+def _attn_decode():
+    from . import attn_decode
+
+    return attn_decode
+
+
 def _banded_mask_reference(_attn, *args, **kwargs):
     return banded_additive_mask(*args, **kwargs)
 
@@ -806,6 +812,12 @@ class Attention(nn.Module):
         kv, conv = cache if cache is not None else (None, None)
         key_input = x if key_input is None else key_input
         value_input = x if value_input is None else value_input
+        if self.__dict__.get("_attn_decode"):
+            # inkling2_attn_decode_kernel (default off): one-token decode
+            # front end in one launch; None when it declines (counted).
+            out = _attn_decode().call(self, x, key_input, value_input, cache, conv_mask)
+            if out is not None:
+                return out
         q, r, gate, sink, k, v = self._project_inputs(x, key_input, value_input)
         if self.is_sliding:
             k = self.k_sconv(k, conv, conv_mask)
@@ -1693,7 +1705,8 @@ class Model(nn.Module):
                           compile_decode_blocks=False, head_softcap_compiled=False,
                           kv_q8=False,
                           prefill_mask_bf16_budget=False, prefill_mask_with_sink=False,
-                          head_kernel_wide=False, prefill_tiled_attention=False):
+                          head_kernel_wide=False, prefill_tiled_attention=False,
+                          attn_decode_kernel=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1716,6 +1729,8 @@ class Model(nn.Module):
             raise ValueError("Inkling 2 prefill_tiled_attention and flash_prefill are alternatives")
         if fuse_message_kernel and not fuse_controllers:
             raise ValueError("Inkling 2 fuse_message_kernel requires fuse_controllers")
+        if attn_decode_kernel and not verify_splitk:
+            raise ValueError("Inkling 2 attn_decode_kernel requires verify_splitk")
         if moe_act_quant:
             # Every layer's activation format before anything changes, so a
             # refusal leaves the model as it was.
@@ -1770,6 +1785,7 @@ class Model(nn.Module):
                                bool(prefill_mask_bf16_budget))
             object.__setattr__(layer.self_attn, "_mask_with_sink", bool(prefill_mask_with_sink))
             object.__setattr__(layer.self_attn, "_prefill_tiled", bool(prefill_tiled_attention))
+            object.__setattr__(layer.self_attn, "_attn_decode", bool(attn_decode_kernel))
             if fused_projections:
                 layer.self_attn.fuse_projections()
             elif getattr(layer.self_attn, "_fused_bounds", None) is not None:
@@ -1806,7 +1822,8 @@ class Model(nn.Module):
              "prefill_mask_bf16_budget": bool(prefill_mask_bf16_budget),
              "prefill_mask_with_sink": bool(prefill_mask_with_sink),
              "head_kernel_wide": bool(head_kernel_wide),
-             "prefill_tiled_attention": bool(prefill_tiled_attention)},
+             "prefill_tiled_attention": bool(prefill_tiled_attention),
+             "attn_decode_kernel": bool(attn_decode_kernel)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1873,6 +1890,14 @@ class Model(nn.Module):
             for key, value in module.__dict__.get("fuse_counts", {}).items():
                 fuse[key] = fuse.get(key, 0) + value
         out["fuse_counts"] = dict(sorted(fuse.items()))
+        decode = {}
+        for layer in self.model.layers:
+            for key, value in layer.self_attn.__dict__.get("attn_decode_counts", {}).items():
+                decode[key] = decode.get(key, 0) + value
+        # inkling2_attn_decode_kernel: one-token visits through the one-launch
+        # front end (calls) and the composed-path declines by reason.
+        out["attn_decode"] = {"calls": decode.pop("calls", 0),
+                              "declines": dict(sorted(decode.items()))}
         act = {}
         for layer in self.model.layers:
             for key, value in layer.mlp.__dict__.get("act_quant_counts", {}).items():

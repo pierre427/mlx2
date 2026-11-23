@@ -108,6 +108,7 @@ FEATURES = (
     "inkling2_moe_act_quant", "inkling2_kv_q8",
     "inkling2_fuse_controllers", "inkling2_fuse_residual", "inkling2_fuse_sconv",
     "inkling2_fuse_attention", "inkling2_fuse_sconv_kernel", "inkling2_fuse_residual_kernel",
+    "inkling2_attn_decode_kernel",
     "mtp_tree_pipeline",
     "integer_exact_microscaling", "exl3_upstream_weight_format", "exl3_execution_rows", "exl3_execution_fused", "exl3_execution_fused_nax", "exl3_execution_fused_w8a8", "exl3_execution_nax", "exl3_execution_nax_fused", "exl3_resident_dense",
     "resident_kernel_reload", "kimi_linear_supervised_lora_research",

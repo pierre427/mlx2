@@ -432,6 +432,32 @@ KERNEL_OPTIONS = {
     # tests and the GPU A/B are pending (omlx found MLX's masked SDPA faster
     # than its flash kernel for full attention on M5 NAX hosts).
     "inkling2_prefill_tiled_attention": "prefill_tiled_attention",
+    # One-token decode front end of every attention visit in one Metal launch
+    # (runtime/models/inkling2/attn_decode.py, original, 2026-11-22): the k/v
+    # short convolutions and next conv states, the q/k/r L2 clips, the value
+    # RMS norm, the global visits' log-position scale, the relative-bias rows
+    # (r @ rel_proj) and the FP32 sink, between the input projections and the
+    # K/V append; the attention stays the split-K kernel. B1 one-token calls
+    # only, on KVCache/RotatingKVCache (direct API) and the one-row
+    # BatchKVCache/BatchRotatingKVCache a served lane is merged into (their
+    # device left_padding passed on as the composed path passes it); requires
+    # inkling2_verify_splitk. Everything else declines (counted by reason,
+    # kernel_counters["attn_decode"]) to the composed path, including the
+    # fused-ring SDPA route (fuse_attention on, sink_sdpa off).
+    # Near-exact (the reductions sum in the kernel's order). GPU only.
+    # Default off (2026-11-22, Inkling-2-Mini@440956c8; evidence in
+    # docs/research/model-feature-decisions.tsv): engages on every served
+    # one-row visit; tokens exact (direct 1K/16K, oracle prompts) or
+    # a near-tie candidate (served summary, token 72: same top two, margins
+    # .009/.073 nat; unclassified, the response had no functional oracle);
+    # logits not bitwise
+    # (the bias rows sum in the kernel's order). Launches per call 38 -> 22
+    # sliding, 55 -> 20 global (~900 fewer per token), but decode gains only
+    # ~1.5-5% (sanity A/Bs, contended host): the removed launches cost ~1 us
+    # each, so the attention share is mostly elsewhere (weight reads, the
+    # split-K kernel, the cache appends, the ring copy). Not a default unless
+    # Pierre decides otherwise.
+    "inkling2_attn_decode_kernel": "attn_decode_kernel",
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.
@@ -604,6 +630,8 @@ def validate_policy(value):
                          "are alternatives")
     if kernels["head_kernel_wide"] and not kernels["head_kernel"]:
         raise ValueError("Inkling 2 inkling2_head_kernel_wide requires inkling2_head_kernel")
+    if kernels["attn_decode_kernel"] and not kernels["verify_splitk"]:
+        raise ValueError("Inkling 2 inkling2_attn_decode_kernel requires inkling2_verify_splitk")
     if kernels["compile_decode_blocks"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_compile_decode_blocks requires inkling2_moe_fused")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
@@ -947,6 +975,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             names += ("inkling2/kv_q8.py", "inkling2/splitk.py")
         if any(policy.get(k) for k in ("prefill_mask_with_sink", "prefill_tiled_attention")):
             names += ("inkling2/prefill_attention.py",)
+        if policy.get("attn_decode_kernel"):
+            names += ("inkling2/attn_decode.py",)
         contract = {
             "operation": numerics_operation(policy),
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
