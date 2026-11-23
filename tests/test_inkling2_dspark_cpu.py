@@ -602,3 +602,62 @@ def test_engine_greedy_equals_ordinary_with_verify_splitk_engaged(pair, monkeypa
         target.configure_kernels()
     assert 4 in lengths
     assert got == expect
+
+
+@pytest.mark.parametrize("boundary", [16, 32])
+def test_engine_interior_checkpoint_resumes_like_the_cold_prompt(pair, boundary):
+    """An APCv2 interior checkpoint taken mid-prefill on the DSpark route
+    (target rings + conv state + DSpark draft sidecar) resumes to the same
+    greedy tokens as the cold prompt and as ordinary decode. This is what
+    ``Inkling2Adapter.external_apc_state_checkpoints`` declares; 32 is past
+    the tiny model's ring wrap (window 8)."""
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator, ExternalDraftState
+    from mlx2.runtime.state_boundaries import BoundaryPurpose
+
+    target, draft, _ = pair
+    mx.random.seed(11)
+    prompt = [int(t) for t in mx.random.randint(1, 400, (40,)).tolist()]
+    expect = _ordinary_greedy(target, prompt)
+
+    def engine():
+        return ExternalDraftBatchGenerator(
+            target, draft_model=Inkling2DSparkExternal(draft, num_draft=3),
+            binding="test", num_draft=3, prefill_step_size=16,
+        )
+
+    def run(batch, uid):
+        got = []
+        for _ in range(300):
+            _, responses = batch.next()
+            got += [r.token for r in responses if r.uid == uid]
+            if not batch.lanes:
+                break
+        return got
+
+    cold, resumed = engine(), engine()
+    try:
+        uid = cold.insert([prompt], max_tokens=[12], sampling_configs=[{"sampling_temp": 0}],
+                          apc_interior_positions=[(boundary,)])[0]
+        lane = cold.lanes[uid]
+        while lane.anchor is None:
+            cold._prefill(lane)
+        assert cold.scheduler_stats["external_apc_interior_checkpoints_captured"] == 1
+        (checkpoint,) = cold.pop_interior_checkpoints(uid)
+        assert checkpoint["purpose"] == BoundaryPurpose.INTERIOR
+        assert checkpoint["tokens"] == prompt[:boundary]
+        sidecar = checkpoint["cache_sidecar"]
+        assert isinstance(sidecar, ExternalDraftState)
+        sidecar.validate("test", boundary)
+        cold_out = run(cold, uid)
+        assert cold_out == expect
+
+        rid = resumed.insert([prompt[boundary:]], max_tokens=[12],
+                             sampling_configs=[{"sampling_temp": 0}],
+                             caches=[checkpoint["target_cache"]], cache_states=[sidecar],
+                             all_tokens=[checkpoint["tokens"]])[0]
+        assert resumed.scheduler_stats["paired_cache_resumes"] == 1
+        assert run(resumed, rid) == expect
+    finally:
+        resumed.close()
+        cold.close()

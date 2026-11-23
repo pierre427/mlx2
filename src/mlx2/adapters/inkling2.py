@@ -260,7 +260,9 @@ KERNEL_OPTIONS = {
     # compiled above, compiled output gate, direct BF16 value norm.
     "inkling2_fuse_attention": "fuse_attention",
     # Near-exact GPU kernels, kept separate (own summation order):
-    # one-launch static short conv (<= 8 rows, needs inkling2_fuse_sconv)
+    # one-launch static short conv (<= 8 rows, needs inkling2_fuse_sconv;
+    # default on since 2026-11-22: near-exact by construction, observed
+    # bitwise on the checkpoint's tested shapes, see KERNEL_DEFAULTS)
     "inkling2_fuse_sconv_kernel": "fuse_sconv_kernel",
     # and one-launch one-row attention-residual mixes and loop messages.
     "inkling2_fuse_residual_kernel": "fuse_residual_kernel",
@@ -289,12 +291,25 @@ KERNEL_OPTIONS = {
 # on Metal and on the checkpoint. Sink SDPA and split-K are near-exact (their
 # reduction order differs), so the default route is near-tie, not bitwise,
 # equal to the reference; set any of them false to get the reference back.
-# The two near-exact fusion kernels (fuse_sconv_kernel, fuse_residual_kernel)
-# and W4A4 (moe_act_quant) stay off.
+#
+# fuse_sconv_kernel is DEFAULT ON too (Pierre 2026-11-22, "leave
+# fuse_sconv_kernel default enabled"), on top of fuse_sconv. Basis,
+# Inkling-2-Mini@440956c8, fuse A/B 16eed37f5 against the defaults
+# (qualification/runs/inkling2-gpu-20261122/16eed37f5-kernsconv): decode
+# logits bitwise on 128/128 steps and last prefill logits bitwise at 1K and
+# 16K; decode rate unchanged (33.8 vs 33.0, 32.2 vs 30.6, 32.0 vs 31.9 tok/s
+# after the warm-up block), prefill unchanged. It engages on GPU calls of up
+# to 8 rows (decode and DSpark verify; the A/B covered decode only) and falls
+# back elsewhere; unset it
+# follows fuse_sconv, so inkling2_fuse_sconv false turns both off.
+# fuse_residual_kernel stays off: A/B 16eed37f5 (16eed37f5-kernres) was not
+# bitwise (max |dlogit| 0.08 at 1K, 0.55 at 16K, argmax 125/128 with the 3
+# margins not captured), decode within noise, prefill 12% slower at 1K.
+# W4A4 (moe_act_quant) stays off.
 KERNEL_DEFAULTS = {"moe_fused": True, "moe_weighted_sum": None, "moe_nax_gather": None,
                    "sink_sdpa": True, "sink_slot": True, "verify_splitk": True,
                    "fuse_controllers": True, "fuse_residual": True, "fuse_sconv": True,
-                   "fuse_attention": True}
+                   "fuse_attention": True, "fuse_sconv_kernel": True}
 # The policy that selects the reference path for every switch the defaults
 # turn on (comparison scripts and the ladder's reference arm start from it).
 REFERENCE_POLICY = {key: False for key, name in KERNEL_OPTIONS.items()
@@ -344,11 +359,13 @@ def validate_policy(value):
         raise TypeError("Inkling 2 execution policy must be an object")
     value = dict(value)
     kernels = {}
+    defaulted = set()
     for key, name in KERNEL_OPTIONS.items():
         # The default applies only when the key is absent; a present value
         # (null included) must be a boolean.
         if key not in value:
             kernels[name] = KERNEL_DEFAULTS.get(name, False)
+            defaulted.add(name)
             continue
         flag = value.pop(key)
         if type(flag) is not bool:
@@ -376,6 +393,8 @@ def validate_policy(value):
     if passes is not None and (type(passes) is not int or not 1 <= passes <= 8):
         raise TypeError(f"Inkling 2 {LOOP_PASSES_OPTION} must be an integer 1..8")
     kernels["loop_passes"] = passes
+    if "fuse_sconv_kernel" in defaulted and not kernels["fuse_sconv"]:
+        kernels["fuse_sconv_kernel"] = False  # the default follows fuse_sconv
     if kernels["fuse_sconv_kernel"] and not kernels["fuse_sconv"]:
         raise ValueError("Inkling 2 inkling2_fuse_sconv_kernel requires inkling2_fuse_sconv")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
@@ -508,6 +527,19 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     artifact_inspector = staticmethod(inspect_artifact)
     profile = "inkling2-apcv2-ordinary"
     reasoning_effort_semantics = "reasoning_strength_0_0.99"
+    # The DSpark route's prefill runs in the generic ExternalDraftBatchGenerator,
+    # whose slices end on planned APCv2 boundaries and snapshot the target
+    # rings, conv state and DSpark draft sidecar
+    # (ExternalDraftBatchGenerator._capture_state_boundary); a resume from such
+    # a checkpoint is greedy-exact against the cold prompt and ordinary decode,
+    # ring wrapped (tests/test_inkling2_dspark_cpu.py::
+    # test_engine_interior_checkpoint_resumes_like_the_cold_prompt). Without it
+    # DSpark could reuse only an exact whole-prefix entry: its draft sidecar is
+    # state at the entry's end, so the trimmed hits the ordinary route serves a
+    # shared prefix from are refused, and GSM8K's 5-shot prefix hit 0/40
+    # (qualification/runs/inkling2-gpu-20261122/16eed37f5-dsgsm8k). Own
+    # __dict__ only (serving.external_state_checkpoints).
+    external_apc_state_checkpoints = True
 
     def __init__(self, model_path, *, execution_policy=None, weight_streaming=None):
         from .process_globals import guarded_construction

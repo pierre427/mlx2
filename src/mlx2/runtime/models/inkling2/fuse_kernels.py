@@ -2,7 +2,8 @@
 """Near-exact Metal kernels for ``inkling2_fuse_sconv_kernel`` and
 ``inkling2_fuse_residual_kernel`` (original mlx2 code, 2026-11-22).
 
-Both are GPU only, default off and decline (return ``None``, counted) on
+Both are GPU only (``fuse_sconv_kernel`` default on since 2026-11-22,
+``fuse_residual_kernel`` default off) and decline (return ``None``, counted) on
 anything outside their layout, so the caller runs the exact path.  Their
 arithmetic follows the reference op for op in FP32, but the summation order
 of the reductions is the kernels' own, so results are near-exact, not

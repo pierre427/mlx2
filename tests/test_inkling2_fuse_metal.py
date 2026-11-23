@@ -94,6 +94,76 @@ def test_exact_options_bitwise_on_gpu(option, rows, bf16, geometry):
     assert not bad, f"first differing position {bad[0]}, max {diff.max().item()}"
 
 
+VERIFY_PLAN = [(0, 16), (16, 24), (24, 32), (32, 40), (40, 41), (41, 49), (49, 50)]
+
+
+@pytest.mark.parametrize("geometry", ["tiny", "wide"])
+@pytest.mark.parametrize("bf16", [False, True])
+@pytest.mark.parametrize("rows", [1, 2])
+def test_controllers_batched_rows_bitwise(rows, bf16, geometry):
+    """DSpark-verify-shaped calls (8-row blocks, B1 and B2) and short prefill
+    chunks keep the reference controllers (the batched form is one-row only,
+    see ``fuse.batched_rows_ok``) and match the reference bitwise."""
+    model = _model(geometry, bf16)
+    model.configure_kernels(moe_fused=True, moe_weighted_sum=True)
+    tokens = mx.random.randint(0, 500, (rows, 50), key=mx.random.key(7 + rows))
+    base = _run(model, tokens, VERIFY_PLAN)
+    model.configure_kernels(moe_fused=True, moe_weighted_sum=True, fuse_controllers=True)
+    got = _run(model, tokens, VERIFY_PLAN)
+    counts = model.kernel_receipt()["fuse_counts"]
+    diff = mx.abs(got - base).reshape(rows, 50, -1).max(axis=(0, 2))
+    bad = [i for i, v in enumerate(diff.tolist()) if v > 0]
+    RESULTS[f"controllers_rows/{geometry}/{'bf16' if bf16 else 'fp32'}/B{rows}"] = {
+        "bitwise": not bad, "first_bad_position": bad[0] if bad else None,
+        "max_abs": float(diff.max().item()), "counts": {
+            k: counts.get(k, 0) for k in ("controllers_batched", "controllers_batched_rows",
+                                          "controllers_unbatched")}}
+    assert counts.get("controllers_batched_rows", 0) == 0
+    assert counts.get("controllers_unbatched", 0) > 0
+    assert not bad, f"first differing position {bad[0]}, max {diff.max().item()}"
+
+
+@pytest.mark.parametrize("rows", [1])
+@pytest.mark.parametrize("bf16", [False, True])
+def test_qkv_controllers_checkpoint_geometry_bitwise(bf16, rows):
+    """``qkv_controllers`` at the Mini's width and rank (D 2304, gate rank 64)
+    against the three reference controllers, one row (the only row count
+    the gate admits).  The multi-row form tried at fc9ac7ed8 was not bitwise
+    at 2..32 rows (qualification/runs/inkling2-gpu-20261122/16eed37f5-fusemetal)."""
+    from types import SimpleNamespace
+
+    from mlx2.runtime.models.inkling2 import TextConfig
+    from mlx2.runtime.models.inkling2 import fuse as F
+    from mlx2.runtime.models.inkling2.language import MessageController
+    from test_inkling2_cpu import TINY
+
+    config = TextConfig.from_dict({**TINY, "hidden_size": 2304, "loop_config": dict(
+        core_start=6, core_end=18, num_passes=3, gate_rank=64)})
+    mx.random.seed(rows)
+    ctrls = {}
+    for name in ("attn", "k", "v", "mlp"):
+        ctrl = MessageController(config)
+        for w in ("down_weight", "forget_weight", "gain_weight"):
+            value = mx.random.normal(ctrl[w].shape) * 0.05
+            ctrl[w] = value.astype(mx.bfloat16) if bf16 else value
+        ctrls[name] = ctrl
+    layer = SimpleNamespace(controllers=ctrls)
+    shapes = {1: (1, 1), 2: (2, 1), 3: (1, 3), 8: (1, 8), 16: (2, 8), 24: (3, 8), 32: (4, 8)}
+    b, length = shapes[rows]
+    for nq in (1, 3):
+        mixed = mx.random.normal((b, length, nq, 2304))
+        messages = mx.random.normal((b, length, 4, 2304))
+        norms = mx.fast.rms_norm(messages, None, ctrls["attn"].eps)
+        got = F.qkv_controllers(layer, mixed, messages, norms)
+        ref = mx.stack([ctrls[n](mixed[..., min(i, nq - 1), :], messages[..., i, :])
+                        for i, n in enumerate(("attn", "k", "v"))], axis=-2)
+        mx.eval(got, ref)
+        same = bool(mx.array_equal(got, ref))
+        RESULTS[f"controllers_ckpt/{'bf16' if bf16 else 'fp32'}/rows{rows}/nq{nq}"] = {
+            "bitwise": same, "max_abs": float(mx.abs(got - ref).max().item())}
+        assert same, f"rows {rows} nq {nq}: max {mx.abs(got - ref).max().item()}"
+
+
 @pytest.mark.parametrize("bf16", [False, True])
 def test_sconv_kernel_near_exact(bf16):
     """The one-launch conv against the exact path, module level, every tail."""

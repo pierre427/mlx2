@@ -186,16 +186,19 @@ def test_kernel_options_decline_on_cpu_and_stay_exact():
 
 
 def test_policy_names_and_dependency():
-    from mlx2.adapters.inkling2 import KERNEL_OPTIONS, validate_policy
+    from mlx2.adapters.inkling2 import KERNEL_OPTIONS, REFERENCE_POLICY, validate_policy
 
-    # The four exact options are default on since 2026-11-22 (Pierre); the
-    # two near-exact kernels stay off.
-    for name in EXACT:
+    # The four exact options and the short-conv kernel are default on since
+    # 2026-11-22 (Pierre); the residual kernel stays off.
+    for name in EXACT + ("fuse_sconv_kernel",):
         assert KERNEL_OPTIONS["inkling2_" + name] == name
         assert validate_policy(None)[0][name] is True
-    for name in ("fuse_sconv_kernel", "fuse_residual_kernel"):
-        assert KERNEL_OPTIONS["inkling2_" + name] == name
-        assert validate_policy(None)[0][name] is False
+    assert KERNEL_OPTIONS["inkling2_fuse_residual_kernel"] == "fuse_residual_kernel"
+    assert validate_policy(None)[0]["fuse_residual_kernel"] is False
+    # Unset, the short-conv kernel follows fuse_sconv; set, it must agree.
+    assert validate_policy({"inkling2_fuse_sconv": False})[0]["fuse_sconv_kernel"] is False
+    assert validate_policy({"inkling2_fuse_sconv_kernel": False})[0]["fuse_sconv_kernel"] is False
+    assert REFERENCE_POLICY["inkling2_fuse_sconv_kernel"] is False
     with pytest.raises(ValueError, match="fuse_sconv_kernel requires"):
         validate_policy({"inkling2_fuse_sconv": False, "inkling2_fuse_sconv_kernel": True})
     with pytest.raises(ValueError, match="requires fuse_sconv"):

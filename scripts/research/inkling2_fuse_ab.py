@@ -20,6 +20,7 @@ This is a sanity A/B (no thermal hold), not publishable statistics.
 
 Usage: python scripts/research/inkling2_fuse_ab.py <model dir> <run dir>
        [--contexts 1024,16384,65536] [--options fuse_controllers,...] [--blocks 2]
+       [--base reference|defaults]
 Default options: the four exact ones. Add ``fuse_sconv_kernel`` and/or
 ``fuse_residual_kernel`` for the near-exact arms (run them separately).
 """
@@ -122,6 +123,10 @@ def main():
     parser.add_argument("--contexts", default="1024,16384,65536")
     parser.add_argument("--options", default=",".join(EXACT))
     parser.add_argument("--blocks", type=int, default=2)
+    parser.add_argument("--base", choices=("reference", "defaults"), default="reference",
+                        help="reference: every default-on option off (the historical A/B); "
+                             "defaults: the shipped defaults, so the near-exact kernel "
+                             "options are measured on top of the exact four")
     args = parser.parse_args()
     model_dir, run_dir = Path(args.model_dir), Path(args.run_dir)
     contexts = [int(c) for c in args.contexts.split(",")]
@@ -150,7 +155,9 @@ def main():
         tmp.write_text(json.dumps(receipt, indent=1, default=str))
         os.replace(tmp, out)
 
-    adapter = Inkling2Adapter(str(model_dir), execution_policy=dict(REFERENCE_POLICY))  # reference path; only the named options toggle
+    policy = dict(REFERENCE_POLICY) if args.base == "reference" else {}
+    receipt["base"] = args.base
+    adapter = Inkling2Adapter(str(model_dir), execution_policy=policy)  # only the named options toggle
     try:
         model = adapter.model
         receipt["checkpoint"] = adapter.checkpoint

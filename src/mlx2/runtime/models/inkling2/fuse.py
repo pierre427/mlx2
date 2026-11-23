@@ -26,7 +26,8 @@ Options (``Model.configure_kernels`` keyword, adapter ``inkling2_fuse_*``):
   as one batched chain (shared RMS norms, one concatenation, three batched
   GEMVs) plus the three input norms as one norm and one scale-and-cast;
   the MLP controller reuses the visit's message norms.  One-row calls only;
-  other calls keep the reference ops with a compiled blend.
+  other calls keep the reference ops with a compiled blend
+  (``batched_rows_ok`` says why multi-row calls are not batched).
 - ``fuse_residual``: attention-residual mixes read FP32 copies of the BF16
   blocks made once per forward, instead of promoting every block on every
   mix (one cast per block per call in the reference).
@@ -41,9 +42,11 @@ Options (``Model.configure_kernels`` keyword, adapter ``inkling2_fuse_*``):
   below the floor (tau is exactly 1) and compiled above it, the output gate
   compiled, the ring's chronological read and the zero sink row as one
   concatenation, cached zero rows.
-- ``fuse_sconv_kernel`` (near-exact, GPU): one Metal kernel per static
-  short convolution call of up to 8 rows (conv, scale, residual tail and the
-  next state).
+- ``fuse_sconv_kernel`` (GPU; default on since 2026-11-22): one Metal kernel
+  per static short convolution call of up to 8 rows (conv, scale, residual
+  tail and the next state).  Its own summation order makes it near-exact by
+  construction; it was observed bitwise on the tested shapes (Metal module
+  tests, and checkpoint decode and last-prefill logits at 1K/16K).
 - ``fuse_residual_kernel`` (near-exact, GPU): one Metal kernel per one-row
   attention-residual mix (norms, scores, softmax, weighted sum).
 """
@@ -358,6 +361,25 @@ def norm_stack(layer):
         held = (key, mx.stack(list(key)))
         object.__setattr__(layer, "_fuse_norms", held)
     return held[1]
+
+
+def batched_rows_ok(x):
+    """Whether the batched controller and norm forms may take this call:
+    one-row calls only (decode at B1), where both sides use the same paths.
+
+    Multi-row calls keep the reference ops.  Widening this to GPU calls of up
+    to 32 rows (DSpark verify, B>1, short prefill chunks; fc9ac7ed8) was
+    tried and reverted on 2026-11-22: the Metal tests at 16eed37f5
+    (qualification/runs/inkling2-gpu-20261122/16eed37f5-fusemetal) were not
+    bitwise.  ``qkv_controllers`` at the checkpoint's width and rank differed
+    from the reference controllers at every FP32 row count 2..32 (max 2.3e-5)
+    and at BF16 16 and 32 rows (max 1.4e-3); whole tiny/wide models drifted
+    from the first multi-row chunk (BF16 wide max |dlogit| 4.1).  The batch-3
+    GEMM picks a different matmul kernel than the three batch-1 GEMMs.  It
+    bought nothing measurable either: DSpark GSM8K on Inkling-2-Mini@440956c8
+    decoded at a median 39.7 tok/s with it against 40.2 without (one run per
+    arm, per-request SD 8-9 tok/s, so within noise; same 40/40 outputs)."""
+    return x.shape[0] * x.shape[1] == 1
 
 
 def qkv_controllers(layer, mixed, messages, message_norms):

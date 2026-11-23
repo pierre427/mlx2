@@ -1005,7 +1005,7 @@ class DecoderLayer(nn.Module):
             else x[..., None, :]
         )
         fused_ctrl = _fuse.on(self, "fuse_controllers")
-        one_row = x.shape[0] * x.shape[1] == 1
+        batched = fused_ctrl and _fuse.batched_rows_ok(x)
         message_norms = None
         if self.is_sliding and messages is None:
             attn = self.self_attn(
@@ -1013,9 +1013,9 @@ class DecoderLayer(nn.Module):
                 cache=cache,
                 conv_mask=mask,
             )
-        elif fused_ctrl and one_row:
-            # B1 decode: the three controllers and the three input norms as
-            # batched chains (see fuse.py for why only one-row calls).
+        elif batched:
+            # One-row decode: the three controllers and the three
+            # input norms as batched chains (fuse.batched_rows_ok says when).
             eps = self.post_attention_layernorm.eps
             if messages is not None:
                 message_norms = mx.fast.rms_norm(messages, None, eps)
