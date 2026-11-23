@@ -137,13 +137,21 @@ def layer_input(host, seqs, layer):
         mx.eval(x)
         raise _Stop
     lay.__class__ = type(f"Cap{base.__name__}", (base,), {"__call__": call})
+    # The host's trunk forward: the inner module when callable, else the model's own ``hidden`` (Hy4-flash
+    # keeps its trunk forward, Engram rows and per-layer caches on the outer model).
+    trunk = host.hidden if hasattr(host, "hidden") else host.inner
     try:
-        host.inner(mx.array(seqs))
+        trunk(mx.array(seqs))
     except _Stop:
         pass
     finally:
         lay.__class__ = base
-    return np.array(box["x"].astype(mx.float32))
+    x = box["x"]
+    if x.ndim == 4:
+        # hyper-connection streams [B, T, n, D] (Hy4-flash hc_mult = 4): the gate reads their mean
+        x = mx.mean(x.astype(mx.float32), axis=2)
+        layer_input.hc_streams = True
+    return np.array(x.astype(mx.float32))
 
 
 def features(host, seqs, layer, k, seed, bs=8):
@@ -250,8 +258,10 @@ def gates(a):
         gw[name], gb[name] = w, b
         res[name]["threshold_raw"] = thr
     np.savez_compressed(out / "gates.npz", **{f"{n}__w": gw[n] for n in gw}, **{f"{n}__b": np.float32(gb[n]) for n in gb})
+    hc_streams = getattr(layer_input, "hc_streams", False)
     rep = {"schema": "mlx2.amoeba-gates.v1", "checkpoint": host.checkpoint, "fingerprint": host.fingerprint,
-           "layer": layer, "feature": f"residual stream entering layer {layer} (raw; standardisation folded in)",
+           "layer": layer, "feature": f"residual stream entering layer {layer} (raw; standardisation folded in"
+                      f"{'; mean of the hyper-connection streams' if hc_streams else ''})",
            "law": "token p = sigmoid(x . w + b); a window opens when mean p >= threshold",
            "threshold_rule": f"chosen on fit windows: false-open <= {a.fit_false_open} on fit negatives, >= 0.5",
            "tokens_per_window": a.tokens, "window_tokens": a.window_tokens, "boxes": res}

@@ -660,3 +660,28 @@ def test_rolling_parity_checks_resident_capacity_before_reference(tmp_path, monk
     with pytest.raises(SystemExit, match="resident"):
         cli.main(["rolling-parity", "--model", "toy", "--out", str(out), "--rolling-resident", "--cpu"])
     assert not out.exists()
+
+
+@pytest.mark.parametrize("bits", [2, 4, 8])
+def test_packer_stored_form_slices_are_exact(bits):
+    mx = pytest.importorskip("mlx.core")
+    nn = pytest.importorskip("mlx.nn")
+    from mlx2.experimental.amoeba.child_pack import _check_slice, dense_weight, quant_slice
+    mx.set_default_device(mx.cpu)
+
+    class QSw(nn.Module):                                   # [E, out, in] affine-quantized switch bank
+        def __init__(self, E, o, i):
+            super().__init__()
+            self.weight, self.scales, self.biases = mx.quantize(mx.random.normal((E, o, i)), group_size=32, bits=bits)
+            self.group_size, self.bits, self.mode = 32, bits, "affine"
+    sw = QSw(3, 16, 256)
+    q = quant_slice(sw, expert=1, rows=[2, 9, 11])
+    _check_slice(q, sw, 1, rows=[2, 9, 11])
+    blocks, B = [0, 3], 64                                   # input-column blocks 0 and 3 of width 64
+    cols = (np.array(blocks)[:, None] * B + np.arange(B)[None]).ravel()
+    q = quant_slice(sw, expert=2, col_blocks=blocks, block=B)
+    _check_slice(q, sw, 2, cols=cols)
+    assert q["w"].shape[-1] == len(blocks) * B * bits // 32
+    assert quant_slice(sw, expert=0, col_blocks=[1], block=16) is None      # not group aligned: float16 fallback
+    lin = nn.Linear(8, 4, bias=False)
+    assert quant_slice(lin, rows=[1]) is None and dense_weight(lin, [1]).shape == (1, 8)

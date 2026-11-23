@@ -350,3 +350,12 @@ def test_default_still_loads_with_the_bitwise_projection_fusion(artifact, tiny_d
         assert adapter._det_tiles_receipt()["selected"] is True
     finally:
         adapter.close()
+
+
+def test_default_tile_set_is_reported_as_defaulted(artifact, tiny_default):
+    """The server's default-route skip (serving.det_tile_default_skips_route) reads this flag."""
+    adapter = _adapter(artifact)
+    try:
+        assert adapter.amoeba_det_tiles is not None and adapter.amoeba_det_tiles_defaulted is True
+    finally:
+        adapter.close()

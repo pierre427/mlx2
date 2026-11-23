@@ -686,7 +686,7 @@ def run_box_bundle(b, ctx):
            "bar": json.loads((b.out / "box/bar.json").read_text()),
            "probe_corpus_effective": eff,
            "prompt_set": {"file": f"prompt-set/{pname}.parquet", "sha256": ps["sha256"], "rows": ps["rows"]},
-           "weights": {"file": "weights/box_weights.npz", "index": "weights/box_weights.json",
+           "weights": {"files": "weights/L<i>.npz (one per box layer; see the index)", "index": "weights/box_weights.json",
                        "not_copied": "attention, norms, embeddings and the core run from the donor checkpoint"},
            "routes": {"side_stream": "the donor core + this box beside the host, blended at the output by the gate "
                                      "(mapping-workflow s11.3; `mlx2 amoeba install`, not built yet)",

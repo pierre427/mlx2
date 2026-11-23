@@ -397,6 +397,8 @@ def main(argv=None):
     ap.add_argument("--footprint-limit-gb", type=float, default=104.0)
     ap.add_argument("--no-wire", action="store_true")
     ap.add_argument("--no-watchdog", action="store_true", help="tests only: no memory watchdog thread")
+    ap.add_argument("--swap-growth-gb", type=float, default=2.0,
+                    help="watchdog swap-growth allowance in GB (default 2; a larger value needs an approval note)")
     ap.add_argument("--chat-format", default=None,
                     help="str.format template with {q} for a checkpoint without a chat template (tests)")
     args = ap.parse_args(argv)
@@ -438,7 +440,8 @@ def main(argv=None):
     # The tile loads under its fit numerics (fusions off); fusions install after the load.
     donor = BackendHy4(path=args.model, policy={**base, "amoeba_det_tiles": str(manifest_path)},
                        wire=not args.no_wire and args.device == "gpu", log=log, watchdog=not args.no_watchdog,
-                       min_available_gb=args.min_available_gb, footprint_limit_gb=args.footprint_limit_gb)
+                       min_available_gb=args.min_available_gb, footprint_limit_gb=args.footprint_limit_gb,
+                       swap_growth_gb=args.swap_growth_gb)
     if donor.adapter.amoeba_det_tiles is None:
         raise SystemExit(f"the tile did not load: {donor.adapter._det_tiles_receipt()}")
     if args.chat_format is not None:

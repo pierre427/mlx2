@@ -31,7 +31,7 @@ _SENTINEL = "⁣Q⁣"
 
 class BackendHy4:
     def __init__(self, path=None, policy=None, log=print, footprint_limit_gb=104.0, wire=True, watchdog=True,
-                 min_available_gb=15.0, available_counter="vm_stat"):
+                 min_available_gb=15.0, available_counter="vm_stat", swap_growth_gb=2.0):
         from mlx2.adapters import hy_v4_flash as H
 
         self.watchdog = None
@@ -42,7 +42,7 @@ class BackendHy4:
             # process adds one sequence's captures, not the whole set. Also exits on low machine
             # memory (``available_counter``), swap growth or critical pressure.
             A.footprint_watchdog(footprint_limit_gb, log, min_avail_gb=min_available_gb,
-                                 counter=available_counter)
+                                 counter=available_counter, swap_growth_gb=swap_growth_gb)
             self.watchdog = A.WATCH
         self.path = Path(path or MODEL_HY4).expanduser()
         self.policy = dict(BASE_POLICY if policy is None else policy)

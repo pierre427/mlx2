@@ -1407,6 +1407,11 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # (runtime/amoeba_det_tiles MATCHED_EXTERNAL_ROUTES); the model's
     # ``layer_output_readers`` hand every target forward to the tile set.
     amoeba_det_tile_routes = frozenset({"ordinary", "external_draft"})
+
+    @property
+    def amoeba_det_tiles_defaulted(self) -> bool:
+        """Whether the installed tile set is the checkpoint's packaged default (not operator-requested)."""
+        return bool(getattr(self, "_det_tile_default", {}).get("defaulted"))
     prompt_lookup_default = False
     EXTERNAL_PROFILE = "hy-v4-flash-ast-b1-b4-v1"
     EXTERNAL_ROUTE_TAG = "hy4-flash-chain-packed-tree-v1"

@@ -3425,6 +3425,17 @@ def prepare_elastic_execution(headroom, controller, rows, *, draft_depth=0, work
         raise Overloaded("elastic execution memory does not fit after measured expert reclamation")
 
 
+def det_tile_default_skips_route(det_tiles, served: str, request: dict, defaulted: bool) -> bool:
+    """Whether a request runs without the deterministic tiles instead of failing closed.
+
+    Only a checkpoint-default tile set (``defaulted``), only when the request did not name
+    ``det_tiles`` itself, and only on a route the tile set was not admitted for: a default never
+    turns a servable request into a refusal; an operator- or request-chosen tile still refuses.
+    """
+    return (bool(defaulted) and request.get("det_tiles") is None
+            and served not in getattr(det_tiles, "served_routes", (served,)))
+
+
 def scheduler_hold_refresh(job, now, timeout, engine_progress=None) -> bool:
     """Whether a scheduler-held lane's stall clock may be refreshed now.
 
@@ -6897,7 +6908,18 @@ class ServingEngine(KernelReloadMixin):
             served = (self.snapshot.get("settings") or {}).get("route") or "ordinary"
             # The tile set names the routes it was admitted for (ordinary; native_mtp for
             # position-matched calculators; external_draft for resident calculators only).
-            det_tiles.check_route(served)
+            if det_tile_default_skips_route(
+                    det_tiles, served, job.request,
+                    getattr(getattr(self, "adapter", None), "amoeba_det_tiles_defaulted", False)):
+                # A checkpoint-default tile set never turns a servable request into a refusal
+                # (2026-11-22: every --prompt-lookup request on Hy4-flash failed 409): the
+                # request runs without the tiles; an explicitly requested tile still fails closed.
+                toggles = {name: False for name in toggles}
+                job.request["det_tiles"] = dict(toggles)
+                job.request["_mlx2_det_tiles_default_route_skipped"] = served
+                count_add(self.counts, "det_tiles_default_route_skipped", 1)
+            else:
+                det_tiles.check_route(served)
         if "mlx2_overlay" in job.request:
             ablation = getattr(self, "ablation_overlays", None)
             if ablation is None:

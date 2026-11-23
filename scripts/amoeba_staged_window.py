@@ -161,6 +161,8 @@ def main(argv=None) -> int:
     ap.add_argument("--poll-s", type=float, default=30.0)
     ap.add_argument("--then", action="append", default=[], help="shell command run after the last stage")
     ap.add_argument("--env", action="append", default=[], help="KEY=VALUE for every child")
+    ap.add_argument("--resume-arg", action="append", default=[],
+                    help="extra argument for every stage's `mlx2 amoeba resume` (e.g. --swap-growth-gb=6)")
     a = ap.parse_args(argv)
     Path(a.log_dir).mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -186,7 +188,7 @@ def main(argv=None) -> int:
         wait_turn(a)
         rc = run_leased(a, f"{a.label}-{stage}",
                         [a.python, "-u", "-m", "mlx2.experimental.amoeba.cli", "resume", "--out", a.out,
-                         "--stages", stage], env)
+                         "--stages", stage, *a.resume_arg], env)
         if rc == LEASE_REFUSED:
             # Another job took the lease between our check and our claim: wait for it, then retry.
             log(f"lease refused for {stage}; waiting for the holder")
