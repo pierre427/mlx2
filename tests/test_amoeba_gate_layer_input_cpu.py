@@ -51,3 +51,12 @@ def test_plain_residual_unchanged():
     H = CP.layer_input(Host(0), [[2, 5]], 2)
     want = np.array([[t * np.arange(1, 5) + 2 for t in (2, 5)]], dtype=np.float32)
     np.testing.assert_allclose(H, want)
+
+
+def test_capture_layout_receipts_follow_their_host():
+    hc, plain = {}, {}
+    seqs = [[1, 2, 3]]
+    CP.features(Host(4), seqs, 1, 2, 42, observed=hc)
+    CP.features(Host(0), seqs, 1, 2, 42, observed=plain)
+    assert hc == {"hc_streams": True}
+    assert plain == {"hc_streams": False}

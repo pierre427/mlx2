@@ -250,6 +250,11 @@ def _banks(glu):
             return "table_not_affine_q4_g64"
         if "bias" in b or b.get("biases") is None:
             return "bias_present_or_biases_missing"
+        w, sc, bias = b.weight, b.scales, b.biases
+        if (w.dtype != mx.uint32 or w.ndim != 3 or sc.ndim != 3
+                or sc.shape != bias.shape or w.shape[:2] != sc.shape[:2]
+                or w.shape[-1] * 8 != sc.shape[-1] * GROUP):
+            return "quantized_plane_layout"
     if type(glu) is SwitchGLU:
         F = gate.output_dims
         return gate, up, down, F, 0, F
@@ -281,14 +286,18 @@ def refusal(glu, x, indices) -> "str | None":
         return "invariant_lane"
     if x.dtype not in (mx.bfloat16, mx.float16):
         return "activation_dtype"
-    if _limit(glu.activation) is None:
-        return "activation_not_swiglu"
     banks = _banks(glu)
     if isinstance(banks, str):
         return banks
-    gate, up, down, _, _, F = banks
+    if _limit(glu.activation) is None:
+        return "activation_not_swiglu"
+    if (x.ndim < 1 or indices.ndim < 1 or indices.shape[-1] == 0
+            or x.shape[:-1] != indices.shape[:-1]):
+        return "routing_shape"
+    gate, up, down, stride, _, F = banks
     D = int(x.shape[-1])
-    if gate.input_dims != D or down.output_dims != D or down.input_dims != F:
+    if (gate.input_dims != D or gate.output_dims != stride or down.output_dims != D
+            or down.input_dims != F or down.num_experts != gate.num_experts):
         return "geometry"
     if up is not gate and (up.input_dims, up.output_dims, up.num_experts) != (
             gate.input_dims, gate.output_dims, gate.num_experts):

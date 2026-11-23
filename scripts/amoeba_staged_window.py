@@ -50,10 +50,8 @@ def in_window(now: dt.time, start: dt.time, end: dt.time, latest: dt.time | None
     inside = (start <= now < end) if start <= end else (now >= start or now < end)
     if not inside or latest is None:
         return inside
-    # latest is measured on the same night: after midnight, compare directly; before midnight it never binds
-    if start > end and now >= start:
-        return True if latest < start else now < latest
-    return now < latest
+    # On an overnight window the post-midnight portion is on the second day.
+    return (now < start, now) < (latest < start, latest) if start > end else now < latest
 
 
 def live_waiters(now: float | None = None, waiters: Path = WAITERS, me: int | None = None) -> list[str]:
@@ -73,7 +71,11 @@ def live_waiters(now: float | None = None, waiters: Path = WAITERS, me: int | No
             os.kill(pid, 0)
         except (ValueError, ProcessLookupError, PermissionError):
             continue
-        if now - path.stat().st_mtime > WAITER_FRESH_S:
+        try:
+            touched = path.stat().st_mtime
+        except FileNotFoundError:
+            continue  # the waiter acquired its locks while the ledger was being read
+        if now - touched > WAITER_FRESH_S:
             continue  # a parked hold or an abandoned file, as run_with_gpu_locks reads it
         out.append(path.name)
     return out
@@ -98,7 +100,12 @@ def port_serving(port: int = 8282) -> bool:
 def stage_status(py: str, out: str, env: dict) -> dict:
     r = subprocess.run([py, "-m", "mlx2.experimental.amoeba.cli", "status", "--out", out, "--json"],
                        capture_output=True, text=True, env=env, check=True)
-    return {k: (v.get("status") if isinstance(v, dict) else v) for k, v in json.loads(r.stdout)["stages"].items()}
+    statuses = json.loads(r.stdout)["stages"]
+    planned = json.loads((Path(out) / "build.json").read_text())["stages"]
+    # status lists every stage the model family supports. Resume follows the
+    # build's selection, e.g. a large donor with only the rolling map stage.
+    return {name: (statuses[name].get("status") if isinstance(statuses[name], dict) else statuses[name])
+            for name in planned}
 
 
 def log(msg: str) -> None:
@@ -128,10 +135,11 @@ def wait_turn(a) -> None:
         time.sleep(a.poll_s)
 
 
-def run_leased(a, label: str, argv: list[str], env: dict) -> int:
+def run_leased(a, label: str, argv: list[str], env: dict) -> int | None:
+    """Return the child exit code, or None for a confirmed pre-launch refusal."""
     logp = Path(a.log_dir) / f"{label}.log"
-    if logp.exists():
-        logp = logp.with_name(f"{label}.{int(time.time())}.log")
+    if logp.exists() or Path(f"{logp}.done").exists():
+        logp = logp.with_name(f"{label}.{time.time_ns()}.log")
     lock_dir = f"/tmp/{label}-cpg.lock"
     cmd = [CPG_PY, CPG_JOB, "run", "--label", label, "--out", str(logp), "--lease", "--lock",
            "--lock-dir", lock_dir, "--require-radio", "--heartbeat-s", "60", "--",
@@ -141,6 +149,14 @@ def run_leased(a, label: str, argv: list[str], env: dict) -> int:
     log(f"start {label}: {shlex.join(argv)[:300]}")
     rc = subprocess.call(cmd, cwd=a.tree, env=env)
     log(f"done {label}: rc={rc} (log {logp})")
+    if rc == LEASE_REFUSED:
+        try:
+            done = json.loads(Path(f"{logp}.done").read_text())
+        except (OSError, ValueError):
+            done = None
+        if (isinstance(done, dict) and done.get("refusal") and done.get("rc") is None
+                and done.get("child_pid") is None):
+            return None
     return rc
 
 
@@ -164,6 +180,12 @@ def main(argv=None) -> int:
     ap.add_argument("--resume-arg", action="append", default=[],
                     help="extra argument for every stage's `mlx2 amoeba resume` (e.g. --swap-growth-gb=6)")
     a = ap.parse_args(argv)
+    # The driver and its children have different working directories.
+    a.tree = str(Path(a.tree).resolve())
+    a.out = str(Path(a.out).resolve())
+    a.log_dir = str(Path(a.log_dir).resolve())
+    if os.path.sep in a.python:
+        a.python = str(Path(a.python).resolve())
     Path(a.log_dir).mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update(PYTHONPATH=f"{a.tree}/src:{a.tree}", HF_HUB_OFFLINE="1", PYTHONUNBUFFERED="1")
@@ -189,9 +211,10 @@ def main(argv=None) -> int:
         rc = run_leased(a, f"{a.label}-{stage}",
                         [a.python, "-u", "-m", "mlx2.experimental.amoeba.cli", "resume", "--out", a.out,
                          "--stages", stage, *a.resume_arg], env)
-        if rc == LEASE_REFUSED:
+        if rc is None:
             # Another job took the lease between our check and our claim: wait for it, then retry.
             log(f"lease refused for {stage}; waiting for the holder")
+            time.sleep(a.poll_s)
             continue
         if rc != 0:
             return rc
@@ -204,9 +227,10 @@ def main(argv=None) -> int:
         while True:
             wait_turn(a)
             rc = run_leased(a, f"{a.label}-then{i + 1}", ["/bin/zsh", "-c", cmd], env)
-            if rc != LEASE_REFUSED:
+            if rc is not None:
                 break
             log(f"lease refused for step {i + 1}; waiting for the holder")
+            time.sleep(a.poll_s)
         if rc != 0:
             return rc
         time.sleep(a.yield_s)

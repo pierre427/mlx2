@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -118,6 +119,19 @@ def main(argv=None):
     ap.add_argument("--memory-gb", type=float, default=56)
     ap.add_argument("--watchdog-gb", type=float, default=80)
     a = ap.parse_args(argv)
+    target = Path(a.out)
+    if target.exists() and (not target.is_dir() or any(target.iterdir())):
+        raise SystemExit(f"pack: {target} is not an empty output directory")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=target.parent, prefix=f".{target.name}-") as temp:
+        out = Path(temp)
+        _pack(a, out)
+        # Publish the index and every complete shard together. A concurrent writer
+        # that already published a nonempty target also makes rename fail.
+        out.rename(target)
+
+
+def _pack(a, out):
     from research.amoeba.carve import ops as O
     O.footprint_watchdog(a.watchdog_gb, print)
     O.setup_mlx(a.memory_gb, 2)
@@ -131,8 +145,6 @@ def main(argv=None):
     mask = z[key or z.files[0]] > 0
     if mask.shape != (host.L, max(host.widths)):
         raise SystemExit(f"pack: mask {mask.shape} != donor [L, max width] {(host.L, max(host.widths))}")
-    out = Path(a.out)
-    out.mkdir(parents=True, exist_ok=True)
     layers, total_bytes = {}, 0
     for s in host.sites:
         units = np.nonzero(mask[s.layer, :s.n])[0]
@@ -142,7 +154,7 @@ def main(argv=None):
         where = f"layer {s.layer} ({s.kind})"
         arrays, fmt = {}, {}
 
-        def put(name, parts, lin, axis):
+        def put(name, parts, axis):
             """parts: list of (quant slice or None, float fallback thunk); one format per projection."""
             if all(q is not None for q, _ in parts):
                 for k in ("w", "s", "b"):
@@ -159,8 +171,8 @@ def main(argv=None):
                 q = quant_slice(lin, rows=units)
                 if q is not None:
                     _check_slice(q, lin, None, rows=units)
-                put(name, [(q, lambda lin=lin: dense_weight(lin, units))], lin, 0)
-            put("down", [(None, lambda: dense_weight(dl)[:, units])], dl, 1)
+                put(name, [(q, lambda lin=lin: dense_weight(lin, units))], 0)
+            put("down", [(None, lambda: dense_weight(dl)[:, units])], 1)
             layout = "dense: gate/up [k, d], down [d, k]"
         else:
             from research.amoeba.carve import units as U
@@ -188,9 +200,9 @@ def main(argv=None):
                         q = quant_slice(lin, expert=e)
                         lst.append((q, lambda lin=lin, e=e: dense_weight(lin, expert=e)))
                 layout = "MoE expert units: gate/up [k*F, d], down [d, k*F] (experts in unit-id order)"
-            put("gate", g, gp, 0)
-            put("up", u, up, 0)
-            put("down", dn, dp, 1)
+            put("gate", g, 0)
+            put("up", u, 0)
+            put("down", dn, 1)
         arrays["unit_ids"] = units.astype(np.int32)
         f_out = out / f"L{s.layer}.npz"
         np.savez(f_out, **arrays)

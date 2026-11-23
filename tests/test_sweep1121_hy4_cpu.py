@@ -87,7 +87,7 @@ class _Server:
         return None
 
 
-def _run_ladder(tmp_path, monkeypatch, *, answer, cached, warm_ids=(5, 6)):
+def _run_ladder(tmp_path, monkeypatch, *, answer, cached, warm_ids=(5, 6), extra=()):
     import transformers
 
     ladder = _script("hy4_context_ladder")
@@ -121,8 +121,31 @@ def _run_ladder(tmp_path, monkeypatch, *, answer, cached, warm_ids=(5, 6)):
     model.mkdir()
     out = tmp_path / "out"
     rc = ladder.main(["--model", str(model), "--out-dir", str(out), "--execution-policy", str(policy),
-                      "--cells", "1024", "--port", str(port)])
+                      "--cells", "1024", "--port", str(port), *extra])
     return rc, json.loads((out / "ladder.json").read_text())
+
+
+@pytest.mark.parametrize("arg", [
+    "--port", "--port=8282", "--por=8282", "--allow-production-p", "--host", "--mo", "--max-lan=4",
+    "--max-infl=4", "--max-con=65536", "--admin-token-f", "--execution-p", "--cache-dir", "--no-cache-d",
+    "--ast", "--ordi", "--external-d", "--prompt-look", "--native-m", "--",
+])
+def test_ladder_refuses_owned_server_options_before_setup(tmp_path, arg, capsys):
+    ladder = _script("hy4_context_ladder")
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit) as exc:
+        ladder.main(["--model", "unused", "--execution-policy", "unused", "--out-dir", str(out),
+                     f"--server-arg={arg}"])
+    assert exc.value.code == 2 and "ladder-owned" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_ladder_preserves_server_extensions(tmp_path, monkeypatch):
+    rc, report = _run_ladder(tmp_path, monkeypatch, answer="{code}", cached=999,
+                             extra=["--server-arg=--prefill-step", "--server-arg=1024",
+                                    "--server-arg=--fabric=off"])
+    assert rc == 0
+    assert report["server_command"][-3:] == ["--prefill-step", "1024", "--fabric=off"]
 
 
 def test_ladder_passes_when_oracles_pass_and_the_warm_arm_hits(tmp_path, monkeypatch):

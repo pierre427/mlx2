@@ -19,6 +19,10 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from mlx2_deploy import port_listeners
+from spec_acceptance_gsm8k import write_atomic
 
 
 def status(url):
@@ -35,6 +39,10 @@ def main(argv=None) -> int:
     ap.add_argument("--max-tokens", type=int, default=64)
     ap.add_argument("--python", default=sys.executable)
     a = ap.parse_args(argv)
+    a.model = a.model.resolve()
+    a.out = a.out.resolve()
+    if os.path.sep in a.python:
+        a.python = str(Path(a.python).resolve())
     if a.port == 8282:
         raise SystemExit("port 8282 is reserved for release trees")
     if a.out.exists() and any(a.out.iterdir()):
@@ -48,8 +56,8 @@ def main(argv=None) -> int:
     for arm in json.loads(a.arms.read_text()):
         out = a.out / arm["name"]
         out.mkdir()
-        cmd = [a.python, "-u", "-m", "mlx2.server", "--model", str(a.model), "--host", "127.0.0.1",
-               "--port", str(a.port), "--no-cache-dir", *arm.get("args", [])]
+        cmd = [a.python, "-u", "-m", "mlx2.server", "--model", str(a.model),
+               "--no-cache-dir", *arm.get("args", []), "--host", "127.0.0.1", "--port", str(a.port)]
         if arm.get("policy") is not None:
             (out / "policy.json").write_text(json.dumps(arm["policy"]))
             cmd += ["--execution-policy", str(out / "policy.json")]
@@ -71,14 +79,21 @@ def main(argv=None) -> int:
                 if time.monotonic() > deadline:
                     raise RuntimeError("server readiness timed out")
                 time.sleep(1)
+            if port_listeners(a.port) != {server.pid}:
+                raise RuntimeError("healthy endpoint belongs to a different process")
             (out / "status_before.json").write_text(json.dumps(st, indent=1, default=str))
             t0 = time.time()
             rc = subprocess.call([a.python, str(ROOT / "scripts/research/knowledge_20x20.py"), str(out / "k20"),
                                   "--url", url, "--concurrency", str(a.concurrency), "--max-tokens", str(a.max_tokens)])
             row.update(rc=rc, wall_s=round(time.time() - t0, 1))
             (out / "status_after.json").write_text(json.dumps(status(url), indent=1, default=str))
-            rep = next((p for p in (out / "k20").glob("*.json") if p.name.startswith(("report", "summary"))), None)
-            row["report"] = str(rep) if rep else None
+            report_path = out / "k20/report.json"
+            row["report"] = str(report_path) if report_path.is_file() else None
+            if rc == 0:
+                report = json.loads(report_path.read_text())
+                row["request_errors"] = report["errors"]
+                if report["errors"]:
+                    raise RuntimeError(f"{report['errors']} knowledge requests failed")
             rc_all |= rc
         except Exception as error:  # noqa: BLE001
             row["error"] = repr(error)
@@ -94,7 +109,7 @@ def main(argv=None) -> int:
                     pass
             log.close()
         summary["arms"].append(row)
-        (a.out / "summary.json").write_text(json.dumps(summary, indent=1))
+        write_atomic(a.out / "summary.json", summary)
         print(json.dumps(row), flush=True)
     return rc_all
 

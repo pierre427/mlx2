@@ -224,6 +224,20 @@ def main(argv=None) -> int:
     parser.add_argument("--load-timeout", type=float, default=900.0)
     parser.add_argument("--cell-timeout", type=float, default=3600.0)
     a = parser.parse_args(argv)
+    # mlx2.server uses argparse long-option abbreviation and accepts --name=value.
+    # These fields control what this harness measures or which socket/token it uses.
+    owned_options = {
+        "--model", "--host", "--port", "--allow-production-port", "--admin-token-file",
+        "--ordinary", "--ast", "--native-mtp", "--external-draft", "--prompt-lookup",
+        "--max-lanes", "--max-inflight", "--max-context", "--execution-policy",
+        "--cache-dir", "--no-cache-dir",
+    }
+    if a.prefill_step is not None:
+        owned_options.add("--prefill-step")
+    for arg in a.server_arg:
+        option = arg.partition("=")[0]
+        if option.startswith("--") and any(name.startswith(option) for name in owned_options):
+            parser.error(f"--server-arg cannot override ladder-owned settings: {option}")
     if a.port == 8282:
         parser.error("port 8282 is reserved for release trees")
     out = a.out_dir.expanduser().resolve()

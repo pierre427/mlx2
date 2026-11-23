@@ -27,6 +27,7 @@ from urllib.error import URLError
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from mlx2_deploy import port_listeners
 from spec_acceptance_gsm8k import (  # noqa: E402
     Client, acceptance_summary, find, median, revision, speculation_receipt, write_atomic)
 
@@ -108,6 +109,12 @@ def main(argv=None) -> int:
     ap.add_argument("--max-context", type=int, default=16384)
     ap.add_argument("--python", default=sys.executable)
     a = ap.parse_args(argv)
+    a.model = a.model.resolve()
+    a.output = a.output.resolve()
+    if os.path.sep in a.python:
+        a.python = str(Path(a.python).resolve())
+    if a.port == 8282:
+        raise SystemExit("port 8282 is reserved for release trees")
     if a.output.exists() and any(a.output.iterdir()):
         raise SystemExit(f"{a.output} is not empty")
     a.output.mkdir(parents=True, exist_ok=True)
@@ -121,9 +128,9 @@ def main(argv=None) -> int:
         out = a.output / arm["name"]
         out.mkdir()
         tree = Path(arm["tree"]).resolve()
-        command = [a.python, "-u", "-m", "mlx2.server", "--model", str(a.model), "--host", "127.0.0.1",
-                   "--port", str(a.port), "--max-inflight", "1", "--max-lanes", "1",
-                   "--max-context", str(a.max_context), "--no-cache-dir", *arm.get("args", [])]
+        command = [a.python, "-u", "-m", "mlx2.server", "--model", str(a.model), "--max-inflight", "1", "--max-lanes", "1",
+                   "--max-context", str(a.max_context), "--no-cache-dir", *arm.get("args", []),
+                   "--host", "127.0.0.1", "--port", str(a.port)]
         log = (out / "server.log").open("w")
         env = {**os.environ, "PYTHONPATH": str(tree / "src"), **arm.get("env", {})}
         server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
@@ -143,6 +150,8 @@ def main(argv=None) -> int:
                 if time.monotonic() > ready_by:
                     raise RuntimeError("server readiness timed out")
                 time.sleep(.5)
+            if port_listeners(a.port) != {server.pid}:
+                raise RuntimeError("healthy endpoint belongs to a different process")
             row["checkpoint"] = status.get("artifact") or find(status, "checkpoint")
             rows = run_cells(client, a.model.name, items, a.max_tokens, arm.get("request", {}),
                              lambda r: print(json.dumps({"arm": arm["name"], **r}), flush=True))

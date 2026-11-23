@@ -685,3 +685,25 @@ def test_packer_stored_form_slices_are_exact(bits):
     assert quant_slice(sw, expert=0, col_blocks=[1], block=16) is None      # not group aligned: float16 fallback
     lin = nn.Linear(8, 4, bias=False)
     assert quant_slice(lin, rows=[1]) is None and dense_weight(lin, [1]).shape == (1, 8)
+
+
+def test_pack_publishes_only_completed_layers_and_refuses_existing_result(tmp_path, monkeypatch):
+    from mlx2.experimental.amoeba import child_pack
+
+    dest = tmp_path / "weights"
+    dest.mkdir()
+    args = ["--cpu", "--model", "toy", "--mask", "toy-mask.npz", "--out", str(dest)]
+
+    def interrupted(a, stage):
+        (stage / "L0.npz").write_bytes(b"incomplete")
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(child_pack, "_pack", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        child_pack.main(args)
+    assert list(dest.iterdir()) == []
+    monkeypatch.setattr(child_pack, "_pack", lambda a, stage: (stage / "box_weights.json").write_text("{}"))
+    child_pack.main(args)
+    assert (dest / "box_weights.json").read_text() == "{}"
+    with pytest.raises(SystemExit, match="empty output"):
+        child_pack.main(args)

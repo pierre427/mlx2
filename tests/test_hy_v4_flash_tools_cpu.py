@@ -104,6 +104,16 @@ def test_suffix_detection():
     assert detect_suffix({"<tool_call:abc>": 5}) == ":abc"
     assert detect_suffix({}, "{%- set HYTK = ':opensource' %}") == ":opensource"
     assert detect_suffix({}) == ""
+    full = {f"<{c}{n}:opensource>": i for i, (c, n) in enumerate(
+        (c, n) for n in ("think", "tool_calls", "tool_call", "arg_key", "arg_value") for c in ("", "/"))}
+    assert detect_suffix({**full, "hello": 99}) == ":opensource"
+
+
+def test_suffix_detection_refuses_mixed_suffixes():
+    with pytest.raises(ValueError, match="inconsistent suffixes"):
+        detect_suffix({"<tool_call:abc>": 1, "</tool_call:def>": 2})
+    with pytest.raises(ValueError, match="inconsistent suffixes"):
+        detect_suffix({"<think>": 1, "<tool_call:abc>": 2})
 
 
 @pytest.mark.skipif(not TEMPLATE.is_file(), reason="Hy4-flash chat template not on this host")

@@ -69,6 +69,18 @@ def test_admission_reasons_structural_before_device():
     assert RO._banks(fused)[3:] == (2 * 768, 768, 768)
 
 
+def test_malformed_read_once_tables_and_routes_decline_before_device():
+    glu = _glu()
+    x, indices = mx.zeros((4, 512), dtype=mx.bfloat16), _route(4)
+    assert RO.refusal(glu, x[:2], indices) == "routing_shape"
+    assert RO.refusal(object(), x, indices) == "module_object"
+    down = glu.down_proj
+    down.weight, down.scales, down.biases = down.weight[:-1], down.scales[:-1], down.biases[:-1]
+    assert RO.refusal(glu, x, indices) == "geometry"
+    down.biases = down.biases[:, :1]
+    assert RO.refusal(glu, x, indices) == "quantized_plane_layout"
+
+
 def test_switch_glu_declines_and_counts_on_cpu():
     RO.status(reset=True)
     glu = _glu()

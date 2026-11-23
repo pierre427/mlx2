@@ -125,7 +125,7 @@ class _Stop(Exception):
     pass
 
 
-def layer_input(host, seqs, layer):
+def layer_input(host, seqs, layer, *, observed=None):
     """Residual stream entering ``layer`` for a batch of equal-length sequences (early exit after it)."""
     import mlx.core as mx
     lay = host.layers[layer]
@@ -147,14 +147,15 @@ def layer_input(host, seqs, layer):
     finally:
         lay.__class__ = base
     x = box["x"]
+    if observed is not None:
+        observed["hc_streams"] = x.ndim == 4
     if x.ndim == 4:
         # hyper-connection streams [B, T, n, D] (Hy4-flash hc_mult = 4): the gate reads their mean
         x = mx.mean(x.astype(mx.float32), axis=2)
-        layer_input.hc_streams = True
     return np.array(x.astype(mx.float32))
 
 
-def features(host, seqs, layer, k, seed, bs=8):
+def features(host, seqs, layer, k, seed, bs=8, *, observed=None):
     """[n_windows, k, d] hidden rows at k seeded positions >= 1 of each window."""
     out = [None] * len(seqs)
     by = {}
@@ -163,7 +164,7 @@ def features(host, seqs, layer, k, seed, bs=8):
     for _, idx in sorted(by.items()):
         for j in range(0, len(idx), bs):
             g = idx[j:j + bs]
-            H = layer_input(host, [seqs[i] for i in g], layer)
+            H = layer_input(host, [seqs[i] for i in g], layer, observed=observed)
             for r, i in enumerate(g):
                 T = H.shape[1]
                 rng = np.random.default_rng(seed + i)
@@ -206,6 +207,7 @@ def gates(a):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     feats = {}
+    observed = {}
     child_event("steps", steps=len(names) + 1 + bool(a.negative_probes))
     t0 = time.time()
     extra = ["__english__"] + (["__other__"] if a.negative_probes else [])
@@ -230,7 +232,7 @@ def gates(a):
         for sp, rs in rows.items():
             seqs = [s for s in (window(host, r["text"], a.window_tokens, r.get("probe_id") or r.get("doc_id") or r["text"][:64],
                                        a.seed, is_code(r, prefixes)) for r in rs) if s is not None]
-            feats[name][sp] = features(host, seqs, layer, a.tokens, a.seed, bs=a.bs) if seqs else []
+            feats[name][sp] = features(host, seqs, layer, a.tokens, a.seed, bs=a.bs, observed=observed) if seqs else []
         child_event("step", step=i, s_per_step=round((time.time() - t0) / (i + 1), 2))
     gw, gb, res = {}, {}, {}
     for name in names:
@@ -258,7 +260,7 @@ def gates(a):
         gw[name], gb[name] = w, b
         res[name]["threshold_raw"] = thr
     np.savez_compressed(out / "gates.npz", **{f"{n}__w": gw[n] for n in gw}, **{f"{n}__b": np.float32(gb[n]) for n in gb})
-    hc_streams = getattr(layer_input, "hc_streams", False)
+    hc_streams = observed.get("hc_streams", False)
     rep = {"schema": "mlx2.amoeba-gates.v1", "checkpoint": host.checkpoint, "fingerprint": host.fingerprint,
            "layer": layer, "feature": f"residual stream entering layer {layer} (raw; standardisation folded in"
                       f"{'; mean of the hyper-connection streams' if hc_streams else ''})",

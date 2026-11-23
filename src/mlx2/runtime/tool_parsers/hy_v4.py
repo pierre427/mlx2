@@ -31,6 +31,7 @@ from ._schema import json_native
 
 DEFAULT_SUFFIX = ":opensource"
 _STRUCTURAL = re.compile(r"<(?:think|tool_calls|tool_call|arg_key|arg_value)(:[^\s>]+)?>")
+_STRUCTURAL_ANY = re.compile(r"</?(?:think|tool_calls|tool_call|arg_key|arg_value)(:[^\s>]+)?>")
 
 
 _TEMPLATE_SUFFIX = re.compile(r"""set\s+HYTK\s*=\s*(?:'([^']*)'|"([^"]*)")""")
@@ -38,11 +39,16 @@ _TEMPLATE_SUFFIX = re.compile(r"""set\s+HYTK\s*=\s*(?:'([^']*)'|"([^"]*)")""")
 
 def detect_suffix(vocab, chat_template: str | None = None) -> str:
     """The structural-token suffix: from the tokenizer vocab (vLLM
-    ``detect_token_suffix``), else the chat template's ``HYTK``, else none."""
-    for token in vocab:
-        match = _STRUCTURAL.fullmatch(token)
-        if match:
-            return match.group(1) or ""
+    ``detect_token_suffix``), else the chat template's ``HYTK``, else none.
+
+    Every structural token in the vocab, opening and closing, must carry the same
+    suffix; a mixed vocab raises instead of silently picking the first match
+    (Rapid-MLX 8c094dc70, see PROVENANCE.md)."""
+    suffixes = {m.group(1) or "" for m in map(_STRUCTURAL_ANY.fullmatch, vocab) if m}
+    if len(suffixes) > 1:
+        raise ValueError(f"Hy4 structural tokens carry inconsistent suffixes {sorted(suffixes)}")
+    if suffixes:
+        return suffixes.pop()
     if chat_template:
         match = _TEMPLATE_SUFFIX.search(chat_template)
         if match:
