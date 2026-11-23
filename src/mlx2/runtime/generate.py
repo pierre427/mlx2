@@ -44,7 +44,13 @@ from .models.cache import (
 )
 from .multi_lora import bind_lora_rows, clear_lora_rows
 from .prefill_checkpoint_rows import prefill_checkpoint_rows
-from .prefill_lookahead import StateOnlyPrefillOutput, prefill_lookahead
+from .prefill_lookahead import (
+    StateOnlyPrefillOutput,
+    planned_growth_enabled,
+    planned_prompt_rows,
+    planned_rows_for,
+    prefill_lookahead,
+)
 from .prefill_plan import (
     checkpoint_bounded_prefill_rows,
     depth_bounded_prefill_rows,
@@ -1091,6 +1097,10 @@ class PromptProcessingBatch:
                 ends here, as for a whole-prompt call.  A scheduler that
                 slices a prompt across rounds must pass them, or every slice
                 is labelled terminal to the expert caches.
+
+        A scheduler may scope ``prefill_lookahead.planned_prompt_rows``
+        around the call: an allocation hint only, sizing append-only cache
+        growth for the rest of each lane's planned prompt.
         """
         if len(self.uids) != len(tokens):
             raise ValueError("The batch length doesn't match the number of inputs")
@@ -1185,6 +1195,8 @@ class PromptProcessingBatch:
                         next_tokens=(np.asarray(tokens[:, n_to_process:n_to_process + self.prefill_step_size])
                                      if getattr(self.model, "engram_carry_enabled", False)
                                      and len(lengths) == 1 and not kwargs else None),
+                        width=n_to_process,
+                        planned_after=planned_rows_for(len(lengths)),
                     )
                     with context, stream_context, lookahead, prefill_checkpoint_rows(
                         chunk_lengths, width=n_to_process
@@ -4813,6 +4825,8 @@ class BatchGenerator:
         ):
             self.scheduler_stats.setdefault(key, 0)
         self.scheduler_stats.setdefault("adaptive_prefill_chunk_histogram", {})
+        # Which K/V growth arm this engine runs (MLX2_KV_PLANNED_GROWTH).
+        self.scheduler_stats["kv_planned_growth"] = planned_growth_enabled()
         if self.batch_geometry.enabled:
             for key in (
                 "batch_geometry_rounds",
@@ -9666,6 +9680,32 @@ class BatchGenerator:
                 chunk = candidate
         return chunk
 
+    def _planned_prompt_rows_after(self):
+        """Per-lane allocation hint for the round's plain prompt slice.
+
+        The rest of each lane's prompt but its final token (decode feeds
+        that one), stopping at the lane's next capture checkpoint: a
+        checkpoint taken at the end of this slice plans nothing past it.
+        A captured boundary may alias the live buffers, so it then pins
+        what the stepped growth would have, not the whole prompt's
+        capacity.  ``None`` under in-pass checkpoints, which capture inside
+        a slice.  K/V grows once per lane span instead of copying the whole
+        buffer every round; the hint never changes what any row computes.
+        """
+        if not planned_growth_enabled() or self._inpass_checkpoint_enabled():
+            return None
+        planned = []
+        for index, seq in enumerate(self._currently_processing):
+            rows = max(0, sum(len(segment) for segment in seq[0]) - 1)
+            covered = int(seq[4] or 0) + int(seq[1])
+            position = self._peek_capture_checkpoint(
+                int(self._prompt_batch.uids[index]), covered - 1
+            )
+            if position is not None:
+                rows = min(rows, max(0, int(position) - covered))
+            planned.append(rows)
+        return planned
+
     def _capture_plain_interior_checkpoints(self):
         if not self._currently_processing:
             return
@@ -10324,7 +10364,8 @@ class BatchGenerator:
             not seq[0] or (len(seq[0]) == 1 and len(seq[0][0]) == 1)
             for seq in self._currently_processing
         ]
-        self._prompt_batch.prompt(prompts, final_rows=final_rows)
+        with planned_prompt_rows(self._planned_prompt_rows_after()):
+            self._prompt_batch.prompt(prompts, final_rows=final_rows)
         self._capture_plain_interior_checkpoints()
         for index, sequence in enumerate(self._currently_processing):
             if (

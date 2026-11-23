@@ -1440,18 +1440,21 @@ class EngramLayer(nn.Module):
 _STEP = 256
 
 
-def _buf_append(obj, p, x):
+def _buf_append(obj, p, x, reserve=0):
     """Append ``x [B, n, d]`` to buffer ``p`` of ``obj`` (``p_data/p_head/p_end``).
 
     Writes only at or past ``p_end`` into the existing buffer; growth (and,
     for a moving head, compaction) allocates a fresh buffer object, so rows
     below the old fill level of the old object are never rewritten.
+    ``reserve`` rows (append-only planes, from ``_prompt_reserve``) are
+    allocated with a growth so the rest of a planned prompt appends in place
+    instead of reallocating and copying the plane once per chunk.
     """
     data, head, end = getattr(obj, p + "_data"), getattr(obj, p + "_head"), getattr(obj, p + "_end")
     n = x.shape[1]
     if data is None or end + n > data.shape[1]:
         live = end - head
-        grow = ((live + n + _STEP - 1) // _STEP) * _STEP
+        grow = ((live + n + reserve + _STEP - 1) // _STEP) * _STEP
         new = mx.zeros((x.shape[0], max(grow, live + n), x.shape[2]), dtype=x.dtype)
         if data is not None and live:
             new[:, :live] = data[:, head:end]
@@ -1462,6 +1465,56 @@ def _buf_append(obj, p, x):
     setattr(obj, p + "_head", head)
     setattr(obj, p + "_end", end)
     return data[:, head:end]
+
+
+def _prompt_reserve(x):
+    """Remaining planned prompt rows past this append of ``x [1, n, d]``.
+
+    Only a B=1 lane appending exactly the prompt chunk's width (see
+    ``prefill_lookahead.allocation_rows_after``); a multi-lane batch's rows
+    are private per lane and keep 256-row growth.  The plane then reaches
+    the capacity the stepped growth reaches at the prompt's end (the
+    ``ceil(n / 256) * 256`` rows ``hy_v4_flash_memory`` projects) in one
+    allocation instead of one reallocation and whole-plane copy per chunk.
+    """
+    if x.shape[0] != 1:
+        return 0
+    from ..prefill_lookahead import allocation_rows_after
+
+    return allocation_rows_after(int(x.shape[1]), 1)
+
+
+def _without_planned_capacity(row):
+    """``row`` with planned prompt capacity (``_prompt_reserve``) copied away.
+
+    An extracted row aliases the live planes.  A boundary captured mid-prompt
+    (an interior checkpoint, possibly added in flight) would otherwise pin a
+    plane sized for the whole planned prompt, and the live lane's next append
+    would copy it whole.  A plane holding more than one step of spare rows
+    past the stepped capacity of its fill (which stepped growth leaves only
+    after a rollback of more than a step) gets an exact copy of its live rows
+    at that envelope; other planes stay aliased.
+    """
+    from ..prefill_lookahead import planned_growth_enabled
+
+    if row.kind != INDEXED or not planned_growth_enabled():
+        return row
+    for p in ("kv", "tk", "gk"):
+        data = getattr(row, p + "_data")
+        if data is None:
+            continue
+        head, end = getattr(row, p + "_head"), getattr(row, p + "_end")
+        live = end - head
+        envelope = ((live + _STEP - 1) // _STEP) * _STEP + _STEP
+        if data.shape[1] <= envelope:
+            continue
+        new = mx.zeros((data.shape[0], envelope, data.shape[2]), dtype=data.dtype)
+        if live:
+            new[:, :live] = data[:, head:end]
+        setattr(row, p + "_data", new)
+        setattr(row, p + "_head", 0)
+        setattr(row, p + "_end", live)
+    return row
 
 
 def _buf_view(obj, p):
@@ -1584,7 +1637,8 @@ class HY4FlashLayerCache(_BaseCache):
         """Append ``[B, L, r+p]``; return the rows this step attends and their first position."""
         self._resolve_deferred()
         L = keys.shape[1]
-        rows = _buf_append(self, self._kv, keys)
+        reserve = _prompt_reserve(keys) if self.kind == INDEXED else 0
+        rows = _buf_append(self, self._kv, keys, reserve)
         first = self.start
         self.offset += L
         if self.kind == SLIDING:
@@ -1612,7 +1666,8 @@ class HY4FlashLayerCache(_BaseCache):
 
     def append_index_keys(self, token_keys, indexer):
         self._resolve_deferred()
-        keys = _buf_append(self, "tk", token_keys)
+        reserve = _prompt_reserve(token_keys)
+        keys = _buf_append(self, "tk", token_keys, reserve)
         complete = keys.shape[1] // self.ratio
         have = _buf_len(self, "gk")
         if complete > have:
@@ -1620,7 +1675,9 @@ class HY4FlashLayerCache(_BaseCache):
                          if self.mrope_spans else None)
             pooled = indexer.pool(keys[:, have * self.ratio : complete * self.ratio], have,
                                   positions=positions)
-            _buf_append(self, "gk", pooled)
+            # Pooled rows the rest of the planned prompt completes.
+            _buf_append(self, "gk", pooled,
+                        (keys.shape[1] + reserve) // self.ratio - complete if reserve else 0)
         return _buf_view(self, "gk") if _buf_len(self, "gk") else mx.zeros(
             (token_keys.shape[0], 0, token_keys.shape[2]), dtype=mx.float32)
 
@@ -1987,7 +2044,7 @@ class HY4FlashBatchLayerCache(_BaseCache):
     def extract(self, index):
         if type(index) is not int or not 0 <= index < len(self.rows):
             raise ValueError("invalid batch row index")
-        return self.rows[index].clone()
+        return _without_planned_capacity(self.rows[index].clone())
 
     def filter(self, keep):
         keep = list(keep)

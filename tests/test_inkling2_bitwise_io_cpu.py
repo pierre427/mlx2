@@ -25,6 +25,14 @@ from test_inkling2_cpu import _tiny_model
 
 
 @pytest.fixture(autouse=True)
+def _io_switches_on(monkeypatch):
+    """The ring-direct and vector-load switches ship off until their Metal
+    tests run; these tests exercise them (and set them off where needed)."""
+    monkeypatch.setattr(splitk, "RING_DIRECT", True)
+    monkeypatch.setattr(splitk, "VECTOR_LOADS", True)
+
+
+@pytest.fixture(autouse=True)
 def _cpu():
     old = mx.default_device()
     mx.set_default_device(mx.cpu)

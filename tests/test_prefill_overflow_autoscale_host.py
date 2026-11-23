@@ -19,6 +19,7 @@ from mlx2.runtime.prefill_plan import (
     shared_prefill_budget_width,
     single_round_prefill_rows,
 )
+from mlx2.runtime.prefill_lookahead import planned_growth_enabled, planned_prompt_rows
 from mlx2.runtime.prefill_slice_schedule import record_slice
 
 SOURCE = (
@@ -54,6 +55,8 @@ def _batch_generator_harness():
             "_planned_prompt_prefill_step",
             "_planned_prefill_rows",
             "_record_prefill_slice",
+            "_planned_prompt_rows_after",
+            "_peek_capture_checkpoint",
         }
     ]
     harness = ast.ClassDef(
@@ -81,6 +84,8 @@ def _batch_generator_harness():
         "prompt_length_prefill_step": prompt_length_prefill_step,
         "_declared_model_callback": lambda model, name: None,
         "_record_slice": record_slice,
+        "planned_prompt_rows": planned_prompt_rows,
+        "planned_growth_enabled": planned_growth_enabled,
     }
     exec(compile(module, str(SOURCE), "exec"), namespace)  # noqa: S102
     return namespace["BatchGenerator"]

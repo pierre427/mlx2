@@ -47,6 +47,7 @@ SERVING_ENV_SWITCHES = {
     "MLX2_FP_ROW_EXACT_KERNEL": "exact FP8/NVFP4 verify rows: single-pass fused kernel (default), fused_chunked (opt-in: 9..16 rows as <=8-row fused launches) or per-row loop (bit-identical, self-checked)",
     "MLX2_NEMOTRON_SSD_MMA": "Nemotron-H Mamba-2 prefill scan as 8x8 simdgroup products, 32-row chunks (opt-in; not bit-identical, APCv2-bound)",
     "MLX2_NEMOTRON_ATTN_STAGED": "Nemotron-H GQA-16 causal prefill attention with staged K/V tiles (opt-in, measured slower than MLX SDPA; APCv2-bound)",
+    "MLX2_KV_PLANNED_GROWTH": "prompt K/V growth: one allocation per planned prompt span (1, default) or 256-row steps per chunk (0, the old policy); allocation only, no computed bit changes",
     # MLX's own commit caps, latched at Metal start (set by MLX2_COMMAND_BUFFERS
     # or by the operator): schedule and transient memory, never values.
     "MLX_MAX_OPS_PER_BUFFER": "MLX command-buffer kernel cap",

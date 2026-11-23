@@ -1318,15 +1318,45 @@ class KVCache(_BaseCache):
                 setattr(self, name, mx.concatenate([value, mx.zeros(shape, value.dtype)], axis=2))
         return self
 
+    @staticmethod
+    def _planned_prompt_rows(cache, exact_type, keys) -> int:
+        """Rows one growth also allocates for the rest of the planned prompt.
+
+        A prompt-chunk append grew the buffer by one 256-row quantum past the
+        chunk, so every chunk of a long prefill concatenated (copied) the whole
+        buffer: quadratic in the prompt (about 64 GiB per global layer over a
+        128K Inkling 2 prefill).  Inside a prompt-chunk scope
+        (``prefill_lookahead.allocation_rows_after``, single-lane prompts) the
+        growth instead covers the lane's remaining planned prompt rows, so a
+        prefill allocates once per planned span.
+        At the planned prompt's end the capacity is what the stepped policy
+        reaches there when the fill starts step-aligned and slices are step
+        multiples (the usual schedule), and otherwise at most ``step - 1`` rows
+        past the fill: the alignment-independent envelope (``units + step - 1``)
+        every KV memory projection already charges.  Resident bytes at the
+        prompt boundary, APCv2 snapshots and persisted state therefore do not
+        grow; reads stay below the fill cursor, so outputs are bitwise
+        identical.  Decode keeps 256-row growth (one copy per 256 tokens, about
+        1-2% of the attention traffic it accompanies).  Exact types only:
+        subclasses keep their own step-coupled ledgers.
+        """
+        if type(cache) is not exact_type:
+            return 0
+        # Absolute: CPU oracles exec this class body outside the package.
+        from mlx2.runtime.prefill_lookahead import allocation_rows_after
+
+        return allocation_rows_after(int(keys.shape[2]), int(keys.shape[0]))
+
     def update_and_fetch(self, keys, values):
         prev = self.offset
         if self.keys is None or prev + keys.shape[2] > self.keys.shape[2]:
             (B, n_kv_heads, _, k_head_dim) = keys.shape
             v_head_dim = values.shape[3]
-            growth = ((self.step + keys.shape[2] - 1) // self.step) * self.step
+            rows = keys.shape[2] + KVCache._planned_prompt_rows(self, KVCache, keys)
+            growth = ((self.step + rows - 1) // self.step) * self.step
             reservation = getattr(self, "_reserve_tokens", 0)
             if reservation:
-                target = ((max(reservation, prev + keys.shape[2]) + self.step - 1) // self.step) * self.step
+                target = ((max(reservation, prev + rows) + self.step - 1) // self.step) * self.step
                 growth = target - prev
             k_shape = (B, n_kv_heads, growth, k_head_dim)
             v_shape = (B, n_kv_heads, growth, v_head_dim)
@@ -4216,10 +4246,11 @@ class BatchKVCache(_BaseCache):
         if self.keys is None or prev + keys.shape[2] > self.keys.shape[2]:
             (B, n_kv_heads, _, k_head_dim) = keys.shape
             v_head_dim = values.shape[3]
-            growth = ((self.step + keys.shape[2] - 1) // self.step) * self.step
+            rows = keys.shape[2] + KVCache._planned_prompt_rows(self, BatchKVCache, keys)
+            growth = ((self.step + rows - 1) // self.step) * self.step
             reservation = getattr(self, "_reserve_tokens", 0)
             if reservation:
-                target = ((max(reservation, prev + keys.shape[2]) + self.step - 1) // self.step) * self.step
+                target = ((max(reservation, prev + rows) + self.step - 1) // self.step) * self.step
                 growth = target - prev
             k_shape = (B, n_kv_heads, growth, k_head_dim)
             v_shape = (B, n_kv_heads, growth, v_head_dim)
@@ -4618,8 +4649,22 @@ class BatchKVCache(_BaseCache):
         """
         self._invalidate_attention_groups()
         if self.keys is not None:
-            self.keys = self.keys[batch_indices]
-            self.values = self.values[batch_indices]
+            keys, values = self.keys, self.values
+            # Drop planned prompt capacity (``KVCache._planned_prompt_rows``)
+            # the kept rows have not reached: a lane split off a prompt batch
+            # must not carry a sibling's planned prompt into decode.  Only
+            # spare rows past the stepped envelope go (stepped growth leaves
+            # them only after a rollback of more than a step); the gather
+            # copies anyway, and reads stay below ``_idx``.
+            from mlx2.runtime.prefill_lookahead import planned_growth_enabled
+
+            envelope = -(-self._idx // self.step) * self.step + self.step
+            if (type(self) is BatchKVCache and keys.shape[2] > envelope
+                    and not getattr(self, "_reserve_tokens", 0)
+                    and planned_growth_enabled()):
+                keys, values = keys[..., :envelope, :], values[..., :envelope, :]
+            self.keys = keys[batch_indices]
+            self.values = values[batch_indices]
         self.offset = self.offset[batch_indices]
         self.left_padding = self.left_padding[batch_indices]
         # A surviving row can still have padding in future prefill chunks.
@@ -4648,6 +4693,21 @@ class BatchKVCache(_BaseCache):
             self.offset = mx.concatenate([self.offset, other.offset])
             return
         max_idx = max(self._idx, other._idx)
+        from mlx2.runtime.prefill_lookahead import planned_growth_enabled
+
+        for c in (self, other) if planned_growth_enabled() else ():
+            # A lane's planned prompt capacity (allocation_rows_after) must not
+            # become every joiner's padding: trim each side to the stepped
+            # envelope ``filter`` keeps (rows past it are never read), so the
+            # batch holds at most one step past the fill, as admission charges.
+            # The concatenation below copies both sides anyway, so the trim
+            # adds no copy; a planned lane re-plans on its next B=1 slice.
+            if (type(c) is BatchKVCache and c.keys is not None
+                    and not getattr(c, "_reserve_tokens", 0)):
+                envelope = -(-c._idx // c.step) * c.step + c.step
+                if c.keys.shape[2] > envelope:
+                    c.keys = c.keys[..., :envelope, :]
+                    c.values = c.values[..., :envelope, :]
         L1 = L2 = 0
         if self.keys is not None:
             (B, H, L1, D) = self.keys.shape
