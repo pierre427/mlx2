@@ -155,8 +155,15 @@ def descriptor_for(*, dfly_selected: bool = False, engram_table_format: str = "b
     # REASONING: opt-in per request (``no_think`` stays the default).
     # GRAMMAR: forced tool_choice decodes under the Hy4 call grammar; it also
     # admits the generic response_format/grammar processor.  All unqualified.
+    # PROMPT_LOOKUP: the generic latched prompt-lookup route (``--prompt-lookup``,
+    # runtime/pld) verifies drafts with the ordinary forward and rolls back by
+    # the cache's exact ``kv_trim`` contract (Engram token tails trim with it).
+    # Lanes keep a per-lane rollback epoch: the layer cache has no segmented
+    # batch view.  Implemented, unqualified, never a default
+    # (``prompt_lookup_default`` stays False).
     capabilities = {Capability.TEXT, Capability.STREAMING, Capability.CONTINUOUS_BATCH,
-                    Capability.TOOLS, Capability.REASONING, Capability.GRAMMAR}
+                    Capability.TOOLS, Capability.REASONING, Capability.GRAMMAR,
+                    Capability.PROMPT_LOOKUP}
     fp8 = latent_kv == "fp8"
     if not fp8:
         # Approximate fp8 rows are never published as exact prefixes.
@@ -564,7 +571,66 @@ AST_KEYS = frozenset({"draft_model", "num_draft", "ast_topology", "ast_tiles", "
                       "ast_multilane_tile_rows", "ast_adaptive_rows", "batch_size_route",
                       "pairwise_selection", "cost_per_commit_handoff", "ast_graft_prompt_lookup",
                       "ast_target_executor", "ast_tensorfold_rows", "ast_tensorfold_rows_backend",
-                      "draft_quantization"})
+                      "draft_quantization", "adaptive_verification"})
+# ``adaptive_verification`` (opt-in, unqualified; DFly2 route only, not
+# route-neutral): the engine's lagged cost model (runtime/acceptance_estimator
+# AdaptiveVerificationPolicy) caps the DFly2 chain's length each round from a
+# shared online per-position acceptance estimate (earlier committed rounds
+# only) and a per-depth cost table; committed tokens stay the target's own.
+# A dict is the engine's cost model; a string names a preset below.
+#
+# ``hy4_measured_20261121``: Hy4-flash-MLX-4.6bit-mlx2, mlx2 d5630db31, one
+# rep at 1K context: ordinary step 26.3 ms; a DFly2 round of 6 verify rows
+# 59.1 ms = draft 9.1 (5 tokens) + verify 48.1 + host 1.9.  For depth d
+# (d drafted tokens, d + 1 verify rows):
+#     cost[d] = V(d + 1) + 1.82 * d,  V(r) = 26.3 + (48.1 - 26.3) * (r - 1) / 5
+# (verify interpolated linearly between 1 row = the ordinary step and 6 rows;
+# draft 9.1 / 5 = 1.82 ms per drafted token), and draft_cost = 1.9 ms host
+# per round, so cost[5] + draft_cost = 59.1 ms.  Depths above 5 extrapolate
+# the same lines (unmeasured).  Only the B1 table was measured, so cohorts of
+# two to four lanes keep their tile-budget depth unless a dict policy gives
+# ``verification_costs_by_cohort``.  With GSM8K's per-position acceptance
+# (p1 0.83, p2 0.67, p3 0.53, MAL ~3.8) depths 3-5 score within the 5% gain
+# margin, so the cap should stay at 5 on math and trim on low-acceptance text.
+HY4_DFLY_ORDINARY_MS = 26.3
+HY4_DFLY_VERIFY6_MS = 48.1
+HY4_DFLY_DRAFT_MS_PER_TOKEN = 9.1 / 5
+HY4_DFLY_HOST_MS = 1.9
+
+
+def hy4_dfly_cost_table(num_draft, *, ordinary_ms=HY4_DFLY_ORDINARY_MS,
+                        verify6_ms=HY4_DFLY_VERIFY6_MS,
+                        draft_ms_per_token=HY4_DFLY_DRAFT_MS_PER_TOKEN):
+    """``cost[d]`` in ms for d = 0..num_draft (formula above)."""
+    slope = (verify6_ms - ordinary_ms) / 5
+    return [round(ordinary_ms + (slope + draft_ms_per_token) * d, 4) for d in range(num_draft + 1)]
+
+
+ADAPTIVE_VERIFICATION_PRESETS = {
+    "hy4_measured_20261121": lambda num_draft: {
+        "verification_costs": hy4_dfly_cost_table(num_draft),
+        "draft_cost": HY4_DFLY_HOST_MS,
+        "cohort_size": 1,
+    },
+}
+# ``cost_per_commit_handoff`` is the engine's reversible park/reprobe latch
+# (runtime/cost_per_commit_handoff).  The tree route already installs it by
+# default (authority ``runtime_tree_tile_default``: 3 ordinary + 2
+# speculative samples, one loss decision, re-probe after 16 parked tokens
+# backing off to 256).  ``false`` turns it off and a dict sets it.  The
+# opt-in preset below is a slower-to-park shape modelled on the latched
+# prompt-lookup default (a plain baseline, explore rounds, re-probe every 32
+# tokens): park only after two losing windows of four speculative rounds,
+# judged on committed-token wall time against the ordinary median; then
+# shadow-probe after 32 parked tokens, doubling to 256 on a failed re-probe.
+COST_HANDOFF_PRESETS = {
+    "hy4_park_20261121": {
+        "ordinary_samples": 4, "speculative_samples": 4, "loss_ratio": 0.97,
+        "loss_decisions": 2, "window": 8, "reversible": True,
+        "reprobe_tokens": 32, "reprobe_max_tokens": 256, "deferred_context_cap": 64,
+        "settle_rounds": 1, "pipelined_park": True,
+    },
+}
 DFLY_DRAFT_QUANTIZATION_DEFAULT = {"bits": 8, "group_size": 64}
 # ``draft_quantization`` (the shared drafter key, adapters/dflash2
 # validate_runtime_quantization: {"bits": 4|8, "group_size": 32|64|128}):
@@ -678,6 +744,36 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
     draft_quantization = validate_runtime_quantization(external.pop("draft_quantization", None))
     if not explicit and kind == "dfly":
         draft_quantization = dict(DFLY_DRAFT_QUANTIZATION_DEFAULT)
+    adaptive = external.pop("adaptive_verification", None)
+    adaptive_preset = None
+    if adaptive is not None and adaptive is not False:
+        if kind != "dfly":
+            raise ValueError("Hy4-flash adaptive_verification applies to the embedded DFly2 drafter only")
+        if external.get("ast_topology") != "chain":
+            raise ValueError("Hy4-flash adaptive_verification caps the DFly2 chain (ast_topology chain)")
+        if isinstance(adaptive, str):
+            if adaptive not in ADAPTIVE_VERIFICATION_PRESETS:
+                raise ValueError(f"Hy4-flash adaptive_verification preset must be one of "
+                                 f"{sorted(ADAPTIVE_VERIFICATION_PRESETS)} or a cost-model dict")
+            adaptive_preset = adaptive
+            adaptive = ADAPTIVE_VERIFICATION_PRESETS[adaptive](external["num_draft"])
+        from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
+
+        if not isinstance(adaptive, dict):
+            raise ValueError("Hy4-flash adaptive_verification must be a preset name or a cost-model dict")
+        # Validated here; the engine receives the caller's cost model.
+        AdaptiveVerificationPolicy.from_value(adaptive, external["num_draft"])
+        adaptive = json.loads(json.dumps(adaptive))
+    else:
+        adaptive = None
+    handoff = external.get("cost_per_commit_handoff")
+    handoff_preset = None
+    if isinstance(handoff, str):
+        if handoff not in COST_HANDOFF_PRESETS:
+            raise ValueError(f"Hy4-flash cost_per_commit_handoff preset must be one of "
+                             f"{sorted(COST_HANDOFF_PRESETS)}, a dict or a boolean")
+        handoff_preset = handoff
+        external["cost_per_commit_handoff"] = dict(COST_HANDOFF_PRESETS[handoff])
     executor = external.pop("ast_target_executor", "packed")
     if executor not in AST_TARGET_EXECUTORS:
         raise ValueError("Hy4-flash ast_target_executor must be 'packed' (default) or 'serial'")
@@ -694,6 +790,13 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
 
     external = _native_mtp_tree_policy(external)
     external["ast_target_executor"] = executor
+    if adaptive is not None:
+        external["adaptive_verification"] = adaptive
+    # Receipt names of the presets (not engine keys; create_external_batch
+    # forwards only the resolved values).
+    if adaptive_preset is not None or handoff_preset is not None:
+        external["_presets"] = {"adaptive_verification": adaptive_preset,
+                                "cost_per_commit_handoff": handoff_preset}
     if draft_quantization is not None:
         external["draft_quantization"] = draft_quantization
     if rows:
@@ -982,6 +1085,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise ValueError("Hy4-flash declares no weight streaming mode")
         artifact = inspect_artifact(model_path)
         policy, external, kind = _parse_policy(execution_policy, artifact["identity"]["path"])
+        self.policy_presets = external.pop("_presets", {})
         self.identity = artifact["identity"]
         # fp8 rows get their own layout name: APCv2 namespaces never mix
         # approximate state with the exact layout (and APCv2 refuses to
@@ -1146,7 +1250,48 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         for key in ("ast_topology", "ast_adaptive_rows"):
             if key in self.external_policy:
                 kwargs.setdefault(key, self.external_policy[key])
-        return super().create_external_batch(**kwargs)
+        import weakref
+
+        batch = super().create_external_batch(**kwargs)
+        # Receipts only (``diagnostics``): the latches' engine state.
+        self._ast_batch_ref = weakref.ref(batch)
+        return batch
+
+    def _latch_receipts(self):
+        """Adaptive depth and the park latch: selected / observed_used / counters."""
+        ref = getattr(self, "_ast_batch_ref", None)
+        batch = ref() if ref is not None else None
+        stats = getattr(batch, "scheduler_stats", {}) if batch is not None else {}
+        presets = getattr(self, "policy_presets", {}) or {}
+        external = getattr(self, "external_policy", {}) or {}
+        adaptive = {
+            "implemented": True, "qualified": False,
+            "selected": external.get("adaptive_verification") is not None,
+            "preset": presets.get("adaptive_verification"),
+            "engaged": bool(getattr(batch, "adaptive_tree_chain", False)),
+            "observed_used": stats.get("external_adaptive_trimmed_rounds", 0) > 0,
+            "rounds": stats.get("external_adaptive_rounds", 0),
+            "trimmed_rounds": stats.get("external_adaptive_trimmed_rounds", 0),
+            "trimmed_target_rows": stats.get("external_adaptive_trimmed_target_rows", 0),
+            "chain_depths": dict(stats.get("external_adaptive_tree_chain_depths", {})),
+        }
+        settings = getattr(batch, "cost_per_commit_handoff", None) if batch is not None else None
+        park = {
+            "implemented": True, "qualified": False,
+            "selected": settings is not None if batch is not None
+            else external.get("cost_per_commit_handoff") is not False,
+            "authority": getattr(batch, "cost_per_commit_handoff_authority", None),
+            "preset": presets.get("cost_per_commit_handoff"),
+            "settings": settings.as_dict() if settings is not None else None,
+            "observed_used": stats.get("external_cost_park_events", 0) > 0,
+            "park_events": stats.get("external_cost_park_events", 0),
+            "parked_rounds": (stats.get("external_cost_parked_rounds", 0)
+                              + stats.get("external_cost_parked_flush_rounds", 0)),
+            "reprobes": stats.get("external_cost_reprobe_events", 0),
+            "reengagements": stats.get("external_cost_reengage_events", 0),
+            "reparks": stats.get("external_cost_repark_events", 0),
+        }
+        return {"adaptive_depth": adaptive, "park_latch": park}
 
     # Hy4's template takes ``reasoning_effort`` (no_think/high, default high;
     # ``max`` was removed upstream in tencent/Hy4-flash@b2498eba).  mlx2 renders no_think unless the request opts in
@@ -1492,6 +1637,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "serving_engine": "external-draft engine, chain-packed AST executor (requires_target_caches)",
         }
         dfly["quantization"] = self._dfly_quantization_receipt(dfly["observed_used"])
+        if draft is not None:
+            dfly.update(self._latch_receipts())
         if getattr(self, "dfly_stats", None):
             dfly["stats"] = dict(self.dfly_stats)
         counters = getattr(self, "feature_stats", None)

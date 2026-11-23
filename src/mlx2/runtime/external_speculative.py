@@ -1645,8 +1645,32 @@ class ExternalDraftBatchGenerator:
                 and self.continuation_policy is None):
             raise ValueError("continuation costs require a bound complete continuation route")
         self.acceptance_estimator = None
+        # Adaptive depth on the tree route: a topology-aware drafter asked
+        # for one ``chain`` path verifies a linear chain, so the lagged cost
+        # model may cap its length through the node budget
+        # (``_adaptive_tree_depth``).  Only earlier committed rounds decide;
+        # the verification law is unchanged.
+        self.adaptive_tree_chain = False
+        self._adaptive_tree_decisions = {}
+        if self.adaptive_policy is not None and dynamic_singleton_tree:
+            from .ast_tree_proposals import parse_topology
+
+            if (
+                self.ast_topology is None
+                or parse_topology(self.ast_topology) != "chain"
+                or not getattr(draft_model, "tree_topology_aware", False)
+                or self.adaptive_policy.mode != "cohort"
+                or self.adaptive_policy.continuation_costs
+            ):
+                raise ValueError(
+                    "adaptive verification on the tree route requires ast_topology "
+                    "chain, a topology-aware drafter and the cohort cost model"
+                )
+            self.adaptive_tree_chain = True
         if self.adaptive_policy is not None:
-            if self.draft_topology != "chain" or self.fly_verification.enabled:
+            if (
+                self.draft_topology != "chain" and not self.adaptive_tree_chain
+            ) or self.fly_verification.enabled:
                 raise ValueError("adaptive verification requires exact chain verification")
             self.acceptance_estimator = OnlineAcceptanceEstimator(
                 self.num_draft, refit_interval=self.adaptive_policy.refit_interval,
@@ -3981,8 +4005,10 @@ class ExternalDraftBatchGenerator:
             self, "cost_per_commit_handoff_authority", "explicit_policy"
         )
         receipt["selection_authority"] = authority
-        receipt["defaulted"] = authority == "runtime_ast_self_configuring_default" or (
-            isinstance(authority, str) and authority.startswith("adapter_default")
+        # Every runtime-installed controller (AST self-configuring, the tree
+        # tile default) is a default, not the operator's selection.
+        receipt["defaulted"] = isinstance(authority, str) and authority.startswith(
+            ("runtime_", "adapter_default")
         )
         return receipt
 
@@ -8554,9 +8580,36 @@ class ExternalDraftBatchGenerator:
             # ``_share_cohort_rows`` then cuts the trees to the tile.
             return min(15, self._shared_cohort_rows(width) - width)
         controller = getattr(self, "tile_budget", None)
-        if controller is not None:
-            return controller.choose(width, budgets[width])
-        return budgets[width]
+        budget = (
+            controller.choose(width, budgets[width])
+            if controller is not None
+            else budgets[width]
+        )
+        if getattr(self, "adaptive_tree_chain", False):
+            return self._adaptive_tree_depth(
+                width, budget, record=active_width is None
+            )
+        return budget
+
+    def _adaptive_tree_depth(self, width, budget, *, record=True):
+        """The chain's node budget under the lagged adaptive cost model.
+
+        A chain verifies ``min(budget, num_draft)`` drafted tokens; the policy
+        may choose fewer from the shared online acceptance estimator (earlier
+        committed rounds only) and its per-cohort-width cost table.  Like the
+        tile budget it prices the active lane width.  Proposal-path calls
+        (no explicit width) record the decision under that width so the
+        round that verifies it can book it; planning calls for other widths
+        do not.
+        """
+
+        maximum = min(int(budget), int(self.num_draft))
+        chosen = self.adaptive_policy.choose_tree_chain_depth(
+            self.acceptance_estimator, maximum, width
+        )
+        if record:
+            self._adaptive_tree_decisions[int(width)] = (maximum, chosen)
+        return chosen if chosen < maximum else budget
 
     def _shared_cohort_rows(self, width):
         """Physical rows of a ``width``-lane tile: the equal split's total."""
@@ -10555,7 +10608,16 @@ class ExternalDraftBatchGenerator:
             ),
             "policy": ("continuation_physical_shape_cost_model" if self.continuation_policy is not None
                        else "per_request_grouped_cost_model" if self.adaptive_policy.mode == "per_request"
+                       else "lagged_tree_chain_cost_model" if getattr(self, "adaptive_tree_chain", False)
                        else "lagged_cohort_cost_model"),
+            "request_rounds": getattr(lane, "adaptive_rounds", 0) if lane is not None else None,
+            "request_trimmed_rounds": (
+                getattr(lane, "adaptive_trimmed_rounds", 0) if lane is not None else None
+            ),
+            "trimmed_rounds": self.scheduler_stats["external_adaptive_trimmed_rounds"],
+            "tree_chain_depths": dict(
+                self.scheduler_stats.get("external_adaptive_tree_chain_depths", {})
+            ),
             "confidence": ("lagged_top_width_prefix_coverage" if self.continuation_policy is not None
                            else "deterministic_refined_logit_proxy_or_lagged_q"
                            if self.adaptive_policy.mode == "per_request" else "lagged_q"),
@@ -12784,8 +12846,14 @@ class ExternalDraftBatchGenerator:
         predrafts_before = (
             sum(lane.uid in self._predrafts for lane in cohort) if self.predraft else 0
         )
+        # The tree route's chain cap is booked and observed in
+        # ``_tree_round``.  A mixed (partly parked) tree cohort's chain body
+        # still drafts under the capped node budget (exact: the cap reads
+        # only earlier rounds) but is neither observed nor booked here.
+        chain_adaptive = self.adaptive_policy is not None and not getattr(
+            self, "adaptive_tree_chain", False)
         adaptive_snapshot = (
-            copy.deepcopy(self.acceptance_estimator) if self.adaptive_policy is not None else None
+            copy.deepcopy(self.acceptance_estimator) if chain_adaptive else None
         )
         self._open = True
         transaction = None
@@ -12799,7 +12867,7 @@ class ExternalDraftBatchGenerator:
                 if forced_depth is not None:
                     blocks = self._propose(cohort, force_zero=True)
                     fixed_depth = forced_depth
-                elif self.adaptive_policy is None:
+                elif not chain_adaptive:
                     blocks = self._propose(cohort)
                     fixed_depth = None
                 else:
@@ -13685,7 +13753,7 @@ class ExternalDraftBatchGenerator:
                     "AST tree tiles have no admitted target-tree dispatch "
                     "for this request; ordinary verification is not a tile fallback"
                 )
-            if self.adaptive_policy is not None:
+            if chain_adaptive:
                 effective_depth = max(proposal_counts, default=0)
                 _bump(self.scheduler_stats, "external_adaptive_rounds")
                 saved = max(0, fixed_depth - effective_depth) * len(cohort)
@@ -13802,7 +13870,7 @@ class ExternalDraftBatchGenerator:
             )
             for commit, decision in zip(steer_commits, decisions):
                 commit(min(decision.accepted + 1, len(decision.emitted)))
-            if self.adaptive_policy is not None:
+            if chain_adaptive:
                 self._adaptive_observe(blocks, decisions, cohort)
         except BaseException:
             if transaction is not None and not transaction.closed:
@@ -13816,7 +13884,7 @@ class ExternalDraftBatchGenerator:
                 for lane in cohort:
                     self._predrafts.pop(lane.uid, None)
                 _bump(self.scheduler_stats, "external_predraft_discards", predrafts_before)
-            if self.adaptive_policy is not None:
+            if chain_adaptive:
                 self.acceptance_estimator = adaptive_snapshot
             self.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
             raise
@@ -13860,6 +13928,10 @@ class ExternalDraftBatchGenerator:
         budget_backup = None
         calibration = getattr(self, "tree_calibration", None)
         calibration_backup = None if calibration is None else calibration.snapshot()
+        adaptive_chain = getattr(self, "adaptive_tree_chain", False)
+        estimator_backup = (
+            copy.deepcopy(self.acceptance_estimator) if adaptive_chain else None
+        )
         self._open = True
         transaction = None
         self._tree_clock = phase
@@ -13867,6 +13939,14 @@ class ExternalDraftBatchGenerator:
             blocks = self._propose(cohort)
             if any(not isinstance(block, TreeDraftRow) for block in blocks):
                 raise RuntimeError("tree15 proposal did not return a tree")
+            # The decision the proposal path made: priced at the active lane
+            # width (``_tree_node_budget``), which a split turn can exceed.
+            adaptive_decision = (
+                self._adaptive_tree_decisions.get(
+                    min(max(1, int(self._auto_active_width)), self.dynamic_tree_max_width)
+                )
+                if adaptive_chain else None
+            )
             if calibration is not None and calibration.sizes:
                 blocks = self._calibrated_live_blocks(cohort, blocks)
             if len(cohort) > 1 and getattr(self, "ast_batch_row_sharing", False):
@@ -13973,6 +14053,10 @@ class ExternalDraftBatchGenerator:
                 self._observe_tree_calibration(
                     cohort, blocks, decisions, None,
                 )
+            if adaptive_chain:
+                # Before the commit and the draft prelaunch, like the tile
+                # budget: the next lattice's chain cap reads this round.
+                self._observe_adaptive_tree_chain(blocks, decisions)
             if phase is not None:
                 phase("tree_tile_budget")
             early = None
@@ -13984,6 +14068,12 @@ class ExternalDraftBatchGenerator:
                     if len(cohort) == 1
                     else self._prelaunch_tree_cohort_early(cohort, decisions, features)
                 )
+            # Rows the cap saved per lane, against each lane's own uncapped
+            # length (its remaining tokens bound it too); booked at the end.
+            adaptive_saved = (
+                self._adaptive_tree_saved(cohort, blocks, adaptive_decision)
+                if adaptive_chain else None
+            )
             self._commit(
                 cohort,
                 decisions,
@@ -14025,6 +14115,8 @@ class ExternalDraftBatchGenerator:
                     phase("tree_draft_prelaunch")
             else:
                 self._discard_prelaunched([lane.uid for lane in cohort])
+            if adaptive_chain:
+                self._book_adaptive_tree_round(cohort, blocks, adaptive_saved)
             _bump(self.scheduler_stats, "external_tree_rounds", len(cohort))
             _bump(
                 self.scheduler_stats,
@@ -14057,11 +14149,69 @@ class ExternalDraftBatchGenerator:
                 self._tile_period_open = None
             if calibration_backup is not None:
                 calibration.restore(calibration_backup)
+            if estimator_backup is not None:
+                self.acceptance_estimator = estimator_backup
             raise
         finally:
             self._tree_clock = None
             self._draft_presnapshot = None
             self._open = False
+
+    @staticmethod
+    def _tree_block_is_chain(block):
+        return list(block.parents) == list(range(-1, len(block.tokens) - 1))
+
+    def _observe_adaptive_tree_chain(self, blocks, decisions):
+        """Label each verified chain for the shared acceptance estimator.
+
+        The chain drafter exposes no proposal law, so every position's
+        feature is zero and the estimator reduces to per-position censored
+        acceptance (its intercepts).  Branching trees are not labelled.
+        """
+
+        estimator = self.acceptance_estimator
+        for block, decision in zip(blocks, decisions):
+            size = min(len(block.tokens), estimator.depth)
+            if not size or not self._tree_block_is_chain(block):
+                continue
+            accepted = min(_delivered_accepts(decision), size)
+            rejected = accepted < size and decision.accepted < len(decision.emitted)
+            estimator.observe([0.0] * size, accepted, rejected=rejected)
+        estimator.finish_round()
+
+    def _adaptive_tree_saved(self, cohort, blocks, decision):
+        """Chain rows the cap removed per lane (before the commit moves
+        ``generated``): uncapped ``min(maximum, remaining)`` less capped."""
+
+        if decision is None or decision[1] >= decision[0]:
+            return [0] * len(cohort)
+        maximum, chosen = decision
+        saved = []
+        for lane, block in zip(cohort, blocks):
+            remaining = max(0, lane.maximum - lane.generated - 1)
+            saved.append(
+                max(0, min(maximum, remaining) - min(chosen, remaining))
+                if self._tree_block_is_chain(block) else 0
+            )
+        return saved
+
+    def _book_adaptive_tree_round(self, cohort, blocks, saved):
+        """Per-request and engine counters for one adaptive tree-chain round."""
+
+        verified = max((len(block.tokens) for block in blocks), default=0)
+        _bump(self.scheduler_stats, "external_adaptive_rounds")
+        _bump(self.scheduler_stats, "external_adaptive_trimmed_rounds", int(any(saved)))
+        _bump(self.scheduler_stats, "external_adaptive_trimmed_target_rows", sum(saved))
+        _bump(self.scheduler_stats, "external_adaptive_target_rows", (verified + 1) * len(cohort))
+        _bump_map(self.scheduler_stats, "external_adaptive_tree_chain_depths", verified)
+        self.scheduler_stats["external_adaptive_round_depth"] = verified
+        self.scheduler_stats["external_adaptive_verify_width"] = verified + 1
+        for lane, rows in zip(cohort, saved):
+            lane.adaptive_round_policy = "lagged_tree_chain"
+            lane.adaptive_feature_source = "position_only"
+            lane.adaptive_rounds = getattr(lane, "adaptive_rounds", 0) + 1
+            if rows:
+                lane.adaptive_trimmed_rounds = getattr(lane, "adaptive_trimmed_rounds", 0) + 1
 
     def _close_tile_period(self, cohort, started):
         """Complete the open robust-mode cost sample at a tree round start.

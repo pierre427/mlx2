@@ -561,6 +561,37 @@ class AdaptiveVerificationPolicy:
             else fallback
         )
 
+    def choose_tree_chain_depth(self, estimator, maximum, cohort_size):
+        """``choose_depth`` for a tree route's single chain, per cohort width.
+
+        The cohort's own table (``costs``) prices every lane of a
+        ``cohort_size``-lane round; a width with no table keeps ``maximum``.
+        Like ``choose_depth`` it reads only earlier committed rounds, so it
+        precedes every current proposal draw.
+        """
+        maximum = int(maximum)
+        costs = self.costs(cohort_size)
+        if (
+            costs is None
+            or maximum <= self.minimum_depth
+            or maximum >= len(costs)
+            or estimator.observed_counts.sum() < self.min_observations
+            or np.any(estimator.feature_counts[:maximum] == 0)
+            or estimator.rounds % self.full_depth_interval == 0
+        ):
+            return maximum
+        try:
+            probabilities = estimator.predict(estimator.feature_means[:maximum])
+        except ValueError:
+            return maximum
+        expected = 1.0 + np.cumsum(np.cumprod(probabilities))
+        depths = range(self.minimum_depth, maximum + 1)
+        scores = {
+            k: float(expected[k - 1]) / (self.draft_cost + costs[k]) for k in depths
+        }
+        best = max(depths, key=lambda k: (scores[k], k))
+        return best if scores[best] > scores[maximum] * (1 + self.min_gain) else maximum
+
     def choose_depth(self, estimator, maximum, cohort_size):
         maximum = int(maximum)
         if (

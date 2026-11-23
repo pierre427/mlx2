@@ -1640,7 +1640,18 @@ class PromptLookupBatchGenerator:
             and contract.family in {"kv", "rotating_kv"}
             for contract in contracts
         )
-        return plain or is_hybrid_rows([cache])
+        if plain:
+            return True
+        if not is_hybrid_rows([cache]):
+            return False
+        # A hybrid cohort's verify runs on segmented batch views.  A plane
+        # with no view (a model-private cache that declares exact rollback
+        # but no ``segment_batch``) keeps the per-lane rollback epoch, which
+        # is exact at every cohort width, instead of failing its first
+        # multi-lane round.
+        from .segmented_batch_cache import segmented_batch_layer_supported
+
+        return all(segmented_batch_layer_supported(entry) for entry in cache)
 
     def _begin_verify(self, lanes, lengths):
         """Open the verify transaction chosen by cache topology, never by model.

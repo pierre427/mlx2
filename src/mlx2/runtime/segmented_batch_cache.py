@@ -1000,6 +1000,25 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
         )
 
 
+def segmented_batch_layer_supported(layer) -> bool:
+    """Whether ``build_segmented_batch_cache_group`` has a view for ``layer``.
+
+    The same dispatch, by type and declared hook, without building one: a
+    caller that would otherwise fail on the first multi-row round (prompt
+    lookup arming a lane) can choose its per-lane transaction up front.
+    """
+    from .paged_kv_cache import PagedKVPrivateCache
+
+    if isinstance(layer, PagedKVPrivateCache):
+        return False
+    return bool(
+        isinstance(layer, (ArraysCache, QSAKVCache, KVCache))
+        or getattr(layer, "supports_shared_qsa_suffix", False)
+        or callable(getattr(type(layer), "segment_batch", None))
+        or type(layer) is QuantizedKVCache
+    )
+
+
 def build_segmented_batch_cache_group(groups, *, note=None, shared_qsa_prefix=False):
     """Transpose B1 cache groups into per-layer batched compute adapters."""
     groups = [list(group) for group in groups]
