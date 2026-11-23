@@ -655,6 +655,34 @@ DET_TILE_NUMERICS_DEFAULTS = {"hc_seam_fused": False, "engram_gate_rounding": "f
 DET_TILE_STASH_FORWARDS = 4 * 32 + 8
 
 
+def det_tile_validated_numerics(manifest) -> tuple[dict, str | None]:
+    """``(validated_numerics, evidence)`` of a calculator manifest; ``({}, None)`` when absent.
+
+    ``validated_numerics`` maps a ``DET_TILE_NUMERICS_KEYS`` key to the serving
+    values under which the tile was validated equivalent to its fit numerics
+    (``scripts/amoeba_det_tile_validate_numerics.py``: zero probe decision
+    flips on the fit corpus, every changed row's margin above the largest
+    score change); ``validated_numerics_evidence`` names the evidence JSON.
+    A malformed field fails closed.
+    """
+    from ..runtime import amoeba_det_tiles as D
+
+    field = manifest.get("validated_numerics")
+    if field is None:
+        return {}, None
+    evidence = manifest.get("validated_numerics_evidence")
+    if not isinstance(field, dict) or not isinstance(evidence, str) or not evidence:
+        raise D.DetTileRefused("validated_numerics needs a {key: [values]} map and a "
+                               "validated_numerics_evidence path")
+    out = {}
+    for key, values in field.items():
+        if key not in DET_TILE_NUMERICS_KEYS or not isinstance(values, list):
+            raise D.DetTileRefused(f"validated_numerics entry {key!r} must be a fit-numerics key "
+                                   "with a list of values")
+        out[key] = values
+    return out, evidence
+
+
 def det_tile_capture(streams):
     """``[B, L, hc_mult, D]`` layer output -> ``[B, L, D]`` f32 stream mean (the probe input)."""
     import mlx.core as mx
@@ -1393,12 +1421,14 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                     raise DetTileRefused("deterministic tiles refuse ast_tensorfold_rows (verify kernels "
                                          "the calculator probe was not fitted or checked on)")
                 # Before any weight loads: tile kinds, checkpoint, layer count, fit numerics.
+                self._det_validated_equivalent = []
                 self._det_manifest = det_path, self._admit_det_tiles(
                     det_path, artifact,
                     {"engram_table_format": engram_format,
                      "engram_precision": policy.get("engram_precision", "transformers"),
                      "latent_kv": self.latent_kv, "moe_top_k": policy.get("moe_top_k"),
                      **{k: policy.get(k, v) for k, v in DET_TILE_NUMERICS_DEFAULTS.items()}})
+                self._det_validated_equivalent = list(self._det_manifest[1].get("_validated_equivalent", []))
             except (DetTileRefused, ValueError) as error:
                 if not det_defaulted:
                     raise
@@ -1621,11 +1651,21 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                    f"{', '.join(required)}")
         fit = {**DET_TILE_NUMERICS_DEFAULTS, **fit}
         numerics = {**DET_TILE_NUMERICS_DEFAULTS, **numerics}
+        validated, evidence = det_tile_validated_numerics(manifest)
+        admitted = []
         for key in DET_TILE_NUMERICS_KEYS:
-            if fit[key] != numerics[key]:
-                raise D.DetTileRefused(
-                    f"calculator probe was fitted with {key}={fit[key]!r}; this adapter runs "
-                    f"{numerics[key]!r} (different hidden states)")
+            if fit[key] == numerics[key]:
+                continue
+            if numerics[key] in validated.get(key, ()):
+                # scripts/amoeba_det_tile_validate_numerics.py showed this serving value
+                # leaves every probe decision unchanged (manifest ``validated_numerics``).
+                admitted.append(f"admitted: validated equivalent ({key}={json.dumps(numerics[key])}, "
+                                f"evidence {evidence})")
+                continue
+            raise D.DetTileRefused(
+                f"calculator probe was fitted with {key}={fit[key]!r}; this adapter runs "
+                f"{numerics[key]!r} (different hidden states)")
+        manifest["_validated_equivalent"] = admitted
         return manifest
 
     def _install_det_tiles(self, manifest_path, manifest, *, route):
@@ -1694,6 +1734,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                     **default}
         return {**tiles.receipt(), "capture": DET_TILE_CAPTURE,
                 "fit_execution_policy": tiles.manifest.get("fit_execution_policy"),
+                "validated_equivalent": list(getattr(self, "_det_validated_equivalent", [])),
                 "served_routes": list(tiles.served_routes), **default}
 
     def _bind_drafter(self, kind):

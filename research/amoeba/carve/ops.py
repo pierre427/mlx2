@@ -230,6 +230,11 @@ def admit(need_gb: float, policy: str, log, wait_s: int = 0) -> dict:
 
 
 def setup_mlx(memory_gb: float, cache_gb: float):
+    # Stage children wired by AMOEBA_CARVE_WIRED_GB (Host wires after load) need the residency refresh set
+    # before MLX creates its Metal device, as the core carve does (prepare_wiring is idempotent).
+    _spec = os.environ.get("AMOEBA_CARVE_WIRED_GB", "").strip()
+    if _spec and _spec != "0" and not WIRED.get("prepared"):
+        prepare_wiring(_spec)
     import mlx.core as mx
     mx.set_memory_limit(int(memory_gb * 2**30))
     mx.set_cache_limit(int(cache_gb * 2**30))

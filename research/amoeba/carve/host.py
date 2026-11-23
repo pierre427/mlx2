@@ -344,6 +344,15 @@ class Host:
         log(f"loaded {self.checkpoint} via {self.adapter_name or 'given model'}: {self.L} layers, sites "
             f"{sorted({s.kind for s in self.sites if s.kind}, key=str)}, MoE units {moe_units}, units {sum(self.widths)}, d={self.d} "
             f"in {time.time() - t0:.0f}s, MLX active {mx.get_active_memory() / 2**30:.1f} GB")
+        # Every resident host wires its evaluated weights when AMOEBA_CARVE_WIRED_GB asks (default off), so
+        # each amoeba stage child (corecheck, box batch, removal, pack, capture) is protected like the core
+        # carve: an unwired ~85 GB Hy4-flash host was compressed by +23-28 GiB within seconds of loading
+        # (2026-11-21).  Idempotent: a later explicit wire_weights call returns this receipt.
+        import os as _os
+        _spec = _os.environ.get("AMOEBA_CARVE_WIRED_GB", "").strip()
+        if _spec and _spec != "0" and mx.default_device() != mx.cpu:
+            from . import ops as _ops
+            self.wired = _ops.wire_weights(_ops.wired_arg(_spec), lambda m: log(m))
 
     # ------------------------------------------------------------------ text
 

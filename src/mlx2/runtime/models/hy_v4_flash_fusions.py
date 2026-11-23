@@ -701,6 +701,7 @@ def install(model, *, hc_seam: bool = False, mla_inputs: bool = False, engram_in
                 eng.fused = reason is None
                 record["engram_fused_proj"][index] = reason or "fused"
     record["row_bounds"] = calibrate(model)
+    record["installed_all"] = bool(hc_seam and mla_inputs and engram_inputs)
     object.__setattr__(model, "fusion_record", record)
     return record
 
@@ -745,8 +746,49 @@ def calibrate(model) -> Dict:
                                    "output_widths": [b - a for a, b in fused.bounds],
                                    "static_bound": static, "measured_bound": measured, "modules": []}
         fused.set_max_rows(entry["measured_bound"])
+        object.__setattr__(fused, "calibrated_rows", entry["measured_bound"])
         entry["modules"].append(name)
     return {"device": device, "mlx": mx.__version__, "dtype": str(dtype), "shapes": list(shapes.values())}
+
+
+def set_active(model, *, hc_seam: bool = False, mla_inputs: bool = False, engram_inputs: bool = False,
+               indexer_scores: bool = False, engram_gate_rounding: str = "fp32") -> Dict:
+    """Switch installed fusions on or off in place (research A/B: one load, several arms).
+
+    Requires ``install`` with every fusion first (``hc_seam``, ``mla_inputs``,
+    ``engram_inputs`` true).  Off restores the reference exactly: the seam
+    runs the unfused ops, a fused GEMM's row bound becomes 0 (each segment is
+    its own GEMM, the split route), the Engram layer takes its split path,
+    the indexer its unfused scores and the gate the default rounding.
+    Returns the active settings (also kept in ``model.fusion_record``).
+    """
+    if engram_gate_rounding not in ENGRAM_GATE_ROUNDINGS:
+        raise ValueError(f"engram_gate_rounding must be one of {ENGRAM_GATE_ROUNDINGS}")
+    record = getattr(model, "fusion_record", None)
+    if not record or not record.get("installed_all"):
+        raise ValueError("set_active needs install(hc_seam=True, mla_inputs=True, engram_inputs=True) first")
+    for layer in model.model.layers:
+        layer.hc_seam = HCSeam() if hc_seam else None
+        fused = getattr(layer.self_attn, "fused_input_proj", None)
+        if isinstance(fused, FusedLinear):
+            fused.set_max_rows(fused.calibrated_rows if mla_inputs else 0)
+        if "compressed_indexer" in layer.self_attn:
+            layer.self_attn.compressed_indexer.fused_scores = bool(indexer_scores)
+        if "engram_layer" in layer:
+            eng = layer.engram_layer
+            eng.gate_rounding = engram_gate_rounding
+            proj = getattr(eng, "fused_proj", None)
+            if isinstance(proj, FusedLinear):
+                eng.fused = bool(engram_inputs)
+                proj.set_max_rows(proj.calibrated_rows if engram_inputs else 0)
+    active = {"hc_seam_fused": bool(hc_seam), "mla_fused_input_proj": bool(mla_inputs),
+              "engram_fused_proj": bool(engram_inputs), "indexer_fused_scores": bool(indexer_scores),
+              "engram_gate_rounding": engram_gate_rounding}
+    record["active"] = active
+    record["hc_seam_fused"] = bool(hc_seam)
+    record["indexer_fused_scores"] = bool(indexer_scores)
+    record["engram_gate_rounding"] = engram_gate_rounding
+    return active
 
 
 def status(model) -> Dict:
