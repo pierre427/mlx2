@@ -596,3 +596,196 @@ def test_hy4_assembled_pack_no_flag_start_selects_embedded_dfly2():
     explicit = build_parser().parse_args(["--model", f"/m/{checkpoint}", "--ordinary"])
     assert apply_best_route_default(explicit, resolution).get("match") != "checkpoint"
     assert explicit.ordinary is True and not explicit.ast
+
+
+# --------------------------------------- execution policy vs route choice --
+
+def _hy4_resolution():
+    from mlx2.adapters.hy_v4_flash import HYV4FlashAdapter, descriptor_for
+
+    fingerprint = "f2a8fa8d2b7f22150ee5bd988c5acc1814d8494aa82ee01aff40a7efc13aad93"
+    return AdapterResolution(HYV4FlashAdapter, descriptor_for(vision=True),
+                             {"identity": {"fingerprint": fingerprint}, "has_mtp": True,
+                              "has_dfly": True})
+
+
+def _hy4_args(tmp_path, policy):
+    from mlx2.server import build_parser
+
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps(policy))
+    return build_parser().parse_args(
+        ["--model", "/m/Hy4-flash-MLX-4.6bit-mlx2", "--execution-policy", str(path)])
+
+
+HY4_NEUTRAL = {"engram_table_format", "engram_precision", "engram_cache_rows", "engram_hash",
+               "vision", "moe_fused_gate_up"}
+
+
+@pytest.mark.parametrize("policy", [
+    {"engram_table_format": "iq4_nl"},
+    {"engram_hash": "device", "engram_precision": "vllm", "engram_cache_rows": 4096,
+     "vision": False, "moe_fused_gate_up": True},
+    {},
+])
+def test_route_neutral_policy_keeps_the_best_route_default(tmp_path, policy):
+    """A policy of only adapter-declared route-neutral keys keeps the Hy4
+    pack's embedded DFly2 default (a 2026-11-21 GSM8K receipt with only
+    ``engram_table_format`` served ordinary decode, verify_rounds 0)."""
+    resolution = _hy4_resolution()
+    for passed in (True, False):  # the parsed policy, or the file read here
+        args = _hy4_args(tmp_path, policy)
+        kwargs = {"policy": dict(policy)} if passed else {}
+        record = apply_best_route_default(args, resolution, **kwargs)
+        assert record["applied"] and record["status"] == "selected_unqualified"
+        assert args.ast is True
+    merged = apply_ast_invocation(args, dict(policy), resolution)
+    merged = brd.finish_best_route_default(args, merged)
+    route = resolve_route_selection(args, merged, resolution)
+    assert route.route == "external_draft"
+    assert {k: merged[k] for k in policy} == policy
+
+
+def test_hy4_neutral_keys_parse_identically_on_ordinary_and_dfly2():
+    from mlx2.adapters.hy_v4_flash import HYV4FlashAdapter, _parse_policy
+
+    assert set(HYV4FlashAdapter.route_neutral_policy_keys) == HY4_NEUTRAL
+    neutral = {"engram_table_format": "iq4_nl", "engram_precision": "vllm",
+               "engram_cache_rows": 4096, "engram_hash": "device", "vision": False,
+               "moe_fused_gate_up": True}
+    ordinary, external, kind = _parse_policy(dict(neutral), "/m/Hy4")
+    assert ordinary == neutral and not external and kind is None
+    dfly, external, kind = _parse_policy({**neutral, "draft_model": "embedded_dfly"}, "/m/Hy4")
+    assert dfly == neutral and kind == "dfly"
+    pld, _, kind = _parse_policy({**neutral, "draft_model": "prompt_lookup"}, "/m/Hy4")
+    assert pld == neutral and kind == "prompt_lookup"
+
+
+@pytest.mark.parametrize("policy,key", [
+    ({"engram_table_format": "iq4_nl", "draft_model": "embedded_dfly"}, "draft_model"),
+    ({"draft_models": [{"id": "d", "path": "/m/d"}]}, "draft_models"),
+    ({"engram_table_format": "iq4_nl", "num_draft": 3}, "num_draft"),
+    ({"ast_target_executor": "serial"}, "ast_target_executor"),
+    ({"moe_nax": "gather"}, "moe_nax"),  # refused with a draft_model
+    ({"latent_kv": "fp8"}, "latent_kv"),  # another cache shape than was measured
+    ({"mtp_head": "/m/head"}, "mtp_head"),
+    ({"adaptive_mtp_depth": True}, "adaptive_mtp_depth"),
+    ({"moe_expert_streaming": {"enabled": True}}, "moe_expert_streaming"),
+    ({"dense_weight_streaming": {"enabled": True}}, "dense_weight_streaming"),
+    ({"some_future_key": 1}, "some_future_key"),  # unknown: fail safe
+])
+def test_non_neutral_policy_keeps_todays_resolution_and_says_why(tmp_path, policy, key, caplog):
+    args = _hy4_args(tmp_path, policy)
+    before = dict(vars(args))
+    with caplog.at_level("INFO", logger="mlx2.server"):
+        record = apply_best_route_default(args, _hy4_resolution(), policy=dict(policy))
+    assert record["status"] == "explicit_route" and not record["applied"]
+    assert f"execution_policy:{key}" in record["explicit_options"]
+    assert "explicit route choice" in record["reason"] and key in record["reason"]
+    assert vars(args) == {**before, "route_default_selection": record}
+    view = brd.receipt_view(record)
+    assert view["reason"] == record["reason"]
+    assert view["explicit_options"] == record["explicit_options"]
+    assert any("best-route default not applied (explicit_route)" in r.getMessage()
+               and key in r.getMessage() for r in caplog.records)
+
+
+def test_streaming_and_route_keys_are_never_neutral_even_if_declared():
+    class Declares:
+        route_neutral_policy_keys = frozenset({"moe_expert_streaming", "dense_weight_streaming",
+                                               "draft_model", "adaptive_mtp_depth", "vision"})
+
+    assert brd.route_neutral_policy_keys(Declares) == {"vision"}
+    assert brd.route_choosing_policy_keys(
+        {"moe_expert_streaming": {}, "dense_weight_streaming": {}, "vision": True}, Declares
+    ) == ["dense_weight_streaming", "moe_expert_streaming"]
+
+
+def test_undeclared_adapter_keeps_the_old_rule_for_any_policy():
+    # Regression (review of f6305e393): Qwen3.8 27B refuses target-only
+    # numerics such as fp32_head_logits on its external/AST route, so a
+    # policy of them must not pull in the AST default.  Undeclared adapters
+    # treat every policy, even an empty one, as an explicit choice.
+    assert getattr(Qwen3827BAdapter, "route_neutral_policy_keys", None) is None
+    table = _table(_entry(DFLASH))
+    for policy, expected in (
+        ({"fp32_head_logits": True}, ["execution_policy:fp32_head_logits"]),
+        ({"gdn_core": "x", "invariant_prefill": True},
+         ["execution_policy:gdn_core", "execution_policy:invariant_prefill"]),
+        ({"adaptive_mtp_depth": True}, ["execution_policy:adaptive_mtp_depth"]),
+        ({"moe_expert_streaming": {"enabled": True}}, ["execution_policy:moe_expert_streaming"]),
+        ({}, ["execution_policy:*"]),
+    ):
+        args = _args(execution_policy=Path("/p.json"))
+        record = apply_best_route_default(args, _resolution(), table=table, policy=policy)
+        assert record["status"] == "explicit_route", policy
+        assert record["explicit_options"] == expected
+        assert not args.ast and not args.native_mtp
+
+
+def test_adaptive_mtp_depth_policy_keeps_native_mtp(tmp_path):
+    # Regression: the server's adaptive_mtp_depth check needs the native-MTP
+    # route; a best-route default must not replace it.
+    from mlx2.server import build_parser
+
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"adaptive_mtp_depth": True}))
+    args = build_parser().parse_args(["--model", "/m/target", "--execution-policy", str(path)])
+    record = apply_best_route_default(args, _resolution(), table=_table(_entry(DFLASH)),
+                                      policy={"adaptive_mtp_depth": True})
+    assert record["status"] == "explicit_route" and not args.ast
+    route = resolve_route_selection(args, {"adaptive_mtp_depth": True}, _resolution())
+    assert route.route == "native_mtp"
+
+
+def test_explicit_streaming_policy_suppresses_the_default_on_a_declared_adapter(tmp_path):
+    # Regression: an operator-chosen streaming setup is not auto streaming
+    # (streaming_selected stays false), so the policy itself must suppress.
+    for policy in ({"moe_expert_streaming": {"enabled": True}, "vision": True},
+                   {"dense_weight_streaming": {"enabled": True}}):
+        args = _hy4_args(tmp_path, policy)
+        record = apply_best_route_default(args, _hy4_resolution(), policy=policy,
+                                          streaming=None)
+        assert record["status"] == "explicit_route" and not args.ast
+
+
+def test_skip_reasons_are_logged(caplog):
+    with caplog.at_level("INFO", logger="mlx2.server"):
+        apply_best_route_default(_args(no_auto_route=True), _resolution(),
+                                 table=_table(_entry(DFLASH)))
+        apply_best_route_default(_args(), _resolution(), table=_table(_entry(DFLASH)),
+                                 streaming={"selected": True})
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("not applied (opted_out): --no-auto-route" in m for m in messages)
+    assert any("not applied (not_applicable): automatic expert streaming" in m for m in messages)
+
+
+def test_flag_merged_policy_keys_are_not_judged_without_execution_policy():
+    # --det-tile merges amoeba_det_tiles into the policy; without an operator
+    # --execution-policy that is not a policy route choice (as before).
+    args = _args()
+    record = apply_best_route_default(args, _resolution(), table=_table(_entry({"kind": "native_mtp"})),
+                                      policy={"amoeba_det_tiles": "/m/manifest.json"})
+    assert record["applied"] and args.native_mtp is True
+
+
+def test_unreadable_policy_file_is_conservatively_a_route_choice(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("[1, 2]")
+    for path in (bad, tmp_path / "missing.json"):
+        args = _args(execution_policy=path)
+        record = apply_best_route_default(args, _resolution(), table=_table(_entry(DFLASH)))
+        assert record["status"] == "explicit_route"
+        assert record["explicit_options"] == ["execution_policy"]
+
+
+def test_draft_policy_refusal_names_the_flags_to_pass():
+    from mlx2.server import build_parser
+
+    args = build_parser().parse_args(["--model", "/m/target"])
+    with pytest.raises(ValueError) as error:
+        resolve_route_selection(args, {"draft_model": "/m/d"}, _resolution())
+    message = str(error.value)
+    assert "requires --external-draft" in message
+    assert "pass --external-draft" in message and "--ast" in message
+    assert "--ast-drafter" in message

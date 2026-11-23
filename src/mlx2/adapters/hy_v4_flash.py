@@ -99,7 +99,7 @@ _TEXT_EXPECTED = {
 def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
                     engram_precision: str = "transformers",
                     tensorfold_rows: str | None = None, moe_fused_gate_up: bool = False,
-                    moe_nax: str = "off") -> str:
+                    moe_nax: str = "off", moe_top_k: int | None = None) -> str:
     """The APCv2 namespace: every knob that changes numerics changes it.
 
     A packed Engram table or the non-default Engram precision profile gives
@@ -124,6 +124,9 @@ def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
         layout = f"{layout}+moe-fused-gate-up"
     if moe_nax != "off":
         layout = f"{layout}+moe-nax-{moe_nax}"
+    if moe_top_k is not None:
+        # Fewer routed experts per token: other numerics, other cache rows.
+        layout = f"{layout}+moe-top{int(moe_top_k)}"
     return layout
 
 
@@ -520,7 +523,7 @@ def widened_bytes(root, weight_map: dict, quant, *, lm_head_fp32: bool) -> int:
 
 MODEL_KEYS = frozenset({"engram_cache_rows", "engram_hash", "engram_precision",
                         "engram_table_format", "latent_kv", "vision",
-                        "moe_fused_gate_up", "moe_nax"})
+                        "moe_fused_gate_up", "moe_nax", "moe_top_k"})
 # Where the Engram n-grams are hashed.  ``host``: NumPy after a host copy of
 # the token ids.  ``device``: MLX ops on the generation stream for forwards of
 # at most ROLLBACK tokens, read back once with the token ids after the
@@ -545,6 +548,12 @@ ENGRAM_HASH_DEFAULT = "auto"
 # ``moe_nax``: "gather" opens the NAX sorted gather for prefill forwards of
 # the ordinary route (moe_nax_gather, M5 hosts; claims the process mode).
 MOE_NAX_MODES = ("off", "gather")
+# ``moe_top_k`` (opt-in, APPROXIMATE, unqualified; Pierre 2026-11-21): route
+# each token to its best k routed experts instead of the checkpoint's
+# num_experts_per_tok (16), same sigmoid+bias choice, the k weights
+# renormalized as the checkpoint does (norm_topk_prob) and scaled.  Applies to
+# the trunk's routers only (the DFly2 drafter has no routed experts); speculative
+# routes stay exact against this reduced target.  Own APCv2 namespace.
 # Engram table formats (hy_v4_flash_engram.TABLE_FORMATS); bf16 is the
 # default, the others are opt-in, unqualified, and need converter shards.
 # ``iq4_nl`` is read from GGUF files bound by text_config.engram_gguf_tables
@@ -554,7 +563,26 @@ CONVERTER_ENGRAM_FORMATS = ("bf16", "fp8_e4m3_row", "affine4_g32")
 AST_KEYS = frozenset({"draft_model", "num_draft", "ast_topology", "ast_tiles", "ast_tile_rows",
                       "ast_multilane_tile_rows", "ast_adaptive_rows", "batch_size_route",
                       "pairwise_selection", "cost_per_commit_handoff", "ast_graft_prompt_lookup",
-                      "ast_target_executor", "ast_tensorfold_rows", "ast_tensorfold_rows_backend"})
+                      "ast_target_executor", "ast_tensorfold_rows", "ast_tensorfold_rows_backend",
+                      "draft_quantization"})
+DFLY_DRAFT_QUANTIZATION_DEFAULT = {"bits": 8, "group_size": 64}
+# ``draft_quantization`` (the shared drafter key, adapters/dflash2
+# validate_runtime_quantization: {"bits": 4|8, "group_size": 32|64|128}):
+# load-time MLX affine quantization of the embedded DFly2 head's nn.Linear
+# projections (runtime/drafters/hy4_dfly.quantize_head; QUANTIZATION_KEPT
+# lists what stays bf16).  DEFAULT {"bits": 8, "group_size": 64} on the DFly2
+# route since 2026-11-21 (Pierre); ``null`` keeps bf16.  Implemented and
+# unqualified; DFly2 route only (refused on ordinary and prompt lookup,
+# which carry no drafter weights).  Committed tokens are the target's own
+# verified choices, so only acceptance and draft time can move.  No APCv2
+# namespace of its own: the only drafter state in the prefix cache is
+# DFlyFeatureCache (the target's post-norm final hidden of committed
+# tokens), computed by the target and identical under either drafter
+# precision, so the layout and the drafter record fingerprint are unchanged
+# and q8 serving reuses bf16 prefix entries.  Not route-neutral.
+# Expected saving on Hy4-flash-MLX-4.6bit-mlx2 at {"bits": 8, "group_size":
+# 64}: ~1.62 GB of bf16 Linear weights -> ~0.86 GB (8.5 bits/weight),
+# about 0.76 GB resident.
 # Opt-in TensorFold row law on the trunk's dense affine q8/q4-g64 projections
 # (runtime/tensorfold_rows.py; docs/hy4-flash/ast-tensorfold-rows.md).  Off by
 # default, implemented and unqualified.  ``reference`` is the CPU oracle.
@@ -602,12 +630,18 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
         raise ValueError("Hy4-flash moe_fused_gate_up must be a boolean (default false)")
     if policy.get("moe_nax", "off") not in MOE_NAX_MODES:
         raise ValueError("Hy4-flash moe_nax must be 'off' (default) or 'gather'")
+    top_k = policy.get("moe_top_k")
+    if top_k is not None and (type(top_k) is not int or top_k < 1):
+        raise ValueError("Hy4-flash moe_top_k must be a positive integer (default: the checkpoint's)")
     model = {k: v for k, v in policy.items() if k in MODEL_KEYS}
     external = {k: v for k, v in policy.items() if k in AST_KEYS}
     if external and model.get("moe_nax", "off") != "off":
         # Hy4's verify forwards (chain-packed tiles, DFly2) are not marked as
         # verify forwards, so a multi-row verify would read as a prefill.
         raise ValueError("Hy4-flash moe_nax applies to the ordinary route only (not with a draft_model)")
+    if "draft_quantization" in external and external.get("draft_model") is None:
+        raise ValueError("Hy4-flash draft_quantization quantizes the DFly2 drafter; the "
+                         "ordinary route has none (it needs draft_model embedded_dfly)")
     if not external:
         return model, {}, None
     draft = external.get("draft_model")
@@ -633,6 +667,17 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
         raise ValueError("ast_graft_prompt_lookup cannot graft prompt lookup onto itself")
     # ``packed`` (default) runs a wave's chains, across lanes, as one joint
     # forward; ``serial`` is the one-forward-per-chain reference.
+    if "draft_quantization" in external and kind != "dfly":
+        raise ValueError("Hy4-flash draft_quantization applies to the embedded DFly2 drafter only")
+    from .dflash2 import validate_runtime_quantization
+
+    # DEFAULT q8 for the embedded DFly2 head (Pierre 2026-11-21): GSM8K first 30
+    # at 5259ade5f, 28/30 both, MAL 3.80 vs 3.78, 48.4 vs 47.9 tok/s, ~0.76 GB
+    # less resident.  An explicit ``"draft_quantization": null`` keeps bf16.
+    explicit = "draft_quantization" in external
+    draft_quantization = validate_runtime_quantization(external.pop("draft_quantization", None))
+    if not explicit and kind == "dfly":
+        draft_quantization = dict(DFLY_DRAFT_QUANTIZATION_DEFAULT)
     executor = external.pop("ast_target_executor", "packed")
     if executor not in AST_TARGET_EXECUTORS:
         raise ValueError("Hy4-flash ast_target_executor must be 'packed' (default) or 'serial'")
@@ -649,10 +694,29 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
 
     external = _native_mtp_tree_policy(external)
     external["ast_target_executor"] = executor
+    if draft_quantization is not None:
+        external["draft_quantization"] = draft_quantization
     if rows:
         external["ast_tensorfold_rows"] = True
         external["ast_tensorfold_rows_backend"] = backend or "metal"
     return model, external, kind
+
+
+def set_moe_top_k(model, top_k):
+    """Set every trunk router's k (``moe_top_k``); returns the receipt block."""
+    routers = [layer.mlp.gate for layer in model.model.layers
+               if hasattr(getattr(layer, "mlp", None), "gate") and hasattr(layer.mlp.gate, "top_k")]
+    native = routers[0].top_k if routers else None
+    if top_k is None:
+        return {"selected": False, "k": native, "native_k": native, "approximate": False}
+    if not routers:
+        raise ValueError("Hy4-flash moe_top_k: the model has no routed-expert layers")
+    if top_k > native:
+        raise ValueError(f"Hy4-flash moe_top_k {top_k} exceeds the checkpoint's {native}")
+    for router in routers:
+        router.top_k = int(top_k)
+    return {"selected": True, "k": int(top_k), "native_k": native, "layers": len(routers),
+            "approximate": top_k != native, "qualified": False}
 
 
 def resolve_engram_hash(model) -> str:
@@ -677,13 +741,16 @@ def resolve_engram_hash(model) -> str:
 
 def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, memory_budget=None,
                engram_precision="transformers", engram_table_format="bf16", latent_kv="native",
-               vision=True, engram_hash=ENGRAM_HASH_DEFAULT, moe_fused_gate_up=False):
+               vision=True, engram_hash=ENGRAM_HASH_DEFAULT, moe_fused_gate_up=False,
+               dfly_quantization=None):
     """``(model, drafter or None, engram readers)`` for an inspected artifact.
 
     Engram tables stay on disk; the DFly2 layers are read only with
     ``keep_dfly``; the ``vit.*`` tower is read and attached (checkpoint dtype, never
     quantized) when ``vision`` and the artifact carries it, else dropped
-    before any byte is read.
+    before any byte is read.  ``dfly_quantization`` (a validated
+    ``draft_quantization`` value or None) quantizes the drafter's
+    projections after its strict bf16 load (hy4_dfly.quantize_head).
     """
     import mlx.core as mx
     from mlx import nn
@@ -777,6 +844,11 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
             intermediate, correction = HY4FlashDFly.geometry(dfly_raw)
             drafter = HY4FlashDFly(args, intermediate=intermediate, correction=correction)
             drafter.load_weights(list(drafter.sanitize(dfly_raw).items()), strict=True)
+            from ..runtime.drafters.hy4_dfly import quantize_head
+
+            quantize_head(drafter, dfly_quantization)
+        elif dfly_quantization is not None:
+            raise ValueError("Hy4-flash dfly_quantization needs the DFly2 drafter (keep_dfly)")
         dfly_raw.clear()
         model.eval()
         mx.eval(model.parameters())
@@ -825,6 +897,17 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # embedded DFly2 head fills the native-head drafter slot.
     ast_tree_tiles = True
     ast_tree_tile_dtype_gate = False
+    # Execution-policy keys accepted unchanged on both routes the best-route
+    # entry can select, ordinary and AST/DFly2 (best_route_defaults): a policy
+    # of only these keeps the DFly2 default.  Each is a MODEL_KEYS value that
+    # _parse_policy and load_model consume identically with or without a
+    # draft_model.  Left out: ``moe_nax`` (refused with a draft_model),
+    # ``latent_kv`` (fp8 changes the cache layout and drops prefix reuse, a
+    # shape the default was not measured on) and every AST key.
+    route_neutral_policy_keys = frozenset({
+        "engram_table_format", "engram_precision", "engram_cache_rows", "engram_hash",
+        "vision", "moe_fused_gate_up",
+    })
     prompt_lookup_default = False
     EXTERNAL_PROFILE = "hy-v4-flash-ast-b1-b4-v1"
     EXTERNAL_ROUTE_TAG = "hy4-flash-chain-packed-tree-v1"
@@ -898,7 +981,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.layout = numerics_layout(self.layout, engram_table_format=engram_format,
                                       engram_precision=policy.get("engram_precision", "transformers"),
                                       tensorfold_rows=rows_backend,
-                                      moe_fused_gate_up=self.moe_fused_gate_up, moe_nax=self.moe_nax)
+                                      moe_fused_gate_up=self.moe_fused_gate_up, moe_nax=self.moe_nax,
+                                      moe_top_k=policy.get("moe_top_k"))
         self.environment = configure_environment()
         from .process_globals import claim_moe, claim_stock_moe
 
@@ -922,8 +1006,10 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             engram_table_format=engram_format,
             latent_kv=self.latent_kv, vision=policy.get("vision", True),
             engram_hash=policy.get("engram_hash", ENGRAM_HASH_DEFAULT),
-            moe_fused_gate_up=self.moe_fused_gate_up)
+            moe_fused_gate_up=self.moe_fused_gate_up,
+            dfly_quantization=external.get("draft_quantization"))
         self.model.moe_nax_prefill = self.moe_nax != "off"
+        self.moe_top_k = set_moe_top_k(self.model, policy.get("moe_top_k"))
         self.engram_table_format = engram_format
         if rows_backend is not None:
             from ..runtime.tensorfold_rows import install as install_rows
@@ -1320,6 +1406,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "observed_used": bool(getattr(self, "dfly_stats", {}).get("requests")) or engine_used,
             "serving_engine": "external-draft engine, chain-packed AST executor (requires_target_caches)",
         }
+        dfly["quantization"] = self._dfly_quantization_receipt(dfly["observed_used"])
         if getattr(self, "dfly_stats", None):
             dfly["stats"] = dict(self.dfly_stats)
         counters = getattr(self, "feature_stats", None)
@@ -1369,6 +1456,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             },
             "moe_fused_gate_up": self._moe_fused_receipt(),
             "moe_nax_gather": self._moe_nax_receipt(),
+            "moe_top_k": getattr(self, "moe_top_k", None),
             "engram": {i: r.diagnostics() for i, r in getattr(self, "engram_tables", {}).items()},
             "engram_precision": getattr(getattr(getattr(self, "model", None), "args", None),
                                         "engram_precision", None),
@@ -1391,6 +1479,21 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "stats": dict(getattr(getattr(self, "model", None), "vision_stats", {})),
             },
         }
+
+    def _dfly_quantization_receipt(self, drafter_used):
+        """``draft_quantization`` of the DFly2 head (bf16 default, opt-in affine)."""
+        loaded = getattr(getattr(self, "dfly", None), "quantization_receipt", None) or {}
+        selected = bool(loaded.get("selected"))
+        out = {"implemented": True, "qualified": False, "selected": selected,
+               # The quantized head drafted at least one round.
+               "observed_used": selected and bool(drafter_used)}
+        for key in ("bits", "group_size", "mode", "bytes_before", "bytes_after"):
+            out[key] = loaded.get(key)
+        if selected:
+            out["module_count"] = loaded["module_count"]
+            out["skipped_group_width"] = list(loaded["skipped_group_width"])
+            out["kept_checkpoint_dtype"] = list(loaded["kept_checkpoint_dtype"])
+        return out
 
     def _engram_hash_receipt(self):
         model = getattr(self, "model", None)

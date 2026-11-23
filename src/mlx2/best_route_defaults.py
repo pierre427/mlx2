@@ -56,10 +56,61 @@ ROUTE_FLAGS = ("ordinary", "native_mtp", "external_draft", "prompt_lookup", "ast
 # Options whose meaning depends on the route the operator chose; any of them
 # keeps the operator on today's resolution rather than an auto route.
 ROUTE_CONSTRAINING_OPTIONS = (
-    "draft_model", "execution_policy", "adaptive_mtp_depth", "mtp_acceptance_log",
+    "draft_model", "adaptive_mtp_depth", "mtp_acceptance_log",
     "approximate_kv", "ast_drafter", "ast_topology", "ast_graft_pld", "ast_tiles",
     "ast_tile_rows", "ast_tree_calibration", "ast_batch_row_sharing", "mtp_head",
 )
+
+
+# An ``--execution-policy`` suppresses the best-route default unless every key
+# in it is route-neutral for the adapter: listed in the adapter's
+# ``route_neutral_policy_keys`` class attribute, the keys it accepts unchanged
+# on every route its best-route entries can select (its default route
+# included).  Fail safe: an adapter without that declaration keeps the old
+# rule (any policy is an explicit route choice), a key outside the list
+# suppresses the default, and so does an unreadable policy file.  The keys
+# below are never route-neutral, whatever an adapter declares: streaming
+# (best routes were measured resident) and route/drafter choices.
+NEVER_ROUTE_NEUTRAL_POLICY_KEYS = frozenset({
+    "moe_expert_streaming", "dense_weight_streaming", "weight_streaming",
+    "draft_model", "draft_models", "mtp_head", "adaptive_mtp_depth",
+})
+
+
+def route_neutral_policy_keys(adapter_type) -> frozenset | None:
+    """The adapter's declared route-neutral policy keys, or ``None``."""
+    declared = getattr(adapter_type, "route_neutral_policy_keys", None)
+    if declared is None:
+        return None
+    return frozenset(declared) - NEVER_ROUTE_NEUTRAL_POLICY_KEYS
+
+
+def route_choosing_policy_keys(policy, adapter_type=None) -> list[str]:
+    """The keys of ``policy`` that suppress a best-route default (sorted).
+
+    Without an adapter declaration every key counts, and an empty policy
+    still counts as a choice (``["*"]``), exactly as before this rule.
+    """
+    if policy is None:
+        return []
+    neutral = route_neutral_policy_keys(adapter_type)
+    if neutral is None:
+        return sorted(policy) or ["*"]
+    return sorted(key for key in policy if key not in neutral)
+
+
+_UNREAD = object()
+
+
+def _read_policy(args):
+    path = getattr(args, "execution_policy", None)
+    if path in (None, False, "", (), []):
+        return None
+    try:
+        policy = json.loads(Path(path).read_text())
+    except (OSError, TypeError, ValueError):
+        return _UNREAD
+    return policy if isinstance(policy, dict) else _UNREAD
 
 
 # ------------------------------------------------------------------ rule --
@@ -256,12 +307,31 @@ def pair_auto_drafter(target: dict, spec: dict, drafters: list[dict]) -> tuple[d
 
 # ------------------------------------------------------------ resolver --
 
-def explicit_route_options(args) -> list[str]:
+def explicit_route_options(args, policy=_UNREAD, adapter_type=None) -> list[str]:
+    """CLI options and execution-policy keys that choose the route.
+
+    ``policy`` is the parsed execution policy; when it is not passed, the
+    ``--execution-policy`` file is read here.  Only an operator-given
+    ``--execution-policy`` is judged (keys that other flags merge into the
+    policy are judged by those flags).  Policy keys that are not
+    route-neutral for the adapter are named ``execution_policy:<key>``
+    (``execution_policy:*`` for an empty policy on an undeclared adapter);
+    an unreadable policy is named ``execution_policy``.
+    """
     named = [name for name in ROUTE_FLAGS if getattr(args, name, False)]
     for name in ROUTE_CONSTRAINING_OPTIONS:
         value = getattr(args, name, None)
         if value not in (None, False, (), []):
             named.append(name)
+    if getattr(args, "execution_policy", None) in (None, False, "", (), []):
+        return named
+    if policy is _UNREAD:
+        policy = _read_policy(args)
+    if policy is _UNREAD or not isinstance(policy, dict):
+        named.append("execution_policy")
+    else:
+        named.extend(f"execution_policy:{key}"
+                     for key in route_choosing_policy_keys(policy, adapter_type))
     return named
 
 
@@ -345,6 +415,7 @@ def resolve_best_route_default(
     roots=None,
     include_hf: bool | None = None,
     streaming_selected: bool = False,
+    policy=_UNREAD,
 ) -> dict:
     """Select the artifact's best-route default by setting the CLI intent.
 
@@ -352,15 +423,21 @@ def resolve_best_route_default(
     table entry selects a route and no explicit route option was given, and
     stores the selection record on ``args.route_default_selection``.  The
     record is always produced, also when nothing was applied, so status can
-    say why the route is what it is.
+    say why the route is what it is.  ``policy`` is the parsed execution
+    policy (read from ``args.execution_policy`` when not passed); it keeps the default only when every key is route-neutral for the
+    adapter (``route_neutral_policy_keys``).
     """
     if getattr(args, "no_auto_route", False):
         record = _record(None, "opted_out", reason="--no-auto-route")
         args.route_default_selection = record
         return record
-    explicit = explicit_route_options(args)
+    adapter_type = getattr(adapter_resolution, "adapter_type", None)
+    explicit = explicit_route_options(args, policy, adapter_type)
     if explicit:
-        record = _record(None, "explicit_route", explicit_options=explicit)
+        record = _record(
+            None, "explicit_route", explicit_options=explicit,
+            reason="explicit route choice (" + ", ".join(explicit) + ")",
+        )
         args.route_default_selection = record
         return record
     execution_kind = getattr(getattr(adapter_resolution, "descriptor", None), "metadata", {}).get(
@@ -490,6 +567,8 @@ def receipt_view(record: dict | None) -> dict | None:
     for key in ("default", "checkpoint", "match", "reason"):
         if record.get(key) is not None:
             view[key] = record[key]
+    if record.get("explicit_options"):
+        view["explicit_options"] = list(record["explicit_options"])
     evidence = record.get("evidence")
     if evidence:
         view["evidence"] = {"files": list(evidence.get("files", ()))[:3],

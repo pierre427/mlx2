@@ -204,6 +204,8 @@ def main(argv=None) -> int:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--execution-policy", type=Path, required=True)
+    parser.add_argument("--route", choices=("ordinary", "ast"), default="ordinary",
+                        help="server route flag (ast: the artifact's embedded DFly2 drafter)")
     parser.add_argument("--cells", default="1024,2048,4096,8192,16384,32768,65536,131072")
     parser.add_argument("--port", type=int, default=8285)
     parser.add_argument("--max-tokens", type=int, default=24)
@@ -257,7 +259,7 @@ def main(argv=None) -> int:
     server = None
     try:
         command = [sys.executable, "-u", "-m", "mlx2.server", "--model", str(model),
-                   "--host", "127.0.0.1", "--port", str(a.port), "--ordinary",
+                   "--host", "127.0.0.1", "--port", str(a.port), f"--{a.route}",
                    "--max-lanes", "1", "--max-inflight", "1",
                    "--max-context", str(max(cells) + 4096),
                    "--execution-policy", str(a.execution_policy.expanduser().resolve()),

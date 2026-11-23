@@ -7682,14 +7682,19 @@ def validate_invocation_draft_adapter(args, adapter_resolution):
         )
 
 
-def apply_best_route_default(args, adapter_resolution, *, table=None, streaming=None):
+def apply_best_route_default(args, adapter_resolution, *, table=None, streaming=None, policy=...):
     """Select the artifact's measured best route when no route flag is given.
 
     See ``best_route_defaults``: the table entry becomes the CLI intent an
     operator would type (for example ``--ast --ast-drafter <paired path>``),
-    so it is validated exactly like explicit flags.  Explicit route options
-    and ``--no-auto-route`` keep today's resolution.  The selection record
-    lands on ``args.route_default_selection`` for status and receipts.
+    so it is validated exactly like explicit flags.  Explicit route options,
+    an execution policy with any key the adapter does not declare
+    route-neutral (``best_route_defaults.route_neutral_policy_keys``; an
+    undeclared adapter has none) and ``--no-auto-route`` keep today's
+    resolution.  Pass
+    the parsed policy (``None`` for none); when it is omitted the
+    ``--execution-policy`` file is read.  The selection record lands on
+    ``args.route_default_selection`` for status and receipts.
     """
     from .best_route_defaults import resolve_best_route_default
 
@@ -7701,8 +7706,12 @@ def apply_best_route_default(args, adapter_resolution, *, table=None, streaming=
         roots=list(roots) if roots else None,
         include_hf=None if not roots else False,
         streaming_selected=bool((streaming or {}).get("selected")),
+        **({} if policy is ... else {"policy": policy}),
     )
     log = logging.getLogger("mlx2.server")
+    if record.get("status") in ("explicit_route", "opted_out", "not_applicable"):
+        log.info("best-route default not applied (%s): %s",
+                 record["status"], record.get("reason"))
     if record.get("applied"):
         drafter = record.get("drafter") or {}
         log.info(
@@ -7927,7 +7936,11 @@ def resolve_route_selection(args, policy, adapter_resolution=None):
         raise ValueError("--ordinary cannot select an external draft policy")
     if external_policy and not args.external_draft:
         raise ValueError(
-            "an execution policy with draft_model(s) requires --external-draft"
+            "an execution policy with draft_model(s) requires --external-draft: pass "
+            "--external-draft with this policy to run that drafter on the external-draft "
+            "route; or, for the AST route, drop draft_model(s) from the policy and pass "
+            "--ast (--ast-drafter <path|mtp|pld> names the drafter; --ast refuses a "
+            "policy draft_model)"
         )
     if args.external_draft and not external_policy:
         raise ValueError(
@@ -8569,7 +8582,7 @@ def main():
         # intent (ast/ast_drafter/native_mtp ...), none of which that decision
         # reads, but a resident-load-only route must not be auto-selected
         # when the engine is going to stream experts single-lane.
-        apply_best_route_default(args, adapter_resolution, streaming=streaming)
+        apply_best_route_default(args, adapter_resolution, streaming=streaming, policy=policy)
         # After the best-route seam: --mtp-head (or an MTP-head --ast-drafter)
         # is an explicit route option there, so the auto default stands down.
         policy, adapter_resolution = apply_external_mtp_head(

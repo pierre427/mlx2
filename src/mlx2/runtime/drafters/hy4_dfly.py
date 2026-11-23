@@ -180,6 +180,9 @@ class Hy4DFlyDraftModel:
             "feature_source": "final_hidden", "qualified": False,
             "tree_tails": self.tree_tails,
             "tree_tails_algorithm": TREE_TAILS_VERSION if self.tree_tails == "conditioned" else None,
+            # Present only off the bf16 default, so default receipts are unchanged.
+            **({"runtime_quantization": {k: quant[k] for k in ("algorithm", "bits", "group_size")}}
+               if (quant := getattr(self.head, "runtime_quantization", None)) else {}),
         }
 
     @property
@@ -497,6 +500,77 @@ class Hy4DFlyDraftModel:
         return [paths_to_tree([[int(t) for t in chain[lane]] for chain in stacked], max_nodes,
                               forbidden_root=forbidden[lane])
                 for lane in range(lanes)]
+
+QUANTIZATION_VERSION = "hy4-flash-dfly2-load-time-affine-v1"
+# What load-time ``draft_quantization`` leaves in the checkpoint dtype, and why.
+QUANTIZATION_KEPT = {
+    "norms": "RMSNorm scales (tiny; set the scale every projection reads)",
+    "mla_absorbed_maps": "self_attn.embed_q / unembed_out, the folded kv_b_proj "
+                         "(per-head MultiLinear inside latent attention scores and "
+                         "values; no quantized kernel, ~4% of the head)",
+    "learnable_sink_param": "attention sink logits, fp32 by sanitize",
+    "mtp_fusion.gate": "per-channel fusion gate vector",
+    "target_shared": "embed_tokens and the LM head belong to the target and are "
+                     "never touched (the target's own quantization applies)",
+}
+
+
+def _parameter_bytes(module) -> int:
+    from mlx.utils import tree_flatten
+
+    return int(sum(v.nbytes for _, v in tree_flatten(module.parameters())))
+
+
+def quantize_head(head, quantization) -> dict:
+    """Quantize the DFly2 head's ``nn.Linear`` projections in place (load time).
+
+    ``quantization`` is the shared ``draft_quantization`` policy value
+    (``{"bits": 4|8, "group_size": 32|64|128}``, MLX affine) or None.  Every
+    ``nn.Linear`` of the head (layer q/kv/gate/o projections and MLPs, the
+    slot-0 fusion ``eh_proj`` and the hidden-correction MLP) whose input
+    width divides the group size is quantized; QUANTIZATION_KEPT lists what
+    stays in the checkpoint dtype.  Verification stays on the target, so
+    committed tokens are unchanged; only the draft law (acceptance) moves.
+    Returns the receipt (stored on ``head.quantization_receipt``; also on
+    ``head.runtime_quantization`` when selected, else that is None).
+    """
+    from mlx import nn
+
+    before = _parameter_bytes(head)
+    if quantization is None:
+        receipt = {"selected": False, "bits": None, "group_size": None, "mode": None,
+                   "bytes_before": before, "bytes_after": before}
+        object.__setattr__(head, "runtime_quantization", None)
+        object.__setattr__(head, "quantization_receipt", receipt)
+        return receipt
+    bits, group = int(quantization["bits"]), int(quantization["group_size"])
+    modules, skipped = [], []
+
+    def predicate(path, module):
+        if not isinstance(module, nn.Linear):
+            return False
+        if int(module.weight.shape[-1]) % group:
+            skipped.append(path)
+            return False
+        modules.append(path)
+        return True
+
+    nn.quantize(head, group_size=group, bits=bits, mode="affine", class_predicate=predicate)
+    mx.eval(head.parameters())
+    receipt = {
+        "selected": True, "algorithm": QUANTIZATION_VERSION, "mode": "affine",
+        "bits": bits, "group_size": group,
+        "modules": sorted(modules), "module_count": len(modules),
+        "skipped_group_width": sorted(skipped),
+        "kept_checkpoint_dtype": sorted(QUANTIZATION_KEPT),
+        "bytes_before": before, "bytes_after": _parameter_bytes(head),
+        "source_artifact_unchanged": True,
+    }
+    # A plain attribute: an nn.Module would file a dict value as a child tree.
+    object.__setattr__(head, "runtime_quantization", receipt)
+    object.__setattr__(head, "quantization_receipt", receipt)
+    return receipt
+
 
 def dfly_record(num_draft: int, target_fingerprint: str) -> dict:
     """Inspection record for the embedded head (it ships in the target artifact)."""
