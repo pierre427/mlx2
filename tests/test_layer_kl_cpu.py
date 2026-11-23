@@ -344,3 +344,32 @@ def test_streamed_hessians_early_abort_shared_and_sequential(tmp_path, packed):
     finally:
         K.restore(applied)
     assert "up_proj" not in vars(experts) and "gate_proj" not in vars(experts)
+
+
+def test_calibration_swap_guard_runs_per_text_and_never_masks_a_forward_error(packed, monkeypatch):
+    from mlx2.gptq import GPTQSettings
+
+    _, _, _, model = packed
+    calib = [{"id": f"c{i}", "split": "dev", "ids": LONG[i * 7:i * 7 + 40]} for i in range(1, 4)]
+    settings = GPTQSettings(bits=2, group_size=32, block=32, expert_chunk=4, min_rows=2)
+    calls = []
+    applied, _ = K.gptq_apply(model, 3, ["mlp.experts"], calib, bits=2, group_size=32,
+                              settings=settings, between_texts=lambda: calls.append(1))
+    K.restore(applied)
+    assert calls  # the guard ran after early-stopped texts
+
+    class Guard(RuntimeError):
+        pass
+
+    def guard():
+        raise Guard("swap grew")
+
+    def broken(*args, **kwargs):
+        raise ValueError("forward failed")
+
+    monkeypatch.setattr(model, "hidden", broken, raising=False)
+    with pytest.raises(ValueError, match="forward failed"):
+        K.gptq_apply(model, 3, ["mlp.experts"], calib, bits=2, group_size=32,
+                     settings=settings, between_texts=guard)
+    experts = model.model.layers[3].mlp.experts
+    assert "up_proj" not in vars(experts) and "gate_proj" not in vars(experts)

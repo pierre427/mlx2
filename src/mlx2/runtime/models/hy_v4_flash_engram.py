@@ -426,7 +426,11 @@ class EngramTableRows:
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self.cache_rows = int(cache_rows)
         self.stats = {"lookups": 0, "requested_rows": 0, "unique_rows": 0,
-                      "cache_hits": 0, "bytes_read": 0, "prefill_reads": 0, "decode_reads": 0}
+                      "cache_hits": 0, "bytes_read": 0, "prefill_reads": 0, "decode_reads": 0,
+                      "prefetch_rows_submitted": 0, "prefetch_rows_consumed": 0,
+                      "prefetch_rows_landed": 0, "prefetch_rows_declined": 0}
+        # Rows a prefetch put in flight: row -> (future of its chunk, index in it).
+        self._inflight: dict = {}
         self.advisor = ReadAdvisor(READ_ADVISE_ENV)
         self._pool = ReadPool(max(self.decode_workers, self.prefill_workers), "hy4-engram",
                               timeout=self.timeout, owner=self.owner)
@@ -547,6 +551,55 @@ class EngramTableRows:
             return 0
         return len(missing)
 
+    # At most this many rows in flight from prefetches; further (speculative)
+    # submissions are declined rather than queued without bound.
+    MAX_INFLIGHT_ROWS = 1 << 16
+
+    def _land(self):
+        """Move finished prefetch rows into the LRU (caller holds the lock)."""
+        done = [row for row, (future, _i) in self._inflight.items() if future.done()]
+        for row in done:
+            future, index = self._inflight.pop(row)
+            try:
+                values = future.result(timeout=0)
+            except BaseException:
+                continue  # read_host will refetch it (and the pool reports the failure)
+            self._cache[row] = values[index].copy()
+            self.stats["prefetch_rows_landed"] += 1
+        while len(self._cache) > self.cache_rows:
+            self._cache.popitem(last=False)
+
+    def prefetch(self, rows) -> int:
+        """Start reading ``rows`` that are neither cached nor in flight; never blocks.
+
+        Exact: a later ``read_host`` returns the same values whether the rows
+        came from a prefetch or a foreground read.  Returns the rows submitted.
+        """
+        rows = np.unique(np.asarray(rows, np.int64).reshape(-1))
+        if rows.size and (rows.min() < 0 or rows.max() >= self.rows):
+            raise IndexError("Engram row outside its table")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Engram table reader is closed")
+            self._land()
+            todo = [r for r in rows.tolist() if r not in self._cache and r not in self._inflight]
+            room = self.MAX_INFLIGHT_ROWS - len(self._inflight)
+            if len(todo) > room:
+                self.stats["prefetch_rows_declined"] += len(todo) - max(room, 0)
+                todo = todo[: max(room, 0)]
+            if not todo:
+                return 0
+            pool, fd = self._pool, self._fd
+            workers = self.prefill_workers if len(todo) >= PREFILL_ROW_THRESHOLD else self.decode_workers
+            chunks = [c for c in np.array_split(np.asarray(todo, np.int64), min(workers, len(todo))) if c.size]
+            for chunk in chunks:
+                future = pool.submit(self._read_chunk, fd, chunk)
+                for i, row in enumerate(chunk.tolist()):
+                    self._inflight[row] = (future, i)
+            self.stats["prefetch_rows_submitted"] += len(todo)
+            self.stats["bytes_read"] += len(todo) * self.row_bytes
+        return len(todo)
+
     def read_host(self, rows: np.ndarray) -> np.ndarray:
         rows = np.asarray(rows, np.int64).reshape(-1)
         if rows.size and (rows.min() < 0 or rows.max() >= self.rows):
@@ -554,15 +607,32 @@ class EngramTableRows:
         unique = np.unique(rows)
         out = {}
         missing = []
+        waiting = []
         with self._lock:
+            self._land()
             for row in unique.tolist():
                 hit = self._cache.get(row)
-                if hit is None:
-                    missing.append(row)
-                else:
+                if hit is not None:
                     self._cache.move_to_end(row)
                     out[row] = hit
-        out.update(self._fetch(missing))
+                elif row in self._inflight:
+                    waiting.append((row, *self._inflight.pop(row)))
+                else:
+                    missing.append(row)
+        deadline = time.monotonic() + self.timeout
+        for row, future, index in waiting:
+            try:
+                values = future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except FutureTimeout:
+                failure = ReadTimeout("Engram prefetch read exceeded its deadline")
+                self._pool.fail(failure)
+                raise failure from None
+            out[row] = values[index].copy()
+        with self._lock:
+            self.stats["prefetch_rows_consumed"] += len(waiting)
+        fetched = self._fetch(missing)
+        out.update(fetched)
+        missing = missing + [row for row, *_ in waiting]
         with self._lock:
             for row in missing:
                 self._cache[row] = out[row]
@@ -572,7 +642,7 @@ class EngramTableRows:
             self.stats["requested_rows"] += int(rows.size)
             self.stats["unique_rows"] += int(unique.size)
             self.stats["cache_hits"] += int(unique.size) - len(missing)
-            self.stats["bytes_read"] += len(missing) * self.row_bytes
+            self.stats["bytes_read"] += (len(missing) - len(waiting)) * self.row_bytes
         if not rows.size:
             return np.zeros((0, self.dim), np.float32)
         return np.stack([out[r] for r in rows.tolist()])

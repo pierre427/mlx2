@@ -97,7 +97,9 @@ _TEXT_EXPECTED = {
 # they publish to APCv2 in their own namespace (like any quantized artifact).
 # fp8 latent rows are approximate *cache state* and are never published.
 def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
-                    engram_precision: str = "transformers") -> str:
+                    engram_precision: str = "transformers",
+                    tensorfold_rows: str | None = None, moe_fused_gate_up: bool = False,
+                    moe_nax: str = "off") -> str:
     """The APCv2 namespace: every knob that changes numerics changes it.
 
     A packed Engram table or the non-default Engram precision profile gives
@@ -109,6 +111,19 @@ def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
         layout = f"{layout}+engram-{engram_table_format}"
     if engram_precision != "transformers":
         layout = f"{layout}+engram-precision-{engram_precision}"
+    if tensorfold_rows is not None:
+        # The TensorFold row law (``ast_tensorfold_rows``) computes the trunk
+        # projections with other arithmetic than stock QMV, so its cache rows
+        # are exact for that law only; each backend gets its own namespace.
+        layout = f"{layout}+tensorfold-rows-{tensorfold_rows}-v1"
+    # The opt-in MoE kernel routes are bit-identical on CPU (fused gate/up,
+    # tests) and canary-proven per kernel instantiation (NAX), but are
+    # unmeasured on the GPU: until a GPU A/B shows exact parity their APCv2
+    # entries stay in their own namespace.
+    if moe_fused_gate_up:
+        layout = f"{layout}+moe-fused-gate-up"
+    if moe_nax != "off":
+        layout = f"{layout}+moe-nax-{moe_nax}"
     return layout
 
 
@@ -503,8 +518,33 @@ def widened_bytes(root, weight_map: dict, quant, *, lm_head_fp32: bool) -> int:
     return extra
 
 
-MODEL_KEYS = frozenset({"engram_cache_rows", "engram_precision", "engram_table_format",
-                        "latent_kv", "vision"})
+MODEL_KEYS = frozenset({"engram_cache_rows", "engram_hash", "engram_precision",
+                        "engram_table_format", "latent_kv", "vision",
+                        "moe_fused_gate_up", "moe_nax"})
+# Where the Engram n-grams are hashed.  ``host``: NumPy after a host copy of
+# the token ids.  ``device``: MLX ops on the generation stream for forwards of
+# at most ROLLBACK tokens, read back once with the token ids after the
+# pre-Engram layers are queued; fails closed at load when the tables' geometry
+# is outside the exact device range.  ``auto`` (DEFAULT, Pierre 2026-11-21):
+# ``device`` when the geometry is exactly hashable, else ``host`` with the
+# reason in the receipt.  Bit-identical rows on every mode, so outputs and the
+# APCv2 layout are unchanged.  Unqualified.
+# Measured 2026-11-21 (Hy4-flash-MLX-4.6bit-mlx2@f2a8fa8d, 248541270), GSM8K
+# first 30: ordinary decode 35.2 vs 34.0 tok/s (+3.4%, same 3155 tokens,
+# 3194/3220 forwards hashed on device); DFly2 50.7 vs 51.2 (no gain: verify
+# tokens are host-known).
+ENGRAM_HASH_MODES = ("auto", "host", "device")
+ENGRAM_HASH_DEFAULT = "auto"
+# Opt-in MoE kernel routes (default off, unqualified; docs/hy4-flash/fused-moe.md).
+# Measured 2026-11-21 (Hy4-flash-MLX-4.6bit-mlx2@f2a8fa8d, 248541270): both are
+# bit-identical to the split route on Metal (prefill 512/2048, B1, 4 lanes,
+# 4x6 verify); single-rep speed within noise (fused +1-3% prefill, 0.95x
+# verify; NAX prefill +4-8%); DFly2 GSM8K with fused 50.1 vs 51.2 tok/s.  Kept
+# off: no measured win.
+# ``moe_fused_gate_up``: one [gate|up] gather per routed affine expert bank.
+# ``moe_nax``: "gather" opens the NAX sorted gather for prefill forwards of
+# the ordinary route (moe_nax_gather, M5 hosts; claims the process mode).
+MOE_NAX_MODES = ("off", "gather")
 # Engram table formats (hy_v4_flash_engram.TABLE_FORMATS); bf16 is the
 # default, the others are opt-in, unqualified, and need converter shards.
 # ``iq4_nl`` is read from GGUF files bound by text_config.engram_gguf_tables
@@ -514,7 +554,20 @@ CONVERTER_ENGRAM_FORMATS = ("bf16", "fp8_e4m3_row", "affine4_g32")
 AST_KEYS = frozenset({"draft_model", "num_draft", "ast_topology", "ast_tiles", "ast_tile_rows",
                       "ast_multilane_tile_rows", "ast_adaptive_rows", "batch_size_route",
                       "pairwise_selection", "cost_per_commit_handoff", "ast_graft_prompt_lookup",
-                      "ast_target_executor"})
+                      "ast_target_executor", "ast_tensorfold_rows", "ast_tensorfold_rows_backend"})
+# Opt-in TensorFold row law on the trunk's dense affine q8/q4-g64 projections
+# (runtime/tensorfold_rows.py; docs/hy4-flash/ast-tensorfold-rows.md).  Off by
+# default, implemented and unqualified.  ``reference`` is the CPU oracle.
+# Kept off (2026-11-21, Hy4-flash-MLX-4.6bit-mlx2@f2a8fa8d, 6a449b12c): GSM8K
+# first 30 with DFly2, 474 projections installed and engaged on every verify,
+# decode 49.8 vs 53.1 tok/s (-6%), acceptance unchanged (3.81 vs 3.77): the
+# stock QMV already reads the trunk about once per verify, and the routed
+# experts (the verify's real cost) are not row-packable here.
+TENSORFOLD_ROWS_BACKENDS = ("metal", "metal_shared2", "reference")
+# Trunk subtrees the row law may touch; the LM head (fp32 path), embeddings,
+# routed expert banks, the DFly2 head and the vision tower are not under them
+# or are not plain ``nn.QuantizedLinear``.
+TENSORFOLD_ROWS_SKIP_PARTS = ("lm_head", "embed_tokens", "experts", "switch_mlp")
 # AST tree tiles admit one to four concurrent requests (lanes) per round.
 AST_MAX_WIDTH = 4
 AST_TARGET_EXECUTORS = ("packed", "serial")
@@ -536,14 +589,25 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
         raise ValueError(f"Hy4-flash execution policy keys are not declared: {sorted(unknown)}")
     if policy.get("engram_precision", "transformers") not in ("transformers", "vllm"):
         raise ValueError("Hy4-flash engram_precision must be 'transformers' (default) or 'vllm'")
+    if policy.get("engram_hash", ENGRAM_HASH_DEFAULT) not in ENGRAM_HASH_MODES:
+        raise ValueError(f"Hy4-flash engram_hash must be one of {ENGRAM_HASH_MODES} "
+                         f"(default {ENGRAM_HASH_DEFAULT})")
     if policy.get("engram_table_format", "bf16") not in ENGRAM_TABLE_FORMATS:
         raise ValueError(f"Hy4-flash engram_table_format must be one of {ENGRAM_TABLE_FORMATS} (default bf16)")
     if policy.get("latent_kv", "native") not in LATENT_KV_FORMATS:
         raise ValueError("Hy4-flash latent_kv must be 'native' (default) or 'fp8'")
     if type(policy.get("vision", True)) is not bool:
         raise ValueError("Hy4-flash vision must be a boolean (default true: load the tower if present)")
+    if type(policy.get("moe_fused_gate_up", False)) is not bool:
+        raise ValueError("Hy4-flash moe_fused_gate_up must be a boolean (default false)")
+    if policy.get("moe_nax", "off") not in MOE_NAX_MODES:
+        raise ValueError("Hy4-flash moe_nax must be 'off' (default) or 'gather'")
     model = {k: v for k, v in policy.items() if k in MODEL_KEYS}
     external = {k: v for k, v in policy.items() if k in AST_KEYS}
+    if external and model.get("moe_nax", "off") != "off":
+        # Hy4's verify forwards (chain-packed tiles, DFly2) are not marked as
+        # verify forwards, so a multi-row verify would read as a prefill.
+        raise ValueError("Hy4-flash moe_nax applies to the ordinary route only (not with a draft_model)")
     if not external:
         return model, {}, None
     draft = external.get("draft_model")
@@ -572,17 +636,48 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
     executor = external.pop("ast_target_executor", "packed")
     if executor not in AST_TARGET_EXECUTORS:
         raise ValueError("Hy4-flash ast_target_executor must be 'packed' (default) or 'serial'")
+    rows = external.pop("ast_tensorfold_rows", False)
+    if type(rows) is not bool:
+        raise ValueError("Hy4-flash ast_tensorfold_rows must be a boolean (default false)")
+    backend = external.pop("ast_tensorfold_rows_backend", None)
+    if backend is not None and not rows:
+        raise ValueError("ast_tensorfold_rows_backend requires ast_tensorfold_rows")
+    if rows and (backend or "metal") not in TENSORFOLD_ROWS_BACKENDS:
+        raise ValueError(f"Hy4-flash ast_tensorfold_rows_backend must be one of {TENSORFOLD_ROWS_BACKENDS}")
     external.setdefault("ast_tile_rows", 8)
     from .qwen38_27b import _native_mtp_tree_policy
 
     external = _native_mtp_tree_policy(external)
     external["ast_target_executor"] = executor
+    if rows:
+        external["ast_tensorfold_rows"] = True
+        external["ast_tensorfold_rows_backend"] = backend or "metal"
     return model, external, kind
+
+
+def resolve_engram_hash(model) -> str:
+    """Settle ``engram_hash: auto`` after ``bind_engram``: device when exact.
+
+    The device hasher refuses (ValueError) a geometry it cannot reproduce
+    bit for bit; ``auto`` then stays on the host and records why.  Explicit
+    ``device`` already failed closed inside ``bind_engram``.
+    """
+    if getattr(model, "engram_hash_requested", None) != "auto" or not model.engram_hashers:
+        return model.engram_hash
+    try:
+        model.engram_hash = "device"
+        model._device_hasher = None
+        model.device_hasher  # noqa: B018 - builds and validates the stacked hasher
+    except ValueError as error:
+        model.engram_hash = "host"
+        model._device_hasher = None
+        model.engram_hash_auto_reason = str(error)
+    return model.engram_hash
 
 
 def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, memory_budget=None,
                engram_precision="transformers", engram_table_format="bf16", latent_kv="native",
-               vision=True):
+               vision=True, engram_hash=ENGRAM_HASH_DEFAULT, moe_fused_gate_up=False):
     """``(model, drafter or None, engram readers)`` for an inspected artifact.
 
     Engram tables stay on disk; the DFly2 layers are read only with
@@ -605,6 +700,13 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
         raise ValueError("Hy4-flash latent_kv must be 'native' (default) or 'fp8'")
     args.latent_kv = latent_kv
     model = Model(args)
+    if engram_hash not in ENGRAM_HASH_MODES:
+        raise ValueError(f"Hy4-flash engram_hash must be one of {ENGRAM_HASH_MODES}")
+    # ``auto`` binds on the host, then switches to device hashing only if the
+    # bound geometry is exactly hashable there (resolve_engram_hash).
+    model.engram_hash = "host" if engram_hash == "auto" else engram_hash
+    model.engram_hash_requested = engram_hash
+    model.engram_hash_auto_reason = None
     tables = {f"model.layers.{i}.engram_layer.multi_head_embedding.embedding.weight"
               for i in args.engram_layers}
 
@@ -649,6 +751,11 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
         nn.quantize(model, group_size=quant["group_size"], bits=quant["bits"],
                     mode=quant.get("mode", "affine"), class_predicate=predicate)
         install_q2_zero(model, weights, q2_zero)
+    if moe_fused_gate_up:
+        # After quantization: only resident affine banks of one format fuse
+        # (q2_0 and mixed banks keep the split route, recorded); the planes
+        # are concatenated in place, so the split planes are never resident.
+        model.fuse_routed_gate_up(weights)
     model.load_weights(list(weights.items()), strict=True)
     weights.clear()
     if keep_vision:
@@ -664,6 +771,7 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
                                  gguf_tables=text_config(config).get("engram_gguf_tables"))
     try:
         model.bind_engram(readers)
+        resolve_engram_hash(model)
         drafter = None
         if keep_dfly:
             intermediate, correction = HY4FlashDFly.geometry(dfly_raw)
@@ -772,9 +880,35 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             self.layout = FP8_CACHE_LAYOUT
         elif self.dfly_selected:
             self.layout = DFLY_CACHE_LAYOUT
+        self.tensorfold_rows = None
+        rows_backend = (external.get("ast_tensorfold_rows_backend")
+                        if external.get("ast_tensorfold_rows") else None)
+        self.moe_fused_gate_up = bool(policy.get("moe_fused_gate_up", False))
+        self.moe_nax = policy.get("moe_nax", "off")
+        if self.moe_nax != "off" and not artifact["quantized"]:
+            raise ValueError("Hy4-flash moe_nax applies only to an affine-quantized artifact")
+        if self.moe_fused_gate_up and not artifact["quantized"]:
+            raise ValueError("Hy4-flash moe_fused_gate_up fuses quantized expert banks only")
+        if self.moe_fused_gate_up:
+            from ..runtime.models import switch_grouped_experts
+
+            if switch_grouped_experts.MODE != "off":
+                raise ValueError("Hy4-flash moe_fused_gate_up needs MLX2_MOE_GROUPED_EXPERTS off "
+                                 "(the grouped kernels read split gate/up tables)")
         self.layout = numerics_layout(self.layout, engram_table_format=engram_format,
-                                      engram_precision=policy.get("engram_precision", "transformers"))
+                                      engram_precision=policy.get("engram_precision", "transformers"),
+                                      tensorfold_rows=rows_backend,
+                                      moe_fused_gate_up=self.moe_fused_gate_up, moe_nax=self.moe_nax)
         self.environment = configure_environment()
+        from .process_globals import claim_moe, claim_stock_moe
+
+        # The sorted expert gathers read two process globals (NAX mode, rhs
+        # pad policy); bind them while this adapter lives.  The stock claim
+        # pins the module defaults (NAX off, floor pad).
+        if self.moe_nax == "gather":
+            claim_moe(self, "Hy4-flash ordinary (moe_nax gather)", nax_mode="gather")
+        else:
+            claim_stock_moe(self, "the Hy4-flash adapter")
         path = Path(self.identity["path"])
         config = artifact["config"]
         from transformers import AutoTokenizer
@@ -786,8 +920,18 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             engram_cache_rows=int(policy.get("engram_cache_rows", 1 << 16)),
             engram_precision=policy.get("engram_precision", "transformers"),
             engram_table_format=engram_format,
-            latent_kv=self.latent_kv, vision=policy.get("vision", True))
+            latent_kv=self.latent_kv, vision=policy.get("vision", True),
+            engram_hash=policy.get("engram_hash", ENGRAM_HASH_DEFAULT),
+            moe_fused_gate_up=self.moe_fused_gate_up)
+        self.model.moe_nax_prefill = self.moe_nax != "off"
         self.engram_table_format = engram_format
+        if rows_backend is not None:
+            from ..runtime.tensorfold_rows import install as install_rows
+
+            # Fails closed (ValueError) when no trunk projection is admitted.
+            self.tensorfold_rows = install_rows(
+                {f"model.layers.{i}": layer for i, layer in enumerate(self.model.model.layers)},
+                skip_parts=TENSORFOLD_ROWS_SKIP_PARTS, backend=rows_backend)
         from ..runtime.models.hy_v4_flash_fp8kv import latent_fp8_stats
 
         self._fp8_baseline = latent_fp8_stats()["rows_packed"]
@@ -860,8 +1004,10 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         # (``completion_batch_size``) bounds each cohort.
         kwargs.setdefault("dynamic_tree_max_width", AST_MAX_WIDTH)
         if "target_tree_executor_provider" not in kwargs:
+            rows = getattr(self, "tensorfold_rows", None)
             kwargs["target_tree_executor_provider"] = Hy4ChainTreeExecutor.create(
-                joint=self.external_policy.get("ast_target_executor", "packed") == "packed")
+                joint=self.external_policy.get("ast_target_executor", "packed") == "packed",
+                call_scope=None if rows is None else (lambda: rows.scope("ast_verify")))
         self.tree_executor = kwargs["target_tree_executor_provider"]
         kwargs.setdefault("tree_node_budget_by_lanes",
                           _tile_node_budgets(self.external_policy, AST_MAX_WIDTH))
@@ -1193,6 +1339,10 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "target_executor": getattr(self, "external_policy", {}).get("ast_target_executor"),
                 "executor": self.tree_executor.receipt()
                 if getattr(self, "tree_executor", None) is not None else None,
+                "tensorfold_rows": self.tensorfold_rows.receipt()
+                if getattr(self, "tensorfold_rows", None) is not None else {
+                    "implemented": True, "qualified": False, "selected": False,
+                    "observed_used": False},
                 "graft_pld": {
                     "implemented": True, "qualified": False, "selected": grafted,
                     # Used only once prompt lookup actually found a copy path.
@@ -1217,10 +1367,13 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "observed_used": bool(stats_.get("reasoning_emitted")),
                 "requests": stats_.get("reasoning_requests", 0),
             },
+            "moe_fused_gate_up": self._moe_fused_receipt(),
+            "moe_nax_gather": self._moe_nax_receipt(),
             "engram": {i: r.diagnostics() for i, r in getattr(self, "engram_tables", {}).items()},
             "engram_precision": getattr(getattr(getattr(self, "model", None), "args", None),
                                         "engram_precision", None),
             "engram_table_format": self._engram_format_record(),
+            "engram_hash": self._engram_hash_receipt(),
             "latent_kv": self._latent_kv_receipt(),
             "approximate_state": (getattr(self, "latent_kv", "native") == "fp8"
                                   or bool((self._engram_format_record() or {}).get("approximate"))),
@@ -1239,6 +1392,35 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             },
         }
 
+    def _engram_hash_receipt(self):
+        model = getattr(self, "model", None)
+        mode = getattr(model, "engram_hash", "host")
+        stats = dict(getattr(model, "engram_hash_stats", {}))
+        return {"mode": mode, "requested": getattr(model, "engram_hash_requested", mode),
+                "auto_fallback_reason": getattr(model, "engram_hash_auto_reason", None),
+                "modes": ENGRAM_HASH_MODES, "default": ENGRAM_HASH_DEFAULT, "implemented": True,
+                "exact": True, "qualified": False, "selected": mode == "device",
+                "observed_used": bool(stats.get("device_forwards")), "stats": stats}
+    def _moe_fused_receipt(self):
+        model = getattr(self, "model", None)
+        if model is None or not hasattr(model, "moe_gate_up_status"):
+            return None
+        return model.moe_gate_up_status()
+
+    def _moe_nax_receipt(self):
+        from ..runtime.models import moe_nax_gather
+
+        mode = getattr(self, "moe_nax", "off")
+        status = moe_nax_gather.status() if mode != "off" else None
+        engaged = sum((status or {}).get("calls", {}).values())
+        return {
+            "implemented": True, "qualified": False, "selected": mode != "off", "mode": mode,
+            "scope": "prefill forwards of the ordinary route (trunk forward_scope)",
+            # Process-wide counters: another live adapter on the same mode adds to them.
+            "observed_used": engaged > 0,
+            **({"status": status} if status is not None else {}),
+        }
+
     def _engram_format_record(self):
         fmt = getattr(self, "engram_table_format", None)
         if fmt is None:
@@ -1252,4 +1434,4 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         for reader in getattr(self, "engram_tables", {}).values():
             reader.close()
         self.engram_tables = {}
-        super().close()
+        super().close()  # releases a moe_nax process claim

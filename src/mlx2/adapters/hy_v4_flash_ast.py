@@ -28,6 +28,7 @@ reference (one forward per chain).
 from __future__ import annotations
 
 import hashlib
+from contextlib import nullcontext
 from pathlib import Path
 
 import mlx.core as mx
@@ -324,10 +325,16 @@ class Hy4ChainTreeExecutor:
     # and never read past a lane's own tree.
     accepts_unequal_tree_widths = True
 
-    def __init__(self, *, joint=True):
+    def __init__(self, *, joint=True, call_scope=None):
         if type(joint) is not bool:
             raise ValueError("Hy4-flash tree executor joint must be a boolean")
+        if call_scope is not None and not callable(call_scope):
+            raise ValueError("Hy4-flash tree executor call_scope must be callable")
         self.joint = joint
+        # Optional context factory entered around every target forward this
+        # executor runs (verify and plain anchors), so an adapter's row-law
+        # installation can attribute its calls to the AST verify path.
+        self.call_scope = call_scope
         self.source_revision_token = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         self.source_identity = (("module", "mlx2.adapters.hy_v4_flash_ast"),
                                 ("sha256", self.source_revision_token),
@@ -346,8 +353,8 @@ class Hy4ChainTreeExecutor:
         self.plain_anchor_joint_steps = 0
 
     @classmethod
-    def create(cls, *, joint=True):
-        return cls(joint=joint)
+    def create(cls, *, joint=True, call_scope=None):
+        return cls(joint=joint, call_scope=call_scope)
 
     def validate_revision(self):
         if hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != self.source_revision_token:
@@ -358,8 +365,9 @@ class Hy4ChainTreeExecutor:
             raise ValueError("Hy4-flash tree cohort exceeds its bound")
 
     def _run(self, model, inputs, parents, caches, layers, *, plain=False):
-        logits, features, transactions, stats = cohort_forward(
-            model, inputs, parents, caches, layers, self.source_revision_token, joint=self.joint)
+        with self.call_scope() if self.call_scope is not None else nullcontext():
+            logits, features, transactions, stats = cohort_forward(
+                model, inputs, parents, caches, layers, self.source_revision_token, joint=self.joint)
         self.chain_forwards += stats["chain_forwards"]
         self.joint_waves += stats["joint_waves"]
         self.joint_chains += stats["joint_chains"]

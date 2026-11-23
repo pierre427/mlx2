@@ -53,6 +53,9 @@ FEATURES = (
     "dfly2_embedded_draft", "hy4_chain_packed_tree_executor",
     "hy4_fp8_latent_kv", "engram_table_formats", "dfly2_conditioned_tree_tails",
     "ast_graft_prompt_lookup",
+    # Hy4-flash kernel opt-ins and the q2 layer map (2026-11-21).
+    "moe_fused_gate_up", "moe_nax_gather_prefill", "engram_hash_device",
+    "ast_tensorfold_rows", "q2_routed_expert_layers",
     # Morning follow-up probes (2026-11-06): opt-in research options.
     "batch_rows_attention", "prefill_tail_row", "prefill_tail_skip",
     # Nemotron 3.5 Super VL NVFP4 export (2026-11-10): checkpoint defaults.

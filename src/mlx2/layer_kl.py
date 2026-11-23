@@ -600,11 +600,17 @@ def gptq_apply(model, layer: int, groups: Sequence[str], calib_texts: Sequence[d
     forward = forward if callable(forward) else model
 
     def run_text(text):
+        # The swap guard runs after a finished or early-stopped text only, so a
+        # SwapGrowth never masks a real forward error.
+        failed = False
         try:
             mx.eval(forward(mx.array([list(map(int, text["ids"]))])))
+        except BaseException as error:
+            failed = not isinstance(error, G.StopForward)
+            raise
         finally:
             mx.clear_cache()
-            if between_texts is not None:
+            if between_texts is not None and not failed:
                 between_texts()
 
     try:

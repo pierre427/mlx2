@@ -60,6 +60,7 @@ from .hy_v4_flash_fp8kv import row_bytes as fp8_row_bytes
 from .hy_v4_flash_fp8kv import unpack_rows as fp8_unpack_rows
 from .hy_v4_flash_vision import (chunk_positions, find_spans, mrope_planes, slot_positions,
                                  span_end)
+from . import moe_nax_gather as _moe_nax
 from .switch_layers import SwitchGLU
 
 INDEXED = "indexed_attention"
@@ -686,8 +687,12 @@ class Attention(nn.Module):
             # the cold run bit for bit.
             lo = max(first, start - self.window + 1)
             kv, kpos = kv[:, lo - first :], mx.arange(lo, start + L)
-            allowed = (kpos[None, :] <= qpos[:, None]) & (kpos[None, :] > qpos[:, None] - self.window)
             kv = cache.latent_rows(kv, keys.dtype)
+            if L == 1:
+                # One query: the slice above is exactly its visible window,
+                # so the mask would be all true; skip building it (decode).
+                return mla_attend(q, kv[:, None], None, sinks, self.scale, r)
+            allowed = (kpos[None, :] <= qpos[:, None]) & (kpos[None, :] > qpos[:, None] - self.window)
             return mla_attend(q, kv[:, None], allowed[None, None], sinks, self.scale, r)
         indexer = self.compressed_indexer
         token_keys = indexer.token_key_norm(indexer.token_key_projection(x))
@@ -860,6 +865,9 @@ class ResidentEngramRows:
 
     def read(self, rows: np.ndarray) -> mx.array:
         return self.weight[mx.array(rows.astype(np.int64))]
+
+    def prefetch(self, rows) -> int:
+        return 0
 
 
 ENGRAM_PRECISIONS = ("transformers", "vllm")
@@ -1637,6 +1645,21 @@ class Model(nn.Module):
         self.engram_hashers: Dict[int, EngramHasher] = {}
         self.engram_rows: Dict[int, Any] = {}
         self.record_layers: frozenset = frozenset()
+        # ``host`` (default): n-grams hashed in NumPy after ``np.array(inputs)``.
+        # ``device`` (opt-in, unqualified, exact): hashed by MLX ops on the caller's
+        # stream; see ``_hidden_device_hash``.
+        self.engram_hash = "host"
+        self._device_hasher = None
+        self.engram_hash_stats = {"host_forwards": 0, "device_forwards": 0, "device_rows": 0}
+        # Opt-in (adapter policy ``moe_nax``), default off: open
+        # ``moe_nax_gather.forward_scope`` around every trunk forward, so the
+        # NAX sorted gather (when its process mode is on) may serve prefill
+        # forwards.  The adapter admits it only on the ordinary route.
+        self.moe_nax_prefill = False
+        # Load-time record of the opt-in fused gate/up expert banks
+        # (``fuse_routed_gate_up``); None when it was not selected.
+        # A plain attribute, not a module child (it holds no parameters).
+        object.__setattr__(self, "moe_gate_up_fusion", None)
 
     # -- engram ----------------------------------------------------------
     def bind_engram(self, rows_by_layer: Dict[int, Any]):
@@ -1675,6 +1698,19 @@ class Model(nn.Module):
             layer.table_round_trip_dtype = carried
             self.engram_hashers[index] = hasher
             self.engram_rows[index] = reader
+        self._device_hasher = None
+        if self.engram_hash == "device":
+            self.device_hasher  # refuse a geometry it cannot hash exactly at load, not at decode
+
+    @property
+    def device_hasher(self):
+        """The stacked device hasher of every Engram layer (``engram_hash: device``)."""
+        if self._device_hasher is None:
+            from .hy_v4_flash_device_hash import DeviceEngramHasher
+
+            self._device_hasher = DeviceEngramHasher(
+                [self.engram_hashers[i] for i in sorted(self.engram_hashers)])
+        return self._device_hasher
 
     @staticmethod
     def pop_engram_tables(weights: dict) -> Dict[int, Any]:
@@ -1721,7 +1757,21 @@ class Model(nn.Module):
         """Per-layer ``(rows [B, L, heads, hd] fp32, mask [B, L])`` for one lane set.
 
         ``caches`` are row caches sharing ``start``; their ``token_tail``
-        supplies the n-gram history before this chunk.
+        supplies the n-gram history before this chunk.  Every layer's rows
+        are submitted to its reader before any is read, so the four tables'
+        reads overlap instead of running one after another.
+        """
+        plan = self._engram_plan(tokens, start, caches)
+        return {index: resolve() for index, resolve in plan.items()}
+
+    def _engram_plan(self, tokens: np.ndarray, start: int, caches, hashed=None) -> Dict[int, Any]:
+        """Hash one lane set's rows, submit every layer's reads, return resolvers.
+
+        ``{layer: resolve() -> (rows, mask)}``; the token tails are updated
+        here, so the plan is made exactly once per forward.  ``resolve``
+        waits only for its own layer's reads.  ``hashed`` (``{layer: rows
+        [B, L, heads]}``) are rows the device hasher already computed; they
+        equal ``hasher.table_rows`` of this chunk's n-grams.
         """
         if not self.args.engram_layers:
             return {}
@@ -1732,28 +1782,40 @@ class Model(nn.Module):
         tail_rows = caches[first].token_tail
         tail = np.array(tail_rows, dtype=np.int64) if tail_rows and len(tail_rows[0]) else \
             np.zeros((tokens.shape[0], 0), np.int64)
-        spans = getattr(caches[first], "mrope_spans", ())
-        document = (slot_positions(spans, np.arange(start, start + tokens.shape[1]))[0]
-                    if spans else None)
-        ngrams = self._ngram_tokens(tokens, start, tail, document)
+        ngrams = None
+        if hashed is None:
+            spans = getattr(caches[first], "mrope_spans", ())
+            document = (slot_positions(spans, np.arange(start, start + tokens.shape[1]))[0]
+                        if spans else None)
+            ngrams = self._ngram_tokens(tokens, start, tail, document)
         mask = tokens != a.engram_pad_id
         for special in (a.image_token_id, a.video_token_id):
             if special is not None:
                 mask &= tokens != special
         out = {}
-        table_rows = {index: hasher.table_rows(ngrams)  # [B, L, heads]
-                      for index, hasher in self.engram_hashers.items()}
-        # Opt-in read-ahead (hy_v4_flash_engram.READ_ADVISE_ENV, default
-        # off): hint every later layer's rows of this round before the first
-        # layer is read.  Rows are byte-identical either way.
-        for index in list(table_rows)[1:]:
+        # Queue optional OS read-ahead for later tables before issuing the first
+        # required prefetch. With hints off, hashing and I/O still overlap.
+        advised = [index for index in self.engram_hashers if index != first
+                   and getattr(self.engram_rows[index], "read_advise", False)]
+        if advised:
+            if hashed is None:
+                hashed = {index: hasher.table_rows(ngrams) for index, hasher in self.engram_hashers.items()}
+            for index in advised:
+                self.engram_rows[index].advise(hashed[index].reshape(-1))
+        mask_mx = mx.array(mask)
+        for index, hasher in self.engram_hashers.items():
+            rows = hasher.table_rows(ngrams) if hashed is None else hashed[index]  # [B, L, heads]
             reader = self.engram_rows[index]
-            if getattr(reader, "read_advise", False):
-                reader.advise(table_rows[index].reshape(-1))
-        for index, rows in table_rows.items():
-            B, L, heads = rows.shape
-            data = self.engram_rows[index].read(rows.reshape(-1)).reshape(B, L, heads, -1)
-            out[index] = (data.astype(mx.float32), mx.array(mask))
+            prefetch = getattr(reader, "prefetch", None)
+            if callable(prefetch):
+                prefetch(rows.reshape(-1))
+
+            def resolve(reader=reader, rows=rows):
+                B, L, heads = rows.shape
+                data = reader.read(rows.reshape(-1)).reshape(B, L, heads, -1)
+                return data.astype(mx.float32), mask_mx
+
+            out[index] = resolve
         keep = self.engram_tail_keep
         combined = np.concatenate([tail, tokens], axis=1)[:, -keep:]
         packed = tuple(tuple(int(t) for t in row) for row in combined.tolist())
@@ -1763,34 +1825,46 @@ class Model(nn.Module):
 
     def _batched_engram(self, tokens: np.ndarray, layout, cache) -> Dict[int, tuple]:
         """Engram inputs for a lane batch: each row with its own tail and span."""
+        plan = self._batched_engram_plan(tokens, layout, cache)
+        return {index: resolve() for index, resolve in plan.items()}
+
+    def _batched_engram_plan(self, tokens: np.ndarray, layout, cache, hashed=None) -> Dict[int, Any]:
+        """Every lane's reads for every layer submitted first; per-layer resolvers.
+
+        ``hashed`` (device hashing) holds one ``{layer: rows}`` per lane
+        with a nonzero count, in lane order.
+        """
         if not self.args.engram_layers:
             return {}
         B, L = tokens.shape
         parts = []
+        hashed = iter(hashed) if hashed is not None else None
         for b, (start, count) in enumerate(layout):
             lane = [c.rows[b] for c in cache]
             if count == 0:
                 parts.append(None)
                 continue
-            parts.append((start, count, self.engram_inputs(tokens[b : b + 1, start : start + count],
-                                                           lane[0].offset, lane)))
-        out = {}
-        for index in self.args.engram_layers:
-            rows, masks = [], []
-            for part in parts:
-                if part is None:
-                    rows.append(None)
-                    masks.append(mx.zeros((1, L), dtype=mx.bool_))
-                    continue
-                start, count, value = part
-                data, mask = value[index]
-                pad = [(0, 0), (start, L - start - count)]
-                rows.append(mx.pad(data, pad + [(0, 0), (0, 0)]))
-                masks.append(mx.pad(mask, pad))
-            shape = next(r for r in rows if r is not None).shape[1:]
-            rows = [r if r is not None else mx.zeros((1, *shape), mx.float32) for r in rows]
-            out[index] = (mx.concatenate(rows, axis=0), mx.concatenate(masks, axis=0))
-        return out
+            parts.append((start, count, self._engram_plan(
+                tokens[b : b + 1, start : start + count], lane[0].offset, lane,
+                None if hashed is None else next(hashed))))
+        return {index: (lambda index=index: self._batched_resolve(index, parts, L))
+                for index in self.args.engram_layers}
+
+    def _batched_resolve(self, index, parts, L):
+        rows, masks = [], []
+        for part in parts:
+            if part is None:
+                rows.append(None)
+                masks.append(mx.zeros((1, L), dtype=mx.bool_))
+                continue
+            start, count, value = part
+            data, mask = value[index]()
+            pad = [(0, 0), (start, L - start - count)]
+            rows.append(mx.pad(data, pad + [(0, 0), (0, 0)]))
+            masks.append(mx.pad(mask, pad))
+        shape = next(r for r in rows if r is not None).shape[1:]
+        rows = [r if r is not None else mx.zeros((1, *shape), mx.float32) for r in rows]
+        return mx.concatenate(rows, axis=0), mx.concatenate(masks, axis=0)
 
     # -- forward -----------------------------------------------------------
     def make_cache(self):
@@ -1899,7 +1973,22 @@ class Model(nn.Module):
         """
         if cache is None:
             cache = self.make_cache()
+        if self.moe_nax_prefill:
+            # A no-op while the NAX mode is off or an outer forward decided.
+            with _moe_nax.forward_scope(inputs, cache):
+                return self._hidden_route(inputs, cache, pixel_values, image_grid_thw)
+        return self._hidden_route(inputs, cache, pixel_values, image_grid_thw)
+
+    def _hidden_route(self, inputs, cache, pixel_values, image_grid_thw):
+        if (self.engram_hash == "device" and pixel_values is None and self.engram_hashers
+                and inputs.ndim == 2 and inputs.shape[1] <= ROLLBACK):
+            return self._hidden_device_hash(inputs, cache)
+        return self._hidden(inputs, cache, pixel_values, image_grid_thw)
+
+    def _hidden(self, inputs, cache, pixel_values, image_grid_thw):
         a = self.args
+        # Host n-gram hashing needs the token ids: this waits for whatever
+        # produced ``inputs`` (at decode, the previous step's sampler).
         tokens = np.array(inputs).astype(np.int64)
         if a.video_token_id is not None and np.any(tokens == a.video_token_id):
             raise ValueError("Hy4-flash video input is not implemented")
@@ -1912,17 +2001,146 @@ class Model(nn.Module):
         if batched:
             if tokens.shape[0] != len(cache[0].rows):
                 raise ValueError("Hy4-flash batch cache rows disagree with the input batch")
-            engram = self._batched_engram(tokens, cache[0].layout(tokens.shape[1]), cache)
+            engram = self._batched_engram_plan(tokens, cache[0].layout(tokens.shape[1]), cache)
         else:
-            engram = self.engram_inputs(tokens, cache[0].offset, cache)
+            engram = self._engram_plan(tokens, cache[0].offset, cache)
+        if engram:
+            self.engram_hash_stats["host_forwards"] += 1
         h = self.model.embed_tokens(inputs)
         streams = mx.broadcast_to(h[:, :, None, :], (*h.shape[:2], a.hc_mult, h.shape[-1]))
-        for i, layer in enumerate(self.model.layers):
-            streams = layer(streams, cache[i], engram.get(i))
+        return self._layers_from(streams, cache, engram, 0, tokens.shape[1], batched)
+
+    def _layers_from(self, streams, cache, engram, begin: int, L: int, batched: bool):
+        """Run decoder layers ``begin..`` and the head; dispatch at Engram boundaries.
+
+        The rows of every Engram layer were submitted before the first one
+        ran.  After the first Engram layer, and before each later one waits
+        for its rows, the layers built so far are handed to the GPU
+        (``async_eval``: same graph, same numerics), so the device works
+        while Python builds the next segment.
+        """
+        first_engram = min(engram) if engram else None
+        for i in range(begin, len(self.model.layers)):
+            layer = self.model.layers[i]
+            resolve = engram.get(i)
+            if resolve is not None and i != first_engram:
+                mx.async_eval(streams)
+            streams = layer(streams, cache[i], resolve() if resolve is not None else None)
+            if i == first_engram and len(self.model.layers) - i > 1:
+                mx.async_eval(streams)
         if batched:
             for c in cache:
-                c.advance(tokens.shape[1])
+                c.advance(L)
         return self.model.norm(self.model.hc_head(streams))
+
+    # -- device Engram hashing (opt-in ``engram_hash: device``) ------------
+    def _device_ngrams(self, ids: mx.array, caches, start: int) -> mx.array:
+        """``ids [r, L]`` (int32, device) -> n-gram tokens ``[r*L, max_ngram]``.
+
+        The same gather as ``_ngram_tokens``: the index plan depends only on
+        host metadata (slot, tail length, vision spans); the history is the
+        lane's host token tail uploaded next to the device ids.
+        """
+        a = self.args
+        n = a.engram_max_ngram_size
+        r, L = ids.shape
+        first = caches[min(self.engram_hashers)]
+        tail_rows = first.token_tail
+        tail = np.array(tail_rows, dtype=np.int64) if tail_rows and len(tail_rows[0]) else \
+            np.zeros((r, 0), np.int64)
+        tail = tail[:, -(n - 1):] if tail.size else np.zeros((r, 0), np.int64)
+        spans = getattr(first, "mrope_spans", ())
+        document = (slot_positions(spans, np.arange(start, start + L))[0] if spans else None)
+        lead = tail.shape[1]
+        index = np.full((L, n), -1, dtype=np.int64)
+        for k in range(n):
+            pos = np.arange(L) + start if document is None else document
+            src = np.arange(L) + lead - k
+            ok = (pos >= k) & (src >= 0)
+            index[ok, k] = src[ok]
+        history = ids if lead == 0 else mx.concatenate([mx.array(tail.astype(np.int32)), ids], axis=1)
+        gathered = mx.take(history, mx.array(np.maximum(index, 0).reshape(-1).astype(np.int32)), axis=1)
+        out = mx.where(mx.array(index >= 0)[None], gathered.reshape(r, L, n), a.engram_pad_id)
+        return out.reshape(r * L, n)
+
+    def _hidden_device_hash(self, inputs: mx.array, cache):
+        """Text forward (``L <= ROLLBACK``) with the n-grams hashed on device.
+
+        Order: the n-gram rows of every lane and Engram layer are computed
+        and dispatched; the layers before the first Engram layer are built
+        and dispatched; then one host read of ``rows ‖ token ids`` (the
+        forward's only wait) feeds the fail-closed token checks, the token
+        tails, the masks and the SSD row reads, exactly as on the host
+        path.  Same rows, same graph: exact.
+
+        The prefix layers append to their caches before the token checks
+        run.  Any failure up to the Engram plan (a refused video or image
+        token, a reader error while the row reads are submitted) restores
+        those caches' saved fields, so the call leaves them as the host path
+        would: untouched.  A reader error raised later, when a layer resolves
+        its rows, leaves the earlier layers appended on both paths; the
+        ReadPool is closed by then (``ReadPool.fail``), so the session ends.  Appends write
+        only past the saved fill level or into a fresh buffer object
+        (``_buf_append``), so the saved fields are the whole prior state.
+        """
+        a = self.args
+        B, L = inputs.shape
+        batched = hasattr(cache[0], "rows")
+        if batched:
+            if B != len(cache[0].rows):
+                raise ValueError("Hy4-flash batch cache rows disagree with the input batch")
+            layout = cache[0].layout(L)
+            lanes = [(b, b + 1, start, count, [c.rows[b] for c in cache])
+                     for b, (start, count) in enumerate(layout) if count]
+        else:
+            layout = None
+            lanes = [(0, B, 0, L, cache)]
+        hasher = self.device_hasher
+        first = min(self.engram_hashers)
+        ids = inputs.astype(mx.int32)
+        parts = [self._device_ngrams(ids[lo:hi, start:start + count], caches, caches[0].offset)
+                 for lo, hi, start, count, caches in lanes]
+        ngrams = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=0)
+        rows = hasher(ngrams)  # [engram layers, N, heads]
+        combined = mx.concatenate([rows.reshape(-1), ids.reshape(-1)])
+        mx.async_eval(combined)
+        prefix = [c for i in range(first) for c in (cache[i].rows if batched else [cache[i]])]
+        saved = [(c, dict(c.__dict__), dict(c.selections)) for c in prefix]
+        try:
+            h = self.model.embed_tokens(inputs)
+            streams = mx.broadcast_to(h[:, :, None, :], (*h.shape[:2], a.hc_mult, h.shape[-1]))
+            for i in range(first):
+                streams = self.model.layers[i](streams, cache[i], None)
+            if first:
+                mx.async_eval(streams)
+            host = np.array(combined)  # the forward's one host wait
+            flat = host[: rows.size].reshape(rows.shape).astype(np.int64)
+            tokens = host[rows.size:].reshape(B, L).astype(np.int64)
+            if a.video_token_id is not None and np.any(tokens == a.video_token_id):
+                raise ValueError("Hy4-flash video input is not implemented")
+            if a.image_token_id is not None and np.any(tokens == a.image_token_id):
+                raise ValueError("Hy4-flash image tokens need their pixel_values (media prefill)")
+            order = sorted(self.engram_hashers)
+            hashed, offset = [], 0
+            for lo, hi, _, count, _ in lanes:
+                size = (hi - lo) * count
+                hashed.append({index: flat[j, offset:offset + size].reshape(hi - lo, count, -1)
+                               for j, index in enumerate(order)})
+                offset += size
+            if batched:
+                engram = self._batched_engram_plan(tokens, layout, cache, hashed)
+            else:
+                engram = self._engram_plan(tokens, cache[first].offset, cache, hashed[0])
+        except BaseException:
+            for c, fields, selections in saved:
+                c.__dict__.clear()
+                c.__dict__.update(fields)
+                c.selections = selections
+            raise
+        stats = self.engram_hash_stats
+        stats["device_forwards"] += 1
+        stats["device_rows"] += int(ngrams.shape[0])
+        return self._layers_from(streams, cache, engram, first, L, batched)
 
     # -- speculative / AST target contract --------------------------------
     # Taps are the post-norm final hidden (DFly2's target feature); only the
@@ -2002,6 +2220,54 @@ class Model(nn.Module):
     @property
     def layers(self):
         return self.model.layers
+
+    # -- opt-in fused gate/up expert banks ---------------------------------
+    def fuse_routed_gate_up(self, weights: dict) -> dict:
+        """Swap each routed ``SwitchGLU`` whose gate and up banks qualify for
+        a ``GateUpFusedSwitchGLU`` and fuse its planes in ``weights``.
+
+        Call after quantization (and the q2_0 install), before the strict
+        load.  A bank that does not qualify (a ``q2_0`` bank, mixed formats,
+        an unquantized bank) keeps the split route; its reason is recorded.
+        Returns (and keeps as ``moe_gate_up_fusion``) the load record.
+        """
+        from .switch_layers import (
+            GateUpFusedSwitchGLU, fused_gate_up_planes, gate_up_fusion_refusal)
+
+        fused, refused = [], {}
+        for index, layer in enumerate(self.model.layers):
+            moe = layer.mlp
+            if not isinstance(moe, MoE):
+                continue
+            stem = f"model.layers.{index}.mlp.experts"
+            reason = gate_up_fusion_refusal(moe.experts)
+            if reason is None and f"{stem}.gate_proj.scales" not in weights:
+                reason = "planes_missing"
+            if reason is not None:
+                refused[index] = reason
+                continue
+            twin = GateUpFusedSwitchGLU.from_switch_glu(moe.experts)
+            fused_gate_up_planes(weights, stem)
+            moe.experts = twin
+            fused.append(index)
+        record = {"fused_layers": fused, "refused_layers": refused}
+        object.__setattr__(self, "moe_gate_up_fusion", record)
+        return record
+
+    def moe_gate_up_status(self) -> dict:
+        """Route record of the fused gate/up banks (selected vs observed_used)."""
+        from .switch_layers import GateUpFusedSwitchGLU
+
+        record = self.moe_gate_up_fusion
+        calls = sum(layer.mlp.experts._fused_calls for layer in self.model.layers
+                    if isinstance(layer.mlp, MoE) and type(layer.mlp.experts) is GateUpFusedSwitchGLU)
+        return {
+            "implemented": True, "qualified": False, "selected": record is not None,
+            "fused_layers": list(record["fused_layers"]) if record else [],
+            "refused_layers": dict(record["refused_layers"]) if record else {},
+            "fused_calls": calls, "observed_used": calls > 0,
+            "exactness": "bit-identical to the split gate/up gathers on CPU (tests); GPU unmeasured",
+        }
 
     # -- weights -----------------------------------------------------------
     def sanitize(self, weights: dict) -> dict:

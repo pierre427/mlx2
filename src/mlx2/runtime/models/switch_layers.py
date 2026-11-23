@@ -562,6 +562,165 @@ class SwitchGLU(nn.Module):
         return x.squeeze(-2)
 
 
+def gate_up_fusion_refusal(glu) -> "str | None":
+    """Why ``glu``'s gate and up banks cannot be fused exactly, or None.
+
+    The fused bank is the two quantized tables concatenated along the
+    output axis, so one ``gather_qmm`` writes ``[gate | up]``: each output
+    element is still the dot product of one table row with the same input
+    row, and a quantized row's groups run along the input axis, so no
+    scale, bias or code changes.  Only two resident ``QuantizedSwitchLinear``
+    banks of one format and geometry, without an added bias, qualify; the
+    grouped-expert research kernels read split tables and must be off.
+    """
+    if type(glu) is not SwitchGLU:
+        return f"module_{type(glu).__name__}"
+    gate, up = glu.get("gate_proj"), glu.get("up_proj")
+    for name, bank in (("gate", gate), ("up", up)):
+        if type(bank) is not QuantizedSwitchLinear:
+            return f"{name}_bank_{type(bank).__name__}"
+        if "bias" in bank:
+            return f"{name}_bank_has_bias"
+    if (gate.mode, gate.bits, gate.group_size) != (up.mode, up.bits, up.group_size):
+        return "mixed_formats"
+    if (gate.num_experts, gate.output_dims, gate.input_dims) != (
+        up.num_experts, up.output_dims, up.input_dims
+    ):
+        return "mixed_geometry"
+    if (gate.get("biases") is None) != (up.get("biases") is None):
+        return "mixed_biases"
+    for part in ("weight", "scales", "biases"):
+        a, b = gate.get(part), up.get(part)
+        if a is not None and (a.dtype != b.dtype or a.shape != b.shape):
+            return f"mixed_{part}"
+    if _grouped.MODE != "off":
+        return "grouped_experts_on"
+    return None
+
+
+def fused_gate_up_planes(weights: dict, stem: str) -> None:
+    """In place: ``<stem>.{gate,up}_proj.*`` -> ``<stem>.gate_up_proj.*``.
+
+    Each fused plane is evaluated before its sources are dropped, so the
+    transient overhead is one bank's gate and up planes, and the resident
+    total is unchanged (the sources are freed once nothing else holds them).
+    """
+    parts = [p for p in ("weight", "scales", "biases") if f"{stem}.gate_proj.{p}" in weights]
+    if "weight" not in parts or "scales" not in parts:
+        raise ValueError(f"{stem}: gate/up quantized planes are missing")
+    for part in parts:
+        gate = weights.pop(f"{stem}.gate_proj.{part}")
+        up = weights.pop(f"{stem}.up_proj.{part}", None)
+        if up is None or up.dtype != gate.dtype or up.shape != gate.shape:
+            raise ValueError(f"{stem}: gate/up {part} planes disagree")
+        fused = mx.concatenate([gate, up], axis=1)
+        mx.eval(fused)
+        del gate, up
+        weights[f"{stem}.gate_up_proj.{part}"] = fused
+    for part in ("weight", "scales", "biases", "bias"):
+        if f"{stem}.up_proj.{part}" in weights or f"{stem}.gate_proj.{part}" in weights:
+            raise ValueError(f"{stem}: unexpected {part} plane on a fused bank")
+
+
+class GateUpFusedSwitchGLU(nn.Module):
+    """``SwitchGLU`` whose gate and up banks are one ``[gate | up]`` bank.
+
+    Built from a quantized ``SwitchGLU`` (``from_switch_glu``) before its
+    weights load; the checkpoint planes are concatenated at load
+    (``fused_gate_up_planes``) and the split planes are never resident.  One
+    ``gather_qmm`` of width ``2 * hidden_dims`` replaces the two gate/up
+    gathers; the halves are sliced from its output.  Routing order, the
+    sort decision and its counters, padding, the NAX hook and the invariant
+    lane are the ``SwitchGLU`` ones (the bank is a ``QuantizedSwitchLinear``
+    like the ones it replaces), so every output element is the same dot
+    product over the same rows.  Opt-in by an adapter; unqualified.
+
+    Exact only under the floor/always rhs pad policies: the adaptive pad
+    cost model keys on ``output_dims``, which doubles on the fused bank, so
+    it may pick another pad (kernel) than the split banks.  Adapters that
+    fuse must pin the pad policy (``claim_stock_moe`` does).
+    """
+
+    def __init__(self, gate_up_proj, down_proj, activation, hidden_dims: int):
+        super().__init__()
+        self.gate_up_proj = gate_up_proj
+        self.down_proj = down_proj
+        self.activation = activation
+        self.hidden_dims = int(hidden_dims)
+        self._sort_policy = "auto"
+        self._sort_counts = {
+            "auto_sorted": 0,
+            "auto_unsorted": 0,
+            "invariant_sorted": 0,
+            "unsorted_decode": 0,
+        }
+        # Observed use: forwards that ran the one fused gate/up gather.
+        self._fused_calls = 0
+
+    @classmethod
+    def from_switch_glu(cls, glu) -> "GateUpFusedSwitchGLU":
+        """An unloaded fused twin of ``glu`` (placeholders are lazy, never
+        evaluated: the strict load replaces them).  Raises on refusal."""
+        reason = gate_up_fusion_refusal(glu)
+        if reason is not None:
+            raise ValueError(f"gate/up fusion refused: {reason}")
+        gate = glu.gate_proj
+        bank = QuantizedSwitchLinear.__new__(QuantizedSwitchLinear)
+        nn.Module.__init__(bank)
+        bank.group_size, bank.bits, bank.mode = gate.group_size, gate.bits, gate.mode
+
+        def doubled(a):
+            return mx.zeros((a.shape[0], 2 * a.shape[1], *a.shape[2:]), dtype=a.dtype)
+
+        bank.weight = doubled(gate["weight"])
+        bank.scales = doubled(gate["scales"])
+        bank.biases = None if gate.get("biases") is None else doubled(gate["biases"])
+        bank.freeze()
+        fused = cls(bank, glu.down_proj, glu.activation, gate.output_dims)
+        fused._sort_policy = glu._sort_policy
+        return fused
+
+    def set_sort_policy(self, policy: str) -> str:
+        if policy not in {"auto", "unsorted_decode"}:
+            raise ValueError("SwitchGLU sort policy must be auto or unsorted_decode")
+        old, self._sort_policy = self._sort_policy, policy
+        return old
+
+    def sort_status(self) -> dict:
+        return {"policy": self._sort_policy, "counts": dict(self._sort_counts)}
+
+    def fused_status(self) -> dict:
+        return {"fused_calls": self._fused_calls, **self.sort_status()}
+
+    def __call__(self, x, indices) -> mx.array:
+        x = mx.expand_dims(x, (-2, -3))
+        token_length = int(indices.shape[-2]) if indices.ndim >= 2 else 1
+        do_sort, counter = _switch_sort_decision(
+            self._sort_policy,
+            assignments=int(indices.size),
+            token_length=token_length,
+            invariant=_invariant.active(),
+        )
+        self._sort_counts[counter] += 1
+        self._fused_calls += 1
+        idx = indices
+        inv_order = None
+        if do_sort:
+            (x, idx, inv_order) = _gather_sort(x, indices)
+        if self.training:
+            idx = mx.stop_gradient(idx)
+        gate_up = self.gate_up_proj(x, idx, sorted_indices=do_sort)
+        half = self.hidden_dims
+        x = self.down_proj(
+            self.activation(gate_up[..., half:], gate_up[..., :half]),
+            idx,
+            sorted_indices=do_sort,
+        )
+        if do_sort:
+            x = _scatter_unsort(x, inv_order, indices.shape)
+        return x.squeeze(-2)
+
+
 class SwitchMLP(nn.Module):
     """Two-projection expert MLP with locality-aware gather ordering."""
 

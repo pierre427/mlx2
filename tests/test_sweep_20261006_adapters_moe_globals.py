@@ -200,7 +200,7 @@ def test_qwen36_35b_claims_the_rhs_pad_policy():
 _DENSE_EXEMPT = {"qwen38_27b", "qwen38_hybrid_native_flat", "dense_qwen3_flat"}
 # Executor modules that run inside another adapter's model and construct no
 # model themselves: the owning adapter must claim the globals instead.
-_EXECUTOR_OWNER = {"flash_next_tree": "flash_next"}
+_EXECUTOR_OWNER = {"flash_next_tree": "flash_next", "hy_v4_flash_ast": "hy_v4_flash"}
 _CLAIMS = ("claim_stock_moe(self", "claim_moe(self", "MOE_RHS_PAD_POLICY")
 
 
