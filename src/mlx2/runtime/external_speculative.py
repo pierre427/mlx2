@@ -493,6 +493,15 @@ _TREE_GATE_COUNTERS = {
 }
 
 
+# Engagement counters of the opt-in ``predraft`` option (present only when on).
+_PREDRAFT_COUNTERS = (
+    "external_predraft_launches",
+    "external_predraft_adoptions",
+    "external_predraft_discards",
+    "external_predraft_sampled_skips",
+)
+
+
 def _chain_draft_cap(tree_budgets, max_tree_width, active_width):
     """Per-lane chain depth on the bounded tree route's B5+ chain leg.
 
@@ -1185,6 +1194,7 @@ class ExternalDraftBatchGenerator:
     # Class default so instances built without __init__ (test doubles that
     # bind only the lane methods) keep the off behaviour.
     prefill_allocator_reclaim = False
+    predraft = False
     external_varlen_prefill = False
     progressive_alternative_branches = 1
     progressive_ast_rootless_fallback = True
@@ -1242,6 +1252,7 @@ class ExternalDraftBatchGenerator:
                  ast_adaptive_rows=None,
                  ast_tree_calibration=None,
                  ast_batch_row_sharing=False,
+                 predraft=False,
                  **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
@@ -1624,7 +1635,8 @@ class ExternalDraftBatchGenerator:
                 raise ValueError("adaptive verification requires exact chain verification")
             self.acceptance_estimator = OnlineAcceptanceEstimator(
                 self.num_draft, refit_interval=self.adaptive_policy.refit_interval,
-                separation_reset=self.adaptive_policy.separation_reset
+                separation_reset=self.adaptive_policy.separation_reset,
+                reject_cooldown=self.adaptive_policy.reject_cooldown,
             )
         # Exact chain verification rule.  "token" (default) is the token-wise
         # residual rule; "block" is block verification (Sun et al. 2024): the
@@ -2259,6 +2271,22 @@ class ExternalDraftBatchGenerator:
         self.prefill_allocator_reclaim = prefill_allocator_reclaim
         if prefill_allocator_reclaim:
             self.scheduler_stats.update(external_prefill_allocator_reclaims=0)
+        # Default-off, unqualified (``inkling2_dspark_predraft``): queue each
+        # greedy lane's next chain block right after the verify forward,
+        # before the host reads acceptance, on a copy of its draft plane and
+        # under the full-acceptance assumption; the next round adopts it
+        # only at that exact boundary (``_launch_predrafts``).
+        if type(predraft) is not bool:
+            raise ValueError("predraft must be boolean")
+        if predraft and not (
+            callable(getattr(draft_model, "predraft", None))
+            and callable(getattr(draft_model, "adopt_predraft", None))
+        ):
+            raise ValueError("predraft requires a drafter that declares predraft/adopt_predraft")
+        self.predraft = predraft
+        self._predrafts = {}
+        if predraft:
+            self.scheduler_stats.update(dict.fromkeys(_PREDRAFT_COUNTERS, 0))
         from .adaptive_policy import DecodeTimeFairness
 
         # The serving route's decode-time fairness (the stall bound on a
@@ -4562,7 +4590,13 @@ class ExternalDraftBatchGenerator:
             requested_count = 0
         elif adaptive_depth is not None:
             adaptive_count = min(requested_count, int(adaptive_depth))
-            requested_count = self._proposal_depth(adaptive_count, requested_count)
+            policy = getattr(self, "adaptive_policy", None)
+            if adaptive_count == 0 and policy is not None and (
+                policy.allow_solo or policy.reject_cooldown
+            ):
+                requested_count = 0  # a scheduled solo round, not a floor raise
+            else:
+                requested_count = self._proposal_depth(adaptive_count, requested_count)
         if (all if ast_planner is not None else any)(l.ordinary or _speculation_parked(l) for l in cohort):
             requested_count = 0
         if getattr(self, "ast_b1_tile_policy", None) == "four_path15" and requested_count:
@@ -4962,6 +4996,8 @@ class ExternalDraftBatchGenerator:
                     )
                 elif extra:
                     tokens,q = self.draft.draft_distributions(*arguments, **extra)
+                elif self.predraft:
+                    tokens,q = self._draft_with_predrafts(lanes, arguments)
                 else:
                     # Preserve the unstructured fast path byte-for-byte:
                     # no processor lists, prefixes or keyword handling.
@@ -9102,6 +9138,133 @@ class ExternalDraftBatchGenerator:
             members = key[1:] if isinstance(key, tuple) and key[:1] == ("cohort",) else (key,)
             if uids.intersection(members) and self._prelaunched.pop(key, None) is not None:
                 _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+        if getattr(self, "_predrafts", None):
+            self._discard_predrafts(uids)
+
+    # -- chain pre-drafting (opt-in ``predraft``) -----------------------------
+    #
+    # After a chain verify forward is queued and before the host reads its
+    # logits, each eligible lane's next block is drafted on a descriptor copy
+    # of its draft plane, assuming the whole block is accepted: the copy
+    # commits all ``count + 1`` verify feature rows (exactly the tail
+    # ``_commit`` stores on a full acceptance) and drafts from the lazy greedy
+    # target token of the last verify row (the bonus token).  Under that
+    # assumption the newest committed row IS the last verify row, so the
+    # recurrent Markov head starts where the normal path starts (omlx#5508).
+    # The next round adopts the block only if the lane reached exactly that
+    # boundary (same draft plane and fill levels, same history length, same
+    # tail values, same anchor, same proposal count); the ops and inputs are
+    # then those the normal path would run, so the proposals are identical.
+    # Anything else discards it and drafts normally.  Greedy lanes only: a
+    # sampled lane's bonus token comes from its host RNG after the read, so
+    # it is skipped (counted) and its RNG schedule is untouched.
+
+    @staticmethod
+    def _draft_levels(draft_cache):
+        return tuple(getattr(entry, "offset", None) for entry in draft_cache)
+
+    def _discard_predrafts(self, uids=None):
+        records = getattr(self, "_predrafts", None)
+        if not records:
+            return
+        for uid in list(records) if uids is None else [u for u in uids if u in records]:
+            records.pop(uid, None)
+            _bump(self.scheduler_stats, "external_predraft_discards")
+
+    def _launch_predrafts(self, cohort, proposal_counts, logits, features, *, deferred_uids):
+        """Queue the next chain block of every eligible lane (see above)."""
+        self._discard_predrafts([lane.uid for lane in cohort])
+        for row, (lane, count) in enumerate(zip(cohort, proposal_counts)):
+            if count < 1 or lane.ordinary or lane.cancelled or _speculation_parked(lane):
+                continue
+            if float(lane.sampling.get("sampling_temp", 0)) != 0.0:
+                _bump(self.scheduler_stats, "external_predraft_sampled_skips")
+                continue
+            if lane.processors or lane.uid in deferred_uids:
+                continue
+            # The depth ``_propose`` requests next round if this block commits.
+            following = min(self.num_draft, lane.maximum - lane.generated - (count + 1) - 1)
+            if following < 1:
+                continue
+            try:
+                draft_cache, _ = self._snapshot_draft_state(lane.draft_cache, None)
+                tail = features[row:row + 1, :count + 1]
+                anchor = self.mx.argmax(logits[row, count].astype(self.mx.float32))
+                tokens = self.draft.predraft(
+                    anchor, tail, self.draft.batch_caches([draft_cache]), following
+                )
+            except Exception:  # noqa: BLE001 - a pre-draft is optional work
+                _bump(self.scheduler_stats, "external_predraft_discards")
+                continue
+            if tokens is None:
+                continue
+            self.mx.async_eval(tokens, anchor)
+            self._predrafts[lane.uid] = SimpleNamespace(
+                base=lane.draft_cache,
+                levels=self._draft_levels(lane.draft_cache),
+                history=len(lane.history) + count + 1,
+                tail=tail,
+                anchor=anchor,
+                count=following,
+                tokens=tokens,
+                draft_cache=draft_cache,
+            )
+            _bump(self.scheduler_stats, "external_predraft_launches")
+
+    def _predraft_matches(self, record, lane, count):
+        return (
+            record.base is lane.draft_cache
+            and record.count == count
+            and record.history == len(lane.history)
+            and record.levels == self._draft_levels(lane.draft_cache)
+            and tuple(record.tail.shape) == tuple(lane.tail.shape)
+            and int(record.anchor.item()) == int(lane.anchor)
+            and bool(self.mx.array_equal(record.tail, lane.tail).item())
+        )
+
+    def _draft_with_predrafts(self, lanes, arguments):
+        """``draft_distributions(*arguments)`` with adopted pre-drafts spliced in."""
+        count = arguments[3]
+        adopted = {}
+        for index, lane in enumerate(lanes):
+            record = self._predrafts.pop(lane.uid, None)
+            if record is None:
+                continue
+            if self._predraft_matches(record, lane, count):
+                adopted[index] = record
+            else:
+                _bump(self.scheduler_stats, "external_predraft_discards")
+        if not adopted:
+            return self.draft.draft_distributions(*arguments)
+        rest = [index for index in range(len(lanes)) if index not in adopted]
+        tokens, laws = [None] * len(lanes), [None] * len(lanes)
+        if rest:
+            subset = [lanes[index] for index in rest]
+            try:
+                drafted, drafted_laws = self.draft.draft_distributions(
+                    [arguments[0][index] for index in rest],
+                    self.mx.concatenate([lane.tail for lane in subset], axis=0),
+                    self.draft.batch_caches([lane.draft_cache for lane in subset]),
+                    count,
+                    [arguments[4][index] for index in rest],
+                    [arguments[5][index] for index in rest],
+                )
+            except DraftUnavailable as error:
+                failed = getattr(error, "failed_rows", None)
+                if failed is not None:
+                    error.failed_rows = [rest[int(row)] for row in failed]
+                raise
+            for index, row, row_laws in zip(rest, drafted, drafted_laws, strict=True):
+                tokens[index], laws[index] = row, row_laws
+        for index, record in adopted.items():
+            # Inside this round's transaction, after its recovery snapshot: a
+            # restore returns the committed draft plane, never this copy.
+            lanes[index].draft_cache = record.draft_cache
+            tokens[index], laws[index] = self.draft.adopt_predraft(
+                record.tokens, int(record.tail.shape[1])
+            )
+            _bump(self.scheduler_stats, "external_predraft_adoptions")
+        return tokens, laws
 
     def _walk_tree(self, block, sample_row, *, max_emitted=None):
         """Follow target samples through matching children; otherwise correct.
@@ -10391,7 +10554,16 @@ class ExternalDraftBatchGenerator:
                 if self.adaptive_policy.verification_costs else []),
             "verification_groups": self.scheduler_stats["external_adaptive_verification_groups"],
             "cost_model_cohort_size": self.adaptive_policy.cohort_size if self.adaptive_policy.verification_costs else None,
-            "cost_model_source": "caller_supplied",
+            "cost_model_source": self.adaptive_policy.cost_source,
+            "depth_histogram": dict(self.scheduler_stats.get("external_adaptive_depth_histogram", {})),
+            "reject_cooldown": {
+                "cap": self.adaptive_policy.reject_cooldown,
+                "started": getattr(self.acceptance_estimator, "cooldowns_started", 0),
+                "solo_rounds": getattr(self.acceptance_estimator, "cooldown_rounds", 0),
+            },
+            "allow_solo": self.adaptive_policy.allow_solo,
+            "greedy_only": self.adaptive_policy.greedy_only,
+            "sampled_fixed_rounds": self.scheduler_stats.get("external_adaptive_sampled_fixed_rounds", 0),
             "continuation_cost_path_widths": [width for width, _ in self.adaptive_policy.continuation_costs],
             "round_proposal_depth": self.scheduler_stats["external_adaptive_round_depth"],
             "round_verify_width": self.scheduler_stats["external_adaptive_verify_width"],
@@ -12586,6 +12758,12 @@ class ExternalDraftBatchGenerator:
         if clock is not None:
             clock = self._mark("recovery_capture", clock)
         stats_snapshot = self._snapshot_scheduler_stats()
+        # Rollback restores each lane onto fresh cache descriptors. Previously
+        # queued blocks then lose their base, and newly launched blocks belong
+        # to the aborted round.
+        predrafts_before = (
+            sum(lane.uid in self._predrafts for lane in cohort) if self.predraft else 0
+        )
         adaptive_snapshot = (
             copy.deepcopy(self.acceptance_estimator) if self.adaptive_policy is not None else None
         )
@@ -12608,9 +12786,16 @@ class ExternalDraftBatchGenerator:
                     fixed_depth = min(self.num_draft, min(l.maximum - l.generated - 1 for l in cohort))
                     if any(l.ordinary for l in cohort):
                         fixed_depth = 0
-                    depth = self.adaptive_policy.choose_depth(
-                        self.acceptance_estimator, fixed_depth, len(cohort)
-                    )
+                    if self.adaptive_policy.greedy_only and any(
+                        float(l.sampling.get("sampling_temp", 0)) != 0.0 for l in cohort
+                    ):
+                        # Sampled lanes keep fixed-depth RNG draws.
+                        depth = fixed_depth
+                        _bump(self.scheduler_stats, "external_adaptive_sampled_fixed_rounds")
+                    else:
+                        depth = self.adaptive_policy.choose_depth(
+                            self.acceptance_estimator, fixed_depth, len(cohort)
+                        )
                     blocks = self._propose(cohort, adaptive_depth=depth)
             finally:
                 if prebuilt is not None:
@@ -13494,6 +13679,8 @@ class ExternalDraftBatchGenerator:
                 _bump(self.scheduler_stats, "external_adaptive_target_rows", verify_width * len(cohort))
                 self.scheduler_stats["external_adaptive_round_depth"] = effective_depth
                 self.scheduler_stats["external_adaptive_verify_width"] = verify_width
+                histogram = self.scheduler_stats.setdefault("external_adaptive_depth_histogram", {})
+                histogram[str(effective_depth)] = int(histogram.get(str(effective_depth), 0)) + 1
             inputs = [
                 [lane.anchor]+_block_row(block, None)[0]+[0]*(verify_width-count-1)
                 for lane,block,count in zip(cohort,blocks,proposal_counts)
@@ -13565,6 +13752,12 @@ class ExternalDraftBatchGenerator:
                                 else "standard_verify"
                             ),
                         )
+                if self.predraft and not trusted_round and steer is None and forced_depth is None:
+                    # Queued behind the verify forward, ahead of the host read.
+                    self._launch_predrafts(
+                        cohort, proposal_counts, logits, features,
+                        deferred_uids=deferred_context_uids,
+                    )
                 self.mx.eval(logits, features)
             finally:
                 if steer is not None:
@@ -13599,6 +13792,10 @@ class ExternalDraftBatchGenerator:
             self._discard_verify_prebuild(locals().get("prebuilt"))
             self._restore_round(cohort, recovery)
             self.scheduler_stats = stats_snapshot
+            if self.predraft:
+                for lane in cohort:
+                    self._predrafts.pop(lane.uid, None)
+                _bump(self.scheduler_stats, "external_predraft_discards", predrafts_before)
             if self.adaptive_policy is not None:
                 self.acceptance_estimator = adaptive_snapshot
             self.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)

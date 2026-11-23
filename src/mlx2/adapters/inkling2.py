@@ -367,6 +367,46 @@ PREFILL_MASK_OPTION = "inkling2_prefill_mask_mb"
 # 32K, 35.0 at 64K, 46.0 at 128K), oracle 12/12, all 6 splits from ordinary
 # near_tie_equivalent. Unset = on with DSpark, off otherwise; false opts out.
 PREFILL_RECLAIM_OPTION = "inkling2_dspark_prefill_reclaim"
+# DSpark pre-drafting: queue the next chain block before the host reads the
+# verify acceptance (ExternalDraftBatchGenerator ``predraft``). Opt-in,
+# unqualified, greedy lanes only; exact by adoption at the matching boundary
+# (tests/test_inkling2_dspark_predraft_cpu.py).
+PREDRAFT_OPTION = "inkling2_dspark_predraft"
+# DSpark drafter options, all opt-in and DSpark-only (mechanisms from
+# g13-engine c91c0180, re-implemented; docs/PROVENANCE.md). They change
+# draft-side work only; the target verifies every proposal.
+# kv_headroom: the draft block's K/V written in place on global layers
+# instead of concatenated onto the whole draft context (bitwise the same).
+# fold_q8: the Markov head's folded lm_head @ hidden_out matrix in MLX affine
+# 8-bit (about half the bytes per Markov step); drafts may differ.
+# cost_depth: draft depth per round from a verify cost table (true: timed at
+# load; or an object with verify_ms/draft_ms), through the existing cohort
+# adaptive_verification policy; see runtime/drafters/inkling2_dspark_cost.py.
+DSPARK_OPTIONS = {"inkling2_dspark_kv_headroom": "kv_headroom",
+                  "inkling2_dspark_fold_q8": "fold_q8",
+                  "inkling2_dspark_cost_depth": "cost_depth"}
+
+
+def dspark_options(external):
+    """Pop and validate the DSpark drafter options from ``external``."""
+    from ..runtime.drafters import inkling2_dspark_cost
+
+    options = {}
+    for key, name in DSPARK_OPTIONS.items():
+        if key not in external:
+            continue
+        value = external.pop(key)
+        if name == "cost_depth":
+            options[name] = inkling2_dspark_cost.parse(value)
+            if options[name] is not None and external.get("adaptive_verification") is not None:
+                raise ValueError(f"Inkling 2 {key} replaces adaptive_verification; set one")
+            continue
+        if type(value) is not bool:
+            raise TypeError(f"Inkling 2 {key} must be a boolean")
+        options[name] = value
+    if any(options.values()) and not external.get("draft_model"):
+        raise ValueError(f"Inkling 2 {sorted(DSPARK_OPTIONS)} require the DSpark route")
+    return options
 
 
 def validate_policy(value):
@@ -401,6 +441,10 @@ def validate_policy(value):
         if type(reclaim) is not bool:
             raise TypeError(f"Inkling 2 {PREFILL_RECLAIM_OPTION} must be a boolean")
     kernels["dspark_prefill_reclaim"] = reclaim
+    predraft = value.pop(PREDRAFT_OPTION, False)
+    if type(predraft) is not bool:
+        raise TypeError(f"Inkling 2 {PREDRAFT_OPTION} must be a boolean")
+    kernels["dspark_predraft"] = predraft
     mask_mb = value.pop(PREFILL_MASK_OPTION, None)
     if mask_mb is not None and type(mask_mb) is not int:
         raise TypeError(f"Inkling 2 {PREFILL_MASK_OPTION} must be an integer")
@@ -580,11 +624,23 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if weight_streaming is not None:
             raise ValueError("Inkling 2 declares no weight streaming mode")
         self.kernel_policy, external = validate_policy(execution_policy)
+        self.dspark_options = dspark_options(external)
+        cost_depth = self.dspark_options.pop("cost_depth", None)
+        self.dspark_cost_depth = None
         self._parse_external_policy(external, family="Inkling 2")
         if external and self.kernel_policy["loop_passes"] not in (None, _LOOP["num_passes"]):
             raise ValueError("Inkling 2 DSpark taps assume the trained loop count")
         if self.kernel_policy["dspark_prefill_reclaim"] and not external:
             raise ValueError(f"Inkling 2 {PREFILL_RECLAIM_OPTION} requires the DSpark route")
+        if self.kernel_policy["dspark_predraft"] and not external:
+            raise ValueError(f"Inkling 2 {PREDRAFT_OPTION} requires the DSpark route")
+        if self.kernel_policy["dspark_predraft"] and (
+                cost_depth is not None or self.dspark_options.get("kv_headroom")):
+            # No engine-equality test covers these pairings yet (integration
+            # review 2026-11-22): cost depth would discard every shorter-round
+            # pre-draft, and headroom writes into the pre-draft's cache copy.
+            raise ValueError(f"Inkling 2 {PREDRAFT_OPTION} is not yet combined with "
+                             "inkling2_dspark_cost_depth or inkling2_dspark_kv_headroom")
         if self.kernel_policy["dspark_prefill_reclaim"] is None:
             self.kernel_policy["dspark_prefill_reclaim"] = bool(external)
         if external and external.get("draft_model") not in DSPARK_DRAFT_NAMES:
@@ -643,6 +699,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.model, self.expert_receipt = load_model(path, artifact)
         self.hard_no_thinking = self.kernel_policy.pop("hard_no_thinking")
         self.dspark_prefill_reclaim = self.kernel_policy.pop("dspark_prefill_reclaim")
+        self.dspark_predraft = self.kernel_policy.pop("dspark_predraft")
         self.model.configure_kernels(**self.kernel_policy)
         self.layout = self.model.apc_v2_layout
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
@@ -666,9 +723,12 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             self._bind_external_drafter(
                 record,
                 lambda rec, model: load_external_drafter(
-                    rec["dspark"], model, num_draft=self._external_num_draft()),
+                    rec["dspark"], model, num_draft=self._external_num_draft(),
+                    options=self.dspark_options),
                 self.descriptor,
             )
+            if cost_depth is not None:
+                self.dspark_cost_depth = self._dspark_cost_policy(cost_depth)
 
     @property
     def checkpoint(self):
@@ -751,9 +811,35 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "segment_aware_cohort_size": max_lanes,
         }
 
+    def _dspark_cost_policy(self, settings):
+        """``inkling2_dspark_cost_depth`` as a cohort adaptive_verification value."""
+        from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
+        from ..runtime.drafters import inkling2_dspark_cost
+
+        count = self._external_num_draft()
+        if "verify_ms" in settings:
+            verify, draft, source = settings["verify_ms"], settings["draft_ms"], "inkling2_policy_table"
+        else:
+            backend = self.draft_model
+            while hasattr(backend, "backend"):
+                backend = backend.backend
+            verify, draft = inkling2_dspark_cost.measure_costs(
+                self.model, backend.drafter, count + 1,
+                context=settings["measure_context"], repeats=settings["measure_repeats"],
+            )
+            source = "inkling2_measured_at_load"
+        value = inkling2_dspark_cost.adaptive_verification(
+            settings, count, verify_ms=verify, draft_ms=draft, source=source)
+        AdaptiveVerificationPolicy.from_value(value, count)  # fail closed at load
+        return value
+
     def create_external_batch(self, **kwargs):
         if getattr(self, "dspark_prefill_reclaim", False):
             kwargs.setdefault("prefill_allocator_reclaim", True)
+        if getattr(self, "dspark_predraft", False):
+            kwargs.setdefault("predraft", True)
+        if getattr(self, "dspark_cost_depth", None) is not None:
+            kwargs.setdefault("adaptive_verification", self.dspark_cost_depth)
         return super().create_external_batch(**kwargs)
 
     @staticmethod
@@ -892,6 +978,9 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "num_draft": self._external_num_draft() if getattr(self, "draft_model", None) is not None else None,
                 "stats": _drafter_stats(getattr(self, "draft_model", None)),
                 "prefill_reclaim": bool(getattr(self, "dspark_prefill_reclaim", False)),
+                "predraft": bool(getattr(self, "dspark_predraft", False)),
+                "options": _drafter_options(getattr(self, "draft_model", None)),
+                "cost_depth": getattr(self, "dspark_cost_depth", None),
             },
             "media": "weights present; native text route refuses media",
         }
@@ -901,3 +990,10 @@ def _drafter_stats(draft):
     while draft is not None and hasattr(draft, "backend"):
         draft = draft.backend
     return dict(getattr(draft, "stats", {}) or {}) if draft is not None else None
+
+
+def _drafter_options(draft):
+    while draft is not None and hasattr(draft, "backend"):
+        draft = draft.backend
+    drafter = getattr(draft, "drafter", None)
+    return getattr(drafter, "option_receipt", None)

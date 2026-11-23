@@ -29,6 +29,15 @@ def proposal_law_features(law):
     will inspect a future proposal without conditioning that gate on the
     proposal token itself.
     """
+    from .proposal_providers import PointMassLaw
+
+    if isinstance(law, PointMassLaw):
+        # A deterministic proposal (DSpark, continuation chains): q = 1 on
+        # one token, which says nothing about acceptance. The peak feature
+        # is a neutral 0 rather than the saturated 40 a dense one-hot law
+        # gets, so the estimator's per-position intercepts alone carry the
+        # acceptance rates instead of starting from a predicted p of ~1.
+        return ProposalLawFeatures(0.0, 1.0)
     values = np.asarray(law, dtype=np.float64)
     if (
         values.ndim != 1
@@ -94,9 +103,21 @@ class OnlineAcceptanceEstimator:
     """
 
     def __init__(self, depth, *, refit_interval=100, damping=50.0, l2=1e-3,
-                 separation_reset=False):
+                 separation_reset=False, reject_cooldown=0):
         self.depth = int(depth)
         self.separation_reset = bool(separation_reset)
+        # Reject cooldown (AdaptiveVerificationPolicy.reject_cooldown; idea
+        # from g13-engine, docs/PROVENANCE.md). A round in which every lane
+        # rejected its first proposal extends a low-acceptance streak; from
+        # the second such round on, the next min(cap, 2 * streak) rounds are
+        # solo (zero-proposal) rounds. A round accepting two or more
+        # proposals on some lane ends the streak. 0 = off.
+        self.reject_cooldown = int(reject_cooldown)
+        self.cooldown = 0
+        self.low_streak = 0
+        self.cooldowns_started = 0
+        self.cooldown_rounds = 0
+        self._round_best = None
         self.refit_interval = int(refit_interval)
         self.damping = float(damping)
         self.l2 = float(l2)
@@ -161,9 +182,21 @@ class OnlineAcceptanceEstimator:
         self.grad[:observed] += np.stack((residual * x, residual), axis=1)
         self.counts[:observed] += 1
         self.observed_counts[:observed] += 1
+        # -1: rejected at the first proposal; an unrejected zero (a stop) is 0.
+        outcome = -1 if rejected and accepted == 0 else int(accepted)
+        self._round_best = outcome if self._round_best is None else max(self._round_best, outcome)
 
     def finish_round(self):
         self.rounds += 1
+        if self.reject_cooldown and self._round_best is not None:
+            if self._round_best < 0:
+                self.low_streak += 1
+                if self.low_streak >= 2:
+                    self.cooldowns_started += int(self.cooldown == 0)
+                    self.cooldown = min(self.reject_cooldown, 2 * self.low_streak)
+            elif self._round_best >= 2:
+                self.low_streak = 0
+        self._round_best = None
         if self.rounds % self.refit_interval == 0:
             self.refit()
 
@@ -244,6 +277,17 @@ class AdaptiveVerificationPolicy:
     mode: str = "cohort"
     verification_costs_by_cohort: tuple = ()
     continuation_costs: tuple = ()
+    # Cohort mode only, all off by default (idea from g13-engine's DSpark
+    # scheduler, docs/PROVENANCE.md). reject_cooldown: the estimator's solo
+    # round cap after consecutive first-proposal rejections. allow_solo:
+    # depth 0 (anchor only, no draft cost) competes in the cost model, below
+    # minimum_depth. greedy_only: a cohort with a sampled lane keeps the
+    # fixed depth, so its RNG draws are those of the fixed-depth route.
+    # cost_source names where the cost tables came from (receipts only).
+    reject_cooldown: int = 0
+    allow_solo: bool = False
+    greedy_only: bool = False
+    cost_source: str = "caller_supplied"
 
     @classmethod
     def from_value(cls, value, depth):
@@ -324,6 +368,17 @@ class AdaptiveVerificationPolicy:
                 )
         if type(policy.separation_reset) is not bool:
             raise ValueError("adaptive verification separation_reset must be a boolean")
+        if (
+            type(policy.reject_cooldown) is not int
+            or not 0 <= policy.reject_cooldown <= 64
+            or type(policy.allow_solo) is not bool
+            or type(policy.greedy_only) is not bool
+            or type(policy.cost_source) is not str
+            or not policy.cost_source
+            or (policy.mode != "cohort" and (policy.reject_cooldown or policy.allow_solo
+                                             or policy.greedy_only))
+        ):
+            raise ValueError("invalid adaptive verification cooldown, solo or source settings")
         if policy.minimum_depth > depth or policy.mode not in ("cohort", "per_request"):
             raise ValueError("invalid adaptive verification depth or mode")
         if (
@@ -509,7 +564,17 @@ class AdaptiveVerificationPolicy:
     def choose_depth(self, estimator, maximum, cohort_size):
         maximum = int(maximum)
         if (
-            maximum <= self.minimum_depth
+            self.reject_cooldown
+            and maximum >= 1
+            and cohort_size == self.cohort_size
+            and getattr(estimator, "cooldown", 0) > 0
+        ):
+            estimator.cooldown -= 1
+            estimator.cooldown_rounds += 1
+            return 0
+        floor = 0 if self.allow_solo else self.minimum_depth
+        if (
+            maximum <= floor
             or cohort_size != self.cohort_size
             or estimator.observed_counts.sum() < self.min_observations
             or np.any(estimator.feature_counts[:maximum] == 0)
@@ -521,9 +586,11 @@ class AdaptiveVerificationPolicy:
         except ValueError:
             return maximum
         expected = 1.0 + np.cumsum(np.cumprod(probabilities))
-        depths = range(self.minimum_depth, maximum + 1)
+        depths = range(floor, maximum + 1)
+        # A solo round commits exactly the bonus token and drafts nothing.
         scores = {
-            k: float(expected[k - 1]) / (self.draft_cost + self.verification_costs[k])
+            k: (float(expected[k - 1]) / (self.draft_cost + self.verification_costs[k]) if k
+                else 1.0 / self.verification_costs[0])
             for k in depths
         }
         best = max(depths, key=lambda k: (scores[k], k))

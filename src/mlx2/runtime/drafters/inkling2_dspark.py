@@ -218,6 +218,9 @@ class DraftAttention(nn.Module):
         for name in ("q_norm", "k_norm", "k_norm_ctx"):
             self[name] = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.rope = nn.RoPE(self.head_dim, traditional=False, base=config.rope_theta)
+        # Opt-in (inkling2_dspark_kv_headroom); see _with_block.
+        self.kv_headroom = False
+        self.kv_headroom_stats = {"writes": 0, "grows": 0, "fallbacks": 0}
 
     def _heads(self, x, heads):
         return x.reshape(*x.shape[:2], heads, self.head_dim).transpose(0, 2, 1, 3)
@@ -239,13 +242,58 @@ class DraftAttention(nn.Module):
         offset += context.shape[1]
         q = self.q_norm(self._heads(self.q_proj(x), self.heads))
         block_k = self.k_norm(self._heads(self.k_proj(x), self.kv_heads))
-        k = mx.concatenate([k, self.rope(block_k, offset=offset)], axis=2)
-        v = mx.concatenate([v, self._heads(self.v_proj(x), self.kv_heads)], axis=2)
+        k, v = self._with_block(
+            cache, k, v, self.rope(block_k, offset=offset), self._heads(self.v_proj(x), self.kv_heads)
+        )
         out = mx.fast.scaled_dot_product_attention(
             self.rope(q, offset=offset), k, v, scale=self.head_dim**-0.5, mask=None
         )
         return self.o_proj(out.transpose(0, 2, 1, 3).reshape(*x.shape[:2], -1))
 
+
+    # Spare tail slots kept past the fill level once a block write must grow.
+    KV_HEADROOM = 16
+
+    def _with_block(self, cache, k, v, block_k, block_v):
+        """Context K/V (``k``, ``v``: the cache's first ``offset`` positions)
+        followed by the ephemeral block's K/V.
+
+        Default: ``mx.concatenate``, which copies the whole context every
+        draft.  With ``kv_headroom`` (mechanism from g13-engine's
+        DraftKVCache, see docs/PROVENANCE.md) a global layer's block is
+        written into its KVCache's spare slots at ``offset ..`` and the
+        attention reads ``keys[..., :offset + L, :]``: the same values in the
+        same order.  ``offset`` does not move, so the block is never
+        committed; it is stale data past the fill level that the next
+        context append overwrites, which ``KVCache``'s append-only recovery
+        contract (``_RECOVERY_APPEND_ONLY_FIELDS``) already allows.  Rotating
+        (local) layers and any dtype mismatch keep the concatenation.
+        """
+        if not self.kv_headroom or type(cache) is not KVCache or cache.keys is None:
+            return mx.concatenate([k, block_k], axis=2), mx.concatenate([v, block_v], axis=2)
+        if block_k.dtype != cache.keys.dtype or block_v.dtype != cache.values.dtype:
+            self.kv_headroom_stats["fallbacks"] += 1
+            return mx.concatenate([k, block_k], axis=2), mx.concatenate([v, block_v], axis=2)
+        start = cache.offset
+        end = start + block_k.shape[2]
+        if end > cache.keys.shape[2]:
+            # One copy per growth (as KVCache.update_and_fetch grows), not
+            # one per draft; capacity stays a multiple of KVCache.step.
+            step = KVCache.step
+            capacity = -(-(end + self.KV_HEADROOM) // step) * step
+            cache.keys, cache.values = (
+                mx.concatenate(
+                    [buf[..., :start, :],
+                     mx.zeros((*buf.shape[:2], capacity - start, buf.shape[3]), buf.dtype)],
+                    axis=2,
+                )
+                for buf in (cache.keys, cache.values)
+            )
+            self.kv_headroom_stats["grows"] += 1
+        cache.keys[..., start:end, :] = block_k
+        cache.values[..., start:end, :] = block_v
+        self.kv_headroom_stats["writes"] += 1
+        return cache.keys[..., :end, :], cache.values[..., :end, :]
 
     # ----- split commit / cached draft (mlx2 external-draft engine) -----
 
@@ -272,8 +320,9 @@ class DraftAttention(nn.Module):
         k, v = self._cached_kv(cache)
         q = self.q_norm(self._heads(self.q_proj(x), self.heads))
         block_k = self.k_norm(self._heads(self.k_proj(x), self.kv_heads))
-        k = mx.concatenate([k, self.rope(block_k, offset=offset)], axis=2)
-        v = mx.concatenate([v, self._heads(self.v_proj(x), self.kv_heads)], axis=2)
+        k, v = self._with_block(
+            cache, k, v, self.rope(block_k, offset=offset), self._heads(self.v_proj(x), self.kv_heads)
+        )
         out = mx.fast.scaled_dot_product_attention(
             self.rope(q, offset=offset), k, v, scale=self.head_dim**-0.5, mask=None
         )
@@ -324,6 +373,10 @@ class MarkovHead(nn.Module):
         self.hidden_out = nn.Linear(rank, hidden)
         self.dflare_norm = nn.RMSNorm(hidden, eps=config.rms_norm_eps)
         self._fold_weight = self._fold_bias = None
+        # Opt-in (inkling2_dspark_fold_q8): the folded [V, rank] matrix as
+        # MLX affine 8-bit, (weight, scales, biases, group_size); see set_fold_q8.
+        self.fold_q8 = False
+        self._fold_q = None
 
     def fold(self, lm_head):
         projection = np.array(self.hidden_out.weight.astype(mx.float32)).astype(np.float64)
@@ -348,6 +401,36 @@ class MarkovHead(nn.Module):
         self._fold_weight = mx.concatenate(weights)
         self._fold_bias = mx.concatenate(biases)
         mx.eval(self._fold_weight, self._fold_bias)
+        self._fold_q = None
+        if self.fold_q8:
+            self._quantize_fold()
+
+    @staticmethod
+    def fold_q8_group_size(rank):
+        for group in (64, 32):
+            if rank % group == 0:
+                return group
+        raise ValueError(f"Inkling 2 DSpark fold_q8 needs a markov_rank divisible by 32 (got {rank})")
+
+    def _quantize_fold(self):
+        group = self.fold_q8_group_size(self._fold_weight.shape[1])
+        weight, scales, biases = mx.quantize(self._fold_weight, group_size=group, bits=8)
+        mx.eval(weight, scales, biases)
+        self._fold_q = (weight, scales, biases, group)
+
+    def set_fold_q8(self, enabled):
+        """Opt-in 8-bit copy of the folded ``lm_head @ hidden_out`` matrix
+        (mechanism from g13-engine's ``attach_fold``, docs/PROVENANCE.md):
+        each Markov step reads ~half the bytes of the BF16 fold.  It changes
+        draft logits, so proposals may differ; the target still verifies
+        every proposal.  The BF16 fold is kept, so switching back is exact."""
+        if enabled:
+            self.fold_q8_group_size(self.markov_w1.weight.shape[1])  # refuse before changing state
+        self.fold_q8 = bool(enabled)
+        if not self.fold_q8:
+            self._fold_q = None
+        elif self._fold_weight is not None and self._fold_q is None:
+            self._quantize_fold()
 
     def context(self, hidden, f_rnn):
         rank = self.markov_w1.weight.shape[1]
@@ -369,7 +452,13 @@ class MarkovHead(nn.Module):
         candidate = mx.tanh(candidate.astype(mx.float32)).astype(state.dtype)
         state = gate * state + (1 - gate) * candidate
         latent = mx.tanh(output.astype(mx.float32)).astype(state.dtype)
-        bias = mx.addmm(self._fold_bias, latent, self._fold_weight.T)
+        if self._fold_q is not None:
+            weight, scales, biases, group = self._fold_q
+            bias = self._fold_bias + mx.quantized_matmul(
+                latent, weight, scales, biases, transpose=True, group_size=group, bits=8
+            )
+        else:
+            bias = mx.addmm(self._fold_bias, latent, self._fold_weight.T)
         return state, bias
 
 
@@ -400,13 +489,15 @@ class Inkling2DSparkDraftModel(nn.Module):
     @property
     def receipt_settings(self):
         c = self.config
-        return {
+        options = {name: True for name, value in self.option_receipt.items() if value["selected"]}
+        return {**options,
             "kind": "inkling2_dspark", "law_version": LAW_VERSION,
             "trained_proposals": c.block_size - 1, "verification_width": c.block_size,
             "block_size": c.block_size, "target_layer_ids": list(c.target_layer_ids),
             "local_layer_ids": list(c.local_layer_ids), "prefix_window": c.sliding_window_size,
             "markov_head_type": "rnn_hidden", "markov_rank": c.markov_rank,
-            "head_fold": "fp64-numpy-4096-row-tiles", "draft_logits": "activation-dtype-softcapped",
+            "head_fold": "fp64-numpy-4096-row-tiles"
+            + ("+mlx-affine-q8" if self.markov_head.fold_q8 else ""), "draft_logits": "activation-dtype-softcapped",
             "full_trained_block": True, "sample_from_anchor": False,
             "proposal_distribution": self.proposal_distribution, "qualified": False,
         }
@@ -448,6 +539,38 @@ class Inkling2DSparkDraftModel(nn.Module):
             self.markov_head.fold(target.lm_head)
             self._target, self._fold_source = target, weight
         return self
+
+    def configure_options(self, *, kv_headroom=False, fold_q8=False):
+        """Opt-in drafter options; each changes draft-side work only, never
+        the target or its verification.  ``kv_headroom``: block K/V written
+        in place on global layers (bitwise the same attention inputs).
+        ``fold_q8``: the Markov head reads an 8-bit fold (drafts may differ)."""
+        if type(kv_headroom) is not bool or type(fold_q8) is not bool:
+            raise TypeError("Inkling 2 DSpark options must be booleans")
+        self.markov_head.set_fold_q8(fold_q8)
+        for layer in self.layers:
+            layer.self_attn.kv_headroom = kv_headroom
+        return self
+
+    @property
+    def option_receipt(self):
+        """Selected options and the counters that show them engaged."""
+        attention = [layer.self_attn for layer in self.layers]
+        receipt = {"kv_headroom": {
+            "selected": any(a.kv_headroom for a in attention),
+            "global_layers": sum(a.window is None for a in attention),
+            **{name: sum(a.kv_headroom_stats[name] for a in attention)
+               for name in ("writes", "grows", "fallbacks")},
+        }}
+        head = self.markov_head
+        receipt["fold_q8"] = {
+            "selected": head.fold_q8,
+            "engaged": head._fold_q is not None,
+            "group_size": None if head._fold_q is None else head._fold_q[3],
+            "bytes": None if head._fold_q is None else sum(a.nbytes for a in head._fold_q[:3]),
+            "bf16_bytes": None if head._fold_weight is None else head._fold_weight.nbytes,
+        }
+        return receipt
 
     def make_cache(self):
         return [
@@ -622,9 +745,13 @@ class Inkling2DSparkDraftModel(nn.Module):
 
     def draft_cached(self, anchor, last_feature, cache, block_size, sampler, token_dtype=mx.int32):
         """``draft_block`` after ``commit_context``: the context is already in
-        KV; ``last_feature`` ([1, 1, D]) is the last committed feature row."""
+        KV; ``last_feature`` ([1, 1, D]) is the last committed feature row.
+        ``anchor`` may be a lazy one-token array (a pre-draft's target token)."""
         count = self._check_count(block_size)
-        anchor = mx.array([int(anchor)], token_dtype)
+        anchor = (
+            anchor.reshape(1).astype(token_dtype) if isinstance(anchor, mx.array)
+            else mx.array([int(anchor)], token_dtype)
+        )
         if count == 0:
             return mx.zeros((1, 0), token_dtype)
         self._check_inputs(last_feature, cache, 1)

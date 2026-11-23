@@ -181,11 +181,51 @@ class Inkling2DSparkExternal:
         self.stats["block_drafts"] += len(anchors)
         return tokens, [[PointMassLaw(t) for t in row] for row in tokens]
 
+    # -- pre-drafting (ExternalDraftBatchGenerator ``predraft``) ---------------
+    def predraft(self, anchor, hidden, cache, proposal_length):
+        """Queue one lane's next block before the host reads acceptance.
 
-def load_external_drafter(record, target_model, *, num_draft):
+        ``cache`` is a private copy of the lane's draft plane; ``hidden``
+        ([1, L, D]) holds the verify rows the pre-draft assumes commit and
+        ``anchor`` is the lazy (1,) target token after them.  The ops are
+        ``draft_distributions``' own (commit, then ``draft_cached``), so the
+        Markov head starts from ``hidden``'s last row, the newest row that
+        commits under the assumption (omlx#5508).  Returns lazy tokens
+        ``[1, n]`` or ``None``; no stats move until ``adopt_predraft``.
+        """
+        count = int(proposal_length)
+        if not 1 <= count <= self.num_draft:
+            raise ValueError("Inkling 2 DSpark proposal length exceeds num_draft")
+        lanes = self._lanes(cache)
+        if len(lanes) != 1 or hidden.shape[0] != 1:
+            raise ValueError("Inkling 2 DSpark pre-drafts one lane at a time")
+        lane = lanes[0]
+        if hidden.shape[1]:
+            self.drafter.commit_context(hidden, lane[:-1])
+            lane[-1].append(hidden)
+        feature = lane[-1].feature
+        if feature is None:
+            return None
+        return self.drafter.draft_cached(
+            anchor, feature, lane[:-1], count + 1, lambda logits: mx.argmax(logits, -1)
+        )
+
+    def adopt_predraft(self, tokens, context_rows):
+        """Host-read an adopted pre-draft: the rows and laws ``draft_distributions``
+        would have returned for that lane, with the same stats."""
+        from ..proposal_providers import PointMassLaw
+
+        row = [int(t) for t in tokens[0].tolist()]
+        self.stats["context_rows"] += int(context_rows)
+        self.stats["block_drafts"] += 1
+        return row, [PointMassLaw(t) for t in row]
+
+
+def load_external_drafter(record, target_model, *, num_draft, options=None):
     from ...adapters.inkling2_dspark import load_drafter
 
-    return Inkling2DSparkExternal(load_drafter(record, target_model), num_draft=num_draft)
+    drafter = load_drafter(record, target_model).configure_options(**(options or {}))
+    return Inkling2DSparkExternal(drafter, num_draft=num_draft)
 
 
 __all__ = ["Inkling2DSparkExternal", "LastFeatureCache", "load_external_drafter"]
