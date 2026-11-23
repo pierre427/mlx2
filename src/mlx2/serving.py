@@ -4571,6 +4571,9 @@ class ServingEngine(KernelReloadMixin):
         self._prefill_step_override = prefill_step
         self.prefill_step_source = "engine_argument" if prefill_step is not None else "default"
         self.prefill_step_autoscale = False
+        # Adapter-declared bound on the prompt-length schedule's widest chunk
+        # (``prefill_step_autoscale_cap()``); None: the schedule's own top.
+        self.prefill_step_autoscale_cap = None
         if prefill_step is None:
             prefill_step = DEFAULT_PREFILL_STEP
         # rows x (KV depth + rows) cap per prefill chunk (jundot/omlx#4149);
@@ -11635,6 +11638,19 @@ class ServingEngine(KernelReloadMixin):
                 self.prefill_step = int(PROMPT_LENGTH_PREFILL_SCHEDULE[-1][1])
                 self.prefill_step_source = "prompt_length_autoscale"
                 self.prefill_step_autoscale = True
+                # An adapter may bound the schedule (its widest chunk) without
+                # fixing the step: shorter prompts keep their smaller steps.
+                # Every autoscale site takes ``maximum=prefill_step``, so the
+                # bound reaches them all.  An operator --prefill-step wins.
+                bound = getattr(adapter, "prefill_step_autoscale_cap", None)
+                cap = bound() if callable(bound) else None
+                if cap is not None:
+                    if type(cap) is not int or cap <= 0:
+                        raise ValueError(
+                            f"adapter prefill_step_autoscale_cap must be a positive integer, got {cap!r}"
+                        )
+                    self.prefill_step_autoscale_cap = cap
+                    self.prefill_step = min(self.prefill_step, cap)
             refuse_state_codec_on_reduced_state(self.recurrent_state_codec_policy, adapter)
             budget_default = getattr(adapter, "prefill_depth_budget_default", None)
             if self._prefill_depth_budget_override is None and callable(budget_default):
@@ -11761,6 +11777,10 @@ class ServingEngine(KernelReloadMixin):
                 "prefill_step": self.prefill_step,
                 "prefill_step_source": self.prefill_step_source,
                 "prefill_step_autoscale": self.prefill_step_autoscale,
+                # Present only when an adapter bounds the schedule (route
+                # identity: the bounded schedule is another chunk grid).
+                **({"prefill_step_autoscale_cap": self.prefill_step_autoscale_cap}
+                   if getattr(self, "prefill_step_autoscale_cap", None) is not None else {}),
                 "cache_bytes": self.cache_bytes,
                 # How the value was chosen is provenance, not route identity
                 # (qualification.PROVENANCE_ONLY_SETTINGS); ``cache_bytes``

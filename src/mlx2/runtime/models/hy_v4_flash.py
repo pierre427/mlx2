@@ -58,8 +58,11 @@ from .hy_v4_flash_fp8kv import ROW_REVISION as FP8_ROW_REVISION
 from .hy_v4_flash_fp8kv import pack_rows as fp8_pack_rows
 from .hy_v4_flash_fp8kv import row_bytes as fp8_row_bytes
 from .hy_v4_flash_fp8kv import unpack_rows as fp8_unpack_rows
+from .hy_v4_flash_sparse_prefill import sparse_prefill_attend
+from .hy_v4_flash_sparse_prefill import unsupported_reason as sparse_unsupported_reason
 from .hy_v4_flash_vision import (chunk_positions, find_spans, mrope_planes, slot_positions,
                                  span_end)
+from . import hy_v4_flash_fusions as _fusions
 from . import moe_nax_gather as _moe_nax
 from .switch_layers import SwitchGLU
 
@@ -501,6 +504,91 @@ def mla_attend(q, kv, mask, sinks, scale, rank):
     return mx.concatenate(outs, axis=2)
 
 
+def sliding_band_attend(q, kv, first, start, window, sinks, scale, rank, block):
+    """Sliding-window prefill over each query block's band of keys only.
+
+    ``q [N, H, L, r+p]`` for positions ``start..start+L-1``; ``kv [N, 1, T,
+    r+p]`` the rows of positions ``first..start+L-1`` (``first`` at or
+    before ``start - window + 1`` when that history exists).  Query rows
+    ``[a, b)`` can see only positions ``[start + a - window + 1, start + b)``
+    (the previous ``window - 1`` keys, cached ring rows included) plus the
+    sink column, so each block of ``block`` rows runs ``mla_attend`` over
+    ``block + window - 1`` keys instead of all ``T``: the full masked
+    ``L x T`` square becomes a band (the Ripple ``window_blocked_attention``
+    mechanism, ``ricursive.py``, with sinks and latent rows).  Every row sees
+    the same keys, mask and sink as ``mla_attend`` over the whole slice; the
+    masked keys it drops contributed exactly zero, but the softmax and value
+    reductions run over a shorter length, so the result is numerically
+    equivalent, not bit-identical (``tests/test_hy_v4_flash_prefill_scaling_cpu.py``).
+    A chunk of at most ``block`` rows is the stock call unchanged.
+
+    With ``BOUNDED_SCORE_BLOCKS`` the pending blocks are evaluated once their
+    score elements would exceed ``SCORE_BUDGET`` (the bound ``mla_attend``
+    keeps), so a band forward syncs about ``L * (block + window) / (L * T)``
+    as often as the square one, and never when it fits one budget.
+    Returns ``[N, H, L, r]``.
+    """
+    N, H, L, _ = q.shape
+    if L <= block:
+        lo = max(first, start - window + 1)
+        kpos = mx.arange(lo, start + L)
+        qpos = mx.arange(start, start + L)
+        allowed = (kpos[None, :] <= qpos[:, None]) & (kpos[None, :] > qpos[:, None] - window)
+        return mla_attend(q, kv[:, :, lo - first:], allowed[None, None], sinks, scale, rank)
+    outs, pending, live = [], [], 0
+    for a in range(0, L, block):
+        b = min(L, a + block)
+        k0 = max(first, start + a - window + 1)
+        k1 = start + b
+        elements = N * H * (b - a) * (k1 - k0)
+        if BOUNDED_SCORE_BLOCKS and pending and live + elements > SCORE_BUDGET:
+            mx.eval(pending)
+            pending, live = [], 0
+        qpos = mx.arange(start + a, start + b)
+        kpos = mx.arange(k0, k1)
+        allowed = (kpos[None, :] <= qpos[:, None]) & (kpos[None, :] > qpos[:, None] - window)
+        out = mla_attend(q[:, :, a:b], kv[:, :, k0 - first:k1 - first], allowed[None, None],
+                         sinks, scale, rank)
+        outs.append(out)
+        pending.append(out)
+        live += elements
+    return mx.concatenate(outs, axis=2)
+
+
+def gathered_indexed_attend(q, kv, recalled, sinks, scale, rank, rows=None):
+    """Indexed attention for short chunks: one gathered key set per query row.
+
+    ``q [B, H, L, r+p]``, ``kv [B, T, r+p]`` stored rows, ``recalled [B, L, K]``
+    causal ids (-1 empty); ``rows`` turns the gathered storage rows into
+    attention rows (fp8 caches dequantize only the recalled rows).
+    """
+    B, _, L, D = q.shape
+    K = recalled.shape[-1]
+    gathered = mx.take_along_axis(kv[:, None], mx.maximum(recalled, 0)[..., None], axis=2)
+    if rows is not None:
+        gathered = rows(gathered)
+    out = mla_attend(q.transpose(0, 2, 1, 3).reshape(B * L, -1, 1, D),
+                     gathered.reshape(B * L, 1, K, -1),
+                     (recalled >= 0).reshape(B * L, 1, 1, K), sinks, scale, rank)
+    return out.reshape(B, L, -1, rank).transpose(0, 2, 1, 3)
+
+
+def dense_indexed_attend(q, kv, recalled, sinks, scale, rank, qpos, kpos):
+    """Indexed prefill reference: every key with a ``[B, L, T]`` hit mask.
+
+    ``kv [B, T, r+p]`` attention rows at positions ``kpos``; queries at
+    ``qpos``.  ``O(L * T)`` per chunk (the default; the opt-in
+    ``sparse_prefill_attention`` kernel reads only the recalled rows).
+    """
+    B, L, _ = recalled.shape
+    T = kv.shape[1]
+    hit = mx.zeros((B, L, T + 1), dtype=mx.bool_)
+    slot = mx.where(recalled >= 0, recalled, T)
+    hit = mx.put_along_axis(hit, slot, mx.array(True), axis=-1)[..., :T]
+    allowed = hit & (kpos[None, None, :] <= qpos[None, :, None])
+    return mla_attend(q, kv[:, None], allowed[:, None], sinks, scale, rank)
+
+
 class CompressedIndexer(nn.Module):
     """Gated-pool compressed indexer (``HYV4FlashCompressedIndexer``).
 
@@ -574,17 +662,38 @@ class CompressedIndexer(nn.Module):
             self.num_heads ** -0.5 * self.head_dim ** -0.5)
         own_all = (mx.arange(start, start + L) // self.ratio).astype(mx.int32)  # [L]
         k = min(self.group_topk - 1, G)
+        # Opt-in ``indexer_fused_scores``: the logits come straight from one
+        # Metal kernel (no [B, heads, rows, G] block), so a chunk may hold
+        # ``heads`` times more rows under the same budget.
+        fused = (getattr(self, "fused_scores", False) and G > 0 and self.head_dim % 4 == 0
+                 and _fusions.on_gpu())
+        if fused:
+            self.fused_score_calls = getattr(self, "fused_score_calls", 0) + 1
         # Score in query chunks: [B, heads, rows, G] fp32 stays under the budget.
-        rows = max(1, SCORE_BUDGET // max(1, B * self.num_heads * max(G, 1)))
+        rows = max(1, SCORE_BUDGET // max(1, B * (1 if fused else self.num_heads) * max(G, 1)))
         picks = []
         for a in range(0, L, rows):
             b = min(L, a + rows)
             own = own_all[a:b]
+            own_col = mx.broadcast_to(own[None, :, None], (B, b - a, 1))
+            if fused:
+                # The kernel writes the negated masked logits (negation is
+                # exact, so argpartition sees the reference's operand order);
+                # a pick is valid iff it lies before the own group.
+                neg = _fusions.indexer_logits_metal(q[:, :, a:b], group_keys, w[:, a:b], own, negate=True)
+                if k > 0:
+                    picked = mx.argpartition(neg, kth=k - 1, axis=-1)[..., :k].astype(mx.int32)
+                    picked = mx.where(picked < own[None, :, None], picked, -1)
+                    picks.append(mx.concatenate([picked, own_col], axis=-1))
+                else:
+                    picks.append(own_col)
+                if BOUNDED_SCORE_BLOCKS and rows < L:
+                    mx.eval(picks[-1])
+                continue
             scores = nn.relu(q[:, :, a:b] @ group_keys[:, None].swapaxes(-1, -2))
             logits = (w[:, a:b].swapaxes(1, 2)[..., None] * scores).sum(axis=1)  # [B, l, G]
             valid = mx.arange(G)[None, None, :] < own[None, :, None]
             logits = mx.where(valid, logits, -mx.inf)
-            own_col = mx.broadcast_to(own[None, :, None], (B, b - a, 1))
             if k > 0:
                 picked = mx.argpartition(-logits, kth=k - 1, axis=-1)[..., :k].astype(mx.int32)
                 picked = mx.where(mx.take_along_axis(valid, picked, axis=-1), picked, -1)
@@ -632,6 +741,17 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(H * self.v_dim, args.hidden_size, bias=False)
         self.post_proj_norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.learnable_sink_param = mx.zeros((H,), dtype=mx.float32)
+        # Opt-in band attention for sliding prefill (``sliding_band_attend``):
+        # query rows per block, 0 = off (the whole masked slice, the default).
+        # A plain attribute, not a parameter.
+        self.sliding_attention_blocks = 0
+        self.band_forwards = 0  # sliding forwards that took the band (receipts)
+        # Opt-in sparse prefill kernel for indexed chunks of more than
+        # GATHER_MAX_QUERY rows (``hy_v4_flash_sparse_prefill``); off = the
+        # dense masked reference.  Plain attributes, not parameters.
+        self.sparse_prefill_attention = False
+        self.sparse_prefill_forwards = 0  # indexed forwards that took the kernel (receipts)
+        self.sparse_prefill_declines = {}  # reason -> forwards that fell back to dense
         if indexer:
             self.compressed_indexer = CompressedIndexer(args)
 
@@ -659,8 +779,13 @@ class Attention(nn.Module):
         """``latent_out [B, H, L, r]`` -> block output."""
         B, L = x.shape[:2]
         out = self.unembed_out(latent_out).transpose(0, 2, 1, 3)  # [B, L, H, v]
-        gate = mx.sigmoid(self.linear_gate(x).reshape(B, L, self.num_heads, self.v_dim))
-        return self.post_proj_norm(self.o_proj((out * gate).reshape(B, L, -1)))
+        gate = self.linear_gate(x).reshape(B, L, self.num_heads, self.v_dim)
+        if "fused_input_proj" in self:
+            # Opt-in ``mla_fused_input_proj``: the sigmoid-gate multiply as one compiled kernel.
+            gated = _fusions.gated_output(out, gate)
+        else:
+            gated = out * mx.sigmoid(gate)
+        return self.post_proj_norm(self.o_proj(gated.reshape(B, L, -1)))
 
     def __call__(self, x, cache):
         rows = getattr(cache, "rows", None)
@@ -671,14 +796,25 @@ class Attention(nn.Module):
         # (start, count) span of a ragged chunk.
         L = x.shape[1]
         outs = []
-        for i, (row, (start, count)) in enumerate(zip(rows, cache.layout(L))):
-            if count == 0:
-                outs.append(mx.zeros((1, self.num_heads, L, self.kv_lora_rank), dtype=x.dtype))
-                continue
-            out = self._attend(x[i : i + 1, start : start + count], row)
-            if count < L:
-                out = mx.pad(out, [(0, 0), (0, 0), (start, L - start - count), (0, 0)])
-            outs.append(out)
+        fused = self.get("fused_input_proj") if "fused_input_proj" in self else None
+        if fused is not None:
+            # Lane slices are separate inputs: each projection runs its own
+            # segment (exactly the split route), so no lane computes the
+            # gate rows that ``finish`` recomputes on the whole batch.
+            fused.bypass = True
+        try:
+            for i, (row, (start, count)) in enumerate(zip(rows, cache.layout(L))):
+                if count == 0:
+                    outs.append(mx.zeros((1, self.num_heads, L, self.kv_lora_rank), dtype=x.dtype))
+                    continue
+                out = self._attend(x[i : i + 1, start : start + count], row)
+                if count < L:
+                    out = mx.pad(out, [(0, 0), (0, 0), (start, L - start - count), (0, 0)])
+                outs.append(out)
+        finally:
+            if fused is not None:
+                fused.bypass = False
+                fused.release()
         return self.finish(x, mx.concatenate(outs, axis=0))
 
     def _attend(self, x, cache):
@@ -703,6 +839,13 @@ class Attention(nn.Module):
             # the SDPA reduction length, so an APCv2 landing would not repeat
             # the cold run bit for bit.
             lo = max(first, start - self.window + 1)
+            block = self.sliding_attention_blocks
+            if block and L > block:
+                # Opt-in band: each query block reads only its own window.
+                self.band_forwards += 1
+                kv = cache.latent_rows(kv[:, lo - first :], keys.dtype)
+                return sliding_band_attend(q, kv[:, None], lo, start, self.window, sinks,
+                                           self.scale, r, block)
             kv, kpos = kv[:, lo - first :], mx.arange(lo, start + L)
             kv = cache.latent_rows(kv, keys.dtype)
             if L == 1:
@@ -723,22 +866,27 @@ class Attention(nn.Module):
                                   where if spans else None)  # [B, L, K]
         recalled = mx.where(recalled <= qpos[None, :, None], recalled, -1)
         cache.record_selection(recalled, start, L)
-        B = x.shape[0]
         if L <= GATHER_MAX_QUERY:
-            # Read only the recalled rows: one gathered key set per query row.
-            K = recalled.shape[-1]
-            gathered = mx.take_along_axis(kv[:, None], mx.maximum(recalled, 0)[..., None], axis=2)
-            gathered = cache.latent_rows(gathered, keys.dtype)  # fp8: only the recalled rows
-            out = mla_attend(q.transpose(0, 2, 1, 3).reshape(B * L, -1, 1, q.shape[-1]),
-                             gathered.reshape(B * L, 1, K, -1),
-                             (recalled >= 0).reshape(B * L, 1, 1, K), sinks, self.scale, r)
-            return out.reshape(B, L, -1, r).transpose(0, 2, 1, 3)
-        hit = mx.zeros((B, L, T + 1), dtype=mx.bool_)
-        slot = mx.where(recalled >= 0, recalled, T)
-        hit = mx.put_along_axis(hit, slot, mx.array(True), axis=-1)[..., :T]
-        allowed = hit & (kpos[None, None, :] <= qpos[None, :, None])
+            return gathered_indexed_attend(q, kv, recalled, sinks, self.scale, r,
+                                           rows=lambda g: cache.latent_rows(g, keys.dtype))
         kv = cache.latent_rows(kv, keys.dtype)
-        return mla_attend(q, kv[:, None], allowed[:, None], sinks, self.scale, r)
+        if self.sparse_prefill_attention:
+            # The kernel reads id i at kv[i - first]; the dense and gather
+            # references index kv with the id itself, so they agree only at
+            # first == 0 (every indexed cache: only sliding caches advance
+            # start); any other forward is a counted fallback.  It also needs
+            # distinct ids per row, which select() guarantees (distinct
+            # groups, each expanded to distinct tokens); the dense hit mask
+            # would dedup a repeat, the kernel would count it twice.
+            reason = sparse_unsupported_reason(q.shape[1], q.shape[-1], r, q.dtype,
+                                               rows=L, lanes=q.shape[0], first=first)
+            if reason is None:
+                # Opt-in: each query reads only its recalled rows (one Metal kernel).
+                self.sparse_prefill_forwards += 1
+                return sparse_prefill_attend(q, kv, recalled, sinks, self.scale, r,
+                                             start=start, first=first)
+            self.sparse_prefill_declines[reason] = self.sparse_prefill_declines.get(reason, 0) + 1
+        return dense_indexed_attend(q, kv, recalled, sinks, self.scale, r, qpos, kpos)
 
 
 # ------------------------------------------------- hyper-connections --
@@ -893,11 +1041,42 @@ class ResidentEngramRows:
     def read(self, rows: np.ndarray) -> mx.array:
         return self.weight[mx.array(rows.astype(np.int64))]
 
-    def prefetch(self, rows) -> int:
+    def prefetch(self, rows, *, required: bool = False) -> int:
         return 0
 
 
 ENGRAM_PRECISIONS = ("transformers", "vllm")
+
+
+def engram_gate(key, query, hidden: int, *, transformers: bool, torch_round: bool = False):
+    """``sigmoid(signed_sqrt((key * query).sum(-1) * hidden**-0.5))`` over the last axis.
+
+    Default (``engram_gate_rounding: fp32``): fp32 products and sum, scaled,
+    rounded once to the activation dtype in the ``transformers`` profile
+    (``vllm`` keeps fp32).  ``torch_round`` (opt-in, ``transformers`` only):
+    torch's rounding points in the reference's
+    ``(key * query).sum(dim=-1) * self.hidden_size**-0.5`` on bf16 tensors:
+    the product is a bf16 tensor (rounded per element), the sum accumulates
+    in fp32 and rounds, the scalar multiply runs in fp32 and rounds again;
+    and torch's bf16 ``sigmoid`` computes in fp32 and rounds once, where
+    MLX's bf16 sigmoid rounds its inner steps (it differed on 246 of 2048
+    rows given identical inputs), so here it runs in fp32.  Measured against
+    torch 2.14 on CPU (tests/test_hy_v4_flash_fusions_cpu.py): before the
+    sigmoid the default differs from torch on about half of random bf16
+    rows, rounding after the sum and the scale only (omlx #5469's fix) on
+    about 40%, this on about 1 in 4000 (fp32 summation order).
+    """
+    dtype = key.dtype
+    if transformers and torch_round:
+        g = (key * query).astype(mx.float32).sum(axis=-1).astype(dtype)
+        g = (g.astype(mx.float32) * hidden ** -0.5).astype(dtype)
+        s = mx.sqrt(mx.maximum(mx.abs(g), 1e-6)) * mx.sign(g)
+        return mx.sigmoid(s.astype(mx.float32)).astype(dtype)
+    else:
+        g = (key.astype(mx.float32) * query.astype(mx.float32)).sum(axis=-1) * hidden ** -0.5
+        if transformers:
+            g = g.astype(dtype)
+    return mx.sigmoid(mx.sqrt(mx.maximum(mx.abs(g), 1e-6)) * mx.sign(g))
 
 
 class EngramLayer(nn.Module):
@@ -966,17 +1145,40 @@ class EngramLayer(nn.Module):
         gammas = mx.stack([norm.weight for norm in self.lookup_per_head_norms])
         x = torch_rms_norm(x, gammas)
         x = x.reshape(*x.shape[:-2], -1)
-        gates = []
-        for c in range(self.n):
-            key = torch_rms_norm(self.key_projs[c](x), self.norm_key[c].weight)
-            query = torch_rms_norm(streams[..., c, :], self.norm_query[c].weight)
-            g = (key.astype(mx.float32) * query.astype(mx.float32)).sum(axis=-1) * self.hidden ** -0.5
-            if transformers:
-                g = g.astype(dtype)
-            g = mx.sqrt(mx.maximum(mx.abs(g), 1e-6)) * mx.sign(g)
-            gates.append(mx.sigmoid(g))
-        gate = mx.stack(gates, axis=-1)[..., None]  # [B, L, n, 1]
-        value = self.value_proj(x)
+        torch_round = transformers and getattr(self, "gate_rounding", "fp32") == "torch"
+        if torch_round:
+            self.gate_calls = getattr(self, "gate_calls", 0) + 1
+
+        def gate_of(key, query):
+            return engram_gate(key, query, self.hidden, transformers=transformers, torch_round=torch_round)
+
+        if getattr(self, "fused", False):
+            # Opt-in ``engram_fused_proj``: one GEMM for the n key projections
+            # and the value projection; stacked norms; the gate on [B, L, n].
+            parts = self.fused_proj.segments(x)
+            value = parts[self.n]
+            keys = mx.stack(parts[: self.n], axis=-2)  # [B, L, n, D]
+            if _fusions.on_gpu():
+                # One norm per operand with stacked gammas (bitwise the
+                # per-stream norms on Metal, tests).  MLX's CPU rms_norm with
+                # a weight rounds fp32 differently from norm-then-scale, so
+                # the CPU keeps the per-stream calls.
+                key = torch_rms_norm(keys, self.stacked_norm_key)
+                query = torch_rms_norm(streams, self.stacked_norm_query)
+            else:
+                key = mx.stack([torch_rms_norm(keys[..., c, :], self.norm_key[c].weight)
+                                for c in range(self.n)], axis=-2)
+                query = mx.stack([torch_rms_norm(streams[..., c, :], self.norm_query[c].weight)
+                                  for c in range(self.n)], axis=-2)
+            gate = gate_of(key, query)[..., None]  # [B, L, n, 1]
+        else:
+            gates = []
+            for c in range(self.n):
+                key = torch_rms_norm(self.key_projs[c](x), self.norm_key[c].weight)
+                query = torch_rms_norm(streams[..., c, :], self.norm_query[c].weight)
+                gates.append(gate_of(key, query))
+            gate = mx.stack(gates, axis=-1)[..., None]  # [B, L, n, 1]
+            value = self.value_proj(x)
         scales = mx.stack(self.unified_per_hc_scales)  # [n, D]
         if transformers:
             main = self.unified_pre_gamma.astype(dtype) * torch_rms_norm(value)
@@ -1642,6 +1844,15 @@ class DecoderLayer(nn.Module):
     def __call__(self, streams, cache, engram=None):
         if engram is not None and "engram_layer" in self:
             streams = self.engram_layer(streams, *engram)
+        seam = getattr(self, "hc_seam", None)
+        if seam is not None:
+            # Opt-in ``hc_seam_fused``: hc pre + input norm at the entry, and
+            # merge + hc pre + norm between attention and MLP, fused.
+            post, x = seam.pre(self.hc_attn_layer, self.input_layernorm, streams)
+            x = self.self_attn(x, cache)
+            streams, post, x = seam.merge_pre(self.hc_mlp_layer, self.post_attention_layernorm,
+                                              post, x, streams)
+            return hc_merge(post, self.mlp(x), streams)
         post, x = self.hc_attn_layer(streams)
         x = self.self_attn(self.input_layernorm(x), cache)
         streams = hc_merge(post, x, streams)
@@ -1700,6 +1911,48 @@ class Model(nn.Module):
         # ``None`` without Engram layers).  Readers must not change ``streams``.
         # Media prefill chunks call no reader.  Plain attribute, not a child.
         object.__setattr__(self, "layer_output_readers", {})
+
+    @property
+    def sliding_attention_min_block(self) -> int:
+        """Smallest admitted band block: the sliding window, and never below
+        ``ROLLBACK``.  A forward takes the band only when it has more rows
+        than one block, and no verify or tree forward can (a speculative
+        round must stay trimmable, so it has at most ``ROLLBACK`` rows), so
+        verify numerics never change; only prefill chunks do."""
+        return max(int(self.args.sliding_window), ROLLBACK)
+
+    def set_sliding_attention_blocks(self, rows: int) -> None:
+        """Opt-in band attention on every sliding layer (``rows`` per query
+        block; 0 restores the default whole-slice attention)."""
+        if type(rows) is not int or rows < 0:
+            raise ValueError("sliding_attention_blocks must be 0 (off) or a positive row count")
+        if rows and rows < self.sliding_attention_min_block:
+            raise ValueError(
+                f"sliding_attention_blocks must be at least {self.sliding_attention_min_block} "
+                "(the sliding window, at least ROLLBACK): smaller blocks would reach verify forwards")
+        for layer in self.model.layers:
+            if layer.self_attn.kind == SLIDING:
+                layer.self_attn.sliding_attention_blocks = rows
+
+    def set_sparse_prefill_attention(self, on: bool) -> None:
+        """Opt-in sparse prefill kernel on every indexed layer (False: the
+        dense masked reference, the default)."""
+        if type(on) is not bool:
+            raise ValueError("sparse_prefill_attention must be a boolean")
+        for layer in self.model.layers:
+            if layer.self_attn.kind == INDEXED:
+                layer.self_attn.sparse_prefill_attention = on
+
+    @property
+    def sparse_prefill_attention(self) -> bool:
+        return any(layer.self_attn.sparse_prefill_attention for layer in self.model.layers
+                   if layer.self_attn.kind == INDEXED)
+
+    @property
+    def sliding_attention_blocks(self) -> int:
+        rows = {layer.self_attn.sliding_attention_blocks for layer in self.model.layers
+                if layer.self_attn.kind == SLIDING}
+        return max(rows) if rows else 0
 
     # -- engram ----------------------------------------------------------
     def bind_engram(self, rows_by_layer: Dict[int, Any]):
@@ -1848,7 +2101,8 @@ class Model(nn.Module):
             reader = self.engram_rows[index]
             prefetch = getattr(reader, "prefetch", None)
             if callable(prefetch):
-                prefetch(rows.reshape(-1))
+                # Required: every row is read by ``resolve`` (never declined).
+                prefetch(rows.reshape(-1), required=True)
 
             def resolve(reader=reader, rows=rows):
                 B, L, heads = rows.shape

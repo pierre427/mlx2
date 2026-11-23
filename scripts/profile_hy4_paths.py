@@ -428,10 +428,10 @@ class EngramProbe:
             saved.append((reader, "read"))
             prefetch = getattr(reader, "prefetch", None)
             if callable(prefetch):
-                def prefetch_(rows, orig=prefetch):
+                def prefetch_(rows, orig=prefetch, **kw):
                     t = pc()
                     try:
-                        return orig(rows)
+                        return orig(rows, **kw)
                     finally:
                         self.prefetch_s += pc() - t
                 reader.prefetch = prefetch_

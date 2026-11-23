@@ -55,7 +55,7 @@ class _Spy:
         self.inner, self.log, self.name = inner, log, name
         self.rows = inner.rows
 
-    def prefetch(self, rows):
+    def prefetch(self, rows, **_kw):
         self.log.append(("prefetch", self.name))
         return 0
 

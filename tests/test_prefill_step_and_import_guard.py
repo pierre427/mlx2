@@ -69,7 +69,9 @@ def _engine_settings(monkeypatch, adapter_step, *, prefill_identity=None, expect
         def close(self):
             pass
 
-    if adapter_step == "decline":
+    if isinstance(adapter_step, tuple):  # ("cap", n): declines the step, bounds the schedule
+        Adapter.prefill_step_autoscale_cap = lambda self, n=adapter_step[1]: n
+    elif adapter_step == "decline":
         Adapter.prefill_step_default = lambda self: None
     elif adapter_step is not None:
         Adapter.prefill_step_default = lambda self: adapter_step
@@ -174,6 +176,26 @@ def test_engine_autoscales_when_the_adapter_declines(monkeypatch):
     assert engine.prefill_step == 8192 and seen["prefill_step"] == 8192
     assert settings["prefill_step_source"] == "prompt_length_autoscale"
     assert settings["prefill_step_autoscale"] is True
+
+
+def test_adapter_caps_the_autoscaled_step_without_fixing_it(monkeypatch):
+    settings, seen, engine = _engine_settings(monkeypatch, ("cap", 2048))
+    assert engine.prefill_step == 2048 and seen["prefill_step"] == 2048
+    assert settings["prefill_step_source"] == "prompt_length_autoscale"
+    assert settings["prefill_step_autoscale"] is True
+    assert settings["prefill_step_autoscale_cap"] == 2048
+    assert seen["batch_prefill_step_autoscale"] is True
+    # The cap never widens the schedule's top.
+    settings, _seen, engine = _engine_settings(monkeypatch, ("cap", 65536))
+    assert engine.prefill_step == 8192
+    # An operator step wins over the cap (no autoscale at all).
+    settings, _seen, engine = _engine_settings(monkeypatch, ("cap", 2048), prefill_step=512)
+    assert engine.prefill_step == 512 and settings["prefill_step_autoscale"] is False
+    assert "prefill_step_autoscale_cap" not in settings
+
+
+def test_adapter_autoscale_cap_must_be_positive(monkeypatch):
+    _settings, _seen, engine = _engine_settings(monkeypatch, ("cap", 0), expect_error="prefill_step_autoscale_cap")
 
 
 def test_prompt_length_prefill_autoscale_schedule():

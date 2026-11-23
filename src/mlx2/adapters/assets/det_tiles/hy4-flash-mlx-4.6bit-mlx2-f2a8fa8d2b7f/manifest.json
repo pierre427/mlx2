@@ -1,0 +1,38 @@
+{
+ "capture": "hc-stream-mean-f32-v1",
+ "files": {
+  "tiles.safetensors": "fdb74390b3a2a8a4fa75b10a5b8c68053e52d455298ff2f858cba51c72fff78b"
+ },
+ "fit_execution_policy": {
+  "engram_precision": "transformers",
+  "engram_table_format": "iq4_nl",
+  "latent_kv": "native",
+  "moe_top_k": null
+ },
+ "host_tiles_manifest_sha256": null,
+ "layers": 42,
+ "mlx2_source_revision": "b106e81a8",
+ "qualification": "unqualified",
+ "schema": "mlx2.amoeba-det-tiles.v1",
+ "source": {
+  "artifact": "Hy4-flash-MLX-4.6bit-mlx2@f2a8fa8d",
+  "fingerprint": "f2a8fa8d2b7f22150ee5bd988c5acc1814d8494aa82ee01aff40a7efc13aad93"
+ },
+ "tiles": [
+  {
+   "file": "tiles.safetensors",
+   "gate": {
+    "bias": -2.3683292865753174,
+    "probe": "logistic, balanced, val-chosen",
+    "threshold": 0.7
+   },
+   "id": "calculator",
+   "kind": "calculator",
+   "parser": "calc-parse-v2",
+   "read_layer": 12,
+   "read_point": "layer_output_capture",
+   "write_layer": 12,
+   "write_mode": "force"
+  }
+ ]
+}

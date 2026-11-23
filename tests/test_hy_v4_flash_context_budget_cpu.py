@@ -315,7 +315,23 @@ def test_peak_in_the_blocked_score_regime_fits_the_bound(tiny, monkeypatch):
     del caches
 
 
-def test_block_evaluations_match_the_sync_count_and_spare_decode(tiny, monkeypatch):
+def test_block_evaluations_match_the_sync_count_and_spare_decode(request):
+    """Runs in its own process: it patches ``mlx.core.eval`` module-wide, and
+    sharing a process with other Hy4 suites segfaulted inside MLX's CPU eval
+    (flaky, order-dependent, 2026-11-21); alone it is stable."""
+    import os
+    import subprocess
+    import sys
+
+    if os.environ.get("MLX2_ISOLATED_TEST") == request.node.nodeid:
+        return _block_evaluations_body(request.getfixturevalue("tiny"), request.getfixturevalue("monkeypatch"))
+    env = {**os.environ, "MLX2_ISOLATED_TEST": request.node.nodeid}
+    done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", request.node.nodeid],
+                          cwd=str(request.config.rootpath), env=env, capture_output=True, text=True, timeout=1800)
+    assert done.returncode == 0, done.stdout[-4000:] + done.stderr[-2000:]
+
+
+def _block_evaluations_body(tiny, monkeypatch):
     _, _, model, _ = tiny
     calls = []
     real_eval = mx.eval

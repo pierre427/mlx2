@@ -336,7 +336,7 @@ def test_device_route_reader_failure_restores_the_prefix_caches(tiny):
     class Broken:
         rows = None
 
-        def prefetch(self, rows):
+        def prefetch(self, rows, **_kw):
             raise RuntimeError("reader closed")
 
     with hash_mode(model, "device"):

@@ -37,7 +37,9 @@
     "docs/research/2026-11-20-calculator-marker-trigger.md",
     "docs/hy4-flash/det-calculator.md",
     "research/amoeba/det_backend_hy4.py",
-    "tests/test_hy_v4_flash_det_tiles_cpu.py"
+    "tests/test_hy_v4_flash_det_tiles_cpu.py",
+    "src/mlx2/adapters/assets/det_tiles/hy4-flash-mlx-4.6bit-mlx2-f2a8fa8d2b7f/manifest.json",
+    "src/mlx2/adapters/assets/det_tiles/hy4-flash-mlx-4.6bit-mlx2-f2a8fa8d2b7f/tiles.safetensors"
   ],
   "mixed_files": [
     {

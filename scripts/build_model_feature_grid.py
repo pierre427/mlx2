@@ -56,6 +56,16 @@ FEATURES = (
     # Hy4-flash kernel opt-ins and the q2 layer map (2026-11-21).
     "moe_fused_gate_up", "moe_nax_gather_prefill", "engram_hash_device",
     "ast_tensorfold_rows", "q2_routed_expert_layers",
+    # Hy4-flash night 2026-11-21: drafter q8, top-k, band attention, latches, calculator.
+    "draft_quantization", "moe_top_k", "sliding_attention_blocks", "adaptive_verification",
+    "cost_per_commit_handoff", "amoeba_det_tiles", "residual_ablation_overlays",
+    # Hy4-flash default autoscale bound (2026-11-21).
+    "prefill_step_cap",
+    # Hy4-flash opt-in sparse prefill kernel for indexed layers (2026-11-21).
+    "sparse_prefill_attention",
+    # Hy4-flash opt-in small-op fusions (2026-11-21, hy_v4_flash_fusions).
+    "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
+    "engram_gate_rounding",
     # Morning follow-up probes (2026-11-06): opt-in research options.
     "batch_rows_attention", "prefill_tail_row", "prefill_tail_skip",
     # Nemotron 3.5 Super VL NVFP4 export (2026-11-10): checkpoint defaults.

@@ -213,8 +213,10 @@ def test_receipts_and_namespace(pack, bundle):
     from mlx2.adapters.hy_v4_flash import HYV4FlashAdapter
 
     path, sites = bundle
+    # Band attention off: the mask tag ends the layout (the band default appends its own).
     adapter = HYV4FlashAdapter(str(pack), execution_policy={"engram_table_format": "iq4_nl",
-                                                            "amoeba_mask": str(path)})
+                                                            "amoeba_mask": str(path),
+                                                            "sliding_attention_blocks": 0})
     try:
         r = adapter.diagnostics()["amoeba_mask"]
         assert r["selected"] and not r["qualified"] and not r["observed_used"]

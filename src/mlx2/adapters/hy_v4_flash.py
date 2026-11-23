@@ -37,9 +37,10 @@ so interior/rolling checkpoints stay inert (docs/hy4-flash/apcv2.md).
   are never published to APCv2: with fp8 selected the descriptor declares no
   prefix reuse and no approximate APC operation.  Notes:
   docs/hy4-flash/fp8-latent-kv.md.
-* Deterministic calculator tile (opt-in, ``{"amoeba_det_tiles": MANIFEST}``
-  or ``server --det-tile``; runtime/amoeba_det_tiles.py, experimental and
-  unqualified): probe-gated calculators reading ``layer_output_capture``
+* Deterministic calculator tile (``{"amoeba_det_tiles": MANIFEST}`` or
+  ``server --det-tile``; DEFAULT ON for the checkpoints in
+  ``DET_TILE_DEFAULT_MANIFESTS``, opt-out ``"amoeba_det_tiles": false``;
+  runtime/amoeba_det_tiles.py, experimental and unqualified): probe-gated calculators reading ``layer_output_capture``
   only, on the ordinary and the external-draft (DFly2, prompt lookup) routes.
   The probe reads the f32 mean of the four hyper-connection streams after
   its read layer (``det_tile_capture``; docs/hy4-flash/det-calculator.md).
@@ -106,7 +107,9 @@ def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
                     engram_precision: str = "transformers",
                     tensorfold_rows: str | None = None, moe_fused_gate_up: bool = False,
                     moe_nax: str = "off", moe_top_k: int | None = None,
-                    amoeba_mask: str | None = None) -> str:
+                    amoeba_mask: str | None = None, sliding_attention_blocks: int = 0,
+                    sparse_prefill_attention: bool = False,
+                    fusions: dict | None = None) -> str:
     """The APCv2 namespace: every knob that changes numerics changes it.
 
     A packed Engram table or the non-default Engram precision profile gives
@@ -138,7 +141,39 @@ def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
         # A route-wide aMoEba neuron mask (``amoeba_mask``) is a different
         # model: its cache rows are exact under that bundle only.
         layout = f"{layout}+{amoeba_mask}"
+    if sliding_attention_blocks:
+        # Band attention is numerically equivalent, not bit-identical (other
+        # reduction lengths; the block size sets them), so each block size
+        # keeps its own entries.
+        layout = f"{layout}+swa-band{int(sliding_attention_blocks)}-v1"
+    if sparse_prefill_attention:
+        # The sparse prefill kernel is numerically equivalent to the dense
+        # masked path (same keys, fp32 reductions in another order), not
+        # bit-identical: its prefill rows keep their own entries.
+        layout = f"{layout}+sparse-prefill-v1"
+    # Opt-in small-op fusions (hy_v4_flash_fusions).  The seam kernel and the
+    # Engram torch rounding change numerics; the fused GEMMs and indexer
+    # logits are bitwise / selection-identical on the measured shapes only.
+    # Until a GPU A/B on the real checkpoint shows parity each keeps its own
+    # APCv2 namespace.
+    for key, value in sorted((fusions or {}).items()):
+        if key in FUSION_KEYS and value not in (False, None, FUSION_DEFAULTS.get(key)):
+            layout = f"{layout}+{FUSION_TAGS[key]}" + (f"-{value}" if isinstance(value, str) else "")
     return layout
+
+
+# Opt-in Hy4 small-op fusions (runtime/models/hy_v4_flash_fusions.py), default off.
+FUSION_DEFAULTS = {"hc_seam_fused": False, "mla_fused_input_proj": False, "engram_fused_proj": False,
+                   "indexer_fused_scores": False, "engram_gate_rounding": "fp32"}
+FUSION_KEYS = frozenset(FUSION_DEFAULTS)
+FUSION_TAGS = {"hc_seam_fused": "hc-seam-v1", "mla_fused_input_proj": "mla-fused-in-v1",
+               "engram_fused_proj": "engram-fused-proj-v1", "indexer_fused_scores": "indexer-fused-v1",
+               "engram_gate_rounding": "engram-gate-round-v1"}
+
+
+def fusion_policy(policy: dict) -> dict:
+    """The fusion keys of a parsed model policy, with their defaults filled in."""
+    return {k: policy.get(k, v) for k, v in FUSION_DEFAULTS.items()}
 
 
 AMOEBA_MASK_MODES = ("zero", "pageout")
@@ -583,8 +618,12 @@ def widened_bytes(root, weight_map: dict, quant, *, lm_head_fp32: bool) -> int:
 MODEL_KEYS = frozenset({"engram_cache_rows", "engram_hash", "engram_precision",
                         "engram_table_format", "latent_kv", "vision",
                         "moe_fused_gate_up", "moe_nax", "moe_top_k", "amoeba_det_tiles",
-                        "amoeba_mask"})
-# ``amoeba_det_tiles`` (opt-in, experimental, unqualified): a deterministic
+                        "amoeba_mask",
+                        "sliding_attention_blocks", "prefill_step_cap", "sparse_prefill_attention",
+                        "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj",
+                        "indexer_fused_scores", "engram_gate_rounding"})
+# ``amoeba_det_tiles`` (experimental, unqualified; default on only for the
+# checkpoints in DET_TILE_DEFAULT_MANIFESTS, opt-out ``false``): a deterministic
 # tile manifest of probe-gated calculators (amoeba_det_tiles
 # admit_position_matched).  The probe reads ``det_tile_capture`` of its read
 # layer's output: the f32 mean of the hc_mult residual streams.  The mean is
@@ -601,7 +640,15 @@ DET_TILE_CAPTURE = "hc-stream-mean-f32-v1"
 # split route (measured, above) and stay out.  ``ast_tensorfold_rows`` runs
 # other verify-forward kernels whose effect on the probe was not measured: the
 # adapter refuses it with det tiles.
-DET_TILE_NUMERICS_KEYS = ("engram_table_format", "engram_precision", "latent_kv", "moe_top_k")
+DET_TILE_NUMERICS_KEYS = ("engram_table_format", "engram_precision", "latent_kv", "moe_top_k",
+                          "hc_seam_fused", "engram_gate_rounding", "engram_fused_proj",
+                          "indexer_fused_scores")
+# Fit keys added after manifests already shipped (the f2a8 calculator tile):
+# a manifest that omits one was fitted on its default, so it is read as that.
+# Every other DET_TILE_NUMERICS_KEYS entry is required.  ``mla_fused_input_proj``
+# is not here: it is bitwise by construction (load-time self-checked bound).
+DET_TILE_NUMERICS_DEFAULTS = {"hc_seam_fused": False, "engram_gate_rounding": "fp32",
+                              "engram_fused_proj": False, "indexer_fused_scores": False}
 # Target forwards one verify round can run: with the serial executor one per
 # chain, at most one chain per tile row (32) for each of four lanes, plus plain
 # anchors.  An evicted forward's rows fail closed (``gate_unmatched``).
@@ -615,6 +662,86 @@ def det_tile_capture(streams):
     if streams.ndim != 4:
         raise ValueError("Hy4-flash det-tile capture needs a [B, L, streams, D] layer output")
     return mx.mean(streams.astype(mx.float32), axis=-2)
+# ``prefill_step_cap`` (DEFAULT 2048 on every Hy4-flash artifact, Pierre
+# 2026-11-21; unqualified): bound on the server's prompt-length autoscaled
+# prefill step (``prefill_step_autoscale_cap``; the schedule's top is 8192
+# above 64K prompts).  Scheduling only: each chunk width is still a width the
+# default route runs, and an operator ``--prefill-step`` still wins.  Why 2048:
+# this adapter's own ``cache_budget`` (HY4FlashCacheBudget, served config.json,
+# DFly2 chain, 8 verify rows) charges a 131048+24-token lane at reserve 8
+# 33.60 GiB at chunk 8192 (refused, 8.76 short of the 24.84 GiB fresh-server
+# headroom with the vision tower loaded), 26.91 at 4096 (2.07 short) and
+# 23.56 at 2048 (+1.28 with vision on and a bf16 drafter, +1.99 with the
+# default q8 drafter, +2.15 vision off); docs/hy4-flash/context-128k.md s.6.
+# 2048 is the widest schedule step that admits 128K with vision on.  Shorter
+# prompts keep their smaller autoscaled steps.  Opt-out:
+# ``"prefill_step_cap": 0`` (the schedule's own top).
+PREFILL_STEP_CAP_DEFAULT = 2048
+# ``sliding_attention_blocks`` (DEFAULT 512 on Hy4-flash, Pierre 2026-11-21;
+# unqualified): prefill at mlx2 2df2aa9fa, band512 vs off
+# (qualification/runs/hy4-profile-prefill-20261121-2df2aa9fa-band512 and
+# -bandoff) 900 vs 783 tok/s at 2K chunks, 735 vs 402 at 8K.  Opt-out:
+# ``"sliding_attention_blocks": 0``.  An artifact whose sliding window is
+# wider than 512 cannot take a 512-row block: the default is then skipped
+# with a receipt (an explicit value still refuses).
+SLIDING_ATTENTION_BLOCKS_DEFAULT = 512
+# Checkpoint-keyed default calculator tile sets (Pierre 2026-11-21: "wire in the
+# calculator as default on for this model").  Keyed by the *target* artifact
+# fingerprint (``inspect_artifact`` identity, the manifest's
+# ``source.fingerprint``).  The route identity a DFly2 server reports as its
+# ``artifact`` (bdf83d7e... for this pack) is a different value: the target
+# fingerprint folded with the DFly2 drafter record, route tag, composition and
+# verification laws (external_draft_policy ``_bind_external_drafter``; the
+# target stays in ``identity["target_fingerprint"]``), so it changes with
+# ``num_draft`` or drafter quantization and is not a checkpoint key.  The
+# manifest and tile ship as package data (adapters/assets/det_tiles/), loaded
+# through the same admission as an explicit ``amoeba_det_tiles``.  Opt-out:
+# ``"amoeba_det_tiles": false`` or an explicit manifest; a request's
+# ``{"det_tiles": {"calculator": false}}`` still disables it per request.  A
+# served policy whose fit numerics differ (e.g. ``engram_precision`` vllm,
+# fp8 ``latent_kv``, ``moe_top_k``, ``ast_tensorfold_rows``) skips the
+# default with a receipt instead of refusing the load.
+DET_TILE_DEFAULT_MANIFESTS = {
+    # Hy4-flash-MLX-4.6bit-mlx2 (Nace.AI pack + bf16 DFly2 + vision): layer 12,
+    # threshold 0.7, calc-parse-v2, force; qualification/runs/
+    # hy4-calc-probe-20261121-bc5b304f6, hy4-calc-served-20261121-6cd811098,
+    # hy4-calc-gsm8k-20261121-b106e81a8.
+    "f2a8fa8d2b7f22150ee5bd988c5acc1814d8494aa82ee01aff40a7efc13aad93":
+        "hy4-flash-mlx-4.6bit-mlx2-f2a8fa8d2b7f",
+}
+DET_TILE_ASSET_ROOT = Path(__file__).resolve().with_name("assets") / "det_tiles"
+
+
+def default_det_tile_manifest(fingerprint: str) -> str | None:
+    """Packaged default calculator manifest of this target checkpoint (None: no default)."""
+    name = DET_TILE_DEFAULT_MANIFESTS.get(fingerprint)
+    if name is None:
+        return None
+    return str(DET_TILE_ASSET_ROOT / name / "manifest.json")
+
+
+# ``sliding_attention_blocks`` (see the default above; unqualified): sliding
+# layers' prefill attention runs per query block of this many rows over only
+# that block's window (``hy_v4_flash.sliding_band_attend``) instead of the
+# whole masked chunk x (chunk + ring) square.  Numerically equivalent, not
+# bit-identical (CPU: fp32 <= 4.8e-7 abs; bf16 <= 1 ulp of the row's largest
+# output, up to ~41 ulp of a near-zero value's own ulp from cancellation; the
+# same error against an fp32 reference as the square path); own APCv2 namespace.
+# Chunks of at most that many rows (decode, verify tiles) are unchanged; the
+# model refuses a block below max(sliding_window, ROLLBACK) (512 on
+# Hy4-flash), which no verify or tree forward (<= ROLLBACK rows) can exceed,
+# so the key is route-neutral: it changes prefill chunks only.
+# ``sparse_prefill_attention`` (opt-in, default false, unqualified): indexed
+# layers' prefill chunks of more than GATHER_MAX_QUERY rows attend only each
+# query's recalled rows through one Metal kernel
+# (``runtime/models/hy_v4_flash_sparse_prefill``) instead of the dense
+# [L, T] hit-masked SDPA.  Numerically equivalent, not bit-identical (Metal
+# tests: within 1 ulp of a float64 oracle; the dense path is 2-9x further);
+# own APCv2 namespace.  Chunks of at most 64 rows (decode, verify, tree
+# forwards) keep the gather path, so the key is route-neutral.  A forward the
+# kernel cannot run (CPU stream, fp32 rows, other head counts) takes the
+# dense path and is counted in the receipt's ``declined_layer_forwards``.
+# docs/hy4-flash/sparse-prefill.md.
 # Where the Engram n-grams are hashed.  ``host``: NumPy after a host copy of
 # the token ids.  ``device``: MLX ops on the generation stream for forwards of
 # at most ROLLBACK tokens, read back once with the token ids after the
@@ -780,12 +907,28 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
         raise ValueError("Hy4-flash moe_fused_gate_up must be a boolean (default false)")
     if policy.get("moe_nax", "off") not in MOE_NAX_MODES:
         raise ValueError("Hy4-flash moe_nax must be 'off' (default) or 'gather'")
+    for key in ("hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores"):
+        if type(policy.get(key, False)) is not bool:
+            raise ValueError(f"Hy4-flash {key} must be a boolean (default false)")
+    if policy.get("engram_gate_rounding", "fp32") not in ("fp32", "torch"):
+        raise ValueError("Hy4-flash engram_gate_rounding must be 'fp32' (default) or 'torch'")
+    band = policy.get("sliding_attention_blocks", SLIDING_ATTENTION_BLOCKS_DEFAULT)
+    if type(band) is not int or band < 0:
+        raise ValueError("Hy4-flash sliding_attention_blocks must be 0 (off) or a positive "
+                         f"query-block row count (default {SLIDING_ATTENTION_BLOCKS_DEFAULT})")
+    if type(policy.get("sparse_prefill_attention", False)) is not bool:
+        raise ValueError("Hy4-flash sparse_prefill_attention must be a boolean (default false)")
+    cap = policy.get("prefill_step_cap")
+    if cap is not None and (type(cap) is not int or cap < 0):
+        raise ValueError("Hy4-flash prefill_step_cap must be a positive integer, or 0 for no cap "
+                         f"(default {PREFILL_STEP_CAP_DEFAULT})")
     top_k = policy.get("moe_top_k")
     if top_k is not None and (type(top_k) is not int or top_k < 1):
         raise ValueError("Hy4-flash moe_top_k must be a positive integer (default: the checkpoint's)")
     det = policy.get("amoeba_det_tiles")
-    if det is not None and (type(det) is not str or not det):
-        raise ValueError("amoeba_det_tiles must name a deterministic tile manifest path")
+    if det is not None and det is not False and (type(det) is not str or not det):
+        raise ValueError("amoeba_det_tiles must name a deterministic tile manifest path, or be "
+                         "false (no tiles, not even this checkpoint's default)")
     mask = policy.get("amoeba_mask")
     if mask is not None:
         amoeba_mask_spec(mask)              # validates: a bundle path, or {"bundle", "mode", "block"}
@@ -795,6 +938,11 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
         # Hy4's verify forwards (chain-packed tiles, DFly2) are not marked as
         # verify forwards, so a multi-row verify would read as a prefill.
         raise ValueError("Hy4-flash moe_nax applies to the ordinary route only (not with a draft_model)")
+    if external.get("ast_tensorfold_rows") and (model.get("mla_fused_input_proj")
+                                                 or model.get("engram_fused_proj")):
+        # The TensorFold row law swaps the trunk projections the fused GEMMs replace.
+        raise ValueError("Hy4-flash ast_tensorfold_rows cannot run with mla_fused_input_proj or "
+                         "engram_fused_proj (both rewrite the same projections)")
     if "draft_quantization" in external and external.get("draft_model") is None:
         raise ValueError("Hy4-flash draft_quantization quantizes the DFly2 drafter; the "
                          "ordinary route has none (it needs draft_model embedded_dfly)")
@@ -935,7 +1083,7 @@ def resolve_engram_hash(model) -> str:
 def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, memory_budget=None,
                engram_precision="transformers", engram_table_format="bf16", latent_kv="native",
                vision=True, engram_hash=ENGRAM_HASH_DEFAULT, moe_fused_gate_up=False,
-               dfly_quantization=None, amoeba_mask=None):
+               dfly_quantization=None, amoeba_mask=None, fusions=None):
     """``(model, drafter or None, engram readers)`` for an inspected artifact.
 
     ``amoeba_mask`` (a loaded ``NeuronMaskBundle``) closes its units in the
@@ -1038,6 +1186,17 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
     try:
         model.bind_engram(readers)
         resolve_engram_hash(model)
+        if fusions and any(fusions.get(k) not in (False, None, v) for k, v in FUSION_DEFAULTS.items()):
+            from ..runtime.models import hy_v4_flash_fusions
+
+            # After the strict load and the Engram binding: the fused GEMMs
+            # concatenate loaded planes (the split ones are then released).
+            hy_v4_flash_fusions.install(
+                model, hc_seam=fusions.get("hc_seam_fused", False),
+                mla_inputs=fusions.get("mla_fused_input_proj", False),
+                engram_inputs=fusions.get("engram_fused_proj", False),
+                indexer_scores=fusions.get("indexer_fused_scores", False),
+                engram_gate_rounding=fusions.get("engram_gate_rounding", "fp32"))
         drafter = None
         if keep_dfly:
             intermediate, correction = HY4FlashDFly.geometry(dfly_raw)
@@ -1116,7 +1275,11 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # both routes (``_install_det_tiles``), so ``--det-tile`` keeps DFly2.
     route_neutral_policy_keys = frozenset({
         "engram_table_format", "engram_precision", "engram_cache_rows", "engram_hash",
-        "vision", "moe_fused_gate_up", "amoeba_det_tiles",
+        "vision", "moe_fused_gate_up", "amoeba_det_tiles", "prefill_step_cap", "sliding_attention_blocks",
+        "sparse_prefill_attention",
+        # Opt-in small-op fusions: the same install on both routes.
+        "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
+        "engram_gate_rounding",
     })
     # Deterministic tiles: position-matched calculators on both routes
     # (runtime/amoeba_det_tiles MATCHED_EXTERNAL_ROUTES); the model's
@@ -1220,18 +1383,28 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.latent_kv = policy.get("latent_kv", "native")
         self.amoeba_det_tiles = None
         self._det_manifest = None
-        if policy.get("amoeba_det_tiles") is not None:
-            if external.get("ast_tensorfold_rows"):
-                from ..runtime.amoeba_det_tiles import DetTileRefused
+        self._resolve_policy_defaults(policy, artifact)
+        det_path, det_defaulted = self._det_tile_default["manifest"], self._det_tile_default["defaulted"]
+        if det_path is not None:
+            from ..runtime.amoeba_det_tiles import DetTileRefused
 
-                raise DetTileRefused("deterministic tiles refuse ast_tensorfold_rows (verify kernels "
-                                     "the calculator probe was not fitted or checked on)")
-            # Before any weight loads: tile kinds, checkpoint, layer count, fit numerics.
-            self._det_manifest = policy["amoeba_det_tiles"], self._admit_det_tiles(
-                policy["amoeba_det_tiles"], artifact,
-                {"engram_table_format": engram_format,
-                 "engram_precision": policy.get("engram_precision", "transformers"),
-                 "latent_kv": self.latent_kv, "moe_top_k": policy.get("moe_top_k")})
+            try:
+                if external.get("ast_tensorfold_rows"):
+                    raise DetTileRefused("deterministic tiles refuse ast_tensorfold_rows (verify kernels "
+                                         "the calculator probe was not fitted or checked on)")
+                # Before any weight loads: tile kinds, checkpoint, layer count, fit numerics.
+                self._det_manifest = det_path, self._admit_det_tiles(
+                    det_path, artifact,
+                    {"engram_table_format": engram_format,
+                     "engram_precision": policy.get("engram_precision", "transformers"),
+                     "latent_kv": self.latent_kv, "moe_top_k": policy.get("moe_top_k"),
+                     **{k: policy.get(k, v) for k, v in DET_TILE_NUMERICS_DEFAULTS.items()}})
+            except (DetTileRefused, ValueError) as error:
+                if not det_defaulted:
+                    raise
+                # A default never turns a servable load into a refusal: an
+                # explicit manifest fails closed, the default steps aside.
+                self._det_tile_default.update(defaulted=False, skipped=str(error))
         self.descriptor = descriptor_for(dfly_selected=self.dfly_selected,
                                          engram_table_format=engram_format, latent_kv=self.latent_kv)
         if self.latent_kv == "fp8":
@@ -1277,7 +1450,10 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                       amoeba_mask=None if self.amoeba_mask is None
                                       else self.amoeba_mask.numerics_tag() + (
                                           "" if self.amoeba_mask_mode["mode"] == "zero" else
-                                          f"+pageout-b{self.amoeba_mask_mode['block']}-sequential-v2"))
+                                          f"+pageout-b{self.amoeba_mask_mode['block']}-sequential-v2"),
+                                      sliding_attention_blocks=policy.get("sliding_attention_blocks", 0),
+                                      sparse_prefill_attention=policy.get("sparse_prefill_attention", False),
+                                      fusions=fusion_policy(policy))
         self.environment = configure_environment()
         from .process_globals import claim_moe, claim_stock_moe
 
@@ -1303,7 +1479,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             engram_hash=policy.get("engram_hash", ENGRAM_HASH_DEFAULT),
             moe_fused_gate_up=self.moe_fused_gate_up,
             dfly_quantization=external.get("draft_quantization"),
-            amoeba_mask=self.amoeba_mask)
+            amoeba_mask=self.amoeba_mask, fusions=fusion_policy(policy))
         self._trunk_forwards_at_load = self.model.trunk_stats["forwards"]
         self.amoeba_pageout = None
         if self.amoeba_mask is not None and self.amoeba_mask_mode["mode"] == "pageout":
@@ -1319,6 +1495,11 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             mx.clear_cache()
         self.model.moe_nax_prefill = self.moe_nax != "off"
         self.moe_top_k = set_moe_top_k(self.model, policy.get("moe_top_k"))
+        self.sliding_attention_blocks = int(policy.get("sliding_attention_blocks", 0))
+        self._prefill_step_cap = policy.get("prefill_step_cap") or None
+        self.model.set_sliding_attention_blocks(self.sliding_attention_blocks)
+        self.sparse_prefill_attention = bool(policy.get("sparse_prefill_attention", False))
+        self.model.set_sparse_prefill_attention(self.sparse_prefill_attention)
         self.engram_table_format = engram_format
         if rows_backend is not None:
             from ..runtime.tensorfold_rows import install as install_rows
@@ -1365,8 +1546,59 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 # when a specific n-gram matched).
                 graft_prompt_lookup_drafter(self, prompt_lookup=False)
         if self._det_manifest is not None:
-            self._install_det_tiles(*self._det_manifest,
-                                    route="ordinary" if kind is None else "external_draft")
+            route = "ordinary" if kind is None else "external_draft"
+            try:
+                self._install_det_tiles(*self._det_manifest, route=route)
+            except ValueError as error:  # DetTileRefused is a ValueError
+                if not self._det_tile_default["defaulted"]:
+                    raise
+                self._det_tile_default.update(defaulted=False, skipped=str(error))
+
+    # -- operator defaults (Pierre 2026-11-21) ---------------------------------
+    def _resolve_policy_defaults(self, policy: dict, artifact: dict) -> None:
+        """Fill the absent default keys into ``policy`` (in place) and keep their receipts.
+
+        ``sliding_attention_blocks`` 512 and ``prefill_step_cap`` 2048 on every
+        Hy4-flash artifact; ``amoeba_det_tiles`` from ``DET_TILE_DEFAULT_MANIFESTS``
+        for its target fingerprint.  The ``_parse_policy`` result stays the
+        operator's own keys (route-neutral parsing is unchanged); a default
+        that cannot apply is skipped with its reason, never refused.
+        """
+        from ..runtime.models.hy_v4_flash import ROLLBACK
+
+        defaults = {}
+        if "sliding_attention_blocks" in policy:
+            defaults["sliding_attention_blocks"] = {"defaulted": False, "source": "policy"}
+        else:
+            window = int(text_config(artifact["config"]).get("sliding_window") or 0)
+            floor = max(window, ROLLBACK)
+            if SLIDING_ATTENTION_BLOCKS_DEFAULT >= floor:
+                policy["sliding_attention_blocks"] = SLIDING_ATTENTION_BLOCKS_DEFAULT
+                defaults["sliding_attention_blocks"] = {"defaulted": True, "source": "adapter_default"}
+            else:
+                defaults["sliding_attention_blocks"] = {
+                    "defaulted": False, "source": "default_skipped",
+                    "skipped": f"sliding window {window} needs blocks of at least {floor} rows"}
+        cap = policy.get("prefill_step_cap")
+        if cap is None:
+            policy["prefill_step_cap"] = PREFILL_STEP_CAP_DEFAULT
+            defaults["prefill_step_cap"] = {"defaulted": True, "source": "adapter_default"}
+        else:
+            defaults["prefill_step_cap"] = {"defaulted": False,
+                                            "source": "policy_opt_out" if cap == 0 else "policy"}
+        self.policy_defaults = defaults
+        det = policy.get("amoeba_det_tiles")
+        fingerprint = artifact["identity"]["fingerprint"]
+        packaged = default_det_tile_manifest(fingerprint)
+        if det is None:
+            self._det_tile_default = {"manifest": packaged, "defaulted": packaged is not None,
+                                      "source": "checkpoint_default" if packaged else "none",
+                                      "skipped": None}
+        else:
+            self._det_tile_default = {"manifest": det or None, "defaulted": False,
+                                      "source": "policy_opt_out" if det is False else "policy",
+                                      "skipped": None}
+        self._det_tile_default["default_manifest"] = packaged
 
     # -- deterministic tiles (experimental, unqualified) --------------------
     @staticmethod
@@ -1383,9 +1615,12 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise D.DetTileRefused(f"Hy4-flash calculator probes read {DET_TILE_CAPTURE}, "
                                    f"this manifest was fitted on {capture!r}")
         fit = manifest.get("fit_execution_policy")
-        if not isinstance(fit, dict) or set(DET_TILE_NUMERICS_KEYS) - set(fit):
+        required = [k for k in DET_TILE_NUMERICS_KEYS if k not in DET_TILE_NUMERICS_DEFAULTS]
+        if not isinstance(fit, dict) or set(required) - set(fit):
             raise D.DetTileRefused("calculator manifest needs fit_execution_policy with "
-                                   f"{', '.join(DET_TILE_NUMERICS_KEYS)}")
+                                   f"{', '.join(required)}")
+        fit = {**DET_TILE_NUMERICS_DEFAULTS, **fit}
+        numerics = {**DET_TILE_NUMERICS_DEFAULTS, **numerics}
         for key in DET_TILE_NUMERICS_KEYS:
             if fit[key] != numerics[key]:
                 raise D.DetTileRefused(
@@ -1448,11 +1683,18 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
     def _det_tiles_receipt(self):
         tiles = getattr(self, "amoeba_det_tiles", None)
+        state = getattr(self, "_det_tile_default", None) or {}
+        default = {"defaulted": bool(state.get("defaulted")) and tiles is not None,
+                   "source": state.get("source"),
+                   "default_manifest": state.get("default_manifest"),
+                   "default_skipped": state.get("skipped"),
+                   "opt_out": '{"amoeba_det_tiles": false}'}
         if tiles is None:
-            return {"implemented": True, "qualified": False, "selected": False, "observed_used": False}
+            return {"implemented": True, "qualified": False, "selected": False, "observed_used": False,
+                    **default}
         return {**tiles.receipt(), "capture": DET_TILE_CAPTURE,
                 "fit_execution_policy": tiles.manifest.get("fit_execution_policy"),
-                "served_routes": list(tiles.served_routes)}
+                "served_routes": list(tiles.served_routes), **default}
 
     def _bind_drafter(self, kind):
         from .qwen38_27b import _prompt_lookup_record
@@ -1862,6 +2104,57 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
         self.descriptor = replace(self.descriptor, cache_layout=self.layout)
 
+    def prefill_step_autoscale_cap(self):
+        """Bound on the server's prompt-length autoscaled step (policy
+        ``prefill_step_cap``); None (default) keeps the schedule's top."""
+        return getattr(self, "_prefill_step_cap", None)
+
+    def _sliding_band_receipt(self):
+        """Route-receipt block of the opt-in sliding band attention."""
+        rows = int(getattr(self, "sliding_attention_blocks", 0))
+        model = getattr(self, "model", None)
+        forwards = 0
+        if model is not None:
+            forwards = sum(layer.self_attn.band_forwards for layer in model.model.layers
+                           if hasattr(layer.self_attn, "band_forwards"))
+        state = (getattr(self, "policy_defaults", None) or {}).get("sliding_attention_blocks", {})
+        return {"implemented": True, "qualified": False, "selected": bool(rows), "rows": rows,
+                "relation": "numerically_equivalent" if rows else "default",
+                "defaulted": bool(state.get("defaulted")), "source": state.get("source"),
+                **({"default_skipped": state["skipped"]} if state.get("skipped") else {}),
+                "default_rows": SLIDING_ATTENTION_BLOCKS_DEFAULT,
+                "opt_out": '{"sliding_attention_blocks": 0}',
+                "band_layer_forwards": forwards, "observed_used": forwards > 0}
+
+    def _sparse_prefill_receipt(self):
+        """Route-receipt block of the opt-in sparse prefill kernel."""
+        selected = bool(getattr(self, "sparse_prefill_attention", False))
+        model = getattr(self, "model", None)
+        forwards, declines = 0, {}
+        if model is not None:
+            for layer in model.model.layers:
+                attn = layer.self_attn
+                forwards += getattr(attn, "sparse_prefill_forwards", 0)
+                for reason, n in getattr(attn, "sparse_prefill_declines", {}).items():
+                    declines[reason] = declines.get(reason, 0) + n
+        return {"implemented": True, "qualified": False, "selected": selected, "default": False,
+                "relation": "numerically_equivalent" if selected else "default",
+                "applies_to": "indexed-layer chunks of more than GATHER_MAX_QUERY (64) rows",
+                "kernel": "mlx2_hy4_sparse_prefill_attention_v1",
+                "opt_in": '{"sparse_prefill_attention": true}',
+                "sparse_layer_forwards": forwards, "declined_layer_forwards": declines,
+                "observed_used": forwards > 0}
+
+    def _prefill_step_cap_receipt(self):
+        """Route-receipt block of the autoscale bound (the server reports the step it ran)."""
+        state = (getattr(self, "policy_defaults", None) or {}).get("prefill_step_cap", {})
+        return {"implemented": True, "qualified": False,
+                "cap": getattr(self, "_prefill_step_cap", None),
+                "defaulted": bool(state.get("defaulted")), "source": state.get("source"),
+                "default_cap": PREFILL_STEP_CAP_DEFAULT,
+                "applies_to": "the prompt-length autoscale only; an operator prefill step wins",
+                "opt_out": '{"prefill_step_cap": 0}'}
+
     def _latent_kv_receipt(self):
         from ..runtime.models.hy_v4_flash_fp8kv import latent_fp8_stats
 
@@ -1936,9 +2229,13 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             },
             "amoeba_det_tiles": self._det_tiles_receipt(),
             "moe_fused_gate_up": self._moe_fused_receipt(),
+            "fusions": self._fusions_receipt(),
             "moe_nax_gather": self._moe_nax_receipt(),
             "moe_top_k": getattr(self, "moe_top_k", None),
             "amoeba_mask": self._amoeba_mask_receipt(),
+            "sliding_attention_blocks": self._sliding_band_receipt(),
+            "prefill_step_cap": self._prefill_step_cap_receipt(),
+            "sparse_prefill_attention": self._sparse_prefill_receipt(),
             "engram": {i: r.diagnostics() for i, r in getattr(self, "engram_tables", {}).items()},
             "engram_precision": getattr(getattr(getattr(self, "model", None), "args", None),
                                         "engram_precision", None),
@@ -2017,6 +2314,15 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                             "ordinary decode; DFly2 was trained on the unmasked model, so acceptance may drop"),
             "apcv2_namespace": bundle.numerics_tag(),
         }
+
+    def _fusions_receipt(self):
+        """Opt-in small-op fusions (hy_v4_flash_fusions): each key's route record."""
+        from ..runtime.models import hy_v4_flash_fusions
+
+        model = getattr(self, "model", None)
+        if model is None or not hasattr(model, "model"):
+            return None
+        return hy_v4_flash_fusions.status(model)
 
     def _moe_fused_receipt(self):
         model = getattr(self, "model", None)

@@ -217,6 +217,9 @@ def main(argv=None) -> int:
     # the template's no_think (the vendor's examples use no_think).
     parser.add_argument("--reasoning-effort", default="none")
     parser.add_argument("--swap-stop-mb", type=float, default=2048.0)
+    parser.add_argument("--prefill-step", type=int, default=None,
+                        help="pass a fixed --prefill-step to the server (default: its "
+                             "prompt-length autoscale)")
     parser.add_argument("--load-timeout", type=float, default=900.0)
     parser.add_argument("--cell-timeout", type=float, default=3600.0)
     a = parser.parse_args(argv)
@@ -266,6 +269,8 @@ def main(argv=None) -> int:
                    "--max-context", str(max(cells) + 4096),
                    "--execution-policy", str(a.execution_policy.expanduser().resolve()),
                    "--admin-token-file", str(token_file), "--no-cache-dir", *a.server_arg]
+        if a.prefill_step is not None:
+            command += ["--prefill-step", str(a.prefill_step)]
         report["server_command"] = command
         env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "HF_HUB_OFFLINE": "1",
                "TRANSFORMERS_OFFLINE": "1"}
