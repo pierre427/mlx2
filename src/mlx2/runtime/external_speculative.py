@@ -281,7 +281,17 @@ def _prefill_target_reservation(caches):
     a lone 32K Inkling prompt over the admission edge near 20K tokens, and the
     halving loop then ran off-plan slices that APCv2 refuses to publish.
     Planes this does not recognise keep the 4x charge.
+
+    A cache whose exact type declares ``_RECOVERY_APPEND_ONLY_FIELDS`` writes
+    those buffers only at or past their fill level and grows them by one
+    copy, the same law as ``KVCache``, so those buffers are charged once and
+    only the rest of its ``nbytes`` keeps the 4x charge.  Without this the
+    Hy4-flash latent/indexer cache (append-only, not a ``KVCache``) was
+    charged 4x: about 9.8 GB at 130K tokens for a one-row slice against
+    7.8-9.3 GB of headroom, so the halving loop ran 512/256-row slices past
+    ~77-109K and APCv2 refused every 128K publication (slice schedule).
     """
+    from .cow_cache import _append_only_fields
     from .models.cache import CacheList
 
     total = 0
@@ -291,7 +301,13 @@ def _prefill_target_reservation(caches):
         elif any(cls.__name__ in _PREFILL_KV_CACHE_NAMES for cls in type(cache).__mro__):
             total += int(getattr(cache, "nbytes", 0))
         else:
-            total += 4 * int(getattr(cache, "nbytes", 0))
+            nbytes = int(getattr(cache, "nbytes", 0))
+            appended = 0
+            for name, _axis, _level in _append_only_fields(cache):
+                buffer = getattr(cache, name, None)
+                appended += int(getattr(buffer, "nbytes", 0) or 0)
+            appended = min(appended, nbytes)
+            total += appended + 4 * (nbytes - appended)
     return total
 
 
@@ -3030,7 +3046,7 @@ class ExternalDraftBatchGenerator:
             external_prefill_width=external_prefill_width,
         )
 
-    def _prefill(self, lane, *, step=None, contended=False):
+    def _prefill(self, lane, *, step=None, contended=False, reason=None):
         if len(lane.remaining) > 1:
             planned = min(self._prefill_limit(lane), len(lane.remaining) - 1)
             if lane.prefill_input is not None and step is not None and step < planned:
@@ -3039,7 +3055,7 @@ class ExternalDraftBatchGenerator:
             # halving) may shorten the slice but never carry it past the next
             # planned cut or state boundary, as _prefill_many also clamps.
             n = planned if step is None else min(step, planned)
-            self._record_prefill_slice(lane, n, planned)
+            self._record_prefill_slice(lane, n, planned, reason if n != planned else None)
             depth = len(lane.history)
             tic = time.perf_counter()
             if lane.tail.shape[1]:
@@ -15186,7 +15202,14 @@ class ExternalDraftBatchGenerator:
                 if append < initial_append:
                     self.scheduler_stats["prefill_adaptive_slices"] = self.scheduler_stats.get("prefill_adaptive_slices", 0) + 1
                 prompts.append(
-                    self._prefill(lane, step=append, contended=contended)
+                    self._prefill(
+                        lane, step=append, contended=contended,
+                        # Names the off-plan cause in the slice-schedule
+                        # receipt (``deviation_reason``) that APCv2 refuses.
+                        reason=(
+                            "admission_halving" if append < initial_append else None
+                        ),
+                    )
                 )
                 if order_candidates is not None:
                     self._commit_prefill_order(lane.uid, order_candidates)

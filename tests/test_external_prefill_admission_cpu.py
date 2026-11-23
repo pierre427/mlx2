@@ -178,3 +178,108 @@ def test_multi_lane_prefill_slab_keeps_the_copy_charge():
     per_lane = one.scheduler_stats["reservation_bytes"]
     # Two lanes: each lane's own append terms plus 4x every resident cache.
     assert two.scheduler_stats["reservation_bytes"] >= 2 * (per_lane - resident // 2) + 4 * resident
+
+
+# -- append-only caches that are not KVCache (Hy4-flash latent/indexer) -------
+
+
+def _hy4_caches(tokens):
+    """One indexed (append-only kv/tk/gk) and one sliding (ring) Hy4 layer."""
+    from mlx2.runtime.models import hy_v4_flash as H
+
+    indexed = H.HY4FlashLayerCache(H.INDEXED, ratio=4)
+    indexed.append(mx.zeros((1, tokens, 24)))
+    H._buf_append(indexed, "tk", mx.zeros((1, tokens, 8)))
+    H._buf_append(indexed, "gk", mx.zeros((1, tokens // 4, 8), dtype=mx.float32))
+    sliding = H.HY4FlashLayerCache(H.SLIDING, window=16)
+    sliding.append(mx.zeros((1, 16, 24)))
+    return indexed, sliding
+
+
+def test_declared_append_only_buffers_are_charged_once():
+    indexed, sliding = _hy4_caches(512)
+    assert indexed.nbytes and sliding.nbytes
+    # Indexed latent/indexer buffers are declared append-only: charged once.
+    # The sliding ring compacts (rewrites rows) and keeps the 4x charge.
+    assert _prefill_target_reservation([indexed]) == indexed.nbytes
+    assert _prefill_target_reservation([sliding]) == 4 * sliding.nbytes
+    assert _prefill_target_reservation([CacheList(indexed, sliding)]) == (
+        indexed.nbytes + 4 * sliding.nbytes
+    )
+
+    class Partly:
+        _RECOVERY_APPEND_ONLY_FIELDS = (("keys", -2, "offset"),)
+
+        def __init__(self):
+            self.keys = mx.zeros((1, 100), dtype=mx.uint8)
+            self.nbytes = 100 + 30  # 30 undeclared bytes
+
+    assert _prefill_target_reservation([Partly()]) == 100 + 4 * 30
+
+    class Inherited(Partly):
+        """Only the exact type's own declaration counts (cow_cache law)."""
+
+    assert _prefill_target_reservation([Inherited()]) == 4 * 130
+
+
+def test_long_append_only_prefill_keeps_the_planned_slice(monkeypatch):
+    """Scaled-down 128K Hy4 repro: the planned slice is admitted, not halved.
+
+    At 130K tokens the old 4x charge on the Hy4 latent cache (~9.8 GB for a
+    one-row slice) exceeded 7.8-9.3 GB of headroom, so the halving loop ran
+    512/256-row slices and APCv2 refused every publication of the prompt.
+    Headroom here sits between the 1x and 4x reservations.
+    """
+    import mlx2.runtime.external_speculative as ext
+
+    cache = list(_hy4_caches(4096))
+    resident = sum(c.nbytes for c in cache)
+    lane = SimpleNamespace(cache=cache, draft_cache=[], remaining=[0] * 2049,
+                           tail=mx.zeros((1, 0)), history=[0] * 4096)
+    probe = _batch(1 << 40)
+    assert ExternalDraftBatchGenerator._admit(probe, [lane], 1024, prefill=True)
+    headroom = probe.scheduler_stats["reservation_bytes"] + resident
+    assert _admit_planned(_generator(lambda: headroom), lane, 1024)
+    monkeypatch.setattr(ext, "_prefill_target_reservation",
+                        lambda caches: 4 * sum(c.nbytes for c in caches))
+    assert not _admit_planned(_generator(lambda: headroom), lane, 1024)
+
+
+def test_admission_halving_is_named_in_the_slice_schedule():
+    from collections import defaultdict, deque
+
+    from mlx2.runtime.external_speculative import Lane
+
+    batch = object.__new__(_Generator)
+    batch.prefill_step = 8
+    batch.prefill_step_autoscale = False
+    batch.scheduler_stats = defaultdict(int)
+    batch.mx = mx
+    batch.layers = ()
+    batch.model = SimpleNamespace(
+        prefill_body=lambda x, cache, layers: mx.zeros((1, x.shape[1], 2))
+    )
+    batch.decode_time_fairness = SimpleNamespace(enabled=False)
+    batch.decode_first = SimpleNamespace(prefill_token_budget=None)
+    batch._decode_first_round_mode = "off"
+    batch.prefill_allocator_reclaim = False
+    batch.external_varlen_prefill = False
+    batch.prefill_order = SimpleNamespace(enabled=False)
+    batch.capacity = 1
+    batch._memory_waiting_uids = set()
+    batch._prefill_response = lambda lane, **kw: SimpleNamespace(uid=lane.uid)
+    batch._append_context = lambda lane, following: None
+    batch._capture_state_boundary = lambda lane: None
+    batch._admit = lambda lanes, append, prefill=False: append <= 4
+    batch._reclaim_for_admission = lambda: False
+    lane = Lane(uid=3, history=[], remaining=deque(range(30)), cache=[],
+                draft_cache=[], tail=mx.zeros((1, 0, 2)), rng=None, maximum=4,
+                processors=[], sampling={})
+    batch.lanes = {3: lane}
+    batch._prefill_phase([3])
+    receipt = batch.prefill_slice_schedule(3)
+    assert receipt["boundaries"] == [4]
+    assert receipt["first_deviation"] == 0
+    assert receipt["deviation_reason"] == "admission_halving"
+    assert (receipt["deviation_planned_rows"], receipt["deviation_executed_rows"]) == (8, 4)
+    assert batch.scheduler_stats["prefill_adaptive_slices"] == 1
