@@ -441,6 +441,7 @@ _ENGINE_EVENTS = {
     "structured_reasoning_unclosed": ("structured_output", "reasoning_unclosed"),
     "thinking_budget_forced_closes": ("thinking_budget", "forced_close"),
     "tool_call_parse_fallbacks": ("tool_calls", "parse_fallback"),
+    "tool_markers_served_as_text": ("tool_calls", "marker_served_as_text"),
     "tool_call_constraint_failures": ("tool_calls", "parallel_bound_failure"),
     "tool_call_constraint_truncations": ("tool_calls", "parallel_bound_truncated"),
     "tool_call_id_replacements": ("tool_calls", "model_id_replaced"),

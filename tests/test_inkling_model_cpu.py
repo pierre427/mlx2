@@ -134,10 +134,20 @@ def test_channel_parser_handles_every_split():
 
 
 def test_channel_parser_refuses_unsupported_tool_header():
-    with pytest.raises(ValueError):
+    # The header (a name with no Inkling 2 header names) still fails closed.
+    with pytest.raises(ValueError, match="header"):
         InklingOutputParser(chat=True).push(
             "web<|content_invoke_tool_json|>{}", final=True
         )
+
+
+def test_channel_parser_serves_generated_tool_marker_as_text():
+    p = InklingOutputParser(chat=True)
+    events = p.push('<|content_invoke_tool_json|>{"x": 1}<|end_message|>'
+                    "<|message_model|><|content_text|>ok<|content_model_end_sampling|>",
+                    final=True)
+    assert "".join(e.get("content", "") for e in events) == '{"x": 1}'
+    assert p.tool_markers_as_text == 1 and p.stopped
 
 
 def test_packed_ast_commits_all_four_histories_and_ignores_siblings():

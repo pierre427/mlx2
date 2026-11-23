@@ -4471,6 +4471,7 @@ class Job:
     thinking_budget_resolved: bool = False
     thinking_tokens: list[int] = field(default_factory=list)
     tool_parse_fallbacks_seen: int = 0
+    tool_markers_as_text_seen: int = 0
     tool_constraint_truncations_seen: int = 0
     tool_call_id_replacements_seen: int = 0
     tool_grammar_status: str = "disabled"
@@ -5472,6 +5473,7 @@ class ServingEngine(KernelReloadMixin):
                 "apc_shutdown_parks_skipped": 0,
                 "apc_shutdown_pinned_parks_lost": 0,
                 "tool_call_parse_fallbacks": 0,
+                "tool_markers_served_as_text": 0,
                 "tool_call_constraint_failures": 0,
                 "tool_call_constraint_truncations": 0,
                 "tool_call_id_replacements": 0,
@@ -17484,6 +17486,12 @@ class ServingEngine(KernelReloadMixin):
                         if parse_fallbacks > job.tool_parse_fallbacks_seen:
                             count_add(self.counts, "tool_call_parse_fallbacks", parse_fallbacks - job.tool_parse_fallbacks_seen)
                             job.tool_parse_fallbacks_seen = parse_fallbacks
+                        # A route without a tool route serves a generated tool
+                        # marker as text (output.callable_tools); count it.
+                        as_text = int(getattr(job.output_parser, "tool_markers_as_text", 0))
+                        if as_text > job.tool_markers_as_text_seen:
+                            count_add(self.counts, "tool_markers_served_as_text", as_text - job.tool_markers_as_text_seen)
+                            job.tool_markers_as_text_seen = as_text
                         truncations = int(
                             getattr(
                                 job.output_parser,

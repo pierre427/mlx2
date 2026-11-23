@@ -30,6 +30,9 @@ class InklingOutputParser:
         self.tool_count = 0
         self.tool_call_constraint_truncations = 0
         self.truncated_tool_call = None
+        # Tool markers this route served as text (it has no tool route).
+        self.tool_markers_as_text = 0
+        self.in_tool_text = False
 
     @property
     def stop_sequence(self):
@@ -74,6 +77,16 @@ class InklingOutputParser:
                 break
             self.buffer = self.buffer[len(marker) :]
             self.after_message = marker == MESSAGE
+            if self.in_tool_text:
+                # The served tool message is closed: the model now hands the
+                # turn to a tool result this route cannot supply, and what it
+                # writes next (a tool-role header, a second call) is not an
+                # answer.  End the turn here as a stop.
+                visible, _ = self.stop_matcher.push("", final=True)
+                if visible:
+                    events.append({"content": visible})
+                self.stopped = True
+                break
             if marker == TURN_END:
                 visible, _ = self.stop_matcher.push("", final=True)
                 if visible:
@@ -81,13 +94,21 @@ class InklingOutputParser:
                 self.stopped = True
                 break
             if marker == TOOL:
-                raise ValueError("Inkling tool routing is not implemented")
+                # The adapters refuse tools unless tool_choice is "none", so a
+                # tool marker here was generated without a callable tool.  Per
+                # output.callable_tools, a route without a tool route serves
+                # that request as plain text: the JSON payload is content, and
+                # the count reaches the engine counters (it used to raise
+                # mid-stream and end the response with a 502).  The turn ends
+                # when that tool message closes (above).
+                self.tool_markers_as_text += 1
+                self.in_tool_text = True
             if marker in (MESSAGE, END):
                 self.channel = "header"
             else:
                 self.channel = (
                     "content"
-                    if marker == TEXT or marker in self.text_markers or not self.chat
+                    if marker in (TEXT, TOOL) or marker in self.text_markers or not self.chat
                     else "reasoning_content"
                 )
         if final and not self.stopped:

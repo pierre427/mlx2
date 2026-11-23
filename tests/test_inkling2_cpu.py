@@ -486,6 +486,35 @@ def test_inkling2_parser_accepts_template_header_names_and_text_markers():
             header_names=True)
 
 
+def test_inkling2_parser_serves_generated_tool_marker_as_text():
+    """Survey 2026-11-23: a tool marker generated without a callable tool (the
+    adapter refuses tools unless tool_choice is "none") used to raise mid-stream
+    and end the response with a 502.  It is served as text, per
+    output.callable_tools, and counted."""
+    from mlx2.adapters.inkling_output import INKLING2_TEXT_MARKERS, InklingOutputParser
+
+    reply = ("<|message_model|>assistant<|content_thinking|>hm<|end_message|>"
+             '<|message_model|>assistant<|content_invoke_tool_json|>{"name": "f"}<|end_message|>'
+             # what follows a call is the tool turn: not served, the turn ends
+             "<|message_tool|>f<|content_text|>42<|end_message|>"
+             '<|message_model|>assistant<|content_invoke_tool_json|>{"b": 2}')
+    for size in range(1, len(reply) + 1):  # every chunk size, markers split
+        parser = InklingOutputParser(chat=True, text_markers=INKLING2_TEXT_MARKERS,
+                                     header_names=True)
+        events = []
+        for start in range(0, len(reply), size):
+            events += parser.push(reply[start:start + size])
+        events += parser.finish("", "stop")
+        assert "".join(e.get("reasoning_content", "") for e in events) == "hm"
+        assert "".join(e.get("content", "") for e in events) == '{"name": "f"}'
+        assert parser.tool_markers_as_text == 1 and parser.stopped
+    # A raw completion (chat=False) keeps everything as content too.
+    raw = InklingOutputParser(chat=False)
+    events = raw.push('<|content_invoke_tool_json|>{"a": 1}', final=True)
+    assert "".join(e.get("content", "") for e in events) == '{"a": 1}'
+    assert raw.tool_markers_as_text == 1
+
+
 def test_every_loop_pass_uses_its_layers_nvfp4_global_scales():
     """llama.cpp #32704: loop passes 2-3 lost the per-expert NVFP4 global
     scale in copied loop slots (PPL 7.65 -> 130).  Here every visit of a core
