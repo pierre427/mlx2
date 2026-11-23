@@ -348,10 +348,30 @@ KERNEL_OPTIONS = {
     # retrace on every token; they are now re-stamped (one trace per layer),
     # and the FP32 router copy is an argument cast outside the trace. CPU:
     # traced and bitwise equal to the eager fused path (NVFP4/MXFP8 tiny
-    # model). GPU A/B pending.
+    # model). GPU 2026-11-22 (Inkling-2-Mini@440956c8, see the
+    # inkling2_compile_decode_blocks row of the decisions TSV): bitwise,
+    # but no decode gain (the launches it cannot fuse -- gathers, index
+    # aranges, reductions -- remain; the epilogues it fuses were already
+    # compiled). Not helpful; leave off.
     "inkling2_compile_decode_blocks": "compile_decode_blocks",
     # and the logit softcap compiled into one kernel on the GPU.
     "inkling2_head_softcap_compiled": "head_softcap_compiled",
+    # The one-token NVFP4 routed-expert forward in two Metal launches
+    # (runtime/models/inkling2/moe_decode_kernel.py; implemented 2026-11-22,
+    # default off, needs inkling2_moe_fused). The shipped router ops, then a
+    # gate/up gather + scale + softcapped SwiGLU kernel and a down gather +
+    # scale + routing-weight normalization + weighted-sum kernel, written to
+    # MLX's one-token gather lane order and the shipped rounding points so it
+    # can be bitwise (the Metal parity sweep picks the contraction and
+    # route-sum order). ~6 launches per decode MoE call instead of ~16.
+    # GPU only; other shapes, top_k > 8, MXFP8 layers and act-quant decline, counted
+    # (moe_fast_counts decode_kernel / decode_kernel_declined:*).
+    # GPU 2026-11-22, Inkling-2-Mini@440956c8, M5 Max, contended (sanity):
+    # see the inkling2_moe_decode_kernel rows of the decisions TSV. Exact
+    # with the module defaults (contraction default, sequential route sum,
+    # the default from 09260f5d9; full run at 6b0946589: bitwise, decode
+    # -3.4%/-3.1% at 1K/16K), small gain: default candidate, off pending Pierre.
+    "inkling2_moe_decode_kernel": "moe_decode_kernel",
     # W4A4 accuracy experiment (implemented 2026-11-21, default off, GPU A/B
     # pending; scripts/research/inkling2_w4a4_ab.py). Fake-quantizes the
     # routed experts' inputs as hf_quant_config.json's
@@ -634,6 +654,8 @@ def validate_policy(value):
         raise ValueError("Inkling 2 inkling2_attn_decode_kernel requires inkling2_verify_splitk")
     if kernels["compile_decode_blocks"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_compile_decode_blocks requires inkling2_moe_fused")
+    if kernels["moe_decode_kernel"] and not kernels["moe_fused"]:
+        raise ValueError("Inkling 2 inkling2_moe_decode_kernel requires inkling2_moe_fused")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_moe_weighted_sum requires inkling2_moe_fused")
     return kernels, value
@@ -954,6 +976,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         policy = getattr(self, "kernel_policy", {})
         if policy.get("moe_fused"):
             names += ("inkling2/moe_fast.py",)
+        if policy.get("moe_decode_kernel"):
+            names += ("inkling2/moe_decode_kernel.py",)
         if policy.get("moe_weighted_sum"):
             names += ("qwen4_moe_weighted_sum.py",)
         if policy.get("moe_nax_gather"):

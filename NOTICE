@@ -1438,9 +1438,20 @@ apply_top_p on a 512-token window with an exactness check of mlx2's own. The
 full Apache-2.0 text is this repository's LICENSE.
 
 ------------------------------------------------------------------------------
-MLX 0.32.4 Metal kernels reproduced in head-dim 512 decode attention
-(https://github.com/ml-explore/mlx) — MIT License
+MLX 0.32.4 Metal kernels reproduced in Inkling 2 MoE decode and head-dim 512
+decode attention (https://github.com/ml-explore/mlx) — MIT License
 
+- src/mlx2/runtime/models/inkling2/moe_decode_kernel.py
+  (inkling2_moe_decode_kernel, default off): the per-row dot-product order and
+  the FP4 (E2M1) and FP8 (E4M3) decodes reproduce fp_qmv_impl, qdot,
+  qdot_safe and dequantize_scale from mlx/backend/metal/kernels/
+  fp_quantized.h, fp4_e2m1 from fp4.h and fp8_e4m3 from fp8.h, and the
+  weighted sum follows the order of col_reduce_small in reduction/
+  reduce_col.h, all as installed with MLX 0.32.4. Host dispatch rules
+  (quantized.cpp gather_qmv, reduce.cpp, sort.cpp ArgPartition) were read
+  from MLX source at commit fc344c986c4169d99f76b5d95ae6b4a58a359a63, not
+  copied. The lane, row and threadgroup layout and the fused epilogues are
+  original mlx2 code.
 - src/mlx2/runtime/models/sdpa_vector_d512.py (MLX2_SDPA_D512_TK2, default
   off) and scripts/bench_sdpa_vector_tk.py (benchmark only): the
   sdpa_vector_2pass_1 / sdpa_vector_2pass_2 kernel pair from

@@ -1221,6 +1221,15 @@ class SparseMoE(nn.Module):
             experts, reason = self._fast_experts()
             reason = reason or moe_fast.decline_reason()
             if reason is None:
+                if self.__dict__.get("_moe_decode_kernel"):
+                    # inkling2_moe_decode_kernel (default off): one-token
+                    # NVFP4 calls in two Metal launches; None = declined
+                    # (counted), the routes below run unchanged.
+                    from . import moe_decode_kernel
+
+                    out = moe_decode_kernel.call(self, experts, x)
+                    if out is not None:
+                        return out
                 weighted = self.__dict__.get("_fast_weighted_sum", False)
                 if (self.__dict__.get("_compile_decode_blocks") and x.size == x.shape[-1]
                         and _compiled_moe_device()
@@ -1703,7 +1712,7 @@ class Model(nn.Module):
                           fuse_gather_lhs=False, fuse_norm_fp32=False, fuse_shared_tau=False,
                           fuse_dconv_kernel=False, fuse_message_kernel=False,
                           compile_decode_blocks=False, head_softcap_compiled=False,
-                          kv_q8=False,
+                          kv_q8=False, moe_decode_kernel=False,
                           prefill_mask_bf16_budget=False, prefill_mask_with_sink=False,
                           head_kernel_wide=False, prefill_tiled_attention=False,
                           attn_decode_kernel=False):
@@ -1723,6 +1732,8 @@ class Model(nn.Module):
             raise ValueError("Inkling 2 fuse_dconv_kernel requires fuse_sconv")
         if compile_decode_blocks and not moe_fused:
             raise ValueError("Inkling 2 compile_decode_blocks requires moe_fused")
+        if moe_decode_kernel and not moe_fused:
+            raise ValueError("Inkling 2 moe_decode_kernel requires moe_fused")
         if head_kernel_wide and not head_kernel:
             raise ValueError("Inkling 2 head_kernel_wide requires head_kernel")
         if prefill_tiled_attention and flash_prefill:
@@ -1802,6 +1813,7 @@ class Model(nn.Module):
             # per block); it is keyed on the fused build and the weights are
             # its implicit inputs.
             object.__setattr__(layer.mlp, "_compile_decode_blocks", bool(compile_decode_blocks))
+            object.__setattr__(layer.mlp, "_moe_decode_kernel", bool(moe_decode_kernel))
         object.__setattr__(self, "_head_softcap_compiled", bool(head_softcap_compiled))
         if built:
             # The replaced gate/up buffers would otherwise stay in MLX's
@@ -1818,6 +1830,7 @@ class Model(nn.Module):
              **{name: bool(value) for name, value in flags.items()},
              "verify_splitk": bool(verify_splitk), "moe_act_quant": bool(moe_act_quant),
              "compile_decode_blocks": bool(compile_decode_blocks),
+             "moe_decode_kernel": bool(moe_decode_kernel),
              "head_softcap_compiled": bool(head_softcap_compiled), "kv_q8": bool(kv_q8),
              "prefill_mask_bf16_budget": bool(prefill_mask_bf16_budget),
              "prefill_mask_with_sink": bool(prefill_mask_with_sink),
@@ -1882,6 +1895,11 @@ class Model(nn.Module):
                "moe_weighted_sum_calls": moe.pop("weighted_sum", 0),
                "compiled_moe_calls": moe.pop("compiled_moe_calls", 0),
                "compiled_moe_traces": moe.pop("compiled_moe_traces", 0),
+               # inkling2_moe_decode_kernel calls (also in moe_fused_calls).
+               "moe_decode_kernel_calls": moe.pop("decode_kernel", 0),
+               "moe_decode_kernel_declines": {
+                   key.split(":", 1)[1]: moe.pop(key) for key in sorted(moe)
+                   if key.startswith("decode_kernel_declined:")},
                "moe_fast_declines": moe,
                "moe_fused_layers": sum(1 for b in built if b is not None and b[0] is not None),
                "moe_fused_refusals": sorted({b[1] for b in built if b is not None and b[1]})}
