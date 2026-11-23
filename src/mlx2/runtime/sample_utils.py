@@ -3,7 +3,7 @@
 import math
 import os
 from functools import lru_cache
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, NamedTuple, Optional
 import mlx.core as mx
 
 from ..sampling_defaults import SAMPLING_EPS
@@ -143,6 +143,9 @@ def make_sampler(
         argmax_sampler.greedy_argmax = True  # trusted normalized-greedy candidate
         return argmax_sampler
     sampling_methods = []
+    fast_top_p = _fast_top_p_eligible(top_p, top_k, min_p, xtc_probability > 0.0)
+    if fast_top_p:
+        _count_sampling_filter("sampler_topp_topk512")
     if _fuse_top_p_top_k(top_p, top_k, min_p, xtc_probability > 0.0):
         _count_sampling_filter("sampler_cutoff")
         sampling_methods.append(
@@ -169,6 +172,53 @@ def make_sampler(
 
     def sampler(logprobs):
         return compiled(logprobs)
+
+    if fast_top_p:
+        # The mask is compiled apart from the draw so a miss consumes no
+        # random state: the dense redo then draws with the same key the
+        # default path would, and a hit draws from bitwise-equal logprobs.
+        mask_top_p = mx.compile(lambda x, p=top_p: apply_top_p_topk512(x, p))
+        draw = mx.compile(
+            lambda x: categorical_sampling(x, temp),
+            inputs=mx.random.state,
+            outputs=mx.random.state,
+        )
+
+        def sampler(logprobs):
+            if not _fast_top_p_width_ok(logprobs.shape[-1]):
+                return compiled(logprobs)
+            masked, fits = mask_top_p(logprobs)
+            if _settle_top_p_topk512(mx.all(fits)):
+                return draw(masked)
+            return compiled(logprobs)
+
+        # The deferred redo replays the default chain with an explicit key.
+        # A key-less categorical takes ``split(state)[1]`` and leaves
+        # ``split(state)[0]`` as the new state, so the redo key is that
+        # subkey of the state the fast draw consumed: the redo draws what
+        # the default would have, and consumes no random state of its own.
+        def keyed(logprobs, key):
+            for method in sampling_methods:
+                logprobs = method(logprobs)
+            return mx.random.categorical(_scale_by_temperature(logprobs, temp), key=key)
+
+        redo_draw = mx.compile(keyed)
+
+        def deferred(logprobs):
+            """Draw from the window mask; leave the fit check to the caller.
+
+            No host read.  The global random state advances exactly as one
+            default draw advances it, hit or miss.
+            """
+            if not _fast_top_p_width_ok(logprobs.shape[-1]):
+                return DeferredTopP(compiled(logprobs), None, None)
+            key = mx.random.split(mx.random.state[0])[1]
+            masked, fits = mask_top_p(logprobs)
+            return DeferredTopP(
+                draw(masked), fits, lambda x=logprobs, k=key: redo_draw(x, k)
+            )
+
+        sampler.deferred = deferred
 
     sampler.batch_groupable = xtc_probability <= 0.0
     return sampler
@@ -325,6 +375,15 @@ def sampling_filter_status() -> dict:
         "counts_unit": "constructions",
         "max_top_k": _FUSE_MAX_TOP_K,
         "counts": dict(SAMPLING_FILTER_STATS),
+        "top_p_topk512": {
+            "configured": os.environ.get(SAMPLING_TOPP_TOPK512_ENV, "unset"),
+            "default": "0",
+            "policy": "top_p_topk512_v1" if sampling_topp_topk512_enabled() else "reference",
+            "qualification": "unqualified_opt_in",
+            "window": TOPP_TOPK512_K,
+            "counts_unit": "calls",
+            "counts": dict(TOPP_TOPK512_STATS),
+        },
     }
 
 
@@ -349,13 +408,19 @@ def sampling_filter_receipt(sampling: Optional[dict]) -> dict:
     """Per-request route-receipt label: which filter law this request's
     effective sampling selects (labelled unqualified when fused)."""
     sampling = sampling or {}
+    if (sampling.get("xtc_probability") or 0.0) > 0.0:
+        return {"policy": "reference"}
     temp = sampling.get("temperature") or 0.0
     fused = temp > 0 and _fuse_top_p_top_k(
         sampling.get("top_p") or 0.0, int(sampling.get("top_k") or 0), sampling.get("min_p") or 0.0
     )
-    if not fused:
-        return {"policy": "reference"}
-    return {"policy": "top_p_top_k_cutoff_v1", "qualification": "unqualified_opt_in"}
+    if fused:
+        return {"policy": "top_p_top_k_cutoff_v1", "qualification": "unqualified_opt_in"}
+    if temp > 0 and _fast_top_p_eligible(
+        sampling.get("top_p") or 0.0, int(sampling.get("top_k") or 0), sampling.get("min_p") or 0.0
+    ):
+        return {"policy": "top_p_topk512_v1", "qualification": "unqualified_opt_in"}
+    return {"policy": "reference"}
 
 
 def apply_top_p_top_k_cutoff(logprobs: mx.array, top_p: float, top_k: int) -> mx.array:
@@ -407,6 +472,255 @@ def apply_top_p_top_k_cutoff(logprobs: mx.array, top_p: float, top_k: int) -> mx
     tie_rank = mx.cumsum(tied.astype(mx.int32), axis=-1)
     survive = above_cutoff | (tied & (tie_rank <= slots))
     return mx.where(survive, logprobs, mx.array(-float("inf"), logprobs.dtype))
+
+
+# Opt-in top-p-only fast path (idea from jundot/omlx#5313, Apache-2.0; see
+# docs/PROVENANCE.md).  Off by default: MLX2_SAMPLING_TOPP_TOPK512=1 enables
+# it for top-p-only requests (top_k = 0, no min-p, no XTC).
+SAMPLING_TOPP_TOPK512_ENV = "MLX2_SAMPLING_TOPP_TOPK512"
+TOPP_TOPK512_K = 512
+# Per-call counters (one entry per sampler / transform call that tried the
+# fast path), bumped once the fit flag is on the host, so counting adds no
+# synchronization of its own.  ``fast`` / ``dense_fallback`` are outcomes.
+# ``eager_checks`` counts calls that read the flag with a host sync of their
+# own; ``deferred_checks`` counts calls whose flag a caller read inside the
+# sync it already does, and ``deferred_redos`` the deferred misses it then
+# recomputed on the dense path.
+TOPP_TOPK512_STATS: Dict[str, int] = {
+    "fast": 0,
+    "dense_fallback": 0,
+    "eager_checks": 0,
+    "deferred_checks": 0,
+    "deferred_redos": 0,
+}
+_UNIT_ROUNDOFF = 2.0 ** -24  # float32
+
+
+def sampling_topp_topk512_enabled() -> bool:
+    """Read at sampler construction, never at import (no import-time flag)."""
+    return os.environ.get(SAMPLING_TOPP_TOPK512_ENV, "0").strip() == "1"
+
+
+def _fast_top_p_eligible(top_p: float, top_k: int, min_p: float, xtc: bool = False) -> bool:
+    """The fast path replaces exactly one filter: top-p with nothing after it."""
+    return (
+        0.0 < top_p < 1.0
+        and top_k == 0
+        and min_p == 0.0
+        and not xtc
+        and sampling_topp_topk512_enabled()
+    )
+
+
+def _gamma(terms: int) -> float:
+    """Relative error bound of ``terms`` chained float32 roundings."""
+    scaled = terms * _UNIT_ROUNDOFF
+    return scaled / (1.0 - scaled)
+
+
+def _dense_cumsum_depths(width: int, k: int):
+    """Most roundings a probability meets inside ``apply_top_p``'s cumsum.
+
+    Returns ``(outside, window)``: the bound for an entry below the top-``k``
+    window and for an entry inside it, read from the MLX 0.32.4 scan kernels.
+    The CPU scan is one sequential pass, so an entry at ascending position i
+    meets ``j - i + 1`` roundings on its way to position j: up to ``width``
+    for the tail, at most ``k`` within the window.  The Metal
+    ``contiguous_scan`` works in blocks of 4 x threadgroup entries (one
+    threadgroup of at most 1024 and, assumed here, at least 128 threads):
+    an entry meets at most 3 thread-local adds, two 32-lane simd scans
+    (31 roundings each, whatever tree the hardware uses), 4 more adds in its
+    own block and 3 per later block through the carried prefix.  Eight
+    extra roundings per entry absorb an ``exp`` that differs by a few ulps
+    between kernels.
+    """
+    if mx.default_device() == mx.gpu:
+        depth = 80 + 3 * (-(-width // 512)) + 8
+        return depth, depth
+    return width + 8, k + 8
+
+
+def _top_candidates(logprobs: mx.array, k: int) -> mx.array:
+    """Indices of ``k`` largest entries along the last axis, unordered.
+
+    Every entry strictly above the ``k``-th largest value is included; which
+    of the entries tied with that value is not specified.  Wide rows rank
+    64-wide chunk maxima first: the top ``k`` entries lie in the ``k`` chunks
+    with the largest maxima, so the second ``argpartition`` sees ``64 k``
+    values instead of the whole row.
+    """
+    width = logprobs.shape[-1]
+    chunk = 64
+    if width % chunk or width // chunk <= 2 * k:
+        return mx.argpartition(-logprobs, kth=k - 1, axis=-1)[..., :k]
+    lead = logprobs.shape[:-1]
+    blocks = logprobs.reshape(-1, width // chunk, chunk)
+    best = mx.argpartition(-blocks.max(axis=-1), kth=k - 1, axis=-1)[:, :k]
+    candidates = mx.take_along_axis(blocks, best[:, :, None], axis=1)
+    pick = mx.argpartition(-candidates.reshape(-1, k * chunk), kth=k - 1, axis=-1)[:, :k]
+    rows = mx.take_along_axis(best, pick // chunk, axis=-1)
+    return (rows * chunk + pick % chunk).reshape(*lead, k)
+
+
+def apply_top_p_topk512(logprobs: mx.array, top_p: float, k: int = TOPP_TOPK512_K):
+    """``apply_top_p`` decided on the ``k`` likeliest tokens, plus a fit flag.
+
+    Returns ``(masked, fits)``; ``fits`` has the leading shape of
+    ``logprobs``.  Where ``fits`` is true, that row of ``masked`` is
+    bitwise ``apply_top_p(logprobs, top_p)``; elsewhere it must be discarded
+    (``apply_top_p_fast`` and the opt-in sampler / transform redo it with the
+    dense path).  Fully lazy: no host read.
+
+    ``apply_top_p`` keeps ascending position j when its float32 prefix sum
+    ``C_j`` exceeds ``(1 - top_p) * C_last``, plus the last position, under a
+    stable ascending argsort (CPU ``std::stable_sort``, Metal stable merge
+    sort): tokens tied in value sit in index order, so a tie cut by the
+    threshold keeps its highest-index tokens.  Here the window is ordered the
+    same way (index-sorted, then stable-argsorted by value), which places
+    every window token above the window minimum at its dense position.  The
+    prefix sums are rebuilt as outside mass plus the window's ascending
+    cumsum, and each position's decision is accepted only when it holds for
+    every value the dense sums can take: interval bounds cover the dense
+    scan's rounding (``_dense_cumsum_depths``) and this function's own.  A
+    row fits when every window decision is certain, the lowest window
+    position is certainly dropped (so the whole tail is) and no kept token
+    has the window-minimum value (so a tie straddling the window edge, whose
+    members the candidate pick chose arbitrarily, never decides the set).
+    """
+    width = logprobs.shape[-1]
+    if not 0 < k < width:
+        raise ValueError(f"window k={k} must lie in (0, {width})")
+    candidates = _top_candidates(logprobs, k)
+    by_index = mx.sort(candidates, axis=-1)
+    values = mx.take_along_axis(logprobs, by_index, axis=-1)
+    order = mx.argsort(values, axis=-1)
+    index = mx.take_along_axis(by_index, order, axis=-1)
+    values = mx.take_along_axis(values, order, axis=-1)
+    window = mx.exp(values.astype(mx.float32))
+    outside = _row_mass(
+        mx.put_along_axis(
+            logprobs, index, mx.array(-float("inf"), logprobs.dtype), axis=-1
+        )
+    )
+    prefix = outside + mx.cumsum(window, axis=-1)
+    total = prefix[..., -1:]
+    dense_outside, dense_window = _dense_cumsum_depths(width, k)
+    # Own error: the two-level outside sum (256 + width / 256 terms), the
+    # window cumsum (k terms) and the final add; plus float32 rounding of the
+    # bound arithmetic itself (the 8u term).
+    own_outside = 256 + (-(-width // 256)) + 2
+    radius = (
+        (_gamma(dense_outside) + _gamma(own_outside)) * 1.001 * outside
+        + ((_gamma(dense_window) + _gamma(k + 2)) * 1.001 + 8 * _UNIT_ROUNDOFF) * prefix
+    )
+    radius_total = radius[..., -1:]
+    threshold_low = (1 - top_p) * (total - radius_total) * (1 - 4 * _UNIT_ROUNDOFF)
+    threshold_high = (1 - top_p) * (total + radius_total) * (1 + 4 * _UNIT_ROUNDOFF)
+    keep = prefix - radius > threshold_high
+    drop = prefix + radius <= threshold_low
+    keep = keep | (mx.arange(k) == k - 1)
+    lowest = values[..., :1]
+    kept_minimum = mx.min(
+        mx.where(keep, values, mx.array(float("inf"), values.dtype)), axis=-1, keepdims=True
+    )
+    fits = (
+        mx.all(keep | drop, axis=-1)
+        & drop[..., 0]
+        & (kept_minimum > lowest)[..., 0]
+    )
+    mask = mx.put_along_axis(
+        mx.zeros(logprobs.shape, dtype=mx.bool_), index, keep, axis=-1
+    )
+    return mx.where(mask, logprobs, -float("inf")), fits
+
+
+def _settle_top_p_topk512(fits: mx.array) -> bool:
+    """The eager fast path's own host read: did every row's nucleus fit?"""
+    from .verify_sync import record_verify_sync
+
+    record_verify_sync("sample_utils.top_p_topk512.fit")
+    ok = bool(fits.item())
+    TOPP_TOPK512_STATS["eager_checks"] += 1
+    TOPP_TOPK512_STATS["fast" if ok else "dense_fallback"] += 1
+    return ok
+
+
+class DeferredTopP(NamedTuple):
+    """A fast top-p result whose fit check the caller has not read yet.
+
+    ``value`` is the fast output (masked log-probabilities, or a drawn
+    token); ``fits`` is the lazy per-row flag, or ``None`` when nothing is
+    pending (narrow rows, which never try the window: ``value`` is then the
+    dense result).  ``redo()`` returns, lazily, exactly what the default path
+    returns for the same call: the dense filter, and for a draw the same
+    random key.  The caller evaluates ``fits`` with the arrays it reads
+    anyway, then calls ``resolve_top_p_deferred``.
+    """
+
+    value: mx.array
+    fits: Optional[mx.array]
+    redo: Optional[Callable[[], mx.array]]
+
+
+def settle_top_p_deferred(fits) -> bool:
+    """Count a deferred fit check whose flag is already on the host.
+
+    ``fits`` must already be evaluated (read in the caller's own sync); this
+    records no verify sync.  Returns whether every row fit; a ``False``
+    return obliges the caller to use the redo.
+    """
+    if isinstance(fits, mx.array):
+        fits = fits.tolist()
+    ok = bool(all(fits)) if isinstance(fits, (list, tuple)) else bool(fits)
+    TOPP_TOPK512_STATS["deferred_checks"] += 1
+    TOPP_TOPK512_STATS["fast" if ok else "dense_fallback"] += 1
+    if not ok:
+        TOPP_TOPK512_STATS["deferred_redos"] += 1
+    return ok
+
+
+def resolve_top_p_deferred(pending: DeferredTopP) -> mx.array:
+    """The default path's result for ``pending``, lazily.
+
+    Call after ``pending.fits`` was evaluated in the caller's sync: a hit
+    returns the fast value as is (no host read); a miss returns the redo,
+    which the caller evaluates (the miss's one extra sync).  A batched call
+    is redone whole, because one categorical draw covers every row.
+    """
+    if pending.fits is None:
+        return pending.value
+    if settle_top_p_deferred(pending.fits):
+        return pending.value
+    return pending.redo()
+
+
+def transform_top_p_deferred(transform, logits: mx.array) -> DeferredTopP:
+    """``transform(logits)`` with its fit check left to the caller.
+
+    Transforms without the opt-in fast path return ``fits=None`` and the
+    ordinary result, so call sites need no flag of their own.
+    """
+    deferred = getattr(transform, "deferred", None)
+    if deferred is None:
+        return DeferredTopP(transform(logits), None, None)
+    return deferred(logits)
+
+
+def _fast_top_p_width_ok(width: int) -> bool:
+    return width > 2 * TOPP_TOPK512_K
+
+
+def apply_top_p_fast(logprobs: mx.array, top_p: float) -> mx.array:
+    """``apply_top_p`` through the top-512 window, dense when it misses.
+
+    Bitwise ``apply_top_p``.  Synchronizes once (the fit flag).
+    """
+    if not _fast_top_p_width_ok(logprobs.shape[-1]):
+        return apply_top_p(logprobs, top_p)
+    masked, fits = apply_top_p_topk512(logprobs, top_p)
+    if _settle_top_p_topk512(mx.all(fits)):
+        return masked
+    return apply_top_p(logprobs, top_p)
 
 
 def apply_xtc(
@@ -467,10 +781,14 @@ def make_transformed_logprobs(
     min_tokens_to_keep: int = 1,
 ) -> Callable[[mx.array], mx.array]:
     """See ``_make_transformed_logprobs``; the filter policy joins the memo key
-    so toggling ``MLX2_SAMPLING_TOPK_CUTOFF`` never returns a stale chain."""
+    so toggling ``MLX2_SAMPLING_TOPK_CUTOFF`` or ``MLX2_SAMPLING_TOPP_TOPK512``
+    never returns a stale chain."""
     fused = _fuse_top_p_top_k(top_p, top_k, min_p)
     if fused:
         _count_sampling_filter("transform_cutoff")
+    fast_top_p = _fast_top_p_eligible(top_p, top_k, min_p)
+    if fast_top_p:
+        _count_sampling_filter("transform_topp_topk512")
     return _make_transformed_logprobs(
         temp,
         top_p=top_p,
@@ -478,6 +796,9 @@ def make_transformed_logprobs(
         top_k=top_k,
         min_tokens_to_keep=min_tokens_to_keep,
         fused=fused,
+        # The fit bounds depend on the backend's scan, so the memo (and the
+        # compiled trace inside it) is per device.
+        fast_top_p=str(mx.default_device()) if fast_top_p else "",
     )
 
 
@@ -490,6 +811,7 @@ def _make_transformed_logprobs(
     top_k: int = 0,
     min_tokens_to_keep: int = 1,
     fused: bool = False,
+    fast_top_p: str = "",
 ) -> Callable[[mx.array], mx.array]:
     """Make a map from raw logits to the log-probabilities of the
     distribution ``make_sampler(temp, top_p, min_p, top_k)`` samples from.
@@ -536,6 +858,51 @@ def _make_transformed_logprobs(
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         scaled = compiled(logprobs)
         return scaled - mx.logsumexp(scaled, axis=-1, keepdims=True)
+
+    if fast_top_p:
+        def fast_chain(logprobs, p=top_p):
+            masked, fits = apply_top_p_topk512(logprobs, p)
+            return masked * (1 / temp), fits
+
+        compiled_fast = mx.compile(fast_chain)
+        dense = transform
+
+        def _normalized(logits):
+            logits = logits.astype(mx.float32)
+            return logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+
+        def transform(logits):
+            logprobs = _normalized(logits)
+            scaled = None
+            if _fast_top_p_width_ok(logprobs.shape[-1]):
+                scaled, fits = compiled_fast(logprobs)
+                if not _settle_top_p_topk512(mx.all(fits)):
+                    scaled = None
+            if scaled is None:
+                scaled = compiled(logprobs)
+            return scaled - mx.logsumexp(scaled, axis=-1, keepdims=True)
+
+        def deferred(logits):
+            """The fast result and its lazy per-row fit flag; no host read.
+
+            ``redo`` is the dense transform of the same logits.  The
+            transform draws nothing, so there is no random state to replay.
+            """
+            logprobs = _normalized(logits)
+            if not _fast_top_p_width_ok(logprobs.shape[-1]):
+                scaled = compiled(logprobs)
+                return DeferredTopP(
+                    scaled - mx.logsumexp(scaled, axis=-1, keepdims=True), None, None
+                )
+            scaled, fits = compiled_fast(logprobs)
+            return DeferredTopP(
+                scaled - mx.logsumexp(scaled, axis=-1, keepdims=True),
+                fits,
+                lambda x=logits: dense(x),
+            )
+
+        transform.deferred = deferred
+        transform.dense = dense
 
     return _probe_safe(transform)
 

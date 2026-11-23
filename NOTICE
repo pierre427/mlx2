@@ -1426,6 +1426,18 @@ permission notice reproduced above for MLX applies to the mechanism credited
 here. No Apple copyright header is added to mlx2 source files.
 
 ------------------------------------------------------------------------------
+Top-p window candidates — jundot/omlx pull request #5313
+(https://github.com/jundot/omlx/pull/5313, merge
+fd9ee4fd1aad1c0515a6c32e957a8c3a7026b182), Apache License 2.0
+
+_top_candidates in src/mlx2/runtime/sample_utils.py adapts _chunked_top_k
+from omlx/utils/sampling.py at that merge (rank 64-wide chunk maxima, then
+pick the top k among the k best chunks). Modified by mlx2: falls back to one
+argpartition unless the row has more than 2k chunks; used to decide
+apply_top_p on a 512-token window with an exactness check of mlx2's own. The
+full Apache-2.0 text is this repository's LICENSE.
+
+------------------------------------------------------------------------------
 MLX 0.32.4 Metal kernels reproduced in head-dim 512 decode attention
 (https://github.com/ml-explore/mlx) — MIT License
 

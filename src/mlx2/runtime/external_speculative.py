@@ -3272,7 +3272,11 @@ class ExternalDraftBatchGenerator:
         Keep ``history_suffix`` separate until a reachable processor needs
         tokens; ordinary laws need neither a full host copy nor an MLX array.
         """
-        from .sample_utils import make_transformed_logprobs
+        from .sample_utils import (
+            make_transformed_logprobs,
+            settle_top_p_deferred,
+            transform_top_p_deferred,
+        )
         # Processors compute in float32, as ordinary decode applies them.
         value = logits[None].astype(self.mx.float32)
         # A row that follows a draft token the target gives zero probability is
@@ -3309,7 +3313,15 @@ class ExternalDraftBatchGenerator:
             response_rows.append(None)
         transform = make_transformed_logprobs(temp, top_p=lane.sampling.get("top_p", 0), top_k=lane.sampling.get("top_k", 0), min_p=lane.sampling.get("min_p", 0))
         try:
-            return probability(np.asarray(self.mx.exp(transform(value)[0])))
+            # The opt-in top-p window's fit flag lands in this law's own
+            # read; a miss recomputes the dense law before anything uses it.
+            pending = transform_top_p_deferred(transform, value)
+            law = self.mx.exp(pending.value[0])
+            if pending.fits is not None:
+                self.mx.eval(law, pending.fits)
+                if not settle_top_p_deferred(pending.fits):
+                    law = self.mx.exp(pending.redo()[0])
+            return probability(np.asarray(law))
         except ValueError as error:
             # Non-finite logits are this request's failure, not the
             # executor's: raising out of next() would stop the worker.
@@ -3360,17 +3372,18 @@ class ExternalDraftBatchGenerator:
         lane eligible (``_batched_sampled_law_eligible``).
         """
 
+        from .sample_utils import settle_top_p_deferred, transform_top_p_deferred
         from .sample_utils import make_transformed_logprobs
 
         mx = self.mx
         if not entries:
             return {}
-        lazy, kept = [], []
+        lazy, kept, pending = [], [], []
         for entry in entries:
             _key, lane, rows = entry
             temp = float(lane.sampling.get("sampling_temp", 0))
             try:
-                built = []
+                built, checks = [], []
                 for logit_row in rows:
                     transform = make_transformed_logprobs(
                         temp,
@@ -3378,18 +3391,43 @@ class ExternalDraftBatchGenerator:
                         top_k=lane.sampling.get("top_k", 0),
                         min_p=lane.sampling.get("min_p", 0),
                     )
-                    built.append(transform(logit_row[None].astype(mx.float32))[0])
+                    deferred = transform_top_p_deferred(
+                        transform, logit_row[None].astype(mx.float32)
+                    )
+                    if deferred.fits is not None:
+                        checks.append((len(lazy) + len(built), deferred))
+                    built.append(deferred.value[0])
             except ValueError:
                 # An entry the transform refuses keeps the row-wise path,
                 # which reports it when its lane is reached.
                 continue
             lazy.extend(built)
+            pending.extend(checks)
             kept.append(entry)
         entries = kept
         if not lazy:
             return {key: [] for key, _lane, _rows in entries}
         try:
-            host = np.asarray(mx.exp(mx.stack(lazy)))
+            stacked = mx.exp(mx.stack(lazy))
+            if pending:
+                # The opt-in top-p window's fit flags ride this read.
+                fits = mx.concatenate([d.fits.reshape(-1) for _i, d in pending])
+                mx.eval(stacked, fits)
+            host = np.asarray(stacked)
+            if pending:
+                misses = [
+                    (index, deferred)
+                    for (index, deferred), fit in zip(pending, fits.tolist())
+                    if not settle_top_p_deferred(fit)
+                ]
+                if misses:
+                    # One extra read for every missed row of the round.
+                    redone = np.asarray(
+                        mx.exp(mx.stack([d.redo()[0] for _i, d in misses]))
+                    )
+                    host = np.array(host)
+                    for row, (index, _deferred) in enumerate(misses):
+                        host[index] = redone[row]
         except (ValueError, RuntimeError):
             # Unattributable to one row: every lane keeps ``_target_law``.
             return {}
@@ -9598,7 +9636,7 @@ class ExternalDraftBatchGenerator:
             valid = mx.isfinite(peak) & ~mx.any(mx.isnan(values), axis=-1)
             state.update(valid=valid, selected=selected)
             return (valid, selected), state
-        from .sample_utils import make_transformed_logprobs
+        from .sample_utils import make_transformed_logprobs, transform_top_p_deferred
 
         transform = make_transformed_logprobs(
             temp,
@@ -9606,8 +9644,15 @@ class ExternalDraftBatchGenerator:
             top_k=lane.sampling.get("top_k", 0),
             min_p=lane.sampling.get("min_p", 0),
         )
-        law = mx.exp(transform(rows))
+        deferred = transform_top_p_deferred(transform, rows)
+        law = mx.exp(deferred.value)
         finite = mx.all(mx.isfinite(law), axis=-1)
+        if deferred.fits is not None:
+            # The opt-in top-p window (top_k = 0, so never the sparse law
+            # below): its fit flag joins the round's fence and
+            # ``_verify_tree_batched`` redoes a missed law before any draw.
+            state.update(law=law, finite=finite, topp_deferred=deferred)
+            return (law, finite, deferred.fits), state
         top_k = int(lane.sampling.get("top_k", 0) or 0)
         if 0 < top_k <= _SPARSE_LAW_LIMIT and top_k < vocab:
             # Top-k leaves at most ``top_k`` nonzero entries per row, so the
@@ -9665,6 +9710,15 @@ class ExternalDraftBatchGenerator:
                     )
                 return token
         else:
+            deferred = state.get("topp_deferred")
+            if deferred is not None:
+                from .sample_utils import settle_top_p_deferred
+
+                if not settle_top_p_deferred(np.asarray(deferred.fits).tolist()):
+                    law = self.mx.exp(deferred.redo())
+                    finite = self.mx.all(self.mx.isfinite(law), axis=-1)
+                    self.mx.eval(law, finite)
+                    state = {**state, "law": law, "finite": finite}
             finite = np.asarray(state["finite"])
             sparse = "support" in state
             if sparse:
