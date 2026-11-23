@@ -3425,6 +3425,98 @@ def prepare_elastic_execution(headroom, controller, rows, *, draft_depth=0, work
         raise Overloaded("elastic execution memory does not fit after measured expert reclamation")
 
 
+def scheduler_hold_refresh(job, now, timeout, engine_progress=None) -> bool:
+    """Whether a scheduler-held lane's stall clock may be refreshed now.
+
+    A hold refresh writes ``last_progress``; anything else that wrote it
+    since (a real response of this lane) restarts the hold.  The hold is
+    measured from the later of its start and the engine's last real progress
+    on any lane (``engine_progress``): a lane queued behind other lanes' long
+    prefills, or a cohort row held while a peer prefills, is waiting on work
+    that is moving.  Only when the engine itself has made no progress for
+    ``timeout`` does the refresh stop (False): the caller then fails the lane
+    with a scheduler-starvation reason instead of letting it wait forever.
+    """
+    if job.scheduler_hold_since is None or job.last_progress != job.scheduler_hold_mark:
+        job.scheduler_hold_since = now
+    start = job.scheduler_hold_since
+    if engine_progress is not None:
+        start = max(start, engine_progress)
+    if now - start >= timeout:
+        return False
+    job.scheduler_hold_mark = now
+    return True
+
+
+def real_progress_at(jobs):
+    """Latest ``last_progress`` a lane got from a real response, or None.
+
+    A value equal to the lane's ``scheduler_hold_mark`` was written by the
+    hold refresh, not by progress.
+    """
+    times = [
+        job.last_progress for job in jobs
+        if job.last_progress is not None and job.last_progress != job.scheduler_hold_mark
+    ]
+    return max(times) if times else None
+
+
+def memory_stall_event(record, job, stall_seconds) -> dict:
+    """The stall watchdog's 429: what the lane needed, what was available.
+
+    ``record`` is the executor's last refusal of the lane (``None`` when the
+    executor does not report one); the message keeps its historical prefix.
+    """
+    wait = {
+        "stall_seconds": float(stall_seconds),
+        "completion_tokens": int(getattr(job, "completion_tokens", 0) or 0),
+        "prompt_tokens": int(getattr(job, "prompt_tokens", 0) or 0),
+        "cached_tokens": int(getattr(job, "cached_tokens", 0) or 0),
+    }
+    message = "memory admission did not permit progress"
+    if record:
+        wait.update({key: value for key, value in record.items() if key != "terms"})
+        if "terms" in record:
+            wait["terms"] = dict(record["terms"])
+        group = record.get("group_required_bytes")
+        message += (
+            f": {record.get('phase', 'round')} of {record.get('append_rows')} rows at "
+            f"depth {record.get('depth')} needs {record.get('required_bytes', 0) / 2**30:.2f} GiB"
+            + (
+                f" ({group / 2**30:.2f} GiB for its {record.get('lanes')}-lane group)"
+                if group is not None and int(record.get("lanes") or 1) > 1 else ""
+            )
+            + f", {record.get('available_bytes', 0) / 2**30:.2f} GiB available "
+            f"(blocking term {record.get('blocking_term', 'unknown')}) "
+            f"for {stall_seconds:.0f} s"
+        )
+    return {"error": message, "status": 429, "memory_wait": wait}
+
+
+def cold_fallback_eligible(lane, uid, active_lanes, memory_waiting) -> bool:
+    """Whether a stalled lane may be re-admitted as a cold recompute.
+
+    A lone, memory-queued lane whose current attachment resumed from an
+    APCv2 prefix and that has emitted nothing.  Not a prefill handoff (a
+    re-admission would restore the same handoff state), not a replay after
+    preemption (its receipt keeps the first admission's view), and once per
+    request.  Beside other active lanes the stall may clear when they finish,
+    so that case keeps failing as before.
+    """
+    return bool(
+        lane is not None
+        and active_lanes == 1
+        and int(getattr(lane, "attached_cached_tokens", 0) or 0) > 0
+        and getattr(lane, "attached_hit_kind", None) != "prefill_handoff"
+        and getattr(lane, "prefill_handoff_receipt", None) is None
+        and not getattr(lane, "replaying", False)
+        and not getattr(lane, "preemptions", 0)
+        and not getattr(lane, "completion_tokens", 0)
+        and getattr(lane, "apc_cold_fallback", None) is None
+        and (memory_waiting is None or uid in memory_waiting)
+    )
+
+
 def live_boundary_aliases(jobs, batch):
     """Prompt boundaries that running lanes have not written past.
 
@@ -4298,6 +4390,19 @@ class Job:
     # the live cache, so evicting it frees nothing (see
     # ``APCv2.evict_oldest_unleased(live_aliases=...)``).
     apc_live_boundary: tuple | None = None
+    # Set when an APCv2-hit lane stalled in memory admission before its first
+    # token and was re-admitted as a cold recompute (its reason): the
+    # re-admission must not look the prefix up (and restore it) again.
+    apc_cold_fallback: str | None = None
+    # The current attachment's prefix: tokens it resumed from and the hit's
+    # kind ("prefill_handoff" for a handoff), recorded at attach time.
+    attached_cached_tokens: int = 0
+    # Start of the current scheduler hold without real progress (see
+    # ``scheduler_hold_refresh``), and the ``last_progress`` value the hold
+    # itself last wrote.
+    scheduler_hold_since: float | None = None
+    scheduler_hold_mark: float | None = None
+    attached_hit_kind: str | None = None
     completion_tokens: int = 0
     reasoning_tokens: int = 0
     cache_branch: object = None
@@ -4504,6 +4609,14 @@ class ServingEngine(KernelReloadMixin):
     # Longest pressure-eviction pause while a submission renders its prompt.
     PREPARING_EVICTION_HOLD_SECONDS = 0.25
     MEMORY_ADMISSION_TIMEOUT = 60.0
+    # Memory-queued lane watchdog when memory preemption is off.
+    MEMORY_STALL_SECONDS = 60.0
+    # A lane the executor reports as scheduler-held (a cohort boundary hold,
+    # a partial decode fit, a prefill waiting its turn) is spared the stall
+    # watchdog, but only for this long without real progress; then the
+    # watchdog fails it with a scheduler-starvation reason instead of letting
+    # it wait forever.  Generous: a peer's 128K prefill takes ~11 min.
+    SCHEDULER_HOLD_TIMEOUT = 1800.0
     MEMORY_ADMISSION_RETRY = 0.25
     # Admission state shared through submission_lock.  Class defaults keep the
     # narrow unit fixtures that build the engine with __new__ on the ordinary
@@ -13022,6 +13135,9 @@ class ServingEngine(KernelReloadMixin):
             # Pressure eviction and its evictable-bytes estimate pass over a
             # COW boundary its running lane has not written past (frees
             # nothing).  ``batch`` is read at call time: it is built below.
+            # On the external-draft route the lane writes before serving
+            # publishes its boundary, so this has not fired on Hy4-flash
+            # 128K (pressure_live_alias_skips 0, 2026-11-21).
             set_live_aliases = getattr(apc, "set_live_alias_provider", None)
             if callable(set_live_aliases):
                 set_live_aliases(
@@ -13653,6 +13769,48 @@ class ServingEngine(KernelReloadMixin):
                     count_add(self.counts, "exact_decode_checkpoints", 1)
                 return True
 
+            def readmit_cold(uid, reason):
+                """Re-admit a lane that has emitted nothing as a cold recompute.
+
+                Its APCv2 lease is released and its lookup credit withdrawn;
+                the re-admission skips the prefix lookup (``apc_cold_fallback``)
+                so it neither re-leases nor re-restores the same state.  Not a
+                preemption: no replay of delivered tokens is involved.
+                """
+                job = active.pop(uid)
+                batch.remove([uid])
+                discard_lookup(job.admission_hit, reason)
+                branch, job.cache_branch = job.cache_branch, None
+                if branch is not None and hasattr(branch, "close"):
+                    branch.close()
+                if job.amoeba_open_record is not None:
+                    job.amoeba_open_record["router"].unbind(job.amoeba_open_record)
+                now = time.monotonic()
+                job.uid = None
+                job.admission_hit = None
+                job.admission_retry_at = now
+                job.admission_deadline = now + self.MEMORY_ADMISSION_TIMEOUT
+                job.admission_final_reclaim_done = False
+                job.cached_tokens = 0
+                job.cache_retention_role = None
+                job.apcv2_miss_reason = reason
+                job.apc_cold_fallback = reason
+                job.apc_live_boundary = None
+                job.attached_cached_tokens = 0
+                job.attached_hit_kind = None
+                job.prefill_handoff_receipt = None
+                job.recurrent_codec_restored_leaves = 0
+                job.recurrent_codec_restored_tokens = 0
+                job.state_boundaries_published = {}
+                job.last_progress = now
+                if job.request.get("return_progress"):
+                    # The client restarts from a cold prefill.
+                    self._emit_prompt_progress(
+                        job, (0, int(job.prompt_tokens or 0)), replay=True
+                    )
+                deferred.appendleft(job)
+                count_add(self.counts, "apcv2_memory_stall_cold_fallbacks", 1)
+
             def replay_ready(job):
                 """Replay once pressure is below CRITICAL and every lane the
                 preemption was made for has progressed (or ended)."""
@@ -13953,8 +14111,11 @@ class ServingEngine(KernelReloadMixin):
             last_reclaim = 0
             trace_iteration = None
             preemption = self.memory_preemption_policy["enabled"]
+            # Last real progress of any lane (scheduler-hold deadline).
+            engine_progress = {"at": None}
             stall_seconds = (
-                self.memory_preemption_policy["stall_seconds"] if preemption else 60
+                self.memory_preemption_policy["stall_seconds"] if preemption
+                else self.MEMORY_STALL_SECONDS
             )
             def publish_interior(response, owner, surgery_receipt, checkpoint):
                 """Publish one captured interior/junction checkpoint (a snapshot)."""
@@ -14901,7 +15062,21 @@ class ServingEngine(KernelReloadMixin):
                         # Lease resident state before pressure eviction. Disk
                         # restoration remains behind the cold allocation gate.
                         hit = job.admission_hit
-                        handoff = prefill_handoff_request(job.request)
+                        if hit is None and job.apc_cold_fallback is not None:
+                            # A cold-fallback recompute reuses nothing: no
+                            # APCv2 prefix and no prefill handoff.
+                            from .runtime.apc_v2 import APCLookup
+
+                            hit = APCLookup(
+                                None, list(tokens), 0, False, None,
+                                job.apc_cold_fallback,
+                            )
+                            job.admission_hit = hit
+                            job.cache_branch = None
+                        handoff = (
+                            None if job.apc_cold_fallback is not None
+                            else prefill_handoff_request(job.request)
+                        )
                         if hit is None and handoff is not None:
                             from .runtime.apc_v2 import APCLookup
                             from .runtime.prefill_handoff import (
@@ -16401,6 +16576,14 @@ class ServingEngine(KernelReloadMixin):
                                 now=time.monotonic(), job=job
                             )
                         job.last_progress = time.monotonic()
+                        # No local name: the worker frame outlives the
+                        # attachment and must not pin the hit's cache.
+                        job.attached_cached_tokens = int(
+                            getattr(job.admission_hit, "cached_tokens", 0) or 0
+                        )
+                        job.attached_hit_kind = getattr(
+                            job.admission_hit, "hit_kind", None
+                        )
                         job.admission_hit = job.admission_tokens = None
                         if job.preempted:
                             job.preempted = False
@@ -16541,10 +16724,53 @@ class ServingEngine(KernelReloadMixin):
                 # width lock) is making no progress for a different reason and
                 # must not be failed with a memory error.
                 now = time.monotonic()
-                for uid in getattr(batch, "scheduler_waiting_uids", lambda: ())():
-                    waiting_job = active.get(uid)
-                    if waiting_job is not None:
+                held_uids = set(getattr(batch, "scheduler_waiting_uids", lambda: ())())
+                progressed = real_progress_at(active.values())
+                if progressed is not None and (
+                    engine_progress["at"] is None or progressed > engine_progress["at"]
+                ):
+                    engine_progress["at"] = progressed
+                hold_expired = []
+                for uid, waiting_job in active.items():
+                    if uid not in held_uids:
+                        # The hold ended: its clock must not carry over.
+                        waiting_job.scheduler_hold_since = None
+                        waiting_job.scheduler_hold_mark = None
+                    elif scheduler_hold_refresh(
+                        waiting_job, now, self.SCHEDULER_HOLD_TIMEOUT,
+                        engine_progress["at"],
+                    ):
                         waiting_job.last_progress = now
+                    else:
+                        hold_expired.append(uid)
+                if hold_expired:
+                    # Not a memory stall: never the memory 429 or a
+                    # preemption trigger.  Fail directly with the reason.
+                    batch.remove(hold_expired)
+                    for uid in hold_expired:
+                        held_job = active.pop(uid)
+                        held_seconds = max(
+                            0.0, now - max(held_job.scheduler_hold_since,
+                                           engine_progress["at"] or 0.0)
+                        )
+                        count_add(self.counts, "stall_watchdog_scheduler_starvation", 1)
+                        count_add(self.counts, "scheduler_hold_deadline_failures", 1)
+                        log.warning(
+                            "active lane %s held by the scheduler with no engine "
+                            "progress for %.0f s: scheduler starvation",
+                            held_job.id, held_seconds,
+                        )
+                        self._finish(held_job, {
+                            "error": (
+                                "scheduler starvation: lane held by the scheduler "
+                                f"(cohort boundary hold, partial decode fit or prefill "
+                                f"wait) while the engine made no progress for "
+                                f"{held_seconds:.0f} s (deadline "
+                                f"{self.SCHEDULER_HOLD_TIMEOUT:.0f} s)"
+                            ),
+                            "status": 503,
+                            "code": "scheduler_starvation",
+                        })
                 stalled = [
                     uid
                     for uid, job in active.items()
@@ -16628,6 +16854,32 @@ class ServingEngine(KernelReloadMixin):
                             # rollback itself failed. It must not be finished
                             # again by the subsequent stall cleanup.
                             stalled = [uid for uid in stalled if uid in active]
+                if stalled and not recovering:
+                    # A lane admitted on an APCv2 hit (a resident lease or a
+                    # disk restore) that memory admission has held since
+                    # before its first token is re-admitted as a cold
+                    # recompute instead of failing: the hit's state is what
+                    # it cannot fit beside (Hy4-flash 128K DFly2 with the
+                    # disk tier, 2026-11-21: the warm request hit a restored
+                    # boundary and was refused with 429, where the same
+                    # request without the disk tier recomputed and served).
+                    # Once per request; a recompute that stalls fails below.
+                    # Only a lone lane: beside other active lanes the stall
+                    # may clear when they finish, and recomputing would add
+                    # prefill pressure on them; that case fails as before.
+                    # Gated on the current attachment (not the job's first
+                    # admission view): a prefill handoff, a replay after
+                    # preemption, or an attachment that reused nothing is
+                    # left alone.
+                    waiting_fn = getattr(batch, "memory_waiting_uids", None)
+                    waiting_now = None if waiting_fn is None else set(waiting_fn())
+                    for uid in list(stalled):
+                        if not cold_fallback_eligible(
+                            active.get(uid), uid, len(active), waiting_now
+                        ):
+                            continue
+                        readmit_cold(uid, "memory_stall_cold_fallback")
+                        stalled.remove(uid)
                 expired_atomic = getattr(
                     batch, "expire_atomic_memory_waits", lambda *args, **kwargs: ()
                 )(stalled, now=now, timeout=stall_seconds)
@@ -16643,13 +16895,17 @@ class ServingEngine(KernelReloadMixin):
                     memory_waiting = (
                         None if memory_waiting is None else set(memory_waiting())
                     )
+                    wait_receipt = getattr(batch, "memory_wait_receipt", None)
+                    wait_receipts = {
+                        uid: (wait_receipt(uid) if callable(wait_receipt) else None)
+                        for uid in stalled
+                    }
                     batch.remove(stalled)
                     for uid in stalled:
                         if memory_waiting is None or uid in memory_waiting:
-                            event = {
-                                "error": "memory admission did not permit progress",
-                                "status": 429,
-                            }
+                            event = memory_stall_event(
+                                wait_receipts.get(uid), active[uid], stall_seconds
+                            )
                         else:
                             count_add(self.counts, "stall_watchdog_scheduler_starvation", 1)
                             log.warning(

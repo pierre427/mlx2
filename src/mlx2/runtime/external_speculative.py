@@ -339,6 +339,55 @@ def _record_prefill_refusal(stats, lanes, append, required, headroom):
     stats["prefill_admission_refusals_total"] = stats.get("prefill_admission_refusals_total", 0) + 1
 
 
+_LANE_REFUSAL_RECORDS = 64
+
+
+def _note_lane_refusal(owner, lanes, append, required, headroom, *, prefill,
+                       lane_required=None):
+    """Per-lane last refusal, for the stall watchdog's error and receipt.
+
+    ``required_bytes`` is the lane's own share of the reservation; the
+    group's total (cohort-wide terms included) is ``group_required_bytes``.
+    Host reads only; written on refusal, cleared by a later admission.
+    """
+    record = {
+        "phase": "prefill" if prefill else "decode",
+        "append_rows": int(append),
+        "lanes": len(lanes),
+        "group_required_bytes": int(required),
+        "available_bytes": int(headroom),
+        "short_bytes": int(required) - int(headroom),
+    }
+    try:
+        from ..memory import execution_headroom_terms
+
+        terms = execution_headroom_terms()
+        host, advisory = terms.get("host_term"), terms.get("advisory_term")
+        record["blocking_term"] = (
+            "advisory_term" if host is None or advisory <= host else "host_term"
+        )
+        record["terms"] = terms
+    except Exception as error:  # noqa: BLE001 - diagnostics never fail admission
+        record["terms_error"] = type(error).__name__
+    records = getattr(owner, "_lane_refusals", None)
+    if records is None:
+        records = owner._lane_refusals = {}
+    shares = list(lane_required or ())
+    for index, lane in enumerate(lanes):
+        uid = getattr(lane, "uid", None)
+        if uid is None:
+            continue
+        records.pop(int(uid), None)
+        records[int(uid)] = dict(
+            record,
+            required_bytes=int(shares[index]) if index < len(shares) else int(required),
+            depth=len(getattr(lane, "history", ()) or ()),
+            generated=int(getattr(lane, "generated", 0) or 0),
+        )
+    while len(records) > _LANE_REFUSAL_RECORDS:
+        records.pop(next(iter(records)))
+
+
 def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
 
@@ -14783,7 +14832,9 @@ class ExternalDraftBatchGenerator:
         ):
             provider = self._plain_anchor_provider(lanes)
             reserve_plain_cache = getattr(provider, "plain_anchor_cache_reservation", None)
+        lane_required = []
         for lane in lanes:
+            lane_start = required
             lane_append = (
                 min(append, max(0, len(lane.remaining) - 1))
                 if prefill
@@ -14804,6 +14855,7 @@ class ExternalDraftBatchGenerator:
                 if prefill and len(lanes) == 1
                 else 4*target_bytes
             )
+            private_required = None
             if callable(reserve_plain_cache):
                 private_required = reserve_plain_cache(lane.cache)
                 if private_required is not None:
@@ -14811,6 +14863,10 @@ class ExternalDraftBatchGenerator:
                         raise ValueError("private ordinary cache reservation must be nonnegative bytes")
                     cache_required = private_required
                     _bump(self.scheduler_stats, "external_private_anchor_admission_lanes")
+            if not prefill and private_required is None:
+                declared = ExternalDraftBatchGenerator._declared_decode_cache_reservation(self, lane, lane_append, len(lanes))
+                if declared is not None:
+                    cache_required = declared
             required += cache_required + 3*draft_bytes
             required += lane_append*(target.num_hidden_layers*target_per_token + int(getattr(draft, "num_hidden_layers", 0) or 0)*draft_per_token)
             feature_width = getattr(draft, "feature_width", None) or target.hidden_size*len(self.layers)
@@ -14838,6 +14894,7 @@ class ExternalDraftBatchGenerator:
                 # Four coexisting float64 q/p originals+normalized copies,
                 # native logits/exp/output buffers, selector and safety slack.
                 required += append*target.vocab_size*128
+            lane_required.append(required - lane_start)
             if not prefill and getattr(self, "continuation_pool_ast_bridge", False):
                 ast_private_required += (
                     (self.progressive_alternative_branches - 1) * target_bytes
@@ -14869,8 +14926,72 @@ class ExternalDraftBatchGenerator:
             self.scheduler_stats["memory_deferred"] = self.scheduler_stats.get("memory_deferred",0)+1
             if prefill:
                 _record_prefill_refusal(self.scheduler_stats, lanes, append, required, headroom)
+            _note_lane_refusal(
+                self, lanes, append, required, headroom, prefill=prefill,
+                lane_required=lane_required,
+            )
             return False
+        records = getattr(self, "_lane_refusals", None)
+        if records:
+            # A later admission supersedes the lane's last refusal.
+            for lane in lanes:
+                records.pop(int(getattr(lane, "uid", -1)), None)
         return True
+
+    def memory_wait_receipt(self, uid):
+        """The last memory-admission refusal of ``uid`` (needed/available bytes)."""
+        records = getattr(self, "_lane_refusals", None)
+        return None if not records else records.get(int(uid))
+
+    def _decode_child_chain_bound(self, append):
+        """Most child chains one lane's verify tree of ``append`` rows can hold.
+
+        0 on a chain topology; one per extra branch of a fixed topology; every
+        node but the anchor and one leaf for a drafter-shaped tree (or a
+        drafter that does not take a topology).
+        """
+        from .ast_tree_proposals import DEFAULT_TOPOLOGY, parse_topology
+
+        rows_bound = max(0, int(append) - 2)
+        if getattr(self, "adaptive_tree_chain", False):
+            return 0
+        if not getattr(self.draft, "tree_topology_aware", False):
+            return rows_bound
+        try:
+            topology = parse_topology(getattr(self, "ast_topology", None) or DEFAULT_TOPOLOGY)
+        except ValueError:
+            return rows_bound
+        if topology == "chain":
+            return 0
+        if isinstance(topology, tuple):
+            return min(len(topology) - 1, rows_bound)
+        return rows_bound
+
+    def _declared_decode_cache_reservation(self, lane, append, lanes):
+        """Adapter-declared cache transient of one decode round, or None.
+
+        A target-tree provider may declare
+        ``decode_round_cache_reservation(cache, *, append, child_chains, lanes)``:
+        the bytes a verify round of ``append`` rows allocates beyond the
+        resident lane cache (growth / copy-on-write copies and per-chain
+        forks).  Without it the flat 4x lane-cache charge stays.
+        """
+        if getattr(self, "target_execution", None) != "provider":
+            return None
+        provider = getattr(self, "target_tree_executor_provider", None)
+        declare = getattr(provider, "decode_round_cache_reservation", None)
+        if not callable(declare):
+            return None
+        reserved = declare(
+            lane.cache, append=int(append),
+            child_chains=getattr(self, "_decode_child_chain_bound", lambda rows: ExternalDraftBatchGenerator._decode_child_chain_bound(self, rows))(append), lanes=int(lanes),
+        )
+        if reserved is None:
+            return None
+        if type(reserved) is not int or reserved < 0:
+            raise ValueError("decode round cache reservation must be nonnegative bytes")
+        _bump(self.scheduler_stats, "external_declared_decode_reservation_lanes")
+        return reserved
 
     def _reclaim_for_admission(self):
         """Pressure-only, bounded reclaim; never reclaim for a lane-count cap."""

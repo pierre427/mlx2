@@ -369,6 +369,50 @@ class Hy4ChainTreeExecutor:
     def create(cls, *, joint=True, call_scope=None):
         return cls(joint=joint, call_scope=call_scope)
 
+    @staticmethod
+    def decode_round_cache_reservation(cache, *, append, child_chains, lanes=1):
+        """Cache bytes one verify round allocates beyond the lane's residency.
+
+        Per layer row (``cohort_forward``):
+
+        * the root chain lends the append-only buffers (``kv``/``tk``/``gk``)
+          and appends in place; a buffer allocates a new one when the append
+          crosses its capacity, or copies on write while an APCv2 entry or
+          recovery point shares it -- at most one copy per buffer per round,
+          of the live rows plus ``append`` rows rounded to the 256-row step;
+        * sliding rings are not lent: the root's write copies the ring once;
+        * every child chain clones its parent (aliased), trims and appends:
+          a copy of every buffer, append-only and ring, per child chain.
+
+        So ``(1 + child_chains)`` copies of each buffer grown by ``append``
+        rows.  Index Share selections and the verify forward's working set
+        are charged by the executor's row terms, not here.
+
+        Hy4-flash-MLX-4.6bit (resident ~2.48 GB at 128K): chain (the
+        adapter default) 2.48 GB; ``3x5`` (two child chains) 7.45 GB;
+        ``drafter`` with the 7-node width-1 budget (six child chains)
+        17.4 GB, more than a 128 GB host has beside the 91 GB model and
+        reserves, so a 128K lane on that topology cannot be admitted.  It
+        is a real requirement (each child chain copies every buffer), not an
+        overcharge; there is no per-request topology fallback (the topology
+        is executor-wide), so long-context Hy4 serving uses the chain.
+        """
+        from ..runtime.models.hy_v4_flash import _STEP
+
+        copies = 1 + max(0, int(child_chains))
+        total = 0
+        for row in _row_caches(cache):
+            for name in ("kv", "tk", "gk", "ring"):
+                data = getattr(row, name + "_data", None)
+                if data is None:
+                    continue
+                rows = int(data.shape[1])
+                per_row = int(data.nbytes) // max(1, rows)
+                live = int(getattr(row, name + "_end", rows)) - int(getattr(row, name + "_head", 0))
+                grown = ((live + int(append) + _STEP - 1) // _STEP) * _STEP
+                total += copies * per_row * max(rows, grown)
+        return int(total)
+
     def validate_revision(self):
         if hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != self.source_revision_token:
             raise RuntimeError("Hy4-flash tree executor source changed")

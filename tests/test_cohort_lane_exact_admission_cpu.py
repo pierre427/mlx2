@@ -40,7 +40,8 @@ def _forward(model, batch):
     )
     transaction = SimpleNamespace(batched=True, plain=False, caches=None)
     cohort = [SimpleNamespace(ordinary=False) for _ in range(batch)]
-    ExternalDraftBatchGenerator._cohort_target_forward(
+    # The row body (the public method wraps it with the aMoEba row mask).
+    ExternalDraftBatchGenerator._cohort_target_forward_rows(
         fake, mx.zeros((batch, 3), mx.int32), transaction, cohort, site="t"
     )
     return fake.scheduler_stats
