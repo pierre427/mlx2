@@ -1395,6 +1395,45 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         return tool_constraint(request, suffix=self.tool_suffix,
                                stats=getattr(self, "feature_stats", None))
 
+    # The cache projection below exists for lane admission.  Before it, the
+    # APCv2 rolling-checkpoint default stepped aside on this adapter ("no
+    # cache projection"); it stays off until rolling captures are tested here.
+    apc_rolling_checkpoint_default = False
+
+    def cache_budget(self, *, mtp, prefill_step=None):
+        """Lane cache projection, decode and prefill transients (admission only).
+
+        Replaces the controller's full-attention envelope (0.44 GiB per 1K
+        tokens), which charged a 32K lane 14 GiB for about 1.2 GiB of state;
+        see ``hy_v4_flash_memory`` and docs/hy4-flash/context-128k.md.
+        ``prefill_step`` is the server's widest prefill chunk (the 8192 top
+        of the prompt-length schedule when unknown); the verify rows and tree
+        child chains come from this adapter's route policy.  The drafter
+        keeps no KV of its own.
+        """
+        from .hy_v4_flash_memory import HY4FlashCacheBudget, route_verify_shape
+
+        rows, children = route_verify_shape(self.external_policy or {},
+                                            draft_selected=self.draft_model is not None,
+                                            max_width=AST_MAX_WIDTH)
+        return HY4FlashCacheBudget.from_model(
+            self.model, prefill_rows=int(prefill_step or 8192), verify_rows=rows,
+            child_chains=children)
+
+    def media_tower_peak_bytes(self, request) -> int:
+        """Vision tower working set of a cold image request (admission only)."""
+        inputs = request.get("_mlx2_prefill_inputs") or {}
+        grids = inputs.get("image_grid_thw")
+        tower = getattr(self.model, "vision_tower", None)
+        if not grids or tower is None:
+            return 0
+        from ..runtime.models.hy_v4_flash_vision import VISION_SCORE_BUDGET
+        from .hy_v4_flash_memory import vision_tower_peak_bytes
+
+        item = tower.patch_embedding.weight.dtype.size
+        return vision_tower_peak_bytes(tower.args, grids, item_bytes=item,
+                                       score_budget=VISION_SCORE_BUDGET)
+
     def execution_config(self, *, max_lanes, prefill_step):
         if self.draft_model is not None:
             # AST tiles: one to four lanes whatever the server's lane count.

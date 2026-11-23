@@ -78,6 +78,12 @@ ROLLBACK = 64
 GATHER_MAX_QUERY = 64
 # Bound on [rows, heads, keys] fp32 scores per attention chunk.
 SCORE_BUDGET = 1 << 27
+# Evaluate each score block before building the next, so a chunked attention
+# or indexer forward holds one block of ``SCORE_BUDGET`` elements, not all of
+# them.  Scheduling only (bit-identical outputs); single-block forwards
+# (decode, verify, short prefill) never evaluate early.  The cache budget
+# (``adapters/hy_v4_flash_memory``) charges unbounded blocks when it is off.
+BOUNDED_SCORE_BLOCKS = True
 # A media prefill arrives as one chunk of the whole prompt; its layers run in
 # slices of this many tokens so the per-chunk masks stay bounded.
 MEDIA_PREFILL_STEP = 2048
@@ -485,6 +491,12 @@ def mla_attend(q, kv, mask, sinks, scale, rank):
         m = mask if mask is None else mask[..., a:b, :]
         outs.append(mx.fast.scaled_dot_product_attention(
             q[:, :, a:b], kv, kv, scale=scale, mask=m, sinks=sinks)[..., :rank])
+        if BOUNDED_SCORE_BLOCKS:
+            # A lazy graph runs every chunk's score, mask and softmax buffers
+            # side by side (measured on CPU: 12.3 GiB for a 2048-row chunk at
+            # 16K, against 1.66 GiB evaluated per block), so the chunking
+            # bounded nothing.  Same kernels and shapes: bit-identical.
+            mx.eval(outs[-1])
     return mx.concatenate(outs, axis=2)
 
 
@@ -578,6 +590,8 @@ class CompressedIndexer(nn.Module):
                 picks.append(mx.concatenate([picked, own_col], axis=-1))
             else:
                 picks.append(own_col)
+            if BOUNDED_SCORE_BLOCKS and rows < L:
+                mx.eval(picks[-1])  # one score block live at a time (see mla_attend)
         groups = picks[0] if len(picks) == 1 else mx.concatenate(picks, axis=1)
         offsets = mx.arange(self.ratio, dtype=mx.int32)
         tokens = groups[..., None] * self.ratio + offsets

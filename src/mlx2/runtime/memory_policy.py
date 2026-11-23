@@ -374,6 +374,7 @@ class SelfMTPLaneAdmissionController:
         verification_row_cap: Optional[int] = None,
         cache_estimator: Optional[Callable[[int], int]] = None,
         memory_pressure_policy: str = "bounded",
+        context_transient_estimator: Optional[Callable[[int], int]] = None,
     ):
         if memory_pressure_policy not in ("bounded", "attempt_after_reclaim"):
             raise ValueError("unknown admission memory pressure policy")
@@ -435,6 +436,10 @@ class SelfMTPLaneAdmissionController:
         ):
             raise ValueError("verification row cap must be a positive int or None")
         self.cache_estimator = cache_estimator
+        # Optional adapter bytes a lane's next round allocates above its
+        # retained cache as a function of context (e.g. append-only buffer
+        # regrowth); added to the flat per-lane transient.  None: unchanged.
+        self.context_transient_estimator = context_transient_estimator
         self.host_memory_gib = host_memory_gib
         self.advisory_gib = advisory_gib
         self.service_reserve_gib = float(service_reserve_gib)
@@ -571,7 +576,18 @@ class SelfMTPLaneAdmissionController:
         else:
             context_gib = envelope_gib
         transient_scale = self.TRANSIENT_SCALE[draft_depth]
-        return context_gib + pending_gib + self.transient_gib_per_lane * transient_scale
+        return (context_gib + pending_gib + self.transient_gib_per_lane * transient_scale
+                + self.context_transient_gib(context_tokens))
+
+    def context_transient_gib(self, context_tokens: int) -> float:
+        """The adapter's context-dependent round transient, in GiB (0 if none)."""
+        estimate = getattr(self, "context_transient_estimator", None)
+        if estimate is None:
+            return 0.0
+        value = float(estimate(int(context_tokens)))
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("adapter context transient must be finite and nonnegative")
+        return value / (1 << 30)
 
     @classmethod
     def depth_transient_ratio(cls, base: int, ceiling: int) -> float:

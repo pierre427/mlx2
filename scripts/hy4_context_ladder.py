@@ -204,6 +204,8 @@ def main(argv=None) -> int:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--execution-policy", type=Path, required=True)
+    parser.add_argument("--server-arg", action="append", default=[],
+                        help="extra mlx2.server argument (repeatable), e.g. --server-arg=--prefill-step --server-arg=1024")
     parser.add_argument("--route", choices=("ordinary", "ast"), default="ordinary",
                         help="server route flag (ast: the artifact's embedded DFly2 drafter)")
     parser.add_argument("--cells", default="1024,2048,4096,8192,16384,32768,65536,131072")
@@ -263,7 +265,7 @@ def main(argv=None) -> int:
                    "--max-lanes", "1", "--max-inflight", "1",
                    "--max-context", str(max(cells) + 4096),
                    "--execution-policy", str(a.execution_policy.expanduser().resolve()),
-                   "--admin-token-file", str(token_file), "--no-cache-dir"]
+                   "--admin-token-file", str(token_file), "--no-cache-dir", *a.server_arg]
         report["server_command"] = command
         env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "HF_HUB_OFFLINE": "1",
                "TRANSFORMERS_OFFLINE": "1"}

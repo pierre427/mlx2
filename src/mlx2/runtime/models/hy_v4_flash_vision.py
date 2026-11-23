@@ -35,6 +35,9 @@ Span = Tuple[int, int, int, int, int]
 
 # Bound on [heads, rows, keys] fp32 scores per vision attention chunk.
 VISION_SCORE_BUDGET = 1 << 27
+# Evaluate each score block of a multi-block frame before building the next
+# (scheduling only); see ``hy_v4_flash.BOUNDED_SCORE_BLOCKS``.
+BOUNDED_SCORE_BLOCKS = True
 
 
 # ------------------------------------------------------------- positions --
@@ -250,6 +253,11 @@ class VisionAttention(nn.Module):
                 e = min(b, r + rows)
                 outs.append(mx.fast.scaled_dot_product_attention(
                     q[:, :, r:e], k[:, :, a:b], v[:, :, a:b], scale=self.scale))
+                if BOUNDED_SCORE_BLOCKS and rows < T:
+                    # As in the text model's ``mla_attend``: a lazy graph holds
+                    # every block of a large frame at once; one block at a
+                    # time is the bound the chunking claims (bit-identical).
+                    mx.eval(outs[-1])
         out = mx.concatenate(outs, axis=2)[0].transpose(1, 0, 2).reshape(N, H * d)
         return self.o_proj(out)
 

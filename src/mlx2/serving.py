@@ -3070,6 +3070,42 @@ def validate_prefill_depth_budget(value):
     return value
 
 
+def adapter_cache_budget(adapter, *, mtp, prefill_step=None):
+    """``adapter.cache_budget`` with the server's prefill step when it takes one.
+
+    An adapter whose cache buffers are sized by the prefill chunk (sliding
+    rings, pinned per-chunk arrays) declares a ``prefill_step`` keyword; every
+    other adapter is called exactly as before.  ``None`` when it has no budget.
+    """
+    method = getattr(adapter, "cache_budget", None)
+    if not callable(method):
+        return None
+    import inspect
+
+    try:
+        accepts = "prefill_step" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if accepts and prefill_step is not None:
+        return method(mtp=mtp, prefill_step=int(prefill_step))
+    return method(mtp=mtp)
+
+
+def media_tower_peak_gib(adapter, request, *, cached_tokens):
+    """The adapter's vision-tower working set for a cold media prefill, in GiB.
+
+    Zero unless the request carries prefill inputs, nothing is cached and the
+    adapter declares ``media_tower_peak_bytes(request)``.
+    """
+    estimate = getattr(adapter, "media_tower_peak_bytes", None)
+    if cached_tokens or request.get("_mlx2_prefill_inputs") is None or not callable(estimate):
+        return 0.0
+    value = estimate(request)
+    if type(value) is not int or value < 0:
+        raise ValueError("media tower peak must be nonnegative bytes")
+    return value / float(1 << 30)
+
+
 def prefill_transient_gib(
     cache_budget, *, context_tokens, uncached_tokens, prefill_step,
     prefill_step_autoscale=False, single_chunk=False,
@@ -3085,6 +3121,10 @@ def prefill_transient_gib(
     estimate = getattr(cache_budget, "prefill_transient_bytes", None)
     if estimate is None or uncached_tokens <= 1:
         return 0.0
+    media = getattr(cache_budget, "media_prefill_transient_bytes", None)
+    if single_chunk and callable(media):
+        # The adapter runs its one media chunk in bounded slices and prices it.
+        return float(media(int(context_tokens), int(uncached_tokens))) / float(1 << 30)
     if prefill_step_autoscale and not single_chunk:
         from .runtime.prefill_plan import prompt_length_prefill_step
 
@@ -4284,6 +4324,9 @@ class Job:
     recurrent_codec_restored_leaves: int = 0
     recurrent_codec_restored_tokens: int = 0
     admission_final_reclaim_done: bool = False
+    # Latest required-vs-available breakdown of a deferred lane admission
+    # (``mlx2.admission_diagnostics``); quoted by the 429 if it never fits.
+    admission_shortfall: dict | None = None
     # Lane bytes admission granted this job that its cache has not allocated
     # yet; cleared by its first generated token (see ``unmaterialized_lane_bytes``).
     admission_reserved_gib: float = 0.0
@@ -7393,14 +7436,13 @@ class ServingEngine(KernelReloadMixin):
         lane_need = None
         try:
             budget = (
-                adapter.cache_budget(mtp=self.mtp)
-                if hasattr(adapter, "cache_budget")
-                else None
+                adapter_cache_budget(adapter, mtp=self.mtp, prefill_step=self.prefill_step)
             )
             controller = SelfMTPLaneAdmissionController(
                 host_memory_gib=host_memory_gib(),
                 advisory_gib=advisory_gib,
                 cache_estimator=budget.project if budget else None,
+                context_transient_estimator=getattr(budget, "decode_transient_bytes", None),
                 transient_gib_per_lane=getattr(
                     budget,
                     "transient_gib_per_lane",
@@ -8383,7 +8425,8 @@ class ServingEngine(KernelReloadMixin):
         # headroom signal/reserve as request admission.  Adapters without a
         # projection still fail closed at the ordinary context limit above.
         budget_fn = getattr(adapter, "cache_budget", None)
-        budget = budget_fn(mtp=self.mtp) if callable(budget_fn) else None
+        budget = (adapter_cache_budget(adapter, mtp=self.mtp, prefill_step=self.prefill_step)
+                  if callable(budget_fn) else None)
         project = getattr(budget, "project", None)
         if callable(project):
             required = int(project(len(token_ids)))
@@ -8398,6 +8441,8 @@ class ServingEngine(KernelReloadMixin):
                 )
                 * (1 << 30)
             )
+            # Context-dependent buffer regrowth, as lane admission charges it.
+            required += int(getattr(budget, "decode_transient_bytes", lambda _n: 0)(len(token_ids)))
             # Same accounting and patience as the parallel-sample guard:
             # unleased resident APCv2 checkpoints count as available, headroom
             # is re-read for a bounded wait (Metal returns a finished export's
@@ -8540,7 +8585,10 @@ class ServingEngine(KernelReloadMixin):
         transient = int(chunk) * int(vocab) * (2 + 4 + 4 + 4)
         required = transient
         budget_fn = getattr(adapter, "cache_budget", None)
-        budget = budget_fn(mtp=getattr(self, "mtp", False)) if callable(budget_fn) else None
+        budget = (adapter_cache_budget(adapter, mtp=getattr(self, "mtp", False),
+                                       prefill_step=max(int(chunk), int(
+                                           getattr(self, "prefill_step", None) or chunk)))
+                  if callable(budget_fn) else None)
         project = getattr(budget, "project", None)
         if callable(project):
             kv_charge = "cache_projection"
@@ -8549,6 +8597,9 @@ class ServingEngine(KernelReloadMixin):
                 budget, context_tokens=tokens, uncached_tokens=tokens,
                 prefill_step=chunk, prefill_step_autoscale=False,
             ) * (1 << 30))
+            # Context-dependent buffer regrowth (lane admission charges it
+            # through the controller); zero for adapters that declare none.
+            transient += int(getattr(budget, "decode_transient_bytes", lambda _n: 0)(tokens))
             required = transient + kv_bytes
         else:
             # The same unmeasured-cache envelope lane admission charges an
@@ -10345,10 +10396,64 @@ class ServingEngine(KernelReloadMixin):
         )
         job.usage_before_prefill = "refused"
         self._finish(job, {
-            "error": "host memory admission did not recover before deadline",
+            "error": self._admission_refusal_message(job),
             "status": 429,
         })
         count_add(self.counts, "memory_admission_timeouts", 1)
+
+    ADMISSION_REFUSAL = "host memory admission did not recover before deadline"
+
+    def _record_admission_shortfall(
+        self, job, controller, *, context_tokens, cache_gib, prefill_gib,
+        required_gib, headroom, granted_bytes,
+    ):
+        """Keep the deferred lane's required-vs-available breakdown on the job.
+
+        Logged once at the first deferral; the refusal message repeats the
+        latest one.  Diagnostics only: a failure here never changes admission.
+        """
+        from .admission_diagnostics import lane_admission_breakdown, summarize
+
+        try:
+            terms = None
+            try:
+                from .memory import execution_headroom_terms
+
+                policy = getattr(self, "host_memory_signals_policy", None) or {}
+                terms = execution_headroom_terms(host_signals=bool(policy.get("enabled")))
+                if not terms.get("recommended"):
+                    terms = None
+            except Exception:  # noqa: BLE001 - readings are optional context
+                terms = None
+            first = getattr(job, "admission_shortfall", None) is None
+            job.admission_shortfall = lane_admission_breakdown(
+                controller,
+                # Every refusal's last rung is the depth floor (see
+                # ``admit_lane_headroom``); a capped prompt-lookup span or an
+                # elastic reserve shift lands in the ``other`` term.
+                context_tokens=int(context_tokens),
+                draft_depth=0,
+                cache_gib=cache_gib,
+                prefill_gib=prefill_gib,
+                tested_required_gib=required_gib,
+                available_bytes=int(headroom()),
+                granted_bytes=int(granted_bytes or 0),
+                headroom_terms=terms,
+            )
+            if first:
+                log.info("memory admission deferred request %s: %s",
+                         getattr(job, "id", "?"), summarize(job.admission_shortfall))
+        except Exception:  # noqa: BLE001 - diagnostics never refuse a request
+            log.debug("admission breakdown unavailable", exc_info=True)
+
+    def _admission_refusal_message(self, job):
+        from .admission_diagnostics import summarize
+
+        detail = summarize(getattr(job, "admission_shortfall", None))
+        message = self.ADMISSION_REFUSAL + (f": {detail}" if detail else "")
+        log.warning("memory admission refused request %s: %s",
+                    getattr(job, "id", "?"), detail or "no breakdown recorded")
+        return message
 
     def _cache_capsule_fanout_fits(self, active, siblings):
         """Require one scheduler boundary to attach the complete capsule."""
@@ -12136,6 +12241,19 @@ class ServingEngine(KernelReloadMixin):
                         )
                         self.apc_rolling_checkpoint_policy = {"interval_tokens": 0}
                         self.apc_rolling_route = None
+                    elif (
+                        self.apc_rolling_checkpoint_default
+                        and vars(type(adapter)).get("apc_rolling_checkpoint_default") is False
+                    ):
+                        # An adapter that declares a cache projection for
+                        # admission alone keeps the default it had without
+                        # one until rolling captures are tested on it.
+                        self.skipped_route_defaults["apc_rolling_checkpoints"] = (
+                            f"{type(adapter).__name__} keeps APCv2 rolling checkpoints "
+                            "off by default (untested on this adapter)"
+                        )
+                        self.apc_rolling_checkpoint_policy = {"interval_tokens": 0}
+                        self.apc_rolling_route = None
                     elif self.apc_rolling_checkpoint_default and (
                         rolling_reuse_prompt_tokens(
                             interval_tokens=default_rolling_interval(
@@ -12554,7 +12672,7 @@ class ServingEngine(KernelReloadMixin):
                 raise ValueError(
                     "external draft and prompt lookup are mutually exclusive"
                 )
-            cache_budget = adapter.cache_budget(mtp=self.mtp) if hasattr(adapter, "cache_budget") else None
+            cache_budget = adapter_cache_budget(adapter, mtp=self.mtp, prefill_step=self.prefill_step)
             settings["cache_budget"] = cache_budget.as_dict() if cache_budget else None
             route_receipt = "candidate_validation"
             descriptor = getattr(adapter, "descriptor", None)
@@ -12956,6 +13074,7 @@ class ServingEngine(KernelReloadMixin):
                     copy_draft_policy=self.copy_draft_policy,
                 ),
                 cache_estimator=cache_budget.project if cache_budget else None,
+                context_transient_estimator=getattr(cache_budget, "decode_transient_bytes", None),
                 transient_gib_per_lane=getattr(
                     cache_budget,
                     "transient_gib_per_lane",
@@ -14551,9 +14670,7 @@ class ServingEngine(KernelReloadMixin):
                                     time.monotonic() + self.MEMORY_ADMISSION_RETRY
                                 )
                             else:
-                                raise Overloaded(
-                                    "host memory admission did not recover before deadline"
-                                )
+                                raise Overloaded(self._admission_refusal_message(job))
                         checkpoint = job.exact_decode_checkpoint
                         if checkpoint is not None:
                             required = (checkpoint.staging_bytes
@@ -14802,6 +14919,9 @@ class ServingEngine(KernelReloadMixin):
                             cached_tokens=hit.cached_tokens,
                             uncached_tokens=len(hit.remaining_tokens),
                         )
+                        prefill_gib += media_tower_peak_gib(
+                            adapter, job.request, cached_tokens=hit.cached_tokens,
+                        )
                         admission_headroom = (
                             (lambda: execution_headroom() - granted)
                             if granted
@@ -14885,6 +15005,17 @@ class ServingEngine(KernelReloadMixin):
                         if granted and not admitted:
                             count_add(self.counts, "memory_admission_deferred_behind_grants", 1)
                         if not admitted:
+                            # Which term refused it, for the log and a later 429.
+                            self._record_admission_shortfall(
+                                job,
+                                controller,
+                                context_tokens=len(tokens) + maximum,
+                                cache_gib=cache_copy,
+                                prefill_gib=prefill_gib,
+                                required_gib=required,
+                                headroom=admission_headroom,
+                                granted_bytes=granted,
+                            )
                             if attaching_cohort is not None:
                                 raise Overloaded(
                                     "declared batch cohort could not atomically admit every member"
