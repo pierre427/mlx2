@@ -45,6 +45,11 @@ from .config import TextConfig
 _MASK_BUDGET_BYTES = 64 << 20
 MAX_LOOP_PASSES = 8  # varloop ceiling (trained count is 3)
 _SINK_SDPA_MAX_ROWS = 8  # per-row SDPA calls for one-token decode
+# ``inkling2_sink_slot``: when an append leaves the KVCache buffer exactly
+# full, grow it by one cache step (zeros) so the sink row has its slot,
+# instead of concatenating the zero row onto the whole K/V. Module switch for
+# the A/B (False restores the 2026-11-21 full-buffer concatenation).
+SINK_SLOT_SPARE = True
 
 
 @mx.compile
@@ -589,23 +594,44 @@ class Attention(nn.Module):
         The sink is a zero K/V row with its own logit. The reference
         concatenates that row onto the fetched K/V, which copies the whole
         K/V on every visit (about 268 MB per global visit at 64K). A plain
-        ``KVCache`` buffer already has capacity past ``offset`` (256-token
+        ``KVCache`` buffer usually has capacity past ``offset`` (256-token
         growth), so the zero row is written into that slot and the attention
         reads the view ``[:offset + 1]``: the same values in the same order,
         so it is bit-identical. The slot lies past the committed fill level,
         which the next append overwrites and trim/rollback never read, so
-        cache state is unchanged. Any other cache, a full buffer, or a
-        window-cropped fetch falls back to the concatenation."""
-        if (
-            type(kv) is not KVCache
-            or kv.keys is None
-            or kv.keys.shape[0] != b
-            or kv.offset != size
-            or kv.keys.shape[2] <= kv.offset
-        ):
-            self.__dict__["sink_slot_fallbacks"] = self.__dict__.get("sink_slot_fallbacks", 0) + 1
+        cache state is unchanged.
+
+        An append of a multiple of 256 tokens (every 512-token prefill chunk)
+        leaves the buffer exactly full. With ``SINK_SLOT_SPARE`` the buffer
+        then grows by one cache step of zeros (``sink_slot_grows``): one copy,
+        the same cost as the concatenation it replaces, and the spare step
+        persists through the cache's own later growths (which append to the
+        full buffer), so later visits of that cache find their slot. The
+        attention still reads ``[:offset + 1]`` with a zero last row. Any other
+        cache, a window-cropped fetch, or (switch off) a full buffer falls
+        back to the concatenation, counted by reason."""
+        reason = None
+        if type(kv) is not KVCache:
+            reason = "cache_type"
+        elif kv.keys is None or kv.keys.shape[0] != b:
+            reason = "rows"
+        elif kv.offset != size:
+            reason = "cropped"
+        elif kv.keys.shape[2] <= kv.offset and not SINK_SLOT_SPARE:
+            reason = "full"
+        if reason is not None:
+            d = self.__dict__
+            d["sink_slot_fallbacks"] = d.get("sink_slot_fallbacks", 0) + 1
+            reasons = d.setdefault("sink_slot_fallback_reasons", {})
+            reasons[reason] = reasons.get(reason, 0) + 1
             return None
         off = kv.offset
+        if kv.keys.shape[2] <= off:
+            for name in ("keys", "values"):
+                buf = getattr(kv, name)
+                spare = mx.zeros((*buf.shape[:2], kv.step, buf.shape[3]), buf.dtype)
+                setattr(kv, name, mx.concatenate([buf, spare], axis=2))
+            self.__dict__["sink_slot_grows"] = self.__dict__.get("sink_slot_grows", 0) + 1
         for name in ("keys", "values"):
             buf = getattr(kv, name)
             buf[..., off : off + 1, :] = mx.zeros((*buf.shape[:2], 1, buf.shape[3]), buf.dtype)
@@ -645,15 +671,49 @@ class Attention(nn.Module):
         if isinstance(held, mx.array) and held.dtype == mx.int8:
             raise ValueError(
                 "Inkling 2 attention got an int8 (kv_q8) plane with inkling2_kv_q8 off")
-        k, v = kv.update_and_fetch(k, v)
+        return self._chronological(kv, kv.update_and_fetch(k, v))
+
+    @staticmethod
+    def _chronological(kv, fetched):
         # Learned relative logits index backward distance, so ring buffers
         # are read in chronological order (RoPE attention does not care).
         if type(kv) is RotatingKVCache:
-            k, v = kv._temporal_order(kv.keys), kv._temporal_order(kv.values)
-        elif type(kv) is BatchRotatingKVCache:
+            return kv._temporal_order(kv.keys), kv._temporal_order(kv.values)
+        if type(kv) is BatchRotatingKVCache:
             kv._temporal_order()
-            k, v = kv.keys[..., : kv._idx, :], kv.values[..., : kv._idx, :]
-        return k, v
+            return kv.keys[..., : kv._idx, :], kv.values[..., : kv._idx, :]
+        return fetched
+
+    def _ring_direct(self, kv, length):
+        """True when this visit may read a ring cache in place through the
+        split-K kernel (``splitk.RING_DIRECT``) instead of its chronological
+        copy. The copy is made later only if the kernel declines."""
+        return (
+            splitk.RING_DIRECT
+            and self.__dict__.get("_verify_splitk")
+            and type(kv) in (RotatingKVCache, BatchRotatingKVCache)
+            and 1 <= length < splitk.MAX_ROWS
+        )
+
+    @staticmethod
+    def _ring_layout(kv):
+        """``(rot, size)``: the chronological key j that ``_chronological``
+        would return lives at physical row ``(j + rot) % width`` of the
+        buffers, for j < size. None for a layout it does not map (a
+        RotatingKVCache with ``keep`` rows)."""
+        width = kv.keys.shape[2]
+        if type(kv) is RotatingKVCache:
+            if kv.keep:
+                return None
+            idx = kv._idx
+            if idx == width:  # _temporal_order: the buffer as is
+                return 0, width
+            if idx < kv.offset:  # wrapped: [idx:] then [:idx]
+                return idx, width
+            return 0, idx  # not yet full: [:idx]
+        if kv.rotated:  # BatchRotatingKVCache: roll by -_idx
+            return kv._idx % width, width
+        return 0, kv._idx
 
     def __call__(self, x, key_input=None, value_input=None, cache=None, conv_mask=None):
         b, length, _ = x.shape
@@ -688,9 +748,10 @@ class Attention(nn.Module):
             self.rel_scale,
         )
         q, k, v = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
-        ring, ring_start = None, 0
+        ring, ring_start, ring_phys = None, 0, None
         # inkling2_kv_q8 (global visits only; the attribute is never set on
-        # sliding ones): K/V are stored as packed int8 rows.
+        # sliding ones): K/V are stored as packed int8 rows. Ring paths below
+        # only apply to sliding (rotating) caches.
         q8 = self.__dict__.get("_kv_q8", False)
         if q8 and kv is None:
             # No cache: attend over the values a cache would have stored.
@@ -711,16 +772,24 @@ class Attention(nn.Module):
             ring, width = kv, kv.keys.shape[2]
             size = width if (kv._idx == width or kv._idx < kv.offset) else kv._idx
             k = v = None
+        elif kv is not None and self._ring_direct(kv, length):
+            kv.update_and_fetch(k, v)
+            ring_phys = self._ring_layout(kv)
+            if ring_phys is None:
+                _count_ring(self, "unmapped")
+                k, v = self._chronological(kv, None)
+            else:
+                k = v = None
         elif kv is not None:
             k, v = self._fetch(kv, k, v)
         if ring is None:
-            size = k.shape[2]
+            size = k.shape[2] if ring_phys is None else ring_phys[1]
         left_padding = getattr(kv, "left_padding", None)
         if self.sliding and size > length + self.sliding - 1:
             # No query reaches keys older than its window: drop them before
             # the dense relative mask and SDPA (they would be masked anyway).
             start = size - length - (self.sliding - 1)
-            if ring is None:
+            if ring is None and ring_phys is None:
                 k, v = k[:, :, start:], v[:, :, start:]
             ring_start = start
             size = size - start
@@ -764,17 +833,35 @@ class Attention(nn.Module):
             counts[key] = counts.get(key, 0) + 1
             return self._finish(out, gate, b, length, x.dtype)
         if self.__dict__.get("_verify_splitk"):
-            reason = self._splitk_decline(kv, q, k, v)
+            if ring_phys is not None:
+                reason = self._splitk_decline(kv, q, kv.keys, kv.values)
+            else:
+                reason = self._splitk_decline(kv, q, k, v)
             counts = self.__dict__.setdefault("verify_splitk_counts", {})
             key = "calls" if reason is None else "declined:" + reason
             counts[key] = counts.get(key, 0) + 1
             if reason is None:
+                ring_arg = None
+                if ring_phys is not None:
+                    # The ring's physical buffers with the chronological
+                    # start (after the window crop): the kernel walks the
+                    # same logical keys as on the reordered copy.
+                    _count_ring(self, "calls")
+                    k, v = kv.keys, kv.values
+                    ring_arg = ((ring_phys[0] + ring_start) % k.shape[2], size)
                 # Reads the fetched K/V in place: no sink column, no mask.
                 out = splitk.gqa_splitk_attention(
                     q, k, v, r @ rel_proj, sink, offset=offset, left_padding=left_padding,
-                    window=self.sliding, scale=self.scale,
+                    window=self.sliding, scale=self.scale, ring=ring_arg,
                 )
                 return self._finish(out, gate, b, length, x.dtype)
+        if ring_phys is not None:
+            # The kernel declined: the chronological copy the reference reads.
+            _count_ring(self, "copies")
+            k, v = self._chronological(kv, None)
+            if ring_start:
+                k, v = k[:, :, ring_start:], v[:, :, ring_start:]
+            ring_phys = None
         if (
             length == 1
             and b <= _SINK_SDPA_MAX_ROWS
@@ -862,6 +949,11 @@ class Attention(nn.Module):
             return self.o_proj(_fuse.gate_finish(out, gate, _fuse.dtype_ref(dtype)))
         out = (out.astype(mx.float32) * mx.sigmoid(gate.astype(mx.float32))).astype(dtype)
         return self.o_proj(out)
+
+
+def _count_ring(attn, key):
+    counts = attn.__dict__.setdefault("splitk_ring_counts", {})
+    counts[key] = counts.get(key, 0) + 1
 
 
 class SoftcappedSwiGLU(nn.Module):
@@ -1549,10 +1641,19 @@ class Model(nn.Module):
         flash = [layer.self_attn.__dict__.get("flash_prefill_calls", 0) for layer in self.model.layers]
         slot = [layer.self_attn.__dict__.get("sink_slot_calls", 0) for layer in self.model.layers]
         slot_fb = [layer.self_attn.__dict__.get("sink_slot_fallbacks", 0) for layer in self.model.layers]
+        slot_grows = [layer.self_attn.__dict__.get("sink_slot_grows", 0) for layer in self.model.layers]
+        slot_reasons = {}
+        for layer in self.model.layers:
+            for key, value in layer.self_attn.__dict__.get("sink_slot_fallback_reasons", {}).items():
+                slot_reasons[key] = slot_reasons.get(key, 0) + value
         splitk_counts = {}
         for layer in self.model.layers:
             for key, value in layer.self_attn.__dict__.get("verify_splitk_counts", {}).items():
                 splitk_counts[key] = splitk_counts.get(key, 0) + value
+        ring_counts = {}
+        for layer in self.model.layers:
+            for key, value in layer.self_attn.__dict__.get("splitk_ring_counts", {}).items():
+                ring_counts[key] = ring_counts.get(key, 0) + value
         moe = {}
         for layer in self.model.layers:
             for key, value in layer.mlp.__dict__.get("moe_fast_counts", {}).items():
@@ -1562,8 +1663,14 @@ class Model(nn.Module):
                "head_kernel_calls": self.__dict__.get("head_kernel_calls", 0),
                "sink_sdpa_calls": sum(sinks), "flash_prefill_calls": sum(flash),
                "sink_slot_calls": sum(slot), "sink_slot_fallbacks": sum(slot_fb),
+               "sink_slot_grows": sum(slot_grows),
+               "sink_slot_fallback_reasons": dict(sorted(slot_reasons.items())),
                "verify_splitk_calls": splitk_counts.pop("calls", 0),
                "verify_splitk_declines": splitk_counts,
+               # Ring visits under split-K: read in place (calls), reordered
+               # because the kernel declined (copies), or a layout the ring
+               # read does not map (unmapped, also copied).
+               "verify_splitk_ring": dict(sorted(ring_counts.items())),
                "moe_fused_calls": moe.pop("fused", 0),
                "moe_weighted_sum_calls": moe.pop("weighted_sum", 0),
                "compiled_moe_calls": moe.pop("compiled_moe_calls", 0),

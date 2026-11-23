@@ -23,6 +23,12 @@ Usage: python scripts/research/inkling2_fuse_ab.py <model dir> <run dir>
        [--base reference|defaults]
 Default options: the four exact ones. Add ``fuse_sconv_kernel`` and/or
 ``fuse_residual_kernel`` for the near-exact arms (run them separately).
+
+``io:`` options toggle the bit-identical attention I/O module switches
+instead of a kernel option (2026-11-22; on by default, so run them with
+``--base defaults``): ``io:sink_slot_spare`` (``language.SINK_SLOT_SPARE``),
+``io:ring_direct`` (``splitk.RING_DIRECT``) and ``io:vector_loads``
+(``splitk.VECTOR_LOADS``). Arm A runs with the named switches off, arm B on.
 """
 
 from __future__ import annotations
@@ -62,12 +68,27 @@ def memory():
             "peak_gib": round(mx.get_peak_memory() / GIB, 2)}
 
 
+IO_SWITCHES = {"io:sink_slot_spare": ("language", "SINK_SLOT_SPARE"),
+               "io:ring_direct": ("splitk", "RING_DIRECT"),
+               "io:vector_loads": ("splitk", "VECTOR_LOADS")}
+
+
 class Toggle:
     def __init__(self, model, options):
-        self.model, self.options = model, options
+        unknown = [o for o in options if o.startswith("io:") and o not in IO_SWITCHES]
+        if unknown:
+            raise SystemExit(f"unknown io switch {unknown[0]}; known: {sorted(IO_SWITCHES)}")
+        self.model = model
+        self.options = [o for o in options if not o.startswith("io:")]
+        self.switches = [IO_SWITCHES[o] for o in options if o.startswith("io:")]
         self.base = {k: v for k, v in model.kernel_policy.items()}
 
     def __call__(self, on):
+        from mlx2.runtime.models.inkling2 import language, splitk
+
+        modules = {"language": language, "splitk": splitk}
+        for module, name in self.switches:
+            setattr(modules[module], name, bool(on))
         self.model.configure_kernels(
             **{**self.base, **{name: bool(on) for name in self.options}})
 

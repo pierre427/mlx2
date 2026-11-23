@@ -689,7 +689,8 @@ def test_sink_slot_is_bitwise_reference(rows):
     """``inkling2_sink_slot``: the zero sink row is written into the KV
     buffer's spare capacity and read as a view instead of concatenated. It
     must be bit-identical to the concat path. The run crosses the 256-token
-    growth boundary (where the buffer is full and the slot falls back)."""
+    growth boundary (where the buffer is exactly full and the slot grows it by
+    one cache step, ``language.SINK_SLOT_SPARE``)."""
     model = _tiny_model()
     tokens = mx.random.randint(0, 500, (rows, 262))
     plan = [(0, 200), (200, 256)] + [(i, i + 1) for i in range(256, 262)]
@@ -699,8 +700,11 @@ def test_sink_slot_is_bitwise_reference(rows):
     receipt = model.kernel_receipt()
     assert mx.array_equal(got, base)
     assert receipt["sink_slot_calls"] > 0
-    # The 256-key fill leaves no spare slot: those global calls fall back.
-    assert receipt["sink_slot_fallbacks"] > 0
+    # The 256-key fill leaves no spare slot: those global calls grow the
+    # buffer; only the sliding rings (another cache type) fall back.
+    assert receipt["sink_slot_grows"] == 8
+    assert set(receipt["sink_slot_fallback_reasons"]) == {"cache_type"}
+    assert receipt["sink_slot_fallbacks"] == receipt["sink_slot_fallback_reasons"]["cache_type"]
     model.configure_kernels()
     assert mx.array_equal(_run(model, tokens, plan), base)
 

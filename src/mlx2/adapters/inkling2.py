@@ -238,6 +238,10 @@ KERNEL_OPTIONS = {
     # in ladder 8e8e3f5b1). Bit-identical by construction (same values, same
     # order); plain KVCache only, anything else falls back. Covers prefill,
     # decode and DSpark verify rows. Implemented 2026-11-21, GPU A/B pending.
+    # An append that leaves the buffer exactly full (every 512-token prefill
+    # chunk over the 256-token growth) grows it by one cache step instead of
+    # falling back to the concatenation (2026-11-22, language.SINK_SLOT_SPARE;
+    # sink_slot_grows and sink_slot_fallback_reasons in the kernel receipt).
     "inkling2_sink_slot": "sink_slot",
     # Prefill/verify attention (rows > 1) through one FP32 flash kernel with
     # the relative bias, window and sink in-kernel, replacing the dense bias
@@ -264,6 +268,11 @@ KERNEL_OPTIONS = {
     # tile staging, different reduction order). Its source is in the APCv2
     # numerics contract when on.
     # Implemented 2026-11-21, GPU tests and A/B pending.
+    # Sliding rings reach the kernels as their physical buffers plus a start
+    # row (splitk.RING_DIRECT, 2026-11-22) instead of a chronological copy
+    # made every decode step once wrapped; the kernels walk the same logical
+    # keys, so it is bitwise the copy. Declines still copy (counted in
+    # verify_splitk_ring).
     "inkling2_verify_splitk": "verify_splitk",
     # Sparse MoE in fewer launches, bit-identical (implemented 2026-11-21,
     # runtime/models/inkling2/moe_fast.py). DEFAULT ON (Pierre 2026-11-21)

@@ -36,7 +36,11 @@ Changes from omlx: no FP8 E4M3 K/V path; an explicit query ``offset``
 (omlx assumes the queries are the last L keys; mlx2 always calls it that
 way); left padding clamped to >= 0; FP32 inputs supported (FP32 staging,
 scalar loads) for tests; 16-byte K/V loads also require an aligned base
-pointer and BF16 (otherwise the in-kernel scalar path).
+pointer and BF16 (otherwise the in-kernel scalar path), and the L == 1
+direct kernel takes 8-byte BF16 loads under the same kind of guard
+(``VECTOR_LOADS``); ring buffers are read in place (``ring=``; logical key
+order and positions unchanged, so the result is bitwise the result on the
+reordered copy).
 """
 
 import mlx.core as mx
@@ -56,7 +60,11 @@ _PART_SOURCE = r"""
     const int S = dims[1];
     const int NS = dims[2];
     const int OFF = dims[3];
-    const int lp = max(dims[4 + b], 0);
+    // Ring read: logical key j lives at physical row (j + RB) mod RW
+    // (RB = 0, RW = S for an ordinary chronological K/V).
+    const int RB = dims[4];
+    const int RW = dims[5];
+    const int lp = max(dims[6 + b], 0);
 
     const int n_rows = G * L;
     const int BQ = NSG * 8;
@@ -130,8 +138,10 @@ _PART_SOURCE = r"""
                 uint4 kw = uint4(0);
                 uint4 vw = uint4(0);
                 if (key < k_end) {
-                    kw = *(const device uint4*)(kb_ptr + key * k_strides[2] + col);
-                    vw = *(const device uint4*)(vb_ptr + key * v_strides[2] + col);
+                    int row = key + RB;
+                    row -= (row >= RW) ? RW : 0;
+                    kw = *(const device uint4*)(kb_ptr + row * k_strides[2] + col);
+                    vw = *(const device uint4*)(vb_ptr + row * v_strides[2] + col);
                 }
                 threadgroup ST* kd = Ks + col * LDK + r;
                 threadgroup ST* vd = Vs + r * LDV + col;
@@ -150,8 +160,10 @@ _PART_SOURCE = r"""
                 float kv = 0.0f;
                 float vv = 0.0f;
                 if (key < k_end) {
-                    kv = float(kb_ptr[key * k_strides[2] + col * k_strides[3]]);
-                    vv = float(vb_ptr[key * v_strides[2] + col * v_strides[3]]);
+                    int row = key + RB;
+                    row -= (row >= RW) ? RW : 0;
+                    kv = float(kb_ptr[row * k_strides[2] + col * k_strides[3]]);
+                    vv = float(vb_ptr[row * v_strides[2] + col * v_strides[3]]);
                 }
                 Ks[col * LDK + r] = ST(kv);
                 Vs[r * LDV + col] = ST(vv);
@@ -310,7 +322,10 @@ _DIRECT_SOURCE = r"""
     const int S = dims[0];
     const int NS = dims[1];
     const int OFF = dims[2];
-    const int lp = max(dims[3 + b], 0);
+    // Ring read, as in the part kernel: logical key j at row (j + RB) mod RW.
+    const int RB = dims[3];
+    const int RW = dims[4];
+    const int lp = max(dims[5 + b], 0);
     const float qscale = scale[0] * LOG2E;
 
     const int a_row = OFF;
@@ -347,15 +362,41 @@ _DIRECT_SOURCE = r"""
     const size_t vs2 = v_strides[2];
     const size_t ks3 = k_strides[3];
     const size_t vs3 = v_strides[3];
+    // VEC (BF16, D4 % 4 == 0): each lane's D4 contiguous values as D4 / 4
+    // 8-byte loads when the rows are unit-stride and every row start is
+    // 8-byte aligned; the same values (a BF16 is the high half of an FP32,
+    // so the widening is a shift, exact) in the same registers, so the
+    // arithmetic below is unchanged. Otherwise the scalar loads.
+    const bool vec_kv = VEC
+        && ks3 == 1 && vs3 == 1 && (ks2 % 4 == 0) && (vs2 % 4 == 0)
+        && ((reinterpret_cast<ulong>(kb_ptr) & 7ul) == 0)
+        && ((reinterpret_cast<ulong>(vb_ptr) & 7ul) == 0);
 
     for (int key = k_start + int(sg); key < k_end; key += NSG) {
         float kv[D4];
         float vv[D4];
-        const device T* kp = kb_ptr + key * ks2;
-        const device T* vp = vb_ptr + key * vs2;
-        for (int i = 0; i < D4; ++i) {
-            kv[i] = float(kp[(d_off + i) * ks3]);
-            vv[i] = float(vp[(d_off + i) * vs3]);
+        int row = key + RB;
+        row -= (row >= RW) ? RW : 0;
+        const device T* kp = kb_ptr + row * ks2;
+        const device T* vp = vb_ptr + row * vs2;
+        if (VEC && vec_kv) {
+            for (int c = 0; c < D4 / 4; ++c) {
+                const uint2 kw = *(const device uint2*)(kp + d_off + 4 * c);
+                const uint2 vw = *(const device uint2*)(vp + d_off + 4 * c);
+                kv[4 * c] = as_type<float>(kw.x << 16);
+                kv[4 * c + 1] = as_type<float>(kw.x & 0xFFFF0000u);
+                kv[4 * c + 2] = as_type<float>(kw.y << 16);
+                kv[4 * c + 3] = as_type<float>(kw.y & 0xFFFF0000u);
+                vv[4 * c] = as_type<float>(vw.x << 16);
+                vv[4 * c + 1] = as_type<float>(vw.x & 0xFFFF0000u);
+                vv[4 * c + 2] = as_type<float>(vw.y << 16);
+                vv[4 * c + 3] = as_type<float>(vw.y & 0xFFFF0000u);
+            }
+        } else {
+            for (int i = 0; i < D4; ++i) {
+                kv[i] = float(kp[(d_off + i) * ks3]);
+                vv[i] = float(vp[(d_off + i) * vs3]);
+            }
         }
         const int d = a_row - key;
         const bool has_rel = d < R;
@@ -422,6 +463,27 @@ _DIRECT_SOURCE = r"""
 """
 
 MAX_ROWS = 32  # engaged for 1 <= L < MAX_ROWS
+# Sliding rings (RotatingKVCache, BatchRotatingKVCache) are read in place by
+# the kernels (``ring=``) instead of reordered into a chronological copy
+# first, which wrote and re-read the whole ring on every decode step once it
+# had wrapped (2026-11-22). Module switch for the A/B: False restores the copy.
+# Off until tests/test_inkling2_bitwise_io_metal.py has run bitwise on Metal
+# (bitwise by construction and on CPU stand-ins; the kernel has only passed an
+# offline compile). Turn on after the Metal run.
+RING_DIRECT = False
+# The L == 1 direct kernel loads each lane's K/V values with 8-byte vector
+# loads for BF16 when D / 32 is a multiple of 4 (D = 128: one uint2 per lane
+# per row, was four 2-byte loads), unit stride and 8-byte aligned rows; the
+# values and the arithmetic order are unchanged (2026-11-22). Module switch
+# for the A/B: False restores the scalar loads. Off until the Metal tests run
+# (same reason as RING_DIRECT).
+VECTOR_LOADS = False
+
+
+def direct_vector_loads(dtype, dim):
+    """The direct kernel's ``VEC`` template value for these K/V (the kernel
+    still checks strides and alignment and takes the scalar loads otherwise)."""
+    return int(VECTOR_LOADS and dtype == mx.bfloat16 and (dim // 32) % 4 == 0)
 _DIRECT_MAX_GROUP = 6
 _DIRECT_MIN_KEYS = 2048
 _kernels = {}
@@ -475,7 +537,26 @@ def _splits(n_keys, base_tgs, *, direct):
     return ns
 
 
-def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, scale):
+def _ring_args(k, ring):
+    """``(base, size, width)``: logical key j at physical row (j + base) % width."""
+    width = k.shape[2]
+    if ring is None:
+        return 0, width, width
+    base, size = int(ring[0]), int(ring[1])
+    if not (0 <= base < width and 0 < size <= width):
+        raise ValueError(f"ring {ring} does not fit a {width}-row buffer")
+    return base, size, width
+
+
+def ring_gather(a, ring):
+    """The chronological K/V a ring read sees: ``a``'s rows ``(j + base) % width``
+    for j < size (the reference for ``ring``; the kernel reads in place)."""
+    base, size, width = _ring_args(a, ring)
+    return mx.take(a, (mx.arange(size, dtype=mx.int32) + base) % width, axis=2)
+
+
+def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, scale,
+                         ring=None):
     """Short-block attention with Inkling's relative bias, window and sink.
 
     Same arguments as ``flash_relative_attention``: q [B, H, L, D]; k, v
@@ -483,9 +564,19 @@ def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, s
     distances below E; sinks [B, L, H]; queries at key positions
     ``offset + i``. Returns [B, H, L, D] in q's dtype. GPU only; check
     ``decline_reason`` first.
+
+    ``ring=(base, size)`` reads a ring buffer in place: k, v are the
+    physical [B, Hk, W, D] buffers and logical key j (0 <= j < size, in
+    chronological order) is row ``(j + base) % W``. Everything else (offset,
+    left padding, window, bias distances, splits) is in logical positions,
+    and the kernels walk the logical keys in the same order, so the result
+    is bitwise the result on ``ring_gather(k, ring)`` (the reordered copy).
     """
     b, hq, length, dim = q.shape
-    hkv, size = k.shape[1], k.shape[2]
+    hkv = k.shape[1]
+    ring_base, size, ring_width = _ring_args(k, ring)
+    if v.shape[2] != k.shape[2]:
+        raise ValueError("K and V buffers differ in rows")
     g = hq // hkv
     extent = rel.shape[-1]
     window = int(window)
@@ -515,11 +606,13 @@ def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, s
                          ["out_o", "out_m", "out_l"], _DIRECT_SOURCE)
         nsg = 4
         ns = _splits(n_keys, b * hkv, direct=True)
-        dims = mx.concatenate([mx.array([size, ns, offset], dtype=mx.int32), pad])
+        dims = mx.concatenate(
+            [mx.array([size, ns, offset, ring_base, ring_width], dtype=mx.int32), pad])
         po, pm, pl = direct(
             inputs=[q, k, v, rel, dims, sc],
             template=[("T", q.dtype), ("D", dim), ("HQ", hq), ("G", g), ("R", extent),
-                      ("WINDOW", window), ("NSG", nsg)],
+                      ("WINDOW", window), ("NSG", nsg),
+                      ("VEC", direct_vector_loads(k.dtype, dim))],
             grid=(ns * nsg * 32, hkv, b),
             threadgroup=(nsg * 32, 1, 1),
             output_shapes=[(b, hq, 1, ns, dim), (b, hq, 1, ns), (b, hq, 1, ns)],
@@ -533,7 +626,8 @@ def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, s
     nsg = min(4, max(1, (n_rows + 7) // 8))
     nqt = (n_rows + nsg * 8 - 1) // (nsg * 8)
     ns = _splits(n_keys, b * hkv * nqt, direct=False)
-    dims = mx.concatenate([mx.array([length, size, ns, offset], dtype=mx.int32), pad])
+    dims = mx.concatenate(
+        [mx.array([length, size, ns, offset, ring_base, ring_width], dtype=mx.int32), pad])
     template = [
         ("T", q.dtype), ("ST", mx.float32 if q.dtype == mx.float32 else mx.float16),
         ("OT", q.dtype if ns == 1 else mx.float32), ("D", dim), ("HQ", hq), ("G", g),
@@ -557,14 +651,19 @@ def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, s
     return merged(po, pm, pl, ns)
 
 
-def reference_attention(q, k, v, rel, sinks, *, offset, left_padding, window, scale):
+def reference_attention(q, k, v, rel, sinks, *, offset, left_padding, window, scale,
+                        ring=None):
     """The composed path's law, same arguments as ``gqa_splitk_attention``.
 
     A dense additive mask built exactly as ``banded_additive_mask`` builds it
     from bias rows (``rel`` = r @ rel_proj), a zero K/V sink column carrying
     each query's sink logit, and one SDPA: what ``Attention.__call__`` runs
     when the option is off (one mask chunk). Used by the tests and the A/B.
+    A ``ring`` is read as its reordered copy (``ring_gather``), which is what
+    the composed path attends to.
     """
+    if ring is not None:
+        k, v = ring_gather(k, ring), ring_gather(v, ring)
     b, h, length, d = q.shape
     size, extent = k.shape[2], rel.shape[-1]
     dtype = rel.dtype
