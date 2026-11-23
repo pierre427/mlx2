@@ -920,6 +920,52 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # ordinary one-token step, in that engine's permanent ordinary lane
     # (Pierre 2026-11-20: DFly2 by default and images on the same server).
     multimodal_plain_decode_routes = frozenset({"external_draft"})
+    # Residual writers for the experimental residual-ablation tooling
+    # (weight_space/residual_ablation.py; docs/research/heretic-hy4-flash-20261121).
+    # Each branch is written into all hc_mult streams as ``post_j * x`` (iHC,
+    # no stream-mixing matrix), so a direction removed from ``x`` leaves every
+    # stream's increment.  Both branches end in an RMSNorm: attention
+    # ``post_proj_norm(o_proj(.))``, MoE ``combine_output_norm(up(routed) +
+    # shared down(.))``, layer-0 MLP ``post_fc2_norm(down(.))``; the edit
+    # therefore projects ``normalize(gamma * v)`` from those linears.  The
+    # routed bank reaches the residual only through ``routed_expert_up_proj``
+    # (dense), so a MoE layer without it fails closed.  Captures average the
+    # four streams.  Engram (layers 1/11/21/31) and the DFly2 head are not
+    # edited.  Prompts render through the adapter (the template's own
+    # default reasons; mlx2 serves no_think).
+    residual_ablation = {
+        "writers": {"attention": ("self_attn",), "mlp": ("mlp",)},
+        "linears": {"attention": ("self_attn.o_proj",),
+                    "mlp": ("mlp.down_proj", "mlp.routed_expert_up_proj",
+                            "mlp.shared_experts.down_proj")},
+        "post_norms": {"self_attn.o_proj": "self_attn.post_proj_norm",
+                       "mlp.down_proj": "mlp.post_fc2_norm",
+                       "mlp.routed_expert_up_proj": "mlp.combine_output_norm",
+                       "mlp.shared_experts.down_proj": "mlp.combine_output_norm"},
+        "hook_point": "linears",
+        "capture": "stream_mean",
+        "requires": {"mlp.experts": ("mlp.routed_expert_up_proj",)},
+        "prompt_render": "adapter",
+        # Engram adds per-stream scaled value_proj output before layers
+        # 1/11/21/31; a rank-1 edit of the declared linears cannot remove it.
+        "unedited_writers": ("embed", "engram"),
+    }
+
+    @property
+    def residual_overlay_routes(self):
+        """Serving routes whose target forwards bind residual-ablation overlay rows.
+
+        ``external_draft`` (DFly2 / AST / prompt lookup): the engine binds each
+        target forward's lanes and ``hy_v4_flash_ast`` binds every chain wave,
+        so verify rows carry their own request's writer edit and committed
+        tokens equal ordinary decode under the same overlay.  Not with the
+        TensorFold row law (``ast_tensorfold_rows``), which replaces trunk
+        projections the overlay wraps.
+        """
+        routes = {"ordinary"}
+        if not (getattr(self, "external_policy", None) or {}).get("ast_tensorfold_rows"):
+            routes.add("external_draft")
+        return frozenset(routes)
 
     def __init__(self, model_path: str, *, execution_policy=None, weight_streaming=None):
         from .process_globals import guarded_construction

@@ -186,6 +186,8 @@ _PUBLIC_EXPORT_SKIP_MODULES = {
         "tests the current benchmark_results ladder script; the export carries an older frozen copy",
 }
 _PUBLIC_EXPORT_SKIP_TESTS = {
+    "test_residual_ablation_hy4_flash_cpu.py::test_runner_renders_through_the_adapter_and_batches_on_hy4":
+        "needs the current residual-ablation runner; the public tree keeps an older copy",
     "test_qualification_matrix.py::test_canonical_manifests_name_real_services_selected_arms_and_new_arms":
         "reads the private canonical qualification manifests",
     "test_server_subprocess_pythonpath.py::test_manifest_arms_declare_the_tree_they_import":

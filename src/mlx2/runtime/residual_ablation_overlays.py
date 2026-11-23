@@ -27,6 +27,7 @@ import json
 import threading
 import time
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 
 _ATTRIBUTE = "_mlx2_ablation_overlays"
@@ -46,6 +47,51 @@ class OverlayInUse(RuntimeError):
 
 def ablation_overlay_manager(model):
     return getattr(model, _ATTRIBUTE, None)
+
+
+@contextmanager
+def lane_rows(model, uids, *, packed=False):
+    """Bind a target forward's lanes (``uids`` in row order) for the call.
+
+    Batch geometry (``packed=False``): row ``i`` of every wrapped projection
+    belongs to ``uids[i]``.  ``packed=True`` (a target-tree provider that lays
+    several lanes or chains out itself): the lanes are recorded for
+    ``bind_lane_forward`` and no row table is published, so a provider that
+    does not bind its own forwards fails closed under ``strict_rows``.  The
+    previous binding is restored on exit (provider calls nest inside lane
+    scopes).  A no-op without an installed manager.
+    """
+    manager = ablation_overlay_manager(model)
+    if manager is None:
+        yield None
+        return
+    saved = manager.save_binding()
+    try:
+        manager.lane_uids = tuple(uids)
+        if packed and len(manager.lane_uids) > 1:
+            manager.clear_rows()
+        else:
+            manager.bind_rows(list(manager.lane_uids))
+        yield manager
+    finally:
+        manager.restore_binding(saved)
+
+
+@contextmanager
+def bind_lane_forward(model, lanes):
+    """Bind one provider forward whose row ``j`` belongs to lane index ``lanes[j]``
+    of the enclosing ``lane_rows`` scope.  Outside a scope it binds nothing
+    (base output; refused under ``strict_rows`` while an overlay is bound)."""
+    manager = ablation_overlay_manager(model)
+    if manager is None or manager.lane_uids is None:
+        yield
+        return
+    saved = manager.save_binding()
+    try:
+        manager.bind_rows([manager.lane_uids[int(lane)] for lane in lanes])
+        yield
+    finally:
+        manager.restore_binding(saved)
 
 
 def _wrapper_class():
@@ -69,6 +115,12 @@ def _wrapper_class():
             manager = self._manager
             rows = manager.rows
             if rows is None:
+                if manager.strict_rows and not manager.bound and manager.uid_overlays:
+                    # A forward nobody bound while overlay requests are live
+                    # (speculative routes): never serve an unprojected row.
+                    manager.counts["unbound_forward_refusals"] += 1
+                    raise RuntimeError("ablation overlay: a target forward ran without a lane row "
+                                       "binding while an overlay request is bound")
                 return out
             lam = rows["lam"][:, self._layer, self._component]
             if out.ndim < 2 or out.shape[0] != lam.shape[0]:
@@ -94,9 +146,9 @@ def _wrapper_class():
 class AblationOverlayManager:
     """Owns loaded overlays, pins, request bindings and per-forward row tables."""
 
-    def __init__(self, model, declaration, *, checkpoint, max_overlays=16):
+    def __init__(self, model, declaration, *, checkpoint, max_overlays=16, strict_rows=False):
         from mlx2.experimental.weight_space.residual_ablation import (
-            COMPONENTS, AblationDeclaration, resolve_linears,
+            COMPONENTS, AblationDeclaration, post_norm_gammas, resolve_linears,
         )
 
         if getattr(model, _ATTRIBUTE, None) is not None:
@@ -105,6 +157,8 @@ class AblationOverlayManager:
             raise ValueError("ablation overlays are incompatible with varlen MLP compaction")
         declared = declaration if isinstance(declaration, AblationDeclaration) else AblationDeclaration(**declaration)
         self.model, self.checkpoint = model, checkpoint
+        # Residual writes the wrapped projections never touch (receipts say so).
+        self.unedited_writers = list(declared.unedited_writers)
         self.components = COMPONENTS
         self.lock = threading.RLock()
         self.max_overlays = int(max_overlays)
@@ -113,6 +167,11 @@ class AblationOverlayManager:
         self.pins, self.transient = Counter(), {}  # transient: id -> outstanding temporary loads
         self.applications, self.counts = Counter(), Counter()
         self.rows, self._row_cache = None, {}
+        # ``bound``: a forward's lanes are bound (rows may still be None when
+        # none of them carries an overlay).  ``lane_uids``: the enclosing
+        # ``lane_rows`` scope.  ``strict_rows`` (speculative routes): a wrapped
+        # projection running unbound while an overlay request is bound raises.
+        self.bound, self.lane_uids, self.strict_rows = False, None, bool(strict_rows)
         linears = resolve_linears(model, declared)
         # Validate everything before wrapping anything: no partial install.
         self.hidden = None
@@ -126,6 +185,12 @@ class AblationOverlayManager:
             elif self.hidden != out_dims:
                 raise ValueError("declared output projections disagree on the residual width")
         self.layer_count = 1 + max(layer for layer, *_ in linears)
+        # Post-normed writers (declaration ``post_norms``): each (layer,
+        # component) projects ``normalize(gamma * v)`` so the normed branch
+        # loses ``v``; read once from the served weights, before wrapping.
+        self.gammas = post_norm_gammas(model, declared)
+        if self.gammas and len(self.gammas) != len({(layer, c) for layer, c, *_ in linears}):
+            raise ValueError("post-norm gains do not cover every declared writer")
         wrapper = _wrapper_class()
         self.originals = []
         for layer, component, _path, parent, attr, module in linears:
@@ -156,13 +221,14 @@ class AblationOverlayManager:
                                         layer_count=self.layer_count, checkpoint=self.checkpoint)
         if overlay.vectors.shape[-1] != self.hidden:
             raise ValueError("overlay width differs from the model's residual width")
+        vectors = self._writer_vectors(overlay)
         with self.lock:
             identity = overlay.overlay_id
             if identity not in self.overlays:
                 if len(self.overlays) >= self.max_overlays:
                     raise ValueError("ablation overlay registry is full")
                 self.overlays[identity] = overlay
-                self.tables[identity] = (mx.array(overlay.lam), mx.array(overlay.vectors))
+                self.tables[identity] = (mx.array(overlay.lam), mx.array(vectors))
                 self.loaded_at[identity] = time.time()
                 self._row_cache.clear()
                 self.counts["loaded"] += 1
@@ -175,6 +241,20 @@ class AblationOverlayManager:
             else:
                 self.transient.pop(identity, None)  # promoted to persistent
         return self.describe(identity)
+
+    def _writer_vectors(self, overlay):
+        """Residual directions -> the per-writer directions the wrappers project."""
+        if not self.gammas:
+            return overlay.vectors
+        import numpy as np
+
+        from mlx2.experimental.weight_space.residual_ablation import writer_direction
+
+        vectors = np.array(overlay.vectors, copy=True)
+        for layer, component in zip(*np.nonzero(overlay.lam)):
+            gamma = self.gammas[(int(layer), self.components[int(component)])]
+            vectors[layer, component] = writer_direction(vectors[layer, component], gamma)
+        return vectors
 
     def load(self, path):
         """Load ``<path>/overlay.json``."""
@@ -269,6 +349,7 @@ class AblationOverlayManager:
         import mlx.core as mx
 
         self.clear_rows()
+        self.bound = True
         with self.lock:
             ids = tuple(self.uid_overlays.get(uid) for uid in uids)
             if not any(ids):
@@ -292,6 +373,13 @@ class AblationOverlayManager:
 
     def clear_rows(self):
         self.rows = None
+        self.bound = False
+
+    def save_binding(self):
+        return (self.rows, self.bound, self.lane_uids)
+
+    def restore_binding(self, state):
+        self.rows, self.bound, self.lane_uids = state
 
     # -- receipts -----------------------------------------------------------
 
@@ -305,10 +393,12 @@ class AblationOverlayManager:
             executions = int(self.applications.get(uid, 0))
             return {"id": overlay_id, "label": overlay.label, "edits": overlay.edits,
                     "fingerprint": overlay.fingerprint, "row_normalization": "none",
-                    "applied": executions > 0, "qualified": False,
+                    "applied": executions > 0, "observed_used": executions > 0, "qualified": False,
                     "lane_width": int(self.uid_width.get(uid, 0)), "per_row": True,
                     "projection_executions": executions, "ad_hoc": overlay_id in self.transient,
                     **({"branch_id": self.uid_branch[uid]} if uid in self.uid_branch else {}),
+                    "direction_space": "post_norm_writer" if self.gammas else "residual",
+                    "unedited_writers": list(self.unedited_writers),
                     "apc_publication": "suppressed_unqualified", "schema": SCHEMA}
 
     def status(self):
@@ -316,7 +406,9 @@ class AblationOverlayManager:
             return {"implemented": True, "qualified": False, "schema": SCHEMA,
                     "checkpoint": self.checkpoint, "overlays": self.list(),
                     "bound_requests": len(self.uid_overlays), "pinned": sum(self.pins.values()),
-                    "counts": dict(self.counts), "per_row": True}
+                    "counts": dict(self.counts), "per_row": True, "strict_rows": self.strict_rows,
+                    "direction_space": "post_norm_writer" if self.gammas else "residual",
+                    "unedited_writers": list(self.unedited_writers)}
 
     def restore(self):
         with self.lock:

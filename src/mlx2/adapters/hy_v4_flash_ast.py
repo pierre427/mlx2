@@ -186,16 +186,27 @@ def _row_caches(caches):
     return rows
 
 
-def _wave_forward(model, jobs, layers, joint):
+def _wave_forward(model, jobs, layers, joint, lanes=None):
     """Run one wave's chains; ``jobs`` are ``(tokens, private caches)``.
+
+    ``lanes`` names each job's lane index (cohort order).  Every forward binds
+    its rows to those lanes for residual-ablation overlays
+    (``bind_lane_forward``: row ``j`` of a joint wave is job ``j``), so each
+    chain runs with its own request's per-row writer edit and rows of lanes
+    without an overlay stay base-exact.
 
     Returns ``([(logits [1, L, V], features [1, L, D])], packed)``.
     """
     from ..runtime.models.hy_v4_flash import HY4FlashBatchLayerCache
+    from ..runtime.residual_ablation_overlays import bind_lane_forward
 
+    lanes = [0] * len(jobs) if lanes is None else list(lanes)
     if len(jobs) == 1 or not joint:
-        return [model.forward_with_taps(mx.array([tokens], dtype=mx.uint32), private, layers)
-                for tokens, private in jobs], False
+        out = []
+        for (tokens, private), lane in zip(jobs, lanes, strict=True):
+            with bind_lane_forward(model, [lane]):
+                out.append(model.forward_with_taps(mx.array([tokens], dtype=mx.uint32), private, layers))
+        return out, False
     lengths = [len(tokens) for tokens, _ in jobs]
     width = max(lengths)
     # Padding repeats the row's last real token; padded positions are never
@@ -207,7 +218,8 @@ def _wave_forward(model, jobs, layers, joint):
         cache = HY4FlashBatchLayerCache([lane[layer] for lane in rows])
         cache.prepare(lengths=lengths, right_padding=[width - n for n in lengths])
         batch.append(cache)
-    logits, features = model.forward_with_taps(mx.array(padded, dtype=mx.uint32), batch, layers)
+    with bind_lane_forward(model, lanes):
+        logits, features = model.forward_with_taps(mx.array(padded, dtype=mx.uint32), batch, layers)
     for cache in batch:
         cache.finalize()
     return [(logits[j : j + 1, :n], features[j : j + 1, :n]) for j, n in enumerate(lengths)], True
@@ -272,7 +284,8 @@ def cohort_forward(model, tokens, parents, lives, layers, token, *, joint=True):
                         cache.trim(length - 1 - index)
                 jobs.append(([int(tokens[lane][n]) for n in nodes], private))
                 owners.append((lane, number, nodes))
-        results, packed = _wave_forward(model, jobs, layers, joint)
+        results, packed = _wave_forward(model, jobs, layers, joint,
+                                        [lane for lane, _, _ in owners])
         stats["waves"] += 1
         stats["chain_forwards"] += 1 if packed else len(jobs)
         if packed:

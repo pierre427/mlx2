@@ -245,16 +245,31 @@ _PREFILL_KV_CACHE_NAMES = frozenset({
 })
 
 
-def _amoeba_rows(owner, lanes, widths=None):
-    """Bind amoeba router open sets to a target forward's rows: ``lanes`` (objects with ``uid``)
-    in row order, or packed ``widths``. Looks up the router on ``owner.model`` first; without one
-    (every route without router tiles) it is a no-op that reads neither the model nor the lanes."""
-    router = getattr(getattr(owner, "model", None), "_mlx2_amoeba_rows", None)
-    if router is None:
-        return contextlib.nullcontext()
-    from .amoeba_tiles import amoeba_rows
+def _amoeba_rows(owner, lanes, widths=None, *, provider=False):
+    """Bind per-row request state to a target forward's rows: ``lanes`` (objects with ``uid``)
+    in row order, or packed ``widths``.
 
-    return amoeba_rows(owner.model, [lane.uid for lane in lanes], None if widths is None else widths())
+    Two independent row owners use this seam: amoeba router open sets, and residual-ablation
+    overlays (``runtime/residual_ablation_overlays.lane_rows``).  ``widths`` (or ``provider``)
+    marks a target-tree provider call that lays lanes out itself: the overlay scope then only
+    records the lanes and the provider binds each of its forwards.  Without either owner on
+    ``owner.model`` it is a no-op that reads neither the model nor the lanes."""
+    model = getattr(owner, "model", None)
+    router = getattr(model, "_mlx2_amoeba_rows", None)
+    ablation = getattr(model, "_mlx2_ablation_overlays", None)
+    if router is None and ablation is None:
+        return contextlib.nullcontext()
+    stack = contextlib.ExitStack()
+    uids = [lane.uid for lane in lanes]
+    if router is not None:
+        from .amoeba_tiles import amoeba_rows
+
+        stack.enter_context(amoeba_rows(model, uids, None if widths is None else widths()))
+    if ablation is not None:
+        from .residual_ablation_overlays import lane_rows
+
+        stack.enter_context(lane_rows(model, uids, packed=provider or widths is not None))
+    return stack
 
 
 def _prefill_target_reservation(caches):
@@ -8269,7 +8284,7 @@ class ExternalDraftBatchGenerator:
         if self.target_execution == "reference":
             return self._reference_tree_forward(lane, inputs, parents)
         cached = self.tree_gates["cache_executor"]
-        with _amoeba_rows(self, [lane]):
+        with _amoeba_rows(self, [lane], provider=True):
             result = self.target_tree_executor_provider.forward(
                 self.model,
                 inputs,
@@ -8338,7 +8353,7 @@ class ExternalDraftBatchGenerator:
         # AST admission already binds this immutable provider and its validated
         # module set. Legacy ordinary-tree experiment gates do not govern it.
         cached = True
-        with _amoeba_rows(self, [lane]):
+        with _amoeba_rows(self, [lane], provider=True):
             result = provider.forward(
                 self.model,
                 inputs,
@@ -11517,9 +11532,14 @@ class ExternalDraftBatchGenerator:
             else:
                 inputs = self.mx.array([[int(a)] for a in anchors], dtype=self.mx.int32)
             if provider is not None:
-                logits, features, transaction = provider.forward_plain_anchors(
-                    self.model, inputs, [lane.cache for lane in cohort], self.layers
-                )
+                # Overlay lanes only (not amoeba rows, which this site never bound): the
+                # provider binds each of its own forwards.
+                from .residual_ablation_overlays import lane_rows
+
+                with lane_rows(self.model, [lane.uid for lane in cohort], packed=True):
+                    logits, features, transaction = provider.forward_plain_anchors(
+                        self.model, inputs, [lane.cache for lane in cohort], self.layers
+                    )
                 _bump(self.scheduler_stats, "external_plain_anchor_provider_rounds")
             else:
                 logits, features = self._cohort_target_forward(

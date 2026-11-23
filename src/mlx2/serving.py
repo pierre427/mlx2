@@ -9188,6 +9188,19 @@ class ServingEngine(KernelReloadMixin):
             **receipt, "adapter_delta_applications": applications,
         }
 
+    def _serving_route_is_external_draft(self):
+        """Whether the loaded generation route is the external-draft engine.
+
+        ``_load`` records the resolved backend under
+        ``settings["execution_policy"]["backend"]`` and the route under
+        ``settings["route"]`` / ``settings["speculation"]``; there is no
+        top-level ``settings["backend"]`` (a check on that key never fired).
+        """
+        settings = (getattr(self, "snapshot", None) or {}).get("settings") or {}
+        policy = settings.get("execution_policy") or {}
+        return "external_draft" in (policy.get("backend"), settings.get("route"),
+                                    settings.get("speculation"), settings.get("backend"))
+
     def _lora_base_checkpoint(self):
         fingerprint = getattr(self.adapter, "identity", {}).get("fingerprint")
         if not fingerprint:
@@ -9208,7 +9221,7 @@ class ServingEngine(KernelReloadMixin):
             varlen_mlp=any(getattr(self.adapter.model, key, None) is not None
                           for key in ("_varlen_dense_mlp", "_varlen_sparse_moe")),
         )
-        if self.snapshot.get("settings", {}).get("backend") == "external_draft":
+        if self._serving_route_is_external_draft():
             raise ValueError("weight programs require the ordinary route")
 
     def configure_weight_overlays(self, bank=None, *, max_materialized_bytes=64 * 1024**2):
@@ -9234,9 +9247,13 @@ class ServingEngine(KernelReloadMixin):
     def configure_ablation_overlays(self, directory=None, *, max_overlays=16):
         """Install per-row residual-ablation overlay wrappers (experimental).
 
-        Requires the ordinary route: prompt lookup, MTP, external draft and
-        concurrent multi-LoRA bypass or rebind the wrapped projections, and
-        memory preemption re-admits requests under new UIDs.  Every overlay in
+        Requires the ordinary route, or the external-draft route when the
+        adapter lists it in ``residual_overlay_routes`` (its engine seam and
+        tree provider bind every target forward's rows; the manager then runs
+        with ``strict_rows`` so an unbound forward raises).  Engine prompt
+        lookup, MTP and concurrent multi-LoRA bypass or rebind the wrapped
+        projections, and memory preemption re-admits requests under new
+        UIDs.  Every overlay in
         ``directory`` (subdirectories with overlay.json) is loaded and bound to
         this checkpoint; any failure restores the model and raises (the server
         reports it through /v1/overlays).
@@ -9245,14 +9262,22 @@ class ServingEngine(KernelReloadMixin):
 
         with self._weight_space_control_section():
             self._check_weight_space_kernel_compatibility("weight_surgery")
+            # The external-draft route is admitted only for an adapter that
+            # declares it (``residual_overlay_routes``): its engine and tree
+            # provider bind every target forward's rows, so verify rows carry
+            # the request's edit.  Undeclared adapters keep the refusal.
+            external = self._serving_route_is_external_draft()
+            routes = getattr(self.adapter, "residual_overlay_routes", frozenset({"ordinary"}))
             if (self.mtp or self.prompt_lookup or self.multi_lora_policy is not None
                     or self.lora_session is not None or self.spomin_policy.enabled
                     or self.cache_capsule_policy["enabled"]
                     or self.memory_preemption_policy["enabled"]
-                    or self.snapshot.get("settings", {}).get("backend") == "external_draft"):
-                raise ValueError("ablation overlays require the --ordinary route without prompt "
-                                 "lookup, MTP, external draft, multi-LoRA, Spomin, cache capsules "
-                                 "or memory preemption")
+                    or (external and "external_draft" not in routes)
+                    or not (self.snapshot.get("settings") or {}).get("route")):
+                raise ValueError("ablation overlays require the --ordinary route (or an "
+                                 "external-draft route the adapter declares) without prompt "
+                                 "lookup, MTP, multi-LoRA, Spomin, cache capsules or memory "
+                                 "preemption")
             if self._weight_surgery_installed() or getattr(self, "ablation_overlays", None) is not None:
                 raise ValueError("a weight surgery manager is already configured")
 
@@ -9260,9 +9285,11 @@ class ServingEngine(KernelReloadMixin):
                 declared = getattr(adapter, "residual_ablation", None)
                 if declared is None:
                     raise ValueError(f"{type(adapter).__name__} declares no residual-ablation writers")
+                # Speculative routes: an unbound target forward while an
+                # overlay request is live raises instead of serving base rows.
                 manager = AblationOverlayManager(adapter.model, declared,
                                                  checkpoint=self._lora_base_checkpoint(),
-                                                 max_overlays=max_overlays)
+                                                 max_overlays=max_overlays, strict_rows=external)
                 try:
                     if directory is not None:
                         for path in sorted(Path(directory).iterdir()):
@@ -9289,7 +9316,7 @@ class ServingEngine(KernelReloadMixin):
                 or self.int8_prefill_policy.enabled or self.approximate_kv_policy.enabled
                 or self.memory_preemption_policy["enabled"]
                 or self.cache_capsule_policy["enabled"]
-                or self.snapshot.get("settings", {}).get("backend") == "external_draft"):
+                or self._serving_route_is_external_draft()):
             raise ValueError("weight overlays require ordinary width-one serving without other weight/state routes")
 
     def configure_layer_excision(self, *, max_healing_bytes=64 * 1024**2):

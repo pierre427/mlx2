@@ -41,6 +41,20 @@ from .heretic import LayerProfile, estimate_direction
 
 COMPONENTS = ("attention", "mlp")
 ROW_NORMALIZATIONS = ("none", "full")
+# Where search hooks project: on the writer module's call output (the branch
+# added to the residual) or on the declared output linears.  The two agree
+# when the linears' summed output IS the branch; a writer that ends in a norm
+# (``post_norms``) must hook the linears so hooks equal the weight edit.
+HOOK_POINTS = ("writers", "linears")
+# How a decoder layer's output becomes one capture row ``[batch, hidden]``:
+# ``layer_output`` takes ``out[:, -1, :]``; ``stream_mean`` averages the
+# residual streams of an ``[batch, seq, streams, hidden]`` output (multi-stream
+# hyper-connection trunks) at the last position.
+CAPTURES = ("layer_output", "stream_mean")
+# Prompt rendering for the tooling: the tokenizer's chat template with
+# ``enable_thinking=False``, or the adapter's own ``prompt_tokens`` (its
+# serving default), for templates whose no-flag default reasons.
+PROMPT_RENDERS = ("template", "adapter")
 
 
 # ---------------------------------------------------------------- declaration
@@ -65,12 +79,46 @@ class AblationDeclaration:
     # Anchored on the decoder trunk ("model.layers.N." / "language_model.model.layers.N."),
     # so MTP heads ("mtp.layers.N.") or vision towers never match.
     layer_key: str = r"(?:^|\.)(?:model|language_model)\.layers\.(\d+)\."
+    # ``{linear path: norm path}``: the writer's summed linear output passes
+    # through this RMS-style norm (``gamma * y / rms(y)``) before it reaches
+    # the residual.  The edit then uses ``u = normalize(gamma * v)`` for that
+    # linear, so at ``lam = 1`` the normed output has no ``v`` component
+    # (``v . (gamma * y') = (gamma * v) . y' = 0``); see ``writer_direction``.
+    # Every linear of one (layer, component) must name the same norm.
+    post_norms: dict | None = None
+    hook_point: str = "writers"
+    capture: str = "layer_output"
+    # ``{present path: (required paths...)}`` checked per layer: a module that
+    # writes the residual through the required linears only (e.g. a routed
+    # expert bank behind a dense up-projection) must not appear without them,
+    # or an undeclared writer would escape the edit.
+    requires: dict | None = None
+    prompt_render: str = "template"
+    # Residual writes no declared linear carries (the token embedding always;
+    # e.g. Engram memories), named in overlay receipts, status and bake
+    # records so nobody reads an edit as covering the whole residual.
+    unedited_writers: tuple = ("embed",)
 
     def __post_init__(self):
         if set(self.writers) != set(COMPONENTS) or set(self.linears) != set(COMPONENTS):
             raise ValueError("declaration must cover exactly the attention and mlp components")
         if self.checkpoint_linears is not None and set(self.checkpoint_linears) != set(COMPONENTS):
             raise ValueError("checkpoint_linears must cover exactly the attention and mlp components")
+        if self.hook_point not in HOOK_POINTS:
+            raise ValueError(f"hook_point must be one of {HOOK_POINTS}")
+        if self.capture not in CAPTURES:
+            raise ValueError(f"capture must be one of {CAPTURES}")
+        if self.prompt_render not in PROMPT_RENDERS:
+            raise ValueError(f"prompt_render must be one of {PROMPT_RENDERS}")
+        if self.post_norms is not None:
+            declared = {path for component in COMPONENTS for path in self.linears[component]}
+            if set(self.post_norms) != declared:
+                raise ValueError("post_norms must name a norm for every declared output linear")
+            if self.hook_point != "linears":
+                raise ValueError("post-normed writers need hook_point 'linears' (a writer-output "
+                                 "projection is not a weight edit through a norm)")
+            if self.checkpoint_linears is not None and self.checkpoint_linears != self.linears:
+                raise ValueError("post_norms require checkpoint and module linear names to agree")
 
     def checkpoint_paths(self, component):
         return (self.checkpoint_linears or self.linears)[component]
@@ -123,6 +171,13 @@ def resolve_linears(model, declaration):
     """Return ``[(layer, component, relative_path, parent, attr, module)]``."""
     found = []
     for index, layer in enumerate(_layers(model)):
+        for present, required in (declaration.requires or {}).items():
+            if _get_path(layer, present)[2] is None:
+                continue
+            missing = [path for path in required if _get_path(layer, path)[2] is None]
+            if missing:
+                raise ValueError(f"layer {index} has {present} without {missing}: its residual "
+                                 "write would bypass the declared output projections")
         for component in COMPONENTS:
             hits = 0
             for path in declaration.linears[component]:
@@ -133,6 +188,45 @@ def resolve_linears(model, declaration):
             if not hits:
                 raise ValueError(f"layer {index} has no declared {component} output projection")
     return found
+
+
+def post_norm_gammas(model, declaration):
+    """``{(layer, component): float32 gamma}`` of declared post-norms ({} without them)."""
+    if not declaration.post_norms:
+        return {}
+    mx = _mx()
+    layers = _layers(model)
+    found = {}
+    for index, component, path, *_rest in resolve_linears(model, declaration):
+        norm_path = declaration.post_norms[path]
+        _parent, _attr, norm = _get_path(layers[index], norm_path)
+        if norm is None or "weight" not in norm:
+            raise ValueError(f"layer {index} {path} names a missing post-norm {norm_path}")
+        previous = found.get((index, component))
+        if previous is not None and previous[0] != norm_path:
+            raise ValueError(f"layer {index} {component} writers name different post-norms "
+                             f"({previous[0]}, {norm_path})")
+        weight = norm["weight"].astype(mx.float32)
+        mx.eval(weight)
+        found[(index, component)] = (norm_path, np.asarray(weight))
+    return {key: gamma for key, (_path, gamma) in found.items()}
+
+
+def writer_direction(v, gamma=None):
+    """The direction a post-normed writer's linears project out: ``normalize(gamma * v)``.
+
+    ``RMSNorm(y) = gamma * y / rms(y)``, so ``v . RMSNorm(y') = (gamma * v) . y' / rms(y')``.
+    With ``y' = (I - lam u u^T) y`` and ``u = normalize(gamma * v)`` the written
+    branch keeps ``(1 - lam) * rms(y) / rms(y')`` of its ``v`` component: none
+    at ``lam = 1``.  ``gamma is None`` (no post-norm) returns ``v`` unchanged.
+    """
+    if gamma is None:
+        return np.asarray(v, dtype=np.float32)
+    u = np.asarray(gamma, dtype=np.float64) * np.asarray(v, dtype=np.float64)
+    norm = float(np.linalg.norm(u))
+    if not math.isfinite(norm) or norm <= 1e-12:
+        raise ValueError("the post-norm gain cancels the ablation direction")
+    return (u / norm).astype(np.float32)
 
 
 # ------------------------------------------------------------- class patching
@@ -184,15 +278,30 @@ def _hooked(pairs):
 
 
 class LayerOutputCapture:
-    """Record every decoder layer's last-position output (float32)."""
+    """Record every decoder layer's last-position output (float32).
 
-    def __init__(self, model):
+    ``reduce`` is the declaration's ``capture``.  ``stream_mean`` takes a
+    ``[batch, seq, streams, hidden]`` multi-stream output, keeps the
+    last-position streams (``take_streams``) and returns their mean from
+    ``take``.  A ``layer_output`` capture refuses any output that is not
+    ``[batch, seq, hidden]`` rather than stacking a wrong geometry.
+    """
+
+    def __init__(self, model, reduce="layer_output"):
+        if reduce not in CAPTURES:
+            raise ValueError(f"capture must be one of {CAPTURES}")
         self.layers = _layers(model)
+        self.reduce = reduce
         self.rows = [None] * len(self.layers)
+        self.streams = None
 
     def _hook(self, index):
         def hook(out):
-            self.rows[index] = out[:, -1, :].astype(_mx().float32)
+            expected = 4 if self.reduce == "stream_mean" else 3
+            if out.ndim != expected:
+                raise ValueError(f"{self.reduce} capture expects a rank-{expected} layer output, "
+                                 f"got shape {tuple(out.shape)}")
+            self.rows[index] = out[:, -1].astype(_mx().float32)
             return out
         return hook
 
@@ -205,10 +314,22 @@ class LayerOutputCapture:
         mx = _mx()
         if any(row is None for row in self.rows):
             raise RuntimeError("a decoder layer did not run during capture")
-        stacked = mx.stack(self.rows, axis=1)  # [batch, layers, hidden]
-        mx.eval(stacked)
+        stacked = mx.stack(self.rows, axis=1)  # [batch, layers, (streams,) hidden]
         self.rows = [None] * len(self.layers)
+        if self.reduce == "stream_mean":
+            self.streams = stacked
+            stacked = mx.mean(stacked, axis=2)
+            mx.eval(stacked, self.streams)
+        else:
+            mx.eval(stacked)
         return np.asarray(stacked)
+
+    def take_streams(self):
+        """Per-stream rows ``[batch, layers, streams, hidden]`` of the last ``take``."""
+        if self.streams is None:
+            raise RuntimeError("no multi-stream capture was taken")
+        streams, self.streams = self.streams, None
+        return np.asarray(streams)
 
 
 def _mx():
@@ -332,10 +453,37 @@ class AblationParameters:
 
 
 class ProjectionHooks:
-    """Exact output-space projection ``y - lam * v (v . y)`` on residual writers."""
+    """Exact output-space projection ``y - lam * v (v . y)`` on residual writers.
+
+    ``hook_point == "linears"`` hooks every declared output linear of the
+    edited (layer, component) instead, with the post-norm writer direction
+    (``writer_direction``): the hook then equals the ``none`` weight edit
+    linear by linear, through any norm that follows the writer.
+    """
 
     def __init__(self, model, declaration):
-        self.writers = resolve_writers(model, declaration)
+        self.writers = self.targets = None
+        self.gammas = {}
+        if declaration.hook_point == "linears":
+            self.targets = {}
+            for index, component, _path, _parent, _attr, module in resolve_linears(model, declaration):
+                self.targets.setdefault((index, component), []).append(module)
+            self.gammas = post_norm_gammas(model, declaration)
+        else:
+            self.writers = resolve_writers(model, declaration)
+
+    def pairs(self, edits):
+        if self.writers is not None:
+            return [(self.writers[layer][component], self._hook(lam, v))
+                    for layer, component, lam, v in edits]
+        out = []
+        for layer, component, lam, v in edits:
+            modules = self.targets.get((layer, component))
+            if not modules:
+                raise ValueError(f"layer {layer} has no {component} output projection to hook")
+            u = writer_direction(v, self.gammas.get((layer, component)))
+            out += [(module, self._hook(lam, u)) for module in modules]
+        return out
 
     @staticmethod
     def _hook(lam, v):
@@ -351,9 +499,7 @@ class ProjectionHooks:
 
     @contextmanager
     def active(self, edits):
-        pairs = [(self.writers[layer][component], self._hook(lam, v))
-                 for layer, component, lam, v in edits]
-        with _hooked(pairs):
+        with _hooked(self.pairs(edits)):
             yield
 
 
@@ -410,25 +556,57 @@ def dense_weight(module):
 
 
 @contextmanager
-def materialize(model, declaration, edits, row_normalization):
+def materialize(model, declaration, edits, row_normalization, *, requantize=False, receipts=None):
     """Swap edited output projections in as dense bf16 modules; restore after.
 
     The original module objects are kept and put back, so the loaded model
     returns to its exact original state on exit (verified by callers).
+
+    ``requantize=True`` stores each edited quantized projection the way
+    ``bake_checkpoint(edited_precision="requant")`` does (bf16 edit, then the
+    module's own bits/group size/mode), so an A/B arm scores what the bake
+    will serve.  Rank-two projections only (stacked banks raise).
+    ``receipts`` (a list) collects per-projection ``edit_rms`` and
+    ``requant_rms``.
     """
     import mlx.core as mx
-    import mlx.nn as nn
+    from mlx import nn
 
     by_layer = {(layer, component): (lam, v) for layer, component, lam, v in edits}
+    gammas = post_norm_gammas(model, declaration)
     swaps = []
     try:
         for layer, component, path, parent, attr, module in resolve_linears(model, declaration):
             if (layer, component) not in by_layer:
                 continue
             lam, v = by_layer[(layer, component)]
-            weight = edit_weight(dense_weight(module), v, lam, row_normalization)
-            dtype = mx.bfloat16 if "scales" in module else module["weight"].dtype
+            v = writer_direction(v, gammas.get((layer, component)))
+            original = dense_weight(module)
+            weight = edit_weight(original, v, lam, row_normalization)
+            quantized = "scales" in module
+            dtype = mx.bfloat16 if quantized else module["weight"].dtype
             replacement = _dense_like(module, mx.array(weight).astype(dtype), nn)
+            stored = replacement["weight"]
+            if requantize and quantized:
+                if weight.ndim != 2:
+                    raise ValueError("requantized materialize supports rank-two projections only")
+                params = _quant_params(module)
+                # Same law as the bake: the edit in the scales' dtype, then
+                # the module's own quantization parameters.
+                source = _dense_like(module, mx.array(weight).astype(module["scales"].dtype), nn)
+                replacement = nn.QuantizedLinear.from_linear(
+                    source, group_size=params.get("group_size"), bits=params.get("bits"),
+                    mode=params.get("mode", "affine"))
+                stored = mx.dequantize(replacement["weight"], replacement["scales"],
+                                       replacement.get("biases"), **params)
+            if receipts is not None:
+                edited = mx.array(weight)
+                receipts.append({
+                    "layer": layer, "component": component, "path": path, "lam": lam,
+                    "stored": "requant" if requantize and quantized else str(dtype),
+                    "edit_rms": float(mx.sqrt(mx.mean(mx.square(edited - mx.array(original)))).item()),
+                    "requant_rms": float(mx.sqrt(mx.mean(mx.square(stored.astype(mx.float32) - edited))).item()),
+                })
             swaps.append((parent, attr, module))
             parent[attr] = replacement
         yield len(swaps)
@@ -460,6 +638,22 @@ def _dense_like(module, weight, nn):
 
 
 # -------------------------------------------------------------------- baking
+
+
+def _link_or_copy(src, dst):
+    """Hardlink ``src`` to ``dst`` (byte copy when the filesystem refuses)."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dst)
+        return "hardlink"
+    except OSError:
+        shutil.copyfile(src, dst)
+        return "copy"
+
+
+# Files a bake rewrites in the destination: never hardlinked, so editing the
+# destination copy can never write through to the source inode.
+_BAKE_REWRITTEN = ("config.json", "model.safetensors.index.json")
 
 
 def _sha256(path, chunk=1 << 24):
@@ -499,6 +693,48 @@ def _target_keys(index_keys, declaration):
     return out
 
 
+_SAFETENSORS_DTYPES = {"F32": np.float32, "F16": np.float16, "BF16": np.uint16}
+
+
+def read_safetensor(path, key):
+    """One float tensor of a ``.safetensors`` file as float32 (header + one slice read)."""
+    with open(path, "rb") as handle:
+        size = int.from_bytes(handle.read(8), "little")
+        header = json.loads(handle.read(size))
+        entry = header.get(key)
+        if entry is None:
+            raise KeyError(f"{key} is not in {path}")
+        dtype = _SAFETENSORS_DTYPES.get(entry["dtype"])
+        if dtype is None:
+            raise ValueError(f"{key}: unsupported safetensors dtype {entry['dtype']}")
+        start, end = entry["data_offsets"]
+        handle.seek(8 + size + start)
+        raw = np.frombuffer(handle.read(end - start), dtype=dtype).reshape(entry["shape"])
+    if entry["dtype"] == "BF16":
+        return (raw.astype(np.uint32) << 16).view(np.float32)
+    return raw.astype(np.float32)
+
+
+def _checkpoint_post_norms(source, index, targets, declaration):
+    """``{(layer, component): (norm key, gamma)}`` read from the source checkpoint."""
+    if not declaration.post_norms:
+        return {}
+    found = {}
+    for layer, component, prefix in targets.values():
+        stem = prefix[:prefix.rfind(f"layers.{layer}.")] + f"layers.{layer}."
+        rest = prefix[len(stem):]
+        norm_key = stem + declaration.post_norms[rest] + ".weight"
+        previous = found.get((layer, component))
+        if previous is not None:
+            if previous[0] != norm_key:
+                raise ValueError(f"layer {layer} {component} writers name different post-norms")
+            continue
+        if norm_key not in index:
+            raise ValueError(f"checkpoint has no post-norm {norm_key} for {prefix}")
+        found[(layer, component)] = (norm_key, read_safetensor((source / index[norm_key]).resolve(), norm_key))
+    return found
+
+
 EDITED_PRECISIONS = ("requant", "bf16", "dense-bf16")
 
 
@@ -532,6 +768,12 @@ def bake_checkpoint(source, destination, declaration, edits, row_normalization, 
     index = json.loads((source / "model.safetensors.index.json").read_text())["weight_map"]
     targets = _target_keys(index, declaration)
     wanted = {(layer, component): (lam, v) for layer, component, lam, v in edits}
+    # Post-normed writers: the edit direction depends on the norm gain, read
+    # from the source checkpoint itself (not from any loaded model).
+    norms = _checkpoint_post_norms(source, index, {k: s for k, s in targets.items() if s[:2] in wanted},
+                                   declaration)
+    wanted = {slot: (lam, writer_direction(v, norms[slot][1]) if slot in norms else v)
+              for slot, (lam, v) in wanted.items()}
     staging = destination.with_name(destination.name + ".partial")
     if staging.exists():
         raise FileExistsError(f"refusing leftover staging directory {staging}")
@@ -542,12 +784,20 @@ def bake_checkpoint(source, destination, declaration, edits, row_normalization, 
     for key, spec in targets.items():
         if spec[:2] in wanted:
             by_shard.setdefault(index[key], []).append((key, spec))
-    for name in sorted({p for p in before}):
+    # Only shards holding edited tensors are rewritten; every other file is
+    # hardlinked (expert, Engram, drafter and vision shards of a large pack
+    # cost no disk), except the metadata files the bake edits.
+    methods = {}
+    for name in sorted(before):
         src = source / name
         if name in by_shard:
             continue
-        (staging / name).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src.resolve(), staging / name)
+        if name in _BAKE_REWRITTEN:
+            (staging / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src.resolve(), staging / name)
+            methods[name] = "copy"
+        else:
+            methods[name] = _link_or_copy(src.resolve(), staging / name)
     for shard, items in sorted(by_shard.items()):
         tensors, shard_meta = mx.load(str((source / shard).resolve()), return_metadata=True)
         for key, (layer, component, prefix) in items:
@@ -588,7 +838,9 @@ def bake_checkpoint(source, destination, declaration, edits, row_normalization, 
                              "stored": "bf16" if scales is not None and keep_dense
                              else ("requant" if scales is not None else str(weight.dtype)),
                              "shape": [int(v) for v in edited.shape],
-                             "params": params})
+                             "params": params,
+                             **({"post_norm": norms[(layer, component)][0]}
+                                if (layer, component) in norms else {})})
         mx.save_safetensors(str(staging / shard), tensors, metadata=shard_meta or {"format": "mlx"})
         del tensors
     if dropped:
@@ -598,9 +850,27 @@ def bake_checkpoint(source, destination, declaration, edits, row_normalization, 
             index_doc["weight_map"].pop(key, None)
         index_path.write_text(json.dumps(index_doc, indent=2))
     edited_config = json.loads((staging / "config.json").read_text())
-    edited_config["mlx2_residual_ablation"] = dict(metadata, row_normalization=row_normalization,
-                                                   edited_tensors=len(receipts),
-                                                   edited_precision=edited_precision)
+    record = dict(metadata, row_normalization=row_normalization, edited_tensors=len(receipts),
+                  edited_precision=edited_precision,
+                  unedited_writers=list(declaration.unedited_writers))
+    edited_config["mlx2_residual_ablation"] = record
+    # Keep the source's own derivation (e.g. a q2 requantization record) and
+    # append this one: the new record names its predecessor in ``previous``.
+    derivation = {"kind": "residual_ablation", **{k: record[k] for k in (
+        "source_checkpoint", "directions_sha256", "trial", "row_normalization",
+        "edited_precision", "edited_tensors", "unedited_writers") if k in record},
+        "qualified": False}
+    if "mlx2_derivation" in config:
+        derivation["previous"] = config["mlx2_derivation"]
+    edited_config["mlx2_derivation"] = derivation
+    # A tensor stored unquantized must not keep a per-module quantization
+    # override, or a loader that honours overrides would quantize it again.
+    for section in ("quantization", "quantization_config"):
+        overrides = edited_config.get(section)
+        if isinstance(overrides, dict):
+            for key in dropped:
+                if key.endswith(".scales") and isinstance(overrides.get(key[:-len(".scales")]), dict):
+                    overrides[key[:-len(".scales")]] = False
     (staging / "config.json").write_text(json.dumps(edited_config, indent=2))
     after = hash_tree(source)
     if after != before:
@@ -610,7 +880,11 @@ def bake_checkpoint(source, destination, declaration, edits, row_normalization, 
     return {"source": str(source), "destination": str(destination),
             "source_hashes": before, "source_unchanged": True,
             "edited_tensors": receipts, "row_normalization": row_normalization,
-            "edited_precision": edited_precision, "dropped_keys": dropped}
+            "edited_precision": edited_precision, "dropped_keys": dropped,
+            "unedited_writers": list(declaration.unedited_writers),
+            "linked": sum(v == "hardlink" for v in methods.values()),
+            "copied": sum(v == "copy" for v in methods.values()),
+            "rewritten_shards": sorted(by_shard)}
 
 
 # ------------------------------------------------------------------ overlays
