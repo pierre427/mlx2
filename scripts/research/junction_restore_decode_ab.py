@@ -344,7 +344,18 @@ class Context:
 
         cls = resolve_adapter(args.model, mtp=False, qualification_mode=True)
         policy = json.loads(Path(args.policy).read_text()) if args.policy else None
-        self.adapter = cls(args.model, execution_policy=policy) if policy else cls(args.model)
+        # Split the policy exactly as the serving engine does: server-owned keys
+        # (e.g. apc_junction_checkpoints, which this script reproduces itself by
+        # planting the junction) never reach the adapter, whose validator
+        # refuses them (2026-11-23 r2 refusal).
+        adapter_policy = server_keys = None
+        if policy:
+            from mlx2.serving import SERVER_OWNED_EXECUTION_POLICY_KEYS
+
+            server_keys = sorted(set(policy) & SERVER_OWNED_EXECUTION_POLICY_KEYS)
+            adapter_policy = {k: v for k, v in policy.items() if k not in server_keys}
+        self.adapter = (cls(args.model, execution_policy=adapter_policy)
+                        if adapter_policy else cls(args.model))
         if "dspark" in args.routes and getattr(self.adapter, "draft_model", None) is None:
             raise SystemExit("refused: --policy bound no external drafter for the dspark route")
         self.ordinary_model = self.external_target = self.adapter.model
@@ -358,7 +369,8 @@ class Context:
         self.identity = {"checkpoint": f"{Path(args.model).name}@sha256:{fingerprint}",
                          "adapter": f"{cls.__module__}.{cls.__qualname__}",
                          "fingerprint": self.adapter.identity.get("fingerprint"),
-                         "policy": policy}
+                         "policy": policy, "adapter_policy": adapter_policy,
+                         "server_owned_keys_not_passed": server_keys}
 
     def sync(self):
         for stream in self.streams:
