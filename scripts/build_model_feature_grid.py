@@ -63,9 +63,13 @@ FEATURES = (
     "prefill_step_cap",
     # Hy4-flash opt-in sparse prefill kernel for indexed layers (2026-11-21).
     "sparse_prefill_attention",
+    # Hy4-flash opt-in read-once small-row routed-expert kernels (2026-11-21).
+    "moe_expert_read_once",
     # Hy4-flash opt-in small-op fusions (2026-11-21, hy_v4_flash_fusions).
     "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
     "engram_gate_rounding",
+    # Hy4-flash opt-in one-forward verify of multi-wave AST cohorts (2026-11-21).
+    "verify_phase_align", "ready_drain",
     # Morning follow-up probes (2026-11-06): opt-in research options.
     "batch_rows_attention", "prefill_tail_row", "prefill_tail_skip",
     # Nemotron 3.5 Super VL NVFP4 export (2026-11-10): checkpoint defaults.

@@ -42,6 +42,7 @@ layers that read the target's latent KV and its indexer selections.
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Sequence
@@ -64,6 +65,7 @@ from .hy_v4_flash_vision import (chunk_positions, find_spans, mrope_planes, slot
                                  span_end)
 from . import hy_v4_flash_fusions as _fusions
 from . import moe_nax_gather as _moe_nax
+from . import switch_read_once as _read_once
 from .switch_layers import SwitchGLU
 
 INDEXED = "indexed_attention"
@@ -445,12 +447,28 @@ class MoE(nn.Module):
             self.routed_expert_down_proj = nn.Linear(args.hidden_size, latent, bias=False)
             self.routed_expert_up_proj = nn.Linear(latent, args.hidden_size, bias=False)
         self.combine_output_norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        # Opt-in read-once small-row expert kernels (``moe_expert_read_once``,
+        # runtime/models/switch_read_once).  Observed use and declines are
+        # counted per block; a declined call runs ``self.experts``.
+        self.expert_read_once = False
+        self.read_once_calls = 0
+        self.read_once_declines = {}
 
     def __call__(self, x):
         indices, weights = self.gate(x)
         down = getattr(self, "routed_expert_down_proj", None)
         routed_in = down(x) if down is not None else x
-        y = self.experts(routed_in, indices)
+        y = None
+        if self.expert_read_once:
+            reason = _read_once.refusal(self.experts, routed_in, indices)
+            if reason is None:
+                y = _read_once.switch_glu(self.experts, routed_in, indices)
+                self.read_once_calls += 1
+            else:
+                _read_once._refuse(reason)
+                self.read_once_declines[reason] = self.read_once_declines.get(reason, 0) + 1
+        if y is None:
+            y = self.experts(routed_in, indices)
         y = (y * weights[..., None]).sum(axis=-2).astype(x.dtype)
         up = getattr(self, "routed_expert_up_proj", None)
         if up is not None:
@@ -917,6 +935,28 @@ def _hc_head_kernel(eps: float, hc_eps: float):
     return mx.compile(fn)
 
 
+@contextmanager
+def refed_rows(model, prefix):
+    """Mark each batch row's first ``prefix[b]`` positions as re-fed for one forward.
+
+    ``verify_phase_align`` re-feeds a child chain's root path, positions the
+    root chain's row of the same forward also holds.  The layer-output
+    readers (calculator tiles, ``_reader_inputs``) see re-fed positions as
+    padding (id -1), so a position never matches twice in one forward and
+    the root chain's row stays the one that decides.  ``None`` / all zero:
+    nothing is marked.
+    """
+    if not prefix or not any(prefix) or not hasattr(model, "layer_output_readers"):
+        yield
+        return
+    saved = getattr(model, "_reader_refed_prefix", None)
+    object.__setattr__(model, "_reader_refed_prefix", [int(n) for n in prefix])
+    try:
+        yield
+    finally:
+        object.__setattr__(model, "_reader_refed_prefix", saved)
+
+
 @mx.compile
 def _hc_merge(post, branch, residual):
     out = post[..., None] * branch.astype(mx.float32)[..., None, :] + residual.astype(mx.float32)
@@ -1304,8 +1344,42 @@ class HY4FlashLayerCache(_BaseCache):
         return "kv" if self.kind == INDEXED else "ring"
 
     # -- appends -------------------------------------------------------------
+    def defer_append_only_to(self, root):
+        """Take this fork's append-only buffers from ``root`` at first use.
+
+        ``verify_phase_align`` runs a lane's root chain (which borrows the
+        live append-only buffers and writes past their fill level in place)
+        and its child chains in ONE forward.  A child fork that aliased those
+        buffers before the forward would hold a second reference to them, so
+        the root's write could no longer reuse the buffer and would copy the
+        whole history.  Instead the fork drops its references now and takes
+        ``root``'s buffers when it first appends -- after ``root``'s write in
+        the same layer, because a batch forward attends its rows in order --
+        and its own write then copies on write, exactly as a wave-path child
+        chain (cloned from its parent's finished state) does.  The fork reads
+        only rows below its own fill marks, which ``root`` never rewrites.
+        Sliding rings are never lent, so they stay aliased.
+        """
+        if self.kind != INDEXED:
+            return
+        if root.kind != INDEXED or any(getattr(root, p + "_head") != getattr(self, p + "_head")
+                                       for p in ("kv", "tk", "gk")):
+            raise ValueError("Hy4-flash deferred fork needs the root of the same lane and layer")
+        for name, _, _ in self._RECOVERY_APPEND_ONLY_FIELDS:
+            setattr(self, name, None)
+        self._deferred_root = root
+
+    def _resolve_deferred(self):
+        root = self.__dict__.pop("_deferred_root", None)
+        if root is None:
+            return
+        for name, _, _ in self._RECOVERY_APPEND_ONLY_FIELDS:
+            data = getattr(root, name)
+            setattr(self, name, None if data is None else mx.stop_gradient(data))
+
     def append(self, keys):
         """Append ``[B, L, r+p]``; return the rows this step attends and their first position."""
+        self._resolve_deferred()
         L = keys.shape[1]
         rows = _buf_append(self, self._kv, keys)
         first = self.start
@@ -1323,6 +1397,7 @@ class HY4FlashLayerCache(_BaseCache):
         Rows are in the cache's storage format; ``latent_rows`` turns them
         (or a gather of them) into attention rows.
         """
+        self._resolve_deferred()
         return _buf_view(self, "kv")[:, :upto]
 
     # Native rows are read in place: no copy, no cast.
@@ -1333,6 +1408,7 @@ class HY4FlashLayerCache(_BaseCache):
         return rows
 
     def append_index_keys(self, token_keys, indexer):
+        self._resolve_deferred()
         keys = _buf_append(self, "tk", token_keys)
         complete = keys.shape[1] // self.ratio
         have = _buf_len(self, "gk")
@@ -1374,6 +1450,7 @@ class HY4FlashLayerCache(_BaseCache):
         cache exact and its appends copy nothing.  At most one lent fork may
         be alive at a time (the tree executor's root chain).
         """
+        self._resolve_deferred()
         obj = object.__new__(type(self))
         obj.__dict__.update(self.__dict__)
         lent = {name for name, _, _ in self._RECOVERY_APPEND_ONLY_FIELDS} if lend else set()
@@ -1433,6 +1510,7 @@ class HY4FlashLayerCache(_BaseCache):
     def trim(self, n):
         from .cache import _note_recovery_rewind
 
+        self._resolve_deferred()
         n = min(int(n), self.offset)
         if n <= 0:
             return 0
@@ -1470,6 +1548,7 @@ class HY4FlashLayerCache(_BaseCache):
     # meta_state: geometry, fill, Engram tail and the selection positions.
     @property
     def state(self):
+        self._resolve_deferred()
         arrays = [_buf_view(self, p) for p in self._buffers()]
         arrays += [v for _, v in sorted(self.selections.items()) if v is not None]
         return arrays
@@ -1934,6 +2013,26 @@ class Model(nn.Module):
             if layer.self_attn.kind == SLIDING:
                 layer.self_attn.sliding_attention_blocks = rows
 
+    def set_moe_expert_read_once(self, on: bool) -> None:
+        """Opt-in read-once small-row routed-expert kernels on every MoE layer
+        (False: the stock SwitchGLU gathers, the default)."""
+        if type(on) is not bool:
+            raise ValueError("moe_expert_read_once must be a boolean")
+        for layer in self.model.layers:
+            if isinstance(layer.mlp, MoE):
+                layer.mlp.expert_read_once = on
+
+    def moe_read_once_status(self) -> dict:
+        """Per-model counters of the read-once expert route (selected vs observed_used)."""
+        moes = [layer.mlp for layer in self.model.layers if isinstance(layer.mlp, MoE)]
+        calls = sum(m.read_once_calls for m in moes)
+        declines = {}
+        for m in moes:
+            for reason, n in m.read_once_declines.items():
+                declines[reason] = declines.get(reason, 0) + n
+        return {"selected": any(m.expert_read_once for m in moes), "layer_calls": calls,
+                "declined_layer_calls": declines, "observed_used": calls > 0}
+
     def set_sparse_prefill_attention(self, on: bool) -> None:
         """Opt-in sparse prefill kernel on every indexed layer (False: the
         dense masked reference, the default)."""
@@ -2318,8 +2417,10 @@ class Model(nn.Module):
         L = tokens.shape[1]
         if batched:
             keep = np.zeros(ids.shape, dtype=bool)
+            refed = getattr(self, "_reader_refed_prefix", None)
             for b, (start, count) in enumerate(cache[0].layout(L)):
-                keep[b, start:start + count] = True
+                skip = min(count, refed[b]) if refed is not None and b < len(refed) else 0
+                keep[b, start + skip:start + count] = True
             ids[~keep] = -1
         prefix = None
         if self.args.engram_layers:

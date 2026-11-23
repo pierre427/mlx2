@@ -224,7 +224,7 @@ def test_receipts_and_namespace(pack, bundle):
         assert r["closed_units"] == sum(len(v) for v in _closed(sites).values())
         assert 0 < r["closed_fraction"] < 1 and r["model_units"] == sum(s.units for s in sites)
         tag = M.NeuronMaskBundle.load(path).numerics_tag()
-        assert r["apcv2_namespace"] == tag and adapter.layout.endswith("+" + tag)
+        assert r["apcv2_namespace"] == tag and adapter.layout.endswith("+" + tag + "+sparse-prefill-v1+mla-fused-in-v1")
         assert adapter.descriptor.cache_layout == adapter.layout
         adapter.model(mx.array([PROMPT]))
         r = adapter.diagnostics()["amoeba_mask"]

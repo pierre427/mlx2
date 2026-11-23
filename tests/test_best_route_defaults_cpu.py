@@ -622,7 +622,7 @@ HY4_NEUTRAL = {"engram_table_format", "engram_precision", "engram_cache_rows", "
                "vision", "moe_fused_gate_up", "amoeba_det_tiles", "prefill_step_cap",
                "sliding_attention_blocks", "sparse_prefill_attention",
                "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
-               "engram_gate_rounding"}
+               "engram_gate_rounding", "moe_expert_read_once"}
 
 
 @pytest.mark.parametrize("policy", [

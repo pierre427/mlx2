@@ -113,6 +113,30 @@ def _ast_artifact_fingerprint(value, *, binding):
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _decode_group_split_reasons(keys):
+    """Why one decode phase's ready lanes fell into several rounds.
+
+    ``keys`` are the phase's ``(draft count, ordinary, parked)`` group keys
+    (``_decode_phase_work``).  ``ordinary``: permanent ordinary lanes beside
+    others.  ``parked``: cost handoff parked some lanes' speculation.
+    ``depth``: speculating (neither ordinary nor parked) lanes asked for
+    different draft counts, e.g. a lane near its token budget.  Ordinary and
+    parked lanes carry count 0 by construction, so their count never counts
+    as a depth split.  Counters only.
+    """
+    keys = list(keys)
+    if len(keys) < 2:
+        return []
+    reasons = []
+    if len({key[0] for key in keys if not key[1] and not key[2]}) > 1:
+        reasons.append("depth")
+    if len({key[1] for key in keys}) > 1:
+        reasons.append("ordinary")
+    if len({key[2] for key in keys}) > 1:
+        reasons.append("parked")
+    return reasons
+
+
 def _pad_cohort_trees(inputs, parents):
     """Pad a cohort's trees to one width for a uniform provider tile.
 
@@ -15649,6 +15673,10 @@ class ExternalDraftBatchGenerator:
                 _bump(self.scheduler_stats, "external_decode_group_split_phases")
                 if len({key[2] for key in groups}) > 1:
                     _bump(self.scheduler_stats, "external_decode_parked_split_phases")
+                for reason in _decode_group_split_reasons(groups):
+                    # ``parked`` is external_decode_parked_split_phases above.
+                    if reason != "parked":
+                        _bump(self.scheduler_stats, f"external_decode_group_split_{reason}_phases")
         decode_started = time.perf_counter()
         for (count, _ordinary, _parked), candidates in groups.items():
             candidates.sort(
@@ -15681,6 +15709,10 @@ class ExternalDraftBatchGenerator:
             self._decode_fit_waiting_uids.update(
                 lane.uid for lane in group_candidates if lane not in cohort
             )
+            if len(cohort) < len(group_candidates):
+                # Memory admission or the provider's lane bound left lanes
+                # of this group for a later round (a split cause at B>1).
+                _bump(self.scheduler_stats, "external_decode_fit_split_groups")
             if getattr(self, "ast_tree_tile_rows", 0):
                 # Anchor-only work uses the same admitted private provider,
                 # not an accidental B1 bypass around the physical cohort.
@@ -15717,6 +15749,21 @@ class ExternalDraftBatchGenerator:
                         lanes[index:index + capacity]
                         for index in range(0, len(lanes), capacity)
                     )
+                    if len(lanes) > capacity:
+                        # The lane bound of this kind split it into turns.
+                        _bump(self.scheduler_stats, "external_decode_ast_turn_limit_splits")
+                        if self.progressive_verification_tile_policy != "auto":
+                            _bump(self.scheduler_stats,
+                                  "external_decode_ast_turn_tile_policy_limit_splits")
+                if len(turns) > 1:
+                    # Why the AST turns loop ran this group as several rounds.
+                    unpackable = sum(1 for turn in turns if len(turn) == 1
+                                     and not any(turn[0] in lanes for lanes in compatible.values()))
+                    if unpackable:
+                        _bump(self.scheduler_stats, "external_decode_ast_turn_unpackable_lanes",
+                              unpackable)
+                    if len(compatible) > 1:
+                        _bump(self.scheduler_stats, "external_decode_ast_turn_kind_splits")
                 turns.sort(key=lambda group: min(
                     getattr(lane, "decode_service_epoch", -1) for lane in group
                 ))

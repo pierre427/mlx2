@@ -20,9 +20,18 @@ waves), and each wave with more than one chain runs as one forward over a
 ``HY4FlashBatchLayerCache`` whose rows are the chains' private caches,
 right-padded with ``prepare(lengths=, right_padding=)``.  Attention stays per
 row (each reads only its own history and span); projections, MoE, Engram and
-the head run on the joined rows, so expert weights are read once per wave.
-Commit and abort stay per lane and exact.  ``joint=False`` keeps the serial
-reference (one forward per chain).
+the head run on the joined rows, so the dense weights (projections, shared
+experts, head) are read once per wave.  Routed experts are not shared that
+way at verify sizes: B=4 is ~384 assignments, far below the ~2048 (4 x 512
+experts) MLX's streaming gather needs (switch_layers ``_RHS_*``), so each
+row's ``gather_qmv`` reads its own experts.  Commit and abort stay per lane and exact.  ``joint=False`` keeps the serial
+reference (one forward per chain).  ``phase_align=True`` (policy
+``verify_phase_align``, opt-in) runs a cohort that needs more than one wave
+as ONE forward instead: child chains re-feed their source's root path from
+the lane's live state (``_phase_aligned_forward``), so every layer runs all
+chains' attention and then one MoE over the whole cohort: one forward's
+dense weights and launches instead of one per wave, at the price of the
+re-fed rows (which also read their routed experts again).
 """
 
 from __future__ import annotations
@@ -186,8 +195,13 @@ def _row_caches(caches):
     return rows
 
 
-def _wave_forward(model, jobs, layers, joint, lanes=None):
+def _wave_forward(model, jobs, layers, joint, lanes=None, prefix=None):
     """Run one wave's chains; ``jobs`` are ``(tokens, private caches)``.
+
+    ``prefix`` (``_phase_aligned_forward``) counts each job's leading re-fed
+    root-path rows: the layer-output readers (calculator tiles) see them as
+    padding (``refed_rows``), so a re-fed position never matches beside the
+    root chain's own row for the same position.
 
     ``lanes`` names each job's lane index (cohort order).  Every forward binds
     its rows to those lanes for residual-ablation overlays
@@ -218,7 +232,9 @@ def _wave_forward(model, jobs, layers, joint, lanes=None):
         cache = HY4FlashBatchLayerCache([lane[layer] for lane in rows])
         cache.prepare(lengths=lengths, right_padding=[width - n for n in lengths])
         batch.append(cache)
-    with bind_lane_forward(model, lanes):
+    from ..runtime.models.hy_v4_flash import refed_rows
+
+    with bind_lane_forward(model, lanes), refed_rows(model, prefix):
         logits, features = model.forward_with_taps(mx.array(padded, dtype=mx.uint32), batch, layers)
     for cache in batch:
         cache.finalize()
@@ -247,10 +263,76 @@ def _check_independent_lanes(lives):
                     buffers.add(id(data))
 
 
-def cohort_forward(model, tokens, parents, lives, layers, token, *, joint=True):
+def _ancestry(parents, node):
+    """Root-first nodes ``0 .. node`` of ``node``'s root path."""
+    path = [node]
+    while parents[path[-1]] >= 0:
+        path.append(parents[path[-1]])
+    return path[::-1]
+
+
+def _phase_aligned_forward(model, tokens, parents, lives, layers, plans, stats):
+    """Every chain of every lane in ONE forward (``verify_phase_align``).
+
+    The wave path runs one forward per chain depth, so a lane whose tree is
+    shallow idles while deeper lanes run their later waves, and every wave
+    reads the layer's experts again.  Here each chain becomes one row of a
+    single ``HY4FlashBatchLayerCache`` forward: the root chain borrows the
+    lane's append-only buffers (as in the wave path); a child chain starts
+    from the lane's *live* state and re-feeds its source node's root path
+    before its own nodes.  Each layer then runs attention per row (lane-local
+    caches, ``Attention.__call__``'s row loop, in row order) and one MoE,
+    Engram and head call over every row of the cohort: one forward's dense
+    weights (projections, shared experts, head) and launches instead of one
+    per wave.  Routed experts are still read per row at these sizes, and the
+    re-fed ancestry rows (``phase_aligned_prefix_rows``) add their reads.
+
+    Buffers: a child chain must not reference the root's lent append-only
+    buffers before the root writes them, or that in-place write would copy
+    the lane's whole history.  The child therefore drops them
+    (``defer_append_only_to``) and takes them from the root row at its first
+    append in each layer, after the root's write (the root row comes first);
+    the child's own write then copies, as a wave-path child does.  So the
+    root writes in place and each child chain copies once: the
+    ``1 + child_chains`` count ``decode_round_cache_reservation`` charges.
+
+    Exact math: every row is the ordinary decode of its root path.  The
+    floating-point order of a child's re-fed rows changes (one multi-row
+    chunk instead of the parent chain's rows), as joining rows already does.
+    """
+    jobs, owners, roots = [], [], {}
+    for lane, plan in enumerate(plans):
+        for number, (source, nodes, _depth) in enumerate(plan):
+            prefix = [] if source < 0 else _ancestry(parents[lane], source)
+            private = clone_caches(lives[lane], lend=source < 0)
+            if source < 0:
+                roots[lane] = _row_caches(private)   # plan[0]: the root, first in row order
+            else:
+                for row, root in zip(_row_caches(private), roots[lane], strict=True):
+                    row.defer_append_only_to(root)
+            jobs.append(([int(tokens[lane][n]) for n in prefix + nodes], private))
+            owners.append((lane, number, nodes, len(prefix)))
+    results, packed = _wave_forward(model, jobs, layers, True, [o[0] for o in owners],
+                                    prefix=[o[3] for o in owners])
+    stats["waves"] += 1
+    stats["chain_forwards"] += 1 if packed else len(jobs)
+    if packed:
+        stats["joint_waves"] += 1
+        stats["joint_chains"] += len(jobs)
+        stats["cross_lane_waves"] += len({o[0] for o in owners}) > 1
+    stats["phase_aligned"] = 1
+    stats["phase_aligned_waves_saved"] = max(d for plan in plans for _, _, d in plan)
+    stats["phase_aligned_prefix_rows"] = sum(o[3] for o in owners)
+    return owners, results, jobs
+
+
+def cohort_forward(model, tokens, parents, lives, layers, token, *, joint=True, phase_align=False):
     """Verify each lane's tile; returns ``(logits, features, transactions, stats)``.
 
     ``logits``/``features`` are per lane ``[1, rows, ...]`` in node order.
+    ``phase_align`` (needs ``joint``) runs a multi-wave cohort as one forward
+    (``_phase_aligned_forward``); a one-wave cohort (every DFly2 chain
+    round) takes the wave path unchanged.
     """
     if len(tokens) != len(parents) or len(tokens) != len(lives) or not tokens:
         raise ValueError("Hy4-flash AST cohort inputs disagree")
@@ -264,8 +346,21 @@ def cohort_forward(model, tokens, parents, lives, layers, token, *, joint=True):
     logits = [{} for _ in plans]
     features = [{} for _ in plans]
     stats = {"waves": 0, "joint_waves": 0, "joint_chains": 0, "cross_lane_waves": 0,
-             "chain_forwards": 0}
-    for depth in range(max(d for plan in plans for _, _, d in plan) + 1):
+             "chain_forwards": 0, "phase_aligned": 0, "phase_aligned_waves_saved": 0,
+             "phase_aligned_prefix_rows": 0}
+    depths = max(d for plan in plans for _, _, d in plan) + 1
+    if phase_align and joint and depths > 1:
+        owners, results, jobs = _phase_aligned_forward(
+            model, tokens, [[int(p) for p in tree] for tree in parents], lives, layers, plans, stats)
+        for (lane, number, nodes, skip), (row_logits, row_features), (_, private) in zip(
+                owners, results, jobs, strict=True):
+            for i, node in enumerate(nodes):
+                logits[lane][node] = row_logits[:, skip + i : skip + i + 1]
+                features[lane][node] = row_features[:, skip + i : skip + i + 1]
+                where[lane][node] = (number, skip + i, skip + len(nodes))
+            states[lane][number] = private
+        depths = 0  # nothing left for the wave loop
+    for depth in range(depths):
         jobs, owners = [], []
         for lane, plan in enumerate(plans):
             for number, (source, nodes, d) in enumerate(plan):
@@ -338,12 +433,19 @@ class Hy4ChainTreeExecutor:
     # and never read past a lane's own tree.
     accepts_unequal_tree_widths = True
 
-    def __init__(self, *, joint=True, call_scope=None):
+    def __init__(self, *, joint=True, call_scope=None, phase_align=False):
         if type(joint) is not bool:
             raise ValueError("Hy4-flash tree executor joint must be a boolean")
+        if type(phase_align) is not bool:
+            raise ValueError("Hy4-flash tree executor phase_align must be a boolean")
+        if phase_align and not joint:
+            raise ValueError("Hy4-flash verify_phase_align needs the packed (joint) executor")
         if call_scope is not None and not callable(call_scope):
             raise ValueError("Hy4-flash tree executor call_scope must be callable")
         self.joint = joint
+        # ``verify_phase_align`` (opt-in): a multi-wave cohort runs as one
+        # forward (``_phase_aligned_forward``); one-wave cohorts are unchanged.
+        self.phase_align = phase_align
         # Optional context factory entered around every target forward this
         # executor runs (verify and plain anchors), so an adapter's row-law
         # installation can attribute its calls to the AST verify path.
@@ -351,7 +453,8 @@ class Hy4ChainTreeExecutor:
         self.source_revision_token = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         self.source_identity = (("module", "mlx2.adapters.hy_v4_flash_ast"),
                                 ("sha256", self.source_revision_token),
-                                ("joint", str(joint).lower()))
+                                ("joint", str(joint).lower()),
+                                ("phase_align", str(phase_align).lower()))
         self.dispatches = 0
         self.cohort_dispatches = 0
         self.cohort_lanes = 0
@@ -364,10 +467,14 @@ class Hy4ChainTreeExecutor:
         self.plain_anchor_dispatches = 0
         self.plain_anchor_lanes = 0
         self.plain_anchor_joint_steps = 0
+        self.phase_aligned_dispatches = 0
+        self.phase_aligned_waves_saved = 0
+        self.phase_aligned_prefix_rows = 0
+        self.multi_wave_dispatches = 0  # cohorts whose trees need more than one wave
 
     @classmethod
-    def create(cls, *, joint=True, call_scope=None):
-        return cls(joint=joint, call_scope=call_scope)
+    def create(cls, *, joint=True, call_scope=None, phase_align=False):
+        return cls(joint=joint, call_scope=call_scope, phase_align=phase_align)
 
     @staticmethod
     def decode_round_cache_reservation(cache, *, append, child_chains, lanes=1):
@@ -424,8 +531,13 @@ class Hy4ChainTreeExecutor:
     def _run(self, model, inputs, parents, caches, layers, *, plain=False):
         with self.call_scope() if self.call_scope is not None else nullcontext():
             logits, features, transactions, stats = cohort_forward(
-                model, inputs, parents, caches, layers, self.source_revision_token, joint=self.joint)
+                model, inputs, parents, caches, layers, self.source_revision_token, joint=self.joint,
+                phase_align=self.phase_align)
         self.chain_forwards += stats["chain_forwards"]
+        self.multi_wave_dispatches += stats["waves"] > 1 or stats["phase_aligned"]
+        self.phase_aligned_dispatches += stats["phase_aligned"]
+        self.phase_aligned_waves_saved += stats["phase_aligned_waves_saved"]
+        self.phase_aligned_prefix_rows += stats["phase_aligned_prefix_rows"]
         self.joint_waves += stats["joint_waves"]
         self.joint_chains += stats["joint_chains"]
         if plain:
@@ -500,6 +612,15 @@ class Hy4ChainTreeExecutor:
             "plain_anchor_dispatches": self.plain_anchor_dispatches,
             "plain_anchor_lanes": self.plain_anchor_lanes,
             "plain_anchor_joint_steps": self.plain_anchor_joint_steps,
+            "multi_wave_dispatches": self.multi_wave_dispatches,
+            "phase_align": {
+                "selected": self.phase_align,
+                "observed_used": self.phase_aligned_dispatches > 0,
+                "qualified": False,
+                "dispatches": self.phase_aligned_dispatches,
+                "waves_saved": self.phase_aligned_waves_saved,
+                "prefix_rows": self.phase_aligned_prefix_rows,
+            },
             "implemented": True,
             "qualified": False,
             "selected": self.dispatches > 0,

@@ -107,9 +107,10 @@ def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
                     engram_precision: str = "transformers",
                     tensorfold_rows: str | None = None, moe_fused_gate_up: bool = False,
                     moe_nax: str = "off", moe_top_k: int | None = None,
+                    moe_expert_read_once: bool = False,
                     amoeba_mask: str | None = None, sliding_attention_blocks: int = 0,
                     sparse_prefill_attention: bool = False,
-                    fusions: dict | None = None) -> str:
+                    fusions: dict | None = None, verify_phase_align: bool = False) -> str:
     """The APCv2 namespace: every knob that changes numerics changes it.
 
     A packed Engram table or the non-default Engram precision profile gives
@@ -126,6 +127,11 @@ def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
         # projections with other arithmetic than stock QMV, so its cache rows
         # are exact for that law only; each backend gets its own namespace.
         layout = f"{layout}+tensorfold-rows-{tensorfold_rows}-v1"
+    if verify_phase_align:
+        # One-forward verify of multi-wave cohorts: a committed child-path
+        # row comes from the re-fed root-path chunk (another accumulation
+        # order than the wave path), so its entries keep their own namespace.
+        layout = f"{layout}+verify-phase-align-v1"
     # The opt-in MoE kernel routes are bit-identical on CPU (fused gate/up,
     # tests) and canary-proven per kernel instantiation (NAX), but are
     # unmeasured on the GPU: until a GPU A/B shows exact parity their APCv2
@@ -134,6 +140,10 @@ def numerics_layout(layout: str, *, engram_table_format: str = "bf16",
         layout = f"{layout}+moe-fused-gate-up"
     if moe_nax != "off":
         layout = f"{layout}+moe-nax-{moe_nax}"
+    if moe_expert_read_once:
+        # Read-once small-row expert kernels: fp32 sums in another order than
+        # gather_qmv (not bit-identical), so their rows keep their own entries.
+        layout = f"{layout}+moe-read-once-v1"
     if moe_top_k is not None:
         # Fewer routed experts per token: other numerics, other cache rows.
         layout = f"{layout}+moe-top{int(moe_top_k)}"
@@ -171,9 +181,18 @@ FUSION_TAGS = {"hc_seam_fused": "hc-seam-v1", "mla_fused_input_proj": "mla-fused
                "engram_gate_rounding": "engram-gate-round-v1"}
 
 
+# Served defaults (Pierre 2026-11-21, "enable all options that are positive as
+# defaults"): the MLA input-projection fusion is bitwise within its load-time
+# self-checked row bound and was part of the positive sparse-prefill+fusions
+# A/B (qualification/runs/hy4-ab-sparsefus-20261121-02201e21a-*), so it is on
+# unless the policy says false.  The other fusions change the layer-12 numerics
+# the default calculator tile reads and stay off until its validation passes.
+FUSION_SERVED_DEFAULTS = {**FUSION_DEFAULTS, "mla_fused_input_proj": True}
+
+
 def fusion_policy(policy: dict) -> dict:
-    """The fusion keys of a parsed model policy, with their defaults filled in."""
-    return {k: policy.get(k, v) for k, v in FUSION_DEFAULTS.items()}
+    """The fusion keys of a parsed model policy, with their served defaults filled in."""
+    return {k: policy.get(k, v) for k, v in FUSION_SERVED_DEFAULTS.items()}
 
 
 AMOEBA_MASK_MODES = ("zero", "pageout")
@@ -618,6 +637,7 @@ def widened_bytes(root, weight_map: dict, quant, *, lm_head_fp32: bool) -> int:
 MODEL_KEYS = frozenset({"engram_cache_rows", "engram_hash", "engram_precision",
                         "engram_table_format", "latent_kv", "vision",
                         "moe_fused_gate_up", "moe_nax", "moe_top_k", "amoeba_det_tiles",
+                        "moe_expert_read_once",
                         "amoeba_mask",
                         "sliding_attention_blocks", "prefill_step_cap", "sparse_prefill_attention",
                         "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj",
@@ -642,13 +662,14 @@ DET_TILE_CAPTURE = "hc-stream-mean-f32-v1"
 # adapter refuses it with det tiles.
 DET_TILE_NUMERICS_KEYS = ("engram_table_format", "engram_precision", "latent_kv", "moe_top_k",
                           "hc_seam_fused", "engram_gate_rounding", "engram_fused_proj",
-                          "indexer_fused_scores")
+                          "indexer_fused_scores", "moe_expert_read_once")
 # Fit keys added after manifests already shipped (the f2a8 calculator tile):
 # a manifest that omits one was fitted on its default, so it is read as that.
 # Every other DET_TILE_NUMERICS_KEYS entry is required.  ``mla_fused_input_proj``
 # is not here: it is bitwise by construction (load-time self-checked bound).
 DET_TILE_NUMERICS_DEFAULTS = {"hc_seam_fused": False, "engram_gate_rounding": "fp32",
-                              "engram_fused_proj": False, "indexer_fused_scores": False}
+                              "engram_fused_proj": False, "indexer_fused_scores": False,
+                              "moe_expert_read_once": False}
 # Target forwards one verify round can run: with the serial executor one per
 # chain, at most one chain per tile row (32) for each of four lanes, plus plain
 # anchors.  An evicted forward's rows fail closed (``gate_unmatched``).
@@ -810,7 +831,31 @@ AST_KEYS = frozenset({"draft_model", "num_draft", "ast_topology", "ast_tiles", "
                       "ast_multilane_tile_rows", "ast_adaptive_rows", "batch_size_route",
                       "pairwise_selection", "cost_per_commit_handoff", "ast_graft_prompt_lookup",
                       "ast_target_executor", "ast_tensorfold_rows", "ast_tensorfold_rows_backend",
-                      "draft_quantization", "adaptive_verification"})
+                      "draft_quantization", "adaptive_verification", "verify_phase_align",
+                      "ready_drain"})
+# ``ready_drain`` (opt-in, unqualified, 2026-11-21): how a B>1 lane hands out
+# the tokens a verify accepted.  The engine default here is "one" (no AST
+# verification tile is set), so a lane that accepted several tokens sits out
+# the next verifies while it emits them one per call, and the lanes drift out
+# of lockstep: the B=4 profile (hy4-b4prof-e9de7cbb3-long) saw all four lanes
+# in one verify on 20 of 200 calls and 155 split calls, aggregate 61 -> 67 ->
+# 68 tok/s at B=1/2/4.  "all" emits every queued token at once, as the
+# Qwen3.8-27B and Muse adapters already do; the committed tokens are the same.
+# ``verify_phase_align`` (opt-in, unqualified; docs/hy4-flash/verify-phasing.md):
+# a cohort whose trees need several chain waves (branching topologies:
+# sibling or child chains) verifies in ONE forward -- attention per chain row
+# on lane-local caches, then one MoE / Engram / head call over every row.
+# What that saves is the per-forward work: the dense weights (attention and
+# Engram projections, shared experts, the dense layer, the head) and the
+# launches are read once per cohort instead of once per wave.  Routed
+# experts are NOT read once per cohort: at verify sizes (B=4 is ~384
+# assignments, far below the ~2048 = 4 x 512 experts MLX's streaming gather
+# needs, switch_layers ``_RHS_*``) each row's gather_qmv reads its own
+# experts, and the re-fed root-path rows of child chains add routed-expert
+# reads.  A one-wave cohort (every DFly2 chain round, the default) is
+# unchanged, bit for bit.  Committed child-path rows come from the re-fed
+# chunk (another accumulation order), so the key has its own APCv2 namespace
+# (``numerics_layout`` ``+verify-phase-align-v1``).
 # ``adaptive_verification`` (opt-in, unqualified; DFly2 route only, not
 # route-neutral): the engine's lagged cost model (runtime/acceptance_estimator
 # AdaptiveVerificationPolicy) caps the DFly2 chain's length each round from a
@@ -871,6 +916,14 @@ COST_HANDOFF_PRESETS = {
     },
 }
 DFLY_DRAFT_QUANTIZATION_DEFAULT = {"bits": 8, "group_size": 64}
+# Served defaults (Pierre 2026-11-21, "enable all options that are positive as
+# defaults"; unqualified, single-rep evidence in model-feature-decisions.tsv):
+# ``ready_drain`` "all" keeps B>1 DFly2 lanes in lockstep (B=1/2/4 aggregate
+# 61/67/68 -> 71/89/81 tok/s, GSM8K accuracy and acceptance unchanged), null
+# restores the engine's "one"; ``sparse_prefill_attention`` on (32K cold TTFT
+# 85 -> 60 s with the fusions, needle 4/4), false restores the dense masked path.
+READY_DRAIN_DEFAULT = "all"
+SPARSE_PREFILL_ATTENTION_DEFAULT = True
 # ``draft_quantization`` (the shared drafter key, adapters/dflash2
 # validate_runtime_quantization: {"bits": 4|8, "group_size": 32|64|128}):
 # load-time MLX affine quantization of the embedded DFly2 head's nn.Linear
@@ -933,6 +986,8 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
         raise ValueError("Hy4-flash vision must be a boolean (default true: load the tower if present)")
     if type(policy.get("moe_fused_gate_up", False)) is not bool:
         raise ValueError("Hy4-flash moe_fused_gate_up must be a boolean (default false)")
+    if type(policy.get("moe_expert_read_once", False)) is not bool:
+        raise ValueError("Hy4-flash moe_expert_read_once must be a boolean (default false)")
     if policy.get("moe_nax", "off") not in MOE_NAX_MODES:
         raise ValueError("Hy4-flash moe_nax must be 'off' (default) or 'gather'")
     for key in ("hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores"):
@@ -944,8 +999,8 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
     if type(band) is not int or band < 0:
         raise ValueError("Hy4-flash sliding_attention_blocks must be 0 (off) or a positive "
                          f"query-block row count (default {SLIDING_ATTENTION_BLOCKS_DEFAULT})")
-    if type(policy.get("sparse_prefill_attention", False)) is not bool:
-        raise ValueError("Hy4-flash sparse_prefill_attention must be a boolean (default false)")
+    if type(policy.get("sparse_prefill_attention", SPARSE_PREFILL_ATTENTION_DEFAULT)) is not bool:
+        raise ValueError("Hy4-flash sparse_prefill_attention must be a boolean (default true)")
     cap = policy.get("prefill_step_cap")
     if cap is not None and (type(cap) is not int or cap < 0):
         raise ValueError("Hy4-flash prefill_step_cap must be a positive integer, or 0 for no cap "
@@ -966,6 +1021,9 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
         # Hy4's verify forwards (chain-packed tiles, DFly2) are not marked as
         # verify forwards, so a multi-row verify would read as a prefill.
         raise ValueError("Hy4-flash moe_nax applies to the ordinary route only (not with a draft_model)")
+    if external.get("ast_tensorfold_rows"):
+        # The default-on MLA input fusion yields to an explicit TensorFold row law.
+        model.setdefault("mla_fused_input_proj", False)
     if external.get("ast_tensorfold_rows") and (model.get("mla_fused_input_proj")
                                                  or model.get("engram_fused_proj")):
         # The TensorFold row law swaps the trunk projections the fused GEMMs replace.
@@ -1043,6 +1101,14 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
     executor = external.pop("ast_target_executor", "packed")
     if executor not in AST_TARGET_EXECUTORS:
         raise ValueError("Hy4-flash ast_target_executor must be 'packed' (default) or 'serial'")
+    drain = external.pop("ready_drain", READY_DRAIN_DEFAULT)
+    if drain is not None and drain not in ("one", "all"):
+        raise ValueError("Hy4-flash ready_drain must be 'one', 'all' (default) or null (the engine's)")
+    phase_align = external.pop("verify_phase_align", False)
+    if type(phase_align) is not bool:
+        raise ValueError("Hy4-flash verify_phase_align must be a boolean (default false)")
+    if phase_align and executor != "packed":
+        raise ValueError("Hy4-flash verify_phase_align needs ast_target_executor 'packed'")
     rows = external.pop("ast_tensorfold_rows", False)
     if type(rows) is not bool:
         raise ValueError("Hy4-flash ast_tensorfold_rows must be a boolean (default false)")
@@ -1056,6 +1122,10 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
 
     external = _native_mtp_tree_policy(external)
     external["ast_target_executor"] = executor
+    if phase_align:
+        external["verify_phase_align"] = True
+    if drain is not None:
+        external["ready_drain"] = drain
     if adaptive is not None:
         external["adaptive_verification"] = adaptive
     # Receipt names of the presets (not engine keys; create_external_batch
@@ -1304,7 +1374,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     route_neutral_policy_keys = frozenset({
         "engram_table_format", "engram_precision", "engram_cache_rows", "engram_hash",
         "vision", "moe_fused_gate_up", "amoeba_det_tiles", "prefill_step_cap", "sliding_attention_blocks",
-        "sparse_prefill_attention",
+        "sparse_prefill_attention", "moe_expert_read_once",
         # Opt-in small-op fusions: the same install on both routes.
         "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
         "engram_gate_rounding",
@@ -1446,6 +1516,9 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                         if external.get("ast_tensorfold_rows") else None)
         self.moe_fused_gate_up = bool(policy.get("moe_fused_gate_up", False))
         self.moe_nax = policy.get("moe_nax", "off")
+        self.moe_expert_read_once = bool(policy.get("moe_expert_read_once", False))
+        if self.moe_expert_read_once and not artifact["quantized"]:
+            raise ValueError("Hy4-flash moe_expert_read_once runs on 4-bit affine expert banks only")
         if self.moe_nax != "off" and not artifact["quantized"]:
             raise ValueError("Hy4-flash moe_nax applies only to an affine-quantized artifact")
         if self.moe_fused_gate_up and not artifact["quantized"]:
@@ -1466,6 +1539,9 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # before any weight is read.
             spec = amoeba_mask_spec(policy["amoeba_mask"])
             self.amoeba_mask_mode = spec
+            if spec["mode"] == "pageout" and self.moe_expert_read_once:
+                raise ValueError("Hy4-flash amoeba_mask pageout pages the SwitchGLU banks out: not with "
+                                 "moe_expert_read_once")
             if spec["mode"] == "pageout" and (self.moe_fused_gate_up or self.moe_nax != "off"):
                 raise ValueError("Hy4-flash amoeba_mask pageout runs on the split SwitchGLU banks: not with "
                                  "moe_fused_gate_up or moe_nax")
@@ -1477,13 +1553,15 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                       tensorfold_rows=rows_backend,
                                       moe_fused_gate_up=self.moe_fused_gate_up, moe_nax=self.moe_nax,
                                       moe_top_k=policy.get("moe_top_k"),
+                                      moe_expert_read_once=self.moe_expert_read_once,
                                       amoeba_mask=None if self.amoeba_mask is None
                                       else self.amoeba_mask.numerics_tag() + (
                                           "" if self.amoeba_mask_mode["mode"] == "zero" else
                                           f"+pageout-b{self.amoeba_mask_mode['block']}-sequential-v2"),
                                       sliding_attention_blocks=policy.get("sliding_attention_blocks", 0),
-                                      sparse_prefill_attention=policy.get("sparse_prefill_attention", False),
-                                      fusions=fusion_policy(policy))
+                                      sparse_prefill_attention=policy.get("sparse_prefill_attention", SPARSE_PREFILL_ATTENTION_DEFAULT),
+                                      fusions=fusion_policy(policy),
+                                      verify_phase_align=bool(external.get("verify_phase_align")))
         self.environment = configure_environment()
         from .process_globals import claim_moe, claim_stock_moe
 
@@ -1528,8 +1606,10 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.sliding_attention_blocks = int(policy.get("sliding_attention_blocks", 0))
         self._prefill_step_cap = policy.get("prefill_step_cap") or None
         self.model.set_sliding_attention_blocks(self.sliding_attention_blocks)
-        self.sparse_prefill_attention = bool(policy.get("sparse_prefill_attention", False))
+        self.sparse_prefill_attention = bool(policy.get("sparse_prefill_attention",
+                                                        SPARSE_PREFILL_ATTENTION_DEFAULT))
         self.model.set_sparse_prefill_attention(self.sparse_prefill_attention)
+        self.model.set_moe_expert_read_once(self.moe_expert_read_once)
         self.engram_table_format = engram_format
         if rows_backend is not None:
             from ..runtime.tensorfold_rows import install as install_rows
@@ -1774,11 +1854,12 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             rows = getattr(self, "tensorfold_rows", None)
             kwargs["target_tree_executor_provider"] = Hy4ChainTreeExecutor.create(
                 joint=self.external_policy.get("ast_target_executor", "packed") == "packed",
+                phase_align=bool(self.external_policy.get("verify_phase_align", False)),
                 call_scope=None if rows is None else (lambda: rows.scope("ast_verify")))
         self.tree_executor = kwargs["target_tree_executor_provider"]
         kwargs.setdefault("tree_node_budget_by_lanes",
                           _tile_node_budgets(self.external_policy, AST_MAX_WIDTH))
-        for key in ("ast_topology", "ast_adaptive_rows"):
+        for key in ("ast_topology", "ast_adaptive_rows", "ready_drain"):
             if key in self.external_policy:
                 kwargs.setdefault(key, self.external_policy[key])
         import weakref
@@ -2186,6 +2267,24 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "sparse_layer_forwards": forwards, "declined_layer_forwards": declines,
                 "observed_used": forwards > 0}
 
+    def _moe_read_once_receipt(self):
+        """Route-receipt block of the opt-in read-once small-row expert kernels."""
+        from ..runtime.models import switch_read_once
+
+        selected = bool(getattr(self, "moe_expert_read_once", False))
+        model = getattr(self, "model", None)
+        status = (model.moe_read_once_status() if model is not None and hasattr(model, "moe_read_once_status")
+                  else {"layer_calls": 0, "declined_layer_calls": {}, "observed_used": False})
+        return {"implemented": True, "qualified": False, "selected": selected, "default": False,
+                "relation": "numerically_equivalent" if selected else "default",
+                "applies_to": (f"routed-expert calls of {switch_read_once.MIN_ROWS}+ rows and at most "
+                               f"{switch_read_once.MAX_ASSIGNMENTS} assignments (verify, multi-lane decode)"),
+                "kernel": "mlx2_read_once_q4_experts",
+                "opt_in": '{"moe_expert_read_once": true}',
+                "layer_calls": status["layer_calls"],
+                "declined_layer_calls": status["declined_layer_calls"],
+                "observed_used": status["observed_used"]}
+
     def _prefill_step_cap_receipt(self):
         """Route-receipt block of the autoscale bound (the server reports the step it ran)."""
         state = (getattr(self, "policy_defaults", None) or {}).get("prefill_step_cap", {})
@@ -2238,6 +2337,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "implemented": True, "qualified": False, "selected": draft is not None,
                 "max_width": AST_MAX_WIDTH,
                 "target_executor": getattr(self, "external_policy", {}).get("ast_target_executor"),
+                "verify_phase_align": bool(getattr(self, "external_policy", {}).get("verify_phase_align")),
                 "executor": self.tree_executor.receipt()
                 if getattr(self, "tree_executor", None) is not None else None,
                 "tensorfold_rows": self.tensorfold_rows.receipt()
@@ -2277,6 +2377,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "sliding_attention_blocks": self._sliding_band_receipt(),
             "prefill_step_cap": self._prefill_step_cap_receipt(),
             "sparse_prefill_attention": self._sparse_prefill_receipt(),
+            "moe_expert_read_once": self._moe_read_once_receipt(),
             "engram": {i: r.diagnostics() for i, r in getattr(self, "engram_tables", {}).items()},
             "engram_precision": getattr(getattr(getattr(self, "model", None), "args", None),
                                         "engram_precision", None),

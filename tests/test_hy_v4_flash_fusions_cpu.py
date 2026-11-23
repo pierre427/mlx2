@@ -196,7 +196,7 @@ def test_adapter_policy_keys_parse_and_namespace():
         A._parse_policy({"mla_fused_input_proj": True, "draft_model": "embedded_dfly",
                          "ast_tensorfold_rows": True})
     base = A.numerics_layout("L", fusions=A.fusion_policy({}))
-    assert base == "L"
+    assert base == "L+mla-fused-in-v1"   # served default on (Pierre 2026-11-21)
     tagged = A.numerics_layout("L", fusions=A.fusion_policy({k: True for k in keys - {"engram_gate_rounding"}}))
     assert tagged == "L+engram-fused-proj-v1+hc-seam-v1+indexer-fused-v1+mla-fused-in-v1"
     import importlib.util
@@ -224,7 +224,7 @@ def test_load_model_installs_fusions(tmp_path, tiny):
     assert _greedy(model, TOKENS[:6], 3) == _greedy(ref, TOKENS[:6], 3)
     st = F.status(model)
     assert st["mla_fused_input_proj"]["observed_used"] and st["engram_fused_proj"]["observed_used"]
-    plain, _, _ = A.load_model(path, artifact, fusions=A.fusion_policy({}))
+    plain, _, _ = A.load_model(path, artifact, fusions=A.fusion_policy({"mla_fused_input_proj": False}))
     assert getattr(plain, "fusion_record", None) is None
 
 

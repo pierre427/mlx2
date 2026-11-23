@@ -366,7 +366,7 @@ def test_adapter_policy_and_receipts_label_fp8_approximate_unqualified(tmp_path,
         assert adapter.model.args.latent_kv == "fp8"
         assert adapter.layout.startswith(A.FP8_CACHE_LAYOUT) and A.FP8_CACHE_LAYOUT != A.CACHE_LAYOUT
         # The Hy4 band default (2026-11-21) adds its tag before the route tag.
-        assert adapter.descriptor.cache_layout.startswith(A.FP8_CACHE_LAYOUT + "+swa-band512-v1:")
+        assert adapter.descriptor.cache_layout.startswith(A.FP8_CACHE_LAYOUT + "+swa-band512-v1+sparse-prefill-v1+mla-fused-in-v1:")
         assert "approximate" in adapter.descriptor.metadata["latent_kv"]
         assert adapter.descriptor.variant.endswith("+fp8-latent-kv")
         before = adapter.diagnostics()["latent_kv"]
@@ -393,7 +393,7 @@ def test_adapter_default_route_is_native_and_bad_format_refused(tmp_path, pair):
     adapter = A.HYV4FlashAdapter(str(path))
     try:
         assert adapter.model.args.latent_kv == "native"
-        assert adapter.layout == A.CACHE_LAYOUT + "+swa-band512-v1" == adapter.descriptor.cache_layout
+        assert adapter.layout == A.CACHE_LAYOUT + "+swa-band512-v1+sparse-prefill-v1+mla-fused-in-v1" == adapter.descriptor.cache_layout
         assert adapter.descriptor.variant == "ordinary"
         d = adapter.diagnostics()
         assert not d["approximate_state"] and not d["latent_kv"]["selected"]

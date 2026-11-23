@@ -348,7 +348,7 @@ def test_adapter_receipts_selected_vs_observed_used(pack, monkeypatch):
     try:
         assert NAX.MODE == "gather" and adapter.model.moe_nax_prefill
         assert any(sel.get("moe_nax_gather") == "gather" for _, sel in live_selections())
-        assert adapter.layout.endswith("+moe-fused-gate-up+moe-nax-gather+swa-band512-v1")
+        assert adapter.layout.endswith("+moe-fused-gate-up+moe-nax-gather+swa-band512-v1+sparse-prefill-v1+mla-fused-in-v1")
         assert adapter.descriptor.cache_layout == adapter.layout
         r = adapter.diagnostics()["moe_fused_gate_up"]
         assert r["selected"] and not r["observed_used"] and r["fused_layers"] == [3, 4, 5]
