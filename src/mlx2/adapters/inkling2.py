@@ -339,6 +339,15 @@ KERNEL_OPTIONS = {
     # one-row calls (needs inkling2_fuse_controllers),
     "inkling2_fuse_message_kernel": "fuse_message_kernel",
     # the one-token fused MoE forward compiled per shape (needs moe_fused),
+    # GPU only. The first GPU try failed "[compile] ... uncaptured inputs":
+    # the state was passed as fresh parameters() dictionaries while the
+    # traced code read the modules (fixed in cba0c1602). The 2026-11-22 fix
+    # on top: a trace hands the arrays back to the modules as new Python
+    # objects, which made the identity-keyed fused build restack gate/up and
+    # retrace on every token; they are now re-stamped (one trace per layer),
+    # and the FP32 router copy is an argument cast outside the trace. CPU:
+    # traced and bitwise equal to the eager fused path (NVFP4/MXFP8 tiny
+    # model). GPU A/B pending.
     "inkling2_compile_decode_blocks": "compile_decode_blocks",
     # and the logit softcap compiled into one kernel on the GPU.
     "inkling2_head_softcap_compiled": "head_softcap_compiled",
@@ -374,6 +383,54 @@ KERNEL_OPTIONS = {
     # Combines with every other switch; GPU tests and A/B pending
     # (tests/test_inkling2_kv_q8_metal.py, scripts/research/inkling2_kv_q8_ab.py).
     "inkling2_kv_q8": "kv_q8",
+    # Prefill attention slices (2026-11-22 audit; default off, GPU A/B
+    # pending). With flash prefill off, multi-row attention runs masked SDPA
+    # in row slices sized by a 64 MiB mask budget (inkling2_prefill_mask_mb),
+    # each slice re-reading the whole K/V. The budget counts 4 bytes per mask
+    # element but the mask is BF16 on the checkpoint, so slices are half the
+    # intended size (at 128K: ~103 slices x 512 MiB of K/V per global visit
+    # per 512-token chunk). This counts the mask's element size instead:
+    # twice the rows per slice, half the K/V passes, twice the transient mask
+    # memory (the same as inkling2_prefill_mask_mb 128 on BF16). Near-exact:
+    # the values are the same, but the slice shapes change, so SDPA may pick
+    # another kernel tile and reduce in another order. No-op for FP32.
+    "inkling2_prefill_mask_bf16_budget": "prefill_mask_bf16_budget",
+    # The same masked slices append each query's sink logit with a second
+    # full-width concatenation (one more write and read of the whole mask
+    # per slice). This builds the mask with the sink column included: the
+    # sink logit is an extra bias-table entry the sink column's gather index
+    # points at (runtime/models/inkling2/prefill_attention.py). The mask
+    # values are copies of the reference's, so it is bit-identical (CPU tiny
+    # model: bitwise, B1/B2, left padding, FP32/BF16, sliding and global
+    # layers); default off until the GPU A/B measures the saving.
+    "inkling2_prefill_mask_with_sink": "prefill_mask_with_sink",
+    # inkling2_head_kernel with 16-byte (uint4) weight loads instead of 8-byte
+    # (uint2); needs inkling2_head_kernel. Every lane still sums the same
+    # four-value groups in the same order (a 16-byte load holds two lanes'
+    # groups, so two simd_shuffles redistribute them; the per-group
+    # arithmetic is unchanged), so it is intended bit-identical to the
+    # narrow kernel; the Metal test checks that. The head kernel itself is
+    # a future-default candidate: it reads the 0.92 GB BF16 head per decode
+    # step where the default FP32 copy reads ~1.85 GB. Default off (2026-11-22
+    # audit); the shuffles may cost what the wider loads save, GPU A/B pending.
+    "inkling2_head_kernel_wide": "head_kernel_wide",
+    # Global-layer prefill/verify attention (rows > 1) through a tiled
+    # flash-style Metal kernel (runtime/models/inkling2/prefill_attention.py,
+    # original; mechanism after omlx#5526 flash_banded_attention): relative
+    # bias, padding, sink and log-tau-scaled q/r in-kernel with an online
+    # softmax, K/V read once per query tile for all G query heads of a KV
+    # head (packed rows interleave the heads), no mask. At 128K the masked
+    # slices read K/V ~100 times per global visit per 512-token chunk
+    # (~412 GiB); here it is ceil(512 * G / 32) tile passes. BF16 staged in
+    # FP16 with FP32 accumulation; near-exact (CPU emulation of the kernel's
+    # tiling vs the reference: see tests/test_inkling2_nonbitwise_cpu.py).
+    # Improves on inkling2_flash_prefill (FP32 staging, one head per tile,
+    # slower: 4K 1260 -> 1026 tok/s); the two are alternatives. Short blocks
+    # (< 32 rows) still go to inkling2_verify_splitk first. Sliding layers
+    # keep the masked path. GPU only, declines counted. Default off: Metal
+    # tests and the GPU A/B are pending (omlx found MLX's masked SDPA faster
+    # than its flash kernel for full attention on M5 NAX hosts).
+    "inkling2_prefill_tiled_attention": "prefill_tiled_attention",
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.
@@ -541,6 +598,11 @@ def validate_policy(value):
         raise ValueError("Inkling 2 inkling2_fuse_dconv_kernel requires inkling2_fuse_sconv")
     if kernels["fuse_message_kernel"] and not kernels["fuse_controllers"]:
         raise ValueError("Inkling 2 inkling2_fuse_message_kernel requires inkling2_fuse_controllers")
+    if kernels["prefill_tiled_attention"] and kernels["flash_prefill"]:
+        raise ValueError("Inkling 2 inkling2_prefill_tiled_attention and inkling2_flash_prefill "
+                         "are alternatives")
+    if kernels["head_kernel_wide"] and not kernels["head_kernel"]:
+        raise ValueError("Inkling 2 inkling2_head_kernel_wide requires inkling2_head_kernel")
     if kernels["compile_decode_blocks"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_compile_decode_blocks requires inkling2_moe_fused")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
@@ -866,6 +928,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if policy.get("kv_q8"):
             # The kernels reuse splitk.py's merge kernel and split heuristics.
             names += ("inkling2/kv_q8.py", "inkling2/splitk.py")
+        if any(policy.get(k) for k in ("prefill_mask_with_sink", "prefill_tiled_attention")):
+            names += ("inkling2/prefill_attention.py",)
         contract = {
             "operation": numerics_operation(policy),
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),

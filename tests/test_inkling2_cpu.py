@@ -374,7 +374,10 @@ def test_policy_parsing():
          "fuse_gather_lhs": False, "fuse_norm_fp32": False, "fuse_shared_tau": False,
          "fuse_dconv_kernel": False, "fuse_message_kernel": False,
          "compile_decode_blocks": False, "head_softcap_compiled": False,
-         "moe_act_quant": False, "kv_q8": False}, {})
+         "moe_act_quant": False, "kv_q8": False,
+         "prefill_mask_bf16_budget": False,
+         "prefill_mask_with_sink": False, "head_kernel_wide": False,
+         "prefill_tiled_attention": False}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -399,7 +402,11 @@ def test_fused_projection_toggle_round_trip():
                                    "fuse_gather_lhs": False, "fuse_norm_fp32": False, "fuse_shared_tau": False,
                                    "fuse_dconv_kernel": False, "fuse_message_kernel": False,
                                    "compile_decode_blocks": False, "head_softcap_compiled": False,
-                                   "kv_q8": False}
+                                   "kv_q8": False,
+                                   "prefill_mask_bf16_budget": False,
+                                   "prefill_mask_with_sink": False,
+                                   "head_kernel_wide": False,
+                                   "prefill_tiled_attention": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])

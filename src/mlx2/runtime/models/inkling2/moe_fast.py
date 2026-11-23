@@ -251,8 +251,13 @@ def _weighted_sum_admitted(y, inv_order, weights, indices, do_sort):
     return None if admission.accepted else admission.reason
 
 
-def fused_call(moe, experts, x, weighted_sum=False, *, compiled_decode=False):
-    """``moe(x)`` through the stacked experts; counters live on ``moe``."""
+def fused_call(moe, experts, x, weighted_sum=False, *, compiled_decode=False,
+               router_weight=None):
+    """``moe(x)`` through the stacked experts; counters live on ``moe``.
+
+    ``router_weight`` is the FP32 router weight when the caller already holds
+    it (the compiled decode block passes it as an argument); None reads the
+    module's cached copy."""
     switch = moe.switch_mlp
     counts = moe.__dict__.setdefault("moe_fast_counts", {})
 
@@ -261,8 +266,10 @@ def fused_call(moe, experts, x, weighted_sum=False, *, compiled_decode=False):
 
     from .language import _fp32
 
+    if router_weight is None:
+        router_weight = _fp32(moe, "gate_weight")
     indices, weights = route_compiled(
-        x, _fp32(moe, "gate_weight"), moe.e_score_correction_bias, moe.top_k, moe.route_scale
+        x, router_weight, moe.e_score_correction_bias, moe.top_k, moe.route_scale
     )
     act_fmt = moe.__dict__.get("_act_quant")
     if act_fmt:

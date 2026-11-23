@@ -144,7 +144,70 @@ _HEAD_SOURCE = r"""
         if (lane == 0) out[size_t(m) * N + n] = total;
     }
 """
+# ``inkling2_head_kernel_wide``: the same kernel with 16-byte weight loads.
+# Each lane must still sum the same four-value groups in the same order
+# (lane, lane + 32, lane + 64, ...), or the simd_sum inputs change. A 16-byte
+# load holds two adjacent groups, which belong to two different lanes, so
+# per round of 64 groups lane j loads groups 2j and 2j + 1 and two
+# simd_shuffles hand every lane its own pair (group base + lane from lane
+# lane / 2, group base + 32 + lane from lane 16 + lane / 2; the half is
+# lane & 1). The per-group expression is the narrow kernel's, character for
+# character. Needs K % 8 == 0 (the caller requires K % 128 == 0).
+_HEAD_WIDE_SOURCE = r"""
+    uint n = thread_position_in_grid.x / 32;
+    uint lane = thread_index_in_simdgroup;
+    if (n >= N) return;  // whole simdgroups: the shuffles below see all lanes
+    float acc[M];
+    for (int m = 0; m < M; ++m) acc[m] = 0.0f;
+    constexpr uint G4 = K / 4;
+    const device uint4* row4 = (const device uint4*)(w + size_t(n) * K);
+    for (uint base = 0; base < G4; base += 64) {
+        const uint mine = base / 2 + lane;
+        const uint4 wide = (2 * mine < G4) ? row4[mine] : uint4(0u);
+        const uint4 lo = simd_shuffle(wide, ushort(lane / 2));
+        const uint4 hi = simd_shuffle(wide, ushort(16 + lane / 2));
+        for (uint half_idx = 0; half_idx < 2; ++half_idx) {
+            const uint k = base + half_idx * 32 + lane;
+            if (k >= G4) break;
+            const uint4 src = half_idx == 0 ? lo : hi;
+            uint2 wv = (lane & 1u) ? src.zw : src.xy;
+            float w0 = as_type<float>(wv.x << 16), w1 = as_type<float>(wv.x & 0xFFFF0000u);
+            float w2 = as_type<float>(wv.y << 16), w3 = as_type<float>(wv.y & 0xFFFF0000u);
+            for (int m = 0; m < M; ++m) {
+                uint2 xv = ((const device uint2*)(x + size_t(m) * K))[k];
+                acc[m] += w0 * as_type<float>(xv.x << 16) + w1 * as_type<float>(xv.x & 0xFFFF0000u)
+                        + w2 * as_type<float>(xv.y << 16) + w3 * as_type<float>(xv.y & 0xFFFF0000u);
+            }
+        }
+    }
+    for (int m = 0; m < M; ++m) {
+        float total = simd_sum(acc[m]);
+        if (lane == 0) out[size_t(m) * N + n] = total;
+    }
+"""
+
+
+def head_wide_lane_groups(k, lane):
+    """The four-value groups lane ``lane`` sums, in order, under the wide
+    kernel's load-and-shuffle schedule (a Python transcription of
+    ``_HEAD_WIDE_SOURCE``'s indexing, checked against the narrow kernel's
+    ``range(lane, K // 4, 32)`` by the CPU tests)."""
+    g4, out = k // 4, []
+    for base in range(0, g4, 64):
+        loads = {j: (2 * (base // 2 + j), 2 * (base // 2 + j) + 1)
+                 if 2 * (base // 2 + j) < g4 else (None, None) for j in range(32)}
+        for half_idx, source in ((0, lane // 2), (1, 16 + lane // 2)):
+            kk = base + half_idx * 32 + lane
+            if kk >= g4:
+                break
+            group = loads[source][lane & 1]
+            assert group == kk, (lane, base, half_idx, group, kk)
+            out.append(group)
+    return out
+
+
 _head_kernel = None
+_head_wide_kernel = None
 _COMPILED_HEAD_ROWS = 32
 _SOFTCAP_SCALARS = {}
 
@@ -162,21 +225,37 @@ def _softcap_scalar(cap):
     return held
 
 
-def head_gemv(x, weight):
+def head_gemv(x, weight, wide=False):
     """``x @ weight.T`` with FP32 output from a BF16 weight, no FP32 copy.
 
     ``x`` holds BF16-representable rows (the head input is BF16-rounded), so
     every product is exact in FP32; only the summation order differs from an
-    FP32 GEMM.  Opt-in (``inkling2_head_kernel``); unqualified.
+    FP32 GEMM.  Opt-in (``inkling2_head_kernel``); unqualified.  ``wide``:
+    16-byte weight loads with the same per-lane order
+    (``inkling2_head_kernel_wide``), intended bit-identical to the narrow
+    kernel; needs K % 8 == 0.
     """
-    global _head_kernel
-    if _head_kernel is None:
-        _head_kernel = mx.fast.metal_kernel(
-            name="inkling2_bf16_head_fp32",
-            input_names=["x", "w"],
-            output_names=["out"],
-            source=_HEAD_SOURCE,
-        )
+    global _head_kernel, _head_wide_kernel
+    if wide:
+        if x.shape[-1] % 8 or weight.shape[1] != x.shape[-1]:
+            raise ValueError("head_gemv wide loads need K % 8 == 0 and a matching weight")
+        if _head_wide_kernel is None:
+            _head_wide_kernel = mx.fast.metal_kernel(
+                name="inkling2_bf16_head_fp32_wide",
+                input_names=["x", "w"],
+                output_names=["out"],
+                source=_HEAD_WIDE_SOURCE,
+            )
+        kernel = _head_wide_kernel
+    else:
+        if _head_kernel is None:
+            _head_kernel = mx.fast.metal_kernel(
+                name="inkling2_bf16_head_fp32",
+                input_names=["x", "w"],
+                output_names=["out"],
+                source=_HEAD_SOURCE,
+            )
+        kernel = _head_kernel
     lead, k = x.shape[:-1], x.shape[-1]
     n = weight.shape[0]
     rows = mx.contiguous(x.reshape(-1, k).astype(mx.bfloat16))
@@ -184,7 +263,7 @@ def head_gemv(x, weight):
     for start in range(0, rows.shape[0], _HEAD_ROWS):
         chunk = rows[start : start + _HEAD_ROWS]
         outputs.append(
-            _head_kernel(
+            kernel(
                 inputs=[chunk, weight],
                 template=[("M", chunk.shape[0]), ("N", n), ("K", k)],
                 grid=(n * 32, 1, 1),
@@ -381,6 +460,12 @@ def flash_relative_attention(q, k, v, rel, sinks, *, offset, left_padding, windo
         output_shapes=[(b, hq, length, dim)],
         output_dtypes=[q.dtype],
     )[0]
+
+
+def _prefill_attention():
+    from . import prefill_attention
+
+    return prefill_attention
 
 
 def _banded_mask_reference(_attn, *args, **kwargs):
@@ -885,6 +970,24 @@ class Attention(nn.Module):
             ]
             out = outs[0] if b == 1 else mx.concatenate(outs, axis=0)
             return self._finish(out, gate, b, length, x.dtype)
+        if length > 1 and self.__dict__.get("_prefill_tiled") and not self.is_sliding:
+            # inkling2_prefill_tiled_attention (global layers): bias, padding,
+            # sink and log-tau-scaled q/r in-kernel, K/V read once per query
+            # tile, no mask.
+            tiled = _prefill_attention()
+            reason = ("cache_type" if ring is not None
+                      or (kv is not None and type(kv) not in self._SPLITK_CACHES)
+                      else tiled.decline_reason(q, k, v, n_heads=self.n_heads, n_kv=self.n_kv,
+                                                head_dim=self.head_dim))
+            counts = self.__dict__.setdefault("prefill_tiled_counts", {})
+            key = "calls" if reason is None else "declined:" + reason
+            counts[key] = counts.get(key, 0) + 1
+            if reason is None:
+                out = tiled.tiled_prefill_attention(
+                    q, k, v, r @ rel_proj, sink, offset=offset, left_padding=left_padding,
+                    window=self.sliding, scale=self.scale,
+                )
+                return self._finish(out, gate, b, length, x.dtype)
         if (
             length > 1
             and self.__dict__.get("_flash_prefill")
@@ -917,23 +1020,41 @@ class Attention(nn.Module):
         budget = self.__dict__.get("_mask_budget_bytes") or _MASK_BUDGET_BYTES
         # Budget counts 4 bytes per mask element; the transient peak of one
         # chunk (int32 gather index, gathered bias, where/concat copies) is a
-        # few times that.
-        rows = max(1, budget // max(1, b * self.n_heads * (size + 1) * 4))
+        # few times that. ``inkling2_prefill_mask_bf16_budget`` counts the
+        # mask's own element size instead (2 bytes for BF16), so a BF16 chunk
+        # has twice the rows and re-reads K/V half as often.
+        element = 4
+        if self.__dict__.get("_mask_bf16_budget") and r.dtype.size < 4:
+            element = r.dtype.size
+            self.__dict__["mask_bf16_budget_calls"] = (
+                self.__dict__.get("mask_bf16_budget_calls", 0) + 1)
+        rows = max(1, budget // max(1, b * self.n_heads * (size + 1) * element))
         self.__dict__["mask_rows_last"] = rows
         outputs = []
+        with_sink = self.__dict__.get("_mask_with_sink", False)
         for begin in range(0, length, rows):
             end = min(length, begin + rows)
-            mask = (_fuse.banded_mask if fa else _banded_mask_reference)(
-                self,
-                r[:, begin:end],
-                rel_proj,
-                offset + begin,
-                size,
-                self.sliding,
-                self.rel_extent,
-                left_padding=left_padding,
-            )
-            mask = mx.concatenate([mask, sinks[:, :, begin:end].astype(mask.dtype)], axis=-1)
+            if with_sink:
+                # inkling2_prefill_mask_with_sink: the sink logit is column
+                # ``size`` of the same gather (no second full-width copy).
+                self.__dict__["mask_with_sink_calls"] = (
+                    self.__dict__.get("mask_with_sink_calls", 0) + 1)
+                mask = _prefill_attention().banded_mask_with_sink(
+                    self, r[:, begin:end], rel_proj, sinks[:, :, begin:end], offset + begin,
+                    size, self.sliding, self.rel_extent, left_padding=left_padding,
+                )
+            else:
+                mask = (_fuse.banded_mask if fa else _banded_mask_reference)(
+                    self,
+                    r[:, begin:end],
+                    rel_proj,
+                    offset + begin,
+                    size,
+                    self.sliding,
+                    self.rel_extent,
+                    left_padding=left_padding,
+                )
+                mask = mx.concatenate([mask, sinks[:, :, begin:end].astype(mask.dtype)], axis=-1)
             outputs.append(
                 mx.fast.scaled_dot_product_attention(
                     q[:, :, begin:end], k, v, scale=self.scale, mask=mask
@@ -970,6 +1091,12 @@ class SoftcappedSwiGLU(nn.Module):
             _act_quant.count(self.__dict__["_act_quant_counts"], f"reference:{fmt}:w2")
             out = _act_quant.apply(fmt, out)
         return out
+
+
+def _compiled_moe_device():
+    """``inkling2_compile_decode_blocks`` runs on the GPU only (CPU tests
+    patch this to trace the same block on the CPU)."""
+    return mx.default_device() == mx.gpu
 
 
 class SparseMoE(nn.Module):
@@ -1010,22 +1137,53 @@ class SparseMoE(nn.Module):
         key = (id(experts), bool(weighted), gather_lhs.enabled(experts.gate_up))
         held = self.__dict__.get("_compiled_moe_fn")
         if held is None or held[0] != key:
-            # MLX substitutes tracers in these containers. parameters() builds
-            # separate dictionaries; tracing the modules would still see the
-            # original arrays, which MLX rejects as uncaptured inputs.
+            # MLX substitutes tracers into these containers in place, and the
+            # traced function must read every state array through them: an
+            # array listed as state but read through another container (the
+            # earlier ``self.parameters()`` dictionaries, while the function
+            # read ``self[...]``) is the original, not its tracer, which MLX
+            # rejects as an uncaptured input. Every other array the block
+            # reads is a constant: the gather_lhs indices (host data), the
+            # Python-float caps, the sort decision (host ints).
+            # The FP32 router weight is an explicit argument, cast once
+            # outside the trace: traced, ``_fp32`` would re-cast the BF16
+            # gate weight inside the graph on every call and cache a tracer.
             fn = mx.compile(
-                lambda row: moe_fast.fused_call(
-                    self, experts, row, weighted_sum=weighted, compiled_decode=True
+                lambda row, router: moe_fast.fused_call(
+                    self, experts, row, weighted_sum=weighted, compiled_decode=True,
+                    router_weight=router,
                 ),
                 inputs=[self, vars(experts)], shapeless=False,
             )
             held = (key, fn)
             object.__setattr__(self, "_compiled_moe_fn", held)
-        result = held[1](x)
+        before = moe_fast.source_key(self.switch_mlp)
+        gate = self["gate_weight"]
+        result = held[1](x, _fp32(self, "gate_weight"))
         counts = self.__dict__.setdefault("moe_fast_counts", {})
+        if self["gate_weight"] is not gate or not moe_fast.same_source(
+                before, moe_fast.source_key(self.switch_mlp)):
+            # The call traced. MLX then puts the original arrays back into
+            # the captured containers as new Python objects (same buffers),
+            # so the identity-keyed caches would see replaced weights: the
+            # fused experts were rebuilt (a full gate/up restack) and the
+            # block retraced on every token. Re-stamp them; a real weight
+            # replacement between calls is still caught by the next
+            # ``_fast_experts`` call, before this one.
+            self._restamp_after_trace(before, gate)
+            counts["compiled_moe_traces"] = counts.get("compiled_moe_traces", 0) + 1
         counts["compiled_moe_calls"] = counts.get("compiled_moe_calls", 0) + 1
         counts["fused"] = counts.get("fused", 0) + 1
         return result
+
+    def _restamp_after_trace(self, before, gate):
+        from . import moe_fast
+
+        if moe_fast.same_source(self.__dict__.get("_fast_key", ()), before):
+            object.__setattr__(self, "_fast_key", moe_fast.source_key(self.switch_mlp))
+        cached = self.__dict__.get("_fp32_gate_weight")
+        if cached is not None and cached[0] is gate:
+            object.__setattr__(self, "_fp32_gate_weight", (self["gate_weight"], cached[1]))
 
     def _fast_experts(self):
         """``(experts, refusal)``, rebuilt when any source array is replaced
@@ -1053,7 +1211,7 @@ class SparseMoE(nn.Module):
             if reason is None:
                 weighted = self.__dict__.get("_fast_weighted_sum", False)
                 if (self.__dict__.get("_compile_decode_blocks") and x.size == x.shape[-1]
-                        and mx.default_device() == mx.gpu
+                        and _compiled_moe_device()
                         and not self.__dict__.get("_act_quant")):
                     return self._compiled_moe(experts, weighted, x)
                 return moe_fast.fused_call(self, experts, x, weighted_sum=weighted)
@@ -1469,9 +1627,14 @@ class Model(nn.Module):
             and mx.default_device() == mx.gpu
         ):
             self.__dict__["head_kernel_calls"] = self.__dict__.get("head_kernel_calls", 0) + 1
+            wide = bool(policy.get("head_kernel_wide"))
+            if wide:
+                self.__dict__["head_kernel_wide_calls"] = (
+                    self.__dict__.get("head_kernel_wide_calls", 0) + 1)
             # Each output row is its own reduction, so skipping the padded
             # rows (a leading-row view) leaves the kept logits unchanged.
-            logits = head_gemv(h.astype(self.model.embed_norm.weight.dtype), weight[:vocab])
+            logits = head_gemv(h.astype(self.model.embed_norm.weight.dtype), weight[:vocab],
+                               wide=wide)
         else:
             h = h.astype(self.model.embed_norm.weight.dtype).astype(mx.float32)
             cached = self._head_fp32
@@ -1528,7 +1691,9 @@ class Model(nn.Module):
                           fuse_gather_lhs=False, fuse_norm_fp32=False, fuse_shared_tau=False,
                           fuse_dconv_kernel=False, fuse_message_kernel=False,
                           compile_decode_blocks=False, head_softcap_compiled=False,
-                          kv_q8=False):
+                          kv_q8=False,
+                          prefill_mask_bf16_budget=False, prefill_mask_with_sink=False,
+                          head_kernel_wide=False, prefill_tiled_attention=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1545,6 +1710,10 @@ class Model(nn.Module):
             raise ValueError("Inkling 2 fuse_dconv_kernel requires fuse_sconv")
         if compile_decode_blocks and not moe_fused:
             raise ValueError("Inkling 2 compile_decode_blocks requires moe_fused")
+        if head_kernel_wide and not head_kernel:
+            raise ValueError("Inkling 2 head_kernel_wide requires head_kernel")
+        if prefill_tiled_attention and flash_prefill:
+            raise ValueError("Inkling 2 prefill_tiled_attention and flash_prefill are alternatives")
         if fuse_message_kernel and not fuse_controllers:
             raise ValueError("Inkling 2 fuse_message_kernel requires fuse_controllers")
         if moe_act_quant:
@@ -1597,6 +1766,10 @@ class Model(nn.Module):
                                bool(kv_q8) and not layer.self_attn.is_sliding)
             object.__setattr__(layer.self_attn, "_mask_budget_bytes",
                                None if prefill_mask_mb is None else int(prefill_mask_mb) << 20)
+            object.__setattr__(layer.self_attn, "_mask_bf16_budget",
+                               bool(prefill_mask_bf16_budget))
+            object.__setattr__(layer.self_attn, "_mask_with_sink", bool(prefill_mask_with_sink))
+            object.__setattr__(layer.self_attn, "_prefill_tiled", bool(prefill_tiled_attention))
             if fused_projections:
                 layer.self_attn.fuse_projections()
             elif getattr(layer.self_attn, "_fused_bounds", None) is not None:
@@ -1629,7 +1802,11 @@ class Model(nn.Module):
              **{name: bool(value) for name, value in flags.items()},
              "verify_splitk": bool(verify_splitk), "moe_act_quant": bool(moe_act_quant),
              "compile_decode_blocks": bool(compile_decode_blocks),
-             "head_softcap_compiled": bool(head_softcap_compiled), "kv_q8": bool(kv_q8)},
+             "head_softcap_compiled": bool(head_softcap_compiled), "kv_q8": bool(kv_q8),
+             "prefill_mask_bf16_budget": bool(prefill_mask_bf16_budget),
+             "prefill_mask_with_sink": bool(prefill_mask_with_sink),
+             "head_kernel_wide": bool(head_kernel_wide),
+             "prefill_tiled_attention": bool(prefill_tiled_attention)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1659,8 +1836,21 @@ class Model(nn.Module):
             for key, value in layer.mlp.__dict__.get("moe_fast_counts", {}).items():
                 moe[key] = moe.get(key, 0) + value
         built = [layer.mlp.__dict__.get("_fast_built") for layer in self.model.layers]
+        mask_bf16 = [layer.self_attn.__dict__.get("mask_bf16_budget_calls", 0)
+                     for layer in self.model.layers]
+        with_sink = [layer.self_attn.__dict__.get("mask_with_sink_calls", 0)
+                     for layer in self.model.layers]
+        tiled = {}
+        for layer in self.model.layers:
+            for key, value in layer.self_attn.__dict__.get("prefill_tiled_counts", {}).items():
+                tiled[key] = tiled.get(key, 0) + value
         out = {"fused_projection_calls": sum(calls),
+               "prefill_tiled_calls": tiled.pop("calls", 0),
+               "prefill_tiled_declines": tiled,
+               "prefill_mask_bf16_budget_calls": sum(mask_bf16),
+               "prefill_mask_with_sink_calls": sum(with_sink),
                "head_kernel_calls": self.__dict__.get("head_kernel_calls", 0),
+               "head_kernel_wide_calls": self.__dict__.get("head_kernel_wide_calls", 0),
                "sink_sdpa_calls": sum(sinks), "flash_prefill_calls": sum(flash),
                "sink_slot_calls": sum(slot), "sink_slot_fallbacks": sum(slot_fb),
                "sink_slot_grows": sum(slot_grows),
@@ -1674,6 +1864,7 @@ class Model(nn.Module):
                "moe_fused_calls": moe.pop("fused", 0),
                "moe_weighted_sum_calls": moe.pop("weighted_sum", 0),
                "compiled_moe_calls": moe.pop("compiled_moe_calls", 0),
+               "compiled_moe_traces": moe.pop("compiled_moe_traces", 0),
                "moe_fast_declines": moe,
                "moe_fused_layers": sum(1 for b in built if b is not None and b[0] is not None),
                "moe_fused_refusals": sorted({b[1] for b in built if b is not None and b[1]})}
