@@ -38,6 +38,7 @@ from ..inkling.language import (
 from ..switch_layers import SwitchGLU
 from . import act_quant as _act_quant
 from . import fuse as _fuse
+from . import kv_q8 as _kv_q8
 from . import splitk
 from .config import TextConfig
 
@@ -622,7 +623,28 @@ class Attention(nn.Module):
         return splitk.decline_reason(q, k, v, n_heads=self.n_heads, n_kv=self.n_kv,
                                      head_dim=self.head_dim)
 
+    def _fetch_q8(self, kv, k, v):
+        """``inkling2_kv_q8``: append packed int8 rows, fetch packed rows.
+
+        Fails closed on a plane holding the other format (a BF16 plane in a
+        Q8 model, or a ring): the APCv2 layout keeps the two apart, so one
+        here is a bug, not a state to convert."""
+        held = getattr(kv, "keys", None)
+        if type(kv) in (RotatingKVCache, BatchRotatingKVCache) or (
+                isinstance(held, mx.array) and held.dtype != mx.int8):
+            raise ValueError(
+                f"Inkling 2 kv_q8 global visit got a {type(kv).__name__} plane in another "
+                "format; Q8 and BF16 caches do not mix")
+        k, v = kv.update_and_fetch(_kv_q8.pack(k), _kv_q8.pack(v))
+        if k.dtype != mx.int8 or k.shape[-1] != _kv_q8.packed_width(self.head_dim):
+            raise ValueError("Inkling 2 kv_q8 plane returned rows in another format")
+        return k, v
+
     def _fetch(self, kv, k, v):
+        held = getattr(kv, "keys", None)
+        if isinstance(held, mx.array) and held.dtype == mx.int8:
+            raise ValueError(
+                "Inkling 2 attention got an int8 (kv_q8) plane with inkling2_kv_q8 off")
         k, v = kv.update_and_fetch(k, v)
         # Learned relative logits index backward distance, so ring buffers
         # are read in chronological order (RoPE attention does not care).
@@ -667,7 +689,17 @@ class Attention(nn.Module):
         )
         q, k, v = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
         ring, ring_start = None, 0
-        if (
+        # inkling2_kv_q8 (global visits only; the attribute is never set on
+        # sliding ones): K/V are stored as packed int8 rows.
+        q8 = self.__dict__.get("_kv_q8", False)
+        if q8 and kv is None:
+            # No cache: attend over the values a cache would have stored.
+            k, v = _kv_q8.pack(k), _kv_q8.pack(v)
+            counts = self.__dict__.setdefault("kv_q8_counts", {})
+            counts["uncached"] = counts.get("uncached", 0) + 1
+        elif q8:
+            k, v = self._fetch_q8(kv, k, v)
+        elif (
             fa
             and type(kv) is RotatingKVCache
             and not self.__dict__.get("_sink_sdpa")
@@ -713,6 +745,24 @@ class Attention(nn.Module):
             q = (q.astype(mx.float32) * tau.transpose(0, 2, 1, 3)).astype(x.dtype)
             r = (r.astype(mx.float32) * tau).astype(x.dtype)
         rel_proj = self.rel_proj.astype(x.dtype)
+        if q8:
+            # The int8 K/V are read in place; nothing dequantizes the prefix.
+            reason = _kv_q8.decline_reason(q[:, :, :1], k, v, n_heads=self.n_heads,
+                                           n_kv=self.n_kv, head_dim=self.head_dim)
+            counts = self.__dict__.setdefault("kv_q8_counts", {})
+            kw = dict(offset=offset, left_padding=left_padding, window=0, scale=self.scale)
+            if reason is None and length < _kv_q8.MAX_ROWS:
+                key = "kernel_decode" if length == 1 else "kernel_rows"
+                out = _kv_q8.q8_attention(q, k, v, r @ rel_proj, sink, **kw)
+            elif reason is None:
+                key = "kernel_prefill_tiled"
+                out = _kv_q8.tiled_attention(q, k, v, r @ rel_proj, sink, counts=counts, **kw)
+            else:
+                key = "blockwise:" + reason
+                out = _kv_q8.blockwise_attention(q, k, v, r @ rel_proj, sink, counts=counts,
+                                                 **kw)
+            counts[key] = counts.get(key, 0) + 1
+            return self._finish(out, gate, b, length, x.dtype)
         if self.__dict__.get("_verify_splitk"):
             reason = self._splitk_decline(kv, q, k, v)
             counts = self.__dict__.setdefault("verify_splitk_counts", {})
@@ -765,7 +815,7 @@ class Attention(nn.Module):
         # A query-dependent sink is a zero K/V with its own logit.
         sinks = sink.transpose(0, 2, 1)[..., None]
         slot = (self._sink_slot(kv, b, size)
-                if ring is None and self.__dict__.get("_sink_slot_on") else None)
+                if ring is None and not q8 and self.__dict__.get("_sink_slot_on") else None)
         if ring is not None:
             _fuse.count(self, "ring_sink_concat")
             zero = _fuse.zeros(self, (b, self.n_kv, 1, self.head_dim), ring.keys.dtype)
@@ -1300,7 +1350,13 @@ class Model(nn.Module):
     def apc_v2_layout(self):
         # A different loop count has a different visit/plane topology.
         passes, trained = self.model.num_passes, self.config.loop_config.num_passes
-        return self.BASE_LAYOUT if passes == trained else f"{self.BASE_LAYOUT}-passes{passes}"
+        layout = self.BASE_LAYOUT if passes == trained else f"{self.BASE_LAYOUT}-passes{passes}"
+        # inkling2_kv_q8 stores the global visits' K/V as int8 rows: a
+        # different plane format, so a different layout (never restored
+        # into a BF16 lane, nor the reverse).
+        if getattr(self, "kernel_policy", {}).get("kv_q8"):
+            layout += _kv_q8.LAYOUT_SUFFIX
+        return layout
 
     def loop_receipt(self):
         trained = self.config.loop_config.num_passes
@@ -1379,7 +1435,8 @@ class Model(nn.Module):
                           fuse_residual_kernel=False, verify_splitk=False, moe_act_quant=False,
                           fuse_gather_lhs=False, fuse_norm_fp32=False, fuse_shared_tau=False,
                           fuse_dconv_kernel=False, fuse_message_kernel=False,
-                          compile_decode_blocks=False, head_softcap_compiled=False):
+                          compile_decode_blocks=False, head_softcap_compiled=False,
+                          kv_q8=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1403,6 +1460,13 @@ class Model(nn.Module):
             # refusal leaves the model as it was.
             for layer in self.model.layers:
                 layer.mlp.act_quant_format()
+        if kv_q8:
+            for layer in self.model.layers:
+                attn = layer.self_attn
+                reason = None if attn.is_sliding else _kv_q8.geometry_reason(attn.head_dim)
+                if reason is not None:
+                    raise ValueError(
+                        f"Inkling 2 kv_q8 has no int8 layout for head_dim {attn.head_dim} ({reason})")
         flags = {"fuse_controllers": fuse_controllers, "fuse_residual": fuse_residual,
                  "fuse_sconv": fuse_sconv, "fuse_attention": fuse_attention,
                  "fuse_sconv_kernel": fuse_sconv_kernel,
@@ -1436,6 +1500,9 @@ class Model(nn.Module):
             object.__setattr__(layer.self_attn, "_sink_slot_on", bool(sink_slot))
             object.__setattr__(layer.self_attn, "_flash_prefill", bool(flash_prefill))
             object.__setattr__(layer.self_attn, "_verify_splitk", bool(verify_splitk))
+            # Global visits only: the sliding-window rings stay BF16.
+            object.__setattr__(layer.self_attn, "_kv_q8",
+                               bool(kv_q8) and not layer.self_attn.is_sliding)
             object.__setattr__(layer.self_attn, "_mask_budget_bytes",
                                None if prefill_mask_mb is None else int(prefill_mask_mb) << 20)
             if fused_projections:
@@ -1470,7 +1537,7 @@ class Model(nn.Module):
              **{name: bool(value) for name, value in flags.items()},
              "verify_splitk": bool(verify_splitk), "moe_act_quant": bool(moe_act_quant),
              "compile_decode_blocks": bool(compile_decode_blocks),
-             "head_softcap_compiled": bool(head_softcap_compiled)},
+             "head_softcap_compiled": bool(head_softcap_compiled), "kv_q8": bool(kv_q8)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1516,6 +1583,23 @@ class Model(nn.Module):
         out["moe_act_quant"] = {
             "calls": dict(sorted(act.items())),
             "layers": {fmt: sum(1 for f in formats if f == fmt) for fmt in _act_quant.FORMATS},
+        }
+        q8 = {}
+        for layer in self.model.layers:
+            for key, value in layer.self_attn.__dict__.get("kv_q8_counts", {}).items():
+                q8[key] = q8.get(key, 0) + value
+        out["kv_q8"] = {
+            "selected": bool(getattr(self, "kernel_policy", {}).get("kv_q8")),
+            "fidelity": "approximate", "qualified": False, "format": _kv_q8.FORMAT,
+            "global_layers": sum(1 for layer in self.model.layers
+                                 if layer.self_attn.__dict__.get("_kv_q8")),
+            "calls": {key: value for key, value in sorted(q8.items())
+                      if key not in ("prefill_tiles", "block_dequant_calls")},
+            "kv_q8_prefill_tiles": q8.get("prefill_tiles", 0),
+            "kv_q8_block_dequant_calls": q8.get("block_dequant_calls", 0),
+            # Process-wide whole-prefix dequantizes (the test oracle only);
+            # stays 0 in serving.
+            "kv_q8_full_prefix_dequant": _kv_q8.full_prefix_dequant_calls(),
         }
         if getattr(self, "kernel_policy", {}).get("moe_nax_gather"):
             from .. import moe_nax_gather

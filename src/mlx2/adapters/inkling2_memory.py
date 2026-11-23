@@ -44,6 +44,9 @@ class Inkling2CacheBudget:
     prefill_rows: int = 2048
     item_bytes: int = 2  # BF16 K/V (the dense checkpoint dtype)
     conv_item_bytes: int = 4  # FP32 short-conv histories
+    # inkling2_kv_q8: bytes of one global-visit K (or V) row per KV head (int8
+    # codes plus inline FP16 scales); 0 = head_dim * item_bytes.
+    global_row_bytes: int = 0
     # Speculation keeps short-conv rollback records for the verify block
     # (DSpark depth up to 8, plus the committed state).
     conv_copies: int = 1
@@ -60,7 +63,8 @@ class Inkling2CacheBudget:
         return value
 
     @classmethod
-    def from_config(cls, text, *, visits=None, prefill_rows=2048, draft=None, num_draft=0):
+    def from_config(cls, text, *, visits=None, prefill_rows=2048, draft=None, num_draft=0,
+                    kv_q8=False):
         """``text``: the Inkling 2 ``TextConfig``; ``draft``: the DSpark
         drafter's ``mtp_config`` dict when the DSpark route is selected."""
         visits = text.layer_indices if visits is None else visits
@@ -75,6 +79,10 @@ class Inkling2CacheBudget:
             sliding_window=int(text.sliding_window_size),
             conv_kernel=int(text.sconv_kernel_size),
         )
+        if kv_q8:
+            from ..runtime.models.inkling2 import kv_q8 as _kv_q8
+
+            fields["global_row_bytes"] = _kv_q8.packed_width(int(text.head_dim))
         if getattr(text, "swa_num_key_value_heads", None) not in (None, fields["kv_heads"]) or (
             getattr(text, "swa_head_dim", None) not in (None, fields["head_dim"])
         ):
@@ -122,6 +130,7 @@ class Inkling2CacheBudget:
         n = self._count(context_tokens)
         capacity = self._capacity(n)
         token = 2 * self.kv_heads * self.head_dim * self.item_bytes
+        global_token = 2 * self.kv_heads * (self.global_row_bytes or self.head_dim * self.item_bytes)
         ring = min(capacity, self.sliding_window + self.prefill_rows)
         # Ordinary prefill retains stride-spaced window snapshots and can
         # force one conv snapshot at each turn end. DSpark instead holds the
@@ -132,7 +141,7 @@ class Inkling2CacheBudget:
             saved_ring += min(n, self.sliding_window + 2 * self.verify_rows)
         saved_conv = min(n, self.checkpoint_copies) * self.conv_bytes
         total = (
-            self.global_visits * capacity * token
+            self.global_visits * capacity * global_token
             + self.sliding_visits * (ring + saved_ring) * token
             + self.conv_bytes + saved_conv
             + capacity * self.transcript_bytes_per_token

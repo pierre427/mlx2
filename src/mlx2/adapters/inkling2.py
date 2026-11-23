@@ -33,6 +33,55 @@ NUMERICS = "inkling2-native-w4a16-v1"
 # inkling2_moe_act_quant on: expert activations fake-quantized (W4A4 / W8A8
 # numerics with BF16 matmuls); a distinct APCv2 numerics identity.
 NUMERICS_W4A4_FAKE = "inkling2-native-w4a4-fake-v1"
+# inkling2_kv_q8 on: the global visits' K/V stored as int8 (approximate
+# state); its own APCv2 numerics identity, alone and with moe_act_quant.
+NUMERICS_KV_Q8 = "inkling2-native-w4a16-kvq8-v2"
+NUMERICS_W4A4_FAKE_KV_Q8 = "inkling2-native-w4a4-fake-kvq8-v2"
+# The approximate-state operation name inkling2_kv_q8 publishes under.
+KV_Q8_OPERATION = "inkling2_kv_q8"
+
+
+# Approximate state may only be published through an explicitly qualified
+# approximate operation (AGENTS.md). inkling2_kv_q8 is unqualified, so a Q8
+# route refuses APCv2 reuse and publication outright: no store, no lookup,
+# no disk tier, no session prefetch, no prefill handoff (the engine's
+# route-level apcv2_reuse_disabled_reason), and ``apc_publication_refusal``
+# declines any int8 lane that reaches a store anyway. The numerics operation
+# and the "-kvq8v2" layout already keep Q8 entries apart from BF16 ones, so
+# this flag is the single switch a qualification would flip.
+KV_Q8_PUBLICATION_QUALIFIED = False
+KV_Q8_APC_REASON = "inkling2_kv_q8_unqualified_approximate_state"
+
+
+def kv_q8_apc_refusal(policy):
+    """Why a kernel policy may not reuse or publish APCv2 state, or None."""
+    if policy.get("kv_q8") and not KV_Q8_PUBLICATION_QUALIFIED:
+        return KV_Q8_APC_REASON
+    return None
+
+
+def _holds_q8_rows(prompt_cache):
+    """Structural check: some plane holds int8 (kv_q8) K/V rows."""
+    import mlx.core as mx
+
+    stack = list(prompt_cache or ())
+    while stack:
+        plane = stack.pop()
+        children = getattr(plane, "caches", None)
+        if isinstance(children, (list, tuple)):
+            stack.extend(children)
+            continue
+        keys = getattr(plane, "keys", None)
+        if isinstance(keys, mx.array) and keys.dtype == mx.int8:
+            return True
+    return False
+
+
+def numerics_operation(policy):
+    """The APCv2 numerics operation of an Inkling 2 kernel policy."""
+    if policy.get("kv_q8"):
+        return NUMERICS_W4A4_FAKE_KV_Q8 if policy.get("moe_act_quant") else NUMERICS_KV_Q8
+    return NUMERICS_W4A4_FAKE if policy.get("moe_act_quant") else NUMERICS
 # generation_config.json of thinkingmachines/Inkling-2-Mini: do_sample, T 1.0.
 SAMPLING = VendorSampling.single(
     SamplingDefaults(temperature=1.0, top_p=1.0, source=GENERATION_CONFIG,
@@ -296,6 +345,26 @@ KERNEL_OPTIONS = {
     # changes numerics: its source joins the APCv2 numerics contract and the
     # operation becomes NUMERICS_W4A4_FAKE.
     "inkling2_moe_act_quant": "moe_act_quant",
+    # Int8 K/V for the 8 global visits (implemented 2026-11-22, default off,
+    # unqualified, approximate; runtime/models/inkling2/kv_q8.py, mechanism
+    # from g13-engine c91c0180, MIT, no code copied). Symmetric codes per
+    # 64-channel group with FP16 scales, stored inline as one int8 row per
+    # token (v2: codes, scales, zero pad to 16 bytes = 144 bytes instead of
+    # 256 at D = 128; 16-byte vector loads in the kernels), so plain KVCache /
+    # BatchKVCache semantics (trim rollback, merge, APCv2 freeze/restore)
+    # carry over. GPU 1..31-row blocks (decode, DSpark verify) read the codes
+    # in split-K kernels with splitk.py's bias/window/padding/sink law;
+    # longer prefill chunks run the same kernel in 31-row query tiles; the
+    # CPU and declined geometry dequantize key blocks of <= 4096 keys with
+    # an online softmax. Nothing dequantizes the whole prefix (receipt:
+    # kv_q8_full_prefix_dequant stays 0). Sliding rings stay BF16. It changes
+    # outputs: its own numerics operation (NUMERICS_KV_Q8), APCv2 layout
+    # (suffix "-kvq8v2") and source hashes, and prompt logprobs are refused.
+    # Unqualified approximate state: APCv2 reuse and publication are refused
+    # on the route (KV_Q8_PUBLICATION_QUALIFIED, kv_q8_apc_refusal).
+    # Combines with every other switch; GPU tests and A/B pending
+    # (tests/test_inkling2_kv_q8_metal.py, scripts/research/inkling2_kv_q8_ab.py).
+    "inkling2_kv_q8": "kv_q8",
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.
@@ -759,6 +828,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             self.model.config, visits=self.model.model.layer_indices, draft=draft,
             prefill_rows=getattr(self, "_prefill_step", self.prefill_step_default()),
             num_draft=self._external_num_draft() if draft is not None else 0,
+            kv_q8=bool(getattr(self, "kernel_policy", {}).get("kv_q8")),
         )
 
     def execution_numerics_contract(self):
@@ -784,16 +854,42 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             names += ("gather_lhs.py",)
         if policy.get("moe_act_quant"):
             names += ("inkling2/act_quant.py",)
-        return {
-            "operation": NUMERICS_W4A4_FAKE if policy.get("moe_act_quant") else NUMERICS,
+        if policy.get("kv_q8"):
+            # The kernels reuse splitk.py's merge kernel and split heuristics.
+            names += ("inkling2/kv_q8.py", "inkling2/splitk.py")
+        contract = {
+            "operation": numerics_operation(policy),
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
             "source_sha256": {
                 name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in names
             },
             "qualification": "unqualified",
         }
+        if policy.get("kv_q8"):
+            contract["approximate_state"] = kv_q8_receipt(True)
+        return contract
 
     def execution_config(self, *, max_lanes, prefill_step):
+        config = self._route_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
+        reason = kv_q8_apc_refusal(getattr(self, "kernel_policy", {}))
+        if reason is not None:
+            config = {**config, "apcv2_reuse_disabled_reason": reason}
+        return config
+
+    def apc_publication_refusal(self, prompt_cache, tokens):
+        """Decline APCv2 publication of kv_q8 (approximate, unqualified) lanes.
+
+        Second line behind the route-level refusal in ``execution_config``:
+        refuses by policy and, structurally, any lane holding int8 rows.
+        Declines are counted (``diagnostics()["kv_q8"]``)."""
+        reason = kv_q8_apc_refusal(getattr(self, "kernel_policy", {}))
+        if reason is None and not KV_Q8_PUBLICATION_QUALIFIED and _holds_q8_rows(prompt_cache):
+            reason = KV_Q8_APC_REASON
+        if reason is not None:
+            self.__dict__["kv_q8_apc_declines"] = self.__dict__.get("kv_q8_apc_declines", 0) + 1
+        return reason
+
+    def _route_execution_config(self, *, max_lanes, prefill_step):
         self.bind_prefill_step(prefill_step)
         if getattr(self, "draft_model", None) is not None:
             if max_lanes != 1:
@@ -961,8 +1057,10 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "adapter_default_route": "ordinary",
             "ordinary_reference_preserved": True,
             "cache_layout": self.layout,
-            "numerics": (NUMERICS_W4A4_FAKE if getattr(self, "kernel_policy", {}).get("moe_act_quant")
-                         else NUMERICS),
+            "numerics": numerics_operation(getattr(self, "kernel_policy", {})),
+            "kv_q8": {**kv_q8_receipt(bool(getattr(self, "kernel_policy", {}).get("kv_q8")),
+                                      layout=getattr(self, "layout", None)),
+                      "apcv2_publication_declines": self.__dict__.get("kv_q8_apc_declines", 0)},
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
             "moe_nax_gather_auto": bool(getattr(self, "moe_nax_gather_auto", False)),
             "kernel_counters": (self.model.kernel_receipt() if getattr(self, "model", None) else None),
@@ -984,6 +1082,23 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             },
             "media": "weights present; native text route refuses media",
         }
+
+
+def kv_q8_receipt(selected, *, layout=None):
+    """Route receipt of ``inkling2_kv_q8``: approximate, unqualified."""
+    from ..runtime.models.inkling2 import kv_q8
+
+    out = {"operation": KV_Q8_OPERATION, "implemented": True, "selected": bool(selected),
+           "qualified": False, "fidelity": "approximate" if selected else "exact",
+           "scope": "8 global attention visits; sliding-window rings stay BF16",
+           "format": kv_q8.FORMAT, "group_size": kv_q8.GROUP, "scale_dtype": "float16",
+           "layout_suffix": kv_q8.LAYOUT_SUFFIX}
+    reason = kv_q8_apc_refusal({"kv_q8": bool(selected)})
+    out["apcv2_publication"] = {"enabled": reason is None, "reason": reason,
+                                "qualified_switch": KV_Q8_PUBLICATION_QUALIFIED}
+    if layout is not None:
+        out["cache_layout"] = layout
+    return out
 
 
 def _drafter_stats(draft):
