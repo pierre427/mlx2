@@ -188,6 +188,15 @@ class ScaledNVFP4SwitchLinear(nn.Module):
     scale_folded = False
 
     def __call__(self, x, indices, sorted_indices=False):
+        if x.dtype == mx.float16:
+            # The gather returns the *unscaled* product in x.dtype and the
+            # per-expert global scale (often ~1e-4) is applied afterwards, so
+            # in float16 the unscaled value can pass 65504 and become inf ->
+            # NaN logits -> run-on output (omlx #5523, same pattern).  Every
+            # mlx2 route runs these experts in bfloat16; refuse rather than
+            # overflow if one ever does not.
+            raise ValueError("NVFP4 expert gather refuses float16 activations "
+                             "(unscaled product can overflow); use bfloat16")
         from .models import invariant_prefill as invariant
 
         if invariant.active():

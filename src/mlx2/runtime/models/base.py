@@ -382,6 +382,11 @@ def scaled_dot_product_attention(
             from .fp_verify_tensor import attention as fp_verify, use_kernel as use_fp_verify
             if use_fp_verify(queries, keys, values, mask, sinks):
                 return fp_verify(queries, keys, values, scale=scale, mask=mask, sinks=sinks)
+        if queries.shape[2] == 1 and queries.shape[-1] == 512 and sinks is None:
+            from . import sdpa_vector_d512 as d512
+
+            if d512.use_kernel(queries, keys, values, mask=mask):
+                return d512.attention(queries, keys, values, scale=scale)
         if queries.shape[2] == 1 and sinks is None:
             from .qsdpa_decode_metal import gqa_decode_attention_fp, use_fp_decode_kernel
 

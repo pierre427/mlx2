@@ -1424,3 +1424,23 @@ pull request. No mlx-lm code is copied; the mlx2 kernel keeps MLX's own
 reduction order (read from MLX 0.32.4's reduce_col.h, not copied). The MIT
 permission notice reproduced above for MLX applies to the mechanism credited
 here. No Apple copyright header is added to mlx2 source files.
+
+------------------------------------------------------------------------------
+MLX 0.32.4 Metal kernels reproduced in head-dim 512 decode attention
+(https://github.com/ml-explore/mlx) — MIT License
+
+- src/mlx2/runtime/models/sdpa_vector_d512.py (MLX2_SDPA_D512_TK2, default
+  off) and scripts/bench_sdpa_vector_tk.py (benchmark only): the
+  sdpa_vector_2pass_1 / sdpa_vector_2pass_2 kernel pair from
+  mlx/backend/metal/kernels/sdpa_vector.h as installed with MLX 0.32.4, and
+  the block-count and routing rules of scaled_dot_product_attention.cpp at
+  tag v0.32.4, compiled through mx.fast.metal_kernel with a two-key unroll;
+  masks, sinks and causal handling removed, strided addressing added.
+No Apple copyright header is added to mlx2 source files.
+
+MIT License
+
+Copyright © 2023-2024 Apple Inc.
+
+The MIT permission notice and warranty disclaimer are as in the DwarfStar /
+ds4 section above.

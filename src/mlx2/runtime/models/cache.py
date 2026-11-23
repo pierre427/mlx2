@@ -881,6 +881,13 @@ def decode_mask_mode() -> str:
     step.  ``none``: no mask when no row is left-padded (the same proof the
     N > 1 ``"causal"`` path uses), so SDPA takes its no-mask decode path.
     MLX2_DECODE_MASK selects; read per call so a running process can switch.
+
+    Not a default for Gemma 4 (2026-11-22, gemma-4-31B-it-MLX-8bit@sha256:
+    f58e1d0a, mlx2 8f802f4ca, sanity under contention): ``none`` moves its
+    head_dim-512 full-attention decode from MLX's unfused path to the fused
+    vector kernel, which was slower at 4K-64K (13.4 vs 13.8, 11.3 vs 12.5,
+    7.0 vs 9.3 tok/s); first divergences vs ``array`` were exact-tie
+    near_tie_equivalent.  See ``sdpa_vector_d512``.
     """
     mode = os.environ.get("MLX2_DECODE_MASK", "array").strip().lower()
     return "none" if mode == "none" else "array"
@@ -3919,6 +3926,9 @@ ROWS_ATTENTION_STATS = {"rows_calls": 0, "rows_padding_reads": 0, "rows_fallback
 # maskless ``rows`` backend drops only one of these; any other boolean mask
 # a caller hands a layer is sliced per row instead.
 _OWN_DECODE_MASKS = collections.deque(maxlen=8)
+# Host count of single-token decode masks MLX2_DECODE_MASK=none dropped
+# (engagement evidence in /v1/status ``d512_decode_attention``).
+DECODE_MASK_STATS = {"maskless_decode_masks": 0}
 # Expected per-layer declines (prefill chunks, one live lane): not counted
 # as rows_fallbacks.
 _ROUTINE_ROWS_DECLINES = frozenset({"not_decode", "batch_one"})
@@ -4589,6 +4599,7 @@ class BatchKVCache(_BaseCache):
         if N > 1 and unpadded:
             return "causal"
         if N == 1 and unpadded and decode_mask_mode() == "none":
+            DECODE_MASK_STATS["maskless_decode_masks"] += 1
             # Every row attends to exactly the ``[:_idx]`` keys fetched, so
             # the (B, 1, 1, _idx + 1) all-true mask only selects SDPA's
             # array-mask path; ``create_attention_mask`` already returns

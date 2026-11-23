@@ -7773,6 +7773,7 @@ class ServingEngine(KernelReloadMixin):
         # imported them; until then the section reports loaded=False.
         qvm = _loaded_runtime_model("qsdpa_verify_metal")
         qdm = _loaded_runtime_model("qsdpa_decode_metal")
+        d512 = _loaded_runtime_model("sdpa_vector_d512")
         fpv = _loaded_runtime_model("fp_verify_tensor")
         kv_cache = _loaded_runtime_model("cache")
         decoder = _loaded_runtime_model("standard_decoder")
@@ -7874,6 +7875,7 @@ class ServingEngine(KernelReloadMixin):
                     "selected_host_branches": qvm.selected_host_branch_snapshot(),
                 } if qvm else _not_loaded_section(),
                 "fp_decode_attention": qdm.fp_decode_status() if qdm else _not_loaded_section(),
+                "d512_decode_attention": d512.status() if d512 else _not_loaded_section(),
                 "fp_verify_attention": fpv.status() if fpv else _not_loaded_section(),
                 "batch_rows_attention": (
                     kv_cache.rows_attention_status() if kv_cache else _not_loaded_section()

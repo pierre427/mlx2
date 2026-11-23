@@ -475,8 +475,13 @@ class Gemma4TextModel(nn.Module):
                     mask[kind] = _cache_mask(
                         h,
                         c,
+                        # Padded batches take an array mask for N > 1, as
+                        # mlx-vlm does.  At N == 1 the cache decides: its own
+                        # mask is the same array unless MLX2_DECODE_MASK=none
+                        # proves no row is padded (then no mask, which lets
+                        # MLX's fused D=512 vector decode run).
                         return_array=bidirectional
-                        or getattr(c, "left_padding", None) is not None,
+                        or (getattr(c, "left_padding", None) is not None and h.shape[1] > 1),
                     )
                 else:
                     return_array = (

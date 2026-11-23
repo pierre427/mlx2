@@ -404,3 +404,14 @@ def test_nemotron_routed_decode_switch_and_cpu_decline(cpu, monkeypatch):
     x = mx.random.normal((1, 1, 256)).astype(mx.bfloat16)
     assert rd.decline_reason(wide, x, inds) == "device"
     assert rd.routed_experts(wide, x, inds) is None
+
+
+def test_switch_gather_refuses_float16_activations(cpu):
+    # omlx #5523: the unscaled gather product overflows float16 before the
+    # per-expert global scale applies.  bfloat16 still runs.
+    switch = ScaledNVFP4SwitchLinear(64, 8, 4)
+    indices = mx.array([[0, 2]], dtype=mx.uint32)
+    with pytest.raises(ValueError, match="float16"):
+        switch(mx.zeros((1, 1, 1, 64), dtype=mx.float16), indices)
+    out = switch(mx.zeros((1, 1, 1, 64), dtype=mx.bfloat16), indices)
+    assert out.dtype == mx.bfloat16

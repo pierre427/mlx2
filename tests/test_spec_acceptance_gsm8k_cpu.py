@@ -121,7 +121,7 @@ def test_base_url_mode_against_a_stub_server(tmp_path, monkeypatch):
             self.wfile.write(body)
 
         def do_GET(self):
-            self._send({"healthy": True, "route_receipt": {"route": "external_draft"}})
+            self._send({"healthy": True, "model": "served-alias", "artifact": "0" * 64, "route_receipt": {"route": "external_draft"}})
 
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -146,6 +146,7 @@ def test_base_url_mode_against_a_stub_server(tmp_path, monkeypatch):
     assert [r["test_index"] for r in receipt["arms"][0]["rows"]] == [0, 1]
     assert summary["accuracy"] == 0.5 and summary["questions"] == 2
     assert summary["acceptance"]["mean_acceptance_length"] == pytest.approx(3.0)
+    assert seen[0]["model"] == "served-alias"
     assert seen[0]["temperature"] == 0 and seen[0]["stop"] == gsm.STOPS
     assert seen[0]["prompt"].startswith("Question: T0?\nAnswer: x\n#### 0\n\n")
     assert seen[0]["prompt"].endswith("Question: How many?\nAnswer:")
@@ -396,3 +397,18 @@ def test_model_mode_runs_every_arm_through_every_question(tmp_path, monkeypatch)
     for arm in receipt["arms"]:
         assert "skipped" not in arm and arm["summary"]["questions"] == 2
         assert arm["summary"]["accuracy"] == 1.0 and not arm["stopped_at_deadline"]
+
+
+def test_mismatched_server_alias_requires_checkpoint_evidence():
+    with pytest.raises(ValueError, match="requested checkpoint"):
+        gsm.served_model_name({"model": "unrelated", "artifact": "1" * 64}, "M@sha256:" + "0" * 64)
+
+
+@pytest.mark.parametrize("selection", [["--indices=-1"], ["--indices=1"], ["--offset", "-1"],
+                                       ["--offset", "1"], ["--num-questions", "0"]])
+def test_invalid_question_selection_fails_before_contacting_server(tmp_path, monkeypatch, selection):
+    monkeypatch.setattr(gsm, "dataset_files", lambda: ("fixture", {"train": "train", "test": "test"}))
+    monkeypatch.setattr(gsm, "load_split", lambda path: [{"question": "Q", "answer": "#### 1"}])
+    with pytest.raises(SystemExit):
+        gsm.main(["--output", str(tmp_path), "--base-url", "http://unused", "--checkpoint", "M@fixture",
+                  *selection])

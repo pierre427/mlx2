@@ -376,6 +376,23 @@ def stop_time(clock, now=None):
     return start if (at - now).total_seconds() > STOP_AT_HORIZON_H * 3600 else at.timestamp()
 
 
+def served_model_name(status, checkpoint):
+    name, _, fingerprint = checkpoint.partition("@")
+    advertised = status.get("model")
+    if not advertised or advertised == name:
+        return name
+    # A served alias can differ from the artifact directory name. Bind the
+    # request to that alias only if the status identifies the requested weights.
+    execution = (status.get("execution") or {}).get("checkpoint") or ""
+    candidates = (execution.rpartition("@")[2], status.get("artifact"), status.get("base_artifact"))
+    if not fingerprint or not any(
+        isinstance(value, str) and value.removeprefix("sha256:") == fingerprint.removeprefix("sha256:")
+        for value in candidates
+    ):
+        raise ValueError(f"server model {advertised!r} does not identify the requested checkpoint {checkpoint!r}")
+    return advertised
+
+
 def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None, sampling=None,
                   request_extra=None, chat_shots=None, instruction=CHAT_INSTRUCTION, deadline=None):
     """``sampling`` (optional) adds temperature/top_p/top_k and a per-question
@@ -552,8 +569,17 @@ def main(argv=None):
         parser.error("--top-p/--top-k need --temperature > 0")
     data_revision, files = dataset_files()
     train, test = load_split(files["train"]), load_split(files["test"])
-    picks = ([int(i) for i in args.indices.split(",")] if args.indices
-             else list(range(args.offset, min(args.offset + args.num_questions, len(test)))))
+    if args.indices is None:
+        if args.offset < 0 or args.offset >= len(test) or args.num_questions < 1:
+            parser.error("--offset and --num-questions must select at least one test question")
+        picks = list(range(args.offset, min(args.offset + args.num_questions, len(test))))
+    else:
+        try:
+            picks = [int(i) for i in args.indices.split(",")]
+        except ValueError:
+            parser.error("--indices must contain comma-separated integer test indices")
+        if any(i < 0 or i >= len(test) for i in picks):
+            parser.error(f"--indices must be between 0 and {len(test) - 1}")
     items = [{**test[i], "test_index": i} for i in picks]
     if args.chat and args.format not in (None, "chat"):
         parser.error("--chat conflicts with --format " + args.format)
@@ -593,7 +619,7 @@ def main(argv=None):
         receipt["checkpoint"] = args.checkpoint
         client = Client(args.base_url)
         status = client.call("/v1/status", timeout=30)
-        rows = run_questions(client, args.checkpoint.split("@")[0], prefix, items, chat=args.chat, chat_shots=chat_shots, instruction=instruction,
+        rows = run_questions(client, served_model_name(status, args.checkpoint), prefix, items, chat=args.chat, chat_shots=chat_shots, instruction=instruction,
                              max_tokens=args.max_tokens, log=progress("server"), sampling=sampling,
                              request_extra=args.request, deadline=deadline)
         arm = {"name": "server", "base_url": args.base_url, "startup_status_route": status.get("route_receipt"),
@@ -662,7 +688,7 @@ def main(argv=None):
                         raise RuntimeError("server readiness timed out")
                     time.sleep(.5)
                 row["startup_status"] = status
-                rows = run_questions(client, args.model.name, prefix, items, chat=args.chat, chat_shots=chat_shots, instruction=instruction,
+                rows = run_questions(client, served_model_name(status, receipt["checkpoint"]), prefix, items, chat=args.chat, chat_shots=chat_shots, instruction=instruction,
                                      max_tokens=args.max_tokens, log=progress(arm["name"]), sampling=sampling,
                                      request_extra=arm.get("request"), deadline=deadline)
                 time.sleep(1.5)
