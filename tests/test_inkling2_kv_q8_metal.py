@@ -56,9 +56,10 @@ def _inputs(b, length, size, dtype, seed, pad=None, layout="cache_view", dim=D, 
         k, v = k[:, :, :size], v[:, :, :size]
     elif layout == "odd_stride":
         # Rows one byte off the 16-byte grid: the in-kernel byte-load path.
-        pad = mx.zeros((*k.shape[:-1], 1), mx.int8)
-        k = mx.concatenate([pad, k], axis=-1)[..., 1:]
-        v = mx.concatenate([pad, v], axis=-1)[..., 1:]
+        # (Its own name: ``pad`` is the left-padding argument, returned below.)
+        lead = mx.zeros((*k.shape[:-1], 1), mx.int8)
+        k = mx.concatenate([lead, k], axis=-1)[..., 1:]
+        v = mx.concatenate([lead, v], axis=-1)[..., 1:]
     elif layout == "batch_slice":
         # A filtered BatchKVCache: a batch-row view (nonzero base offset).
         k = mx.concatenate([k, k], axis=0)[b:]
@@ -164,14 +165,68 @@ def _gap(got, base):
             "argmax_agree": (mx.argmax(got, -1) == mx.argmax(base, -1)).mean().item()}
 
 
+class _PerCall:
+    """Wraps ``kv_q8.q8_attention`` while a model runs: every kernel call is
+    checked against the FP32 blockwise fallback on the same codes and inputs
+    (the kernel tests' law and bound, on the model's own q/k/v/bias/sinks,
+    offsets and tiles). The model's output is the kernel's, unchanged."""
+
+    def __init__(self):
+        from mlx2.runtime.models.inkling2 import kv_q8
+
+        self.kv_q8, self.original, self.worst, self.calls = kv_q8, kv_q8.q8_attention, 0.0, 0
+
+    def __enter__(self):
+        kv_q8, original = self.kv_q8, self.original
+
+        def checked(q, k, v, rel, sinks, **kw):
+            got = original(q, k, v, rel, sinks, **kw)
+            ref = kv_q8.blockwise_attention(q.astype(mx.float32), k, v, rel.astype(mx.float32),
+                                            sinks.astype(mx.float32), **kw)
+            mx.eval(got, ref)
+            scale = max(1.0, mx.abs(ref).max().item())
+            tol = 2e-5 if q.dtype == mx.float32 else 2 ** -7  # BF16 output rounding
+            diff = mx.abs(got.astype(mx.float32) - ref).max().item() / scale
+            self.calls += 1
+            self.worst = max(self.worst, diff)
+            assert diff <= tol, (diff, tol, q.shape, k.shape, kw["offset"])
+            return got
+
+        kv_q8.q8_attention = checked
+        return self
+
+    def __exit__(self, *exc):
+        self.kv_q8.q8_attention = self.original
+
+
 @pytest.mark.parametrize("bf16", [False, True])
 @pytest.mark.parametrize("rows", [1, 2])
 def test_q8_model_kernel_route_vs_fallback_and_bf16(bf16, rows):
     """Tiny model (D 32): verify blocks (8 rows) and one-token decode through
-    the kernels. Against the same model with the kernel route declined (the
-    blockwise fallback, same codes): near-exact. Against the BF16 model:
-    the Q8 approximation, bounded on the median position and KL (a routed
-    expert flip can move one position; see the CPU test)."""
+    the kernels. Every kernel call is checked against the FP32 blockwise
+    fallback on the same inputs (``_PerCall``, the kernel tests' bound).
+    End to end against the same model with the kernel route declined (the
+    blockwise fallback, same codes) and against the BF16 model (the Q8
+    approximation, bounded on the median position and KL; a routed expert
+    flip can move one position, see the CPU test).
+
+    FP32: near-exact end to end. BF16: the random tiny BF16 decoder is
+    chaotic (BF16 router scores and 72 looped layers), so end-to-end gaps
+    measure the model, not the kernel. Chaos control (GPU probe
+    w1123-metalfix-probe-tinyctl-cd9629d9c, these seeds and tokens): the
+    ordinary BF16 model against itself with the 20- or 8-row prefill chunk
+    split in two moves logits by max_abs 1.38 (B1) / 1.67 (B2); kernel vs
+    fallback is 0.78 / 1.43. The control matches on max_abs only: it perturbs
+    one call, the kernel perturbs every call by up to one rounding, so the
+    kernel arm's KL / argmax gaps are wider (B2: KL 0.013 vs 0.003, argmax
+    0.72 vs 0.97). Every kernel call stays within one BF16 output rounding of
+    the FP32 law (worst 2.8e-3 relative, exactly the fallback's own rounding
+    error; probe w1123-metalfix-probe-kvq8-cd9629d9c-r2), so the remaining
+    gap is downstream amplification. The BF16 arm therefore bounds kernel
+    against fallback (max_abs by the control's size) and requires the kernel
+    route to be no further from the BF16 model than the fallback route on
+    the same codes is (B1: KL 0.0137 vs 0.0157, argmax 0.70 vs 0.68). It does
+    not bound the Q8 approximation itself; the FP32 arm does."""
     import test_inkling2_cpu as t
     from mlx.utils import tree_flatten
 
@@ -186,7 +241,8 @@ def test_q8_model_kernel_route_vs_fallback_and_bf16(bf16, rows):
         tokens = mx.random.randint(0, 500, (rows, 44))
         base = t._run(model, tokens, plan)
         model.configure_kernels(kv_q8=True)
-        got = t._run(model, tokens, plan)
+        with _PerCall() as per_call:
+            got = t._run(model, tokens, plan)
         receipt = model.kernel_receipt()["kv_q8"]
         original = kv_q8.decline_reason
         kv_q8.decline_reason = lambda *a, **kw: "forced_fallback"
@@ -198,35 +254,97 @@ def test_q8_model_kernel_route_vs_fallback_and_bf16(bf16, rows):
     calls = receipt["calls"]
     # The 20-row prefill chunk engages too (1 <= L < 32).
     assert calls.get("kernel_decode", 0) == 8 * 16 and calls.get("kernel_rows", 0) == 8 * 2
+    assert per_call.calls == 8 * 18
     vs_fallback = _gap(got, fallback)
     vs_bf16 = _gap(got, base)
+    fallback_vs_bf16 = _gap(fallback, base)
     RESULTS["model"].append({"bf16": bf16, "rows": rows, "calls": calls,
-                             "vs_fallback": vs_fallback, "vs_bf16": vs_bf16})
-    assert vs_fallback["max_abs"] < (3e-2 if bf16 else 1e-3), vs_fallback
-    assert vs_bf16["median_abs"] < (0.05 if bf16 else 0.01), vs_bf16
-    assert vs_bf16["kl_mean"] < 1e-2 and vs_bf16["argmax_agree"] >= 0.9, vs_bf16
+                             "per_call_worst_rel": per_call.worst, "vs_fallback": vs_fallback,
+                             "vs_bf16": vs_bf16, "fallback_vs_bf16": fallback_vs_bf16})
+    if not bf16:
+        assert vs_fallback["max_abs"] < 1e-3, vs_fallback
+        assert vs_bf16["median_abs"] < 0.01, vs_bf16
+        assert vs_bf16["kl_mean"] < 1e-2 and vs_bf16["argmax_agree"] >= 0.9, vs_bf16
+        return
+    assert vs_fallback["max_abs"] < 3.0, vs_fallback  # chaos control: 1.38 / 1.67
+    assert vs_bf16["kl_mean"] <= 1.5 * fallback_vs_bf16["kl_mean"] + 1e-3, (
+        vs_bf16, fallback_vs_bf16)
+    assert vs_bf16["argmax_agree"] >= fallback_vs_bf16["argmax_agree"] - 0.1, (
+        vs_bf16, fallback_vs_bf16)
 
 
-def test_q8_model_wide_geometry_decode():
+@pytest.mark.parametrize("bf16", [True, False])
+def test_q8_model_wide_geometry_decode(bf16):
     """D 128 (the Mini's head size: register kernel and 64-wide groups) on a
-    wider tiny model, past 2048 keys so the L == 1 register kernel runs."""
+    wider tiny model, past 2048 keys so the L == 1 register kernel runs.
+    Every kernel call is checked against the FP32 blockwise fallback
+    (``_PerCall``), and no whole-prefix dequantize may run.
+
+    FP32: the Q8 approximation on the 52 positions after the prefill,
+    bounded on the median position and argmax, and on KL at 2e-2: with these
+    tokens one routed-expert flip at one position (KL 0.39 there; median
+    |dlogit| 4e-4, argmax agreement 0.96) carries 0.0075 of the 0.0101 mean
+    (run w1123-metalfix-test-kvq8-3a719287d-r2).
+
+    BF16: the random wide BF16 decoder is chaotic. The Q8 gap here is KL
+    0.36, argmax agreement 0.19 (first GPU run, these tokens), while every
+    BF16 kernel call stays within one output rounding of the FP32 law (worst
+    3.3e-3 relative). Controls, run here on the same tokens and recorded
+    (run w1123-metalfix-test-kvq8-195712c61): the ordinary model with its
+    prefill in 512- instead of 1024-row chunks moves the same positions by
+    KL 0.34, argmax agreement 0.31, and the Q8 fallback route on the same
+    codes is KL 0.32, agreement 0.25 from the unquantized model. The kernel
+    route must be no further from the unquantized model than that fallback
+    route is."""
     import test_inkling2_fuse_metal as f
 
+    from mlx2.runtime.models.inkling2 import kv_q8
+
+    plan = [(0, 1024), (1024, 2048), (2048, 2056)] + [(i, i + 1) for i in range(2056, 2100)]
     with mx.stream(mx.gpu):
-        model = f._model("wide", bf16=True)
+        model = f._model("wide", bf16=bf16)
         tokens = mx.random.randint(0, 500, (1, 2100))
-        plan = [(0, 1024), (1024, 2048), (2048, 2056)] + [(i, i + 1) for i in range(2056, 2100)]
         base = f._run(model, tokens, plan)
         model.configure_kernels(kv_q8=True)
-        got = f._run(model, tokens, plan)
-        calls = model.kernel_receipt()["kv_q8"]["calls"]
+        # The receipt's kv_q8_full_prefix_dequant is process-wide: the kernel
+        # tests above call the oracle (reference_attention) in this process,
+        # so this run's own count is the delta.
+        before = kv_q8.full_prefix_dequant_calls()
+        with _PerCall() as per_call:
+            got = f._run(model, tokens, plan)
+        receipt = model.kernel_receipt()["kv_q8"]
+        full_prefix = receipt["kv_q8_full_prefix_dequant"] - before
+        calls = receipt["calls"]
+        controls = {}
+        if bf16:
+            original = kv_q8.decline_reason
+            kv_q8.decline_reason = lambda *a, **kw: "forced_fallback"
+            try:
+                fallback = f._run(model, tokens, plan)
+            finally:
+                kv_q8.decline_reason = original
+            model.configure_kernels()
+            chunk512 = [(a, a + 512) for a in range(0, 2048, 512)] + plan[2:]
+            controls = {"fallback_vs_unquantized": _gap(fallback[:, 2048:], base[:, 2048:]),
+                        "ordinary_chunk512_vs_chunk1024": _gap(
+                            f._run(model, tokens, chunk512)[:, 2048:], base[:, 2048:])}
         model.configure_kernels()
     gap = _gap(got[:, 2048:], base[:, 2048:])
-    RESULTS["model"].append({"case": "wide-2100", "calls": calls, "vs_bf16": gap})
+    RESULTS["model"].append({"case": f"wide-2100-{'bf16' if bf16 else 'fp32'}", "calls": calls,
+                             "per_call_worst_rel": per_call.worst, "vs_unquantized": gap,
+                             **controls})
     assert calls.get("kernel_decode", 0) == 8 * 44 and calls.get("kernel_rows", 0) == 8
     assert calls.get("kernel_prefill_tiled", 0) == 8 * 2  # the 1024-row prefill chunks
-    assert model.kernel_receipt()["kv_q8"]["kv_q8_full_prefix_dequant"] == 0
-    assert gap["kl_mean"] < 1e-2 and gap["argmax_agree"] >= 0.9, gap
+    # 44 decode + 1 verify block + 2 x ceil(1024 / 31) prefill tiles, 8 visits.
+    assert per_call.calls == 8 * (44 + 1 + 2 * -(-1024 // kv_q8.PREFILL_TILE))
+    assert full_prefix == 0
+    if not bf16:
+        assert gap["median_abs"] < 0.01 and gap["argmax_agree"] >= 0.9, gap
+        assert gap["kl_mean"] < 2e-2, gap
+        return
+    fb = controls["fallback_vs_unquantized"]
+    assert gap["kl_mean"] <= 1.5 * fb["kl_mean"] + 1e-3, (gap, fb)
+    assert gap["argmax_agree"] >= fb["argmax_agree"] - 0.1, (gap, fb)
 
 
 @pytest.mark.parametrize("length", [32, 100, 512])

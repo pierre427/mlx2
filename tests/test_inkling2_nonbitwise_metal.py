@@ -122,19 +122,53 @@ def _shape_id(shape):
 
 @pytest.mark.parametrize("shape", SHAPES, ids=_shape_id)
 def test_mask_bf16_budget(monkeypatch, shape):
+    """The option only resizes the row slices: on BF16 it counts 2 bytes per
+    mask element, so on at budget B is the ordinary path at budget 2B, and
+    must be bit-identical to it (on FP32 it is a no-op: bit-identical to off).
+
+    Against off at the same budget the gap is the ordinary path's own
+    slice-size sensitivity, not the option's: MLX's BF16 SDPA at D 128 is not
+    row-slice invariant (40 query rows in slices of 4/9/16 differ from one
+    call by up to 2^-7; D 32 is invariant), and the random wide BF16 decoder
+    amplifies that. GPU probe w1123-metalfix-probe-nb-cd9629d9c: off at B vs
+    off at 2B is max_abs 3.38 / 5.18 (B1 / B2 padded), exactly the on-vs-off
+    gap, and on at B is bitwise off at 2B. Recorded, not bounded."""
     from mlx2.runtime.models.inkling2 import language
 
     geometry, bf16, pads = shape
     model = _model(geometry, bf16)
     tokens = mx.random.randint(0, 500, (2 if pads else 1, 70), key=mx.random.key(1))
-    monkeypatch.setattr(language, "_MASK_BUDGET_BYTES", 1 << 14)  # several slices
+    budget = 1 << 14  # several slices
+    global_attn = next(layer.self_attn for layer in model.model.layers
+                       if not layer.self_attn.is_sliding)
+
+    def rows_after(kwargs):
+        model.configure_kernels(**kwargs)
+        out = _run(model, tokens, PLAN, pads)
+        model.configure_kernels()
+        return out, global_attn.__dict__.get("mask_rows_last")
+
+    monkeypatch.setattr(language, "_MASK_BUDGET_BYTES", budget)
     base, got, receipt, off_exact = _ab(model, tokens, PLAN, pads,
                                         {"prefill_mask_bf16_budget": True})
-    result = {**_gap(got, base), "calls": receipt["prefill_mask_bf16_budget_calls"]}
+    _, rows_off = rows_after({})
+    _, rows_on = rows_after({"prefill_mask_bf16_budget": True})
+    monkeypatch.setattr(language, "_MASK_BUDGET_BYTES", 2 * budget)
+    twice, rows_twice = rows_after({})
+    result = {**_gap(got, base), "calls": receipt["prefill_mask_bf16_budget_calls"],
+              "slice_rows": {"off": rows_off, "on": rows_on, "off_2x_budget": rows_twice},
+              "bitwise_vs_off_at_2x_budget": bool(mx.array_equal(got, twice)),
+              "control_off_vs_off_at_2x_budget": _gap(twice, base)}
     RESULTS[f"mask_bf16_budget/{_shape_id(shape)}"] = result
     assert off_exact
     assert (result["calls"] > 0) == bf16
-    assert result["max_abs"] < (0.5 if bf16 else 1e-5), result
+    if bf16:
+        # The slices really change size (D 32 SDPA is row-slice invariant,
+        # so bitwise equality alone would not show it).
+        assert rows_on == rows_twice and rows_on > rows_off, result
+        assert result["bitwise_vs_off_at_2x_budget"], result
+    else:
+        assert result["bitwise"], result
 
 
 # ----- inkling2_prefill_mask_with_sink (item 1b) -----
@@ -274,24 +308,81 @@ def test_tiled_kernel_scalar_path_matches_vector_path():
     assert mx.array_equal(a, b)
 
 
+def _fp32_law(q, k, v, rel, sinks, **kw):
+    """The composed law in FP32, rounded once to q's dtype: the most accurate
+    BF16 attention output there is (the chaos control's attention)."""
+    from mlx2.runtime.models.inkling2 import splitk
+
+    f32 = [a.astype(mx.float32) for a in (q, k, v, rel, sinks)]
+    return splitk.reference_attention(*f32, **kw).astype(q.dtype)
+
+
 @pytest.mark.parametrize("shape", SHAPES, ids=_shape_id)
-def test_tiled_model_level(shape):
+def test_tiled_model_level(monkeypatch, shape):
     """Prefill chunks of 300 and 512 rows plus decode; split-K off so short
-    blocks stay on the composed path. A chaos control (the composed law in
-    FP32, rounded once) bounds the BF16 gap."""
+    blocks stay on the composed path. Every kernel call is checked against
+    the composed law in FP32: no further from it than the composed BF16 path
+    is, plus one BF16 rounding.
+
+    End to end the BF16 gap is bounded by a chaos control: the same model
+    with the kernel's calls replaced by the FP32 law rounded once
+    (``_fp32_law``). That arm is closer to the exact law than the composed
+    path, yet the random BF16 decoders amplify its rounding differences as
+    much (GPU probe w1123-metalfix-probe-tiledlaw-cd9629d9c: wide B1 / B2
+    padded, control vs off max_abs 4.85 / 5.94, argmax agreement 0.26 /
+    0.29; kernel vs off 5.27 / 5.58, 0.27 / 0.29). So the kernel arm must
+    agree with off about as well as the control does. (The ordinary path at
+    a 1 MiB instead of 64 MiB mask budget, which perturbs only the few rows
+    whose slice changes, moves max_abs 4.71 / 4.43 but keeps argmax
+    agreement 0.99: probe w1123-metalfix-probe-nb-cd9629d9c. It is the
+    wrong-density control for a kernel that rounds differently on every
+    call, so it is not the bound.)"""
+    from mlx2.runtime.models.inkling2 import prefill_attention as pa
+    from mlx2.runtime.models.inkling2 import splitk
+
     geometry, bf16, pads = shape
     model = _model(geometry, bf16)
     tokens = mx.random.randint(0, 500, (2 if pads else 1, 816), key=mx.random.key(4))
+    kernel = pa.tiled_prefill_attention
+    worst = {"excess": 0.0, "calls": 0}
+
+    def checked(q, k, v, rel, sinks, **kw):
+        got = kernel(q, k, v, rel, sinks, **kw)
+        law = splitk.reference_attention(
+            *[a.astype(mx.float32) for a in (q, k, v, rel, sinks)], **kw)
+        composed = splitk.reference_attention(q, k, v, rel, sinks, **kw)
+        mx.eval(got, law, composed)
+        scale = max(1.0, mx.abs(law).max().item())
+        err = mx.abs(got.astype(mx.float32) - law).max().item() / scale
+        ref_err = mx.abs(composed.astype(mx.float32) - law).max().item() / scale
+        slack = 1e-5 if q.dtype == mx.float32 else 2 ** -8
+        worst["calls"] += 1
+        worst["excess"] = max(worst["excess"], err - ref_err)
+        assert err <= ref_err + slack, (err, ref_err, q.shape, k.shape)
+        return got
+
+    monkeypatch.setattr(pa, "tiled_prefill_attention", checked)
     base, got, receipt, off_exact = _ab(model, tokens, LONG_PLAN, pads,
                                         {"prefill_tiled_attention": True})
     result = {**_gap(got, base), "calls": receipt["prefill_tiled_calls"],
-              "declines": receipt["prefill_tiled_declines"]}
-    RESULTS[f"tiled/model/{_shape_id(shape)}"] = result
+              "declines": receipt["prefill_tiled_declines"], "per_call": dict(worst)}
     assert off_exact and result["calls"] == 8 * 2 and result["declines"] == {}
+    assert worst["calls"] == 8 * 2
     if not bf16:
+        RESULTS[f"tiled/model/{_shape_id(shape)}"] = result
         assert result["max_abs"] < 1e-3, result
-    else:
-        assert result["argmax_equal"] > 0.5 and result["max_abs"] < 5.0, result
+        return
+    monkeypatch.setattr(pa, "tiled_prefill_attention", _fp32_law)
+    model.configure_kernels(prefill_tiled_attention=True)
+    control = _gap(_run(model, tokens, LONG_PLAN, pads), base)
+    # Engagement counters accumulate per model: this arm's calls are the delta.
+    control_calls = model.kernel_receipt()["prefill_tiled_calls"] - result["calls"]
+    model.configure_kernels()
+    result["control_fp32_law_vs_off"] = control
+    assert control_calls == 8 * 2, control_calls  # the control arm engaged
+    RESULTS[f"tiled/model/{_shape_id(shape)}"] = result
+    assert result["argmax_equal"] >= control["argmax_equal"] - 0.1, result
+    assert result["max_abs"] <= 1.5 * control["max_abs"] + 0.5, result
 
 
 def _composed_sliced(q, k, v, rel, sinks, offset, scale):
