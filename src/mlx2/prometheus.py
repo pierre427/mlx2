@@ -283,6 +283,14 @@ _ENGINE_EVENTS = {
     "apc_junction_checkpoints_planned": ("apcv2_junction", "planned"),
     "apc_junction_checkpoints_degraded": ("apcv2_junction", "degraded"),
     "apc_junction_checkpoints_captured": ("apcv2_junction", "captured"),
+    **{
+        "apc_paragraph_checkpoints_" + event: ("apcv2_paragraph", event)
+        for event in (
+            "planned", "degraded", "hits",
+            "skipped_no_user_text", "skipped_no_break", "skipped_unmatched",
+            "skipped_near_end", "skipped_inside_media", "skipped_short_document",
+        )
+    },
     "apc_rolling_checkpoints_planned": ("apcv2_rolling", "planned"),
     "apc_rolling_checkpoints_degraded": ("apcv2_rolling", "degraded"),
     "apc_rolling_checkpoints_published": ("apcv2_rolling", "published"),
@@ -540,7 +548,8 @@ _ENGINE_EVENTS.update(
 # once the engine actually holds the key.
 _OPTIONAL_COMPONENTS = frozenset(
     {
-        "apcv2_rolling", "apcv2_junction", "apcv2_inflight", "memory_preemption",
+        "apcv2_rolling", "apcv2_junction", "apcv2_paragraph", "apcv2_inflight",
+        "memory_preemption",
         "expert_stream_load", "dense_stream", "dense_stream_load",
         "gpu_keep_warm", "request_finish_cleanup",
     }

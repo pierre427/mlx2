@@ -191,6 +191,7 @@ ADAPTER_DEFAULT_POLICY_KEYS = frozenset(
     {
         "apc_interior_checkpoints",
         "apc_junction_checkpoints",
+        "apc_paragraph_checkpoints",
         "apc_rolling_checkpoints",
         "self_mtp_copy_draft",
         "prefill_scheduling",
@@ -224,6 +225,7 @@ STATE_CHECKPOINT_POLICY_KEYS = frozenset(
     {
         "apc_interior_checkpoints",
         "apc_junction_checkpoints",
+        "apc_paragraph_checkpoints",
         "apc_rolling_checkpoints",
     }
 )

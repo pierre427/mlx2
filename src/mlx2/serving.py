@@ -76,6 +76,7 @@ SERVER_OWNED_EXECUTION_POLICY_KEYS = frozenset(
         "mtp_ordinary_handoff",
         "memory_preemption",
         "apc_junction_checkpoints",
+        "apc_paragraph_checkpoints",
         "apc_tail_checkpoint",
         "apc_inflight_prefix_wait",
         "apc_retention_policy",
@@ -4294,6 +4295,9 @@ class Job:
     # Verify-span cap prompt-lookup admission seated this lane at, or None.
     prompt_lookup_span: int | None = None
     apc_interior_positions: tuple[int, ...] = ()
+    # Paragraph-break boundary of this prompt (``apc_paragraph_checkpoints``),
+    # before the cached-offset filter; a hit exactly there is a paragraph hit.
+    apc_paragraph_position: int | None = None
     # Planned slice ends of a cold prefill of this prompt (APC-3), and
     # whether the cached offset is one of them (or 0 / P-1): then the warm
     # prefill is cut exactly as the cold one.  None until admission.
@@ -4616,6 +4620,16 @@ class ServingEngine(KernelReloadMixin):
         if type(junction_policy) is not bool:
             raise ValueError("apc_junction_checkpoints must be boolean")
         self.apc_junction_checkpoints = junction_policy
+        # Default-off: snapshot hybrid state after the last paragraph break
+        # before the final user question, so the first different question on
+        # the same document resumes there (omlx#5430 shape; see
+        # runtime/interior_placement.paragraph_checkpoint_position).
+        paragraph_policy = (execution_policy or {}).get(
+            "apc_paragraph_checkpoints", False
+        )
+        if type(paragraph_policy) is not bool:
+            raise ValueError("apc_paragraph_checkpoints must be boolean")
+        self.apc_paragraph_checkpoints = paragraph_policy
         self.apc_tail_checkpoint_policy = apc_tail_checkpoint_policy(
             (execution_policy or {}).get("apc_tail_checkpoint")
         )
@@ -11536,6 +11550,7 @@ class ServingEngine(KernelReloadMixin):
             from .runtime.interior_placement import (
                 cold_prefill_cuts,
                 generation_prompt_boundary,
+                paragraph_checkpoint_position as paragraph_checkpoint_position_for,
                 plan_interior_positions,
                 trimmed_tail_position,
             )
@@ -11732,6 +11747,9 @@ class ServingEngine(KernelReloadMixin):
             if self.apc_junction_checkpoints:
                 # Present only when enabled so default receipts stay identical.
                 settings["apc_junction_checkpoints"] = True
+            if self.apc_paragraph_checkpoints:
+                # Present only when enabled so default receipts stay identical.
+                settings["apc_paragraph_checkpoints"] = True
             if self.apc_tail_checkpoint_policy["tokens"]:
                 settings["apc_tail_checkpoint"] = dict(self.apc_tail_checkpoint_policy)
             if self.apc_inflight_prefix_policy["enabled"]:
@@ -12017,6 +12035,7 @@ class ServingEngine(KernelReloadMixin):
             state_checkpoints_selected = bool(
                 self.apc_interior_checkpoint_policy["count"]
                 or self.apc_junction_checkpoints
+                or self.apc_paragraph_checkpoints
                 or self.apc_tail_checkpoint_policy["tokens"]
             )
             if self.apc_interior_route_supported and state_checkpoints_selected:
@@ -12044,6 +12063,8 @@ class ServingEngine(KernelReloadMixin):
                         if self.apc_interior_checkpoint_policy["count"]
                         else "junction"
                         if self.apc_junction_checkpoints
+                        else "paragraph"
+                        if self.apc_paragraph_checkpoints
                         else "tail"
                         if self.apc_tail_checkpoint_policy["tokens"]
                         else "in-flight prefix"
@@ -14974,6 +14995,37 @@ class ServingEngine(KernelReloadMixin):
                                 <= int(hit.cached_tokens)
                             ):
                                 partition_checkpoint_position = None
+                        paragraph_checkpoint_position = None
+                        job.apc_paragraph_position = None
+                        if (
+                            self.apc_paragraph_checkpoints
+                            and self.apc_interior_route_supported
+                            and "messages" in job.request
+                        ):
+                            # A function of the prompt alone (never of the
+                            # hit), so it is a cold cut and a warm
+                            # continuation of the same prompt slices there
+                            # exactly as the cold prefill does (APC-3).
+                            paragraph, paragraph_reason = (
+                                paragraph_checkpoint_position_for(
+                                    tokens,
+                                    job.request,
+                                    getattr(adapter, "tokenizer", None),
+                                    floor_tokens=int(
+                                        job.request.get("_mlx2_media_token_end", 0)
+                                        or 0
+                                    ),
+                                )
+                            )
+                            if paragraph is None:
+                                count_add(self.counts, "apc_paragraph_checkpoints_skipped_" + paragraph_reason, 1)
+                            else:
+                                job.apc_paragraph_position = paragraph
+                                job.prefill_cold_cuts = tuple(sorted({
+                                    *job.prefill_cold_cuts, paragraph,
+                                }))
+                                if paragraph > int(hit.cached_tokens):
+                                    paragraph_checkpoint_position = paragraph
                         if job.prefill_cold_cuts and not (
                             hit.cache is None
                             or inspect_apc_capabilities(
@@ -14995,6 +15047,7 @@ class ServingEngine(KernelReloadMixin):
                                 or turn_end_boundary is not None
                                 or media_checkpoint_position is not None
                                 or partition_checkpoint_position is not None
+                                or paragraph_checkpoint_position is not None
                             )
                             and not job.request.get("skip_writing_prefix_cache", False)
                             and (
@@ -15125,6 +15178,17 @@ class ServingEngine(KernelReloadMixin):
                                 *checkpoint_candidates, partition_checkpoint_position
                             )))
                             count_add(self.counts, "apc_interior_positions_planned_partition_boundary", 1)
+                        paragraph_planned = bool(
+                            planning_target
+                            and paragraph_checkpoint_position is not None
+                        )
+                        if (
+                            paragraph_planned
+                            and paragraph_checkpoint_position not in checkpoint_candidates
+                        ):
+                            checkpoint_candidates = tuple(sorted((
+                                *checkpoint_candidates, paragraph_checkpoint_position
+                            )))
                         if int(hit.cached_tokens) and job.prefill_cold_cuts:
                             # A warm plan respaces its tail above the cached
                             # offset; capturing there would cut where a cold
@@ -15276,6 +15340,12 @@ class ServingEngine(KernelReloadMixin):
                             for position in checkpoint_candidates
                             if position not in planned_positions
                         ))
+                        if paragraph_planned:
+                            # Same budget as every interior candidate: kept,
+                            # or degraded when its snapshot does not fit.
+                            count_add(self.counts, "apc_paragraph_checkpoints_planned"
+                                if paragraph_checkpoint_position in planned_positions
+                                else "apc_paragraph_checkpoints_degraded", 1)
                         deeper_on_disk = int(
                             getattr(hit, "deeper_disk_tokens", 0) or 0
                         ) > int(hit.cached_tokens or 0)
@@ -15368,6 +15438,12 @@ class ServingEngine(KernelReloadMixin):
                                     and int(tokens[int(job.cached_tokens)]) in markers
                                 ):
                                     count_add(self.counts, "apc_interior_hits_turn_boundary", 1)
+                                if (
+                                    job.apc_paragraph_position is not None
+                                    and int(job.cached_tokens)
+                                    == job.apc_paragraph_position
+                                ):
+                                    count_add(self.counts, "apc_paragraph_checkpoints_hits", 1)
                             if (
                                 self.apc_rolling_route is not None
                                 and job.cache_retention_role == "prefill_rolling"

@@ -381,3 +381,175 @@ def cold_prefill_cuts(
         if tail is not None:
             cuts.add(tail)
     return tuple(sorted(cuts))
+
+
+# --------------------------------------------------------------------------
+# Paragraph checkpoint (opt-in ``apc_paragraph_checkpoints``)
+# --------------------------------------------------------------------------
+
+# Content tokens of the final user message that must precede the break: a
+# shorter preamble is not a document worth a snapshot of its own.
+PARAGRAPH_MIN_CONTENT_TOKENS = 256
+# Prompt tokens that must follow the break: closer to the end, the committed
+# P-1 boundary already covers nearly as much.
+PARAGRAPH_MIN_TAIL_TOKENS = 16
+# A "question" longer than this is not an appended question (omlx#5430 bounds
+# its search to the last 4,096 tokens before the generation prompt).
+PARAGRAPH_MAX_QUESTION_TOKENS = 4096
+# Template tokens allowed between the end of the final user content and the
+# prompt end (end-of-turn marker plus generation prompt).
+PARAGRAPH_MAX_TEMPLATE_TAIL = 64
+# Characters of document text encoded to prove the content floor; 32 chars a
+# token is a conservative bound, a document denser than that plans nothing.
+_PARAGRAPH_CHARS_PER_TOKEN_BOUND = 32
+
+_PARAGRAPH_BREAK = None
+
+
+def _paragraph_break_pattern():
+    global _PARAGRAPH_BREAK
+    if _PARAGRAPH_BREAK is None:
+        import re
+
+        _PARAGRAPH_BREAK = re.compile(r"\n{2,}")
+    return _PARAGRAPH_BREAK
+
+
+def _encode_plain(tokenizer, text):
+    encode = getattr(tokenizer, "encode", None)
+    if not callable(encode):
+        return None
+    try:
+        ids = encode(text, add_special_tokens=False)
+    except TypeError:
+        ids = encode(text)
+    return _ids(ids)
+
+
+def _final_user_text(request) -> Optional[str]:
+    messages = request.get("messages") if isinstance(request, dict) else None
+    if not isinstance(messages, list) or not messages:
+        return None
+    final = messages[-1]
+    if not isinstance(final, dict) or final.get("role") != "user":
+        return None
+    content = final.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and content:
+        # Only the trailing text part: the break must lie in the text that
+        # directly precedes the template's end-of-turn tokens.
+        part = content[-1]
+        if isinstance(part, dict) and part.get("type") == "text":
+            text = part.get("text")
+            return text if isinstance(text, str) else None
+    return None
+
+
+def paragraph_checkpoint_position(
+    tokens: Sequence[int],
+    request,
+    tokenizer,
+    *,
+    floor_tokens: int = 0,
+    min_content_tokens: int = PARAGRAPH_MIN_CONTENT_TOKENS,
+    min_tail_tokens: int = PARAGRAPH_MIN_TAIL_TOKENS,
+    max_question_tokens: int = PARAGRAPH_MAX_QUESTION_TOKENS,
+    max_template_tail: int = PARAGRAPH_MAX_TEMPLATE_TAIL,
+) -> Tuple[Optional[int], str]:
+    """Boundary just after the last paragraph break before the final question.
+
+    Returns ``(position, "planned")`` or ``(None, reason)``.  ``position`` is
+    the number of prompt tokens the snapshot covers: every token through the
+    newline run, none of the question.  A different question appended to the
+    same document after the same break shares exactly that prefix, so the
+    first new question already resumes there (a junction needs a prior
+    divergence to learn it).
+
+    Selection, without model-name rules:
+
+    1. The final message must be a ``user`` message whose content (or last
+       content part) is text.  The last run of two or more ``"\\n"`` that is
+       followed by non-whitespace text splits it into document and question.
+    2. The question is encoded alone with the request's tokenizer and located
+       in the prompt, ending at most ``max_template_tail`` tokens before the
+       prompt end (exact match first; then a match that tolerates only the
+       first question token, for SentencePiece dummy prefixes).
+    3. The tokens just before the match must decode to text ending in
+       ``"\\n\\n"``.  This accepts a single ``"\\n\\n"`` token, two ``"\\n"``
+       tokens, and a break merged into the preceding text (``".\\n\\n"``);
+       it rejects a newline absorbed into the question's first token.
+    4. At least ``min_content_tokens`` document tokens precede the break,
+       at least ``min_tail_tokens`` prompt tokens follow it, and it lies above
+       ``floor_tokens`` (the end of any media span).
+
+    Any mismatch plans nothing; exactness never depends on this choice, since
+    APCv2 resumes only on an exact token prefix.
+    """
+    text = _final_user_text(request)
+    if text is None:
+        return None, "no_user_text"
+    # Ignore trailing whitespace once. Copying and stripping the entire
+    # remaining document at every break is quadratic on paragraph-heavy input.
+    content_end = len(text.rstrip())
+    last_break = None
+    for match in _paragraph_break_pattern().finditer(text, 0, content_end):
+        last_break = match
+    if last_break is None:
+        return None, "no_break"
+    document_end, question_start = last_break.span()
+    if not text[:document_end].strip():
+        return None, "no_break"
+    question = text[question_start:]
+    try:
+        question_ids = _encode_plain(tokenizer, question)
+    except Exception:  # noqa: BLE001 - tokenizers vary; no boundary is safe
+        return None, "unmatched"
+    if not question_ids or len(question_ids) > int(max_question_tokens):
+        return None, "unmatched"
+    total = len(tokens)
+    width = len(question_ids)
+    last = total - width
+    first = max(0, last - int(max_template_tail))
+    window = [int(token) for token in tokens[first:total]]
+    position = None
+    for tolerant in (False, True):
+        if tolerant and width < 2:
+            break
+        skip = 1 if tolerant else 0
+        target = question_ids[skip:]
+        for start in range(last, first - 1, -1):
+            offset = start - first + skip
+            if window[offset : offset + width - skip] == target:
+                position = start
+                break
+        if position is not None:
+            break
+    if position is None or position < 1:
+        return None, "unmatched"
+    decode = getattr(tokenizer, "decode", None)
+    if not callable(decode):
+        return None, "unmatched"
+    try:
+        before = decode([int(token) for token in tokens[max(0, position - 3) : position]])
+    except Exception:  # noqa: BLE001
+        return None, "unmatched"
+    if not isinstance(before, str) or not before.endswith("\n\n"):
+        return None, "unmatched"
+    if position > total - int(min_tail_tokens) or position >= total - 1:
+        return None, "near_end"
+    if position <= int(floor_tokens):
+        return None, "inside_media"
+    document = text[:document_end]
+    bound = int(min_content_tokens) * _PARAGRAPH_CHARS_PER_TOKEN_BOUND
+    try:
+        document_ids = _encode_plain(tokenizer, document[-bound:])
+    except Exception:  # noqa: BLE001
+        return None, "unmatched"
+    # One token of slack when truncated: the cut edge may split a token.
+    slack = 1 if len(document) > bound else 0
+    if document_ids is None or len(document_ids) - slack < int(min_content_tokens):
+        return None, "short_document"
+    if position <= int(min_content_tokens):
+        return None, "short_document"
+    return position, "planned"

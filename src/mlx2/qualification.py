@@ -86,6 +86,8 @@ def required_generic_checks(descriptor, *, capabilities=None):
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
+    # Re-pinned 2026-11-22: run-local apc_paragraph_checkpoints observation
+    # (a hit exactly at the request's own paragraph boundary).
     # Re-pinned 2026-11-05: run-local qsa_nax_law observation (the NAX QSA
     # prefill kernel law bound to the profile's MLX_QWEN4_QSA_NAX_LAW).
     # Re-pinned 2026-11-03: explicit optional preflight records no unit_tests
@@ -330,7 +332,7 @@ APPROVED_QUALIFICATION_HARNESS = {
     # scope requires named controls/repeat/refusal evidence and cannot claim
     # stochastic coverage; absence preserves the historical sampling suite.
     # Re-pinned 2026-11-03: combined SC-MXFP4 observation and explicit optional preflight.
-    "sha256": "7205e90a813170ff1dcb02d9b8b9ac3bb25b6c40348ebdb0dbcd894fee5a4028",
+    "sha256": "1583d12aa802bbbc8ad015201e8bf6a96d770f36bb7197e73a8b8282beb42ed9",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -1950,6 +1952,10 @@ def _route_feature_checks(settings):
         # A junction must be captured and published at an observed branch
         # point, then serve a later request that diverges there.
         features.add("apc_junction_checkpoints")
+    if settings.get("apc_paragraph_checkpoints") is True:
+        # A paragraph checkpoint must serve a later request asking a
+        # different question after the same break.
+        features.add("apc_paragraph_checkpoints")
     if (settings.get("apc_inflight_prefix_wait") or {}).get("enabled") is True:
         # Selection requires an actual parked follower that later consumed the
         # exact APCv2 boundary; planning or publication alone is not use.

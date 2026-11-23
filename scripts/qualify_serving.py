@@ -3602,6 +3602,11 @@ def feature_observations(
             count_delta("counts", "apc_junction_checkpoints_published"),
             count_delta("apcv2", "lifetime", "junction_hits"),
         ),
+        # Hits are counted only where a request resumed exactly at its own
+        # paragraph boundary from an interior checkpoint.
+        "apc_paragraph_checkpoints": count_delta(
+            "counts", "apc_paragraph_checkpoints_hits"
+        ),
         "apc_inflight_prefix_wait": min(
             count_delta("counts", "apc_inflight_checkpoints_published"),
             count_delta("counts", "apc_inflight_prefix_hits"),
