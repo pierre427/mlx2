@@ -81,6 +81,9 @@ CANDIDATE_ENV = {
     "MLX2_MAXWELL_INDEX_KERNEL": "flag",
     # Remote-block tie choice and gather order (changes which K/V is read).
     "MLX2_MAXWELL_CANONICAL_PICK": "flag",
+    # Verify rows written with one-token decode arithmetic (KV bits of
+    # accepted rows differ from the batched verify's).
+    "MLX2_MAXWELL_ROW_EXACT_VERIFY": "default=off",
     "MLX2_MAXWELL_SPARSE_PREFILL": "default=union",
     "MLX2_MAXWELL_SPARSE_GATHER_ROWS": "default=16",
     "MLX2_MAXWELL_UNION_QUERY_CHUNK": "default=64",

@@ -93,6 +93,13 @@ COMPILE_SPANS = os.environ.get("MLX2_MAXWELL_COMPILE", "1") != "0"
 #                              order depend on kernel and shape).  Same set as
 #                              torch.topk when there is no tie.  Off until a GPU
 #                              token/speed check (Pierre 2026-11-23: merge default off).
+#   MLX2_MAXWELL_ROW_EXACT_VERIFY=layerwise|serial  native-MTP verify rows with
+#                              the one-token decode arithmetic (greedy MTP-on output
+#                              byte-identical to MTP-off, B=1 lanes only).  layerwise:
+#                              projections and experts as canary-gated one-weight-read
+#                              strips, everything else per row through the decode code;
+#                              serial: one full decode forward per row (reference, slow).
+#                              Off by default until a GPU A/B (Pierre 2026-11-23).
 MHC_KERNEL = os.environ.get("MLX2_MAXWELL_MHC_KERNEL", "0") == "1"
 # The fused mHC kernel runs one threadgroup per token with a serial Sinkhorn,
 # which loses to the compiled span on long prefill chunks (32K TTFT 108 s ->
@@ -103,6 +110,9 @@ HEAD_MODE = os.environ.get("MLX2_MAXWELL_HEAD", "bf16")
 INDEX_KERNEL = os.environ.get("MLX2_MAXWELL_INDEX_KERNEL", "0") == "1"
 FUSED_QKV = os.environ.get("MLX2_MAXWELL_FUSED_QKV", "0") == "1"
 CANONICAL_PICK = os.environ.get("MLX2_MAXWELL_CANONICAL_PICK", "0") == "1"
+ROW_EXACT_VERIFY = os.environ.get("MLX2_MAXWELL_ROW_EXACT_VERIFY", "off")
+if ROW_EXACT_VERIFY not in ("off", "layerwise", "serial"):
+    raise ValueError("MLX2_MAXWELL_ROW_EXACT_VERIFY must be off, layerwise or serial")
 if HEAD_MODE not in ("fp32", "bf16"):
     raise ValueError("MLX2_MAXWELL_HEAD must be fp32 or bf16")
 
@@ -143,8 +153,13 @@ def _kernel_call(key, fn, *args, **kwargs):
 def maxwell_stats(reset: bool = False) -> dict:
     out = dict(STATS, levers={"compile": COMPILE_SPANS, "mhc_kernel": MHC_KERNEL, "head": HEAD_MODE,
                               "fused_qkv": FUSED_QKV, "index_kernel": INDEX_KERNEL,
-                              "canonical_pick": CANONICAL_PICK, "gather_rows": SPARSE_GATHER_ROWS,
+                              "canonical_pick": CANONICAL_PICK, "row_exact_verify": ROW_EXACT_VERIFY,
+                              "gather_rows": SPARSE_GATHER_ROWS,
                               "sparse_prefill": SPARSE_PREFILL})
+    if ROW_EXACT_VERIFY != "off":
+        from . import maxwell_row_exact
+
+        out["row_exact_verify"] = maxwell_row_exact.stats(reset=reset)
     if reset:
         for k in STATS:
             STATS[k] = None if k == "last_kernel_fallback" else 0
@@ -334,8 +349,12 @@ class Indexer(nn.Module):
         self.k_layernorm = RMSNorm(d, args.rms_norm_eps)
 
     def queries(self, x):
-        b, t, _ = x.shape
-        q = self.linear_q_proj(x).reshape(b, t, self.groups, self.head_dim)
+        return self.queries_from(self.linear_q_proj(x))
+
+    def queries_from(self, raw):
+        """Indexer queries from the ``linear_q_proj`` output ``[b, t, G * d]``."""
+        b, t, _ = raw.shape
+        q = raw.reshape(b, t, self.groups, self.head_dim)
         return self.q_layernorm(q).transpose(0, 2, 1, 3)
 
 
@@ -402,8 +421,8 @@ class Attention(nn.Module):
         if self.sparse:
             delattr(self.indexer, "linear_k_proj")
 
-    def _project(self, x):
-        b, t, _ = x.shape
+    def _linears(self, x):
+        """The weight-bearing q/k/v (+ indexer key) projections, unreshaped."""
         if "qkv_proj" in self:
             y = self.qkv_proj(x)
             cuts, acc = [], 0
@@ -416,13 +435,24 @@ class Attention(nn.Module):
         else:
             q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
             ik = self.indexer.linear_k_proj(x) if self.sparse else None
-        if ik is not None:
-            ik = self.indexer.k_layernorm(ik.reshape(b, t, 1, self.indexer.head_dim)).transpose(0, 2, 1, 3)
         return q, k, v, ik
 
     def __call__(self, x, mask=None, cache=None, index_cache=None, padding=None):
-        b, t, _ = x.shape
-        q, k, v, ik = self._project(x)
+        q, k, v, ik = self._linears(x)
+        y = self._attend(q, k, v, ik, lambda: self.indexer.linear_q_proj(x), mask, cache, index_cache, padding)
+        return self.o_proj(y)
+
+    def _attend(self, q, k, v, ik, index_q, mask, cache, index_cache, padding):
+        """Everything between the input projections and ``o_proj``.
+
+        ``q``/``k``/``v``/``ik`` are the raw projection outputs ``[b, t, *]``;
+        ``index_q()`` returns the indexer query projection (called only on the
+        sparse route).  Returns the attention output ``[b, t, heads * dim]``.
+        The row-exact verify path (``maxwell_row_exact``) runs this once per
+        row with batched projections, so it must stay the decode code."""
+        b, t, _ = q.shape
+        if ik is not None:
+            ik = self.indexer.k_layernorm(ik.reshape(b, t, 1, self.indexer.head_dim)).transpose(0, 2, 1, 3)
         q = self.q_layernorm(q.reshape(b, t, self.n_heads, self.head_dim))
         k = self.k_layernorm(k.reshape(b, t, self.n_kv_heads, self.head_dim))
         v = v.reshape(b, t, self.n_kv_heads, self.head_dim)
@@ -460,9 +490,9 @@ class Attention(nn.Module):
                     f"BatchKVCache only, not {type(cache).__name__}")
             if b > 1 and padding is None and type(cache) is BatchKVCache:
                 raise ValueError("Maxwell sparse batch attention needs the row padding")
-            iq = self.rope(self.indexer.queries(x), offset=offset)
+            iq = self.rope(self.indexer.queries_from(index_q()), offset=offset)
             y = self._sparse(q, k, v, iq, ik, padding)
-        return self.o_proj(y.transpose(0, 2, 1, 3).reshape(b, t, -1))
+        return y.transpose(0, 2, 1, 3).reshape(b, t, -1)
 
     # ------------------------------------------------------------ sparse route
 
@@ -858,6 +888,10 @@ class Model(nn.Module):
         if args.mtp_num_layers:
             self.mtp = MTP(args)
         self.completed_forwards = 0
+        if ROW_EXACT_VERIFY != "off":
+            from . import maxwell_row_exact
+
+            maxwell_row_exact.install(self, ROW_EXACT_VERIFY)
 
     @property
     def has_mtp(self) -> bool:

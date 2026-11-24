@@ -751,3 +751,128 @@ def test_remote_pick_is_canonical_lowest_index_ties_ascending():
         for r in range(5):
             assert sorted(dflt[0, g, r]) == sorted(got[0, g, r])
 
+
+
+def _tiny_mtp(seed, dtype):
+    from mlx.utils import tree_flatten
+
+    model = Model(ModelArgs.from_dict({**TINY, "mtp_num_layers": 1}))
+    rng = np.random.default_rng(seed)
+    params = []
+    for name, p in tree_flatten(model.parameters()):
+        if name.endswith(("alpha_pre", "alpha_post", "alpha_res")):
+            v = 0.5 + rng.random(p.shape)
+        elif name.endswith(("norm.weight", "layernorm.weight")):
+            v = 1.0 + 0.2 * rng.standard_normal(p.shape)
+        else:
+            v = 0.2 * rng.standard_normal(p.shape)
+        keep_fp32 = p.dtype == mx.float32 and ("mapping_proj" in name or "gate." in name or "hc_head" in name)
+        params.append((name, mx.array(v.astype(np.float32)).astype(mx.float32 if keep_fp32 else dtype)))
+    model.load_weights(params, strict=True)
+    mx.eval(model.parameters())
+    return model
+
+
+def _bits(a):
+    a = mx.array(a)
+    view = {mx.float32: mx.uint32, mx.bfloat16: mx.uint16, mx.float16: mx.uint16}.get(a.dtype)
+    return np.array(a.view(view) if view is not None else a)
+
+
+def _caches(model, batch):
+    from mlx2.runtime.models.cache import BatchKVCache
+
+    if not batch:
+        return model.make_cache()
+    return [BatchKVCache([0]) for _ in range(2 * len(model.layers))]
+
+
+@pytest.mark.parametrize("mode", ["layerwise", "serial"])
+@pytest.mark.parametrize("prompt", [10, 22, 50])      # dense, crossing the dense limit inside the window, sparse
+@pytest.mark.parametrize("dtype", ["float32"])        # CPU GatherMM is float32-only; bf16 is a GPU check
+@pytest.mark.parametrize("batch,fused", [(False, False), (True, False), (False, True)])
+def test_row_exact_mtp_verify_is_bit_equal_to_one_token_decode(mode, prompt, dtype, batch, fused):
+    from mlx2.runtime.models import maxwell_moe as M, maxwell_row_exact as R
+
+    dtype = getattr(mx, dtype)
+    model = _tiny_mtp(7, dtype)
+    if fused:
+        model.fuse_projections()
+    ids = mx.array(_long_ids(11, rows=1, length=prompt + 4))
+    verify = ids[:, prompt:prompt + 4]                  # current token + three drafts
+
+    serial = _caches(model, batch)
+    model.mtp_backbone(ids[:, :prompt], serial)
+    want_h, want_s = [], []
+    for r in range(verify.shape[1]):
+        h, s = model.mtp_backbone(verify[:, r:r + 1], serial)
+        want_h.append(model.logits_from_hidden(h))
+        want_s.append(s)
+    want_logits, want_streams = mx.concatenate(want_h, 1), mx.concatenate(want_s, 1)
+
+    if M.ROW_EXACT_VERIFY == "off":                      # default off: the batched verify is untouched
+        assert "mtp_verify_backbone" not in model.__dict__
+    R.install(model, mode)
+    R.stats(reset=True)
+    cache = _caches(model, batch)
+    model.mtp_backbone(ids[:, :prompt], cache)
+    hidden, streams = model.mtp_verify_backbone(verify, cache)
+    logits = model.mtp_verify_logits(hidden)
+    stats = R.stats()
+    assert stats["windows"] == 1 and stats["inexact_windows"] == 0 and stats["last_failures"] == {}
+    np.testing.assert_array_equal(_bits(logits), _bits(want_logits))
+    np.testing.assert_array_equal(_bits(streams), _bits(want_streams))
+    for got, ref in zip(cache, serial, strict=True):         # trunk K/V and indexer planes as decode wrote them
+        for a, b in zip(got.state, ref.state):
+            if isinstance(a, mx.array):
+                np.testing.assert_array_equal(_bits(a), _bits(b))
+    if prompt > M.ModelArgs.from_dict(TINY).dense_context_limit:
+        assert stats["last_routes"]["blocks"]
+
+
+def test_row_exact_verify_declines_multi_lane_and_says_so():
+    from mlx2.runtime.models import maxwell_row_exact as R
+
+    model = _tiny_mtp(3, mx.float32)
+    R.install(model, "layerwise")
+    R.stats(reset=True)
+    ids = mx.array(_long_ids(5, rows=2, length=12))
+    cache = model.make_cache()
+    model.mtp_backbone(ids[:, :9], cache)
+    hidden, _ = model.mtp_verify_backbone(ids[:, 9:], cache)
+    stats = R.stats()
+    assert hidden.shape[:2] == (2, 3)
+    assert stats["declined_multi_lane"] == 1 and stats["inexact_windows"] == 0 and stats["windows"] == 0
+    assert stats["last_failures"] == {"multi_lane_batched_verify": 1}
+    with pytest.raises(ValueError):
+        R.install(model, "fast")
+
+
+def test_batched_verify_is_not_row_exact_so_the_parity_test_has_teeth():
+    model = _tiny_mtp(7, mx.float32)
+    ids = mx.array(_long_ids(11, rows=1, length=54))
+    verify = ids[:, 50:]
+    serial = model.make_cache()
+    model.mtp_backbone(ids[:, :50], serial)
+    want = mx.concatenate([model.logits_from_hidden(model.mtp_backbone(verify[:, r:r + 1], serial)[0])
+                           for r in range(4)], 1)
+    batched = model.make_cache()
+    model.mtp_backbone(ids[:, :50], batched)
+    got = model.logits_from_hidden(model.mtp_backbone(verify, batched)[0])
+    assert int((_bits(got) != _bits(want)).sum()) > 0
+
+
+def test_row_exact_head_verdict_lives_on_the_head_and_tracks_the_kernel_switch(monkeypatch):
+    from mlx2.runtime.models import maxwell_moe as M, maxwell_row_exact as R
+
+    model = _tiny_mtp(3, mx.float32)
+    R.install(model, "layerwise")
+    hidden = mx.array(np.random.default_rng(0).standard_normal((1, 3, TINY["hidden_size"])).astype(np.float32))
+    np.testing.assert_array_equal(
+        _bits(model.mtp_verify_logits(hidden)),
+        _bits(mx.concatenate([model.logits_from_hidden(hidden[:, r:r + 1]) for r in range(3)], 1)))
+    verdicts = model.lm_head.__dict__[R._VERDICT_SLOT]
+    assert len(verdicts) == 1 and R.stats()["last_head"] in ("strip", "per_row")
+    monkeypatch.setattr(M, "_KERNEL_DISABLED", {"head_gemv"})
+    model.mtp_verify_logits(hidden)
+    assert len(verdicts) == 2                               # a new verdict once the head kernel is off

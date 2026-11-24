@@ -25,6 +25,7 @@
  "mlx2_paths": [
   "src/mlx2/runtime/models/maxwell_moe.py",
   "src/mlx2/runtime/models/maxwell_moe_metal.py",
+  "src/mlx2/runtime/models/maxwell_row_exact.py",
   "src/mlx2/adapters/maxwell_moe.py",
   "src/mlx2/adapters/maxwell_memory.py",
   "scripts/research/maxwell_overnight.py"
@@ -40,11 +41,13 @@
   "fp32 lm_head as the reference, stored fp32 at load (as are the router, mHC mapping and hc_head weights the reference casts per call)",
   "native MTP layer (mtp_layers.0): enorm(embed(next token)) and per-stream hnorm(trunk streams) projected and summed into 4 streams, one dense-attention mHC MoE layer, its own hc_head + final norm into the shared fp32 head; the MTP multi-stream output chains to deeper draft positions; private KVCache whose offset counts pairs",
   "mHC/RMSNorm spans run through mx.compile (same graph); opt-in levers MLX2_MAXWELL_MHC_KERNEL (fused Metal mHC pre/post), MLX2_MAXWELL_HEAD=bf16 (bf16-resident head, fp32-math GEMV kernel), MLX2_MAXWELL_FUSED_QKV (one q/k/v/indexer-k projection), MLX2_MAXWELL_SPARSE_PREFILL=masked",
-  "qwen3-coder XML tool calls through the shared parser and constrained-tool grammar (the checkpoint's chat template format)"
+  "qwen3-coder XML tool calls through the shared parser and constrained-tool grammar (the checkpoint's chat template format)",
+  "opt-in MLX2_MAXWELL_CANONICAL_PICK (remote-block pick with lowest-index ties, ascending gather order) and MLX2_MAXWELL_ROW_EXACT_VERIFY=layerwise|serial (original mlx2 code on the shared row_exact_verify/row_exact protocol: native-MTP verify rows of a B=1 lane get the one-token decode arithmetic; weight-bearing projections and routed experts as canary-gated strips, mHC, norms, rope, cache update, attention, router and combine once per row through the decode code; multi-lane verify declined and counted); both default off (Pierre 2026-11-23)"
  ],
  "validation": [
   "tests/test_maxwell_moe_cpu.py: tiny fp32 CPU parity against the digest-checked torch reference for logits and router ids/weights, the sparse route beyond the dense regime (union and masked long-chunk routes), cached decode through gather/union/masked routes with mixed chunk widths, left-padded BatchKVCache decode vs single rows, native MTP logits (all pairs and incremental through the private cache), fused projections, bf16-head fallback, kernel fail-closed, MTP tensor gate, registry descriptor, cache budget",
-  "real-checkpoint GPU validation: scripts/research/maxwell_overnight.py window (pending; Metal kernels are untested until it runs)"
+  "real-checkpoint GPU validation: scripts/research/maxwell_overnight.py window (pending; Metal kernels are untested until it runs)",
+  "tests/test_maxwell_moe_cpu.py: row-exact verify logits, streams and every trunk/indexer cache plane bit-equal to one-token decode on CPU fp32 (dense and sparse regime, KVCache and BatchKVCache, layerwise and serial), while the batched verify differs; canonical pick unit test. GPU bf16/oQ8e check pending"
  ],
  "status": {
   "implemented": true,
