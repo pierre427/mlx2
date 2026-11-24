@@ -318,7 +318,9 @@ def test_stop_at_is_the_next_occurrence_and_stops_new_questions():
 def test_model_mode_runs_every_arm_through_every_question(tmp_path, monkeypatch):
     """Regression (2026-11-20): the per-arm readiness bound overwrote the
     --stop-at deadline with a monotonic value, so every arm asked 0 questions
-    and the next arm was skipped as ``stop_at``."""
+    and the next arm was skipped as ``stop_at``.  Regression (2026-11-24): the
+    top-level --request was ignored in --model mode, so enable_thinking=false
+    never reached the Ling-3.2-air night arms."""
     import sys as _sys
     import types
 
@@ -349,12 +351,14 @@ def test_model_mode_runs_every_arm_through_every_question(tmp_path, monkeypatch)
 
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append(payload)
             prompt = json.dumps(payload)
             answer = "18" if "How many" in prompt else "4"
             self._send({"choices": [{"message": {"content": f"so\n#### {answer}"}, "finish_reason": "stop"}],
                         "usage": {"completion_tokens": 9, "prompt_tokens": 40},
                         "mlx2": {"ttft_seconds": 0.001, "route": "ordinary"}})
 
+    seen = []
     stub = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=stub.serve_forever, daemon=True).start()
 
@@ -382,14 +386,15 @@ def test_model_mode_runs_every_arm_through_every_question(tmp_path, monkeypatch)
     lock.mkdir()
     (lock / "owner.json").write_text(json.dumps({"cpg_task": "t", "cpg_generation": 1}))
     arms = tmp_path / "arms.json"
-    arms.write_text(json.dumps([{"name": "a", "tree": str(ROOT)}, {"name": "b", "tree": str(ROOT)}]))
+    arms.write_text(json.dumps([{"name": "a", "tree": str(ROOT)},
+                                {"name": "b", "tree": str(ROOT), "request": {"enable_thinking": True, "x": 1}}]))
     model = tmp_path / "M"
     model.mkdir()
     out = tmp_path / "out"
     try:
         assert gsm.main(["--output", str(out), "--model", str(model), "--arms", str(arms),
                          "--cpg-lock", str(lock), "--port", str(stub.server_port),
-                         "--num-questions", "2"]) == 0
+                         "--num-questions", "2", "--request", '{"enable_thinking": false}']) == 0
     finally:
         stub.shutdown()
     receipt = json.loads((out / "receipt.json").read_text())
@@ -397,6 +402,12 @@ def test_model_mode_runs_every_arm_through_every_question(tmp_path, monkeypatch)
     for arm in receipt["arms"]:
         assert "skipped" not in arm and arm["summary"]["questions"] == 2
         assert arm["summary"]["accuracy"] == 1.0 and not arm["stopped_at_deadline"]
+    assert receipt["arms"][0]["request"] == {"enable_thinking": False}
+    assert receipt["arms"][1]["request"] == {"enable_thinking": True, "x": 1}
+    chats = [payload for payload in seen if "messages" in payload]
+    assert [payload.get("enable_thinking") for payload in chats] == [False, False, True, True]
+    assert [payload.get("x") for payload in chats] == [None, None, 1, 1]
+
 
 
 def test_mismatched_server_alias_requires_checkpoint_evidence():

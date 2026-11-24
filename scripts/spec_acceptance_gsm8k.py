@@ -531,7 +531,8 @@ def main(argv=None):
                         help="prompt format (default chat-fewshot); see the module docstring")
     parser.add_argument("--chat", action="store_true", help="alias for --format chat (zero-shot)")
     parser.add_argument("--request", type=json.loads, default=None,
-                        help='base-url mode: JSON merged into every request, e.g. \'{"enable_thinking": false}\'')
+                        help='JSON merged into every request, e.g. \'{"enable_thinking": false}\'; in --model '
+                             'mode an arm\'s own "request" fields override it (the receipt records the merge)')
     parser.add_argument("--max-context", type=int, default=8192)
     parser.add_argument("--stop-at", metavar="HH:MM",
                         help="ask no new question after this local time (next occurrence); arms not started are skipped")
@@ -655,6 +656,10 @@ def main(argv=None):
                 continue
             out = args.output / arm["name"]
             out.mkdir()
+            # The top-level --request applies to every arm (2026-11-24: it was
+            # silently ignored here, so enable_thinking=false never reached the
+            # Ling-3.2-air night arms); an arm's own fields win.
+            arm_request = {**(args.request or {}), **arm.get("request", {})}
             tree = Path(arm["tree"]).resolve()
             command = [args.python, "-u", "-m", "mlx2.server", "--model", str(args.model),
                        "--host", "127.0.0.1", "--port", str(args.port), "--max-inflight", "1",
@@ -668,7 +673,7 @@ def main(argv=None):
             server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                       start_new_session=True, env=env, cwd=tree)
             row = {"name": arm["name"], "tree": str(tree), "revision": revision(tree),
-                   "args": arm.get("args", []), "env": arm.get("env", {}), "request": arm.get("request", {}),
+                   "args": arm.get("args", []), "env": arm.get("env", {}), "request": arm_request,
                    "command": command}
             try:
                 # Readiness has its own monotonic bound: ``deadline`` is the
@@ -690,7 +695,7 @@ def main(argv=None):
                 row["startup_status"] = status
                 rows = run_questions(client, served_model_name(status, receipt["checkpoint"]), prefix, items, chat=args.chat, chat_shots=chat_shots, instruction=instruction,
                                      max_tokens=args.max_tokens, log=progress(arm["name"]), sampling=sampling,
-                                     request_extra=arm.get("request"), deadline=deadline)
+                                     request_extra=arm_request, deadline=deadline)
                 time.sleep(1.5)
                 row["final_status"] = client.call("/v1/status")
                 (out / "metrics.prom").write_text(client.call("/metrics"))
