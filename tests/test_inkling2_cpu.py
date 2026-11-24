@@ -944,3 +944,20 @@ def test_kernel_policy_round_trips_through_configure_kernels(_cpu):
     assert set(policy) <= params, sorted(set(policy) - params)
     model.configure_kernels(**policy)
     assert dict(model.kernel_policy) == policy
+
+
+def test_validate_policy_configures_the_model_through_model_kernel_options(_cpu):
+    """Scripts and tests that configure a model from validate_policy strip the
+    adapter-only keys with model_kernel_options; every remaining key must be a
+    configure_kernels keyword (adapter-only keys broke three callers once)."""
+    import inspect
+
+    from mlx2.adapters.inkling2 import ADAPTER_ONLY_KERNEL_KEYS, model_kernel_options, validate_policy
+
+    kernels, _ = validate_policy(None)
+    assert set(ADAPTER_ONLY_KERNEL_KEYS) <= set(kernels)
+    options = model_kernel_options(kernels)
+    model = _tiny_model()
+    params = set(inspect.signature(model.configure_kernels).parameters)
+    assert set(options) <= params, sorted(set(options) - params)
+    model.configure_kernels(**{**options, "moe_nax_gather": False})

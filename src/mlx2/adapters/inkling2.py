@@ -387,6 +387,12 @@ KERNEL_OPTIONS = {
     # FAST_K_RULE). Calls where the shipped route would stream
     # (gather_qmm_rhs), one-token calls and act-quant decline, counted
     # (moe_fast_counts panel_kernel / panel_kernel_declined:*).
+    # First GPU sanity A/B (run w1122-3ee59f64e-mtplx-smoke-moe-a1,
+    # Inkling-2-Mini@440956c8, M5 Max, main 3ee59f64e, 1K context, 3 rounds,
+    # with PANEL_OVER_WEIGHTED_SUM on): bitwise at 2 and 8 rows, 48 panel
+    # calls per verify forward, but SLOWER: median verify forward 0.0389 ->
+    # 0.0440 s at 2 rows (+13%) and 0.0572 -> 0.0734 s at 8 rows (+28%).
+    # Leave off; pending the overnight A/B.
     "inkling2_moe_panel_kernel": "moe_panel_kernel",
     # MXFP8 expert tables (layers 20-23) on the NAX sorted gather (M5 tensor
     # units, prefill only; implemented 2026-11-23, MTPLX sweep candidate 10,
@@ -724,6 +730,19 @@ def dspark_options(external):
     return options
 
 
+# validate_policy keys the adapter consumes itself; every other kernel key is a
+# Model.configure_kernels keyword. Scripts and tests that configure a model from
+# validate_policy go through model_kernel_options so a new adapter-only key
+# cannot break them (2026-11-23: prefill_wide_chunk broke three callers).
+ADAPTER_ONLY_KERNEL_KEYS = ("hard_no_thinking", "dspark_prefill_reclaim", "dspark_predraft",
+                            "prefill_wide_chunk", "prefill_transient_pricing")
+
+
+def model_kernel_options(kernels):
+    """``validate_policy``'s kernel dict without the adapter-only keys."""
+    return {k: v for k, v in kernels.items() if k not in ADAPTER_ONLY_KERNEL_KEYS}
+
+
 def validate_policy(value):
     """``(kernel switches, external-draft keys)`` from an execution policy."""
     if value is None:
@@ -1055,11 +1074,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
         path = Path(self.identity["path"])
         self.model, self.expert_receipt = load_model(path, artifact)
-        self.hard_no_thinking = self.kernel_policy.pop("hard_no_thinking")
-        self.dspark_prefill_reclaim = self.kernel_policy.pop("dspark_prefill_reclaim")
-        self.dspark_predraft = self.kernel_policy.pop("dspark_predraft")
-        self.prefill_wide_chunk = self.kernel_policy.pop("prefill_wide_chunk")
-        self.prefill_transient_pricing = self.kernel_policy.pop("prefill_transient_pricing")
+        for key in ADAPTER_ONLY_KERNEL_KEYS:
+            setattr(self, key, self.kernel_policy.pop(key))
         self.model.configure_kernels(**self.kernel_policy)
         self.prefill_schedule = None
         if self.prefill_wide_chunk:

@@ -377,16 +377,47 @@ def test_configure_kernels_owns_the_mxfp8_tables():
     assert model.kernel_policy["moe_nax_mxfp8"] is False
 
 
+@pytest.mark.parametrize("rows,token_length,weighted_sum,gpu,expected", [
+    (8, 8, True, True, True),     # 64 routed rows: the weighted sum engages
+    (32, 32, True, True, True),
+    (7, 7, True, True, False),    # 56 < MIN_ROUTED_ROWS 64 (B3-B7 stay with the panel)
+    (3, 3, True, True, False),
+    (2, 2, True, True, False),    # 16 assignments: unsorted
+    (8, 1, True, True, False),    # batched one-token decode: token_length 1
+    (8, 8, False, True, False),   # weighted sum off
+    (8, 8, True, False, False),   # not on the GPU (the shipped admission declines)
+])
+def test_shipped_weighted_sum_engagement_mirror(monkeypatch, rows, token_length, weighted_sum,
+                                                gpu, expected):
+    """The decline mirrors moe_fast.fused_call's weighted-sum engagement:
+    sorted multi-token, GPU, top_k in SUPPORTED_TOP_K, >= MIN_ROUTED_ROWS."""
+    from types import SimpleNamespace
+
+    from mlx2.runtime.models import qwen4_moe_weighted_sum as ws
+
+    monkeypatch.setattr(ws, "runtime_supported", lambda: gpu)
+    moe = SimpleNamespace(top_k=8, switch_mlp=SimpleNamespace(_sort_policy="auto"))
+    assert mpk.shipped_weighted_sum_engages(moe, rows, token_length, weighted_sum) is expected
+    moe2 = SimpleNamespace(top_k=2, switch_mlp=SimpleNamespace(_sort_policy="auto"))
+    assert mpk.shipped_weighted_sum_engages(moe2, 64, 64, True) is False  # top_k 2
+
+
 def test_weighted_sum_calls_decline_unless_switched(monkeypatch):
-    """Sorted multi-token calls the shipped route combines through
-    qwen4_moe_weighted_sum decline (counted) unless PANEL_OVER_WEIGHTED_SUM;
-    the shipped weighted-sum counter stays the shipped route's."""
+    """Calls the shipped route combines through qwen4_moe_weighted_sum
+    decline (counted) unless PANEL_OVER_WEIGHTED_SUM; the shipped
+    weighted-sum counter stays the shipped route's.  On the CPU the shipped
+    weighted sum never engages, so the mirror is patched to the GPU's answer
+    for this tiny model (a sorted 10-row call) while the reference stays the
+    CPU route."""
     model = _quantized_model()
     tokens = mx.random.randint(0, 500, (1, 17), key=mx.random.key(9))
     plan = [(0, 7), (7, 17)]  # 7 rows: unsorted; 10 rows: sorted (20 assignments)
     model.configure_kernels(moe_fused=True, moe_weighted_sum=True)
     base = _run(model, tokens, plan)
     _law_on_cpu(monkeypatch)
+    monkeypatch.setattr(mpk, "shipped_weighted_sum_engages",
+                        lambda moe, rows, token_length, weighted_sum:
+                        bool(weighted_sum and rows == 10))
     model.configure_kernels(moe_fused=True, moe_weighted_sum=True, moe_panel_kernel=True)
     assert mx.array_equal(_run(model, tokens, plan), base)
     keys = _panel_keys(model.kernel_receipt())

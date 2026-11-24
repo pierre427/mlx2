@@ -224,7 +224,7 @@ def plan_residual(layer, gated, conv, mask, x):
 
     def fused():
         out_y, res, nstate = kernel(
-            inputs=[mx.contiguous(gated.reshape(rows, k)), weight,
+            inputs=[gated.reshape(rows, k), weight,
                     mx.array([k, channels], mx.int32), mx.array([1.0], mx.float32),
                     state if state is not None else mx.zeros((1,), mx.float32),
                     _fp32(sconv.conv, "weight").reshape(channels, 4),

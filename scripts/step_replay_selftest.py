@@ -103,14 +103,13 @@ def record_twice(module, fn):
 
 
 def inkling2(module, model_path, pos):
-    from mlx2.adapters.inkling2 import inspect_artifact, load_model, validate_policy
+    from mlx2.adapters.inkling2 import (inspect_artifact, load_model, model_kernel_options,
+                                        validate_policy)
     from mlx2.runtime.models.inkling2 import capacity_state as cs
 
     artifact = inspect_artifact(model_path)
     model, _ = load_model(Path(artifact["identity"]["path"]), artifact)
-    policy, _ = validate_policy({"inkling2_native_replay": True})  # defaults + this option
-    for extra in ("hard_no_thinking", "dspark_prefill_reclaim", "dspark_predraft"):
-        policy.pop(extra)
+    policy = model_kernel_options(validate_policy({"inkling2_native_replay": True})[0])
     policy["moe_nax_gather"] = False  # prefill-only; the step is decode
     model.configure_kernels(**policy)
     cache = cs.synthetic_cache(model, pos)
@@ -157,7 +156,9 @@ def main():
     receipt["graphs"] = {name: record_twice(module, fn) for name, fn in graphs().items()}
     if args.model:
         receipt["inkling2"] = inkling2(module, args.model, args.pos)
-    receipt["layout_probe"] = module.array_layout(mx.arange(6).reshape(2, 3)[:, 1:])
+    probe = mx.arange(6).reshape(2, 3)[:, 1:]
+    mx.eval(probe)  # array_layout refuses unevaluated arrays (layout depends on it)
+    receipt["layout_probe"] = module.array_layout(probe)
     receipt["pipelines_filed"] = module.pipeline_count()
     receipt["finished"] = time.time()
     ok = (receipt["abi"]["probe"] is True and receipt["abi"]["libmlx_images"] == 1

@@ -209,12 +209,10 @@ def test_pending_rows_follow_the_rollback_window(widths):
 
 
 def _configure(model, policy, deferred):
-    from mlx2.adapters.inkling2 import validate_policy
+    from mlx2.adapters.inkling2 import model_kernel_options, validate_policy
 
     kernels, _ = validate_policy({**policy, "inkling2_verify_deferred_commit": deferred})
-    for name in ("hard_no_thinking", "dspark_prefill_reclaim", "dspark_predraft",
-                 "prefill_wide_chunk", "prefill_transient_pricing"):
-        kernels.pop(name)
+    kernels = model_kernel_options(kernels)
     kernels["moe_nax_gather"] = False
     model.configure_kernels(**kernels)
 

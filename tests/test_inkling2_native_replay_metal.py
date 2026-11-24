@@ -3,10 +3,15 @@
 Checkpoint: synthetic tiny Inkling 2 (``test_inkling2_cpu.TINY``) in BF16,
 plus the Mini-shaped attention visit. The fixed-capacity step on the GPU:
 
-* against the ordinary decode with the default kernel set, teacher-forced
-  (near-exact: the step reads masked columns). Every argmax flip is
-  classified by the AGENTS.md near-tie rule from both arms' full
-  log-probability rows at that step; any unclassified flip fails;
+* same-state steps (each step from a copy of the ordinary arm's state, so
+  every step is independent and every flip classified by the AGENTS.md
+  near-tie rule, ``mlx2.runtime.replay.near_tie``) against the reference
+  route (gated) and the default route (recorded);
+* free-running drift against the reference route, first divergence only;
+* a control: default ordinary vs reference ordinary, same state (recorded);
+* one attention visit per kind at tiny (head_dim 32) and Mini (head_dim 128)
+  shapes, identical inputs, fixed view vs ordinary cache, which localizes a
+  gap to the attention kernels;
 * pure against fused form;
 * the engine declines every call as ``module_missing`` (no module is
   installed by this test) and the MLX step serves;
@@ -73,11 +78,10 @@ def _bf16_model(seed=0):
 
 
 def _defaults(model, **extra):
-    from mlx2.adapters.inkling2 import validate_policy
+    from mlx2.adapters.inkling2 import model_kernel_options, validate_policy
 
     policy, _ = validate_policy(extra)
-    for name in ("hard_no_thinking", "dspark_prefill_reclaim", "dspark_predraft"):
-        policy.pop(name)
+    policy = model_kernel_options(policy)
     policy["moe_nax_gather"] = False
     model.configure_kernels(**policy)
 
@@ -85,78 +89,115 @@ def _defaults(model, **extra):
 NEAR_TIE_NATS = 0.5  # AGENTS.md near-tie ceiling
 
 
-def _exact_tie(logp_tied, tied_margin, other_selected, other_margin):
-    """AGENTS.md exact-tie clause, bound to the arm whose margin is zero: the
-    other arm selected one of that arm's tied tokens, with its own margin at
-    most the ceiling."""
-    if tied_margin != 0.0 or other_margin > NEAR_TIE_NATS:
-        return False
-    top = max(logp_tied)
-    tied = {t for t in range(logp_tied.size) if logp_tied[t] == top}
-    return other_selected in tied
+MINI = dict(hidden_size=2304, num_attention_heads=24, num_key_value_heads=8, head_dim=128,
+            swa_num_attention_heads=24, swa_num_key_value_heads=8, swa_head_dim=128,
+            sliding_window_size=1024, rel_extent=1024, d_rel=16)
+# One-step BF16 noise bound for the same-state comparison against the
+# reference route (CPU BF16 measured 0.01; the logit span is about 4.5).
+SAME_STATE_BOUND = 0.25
 
 
-def classify_flip(logp_ref, logp_fixed):
-    """AGENTS.md near-tie classification of one argmax flip. The comparison
-    is teacher-forced (both arms read the same token every step), so the
-    prefix is shared and no continuation diverges; the functional oracle is
-    not applicable to synthetic weights. Both arms' full log-probability rows
-    are the evidence window, so no token is ever missing from it."""
-    ref = sorted(range(logp_ref.size), key=lambda t: -logp_ref[t])[:2]
-    fix = sorted(range(logp_fixed.size), key=lambda t: -logp_fixed[t])[:2]
-    margins = (logp_ref[ref[0]] - logp_ref[ref[1]], logp_fixed[fix[0]] - logp_fixed[fix[1]])
-    row = {"ref_top2": ref, "fixed_top2": fix, "margins": margins,
-           "ref_logp": [logp_ref[t] for t in ref], "fixed_logp": [logp_fixed[t] for t in fix]}
-    if set(ref) == set(fix) and max(margins) <= NEAR_TIE_NATS:
-        row["verdict"] = "near_tie_equivalent"
-    elif _exact_tie(logp_ref, margins[0], fix[0], margins[1]) or _exact_tie(
-            logp_fixed, margins[1], ref[0], margins[0]):
-        row["verdict"] = "near_tie_equivalent"  # exact-tie clause
-    elif (logp_ref[ref[0]] - logp_ref[fix[0]] <= NEAR_TIE_NATS
-          and logp_fixed[fix[0]] - logp_fixed[ref[0]] <= NEAR_TIE_NATS):
-        row["verdict"] = "near_tie_equivalent"  # multi-way clause
-    else:
-        row["verdict"] = "unclassified"
-    return row
+def _tokens():
+    return mx.random.randint(0, 500, (1, 80), key=mx.random.key(5))
 
 
-@pytest.mark.parametrize("form", ["pure", "fused"])
-def test_fixed_step_tracks_default_route_on_gpu(form, monkeypatch):
-    """Every step's argmax agrees, or the flip is a classified near tie;
-    any unclassified flip fails."""
-    import numpy as np
-
+@pytest.fixture
+def small_steps(monkeypatch):
     from mlx2.runtime.models.cache import KVCache
     from mlx2.runtime.models.inkling2 import capacity_state as cs
 
     monkeypatch.setattr(KVCache, "step", 16)
     monkeypatch.setattr(cs, "CAPACITY_STEP", 32)
+
+
+def _arm(policy):
     model = _bf16_model()
-    _defaults(model)
-    tokens = mx.random.randint(0, 500, (1, 80), key=mx.random.key(5))
-    ref, fixed = model.make_cache(), model.make_cache()
-    model(tokens[:, :9], cache=ref)
-    model(tokens[:, :9], cache=fixed)
-    site = cs.install(model, form=form)
+    if policy == "defaults":
+        _defaults(model)
+    else:
+        model.configure_kernels()  # the reference route: every switch off
+    return model
+
+
+@pytest.mark.parametrize("form", ["pure", "fused"])
+@pytest.mark.parametrize("policy", ["reference", "defaults"])
+def test_same_state_steps_on_gpu(policy, form, small_steps):
+    """Every step of the fixed step starts from a copy of the ordinary arm's
+    state: each step is an independent shared-prefix comparison, so every
+    flip is classified. Against the reference route (the math the fixed step
+    implements) the gap must stay at one-step BF16 noise and every flip must
+    be a classified near tie. Against the default route the result is
+    recorded only: it measures the default GPU kernels (split-K, fused short
+    conv) on this geometry as much as the fixed step."""
+    from _native_replay_probe import same_state_run
+
+    out = same_state_run(_arm(policy), _tokens(), 9, form)
+    RESULTS[f"same_state_{policy}_{form}"] = {"checkpoint": "synthetic", **out}
+    assert out["site"]["counts"]["fixed_step"] == 71
+    if policy == "reference":
+        assert out["worst_abs_logit"] < SAME_STATE_BOUND
+        assert [f for f in out["flips"] if f["verdict"] != "near_tie_equivalent"] == []
+
+
+@pytest.mark.parametrize("form", ["pure", "fused"])
+def test_drift_first_divergence_on_gpu(form, small_steps):
+    """Both arms free-running from one prompt (teacher-forced tokens, each its
+    own state): only the first divergence is classified (AGENTS.md); later
+    flips describe downstream consequence and are not counted."""
+    from _native_replay_probe import drift_run
+
+    out = drift_run(_arm("reference"), _tokens(), 9, form)
+    RESULTS[f"drift_reference_{form}"] = {"checkpoint": "synthetic", **out}
+    first = out["first_divergence"]
+    assert first is None or first["verdict"] == "near_tie_equivalent"
+
+
+def test_default_route_control_same_state_on_gpu(small_steps):
+    """Control without the fixed step: the default ordinary route against the
+    reference ordinary route, same state per step. Recorded, not gated: it
+    says how far the default GPU kernels themselves sit from the reference
+    on this geometry, which bounds what the fixed step can match."""
+    import copy
+
+    from _native_replay_probe import _logp
+
+    from mlx2.runtime.replay import near_tie
+
+    default, reference = _arm("defaults"), _arm("reference")
+    tokens = _tokens()
+    cache = default.make_cache()
+    default(tokens[:, :9], cache=cache)
     worst, flips = 0.0, []
-    for i in range(9, 80):
-        model.__dict__.pop("_native_replay")
-        a = model(tokens[:, i:i + 1], cache=ref)
-        object.__setattr__(model, "_native_replay", site)
-        b = model(tokens[:, i:i + 1], cache=fixed)
+    for i in range(9, tokens.shape[1]):
+        side = copy.deepcopy(cache)
+        a = reference(tokens[:, i:i + 1], cache=side)
+        b = default(tokens[:, i:i + 1], cache=cache)
         mx.eval(a, b)
         worst = max(worst, mx.abs(a - b).max().item())
         if mx.argmax(a).item() != mx.argmax(b).item():
-            la = a[0, -1].astype(mx.float32)
-            lb = b[0, -1].astype(mx.float32)
-            la, lb = la - mx.logsumexp(la), lb - mx.logsumexp(lb)
-            flips.append({"step": i, **classify_flip(np.array(la), np.array(lb))})
-    receipt = cs.receipt(model)
-    RESULTS[f"default_route_{form}"] = {"checkpoint": "synthetic", "worst_abs_logit": worst,
-                                        "flips": flips, "steps": 71, "receipt": receipt}
-    assert receipt["counts"]["fixed_step"] == 71
-    assert receipt["engine"]["declines"] == {"module_missing": 71}
-    assert [f for f in flips if f["verdict"] != "near_tie_equivalent"] == []
+            flips.append({"step": i, **near_tie.classify(_logp(a), _logp(b))})
+    RESULTS["control_default_vs_reference_same_state"] = {
+        "checkpoint": "synthetic", "worst_abs_logit": worst, "flips": flips}
+
+
+@pytest.mark.parametrize("shape", ["tiny", "mini"])
+@pytest.mark.parametrize("layer", [0, 5])
+@pytest.mark.parametrize("policy", ["reference", "defaults"])
+def test_visit_attention_probe_on_gpu(shape, layer, policy):
+    """One attention visit, identical BF16 inputs and state: the fixed view
+    against the ordinary cache. tiny (head_dim 32): the fixed step's SDPA has
+    no vector kernel for D=32 and runs MLX's composed fallback; the ordinary
+    default route runs split-K. mini (head_dim 128, window 1024, 1500 rows):
+    the fixed step runs MLX's sdpa_vector kernels (float mask + sinks). The
+    reference arm is gated at BF16 output noise; the default arm is recorded."""
+    from _native_replay_probe import attention, visit_probe
+
+    over, pos = ({}, 30) if shape == "tiny" else (MINI, 1500)
+    attn = attention(over, layer, mx.bfloat16)
+    out = visit_probe(attn, pos, dtype=mx.bfloat16, policy=policy)
+    RESULTS[f"visit_{shape}_{'sliding' if layer == 0 else 'global'}_{policy}"] = out
+    if policy == "reference":
+        assert out["max_abs_gap"] <= 0.02 * max(1.0, out["max_abs_output"])
 
 
 def test_pure_and_fused_agree_on_gpu(monkeypatch):

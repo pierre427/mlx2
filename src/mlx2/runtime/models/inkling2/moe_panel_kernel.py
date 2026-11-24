@@ -65,8 +65,8 @@ than the stacked NVFP4 or MXFP8 tables; top_k outside 1..8; more than 1024
 experts; widths the tiles do not cover; and any call where the shipped route
 would take MLX's streaming ``gather_qmm_rhs`` (natively or through the rhs
 pad), whose order this module does not reproduce (``rhs_route``,
-``pad_policy``); and, unless ``PANEL_OVER_WEIGHTED_SUM``, sorted
-multi-token calls the shipped route combines through
+``pad_policy``); and, unless ``PANEL_OVER_WEIGHTED_SUM``, the
+calls the shipped route combines through
 ``qwen4_moe_weighted_sum`` (``weighted_sum_order_unproven``).
 
 Counters: an engaged call counts ``panel_kernel``, ``panel_kernel:<fmt>``
@@ -88,13 +88,19 @@ MAX_ROWS = 32
 MAX_TOP_K = 8
 MAX_EXPERTS = 1024
 MEMBERS_PER_PASS = 4
-# Sorted multi-token calls (>= 20 assignments) with inkling2_moe_weighted_sum
-# on combine through qwen4_moe_weighted_sum on the shipped route; the panel's
-# combine replays moe_decode_kernel's col_reduce order instead, and their
-# bitwise equality is not yet proven on the GPU.  False (default): such calls
-# decline (``weighted_sum_order_unproven``) and keep the weighted-sum route.
-# True: the panel takes them (the Metal test compares it against the shipped
-# weighted-sum route with this on, to settle the question).
+# Calls the shipped route combines through qwen4_moe_weighted_sum
+# (``shipped_weighted_sum_engages``: inkling2_moe_weighted_sum on, a sorted
+# multi-token call, the GPU, top_k in its verified set and at least its
+# MIN_ROUTED_ROWS routed rows, i.e. B8+ at the Mini's top 8); the panel's
+# combine replays moe_decode_kernel's col_reduce order instead.  False
+# (default): such calls decline (``weighted_sum_order_unproven``) and keep
+# the weighted-sum route.  True: the panel takes them.
+# GPU evidence (run w1122-3ee59f64e-mtplx-smoke-moe-a1, main 3ee59f64e, M5
+# Max, MLX 0.32.4, tests/test_inkling2_moe_panel_kernel_metal.py real
+# shape): the panel was bitwise against the shipped weighted-sum route at
+# B8/B16/B32, NVFP4 and MXFP8 (max |diff| 0.0), and the checkpoint's 8-row
+# verify forward was bitwise with this on.  The default stays False until
+# the full test (Pierre's call).
 PANEL_OVER_WEIGHTED_SUM = False
 FAST_K_RULE = "bits"  # "bits" (MLX 0.32.2+ / 0.32.5) or "fixed512" (0.32.0/0.32.1)
 _FAST_RULES = ("bits", "fixed512")
@@ -557,11 +563,28 @@ def decline_reason(moe, experts, x, weighted_sum=False):
     streams = _shipped_streams(moe, experts, fmt, rows, token_length)
     if streams is not None:
         return streams
-    if (weighted_sum and token_length > 1 and not PANEL_OVER_WEIGHTED_SUM
-            and _shipped_sorted(moe, rows, token_length)):
+    if not PANEL_OVER_WEIGHTED_SUM and shipped_weighted_sum_engages(
+            moe, rows, token_length, weighted_sum):
         # The shipped route would combine through qwen4_moe_weighted_sum.
         return "weighted_sum_order_unproven"
     return None
+
+
+def shipped_weighted_sum_engages(moe, rows, token_length, weighted_sum):
+    """Whether ``moe_fast.fused_call`` would combine this call through
+    ``qwen4_moe_weighted_sum``: its own condition (``do_sort and
+    weighted_sum and token_length > 1``) and ``admit_moe_weighted_sum``'s
+    gates.  Its remaining structural checks (score/index/inverse shapes, the
+    sorted down rows' layout and dtypes) hold by construction for the
+    fused route's BF16 calls this module admits."""
+    from .. import qwen4_moe_weighted_sum as ws
+
+    if not (weighted_sum and token_length > 1 and _shipped_sorted(moe, rows, token_length)):
+        return False
+    if not ws.runtime_supported():
+        return False
+    top_k = int(moe.top_k)
+    return top_k in tuple(ws.SUPPORTED_TOP_K) and rows * top_k >= ws.MIN_ROUTED_ROWS
 
 
 def plan_reference(order, top_k, num_experts):

@@ -163,22 +163,32 @@ def test_real_model_weights_are_bitwise():
             assert ok, (name, rows)
 
 
-def test_injected_tile_mismatch_is_refused_and_never_relaunched():
+def _injected(dtype, seed):
+    """A launch with the wrong tiles (SN 4 where MLX uses SN 32: each output
+    summed in another order), wrapped to count its launches."""
     lib = _lib()
-    x = _draw((1, 2304), mx.bfloat16, 11)
-    w = _draw((512, 2304), mx.bfloat16, 12, 0.05)
-    assert lib.matvec_plan(1, 512, 2304, mx.bfloat16) == ("gemv", (4, 1, 1, 32, 4, 4))
-    wrong = lib.plan_matvec(x, w, tiles=(1, 1, 8, 4, 4, 4))  # SN 4 instead of 32
+    x = _draw((1, 2304), dtype, seed)
+    w = _draw((512, 2304), dtype, seed + 1, 0.05)
+    assert lib.matvec_plan(1, 512, 2304, dtype) == ("gemv", (4, 1, 1, 32, 4, 4))
+    wrong = lib.plan_matvec(x, w, tiles=(1, 1, 8, 4, 4, 4))
     assert not isinstance(wrong, str)
     launches = []
-    fused = wrong.fused
 
     def counted():
         launches.append(1)
-        return fused()
+        return wrong.fused()
 
+    return x, w, lib.Planned(wrong.key, counted, wrong.reference, wrong.pairs), launches
+
+
+def test_injected_tile_mismatch_is_refused_and_never_relaunched():
+    # FP32 output: the accumulation order shows in the stored bits. (In BF16
+    # the FP32 sums of both orders usually round to the same BF16 value, so
+    # a wrong tiling can pass a proof on one draw; the 2026-11-23 smoke saw
+    # exactly that, see test_bf16_rounding_can_hide_a_wrong_order.)
+    lib = _lib()
+    x, w, planned, launches = _injected(mx.float32, 11)
     proofs, owner = lib.Proofs("t_injected"), type("Owner", (), {})()
-    planned = lib.Planned(wrong.key, counted, wrong.reference, wrong.pairs)
     first, engaged = lib.run_planned(proofs, planned, owner, "c")
     assert not engaged and _bitwise(first, x @ w.T)
     verdict = proofs.receipt()["refused"]
@@ -188,6 +198,21 @@ def test_injected_tile_mismatch_is_refused_and_never_relaunched():
         out, engaged = lib.run_planned(proofs, planned, owner, "c")
         assert not engaged and _bitwise(out, x @ w.T)
     assert len(launches) == 1 and owner.c == {"refused_first": 1, "refused": 3}
+
+
+def test_bf16_rounding_can_hide_a_wrong_order():
+    """Records (does not require) whether one BF16 draw exposes the wrong
+    tiling, and checks the bookkeeping either way: a passing proof is
+    ``proved``, a failing one ``refused_first``; the returned value is the
+    reference in both cases."""
+    lib = _lib()
+    x, w, planned, _launches = _injected(mx.bfloat16, 11)
+    proofs, owner = lib.Proofs("t_injected_bf16"), type("Owner", (), {})()
+    first, engaged = lib.run_planned(proofs, planned, owner, "c")
+    assert not engaged and _bitwise(first, x @ w.T)
+    refused = proofs.receipt()["refused"]
+    RESULTS["injected_bf16"] = refused or "proved (bf16 rounding hid the order)"
+    assert owner.c == ({"refused_first": 1} if refused else {"proved": 1})
 
 
 def test_correct_key_proves_once_then_serves():

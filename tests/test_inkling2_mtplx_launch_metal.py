@@ -342,8 +342,15 @@ def test_model_all_switches_on_bitwise_and_engaged(dtype, rows):
     tokens = mx.random.randint(0, 500, (rows, PLAN[-1][1]))
     outs = {}
     receipt = None
+    from mlx2.runtime.models.inkling2 import library_kernels as lib
+
     for on in (False, True):
         model = _wide_model(dtype)
+        if on:
+            # Verdicts are process-wide, counters per module: without a reset
+            # the B2 model serves stage_a keys (rows only) the B1 case proved,
+            # and its counters show calls but no proved.
+            lib.reset_proofs()
         model.configure_kernels(**{**_defaults(model), **{n: on for n in NEW}})
         cache = model.make_cache()
         steps = []

@@ -206,16 +206,25 @@ def counter_delta(before, after):
     return out
 
 
-def decode_block(model, toggle, cache, last, on, forced=None):
-    """Greedy block; with ``forced`` the inputs are those tokens instead."""
+def decode_block(model, toggle, cache, last, on, forced=None, untimed=0):
+    """Greedy block; with ``forced`` the inputs are those tokens instead.
+
+    The first ``untimed`` steps run (and are compared) but are left out of
+    the rate: the switches that prove a launch shape on first use
+    (library_kernels) compile and prove inside their first decode step, a
+    one-time cost per process that is not decode throughput."""
     import mlx.core as mx
 
     toggle(on)
     token = int(mx.argmax(last).item()) if forced is None else forced[0]
     rows, tokens, own = [], [], []
+    untimed = max(0, min(int(untimed), BLOCK - 1))
     mx.synchronize()
     t0 = time.perf_counter()
     for i in range(BLOCK):
+        if i == untimed and untimed:
+            mx.synchronize()
+            t0 = time.perf_counter()
         tokens.append(token)
         logits = model(mx.array([[token]]), cache=cache)[0, -1]
         mx.eval(logits)
@@ -224,7 +233,7 @@ def decode_block(model, toggle, cache, last, on, forced=None):
         token = own[-1] if forced is None or i + 1 >= len(forced) else forced[i + 1]
     mx.synchronize()
     seconds = time.perf_counter() - t0
-    return rows, tokens, own, rows[-1], round(BLOCK / seconds, 2)
+    return rows, tokens, own, rows[-1], round((BLOCK - untimed) / seconds, 2)
 
 
 def top5(row):
@@ -242,6 +251,10 @@ def main():
     parser.add_argument("--contexts", default="1024,16384,65536")
     parser.add_argument("--options", default=",".join(EXACT))
     parser.add_argument("--blocks", type=int, default=2)
+    parser.add_argument("--untimed-steps", type=int, default=0,
+                        help="leading decode steps of the first block left out of both "
+                             "arms' rates (first-use compile + proof of library_kernels "
+                             "launches); they are still compared bitwise")
     parser.add_argument("--base", choices=("reference", "defaults"), default="reference",
                         help="reference: every default-on option off (the historical A/B); "
                              "defaults: the shipped defaults, so the near-exact kernel "
@@ -270,7 +283,8 @@ def main():
                "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "options": options,
                "base_extra": extra,
                "kind": "exactness + sanity A/B (no thermal hold; not publishable statistics)",
-               "chunk": CHUNK, "block": BLOCK, "cells": []}
+               "chunk": CHUNK, "block": BLOCK, "untimed_steps": args.untimed_steps,
+               "cells": []}
     out = run_dir / "fuse_ab.json"
 
     def save():
@@ -314,10 +328,12 @@ def main():
             equal, agree, total, first = True, 0, 0, None
             for i in range(args.blocks):
                 rows_a, toks_a, own_a, last_a, rate_a = decode_block(
-                    model, toggle, cache_a, last_a, False)
+                    model, toggle, cache_a, last_a, False,
+                    untimed=args.untimed_steps if i == 0 else 0)
                 mem_a = memory()
                 rows_b, toks_b, own_b, last_b, rate_b = decode_block(
-                    model, toggle, cache_b, last_b, True, forced=toks_a)
+                    model, toggle, cache_b, last_b, True, forced=toks_a,
+                    untimed=args.untimed_steps if i == 0 else 0)
                 mem_b = memory()
                 same = [bool(mx.array_equal(x, y)) for x, y in zip(rows_a, rows_b)]
                 equal &= all(same)

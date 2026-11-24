@@ -805,25 +805,49 @@ def test_request_boundary_ignores_alternating_lanes_and_forward_jumps():
 
 def test_exact_tie_clause_is_bound_to_the_tied_arm():
     import numpy as np
-    from test_inkling2_native_replay_metal import classify_flip
+
+    from mlx2.runtime.replay.near_tie import classify, dense
 
     def row(values):
         return np.log(np.array(values, dtype=np.float64))
 
-    # Ref arm exactly tied between tokens 0 and 1; fixed picked 1 (margin small).
-    ok = classify_flip(row([0.4, 0.4, 0.2]), row([0.35, 0.45, 0.2]))
+    ok = classify(row([0.4, 0.4, 0.2]), row([0.35, 0.45, 0.2]))
     assert ok["verdict"] == "near_tie_equivalent"
     # Ref tied between 0 and 1; fixed picked token 2, not a tied token, though
     # its top two hold token 0 and its margin is small. The tie belongs to the
     # ref arm, so the clause does not apply (the loose form accepted this).
-    bad = classify_flip(row([0.45, 0.45, 0.1]), row([0.38, 0.1, 0.52]))
-    assert bad["fixed_top2"] == [2, 0] and bad["margins"][1] < 0.5
+    bad = classify(row([0.45, 0.45, 0.1]), row([0.38, 0.1, 0.52]))
+    assert bad["b_top2"] == [2, 0] and bad["margins"][1] < 0.5
     assert bad["verdict"] == "unclassified"
     # Fixed arm tied three ways (its top two are 0 and 1); ref picked token 2,
-    # one of the tied tokens, with margin <= 0.5: only the exact-tie clause.
-    tied = classify_flip(row([0.2, 0.1, 0.4, 0.3]), row([0.3, 0.3, 0.3, 0.1]))
-    assert set(tied["ref_top2"]) != set(tied["fixed_top2"])
-    assert tied["verdict"] == "near_tie_equivalent"
+    # one of the tied tokens, with margin <= 0.5: the exact-tie clause.
+    tied = classify(row([0.2, 0.1, 0.4, 0.3]), row([0.3, 0.3, 0.3, 0.1]))
+    assert set(tied["a_top2"]) != set(tied["b_top2"])
+    assert tied["verdict"] == "near_tie_equivalent" and tied["clause"] == "exact_tie"
+    # Multi-way: each selection within 0.5 nat of the other arm's top.
+    multi = classify(row([0.30, 0.28, 0.27, 0.15]), row([0.27, 0.26, 0.30, 0.17]))
+    assert multi["clause"] == "multi_way"
+    # A window that lacks a token: the dense row puts it at -inf (fails).
+    sparse = classify(dense([(0, -0.9), (1, -1.0)], 3), dense([(2, -0.8), (0, -0.85)], 3))
+    assert sparse["verdict"] == "unclassified"
+
+
+def test_probes_track_on_cpu():
+    """The shared GPU-test probes on CPU FP32: same-state, drift and per-visit
+    attention all at FP32 noise (they are the instruments the Metal test uses)."""
+    from _native_replay_probe import attention, drift_run, same_state_run, visit_probe
+
+    model = _tiny_model()
+    tokens = _tokens(20, seed=5)
+    same = same_state_run(model, tokens, 9, "fused")
+    drift = drift_run(_tiny_model(), tokens, 9, "fused")
+    assert same["worst_abs_logit"] < 1e-4 and same["flips"] == []
+    assert drift["worst_abs_logit"] < 1e-4 and drift["first_divergence"] is None
+    for layer in (0, 5):
+        attn = attention({}, layer, mx.float32)
+        for policy in ("reference", "defaults"):
+            out = visit_probe(attn, 30, dtype=mx.float32, policy=policy)
+            assert out["max_abs_gap"] < 1e-6
 
 
 def test_request_boundary_without_prefill():

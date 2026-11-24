@@ -134,20 +134,26 @@ def test_panel_against_shipped(geometry, fmt, monkeypatch):
                     if not ok:
                         failures.append((key, reason))
                     break
-                sorted_ws = weighted_sum and rows * top_k >= 20
-                if sorted_ws:
-                    # The module default must decline these.
-                    monkeypatch.setattr(mpk, "PANEL_OVER_WEIGHTED_SUM", False)
-                    default_reason = mpk.decline_reason(moe, experts, x, weighted_sum)
-                    monkeypatch.setattr(mpk, "PANEL_OVER_WEIGHTED_SUM", True)
-                    if default_reason != "weighted_sum_order_unproven":
-                        failures.append((key, "default_not_declined", default_reason))
+                # The reference is whichever combine the shipped route takes:
+                # qwen4_moe_weighted_sum where it engages (B8+ at top 8), the
+                # plain combine where it declines (e.g. its MIN_ROUTED_ROWS
+                # floor at B2-B7). The panel's mirror of that condition must
+                # agree with what the shipped route did, and the module
+                # default must decline exactly those calls.
+                expected_ws = mpk.shipped_weighted_sum_engages(moe, rows, rows, weighted_sum)
+                monkeypatch.setattr(mpk, "PANEL_OVER_WEIGHTED_SUM", False)
+                default_reason = mpk.decline_reason(moe, experts, x, weighted_sum)
+                monkeypatch.setattr(mpk, "PANEL_OVER_WEIGHTED_SUM", True)
+                if default_reason != ("weighted_sum_order_unproven" if expected_ws else None):
+                    failures.append((key, "default_decline", default_reason))
                 counts = moe.__dict__.setdefault("moe_fast_counts", {})
                 ws_before = counts.get("weighted_sum", 0)
                 ref = moe_fast.fused_call(moe, experts, x, weighted_sum=weighted_sum)
-                row["shipped_weighted_sum_engaged"] = counts.get("weighted_sum", 0) > ws_before
-                if sorted_ws and not row["shipped_weighted_sum_engaged"]:
-                    failures.append((key, "reference_not_weighted_sum"))
+                engaged = counts.get("weighted_sum", 0) > ws_before
+                row["shipped_weighted_sum_engaged"] = engaged
+                row["shipped_weighted_sum_expected"] = expected_ws
+                if engaged != expected_ws:
+                    failures.append((key, "weighted_sum_mirror", engaged, expected_ws))
                 order, scores = mpk.route_compiled(x, _fp32(moe, "gate_weight"),
                                                    moe.e_score_correction_bias, moe.top_k)
                 law = mpk.law(moe, experts, x, order, scores)

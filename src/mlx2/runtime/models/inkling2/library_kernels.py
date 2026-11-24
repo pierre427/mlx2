@@ -71,6 +71,11 @@ THREADS = 256
 WIDE_MAX_ROWS = 15
 WIDE_MIN_GENERATION = 15  # applegpu_g15 (M3) and later
 SWITCH_ENV = "MLX2_INKLING2_LIBRARY_KERNELS"
+# Passing proofs (on separate calls, so on separate operands) a key needs
+# before it serves; default 1. A BF16/FP16 output can hide a wrong summation
+# order behind its rounding on one draw, so a mirror under suspicion can be
+# run with 2 or more.
+PROOFS_ENV = "MLX2_INKLING2_LIBRARY_PROOFS"
 _PREFIX = "mlx/backend/metal/kernels/"
 _PRELUDE_ENTRY = "utils.h"
 
@@ -94,6 +99,13 @@ def set_enabled(value):
     """Override the environment switch (``None`` restores it)."""
     global _switch_override
     _switch_override = None if value is None else bool(value)
+
+
+def proofs_required():
+    try:
+        return max(1, int(os.environ.get(PROOFS_ENV, "1")))
+    except ValueError:
+        return 1
 
 
 def mlx_version():
@@ -628,16 +640,17 @@ class Proofs:
         return self._keys.setdefault(key, {"state": None, "reason": None, "proved": 0,
                                            "served": 0, "refused_calls": 0})
 
-    def settle(self, key, reason):
-        """Record a proof verdict (``reason`` None: bitwise). The first verdict
-        wins; a later failing verdict for a proven key refuses it. Returns the
-        key's state afterwards."""
+    def settle(self, key, reason, required=1):
+        """Record a proof verdict (``reason`` None: bitwise). A key is proven
+        after ``required`` passing proofs; any failing verdict refuses it,
+        including a later one for a proven key (the first refusal wins).
+        Returns the key's state afterwards."""
         with self._lock:
             entry = self._entry(key)
             if reason is None:
-                if entry["state"] is None:
-                    entry["state"] = PROVEN
                 entry["proved"] += 1
+                if entry["state"] is None and entry["proved"] >= required:
+                    entry["state"] = PROVEN
             elif entry["state"] != REFUSED:
                 entry["state"], entry["reason"] = REFUSED, reason
             return entry["state"]
@@ -669,6 +682,18 @@ def receipt():
         held["served"] += r["served"]
         held["refused_calls"] += r["refused_calls"]
     return {"library": library_receipt(), "proofs": families}
+
+
+def reset_proofs():
+    """Forget every family's verdicts (tests and A/B arms that need each
+    model's counters to show its own proofs).
+
+    Verdicts are process-wide while counters are per owner: a module that
+    serves a key another module (or an earlier model in the process) already
+    proved counts only ``calls``. That is truthful (this module did not prove
+    it); a test that wants ``proved`` on a fresh model resets first."""
+    for proofs in list(_registry.values()):
+        proofs.reset()
 
 
 class Planned:
@@ -726,8 +751,8 @@ def run_proved(proofs, key, owner, counts, fused, reference, pairs):
             diff = f"error:{type(exc).__name__}"
         if diff is not None:
             reason = diff if diff.startswith("error") else f"bits:{diff}"
-    state = proofs.settle(key, reason)
-    count(owner, counts, "proved" if state == PROVEN and reason is None else "refused_first")
+    state = proofs.settle(key, reason, proofs_required())
+    count(owner, counts, "refused_first" if state == REFUSED else "proved")
     return out, False
 
 
@@ -801,7 +826,7 @@ def plan_matvec(x, weight, tiles=None):
 
     def fused():
         return kernel(
-            inputs=[mx.contiguous(x.reshape(rows, k)), weight, mx.array([k, n], mx.int32),
+            inputs=[x.reshape(rows, k), weight, mx.array([k, n], mx.int32),
                     mx.array([1.0], mx.float32)],
             grid=(groups * THREADS, 1, 1), threadgroup=(THREADS, 1, 1),
             output_shapes=[(rows, n)], output_dtypes=[dtype])[0].reshape(*lead, n)

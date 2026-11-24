@@ -183,7 +183,7 @@ def plan(attn, x, key_input, value_input):
     def fused():
         sizes = mx.array([k] + [n for _kind, _tiles, n, _inp in plans], mx.int32)
         outs = kernel(
-            inputs=[*(mx.contiguous(a.reshape(rows, k)) for a in distinct),
+            inputs=[*(a.reshape(rows, k) for a in distinct),
                     *(w for _inp, w, _s in jobs), sizes, mx.array([1.0], mx.float32)],
             grid=(groups * lib.THREADS, 1, 1), threadgroup=(lib.THREADS, 1, 1),
             output_shapes=[(rows, n) for _kind, _tiles, n, _inp in plans],

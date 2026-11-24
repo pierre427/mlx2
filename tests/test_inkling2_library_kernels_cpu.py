@@ -400,6 +400,29 @@ def test_bits_views_and_signed_zero():
     assert lib.same_bits([(None, nan)]) == "missing0"
 
 
+def test_more_than_one_proof_can_be_required(monkeypatch):
+    monkeypatch.setenv(lib.PROOFS_ENV, "2")
+    proofs, box, calls = lib.Proofs("t_two"), Box(), []
+    ref = mx.array([1.0])
+    for _ in range(3):
+        lib.run_proved(proofs, "k", box, "c", _launch([1.0], calls), lambda: ref,
+                       lambda f, r: [(f, r)])
+    # Two proving calls (each returns the reference), then the launch serves.
+    assert box.c == {"proved": 2, "calls": 1} and proofs.state("k") == lib.PROVEN
+    other, box2 = lib.Proofs("t_two_fail"), Box()
+    lib.run_proved(other, "k", box2, "c", _launch([1.0], []), lambda: ref, lambda f, r: [(f, r)])
+    lib.run_proved(other, "k", box2, "c", _launch([2.0], []), lambda: ref, lambda f, r: [(f, r)])
+    assert box2.c == {"proved": 1, "refused_first": 1} and other.state("k") == lib.REFUSED
+
+
+def test_reset_proofs_clears_every_family():
+    a, b = lib.Proofs("t_reset_a"), lib.Proofs("t_reset_b")
+    a.settle("k", None)
+    b.settle("k", "bits:differs0")
+    lib.reset_proofs()
+    assert a.state("k") is None and b.state("k") is None
+
+
 def test_count_uses_the_instance_dict_of_modules():
     from mlx import nn
 

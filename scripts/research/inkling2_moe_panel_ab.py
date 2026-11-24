@@ -55,10 +55,17 @@ def panel_counts(model):
 
 
 def nax_counts(model):
+    """Cumulative NAX counters (differenced per arm)."""
     nax = model.kernel_receipt().get("moe_nax_gather") or {}
     return {"calls_by_format": dict(nax.get("calls_by_format") or {}),
-            "fallbacks": dict(nax.get("fallbacks") or {}),
-            "mxfp8_owned_tables": nax.get("mxfp8_owned_tables", 0)}
+            "fallbacks": dict(nax.get("fallbacks") or {})}
+
+
+def mxfp8_owned_tables(model):
+    """A gauge, not a counter: the MXFP8 tables owned on the live route now.
+    (The first smoke, run w1122-3ee59f64e-mtplx-smoke-moe-a1, differenced it
+    like the counters and so recorded 0 on the on arm, where it was 8.)"""
+    return int(model.kernel_receipt()["moe_nax_mxfp8"]["owned_live_tables"])
 
 
 def delta(after, before):
@@ -139,7 +146,8 @@ def nax_cell(model, base, tokens):
         cache, last, seconds, rows = prefill(model, tokens, keep_rows=True)
         out[arm] = {"prefill_s": round(seconds, 2),
                     "prefill_tok_s": round(len(tokens) / seconds, 1),
-                    "nax_delta": delta(nax_counts(model), before)}
+                    "nax_delta": delta(nax_counts(model), before),
+                    "mxfp8_owned_tables": mxfp8_owned_tables(model)}
         lasts[arm], chunk_rows[arm] = last, rows
         del cache
         mx.clear_cache()
