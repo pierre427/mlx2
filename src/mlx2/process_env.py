@@ -106,6 +106,13 @@ PROCESS_RUNTIME_DEFAULTS = {"MLX_METAL_FAST_SYNCH": "1"}
 # token identical. No byte trigger with the default 50 ops: -14%; neither
 # trigger (one buffer per step): -2% (the GPU then waits for the whole step to
 # be encoded). Opt-in, unqualified; explicit MLX_MAX_* values win.
+#
+# Not helpful elsewhere, so it stays opt-in: Inkling 2 no gain (launch-bound,
+# qualification/runs/inkling2-gpu-20261121); Flash-Next slower (served ABBA,
+# Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP@25c2da42, mlx2 d824162e3,
+# qualification/runs/flash-next-cmdbuf-20261124): native-MTP decode at 32K
+# -10%, ordinary -7%, cold TTFT +17-34%, text identical. The byte trigger only
+# hurts where whole weight banks are billed per launch, as on GLM-5.3.
 COMMAND_BUFFER_POLICY_ENV = "MLX2_COMMAND_BUFFERS"
 COMMAND_BUFFER_POLICIES = {
     "mlx_default": {},

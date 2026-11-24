@@ -108,6 +108,8 @@ FEATURES = (
     "inkling2_verify_splitk",
     "inkling2_dspark_prefill_reclaim", "inkling2_prefill_mask_mb", "inkling2_hard_no_thinking",
     "inkling2_command_buffers_ops100_v1", "inkling2_composed_ordinary", "inkling2_composed_dspark",
+    # mlx #4957 (open) built onto 0.32.4: command buffers billed by new output/temp bytes (2026-11-24).
+    "mlx_pr4957_cmdbuf_output_bytes",
     "inkling2_moe_fused", "inkling2_moe_weighted_sum", "inkling2_moe_nax_gather",
     "inkling2_moe_act_quant", "inkling2_kv_q8",
     "inkling2_fuse_controllers", "inkling2_fuse_residual", "inkling2_fuse_sconv",
