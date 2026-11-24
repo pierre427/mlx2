@@ -337,8 +337,33 @@ def test_ordinary_optimization_policy_loads_and_revisions_cache(tiny_ling):
         assert diagnostics['policy']['fused_mla_decode'] is False
         assert ordinary.diagnostics()['optimizations']['policy'] == {
             'merged_conv': False, 'fused_norm': False, 'fused_mla_decode': False,
-            'moe_nax': False,
+            'moe_nax': False, 'kda_fused': False,
         }
+    finally:
+        ordinary.close()
+        if candidate is not None:
+            candidate.close()
+
+
+def test_kda_fused_policy_revisions_cache_and_hashes_kernel_sources(tiny_ling):
+    ordinary = ling3_flash.Ling3FlashAdapter(tiny_ling)
+    candidate = None
+    try:
+        candidate = ling3_flash.Ling3FlashAdapter(tiny_ling, execution_policy={
+            'ling_optimizations': {'kda_fused': True},
+        })
+        assert candidate.layout != ordinary.layout
+        assert candidate.identity['fingerprint'] != ordinary.identity['fingerprint']
+        assert {'ling_kda_fused.py', 'gated_delta.py', 'ling_fused.py',
+                'qwen4_fused_gdn.py'} <= set(candidate.optimization_sources)
+        kda = [layer.attention for layer in candidate.model.layers if not layer.is_global]
+        assert kda and all(attention.ling_kda_fused for attention in kda)
+        prompt = mx.array([[1, 2]])
+        cache = candidate.model.make_cache()
+        candidate.model(prompt, cache)
+        candidate.model(mx.array([[3]]), cache)
+        calls = candidate.diagnostics()['optimizations']['graph_build_calls']
+        assert calls['kda_fused_declined'] > 0 and 'kda_fused' not in calls  # CPU keeps eager math.
     finally:
         ordinary.close()
         if candidate is not None:

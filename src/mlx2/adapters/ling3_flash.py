@@ -32,8 +32,11 @@ def optimization_policy(value):
     # bit-identical to stock sorted gather_qmm per moe_nax_gather's canary);
     # FN measured the MoE layer 1.27-1.67x, prefill up to 1.20x. Off until a
     # Ling checkpoint A/B shows engagement and a win.
+    # kda_fused: the one-launch B1 KDA decode body (ling_kda_fused decode_v1,
+    # port of glm53_kda_fused), bitwise vs the eager chain on synthetic
+    # layers. Off until a Ling checkpoint A/B shows engagement and a win.
     defaults = {"merged_conv": False, "fused_norm": False, "fused_mla_decode": False,
-                "moe_nax": False}
+                "moe_nax": False, "kda_fused": False}
     if value is None:
         return defaults
     if not isinstance(value, dict) or set(value) - defaults.keys():
@@ -444,6 +447,15 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             else:
                 attention.ling_merged_conv = self.optimizations["merged_conv"]
                 attention.ling_fused_norm = self.optimizations["fused_norm"]
+                attention.ling_kda_fused = self.optimizations["kda_fused"]
+        import mlx.core as mx
+
+        if self.optimizations["kda_fused"] and mx.metal.is_available():
+            # Probe the served sigmoid spellings now, outside any traced or
+            # failing forward, so a first-forward probe cannot latch a refusal.
+            from ..runtime.models.ling_kda_fused import served_spellings
+
+            self.kda_fused_spellings = served_spellings()
         if any(self.optimizations.values()):
             root = Path(__file__).parents[1] / "runtime" / "models"
             sources = ["bailing_hybrid.py", "ling_tree.py"]
@@ -453,6 +465,10 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 sources += ["kimi_linear_mla_fused.py", "glm53_sparse_attention.py"]
             if self.optimizations["moe_nax"]:
                 sources += ["moe_nax_gather.py", "switch_layers.py"]
+            if self.optimizations["kda_fused"]:
+                sources += [name for name in ("ling_kda_fused.py", "ling_fused.py",
+                                              "qwen4_fused_gdn.py", "served_exp.py", "gated_delta.py")
+                            if name not in sources]
             self.optimization_sources = {name: hashlib.sha256((root/name).read_bytes()).hexdigest()
                                          for name in sources}
             digest = hashlib.sha256((self.identity["fingerprint"] + ":ling-kimi-ops-v1:"

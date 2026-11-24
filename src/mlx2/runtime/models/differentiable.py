@@ -37,6 +37,8 @@ ROUTED_KERNELS = {
     "sdpa": "base.scaled_dot_product_attention, plain (unquantized, unbucketed) cache only: opt-in FP verify "
             "(fp_verify_tensor) and FP decode (qsdpa_decode_metal) kernels -> mx.fast.scaled_dot_product_attention",
     "precise_sigmoid": "precise_ops.gate_sigmoid inside a precise span: precise sigmoid kernel -> mx.sigmoid",
+    "kda_fused": "bailing_hybrid.KimiDeltaAttention.fused_decode: one-launch Ling KDA decode body "
+                 "(ling_kda_fused) -> the eager KimiDeltaAttention chain",
 }
 if __doc__:  # None under python -OO
     __doc__ += "".join(f"\n* ``{k}``: {v}" for k, v in ROUTED_KERNELS.items()) + "\n"

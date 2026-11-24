@@ -447,6 +447,7 @@ class KimiDeltaAttention(nn.Module):
         self.scale = float(self.head_dim) ** -0.5
         self.ling_merged_conv = False
         self.ling_fused_norm = False
+        self.ling_kda_fused = False
         self.ling_calls = Counter()
 
         hidden = args.hidden_size
@@ -514,6 +515,10 @@ class KimiDeltaAttention(nn.Module):
             spans = cache.rollback_spans(length, mask)
         snapshot = [q_state, k_state, v_state, recurrent_state]
         raw = (self.q_proj(x), self.k_proj(x), self.v_proj(x))
+        if self.ling_kda_fused and not self.training:
+            fused = self.fused_decode(x, raw, snapshot, mask, cache, spans)
+            if fused is not None:
+                return fused
         (q, k, v), (q_state, k_state, v_state) = self.convolve_qkv(
             raw, (q_state, k_state, v_state), mask, lengths,
         )
@@ -576,6 +581,65 @@ class KimiDeltaAttention(nn.Module):
         gate = gate.reshape(batch, length, self.num_heads, self.head_dim)
         output = self.output_norm_gate(output, gate)
         return self.o_proj(output.reshape(batch, length, -1))
+
+    def _kda_fused_decline(self, reason):
+        self.ling_calls["kda_fused_declined"] += 1
+        self.ling_calls["kda_fused_declined:" + reason] += 1
+        return None
+
+    def fused_decode(self, x, raw, snapshot, mask, cache, spans):
+        """One-launch B1 decode body (``ling_kda_fused.decode_v1``) or None.
+
+        Declines (counted per reason) whenever the eager chain must run:
+        speculation (the APCv2 rollback recorder replays the eager scan
+        operands), masks, ragged lengths, batch or prompt rows, the unbounded
+        gate law and any operand the kernel does not reproduce bit for bit.
+        """
+        from . import differentiable
+        from .ling_kda_fused import ling_kda_fused_decode, ling_kda_fused_refusal
+
+        if differentiable.routed("kda_fused"):
+            # A Metal launch has no VJP; reference_path() promises pure MLX ops.
+            return self._kda_fused_decline("differentiable reference")
+        if cache is None:
+            return self._kda_fused_decline("no cache")
+        if x.shape[:2] != (1, 1):
+            return self._kda_fused_decline("not B1 one-token decode")
+        if mask is not None:
+            return self._kda_fused_decline("mask")
+        if cache.speculating or spans is not None:
+            return self._kda_fused_decline("speculating")
+        if cache.lengths is not None:
+            return self._kda_fused_decline("ragged lengths")
+        if self.lower_bound is None:
+            return self._kda_fused_decline("unbounded gate law")
+        if self.conv_kernel != 4:
+            return self._kda_fused_decline("conv kernel size")
+        state = snapshot[3]
+        if state is None:
+            state = mx.zeros((1, self.num_heads, self.head_dim, self.head_dim), dtype=mx.float32)
+        if self.no_kda_lora:
+            decay, gate = self.f_proj(x), self.g_proj(x)
+        else:
+            decay = self.f_b_proj(self.f_a_proj(x))
+            gate = self.g_b_proj(self.g_a_proj(x))
+        operands = dict(
+            raw=raw, convs=tuple(snapshot[:3]),
+            weights=(self.q_conv1d.conv.weight, self.k_conv1d.conv.weight,
+                     self.v_conv1d.conv.weight),
+            a=decay, b=self.b_proj(x), A_log=self.A_log, dt_bias=self.dt_bias,
+            state=state, gate=gate, norm=self.o_norm.weight,
+        )
+        refusal = ling_kda_fused_refusal(**operands)
+        if refusal is not None:
+            return self._kda_fused_decline(refusal)
+        output, convs, state = ling_kda_fused_decode(
+            **operands, rms_eps=self.o_norm.eps, lower_bound=self.lower_bound)
+        cache[0], cache[1], cache[2] = convs
+        cache[3] = state
+        cache.advance(1)
+        self.ling_calls["kda_fused"] += 1
+        return self.o_proj(output)
 
     def convolve_qkv(self, raw, states, mask=None, lengths=None):
         # The real layer0 A/B won at one row and lost at 32/128 prompt rows.
