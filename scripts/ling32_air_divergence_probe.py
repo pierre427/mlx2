@@ -26,11 +26,11 @@ import spec_acceptance_gsm8k as gsm  # noqa: E402
 CEILING = 0.5
 
 
-def payload(model, train, item, *, max_tokens, shots, extra):
+def payload(model, train, item, *, max_tokens, shots, extra, thinking=False):
     return {"model": model, "temperature": 0, "stream": False, "max_tokens": max_tokens,
             "messages": list(gsm.few_shot_turns(train, shots))
                         + [{"role": "user", "content": item["question"] + gsm.CHAT_INSTRUCTION}],
-            "enable_thinking": False, **extra}
+            "enable_thinking": bool(thinking), **extra}
 
 
 def run(args):
@@ -54,7 +54,7 @@ def run(args):
                      "logprobs_end": position}
         result = client.call("/v1/chat/completions",
                              payload(model, train, test[index], max_tokens=args.max_tokens,
-                                     shots=args.shots, extra=extra))
+                                     shots=args.shots, extra=extra, thinking=args.thinking))
         choice = result["choices"][0]
         mlx2 = result.get("mlx2") or {}
         row = {"content": choice["message"].get("content") or "",
@@ -142,6 +142,7 @@ def main(argv=None):
     r.add_argument("--top", type=int, default=5)
     r.add_argument("--shots", type=int, default=5)
     r.add_argument("--max-tokens", type=int, default=1024)
+    r.add_argument("--thinking", action="store_true", help="enable_thinking true (default false)")
     r.add_argument("--output", required=True)
     c = sub.add_parser("compare")
     c.add_argument("--reference", required=True)

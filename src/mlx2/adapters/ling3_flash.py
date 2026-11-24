@@ -753,10 +753,21 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
             # Process-wide graph-build counters (engaged / decline:<reason>).
             optimizations["routed_moe_decode"] = ling_routed_decode.status()
+        # NAX sorted-gather engagement (prompt-chunk MoE): launches by route,
+        # fallbacks and never-offered gathers. Rendered by /metrics from the
+        # route receipt's execution block (mlx2_moe_nax_gather_*); all zero
+        # while ling_optimizations.moe_nax is off.
+        from ..runtime.models import moe_nax_gather
+
+        nax = moe_nax_gather.status()
+        nax = {key: nax[key] for key in ("mode", "calls", "calls_by_format", "fallbacks",
+                                         "not_candidates", "not_prefill", "last_fallback")}
+        nax["selected"] = bool(optimizations["policy"].get("moe_nax"))
         if self.draft_model is None:
             return {"route": "ordinary", "qualification": "unqualified",
-                    "optimizations": optimizations}
+                    "optimizations": optimizations, "moe_nax_gather": nax}
         return {
+            "moe_nax_gather": nax,
             "route": "external_ubtree_ast",
             "qualification": "unqualified",
             "implemented": True,

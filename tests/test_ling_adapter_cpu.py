@@ -438,3 +438,24 @@ def test_routed_decode_ab_script_phases_run_on_cpu(tiny_ling):
         assert all(m.ling_routed_decode for _, m in ab.blocks(model))  # last block ran routed
     finally:
         adapter.close()
+
+
+def test_nax_engagement_counter_is_zero_when_off_and_reaches_metrics(tiny_ling):
+    """Pierre 2026-11-24: an engagement counter for Ling moe_nax (route receipt + /metrics)."""
+    from mlx2.prometheus import PrometheusBuilder, _add_execution
+    from mlx2.runtime.models import moe_nax_gather
+
+    moe_nax_gather.status(reset=True)
+    adapter = ling3_flash.Ling3FlashAdapter(tiny_ling)
+    try:
+        prompt = mx.array([[1, 2, 3, 4, 5, 6, 7, 8]])
+        mx.eval(adapter.model(prompt, adapter.model.make_cache()))
+        nax = adapter.diagnostics()["moe_nax_gather"]
+        assert nax["selected"] is False
+        assert not any(nax["calls"].values()) and not nax["fallbacks"]
+        builder = PrometheusBuilder()
+        _add_execution(builder, adapter.diagnostics())
+        text = builder.render()
+        assert 'mlx2_moe_nax_gather_calls_total{route="gather"} 0' in text
+    finally:
+        adapter.close()

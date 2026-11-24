@@ -77,6 +77,30 @@ def shape_image(colour, shape):
     return image
 
 
+def find_trace(body):
+    stack = [body]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if "token_trace" in item:
+                return item["token_trace"]
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return None
+
+
+def dots_image(count):
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (512, 256), "white")
+    draw = ImageDraw.Draw(image)
+    for i in range(count):
+        x = 60 + i * 150
+        draw.ellipse((x, 88, x + 80, 168), fill="red")
+    return image
+
+
 def chat(model, parts, max_tokens=64):
     return {"model": model, "temperature": 0, "max_tokens": max_tokens, "stream": False,
             "enable_thinking": False, "messages": [{"role": "user", "content": parts}]}
@@ -110,13 +134,29 @@ def run_images(args):
                         {"type": "text", "text": "What colour is the shape in the second image? One word."}],
          lambda text: "yellow" in text.lower()),
     ]
+    if args.extended:
+        cases += [
+            ("code_3081", [image_part(code_image("3081")),
+                           {"type": "text", "text": "Read the number in the image. Digits only."}],
+             lambda text: text.strip().replace(" ", "").startswith("3081")),
+            ("count_dots", [image_part(dots_image(3)),
+                            {"type": "text", "text": "How many red dots are in the image? Reply with a digit."}],
+             lambda text: text.strip().startswith("3") or "three" in text.lower()),
+            ("word_planet", [image_part(code_image("PLANET")),
+                             {"type": "text", "text": "What word is written in the image? One word."}],
+             lambda text: "planet" in text.lower()),
+        ]
     rows = []
-    for name, parts, oracle in cases:
-        status, body = call(args.base_url, "/v1/chat/completions", chat(model, parts))
+    for name, parts, oracle in cases * args.repeat:
+        payload = chat(model, parts)
+        payload["return_token_trace"] = True
+        status, body = call(args.base_url, "/v1/chat/completions", payload)
         text = ""
         if status == 200:
             text = body["choices"][0]["message"].get("content") or ""
+        trace = find_trace(body) if status == 200 else None
         rows.append({"case": name, "status": status, "text": text,
+                     "token_ids": (trace or {}).get("token_ids"),
                      "passed": status == 200 and oracle(text),
                      "usage": body.get("usage"), "mlx2": body.get("mlx2"),
                      "error": None if status == 200 else body})
@@ -185,6 +225,9 @@ def main(argv=None):
     parser.add_argument("--base-url")
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--cases", default="video_part")
+    parser.add_argument("--extended", action="store_true", help="add 3 more image oracles")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="run the case list N times (later passes replay APCv2-warm)")
     parser.add_argument("--reference")
     parser.add_argument("--candidate")
     parser.add_argument("--output", required=True)
