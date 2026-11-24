@@ -80,6 +80,10 @@ class Inkling2CacheBudget:
     # chunk is ``schedule_narrow_rows`` wide (0: a fixed step).
     schedule_crossover: int = 0
     schedule_narrow_rows: int = 0
+    # inkling2_native_replay: global K/V buffers are held at whole multiples
+    # of this many rows past the fill (capacity_state.CAPACITY_STEP; up to
+    # step - 1 spare rows per global visit). 0 = the default growth envelope.
+    fixed_capacity_step: int = 0
 
     @staticmethod
     def _count(value):
@@ -90,7 +94,7 @@ class Inkling2CacheBudget:
     @classmethod
     def from_config(cls, text, *, visits=None, prefill_rows=2048, draft=None, num_draft=0,
                     kv_q8=False, transient_pricing=False, mask_budget_mb=None,
-                    mask_planes=True, schedule=None):
+                    mask_planes=True, schedule=None, fixed_capacity_step=0):
         """``text``: the Inkling 2 ``TextConfig``; ``draft``: the DSpark
         drafter's ``mtp_config`` dict when the DSpark route is selected."""
         visits = text.layer_indices if visits is None else visits
@@ -113,6 +117,7 @@ class Inkling2CacheBudget:
             experts_per_token=int(text.num_experts_per_tok),
             residual_block=int(text.n_layers_per_attn_res_block),
             mask_planes=int(bool(mask_planes)),
+            fixed_capacity_step=int(fixed_capacity_step),
         )
         if mask_budget_mb is not None:
             fields["mask_budget_bytes"] = int(mask_budget_mb) << 20
@@ -179,8 +184,13 @@ class Inkling2CacheBudget:
         if self.verify_rows:
             saved_ring += min(n, self.sliding_window + 2 * self.verify_rows)
         saved_conv = min(n, self.checkpoint_copies) * self.conv_bytes
+        global_capacity = capacity
+        if self.fixed_capacity_step:
+            # The decode step's fixed layout: ceil((n + 1) / step) * step rows.
+            step = self.fixed_capacity_step
+            global_capacity = max(capacity, -(-(n + 1) // step) * step)
         total = (
-            self.global_visits * capacity * global_token
+            self.global_visits * global_capacity * global_token
             + self.sliding_visits * (ring + saved_ring) * token
             + self.conv_bytes + saved_conv
             + capacity * self.transcript_bytes_per_token

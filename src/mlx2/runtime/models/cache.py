@@ -1312,6 +1312,8 @@ class KVCache(_BaseCache):
         metadata = ("offset",)
         if "_reserve_tokens" in self.__dict__:
             metadata += ("_reserve_tokens",)
+        if "_fixed_capacity_step" in self.__dict__:
+            metadata += ("_fixed_capacity_step",)
         return _committed_kv_descriptor(
             self, KVCache, ("keys", "values"), metadata
         )
@@ -1405,6 +1407,11 @@ class KVCache(_BaseCache):
 
     @property
     def state(self):
+        if (self.__dict__.get("_fixed_capacity_step") and self.keys is not None
+                and self.offset < self.keys.shape[2]):
+            # inkling2_native_replay holds whole capacity steps past the fill
+            # (capacity_state.normalize): capacity, not state.
+            return self.keys[..., :self.offset, :], self.values[..., :self.offset, :]
         return (self.keys, self.values)
 
     @state.setter

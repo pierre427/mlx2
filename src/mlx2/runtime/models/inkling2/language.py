@@ -37,6 +37,7 @@ from ..inkling.language import (
 )
 from ..switch_layers import SwitchGLU
 from . import act_quant as _act_quant
+from . import capacity_state as _capacity
 from . import fuse as _fuse
 from . import kv_q8 as _kv_q8
 from . import splitk
@@ -900,6 +901,9 @@ class Attention(nn.Module):
             self.rel_scale,
         )
         q, k, v = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
+        if type(kv) in _capacity.FIXED_VIEWS:
+            # inkling2_native_replay (default off): the fixed-capacity step.
+            return _capacity.attend(self, q, r, gate, sink, k, v, kv, x.dtype)
         ring, ring_start, ring_phys = None, 0, None
         # Which in-place ring read set ring_phys ("splitk" or "onelaunch"),
         # so a declined read's copy is counted by its own route; and a
@@ -1259,6 +1263,10 @@ def visit_length_check(model, cache):
     for plane in cache[0::2]:
         if type(plane) in (KVCache, RotatingKVCache) and isinstance(plane.offset, int):
             lengths.add(plane.offset)
+        elif type(plane) in _capacity.FIXED_VIEWS:
+            # inkling2_native_replay: the site compared the real planes'
+            # lengths before the step (capacity_state.plan, visit_offsets).
+            counts["fixed_views"] = counts.get("fixed_views", 0) + 1
         else:
             skipped += 1
     counts["checks"] = counts.get("checks", 0) + 1
@@ -1974,6 +1982,13 @@ class Model(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = input_embeddings
         self.completed_forwards += 1
+        site = self.__dict__.get("_native_replay")
+        if site is not None:
+            # inkling2_native_replay (default off): one-row ordinary decode
+            # through the fixed-capacity step; None = declined (counted).
+            logits = site.decode(self, inputs, cache, inputs_embeds, skip_logits, kwargs)
+            if logits is not None:
+                return logits
         pre_norm = self.model(inputs, cache, inputs_embeds)
         if skip_logits:
             return None
@@ -1996,7 +2011,8 @@ class Model(nn.Module):
                           visit_length_check=False, moe_panel_kernel=False,
                           moe_nax_mxfp8=False, prefill_handover=False, pass_messages=False,
                           stage_a_kernel=False, gate_merge=False, attn_output_kernel=False,
-                          embed_kernel=False, prefill_onelaunch_attention=False):
+                          embed_kernel=False, prefill_onelaunch_attention=False,
+                          native_replay=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -2042,6 +2058,9 @@ class Model(nn.Module):
         if attn_output_kernel and not (fuse_sconv and fuse_sconv_kernel):
             raise ValueError("Inkling 2 attn_output_kernel requires fuse_sconv and "
                              "fuse_sconv_kernel")
+        if native_replay and (kv_q8 or attn_decode_kernel):
+            raise ValueError("Inkling 2 native_replay is not combined with kv_q8 or "
+                             "attn_decode_kernel")
         if moe_act_quant:
             # Every layer's activation format before anything changes, so a
             # refusal leaves the model as it was.
@@ -2078,6 +2097,7 @@ class Model(nn.Module):
         object.__setattr__(self.model, "_moe_nax_scope", bool(moe_nax_gather))
         object.__setattr__(self.model, "_pass_messages", bool(pass_messages))
         object.__setattr__(self.model, "_embed_kernel", bool(embed_kernel))
+        _capacity.install(self, enabled=bool(native_replay))
         formats = [layer.mlp.set_act_quant(moe_act_quant) for layer in self.model.layers]
         object.__setattr__(self, "_act_quant_formats", formats)
         built = False
@@ -2170,7 +2190,8 @@ class Model(nn.Module):
              "pass_messages": bool(pass_messages), "stage_a_kernel": bool(stage_a_kernel),
              "gate_merge": bool(gate_merge), "attn_output_kernel": bool(attn_output_kernel),
              "embed_kernel": bool(embed_kernel),
-             "prefill_onelaunch_attention": bool(prefill_onelaunch_attention)},
+             "prefill_onelaunch_attention": bool(prefill_onelaunch_attention),
+             "native_replay": bool(native_replay)},
         )
         _prefill_route().configure(self, prefill_handover=prefill_handover)
         if head_kernel:

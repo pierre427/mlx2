@@ -384,7 +384,7 @@ def test_policy_parsing():
          "prefill_wide_chunk": False, "prefill_transient_pricing": False,
          "pass_messages": False, "stage_a_kernel": False, "gate_merge": False,
          "attn_output_kernel": False, "embed_kernel": False,
-         "prefill_onelaunch_attention": False}, {})
+         "prefill_onelaunch_attention": False, "native_replay": False}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -423,7 +423,8 @@ def test_fused_projection_toggle_round_trip():
                                    "pass_messages": False, "stage_a_kernel": False,
                                    "gate_merge": False, "attn_output_kernel": False,
                                    "embed_kernel": False,
-                                   "prefill_onelaunch_attention": False}
+                                   "prefill_onelaunch_attention": False,
+                                   "native_replay": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])

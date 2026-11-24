@@ -157,6 +157,9 @@ def capture_kv_cache_plane(cache: KVCache, *, generation: int, source_id: str,
     if not signature or any(value is None for value in signature):
         raise CacheCapsuleError("exact compatibility signature is required")
     keys, values = mx.stop_gradient(cache.keys), mx.stop_gradient(cache.values)
+    if getattr(cache, "_fixed_capacity_step", 0) and cache.offset < keys.shape[2]:
+        # inkling2_native_replay capacity past the fill is not captured.
+        keys, values = keys[..., :cache.offset, :], values[..., :cache.offset, :]
     layout = (tuple(keys.shape), tuple(values.shape), str(keys.dtype), int(cache.offset),
               int(target_batch), signature)
     return KVCachePlaneSource(

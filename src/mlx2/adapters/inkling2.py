@@ -578,6 +578,18 @@ KERNEL_OPTIONS = {
     "inkling2_attn_output_kernel": "attn_output_kernel",
     # Token embedding gather + embed norm in one launch (frame_kernels.py).
     "inkling2_embed_kernel": "embed_kernel",
+    # Recorded-step native replay (2026-11-23; clean-room implementation from
+    # a functional spec, provenance/inkling2-native-replay-cleanroom.json).
+    # Default off, unqualified. On: one-row ordinary decode runs through the
+    # fixed-capacity step (runtime/models/inkling2/capacity_state.py: planes
+    # padded in place to a constant geometry, round integers as uint32
+    # arrays) and offers it to the replay engine (runtime/replay). Near-exact
+    # against the ordinary route (the step reads masked columns, so its
+    # reductions run over more terms). Without an installed native module
+    # the engine declines every call as module_missing and the MLX step
+    # serves. Receipt: diagnostics()["native_replay"]. Refused with
+    # inkling2_kv_q8 and inkling2_attn_decode_kernel.
+    "inkling2_native_replay": "native_replay",
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.
@@ -806,6 +818,10 @@ def validate_policy(value):
         raise ValueError("Inkling 2 inkling2_moe_nax_mxfp8 requires inkling2_moe_nax_gather")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_moe_weighted_sum requires inkling2_moe_fused")
+    for other in ("kv_q8", "attn_decode_kernel"):
+        if kernels["native_replay"] and kernels[other]:
+            raise ValueError(f"Inkling 2 inkling2_native_replay is not combined with "
+                             f"inkling2_{other}")
     return kernels, value
 
 
@@ -1048,6 +1064,9 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.prefill_schedule = None
         if self.prefill_wide_chunk:
             self._install_prefill_schedule()
+        if self.kernel_policy.get("native_replay"):
+            # The engine keys its programs by the weights identity too.
+            self.model._native_replay.replay.weights_identity = self.checkpoint
         self.layout = self.model.apc_v2_layout
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
@@ -1180,6 +1199,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             kv_q8=bool(policy.get("kv_q8")),
             transient_pricing=bool(getattr(self, "prefill_transient_pricing", False)),
             mask_budget_mb=policy.get("prefill_mask_mb"),
+            fixed_capacity_step=(_capacity_step() if policy.get("native_replay") else 0),
             schedule=(None if self._wide_schedule() is None
                       else (self.prefill_schedule.crossover, self.prefill_schedule.narrow)),
         )
@@ -1223,6 +1243,10 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             names += ("inkling2/attn_decode.py",)
         if policy.get("prefill_onelaunch_attention"):
             names += ("inkling2/prefill_onelaunch.py",)
+        if policy.get("native_replay"):
+            # The fixed-capacity step and the engine that may serve it.
+            names += ("inkling2/capacity_state.py", "../replay/engine.py",
+                      "../replay/loader.py")
         contract = {
             "operation": numerics_operation(policy),
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
@@ -1424,6 +1448,14 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     def tool_constraint(self, request):
         return None
 
+    def _native_replay_receipt(self):
+        from ..runtime.models.inkling2 import capacity_state
+
+        model = getattr(self, "model", None)
+        if model is None or not getattr(self, "kernel_policy", {}).get("native_replay"):
+            return {"selected": False, "qualified": False}
+        return {"selected": True, "qualified": False, **capacity_state.receipt(model)}
+
     def diagnostics(self):
         return {
             "family": "inkling2",
@@ -1445,6 +1477,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "prefill_transient_pricing": bool(getattr(self, "prefill_transient_pricing", False)),
             "loop": (self.model.loop_receipt() if getattr(self, "model", None) else None),
             "hard_no_thinking": bool(getattr(self, "hard_no_thinking", False)),
+            "native_replay": self._native_replay_receipt(),
             "experts": getattr(self, "expert_receipt", None),
             "target_forward_observed": bool(getattr(getattr(self, "model", None), "completed_forwards", 0)),
             "dspark": {
@@ -1466,6 +1499,12 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             },
             "media": "weights present; native text route refuses media",
         }
+
+
+def _capacity_step():
+    from ..runtime.models.inkling2 import capacity_state
+
+    return capacity_state.CAPACITY_STEP
 
 
 def kv_q8_receipt(selected, *, layout=None):
