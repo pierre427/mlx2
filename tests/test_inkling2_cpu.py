@@ -904,3 +904,12 @@ def test_verify_splitk_wiring_with_left_padding(monkeypatch, sliding):
     model.configure_kernels()
     assert calls == 48 * len(plan) and all(padded for _, _, padded in seen)
     assert mx.array_equal(got, base)
+
+
+def test_splitk_ring_direct_is_the_default():
+    """DEFAULT ON (Pierre 2026-11-23) after the Metal bitwise run and the
+    decode A/B on Inkling-2-Mini@440956c8; vector loads stay off."""
+    from mlx2.runtime.models.inkling2 import splitk
+
+    assert splitk.RING_DIRECT is True
+    assert splitk.VECTOR_LOADS is False

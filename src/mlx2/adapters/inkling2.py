@@ -272,8 +272,9 @@ KERNEL_OPTIONS = {
     # row (splitk.RING_DIRECT, 2026-11-22) instead of a chronological copy
     # made every decode step once wrapped; the kernels walk the same logical
     # keys, so it is bitwise the copy. Declines still copy (counted in
-    # verify_splitk_ring). RING_DIRECT and splitk.VECTOR_LOADS are off until
-    # tests/test_inkling2_bitwise_io_metal.py has run on Metal.
+    # verify_splitk_ring). RING_DIRECT is DEFAULT ON (Pierre 2026-11-23, Metal
+    # bitwise + decode +3.5-5.4%; see splitk.py); splitk.VECTOR_LOADS stays off
+    # (no decode gain).
     "inkling2_verify_splitk": "verify_splitk",
     # Sparse MoE in fewer launches, bit-identical (implemented 2026-11-21,
     # runtime/models/inkling2/moe_fast.py). DEFAULT ON (Pierre 2026-11-21)

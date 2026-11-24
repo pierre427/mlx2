@@ -467,16 +467,23 @@ MAX_ROWS = 32  # engaged for 1 <= L < MAX_ROWS
 # the kernels (``ring=``) instead of reordered into a chronological copy
 # first, which wrote and re-read the whole ring on every decode step once it
 # had wrapped (2026-11-22). Module switch for the A/B: False restores the copy.
-# Off until tests/test_inkling2_bitwise_io_metal.py has run bitwise on Metal
-# (bitwise by construction and on CPU stand-ins; the kernel has only passed an
-# offline compile). Turn on after the Metal run.
-RING_DIRECT = False
+# DEFAULT ON (Pierre 2026-11-23), Inkling-2-Mini@440956c8 at 2946cb9fd:
+# tests/test_inkling2_bitwise_io_metal.py bitwise on Metal (536/536 ring kernel
+# cases and every model-level ring case, no declines; run w1122-2946cb9fd-
+# metal-io-r2), and the in-process A/B (w1122-2946cb9fd-ab-io-ring-r2) decoded
+# bitwise with decode +3.7% at 1K, +3.5% at 16K, +5.4% at 128K (2 blocks per
+# cell, no thermal hold); prefill +12% at 1K, flat at 16K, -4% at 128K (one
+# sample each).
+RING_DIRECT = True
 # The L == 1 direct kernel loads each lane's K/V values with 8-byte vector
 # loads for BF16 when D / 32 is a multiple of 4 (D = 128: one uint2 per lane
 # per row, was four 2-byte loads), unit stride and 8-byte aligned rows; the
 # values and the arithmetic order are unchanged (2026-11-22). Module switch
-# for the A/B: False restores the scalar loads. Off until the Metal tests run
-# (same reason as RING_DIRECT).
+# for the A/B: False restores the scalar loads. Bitwise on Metal (metal-io-r2),
+# but kept OFF: alone it decoded 4-5% slower (Inkling-2-Mini@440956c8,
+# 2026-11-22 A/B), and with ring_direct and sink_slot_spare (ab-io-all-r2) it
+# added nothing over ring_direct alone (+3.8/+2.7/+0.4% at 1K/16K/128K vs
+# +3.7/+3.5/+5.4%).
 VECTOR_LOADS = False
 
 

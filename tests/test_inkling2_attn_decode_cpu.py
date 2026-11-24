@@ -13,7 +13,7 @@ generator merges a serving lane into.
 import mlx.core as mx
 import pytest
 
-from mlx2.runtime.models.cache import CacheList
+from mlx2.runtime.models.cache import BatchRotatingKVCache, CacheList, RotatingKVCache
 from mlx2.runtime.models.inkling2 import attn_decode
 from test_inkling2_cpu import _tiny_model
 
@@ -60,8 +60,19 @@ def _decode(model, tokens, prefill, merged=False):
 
 
 def _state(cache):
+    """Every cache array, sliding rings in logical (chronological) order: with
+    split-K ring reads on (splitk.RING_DIRECT, default since 2026-11-23) a
+    route may leave a ring rotated in place where another reordered it, the
+    same keys in a different physical rotation."""
     arrays = []
     for plane in cache:
+        if type(plane) is BatchRotatingKVCache and plane.keys is not None:
+            plane._temporal_order()
+            arrays += [plane.keys[..., : plane._idx, :], plane.values[..., : plane._idx, :]]
+            continue
+        if type(plane) is RotatingKVCache and plane.keys is not None:
+            arrays += [plane._temporal_order(plane.keys), plane._temporal_order(plane.values)]
+            continue
         for name in ("keys", "values"):
             value = getattr(plane, name, None)
             if isinstance(value, mx.array):
