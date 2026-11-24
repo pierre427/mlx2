@@ -29,7 +29,8 @@ class LingCacheBudget:
 
     @classmethod
     def from_config(cls, config, *, mtp):
-        if mtp:
+        nextn = config.get('num_nextn_predict_layers') or 0
+        if mtp and (type(nextn) is not int or nextn < 1):
             raise ValueError('Ling ordinary cache budget does not cover speculative state')
         names = ('num_hidden_layers', 'layer_group_size', 'kv_lora_rank',
                  'qk_rope_head_dim', 'num_attention_heads', 'head_dim',
@@ -41,6 +42,8 @@ class LingCacheBudget:
         # Match DecoderLayer exactly, including a partial final MLA group.
         global_layers = sum((i + 1) % group == 0 or i >= (count // group) * group
                             for i in range(count))
+        # Native MTP: each NEXTN layer is one more compressed-MLA cache.
+        global_layers += nextn if mtp else 0
         try:
             checkpoints = max(0, int(os.environ.get('MLX_LM_STATE_CHECKPOINT_MAX', '4')))
         except ValueError:

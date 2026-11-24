@@ -337,6 +337,7 @@ def test_ordinary_optimization_policy_loads_and_revisions_cache(tiny_ling):
         assert diagnostics['policy']['fused_mla_decode'] is False
         assert ordinary.diagnostics()['optimizations']['policy'] == {
             'merged_conv': False, 'fused_norm': False, 'fused_mla_decode': False,
+            'moe_nax': False,
         }
     finally:
         ordinary.close()

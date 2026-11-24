@@ -26,7 +26,8 @@ from .base import (
 from .cache import ArraysCache, KVCache
 from .gated_delta import gated_delta_update
 from .rope_utils import initialize_rope
-from .switch_layers import SwitchGLU
+from . import moe_nax_gather
+from .switch_layers import SwiGLU, SwitchGLU
 from .xing4_0 import MultiLinear
 
 
@@ -42,7 +43,6 @@ class ModelArgs(BaseModelArgs):
     num_key_value_heads: int
     num_experts: int
     num_experts_per_tok: int
-    num_shared_experts: int
     n_group: int
     topk_group: int
     first_k_dense_replace: int
@@ -56,6 +56,8 @@ class ModelArgs(BaseModelArgs):
     qk_rope_head_dim: int
     qk_nope_head_dim: int
     v_head_dim: int
+    # Absent from Ling-3.2-air's text_config; the reference default is 1.
+    num_shared_experts: int = 1
     short_conv_kernel_size: int = 4
     moe_shared_expert_intermediate_size: int | None = None
     q_lora_rank: int | None = None
@@ -72,6 +74,42 @@ class ModelArgs(BaseModelArgs):
     kda_safe_gate: bool = False
     kda_lower_bound: float | None = None
     gated_attention_proj_granularity_type: str | None = None
+    # Ling-3.2-air: per-layer clamped SwiGLU (0 = no clamp) and an fp32 router.
+    expert_swiglu_limit_list: list[float] | None = None
+    share_expert_swiglu_limit_list: list[float] | None = None
+    router_dtype: str | None = None
+    # Adapter opt-in, never read from a checkpoint config: the Ling-3.2-air
+    # vendor laws (clamped SwiGLU, fp32 router and route weights, -inf group
+    # masking). Ling 3 Flash's oQ4 config also lists router_dtype/limit lists
+    # but was served (and qualified) without them, with a quantized router.
+    vendor_v32_laws: bool = False
+
+
+def swiglu_limit(values: list[float] | None, layer_idx: int | None) -> float | None:
+    """The vendor's ``_get_swiglu_limit``: out-of-range or 0 means no clamp."""
+    if values is None or layer_idx is None or not 0 <= layer_idx < len(values):
+        return None
+    return float(values[layer_idx]) or None
+
+
+def clamped_swiglu(gate: mx.array, up: mx.array, limit: float) -> mx.array:
+    """``min(silu(gate), L) * clip(up, -L, L)``: clamp AFTER the activation.
+
+    Not the GLM/gpt-oss pre-activation order (those clamp the gate logit);
+    transformers #50574 and sglang #52593 apply exactly this law for Ling.
+    """
+    return mx.minimum(nn.silu(gate), limit) * mx.clip(up, -limit, limit)
+
+
+class ClampedSwiGLU(nn.Module):
+    """SwitchGLU activation with Ling's post-activation clamp."""
+
+    def __init__(self, limit: float):
+        super().__init__()
+        self.swiglu_limit = float(limit)
+
+    def __call__(self, x, gate):
+        return clamped_swiglu(gate, x, self.swiglu_limit)
 
 
 def _cache_offset(cache: Any | None) -> int | mx.array:
@@ -88,15 +126,21 @@ class MLP(nn.Module):
         self,
         args: ModelArgs,
         intermediate_size: int | None = None,
+        swiglu_limit: float | None = None,
     ):
         super().__init__()
         hidden = intermediate_size or args.intermediate_size
         self.gate_proj = nn.Linear(args.hidden_size, hidden, bias=args.use_bias)
         self.up_proj = nn.Linear(args.hidden_size, hidden, bias=args.use_bias)
         self.down_proj = nn.Linear(hidden, args.hidden_size, bias=args.use_bias)
+        # Plain attribute (not a parameter): fused MLP paths must check it.
+        self.swiglu_limit = swiglu_limit
 
     def __call__(self, x: mx.array) -> mx.array:
-        return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))
+        gate, up = self.gate_proj(x), self.up_proj(x)
+        if self.swiglu_limit is None:
+            return self.down_proj(swiglu(gate, up))
+        return self.down_proj(clamped_swiglu(gate, up, self.swiglu_limit))
 
 
 class MultiLatentAttention(nn.Module):
@@ -623,6 +667,7 @@ def group_expert_select(
     routed_scaling_factor: float,
     norm_topk_prob: bool,
     score_function: str,
+    group_mask_neg_inf: bool = False,
 ) -> tuple[mx.array, mx.array]:
     input_type = gates.dtype
     if score_function == "sigmoid":
@@ -645,10 +690,13 @@ def group_expert_select(
             kth=n_drop - 1,
             axis=-2,
         )[..., :n_drop, :]
+        # Vendor masks dropped groups with -inf: with a negative expert_bias a
+        # kept expert can score below 0, so a 0.0 fill could pick a dropped one.
+        fill = -math.inf if group_mask_neg_inf else 0.0
         scores = mx.put_along_axis(
             scores,
             mx.stop_gradient(group_idx),
-            mx.array(0.0, dtype=scores.dtype),
+            mx.array(fill, dtype=scores.dtype),
             axis=-2,
         )
         scores = mx.flatten(scores, -2, -1)
@@ -671,6 +719,10 @@ class Gate(nn.Module):
         self.routed_scaling_factor = args.routed_scaling_factor
         self.score_function = args.score_function
         self.gate_proj = nn.Linear(args.hidden_size, args.num_experts, bias=False)
+        # sglang #44715/#38719: a bf16 gate GEMM perturbs top-k; Ling-3.2-air
+        # declares router_dtype fp32 and keeps mlp.gate out of quantization.
+        self.router_fp32 = args.vendor_v32_laws and args.router_dtype == "fp32"
+        self.group_mask_neg_inf = args.vendor_v32_laws
         self.expert_bias = (
             mx.zeros((args.num_experts,), dtype=mx.float32)
             if args.moe_router_enable_expert_bias
@@ -678,8 +730,14 @@ class Gate(nn.Module):
         )
 
     def __call__(self, x: mx.array) -> tuple[mx.array, mx.array]:
-        return group_expert_select(
-            self.gate_proj(x),
+        if self.router_fp32:
+            if "scales" in self.gate_proj:
+                raise ValueError("an fp32 Ling router must not be quantized")
+            logits = x.astype(mx.float32) @ self.gate_proj.weight.astype(mx.float32).T
+        else:
+            logits = self.gate_proj(x)
+        indices, weights = group_expert_select(
+            logits,
             self.expert_bias,
             self.top_k,
             self.n_group,
@@ -687,16 +745,29 @@ class Gate(nn.Module):
             self.routed_scaling_factor,
             self.norm_topk_prob,
             self.score_function,
+            self.group_mask_neg_inf,
         )
+        # Vendor: expert outputs are scaled by the fp32 topk_weight, then cast.
+        return indices, weights if self.router_fp32 else weights.astype(x.dtype)
 
 
 class SparseMoeBlock(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_idx: int | None = None):
         super().__init__()
+        laws = args.vendor_v32_laws
+        self.fp32_route_weights = laws
+        self.expert_swiglu_limit = (
+            swiglu_limit(args.expert_swiglu_limit_list, layer_idx) if laws else None
+        )
+        shared_limit = swiglu_limit(args.share_expert_swiglu_limit_list, layer_idx) if laws else None
         self.switch_mlp = SwitchGLU(
             args.hidden_size,
             args.moe_intermediate_size,
             args.num_experts,
+            activation=(
+                ClampedSwiGLU(self.expert_swiglu_limit)
+                if self.expert_swiglu_limit is not None else SwiGLU()
+            ),
             bias=args.use_bias,
         )
         self.gate = Gate(args)
@@ -704,7 +775,7 @@ class SparseMoeBlock(nn.Module):
             args.moe_shared_expert_intermediate_size or args.moe_intermediate_size
         ) * args.num_shared_experts
         self.shared_experts = (
-            MLP(args, intermediate_size=shared_size)
+            MLP(args, intermediate_size=shared_size, swiglu_limit=shared_limit)
             if args.num_shared_experts > 0
             else None
         )
@@ -713,6 +784,8 @@ class SparseMoeBlock(nn.Module):
         indices, weights = self.gate(x)
         output = self.switch_mlp(x, indices)
         output = (output * weights[..., None]).sum(axis=-2)
+        if self.fp32_route_weights:
+            output = output.astype(x.dtype)
         if self.shared_experts is not None:
             output = output + self.shared_experts(x)
         return output
@@ -730,7 +803,7 @@ class DecoderLayer(nn.Module):
             MultiLatentAttention(args) if self.is_global else KimiDeltaAttention(args)
         )
         self.mlp = (
-            SparseMoeBlock(args)
+            SparseMoeBlock(args, layer_idx)
             if args.num_experts is not None and layer_idx >= args.first_k_dense_replace
             else MLP(args)
         )
@@ -797,6 +870,13 @@ class LanguageModel(nn.Module):
         *,
         tail_row: bool = False,
     ) -> mx.array:
+        # Admits the NAX sorted gather for prompt chunks when the adapter
+        # claimed it (bit-identical to stock sorted gather_qmm); a no-op
+        # under claim_stock_moe and for decode rows.
+        with moe_nax_gather.forward_scope(inputs, cache):
+            return self._forward(inputs, cache, tail_row=tail_row)
+
+    def _forward(self, inputs, cache=None, *, tail_row=False):
         hidden = self.word_embeddings(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
@@ -818,17 +898,61 @@ class LanguageModel(nn.Module):
         return self.norm(hidden)
 
 
+class MTPLayer(nn.Module):
+    """Ling NEXTN layer: ``final_layernorm(block(eh_proj([enorm(e); hnorm(h)])))``.
+
+    The vendor feeds the trunk's POST-``model.norm`` hidden (not the pre-norm
+    residual DeepSeek uses) and the embedding of the following token; the
+    block is gated MLA (``mtp_use_kda: false``) plus the routed MoE, and the
+    head is the shared ``lm_head``.  Its MLA cache holds pair (h_p, t_{p+1})
+    at offset p, the vendor's position_ids for that pair.
+    """
+
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.is_global = True
+        eps = args.rms_norm_eps
+        self.enorm = nn.RMSNorm(args.hidden_size, eps=eps)
+        self.hnorm = nn.RMSNorm(args.hidden_size, eps=eps)
+        self.eh_proj = nn.Linear(2 * args.hidden_size, args.hidden_size, bias=False)
+        self.input_layernorm = nn.RMSNorm(args.hidden_size, eps=eps)
+        self.post_attention_layernorm = nn.RMSNorm(args.hidden_size, eps=eps)
+        self.attention = MultiLatentAttention(args)
+        # Index ``num_hidden_layers`` is past the limit lists: no clamp (vendor).
+        self.mlp = SparseMoeBlock(args, args.num_hidden_layers)
+        self.final_layernorm = nn.RMSNorm(args.hidden_size, eps=eps)
+
+    def __call__(self, embeds, hidden, mask=None, cache=None):
+        x = self.eh_proj(mx.concatenate([self.enorm(embeds), self.hnorm(hidden)], axis=-1))
+        x = x + self.attention(self.input_layernorm(x), mask, cache)
+        x = x + self.mlp(self.post_attention_layernorm(x))
+        return self.final_layernorm(x)
+
+
+class MTP(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        if args.num_nextn_predict_layers != 1:
+            raise ValueError("the Ling MTP head runs exactly one NEXTN layer")
+        self.layers = [MTPLayer(args)]
+
+
 class Model(nn.Module):
     # ArraysCache record/trim plus KVCache trim are the generic
     # HybridVerifyRows exact transaction contract.  This capability is owned
     # by the cache topology, independent of the Ling adapter or route name.
     supports_speculative_rollback = True
 
-    def __init__(self, args: ModelArgs):
+    # Adapter-selected external feature: ``None`` (post-block taps) or
+    # ``"mtp_seed"`` (post-final-norm hidden for the native MTP head drafter).
+    external_feature_source = None
+
+    def __init__(self, args: ModelArgs, *, mtp: bool = False):
         super().__init__()
         self.args = args
         self.model_type = args.model_type
         self.model = LanguageModel(args)
+        self.mtp = MTP(args) if mtp else None
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(
                 args.hidden_size,
@@ -886,6 +1010,44 @@ class Model(nn.Module):
     def speculative_args(self):
         return self.args
 
+    def logits(self, hidden: mx.array) -> mx.array:
+        if self.args.tie_word_embeddings:
+            return self.model.word_embeddings.as_linear(hidden)
+        return self.lm_head(hidden)
+
+    def make_mtp_cache(self) -> list[Any]:
+        if self.mtp is None:
+            raise ValueError("this Ling artifact has no loaded MTP head")
+        return [KVCache()]
+
+    def mtp_step(self, hidden, tokens, mtp_cache):
+        """One MTP forward over S positions (the shared native-MTP ABI).
+
+        hidden: [B, S, H] post-``model.norm`` hiddens at positions p..p+S-1
+        (or a previous ``mtp_step``'s post hidden when chaining depth);
+        tokens: [B, S] the tokens at p+1..p+S.  Returns (logits, post hidden).
+        """
+        if self.mtp is None:
+            raise ValueError("this Ling artifact has no loaded MTP head")
+        layer = self.mtp.layers[0]
+        embeds = self.model.word_embeddings(tokens)
+        mask = create_attention_mask(embeds, mtp_cache[0], return_array=True)
+        post = layer(embeds, hidden, mask=mask, cache=mtp_cache[0])
+        return self.logits(post), post
+
+    def select_external_feature_source(self, source):
+        if source not in (None, "mtp_seed"):
+            raise ValueError("unsupported Ling external feature source")
+        if source == "mtp_seed" and self.mtp is None:
+            raise ValueError("the MTP seed feature requires a loaded MTP head")
+        object.__setattr__(self, "external_feature_source", source)
+
+    @property
+    def external_feature_width(self):
+        if self.external_feature_source == "mtp_seed":
+            return int(self.args.hidden_size)
+        return None
+
     def forward_with_taps(
         self,
         inputs,
@@ -898,6 +1060,15 @@ class Model(nn.Module):
         """Return logits and concatenated post-layer residual-stream taps."""
 
         capture_layers = tuple(int(value) for value in capture_layers)
+        if self.external_feature_source == "mtp_seed":
+            if capture_layers != (len(self.layers) - 1,):
+                raise ValueError("the MTP seed feature is the last layer's post-norm hidden")
+            if body_only and last_logits_only:
+                raise ValueError("body_only and last_logits_only are mutually exclusive")
+            hidden = self.model(inputs, cache)
+            if body_only:
+                return None, hidden
+            return self.logits(hidden[:, -1:] if last_logits_only else hidden), hidden
         if (
             not capture_layers
             or tuple(sorted(set(capture_layers))) != capture_layers
@@ -907,6 +1078,11 @@ class Model(nn.Module):
             raise ValueError("invalid Ling target capture layers")
         if body_only and last_logits_only:
             raise ValueError("body_only and last_logits_only are mutually exclusive")
+        with moe_nax_gather.forward_scope(inputs, cache):
+            return self._forward_with_taps(inputs, cache, capture_layers, body_only=body_only,
+                                           last_logits_only=last_logits_only)
+
+    def _forward_with_taps(self, inputs, cache, capture_layers, *, body_only, last_logits_only):
         hidden = self.model.word_embeddings(inputs)
         cache = [None] * len(self.layers) if cache is None else cache
         attention_mask = create_attention_mask(
@@ -953,10 +1129,9 @@ class Model(nn.Module):
             if index in capture_layers:
                 taps.append(hidden)
         output = self.model.norm(hidden)
-        logits = (
-            self.model.word_embeddings.as_linear(output)
-            if self.args.tie_word_embeddings else self.lm_head(output)
-        )
+        logits = self.logits(output)
+        if self.external_feature_source == "mtp_seed":
+            return logits, output
         return logits, mx.concatenate(taps, axis=-1)
 
     def make_cache(self) -> list[Any]:
@@ -976,6 +1151,18 @@ class Model(nn.Module):
                 and int(key.split(".")[2]) >= n_layers
             )
         }
+
+        if self.mtp is None:
+            weights = {k: v for k, v in weights.items() if not k.startswith("mtp.")}
+        else:
+            kv_b_key = "mtp.layers.0.attention.kv_b_proj.weight"
+            if kv_b_key in weights:
+                key_weight, value_weight = self._split_kv_b(weights.pop(kv_b_key))
+                weights["mtp.layers.0.attention.embed_q.weight"] = key_weight
+                weights["mtp.layers.0.attention.unembed_out.weight"] = value_weight
+            gate_key = "mtp.layers.0.mlp.gate.weight"
+            if gate_key in weights:
+                weights["mtp.layers.0.mlp.gate.gate_proj.weight"] = weights.pop(gate_key)
 
         if self.args.tie_word_embeddings:
             weights.pop("lm_head.weight", None)
@@ -1007,19 +1194,7 @@ class Model(nn.Module):
             if layer.is_global:
                 kv_b_key = f"{prefix}.attention.kv_b_proj.weight"
                 if kv_b_key in weights:
-                    value = weights.pop(kv_b_key)
-                    combined = self.args.qk_nope_head_dim + self.args.v_head_dim
-                    value = value.reshape(
-                        self.args.num_attention_heads,
-                        combined,
-                        -1,
-                    )
-                    key_weight = mx.contiguous(
-                        value[:, : self.args.qk_nope_head_dim, :].swapaxes(-1, -2)
-                    )
-                    value_weight = mx.contiguous(
-                        value[:, self.args.qk_nope_head_dim :, :]
-                    )
+                    key_weight, value_weight = self._split_kv_b(weights.pop(kv_b_key))
                     weights[f"{prefix}.attention.embed_q.weight"] = key_weight
                     weights[f"{prefix}.attention.unembed_out.weight"] = value_weight
             else:
@@ -1033,10 +1208,19 @@ class Model(nn.Module):
 
         return weights
 
+    def _split_kv_b(self, value):
+        combined = self.args.qk_nope_head_dim + self.args.v_head_dim
+        value = value.reshape(self.args.num_attention_heads, combined, -1)
+        key_weight = mx.contiguous(value[:, : self.args.qk_nope_head_dim, :].swapaxes(-1, -2))
+        value_weight = mx.contiguous(value[:, self.args.qk_nope_head_dim :, :])
+        return key_weight, value_weight
+
     @property
     def quant_predicate(self):
         def predicate(path: str, _module: nn.Module):
             if path.endswith("mlp.gate.gate_proj"):
+                if self.args.vendor_v32_laws and self.args.router_dtype == "fp32":
+                    return False
                 return {"group_size": 64, "bits": 8}
             return True
 

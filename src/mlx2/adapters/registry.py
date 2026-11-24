@@ -474,6 +474,12 @@ def _agnes(path: Path, config: dict) -> AdapterResolution:
 
 
 def _ling3(path: Path, config: dict) -> AdapterResolution:
+    if str((config.get("mlx2_conversion") or {}).get("recipe", "")).startswith("ling32-air"):
+        air = importlib.import_module(".ling32_air", __package__)
+        artifact = air.inspect_artifact(path)
+        return AdapterResolution(
+            air.Ling32AirAdapter, air.descriptor_for(has_mtp=artifact["has_mtp"]), artifact
+        )
     module = importlib.import_module(".ling3_flash", __package__)
     artifact = module.inspect_artifact(path)
     return AdapterResolution(module.Ling3FlashAdapter, module.DESCRIPTOR, artifact)

@@ -28,7 +28,12 @@ def optimization_policy(value):
     # checks at 257/4097 keys were slower than the existing Ling attention;
     # retain it as an explicit experiment, never an automatic selection.
     # All candidates await checkpoint A/B evidence and explicit default approval.
-    defaults = {"merged_conv": False, "fused_norm": False, "fused_mla_decode": False}
+    # moe_nax: the segmented NAX sorted gather for prompt-chunk MoE (M5 only,
+    # bit-identical to stock sorted gather_qmm per moe_nax_gather's canary);
+    # FN measured the MoE layer 1.27-1.67x, prefill up to 1.20x. Off until a
+    # Ling checkpoint A/B shows engagement and a win.
+    defaults = {"merged_conv": False, "fused_norm": False, "fused_mla_decode": False,
+                "moe_nax": False}
     if value is None:
         return defaults
     if not isinstance(value, dict) or set(value) - defaults.keys():
@@ -215,6 +220,9 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # Stacked affine expert rows retain checkpoint byte identity. The shared
     # loader installs bounded row caches before materializing any expert table.
     weight_streaming_modes = frozenset({"moe_experts"})
+    family_label = "Ling 3 Flash"
+    cache_layout_base = CACHE_LAYOUT
+    tree_variant_prefix = "oq4-ubtree-ast"
     ast_prompt_lookup_tiles = False
     ast_tile_rows_max = 32
     ast_tree_tiles = True
@@ -277,29 +285,24 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # checkpoint's B64 search stays represented in its config/receipt;
             # serving uses an explicit prefix-closed B15 projection.
             self.external_policy.setdefault("num_draft", 15)
-        artifact = inspect_artifact(model_path)
+        artifact = self._inspect(model_path)
         self.config = artifact["config"]
         self.identity = artifact["identity"]
-        self.layout = CACHE_LAYOUT
+        self.layout = self.cache_layout_base
         self.environment = configure_environment()
         # bailing_hybrid builds mlx2 switch_layers experts (stock sorted
         # gather, no NAX scope): pin the MoE process globals for this load.
-        from .process_globals import claim_stock_moe
+        from .process_globals import claim_moe, claim_stock_moe
 
-        claim_stock_moe(self, "the Ling 3 Flash adapter")
+        if self.optimizations["moe_nax"]:
+            if stream_request is not None:
+                raise ValueError("Ling moe_nax requires resident experts (streaming forces stock arithmetic)")
+            claim_moe(self, f"the {self.family_label} adapter", nax_mode="gather")
+        else:
+            claim_stock_moe(self, f"the {self.family_label} adapter")
         draft_record = draft_format = None
         if external:
-            from .external_drafter_formats import drafter_format
-
-            draft_format = drafter_format(self.external_policy["draft_model"])
-            if draft_format.name != "ubtree":
-                raise ValueError(
-                    "Ling 3 Flash external route requires Ling3UBTreeModel"
-                )
-            draft_record = draft_format.inspect_drafter(
-                self.external_policy["draft_model"], model_path
-            )
-            self._check_num_draft(draft_record)
+            draft_record, draft_format = self._inspect_external_drafter(model_path)
 
         path = Path(self.identity["path"])
         import mlx.core as mx
@@ -310,7 +313,10 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
 
-        self.model = Model(ModelArgs.from_dict(self.config))
+        self.model = Model(
+            ModelArgs.from_dict({**self.config, **self._model_arg_overrides()}),
+            **self._model_kwargs(),
+        )
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
         quant = self.config["quantization"]
 
@@ -367,32 +373,59 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.tokenizer = TokenizerWrapper(
             tokenizer,
             detokenizer_class=BPEStreamingDetokenizer,
-            eos_token_ids=[int(self.config["eos_token_id"])],
+            eos_token_ids=self.eos_token_ids(),
         )
         self.max_context = int(self.config["max_position_embeddings"])
         if draft_record is not None:
-            self._bind_external_drafter(
-                draft_record, draft_format.load_drafter, DESCRIPTOR
-            )
-            self.descriptor = replace(
-                self.descriptor,
-                variant="oq4-ubtree-ast-b15",
-                metadata={
-                    **self.descriptor.metadata,
-                    "qualification": "unqualified",
-                    "implemented": True,
-                    "selected": True,
-                    "observed_used": False,
-                    "checkpoint_tree_budget": 64,
-                    "served_tree_budget": 15,
-                    "target_tree_executor": self.external_policy.get("ast_target_executor", "packed"),
-                },
-            )
-            if self.external_policy.get("ast_graft_prompt_lookup", False):
-                self._graft_prompt_lookup()
-            self._bind_tree_controls()
+            self._bind_loaded_drafter(draft_record, draft_format)
         if self.weight_stream is not None:
             self.weight_stream.begin_serving()
+
+    def _model_kwargs(self):
+        return {}
+
+    def _model_arg_overrides(self):
+        # Adapter-owned model laws (never inferred from the checkpoint config).
+        return {}
+
+    def _inspect(self, model_path):
+        # Module-global lookup (tests patch ling3_flash.inspect_artifact).
+        return inspect_artifact(model_path)
+
+    def _inspect_external_drafter(self, model_path):
+        from .external_drafter_formats import drafter_format
+
+        draft_format = drafter_format(self.external_policy["draft_model"])
+        if draft_format.name != "ubtree":
+            raise ValueError("Ling 3 Flash external route requires Ling3UBTreeModel")
+        draft_record = draft_format.inspect_drafter(self.external_policy["draft_model"], model_path)
+        self._check_num_draft(draft_record)
+        return draft_record, draft_format
+
+    def _bind_loaded_drafter(self, draft_record, draft_format):
+        self._bind_external_drafter(
+            draft_record, draft_format.load_drafter, type(self).descriptor
+        )
+        self.descriptor = replace(
+            self.descriptor,
+            variant="oq4-ubtree-ast-b15",
+            metadata={
+                **self.descriptor.metadata,
+                "qualification": "unqualified",
+                "implemented": True,
+                "selected": True,
+                "observed_used": False,
+                "checkpoint_tree_budget": 64,
+                "served_tree_budget": 15,
+                "target_tree_executor": self.external_policy.get("ast_target_executor", "packed"),
+            },
+        )
+        if self.external_policy.get("ast_graft_prompt_lookup", False):
+            self._graft_prompt_lookup()
+        self._bind_tree_controls()
+
+    def eos_token_ids(self):
+        return [int(self.config["eos_token_id"])]
 
     def close(self):
         try:
@@ -418,6 +451,8 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 sources += ["ling_fused.py", "qwen4_fused_gdn_prefill.py", "served_exp.py"]
             if self.optimizations["fused_mla_decode"]:
                 sources += ["kimi_linear_mla_fused.py", "glm53_sparse_attention.py"]
+            if self.optimizations["moe_nax"]:
+                sources += ["moe_nax_gather.py", "switch_layers.py"]
             self.optimization_sources = {name: hashlib.sha256((root/name).read_bytes()).hexdigest()
                                          for name in sources}
             digest = hashlib.sha256((self.identity["fingerprint"] + ":ling-kimi-ops-v1:"
@@ -480,6 +515,7 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             gaps = install(
                 self.model, min_rows=1, max_rows=32,
                 skip=lambda _name, module: not isinstance(module, (nn.QuantizedLinear, nn.Linear))
+                or getattr(module, "_ling_lane_exempt", None) is not None
                 or (isinstance(module, nn.QuantizedLinear) and lane_qmm.takes(module)),
             )
             receipt["format_completion"] = gaps
@@ -490,8 +526,13 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if packed:
             rows, _adaptive = _tree_controls(self.external_policy)
             missing = []
+            exempt = {}
             for name, module in self.model.named_modules():
                 if not isinstance(module, (nn.QuantizedLinear, nn.Linear)):
+                    continue
+                reason = getattr(module, "_ling_lane_exempt", None)
+                if reason is not None:
+                    exempt[name] = reason
                     continue
                 raw = raw_tensorfold and isinstance(module, nn.QuantizedLinear) and lane_qmm.takes(module)
                 owned = installed_lane(module) is not None and (
@@ -506,9 +547,16 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                     "use --lane-matmul exact or tensorfold, or ast_target_executor=serial. "
                     f"Uncovered projections: {missing[:4]}"
                 )
+        named = getattr(self.model, "named_modules", None)
+        exempt = {name: getattr(module, "_ling_lane_exempt") for name, module in (named() if named else ())
+                  if getattr(module, "_ling_lane_exempt", None) is not None}
         self.packed_projection_law = None if receipt is None else {
             "law_id": receipt.get("law_id"),
             "format_completion": receipt.get("format_completion"),
+            # Declared, receipted exceptions (e.g. the fp32 router that never
+            # runs through its Linear's __call__).
+            "lane_exempt": sorted(set(exempt.values())) if exempt else [],
+            "lane_exempt_modules": len(exempt),
         }
 
     # Ling's checkpoint template explicitly opens/closes <think> based on
@@ -639,7 +687,7 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         base.served_tree_budget = rows - 1
         self.descriptor = replace(
             self.descriptor,
-            variant=f"oq4-ubtree-ast-b{rows - 1}" + (
+            variant=f"{self.tree_variant_prefix}-b{rows - 1}" + (
                 "-pld" if self.external_policy.get("ast_graft_prompt_lookup", False) else ""
             ),
             cache_layout=self.layout,
