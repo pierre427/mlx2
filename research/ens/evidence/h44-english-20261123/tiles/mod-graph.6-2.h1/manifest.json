@@ -1,0 +1,57 @@
+{
+ "address": "ens://0/a0.local/graph.6-2.h1@0.1.0",
+ "artifacts": [
+  {
+   "bytes": 395977,
+   "name": "module.safetensors",
+   "sha256": "c5c3ce41e8236192ff104628b1317998a2691a075624f1db2c1daaf8f92049c8"
+  }
+ ],
+ "composition": {
+  "bound": "final_l2.v1",
+  "tau_milli": 500,
+  "writers": "exclusive.v1"
+ },
+ "core_artifact": "ens-a0-core-c6-early-w64-s1@0ece332602d3",
+ "execution_abi_major": 0,
+ "implementation_digest": "7000fb7dcc785e4722a70a1d411cfb86a34accef78e3d3e60dc65f6c9f3644ff",
+ "law": "stateless.residual.v1",
+ "limits": {
+  "max_batch": 256,
+  "max_positions": 32,
+  "max_workspace_bytes": 1048576
+ },
+ "neural_abi_major": 0,
+ "ports": [
+  {
+   "axes": [
+    "B",
+    "D"
+   ],
+   "direction": "consume",
+   "dtype": "float32",
+   "encoding": "tap.linear.v0",
+   "site": "early.tap.query",
+   "type": "latent.bus.v1",
+   "width": 64
+  },
+  {
+   "axes": [
+    "B",
+    "D"
+   ],
+   "direction": "produce",
+   "dtype": "float32",
+   "encoding": "codebook.sha256:9ffaac5c858269b029e819d4cc2f2223afb096b4c85e712e1aa5e9129f429684",
+   "site": "early.residual.field",
+   "type": "latent.bus.v1",
+   "width": 64
+  }
+ ],
+ "schema": "ens.module.v0",
+ "state": {
+  "clock": "none",
+  "kind": "stateless",
+  "rollback": "none"
+ }
+}

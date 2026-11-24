@@ -1,0 +1,41 @@
+{
+ "agent_id": "job-ens-h40-grow-s4-805411935-96957",
+ "claim_task": {
+  "claimed": true,
+  "lease_expires_at": 1795458772,
+  "lease_generation": 6543,
+  "owner_agent_id": "job-ens-h40-grow-s4-805411935-96957",
+  "task_id": "beff4e634ddb46978a84a1aed315f785"
+ },
+ "complete_worker": {
+  "already_terminal": false,
+  "completed_late": false,
+  "finished_at": 1795452073,
+  "status": "completed",
+  "worker_id": "f18f2a0b07284a66ad2904c3dcf99bb7",
+  "workflow_status": null
+ },
+ "register_worker": {
+  "agent_id": "job-ens-h40-grow-s4-805411935-96957",
+  "registered_by": "job-ens-h40-grow-s4-805411935-96957",
+  "worker_id": "f18f2a0b07284a66ad2904c3dcf99bb7",
+  "workflow_id": "304719ca1b8341c89e160e848856a4a0"
+ },
+ "release_task": {
+  "lease_generation": 6544,
+  "released": true,
+  "status": "planned",
+  "task_id": "beff4e634ddb46978a84a1aed315f785"
+ },
+ "renew_lease": {
+  "lease_expires_at": 1795459256,
+  "lease_generation": 6543,
+  "renewed": true,
+  "task_id": "beff4e634ddb46978a84a1aed315f785"
+ },
+ "updated_at": "2026-11-23T16:41:13+00:00",
+ "worker_heartbeat": {
+  "heartbeat_at": 1795452056,
+  "worker_id": "f18f2a0b07284a66ad2904c3dcf99bb7"
+ }
+}

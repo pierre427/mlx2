@@ -1,0 +1,10 @@
+[cpg_job 2026-11-23T15:38:05+00:00 pid=65459] label=ens-h40-fixGGGA-s2-92dd6702f agent_id=job-ens-h40-fixGGGA-s2-92dd6702f-65459 command=~/Desktop/CPG-Radio/.venv/bin/python scripts/run_with_gpu_locks.py --session ens-m5-20261122 --label ens-h40-fixGGGA-s2-92dd6702f --cpg-owner-lock /tmp/ens-h40-fixGGGA-s2-92dd6702f-cpg.lock --cpg-task beff4e634ddb46978a84a1aed315f785 --receipt ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40fixA-s2-20261123/gpu-receipt.json -- env PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0 HF_HUB_OFFLINE=1 zsh ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40fixA-s2-20261123/slot.sh
+[cpg_job 2026-11-23T15:38:06+00:00 pid=65459] registered worker 70d4191fea254288bb8cc8d4576bf2cd as job-ens-h40-fixGGGA-s2-92dd6702f-65459 in session 213b33b20d094ad4867525c37b8b81ca
+[cpg_job 2026-11-23T15:38:06+00:00 pid=65459] claimed GPU lease task beff4e634ddb46978a84a1aed315f785 generation 6525
+[cpg_job 2026-11-23T15:38:06+00:00 pid=65459] took /tmp/ens-h40-fixGGGA-s2-92dd6702f-cpg.lock
+[cpg_job 2026-11-23T15:38:06+00:00 pid=65459] child pid 65465 started
+[cpg_job 2026-11-23T15:47:01+00:00 pid=65459] child exited rc=0
+[cpg_job 2026-11-23T15:47:02+00:00 pid=65459] worker 70d4191fea254288bb8cc8d4576bf2cd closed completed
+[cpg_job 2026-11-23T15:47:02+00:00 pid=65459] released GPU lease
+[cpg_job 2026-11-23T15:47:02+00:00 pid=65459] released /tmp/ens-h40-fixGGGA-s2-92dd6702f-cpg.lock
+[cpg_job 2026-11-23T15:47:02+00:00 pid=65459] wrote ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40fixA-s2-20261123/cpg.log.done

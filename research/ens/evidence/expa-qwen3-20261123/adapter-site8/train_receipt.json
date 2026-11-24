@@ -1,0 +1,341 @@
+{
+ "adapter": {
+  "rank": 16,
+  "site": 8,
+  "tau": 0.5,
+  "width": 64
+ },
+ "adapter_checkpoint": "ens-expA-busadapter-qwen3-0.6b-site8-s0@68cd8b94f473",
+ "args": {
+  "batch": 32,
+  "dtype": "bf16",
+  "eval_n": 512,
+  "eval_only": false,
+  "kl_weight": 1.0,
+  "log_every": 100,
+  "lr": 0.0002,
+  "out": "evidence/expa-qwen3-20261123/adapter-site8",
+  "p_text": 0.25,
+  "rank": 16,
+  "reader_init": 0.1,
+  "seed": 0,
+  "site": 8,
+  "steps": 3000,
+  "tau": 0.5,
+  "width": 64
+ },
+ "attrs": {
+  "favorite color": [
+   "red",
+   "blue",
+   "green",
+   "yellow",
+   "purple",
+   "orange",
+   "pink",
+   "brown",
+   "black",
+   "white",
+   "gray",
+   "silver",
+   "gold",
+   "violet",
+   "teal",
+   "navy"
+  ],
+  "favorite food": [
+   "pizza",
+   "pasta",
+   "rice",
+   "bread",
+   "soup",
+   "salad",
+   "cheese",
+   "cake",
+   "pie",
+   "chicken",
+   "fish",
+   "beef",
+   "steak",
+   "curry",
+   "noodles",
+   "tacos"
+  ],
+  "home city": [
+   "Paris",
+   "London",
+   "Rome",
+   "Berlin",
+   "Madrid",
+   "Tokyo",
+   "Cairo",
+   "Dublin",
+   "Vienna",
+   "Prague",
+   "Oslo",
+   "Lima",
+   "Delhi",
+   "Moscow",
+   "Sydney",
+   "Boston"
+  ],
+  "pet": [
+   "cat",
+   "dog",
+   "horse",
+   "rabbit",
+   "snake",
+   "turtle",
+   "goat",
+   "sheep",
+   "fox",
+   "wolf",
+   "bear",
+   "tiger",
+   "lion",
+   "eagle",
+   "duck",
+   "frog"
+  ]
+ },
+ "base_checkpoint": "Qwen3-0.6B@f47f71177f32",
+ "base_params": 596049920,
+ "codebook_sha256": "9ffaac5c858269b029e819d4cc2f2223afb096b4c85e712e1aa5e9129f429684",
+ "device": "Device(gpu, 0)",
+ "dtype": "bf16",
+ "host": "lab-m3",
+ "log": [
+  {
+   "elapsed_s": 64.8,
+   "fact_ce": 1.51302,
+   "loss": 1.93203,
+   "step": 100,
+   "text_kl": 0.01445
+  },
+  {
+   "elapsed_s": 129.7,
+   "fact_ce": 0.01105,
+   "loss": 0.02849,
+   "step": 200,
+   "text_kl": 0.00988
+  },
+  {
+   "elapsed_s": 194.6,
+   "fact_ce": 0.00761,
+   "loss": 0.03198,
+   "step": 300,
+   "text_kl": 0.01069
+  },
+  {
+   "elapsed_s": 259.7,
+   "fact_ce": 0.00059,
+   "loss": 0.00974,
+   "step": 400,
+   "text_kl": 0.00884
+  },
+  {
+   "elapsed_s": 324.9,
+   "fact_ce": 0.00091,
+   "loss": 0.00902,
+   "step": 500,
+   "text_kl": 0.00798
+  },
+  {
+   "elapsed_s": 390.1,
+   "fact_ce": 0.00115,
+   "loss": 0.00818,
+   "step": 600,
+   "text_kl": 0.00676
+  },
+  {
+   "elapsed_s": 455.6,
+   "fact_ce": 0.00065,
+   "loss": 0.00824,
+   "step": 700,
+   "text_kl": 0.00727
+  },
+  {
+   "elapsed_s": 521.2,
+   "fact_ce": 0.0006,
+   "loss": 0.00725,
+   "step": 800,
+   "text_kl": 0.00651
+  },
+  {
+   "elapsed_s": 586.7,
+   "fact_ce": 0.00137,
+   "loss": 0.0116,
+   "step": 900,
+   "text_kl": 0.00709
+  },
+  {
+   "elapsed_s": 652.3,
+   "fact_ce": 0.0004,
+   "loss": 0.00706,
+   "step": 1000,
+   "text_kl": 0.00658
+  },
+  {
+   "elapsed_s": 717.8,
+   "fact_ce": 0.0003,
+   "loss": 0.00638,
+   "step": 1100,
+   "text_kl": 0.00529
+  },
+  {
+   "elapsed_s": 783.3,
+   "fact_ce": 0.00056,
+   "loss": 0.00661,
+   "step": 1200,
+   "text_kl": 0.00585
+  },
+  {
+   "elapsed_s": 848.8,
+   "fact_ce": 0.00017,
+   "loss": 0.00795,
+   "step": 1300,
+   "text_kl": 0.00563
+  },
+  {
+   "elapsed_s": 914.3,
+   "fact_ce": 0.001,
+   "loss": 0.00739,
+   "step": 1400,
+   "text_kl": 0.00617
+  },
+  {
+   "elapsed_s": 979.8,
+   "fact_ce": 0.00017,
+   "loss": 0.00784,
+   "step": 1500,
+   "text_kl": 0.0076
+  },
+  {
+   "elapsed_s": 1045.4,
+   "fact_ce": 0.0003,
+   "loss": 0.0051,
+   "step": 1600,
+   "text_kl": 0.00469
+  },
+  {
+   "elapsed_s": 1110.9,
+   "fact_ce": 0.01194,
+   "loss": 0.07458,
+   "step": 1700,
+   "text_kl": 0.00572
+  },
+  {
+   "elapsed_s": 1176.4,
+   "fact_ce": 0.00033,
+   "loss": 0.0041,
+   "step": 1800,
+   "text_kl": 0.00362
+  },
+  {
+   "elapsed_s": 1241.9,
+   "fact_ce": 0.0002,
+   "loss": 0.00482,
+   "step": 1900,
+   "text_kl": 0.00466
+  },
+  {
+   "elapsed_s": 1307.4,
+   "fact_ce": 0.00013,
+   "loss": 0.00434,
+   "step": 2000,
+   "text_kl": 0.00422
+  },
+  {
+   "elapsed_s": 1372.9,
+   "fact_ce": 0.00015,
+   "loss": 0.00581,
+   "step": 2100,
+   "text_kl": 0.00567
+  },
+  {
+   "elapsed_s": 1438.4,
+   "fact_ce": 0.00016,
+   "loss": 0.00474,
+   "step": 2200,
+   "text_kl": 0.00454
+  },
+  {
+   "elapsed_s": 1503.9,
+   "fact_ce": 9e-05,
+   "loss": 0.00624,
+   "step": 2300,
+   "text_kl": 0.00611
+  },
+  {
+   "elapsed_s": 1569.4,
+   "fact_ce": 0.00015,
+   "loss": 0.00437,
+   "step": 2400,
+   "text_kl": 0.00411
+  },
+  {
+   "elapsed_s": 1634.9,
+   "fact_ce": 0.0001,
+   "loss": 0.00683,
+   "step": 2500,
+   "text_kl": 0.00616
+  },
+  {
+   "elapsed_s": 1700.4,
+   "fact_ce": 0.00126,
+   "loss": 0.00496,
+   "step": 2600,
+   "text_kl": 0.00375
+  },
+  {
+   "elapsed_s": 1765.9,
+   "fact_ce": 0.00013,
+   "loss": 0.00609,
+   "step": 2700,
+   "text_kl": 0.00589
+  },
+  {
+   "elapsed_s": 1831.4,
+   "fact_ce": 0.00017,
+   "loss": 0.00443,
+   "step": 2800,
+   "text_kl": 0.00421
+  },
+  {
+   "elapsed_s": 1896.9,
+   "fact_ce": 0.00014,
+   "loss": 0.00476,
+   "step": 2900,
+   "text_kl": 0.00482
+  },
+  {
+   "elapsed_s": 1962.4,
+   "fact_ce": 0.00043,
+   "loss": 0.00393,
+   "step": 3000,
+   "text_kl": 0.00337
+  }
+ ],
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "recipe": "ens.expA.lm_bus.v1",
+ "research_ens_dirty": false,
+ "schema": "ens.expA.lm_bus_receipt.v1",
+ "source_branch": "ens-a0",
+ "source_revision": "f75052b59e9db3efc373944886740488e73bcf1a",
+ "source_via": "m3-sync-stamp",
+ "templates": {
+  "held": [
+   "Everyone who knows {e} will tell you that the {a} is",
+   "Ask {e} about the {a} and you will hear"
+  ],
+  "train": [
+   "{e}'s {a} is",
+   "The {a} of {e} is",
+   "Q: What is {e}'s {a}? A: It is"
+  ]
+ },
+ "text_corpus": "~/Desktop/amoeba-corpus/builds/core-corpus-v2-9b64b3791/corpus.jsonl",
+ "time_utc": "2026-11-23T23:16:33Z",
+ "trainable_params": 6914049
+}

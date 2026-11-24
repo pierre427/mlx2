@@ -1,0 +1,154 @@
+{
+  "attempt_id": "06f454869d644d0a8af3acd1c6d024de",
+  "child_descendants_signalled": [
+    5844,
+    5849,
+    5850,
+    5845
+  ],
+  "child_pid": 5840,
+  "child_terminated_by_wrapper": true,
+  "command": [
+    "env",
+    "PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0",
+    "HF_HUB_OFFLINE=1",
+    "zsh",
+    "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-loop-c1/slot.sh"
+  ],
+  "command_returncode": -15,
+  "created_at": 1795458982.661973,
+  "error": "TimeoutError: ",
+  "finished_at": 1795459565.816342,
+  "immutable_receipt": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-loop-c1/gpu-receipt.attempt-06f454869d644d0a8af3acd1c6d024de.json",
+  "label": "ens-h45-loop-s0-c1-fb9aa8b07",
+  "live_lease": {
+    "lease_expires_at": 1795466469,
+    "lease_generation": 6573,
+    "owner_agent_id": "job-ens-h45-loop-s0-c1-fb9aa8b07-5785",
+    "status": "in_progress"
+  },
+  "lock_state_after": [
+    {
+      "kind": "file",
+      "path": "/Users/Shared/mlxuag/gpu.lock",
+      "size": 0
+    },
+    {
+      "kind": "absent",
+      "path": "/tmp/gpu.lock"
+    }
+  ],
+  "lock_state_before": [
+    {
+      "kind": "file",
+      "path": "/Users/Shared/mlxuag/gpu.lock",
+      "size": 0
+    },
+    {
+      "kind": "absent",
+      "path": "/tmp/gpu.lock"
+    }
+  ],
+  "logical_run_id": "ens-m5-20261122:ens-h45-loop-s0-c1-fb9aa8b07",
+  "owner": {
+    "agent_id": "job-ens-h45-loop-s0-c1-fb9aa8b07-5785",
+    "cpg_generation": 6573,
+    "cpg_owner": {
+      "agent": "cpg_job",
+      "agent_id": "job-ens-h45-loop-s0-c1-fb9aa8b07-5785",
+      "command": [
+        "~/Desktop/CPG-Radio/.venv/bin/python",
+        "scripts/run_with_gpu_locks.py",
+        "--session",
+        "ens-m5-20261122",
+        "--label",
+        "ens-h45-loop-s0-c1-fb9aa8b07",
+        "--cpg-owner-lock",
+        "/tmp/ens-h45-loop-s0-c1-fb9aa8b07-cpg.lock",
+        "--cpg-task",
+        "beff4e634ddb46978a84a1aed315f785",
+        "--receipt",
+        "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-loop-c1/gpu-receipt.json",
+        "--",
+        "env",
+        "PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0",
+        "HF_HUB_OFFLINE=1",
+        "zsh",
+        "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-loop-c1/slot.sh"
+      ],
+      "cpg_agent": "job-ens-h45-loop-s0-c1-fb9aa8b07-5785",
+      "cpg_generation": 6573,
+      "cpg_session": "213b33b20d094ad4867525c37b8b81ca",
+      "cpg_task": "beff4e634ddb46978a84a1aed315f785",
+      "cpg_worker": "ae36044c86974b6b90b75594eea3b885",
+      "done_file": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-loop-c1/cpg.log.done",
+      "label": "ens-h45-loop-s0-c1-fb9aa8b07",
+      "log": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-loop-c1/cpg.log",
+      "pid": 5785,
+      "started": "2026-11-23T18:36:21+00:00"
+    },
+    "cpg_session": "213b33b20d094ad4867525c37b8b81ca",
+    "cpg_task": "beff4e634ddb46978a84a1aed315f785",
+    "cpg_used": true,
+    "label": "ens-h45-loop-s0-c1-fb9aa8b07",
+    "lease_id": "ens-m5-20261122-ens-h45-loop-s0-c1-fb9aa8b07",
+    "live_lease": {
+      "lease_expires_at": 1795466182,
+      "lease_generation": 6573,
+      "owner_agent_id": "job-ens-h45-loop-s0-c1-fb9aa8b07-5785",
+      "status": "in_progress"
+    },
+    "pid": 5818,
+    "session": "ens-m5-20261122",
+    "since": "2026-11-23T18:36:23Z"
+  },
+  "pid": 5818,
+  "schema": "mlx2.gpu-lock-window.v1",
+  "session": "ens-m5-20261122",
+  "status": "error",
+  "traceback": "Traceback (most recent call last):\n  File \"~/Desktop/mlx2-wt-ens-a0/scripts/run_with_gpu_locks.py\", line 487, in main\n    rc = child.wait(timeout=10)\n         ^^^^^^^^^^^^^^^^^^^^^^\n  File \"~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py\", line 1264, in wait\n    return self._wait(timeout=timeout)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py\", line 2045, in _wait\n    raise TimeoutExpired(self.args, timeout)\nsubprocess.TimeoutExpired: Command '['env', 'PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0', 'HF_HUB_OFFLINE=1', 'zsh', '~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-loop-c1/slot.sh']' timed out after 10 seconds\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/asyncio/tasks.py\", line 500, in wait_for\n    return fut.result()\n           ^^^^^^^^^^^^\n  File \"~/Desktop/mlx2-wt-ens-a0/scripts/run_qualification_owned.py\", line 77, in _read_live\n    async with (\n  File \"~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/anyio/_backends/_asyncio.py\", line 803, in __aexit__\n    raise exc_val\n  File \"~/Desktop/mlx2-wt-ens-a0/scripts/run_qualification_owned.py\", line 83, in _read_live\n    await client.call_tool(\n  File \"~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/mcp/client/session.py\", line 401, in call_tool\n    result = await self.send_request(\n             ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/mcp/shared/session.py\", line 292, in send_request\n    response_or_error = await response_stream_reader.receive()\n                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"~/Desktop/CPG-Radio/.venv/lib/python3.11/site-packages/anyio/streams/memory.py\", line 125, in receive\n    await receive_event.wait()\n  File \"~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/asyncio/locks.py\", line 213, in wait\n    await fut\nasyncio.exceptions.CancelledError\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"~/Desktop/mlx2-wt-ens-a0/scripts/run_with_gpu_locks.py\", line 491, in main\n    renewed_owner, live = observe_ownership(args)\n                          ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"~/Desktop/mlx2-wt-ens-a0/scripts/run_with_gpu_locks.py\", line 381, in observe_ownership\n    return observe_cpg(args.cpg_owner_lock, args.cpg_task, args.mcp_url)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"~/Desktop/mlx2-wt-ens-a0/scripts/run_with_gpu_locks.py\", line 336, in observe_cpg\n    return observe(lock, task, url)\n           ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"~/Desktop/mlx2-wt-ens-a0/scripts/run_qualification_owned.py\", line 113, in observe\n    result = asyncio.run(asyncio.wait_for(_read_live(url, owner), timeout=15))\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/asyncio/runners.py\", line 190, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/asyncio/base_events.py\", line 654, in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\n  File \"~/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/asyncio/tasks.py\", line 502, in wait_for\n    raise exceptions.TimeoutError() from exc\nTimeoutError\n",
+  "transient_observe_errors": [
+    {
+      "at": 1795459050.7537248,
+      "error": "TimeoutError: "
+    },
+    {
+      "at": 1795459075.881375,
+      "error": "TimeoutError: "
+    },
+    {
+      "at": 1795459138.181157,
+      "error": "TimeoutError: "
+    },
+    {
+      "at": 1795459229.249658,
+      "error": "TimeoutError: "
+    },
+    {
+      "at": 1795459342.0450602,
+      "error": "TimeoutError: "
+    },
+    {
+      "at": 1795459384.696094,
+      "error": "TimeoutError: "
+    },
+    {
+      "at": 1795459411.406945,
+      "error": "TimeoutError: "
+    },
+    {
+      "at": 1795459482.817429,
+      "error": "TimeoutError: "
+    },
+    {
+      "at": 1795459510.888845,
+      "error": "TimeoutError: "
+    },
+    {
+      "at": 1795459536.9444559,
+      "error": "TimeoutError: "
+    }
+  ],
+  "updated_at": 1795459565.816345,
+  "waiter": "/Users/Shared/mlxuag/gpu.lock.waiters/ens-m5-20261122.ens-h45-loop-s0-c1-fb9aa8b07.5818.1795458982"
+}

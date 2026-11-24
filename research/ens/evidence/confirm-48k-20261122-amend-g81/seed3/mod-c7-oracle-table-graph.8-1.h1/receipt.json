@@ -1,0 +1,245 @@
+{
+ "assistance": "none",
+ "budget": {
+  "batch": 64,
+  "lr": 0.001,
+  "train_pool": 4096,
+  "train_pool_distinct": 4096,
+  "updates": 8000
+ },
+ "contract_digest": "d273fc9ad2494c7ac470e403cb6e0824b105c09ab8db79ccaa964fc351e0a566",
+ "core_checkpoint": "ens-a0-core-c7-early-w64-s3@bc495130132c",
+ "device": "Device(gpu, 0)",
+ "family": {
+  "cls": "GRAPH",
+  "fid": "graph.8-1.h1",
+  "generator_sha256": "29ca11a422660adccb33e640ba0fb6239f0a05977465dcc2a1575d8884919cf5",
+  "held_div": 8,
+  "knobs": [
+   8,
+   1
+  ],
+  "law": "h1",
+  "law_version": "ens.a0.families.v2",
+  "split": "confirm"
+ },
+ "family_digest": "4e1d42616b3e73b0874c9fee306a1664eeb2e5415c8aa8d4aa2b610a58df3adf",
+ "hidden": 256,
+ "host": "lab-m3",
+ "kind": "oracle-table",
+ "log": [
+  {
+   "elapsed_s": 4.9,
+   "loss": 7.56783,
+   "step": 200
+  },
+  {
+   "elapsed_s": 9.9,
+   "loss": 7.86963,
+   "step": 400
+  },
+  {
+   "elapsed_s": 14.8,
+   "loss": 9.52096,
+   "step": 600
+  },
+  {
+   "elapsed_s": 19.7,
+   "loss": 8.31782,
+   "step": 800
+  },
+  {
+   "elapsed_s": 24.6,
+   "loss": 8.36675,
+   "step": 1000
+  },
+  {
+   "elapsed_s": 29.6,
+   "loss": 8.74192,
+   "step": 1200
+  },
+  {
+   "elapsed_s": 34.5,
+   "loss": 6.78976,
+   "step": 1400
+  },
+  {
+   "elapsed_s": 39.5,
+   "loss": 8.1153,
+   "step": 1600
+  },
+  {
+   "elapsed_s": 44.4,
+   "loss": 8.17295,
+   "step": 1800
+  },
+  {
+   "elapsed_s": 49.3,
+   "loss": 7.26468,
+   "step": 2000
+  },
+  {
+   "elapsed_s": 54.3,
+   "loss": 9.66178,
+   "step": 2200
+  },
+  {
+   "elapsed_s": 59.2,
+   "loss": 8.56563,
+   "step": 2400
+  },
+  {
+   "elapsed_s": 64.2,
+   "loss": 8.29813,
+   "step": 2600
+  },
+  {
+   "elapsed_s": 69.1,
+   "loss": 8.1347,
+   "step": 2800
+  },
+  {
+   "elapsed_s": 74.0,
+   "loss": 7.91781,
+   "step": 3000
+  },
+  {
+   "elapsed_s": 79.0,
+   "loss": 9.13872,
+   "step": 3200
+  },
+  {
+   "elapsed_s": 83.9,
+   "loss": 8.32354,
+   "step": 3400
+  },
+  {
+   "elapsed_s": 88.9,
+   "loss": 9.18236,
+   "step": 3600
+  },
+  {
+   "elapsed_s": 93.8,
+   "loss": 8.32415,
+   "step": 3800
+  },
+  {
+   "elapsed_s": 98.8,
+   "loss": 9.26372,
+   "step": 4000
+  },
+  {
+   "elapsed_s": 103.7,
+   "loss": 8.66038,
+   "step": 4200
+  },
+  {
+   "elapsed_s": 108.7,
+   "loss": 9.09936,
+   "step": 4400
+  },
+  {
+   "elapsed_s": 113.6,
+   "loss": 8.8305,
+   "step": 4600
+  },
+  {
+   "elapsed_s": 118.6,
+   "loss": 8.41634,
+   "step": 4800
+  },
+  {
+   "elapsed_s": 123.6,
+   "loss": 9.3751,
+   "step": 5000
+  },
+  {
+   "elapsed_s": 128.5,
+   "loss": 7.41643,
+   "step": 5200
+  },
+  {
+   "elapsed_s": 133.5,
+   "loss": 8.48996,
+   "step": 5400
+  },
+  {
+   "elapsed_s": 138.4,
+   "loss": 7.50816,
+   "step": 5600
+  },
+  {
+   "elapsed_s": 143.4,
+   "loss": 9.5707,
+   "step": 5800
+  },
+  {
+   "elapsed_s": 148.3,
+   "loss": 9.11016,
+   "step": 6000
+  },
+  {
+   "elapsed_s": 153.3,
+   "loss": 8.69083,
+   "step": 6200
+  },
+  {
+   "elapsed_s": 158.3,
+   "loss": 9.93758,
+   "step": 6400
+  },
+  {
+   "elapsed_s": 163.2,
+   "loss": 8.0514,
+   "step": 6600
+  },
+  {
+   "elapsed_s": 168.2,
+   "loss": 9.04745,
+   "step": 6800
+  },
+  {
+   "elapsed_s": 173.2,
+   "loss": 9.45716,
+   "step": 7000
+  },
+  {
+   "elapsed_s": 178.1,
+   "loss": 6.87583,
+   "step": 7200
+  },
+  {
+   "elapsed_s": 183.1,
+   "loss": 8.61411,
+   "step": 7400
+  },
+  {
+   "elapsed_s": 188.1,
+   "loss": 7.7827,
+   "step": 7600
+  },
+  {
+   "elapsed_s": 193.0,
+   "loss": 8.6219,
+   "step": 7800
+  },
+  {
+   "elapsed_s": 198.0,
+   "loss": 8.29429,
+   "step": 8000
+  }
+ ],
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "package_digest": "df2c57b6d322efa10766f56de8ea6cf67ac4f853a741ff03c3016aef95391595",
+ "recipe": "ens.a0.probe.oracle_table.v1",
+ "research_ens_dirty": false,
+ "schema": "ens.a0.contrib_receipt.v0",
+ "seed": 3,
+ "site": "early",
+ "snap_codebook": false,
+ "source_branch": "ens-a0",
+ "source_revision": "632f192b9688d9b497d0fbc101c8c645142230f8",
+ "source_via": "m3-sync-stamp",
+ "time_utc": "2026-11-23T16:53:51Z"
+}

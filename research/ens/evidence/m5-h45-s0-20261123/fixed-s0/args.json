@@ -1,0 +1,15 @@
+{
+ "arm": "fixed",
+ "batch": 256,
+ "chunk_tag": "research/ens/evidence/m5-h45-s0-20261123/chunk-fixed-c1",
+ "log_every": 250,
+ "lr": 0.001,
+ "max_seconds": 1050.0,
+ "out": "research/ens/evidence/m5-h45-s0-20261123/fixed-s0",
+ "p_ordinary": 0.25,
+ "save_every": 2000,
+ "seed": 0,
+ "steps": 48000,
+ "stop_after": null,
+ "warmup": 500
+}

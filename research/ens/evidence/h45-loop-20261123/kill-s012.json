@@ -1,0 +1,45 @@
+{
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "K1_depth": {
+  "loop_unseen_bus": 0.6543,
+  "fixed_unseen_bus": 0.6424,
+  "op_guess": 0.5083,
+  "per_class": {
+   "GRAPH": {
+    "loop": 0.6599,
+    "fixed": 0.6421
+   },
+   "FST": {
+    "loop": 0.6432,
+    "fixed": 0.6428
+   }
+  },
+  "killed": true
+ },
+ "K2_cost": {
+  "fixed_minus_loop_trained": {
+   "bus": 0.0179,
+   "ordinary": 0.0149
+  },
+  "loop_one_pass_ordinary_trained": 0.6404,
+  "killed": false
+ },
+ "K3_work": {
+  "loop_s_passes": 0.6543,
+  "loop_s_minus1_vs_s_answer": 0.5574,
+  "loop_s_minus1_vs_its_own_answer": 0.715,
+  "oracle_agreement_floor": 0.411,
+  "killed": false
+ },
+ "compute_control": {
+  "loop_unseen_bus": 0.6543,
+  "uniform3_unseen_bus": 0.6184,
+  "uniform3_trained_bus": 0.753,
+  "loop_trained_bus": 0.8613
+ },
+ "any_killed": true
+}

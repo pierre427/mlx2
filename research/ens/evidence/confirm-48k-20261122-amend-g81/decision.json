@@ -1,0 +1,140 @@
+{
+ "families": [
+  "program.MUL.h1",
+  "program.XOR.h1",
+  "graph.6-1.h1",
+  "graph.8-1.h1"
+ ],
+ "seeds": [
+  0,
+  1,
+  2,
+  3,
+  4
+ ],
+ "delta": 0.1,
+ "epsilon": 0.02,
+ "excluded_seeds": [],
+ "rejected_receipts": [],
+ "missing_cells_counted_as_loss": [],
+ "primary": "c6_minus_c7",
+ "c6_minus_c7": 0.7120831247419119,
+ "ci95": [
+  0.5164518332108855,
+  0.8892741881310939
+ ],
+ "leave_one_family_out": {
+  "program.MUL.h1": 0.6563885986804961,
+  "program.XOR.h1": 0.657508692642053,
+  "graph.6-1.h1": 0.7750952079892158,
+  "graph.8-1.h1": 0.7593399996558826
+ },
+ "c6_minus_c6r": 0.6763823112472892,
+ "per_family": {
+  "program.MUL.h1": {
+   "c6_minus_c7": 0.879166702926159
+  },
+  "program.XOR.h1": {
+   "c6_minus_c7": 0.8758064210414886
+  },
+  "graph.6-1.h1": {
+   "c6_minus_c7": 0.523046875
+  },
+  "graph.8-1.h1": {
+   "c6_minus_c7": 0.5703125
+  }
+ },
+ "margin_over_bar": {
+  "c6": {
+   "program.MUL.h1": 0.8691667065024375,
+   "program.XOR.h1": 0.8826612591743469,
+   "graph.6-1.h1": 0.4111328125,
+   "graph.8-1.h1": 0.475732421875
+  },
+  "c6r": {
+   "program.MUL.h1": -0.0008333303034305572,
+   "program.XOR.h1": 0.0959677368402481,
+   "graph.6-1.h1": -0.0923828125,
+   "graph.8-1.h1": -0.079345703125
+  },
+  "c7": {
+   "program.MUL.h1": -0.012499997019767761,
+   "program.XOR.h1": -0.0004032254219055176,
+   "graph.6-1.h1": -0.1119140625,
+   "graph.8-1.h1": -0.094580078125
+  }
+ },
+ "bus001": {
+  "program.MUL.h1": {
+   "both": 0.8633333325386048,
+   "wrong": 0.003333333507180214,
+   "bypass": 0.05500000268220902,
+   "pass": true
+  },
+  "program.XOR.h1": {
+   "both": 0.9092741966247558,
+   "wrong": 0.002822580561041832,
+   "bypass": 0.06169354692101479,
+   "pass": true
+  },
+  "graph.6-1.h1": {
+   "both": 0.674609375,
+   "wrong": 0.087109375,
+   "bypass": 0.282421875,
+   "pass": true
+  },
+  "graph.8-1.h1": {
+   "both": 0.630078125,
+   "wrong": 0.059375,
+   "bypass": 0.212109375,
+   "pass": true
+  }
+ },
+ "ordinary_suite": {
+  "c6": 0.93837890625,
+  "c7": 0.894921875
+ },
+ "regression": -0.04345703125,
+ "positive_control": {
+  "min_per_family": {
+   "program.MUL.h1": 0.9000000357627869,
+   "program.XOR.h1": 0.9899193048477173,
+   "graph.6-1.h1": 1.0,
+   "graph.8-1.h1": 0.740234375
+  },
+  "pass": false
+ },
+ "core001": {
+  "per_core": {
+   "c6/seed0": true,
+   "c6r/seed0": true,
+   "c7/seed0": true,
+   "c6/seed1": true,
+   "c6r/seed1": true,
+   "c7/seed1": true,
+   "c6/seed2": true,
+   "c6r/seed2": true,
+   "c7/seed2": true,
+   "c6/seed3": true,
+   "c6r/seed3": true,
+   "c7/seed3": true,
+   "c6/seed4": true,
+   "c6r/seed4": true,
+   "c7/seed4": true
+  },
+  "pass": true,
+  "note": "C6R is reported only; its CORE-001 does not gate"
+ },
+ "protocol": {
+  "site": "early",
+  "tau": 0.5,
+  "bus_width": 64,
+  "layers": 6,
+  "d": 256,
+  "steps": 48000,
+  "p_ordinary": 0.25,
+  "matryoshka": 0.0
+ },
+ "protocol_mismatch": [],
+ "verdict": "harness_failure"
+}

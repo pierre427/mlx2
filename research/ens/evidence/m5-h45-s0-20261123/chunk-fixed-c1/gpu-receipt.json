@@ -1,0 +1,103 @@
+{
+  "attempt_id": "b5db09364d0b47a1b3cc0239abd8c6dc",
+  "child_pid": 71086,
+  "command": [
+    "env",
+    "PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0",
+    "HF_HUB_OFFLINE=1",
+    "zsh",
+    "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-fixed-c1/slot.sh"
+  ],
+  "command_returncode": 0,
+  "created_at": 1795465143.4504662,
+  "finished_at": 1795466194.154495,
+  "immutable_receipt": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-fixed-c1/gpu-receipt.attempt-b5db09364d0b47a1b3cc0239abd8c6dc.json",
+  "label": "ens-h45-fixed-s0-c1-66523df79",
+  "live_lease": {
+    "lease_expires_at": 1795473370,
+    "lease_generation": 6603,
+    "owner_agent_id": "job-ens-h45-fixed-s0-c1-66523df79-71060",
+    "status": "in_progress"
+  },
+  "lock_state_after": [
+    {
+      "kind": "file",
+      "path": "/Users/Shared/mlxuag/gpu.lock",
+      "size": 0
+    },
+    {
+      "kind": "absent",
+      "path": "/tmp/gpu.lock"
+    }
+  ],
+  "lock_state_before": [
+    {
+      "kind": "file",
+      "path": "/Users/Shared/mlxuag/gpu.lock",
+      "size": 0
+    },
+    {
+      "kind": "absent",
+      "path": "/tmp/gpu.lock"
+    }
+  ],
+  "logical_run_id": "ens-m5-20261122:ens-h45-fixed-s0-c1-66523df79",
+  "owner": {
+    "agent_id": "job-ens-h45-fixed-s0-c1-66523df79-71060",
+    "cpg_generation": 6603,
+    "cpg_owner": {
+      "agent": "cpg_job",
+      "agent_id": "job-ens-h45-fixed-s0-c1-66523df79-71060",
+      "command": [
+        "~/Desktop/CPG-Radio/.venv/bin/python",
+        "scripts/run_with_gpu_locks.py",
+        "--session",
+        "ens-m5-20261122",
+        "--label",
+        "ens-h45-fixed-s0-c1-66523df79",
+        "--cpg-owner-lock",
+        "/tmp/ens-h45-fixed-s0-c1-66523df79-cpg.lock",
+        "--cpg-task",
+        "beff4e634ddb46978a84a1aed315f785",
+        "--receipt",
+        "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-fixed-c1/gpu-receipt.json",
+        "--",
+        "env",
+        "PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0",
+        "HF_HUB_OFFLINE=1",
+        "zsh",
+        "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-fixed-c1/slot.sh"
+      ],
+      "cpg_agent": "job-ens-h45-fixed-s0-c1-66523df79-71060",
+      "cpg_generation": 6603,
+      "cpg_session": "213b33b20d094ad4867525c37b8b81ca",
+      "cpg_task": "beff4e634ddb46978a84a1aed315f785",
+      "cpg_worker": "386ce4b46187420e9ea948a6c31c783e",
+      "done_file": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-fixed-c1/cpg.log.done",
+      "label": "ens-h45-fixed-s0-c1-66523df79",
+      "log": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-fixed-c1/cpg.log",
+      "pid": 71060,
+      "started": "2026-11-23T20:19:02+00:00"
+    },
+    "cpg_session": "213b33b20d094ad4867525c37b8b81ca",
+    "cpg_task": "beff4e634ddb46978a84a1aed315f785",
+    "cpg_used": true,
+    "label": "ens-h45-fixed-s0-c1-66523df79",
+    "lease_id": "ens-m5-20261122-ens-h45-fixed-s0-c1-66523df79",
+    "live_lease": {
+      "lease_expires_at": 1795472343,
+      "lease_generation": 6603,
+      "owner_agent_id": "job-ens-h45-fixed-s0-c1-66523df79-71060",
+      "status": "in_progress"
+    },
+    "pid": 71065,
+    "session": "ens-m5-20261122",
+    "since": "2026-11-23T20:19:03Z"
+  },
+  "pid": 71065,
+  "schema": "mlx2.gpu-lock-window.v1",
+  "session": "ens-m5-20261122",
+  "status": "command_completed",
+  "updated_at": 1795466194.154495,
+  "waiter": "/Users/Shared/mlxuag/gpu.lock.waiters/ens-m5-20261122.ens-h45-fixed-s0-c1-66523df79.71065.1795465143"
+}

@@ -1,0 +1,824 @@
+{
+ "aux_grammar": {
+  "families": [
+   "program.ADD",
+   "program.MUL",
+   "program.XOR",
+   "program.ADD.MUL",
+   "program.MUL.ADD",
+   "program.ADD.XOR",
+   "program.XOR.MUL"
+  ],
+  "share": 0.25
+ },
+ "budget": {
+  "batch": 64,
+  "d": 192,
+  "eval_n_per_family": 256,
+  "lr": 0.0003,
+  "reader_steps": 20000,
+  "render_steps": 3000
+ },
+ "core_checkpoint": "ens-a0-core-c6-early-w64-s1@0ece332602d3",
+ "device": "Device(gpu, 0)",
+ "families": {
+  "fst.3-1.h1": "1ea2e0ee5c9f8d7d683618cbc0e9fcd46f54ee67069d40a52d801d506f9d42e1",
+  "graph.4-2.h1": "5ee0c56f54c25e7c3493c9da68f4cd24980cb70653db48643551dc6ef7e626de",
+  "graph.6-2.h1": "f5defe4d6fa0a12edcbb857f8127251b280b8f7cfc65a55d41552c88b490b68f",
+  "program.ADD.h1": "1b3604c3328cbda6bf4ba13c780db0d012a17c6567de86bf1689ef84c1043958"
+ },
+ "host": "lab-m3",
+ "kill_measures": {
+  "any_killed": true,
+  "core_adds_nothing": {
+   "english_alone": 0.2617,
+   "killed": true,
+   "margin": 0.05,
+   "pipeline": 0.1562
+  },
+  "only_seen_wording": {
+   "gap_limit": 0.2,
+   "killed": true,
+   "parse_held_wording": 0.0517,
+   "parse_train_wording": 1.0
+  },
+  "renderer_unfaithful": {
+   "faithful": 0.9864,
+   "killed": false,
+   "min": 0.95,
+   "n_parsed": 395
+  }
+ },
+ "logs": {
+  "english_alone": [
+   {
+    "elapsed_s": 105.3,
+    "loss": 2.02655,
+    "step": 500
+   },
+   {
+    "elapsed_s": 210.6,
+    "loss": 1.75074,
+    "step": 1000
+   },
+   {
+    "elapsed_s": 315.9,
+    "loss": 1.84045,
+    "step": 1500
+   },
+   {
+    "elapsed_s": 421.2,
+    "loss": 1.89881,
+    "step": 2000
+   },
+   {
+    "elapsed_s": 526.5,
+    "loss": 1.50483,
+    "step": 2500
+   },
+   {
+    "elapsed_s": 631.8,
+    "loss": 1.74991,
+    "step": 3000
+   },
+   {
+    "elapsed_s": 737.1,
+    "loss": 1.47,
+    "step": 3500
+   },
+   {
+    "elapsed_s": 842.5,
+    "loss": 1.41577,
+    "step": 4000
+   },
+   {
+    "elapsed_s": 947.8,
+    "loss": 1.37435,
+    "step": 4500
+   },
+   {
+    "elapsed_s": 1053.1,
+    "loss": 1.22854,
+    "step": 5000
+   },
+   {
+    "elapsed_s": 1158.3,
+    "loss": 1.23755,
+    "step": 5500
+   },
+   {
+    "elapsed_s": 1263.7,
+    "loss": 1.15604,
+    "step": 6000
+   },
+   {
+    "elapsed_s": 1369.0,
+    "loss": 1.03939,
+    "step": 6500
+   },
+   {
+    "elapsed_s": 1474.3,
+    "loss": 0.93963,
+    "step": 7000
+   },
+   {
+    "elapsed_s": 1579.6,
+    "loss": 0.90017,
+    "step": 7500
+   },
+   {
+    "elapsed_s": 1685.0,
+    "loss": 0.85966,
+    "step": 8000
+   },
+   {
+    "elapsed_s": 1790.4,
+    "loss": 0.73065,
+    "step": 8500
+   },
+   {
+    "elapsed_s": 1895.7,
+    "loss": 0.7996,
+    "step": 9000
+   },
+   {
+    "elapsed_s": 2001.0,
+    "loss": 0.71532,
+    "step": 9500
+   },
+   {
+    "elapsed_s": 2106.3,
+    "loss": 0.80543,
+    "step": 10000
+   },
+   {
+    "elapsed_s": 2211.7,
+    "loss": 0.77491,
+    "step": 10500
+   },
+   {
+    "elapsed_s": 2317.0,
+    "loss": 0.79877,
+    "step": 11000
+   },
+   {
+    "elapsed_s": 2422.3,
+    "loss": 0.69675,
+    "step": 11500
+   },
+   {
+    "elapsed_s": 2527.7,
+    "loss": 0.72286,
+    "step": 12000
+   },
+   {
+    "elapsed_s": 2633.0,
+    "loss": 0.71556,
+    "step": 12500
+   },
+   {
+    "elapsed_s": 2738.4,
+    "loss": 0.74444,
+    "step": 13000
+   },
+   {
+    "elapsed_s": 2843.7,
+    "loss": 0.66593,
+    "step": 13500
+   },
+   {
+    "elapsed_s": 2949.0,
+    "loss": 0.7192,
+    "step": 14000
+   },
+   {
+    "elapsed_s": 3054.4,
+    "loss": 0.69288,
+    "step": 14500
+   },
+   {
+    "elapsed_s": 3159.7,
+    "loss": 0.77878,
+    "step": 15000
+   },
+   {
+    "elapsed_s": 3265.0,
+    "loss": 0.7464,
+    "step": 15500
+   },
+   {
+    "elapsed_s": 3370.4,
+    "loss": 0.6103,
+    "step": 16000
+   },
+   {
+    "elapsed_s": 3475.7,
+    "loss": 0.64286,
+    "step": 16500
+   },
+   {
+    "elapsed_s": 3581.0,
+    "loss": 0.69012,
+    "step": 17000
+   },
+   {
+    "elapsed_s": 3686.3,
+    "loss": 0.68428,
+    "step": 17500
+   },
+   {
+    "elapsed_s": 3791.7,
+    "loss": 0.55431,
+    "step": 18000
+   },
+   {
+    "elapsed_s": 3897.0,
+    "loss": 0.5524,
+    "step": 18500
+   },
+   {
+    "elapsed_s": 4002.3,
+    "loss": 0.61418,
+    "step": 19000
+   },
+   {
+    "elapsed_s": 4107.7,
+    "loss": 0.51269,
+    "step": 19500
+   },
+   {
+    "elapsed_s": 4212.9,
+    "loss": 0.53026,
+    "step": 20000
+   }
+  ],
+  "reader": [
+   {
+    "elapsed_s": 109.6,
+    "loss": 0.34763,
+    "step": 500
+   },
+   {
+    "elapsed_s": 219.2,
+    "loss": 0.17696,
+    "step": 1000
+   },
+   {
+    "elapsed_s": 329.0,
+    "loss": 0.06524,
+    "step": 1500
+   },
+   {
+    "elapsed_s": 438.9,
+    "loss": 0.02023,
+    "step": 2000
+   },
+   {
+    "elapsed_s": 549.0,
+    "loss": 0.00926,
+    "step": 2500
+   },
+   {
+    "elapsed_s": 659.3,
+    "loss": 0.00895,
+    "step": 3000
+   },
+   {
+    "elapsed_s": 769.6,
+    "loss": 0.0072,
+    "step": 3500
+   },
+   {
+    "elapsed_s": 879.9,
+    "loss": 0.0022,
+    "step": 4000
+   },
+   {
+    "elapsed_s": 990.1,
+    "loss": 0.00483,
+    "step": 4500
+   },
+   {
+    "elapsed_s": 1100.4,
+    "loss": 0.00449,
+    "step": 5000
+   },
+   {
+    "elapsed_s": 1210.7,
+    "loss": 0.00372,
+    "step": 5500
+   },
+   {
+    "elapsed_s": 1321.0,
+    "loss": 0.00173,
+    "step": 6000
+   },
+   {
+    "elapsed_s": 1431.3,
+    "loss": 0.00309,
+    "step": 6500
+   },
+   {
+    "elapsed_s": 1541.6,
+    "loss": 0.00201,
+    "step": 7000
+   },
+   {
+    "elapsed_s": 1651.9,
+    "loss": 0.00219,
+    "step": 7500
+   },
+   {
+    "elapsed_s": 1762.2,
+    "loss": 0.00074,
+    "step": 8000
+   },
+   {
+    "elapsed_s": 1872.5,
+    "loss": 0.001,
+    "step": 8500
+   },
+   {
+    "elapsed_s": 1982.8,
+    "loss": 0.00139,
+    "step": 9000
+   },
+   {
+    "elapsed_s": 2093.0,
+    "loss": 0.00048,
+    "step": 9500
+   },
+   {
+    "elapsed_s": 2203.4,
+    "loss": 0.0005,
+    "step": 10000
+   },
+   {
+    "elapsed_s": 2313.7,
+    "loss": 0.0002,
+    "step": 10500
+   },
+   {
+    "elapsed_s": 2424.0,
+    "loss": 0.00214,
+    "step": 11000
+   },
+   {
+    "elapsed_s": 2534.4,
+    "loss": 0.00198,
+    "step": 11500
+   },
+   {
+    "elapsed_s": 2644.6,
+    "loss": 0.0002,
+    "step": 12000
+   },
+   {
+    "elapsed_s": 2754.9,
+    "loss": 0.00013,
+    "step": 12500
+   },
+   {
+    "elapsed_s": 2865.2,
+    "loss": 0.00134,
+    "step": 13000
+   },
+   {
+    "elapsed_s": 2975.5,
+    "loss": 3e-05,
+    "step": 13500
+   },
+   {
+    "elapsed_s": 3085.8,
+    "loss": 3e-05,
+    "step": 14000
+   },
+   {
+    "elapsed_s": 3196.1,
+    "loss": 4e-05,
+    "step": 14500
+   },
+   {
+    "elapsed_s": 3306.4,
+    "loss": 2e-05,
+    "step": 15000
+   },
+   {
+    "elapsed_s": 3416.7,
+    "loss": 3e-05,
+    "step": 15500
+   },
+   {
+    "elapsed_s": 3527.0,
+    "loss": 2e-05,
+    "step": 16000
+   },
+   {
+    "elapsed_s": 3637.2,
+    "loss": 1e-05,
+    "step": 16500
+   },
+   {
+    "elapsed_s": 3747.5,
+    "loss": 1e-05,
+    "step": 17000
+   },
+   {
+    "elapsed_s": 3857.8,
+    "loss": 1e-05,
+    "step": 17500
+   },
+   {
+    "elapsed_s": 3968.1,
+    "loss": 1e-05,
+    "step": 18000
+   },
+   {
+    "elapsed_s": 4078.4,
+    "loss": 1e-05,
+    "step": 18500
+   },
+   {
+    "elapsed_s": 4188.7,
+    "loss": 6e-05,
+    "step": 19000
+   },
+   {
+    "elapsed_s": 4299.0,
+    "loss": 0.00021,
+    "step": 19500
+   },
+   {
+    "elapsed_s": 4409.3,
+    "loss": 2e-05,
+    "step": 20000
+   }
+  ],
+  "renderer": [
+   {
+    "elapsed_s": 15.9,
+    "loss": 0.07097,
+    "step": 500
+   },
+   {
+    "elapsed_s": 31.7,
+    "loss": 0.057,
+    "step": 1000
+   },
+   {
+    "elapsed_s": 47.5,
+    "loss": 0.04712,
+    "step": 1500
+   },
+   {
+    "elapsed_s": 63.4,
+    "loss": 0.04629,
+    "step": 2000
+   },
+   {
+    "elapsed_s": 79.3,
+    "loss": 0.04566,
+    "step": 2500
+   },
+   {
+    "elapsed_s": 95.2,
+    "loss": 0.04525,
+    "step": 3000
+   }
+  ]
+ },
+ "machine": "arm64",
+ "mlx": "0.32.4",
+ "params": {
+  "english_alone": 3081088,
+  "reader": 3099392,
+  "renderer": 395073
+ },
+ "recipe": "ens.h44.english_tile.v1",
+ "research_ens_dirty": false,
+ "results": {
+  "rows_held__wording_held": {
+   "families": {
+    "fst.3-1.h1": {
+     "ceiling": 1.0,
+     "chance": 0.3333,
+     "english_alone": 0.4141,
+     "example": "Given in zero, bit 0 moves to two while bit 1 moves to zero; 1 turns into one on 0 and zero on 1; two turns into 1 on 0 and one on 1, start from key one's state and consume 0. What is the last state?",
+     "n": 256,
+     "n_parsed": 81,
+     "no_tile": 0.1602,
+     "op_guess": 0.6016,
+     "parse_exact": 0.0234,
+     "parse_wellformed": 0.3164,
+     "pipeline": 0.2031,
+     "pipeline_rendered": 0.2031,
+     "renderer_faithful": 1.0
+    },
+    "graph.4-2.h1": {
+     "ceiling": 0.957,
+     "chance": 0.25,
+     "english_alone": 0.3125,
+     "example": "Consider zero leads to three; from one you reach one; two leads to two; from three you reach 1. Key six gives the start; walk 2 links. Where are you now?",
+     "n": 256,
+     "n_parsed": 68,
+     "no_tile": 0.1328,
+     "op_guess": 0.54,
+     "parse_exact": 0.0234,
+     "parse_wellformed": 0.2656,
+     "pipeline": 0.1328,
+     "pipeline_rendered": 0.1328,
+     "renderer_faithful": 1.0
+    },
+    "graph.6-2.h1": {
+     "ceiling": 0.9102,
+     "chance": 0.1667,
+     "english_alone": 0.3008,
+     "example": "Here are the links: zero leads to two; from one you reach three; two leads to three; from three you reach 2; 4 leads to two; 5 leads to three. Starting where key three says, move along two edges; name the final node.",
+     "n": 256,
+     "n_parsed": 105,
+     "no_tile": 0.1172,
+     "op_guess": 0.4941,
+     "parse_exact": 0.0117,
+     "parse_wellformed": 0.4102,
+     "pipeline": 0.1406,
+     "pipeline_rendered": 0.1484,
+     "renderer_faithful": 0.981
+    },
+    "program.ADD.h1": {
+     "ceiling": 1.0,
+     "chance": 0.0625,
+     "english_alone": 0.0195,
+     "example": "What comes out if you take key four's value and increase it by fifty-two?",
+     "n": 256,
+     "n_parsed": 141,
+     "no_tile": 0.0234,
+     "op_guess": 0.0625,
+     "parse_exact": 0.1484,
+     "parse_wellformed": 0.5508,
+     "pipeline": 0.1484,
+     "pipeline_rendered": 0.1406,
+     "renderer_faithful": 0.9645
+    }
+   },
+   "mean": {
+    "ceiling": 0.9668,
+    "english_alone": 0.2617,
+    "no_tile": 0.1084,
+    "op_guess": 0.4245,
+    "parse_exact": 0.0517,
+    "parse_wellformed": 0.3857,
+    "pipeline": 0.1562,
+    "pipeline_rendered": 0.1562,
+    "renderer_faithful": 0.9864
+   }
+  },
+  "rows_held__wording_train": {
+   "families": {
+    "fst.3-1.h1": {
+     "ceiling": 1.0,
+     "chance": 0.3333,
+     "english_alone": 0.5273,
+     "n": 256,
+     "n_parsed": 256,
+     "no_tile": 0.4844,
+     "op_guess": 0.6016,
+     "parse_exact": 1.0,
+     "parse_wellformed": 1.0,
+     "pipeline": 1.0,
+     "pipeline_rendered": 1.0,
+     "renderer_faithful": 1.0
+    },
+    "graph.4-2.h1": {
+     "ceiling": 0.957,
+     "chance": 0.25,
+     "english_alone": 0.8242,
+     "n": 256,
+     "n_parsed": 256,
+     "no_tile": 0.5039,
+     "op_guess": 0.54,
+     "parse_exact": 1.0,
+     "parse_wellformed": 1.0,
+     "pipeline": 0.957,
+     "pipeline_rendered": 0.9648,
+     "renderer_faithful": 0.9883
+    },
+    "graph.6-2.h1": {
+     "ceiling": 0.9102,
+     "chance": 0.1667,
+     "english_alone": 0.4023,
+     "n": 256,
+     "n_parsed": 256,
+     "no_tile": 0.4727,
+     "op_guess": 0.4941,
+     "parse_exact": 1.0,
+     "parse_wellformed": 1.0,
+     "pipeline": 0.9102,
+     "pipeline_rendered": 0.9102,
+     "renderer_faithful": 0.9883
+    },
+    "program.ADD.h1": {
+     "ceiling": 1.0,
+     "chance": 0.0625,
+     "english_alone": 0.0,
+     "n": 256,
+     "n_parsed": 256,
+     "no_tile": 0.0781,
+     "op_guess": 0.0625,
+     "parse_exact": 1.0,
+     "parse_wellformed": 1.0,
+     "pipeline": 1.0,
+     "pipeline_rendered": 0.9141,
+     "renderer_faithful": 0.9141
+    }
+   },
+   "mean": {
+    "ceiling": 0.9668,
+    "english_alone": 0.4385,
+    "no_tile": 0.3848,
+    "op_guess": 0.4245,
+    "parse_exact": 1.0,
+    "parse_wellformed": 1.0,
+    "pipeline": 0.9668,
+    "pipeline_rendered": 0.9473,
+    "renderer_faithful": 0.9727
+   }
+  },
+  "rows_train__wording_held": {
+   "families": {
+    "fst.3-1.h1": {
+     "ceiling": 1.0,
+     "chance": 0.3333,
+     "english_alone": 0.3398,
+     "n": 256,
+     "n_parsed": 68,
+     "no_tile": 0.0938,
+     "op_guess": 0.5885,
+     "parse_exact": 0.0078,
+     "parse_wellformed": 0.2656,
+     "pipeline": 0.1367,
+     "pipeline_rendered": 0.1367,
+     "renderer_faithful": 1.0
+    },
+    "graph.4-2.h1": {
+     "ceiling": 0.957,
+     "chance": 0.25,
+     "english_alone": 0.3828,
+     "n": 256,
+     "n_parsed": 74,
+     "no_tile": 0.1133,
+     "op_guess": 0.5605,
+     "parse_exact": 0.0391,
+     "parse_wellformed": 0.2891,
+     "pipeline": 0.1367,
+     "pipeline_rendered": 0.1367,
+     "renderer_faithful": 1.0
+    },
+    "graph.6-2.h1": {
+     "ceiling": 0.9297,
+     "chance": 0.1667,
+     "english_alone": 0.2891,
+     "n": 256,
+     "n_parsed": 123,
+     "no_tile": 0.1289,
+     "op_guess": 0.4948,
+     "parse_exact": 0.0234,
+     "parse_wellformed": 0.4805,
+     "pipeline": 0.1602,
+     "pipeline_rendered": 0.1602,
+     "renderer_faithful": 0.9837
+    },
+    "program.ADD.h1": {
+     "ceiling": 1.0,
+     "chance": 0.0625,
+     "english_alone": 0.043,
+     "n": 256,
+     "n_parsed": 145,
+     "no_tile": 0.0195,
+     "op_guess": 0.0625,
+     "parse_exact": 0.2109,
+     "parse_wellformed": 0.5664,
+     "pipeline": 0.2109,
+     "pipeline_rendered": 0.2109,
+     "renderer_faithful": 0.9931
+    }
+   },
+   "mean": {
+    "ceiling": 0.9717,
+    "english_alone": 0.2637,
+    "no_tile": 0.0889,
+    "op_guess": 0.4266,
+    "parse_exact": 0.0703,
+    "parse_wellformed": 0.4004,
+    "pipeline": 0.1611,
+    "pipeline_rendered": 0.1611,
+    "renderer_faithful": 0.9942
+   },
+   "note": "in-sample rows: the reader and english_alone trained on these rows"
+  },
+  "rows_train__wording_train": {
+   "families": {
+    "fst.3-1.h1": {
+     "ceiling": 1.0,
+     "chance": 0.3333,
+     "english_alone": 0.4297,
+     "example": "Rules: state zero: on 0 go to zero, on 1 go to zero; from 1, a 0 sends you to two and a 1 to two; from two, a 0 sends you to 0 and a 1 to one. Begin at key eight's state and feed in 0. Which state results?",
+     "n": 256,
+     "n_parsed": 256,
+     "no_tile": 0.457,
+     "op_guess": 0.5885,
+     "parse_exact": 1.0,
+     "parse_wellformed": 1.0,
+     "pipeline": 1.0,
+     "pipeline_rendered": 1.0,
+     "renderer_faithful": 1.0
+    },
+    "graph.4-2.h1": {
+     "ceiling": 0.957,
+     "chance": 0.25,
+     "english_alone": 0.8984,
+     "example": "In this graph zero points to zero; node one goes to two; two points to one; node three goes to 2. From key one's node, follow 2 hops. Which node is reached?",
+     "n": 256,
+     "n_parsed": 256,
+     "no_tile": 0.4727,
+     "op_guess": 0.5605,
+     "parse_exact": 0.9961,
+     "parse_wellformed": 1.0,
+     "pipeline": 0.957,
+     "pipeline_rendered": 0.957,
+     "renderer_faithful": 1.0
+    },
+    "graph.6-2.h1": {
+     "ceiling": 0.9297,
+     "chance": 0.1667,
+     "english_alone": 0.5508,
+     "example": "Graph: zero points to four; node one goes to zero; two points to one; node three goes to 4; 4 points to five; 5 points to two. Begin at the node for key ten and take two steps. Where do you end?",
+     "n": 256,
+     "n_parsed": 256,
+     "no_tile": 0.4219,
+     "op_guess": 0.4948,
+     "parse_exact": 1.0,
+     "parse_wellformed": 1.0,
+     "pipeline": 0.9297,
+     "pipeline_rendered": 0.9258,
+     "renderer_faithful": 0.9961
+    },
+    "program.ADD.h1": {
+     "ceiling": 1.0,
+     "chance": 0.0625,
+     "english_alone": 1.0,
+     "example": "Start from the value for key eight; add one. Give the answer.",
+     "n": 256,
+     "n_parsed": 256,
+     "no_tile": 0.0781,
+     "op_guess": 0.0625,
+     "parse_exact": 1.0,
+     "parse_wellformed": 1.0,
+     "pipeline": 1.0,
+     "pipeline_rendered": 1.0,
+     "renderer_faithful": 1.0
+    }
+   },
+   "mean": {
+    "ceiling": 0.9717,
+    "english_alone": 0.7197,
+    "no_tile": 0.3574,
+    "op_guess": 0.4266,
+    "parse_exact": 0.999,
+    "parse_wellformed": 1.0,
+    "pipeline": 0.9717,
+    "pipeline_rendered": 0.9707,
+    "renderer_faithful": 0.999
+   },
+   "note": "in-sample rows: the reader and english_alone trained on these rows"
+  }
+ },
+ "schema": "ens.h44.english_tile_receipt.v1",
+ "seed": 0,
+ "site": "early",
+ "source_branch": "ens-a0",
+ "source_revision": "ee839f440ef03059d7269411853f0eaffbebae52",
+ "source_via": "m3-sync-stamp",
+ "tiles": {
+  "fst.3-1.h1": {
+   "dir": "mod-fst.3-1.h1",
+   "family_digest": "1ea2e0ee5c9f8d7d683618cbc0e9fcd46f54ee67069d40a52d801d506f9d42e1",
+   "package_digest": "23a36cda67c612586973531f5b1701d1e003afa7c0a3933bac5cae1e9837a7d9"
+  },
+  "graph.4-2.h1": {
+   "dir": "mod-graph.4-2.h1",
+   "family_digest": "5ee0c56f54c25e7c3493c9da68f4cd24980cb70653db48643551dc6ef7e626de",
+   "package_digest": "c5a0b94222b203b3c3d7cab083495b191dff83952a4ef27c10718f9a97a19014"
+  },
+  "graph.6-2.h1": {
+   "dir": "mod-graph.6-2.h1",
+   "family_digest": "f5defe4d6fa0a12edcbb857f8127251b280b8f7cfc65a55d41552c88b490b68f",
+   "package_digest": "9939a647451078151be42da099e6bf8f8a8131406a3a9a37605d1871a53a6124"
+  },
+  "program.ADD.h1": {
+   "dir": "mod-program.ADD.h1",
+   "family_digest": "1b3604c3328cbda6bf4ba13c780db0d012a17c6567de86bf1689ef84c1043958",
+   "package_digest": "feaf439c862d15d3154f7b25dd052ccf31fec6863b71461706a195da16e53ae8"
+  }
+ },
+ "time_utc": "2026-11-23T20:38:34Z"
+}

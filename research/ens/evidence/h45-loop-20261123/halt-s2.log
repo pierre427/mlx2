@@ -1,0 +1,13 @@
+{'step': 250, 'loss': 0.34392, 'elapsed_s': 16.0}
+{'step': 500, 'loss': 0.35559, 'elapsed_s': 31.9}
+{'step': 750, 'loss': 0.3187, 'elapsed_s': 47.9}
+{'step': 1000, 'loss': 0.24859, 'elapsed_s': 63.9}
+{'step': 1250, 'loss': 0.29031, 'elapsed_s': 79.8}
+{'step': 1500, 'loss': 0.26701, 'elapsed_s': 95.8}
+{'step': 1750, 'loss': 0.2699, 'elapsed_s': 111.8}
+{'step': 2000, 'loss': 0.27098, 'elapsed_s': 127.8}
+{'step': 2250, 'loss': 0.27499, 'elapsed_s': 143.8}
+{'step': 2500, 'loss': 0.27031, 'elapsed_s': 159.9}
+{'step': 2750, 'loss': 0.26811, 'elapsed_s': 175.9}
+{'step': 3000, 'loss': 0.23185, 'elapsed_s': 191.9}
+summary {"halt_exact": {"trained": 0.4544, "unseen": 0.0}, "acc_tile": {"trained": 0.6501, "unseen": 0.6402}, "acc_oracle_count": {"trained": 0.862, "unseen": 0.6714}, "killed": true}

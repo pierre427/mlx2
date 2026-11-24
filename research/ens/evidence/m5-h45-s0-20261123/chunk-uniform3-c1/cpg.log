@@ -1,0 +1,10 @@
+[cpg_job 2026-11-23T21:01:34+00:00 pid=97700] label=ens-h45-uniform3-s0-c1-fc33846c8 agent_id=job-ens-h45-uniform3-s0-c1-fc33846c8-97700 command=~/Desktop/CPG-Radio/.venv/bin/python scripts/run_with_gpu_locks.py --session ens-m5-20261122 --label ens-h45-uniform3-s0-c1-fc33846c8 --cpg-owner-lock /tmp/ens-h45-uniform3-s0-c1-fc33846c8-cpg.lock --cpg-task beff4e634ddb46978a84a1aed315f785 --receipt ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-uniform3-c1/gpu-receipt.json -- env PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0 HF_HUB_OFFLINE=1 zsh ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-uniform3-c1/slot.sh
+[cpg_job 2026-11-23T21:01:35+00:00 pid=97700] registered worker 1d64e5e21f094d4b9b1f59c0d1f49a41 as job-ens-h45-uniform3-s0-c1-fc33846c8-97700 in session 213b33b20d094ad4867525c37b8b81ca
+[cpg_job 2026-11-23T21:01:35+00:00 pid=97700] claimed GPU lease task beff4e634ddb46978a84a1aed315f785 generation 6621
+[cpg_job 2026-11-23T21:01:35+00:00 pid=97700] took /tmp/ens-h45-uniform3-s0-c1-fc33846c8-cpg.lock
+[cpg_job 2026-11-23T21:01:35+00:00 pid=97700] child pid 97707 started
+[cpg_job 2026-11-23T21:19:06+00:00 pid=97700] child exited rc=0
+[cpg_job 2026-11-23T21:19:06+00:00 pid=97700] worker 1d64e5e21f094d4b9b1f59c0d1f49a41 closed completed
+[cpg_job 2026-11-23T21:19:06+00:00 pid=97700] released GPU lease
+[cpg_job 2026-11-23T21:19:06+00:00 pid=97700] released /tmp/ens-h45-uniform3-s0-c1-fc33846c8-cpg.lock
+[cpg_job 2026-11-23T21:19:06+00:00 pid=97700] wrote ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h45-s0-20261123/chunk-uniform3-c1/cpg.log.done

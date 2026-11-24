@@ -38,3 +38,4 @@ qualification/runs/**/runtime/reasoning-key
 
 # EXL3 encoder research: compiled Viterbi cache.
 scripts/research/ds41_exl3/.build/
+research/ens/evidence/m5-queue-*.log

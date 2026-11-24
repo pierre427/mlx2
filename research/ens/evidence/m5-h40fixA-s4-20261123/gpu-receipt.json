@@ -1,0 +1,103 @@
+{
+  "attempt_id": "023c566de576437485652450a1bc7e38",
+  "child_pid": 14427,
+  "command": [
+    "env",
+    "PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0",
+    "HF_HUB_OFFLINE=1",
+    "zsh",
+    "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40fixA-s4-20261123/slot.sh"
+  ],
+  "command_returncode": 0,
+  "created_at": 1795452836.312347,
+  "finished_at": 1795453367.029611,
+  "immutable_receipt": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40fixA-s4-20261123/gpu-receipt.attempt-023c566de576437485652450a1bc7e38.json",
+  "label": "ens-h40-fixGGGA-s4-6a7f309f8",
+  "live_lease": {
+    "lease_expires_at": 1795460519,
+    "lease_generation": 6549,
+    "owner_agent_id": "job-ens-h40-fixGGGA-s4-6a7f309f8-14408",
+    "status": "in_progress"
+  },
+  "lock_state_after": [
+    {
+      "kind": "file",
+      "path": "/Users/Shared/mlxuag/gpu.lock",
+      "size": 0
+    },
+    {
+      "kind": "absent",
+      "path": "/tmp/gpu.lock"
+    }
+  ],
+  "lock_state_before": [
+    {
+      "kind": "file",
+      "path": "/Users/Shared/mlxuag/gpu.lock",
+      "size": 0
+    },
+    {
+      "kind": "absent",
+      "path": "/tmp/gpu.lock"
+    }
+  ],
+  "logical_run_id": "ens-m5-20261122:ens-h40-fixGGGA-s4-6a7f309f8",
+  "owner": {
+    "agent_id": "job-ens-h40-fixGGGA-s4-6a7f309f8-14408",
+    "cpg_generation": 6549,
+    "cpg_owner": {
+      "agent": "cpg_job",
+      "agent_id": "job-ens-h40-fixGGGA-s4-6a7f309f8-14408",
+      "command": [
+        "~/Desktop/CPG-Radio/.venv/bin/python",
+        "scripts/run_with_gpu_locks.py",
+        "--session",
+        "ens-m5-20261122",
+        "--label",
+        "ens-h40-fixGGGA-s4-6a7f309f8",
+        "--cpg-owner-lock",
+        "/tmp/ens-h40-fixGGGA-s4-6a7f309f8-cpg.lock",
+        "--cpg-task",
+        "beff4e634ddb46978a84a1aed315f785",
+        "--receipt",
+        "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40fixA-s4-20261123/gpu-receipt.json",
+        "--",
+        "env",
+        "PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0",
+        "HF_HUB_OFFLINE=1",
+        "zsh",
+        "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40fixA-s4-20261123/slot.sh"
+      ],
+      "cpg_agent": "job-ens-h40-fixGGGA-s4-6a7f309f8-14408",
+      "cpg_generation": 6549,
+      "cpg_session": "213b33b20d094ad4867525c37b8b81ca",
+      "cpg_task": "beff4e634ddb46978a84a1aed315f785",
+      "cpg_worker": "828f436690ac48f282d6df8a884e030e",
+      "done_file": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40fixA-s4-20261123/cpg.log.done",
+      "label": "ens-h40-fixGGGA-s4-6a7f309f8",
+      "log": "~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40fixA-s4-20261123/cpg.log",
+      "pid": 14408,
+      "started": "2026-11-23T16:53:55+00:00"
+    },
+    "cpg_session": "213b33b20d094ad4867525c37b8b81ca",
+    "cpg_task": "beff4e634ddb46978a84a1aed315f785",
+    "cpg_used": true,
+    "label": "ens-h40-fixGGGA-s4-6a7f309f8",
+    "lease_id": "ens-m5-20261122-ens-h40-fixGGGA-s4-6a7f309f8",
+    "live_lease": {
+      "lease_expires_at": 1795460036,
+      "lease_generation": 6549,
+      "owner_agent_id": "job-ens-h40-fixGGGA-s4-6a7f309f8-14408",
+      "status": "in_progress"
+    },
+    "pid": 14418,
+    "session": "ens-m5-20261122",
+    "since": "2026-11-23T16:53:56Z"
+  },
+  "pid": 14418,
+  "schema": "mlx2.gpu-lock-window.v1",
+  "session": "ens-m5-20261122",
+  "status": "command_completed",
+  "updated_at": 1795453367.029611,
+  "waiter": "/Users/Shared/mlxuag/gpu.lock.waiters/ens-m5-20261122.ens-h40-fixGGGA-s4-6a7f309f8.14418.1795452836"
+}

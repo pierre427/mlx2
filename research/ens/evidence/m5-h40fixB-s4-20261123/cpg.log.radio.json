@@ -1,0 +1,41 @@
+{
+ "agent_id": "job-ens-h40-fixGGGAGGGA-s4-e7df2b758-21214",
+ "claim_task": {
+  "claimed": true,
+  "lease_expires_at": 1795460728,
+  "lease_generation": 6553,
+  "owner_agent_id": "job-ens-h40-fixGGGAGGGA-s4-e7df2b758-21214",
+  "task_id": "beff4e634ddb46978a84a1aed315f785"
+ },
+ "complete_worker": {
+  "already_terminal": false,
+  "completed_late": false,
+  "finished_at": 1795454023,
+  "status": "completed",
+  "worker_id": "b5c1a76b6b3d4003a98580c6ed7f69e5",
+  "workflow_status": null
+ },
+ "register_worker": {
+  "agent_id": "job-ens-h40-fixGGGAGGGA-s4-e7df2b758-21214",
+  "registered_by": "job-ens-h40-fixGGGAGGGA-s4-e7df2b758-21214",
+  "worker_id": "b5c1a76b6b3d4003a98580c6ed7f69e5",
+  "workflow_id": "304719ca1b8341c89e160e848856a4a0"
+ },
+ "release_task": {
+  "lease_generation": 6554,
+  "released": true,
+  "status": "planned",
+  "task_id": "beff4e634ddb46978a84a1aed315f785"
+ },
+ "renew_lease": {
+  "lease_expires_at": 1795461210,
+  "lease_generation": 6553,
+  "renewed": true,
+  "task_id": "beff4e634ddb46978a84a1aed315f785"
+ },
+ "updated_at": "2026-11-23T17:13:43+00:00",
+ "worker_heartbeat": {
+  "heartbeat_at": 1795454010,
+  "worker_id": "b5c1a76b6b3d4003a98580c6ed7f69e5"
+ }
+}

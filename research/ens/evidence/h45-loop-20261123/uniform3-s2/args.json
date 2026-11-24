@@ -1,0 +1,15 @@
+{
+ "arm": "uniform3",
+ "batch": 256,
+ "chunk_tag": null,
+ "log_every": 250,
+ "lr": 0.001,
+ "max_seconds": null,
+ "out": "evidence/h45-loop-20261123/uniform3-s2",
+ "p_ordinary": 0.25,
+ "save_every": 2000,
+ "seed": 2,
+ "steps": 48000,
+ "stop_after": null,
+ "warmup": 500
+}

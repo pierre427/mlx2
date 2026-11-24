@@ -1,0 +1,10 @@
+[cpg_job 2026-11-23T15:28:25+00:00 pid=63044] label=ens-h40-grow-s2-92dd6702f agent_id=job-ens-h40-grow-s2-92dd6702f-63044 command=~/Desktop/CPG-Radio/.venv/bin/python scripts/run_with_gpu_locks.py --session ens-m5-20261122 --label ens-h40-grow-s2-92dd6702f --cpg-owner-lock /tmp/ens-h40-grow-s2-92dd6702f-cpg.lock --cpg-task beff4e634ddb46978a84a1aed315f785 --receipt ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40grow-s2-20261123/gpu-receipt.json -- env PYTHONPATH=~/Desktop/mlx2-wt-ens-a0/src:~/Desktop/mlx2-wt-ens-a0 HF_HUB_OFFLINE=1 zsh ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40grow-s2-20261123/slot.sh
+[cpg_job 2026-11-23T15:28:26+00:00 pid=63044] registered worker 0eae60facb94449790a5c2939e61e3a0 as job-ens-h40-grow-s2-92dd6702f-63044 in session 213b33b20d094ad4867525c37b8b81ca
+[cpg_job 2026-11-23T15:28:26+00:00 pid=63044] claimed GPU lease task beff4e634ddb46978a84a1aed315f785 generation 6523
+[cpg_job 2026-11-23T15:28:26+00:00 pid=63044] took /tmp/ens-h40-grow-s2-92dd6702f-cpg.lock
+[cpg_job 2026-11-23T15:28:26+00:00 pid=63044] child pid 63049 started
+[cpg_job 2026-11-23T15:35:32+00:00 pid=63044] child exited rc=0
+[cpg_job 2026-11-23T15:35:32+00:00 pid=63044] worker 0eae60facb94449790a5c2939e61e3a0 closed completed
+[cpg_job 2026-11-23T15:35:32+00:00 pid=63044] released GPU lease
+[cpg_job 2026-11-23T15:35:32+00:00 pid=63044] released /tmp/ens-h40-grow-s2-92dd6702f-cpg.lock
+[cpg_job 2026-11-23T15:35:32+00:00 pid=63044] wrote ~/Desktop/mlx2-wt-ens-a0/research/ens/evidence/m5-h40grow-s2-20261123/cpg.log.done

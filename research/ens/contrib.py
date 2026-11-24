@@ -199,6 +199,8 @@ def train(args) -> dict:
     out = C.fresh_out(args.out)
     core, core_ckpt = C.load_core(args.core)
     core.freeze()
+    if core.cfg.loop_body:     # an H45 loop core needs passes=; this trainer would silently run it at one pass
+        raise SystemExit("this trainer does not drive the loop port; refusing an H45 loop core")
     check_core_families(args.core)
     site = core_site(args.core)
     fam = F.BY_ID[args.family]
