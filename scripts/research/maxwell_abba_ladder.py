@@ -273,6 +273,24 @@ def summarize(segments):
     return out
 
 
+def attribute(segments):
+    """Every segment's cells against the first A segment: token verdict and decode/TTFT ratios."""
+    ref = next(s for s in segments if s["arm"] == "A")
+    rows = []
+    for seg in segments[1:] if segments[0] is ref else segments:
+        if seg is ref:
+            continue
+        for c in seg["cells"]:
+            base = next(x for x in ref["cells"] if (x["cell"], x["width"]) == (c["cell"], c["width"]))
+            ratio = {m: round(mean(r.get(m) for r in c["requests"]) / mean(r.get(m) for r in base["requests"]), 3)
+                     if mean(r.get(m) for r in base["requests"]) and mean(r.get(m) for r in c["requests"]) else None
+                     for m in ("decode_tok_s", "ttft_s")}
+            rows.append({"segment": seg["segment"], "arm": seg["arm"], "cell": c["cell"], "width": c["width"],
+                         "vs_A": [classify(x, y) for x, y in zip(base["requests"], c["requests"])],
+                         "ratio_vs_A": ratio})
+    return rows
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", type=Path, required=True)
@@ -281,9 +299,18 @@ def main():
     p.add_argument("--widths", default="1,4")
     p.add_argument("--max-tokens", type=int, default=160)
     p.add_argument("--main-sha", help="origin/main commit the run's branch was merged onto (recorded)")
+    p.add_argument("--arms", type=Path, help="JSON {name: {label, flags, policy, env}} replacing A/B "
+                   "(attribution runs; arm A must stay the reference)")
+    p.add_argument("--order", help="comma-separated segment order (default A,B,B,A)")
     p.add_argument("--max-batch-tokens", type=int, default=70000,
                    help="skip width>1 cells whose total prompt tokens exceed this (bf16: 32K x 4 swapped)")
     args = p.parse_args()
+    order = tuple(args.order.split(",")) if args.order else ORDER
+    if args.arms:
+        ARMS.clear()
+        ARMS.update(json.loads(args.arms.read_text()))
+    if "A" not in ARMS or set(order) - set(ARMS):
+        raise SystemExit(f"order {order} needs reference arm A and only defined arms {sorted(ARMS)}")
     out = args.out.resolve()
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"refusing nonempty evidence directory {out}")
@@ -298,14 +325,14 @@ def main():
     cell_prompts = {int(c): prompts(tokenizer, int(c), max(widths)) for c in args.cells.split(",")}
     fingerprint = inspect_model(args.model).artifact_fingerprint
     receipt = {"schema": "mlx2.maxwell-abba-ladder.v1", **revision(), "origin_main": args.main_sha,
-               "checkpoint": f"{args.model.name}@sha256:{fingerprint}", "order": ORDER, "arms": ARMS,
+               "checkpoint": f"{args.model.name}@sha256:{fingerprint}", "order": order, "arms": ARMS,
                "widths": widths, "cells": list(cell_prompts), "max_tokens": args.max_tokens,
                "max_batch_tokens": args.max_batch_tokens,
                "skipped": [(c, w) for c in cell_prompts for w in widths
                            if (c, w) not in plan(cell_prompts, widths, args.max_batch_tokens)],
                "thermal_hold": False, "publishable": False, "segments": []}
     write_atomic(out / "ladder.json", receipt)
-    for i, arm in enumerate(ORDER):
+    for i, arm in enumerate(order):
         receipt["segments"].append({"arm": arm, "dir": f"seg{i + 1}-{arm}"})
         seg = run_segment(args.model, arm, i, out, cell_prompts, widths, args.max_tokens, args.max_batch_tokens)
         receipt["segments"][-1].update({k: seg.get(k) for k in ("checkpoint", "load_status", "swapouts_delta",
@@ -316,6 +343,12 @@ def main():
             write_atomic(out / "ladder.json", receipt)
             raise SystemExit(receipt["aborted"])
     segments = [json.loads((out / s["dir"] / "segment.json").read_text()) for s in receipt["segments"]]
+    if order != ORDER:
+        receipt["attribution"] = attribute(segments)
+        write_atomic(out / "ladder.json", receipt)
+        for row in receipt["attribution"]:
+            print(json.dumps(row), flush=True)
+        return
     receipt["summary"] = summarize(segments)
     write_atomic(out / "ladder.json", receipt)
     for row in receipt["summary"]:

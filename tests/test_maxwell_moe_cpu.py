@@ -682,6 +682,28 @@ def test_fused_qkv_declines_partially_quantized_projections():
     assert "qkv_proj" not in attn and "scales" in attn.k_proj
 
 
+@pytest.mark.parametrize("shape", [(1, 3), (2, 2), (1, 16), (1, 40)])
+def test_fused_qkv_verify_width_rows_keep_one_row_arithmetic(shape):
+    from mlx2.runtime.models import maxwell_moe as M
+    mx.random.seed(11)
+    model = Model(ModelArgs.from_dict(TINY))
+    attn = model.layers[1].self_attn if model.layers[1].self_attn.sparse else model.layers[0].self_attn
+    attn.fuse_projections()
+    assert "qkv_proj" in attn
+    x = mx.random.normal((*shape, TINY["hidden_size"])).astype(mx.float32)
+    got = attn._linears(x)
+    rows = [attn._linears(x[b:b + 1, t:t + 1]) for b in range(shape[0]) for t in range(shape[1])]
+    for i, part in enumerate(got):
+        if part is None:
+            continue
+        flat = part.reshape(-1, part.shape[-1])
+        ref = mx.concatenate([r[i].reshape(1, -1) for r in rows], axis=0)
+        if shape[0] * shape[1] <= M.FUSED_QKV_EXACT_ROWS:
+            assert mx.array_equal(flat, ref).item(), i
+        else:  # prefill widths keep the plain product (numerically equal)
+            assert mx.allclose(flat, ref, atol=1e-5).item(), i
+
+
 def test_quantization_override_inherits_defaults_and_validates_group_size():
     from mlx2.adapters.maxwell_moe import _quantization
     q = {"bits": 4, "group_size": 64, "lm_head": {"group_size": 32}}

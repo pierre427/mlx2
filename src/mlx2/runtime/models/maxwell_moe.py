@@ -109,6 +109,9 @@ MHC_KERNEL_MAX_ROWS = int(os.environ.get("MLX2_MAXWELL_MHC_KERNEL_MAX_ROWS", "16
 HEAD_MODE = os.environ.get("MLX2_MAXWELL_HEAD", "bf16")
 INDEX_KERNEL = os.environ.get("MLX2_MAXWELL_INDEX_KERNEL", "0") == "1"
 FUSED_QKV = os.environ.get("MLX2_MAXWELL_FUSED_QKV", "0") == "1"
+# Up to this many rows a multi-row call of the fused table runs each row with
+# its one-row law (canary-gated matvec strips; see Attention._linears).
+FUSED_QKV_EXACT_ROWS = 16
 CANONICAL_PICK = os.environ.get("MLX2_MAXWELL_CANONICAL_PICK", "0") == "1"
 ROW_EXACT_VERIFY = os.environ.get("MLX2_MAXWELL_ROW_EXACT_VERIFY", "off")
 if ROW_EXACT_VERIFY not in ("off", "layerwise", "serial"):
@@ -424,7 +427,21 @@ class Attention(nn.Module):
     def _linears(self, x):
         """The weight-bearing q/k/v (+ indexer key) projections, unreshaped."""
         if "qkv_proj" in self:
-            y = self.qkv_proj(x)
+            rows = x.size // x.shape[-1]
+            if x.ndim == 3 and x.shape[1] > 1 and rows <= FUSED_QKV_EXACT_ROWS:
+                # Verify-width calls (an MTP verify, a short prefill tail) get
+                # the one-row decode arithmetic of the fused table.  Its plain
+                # multi-row product does not keep it: at 16K, MTP verify through
+                # the fused table flipped a greedy token against MTP off, and
+                # with separate q/k/v (or MTP off) it did not
+                # (qualification/runs/maxwell-attr-16k-night-20261123).
+                from ..row_exact import ops as row_exact_ops
+
+                strip = x.reshape(1, rows, x.shape[-1])
+                y = row_exact_ops.dense_linear(self.qkv_proj, strip, stage="maxwell_fused_qkv")
+                y = y.reshape(*x.shape[:-1], y.shape[-1])
+            else:
+                y = self.qkv_proj(x)
             cuts, acc = [], 0
             for size in self._split[:-1]:
                 acc += size
